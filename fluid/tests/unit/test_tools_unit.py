@@ -152,3 +152,207 @@ def test_search_tools_ranks_by_match() -> None:
 
 async def _noop(input, ctx):  # pragma: no cover - registration placeholder
     return "ok"
+
+
+# --- Grep / Glob: bounded walks, error surfacing --------------------------
+
+
+def _tree(tmp_path):
+    """A small repo-shaped tree with one needle in a pruned directory."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("alpha needle here\nplain\n")
+    (tmp_path / "node_modules" / "pkg").mkdir(parents=True)
+    (tmp_path / "node_modules" / "pkg" / "index.js").write_text("needle in deps\n")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "COMMIT_EDITMSG").write_text("needle in git\n")
+    return tmp_path
+
+
+async def test_grep_fallback_prunes_heavy_directories(tmp_path, monkeypatch) -> None:
+    from omni.tools.builtins import grep as grep_mod
+
+    monkeypatch.setattr(grep_mod.shutil, "which", lambda _name: None)
+
+    _tree(tmp_path)
+    registry = ToolRegistry()
+    register_builtins(registry)
+    out = await registry.dispatch("Grep", {"pattern": "needle"}, ToolCtx(cwd=str(tmp_path)))
+
+    assert not out.is_error
+    assert out.text.startswith("searched via python-fallback under ")
+    assert "app.py" in out.text
+    assert "node_modules" not in out.text
+    assert "COMMIT_EDITMSG" not in out.text
+
+
+async def test_grep_fallback_skips_binary_files(tmp_path, monkeypatch) -> None:
+    from omni.tools.builtins import grep as grep_mod
+
+    monkeypatch.setattr(grep_mod.shutil, "which", lambda _name: None)
+
+    (tmp_path / "text.txt").write_text("needle\n")
+    (tmp_path / "blob.bin").write_bytes(b"needle\x00\x01\x02more needle\n")
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    out = await registry.dispatch("Grep", {"pattern": "needle"}, ToolCtx(cwd=str(tmp_path)))
+
+    assert "text.txt" in out.text
+    assert "blob.bin" not in out.text
+
+
+async def test_grep_fallback_caps_matches_and_marks_truncation(tmp_path, monkeypatch) -> None:
+    from omni.tools.builtins import grep as grep_mod
+
+    monkeypatch.setattr(grep_mod.shutil, "which", lambda _name: None)
+
+    (tmp_path / "many.txt").write_text("needle\n" * 500)
+    # A second file that would also match: the cap must stop before reaching it.
+    (tmp_path / "zzz_later.txt").write_text("needle\n")
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    out = await registry.dispatch("Grep", {"pattern": "needle"}, ToolCtx(cwd=str(tmp_path)))
+
+    hits = [ln for ln in out.text.splitlines() if ln.endswith(":needle")]
+    assert len(hits) == grep_mod.MAX_MATCHES
+    assert f"[search truncated: match cap {grep_mod.MAX_MATCHES} reached]" in out.text
+    assert "zzz_later.txt" not in out.text
+
+
+async def test_grep_fallback_honours_glob_filter(tmp_path, monkeypatch) -> None:
+    from omni.tools.builtins import grep as grep_mod
+
+    monkeypatch.setattr(grep_mod.shutil, "which", lambda _name: None)
+    (tmp_path / "a.py").write_text("needle\n")
+    (tmp_path / "a.md").write_text("needle\n")
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    out = await registry.dispatch(
+        "Grep", {"pattern": "needle", "glob": "*.py"}, ToolCtx(cwd=str(tmp_path))
+    )
+    assert "a.py" in out.text and "a.md" not in out.text
+
+
+async def test_grep_fallback_deadline_returns_partial(tmp_path, monkeypatch) -> None:
+    from omni.tools.builtins import grep as grep_mod
+
+    monkeypatch.setattr(grep_mod.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(grep_mod, "FALLBACK_DEADLINE_S", 0.0)
+    (tmp_path / "a.txt").write_text("needle\n")
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    out = await registry.dispatch("Grep", {"pattern": "needle"}, ToolCtx(cwd=str(tmp_path)))
+
+    assert not out.is_error
+    assert "[search truncated: deadline reached after" in out.text
+
+
+async def test_glob_deadline_returns_partial(tmp_path, monkeypatch) -> None:
+    from omni.tools.builtins import glob as glob_mod
+
+    monkeypatch.setattr(glob_mod, "DEADLINE_S", 0.0)
+    (tmp_path / "a.py").write_text("x")
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    out = await registry.dispatch("Glob", {"pattern": "*.py"}, ToolCtx(cwd=str(tmp_path)))
+
+    assert "[search truncated: deadline reached after" in out.text
+
+
+class _FakeProc:
+    def __init__(self, returncode: int, stdout: bytes = b"", stderr: bytes = b"") -> None:
+        self.returncode = returncode
+        self._out, self._err = stdout, stderr
+        self.killed = False
+
+    async def communicate(self):
+        return self._out, self._err
+
+    def kill(self) -> None:  # pragma: no cover - only on the timeout path
+        self.killed = True
+
+    async def wait(self):  # pragma: no cover - only on the timeout path
+        return self.returncode
+
+
+async def test_grep_rg_error_is_surfaced_and_args_are_safe(tmp_path, monkeypatch) -> None:
+    import asyncio as _asyncio
+
+    from omni.tools.builtins import grep as grep_mod
+
+    monkeypatch.setattr(grep_mod.shutil, "which", lambda _name: "/usr/bin/rg")
+    captured: list[str] = []
+
+    async def fake_exec(*args, **kwargs):
+        captured.extend(args)
+        return _FakeProc(2, b"", b"regex parse error: unclosed group")
+
+    monkeypatch.setattr(_asyncio, "create_subprocess_exec", fake_exec)
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    out = await registry.dispatch(
+        "Grep", {"pattern": "-foo(", "no_ignore": True}, ToolCtx(cwd=str(tmp_path))
+    )
+
+    assert out.is_error
+    assert "rg error: regex parse error" in out.text
+    assert "searched via rg under" in out.text
+    # `--` guards a pattern that starts with '-'; -uu comes from no_ignore.
+    assert captured[captured.index("--") + 1] == "-foo("
+    assert "-uu" in captured
+    assert "--max-count" in captured and "--max-filesize" in captured
+
+
+async def test_grep_rg_no_matches_is_not_an_error(tmp_path, monkeypatch) -> None:
+    import asyncio as _asyncio
+
+    from omni.tools.builtins import grep as grep_mod
+
+    monkeypatch.setattr(grep_mod.shutil, "which", lambda _name: "/usr/bin/rg")
+
+    async def fake_exec(*args, **kwargs):
+        return _FakeProc(1, b"", b"")
+
+    monkeypatch.setattr(_asyncio, "create_subprocess_exec", fake_exec)
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    out = await registry.dispatch("Grep", {"pattern": "zzz"}, ToolCtx(cwd=str(tmp_path)))
+    assert not out.is_error and "(no matches)" in out.text
+
+
+async def test_glob_matches_and_prunes(tmp_path) -> None:
+    _tree(tmp_path)
+    (tmp_path / "src" / "notes.md").write_text("x")
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    ctx = ToolCtx(cwd=str(tmp_path))
+
+    out = await registry.dispatch("Glob", {"pattern": "**/*.py"}, ctx)
+    assert not out.is_error
+    assert "app.py" in out.text and "notes.md" not in out.text
+
+    # Bare-name patterns match at any depth; pruned trees stay out entirely.
+    out = await registry.dispatch("Glob", {"pattern": "*.js"}, ctx)
+    assert "(no matches)" in out.text
+
+
+async def test_glob_caps_results(tmp_path) -> None:
+    from omni.tools.builtins import glob as glob_mod
+
+    for i in range(glob_mod.MAX_RESULTS + 25):
+        (tmp_path / f"f{i:04d}.txt").write_text("x")
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    out = await registry.dispatch("Glob", {"pattern": "*.txt"}, ToolCtx(cwd=str(tmp_path)))
+
+    paths = [ln for ln in out.text.splitlines() if ln.endswith(".txt")]
+    assert len(paths) == glob_mod.MAX_RESULTS
+    assert f"[results truncated: cap {glob_mod.MAX_RESULTS} reached]" in out.text
