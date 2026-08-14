@@ -422,10 +422,12 @@
 			max_turns: config.max_turns || null,
 			allowed_tools: allowedTools,
 			disallowed_tools: disallowedTools,
-			// Invoke allowlist: keep only ids that still resolve to a known agent,
-			// and never include this agent itself.
+			// Invoke allowlist: hydrate the stored ids as-is (minus self) — never
+			// filter against allSubagents here, it may not have loaded yet and an
+			// empty match would wipe the allowlist on save. Stale ids of deleted
+			// agents are pruned at save time instead.
 			enabled_agents: ((config as any).enabled_agents || []).filter(
-				(id: string) => id !== profile.id && allSubagents.some(a => a.id === id)
+				(id: string) => id !== profile.id
 			),
 			memory: (config as any).memory || '',
 			include_partial_messages: config.include_partial_messages !== false,
@@ -653,8 +655,12 @@
 		} else if (toolSelectionMode === 'disallow') {
 			config.disallowed_tools = profileForm.disallowed_tools;
 		}
-		// Invoke allowlist: the raw selection (empty = may invoke any agent).
-		config.enabled_agents = profileForm.enabled_agents;
+		// Invoke allowlist (empty = may invoke any agent). Prune ids of deleted
+		// agents, but only when the agent list actually loaded — pruning against
+		// an empty/unloaded list would wipe the allowlist.
+		config.enabled_agents = allSubagents.length > 0
+			? profileForm.enabled_agents.filter((id) => allSubagents.some((a) => a.id === id))
+			: profileForm.enabled_agents;
 		// Per-agent memory (plain text). Omit when empty so clearing it persists.
 		if (profileForm.memory.trim()) config.memory = profileForm.memory;
 		if (profileForm.setting_sources.length > 0) {
