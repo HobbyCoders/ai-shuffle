@@ -10,7 +10,15 @@ from typing import AsyncIterator
 import pytest
 
 from omni.engine.native import NativeLoop
-from omni.events import PermissionRequest, RespondPermission, ToolResult, TurnComplete, UserTurn
+from omni.events import (
+    Interrupt,
+    Interrupted,
+    PermissionRequest,
+    RespondPermission,
+    ToolResult,
+    TurnComplete,
+    UserTurn,
+)
 from omni.hooks.bus import PRE_TOOL_USE, HookBus, HookDecision
 from omni.permissions.engine import PermissionEngine
 from omni.permissions.rules import Rule
@@ -108,6 +116,81 @@ async def test_tool_round_trip() -> None:
     assert done.num_model_calls == 2
     assert done.stop_reason == "end_turn"
     assert provider.calls == 2
+
+
+async def test_interrupt_cancels_in_flight_tool_dispatch() -> None:
+    """An Interrupt must not wait for a long-running tool: the in-flight
+    dispatch is cancelled, the call surfaces as an is_error ToolResult (the
+    transcript stays well-formed), and the turn ends with Interrupted without
+    another model call."""
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    @tool("hang", "Hang until cancelled", {"type": "object", "properties": {}})
+    async def hang(args: dict) -> dict:
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return {"content": [{"type": "text", "text": "never"}]}
+
+    registry = ToolRegistry()
+    registry.register_inproc(create_inproc_server("m", [hang]))
+    provider = ScriptedProvider([
+        _tool("t1", "mcp__m__hang", "{}"),
+        _text("should never be requested"),
+    ])
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="claude-sonnet-5",
+        registry=registry, permissions=PermissionEngine("never_ask"),
+    )
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(started.wait(), timeout=5)
+    await loop.submit(Interrupt())
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+
+    events = loop.bus.log(loop.session_id)
+    result = next(e for e in events if isinstance(e, ToolResult))
+    assert result.is_error
+    assert "interrupted" in result.output
+    assert cancelled.is_set()
+    assert any(isinstance(e, Interrupted) for e in events)
+    assert provider.calls == 1  # no model call after the interrupt
+
+
+async def test_dispatch_stamps_tool_use_id_on_ctx() -> None:
+    """During each dispatch the engine exposes the call's tool_use_id via
+    ctx.extra — host dispatchers (the Task tool) correlate their UI work with
+    the launching tool_use block through it — and clears it afterwards."""
+    from omni.tools.registry import ToolOutcome, ToolSpec
+
+    seen: dict = {}
+    ctx = ToolCtx()
+
+    async def peek(input: dict, c: ToolCtx) -> ToolOutcome:
+        seen["tool_use_id"] = (c.extra or {}).get("tool_use_id")
+        return ToolOutcome(text="ok")
+
+    registry = ToolRegistry()
+    registry.register_builtin(
+        ToolSpec(name="Peek", description="peek", input_schema={"type": "object"}),
+        peek,
+    )
+    provider = ScriptedProvider([
+        _tool("tu-42", "Peek", "{}"),
+        _text("done"),
+    ])
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="claude-sonnet-5",
+        registry=registry, permissions=PermissionEngine("never_ask"), ctx=ctx,
+    )
+    await loop.submit(UserTurn(content="go"))
+    await loop.wait_turn()
+
+    assert seen["tool_use_id"] == "tu-42"
+    assert "tool_use_id" not in ctx.extra  # cleared after the dispatch
 
 
 async def test_permission_ask_allow_and_deny() -> None:

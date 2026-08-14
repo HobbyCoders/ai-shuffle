@@ -437,7 +437,7 @@ class NativeLoop:
 
             blocks: list[Any] = []
             for tu in result.tool_uses:
-                blocks.append(await self._dispatch_tool(sid, turn_id, tu))
+                blocks.append(await self._dispatch_tool_interruptible(sid, turn_id, tu))
             tr_node = SessionNode(
                 node_id=new_id("node"), parent_id=parent.node_id,
                 message=Message(role="user", content=blocks),
@@ -626,11 +626,60 @@ class NativeLoop:
 
     # ─── Tool dispatch ───────────────────────────────────────────────────
 
+    async def _dispatch_tool_interruptible(
+        self, sid: str, turn_id: str, tu: dict[str, Any]
+    ) -> ToolResultBlock:
+        """Dispatch one tool call, racing it against the interrupt flag.
+
+        Interrupt used to be invisible here: the flag was polled only between
+        provider stream chunks and after a full dispatch round, so a
+        long-running tool (a sync Task worker, a slow shell command) pinned the
+        turn arbitrarily long after the user pressed stop. An interrupt now
+        cancels the in-flight dispatch. The cancelled call still surfaces as an
+        is_error ToolResult — every tool_use must get a result or the
+        transcript is malformed for the next model call — and the agent loop's
+        existing post-dispatch interrupt check then ends the turn.
+        """
+        if not self._interrupted.is_set():
+            dispatch = asyncio.create_task(self._dispatch_tool(sid, turn_id, tu))
+            interrupt_wait = asyncio.create_task(self._interrupted.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    {dispatch, interrupt_wait}, return_when=asyncio.FIRST_COMPLETED
+                )
+            finally:
+                interrupt_wait.cancel()
+            # Prefer the finished dispatch even when the interrupt landed in the
+            # same tick — a real result beats a synthesized cancellation.
+            if dispatch in done:
+                return dispatch.result()
+            dispatch.cancel()
+            try:
+                await dispatch
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        text = "Tool execution cancelled: the turn was interrupted."
+        await self._emit(ToolResult(
+            session_id=sid, turn_id=turn_id, tool_use_id=tu["tool_use_id"],
+            name=tu["name"], output=text, is_error=True,
+        ))
+        return ToolResultBlock(
+            tool_use_id=tu["tool_use_id"], content=[Text(text)], is_error=True,
+        )
+
     async def _dispatch_tool(
         self, sid: str, turn_id: str, tu: dict[str, Any]
     ) -> ToolResultBlock:
         tool_use_id = tu["tool_use_id"]
-        outcome = await self._gated_call(sid, turn_id, tu["name"], tool_use_id, tu["input"])
+        # Expose the call's id to handlers for the duration of the dispatch
+        # (dispatches are sequential): host tools that spawn UI-joined work
+        # (the Task dispatcher) need it to correlate their cards with this
+        # tool_use block.
+        self.ctx.extra["tool_use_id"] = tool_use_id
+        try:
+            outcome = await self._gated_call(sid, turn_id, tu["name"], tool_use_id, tu["input"])
+        finally:
+            self.ctx.extra.pop("tool_use_id", None)
         content = [Text(outcome.text)]
         # Nested-instruction injection (instruction-file seam): when a tool
         # touches a path whose own directory carries a CLAUDE.md/AGENTS.md not
