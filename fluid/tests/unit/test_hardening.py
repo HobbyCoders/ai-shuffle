@@ -521,3 +521,48 @@ def test_tool_search_registered_as_builtin() -> None:
     register_builtins(reg)
     spec = reg.get("ToolSearch")
     assert spec is not None and spec.risk == "safe"
+
+
+def test_render_deferred_catalog_truncates_and_sorts() -> None:
+    from omni.tools.builtins.tool_search import render_deferred_catalog
+
+    assert render_deferred_catalog([]) is None
+    long_desc = "x" * 300 + "\nsecond line never shown"
+    specs = [
+        ToolSpec(name="mcp__srv__zeta", description=long_desc, input_schema={}, source="mcp"),
+        ToolSpec(name="mcp__srv__alpha", description="say hello", input_schema={}, source="mcp"),
+    ]
+    text = render_deferred_catalog(specs)
+    assert text is not None and text.startswith("<system-reminder>")
+    assert "select:" in text  # tells the model how to load
+    alpha, zeta = text.index("mcp__srv__alpha"), text.index("mcp__srv__zeta")
+    assert alpha < zeta  # sorted by name
+    line = next(l for l in text.splitlines() if "zeta" in l)
+    assert len(line) < 200 and line.endswith("…")
+    assert "second line" not in text
+
+
+async def test_deferred_catalog_injected_once_on_user_turn() -> None:
+    reg = _registry_with_deferred()
+    provider = ScriptedProvider([_text("one"), _text("two")])
+    loop = NativeLoop(provider=provider, store=MemoryStore(), model="m", registry=reg)
+
+    await loop.submit(UserTurn(content="first"))
+    await loop.wait_turn()
+    await loop.submit(UserTurn(content="second"))
+    await loop.wait_turn()
+
+    def _texts(request: ProviderRequest) -> str:
+        return "\n".join(
+            b.text for m in request.messages for b in m.content
+            if isinstance(b, Text)
+        )
+    first, second = provider.requests[0], provider.requests[1]
+    assert "mcp__srv__hello" in _texts(first)
+    assert "<system-reminder>" in _texts(first)
+    # Announced exactly once: the second turn's history carries the same single
+    # reminder from turn one, and no new block is appended.
+    assert _texts(second).count("mcp__srv__hello") == 1
+    # The schema itself stays deferred — not in the tools array.
+    assert all(t["name"] != "mcp__srv__hello" for t in first.tools)
+    await loop.aclose()

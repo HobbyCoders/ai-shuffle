@@ -168,6 +168,13 @@ class ToolRegistry:
             if not loaded_only or name in self._loaded
         ]
 
+    def deferred_tools(self) -> list[ToolSpec]:
+        """Known-but-unloaded tools — the name+description tier of progressive
+        disclosure. Their schemas enter the prompt only after ``load_schema``."""
+        return [
+            e.spec for name, e in self._entries.items() if name not in self._loaded
+        ]
+
     def search_tools(self, query: str) -> list[ToolSpec]:
         """Substring/word match over name + description, best matches first."""
         tokens = [t for t in query.lower().split() if t]

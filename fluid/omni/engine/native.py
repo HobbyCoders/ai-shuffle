@@ -64,6 +64,7 @@ from omni.permissions.engine import PermissionEngine, plan_mode_tools
 from omni.providers.base import ProviderClient, ProviderRequest
 from omni.codemode.session import CodeModeSession, register_code_mode_tools
 from omni.store.base import SessionMeta, SessionNode, SessionStore, new_id
+from omni.tools.builtins.tool_search import render_deferred_catalog
 from omni.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
 
 
@@ -222,6 +223,10 @@ class NativeLoop:
         # Nested-instruction injection: instruction-file paths already injected
         # this session (each nested CLAUDE.md/AGENTS.md enters context once).
         self._nested_injected: set[str] = set()
+        # Deferred-catalog injection: tool names already announced to the model
+        # (each known-but-unloaded tool is listed once, on the user turn after
+        # it becomes known — the static system prompt stays byte-stable).
+        self._deferred_announced: set[str] = set()
         # Cache-safe tool-result trimming (view-level; the stored tree keeps
         # full fidelity). Sticky per engine lifetime — see context/trim.py.
         self._trimmer = ToolResultTrimmer(config=trim or TrimConfig())
@@ -378,7 +383,15 @@ class NativeLoop:
         sid = meta.session_id
         turn_id = new_id("turn")
 
-        content = [Text(op.content)] if isinstance(op.content, str) else list(op.content)
+        # Connect config MCP servers before building the user node so newly
+        # known deferred tools can be announced on this very turn.
+        await self._connect_mcp_once(sid, turn_id)
+        content: list[Any] = (
+            [Text(op.content)] if isinstance(op.content, str) else list(op.content)
+        )
+        reminder = self._deferred_catalog_reminder()
+        if reminder is not None:
+            content.append(Text(reminder))
         user_node = SessionNode(
             node_id=new_id("node"),
             parent_id=op.parent_node_id or meta.head_node_id,
@@ -396,7 +409,6 @@ class NativeLoop:
         )
         if self.hooks is not None:
             await self.hooks.emit(TURN_START, {"session_id": sid, "turn_id": turn_id})
-        await self._connect_mcp_once(sid, turn_id)
         try:
             await self._agent_loop(sid, turn_id, user_node)
         except asyncio.CancelledError:
@@ -425,6 +437,26 @@ class NativeLoop:
                     message=f"mcp server {name!r} failed to connect: {exc!r}",
                     retriable=False,
                 ))
+
+    def _deferred_catalog_reminder(self) -> str | None:
+        """Announce known-but-unloaded tools, once per tool (name + one-liner).
+
+        Rides the user turn as a system-reminder block so the static system
+        prompt — compiled before MCP servers connect — stays byte-stable for
+        the cache. Without this the model has ToolSearch but no idea what
+        exists to search for. Skipped under code-mode, where discovery goes
+        through the in-kernel list_tools/search_tools instead.
+        """
+        if self.registry is None or self._codemode is not None:
+            return None
+        specs = [
+            s for s in self.registry.deferred_tools()
+            if s.name not in self._deferred_announced
+        ]
+        if not specs:
+            return None
+        self._deferred_announced.update(s.name for s in specs)
+        return render_deferred_catalog(specs)
 
     # ─── Agent loop (model call → tool dispatch → repeat) ────────────────
 

@@ -13,9 +13,42 @@ The registry is injected by the engine as ``ctx.extra["tool_registry"]``.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Sequence
 
 from omni.tools.registry import ToolCtx, ToolOutcome, ToolSpec
+
+# Catalog lines are an index, not documentation: one truncated line per tool.
+_CATALOG_DESC_CAP = 100
+
+
+def _one_line(text: str) -> str:
+    for line in (text or "").strip().splitlines():
+        line = line.strip()
+        if line:
+            return line if len(line) <= _CATALOG_DESC_CAP else line[: _CATALOG_DESC_CAP - 1] + "…"
+    return ""
+
+
+def render_deferred_catalog(specs: Sequence[ToolSpec]) -> str | None:
+    """System-reminder block announcing known-but-unloaded tools.
+
+    The deferred tier of progressive disclosure: names + truncated one-line
+    descriptions, so the model can ``select:`` exact names or pick search
+    keywords without any schema entering the prompt. Returns ``None`` when
+    there is nothing to announce.
+    """
+    if not specs:
+        return None
+    lines = "\n".join(
+        f"- {s.name}: {_one_line(s.description)}" for s in sorted(specs, key=lambda s: s.name)
+    )
+    return (
+        "<system-reminder>\nThe following deferred tools are available. Their "
+        "schemas are NOT loaded — calling them directly will fail. Load a "
+        "schema first with the ToolSearch tool (query "
+        '"select:<name>[,<name>...]" or keywords):\n'
+        f"{lines}\n</system-reminder>"
+    )
 
 SPEC = ToolSpec(
     name="ToolSearch",
