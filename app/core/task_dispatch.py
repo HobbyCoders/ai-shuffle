@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -357,14 +357,58 @@ async def _await_worker_registration(
 # Tool-surface adapters
 # ---------------------------------------------------------------------------
 
-def make_omni_dispatcher(session_id: str, profile_id: Optional[str] = None):
+def make_omni_dispatcher(
+    session_id: "str | Callable[[], Optional[str]]",
+    profile_id: Optional[str] = None,
+):
     """The ``ctx.extra['task_dispatch']`` callable for omni's bare Task builtin
-    (native legs)."""
+    (native legs).
+
+    ``session_id`` is the caller's **app** session id (``sessions.id``) — the
+    row Task dispatch walks for lineage, budget, and worker parenting. It may
+    be a plain string or a zero-argument callable resolved at CALL time.
+
+    Late binding is the point: the native leg builds its ``ToolCtx`` inside
+    ``HarnessAdapter.connect()``, and a brand-new session has no id to bind
+    there yet. The ctx (and therefore this closure) then lives for the whole
+    pooled life of the engine, so a connect-time snapshot would stay empty
+    forever and every Task call would report the tool unavailable.
+
+    ``ctx.session_id`` is deliberately NOT used as a fallback: on a native leg
+    it holds the *omni* session id (``ses_...``), which is not a
+    ``sessions.id`` — dispatching against it would parent the worker onto a
+    session row that does not exist.
+    """
 
     async def _dispatch(input: Dict[str, Any], ctx: Any) -> str:
+        caller_session_id: Any = session_id
+        if callable(caller_session_id):
+            try:
+                caller_session_id = caller_session_id()
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "task_dispatch: caller session-id supplier raised; Task "
+                    "cannot be dispatched for this call",
+                    exc_info=True,
+                )
+                caller_session_id = None
+        if not caller_session_id:
+            logger.warning(
+                "task_dispatch: no app session id resolved at dispatch time — "
+                "refusing to dispatch a parentless worker"
+            )
+            return json.dumps({
+                "ok": False,
+                "error": (
+                    "Task dispatch could not resolve the calling session — the "
+                    "worker would have no parent session to report back to. "
+                    "This is a host wiring problem, not a problem with the "
+                    "request; retry once the session is fully registered."
+                ),
+            })
         payload = await dispatch_task_tool(
             input,
-            caller_session_id=(getattr(ctx, "session_id", None) or session_id),
+            caller_session_id=str(caller_session_id),
             caller_profile_id=profile_id,
         )
         return json.dumps(payload, default=str)

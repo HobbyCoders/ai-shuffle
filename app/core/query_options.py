@@ -1028,4 +1028,11 @@ def build_options_from_profile(
     # a native Anthropic session) so the attribute's presence is not a signal.
     options.aih_provider_id = provider_id
 
+    # Same trick for the app's own session id. The omni HarnessAdapter projects
+    # it onto SessionOptions.extra["app_session_id"], which is how a native leg
+    # knows which `sessions` row to parent a Task worker onto — the omni engine
+    # only ever knows its own `ses_...` handle, and a brand-new session has no
+    # omni id at connect time at all.
+    options.aih_session_id = session_id
+
     return options, agents_dict

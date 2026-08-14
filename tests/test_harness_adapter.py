@@ -1803,6 +1803,44 @@ async def test_build_registry_normalizes_before_connect_mcp(monkeypatch):
     assert servers["remote"] == {"type": "http", "url": "https://example.test/mcp"}
 
 
+@pytest.mark.asyncio
+async def test_delegated_leg_never_connects_external_mcp(monkeypatch):
+    """Ruling PA5: the delegated leg passes external MCP servers to the claude
+    CLI via --mcp-config, and the CLI spawns them inside its child process.
+    connect_mcp'ing them in-process too would run every external server TWICE
+    per session — the in-app connection is never read on that leg (the bundled
+    socket only serves inproc/builtin specs)."""
+    import app.core.provider.harness_adapter as ha
+
+    calls: list = []
+
+    async def fake_connect_mcp(self, name, config):
+        calls.append(name)
+        return []
+
+    monkeypatch.setattr(ha.ToolRegistry, "connect_mcp", fake_connect_mcp)
+
+    servers = {
+        "local": {"command": "node", "args": ["s.js"]},
+        "remote": {"type": "http", "url": "https://example.test/mcp"},
+    }
+    adapter = ha.HarnessAdapter()
+    registry = await adapter._build_registry(
+        SessionOptions(model="fable", mcp_servers=servers), native=False
+    )
+    assert calls == []
+    # Still a registry, not None: DelegatedLoop._start_bundled_server bails on
+    # a None registry BEFORE writing --mcp-config, which would silently drop
+    # the external servers from the CLI child too.
+    assert registry is not None
+
+    # Same servers on a native leg DO connect in-process (the only path there).
+    await adapter._build_registry(
+        SessionOptions(model="gpt-4o", mcp_servers=servers), native=True
+    )
+    assert set(calls) == {"local", "remote"}
+
+
 async def _connect_capturing_native(monkeypatch, tmp_path, **option_kwargs):
     """connect() a native leg whose NativeLoop kwargs are captured."""
     import app.core.provider.harness_adapter as ha
@@ -1897,3 +1935,169 @@ def test_positive_int_rejects_bools_and_junk():
     assert _positive_int(-1) is None
     assert _positive_int(None) is None
     assert _positive_int("abc") is None
+
+
+# ─── Task dispatcher injection on native legs (ruling A13) ───────────────────
+#
+# Regression cover for the live bug: a codex-native session called the bare
+# ``Task`` builtin and got "Task dispatch is not available in this environment
+# — no dispatcher was injected by the host application", because connect() only
+# injected the dispatcher when an omni session id already existed.
+
+
+async def _connect_native_leg(monkeypatch, tmp_path, **extra) -> HarnessAdapter:
+    """A native (openai_responses) leg over the kwarg-capturing fake loop."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(
+        SessionOptions(
+            model="gpt-4o",
+            cwd=str(tmp_path),
+            extra={"omni_provider": "openai_responses", **extra},
+        )
+    )
+    return adapter
+
+
+def _injected_dispatcher():
+    return _CapturingLoop.captured["ctx"].extra.get("task_dispatch")
+
+
+@pytest.mark.asyncio
+async def test_native_leg_injects_task_dispatch_without_a_session_id(
+    monkeypatch, tmp_path
+):
+    """A brand-new native session has neither session_id nor resume_session_id
+    at connect time — the dispatcher must be injected anyway."""
+    await _connect_native_leg(monkeypatch, tmp_path)
+    assert _injected_dispatcher() is not None
+
+
+@pytest.mark.asyncio
+async def test_task_dispatch_uses_the_stamped_app_session_id(monkeypatch, tmp_path):
+    """query_options stamps the app session id; the dispatcher must dispatch
+    against THAT, not the omni ``ses_...`` handle riding on the ctx."""
+    import app.core.task_dispatch as td
+
+    seen: dict = {}
+
+    async def _fake_dispatch(args, *, caller_session_id, caller_profile_id=None):
+        seen["caller"] = caller_session_id
+        return {"ok": True}
+
+    monkeypatch.setattr(td, "dispatch_task_tool", _fake_dispatch)
+    await _connect_native_leg(monkeypatch, tmp_path, app_session_id="app-sess-1")
+
+    ctx = _CapturingLoop.captured["ctx"]
+    assert ctx.session_id != "app-sess-1"  # the omni id is NOT the app id
+    await _injected_dispatcher()({"agent": "helper", "prompt": "go"}, ctx)
+    assert seen["caller"] == "app-sess-1"
+
+
+@pytest.mark.asyncio
+async def test_task_dispatch_falls_back_to_the_sdk_id_lookup(monkeypatch, tmp_path):
+    """Without the stamp, the app session is recovered by reverse-mapping the
+    omni session id through ``sessions.sdk_session_id``."""
+    import app.core.task_dispatch as td
+    from app.db import database
+
+    seen: dict = {}
+
+    async def _fake_dispatch(args, *, caller_session_id, caller_profile_id=None):
+        seen["caller"] = caller_session_id
+        return {"ok": True}
+
+    monkeypatch.setattr(td, "dispatch_task_tool", _fake_dispatch)
+    monkeypatch.setattr(
+        database, "get_session_by_sdk_id",
+        lambda sdk_id: {"id": "app-sess-2"} if sdk_id == "ses_x" else None,
+    )
+    adapter = await _connect_native_leg(monkeypatch, tmp_path)
+    assert adapter._sdk_session_id == "ses_x"
+
+    await _injected_dispatcher()({"agent": "helper", "prompt": "go"}, object())
+    assert seen["caller"] == "app-sess-2"
+
+
+@pytest.mark.asyncio
+async def test_task_dispatch_reports_a_clear_error_when_unresolvable(
+    monkeypatch, tmp_path
+):
+    """No stamp and no mapping → a named error, never a parentless worker."""
+    import json
+
+    import app.core.task_dispatch as td
+    from app.db import database
+
+    async def _explode(*a, **kw):  # pragma: no cover — must never run
+        raise AssertionError("dispatch must not be attempted without a caller")
+
+    monkeypatch.setattr(td, "dispatch_task_tool", _explode)
+    monkeypatch.setattr(database, "get_session_by_sdk_id", lambda sdk_id: None)
+    await _connect_native_leg(monkeypatch, tmp_path)
+
+    raw = await _injected_dispatcher()({"agent": "helper", "prompt": "go"}, object())
+    payload = json.loads(raw)
+    assert payload["ok"] is False
+    assert "could not resolve the calling session" in payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_pooled_engine_dispatcher_picks_up_a_late_session_id(
+    monkeypatch, tmp_path
+):
+    """The ctx built in connect() outlives the connect. The SAME dispatcher
+    must start working once the session id becomes resolvable — this is the
+    pooled-client reuse path ("Reusing pooled client for session ...")."""
+    import json
+
+    import app.core.task_dispatch as td
+    from app.db import database
+
+    seen: dict = {}
+    mapped: dict = {}
+
+    async def _fake_dispatch(args, *, caller_session_id, caller_profile_id=None):
+        seen["caller"] = caller_session_id
+        return {"ok": True}
+
+    monkeypatch.setattr(td, "dispatch_task_tool", _fake_dispatch)
+    monkeypatch.setattr(
+        database, "get_session_by_sdk_id", lambda sdk_id: mapped.get(sdk_id)
+    )
+    await _connect_native_leg(monkeypatch, tmp_path)
+
+    dispatcher = _injected_dispatcher()
+    first = json.loads(await dispatcher({"agent": "helper", "prompt": "go"}, object()))
+    assert first["ok"] is False and "caller" not in seen
+
+    mapped["ses_x"] = {"id": "app-sess-3"}
+    await dispatcher({"agent": "helper", "prompt": "go"}, object())
+    assert seen["caller"] == "app-sess-3"
+
+
+@pytest.mark.asyncio
+async def test_connect_with_sdk_options_projects_the_app_session_id(monkeypatch):
+    """``aih_session_id`` (stamped by query_options) lands on
+    ``SessionOptions.extra['app_session_id']``."""
+    import types
+
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+    monkeypatch.setattr(
+        HarnessAdapter, "_build_store", staticmethod(lambda _o: MemoryStore())
+    )
+
+    adapter = ha.HarnessAdapter()
+    await adapter.connect_with_sdk_options(
+        types.SimpleNamespace(
+            model="claude-sonnet-4-5",
+            aih_provider_id=None,
+            aih_session_id="app-sess-4",
+        )
+    )
+    assert adapter._options.extra["app_session_id"] == "app-sess-4"
