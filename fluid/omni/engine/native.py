@@ -101,6 +101,70 @@ def _plain_text(blocks: list[Any]) -> str:
     return "\n".join(b.text for b in blocks if isinstance(b, Text) and b.text).strip()
 
 
+LOST_TOOL_RESULT_TEXT = (
+    "[interrupted: this tool call never completed (e.g. the server restarted "
+    "mid-call); its result was lost]"
+)
+
+
+def repair_dangling_tool_calls(history: list[Message]) -> list[Message]:
+    """Splice a synthetic result after every tool call that never got one.
+
+    A transcript whose assistant message holds a tool call with no matching
+    tool result is malformed, and providers reject the WHOLE request for it
+    ("No tool output found for function call call_XXX" on the OpenAI dialect) —
+    which poisons the session permanently: every later turn replays the same
+    broken prefix. The hole appears whenever the process dies between the model
+    call and the result append (a server restart or crash mid tool dispatch),
+    and latently if a trimmer/view ever drops a result while keeping its call.
+
+    Repair happens here, at request-build time, at the Message level: nothing is
+    written back to the store (the tree keeps its true, incomplete shape) and
+    nothing is provider-specific. The synthetic result goes DIRECTLY AFTER the
+    message carrying the call — the OpenAI dialect requires a call's output to
+    precede any later item — and is marked is_error so the model reads it as a
+    failure rather than as output worth acting on.
+
+    Pure and idempotent: repaired history has no dangling calls, so a second
+    pass returns it unchanged (the same list object when nothing was missing).
+    """
+    resolved = {
+        block.tool_use_id
+        for message in history
+        for block in message.content
+        if isinstance(block, ToolResultBlock)
+    }
+    out: list[Message] = []
+    repaired = False
+    for message in history:
+        out.append(message)
+        missing: list[str] = []
+        for block in message.content:
+            if (
+                isinstance(block, ToolUseBlock)
+                and block.id
+                and block.id not in resolved
+                and block.id not in missing
+            ):
+                missing.append(block.id)
+        if not missing:
+            continue
+        repaired = True
+        resolved.update(missing)
+        out.append(Message(
+            role="user",
+            content=[
+                ToolResultBlock(
+                    tool_use_id=call_id,
+                    content=[Text(LOST_TOOL_RESULT_TEXT)],
+                    is_error=True,
+                )
+                for call_id in missing
+            ],
+        ))
+    return out if repaired else history
+
+
 class NativeLoop:
     caps = EngineCaps(
         inproc_tools=True, schema_plan_mode=True,
@@ -373,7 +437,7 @@ class NativeLoop:
 
         while True:
             nodes = await self.store.load_path(sid, parent.node_id)
-            history = self._trimmer.apply(nodes)
+            history = repair_dangling_tool_calls(self._trimmer.apply(nodes))
             result = await self._stream_once(sid, turn_id, history)
             num_calls += 1
             if result.stop_reason == "error":
