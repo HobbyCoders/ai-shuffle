@@ -43,6 +43,7 @@ import { appData } from './app-data.svelte';
 import { git } from './git.svelte';
 import { untrack } from 'svelte';
 import { createStore, createSubscribers } from './store-utils';
+import { ensureModelRegistryHydrated } from '$lib/constants/models.svelte';
 // Shared types
 import type {
 	ChatMessage, MessageType,
@@ -374,6 +375,10 @@ const wsConn: WsConnection = createWsConnection({
 	onConnected: () => {
 		console.debug(`[ActiveSession] onConnected: sessionId=${_state.sessionId}, isStreaming=${_state.isStreaming}, hasMessages=${_state.messages.length > 0}`);
 		_update(s => ({ ...s, wsConnected: true, error: null }));
+
+		// A WS (re)connect means the backend is reachable again — heal a boot-time
+		// model-registry hydration failure (page booted during a restart window).
+		void ensureModelRegistryHydrated();
 
 		// Keep the feed-reconcile watchdog alive whenever we're connected. Idempotent:
 		// re-arms after a destroy()/init() cycle (disconnect() clears it) without ever

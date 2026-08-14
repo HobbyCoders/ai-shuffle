@@ -424,13 +424,17 @@ function warnOnDrift(hydrated: ModelOption[], baseline: readonly ModelOption[]):
  *
  * Safe to call multiple times — each call issues one fetch and replaces
  * state atomically. Intended to run once from the root layout after auth.
+ *
+ * Returns true when the swap happened (registry is now hydrated), false on an
+ * empty payload or a failed fetch — the caller uses that to decide whether to
+ * retry (see `ensureModelRegistryHydrated`).
  */
-export async function hydrateModelRegistry(): Promise<void> {
+export async function hydrateModelRegistry(): Promise<boolean> {
 	try {
 		const payload = await api.get<RegistryPayload>('/models');
 		if (!payload || !Array.isArray(payload.models) || payload.models.length === 0) {
 			console.warn('[model-registry] hydrate returned empty payload, keeping static fallback');
-			return;
+			return false;
 		}
 		const models = payload.models.map(mapPayloadModel);
 		// Drift-checked against the static Claude bundle only — providers are
@@ -441,7 +445,59 @@ export async function hydrateModelRegistry(): Promise<void> {
 		_registry.legacyMap = payload.legacy_map ?? { ...STATIC_LEGACY_MAP };
 		_registry.providers = Array.isArray(payload.providers) ? payload.providers : [];
 		_registry.hydrated = true;
+		return true;
 	} catch (e) {
 		console.error('[model-registry] hydrate failed, keeping static fallback', e);
+		return false;
 	}
+}
+
+/** Backoff schedule for the background hydration retry chain. */
+const HYDRATE_RETRY_DELAYS_MS = [2000, 5000, 15000, 30000];
+
+/** At most one background retry chain may be in flight at a time. */
+let _retryChainActive = false;
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Hydrate the registry, and keep trying in the background if the first attempt
+ * fails.
+ *
+ * The boot hydrate is a single GET issued from the root layout. A page that
+ * boots during a deploy/server-restart window loses that one shot, and the app
+ * would then sit on the static Claude-only fallback forever (no provider
+ * models, stale defaults) until the user manually reloaded. This retries on a
+ * [2s, 5s, 15s, 30s] backoff, and the WebSocket `onConnected` hook in
+ * `active-session.ts` re-kicks it on every (re)connect — a live socket means
+ * the backend is reachable again, so a boot-time failure heals itself.
+ *
+ * Resolves as soon as the immediate attempt settles; the retry chain is
+ * fire-and-forget so callers (e.g. the layout's boot `Promise.all`) are never
+ * blocked on it. Concurrent calls each perform their own immediate attempt
+ * (idempotent — each issues one fetch and swaps state atomically) but only one
+ * background chain ever exists.
+ */
+export async function ensureModelRegistryHydrated(): Promise<void> {
+	if (_registry.hydrated) return;
+	if (await hydrateModelRegistry()) return;
+	// Another concurrent caller may have won the race while we were in flight.
+	if (_registry.hydrated) return;
+	if (_retryChainActive) return;
+
+	_retryChainActive = true;
+	void (async () => {
+		try {
+			for (const delay of HYDRATE_RETRY_DELAYS_MS) {
+				await sleep(delay);
+				if (_registry.hydrated) return;
+				if (await hydrateModelRegistry()) return;
+			}
+			console.warn('[model-registry] hydration retries exhausted, keeping static fallback');
+		} finally {
+			_retryChainActive = false;
+		}
+	})();
 }
