@@ -15,6 +15,14 @@
 		 *  grouped (headings in first-appearance order); otherwise it stays flat.
 		 *  Used by the model override to render the provider-grouped library. */
 		group?: string;
+		/** Stable bucket identity. Two rows share a group ONLY when this matches —
+		 *  provider brand names collide (both OpenAI rows display as "OpenAI"), so
+		 *  the caller passes the provider id here to keep the groups separate.
+		 *  Defaults to `group` when omitted. */
+		groupKey?: string;
+		/** Muted qualifier rendered beside the heading (e.g. `API` / `prolite`) —
+		 *  what disambiguates two same-brand groups. */
+		groupSubtext?: string | null;
 	}
 
 	interface Props {
@@ -66,13 +74,22 @@
 	// (the effort/permission dropdowns stay byte-identical flat lists). Groups
 	// keep first-appearance order so the caller controls the ordering.
 	const isGrouped = $derived(modes.some((m) => m.group != null));
-	const groupedModes = $derived.by<{ group: string; items: OverrideMode[] }[]>(() => {
-		const out: { group: string; items: OverrideMode[] }[] = [];
+	interface ModeGroup {
+		key: string;
+		group: string;
+		subtext: string | null;
+		items: OverrideMode[];
+	}
+	const groupedModes = $derived.by<ModeGroup[]>(() => {
+		const out: ModeGroup[] = [];
 		for (const m of modes) {
 			const name = m.group ?? '';
-			let bucket = out.find((g) => g.group === name);
+			// Bucket on the stable key, not the display name — two provider rows
+			// can legitimately share a brand (both OpenAI rows) and must NOT merge.
+			const key = m.groupKey ?? name;
+			let bucket = out.find((g) => g.key === key);
 			if (!bucket) {
-				bucket = { group: name, items: [] };
+				bucket = { key, group: name, subtext: m.groupSubtext ?? null, items: [] };
 				out.push(bucket);
 			}
 			bucket.items.push(m);
@@ -145,9 +162,13 @@
 				<div class="override-dropdown-notice">{notice}</div>
 			{/if}
 			{#if isGrouped}
-				{#each groupedModes as g (g.group)}
+				{#each groupedModes as g (g.key)}
 					{#if g.group}
-						<div class="override-dropdown-grouphead">{g.group}</div>
+						<div class="override-dropdown-grouphead">
+							{g.group}{#if g.subtext}<span class="override-dropdown-groupsub"
+									>&nbsp;· {g.subtext}</span
+								>{/if}
+						</div>
 					{/if}
 					{#each g.items as mode (mode.value)}
 						{@render item(mode)}
@@ -304,6 +325,13 @@
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
 		color: var(--muted-foreground);
+	}
+
+	/* Auth-kind qualifier on a group heading ("· API" / "· PROLITE"). Lighter
+	   and dimmer than the brand it follows, so the brand still reads first. */
+	.override-dropdown-groupsub {
+		font-weight: 500;
+		opacity: 0.7;
 	}
 
 	@keyframes override-dropdown-fade-in {

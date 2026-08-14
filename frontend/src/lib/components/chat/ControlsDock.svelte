@@ -16,6 +16,8 @@
 		getModelLabel,
 		getDefaultModel,
 		encodeProviderModel,
+		getProviderDisplay,
+		getClaudeDisplay,
 		isReroute,
 		type ModelFamily
 	} from '$lib/constants/models';
@@ -77,24 +79,42 @@
 	// only hot-swap within its own provider) is superseded: cross-provider
 	// switching is now a first-class mid-session action — the backend evicts and
 	// reconnects when the resolved provider changes.
-	const NATIVE_GROUP = 'Claude';
+	// Group headings carry a BRAND NAME plus an auth-kind subtext ("OPENAI · API"
+	// vs "OPENAI · PROLITE") from the shared naming rules in `constants/models`,
+	// so all three model surfaces stay consistent. Groups are keyed by provider
+	// ID, never by the displayed brand — the two OpenAI rows share a brand and
+	// must stay separate groups.
+	const NATIVE_GROUP_KEY = '__claude__';
 	const modelOptions = $derived.by(() => {
-		const out: { value: string; label: string; description: string; group: string }[] = [];
+		const out: {
+			value: string;
+			label: string;
+			description: string;
+			group: string;
+			groupKey: string;
+			groupSubtext: string | null;
+		}[] = [];
+		const claude = getClaudeDisplay();
 		for (const m of getModels()) {
 			out.push({
 				value: m.value,
 				label: m.label,
 				description: MODEL_FAMILY_BLURB[m.family] ?? '',
-				group: NATIVE_GROUP
+				group: claude.name,
+				groupKey: NATIVE_GROUP_KEY,
+				groupSubtext: claude.subtext
 			});
 		}
 		for (const p of getProviders()) {
+			const display = getProviderDisplay(p);
 			for (const pm of p.models) {
 				out.push({
 					value: encodeProviderModel(p.id, pm.id),
 					label: pm.label,
 					description: pm.id,
-					group: p.name
+					group: display.name,
+					groupKey: p.id,
+					groupSubtext: display.subtext
 				});
 			}
 		}

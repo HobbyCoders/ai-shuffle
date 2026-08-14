@@ -44,7 +44,11 @@
 		getDefaultModel,
 		getModelLabel,
 		decodeProviderModel,
-		isPresetModel
+		isPresetModel,
+		getProviders,
+		getProviderDisplay,
+		getClaudeDisplay,
+		type ProviderDisplay
 	} from '$lib/constants/models';
 	import { getContextUsage } from '$lib/api/sessions';
 	import {
@@ -357,13 +361,42 @@
 
 	const ringSeverity = $derived<UsageSeverity>(usageSeverity(contextPercent));
 
-	// ── Resolved-install header (device label) ────────────────────────────
-	// The Claude section header always renders (ChatGPT-provider parity): a fixed
-	// "Claude" label, plus the resolved install's device name when known, or an
-	// "Other device" hint for a resolved remote install with no device label. No
-	// account naming and no staleness/"as of" line.
+	// ── Resolved-install header (brand + auth-kind subtext) ───────────────
+	// Every section header in this popover reads BRAND NAME + a subtext saying
+	// how that account authenticates, from the shared naming rules in
+	// `constants/models` — so the popover, the composer's model dropdown and the
+	// agents-UI picker can never drift apart.
+	//
+	// Claude: "Claude" + its subscription plan ("max"/"pro"), or "API" on
+	// API-key auth. Neither is reachable from the usage store the section reads
+	// today (no snapshot field carries the Claude plan), so the subtext falls
+	// back to the resolved install's device name / "Other device" hint rather
+	// than dropping that disambiguation on the floor.
 	const isSelf = $derived(resolvedKey != null && resolvedKey === selfBucketKey($rateLimit));
 	const deviceLabel = $derived(resolvedBucket?.deviceName ?? null);
+	const claudeDisplay = $derived<ProviderDisplay>(getClaudeDisplay());
+	const claudeSubtext = $derived(
+		claudeDisplay.subtext ?? deviceLabel ?? (isSelf ? null : 'Other device')
+	);
+
+	// Provider sections: prefer the hydrated registry row (its `auth_kind` is
+	// derived from the row's auth_mode, so a `custom` row on Codex auth is
+	// classified correctly), falling back to the usage bucket's own fields when
+	// the registry hasn't hydrated.
+	function providerDisplayFor(pb: {
+		providerId: string;
+		providerName: string | null;
+		providerType: string | null;
+		planType: string | null;
+	}): ProviderDisplay {
+		const entry = getProviders().find((p) => p.id === pb.providerId);
+		return getProviderDisplay({
+			name: entry?.name ?? pb.providerName ?? pb.providerType ?? 'Provider',
+			provider_type: entry?.provider_type ?? pb.providerType,
+			auth_kind: entry?.auth_kind ?? null,
+			plan_type: entry?.plan_type ?? pb.planType
+		});
+	}
 
 	// Claude plan-usage collapse: the rows follow the 'plan' section toggle.
 	const planRowsVisible = $derived(isSectionOpen('plan'));
@@ -506,9 +539,9 @@
 			<div class="popover-divider"></div>
 
 			<!-- ═══ Plan usage limits (Claude) ═══ -->
-			<!-- The header always renders (ChatGPT-provider parity): a fixed "Claude"
-			     label + the resolved device name (or "Other device" for a resolved
-			     remote install). It is the collapse toggle for the window rows;
+			<!-- The header always renders (provider parity): the "Claude" brand +
+			     its auth-kind subtext (plan / "API"), falling back to the resolved
+			     device name or "Other device". It is the collapse toggle for the window rows;
 			     collapsed shows the max plan pct on the right and hides the rows +
 			     "No usage data" line. No account naming, no "as of" staleness line. -->
 			<div class="popover-section">
@@ -520,12 +553,9 @@
 					onclick={() => toggleSection('plan')}
 				>
 					<span class="sec-head-labels">
-						<span class="section-device">Claude</span>
-						{#if deviceLabel}
-							<span class="section-account">{deviceLabel}</span>
-						{/if}
-						{#if !isSelf && !deviceLabel}
-							<span class="section-account">Other device</span>
+						<span class="section-device">{claudeDisplay.name}</span>
+						{#if claudeSubtext}
+							<span class="section-account">{claudeSubtext}</span>
 						{/if}
 					</span>
 					{#if !planRowsVisible && planMaxPct != null}
@@ -578,6 +608,7 @@
 			     rows and the credits line. -->
 			{#each Object.values($rateLimit.providerBuckets ?? {}) as pb (pb.providerId)}
 				{@const sectionId = `provider:${pb.providerId}`}
+				{@const pbDisplay = providerDisplayFor(pb)}
 				{@const pbOpen = isSectionOpen(sectionId)}
 				{@const pbWindows = displayWindows(pb.windows)}
 				{@const pbMaxPct = pbWindows.length
@@ -588,15 +619,13 @@
 						type="button"
 						class="sec-header"
 						aria-expanded={pbOpen}
-						aria-label="{pb.providerName ?? pb.providerType ?? 'Provider'} usage — {pbOpen
-							? 'collapse'
-							: 'expand'}"
+						aria-label="{pbDisplay.name} usage — {pbOpen ? 'collapse' : 'expand'}"
 						onclick={() => toggleSection(sectionId)}
 					>
 						<span class="sec-head-labels">
-							<span class="section-device">{pb.providerName ?? pb.providerType ?? 'Provider'}</span>
-							{#if pb.planType}
-								<span class="section-account">{pb.planType}</span>
+							<span class="section-device">{pbDisplay.name}</span>
+							{#if pbDisplay.subtext}
+								<span class="section-account">{pbDisplay.subtext}</span>
 							{/if}
 						</span>
 						{#if !pbOpen}

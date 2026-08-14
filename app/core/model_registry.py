@@ -189,6 +189,51 @@ def model_values() -> List[str]:
     return values
 
 
+def _is_subscription_row(row: Dict[str, object]) -> bool:
+    """Whether a ``model_providers`` row authenticates as a ChatGPT subscription.
+
+    Mirrors ``app.core.provider.omni_credentials._is_codex_subscription``:
+    ``provider_type == "chatgpt"`` OR ``auth_mode == "chatgpt"`` (a ``custom``
+    row can carry the Codex auth mode). Everything else is API-key auth.
+    """
+    return row.get("provider_type") == "chatgpt" or row.get("auth_mode") == "chatgpt"
+
+
+def _provider_plan_types() -> Dict[str, Optional[str]]:
+    """Latest known ``plan_type`` per provider id, from ``provider_usage_snapshots``.
+
+    The table is keyed by ``provider_id`` (one row per provider), but we still
+    keep the newest ``fetched_at`` defensively so a duplicate can never win by
+    iteration order. Best-effort: any db problem yields ``{}`` so the registry
+    payload keeps building (same degradation contract as ``_providers_payload``).
+    """
+    try:
+        from app.db import database
+    except ImportError:
+        return {}
+    try:
+        rows = database.get_all_provider_usage_snapshots()
+    except Exception as e:
+        logger.warning("Could not load provider usage snapshots for plan types: %s", e)
+        return {}
+    latest: Dict[str, Optional[str]] = {}
+    seen_at: Dict[str, int] = {}
+    for row in rows:
+        provider_id = row.get("provider_id")
+        if not provider_id:
+            continue
+        fetched_at = row.get("fetched_at") or 0
+        try:
+            fetched_at = int(fetched_at)
+        except (TypeError, ValueError):
+            fetched_at = 0
+        if provider_id in seen_at and seen_at[provider_id] >= fetched_at:
+            continue
+        seen_at[provider_id] = fetched_at
+        latest[provider_id] = row.get("plan_type")
+    return latest
+
+
 def _providers_payload() -> List[Dict[str, object]]:
     """Serialized ``model_providers`` rows for the registry payload.
 
@@ -214,11 +259,22 @@ def _providers_payload() -> List[Dict[str, object]]:
         # empty table is not this branch: the query itself returns [].
         logger.warning("Could not load model providers for registry payload: %s", e)
         return []
+    # Plan strings are only meaningful for subscription rows, and only fetched
+    # when at least one such row exists (an all-API-key install skips the read).
+    plan_types = _provider_plan_types() if any(_is_subscription_row(r) for r in rows) else {}
     return [
         {
             "id": row["id"],
             "name": row["name"],
             "provider_type": row["provider_type"],
+            # Display metadata (brand + auth-kind subtext). ``auth_kind`` says
+            # HOW the row authenticates; ``plan_type`` names the subscription
+            # tier for subscription rows (null for API-key rows, and for a
+            # subscription row whose usage snapshot hasn't landed yet).
+            "auth_kind": "subscription" if _is_subscription_row(row) else "api",
+            "plan_type": (
+                plan_types.get(row["id"]) if _is_subscription_row(row) else None
+            ),
             "models": [
                 {
                     "id": model.get("id"),

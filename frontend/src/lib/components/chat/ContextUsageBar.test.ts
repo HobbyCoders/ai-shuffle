@@ -696,9 +696,9 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 			providers: [
 				{
 					provider_id: 'codex-1',
-					provider_name: 'Codex',
-					provider_type: 'codex',
-					plan_type: 'Plus',
+					provider_name: 'ChatGPT',
+					provider_type: 'chatgpt',
+					plan_type: 'prolite',
 					windows: [
 						{ type: 'five_hour', utilization: 30, resets_at: future() },
 						{ type: 'seven_day', utilization: 12, resets_at: future() },
@@ -713,12 +713,13 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		// The Claude header always renders (self, empty windows → just "Claude");
 		// the provider adds its own section header below it.
 		expect(container.querySelectorAll('.popover-section').length).toBe(2);
+		// A ChatGPT-subscription row displays under the OpenAI brand.
 		const deviceLabels = Array.from(container.querySelectorAll('.section-device')).map(
 			(e) => e.textContent
 		);
-		expect(deviceLabels).toEqual(['Claude', 'Codex']);
+		expect(deviceLabels).toEqual(['Claude', 'OpenAI']);
 		// The only .section-account belongs to the provider header (Claude self is unlabeled).
-		expect(container.querySelector('.section-account')?.textContent).toBe('Plus');
+		expect(container.querySelector('.section-account')?.textContent).toBe('prolite');
 
 		// One row per provider window (the empty Claude section shows a
 		// non-.popover-row "No usage data yet" line, not counted here).
@@ -752,9 +753,51 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 			(e) => e.textContent
 		);
 		expect(deviceLabels).toEqual(['Claude', 'openrouter']);
-		// No planType → no .section-account anywhere (Claude self is unlabeled too).
-		expect(container.querySelector('.section-account')).toBeNull();
+		// An API-key row is always subtexted "API" (the Claude self header stays
+		// unlabeled — no plan data and no device name in this fixture).
+		const accounts = Array.from(container.querySelectorAll('.section-account')).map(
+			(e) => e.textContent
+		);
+		expect(accounts).toEqual(['API']);
 		expect(container.textContent).toContain('Daily');
+	});
+
+	it('subtexts an OpenAI API-key row as "OpenAI · API", separate from the ChatGPT row', async () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [
+				{
+					provider_id: 'p-chatgpt',
+					provider_name: 'ChatGPT',
+					provider_type: 'chatgpt',
+					plan_type: 'prolite',
+					windows: [{ type: 'five_hour', utilization: 1, resets_at: future() }],
+					credits: null,
+				},
+				{
+					provider_id: 'p-openai',
+					provider_name: 'OpenAI',
+					provider_type: 'openai',
+					windows: [{ type: 'requests', utilization: 0, resets_at: future() }],
+					credits: null,
+				},
+			],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		// Both rows show the OpenAI brand and stay SEPARATE sections; the subtext
+		// is what tells them apart.
+		const deviceLabels = Array.from(container.querySelectorAll('.section-device')).map(
+			(e) => e.textContent
+		);
+		expect(deviceLabels).toEqual(['Claude', 'OpenAI', 'OpenAI']);
+		const accounts = Array.from(container.querySelectorAll('.section-account')).map(
+			(e) => e.textContent
+		);
+		expect(accounts).toEqual(['prolite', 'API']);
+		expect(container.querySelectorAll('.popover-section').length).toBe(3);
 	});
 
 	it('renders a muted credits line and NO bar for a null-limit provider (OpenRouter-style)', async () => {

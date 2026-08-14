@@ -7,12 +7,21 @@ export type {
 	ModelOption,
 	ProviderModel,
 	ProviderEntry,
+	ProviderAuthKind,
+	ProviderDisplay,
+	ProviderDisplayInput,
 	DecodedProviderModel
 } from './models.svelte';
 export {
 	INHERIT_VALUE,
 	CUSTOM_VALUE,
 	CONTEXT_1M_SUFFIX,
+	CLAUDE_BRAND,
+	API_SUBTEXT,
+	SUBSCRIPTION_SUBTEXT,
+	getProviderDisplay,
+	getClaudeDisplay,
+	formatProviderDisplay,
 	PROVIDER_MODEL_PREFIX,
 	encodeProviderModel,
 	decodeProviderModel,

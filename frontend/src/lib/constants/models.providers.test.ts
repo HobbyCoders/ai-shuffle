@@ -14,7 +14,15 @@ vi.mock('$lib/api/client', () => ({
 	api: { get: mocks.get }
 }));
 
-import { getModelLabel, getProviders, hydrateModelRegistry, isRegistryHydrated } from './models';
+import {
+	getModelLabel,
+	getProviders,
+	getProviderDisplay,
+	getClaudeDisplay,
+	formatProviderDisplay,
+	hydrateModelRegistry,
+	isRegistryHydrated
+} from './models';
 
 describe('getProviders — hydration from GET /models', () => {
 	it('is empty before hydration (no static fallback for providers)', () => {
@@ -46,9 +54,73 @@ describe('getProviders — hydration from GET /models', () => {
 				name: 'OpenRouter',
 				provider_type: 'openrouter',
 				models: [{ id: 'openai/gpt-5.6', label: 'GPT-5.6' }],
-				default_model: 'openai/gpt-5.6'
+				default_model: 'openai/gpt-5.6',
+				// Additive display metadata — absent from this payload, so it
+				// normalises to API-key auth with no plan string.
+				auth_kind: 'api',
+				plan_type: null
 			}
 		]);
+	});
+
+	it('carries auth_kind/plan_type through hydration', async () => {
+		mocks.get.mockResolvedValueOnce({
+			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', supports_1m: true }],
+			default: 'sonnet',
+			legacy_map: {},
+			providers: [
+				{
+					id: 'prov-chatgpt',
+					name: 'ChatGPT',
+					provider_type: 'chatgpt',
+					models: [{ id: 'gpt-5.6', label: 'GPT-5.6' }],
+					default_model: 'gpt-5.6',
+					auth_kind: 'subscription',
+					plan_type: 'prolite'
+				},
+				{
+					id: 'prov-openai',
+					name: 'OpenAI',
+					provider_type: 'openai',
+					models: [{ id: 'gpt-5.6', label: 'GPT-5.6' }],
+					default_model: 'gpt-5.6',
+					auth_kind: 'api',
+					plan_type: null
+				}
+			]
+		});
+
+		await hydrateModelRegistry();
+
+		const [chatgpt, openai] = getProviders();
+		expect(chatgpt.auth_kind).toBe('subscription');
+		expect(chatgpt.plan_type).toBe('prolite');
+		expect(openai.auth_kind).toBe('api');
+		expect(openai.plan_type).toBeNull();
+		// The two rows stay SEPARATE entries even though both display as "OpenAI".
+		expect(getProviders().length).toBe(2);
+	});
+
+	it('infers auth_kind from provider_type when an older payload omits it', async () => {
+		mocks.get.mockResolvedValueOnce({
+			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', supports_1m: true }],
+			default: 'sonnet',
+			legacy_map: {},
+			providers: [
+				{
+					id: 'prov-chatgpt',
+					name: 'ChatGPT',
+					provider_type: 'chatgpt',
+					models: [],
+					default_model: null
+				}
+			]
+		});
+
+		await hydrateModelRegistry();
+
+		expect(getProviders()[0].auth_kind).toBe('subscription');
+		expect(getProviders()[0].plan_type).toBeNull();
 	});
 
 	it('carries per-model context_window through hydration onto getProviders()', async () => {
@@ -83,6 +155,80 @@ describe('getProviders — hydration from GET /models', () => {
 		await hydrateModelRegistry();
 
 		expect(getProviders()).toEqual([]);
+	});
+});
+
+describe('getProviderDisplay / getClaudeDisplay — brand + auth-kind subtext', () => {
+	it('shows a ChatGPT-subscription row as OpenAI + its plan', () => {
+		expect(
+			getProviderDisplay({
+				name: 'ChatGPT',
+				provider_type: 'chatgpt',
+				auth_kind: 'subscription',
+				plan_type: 'prolite'
+			})
+		).toEqual({ name: 'OpenAI', subtext: 'prolite' });
+	});
+
+	it('shows an OpenAI API-key row as OpenAI + API', () => {
+		expect(
+			getProviderDisplay({ name: 'OpenAI', provider_type: 'openai', auth_kind: 'api' })
+		).toEqual({ name: 'OpenAI', subtext: 'API' });
+	});
+
+	it('keeps other API-key rows on their own name + API', () => {
+		expect(
+			getProviderDisplay({ name: 'OpenRouter', provider_type: 'openrouter', auth_kind: 'api' })
+		).toEqual({ name: 'OpenRouter', subtext: 'API' });
+		expect(
+			getProviderDisplay({ name: 'My Gateway', provider_type: 'custom', auth_kind: 'api' })
+		).toEqual({ name: 'My Gateway', subtext: 'API' });
+		expect(
+			getProviderDisplay({ name: 'Anthropic', provider_type: 'anthropic', auth_kind: 'api' })
+		).toEqual({ name: 'Anthropic', subtext: 'API' });
+	});
+
+	it('honours auth_kind over provider_type for a custom row on Codex auth', () => {
+		expect(
+			getProviderDisplay({
+				name: 'My Gateway',
+				provider_type: 'custom',
+				auth_kind: 'subscription',
+				plan_type: 'plus'
+			})
+		).toEqual({ name: 'My Gateway', subtext: 'plus' });
+	});
+
+	it('falls back to a generic subscription subtext when the plan is unknown', () => {
+		expect(
+			getProviderDisplay({ name: 'ChatGPT', provider_type: 'chatgpt', auth_kind: 'subscription' })
+		).toEqual({ name: 'OpenAI', subtext: 'Subscription' });
+	});
+
+	it('infers the auth kind from provider_type when auth_kind is absent', () => {
+		expect(getProviderDisplay({ name: 'ChatGPT', provider_type: 'chatgpt' }).subtext).toBe(
+			'Subscription'
+		);
+		expect(getProviderDisplay({ name: 'OpenRouter', provider_type: 'openrouter' }).subtext).toBe(
+			'API'
+		);
+	});
+
+	it('falls back to the provider type, then a generic name, when the row has no name', () => {
+		expect(getProviderDisplay({ provider_type: 'openrouter' }).name).toBe('openrouter');
+		expect(getProviderDisplay({}).name).toBe('Provider');
+	});
+
+	it('names the native Claude group by plan, by API-key auth, or bare', () => {
+		expect(getClaudeDisplay({ planType: 'max' })).toEqual({ name: 'Claude', subtext: 'max' });
+		expect(getClaudeDisplay({ authKind: 'api' })).toEqual({ name: 'Claude', subtext: 'API' });
+		expect(getClaudeDisplay()).toEqual({ name: 'Claude', subtext: null });
+		expect(getClaudeDisplay({ planType: '  ' })).toEqual({ name: 'Claude', subtext: null });
+	});
+
+	it('formats a one-line label for titles/aria', () => {
+		expect(formatProviderDisplay({ name: 'OpenAI', subtext: 'API' })).toBe('OpenAI · API');
+		expect(formatProviderDisplay({ name: 'Claude', subtext: null })).toBe('Claude');
 	});
 });
 

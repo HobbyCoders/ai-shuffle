@@ -144,6 +144,12 @@ export interface ProviderModel {
 }
 
 /**
+ * How a provider row authenticates: a ChatGPT/Codex OAuth subscription, or an
+ * API key. Mirrors the backend's `auth_kind` (see `app/core/model_registry.py`).
+ */
+export type ProviderAuthKind = 'subscription' | 'api';
+
+/**
  * An enabled `model_providers` row, as exposed by the registry (never
  * carries the encrypted auth token — see `app/db/model_providers.py`).
  */
@@ -153,6 +159,14 @@ export interface ProviderEntry {
 	provider_type: string;
 	models: ProviderModel[];
 	default_model: string | null;
+	/** Subscription vs API-key auth. Defaults to `'api'` on an older payload. */
+	auth_kind: ProviderAuthKind;
+	/**
+	 * Subscription plan string for a subscription row (e.g. `'prolite'`), taken
+	 * from the provider's latest usage snapshot. `null` for API-key rows and for
+	 * a subscription row whose snapshot hasn't landed yet.
+	 */
+	plan_type: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -201,6 +215,96 @@ export function isRegistryHydrated(): boolean {
  */
 export function getProviders(): readonly ProviderEntry[] {
 	return _registry.providers;
+}
+
+// ---------------------------------------------------------------------------
+// Provider display naming — the ONE place the brand/subtext rules live.
+//
+// Every surface that names a provider (the context/usage popover, the chat
+// composer's model dropdown, the agents-UI ModelPicker) renders a BRAND NAME
+// plus a SUBTEXT saying how that row authenticates:
+//
+//   provider_type 'chatgpt'  → "OpenAI" · <plan>   (subscription, e.g. "prolite")
+//   provider_type 'openai'   → "OpenAI" · "API"    (API key)
+//   any other row            → <row name> · "API"
+//   native Claude            → "Claude" · <plan> for a subscription account,
+//                              "Claude" · "API" for Anthropic API-key auth
+//
+// The two OpenAI rows deliberately keep their own groups/sections — the
+// subtext is what disambiguates them; nothing here merges or dedupes rows.
+// ---------------------------------------------------------------------------
+
+/** Brand name for the native Claude group/section. */
+export const CLAUDE_BRAND = 'Claude';
+
+/** Subtext used for any API-key-authenticated row. */
+export const API_SUBTEXT = 'API';
+
+/** Fallback subtext for a subscription row whose plan string isn't known yet. */
+export const SUBSCRIPTION_SUBTEXT = 'Subscription';
+
+/** Brand overrides keyed by `provider_type` — rows whose stored name is not the
+ *  brand we want to show (both OpenAI rows display as "OpenAI"). */
+const PROVIDER_BRANDS: Readonly<Record<string, string>> = {
+	chatgpt: 'OpenAI',
+	openai: 'OpenAI'
+};
+
+/** A provider's two-part display label. */
+export interface ProviderDisplay {
+	/** Brand name (the primary label). */
+	name: string;
+	/** Auth-kind subtext, or `null` when nothing is known to show. */
+	subtext: string | null;
+}
+
+/** The subset of a provider row the naming rules actually read. */
+export interface ProviderDisplayInput {
+	name?: string | null;
+	provider_type?: string | null;
+	auth_kind?: ProviderAuthKind | null;
+	plan_type?: string | null;
+}
+
+/**
+ * Brand name + auth-kind subtext for a provider row.
+ *
+ * `auth_kind` is authoritative when present (the backend derives it from the
+ * row's `auth_mode`, so a `custom` row carrying Codex auth is classified
+ * correctly); callers with only a `provider_type` to hand get the same answer
+ * for every non-`custom` row.
+ */
+export function getProviderDisplay(entry: ProviderDisplayInput): ProviderDisplay {
+	const type = entry.provider_type ?? '';
+	const name = PROVIDER_BRANDS[type] || entry.name || type || 'Provider';
+	const kind: ProviderAuthKind =
+		entry.auth_kind ?? (type === 'chatgpt' ? 'subscription' : 'api');
+	if (kind === 'subscription') {
+		return { name, subtext: entry.plan_type || SUBSCRIPTION_SUBTEXT };
+	}
+	return { name, subtext: API_SUBTEXT };
+}
+
+/**
+ * Brand name + subtext for the native Claude group/section.
+ *
+ * `planType` is the subscription tier ("max" / "pro"); pass `authKind: 'api'`
+ * when the install runs on an Anthropic API key. With neither known the group
+ * degrades to a bare "Claude" rather than inventing a subtext — the app has no
+ * store carrying the Claude plan today (see the PR notes).
+ */
+export function getClaudeDisplay(opts?: {
+	planType?: string | null;
+	authKind?: ProviderAuthKind | null;
+}): ProviderDisplay {
+	if (opts?.authKind === 'api') return { name: CLAUDE_BRAND, subtext: API_SUBTEXT };
+	const plan = opts?.planType?.trim();
+	return { name: CLAUDE_BRAND, subtext: plan ? plan : null };
+}
+
+/** One-line `"Brand · subtext"` rendering — for titles/aria labels. */
+export function formatProviderDisplay(display: ProviderDisplay): string {
+	return display.subtext ? `${display.name} · ${display.subtext}` : display.name;
 }
 
 // ---------------------------------------------------------------------------
@@ -393,6 +497,8 @@ interface RegistryProviderPayload {
 	provider_type: string;
 	models: ProviderModel[];
 	default_model: string | null;
+	auth_kind?: ProviderAuthKind | null;
+	plan_type?: string | null;
 }
 
 interface RegistryPayload {
@@ -406,6 +512,24 @@ interface RegistryPayload {
 
 function mapPayloadModel(m: RegistryModelPayload): ModelOption {
 	return { value: m.value, label: m.label, family: m.family, supports1m: m.supports_1m ?? false };
+}
+
+/**
+ * Normalise a provider entry from the payload. `auth_kind`/`plan_type` are
+ * additive — an older backend omits them, so default to API-key auth (the
+ * pre-existing behaviour for every non-ChatGPT row) rather than leaving the
+ * field undefined for consumers.
+ */
+function mapPayloadProvider(p: RegistryProviderPayload): ProviderEntry {
+	return {
+		id: p.id,
+		name: p.name,
+		provider_type: p.provider_type,
+		models: p.models ?? [],
+		default_model: p.default_model ?? null,
+		auth_kind: p.auth_kind ?? (p.provider_type === 'chatgpt' ? 'subscription' : 'api'),
+		plan_type: p.plan_type ?? null
+	};
 }
 
 function warnOnDrift(hydrated: ModelOption[], baseline: readonly ModelOption[]): void {
@@ -439,7 +563,9 @@ export async function hydrateModelRegistry(): Promise<void> {
 		_registry.models = models;
 		_registry.default = payload.default || STATIC_DEFAULT;
 		_registry.legacyMap = payload.legacy_map ?? { ...STATIC_LEGACY_MAP };
-		_registry.providers = Array.isArray(payload.providers) ? payload.providers : [];
+		_registry.providers = Array.isArray(payload.providers)
+			? payload.providers.map(mapPayloadProvider)
+			: [];
 		_registry.hydrated = true;
 	} catch (e) {
 		console.error('[model-registry] hydrate failed, keeping static fallback', e);

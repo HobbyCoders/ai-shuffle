@@ -162,6 +162,9 @@ class TestRegistryPayloadProviders:
             "id": "prov-1",
             "name": "OpenRouter",
             "provider_type": "openrouter",
+            # Display metadata: an API-key row, so no plan string.
+            "auth_kind": "api",
+            "plan_type": None,
             "models": [{
                 "id": "openai/gpt-5.6",
                 "label": "GPT-5.6",
@@ -197,6 +200,94 @@ class TestRegistryPayloadProviders:
             {"id": "model-b", "label": "Model B",
              "context_window": 200000, "max_output_tokens": 8192},
         ]
+
+    def test_chatgpt_row_is_subscription_and_carries_its_plan_type(self, mock_db):
+        """A ChatGPT row reports ``auth_kind='subscription'`` and the plan string
+        from its latest ``provider_usage_snapshots`` row — the subtext the UI
+        renders under the OpenAI brand."""
+        db.create_model_provider(
+            provider_id="prov-chatgpt",
+            name="ChatGPT",
+            provider_type="chatgpt",
+            base_url="https://chatgpt.example/api",
+            models=[{"id": "gpt-5.6", "label": "GPT-5.6"}],
+            enabled=True,
+        )
+        db.upsert_provider_usage_snapshot(
+            provider_id="prov-chatgpt",
+            provider_type="chatgpt",
+            plan_type="prolite",
+            windows=[],
+            credits=None,
+            raw=None,
+            fetched_at=1_700_000_000_000,
+        )
+        entry = m.registry_payload()["providers"][0]
+        assert entry["auth_kind"] == "subscription"
+        assert entry["plan_type"] == "prolite"
+
+    def test_api_key_rows_report_api_auth_and_no_plan(self, mock_db):
+        """API-key rows never carry a plan string, even if a usage snapshot
+        happens to hold one (only subscription rows have a plan)."""
+        db.create_model_provider(
+            provider_id="prov-openai",
+            name="OpenAI",
+            provider_type="openai",
+            base_url="https://api.openai.com/v1",
+            enabled=True,
+        )
+        db.upsert_provider_usage_snapshot(
+            provider_id="prov-openai",
+            provider_type="openai",
+            plan_type="ignored",
+            windows=[],
+            credits=None,
+            raw=None,
+            fetched_at=1_700_000_000_000,
+        )
+        entry = m.registry_payload()["providers"][0]
+        assert entry["auth_kind"] == "api"
+        assert entry["plan_type"] is None
+
+    def test_subscription_row_without_a_snapshot_has_a_null_plan(self, mock_db):
+        db.create_model_provider(
+            provider_id="prov-chatgpt",
+            name="ChatGPT",
+            provider_type="chatgpt",
+            base_url="https://chatgpt.example/api",
+            enabled=True,
+        )
+        entry = m.registry_payload()["providers"][0]
+        assert entry["auth_kind"] == "subscription"
+        assert entry["plan_type"] is None
+
+    def test_plan_type_lookup_degrades_when_the_snapshot_read_fails(self, mock_db, monkeypatch):
+        """A snapshots-table problem must not break the registry payload — the
+        row still reports its auth kind, just without a plan string."""
+        db.create_model_provider(
+            provider_id="prov-chatgpt",
+            name="ChatGPT",
+            provider_type="chatgpt",
+            base_url="https://chatgpt.example/api",
+            enabled=True,
+        )
+
+        def _raise(*_args, **_kwargs):
+            raise Exception('relation "provider_usage_snapshots" does not exist')
+
+        monkeypatch.setattr(db, "get_all_provider_usage_snapshots", _raise)
+        entry = m.registry_payload()["providers"][0]
+        assert entry["auth_kind"] == "subscription"
+        assert entry["plan_type"] is None
+
+    def test_subscription_detection_mirrors_the_gateway_mode_resolution(self):
+        """``provider_type == 'chatgpt'`` OR ``auth_mode == 'chatgpt'`` — a
+        ``custom`` row can carry the Codex auth mode (mirrors
+        ``omni_credentials._is_codex_subscription``)."""
+        assert m._is_subscription_row({"provider_type": "chatgpt"}) is True
+        assert m._is_subscription_row({"provider_type": "custom", "auth_mode": "chatgpt"}) is True
+        assert m._is_subscription_row({"provider_type": "openai"}) is False
+        assert m._is_subscription_row({"provider_type": "custom", "auth_mode": None}) is False
 
     def test_no_auth_token_anywhere_in_payload(self, mock_db):
         db.create_model_provider(

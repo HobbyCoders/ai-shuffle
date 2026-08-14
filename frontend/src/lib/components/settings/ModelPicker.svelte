@@ -24,6 +24,8 @@
 		getModels,
 		getProviders,
 		encodeProviderModel,
+		getProviderDisplay,
+		getClaudeDisplay,
 		CUSTOM_VALUE
 	} from '$lib/constants/models';
 
@@ -44,13 +46,21 @@
 	let { value, onSelect, id, providerModelsOnly = false }: Props = $props();
 
 	const PIN_STORAGE_KEY = 'aihub.pinnedModels';
-	const NATIVE_GROUP = 'Claude';
+	// Groups are keyed by provider ID (the native catalog gets this sentinel) so
+	// two rows sharing a brand — both OpenAI rows display as "OpenAI" — stay
+	// separate groups; the auth-kind subtext is what tells them apart.
+	const NATIVE_GROUP_KEY = '__claude__';
 
 	interface PickerOption {
 		value: string; // composite value emitted on select
 		modelId: string; // raw model id (for search + display)
 		label: string;
+		/** Stable bucket identity (provider id, or the native sentinel). */
+		groupKey: string;
+		/** Brand name shown on the group heading. */
 		group: string;
+		/** Muted auth-kind qualifier on the heading ("API" / "prolite" / …). */
+		groupSubtext: string | null;
 	}
 
 	// ---- pinned set (localStorage-backed) -----------------------------------
@@ -88,17 +98,28 @@
 	const options = $derived.by<PickerOption[]>(() => {
 		const out: PickerOption[] = [];
 		if (!providerModelsOnly) {
+			const claude = getClaudeDisplay();
 			for (const m of getModels()) {
-				out.push({ value: m.value, modelId: m.value, label: m.label, group: NATIVE_GROUP });
+				out.push({
+					value: m.value,
+					modelId: m.value,
+					label: m.label,
+					groupKey: NATIVE_GROUP_KEY,
+					group: claude.name,
+					groupSubtext: claude.subtext
+				});
 			}
 		}
 		for (const p of getProviders()) {
+			const display = getProviderDisplay(p);
 			for (const pm of p.models) {
 				out.push({
 					value: encodeProviderModel(p.id, pm.id),
 					modelId: pm.id,
 					label: pm.label,
-					group: p.name
+					groupKey: p.id,
+					group: display.name,
+					groupSubtext: display.subtext
 				});
 			}
 		}
@@ -152,13 +173,20 @@
 			.filter((o): o is PickerOption => o != null)
 	);
 
-	// Remaining options grouped by their group label, native group first.
-	const groupedOptions = $derived.by<{ group: string; items: PickerOption[] }[]>(() => {
-		const groups: { group: string; items: PickerOption[] }[] = [];
+	// Remaining options grouped by their group KEY (never the brand — see above),
+	// native group first.
+	interface OptionGroup {
+		key: string;
+		group: string;
+		subtext: string | null;
+		items: PickerOption[];
+	}
+	const groupedOptions = $derived.by<OptionGroup[]>(() => {
+		const groups: OptionGroup[] = [];
 		for (const o of filtered) {
-			let bucket = groups.find((g) => g.group === o.group);
+			let bucket = groups.find((g) => g.key === o.groupKey);
 			if (!bucket) {
-				bucket = { group: o.group, items: [] };
+				bucket = { key: o.groupKey, group: o.group, subtext: o.groupSubtext, items: [] };
 				groups.push(bucket);
 			}
 			bucket.items.push(o);
@@ -260,9 +288,11 @@
 					</div>
 				{/if}
 
-				{#each groupedOptions as g (g.group)}
+				{#each groupedOptions as g (g.key)}
 					<div class="mpk-group">
-						<div class="mpk-grouphead">{g.group}</div>
+						<div class="mpk-grouphead">
+							{g.group}{#if g.subtext}<span class="mpk-groupsub">&nbsp;· {g.subtext}</span>{/if}
+						</div>
 						{#each g.items as o (o.value)}
 							{@render row(o)}
 						{/each}
@@ -430,6 +460,13 @@
 		text-transform: uppercase;
 		letter-spacing: 0.04em;
 		color: var(--muted-foreground);
+	}
+
+	/* Auth-kind qualifier on a group heading ("· API" / "· PROLITE") — lighter
+	   and dimmer than the brand it follows, so the brand still reads first. */
+	.mpk-groupsub {
+		font-weight: 500;
+		opacity: 0.7;
 	}
 
 	.mpk-row {
