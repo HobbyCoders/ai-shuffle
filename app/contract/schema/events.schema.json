@@ -1134,6 +1134,18 @@
           "title": "Id",
           "type": "string"
         },
+        "launch_tool_use_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Launch Tool Use Id"
+        },
         "prompt_preview": {
           "anyOf": [
             {

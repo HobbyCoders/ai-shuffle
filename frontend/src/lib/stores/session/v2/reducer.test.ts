@@ -811,6 +811,30 @@ describe('subagent cards', () => {
 		expect(orphan).toBeUndefined();
 	});
 
+	it('subagent.started absorbs the launch tool_use block via launch_tool_use_id', () => {
+		// Omni-leg Task workers key task_id on the WORKER session id, so the
+		// model's launch tool_use block ('toolu-9') never matches task_id. The
+		// event's launch_tool_use_id is what lets the card absorb it — without
+		// it the transcript rendered BOTH a Task tool call and the worker card.
+		const s = fold([
+			ev('tool.use', { tool_use_id: 'toolu-9', name: 'Task', input: { agent: 'helper' } }),
+			ev('subagent.started', {
+				task_id: 'worker-session-1',
+				description: 'Task · Helper',
+				launch_tool_use_id: 'toolu-9',
+			}),
+		]);
+		const cards = s.messages.filter((m) => m.type === 'subagent');
+		expect(cards).toHaveLength(1);
+		expect(cards[0].id).toBe('subagent-worker-session-1');
+		const launchBlock = s.messages.find((m) => m.type === 'tool_use' && m.toolId === 'toolu-9');
+		expect(launchBlock).toBeUndefined();
+		// The launch tool.result that lands when the sync dispatch returns has
+		// no surviving tool_use message — it must not render standalone.
+		const after = reduce(s, ev('tool.result', { tool_use_id: 'toolu-9', content_preview: '{"ok":true}' }));
+		expect(after.messages.filter((m) => m.type === 'tool_use')).toHaveLength(0);
+	});
+
 	it('input_delta after the subagent card exists does not recreate a placeholder', () => {
 		const s = fold([
 			ev('subagent.started', { task_id: 'toolu-1', description: 'bg work' }),

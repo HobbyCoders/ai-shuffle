@@ -1002,9 +1002,20 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// tool.use/tool.result), opening a `tooluse-${taskId}` placeholder
 			// that would spin forever. The subagent card is the designed surface
 			// for the launch — drop the orphan placeholder now the card exists.
+			// Omni-leg Task workers key task_id on the WORKER session id, so the
+			// model's actual launch tool_use_id rides separately as
+			// launch_tool_use_id — absorb that block too, or the transcript shows
+			// both a Task tool call and the worker card for one dispatch.
+			const launchToolUseId = str(event.launch_tool_use_id);
 			next = {
 				...next,
-				messages: next.messages.filter((m) => !(m.type === 'tool_use' && m.toolId === taskId)),
+				messages: next.messages.filter(
+					(m) =>
+						!(
+							m.type === 'tool_use' &&
+							(m.toolId === taskId || (launchToolUseId && m.toolId === launchToolUseId))
+						)
+				),
 			};
 			const msg: ChatMessage = {
 				id: `subagent-${taskId}`,

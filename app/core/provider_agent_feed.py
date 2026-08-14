@@ -163,6 +163,7 @@ class WorkerFeed:
         provider_id: Optional[str] = None,
         model_id: Optional[str] = None,
         prompt: Optional[str] = None,
+        launch_tool_use_id: Optional[str] = None,
     ) -> None:
         self.parent_session_id = parent_session_id
         self.worker_session_id = worker_session_id
@@ -171,6 +172,11 @@ class WorkerFeed:
         self.provider_id = provider_id
         self.model_id = model_id
         self.prompt = prompt
+        # The model's Task tool_use_id (omni native leg), when known. Rides the
+        # subagent.started event so the reducer can absorb the launch tool_use
+        # placeholder into the card; NOT a join key for settles (those stay on
+        # task_id — the worker session id).
+        self.launch_tool_use_id = launch_tool_use_id
 
         self._cursor = 0
         self._frames = 0
@@ -238,6 +244,7 @@ class WorkerFeed:
             # same join key.
             "tool_id": self.task_id,
             "agent_id": self.task_id,
+            "launch_tool_use_id": self.launch_tool_use_id,
             # Unknown agent types render as their raw string badge on the card
             # (SubagentMessage.getModelBadge), so the model id is the useful
             # label here.

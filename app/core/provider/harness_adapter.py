@@ -1469,6 +1469,15 @@ def _provider_row_kind(
         return "openai_responses"
     if ptype == "openrouter":
         return "openrouter"
+    if ptype == "custom":
+        # A "custom" row is an Anthropic-Messages-compatible endpoint by the
+        # app's own contract (the delegated CLI pointed ANTHROPIC_BASE_URL at
+        # it; the catalog reads {base_url}/v1/models) — serve it with the
+        # native Anthropic client aimed at the row's base_url. Before this
+        # branch existed a custom row fell through to the model-string sniff,
+        # and any non-prefixed model id ("grok-4.5") landed on the REAL
+        # Anthropic API with the row's foreign key — an instant, silent 401.
+        return "anthropic"
     if ptype == "anthropic":
         # HARD CONSTRAINT: subscription auth stays on the delegated claude CLI.
         return "delegated" if mode in _SUBSCRIPTION_AUTH_MODES else "anthropic"
@@ -1631,11 +1640,12 @@ async def _build_provider_client(
 ) -> tuple[Any, Optional[httpx.AsyncClient]]:
     """Construct the omni native client for ``kind``, authenticated.
 
-    Returns ``(client, capture_http_client)``. The second element is the
-    usage-header-capturing ``httpx.AsyncClient`` injected into the omni client
-    (openai_responses with a bound provider row only), or ``None`` when no
-    client was injected — the caller owns closing it (the omni client does not,
-    since it did not create it).
+    Returns ``(client, injected_http_client)``. The second element is any
+    ``httpx.AsyncClient`` injected into the omni client (the usage-header
+    capture client on openai_responses rows; the Bearer-header client on
+    custom/base_url anthropic rows), or ``None`` when no client was injected —
+    the caller owns closing it (the omni client does not, since it did not
+    create it).
 
     Credential resolution order (see ``omni_credentials``):
       1. the session's bound ``model_providers`` row (``extra["provider_id"]``,
@@ -1674,8 +1684,29 @@ async def _build_provider_client(
         return OpenRouterClient(), None
     # anthropic — API-key rows only. A Claude Pro/Max SUBSCRIPTION OAuth token is
     # never routed here (that path stays delegated-CLI only); resolve_provider_
-    # credentials refuses such a row outright.
+    # credentials refuses such a row outright. A row-level ``base_url`` (every
+    # ``custom`` row, an anthropic row fronted by a proxy) redirects the client
+    # to that endpoint using the same convention the delegated CLI applies to
+    # ANTHROPIC_BASE_URL: append ``/v1/messages``.
     if creds is not None:
+        if creds.base_url:
+            # Gateways behind a custom base_url were authenticated by the CLI
+            # via ``Authorization: Bearer`` (ANTHROPIC_AUTH_TOKEN); omni's
+            # client only sends ``x-api-key``. Inject an httpx client carrying
+            # the Bearer header too so either scheme works. Returned as the
+            # second element — the adapter owns closing an injected client.
+            bearer_http = httpx.AsyncClient(
+                timeout=600.0,
+                headers={"Authorization": f"Bearer {creds.api_key}"},
+            )
+            return (
+                AnthropicClient(
+                    api_key=creds.api_key,
+                    base_url=creds.base_url.rstrip("/") + "/v1/messages",
+                    http_client=bearer_http,
+                ),
+                bearer_http,
+            )
         return AnthropicClient(api_key=creds.api_key), None
     _require_env_credential("ANTHROPIC_API_KEY", kind)
     return AnthropicClient(), None

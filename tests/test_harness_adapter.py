@@ -736,10 +736,26 @@ def test_provider_kind_explicit_hints_still_outrank_the_row():
     assert _decide_provider_kind(opts2) == "openrouter"
 
 
+def test_provider_kind_custom_row_is_the_anthropic_compatible_native_leg():
+    """A ``custom`` row is an Anthropic-Messages-compatible endpoint by the
+    app's own contract (the delegated CLI pointed ANTHROPIC_BASE_URL at it),
+    so it always drives the native anthropic client at the row's base_url —
+    NEVER the model-string sniff. The sniff sent a custom row's non-prefixed
+    model ("grok-4.5") to the REAL Anthropic API with the row's foreign key:
+    an instant silent 401 and a turn that completed with zero output."""
+    assert _decide_provider_kind(_bound("grok-4.5", "custom")) == "anthropic"
+    # Model ids that LOOK like other vendors' stay on the row's endpoint too —
+    # the row is authoritative for both endpoint and credentials.
+    assert _decide_provider_kind(_bound("gpt-4o", "custom")) == "anthropic"
+    assert _decide_provider_kind(_bound("claude-sonnet-4-5", "custom")) == "anthropic"
+    # ...except the Codex-subscription shape (custom + chatgpt auth), which is
+    # its own leg and is asserted in the row-outranks-sniff test above.
+
+
 def test_provider_kind_unknown_row_type_falls_back_to_the_sniff():
     """A row shape the mapping doesn't recognise must not swallow the decision."""
-    assert _decide_provider_kind(_bound("gpt-4o", "custom")) == "openai_responses"
-    assert _decide_provider_kind(_bound("claude-sonnet-4-5", "custom")) == "delegated"
+    assert _decide_provider_kind(_bound("gpt-4o", "weird-new-type")) == "openai_responses"
+    assert _decide_provider_kind(_bound("claude-sonnet-4-5", "weird-new-type")) == "delegated"
 
 
 def test_provider_kind_looks_the_row_up_when_the_shape_is_missing(monkeypatch):
@@ -2074,7 +2090,7 @@ async def test_task_dispatch_uses_the_stamped_app_session_id(monkeypatch, tmp_pa
 
     seen: dict = {}
 
-    async def _fake_dispatch(args, *, caller_session_id, caller_profile_id=None):
+    async def _fake_dispatch(args, *, caller_session_id, caller_profile_id=None, launch_tool_use_id=None):
         seen["caller"] = caller_session_id
         return {"ok": True}
 
@@ -2096,7 +2112,7 @@ async def test_task_dispatch_falls_back_to_the_sdk_id_lookup(monkeypatch, tmp_pa
 
     seen: dict = {}
 
-    async def _fake_dispatch(args, *, caller_session_id, caller_profile_id=None):
+    async def _fake_dispatch(args, *, caller_session_id, caller_profile_id=None, launch_tool_use_id=None):
         seen["caller"] = caller_session_id
         return {"ok": True}
 
@@ -2150,7 +2166,7 @@ async def test_pooled_engine_dispatcher_picks_up_a_late_session_id(
     seen: dict = {}
     mapped: dict = {}
 
-    async def _fake_dispatch(args, *, caller_session_id, caller_profile_id=None):
+    async def _fake_dispatch(args, *, caller_session_id, caller_profile_id=None, launch_tool_use_id=None):
         seen["caller"] = caller_session_id
         return {"ok": True}
 

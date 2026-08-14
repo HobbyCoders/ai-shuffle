@@ -3832,6 +3832,21 @@ async def _stream_to_websocket_impl(
             "message": "Query was interrupted",
             "metadata": {"terminal_reason": metadata.get("terminal_reason")}
         }
+    elif metadata.get("is_error") and not has_visible_content:
+        # The turn ended on an is_error ResultMessage without rendering ANY
+        # content — the omni legs deliver provider failures this way (an
+        # ErrorEvent becomes a terminal ResultMessage, the generator ends
+        # cleanly, `crashed` never flips). A bare `done` here made the
+        # frontend chime "session complete" over a silently dead turn with no
+        # explanation. Surface it as the terminal `error` frame instead — the
+        # frontend shows the banner and resets streaming state.
+        _errs = metadata.get("errors")
+        _msg = (
+            "; ".join(str(e) for e in _errs)
+            if isinstance(_errs, list) and _errs
+            else "The provider returned an error before producing any output."
+        )
+        yield {"type": "error", "message": _msg, "session_id": session_id}
     else:
         yield {
             "type": "done",

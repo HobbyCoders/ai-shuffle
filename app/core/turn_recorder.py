@@ -260,6 +260,7 @@ def _translate_shared(
             agent_type=event.get("agent_type"),
             description=event.get("description"),
             prompt_preview=_truncate(event.get("prompt")),
+            launch_tool_use_id=event.get("launch_tool_use_id") or None,
             **kw,
         )]
 

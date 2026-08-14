@@ -76,12 +76,15 @@ class ProviderCredentials:
     ``api_key`` and ``auth`` are mutually exclusive: an API-key row yields the
     former, a ChatGPT-subscription row the latter. ``use_codex_backend`` tells
     the caller to point ``OpenAIResponsesClient`` at the Codex responses
-    endpoint rather than the OpenAI platform one.
+    endpoint rather than the OpenAI platform one. ``base_url`` is the provider
+    row's endpoint root (set for ``custom`` rows and any anthropic row that
+    overrides it) — the caller appends the API path (``/v1/messages``).
     """
 
     api_key: Optional[str] = None
     auth: Optional[Any] = None
     use_codex_backend: bool = False
+    base_url: Optional[str] = None
 
 
 # ``auth_mode`` values that mean "this row carries a subscription OAuth login,
@@ -244,4 +247,5 @@ async def resolve_provider_credentials(
             "key for it (or connect its ChatGPT account) before starting a "
             "session on it."
         )
-    return ProviderCredentials(api_key=api_key)
+    base_url = (row.get("base_url") or "").strip() or None
+    return ProviderCredentials(api_key=api_key, base_url=base_url)
