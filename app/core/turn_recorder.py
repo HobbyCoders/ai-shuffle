@@ -1129,6 +1129,130 @@ async def record_cli_wake_turn_completed(
         )
 
 
+# ----------------------------------------------------------------------
+# Voice exchanges (VW3 / ruling VM9) — synthetic turns, no ``turns`` row.
+# ----------------------------------------------------------------------
+
+# Placeholder title stamped by ``POST /api/v1/voice/sessions``; the first
+# exchange replaces it with something derived from what the user actually said.
+VOICE_PLACEHOLDER_TITLE = "Voice session"
+
+# Same shape the chat WS handler derives titles with (100 chars, word-boundary
+# ellipsis) so a voice session's board entry reads like any other.
+_TITLE_MAX_CHARS = 100
+
+
+def _derive_title(text: str) -> str:
+    title = text[:_TITLE_MAX_CHARS].strip()
+    if len(text) > _TITLE_MAX_CHARS:
+        title = title.rsplit(" ", 1)[0] + "..."
+    return title
+
+
+def _voice_exchange_side_effects(
+    session_id: str,
+    user_text: Optional[str],
+    assistant_text: Optional[str],
+) -> Optional[str]:
+    """Search rows + board bookkeeping for one voice exchange (sync).
+
+    Mirrors what a normal turn writes ALONGSIDE the event log:
+    ``session_messages`` rows (FTS/search parity) and the session counters. On
+    the first exchange of a still-unnamed voice session the title is backfilled
+    from the user's first utterance; the derived title is returned so the caller
+    can log it (``None`` when nothing was renamed).
+    """
+    from app.db import database
+
+    if user_text:
+        database.add_session_message(session_id, "user", user_text)
+    if assistant_text:
+        database.add_session_message(session_id, "assistant", assistant_text)
+
+    new_title: Optional[str] = None
+    if user_text:
+        row = database.get_session(session_id)
+        current = (row or {}).get("title") or ""
+        if not current.strip() or current.strip() == VOICE_PLACEHOLDER_TITLE:
+            new_title = _derive_title(user_text) or None
+
+    database.update_session(
+        session_id=session_id, turn_increment=1, title=new_title,
+    )
+    return new_title
+
+
+async def record_voice_exchange(
+    session_id: str,
+    user_text: Optional[str],
+    assistant_text: Optional[str],
+    *,
+    model: Optional[str] = None,
+    usage: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """Persist ONE completed voice exchange as a synthetic turn (ruling VM9).
+
+    Appends ``turn.started`` / ``message.user`` / ``message.assistant`` /
+    ``turn.completed`` in a SINGLE unfenced batch (so the four rows get
+    contiguous seqs) under a ``voice-<uuid>`` turn id with NO ``turns``-table
+    row — exactly the CLI-wake synthetic-turn shape, which the FE reducer
+    already renders as ordinary history and the turn scheduler ignores.
+
+    ``user_text=None`` is legitimate — a model-initiated response, or an input
+    transcription that never arrived — and simply omits the ``message.user``
+    event. Returns the synthetic turn id, or ``None`` when nothing was written.
+    Never raises: a persistence bug must not kill the call.
+    """
+    try:
+        user_text = (user_text or "").strip() or None
+        assistant_text = (assistant_text or "").strip() or None
+        if not user_text and not assistant_text:
+            return None
+
+        turn_id = f"voice-{uuid.uuid4()}"
+        rows: List[Dict[str, Any]] = [
+            _build_event(contract.TurnStarted, session_id, turn_id=turn_id),
+        ]
+        if user_text:
+            rows.append(_build_event(
+                contract.MessageUser, session_id, turn_id=turn_id,
+                content=user_text, kind="text",
+                extra_payload={"source": "voice"},
+            ))
+        rows.append(_build_event(
+            contract.MessageAssistant, session_id, turn_id=turn_id,
+            content=assistant_text or "", kind="text", model=model,
+        ))
+        rows.append(_build_event(
+            contract.TurnCompleted, session_id, turn_id=turn_id,
+            stop_reason="end_turn", usage=usage or {},
+        ))
+        await _append_unfenced(session_id, rows)
+
+        try:
+            new_title = await asyncio.to_thread(
+                _voice_exchange_side_effects, session_id, user_text, assistant_text,
+            )
+            if new_title:
+                logger.info(
+                    "[TurnRecorder] voice session %s titled %r", session_id, new_title,
+                )
+        except Exception:
+            # The event log is the transcript authority — search rows and board
+            # counters failing must not lose the exchange that was just written.
+            logger.warning(
+                "[TurnRecorder] voice exchange side effects failed for %s",
+                session_id, exc_info=True,
+            )
+        return turn_id
+    except Exception:
+        logger.warning(
+            "[TurnRecorder] record_voice_exchange failed for %s", session_id,
+            exc_info=True,
+        )
+        return None
+
+
 async def record_task_settle_frame(
     session_id: str,
     task_id: Optional[str],

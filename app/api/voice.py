@@ -1,6 +1,6 @@
-"""Voice-mode API routes (wave VW1 of docs/VOICE_MODE_PLAN.md).
+"""Voice-mode API routes (waves VW1 + VW3 of docs/VOICE_MODE_PLAN.md).
 
-Two endpoints, deliberately small:
+Deliberately small surface:
 
 * ``GET  /api/v1/voice/providers`` — which ``model_providers`` rows can fund a
   realtime call. OpenAI Realtime is **API-key only**: a ChatGPT/Codex
@@ -10,9 +10,17 @@ Two endpoints, deliberately small:
   session is a REAL ``sessions`` row, created eagerly, ``mode='voice'``) and
   mint a short-lived OpenAI client secret for the browser's WebRTC leg, so the
   provider's API key never leaves this process.
-
-The call surface (register call_id / hangup / state) and the sideband bridge
-are wave VW3 and deliberately absent here.
+* ``POST /api/v1/voice/sessions/{id}/secret`` — re-mint that secret for an
+  EXISTING voice session (rejoin, or the FE's reconnect near OpenAI's session
+  wall). Same flag / eligibility / decrypt path as creation.
+* ``POST /api/v1/voice/sessions/{id}/call`` — the browser has finished its
+  WebRTC handshake and hands us the ``call_id``; the backend joins the same
+  call over its sideband WebSocket (:mod:`app.core.voice_bridge`). Posting a
+  new ``call_id`` REPLACES any existing attachment.
+* ``POST /api/v1/voice/sessions/{id}/hangup`` — detach + stop the bridge.
+  Idempotent.
+* ``GET  /api/v1/voice/sessions/{id}/state`` — is a bridge attached, and is its
+  sideband still connected.
 """
 
 import logging
@@ -118,6 +126,31 @@ class VoiceSessionResponse(BaseModel):
     client_secret: str
     expires_at: Optional[int] = None
     model: str
+
+
+class VoiceSecretResponse(BaseModel):
+    """A freshly minted realtime credential for an existing voice session."""
+    client_secret: str
+    expires_at: Optional[int] = None
+    model: str
+
+
+class VoiceCallRequest(BaseModel):
+    """The ``call_id`` the browser got back from OpenAI's WebRTC handshake."""
+    call_id: str
+
+
+class VoiceOkResponse(BaseModel):
+    """Acknowledgement for the call/hangup control endpoints."""
+    ok: bool = True
+
+
+class VoiceStateResponse(BaseModel):
+    """Whether a sideband bridge is attached to this session, and its health."""
+    active: bool
+    connected: bool
+    started_at: Optional[float] = None
+    model: Optional[str] = None
 
 
 # ============================================================================
@@ -277,6 +310,52 @@ def _extract_client_secret(body: Dict[str, Any]) -> tuple[str, Optional[int]]:
     return str(value), expires_at
 
 
+async def _provider_api_key(provider_row: Dict[str, Any]) -> str:
+    """Decrypt the row's stored API key, or raise a 400 explaining the fix.
+
+    Reuses the omni credential layer's decryption so crypto lives in exactly one
+    place; an eligible row always HAS a token, but a locked encryption service
+    can still yield nothing.
+    """
+    from app.core.provider.omni_credentials import _decrypt_auth_token
+
+    api_key = await run_sync(_decrypt_auth_token, provider_row)
+    if not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"The API key for provider {provider_row.get('name') or provider_row['id']!r} "
+                "could not be read. Re-enter it in Settings → Providers."
+            ),
+        )
+    return api_key
+
+
+async def _require_voice_enabled() -> Dict[str, Any]:
+    """The voice settings, or a 403 when the mode is switched off (VM13)."""
+    from app.api.settings import get_voice_settings
+
+    voice_settings = await run_sync(get_voice_settings)
+    if not voice_settings["voice_mode_enabled"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Voice mode is disabled. Enable it in Settings → Voice.",
+        )
+    return voice_settings
+
+
+async def _require_voice_session(session_id: str) -> Dict[str, Any]:
+    """The session row, or a 404 when it is missing or is not a voice session.
+
+    A chat session is 404 rather than 400 on purpose: the voice call surface
+    simply does not exist for it (ruling VM7 — modes never mix in V1).
+    """
+    row = await run_sync(database.get_session, session_id)
+    if not row or row.get("mode") != "voice":
+        raise HTTPException(status_code=404, detail="Voice session not found.")
+    return row
+
+
 @router.post("/sessions", response_model=VoiceSessionResponse)
 async def create_voice_session(
     request: VoiceSessionCreateRequest,
@@ -300,20 +379,7 @@ async def create_voice_session(
         _resolve_provider_row, request.provider_id, voice_settings["voice_provider_id"]
     )
 
-    # Reuse the omni credential layer's decryption (crypto lives in exactly one
-    # place); an eligible row always has a token, but a locked encryption
-    # service can still yield nothing.
-    from app.core.provider.omni_credentials import _decrypt_auth_token
-
-    api_key = await run_sync(_decrypt_auth_token, provider_row)
-    if not api_key:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"The API key for provider {provider_row.get('name') or provider_row['id']!r} "
-                "could not be read. Re-enter it in Settings → Providers."
-            ),
-        )
+    api_key = await _provider_api_key(provider_row)
 
     model = voice_settings["voice_model"]
     body = await _mint_client_secret(api_key, model)
@@ -340,3 +406,132 @@ async def create_voice_session(
         expires_at=expires_at,
         model=model,
     )
+
+
+# ============================================================================
+# Call surface (VW3) — re-mint, attach, hangup, state
+# ============================================================================
+
+@router.post("/sessions/{session_id}/secret", response_model=VoiceSecretResponse)
+async def mint_voice_session_secret(
+    session_id: str,
+    token: str = Depends(require_auth),
+):
+    """Re-mint the browser's realtime credential for an EXISTING voice session.
+
+    Two callers: reopening a voice session later, and the FE's reconnect as the
+    call approaches OpenAI's session wall (ruling VM15) — it re-handshakes with
+    a fresh secret, gets a new ``call_id``, and posts it to ``/call``, which
+    replaces the sideband and reseeds context.
+
+    The session's own ``provider_id`` (stamped at creation) leads the provider
+    resolution, so a call keeps being funded by the row it started on.
+    """
+    voice_settings = await _require_voice_enabled()
+    session_row = await _require_voice_session(session_id)
+
+    provider_row = await run_sync(
+        _resolve_provider_row,
+        session_row.get("provider_id"),
+        voice_settings["voice_provider_id"],
+    )
+    api_key = await _provider_api_key(provider_row)
+
+    model = voice_settings["voice_model"]
+    body = await _mint_client_secret(api_key, model)
+    client_secret, expires_at = _extract_client_secret(body)
+    logger.info("Voice: re-minted client secret for session %s", session_id)
+
+    return VoiceSecretResponse(
+        client_secret=client_secret, expires_at=expires_at, model=model,
+    )
+
+
+@router.post("/sessions/{session_id}/call", response_model=VoiceOkResponse)
+async def attach_voice_call(
+    session_id: str,
+    request: VoiceCallRequest,
+    token: str = Depends(require_auth),
+):
+    """Join the browser's realtime call from the backend (ruling VM2/VM8).
+
+    Idempotent in the useful sense: posting a NEW ``call_id`` for a session that
+    already has a bridge replaces it (the old attachment is closed first), which
+    is exactly what the reconnect path needs.
+    """
+    from app.core import voice_bridge
+
+    voice_settings = await _require_voice_enabled()
+    session_row = await _require_voice_session(session_id)
+
+    call_id = (request.call_id or "").strip()
+    if not call_id:
+        raise HTTPException(status_code=400, detail="call_id is required.")
+
+    provider_row = await run_sync(
+        _resolve_provider_row,
+        session_row.get("provider_id"),
+        voice_settings["voice_provider_id"],
+    )
+    api_key = await _provider_api_key(provider_row)
+
+    try:
+        await voice_bridge.registry.attach(
+            session_id,
+            call_id,
+            api_key=api_key,
+            model=voice_settings["voice_model"],
+            max_call_minutes=voice_settings["voice_max_call_minutes"],
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "Voice: sideband attach failed for session %s: %s", session_id, exc,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not open the voice sideband connection: {exc}",
+        ) from exc
+
+    return VoiceOkResponse()
+
+
+@router.post("/sessions/{session_id}/hangup", response_model=VoiceOkResponse)
+async def hangup_voice_call(
+    session_id: str,
+    token: str = Depends(require_auth),
+):
+    """Detach and stop the session's bridge. ``ok`` even when there was none.
+
+    Tears down ONLY the bridge and the realtime session — dispatched workers
+    deliberately survive the call ending (ruling VM12). No flag gate: ending a
+    call must keep working even if voice mode was switched off mid-call.
+    """
+    from app.core import voice_bridge
+
+    await _require_voice_session(session_id)
+    stopped = await voice_bridge.registry.detach(session_id)
+    logger.info(
+        "Voice: hangup for session %s (%s)",
+        session_id, "bridge stopped" if stopped else "no live bridge",
+    )
+    return VoiceOkResponse()
+
+
+@router.get("/sessions/{session_id}/state", response_model=VoiceStateResponse)
+async def get_voice_call_state(
+    session_id: str,
+    token: str = Depends(require_auth),
+):
+    """Whether this session has a live sideband, and whether it is connected.
+
+    ``active`` without ``connected`` is the FE's cue that the sideband dropped:
+    the server never reconnects on its own (ruling VM15 puts reconnect on the
+    FE, with a fresh ``call_id``).
+    """
+    from app.core import voice_bridge
+
+    await _require_voice_session(session_id)
+    return VoiceStateResponse(**voice_bridge.registry.state(session_id))

@@ -1037,3 +1037,114 @@ async def test_pop_last_turn_recorder_removes_entry(mock_db):
 
 def test_pop_last_turn_recorder_missing_session_never_raises():
     tr.pop_last_turn_recorder("never-seen-session")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# record_voice_exchange (VW3 / VM9) — synthetic voice turns, no ``turns`` row
+# ---------------------------------------------------------------------------
+
+async def test_record_voice_exchange_writes_one_contiguous_batch(mock_db):
+    # The VM9 shape: turn.started / message.user / message.assistant /
+    # turn.completed, one synthetic ``voice-`` turn id, one append (contiguous
+    # seqs), unfenced — exactly the CLI-wake pattern.
+    _mk_session()
+    turn_id = await tr.record_voice_exchange(
+        SID, "how is the deploy going", "green for ten minutes",
+        model="gpt-realtime-2.1",
+        usage={"voice_realtime": {"total_tokens": 12}},
+    )
+    assert turn_id and turn_id.startswith("voice-")
+
+    rows = _rows()
+    assert [r["event_type"] for r in rows] == [
+        "turn.started", "message.user", "message.assistant", "turn.completed",
+    ]
+    assert all(r["turn_id"] == turn_id for r in rows)
+    assert all(r["run_id"] is None for r in rows)          # unfenced
+    seqs = [r["seq"] for r in rows]
+    assert seqs == list(range(seqs[0], seqs[0] + 4))       # one append_events call
+
+    assert rows[1]["payload"]["content"] == "how is the deploy going"
+    assert rows[1]["payload"]["source"] == "voice"         # extra_payload note
+    assert rows[2]["payload"]["content"] == "green for ten minutes"
+    assert rows[2]["payload"]["kind"] == "text"
+    assert rows[2]["payload"]["model"] == "gpt-realtime-2.1"
+    assert rows[3]["payload"]["stop_reason"] == "end_turn"
+    assert rows[3]["payload"]["usage"] == {"voice_realtime": {"total_tokens": 12}}
+
+
+async def test_record_voice_exchange_tolerates_missing_user_text(mock_db):
+    # A model-initiated response (or a transcription that never arrived) simply
+    # omits the message.user event.
+    _mk_session()
+    await tr.record_voice_exchange(SID, None, "your agent just finished")
+    assert _types() == ["turn.started", "message.assistant", "turn.completed"]
+
+
+async def test_record_voice_exchange_writes_nothing_when_both_sides_empty(mock_db):
+    _mk_session()
+    assert await tr.record_voice_exchange(SID, "  ", None) is None
+    assert _rows() == []
+
+
+async def test_record_voice_exchange_mirrors_into_session_messages(mock_db):
+    _mk_session()
+    await tr.record_voice_exchange(SID, "hello there", "hi, what can I do")
+    messages = [
+        (m["role"], m["content"]) for m in sessions_db.get_session_messages(SID)
+    ]
+    assert messages == [("user", "hello there"), ("assistant", "hi, what can I do")]
+    assert sessions_db.get_session(SID)["turn_count"] == 1
+
+
+async def test_record_voice_exchange_backfills_the_placeholder_title(mock_db):
+    # First exchange renames "Voice session"; later ones leave the title alone.
+    sessions_db.create_session(SID, "default", title=tr.VOICE_PLACEHOLDER_TITLE)
+    await tr.record_voice_exchange(SID, "spin up the release checklist", "on it")
+    assert sessions_db.get_session(SID)["title"] == "spin up the release checklist"
+
+    await tr.record_voice_exchange(SID, "and the changelog", "sure")
+    assert sessions_db.get_session(SID)["title"] == "spin up the release checklist"
+    assert sessions_db.get_session(SID)["turn_count"] == 2
+
+
+async def test_record_voice_exchange_title_truncates_on_a_word_boundary(mock_db):
+    sessions_db.create_session(SID, "default", title=tr.VOICE_PLACEHOLDER_TITLE)
+    spoken = "word " * 40
+    await tr.record_voice_exchange(SID, spoken, "ok")
+    title = sessions_db.get_session(SID)["title"]
+    assert title.endswith("...")
+    assert len(title) <= 103
+
+
+async def test_record_voice_exchange_does_not_retitle_a_named_session(mock_db):
+    sessions_db.create_session(SID, "default", title="Release prep")
+    await tr.record_voice_exchange(SID, "hello", "hi")
+    assert sessions_db.get_session(SID)["title"] == "Release prep"
+
+
+async def test_record_voice_exchange_never_raises(mock_db, monkeypatch):
+    _mk_session()
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(tr.session_events_db, "append_events", _boom)
+    assert await tr.record_voice_exchange(SID, "hi", "hello") is None
+
+
+async def test_record_voice_exchange_survives_side_effect_failure(mock_db, monkeypatch):
+    # The event log is the transcript authority: a session_messages failure must
+    # not lose the exchange that was already appended.
+    _mk_session()
+    from app.db import database as _db
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("no fts")
+
+    monkeypatch.setattr(_db, "add_session_message", _boom)
+    turn_id = await tr.record_voice_exchange(SID, "hi", "hello")
+    assert turn_id is not None
+    assert _types() == [
+        "turn.started", "message.user", "message.assistant", "turn.completed",
+    ]
