@@ -15,7 +15,9 @@
 		getBaseModel,
 		has1MContext,
 		withContextSuffix,
-		modelSupports1M
+		modelSupports1M,
+		encodeProviderModel,
+		decodeProviderModel
 	} from '$lib/constants/models';
 	import { onMount } from 'svelte';
 	import { getComputerUseStatus } from '$lib/api/computerUse';
@@ -328,22 +330,19 @@
 							value={customModelMode
 								? CUSTOM_VALUE
 								: profileForm.provider
-									? `prov:${profileForm.provider}:${profileForm.model}`
+									? encodeProviderModel(profileForm.provider, profileForm.model)
 									: getBaseModel(profileForm.model)}
 							onSelect={(v) => {
+								const composite = decodeProviderModel(v);
 								if (v === CUSTOM_VALUE) {
 									onCustomModelModeChange(true, '');
 									onFormChange('provider', null);
-								} else if (v.startsWith('prov:')) {
-									// Composite value: `prov:<providerId>:<modelId>`. Split on the
-									// first colon only — provider model ids (e.g. OpenRouter's
-									// "meta-llama/llama-3.1:free") can contain colons themselves.
-									const rest = v.slice('prov:'.length);
-									const sep = rest.indexOf(':');
-									const providerId = rest.slice(0, sep);
-									const modelId = rest.slice(sep + 1);
-									onCustomModelModeChange(false, modelId);
-									onFormChange('provider', providerId);
+								} else if (composite) {
+									// `prov:<providerId>:<modelId>` — the shared codec splits on the
+									// first colon only, so provider model ids that contain colons
+									// themselves (e.g. "meta-llama/llama-3.1:free") survive intact.
+									onCustomModelModeChange(false, composite.modelId);
+									onFormChange('provider', composite.providerId);
 								} else {
 									onCustomModelModeChange(false, withContextSuffix(v, modelSupports1M(v) && has1MContext(profileForm.model)));
 									onFormChange('provider', null);

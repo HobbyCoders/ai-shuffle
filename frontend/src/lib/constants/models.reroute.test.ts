@@ -19,7 +19,12 @@ vi.mock('$lib/api/client', () => ({
 import {
 	isReroute,
 	getProviderModels,
-	hydrateModelRegistry
+	hydrateModelRegistry,
+	encodeProviderModel,
+	decodeProviderModel,
+	isProviderModel,
+	getModelLabel,
+	PROVIDER_MODEL_PREFIX
 } from './models';
 
 describe('isReroute — reroute guard', () => {
@@ -51,7 +56,86 @@ describe('isReroute — reroute guard', () => {
 	});
 });
 
-describe('getProviderModels — R7 live-switch scoping', () => {
+describe('provider-model codec — PA13 shared encode/decode', () => {
+	it('round-trips a plain provider/model pair', () => {
+		const encoded = encodeProviderModel('prov-1', 'gpt-5.6');
+		expect(encoded).toBe(`${PROVIDER_MODEL_PREFIX}prov-1:gpt-5.6`);
+		expect(decodeProviderModel(encoded)).toEqual({
+			providerId: 'prov-1',
+			modelId: 'gpt-5.6'
+		});
+	});
+
+	it('round-trips model ids containing slashes AND colons', () => {
+		// OpenRouter slugs carry both; a naive split(':') corrupts them, which is
+		// exactly why the codec splits on the FIRST colon after the prefix only.
+		const id = 'meta-llama/llama-3.1-8b-instruct:free';
+		const decoded = decodeProviderModel(encodeProviderModel('prov-openrouter', id));
+		expect(decoded).toEqual({ providerId: 'prov-openrouter', modelId: id });
+	});
+
+	it('round-trips a model id that itself starts with the prefix', () => {
+		const decoded = decodeProviderModel(encodeProviderModel('p', 'prov:weird:id'));
+		expect(decoded).toEqual({ providerId: 'p', modelId: 'prov:weird:id' });
+	});
+
+	it('returns null for anything that is not a well-formed composite', () => {
+		for (const value of [
+			null,
+			undefined,
+			'',
+			'opus',
+			'claude-sonnet-4-5',
+			'openai/gpt-5.6',
+			'prov:',
+			'prov:p',
+			'prov::model',
+			'prov:p:'
+		]) {
+			expect(decodeProviderModel(value)).toBeNull();
+			expect(isProviderModel(value)).toBe(false);
+		}
+	});
+
+	it('isProviderModel is true only for composites', () => {
+		expect(isProviderModel(encodeProviderModel('p', 'm'))).toBe(true);
+	});
+});
+
+describe('getModelLabel — composite round-trip', () => {
+	it('resolves a composite inside its own provider after hydration', async () => {
+		mocks.get.mockResolvedValueOnce({
+			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', supports_1m: true }],
+			default: 'sonnet',
+			legacy_map: {},
+			providers: [
+				{
+					id: 'prov-openrouter',
+					name: 'OpenRouter',
+					provider_type: 'openrouter',
+					models: [
+						{ id: 'meta-llama/llama-3.1-8b-instruct:free', label: 'Llama 3.1 (free)' }
+					],
+					default_model: null
+				}
+			]
+		});
+		await hydrateModelRegistry();
+
+		expect(
+			getModelLabel(
+				encodeProviderModel('prov-openrouter', 'meta-llama/llama-3.1-8b-instruct:free')
+			)
+		).toBe('Llama 3.1 (free)');
+		// Unknown provider / model → the bare model id, never the raw composite.
+		expect(getModelLabel(encodeProviderModel('nope', 'some-model'))).toBe('some-model');
+		// Non-composites are untouched.
+		expect(getModelLabel('sonnet')).toBe('Sonnet');
+		expect(getModelLabel(null)).toBe('Default');
+	});
+});
+
+describe('getProviderModels — per-provider lookup (R7 scoping superseded by PA13)', () => {
 	it('returns [] for a null/empty provider id (native session, no hydration)', () => {
 		expect(getProviderModels(null)).toEqual([]);
 		expect(getProviderModels('')).toEqual([]);

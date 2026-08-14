@@ -2,11 +2,21 @@
  * Claude model registry — Re-export shim.
  * Implementation lives in models.svelte.ts (Svelte 5 runes).
  */
-export type { ModelFamily, ModelOption, ProviderModel, ProviderEntry } from './models.svelte';
+export type {
+	ModelFamily,
+	ModelOption,
+	ProviderModel,
+	ProviderEntry,
+	DecodedProviderModel
+} from './models.svelte';
 export {
 	INHERIT_VALUE,
 	CUSTOM_VALUE,
 	CONTEXT_1M_SUFFIX,
+	PROVIDER_MODEL_PREFIX,
+	encodeProviderModel,
+	decodeProviderModel,
+	isProviderModel,
 	getModels,
 	getProviders,
 	getProviderModels,

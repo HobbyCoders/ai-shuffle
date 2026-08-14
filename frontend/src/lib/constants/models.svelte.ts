@@ -76,6 +76,60 @@ export const INHERIT_VALUE = '';
 /** Sentinel value meaning "custom free-text entry" (used by the `Custom…` dropdown option). */
 export const CUSTOM_VALUE = '__custom__';
 
+// ---------------------------------------------------------------------------
+// Provider-model composite codec (`prov:<providerId>:<modelId>`)
+// ---------------------------------------------------------------------------
+
+/** Prefix marking a value as a provider-scoped model composite. */
+export const PROVIDER_MODEL_PREFIX = 'prov:';
+
+/** The two halves of a decoded `prov:<providerId>:<modelId>` composite. */
+export interface DecodedProviderModel {
+	providerId: string;
+	modelId: string;
+}
+
+/**
+ * Encode a provider-scoped model selection.
+ *
+ * The composite is the ONE wire/storage shape for "this specific model on this
+ * specific provider" — used by the profile editor's ModelPicker and by the
+ * chat composer's model override (PA13). The backend decodes it in
+ * `app/core/query_options.py`, where the decoded provider id REBINDS the turn's
+ * provider.
+ */
+export function encodeProviderModel(providerId: string, modelId: string): string {
+	return `${PROVIDER_MODEL_PREFIX}${providerId}:${modelId}`;
+}
+
+/**
+ * Decode a `prov:<providerId>:<modelId>` composite, or `null` when `value` is
+ * not a composite (a native Claude alias, a custom id, empty, …).
+ *
+ * Splits on the FIRST colon after the prefix only: provider model ids routinely
+ * contain both `/` and `:` themselves (e.g. OpenRouter's
+ * `meta-llama/llama-3.1-8b-instruct:free`), so a naive `split(':')` corrupts
+ * them. A composite with an empty provider id or an empty model id is rejected
+ * (returns `null`) rather than silently producing a half-value.
+ */
+export function decodeProviderModel(
+	value: string | null | undefined
+): DecodedProviderModel | null {
+	if (!value || !value.startsWith(PROVIDER_MODEL_PREFIX)) return null;
+	const rest = value.slice(PROVIDER_MODEL_PREFIX.length);
+	const sep = rest.indexOf(':');
+	if (sep <= 0) return null;
+	const providerId = rest.slice(0, sep);
+	const modelId = rest.slice(sep + 1);
+	if (!providerId || !modelId) return null;
+	return { providerId, modelId };
+}
+
+/** True when `value` is a well-formed provider-model composite. */
+export function isProviderModel(value: string | null | undefined): boolean {
+	return decodeProviderModel(value) !== null;
+}
+
 /** A curated model offered by an admin-configured non-Anthropic gateway. */
 export interface ProviderModel {
 	id: string;
@@ -206,11 +260,19 @@ export function isPresetModel(value: string | null | undefined): boolean {
  * Falls back to the raw value, or `'Default'` when nothing is set.
  * 1M variants get a `" 1M"` suffix on the base label.
  *
- * Checks the Claude catalog first, then the hydrated provider registry (for
- * non-Anthropic gateway model ids like `openai/gpt-5.6`), before falling
- * back to the raw id.
+ * A `prov:<providerId>:<modelId>` composite (the composer's cross-provider
+ * override, the profile editor's selection) resolves inside its OWN provider so
+ * the pill round-trips the encoded value; otherwise the Claude catalog is
+ * checked first, then the hydrated provider registry (for bare non-Anthropic
+ * gateway model ids like `openai/gpt-5.6`), before falling back to the raw id.
  */
 export function getModelLabel(value: string | null | undefined): string {
+	const composite = decodeProviderModel(value);
+	if (composite) {
+		const provider = _registry.providers.find((p) => p.id === composite.providerId);
+		const match = provider?.models.find((m) => m.id === composite.modelId);
+		return match?.label ?? composite.modelId;
+	}
 	const base = getBaseModel(value);
 	const match = _registry.models.find((m) => m.value === base);
 	if (match) return has1MContext(value) ? `${match.label} 1M` : match.label;
@@ -247,9 +309,13 @@ export function inferModelFamily(value: string | null | undefined): ModelFamily 
 
 /**
  * Curated models offered by a specific enabled gateway provider.
- * Empty when the id is unknown or the registry hasn't hydrated. Used by the
- * live model-switch UI to constrain a provider session's hot-swap to models
- * of its OWN provider (cross-provider = profile edit + respawn — R7).
+ * Empty when the id is unknown or the registry hasn't hydrated.
+ *
+ * NOTE: this used to scope the composer's live model-switch list to the
+ * session's OWN provider (R7: cross-provider = profile edit + respawn). R7 is
+ * SUPERSEDED by PA13 — the composer now offers every provider group and encodes
+ * cross-provider picks with `encodeProviderModel`. This accessor survives as a
+ * plain per-provider lookup.
  */
 export function getProviderModels(providerId: string | null | undefined): readonly ProviderModel[] {
 	if (!providerId) return [];
