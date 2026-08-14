@@ -46,6 +46,21 @@ def _sync_back_active_account_safe() -> None:
         logger.warning(f"Claude account sync-back on status failed (ignored): {e}")
 
 
+def _has_provider_credential_safe() -> bool:
+    """Whether any enabled model-provider row carries a stored credential.
+
+    Defensive by design: this only feeds the additive ``has_any_credential``
+    status field, so a DB hiccup (pool not up, missing table on a rolling
+    deploy) must degrade to "no provider credential" rather than break
+    ``GET /auth/status`` app-wide.
+    """
+    try:
+        return db.count_configured_model_providers() > 0
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Provider-credential probe failed (ignored): {e}")
+        return False
+
+
 def _seed_claude_account_safe() -> None:
     """Seed the default Claude account after the encryption key becomes available."""
     try:
@@ -338,11 +353,19 @@ async def get_auth_status(request: Request):
     # the post-write hook). The mtime gate makes it a stat() no-op normally.
     _sync_back_active_account_safe()
 
+    claude_authenticated = auth_service.is_claude_authenticated()
+
     return {
         "authenticated": is_admin_authenticated,
         "is_admin": is_admin_authenticated,
         "setup_required": auth_service.is_setup_required(),
-        "claude_authenticated": auth_service.is_claude_authenticated(),
+        "claude_authenticated": claude_authenticated,
+        # PA10 (docs/PROVIDER_AGNOSTIC_PLAN.md): "does this install have ANY
+        # usable credential" — the claude subscription login OR at least one
+        # enabled model-provider row with a stored credential. The composer and
+        # first-run setup gate on THIS, not on claude auth alone; Claude-CLI
+        # auth remains required only for claude-subscription agents.
+        "has_any_credential": claude_authenticated or _has_provider_credential_safe(),
         # Honest token-validity signal: True only when the on-disk Claude OAuth
         # token is present AND not expired. Lets the UI surface a "token expired —
         # reconnect" state even though `claude_authenticated` stays True (file
