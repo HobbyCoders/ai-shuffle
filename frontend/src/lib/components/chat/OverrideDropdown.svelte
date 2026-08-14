@@ -11,6 +11,10 @@
 		value: string | null;
 		label: string;
 		description: string;
+		/** Optional section heading. When ANY mode carries one, the list renders
+		 *  grouped (headings in first-appearance order); otherwise it stays flat.
+		 *  Used by the model override to render the provider-grouped library. */
+		group?: string;
 	}
 
 	interface Props {
@@ -57,6 +61,24 @@
 	}: Props = $props();
 
 	const isActive = $derived(isOverridden ?? currentValue !== null);
+
+	// Grouped rendering: only kicks in when at least one mode declares a group
+	// (the effort/permission dropdowns stay byte-identical flat lists). Groups
+	// keep first-appearance order so the caller controls the ordering.
+	const isGrouped = $derived(modes.some((m) => m.group != null));
+	const groupedModes = $derived.by<{ group: string; items: OverrideMode[] }[]>(() => {
+		const out: { group: string; items: OverrideMode[] }[] = [];
+		for (const m of modes) {
+			const name = m.group ?? '';
+			let bucket = out.find((g) => g.group === name);
+			if (!bucket) {
+				bucket = { group: name, items: [] };
+				out.push(bucket);
+			}
+			bucket.items.push(m);
+		}
+		return out;
+	});
 
 	let dropdownRef = $state<HTMLDivElement | null>(null);
 
@@ -122,25 +144,41 @@
 			{#if notice}
 				<div class="override-dropdown-notice">{notice}</div>
 			{/if}
-			{#each modes as mode (mode.value)}
-				<button
-					type="button"
-					class="override-dropdown-item"
-					class:selected={currentValue === mode.value}
-					onclick={() => handleSelect(mode.value)}
-					role="menuitem"
-				>
-					<span class="override-item-label">{mode.label}</span>
-					{#if currentValue === mode.value}
-						<svg class="w-3.5 h-3.5 check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-						</svg>
+			{#if isGrouped}
+				{#each groupedModes as g (g.group)}
+					{#if g.group}
+						<div class="override-dropdown-grouphead">{g.group}</div>
 					{/if}
-				</button>
-			{/each}
+					{#each g.items as mode (mode.value)}
+						{@render item(mode)}
+					{/each}
+				{/each}
+			{:else}
+				{#each modes as mode (mode.value)}
+					{@render item(mode)}
+				{/each}
+			{/if}
 		</div>
 	{/if}
 </div>
+
+{#snippet item(mode: OverrideMode)}
+	<button
+		type="button"
+		class="override-dropdown-item"
+		class:selected={currentValue === mode.value}
+		onclick={() => handleSelect(mode.value)}
+		role="menuitem"
+		title={mode.description || undefined}
+	>
+		<span class="override-item-label">{mode.label}</span>
+		{#if currentValue === mode.value}
+			<svg class="w-3.5 h-3.5 check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+			</svg>
+		{/if}
+	</button>
+{/snippet}
 
 <style>
 	/* ===== OVERRIDE BUTTONS ===== */
@@ -241,6 +279,7 @@
 		bottom: calc(100% + 6px);
 		right: 0;
 		min-width: 140px;
+		max-width: min(320px, 82vw);
 		background: var(--popover);
 		border: 1px solid var(--border);
 		border-radius: var(--radius, 0.75rem);
@@ -248,6 +287,23 @@
 		z-index: 50;
 		padding: 4px;
 		animation: override-dropdown-fade-in 0.15s ease;
+		/* The model override now lists the whole provider-grouped library (PA13),
+		   which can run to dozens of rows — cap it and scroll instead of growing
+		   the popup off the top of the viewport. */
+		max-height: min(420px, 60vh);
+		overflow-y: auto;
+		overscroll-behavior: contain;
+	}
+
+	/* Section heading for grouped lists (model override: Claude + one per
+	   enabled provider). Mirrors ModelPicker's `.mpk-grouphead`. */
+	.override-dropdown-grouphead {
+		padding: 8px 10px 4px;
+		font-size: 10px;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--muted-foreground);
 	}
 
 	@keyframes override-dropdown-fade-in {
@@ -297,6 +353,10 @@
 	.override-item-label {
 		font-weight: 500;
 		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	.override-dropdown-item .check-icon {

@@ -132,7 +132,12 @@ def _claim_window_state(set_model_side_effect=None) -> SessionState:
     injection) point for the claim-window tests below.
     """
     state = _fake_state()
-    state.connect_options = MagicMock(permission_mode="default", model="old-model")
+    # aih_provider_id must be a REAL value on both sides: the set_model hot-swap
+    # is gated on "provider unchanged" (PA13), and two bare MagicMock attributes
+    # never compare equal — which would silently skip the swap under test.
+    state.connect_options = MagicMock(
+        permission_mode="default", model="old-model", aih_provider_id=None
+    )
     state.adapter.set_permission_mode = AsyncMock()
     state.adapter.set_model = AsyncMock(side_effect=set_model_side_effect)
     return state
@@ -142,6 +147,7 @@ def _claim_window_options(options) -> None:
     """Point the turn's options at a different model (and same perm mode)."""
     options.model = "new-model"
     options.permission_mode = "default"
+    options.aih_provider_id = None  # same provider → the model change hot-swaps
 
 
 async def _collect(agen):

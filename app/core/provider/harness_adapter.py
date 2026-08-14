@@ -435,6 +435,16 @@ class HarnessAdapter(ProviderAdapter):
         provider_id = getattr(sdk_options, "aih_provider_id", None)
         if provider_id:
             opts.extra["provider_id"] = provider_id
+            # The bound row's SHAPE, stamped alongside the id by query_options
+            # so ``_decide_provider_kind`` can pick the leg from the provider
+            # row instead of sniffing the model string (PA13). Only forwarded
+            # when present — a missing type makes the adapter look the row up.
+            provider_type = getattr(sdk_options, "aih_provider_type", None)
+            if provider_type:
+                opts.extra["provider_type"] = provider_type
+            provider_auth_mode = getattr(sdk_options, "aih_provider_auth_mode", None)
+            if provider_auth_mode:
+                opts.extra["provider_auth_mode"] = provider_auth_mode
         # The app's own session id (``sessions.id``) rides alongside it as
         # ``aih_session_id``. Native legs need it for Task dispatch: the omni
         # session id is a ``ses_...`` handle, not an app session row, and on a
@@ -822,6 +832,16 @@ class HarnessAdapter(ProviderAdapter):
         if (old.plugins or []) != (new_options.plugins or []):
             return True
         if (old.tools or []) != (new_options.tools or []):
+            return True
+        # Resolved provider binding (PA13 / W-R4) — mirrors
+        # ``session_pool.requires_reconnect``. The engine and its credentials are
+        # built once in ``connect()`` from this id, so a cross-provider switch
+        # can never be a ``set_model`` hot-swap. Compared directly (no
+        # ``or old``-style defaulting): absent means NATIVE, which is a real,
+        # distinct value here.
+        if (old.extra or {}).get("provider_id") != (
+            new_options.extra or {}
+        ).get("provider_id"):
             return True
         return False
 
@@ -1424,6 +1444,62 @@ def _native_max_output_tokens(options: SessionOptions) -> Optional[int]:
     return parsed
 
 
+# ``auth_mode`` values meaning "this provider row carries a subscription OAuth
+# login, not an API key". Mirrors ``omni_credentials._SUBSCRIPTION_AUTH_MODES``
+# (imported rather than re-listed so the two can never drift): an anthropic row
+# in one of these modes MUST land on the delegated CLI leg — Anthropic bans
+# third-party use of subscription tokens, and ``resolve_provider_credentials``
+# raises for kind="anthropic" on such a row.
+def _provider_row_kind(
+    provider_type: Optional[str], auth_mode: Optional[str]
+) -> Optional[str]:
+    """Leg kind implied by a ``model_providers`` row's shape, or None.
+
+    None means "this row shape says nothing" and the caller falls back to the
+    model-string sniff.
+    """
+    from app.core.provider.omni_credentials import _SUBSCRIPTION_AUTH_MODES
+
+    ptype = (provider_type or "").strip().lower()
+    mode = (auth_mode or "").strip().lower()
+
+    # A ChatGPT/Codex subscription row can wear provider_type "chatgpt" OR
+    # "custom" + auth_mode "chatgpt" (mirrors _is_codex_subscription).
+    if ptype in ("openai", "chatgpt") or mode == "chatgpt":
+        return "openai_responses"
+    if ptype == "openrouter":
+        return "openrouter"
+    if ptype == "anthropic":
+        # HARD CONSTRAINT: subscription auth stays on the delegated claude CLI.
+        return "delegated" if mode in _SUBSCRIPTION_AUTH_MODES else "anthropic"
+    return None
+
+
+def _lookup_provider_row_shape(provider_id: str) -> tuple:
+    """(provider_type, auth_mode) for a provider row; (None, None) on any miss.
+
+    Only reached when a session carries ``extra["provider_id"]`` WITHOUT the
+    shape fields ``query_options`` normally stamps alongside it (a hand-built
+    SessionOptions, a test). Never raises — a failed lookup just means the
+    model-string sniff decides.
+    """
+    try:
+        from app.db import database as db
+
+        row = db.get_model_provider(provider_id, include_token=False)
+    except Exception:  # noqa: BLE001 — a lookup failure reads as "no row shape"
+        logger.debug(
+            "[HarnessAdapter] provider row lookup failed for %s; "
+            "falling back to the model-string sniff.",
+            provider_id,
+            exc_info=True,
+        )
+        return None, None
+    if not row:
+        return None, None
+    return row.get("provider_type"), row.get("auth_mode")
+
+
 def _decide_provider_kind(options: SessionOptions) -> str:
     """Return one of: 'delegated' | 'anthropic' | 'openai_responses' | 'openrouter'."""
     engine_hint = options.extra.get("omni_engine")
@@ -1438,6 +1514,24 @@ def _decide_provider_kind(options: SessionOptions) -> str:
         return provider_hint
     if provider_hint == "delegated":
         return "delegated"
+
+    # The BOUND PROVIDER ROW outranks the model-string sniff below (PA13/W-R4).
+    # The sniff reads a model id in isolation, so every cross-provider pick it
+    # can't see the provider for lands on the wrong leg: "anthropic/claude-3.5"
+    # on an OpenRouter row sniffs as an OpenRouter slug only by luck, a bare
+    # "claude-3.5-sonnet" on that same row sniffs as the DELEGATED claude CLI,
+    # and a slugged model on an OpenAI row sniffs as OpenRouter. The row's own
+    # provider_type is authoritative when we have it; the sniff stays as the
+    # fallback for native sessions and rows of unknown shape.
+    bound_provider_id = options.extra.get("provider_id")
+    if bound_provider_id:
+        provider_type = options.extra.get("provider_type")
+        auth_mode = options.extra.get("provider_auth_mode")
+        if not provider_type:
+            provider_type, auth_mode = _lookup_provider_row_shape(str(bound_provider_id))
+        row_kind = _provider_row_kind(provider_type, auth_mode)
+        if row_kind:
+            return row_kind
 
     model = (options.model or "").lower()
     # The app selects Claude models by SHORT ALIAS ("fable"/"opus"/"sonnet"/

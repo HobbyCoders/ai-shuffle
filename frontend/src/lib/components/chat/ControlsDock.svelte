@@ -12,9 +12,10 @@
 	import { Monitor } from 'lucide-svelte';
 	import {
 		getModels,
-		getProviderModels,
+		getProviders,
 		getModelLabel,
 		getDefaultModel,
+		encodeProviderModel,
 		isReroute,
 		type ModelFamily
 	} from '$lib/constants/models';
@@ -69,33 +70,46 @@
 		opus: 'Deep reasoning',
 		fable: 'Most capable'
 	};
-	// The session's resolved provider (null = native Anthropic). Prefer the
-	// running session's own `model_info` note; before its first note (fresh
-	// compose) fall back to the active profile's configured provider so the
-	// picker is scoped correctly on the very first turn too.
-	const sessionProviderId = $derived(
-		$activeSession.liveProvider ?? activeProfile?.config?.provider ?? null
-	);
-	// Live model-switch options. Native session → curated Claude models. Provider
-	// session → ONLY that provider's curated models: a hot-swap stays within the
-	// session's provider; cross-provider is a profile edit + respawn (R7).
-	const modelOptions = $derived(
-		sessionProviderId
-			? getProviderModels(sessionProviderId).map((m) => ({
-					value: m.id,
-					label: m.label,
-					description: ''
-				}))
-			: getModels().map((m) => ({
-					value: m.value,
-					label: m.label,
-					description: MODEL_FAMILY_BLURB[m.family] ?? ''
-				}))
-	);
+	// Live model-switch options — the FULL provider-grouped library (PA13). The
+	// native/Claude group comes first, then one group per enabled provider, with
+	// provider entries encoded as `prov:<providerId>:<modelId>` so the backend can
+	// rebind the turn's provider from the pick alone. R7 (a provider session may
+	// only hot-swap within its own provider) is superseded: cross-provider
+	// switching is now a first-class mid-session action — the backend evicts and
+	// reconnects when the resolved provider changes.
+	const NATIVE_GROUP = 'Claude';
+	const modelOptions = $derived.by(() => {
+		const out: { value: string; label: string; description: string; group: string }[] = [];
+		for (const m of getModels()) {
+			out.push({
+				value: m.value,
+				label: m.label,
+				description: MODEL_FAMILY_BLURB[m.family] ?? '',
+				group: NATIVE_GROUP
+			});
+		}
+		for (const p of getProviders()) {
+			for (const pm of p.models) {
+				out.push({
+					value: encodeProviderModel(p.id, pm.id),
+					label: pm.label,
+					description: pm.id,
+					group: p.name
+				});
+			}
+		}
+		return out;
+	});
 	// Effective selection: the per-session override if set, else the profile's
 	// model, else the registry default. Selecting the profile's own model clears
-	// the override (mirrors the effort/permission pattern).
-	const profileModel = $derived(activeProfile?.config?.model ?? getDefaultModel());
+	// the override (mirrors the effort/permission pattern) — for a provider-bound
+	// profile that means the profile's COMPOSITE, so the checkmark lands on the
+	// right row and re-picking it still clears the override.
+	const profileModel = $derived.by(() => {
+		const model = activeProfile?.config?.model ?? getDefaultModel();
+		const provider = activeProfile?.config?.provider ?? null;
+		return provider ? encodeProviderModel(provider, model) : model;
+	});
 	const modelValue = $derived($activeSession.modelOverride ?? profileModel);
 
 	// Live reroute detection: the backend `model_info` note tells us which model

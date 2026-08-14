@@ -9,16 +9,23 @@
 	 * CONTROLLED component: it renders from `value` (the composite selection
 	 * string used by the phase-1 picker) and emits the newly-chosen value via
 	 * `onSelect`. It owns NO save logic — the parent keeps its exact decode/save
-	 * contract. Composite value encoding (unchanged from phase-1):
+	 * contract. Composite value encoding (unchanged from phase-1; the encode/
+	 * decode pair now lives in `$lib/constants/models` so the chat composer
+	 * shares it — PA13):
 	 *   - native Claude model  → the base model id (e.g. `sonnet`)
-	 *   - provider model       → `prov:<providerId>:<modelId>`
+	 *   - provider model       → `encodeProviderModel(providerId, modelId)`
 	 *   - custom free-text     → CUSTOM_VALUE
 	 *
 	 * Pins are frontend-only, persisted to localStorage (no backend store, no
 	 * schema change) — a per-install convenience across the pinned models.
 	 */
 	import { Search, Star, Check, ChevronDown } from 'lucide-svelte';
-	import { getModels, getProviders, CUSTOM_VALUE } from '$lib/constants/models';
+	import {
+		getModels,
+		getProviders,
+		encodeProviderModel,
+		CUSTOM_VALUE
+	} from '$lib/constants/models';
 
 	interface Props {
 		/** Current composite selection value (see module comment). */
@@ -88,7 +95,7 @@
 		for (const p of getProviders()) {
 			for (const pm of p.models) {
 				out.push({
-					value: `prov:${p.id}:${pm.id}`,
+					value: encodeProviderModel(p.id, pm.id),
 					modelId: pm.id,
 					label: pm.label,
 					group: p.name

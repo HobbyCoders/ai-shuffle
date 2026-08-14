@@ -73,13 +73,27 @@ class _StubPool:
         self.state = None
 
 
-def _engine_patches(stack: ExitStack, pool: _StubPool, cwd: str, model=None, provider=None):
+_UNSET = object()
+
+
+def _engine_patches(
+    stack: ExitStack,
+    pool: _StubPool,
+    cwd: str,
+    model=None,
+    provider=None,
+    resolved_provider=_UNSET,
+):
     """Patch the subprocess/profile boundaries; stub turn-end persistence.
 
     Returns the options MagicMock so the test can set ``options.model`` (the
-    ``requested_model`` passthrough source). ``provider`` seeds the profile
-    config's ``provider`` (the resolved-provider source for the model_info
-    frame; None = native Anthropic).
+    ``requested_model`` passthrough source). ``provider`` seeds BOTH the profile
+    config's ``provider`` and the options object's ``aih_provider_id`` — the
+    latter is the RESOLVED binding query_options stamps, and is what the
+    model_info frame reports (PA13). None = native Anthropic.
+
+    ``resolved_provider`` decouples the two so a test can assert the frame reads
+    the RESOLVED binding rather than re-deriving it from overrides/config.
     """
     profile_config = {} if provider is None else {"provider": provider}
     stack.enter_context(patch.object(
@@ -92,6 +106,9 @@ def _engine_patches(stack: ExitStack, pool: _StubPool, cwd: str, model=None, pro
     options.include_partial_messages = False
     options.cwd = cwd
     options.model = model
+    options.aih_provider_id = (
+        provider if resolved_provider is _UNSET else resolved_provider
+    )
     stack.enter_context(patch(
         "app.core.sdk_options.build_options_from_profile",
         return_value=(options, {}),
@@ -130,14 +147,23 @@ def _new_session(profile_id="default"):
     return session_id
 
 
-async def _run(messages, model=None, tmp_path=None, provider=None):
+async def _run(
+    messages, model=None, tmp_path=None, provider=None, resolved_provider=_UNSET
+):
     """Drive the streaming loop over ``messages`` and return model_info frames."""
     session_id = _new_session()
     state = _make_state()
     pool = _StubPool(state)
     state.adapter.receive_events = _stream_response(messages)
     with ExitStack() as stack:
-        _engine_patches(stack, pool, str(tmp_path), model=model, provider=provider)
+        _engine_patches(
+            stack,
+            pool,
+            str(tmp_path),
+            model=model,
+            provider=provider,
+            resolved_provider=resolved_provider,
+        )
         events = await _collect(qe.stream_to_websocket("hi", session_id, "default"))
     return [
         e for e in events
@@ -265,6 +291,42 @@ async def test_provider_present_for_gateway_session(mock_db, tmp_path):
     assert len(frames) == 1
     assert frames[0]["data"]["provider"] == "prov-openrouter"
     assert frames[0]["data"]["model"] == "openai/gpt-5.6"
+
+
+async def test_provider_is_the_resolved_binding_not_the_profile_config(
+    mock_db, tmp_path
+):
+    """PA13: the frame reports ``options.aih_provider_id`` — the binding
+    query_options actually RESOLVED for this turn — not the profile config.
+
+    A `prov:<pid>:<mid>` composite override rebinds the turn to a provider the
+    profile knows nothing about; re-deriving from overrides/config here (the
+    pre-W-R4 behavior) would report the stale profile provider, which both
+    false-flags the reroute pill and mis-sizes the context bar.
+    """
+    frames = await _run(
+        [_init("sdk-1"), _asst("gpt-5.6")],
+        model="gpt-5.6",
+        provider="prov-from-profile",
+        resolved_provider="prov-picked-in-composer",
+        tmp_path=tmp_path,
+    )
+    assert len(frames) == 1
+    assert frames[0]["data"]["provider"] == "prov-picked-in-composer"
+
+
+async def test_provider_cleared_by_a_native_pick_reports_none(mock_db, tmp_path):
+    """The mirror case: a provider-bound session where a native Claude pick
+    CLEARED the binding reports None, so the reroute pill works again."""
+    frames = await _run(
+        [_init("sdk-1"), _asst("claude-sonnet-4-5")],
+        model="opus",
+        provider="prov-from-profile",
+        resolved_provider=None,
+        tmp_path=tmp_path,
+    )
+    assert len(frames) == 1
+    assert frames[0]["data"]["provider"] is None
 
 
 async def test_subagent_lane_assistant_never_emits(mock_db, tmp_path):

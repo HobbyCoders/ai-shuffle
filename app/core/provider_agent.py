@@ -340,6 +340,7 @@ def validate_provider_model(
     model_id: str,
     *,
     provider_row: Any = _UNSET,
+    require_servable: bool = True,
 ) -> ModelValidation:
     """Whether ``model_id`` is legally servable by ``provider_id``.
 
@@ -351,6 +352,15 @@ def validate_provider_model(
     ``provider_row`` may be passed by a caller that already fetched the row
     (including an explicit ``None`` meaning "I looked and it does not exist");
     omit it and this function does the lookup itself.
+
+    ``require_servable=False`` skips ONLY the
+    :func:`~app.core.environment.is_provider_servable` gate. That predicate is
+    the admission rule for *cross-provider WORKER* models, and it deliberately
+    excludes ``openrouter`` — but a MAIN session may bind to any enabled
+    provider (the profile editor has always allowed it, and omni serves
+    OpenRouter natively). The composer's model override (PA13) validates
+    existence + enabled + curated-membership only, so it can offer exactly the
+    grouped library the profile editor offers instead of a strict subset.
 
     NEVER raises for a validation failure and never imports fastapi.
     """
@@ -391,7 +401,7 @@ def validate_provider_model(
 
     from app.core.environment import is_provider_servable
 
-    if not is_provider_servable(row):
+    if require_servable and not is_provider_servable(row):
         return ModelValidation(
             ok=False,
             code=PROVIDER_NOT_SERVABLE,

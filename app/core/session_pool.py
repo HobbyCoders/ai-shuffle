@@ -1053,8 +1053,8 @@ def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> 
     """Check if option changes between queries require a fresh subprocess.
 
     Some options (model, permission_mode) can be changed at runtime via SDK methods.
-    Others (system_prompt, cwd, mcp_servers, plugins) are CLI args set at spawn time
-    and require a new subprocess.
+    Others (system_prompt, cwd, mcp_servers, plugins, and the resolved provider
+    binding) are fixed at spawn/connect time and require a new subprocess.
     """
     old = state.connect_options
     if old is None:
@@ -1079,6 +1079,21 @@ def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> 
     # Overlay-key comparison is scoped to provider sessions so native
     # [1m]-boundary switches stay hot-swaps (see provider_env_requires_reconnect).
     if provider_env_requires_reconnect(old.env, new_options.env):
+        return True
+
+    # Resolved provider BINDING (PA13 / W-R4). The env comparison above only
+    # sees the gateway overlay vars, which are identical (absent) on two
+    # different NATIVE-leg providers and can coincide across rows — so a
+    # cross-provider switch was invisible here and the wrong client got silently
+    # reused (wrong credentials, wrong leg, wrong base URL). The binding is
+    # stamped on the options object by ``query_options`` (None = native), so
+    # comparing it catches every provider change, including
+    # provider→native-Claude. A provider change MUST evict + reconnect: the
+    # engine/leg and its credentials are fixed at connect time, and
+    # ``adapter.set_model()`` can only hot-swap the model within one client.
+    if getattr(old, "aih_provider_id", None) != getattr(
+        new_options, "aih_provider_id", None
+    ):
         return True
 
     # NOTE: on-disk OAuth credential rotation is deliberately NOT a reconnect
