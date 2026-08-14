@@ -9,12 +9,16 @@ Two responsibilities:
 1. **Tool VFS** — projected typed stubs live under a virtual ``tools`` package.
    ``from tools.get_weather import get_weather`` compiles the stub source on
    demand (list → read → import, lazy) and, when the stub is called, routes to
-   ``__host_call__`` which RPCs the host.
+   ``__host_call__`` which RPCs the host. A second virtual package, ``skills``,
+   mounts the persistent model-authored modules from the SkillStore (the
+   continual harness); those execute under guarded builtins since they are
+   untrusted model output.
 2. **Import guard** — a replacement ``__import__`` installed in the exec
-   namespace's builtins. Only a stdlib-safe allowlist (plus the ``tools`` VFS)
-   is importable; ``os``/``sys``/``subprocess``/``socket``/``ctypes``/… raise a
-   clear error. This is a *soft* boundary by design (the threat model treats
-   the kernel as untrusted); the hard gates are host-side.
+   namespace's builtins. Only a stdlib-safe allowlist (plus the ``tools`` and
+   ``skills`` VFS packages) is importable; ``os``/``sys``/``subprocess``/
+   ``socket``/``ctypes``/… raise a clear error. This is a *soft* boundary by
+   design (the threat model treats the kernel as untrusted); the hard gates
+   are host-side.
 """
 
 from __future__ import annotations
@@ -65,42 +69,55 @@ class ResultRef(str):
 
 
 def make_guarded_import(allowlist: set[str]) -> Callable[..., Any]:
-    """Return an ``__import__`` that permits only ``allowlist`` (+ ``tools``)."""
+    """Return an ``__import__`` permitting only ``allowlist`` + ``tools``/``skills``."""
     real_import = builtins.__import__
 
     def guarded(name, globals=None, locals=None, fromlist=(), level=0):  # noqa: A002
         top = name.split(".", 1)[0] if name else name
-        if top == "tools" or top in allowlist:
+        if top in ("tools", "skills") or top in allowlist:
             return real_import(name, globals, locals, fromlist, level)
         allowed = ", ".join(sorted(allowlist))
         raise ImportError(
             f"import of {top!r} is blocked in the code-mode kernel. "
-            f"Allowed: {allowed} (plus the `tools` package)."
+            f"Allowed: {allowed} (plus the `tools` and `skills` packages)."
         )
 
     return guarded
 
 
 class VfsFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
-    """Resolves the virtual ``tools`` package and its per-tool stub modules.
+    """Resolves two virtual packages: ``tools`` (host-generated stubs) and
+    ``skills`` (persistent, model-authored modules from the SkillStore).
 
-    Reads ``sources`` live (a dict shared with the runner) so ``set_vfs``
-    updates take effect after the runner invalidates cached ``tools.*`` modules.
-    Each stub module is given ``__host_call__`` / ``ResultRef`` / ``ToolError``
-    in its namespace before its source runs.
+    Reads both source dicts live (shared with the runner) so ``set_vfs``
+    updates take effect after the runner invalidates cached modules. Stub
+    modules are host-generated and trusted; skill modules are model-authored,
+    so they execute under the same *guarded builtins* as cell code (blocked
+    ``open``, guarded ``__import__``) — a skill must not widen the sandbox.
     """
 
-    def __init__(self, sources: dict[str, str], host_call: Callable[..., Any]) -> None:
+    def __init__(
+        self,
+        sources: dict[str, str],
+        host_call: Callable[..., Any],
+        *,
+        skills: dict[str, str] | None = None,
+        guarded_builtins: dict[str, Any] | None = None,
+    ) -> None:
         self._sources = sources
+        self._skills = skills if skills is not None else {}
+        self._guarded_builtins = guarded_builtins
         self._host_call = host_call
 
     # ── finder ──
     def find_spec(self, fullname, path=None, target=None):  # noqa: D102
-        if fullname == "tools":
+        if fullname in ("tools", "skills"):
             return importlib.util.spec_from_loader(fullname, self, is_package=True)
         if fullname.startswith("tools."):
-            leaf = fullname.split(".", 1)[1]
-            if leaf in self._sources:
+            if fullname.split(".", 1)[1] in self._sources:
+                return importlib.util.spec_from_loader(fullname, self)
+        if fullname.startswith("skills."):
+            if fullname.split(".", 1)[1] in self._skills:
                 return importlib.util.spec_from_loader(fullname, self)
         return None
 
@@ -114,18 +131,37 @@ class VfsFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
             module.__path__ = []  # mark as a (namespace-ish) package
             module.__doc__ = "Projected tool stubs (code-mode VFS)."
             return
-        leaf = name.split(".", 1)[1]
+        if name == "skills":
+            module.__path__ = []
+            module.__doc__ = "Persistent model-authored skills (continual harness)."
+            return
+        pkg, leaf = name.split(".", 1)
         module.__host_call__ = self._host_call
         module.ResultRef = ResultRef
         module.ToolError = ToolError
-        code = compile(self._sources[leaf], f"tools/{leaf}.py", "exec")
+        if pkg == "skills":
+            # Model-authored: same guarded builtins as cell code.
+            if self._guarded_builtins is not None:
+                module.__dict__["__builtins__"] = self._guarded_builtins
+            source = self._skills[leaf]
+        else:
+            source = self._sources[leaf]
+        code = compile(source, f"{pkg}/{leaf}.py", "exec")
         exec(code, module.__dict__)
 
 
-def install_finder(sources: dict[str, str], host_call: Callable[..., Any]) -> VfsFinder:
+def install_finder(
+    sources: dict[str, str],
+    host_call: Callable[..., Any],
+    *,
+    skills: dict[str, str] | None = None,
+    guarded_builtins: dict[str, Any] | None = None,
+) -> VfsFinder:
     """Install the VFS finder at the front of ``sys.meta_path`` (idempotent)."""
     sys.meta_path = [f for f in sys.meta_path if not isinstance(f, VfsFinder)]
-    finder = VfsFinder(sources, host_call)
+    finder = VfsFinder(
+        sources, host_call, skills=skills, guarded_builtins=guarded_builtins
+    )
     sys.meta_path.insert(0, finder)
     return finder
 

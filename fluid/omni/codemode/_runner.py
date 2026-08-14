@@ -39,6 +39,7 @@ _OUT = sys.stdout.buffer
 _REF_THRESHOLD = truncate.DEFAULT_LIMIT
 _STDOUT_CAP = 16384
 _SOURCES: dict = {}
+_SKILLS: dict = {}
 _NS: dict = {}
 
 
@@ -122,12 +123,17 @@ def _run_cell(code: str):
     return out, value_repr, err
 
 
-def _set_vfs(sources: dict) -> None:
+def _set_vfs(sources: dict, skills: dict) -> None:
     _SOURCES.clear()
     _SOURCES.update(sources or {})
+    _SKILLS.clear()
+    _SKILLS.update(skills or {})
     import importlib
 
-    for name in [n for n in list(sys.modules) if n == "tools" or n.startswith("tools.")]:
+    for name in [
+        n for n in list(sys.modules)
+        if n in ("tools", "skills") or n.startswith(("tools.", "skills."))
+    ]:
         del sys.modules[name]
     importlib.invalidate_caches()
 
@@ -160,6 +166,33 @@ def _guard_network() -> None:
         pass
 
 
+def _guard_filesystem() -> None:
+    """Block direct file I/O so the host permission gate cannot be sidestepped.
+
+    Patches ``builtins.open`` (before ``make_namespace`` copies builtins) plus
+    the ``io``-module escape routes (``io.open`` — which ``pathlib`` delegates
+    to — ``io.FileIO``, ``io.open_code``). Model code must use the projected
+    file tools instead; a huge file read that way still stays in-kernel as a
+    ResultRef. Like the other guards this is a soft boundary (importlib's
+    internal ``_io`` references are untouched so allowlisted imports work);
+    the hard gates remain host-side.
+    """
+    import builtins as _builtins
+    import io as _io
+
+    def _blocked_open(*a, **k):
+        raise PermissionError(
+            "direct file I/O is blocked in the code-mode kernel; use the "
+            "projected file tools (see list_tools) so the host permission "
+            "gate applies — large results stay in-kernel as a ResultRef"
+        )
+
+    _builtins.open = _blocked_open  # type: ignore[assignment]
+    _io.open = _blocked_open  # type: ignore[assignment]
+    _io.open_code = _blocked_open  # type: ignore[assignment]
+    _io.FileIO = _blocked_open  # type: ignore[assignment]
+
+
 def _boot(config: dict) -> None:
     global _REF_THRESHOLD, _STDOUT_CAP, _NS
     _REF_THRESHOLD = config.get("ref_threshold", truncate.DEFAULT_LIMIT)
@@ -167,9 +200,14 @@ def _boot(config: dict) -> None:
     _apply_rlimit(config.get("mem_limit_bytes", 0))
     if not config.get("allow_network", False):
         _guard_network()
+    if not config.get("allow_fs", False):
+        _guard_filesystem()  # must precede make_namespace (it copies builtins)
     allowlist = set(config.get("allowlist") or vfs.DEFAULT_ALLOWLIST)
     _NS = vfs.make_namespace(allowlist=allowlist, host_call=_host_call)
-    vfs.install_finder(_SOURCES, _host_call)
+    vfs.install_finder(
+        _SOURCES, _host_call,
+        skills=_SKILLS, guarded_builtins=_NS["__builtins__"],
+    )
 
 
 def _main() -> None:
@@ -187,7 +225,7 @@ def _main() -> None:
             out, value_repr, err = _run_cell(frame.get("code", ""))
             _send({"kind": "done", "stdout": out, "value_repr": value_repr, "error": err})
         elif kind == "set_vfs":
-            _set_vfs(frame.get("sources") or {})
+            _set_vfs(frame.get("sources") or {}, frame.get("skills") or {})
             _send({"kind": "vfs_ok"})
         elif kind == "shutdown":
             break

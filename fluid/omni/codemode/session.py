@@ -8,6 +8,13 @@ into the kernel VFS, and implements the four code-mode tools:
 - ``search_tools``  — keyword search over the same catalog;
 - ``read_tool_docs``— the generated typed stub (signature + docstring) for a tool.
 
+With a :class:`~omni.codemode.skills.SkillStore` attached, the session is also
+the driver of the *continual harness*: persistent skills mount into the kernel
+as ``skills.<name>``, ``save_skill``/``delete_skill`` are projected as gated
+in-kernel tools, every executed cell is journaled, and (when a synthesizer is
+wired) new journal entries trigger a background distillation pass that turns
+recurring workflows into new skills.
+
 When code-mode is active the model's *schema* is only these four tools; the
 underlying tools stay in the registry (dispatched via host calls) and in the
 projection (discoverable), carrying zero prompt-schema cost.
@@ -27,6 +34,7 @@ from typing import Any
 from omni.codemode.bridge import HostBridge
 from omni.codemode.kernel import HostReply
 from omni.codemode.projection import Projection
+from omni.codemode.skills import SkillStore, referenced_skills
 from omni.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
 from omni.events.model import ToolResult, ToolUse
 from omni.permissions.engine import PermissionEngine
@@ -34,15 +42,24 @@ from omni.store.base import new_id
 from omni.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
 
 CODE_MODE_SOURCE = "codemode"
+SKILLS_SOURCE = "skills"
 
 _RUN_PYTHON_DESC = (
     "Execute Python in a persistent per-session kernel (state survives across "
     "calls). Discover tools with list_tools/search_tools/read_tool_docs, then "
     "`from tools.<name> import <name>` and call them — each call is permission-"
-    "gated on the host. Network is disabled; only a stdlib-safe import allowlist "
-    "is available. The last expression's repr is returned (REPL-style); large "
-    "tool results come back as a ResultRef you can slice in a later call."
+    "gated on the host. Saved skills (reusable helpers that persist across "
+    "sessions) import via `from skills.<name> import <name>`; persist a new one "
+    "with the save_skill tool when you notice a reusable pattern. Network and "
+    "direct file I/O are disabled (use the file tools); only a stdlib-safe "
+    "import allowlist is available. The last expression's repr is returned "
+    "(REPL-style); large tool results come back as a ResultRef you can slice "
+    "in a later call."
 )
+
+# Journal previews are bounded so journal.jsonl (synthesis input) stays small.
+_JOURNAL_STDOUT_CAP = 1500
+_JOURNAL_VALUE_CAP = 300
 
 
 class CodeModeSession:
@@ -52,12 +69,20 @@ class CodeModeSession:
         *,
         config: KernelConfig | None = None,
         exec_timeout: float = 30.0,
+        skills: SkillStore | None = None,
+        synthesizer: "Any | None" = None,  # omni.codemode.continual.Synthesizer
     ) -> None:
         self._registry = registry
         self._config = config or KernelConfig()
         self._exec_timeout = exec_timeout
         self._kernel: SubprocessKernel | None = None
         self._vfs_signature: tuple | None = None
+        self._skills = skills
+        self._synthesizer = synthesizer
+
+    @property
+    def skills(self) -> SkillStore | None:
+        return self._skills
 
     # ── projection (rebuilt cheaply; reflects late-loaded MCP tools) ──
     def _projection(self) -> Projection:
@@ -67,22 +92,37 @@ class CodeModeSession:
         ]
         return Projection(specs)
 
-    # ── the three discovery tools ──
+    # ── the three discovery tools (tools + persistent skills) ──
     def render_list(self) -> str:
         entries = self._projection().entries()
-        if not entries:
-            return "No tools available."
-        lines = ["Tools callable from run_python via `from tools.<name> import <name>`:"]
-        lines += [f"- {leaf}: {one}" for leaf, one in entries]
-        return "\n".join(lines)
+        lines: list[str] = []
+        if entries:
+            lines.append("Tools callable from run_python via `from tools.<name> import <name>`:")
+            lines += [f"- {leaf}: {one}" for leaf, one in entries]
+        if self._skills is not None:
+            saved = self._skills.list()
+            if saved:
+                lines.append("Saved skills, import via `from skills.<name> import <name>`:")
+                lines += [f"- {s.name}: {s.description} [used {s.uses}x]" for s in saved]
+        return "\n".join(lines) if lines else "No tools available."
 
     def render_search(self, query: str) -> str:
-        hits = self._projection().search(query)
+        hits = [(leaf, one) for leaf, one in self._projection().search(query)]
+        if self._skills is not None:
+            tokens = [t for t in query.lower().split() if t]
+            for s in self._skills.list():
+                hay = f"skills.{s.name} {s.description}".lower()
+                if any(t in hay for t in tokens) or (not tokens and query.lower() in hay):
+                    hits.append((f"skills.{s.name}", s.description))
         if not hits:
             return f"No tools match {query!r}."
         return "\n".join(f"- {leaf}: {one}" for leaf, one in hits)
 
     def render_docs(self, name: str) -> str:
+        if self._skills is not None:
+            skill = self._skills.get(name.removeprefix("skills."))
+            if skill is not None:
+                return skill.source
         src = self._projection().docs(name)
         if src is None:
             return f"No such tool: {name!r}. Try list_tools or search_tools."
@@ -91,14 +131,18 @@ class CodeModeSession:
     # ── run_python (driven by the engine, not the registry) ──
     async def _ensure_kernel(self) -> SubprocessKernel:
         sources = self._projection().sources()
-        signature = tuple(sorted(sources.items()))
+        skills = self._skills.sources() if self._skills is not None else {}
+        signature = (
+            tuple(sorted(sources.items())),
+            self._skills.signature() if self._skills is not None else (),
+        )
         if self._kernel is None:
             self._kernel = SubprocessKernel(self._config)
             await self._kernel.start()
-            await self._kernel.set_vfs(sources)
+            await self._kernel.set_vfs(sources, skills)
             self._vfs_signature = signature
         elif signature != self._vfs_signature:
-            await self._kernel.set_vfs(sources)
+            await self._kernel.set_vfs(sources, skills)
             self._vfs_signature = signature
         return self._kernel
 
@@ -127,7 +171,10 @@ class CodeModeSession:
             hooks=loop.hooks, on_permission=_on_permission, ctx=loop.ctx,
         )
 
+        called_tools: list[str] = []
+
         async def _host_call(name: str, kwargs: dict) -> HostReply:
+            called_tools.append(name)
             tool_use_id = new_id("call")
             await loop._emit(ToolUse(
                 session_id=sid, turn_id=turn_id,
@@ -147,6 +194,7 @@ class CodeModeSession:
             return reply
 
         result = await kernel.exec(code, timeout=timeout, on_host_call=_host_call)
+        self._record_cell(code, result, called_tools)
 
         parts: list[str] = []
         if result.stdout.strip():
@@ -158,7 +206,36 @@ class CodeModeSession:
             text = (text + "\n" if parts else "") + f"Error: {result.error}"
         return ToolOutcome(text=text, is_error=bool(result.error))
 
+    # ── continual harness hooks ──
+    def _record_cell(self, code: str, result: Any, called_tools: list[str]) -> None:
+        """Journal the cell, bump skill usage, kick synthesis. Never raises."""
+        if self._skills is None:
+            return
+        try:
+            error_lines = (result.error or "").strip().splitlines()
+            self._skills.journal_append({
+                "code": code,
+                "stdout": result.stdout[:_JOURNAL_STDOUT_CAP],
+                "value": result.value_repr[:_JOURNAL_VALUE_CAP],
+                "error": error_lines[-1] if error_lines else None,
+                "host_calls": result.host_calls,
+                "tools": sorted(set(called_tools)),
+            })
+            self._skills.note_uses(referenced_skills(code))
+        except Exception:
+            pass
+        if self._synthesizer is not None:
+            try:
+                self._synthesizer.kick()
+            except Exception:
+                pass
+
     async def aclose(self) -> None:
+        if self._synthesizer is not None:
+            try:
+                await self._synthesizer.drain()
+            except Exception:
+                pass
         if self._kernel is not None:
             await self._kernel.stop()
             self._kernel = None
@@ -235,4 +312,71 @@ def register_code_mode_tools(registry: ToolRegistry, session: CodeModeSession) -
             source=CODE_MODE_SOURCE,
         ),
         _docs,
+    )
+
+    # Continual-harness persistence tools — registered only with a SkillStore.
+    # Source is SKILLS_SOURCE (not codemode) so they are *projected into the
+    # kernel* rather than into the prompt schema: the model reaches them via
+    # `from tools.save_skill import save_skill`, and every save/delete rides
+    # the same host permission gate as any write-risk tool.
+    store = session.skills
+    if store is None:
+        return
+
+    async def _save_skill(input: dict, _ctx: ToolCtx) -> ToolOutcome:
+        name = input.get("name") or ""
+        source = input.get("source") or ""
+        try:
+            skill = store.save(name, source)
+        except ValueError as exc:
+            return ToolOutcome(text=str(exc), is_error=True)
+        return ToolOutcome(
+            text=(
+                f"skill {skill.name!r} saved — import with "
+                f"`from skills.{skill.name} import {skill.name}` (next run_python "
+                f"call onward, and in every future session): {skill.description}"
+            )
+        )
+
+    async def _delete_skill(input: dict, _ctx: ToolCtx) -> ToolOutcome:
+        name = input.get("name") or ""
+        if store.delete(name):
+            return ToolOutcome(text=f"skill {name!r} deleted")
+        return ToolOutcome(text=f"no such skill: {name!r}", is_error=True)
+
+    registry.register_builtin(
+        ToolSpec(
+            name="save_skill",
+            description=(
+                "Persist a reusable Python skill module across sessions. It "
+                "mounts as skills.<name> in the run_python kernel. Module "
+                "docstring required (first line = one-sentence description); "
+                "define a function named like the skill."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "snake_case identifier"},
+                    "source": {"type": "string", "description": "full module source"},
+                },
+                "required": ["name", "source"],
+            },
+            risk="write",
+            source=SKILLS_SOURCE,
+        ),
+        _save_skill,
+    )
+    registry.register_builtin(
+        ToolSpec(
+            name="delete_skill",
+            description="Delete a persistent skill by name.",
+            input_schema={
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+            risk="write",
+            source=SKILLS_SOURCE,
+        ),
+        _delete_skill,
     )

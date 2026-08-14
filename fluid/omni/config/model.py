@@ -105,6 +105,10 @@ class HarnessConfig:
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
     permission: PermissionConfig = field(default_factory=PermissionConfig)
     code_mode: bool = False
+    # Continual harness (code-mode only): persistent skills root (None → the
+    # SkillStore default, ~/.omni/skills) and the auto-synthesis toggle.
+    skills_dir: str | None = None
+    continual: bool = False
     instruction_files: InstructionFilesConfig = field(default_factory=InstructionFilesConfig)
     cwd: str = "."
     max_tokens: int = 8192
@@ -127,6 +131,8 @@ class HarnessConfig:
             providers=providers,
             permission=PermissionConfig.from_dict(d.get("permission", {})),
             code_mode=bool(d.get("code_mode", False)),
+            skills_dir=d.get("skills_dir"),
+            continual=bool(d.get("continual", False)),
             instruction_files=InstructionFilesConfig.from_dict(d.get("instruction_files", {})),
             cwd=d.get("cwd", "."),
             max_tokens=int(d.get("max_tokens", 8192)),
@@ -154,6 +160,8 @@ class HarnessConfig:
             "default_provider": self.default_provider,
             "default_model": self.default_model,
             "code_mode": self.code_mode,
+            "skills_dir": self.skills_dir,
+            "continual": self.continual,
             "cwd": self.cwd,
             "max_tokens": self.max_tokens,
             "system": self.system,

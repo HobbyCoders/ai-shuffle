@@ -27,5 +27,14 @@ the explicitly permitted path — never raw OAuth token reuse.
   handoff, external notes — not cumulative summarization.
 - **Code-as-actions**: tools projected as typed Python functions into a persistent,
   permission-gated kernel; schemas stay out of the prompt (progressive disclosure).
+  The kernel blocks network *and* direct file I/O (files go through gated tools;
+  large results stay in-kernel behind a `ResultRef`), and its memory cap is
+  enforced on POSIX (rlimit) and Windows (Job Object) alike.
+- **Continual harness**: every executed cell is journaled; a background synthesis
+  pass distills recurring workflows into persistent Python skills (mounted in the
+  kernel as `skills.<name>`, saved via the gated `save_skill` tool, usage-counted
+  for curation). Enable with `--continual` / `OMNI_CONTINUAL=1`; skills live in
+  `~/.omni/skills` (override with `skills_dir` / `OMNI_SKILLS_DIR`).
+  Design rationale: [docs/agent-experience.md](docs/agent-experience.md).
 
 Status: early development (M0).

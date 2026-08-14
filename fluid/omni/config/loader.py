@@ -31,6 +31,8 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "default_provider": "anthropic",
     "default_model": "claude-sonnet-5",
     "code_mode": False,
+    "skills_dir": None,
+    "continual": False,
     "cwd": ".",
     "max_tokens": 8192,
     "system": None,
@@ -118,6 +120,10 @@ def env_overrides(env: dict[str, str] | None = None) -> dict[str, Any]:
         out["cwd"] = env["OMNI_CWD"]
     if "OMNI_CODE_MODE" in env:
         out["code_mode"] = _coerce_bool(env["OMNI_CODE_MODE"])
+    if "OMNI_SKILLS_DIR" in env:
+        out["skills_dir"] = env["OMNI_SKILLS_DIR"]
+    if "OMNI_CONTINUAL" in env:
+        out["continual"] = _coerce_bool(env["OMNI_CONTINUAL"])
     if "OMNI_MAX_TOKENS" in env:
         try:
             out["max_tokens"] = int(env["OMNI_MAX_TOKENS"])
@@ -274,8 +280,17 @@ def build_engine(
     codemode = None
     if config.code_mode:
         from omni.codemode.session import CodeModeSession
+        from omni.codemode.skills import SkillStore
 
-        codemode = CodeModeSession(registry)
+        skills = SkillStore(config.skills_dir)  # None → ~/.omni/skills
+        synthesizer = None
+        if config.continual:
+            from omni.codemode.continual import Synthesizer
+
+            # Same provider/model the session runs on; passes are background
+            # and best-effort (see continual.py's failure posture).
+            synthesizer = Synthesizer(client, model, skills)
+        codemode = CodeModeSession(registry, skills=skills, synthesizer=synthesizer)
 
     return NativeLoop(
         provider=client,

@@ -1,11 +1,13 @@
 """Subprocess kernel v1 — a persistent ``python -I -S`` child over a JSON pipe.
 
 Honestly a *soft* boundary (documented in the plan's threat model): ``-I -S``
-isolation, an import allowlist, a network guard, and a memory rlimit inside the
-child; the real enforcement is the host permission gate reached through
-``on_host_call``. The kernel namespace persists across ``exec`` calls, so the
-model accumulates state — until a wall-clock timeout forces a kill+restart, at
-which point the namespace is lost and that is reported as the exec error.
+isolation, an import allowlist, network + direct-file-I/O guards inside the
+child, and a memory cap (POSIX rlimit in-child; a Job Object assigned from the
+host on Windows, where rlimit is unavailable); the real enforcement is the host
+permission gate reached through ``on_host_call``. The kernel namespace persists
+across ``exec`` calls, so the model accumulates state — until a wall-clock
+timeout forces a kill+restart, at which point the namespace is lost and that is
+reported as the exec error.
 
 Timeout accounting only charges *kernel compute* time: each read segment (the
 time the child spends running until it either finishes or asks for a tool) is
@@ -33,6 +35,7 @@ class KernelConfig:
     allowlist: list[str] | None = None
     mem_limit_bytes: int = _GB
     allow_network: bool = False
+    allow_fs: bool = False  # direct open()/io/pathlib I/O inside the kernel
     ref_threshold: int = 8192
     stdout_cap: int = 16384
     python: str = field(default_factory=lambda: sys.executable)
@@ -42,6 +45,7 @@ class KernelConfig:
             "allowlist": list(self.allowlist) if self.allowlist else list(DEFAULT_ALLOWLIST),
             "mem_limit_bytes": self.mem_limit_bytes,
             "allow_network": self.allow_network,
+            "allow_fs": self.allow_fs,
             "ref_threshold": self.ref_threshold,
             "stdout_cap": self.stdout_cap,
         }
@@ -52,6 +56,8 @@ class SubprocessKernel:
         self.config = config or KernelConfig()
         self._proc: asyncio.subprocess.Process | None = None
         self._vfs_sources: dict[str, str] = {}
+        self._skill_sources: dict[str, str] = {}
+        self._job_handle: int | None = None  # Windows Job Object (memory limit)
 
     # ── lifecycle ──
     async def start(self) -> None:
@@ -64,17 +70,33 @@ class SubprocessKernel:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        # POSIX enforces the memory limit in-child via rlimit; on Windows that
+        # is a no-op, so cap the child from the host with a Job Object.
+        if sys.platform == "win32" and self.config.mem_limit_bytes:
+            self._job_handle = _win_assign_memory_job(
+                self._proc.pid, self.config.mem_limit_bytes
+            )
         await self._send({"kind": "boot", "config": self.config.boot_payload()})
         await self._read_frame()  # {"kind": "ready"}
-        if self._vfs_sources:
-            await self._send({"kind": "set_vfs", "sources": self._vfs_sources})
-            await self._read_frame()
+        if self._vfs_sources or self._skill_sources:
+            await self._send_vfs()
 
-    async def set_vfs(self, sources: dict[str, str]) -> None:
+    async def _send_vfs(self) -> None:
+        await self._send({
+            "kind": "set_vfs",
+            "sources": self._vfs_sources,
+            "skills": self._skill_sources,
+        })
+        await self._read_frame()
+
+    async def set_vfs(
+        self, sources: dict[str, str], skills: dict[str, str] | None = None
+    ) -> None:
         self._vfs_sources = dict(sources)
+        if skills is not None:
+            self._skill_sources = dict(skills)
         if self._proc is not None and self._proc.returncode is None:
-            await self._send({"kind": "set_vfs", "sources": self._vfs_sources})
-            await self._read_frame()
+            await self._send_vfs()
 
     async def stop(self) -> None:
         if self._proc is None:
@@ -88,16 +110,18 @@ class SubprocessKernel:
 
     async def _kill(self) -> None:
         proc, self._proc = self._proc, None
-        if proc is None or proc.returncode is not None:
-            return
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=5)
-        except (asyncio.TimeoutError, Exception):
-            pass
+        job, self._job_handle = self._job_handle, None
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except (asyncio.TimeoutError, Exception):
+                pass
+        if job is not None:
+            _win_close_handle(job)  # KILL_ON_JOB_CLOSE reaps any survivor
 
     async def _restart(self) -> None:
         await self._kill()
@@ -166,6 +190,93 @@ class SubprocessKernel:
         (length,) = struct.unpack(">I", header)
         body = await self._proc.stdout.readexactly(length)
         return _loads(body)
+
+
+# ── Windows Job Object memory limit (host-side counterpart of the POSIX rlimit
+# the child applies to itself; see _runner._apply_rlimit) ─────────────────────
+
+# Best-effort: returns the job handle to keep alive (limits die with the last
+# handle), or None if anything fails — matching the rlimit path's posture.
+def _win_assign_memory_job(pid: int, limit_bytes: int) -> int | None:  # pragma: no cover - win32 only
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x00000100
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+        JobObjectExtendedLimitInformation = 9
+        PROCESS_SET_QUOTA = 0x0100
+        PROCESS_TERMINATE = 0x0001
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                (name, ctypes.c_ulonglong)
+                for name in (
+                    "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                    "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
+                )
+            ]
+
+        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),  # ULONG_PTR
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo", IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.windll.kernel32
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = (
+            JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        )
+        info.ProcessMemoryLimit = limit_bytes
+        ok = kernel32.SetInformationJobObject(
+            job, JobObjectExtendedLimitInformation,
+            ctypes.byref(info), ctypes.sizeof(info),
+        )
+        if not ok:
+            kernel32.CloseHandle(job)
+            return None
+        hproc = kernel32.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, pid)
+        if not hproc:
+            kernel32.CloseHandle(job)
+            return None
+        assigned = kernel32.AssignProcessToJobObject(job, hproc)
+        kernel32.CloseHandle(hproc)
+        if not assigned:
+            kernel32.CloseHandle(job)
+            return None
+        return job
+    except Exception:
+        return None
+
+
+def _win_close_handle(handle: int) -> None:  # pragma: no cover - win32 only
+    try:
+        import ctypes
+
+        ctypes.windll.kernel32.CloseHandle(handle)
+    except Exception:
+        pass
 
 
 def _reply_frame(reply: HostReply) -> dict:

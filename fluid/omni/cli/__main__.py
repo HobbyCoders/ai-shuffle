@@ -33,6 +33,11 @@ def _cli_overrides(args: argparse.Namespace) -> dict[str, Any]:
         overrides["default_model"] = args.model
     if getattr(args, "code_mode", False):
         overrides["code_mode"] = True
+    if getattr(args, "continual", False):
+        overrides["code_mode"] = True  # continual implies code-mode
+        overrides["continual"] = True
+    if getattr(args, "skills_dir", None):
+        overrides["skills_dir"] = args.skills_dir
     if getattr(args, "approval_policy", None):
         overrides["permission"] = {"approval_policy": args.approval_policy}
     return overrides
@@ -101,6 +106,11 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--model", default=None, help="override the default model")
     p.add_argument("--store", default=None, help="JSONL session store directory")
     p.add_argument("--code-mode", action="store_true", dest="code_mode", help="enable code-mode")
+    p.add_argument("--continual", action="store_true",
+                   help="enable the continual harness (implies --code-mode): journal cells "
+                        "and auto-synthesize reusable skills")
+    p.add_argument("--skills-dir", default=None, dest="skills_dir",
+                   help="persistent skills root (default ~/.omni/skills)")
     p.add_argument("--approval-policy", default=None,
                    choices=["never_ask", "on_write", "always_ask"])
 
