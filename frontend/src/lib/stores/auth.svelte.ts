@@ -120,6 +120,15 @@ export const claudeAuthenticated = createDerived(() => _state.status?.claude_aut
 export const claudeTokenValid = createDerived(
 	() => _state.status?.claude_token_valid ?? _state.status?.claude_authenticated ?? false
 );
+// "Any usable credential" (PA10): the Claude subscription login OR at least one
+// enabled model provider with a stored credential. This — not claudeAuthenticated
+// — is what gates the composer (send / mic / attach) and the first-run setup
+// Continue, so an install with only a GPT/OpenRouter/Anthropic-API credential is
+// fully usable. Older backends omit the field: fall back to claude_authenticated
+// so the gate behaves exactly as before.
+export const anyCredential = createDerived(
+	() => _state.status?.has_any_credential ?? _state.status?.claude_authenticated ?? false
+);
 export const githubAuthenticated = createDerived(() => _state.status?.github_authenticated ?? false);
 export const onboardingComplete = createDerived(() => _state.status?.onboarding_complete ?? true);
 export const username = createDerived(() => _state.status?.username ?? null);

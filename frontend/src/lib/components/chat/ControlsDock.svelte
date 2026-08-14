@@ -5,7 +5,7 @@
 	 * and file attach button.
 	 */
 	import { activeSession } from '$lib/stores/active-session';
-	import { claudeAuthenticated } from '$lib/stores/auth.svelte';
+	import { anyCredential } from '$lib/stores/auth.svelte';
 	import { profiles } from '$lib/stores/app-data.svelte';
 	import ContextUsageBar from './ContextUsageBar.svelte';
 	import OverrideDropdown from './OverrideDropdown.svelte';
@@ -304,7 +304,7 @@
 		<button
 			type="button"
 			onclick={onAttachClick}
-			disabled={!$claudeAuthenticated || isUploading}
+			disabled={!$anyCredential || isUploading}
 			class="dock-action-btn"
 			title={isUploading ? 'Uploading...' : $activeSession.project ? 'Attach file' : 'Select a project to attach files'}
 		>

@@ -274,6 +274,10 @@ export interface AuthStatus {
 	/** True only when the Claude OAuth token is present AND not expired.
 	 *  May be undefined on older backends — treat undefined as "unknown". */
 	claude_token_valid?: boolean;
+	/** True when ANY usable credential exists: the Claude subscription login OR
+	 *  at least one enabled model provider with a stored credential (PA10).
+	 *  May be undefined on older backends — fall back to claude_authenticated. */
+	has_any_credential?: boolean;
 	github_authenticated: boolean;
 	onboarding_complete: boolean;
 	username: string | null;
