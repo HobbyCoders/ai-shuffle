@@ -175,8 +175,8 @@
 	});
 
 	// Profile form state — omni harness options only (ruling R3). SDK-era
-	// fields (thinking mode, effort, setting sources, checkpointing, …) are
-	// gone: the omni harness ignores them.
+	// fields (thinking mode, setting sources, checkpointing, …) are gone: the
+	// omni harness ignores them. effort and max_turns are harness-honored.
 	let profileForm = $state({
 		id: '',
 		name: '',
@@ -184,6 +184,8 @@
 		model: getDefaultModel(),
 		provider: null as string | null,
 		permission_mode: 'default',
+		effort: null as 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null,
+		max_turns: null as number | null,
 		allowed_tools: [] as string[],
 		disallowed_tools: [] as string[],
 		enabled_agents: [] as string[],
@@ -325,6 +327,8 @@
 			model: getDefaultModel(),
 			provider: null,
 			permission_mode: 'default',
+			effort: null,
+			max_turns: null,
 			allowed_tools: [],
 			disallowed_tools: [],
 			enabled_agents: [],
@@ -397,6 +401,8 @@
 			model: normalizeModel(config.model) || getDefaultModel(),
 			provider: config.provider ?? null,
 			permission_mode: config.permission_mode || 'default',
+			effort: (config as any).effort || null,
+			max_turns: config.max_turns || null,
 			allowed_tools: allowedTools,
 			disallowed_tools: disallowedTools,
 			// Invoke allowlist: hydrate the stored ids as-is (minus self) — never
@@ -596,6 +602,12 @@
 			app_config_tools: profileForm.app_config_tools
 		};
 
+		// Reasoning depth — honored on every leg (delegated CLI --effort;
+		// native legs via the provider's effort/reasoning param).
+		if (profileForm.effort) config.effort = profileForm.effort;
+		// Per-turn model-call cap (native legs).
+		if (profileForm.max_turns) config.max_turns = profileForm.max_turns;
+
 		// Persist the dropdown mode explicitly so it round-trips even when the tool
 		// list is empty (e.g. "Allow Only Selected" before any tool is picked).
 		// The runtime still derives behavior from allowed_tools/disallowed_tools.
@@ -773,10 +785,12 @@
 			// the export format doesn't carry a provider id.
 			provider: null,
 			permission_mode: agent.permission_mode || 'default',
+			effort: (agent.effort as any) || null,
+			max_turns: agent.max_turns || null,
 			allowed_tools: allowedTools,
 			disallowed_tools: disallowedTools,
 			enabled_agents: agent.enabled_agents || [],
-			memory: (agent as any).memory || '',
+			memory: agent.memory || '',
 			include_partial_messages: agent.include_partial_messages !== false,
 			system_prompt_content: spContent,
 			enabled_ai_tools: enabledAITools,

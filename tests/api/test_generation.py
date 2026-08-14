@@ -318,11 +318,11 @@ class TestGenerateProfileEndpoint:
             "description": "A profile for Python development",
             "model": "sonnet",
             "permission_mode": "default",
-            "thinking_mode": "think",
-            "system_prompt_type": "preset",
-            "system_prompt_preset": "claude_code",
+            "system_prompt_content": "You are a Python development assistant.",
             "allowed_tools": null,
-            "disallowed_tools": null
+            "disallowed_tools": null,
+            "thinking_mode": "think",
+            "system_prompt_preset": "claude_code"
         }'''
 
         mock_text_block = MagicMock(spec=TextBlock)
@@ -361,6 +361,13 @@ class TestGenerateProfileEndpoint:
         agent = result["agent"]
         assert agent["name"] == "Python Developer"
         assert agent["model"] == "sonnet"
+        assert agent["system_prompt_content"] == "You are a Python development assistant."
+        # Dead SDK-era fields emitted by the model must not survive into the
+        # generated config — the omni harness ignores them (ruling A12)
+        assert "thinking_mode" not in agent
+        assert "system_prompt_preset" not in agent
+        assert "system_prompt_type" not in agent
+        assert "setting_sources" not in agent
 
     def test_generate_profile_with_model_param(self, authenticated_client):
         """Should accept optional model parameter."""

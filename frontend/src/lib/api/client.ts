@@ -284,9 +284,10 @@ export interface AuthStatus {
 }
 
 // Profile types — omni harness options only. SDK-era keys (thinking_mode,
-// setting_sources, max_turns, max_buffer_size, user, strict_mcp_config, …)
-// were dropped from the editor; the backend tolerates them on old rows but
-// the omni harness ignores them.
+// setting_sources, max_buffer_size, user, strict_mcp_config, …) were dropped
+// from the editor; the backend tolerates them on old rows but the omni
+// harness ignores them. effort and max_turns ARE honored (adapter maps them
+// onto --effort / provider effort params and the per-turn model-call cap).
 export interface ProfileConfig {
 	model?: string;
 	provider?: string | null;  // model_providers.id this model runs through; unset/null = native Anthropic
@@ -294,9 +295,10 @@ export interface ProfileConfig {
 	disallowed_tools?: string[];
 	tool_selection_mode?: 'all' | 'none' | 'allow' | 'disallow';  // UI-only: persists the editor dropdown so it round-trips even when the tool list is empty
 	permission_mode?: string;
+	effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';  // Reasoning depth — delegated CLI --effort / native provider effort param; chat can override per-turn
+	max_turns?: number;  // Per-turn model-call cap (native legs → omni max_model_calls_per_turn)
 	include_partial_messages?: boolean;
 	enable_file_checkpointing?: boolean;  // LEGACY (SDK-era): still read by chat rewind gating for old rows; no longer written
-	effort?: 'low' | 'medium' | 'high' | 'max';  // LEGACY (SDK-era): still read to seed the chat effort override for old rows; no longer written
 	ai_tools?: Record<string, boolean>;  // AI tool toggles (image_generation, video_generation, etc.)
 	computer_use?: { enabled?: boolean; target_display?: number | null; require_confirmation?: boolean };  // Host desktop control (native mode only)
 	enabled_agents?: string[];  // Optional invoke allowlist: agents this agent may dispatch via the Task tool; empty/unset = any
@@ -459,30 +461,35 @@ export interface WorkspaceValidation {
 // ============================================================================
 
 export interface AgentExportData {
+	// Omni-honored fields — the only ones the backend exports (ruling A12)
 	name: string;
 	description: string | null;
 	model: string | null;
 	permission_mode: string | null;
-	thinking_mode: string | null;
-	effort: string | null;
-	system_prompt_type: string | null;
-	system_prompt_preset: string | null;
+	effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null;  // harness-honored reasoning depth
+	max_turns?: number | null;  // per-turn model-call cap (native legs)
 	system_prompt_content: string | null;
-	system_prompt_append: string | null;
-	system_prompt_inject_env: boolean | null;
 	allowed_tools: string[] | null;
 	disallowed_tools: string[] | null;
 	enabled_agents: string[] | null;
 	ai_tools: Record<string, boolean> | null;
-	max_turns: number | null;
-	max_buffer_size: number | null;
+	memory?: string | null;
 	include_partial_messages: boolean | null;
-	continue_conversation: boolean | null;
-	fork_session: boolean | null;
-	setting_sources: string[] | null;
-	enable_file_checkpointing: boolean | null;
 	app_config_tools: boolean | null;
 	env: Record<string, string> | null;
+	// LEGACY (pre-A12 export files, import-only): a preset prompt's append
+	// text is mapped onto the custom prompt content; everything else is
+	// ignored by the importer.
+	thinking_mode?: string | null;
+	system_prompt_type?: string | null;
+	system_prompt_preset?: string | null;
+	system_prompt_append?: string | null;
+	system_prompt_inject_env?: boolean | null;
+	max_buffer_size?: number | null;
+	continue_conversation?: boolean | null;
+	fork_session?: boolean | null;
+	setting_sources?: string[] | null;
+	enable_file_checkpointing?: boolean | null;
 }
 
 export interface AgentExport {

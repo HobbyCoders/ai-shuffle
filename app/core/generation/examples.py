@@ -349,17 +349,15 @@ Provide structured, scannable responses:
 
 PROFILE_EXAMPLES: List[Dict[str, Any]] = [
     {
-        "description_input": "A profile for thorough code review with extended thinking",
+        "description_input": "A profile for thorough code review",
         "output": {
             "name": "Deep Code Review",
-            "description": "Profile for comprehensive code review sessions with extended reasoning for complex analysis",
+            "description": "Profile for comprehensive code review sessions with deep analysis",
             "model": "sonnet",
             "permission_mode": "default",
-            "thinking_mode": "think",
-            "system_prompt_type": "preset",
-            "system_prompt_preset": "code_review",
-            "system_prompt_append": '''
-## Additional Review Guidelines
+            "system_prompt_content": '''You are a meticulous code reviewer focused on correctness, maintainability, and security.
+
+## Review Guidelines
 
 When reviewing code:
 1. Consider the broader architectural implications
@@ -371,11 +369,9 @@ Always provide actionable feedback with code examples.''',
             "allowed_tools": None,
             "disallowed_tools": ["Write", "Edit", "Bash"],  # Read-only for review
             "enabled_agents": None,
-            "max_turns": None,
+            "memory": None,
             "include_partial_messages": True,
-            "continue_conversation": False,
-            "fork_session": False,
-            "setting_sources": None,
+            "app_config_tools": False,
             "env": None,
         }
     },
@@ -386,10 +382,8 @@ Always provide actionable feedback with code examples.''',
             "description": "Fast, lightweight profile for quick questions and codebase exploration",
             "model": "haiku",
             "permission_mode": "default",
-            "thinking_mode": "default",
-            "system_prompt_type": "preset",
-            "system_prompt_preset": "claude_code",
-            "system_prompt_append": '''
+            "system_prompt_content": '''You are a fast, lightweight assistant for quick questions and codebase exploration.
+
 ## Speed Guidelines
 
 - Prioritize concise answers
@@ -399,11 +393,9 @@ Always provide actionable feedback with code examples.''',
             "allowed_tools": None,
             "disallowed_tools": None,
             "enabled_agents": None,
-            "max_turns": 10,  # Limit for quick sessions
+            "memory": None,
             "include_partial_messages": True,
-            "continue_conversation": False,
-            "fork_session": False,
-            "setting_sources": None,
+            "app_config_tools": False,
             "env": None,
         }
     },
@@ -414,9 +406,6 @@ Always provide actionable feedback with code examples.''',
             "description": "Profile with AI image and video generation capabilities for creative projects",
             "model": "sonnet",
             "permission_mode": "acceptEdits",
-            "thinking_mode": "default",
-            "system_prompt_type": "custom",
-            "system_prompt_preset": None,
             "system_prompt_content": '''You are a Creative Studio assistant with access to AI image and video generation tools.
 
 ## Capabilities
@@ -444,15 +433,12 @@ Save generated files to:
 - `/workspace/generated/videos/` for videos
 
 Always provide the file path and a preview description of generated content.''',
-            "system_prompt_append": None,
             "allowed_tools": None,
             "disallowed_tools": None,
             "enabled_agents": None,
-            "max_turns": None,
+            "memory": None,
             "include_partial_messages": True,
-            "continue_conversation": False,
-            "fork_session": False,
-            "setting_sources": None,
+            "app_config_tools": False,
             "env": None,
             "ai_tools": {
                 "image_generation": True,
@@ -529,16 +515,16 @@ def get_profile_examples_text() -> str:
   "description": "{output.get("description", "")}",
   "model": "{output["model"]}",
   "permission_mode": "{output["permission_mode"]}",
-  "thinking_mode": "{output["thinking_mode"]}",
-  "system_prompt_type": "{output["system_prompt_type"]}",
-  "system_prompt_preset": {f'"{output["system_prompt_preset"]}"' if output.get("system_prompt_preset") else "null"},
   "system_prompt_content": {"<custom prompt>" if output.get("system_prompt_content") else "null"},
-  "system_prompt_append": {"<additional instructions>" if output.get("system_prompt_append") else "null"},
   "allowed_tools": {output.get("allowed_tools") or "null"},
   "disallowed_tools": {output.get("disallowed_tools") or "null"},
-  "max_turns": {output.get("max_turns") or "null"},
   "ai_tools": {output.get("ai_tools") or "null"}
 }}
+```
+
+**Custom Prompt** (excerpt showing structure):
+```markdown
+{output["system_prompt_content"][:600]}...
 ```
 ''')
 

@@ -190,28 +190,6 @@ MODEL_BY_DOMAIN: Dict[str, str] = {
 }
 
 # ============================================================================
-# Thinking Mode by Domain
-# ============================================================================
-
-THINKING_MODE_BY_DOMAIN: Dict[str, str] = {
-    "code-review": "think",
-    "security": "think_harder",
-    "testing": "think",
-    "documentation": "default",
-    "refactoring": "think_harder",
-    "exploration": "default",
-    "planning": "ultra_think",
-    "research": "think",
-    "debugging": "think",
-    "pr-review": "think",
-    "creative": "default",
-    "data-science": "think",
-    "web-browsing": "think",
-    "general": "default",
-}
-
-
-# ============================================================================
 # Helper Functions
 # ============================================================================
 
@@ -283,19 +261,6 @@ def get_model_for_domain(domain: str) -> str:
         Model string (e.g., haiku, sonnet, opus)
     """
     return MODEL_BY_DOMAIN.get(domain, "sonnet")
-
-
-def get_thinking_mode_for_domain(domain: str) -> str:
-    """
-    Get recommended thinking mode for a domain.
-
-    Args:
-        domain: Domain identifier
-
-    Returns:
-        Thinking mode (default, think, think_harder, ultra_think)
-    """
-    return THINKING_MODE_BY_DOMAIN.get(domain, "default")
 
 
 def get_all_available_tools() -> List[str]:

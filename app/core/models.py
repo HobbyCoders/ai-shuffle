@@ -804,32 +804,51 @@ class WebhookTestResponse(BaseModel):
 # ============================================================================
 
 class AgentExportData(BaseModel):
-    """Agent configuration data for export"""
+    """Agent configuration data for export.
+
+    Carries only config the omni harness honors (ruling A12): model,
+    permission_mode, effort, max_turns, custom system-prompt content, tool
+    allow/deny lists, enabled_agents, ai_tools, memory,
+    include_partial_messages, app_config_tools, env. SDK-era fields
+    (thinking_mode, preset prompts, setting_sources, …) are no longer
+    exported; legacy files are still importable via AgentImportData.
+    """
     name: str
     description: Optional[str] = None
     model: Optional[str] = DEFAULT_MODEL
-    permission_mode: Optional[str] = "default"  # default, auto, acceptEdits, plan, bypassPermissions
-    thinking_mode: Optional[str] = "default"
-    effort: Optional[str] = None  # low, medium, high, max, xhigh (xhigh only for Opus 4.7+)
-    system_prompt_type: Optional[str] = "preset"
-    system_prompt_preset: Optional[str] = "claude_code"
+    permission_mode: Optional[str] = "default"  # default, acceptEdits, plan, bypassPermissions
+    effort: Optional[str] = None  # low | medium | high | xhigh | max — harness-honored reasoning depth
+    max_turns: Optional[int] = None  # per-turn model-call cap (native legs)
     system_prompt_content: Optional[str] = None
-    system_prompt_append: Optional[str] = None
-    system_prompt_inject_env: Optional[bool] = False
     allowed_tools: Optional[List[str]] = None
     disallowed_tools: Optional[List[str]] = None
     enabled_agents: Optional[List[str]] = None
     ai_tools: Optional[AIToolsConfig] = None
-    max_turns: Optional[int] = None
-    max_buffer_size: Optional[int] = None
+    memory: Optional[str] = None
     include_partial_messages: Optional[bool] = True
+    app_config_tools: Optional[bool] = False
+    # Environment variables (exported with profile)
+    env: Optional[Dict[str, str]] = None
+
+
+class AgentImportData(AgentExportData):
+    """Legacy-tolerant agent data for the import path.
+
+    Pre-A12 export files carry SDK-era fields the omni harness ignores. They
+    are accepted here so old files still import: a preset-shaped prompt's
+    append text is mapped onto the custom prompt content; everything else is
+    silently dropped.
+    """
+    thinking_mode: Optional[str] = None
+    system_prompt_type: Optional[str] = None
+    system_prompt_preset: Optional[str] = None
+    system_prompt_append: Optional[str] = None
+    system_prompt_inject_env: Optional[bool] = False
+    max_buffer_size: Optional[int] = None
     continue_conversation: Optional[bool] = False
     fork_session: Optional[bool] = False
     setting_sources: Optional[List[str]] = None
     enable_file_checkpointing: Optional[bool] = False
-    app_config_tools: Optional[bool] = False
-    # Environment variables (exported with profile)
-    env: Optional[Dict[str, str]] = None
 
 
 class AgentExport(BaseModel):
@@ -845,7 +864,7 @@ class AgentImportRequest(BaseModel):
     version: str = Field(..., description="Export format version")
     type: str = Field(..., description="Must be 'ai-shuffle-agent'")
     exported_at: Optional[str] = None
-    agent: AgentExportData
+    agent: AgentImportData
 
     # Optional override for profile ID (otherwise generated from name)
     new_id: Optional[str] = Field(None, pattern=r'^[a-z0-9-]+$', min_length=1, max_length=50)

@@ -96,6 +96,8 @@
 		/** `model_providers.id` this profile's model belongs to, or `null` for native Anthropic. */
 		provider: string | null;
 		permission_mode: string;
+		effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null;
+		max_turns: number | null;
 		allowed_tools: string[];
 		disallowed_tools: string[];
 		enabled_agents: string[];
@@ -350,6 +352,25 @@
 						<option value="plan">Plan</option>
 						<option value="bypassPermissions">Bypass Permissions</option>
 					</select>
+				</div>
+			</div>
+			<div class="set-row">
+				<div class="lab"><h4>Effort</h4><p>Reasoning depth vs. speed and cost. Applies to any provider that supports it; can be overridden per-chat.</p></div>
+				<div class="ctl">
+					<select class="sel" value={profileForm.effort || ''} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; onFormChange('effort', v ? v : null); }}>
+						<option value="">Provider default</option>
+						<option value="low">Low</option>
+						<option value="medium">Medium</option>
+						<option value="high">High</option>
+						<option value="xhigh">XHigh</option>
+						<option value="max">Max</option>
+					</select>
+				</div>
+			</div>
+			<div class="set-row">
+				<div class="lab"><h4>Max model calls per turn</h4><p>Caps how many model calls one turn may make. Empty = default.</p></div>
+				<div class="ctl">
+					<input class="inp" type="number" value={profileForm.max_turns} oninput={(e) => { const v = (e.target as HTMLInputElement).value; onFormChange('max_turns', v ? Number(v) : null); }} placeholder="Default (50)" />
 				</div>
 			</div>
 		</div>
