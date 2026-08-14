@@ -275,10 +275,8 @@ If this contains an existing system prompt, use it as the basis for system_promp
 Profiles are pre-configured settings for Claude sessions. They control:
 - Which model to use
 - Permission levels
-- Thinking depth
 - Available tools
 - System prompt customization
-- Session behavior
 
 ## Configuration Fields (All Fields)
 
@@ -286,7 +284,7 @@ Profiles are pre-configured settings for Claude sessions. They control:
 - **name**: Display name for the profile (1-100 chars)
 - **description**: Brief description of the profile's purpose
 
-### Model & Thinking
+### Model
 - **model**: Claude model to use
   - "haiku": Fast, cheap - quick tasks, exploration
   - "sonnet": Balanced - general coding, analysis (default)
@@ -294,12 +292,6 @@ Profiles are pre-configured settings for Claude sessions. They control:
   - "opus" / "opus[1m]": Powerful - complex reasoning, architecture, deep reasoning
   - "fable" / "fable[1m]": Most capable - hardest reasoning, long-running tasks
   - Any other string is treated as a custom model ID and passed through unchanged
-
-- **thinking_mode**: Depth of reasoning
-  - "default": Standard thinking
-  - "think": Extended reasoning, better for complex problems
-  - "think_harder": More thorough analysis
-  - "ultra_think": Maximum reasoning depth
 
 ### Permissions
 - **permission_mode**: How permissions are handled
@@ -314,28 +306,19 @@ Profiles are pre-configured settings for Claude sessions. They control:
 - Available tools: {available_tools}
 
 ### System Prompt
-- **system_prompt_type**: "preset" or "custom"
-- **system_prompt_preset**: When type is "preset", one of:
-  - "claude_code" (default, full coding assistant)
-  - "code_review" (focused on reviewing)
-  - "explain_code" (focused on explanation)
-  - "debug_help" (focused on debugging)
-  - "write_tests" (focused on testing)
-  - "refactor_code" (focused on refactoring)
-  - "write_documentation" (focused on docs)
+- **system_prompt_content**: Full custom system prompt for the profile
+  (null = use the standard coding-assistant prompt). This is the ONLY
+  system-prompt field - there are no presets or append fields.
 
-- **system_prompt_content**: When type is "custom", the full custom system prompt
-- **system_prompt_append**: Additional text appended to ANY prompt (works with presets)
-
-### Session Behavior
-- **max_turns**: Maximum conversation turns (null = unlimited)
+### Streaming
 - **include_partial_messages**: Enable streaming partial messages (default: true)
-- **continue_conversation**: Continue most recent conversation (default: false)
-- **fork_session**: Fork instead of continuing when resuming (default: false)
 
 ### Advanced
 - **enabled_agents**: Array of subagent IDs this profile can use
-- **setting_sources**: Where to load settings from: ["user", "project", "local"]
+- **memory**: Durable text injected whenever this agent runs (usually null
+  for a fresh profile - the agent writes its own memory over time)
+- **app_config_tools**: Allow the agent to manage this app's own configuration
+  via tools (default: false)
 - **env**: Environment variables to set (key-value pairs)
 
 ### AI Tools (for creative profiles)
@@ -349,18 +332,18 @@ Profiles are pre-configured settings for Claude sessions. They control:
 
 ## Common Profile Patterns
 
-| Use Case | Model | Permission | Thinking | Tools |
-|----------|-------|------------|----------|-------|
-| Quick Questions | haiku | default | default | all |
-| Code Review | sonnet | default | think | Read, Grep, Glob only |
-| Development | sonnet | acceptEdits | think | all |
-| Automation | sonnet | bypassPermissions | default | all |
-| Architecture | opus | default | ultra_think | Read, Grep, Glob |
-| Creative Work | sonnet | acceptEdits | default | all + AI tools |
+| Use Case | Model | Permission | Tools |
+|----------|-------|------------|-------|
+| Quick Questions | haiku | default | all |
+| Code Review | sonnet | default | Read, Grep, Glob only |
+| Development | sonnet | acceptEdits | all |
+| Automation | sonnet | bypassPermissions | all |
+| Architecture | opus | default | Read, Grep, Glob |
+| Creative Work | sonnet | acceptEdits | all + AI tools |
 
 ## System Prompt Guidelines
 
-When generating custom system prompts or append text:
+When generating custom system prompt content:
 - Keep focused on the profile's specific purpose
 - Add domain-specific guidelines
 - Include output format preferences if relevant
@@ -385,29 +368,24 @@ Output ONLY a valid JSON object (no markdown code blocks, no explanation):
   "description": "What this profile is for",
   "model": "sonnet",
   "permission_mode": "default",
-  "thinking_mode": "default",
-  "system_prompt_type": "preset",
-  "system_prompt_preset": "claude_code",
   "system_prompt_content": null,
-  "system_prompt_append": null,
   "allowed_tools": null,
   "disallowed_tools": null,
   "enabled_agents": null,
-  "max_turns": null,
+  "memory": null,
   "include_partial_messages": true,
-  "continue_conversation": false,
-  "fork_session": false,
-  "setting_sources": null,
+  "app_config_tools": false,
   "env": null,
   "ai_tools": null
 }}
 
 Notes:
 - Use null for fields that should use defaults
+- Output ONLY the fields shown above - no other fields exist
 - For ai_tools, only include if creative features are needed:
   {{"image_generation": true, "video_generation": true}}
 - Be creative with the name and description
-- Match model/thinking to the task complexity
+- Match the model to the task complexity
 - Restrict tools when appropriate for security/focus
 
 Generate the profile configuration now:'''

@@ -873,30 +873,26 @@ async def export_profile(
     system_prompt = config.get("system_prompt", {}) or {}
     ai_tools = config.get("ai_tools")
 
-    # Build export data - sanitize sensitive paths
+    # Only the custom prompt content survives export (ruling A12) — a legacy
+    # preset-shaped config exports its append text as the custom content.
+    if system_prompt.get("type") == "custom":
+        prompt_content = system_prompt.get("content")
+    else:
+        prompt_content = system_prompt.get("append")
+
+    # Build export data - omni-honored fields only, sanitize sensitive paths
     agent_data = AgentExportData(
         name=profile.get("name", profile_id),
         description=profile.get("description"),
         model=config.get("model", DEFAULT_MODEL),
         permission_mode=config.get("permission_mode", "default"),
-        thinking_mode=config.get("thinking_mode", "default"),
-        effort=config.get("effort"),
-        system_prompt_type=system_prompt.get("type", "preset"),
-        system_prompt_preset=system_prompt.get("preset", "claude_code"),
-        system_prompt_content=system_prompt.get("content"),
-        system_prompt_append=system_prompt.get("append"),
-        system_prompt_inject_env=system_prompt.get("inject_env_details", False),
+        system_prompt_content=prompt_content or None,
         allowed_tools=config.get("allowed_tools"),
         disallowed_tools=config.get("disallowed_tools"),
         enabled_agents=config.get("enabled_agents"),
         ai_tools=ai_tools,
-        max_turns=config.get("max_turns"),
-        max_buffer_size=config.get("max_buffer_size"),
+        memory=config.get("memory"),
         include_partial_messages=config.get("include_partial_messages", True),
-        continue_conversation=config.get("continue_conversation", False),
-        fork_session=config.get("fork_session", False),
-        setting_sources=config.get("setting_sources"),
-        enable_file_checkpointing=config.get("enable_file_checkpointing", False),
         app_config_tools=config.get("app_config_tools", False),
         env=config.get("env"),  # Environment variables are exported
         # Note: We intentionally exclude some data:
@@ -905,6 +901,8 @@ async def export_profile(
         # - user (user identifier)
         # - extra_args (may contain sensitive data)
         # - enabled_plugins (plugin paths are system-specific)
+        # SDK-era fields the omni harness ignores (thinking_mode, preset
+        # prompts, setting_sources, max_buffer_size, …) are not exported.
     )
 
     export_data = AgentExport(
@@ -983,35 +981,25 @@ async def import_profile(
                 detail=f"Too many profiles with similar ID: {base_id}"
             )
 
-    # Build config from agent data
+    # Build config from agent data — omni-honored fields only. Legacy SDK-era
+    # fields in old export files (thinking_mode, effort, max_turns,
+    # max_buffer_size, setting_sources, enable_file_checkpointing,
+    # continue_conversation, fork_session) are accepted but ignored.
     config = {
         "model": agent_data.model or DEFAULT_MODEL,
         "permission_mode": agent_data.permission_mode or "default",
-        "thinking_mode": agent_data.thinking_mode or "default",
         "include_partial_messages": agent_data.include_partial_messages if agent_data.include_partial_messages is not None else True,
-        "continue_conversation": agent_data.continue_conversation or False,
-        "fork_session": agent_data.fork_session or False,
-        "enable_file_checkpointing": agent_data.enable_file_checkpointing or False,
     }
 
-    # Effort level (Opus 4.6+)
-    if agent_data.effort:
-        config["effort"] = agent_data.effort
-
-    # System prompt
-    if agent_data.system_prompt_type == "custom" and agent_data.system_prompt_content:
+    # System prompt — custom content only (ruling A12). Legacy preset-shaped
+    # exports map their append text onto the custom content.
+    prompt_content = agent_data.system_prompt_content or agent_data.system_prompt_append
+    if prompt_content:
         config["system_prompt"] = {
             "type": "custom",
-            "content": agent_data.system_prompt_content,
+            "content": prompt_content,
             "inject_env_details": agent_data.system_prompt_inject_env or False
         }
-    else:
-        config["system_prompt"] = {
-            "type": "preset",
-            "preset": agent_data.system_prompt_preset or "claude_code"
-        }
-        if agent_data.system_prompt_append:
-            config["system_prompt"]["append"] = agent_data.system_prompt_append
 
     # Optional fields
     if agent_data.allowed_tools:
@@ -1034,12 +1022,8 @@ async def import_profile(
             config["enabled_agents"] = valid_enabled
     if agent_data.ai_tools:
         config["ai_tools"] = agent_data.ai_tools.model_dump()
-    if agent_data.max_turns:
-        config["max_turns"] = agent_data.max_turns
-    if agent_data.max_buffer_size:
-        config["max_buffer_size"] = agent_data.max_buffer_size
-    if agent_data.setting_sources:
-        config["setting_sources"] = agent_data.setting_sources
+    if agent_data.memory:
+        config["memory"] = agent_data.memory
     if agent_data.app_config_tools:
         config["app_config_tools"] = agent_data.app_config_tools
     if agent_data.env:

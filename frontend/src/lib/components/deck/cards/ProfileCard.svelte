@@ -790,7 +790,7 @@
 			allowed_tools: allowedTools,
 			disallowed_tools: disallowedTools,
 			enabled_agents: agent.enabled_agents || [],
-			memory: (agent as any).memory || '',
+			memory: agent.memory || '',
 			include_partial_messages: agent.include_partial_messages !== false,
 			system_prompt_content: spContent,
 			enabled_ai_tools: enabledAITools,

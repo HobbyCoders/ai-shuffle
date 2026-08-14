@@ -461,30 +461,35 @@ export interface WorkspaceValidation {
 // ============================================================================
 
 export interface AgentExportData {
+	// Omni-honored fields — the only ones the backend exports (ruling A12)
 	name: string;
 	description: string | null;
 	model: string | null;
 	permission_mode: string | null;
-	thinking_mode: string | null;
-	effort: string | null;
-	system_prompt_type: string | null;
-	system_prompt_preset: string | null;
 	system_prompt_content: string | null;
-	system_prompt_append: string | null;
-	system_prompt_inject_env: boolean | null;
 	allowed_tools: string[] | null;
 	disallowed_tools: string[] | null;
 	enabled_agents: string[] | null;
 	ai_tools: Record<string, boolean> | null;
-	max_turns: number | null;
-	max_buffer_size: number | null;
+	memory?: string | null;
 	include_partial_messages: boolean | null;
-	continue_conversation: boolean | null;
-	fork_session: boolean | null;
-	setting_sources: string[] | null;
-	enable_file_checkpointing: boolean | null;
 	app_config_tools: boolean | null;
 	env: Record<string, string> | null;
+	// LEGACY (pre-A12 export files, import-only): a preset prompt's append
+	// text is mapped onto the custom prompt content; everything else is
+	// ignored by the importer.
+	thinking_mode?: string | null;
+	effort?: string | null;
+	system_prompt_type?: string | null;
+	system_prompt_preset?: string | null;
+	system_prompt_append?: string | null;
+	system_prompt_inject_env?: boolean | null;
+	max_turns?: number | null;
+	max_buffer_size?: number | null;
+	continue_conversation?: boolean | null;
+	fork_session?: boolean | null;
+	setting_sources?: string[] | null;
+	enable_file_checkpointing?: boolean | null;
 }
 
 export interface AgentExport {

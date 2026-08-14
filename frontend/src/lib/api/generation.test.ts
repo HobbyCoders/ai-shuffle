@@ -36,26 +36,15 @@ describe('AI Generation API', () => {
 			description: 'A Python development profile',
 			model: 'sonnet',
 			permission_mode: 'default',
-			thinking_mode: 'default',
-			effort: null,
-			system_prompt_type: 'preset',
-			system_prompt_preset: 'claude_code',
 			system_prompt_content: null,
-			system_prompt_append: null,
-			system_prompt_inject_env: false,
 			allowed_tools: null,
 			disallowed_tools: null,
 			enabled_agents: null,
 			ai_tools: null,
-			max_turns: null,
-			max_buffer_size: null,
+			memory: null,
 			include_partial_messages: true,
-			continue_conversation: false,
-			fork_session: false,
-			setting_sources: null,
-			enable_file_checkpointing: false,
-			env: null,
-			app_config_tools: null
+			app_config_tools: null,
+			env: null
 		}
 	};
 

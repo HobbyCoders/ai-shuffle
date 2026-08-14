@@ -21,7 +21,6 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "domain": "code-review",
         "tools": ["Read", "Grep", "Glob"],
         "model": "sonnet",
-        "thinking_mode": "think",
         "ai_tools": [],
         "prompt_sections": [
             "core_identity",
@@ -53,7 +52,6 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
                     "Secret/credential exposure",
                 ],
                 "model": "opus",  # Security needs extra scrutiny
-                "thinking_mode": "think_harder",
             },
             "performance": {
                 "name": "Performance Code Reviewer",
@@ -76,7 +74,6 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "domain": "testing",
         "tools": ["Read", "Write", "Edit", "Bash", "Grep", "Glob"],
         "model": "sonnet",
-        "thinking_mode": "think",
         "ai_tools": [],
         "prompt_sections": [
             "core_identity",
@@ -113,7 +110,6 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "domain": "security",
         "tools": ["Read", "Grep", "Glob", "WebSearch"],
         "model": "opus",
-        "thinking_mode": "think_harder",
         "ai_tools": [],
         "prompt_sections": [
             "core_identity",
@@ -133,7 +129,6 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "domain": "documentation",
         "tools": ["Read", "Write", "Edit", "Glob", "Grep"],
         "model": "sonnet",
-        "thinking_mode": "default",
         "ai_tools": [],
         "prompt_sections": [
             "core_identity",
@@ -169,7 +164,6 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "domain": "pr-review",
         "tools": ["Read", "Grep", "Glob", "Bash"],
         "model": "sonnet",
-        "thinking_mode": "think",
         "ai_tools": [],
         "prompt_sections": [
             "core_identity",
@@ -187,7 +181,6 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "domain": "research",
         "tools": ["Read", "Grep", "Glob", "WebFetch", "WebSearch"],
         "model": "sonnet",
-        "thinking_mode": "think",
         "ai_tools": [],
         "prompt_sections": [
             "core_identity",
@@ -205,7 +198,6 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "domain": "refactoring",
         "tools": ["Read", "Write", "Edit", "Grep", "Glob", "Bash"],
         "model": "opus",
-        "thinking_mode": "think_harder",
         "ai_tools": [],
         "prompt_sections": [
             "core_identity",
@@ -224,7 +216,6 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "domain": "exploration",
         "tools": ["Read", "Grep", "Glob"],
         "model": "haiku",  # Fast for exploration
-        "thinking_mode": "default",
         "ai_tools": [],
         "prompt_sections": [
             "core_identity",
@@ -241,7 +232,6 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "domain": "planning",
         "tools": ["Read", "Grep", "Glob"],
         "model": "opus",
-        "thinking_mode": "ultra_think",
         "ai_tools": [],
         "prompt_sections": [
             "core_identity",
@@ -259,7 +249,6 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "domain": "debugging",
         "tools": ["Read", "Write", "Edit", "Bash", "Grep", "Glob"],
         "model": "sonnet",
-        "thinking_mode": "think",
         "ai_tools": [],
         "prompt_sections": [
             "core_identity",
@@ -277,7 +266,6 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "domain": "creative",
         "tools": ["Read", "Write", "Edit", "Glob"],
         "model": "sonnet",
-        "thinking_mode": "default",
         "ai_tools": ["image_generation", "image_editing", "image_reference"],
         "prompt_sections": [
             "core_identity",
