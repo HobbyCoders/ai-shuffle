@@ -284,3 +284,92 @@ def test_adapter_requires_reconnect_unrelated_env_no_reconnect():
     adapter = _connected_adapter({"FOO": "1"})
     new_options = SessionOptions(model="claude-sonnet-4-5", env={"FOO": "2"})
     assert adapter.requires_reconnect(new_options) is False
+
+
+# ─── PA13 / W-R4: the resolved provider BINDING forces a reconnect ──────────
+
+
+class TestProviderBindingReconnect:
+    """A cross-provider mid-session switch must evict + reconnect.
+
+    ``query_options`` stamps the turn's RESOLVED provider on the options object
+    as ``aih_provider_id`` (None = native). Before W-R4 nothing compared it: two
+    native-leg providers produce identical (empty) gateway-overlay envs, so the
+    env comparison above sees no change and the pooled client — built for the
+    OLD provider's engine and credentials — was silently reused.
+    """
+
+    @staticmethod
+    def _state(provider_id, env=None):
+        state = _make_state(env)
+        state.connect_options.aih_provider_id = provider_id
+        return state
+
+    @staticmethod
+    def _options(provider_id, env=None):
+        opts = _new_options(env)
+        opts.aih_provider_id = provider_id
+        return opts
+
+    def test_provider_change_forces_reconnect(self):
+        state = self._state("prov-a")
+        new = self._options("prov-b")
+        assert requires_reconnect(state, new) is True
+
+    def test_native_to_provider_forces_reconnect(self):
+        """None → a provider id (a ``prov:`` composite pick on a native session)."""
+        state = self._state(None)
+        new = self._options("prov-a")
+        assert requires_reconnect(state, new) is True
+
+    def test_provider_to_native_forces_reconnect(self):
+        """A provider id → None (a native Claude pick CLEARING the binding)."""
+        state = self._state("prov-a")
+        new = self._options(None)
+        assert requires_reconnect(state, new) is True
+
+    def test_same_provider_is_still_a_hotswap(self):
+        """Same binding, different model → no reconnect; the model change stays a
+        ``set_model`` hot-swap so background workers survive."""
+        state = self._state("prov-a")
+        new = self._options("prov-a")
+        new.model = "some-other-model"
+        assert requires_reconnect(state, new) is False
+
+    def test_both_native_is_still_a_hotswap(self):
+        assert requires_reconnect(self._state(None), self._options(None)) is False
+
+    def test_unstamped_options_are_treated_as_native(self):
+        """Options built by a path that never stamps the attribute (older pooled
+        state, a hand-built ClaudeAgentOptions) read as native on both sides —
+        no spurious respawn."""
+        state = _make_state({})
+        new = _new_options({})
+        assert not hasattr(state.connect_options, "aih_provider_id")
+        assert requires_reconnect(state, new) is False
+
+
+def test_harness_adapter_requires_reconnect_mirrors_provider_binding():
+    """HarnessAdapter mirrors the pool rule off ``extra["provider_id"]``."""
+    from app.core.provider.harness_adapter import HarnessAdapter
+
+    adapter = HarnessAdapter()
+    adapter._options = SessionOptions(model="m", extra={"provider_id": "prov-a"})
+
+    assert adapter.requires_reconnect(
+        SessionOptions(model="m", extra={"provider_id": "prov-b"})
+    ) is True
+    # provider → native (extra key absent) also reconnects.
+    assert adapter.requires_reconnect(SessionOptions(model="m")) is True
+    # Same binding → hot-swap.
+    assert adapter.requires_reconnect(
+        SessionOptions(model="m2", extra={"provider_id": "prov-a"})
+    ) is False
+
+
+def test_harness_adapter_native_both_sides_no_reconnect():
+    from app.core.provider.harness_adapter import HarnessAdapter
+
+    adapter = HarnessAdapter()
+    adapter._options = SessionOptions(model="m")
+    assert adapter.requires_reconnect(SessionOptions(model="m2")) is False

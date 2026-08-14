@@ -227,7 +227,12 @@ async def _run_background_query_impl(
                 if old_opts:
                     new_model = getattr(options, 'model', None)
                     old_model = getattr(old_opts, 'model', None)
-                    if new_model and new_model != old_model:
+                    # Same-provider-only hot-swap (PA13) — a provider change is
+                    # caught by requires_reconnect() and respawns instead; a
+                    # set_model() across providers would send an unknown model id
+                    # to the wrong upstream.
+                    _same_provider = getattr(old_opts, 'aih_provider_id', None) == getattr(options, 'aih_provider_id', None)
+                    if new_model and new_model != old_model and _same_provider:
                         try:
                             # Live hot-swap stays within the session's current provider;
                             # a provider change is caught by requires_reconnect() and

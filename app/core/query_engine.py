@@ -1332,7 +1332,9 @@ async def stream_query(
                 if old_opts:
                     new_model = getattr(options, 'model', None)
                     old_model = getattr(old_opts, 'model', None)
-                    if new_model and new_model != old_model:
+                    # Same-provider-only hot-swap (PA13) — see the WS path's note.
+                    _same_provider = getattr(old_opts, 'aih_provider_id', None) == getattr(options, 'aih_provider_id', None)
+                    if new_model and new_model != old_model and _same_provider:
                         try:
                             # Live hot-swap stays within the session's current provider;
                             # a provider change is caught by requires_reconnect() and
@@ -1995,7 +1997,14 @@ async def _stream_to_websocket_impl(
                 if old_opts:
                     new_model = getattr(options, 'model', None)
                     old_model = getattr(old_opts, 'model', None)
-                    if new_model and new_model != old_model:
+                    # Belt-and-braces provider gate (PA13): requires_reconnect()
+                    # already forces a respawn when the resolved binding changes,
+                    # so this branch is unreachable on a provider switch — but a
+                    # set_model() on a client built for a DIFFERENT provider would
+                    # silently send an unknown model id to the wrong upstream, so
+                    # the hot-swap is spelled out as same-provider-only.
+                    _same_provider = getattr(old_opts, 'aih_provider_id', None) == getattr(options, 'aih_provider_id', None)
+                    if new_model and new_model != old_model and _same_provider:
                         try:
                             # Live hot-swap stays within the session's current provider;
                             # a provider change is caught by requires_reconnect() and
@@ -2509,13 +2518,16 @@ async def _stream_to_websocket_impl(
         # (rerouting) re-emits. Main-lane only (subagent models are their own).
         last_model_info: Optional[str] = None
         requested_model = getattr(options, "model", None)
-        # Resolved provider for this session (None = native Anthropic). Mirrors the
-        # exact precedence used when building options (query_options.py): a
-        # query-level override wins, else the profile config. Carried in the
-        # model_info frame's `data` so the frontend can suppress the "rerouted"
-        # pill — a gateway model (e.g. openai/gpt-5.6) never matches a Claude
-        # family and would otherwise false-positive as rerouted (R1).
-        session_provider = (overrides.get("provider") if overrides else None) or config.get("provider")
+        # Resolved provider for this turn (None = native Anthropic). Read off the
+        # OPTIONS object, which carries the binding query_options actually
+        # resolved (`aih_provider_id`) — session binding, an explicit provider
+        # override, a `prov:` composite model pick that rebound it, or a native
+        # Claude pick that CLEARED it (PA13). Re-deriving it from
+        # overrides/config here used to lie in every one of those cases: the
+        # frontend suppresses the "rerouted" pill on a non-null provider (R1) and
+        # scopes its context-window lookup by it, so a stale value both
+        # false-flags and mis-sizes the bar.
+        session_provider = getattr(options, "aih_provider_id", None)
 
         def _model_info_frame(model: str) -> dict:
             return {
