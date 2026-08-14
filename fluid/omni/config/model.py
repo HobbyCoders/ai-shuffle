@@ -107,8 +107,11 @@ class HarnessConfig:
     code_mode: bool = False
     # Continual harness (code-mode only): persistent skills root (None → the
     # SkillStore default, ~/.omni/skills) and the auto-synthesis toggle.
+    # continual_model pins synthesis to one model regardless of which model
+    # runs the session, so skill quality doesn't drift with provider choice.
     skills_dir: str | None = None
     continual: bool = False
+    continual_model: str | None = None
     instruction_files: InstructionFilesConfig = field(default_factory=InstructionFilesConfig)
     cwd: str = "."
     max_tokens: int = 8192
@@ -133,6 +136,7 @@ class HarnessConfig:
             code_mode=bool(d.get("code_mode", False)),
             skills_dir=d.get("skills_dir"),
             continual=bool(d.get("continual", False)),
+            continual_model=d.get("continual_model"),
             instruction_files=InstructionFilesConfig.from_dict(d.get("instruction_files", {})),
             cwd=d.get("cwd", "."),
             max_tokens=int(d.get("max_tokens", 8192)),
@@ -162,6 +166,7 @@ class HarnessConfig:
             "code_mode": self.code_mode,
             "skills_dir": self.skills_dir,
             "continual": self.continual,
+            "continual_model": self.continual_model,
             "cwd": self.cwd,
             "max_tokens": self.max_tokens,
             "system": self.system,

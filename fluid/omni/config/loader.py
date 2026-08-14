@@ -33,6 +33,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "code_mode": False,
     "skills_dir": None,
     "continual": False,
+    "continual_model": None,
     "cwd": ".",
     "max_tokens": 8192,
     "system": None,
@@ -124,6 +125,8 @@ def env_overrides(env: dict[str, str] | None = None) -> dict[str, Any]:
         out["skills_dir"] = env["OMNI_SKILLS_DIR"]
     if "OMNI_CONTINUAL" in env:
         out["continual"] = _coerce_bool(env["OMNI_CONTINUAL"])
+    if "OMNI_CONTINUAL_MODEL" in env:
+        out["continual_model"] = env["OMNI_CONTINUAL_MODEL"]
     if "OMNI_MAX_TOKENS" in env:
         try:
             out["max_tokens"] = int(env["OMNI_MAX_TOKENS"])
@@ -287,9 +290,10 @@ def build_engine(
         if config.continual:
             from omni.codemode.continual import Synthesizer
 
-            # Same provider/model the session runs on; passes are background
-            # and best-effort (see continual.py's failure posture).
-            synthesizer = Synthesizer(client, model, skills)
+            # Session provider; continual_model pins synthesis to one model so
+            # skill quality doesn't drift with the session's provider choice.
+            # Passes are background and best-effort (see continual.py).
+            synthesizer = Synthesizer(client, config.continual_model or model, skills)
         codemode = CodeModeSession(registry, skills=skills, synthesizer=synthesizer)
 
     return NativeLoop(

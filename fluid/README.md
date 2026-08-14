@@ -30,11 +30,17 @@ the explicitly permitted path — never raw OAuth token reuse.
   The kernel blocks network *and* direct file I/O (files go through gated tools;
   large results stay in-kernel behind a `ResultRef`), and its memory cap is
   enforced on POSIX (rlimit) and Windows (Job Object) alike.
-- **Continual harness**: every executed cell is journaled; a background synthesis
-  pass distills recurring workflows into persistent Python skills (mounted in the
-  kernel as `skills.<name>`, saved via the gated `save_skill` tool, usage-counted
-  for curation). Enable with `--continual` / `OMNI_CONTINUAL=1`; skills live in
-  `~/.omni/skills` (override with `skills_dir` / `OMNI_SKILLS_DIR`).
+- **Continual harness**: the session journal is episodic — user prompts and
+  assistant replies ride alongside every executed cell — and a background
+  synthesis pass distills recurring workflows into persistent Python skills
+  (mounted in the kernel as `skills.<name>`, saved via the gated `save_skill`
+  tool, usage-counted for curation). Skills must prove they work: each carries a
+  pure `_selftest()`, verified in a throwaway kernel on save and whenever the
+  source changes; broken skills are unmounted and flagged. The kernel also
+  checkpoints its namespace after every cell, so a timeout/OOM restart restores
+  the data instead of losing it. Enable with `--continual` / `OMNI_CONTINUAL=1`;
+  skills live in `~/.omni/skills` (`skills_dir` / `OMNI_SKILLS_DIR`); pin the
+  synthesis model with `continual_model` / `OMNI_CONTINUAL_MODEL`.
   Design rationale: [docs/agent-experience.md](docs/agent-experience.md).
 
 Status: early development (M0).

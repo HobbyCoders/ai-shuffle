@@ -123,6 +123,49 @@ def _run_cell(code: str):
     return out, value_repr, err
 
 
+# ─── namespace checkpoint / restore (kernel-death resilience) ────────────────
+#
+# Per-variable pickle so one unpicklable object doesn't void the checkpoint.
+# Functions/classes defined in cells pickle by reference to the __cell__
+# module, which won't exist in a fresh kernel — they are dropped (documented);
+# data (strings, numbers, containers, ResultRefs) survives.
+
+_CKPT_SKIP = ("ResultRef", "ToolError", "HostCallDenied")
+
+
+def _checkpoint() -> dict:
+    import base64
+    import pickle
+
+    vars_map: dict = {}
+    dropped: list = []
+    for key, value in _NS.items():
+        if key.startswith("__") or key in _CKPT_SKIP:
+            continue
+        try:
+            blob = pickle.dumps(value)
+        except Exception:
+            dropped.append(key)
+            continue
+        vars_map[key] = base64.b64encode(blob).decode("ascii")
+    return {"kind": "checkpoint", "vars": vars_map, "dropped": sorted(dropped)}
+
+
+def _restore(vars_map: dict) -> dict:
+    import base64
+    import pickle
+
+    restored: list = []
+    dropped: list = []
+    for key, encoded in (vars_map or {}).items():
+        try:
+            _NS[key] = pickle.loads(base64.b64decode(encoded))
+            restored.append(key)
+        except Exception:
+            dropped.append(key)
+    return {"kind": "restored", "restored": sorted(restored), "dropped": sorted(dropped)}
+
+
 def _set_vfs(sources: dict, skills: dict) -> None:
     _SOURCES.clear()
     _SOURCES.update(sources or {})
@@ -227,6 +270,10 @@ def _main() -> None:
         elif kind == "set_vfs":
             _set_vfs(frame.get("sources") or {}, frame.get("skills") or {})
             _send({"kind": "vfs_ok"})
+        elif kind == "checkpoint":
+            _send(_checkpoint())
+        elif kind == "restore":
+            _send(_restore(frame.get("vars") or {}))
         elif kind == "shutdown":
             break
 

@@ -44,6 +44,7 @@ class Skill:
     description: str  # first line of the module docstring
     uses: int = 0
     updated_at: float = 0.0
+    broken: str | None = None  # last verification failure (None = ok/unverified)
 
 
 def _description_of(source: str) -> str | None:
@@ -140,12 +141,17 @@ class SkillStore:
             return None
         source = path.read_text(encoding="utf-8")
         info = self._load_meta().get("skills", {}).get(name, {})
+        broken = info.get("broken")
+        # A broken verdict only holds for the exact source it was issued on.
+        if broken is not None and info.get("verified_mtime") != self._mtime_ns(name):
+            broken = None
         return Skill(
             name=name,
             source=source,
             description=_description_of(source) or name,
             uses=int(info.get("uses", 0)),
             updated_at=float(info.get("updated_at", 0.0)),
+            broken=broken,
         )
 
     def list(self) -> list[Skill]:
@@ -169,6 +175,30 @@ class SkillStore:
             except OSError:
                 continue
         return tuple(out)
+
+    # ─── verification bookkeeping (see omni.codemode.verify) ─────────────
+    def _mtime_ns(self, name: str) -> int | None:
+        try:
+            return self._path(name).stat().st_mtime_ns
+        except OSError:
+            return None
+
+    def needs_verification(self, name: str) -> bool:
+        """True when the skill was never verified for its current source."""
+        info = self._load_meta().get("skills", {}).get(name, {})
+        mtime = self._mtime_ns(name)
+        return mtime is None or info.get("verified_mtime") != mtime
+
+    def mark_verified(self, name: str, error: str | None = None) -> None:
+        """Record a verification verdict for the skill's current source."""
+        meta = self._load_meta()
+        entry = meta.setdefault("skills", {}).setdefault(name, {"uses": 0})
+        entry["verified_mtime"] = self._mtime_ns(name)
+        if error is None:
+            entry.pop("broken", None)
+        else:
+            entry["broken"] = error
+        self._save_meta(meta)
 
     def note_uses(self, names: list[str]) -> None:
         """Bump usage counters for skills referenced by an executed cell."""

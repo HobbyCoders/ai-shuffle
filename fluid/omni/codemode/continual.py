@@ -1,13 +1,16 @@
 """Continual synthesis — distill the exec journal into persistent skills.
 
-The "continual harness" loop: every code-mode cell is journaled by the
+The "continual harness" loop: every code-mode cell — and every conversation
+turn (user prompt / assistant reply, the episodic half) — is journaled by the
 :class:`~omni.codemode.skills.SkillStore`; once enough new entries accumulate
 (or at session close) the :class:`Synthesizer` makes one plain completion call
-— same provider/model the session runs on, no tools — showing the model its
-existing skill library plus the new journal slice, and asking it to distill
-*reusable* workflow improvements into skill modules. Parsed skills are
-validated and saved through the store, so they mount into the kernel's
-``skills`` package on the next cell and in every future session.
+— no tools; the session's provider, or a dedicated ``continual_model`` —
+showing the model its existing skill library plus the new journal slice, and
+asking it to distill *reusable* workflow improvements into skill modules.
+Parsed candidates are statically validated **and verified** (import +
+``_selftest`` in a throwaway no-tools kernel, see ``verify.py``) before they
+are saved; only proven skills mount into the kernel's ``skills`` package on
+the next cell and in every future session.
 
 Failure posture: synthesis is best-effort and must never break a turn. The
 trigger runs as a single-flight background task; any provider or parse error
@@ -23,6 +26,7 @@ import re
 from typing import Any
 
 from omni.codemode.skills import SkillStore, validate_skill
+from omni.codemode.verify import verify_sources
 from omni.messages.content import Message, Text
 from omni.providers.base import ProviderRequest
 
@@ -32,18 +36,26 @@ harness. Skills are small modules mounted into the agent's Python kernel as
 `skills.<name>`; the agent imports them instead of re-deriving the same
 helper code session after session.
 
-You will see the current skill library and a journal of recently executed
-cells. Distill only *genuinely reusable* workflow improvements:
+You will see the current skill library and a journal of the recent session:
+conversation events ([user] prompts and [assistant] replies — these carry the
+intent behind the work and whether the user accepted it) interleaved with the
+cells that were executed. Distill only *genuinely reusable* workflow
+improvements:
 - recurring multi-step patterns worth naming (not one-off task logic);
 - generalize: parameters instead of hard-coded values from the journal;
 - prefer updating/merging an existing skill over adding a near-duplicate;
 - delete skills that are wrong or superseded;
+- weight user feedback: a workflow the user corrected or rejected is a signal
+  to fix or delete, not to enshrine;
 - most journals need NO new skill — that is the correct common outcome.
 
 Skill module rules: module docstring required (first line = one-sentence
-description); define a function named exactly like the skill; only the
-kernel's stdlib allowlist plus `tools.*` / other `skills.*` imports are
-available; no filesystem or network access.
+description); define a function named exactly like the skill; include a pure
+`_selftest()` that exercises the skill on inline fixture data and raises on
+failure — every skill is verified (import + _selftest, no tools available)
+before it is accepted, and a skill without a self-test cannot prove it works;
+only the kernel's stdlib allowlist plus `tools.*` / other `skills.*` imports
+are available; no filesystem or network access.
 
 Output format — nothing else:
 - for each new/updated skill:
@@ -124,7 +136,7 @@ class Synthesizer:
         if not entries:
             return []
         text = await self._complete(self._prompt(entries))
-        changed = self._apply(text)  # sets last_error (None on a clean pass)
+        changed = await self._apply(text)  # sets last_error (None on a clean pass)
         self._store.set_synth_cursor(cursor + len(entries))
         return changed
 
@@ -139,9 +151,15 @@ class Synthesizer:
             lines.append(s.source.rstrip("\n"))
             lines.append("```")
         lines.append("")
-        lines.append("## Journal of recently executed cells")
-        for i, e in enumerate(entries, 1):
-            lines.append(f"### cell {i}")
+        lines.append("## Session journal (conversation + executed cells, in order)")
+        cell_no = 0
+        for e in entries:
+            kind = e.get("kind", "cell")
+            if kind in ("user", "assistant"):
+                lines.append(f"[{kind}] {str(e.get('text', '')).strip()}")
+                continue
+            cell_no += 1
+            lines.append(f"### cell {cell_no}")
             lines.append("```python")
             lines.append(str(e.get("code", "")).rstrip("\n"))
             lines.append("```")
@@ -168,19 +186,41 @@ class Synthesizer:
                 parts.append(chunk.payload["text"])
         return "".join(parts)
 
-    def _apply(self, text: str) -> list[str]:
-        """Parse the model's output and apply valid changes. Returns names saved
-        or deleted; invalid skills are skipped (recorded on ``last_error``)."""
+    async def _apply(self, text: str) -> list[str]:
+        """Parse the model's output, verify candidates, apply what passes.
+
+        Candidates that fail static validation OR the verification kernel
+        (import + ``_selftest``) are skipped and recorded on ``last_error`` —
+        synthesized knowledge has to prove it works before it lands. Returns
+        the names saved (or ``-name`` for deletions).
+        """
         changed: list[str] = []
         errors: list[str] = []
+        candidates: dict[str, str] = {}
         for match in _SKILL_RE.finditer(text or ""):
             name, source = match.group(1), match.group(2).strip("\n") + "\n"
             error = validate_skill(name, source)
             if error is not None:
                 errors.append(f"{name}: {error}")
                 continue
-            self._store.save(name, source)
-            changed.append(name)
+            candidates[name] = source
+        if candidates:
+            try:
+                verdicts = await verify_sources(
+                    {**self._store.sources(), **candidates}, list(candidates)
+                )
+            except Exception as exc:
+                # Verification infrastructure failure: reject the batch rather
+                # than persist unproven skills.
+                verdicts = {n: f"verification unavailable: {exc}" for n in candidates}
+            for name, source in candidates.items():
+                verdict = verdicts.get(name)
+                if verdict is not None:
+                    errors.append(f"{name}: verification failed: {verdict}")
+                    continue
+                self._store.save(name, source)
+                self._store.mark_verified(name)
+                changed.append(name)
         for match in _DELETE_RE.finditer(text or ""):
             if self._store.delete(match.group(1)):
                 changed.append(f"-{match.group(1)}")

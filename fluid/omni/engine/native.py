@@ -96,6 +96,11 @@ def _is_context_overflow(message: str) -> bool:
     return any(marker in lowered for marker in _OVERFLOW_MARKERS)
 
 
+def _plain_text(blocks: list[Any]) -> str:
+    """Concatenated Text-block text of a message (for the episodic journal)."""
+    return "\n".join(b.text for b in blocks if isinstance(b, Text) and b.text).strip()
+
+
 class NativeLoop:
     caps = EngineCaps(
         inproc_tools=True, schema_plan_mode=True,
@@ -312,6 +317,9 @@ class NativeLoop:
             message=Message(role="user", content=content),
         )
         await self.store.append(sid, user_node)
+        if self._codemode is not None:
+            # Episodic half of the continual journal: the intent behind the turn.
+            self._codemode.record_event("user", _plain_text(content))
         await self._emit(
             TurnStarted(
                 session_id=sid, node_id=user_node.node_id, turn_id=turn_id,
@@ -439,6 +447,9 @@ class NativeLoop:
                     session_id=sid, node_id=parent.node_id, turn_id=turn_id))
                 return
 
+        if self._codemode is not None:
+            # Episodic journal: the turn's final text (acceptance/feedback signal).
+            self._codemode.record_event("assistant", _plain_text(result.message.content))
         if self.hooks is not None:
             await self.hooks.emit(TURN_END, {"session_id": sid, "turn_id": turn_id})
         # Cost rides its own TurnComplete field; keep the usage dict token-shaped.

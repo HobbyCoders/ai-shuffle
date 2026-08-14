@@ -152,16 +152,17 @@ async def test_kernel_blocks_network_and_disallowed_imports() -> None:
         await kernel.stop()
 
 
-async def test_kernel_timeout_restarts_and_reports_namespace_loss() -> None:
+async def test_kernel_timeout_restarts_and_restores_checkpoint() -> None:
     kernel = SubprocessKernel(KernelConfig())
     await kernel.start()
     try:
         await kernel.exec("keep = 7", timeout=10, on_host_call=_null_host)
         slow = await kernel.exec("while True:\n    pass", timeout=0.4, on_host_call=_null_host)
-        assert slow.error and "wall clock" in slow.error and "namespace lost" in slow.error
-        # kernel is usable again but the old namespace is gone
+        assert slow.error and "wall clock" in slow.error
+        # checkpointing (default-on) restores the pre-kill namespace data
+        assert "restored from last checkpoint" in slow.error
         after = await kernel.exec("keep", timeout=10, on_host_call=_null_host)
-        assert after.error and "NameError" in after.error
+        assert after.value_repr == "7"
         ok = await kernel.exec("1 + 1", timeout=10, on_host_call=_null_host)
         assert ok.value_repr == "2"
     finally:

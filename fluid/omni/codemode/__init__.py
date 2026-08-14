@@ -28,6 +28,7 @@ from omni.codemode.projection import Projection, func_name, stub_source
 from omni.codemode.skills import Skill, SkillStore, validate_skill
 from omni.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
 from omni.codemode.truncate import DEFAULT_LIMIT, exceeds, to_result_ref
+from omni.codemode.verify import verify_sources, verify_store
 from omni.codemode.vfs import (
     DEFAULT_ALLOWLIST,
     HostCallDenied,
@@ -63,4 +64,6 @@ __all__ = [
     "stub_source",
     "to_result_ref",
     "validate_skill",
+    "verify_sources",
+    "verify_store",
 ]

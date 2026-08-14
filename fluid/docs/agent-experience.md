@@ -63,11 +63,16 @@ explicitly told that pruning and merging beat accumulation — with "no new
 skill" as the expected common outcome, because a memory system's failure mode
 is hoarding.
 
-What omni still lacks (honest gaps, roadmap-shaped): episodic memory of
-*conversations* (only executed cells are journaled — decisions and user
-feedback live outside the journal); verification that a stored skill still
-works before it is offered (test-on-mount); and cross-provider journals
-(synthesis quality depends on the model that happens to run the session).
+These observations became features (v2): the journal is now **episodic** —
+user prompts and final assistant replies are recorded alongside executed
+cells, so synthesis sees *why* a workflow ran and whether the user accepted
+it (a corrected workflow is a delete signal, not a keep signal). Stored
+skills must **prove they work**: every skill carries a pure `_selftest()`,
+verified in a throwaway no-tools kernel on save and re-verified whenever its
+source changes; broken skills are excluded from the kernel mount and flagged
+in `list_tools` instead of failing silently at use time. And synthesis can be
+pinned to one model (`continual_model`) so skill quality doesn't drift with
+whichever provider runs the session.
 
 ## 4. Context management: prevention beats compaction
 
@@ -78,8 +83,11 @@ cache-safely, keep the prefix append-only) plus the kernel changes what
 "losing context" costs: the namespace holds the real objects, so a compacted
 transcript no longer means lost work. The corollary is that kernel restarts
 are the new cliff — a wall-clock timeout throwing away the namespace is worse
-than a summarization pass. Namespace checkpointing is the natural next step
-behind the same `Kernel` protocol.
+than a summarization pass. So the kernel now checkpoints: after every exec
+the child pickles its picklable variables, and a timeout/OOM restart restores
+them, with the error message reporting exactly what survived (data does;
+cell-defined functions and classes don't — they're re-derivable from the
+transcript, the data often isn't).
 
 ## 5. Permission round-trips shape how I plan
 
@@ -95,15 +103,22 @@ that deserve friction.
 ## 6. What I'd ask of any harness, distilled
 
 - Let data live outside the window by default; make surfacing it my choice
-  (kernel + ResultRef — implemented).
+  (kernel + ResultRef).
 - Never make me pay prompt cost for capability I haven't asked for yet
-  (progressive disclosure — implemented in both tool paths).
+  (progressive disclosure in both tool paths).
 - Turn repetition into artifacts without relying on my diligence
-  (journal + synthesis — implemented; conversational episodic memory — not yet).
-- Make stored knowledge earn its place (usage counts, prune-biased synthesis
-  — implemented; automated verification — not yet).
+  (journal + synthesis; the journal is episodic — conversation events ride
+  alongside cells so intent and feedback inform what gets kept).
+- Make stored knowledge earn its place (usage counts, prune-biased synthesis,
+  and mandatory verification — `_selftest` on save, re-check on change,
+  broken skills flagged and unmounted).
 - Keep the audit surface identical regardless of how I act (host-side gate on
-  every path — implemented).
+  every path).
 - Make state durable across the boundaries I can't control: context
-  compaction (kernel — implemented), kernel death (checkpointing — not yet),
-  sessions (skills — implemented).
+  compaction (kernel namespace), kernel death (checkpoint + restore),
+  sessions (verified skills).
+
+Everything on this list is now implemented in omni. What remains genuinely
+open: a hard sandbox (container/gVisor kernel behind the same protocol) and
+retroactive context eviction at the harness level — the kernel remains the
+working substitute for both.

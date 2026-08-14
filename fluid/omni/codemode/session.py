@@ -34,8 +34,9 @@ from typing import Any
 from omni.codemode.bridge import HostBridge
 from omni.codemode.kernel import HostReply
 from omni.codemode.projection import Projection
-from omni.codemode.skills import SkillStore, referenced_skills
+from omni.codemode.skills import SkillStore, referenced_skills, validate_skill
 from omni.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
+from omni.codemode.verify import verify_sources, verify_store
 from omni.events.model import ToolResult, ToolUse
 from omni.permissions.engine import PermissionEngine
 from omni.store.base import new_id
@@ -60,6 +61,7 @@ _RUN_PYTHON_DESC = (
 # Journal previews are bounded so journal.jsonl (synthesis input) stays small.
 _JOURNAL_STDOUT_CAP = 1500
 _JOURNAL_VALUE_CAP = 300
+_JOURNAL_EVENT_CAP = 2000  # user/assistant conversation events
 
 
 class CodeModeSession:
@@ -103,7 +105,9 @@ class CodeModeSession:
             saved = self._skills.list()
             if saved:
                 lines.append("Saved skills, import via `from skills.<name> import <name>`:")
-                lines += [f"- {s.name}: {s.description} [used {s.uses}x]" for s in saved]
+                for s in saved:
+                    flag = f" [BROKEN, not mounted: {s.broken}]" if s.broken else ""
+                    lines.append(f"- {s.name}: {s.description} [used {s.uses}x]{flag}")
         return "\n".join(lines) if lines else "No tools available."
 
     def render_search(self, query: str) -> str:
@@ -129,9 +133,28 @@ class CodeModeSession:
         return src
 
     # ── run_python (driven by the engine, not the registry) ──
+    async def _mountable_skills(self) -> dict[str, str]:
+        """Verified skill sources for the kernel mount.
+
+        Stale skills (source changed since their last verdict) are re-verified
+        in a throwaway kernel first; broken ones are excluded from the mount
+        and flagged in ``list_tools``. Verification failure of the *pass*
+        itself (e.g. kernel spawn issues) degrades to mounting as-is — the
+        continual layer must never take down run_python.
+        """
+        if self._skills is None:
+            return {}
+        try:
+            await verify_store(self._skills, config=self._config)
+        except Exception:
+            return self._skills.sources()
+        return {
+            s.name: s.source for s in self._skills.list() if s.broken is None
+        }
+
     async def _ensure_kernel(self) -> SubprocessKernel:
         sources = self._projection().sources()
-        skills = self._skills.sources() if self._skills is not None else {}
+        skills = await self._mountable_skills()
         signature = (
             tuple(sorted(sources.items())),
             self._skills.signature() if self._skills is not None else (),
@@ -214,6 +237,7 @@ class CodeModeSession:
         try:
             error_lines = (result.error or "").strip().splitlines()
             self._skills.journal_append({
+                "kind": "cell",
                 "code": code,
                 "stdout": result.stdout[:_JOURNAL_STDOUT_CAP],
                 "value": result.value_repr[:_JOURNAL_VALUE_CAP],
@@ -225,6 +249,29 @@ class CodeModeSession:
         except Exception:
             pass
         if self._synthesizer is not None:
+            try:
+                self._synthesizer.kick()
+            except Exception:
+                pass
+
+    def record_event(self, kind: str, text: str) -> None:
+        """Journal a conversation event — the episodic half of the journal.
+
+        ``kind`` is ``"user"`` (the prompt that started a turn) or
+        ``"assistant"`` (the turn's final text). Synthesis reads these for the
+        intent and feedback surrounding the executed cells: *why* a workflow
+        ran and whether the user accepted it. No-op without a store; never
+        raises (called from the engine's turn path).
+        """
+        if self._skills is None or not (text or "").strip():
+            return
+        try:
+            self._skills.journal_append({"kind": kind, "text": text[:_JOURNAL_EVENT_CAP]})
+        except Exception:
+            pass
+        # A finished turn is a natural synthesis boundary; user events just
+        # accumulate until then.
+        if kind == "assistant" and self._synthesizer is not None:
             try:
                 self._synthesizer.kick()
             except Exception:
@@ -326,13 +373,28 @@ def register_code_mode_tools(registry: ToolRegistry, session: CodeModeSession) -
     async def _save_skill(input: dict, _ctx: ToolCtx) -> ToolOutcome:
         name = input.get("name") or ""
         source = input.get("source") or ""
+        error = validate_skill(name, source)
+        if error is not None:
+            return ToolOutcome(text=error, is_error=True)
+        # Test-on-save: import + optional _selftest() in a throwaway kernel.
+        # A skill that can't prove itself never lands in the store.
         try:
-            skill = store.save(name, source)
-        except ValueError as exc:
-            return ToolOutcome(text=str(exc), is_error=True)
+            verdicts = await verify_sources(
+                {**store.sources(), name: source}, [name], config=session._config
+            )
+            verdict = verdicts.get(name)
+        except Exception:
+            verdict = None  # verification infrastructure failure ≠ bad skill
+        if verdict is not None:
+            return ToolOutcome(
+                text=f"skill {name!r} rejected — verification failed: {verdict}",
+                is_error=True,
+            )
+        skill = store.save(name, source)
+        store.mark_verified(name)
         return ToolOutcome(
             text=(
-                f"skill {skill.name!r} saved — import with "
+                f"skill {skill.name!r} saved and verified — import with "
                 f"`from skills.{skill.name} import {skill.name}` (next run_python "
                 f"call onward, and in every future session): {skill.description}"
             )
@@ -351,7 +413,10 @@ def register_code_mode_tools(registry: ToolRegistry, session: CodeModeSession) -
                 "Persist a reusable Python skill module across sessions. It "
                 "mounts as skills.<name> in the run_python kernel. Module "
                 "docstring required (first line = one-sentence description); "
-                "define a function named like the skill."
+                "define a function named like the skill. Include a pure "
+                "_selftest() (inline fixture data, no tool calls) — it runs "
+                "before the skill is accepted, and again whenever the source "
+                "changes."
             ),
             input_schema={
                 "type": "object",

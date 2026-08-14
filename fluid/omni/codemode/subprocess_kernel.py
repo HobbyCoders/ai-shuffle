@@ -5,9 +5,10 @@ isolation, an import allowlist, network + direct-file-I/O guards inside the
 child, and a memory cap (POSIX rlimit in-child; a Job Object assigned from the
 host on Windows, where rlimit is unavailable); the real enforcement is the host
 permission gate reached through ``on_host_call``. The kernel namespace persists
-across ``exec`` calls, so the model accumulates state — until a wall-clock
-timeout forces a kill+restart, at which point the namespace is lost and that is
-reported as the exec error.
+across ``exec`` calls, so the model accumulates state; after each exec the
+child checkpoints its picklable variables, and a timeout/OOM kill+restart
+restores them (cell-defined functions/classes are not picklable — the exec
+error reports exactly what survived and what didn't).
 
 Timeout accounting only charges *kernel compute* time: each read segment (the
 time the child spends running until it either finishes or asks for a tool) is
@@ -38,6 +39,12 @@ class KernelConfig:
     allow_fs: bool = False  # direct open()/io/pathlib I/O inside the kernel
     ref_threshold: int = 8192
     stdout_cap: int = 16384
+    # Namespace checkpointing: after each exec the child pickles its picklable
+    # variables; on a timeout/OOM restart the host restores them, so kernel
+    # death no longer destroys accumulated data (functions/classes defined in
+    # cells are not picklable and are reported as dropped).
+    checkpoint: bool = True
+    checkpoint_max_bytes: int = 8 * 1024 * 1024
     python: str = field(default_factory=lambda: sys.executable)
 
     def boot_payload(self) -> dict:
@@ -58,6 +65,8 @@ class SubprocessKernel:
         self._vfs_sources: dict[str, str] = {}
         self._skill_sources: dict[str, str] = {}
         self._job_handle: int | None = None  # Windows Job Object (memory limit)
+        self._ckpt_vars: dict[str, str] | None = None  # last namespace checkpoint
+        self._ckpt_dropped: list[str] = []  # unpicklables at checkpoint time
 
     # ── lifecycle ──
     async def start(self) -> None:
@@ -127,6 +136,53 @@ class SubprocessKernel:
         await self._kill()
         await self._spawn()
 
+    # ── namespace checkpoint / restore ──
+    async def _take_checkpoint(self) -> None:
+        """Snapshot the child namespace after an exec (best-effort).
+
+        A failed/oversized snapshot keeps the previous good one; a desynced
+        pipe (checkpoint request timed out) forces a restart+restore so the
+        frame protocol stays aligned.
+        """
+        try:
+            await self._send({"kind": "checkpoint"})
+            frame = await asyncio.wait_for(self._read_frame(), 30)
+        except Exception:
+            await self._restart_and_restore()
+            return
+        if not frame or frame.get("kind") != "checkpoint":
+            await self._restart_and_restore()
+            return
+        vars_map = frame.get("vars") or {}
+        if sum(len(v) for v in vars_map.values()) <= self.config.checkpoint_max_bytes:
+            self._ckpt_vars = vars_map
+            self._ckpt_dropped = list(frame.get("dropped") or [])
+        # else: oversized — keep the previous checkpoint
+
+    async def _restart_and_restore(self) -> str:
+        """Restart the kernel and restore the last checkpoint.
+
+        Returns the note appended to the exec error message, so the model
+        knows exactly what state survived.
+        """
+        await self._restart()
+        if not self.config.checkpoint or not self._ckpt_vars:
+            return " (namespace lost)"
+        try:
+            await self._send({"kind": "restore", "vars": self._ckpt_vars})
+            frame = await asyncio.wait_for(self._read_frame(), 30)
+        except Exception:
+            await self._restart()
+            return " (namespace lost)"
+        if not frame or frame.get("kind") != "restored":
+            return " (namespace lost)"
+        restored = list(frame.get("restored") or [])
+        dropped = self._ckpt_dropped + list(frame.get("dropped") or [])
+        note = f"; namespace restored from last checkpoint ({len(restored)} vars"
+        if dropped:
+            note += f"; not restorable: {', '.join(sorted(set(dropped)))}"
+        return note + ")"
+
     # ── exec ──
     async def exec(
         self, code: str, *, timeout: float, on_host_call: HostCall
@@ -143,18 +199,18 @@ class SubprocessKernel:
             try:
                 frame = await asyncio.wait_for(self._read_frame(), remaining)
             except asyncio.TimeoutError:
-                await self._restart()
+                note = await self._restart_and_restore()
                 return KernelResult(
                     error=(
                         f"execution exceeded {timeout:.1f}s wall clock; "
-                        "kernel restarted (namespace lost)"
+                        f"kernel restarted{note}"
                     ),
                     host_calls=host_calls,
                 )
             except (asyncio.IncompleteReadError, ConnectionError):
-                await self._restart()
+                note = await self._restart_and_restore()
                 return KernelResult(
-                    error="kernel died mid-exec (likely OOM / rlimit); restarted",
+                    error=f"kernel died mid-exec (likely OOM / memory cap); restarted{note}",
                     host_calls=host_calls,
                 )
             remaining -= loop.time() - started
@@ -167,6 +223,8 @@ class SubprocessKernel:
                 reply = await on_host_call(frame["name"], frame.get("kwargs") or {})
                 await self._send(_reply_frame(reply))  # host-service time is not charged
             elif kind == "done":
+                if self.config.checkpoint:
+                    await self._take_checkpoint()
                 return KernelResult(
                     stdout=frame.get("stdout", ""),
                     value_repr=frame.get("value_repr", ""),
@@ -174,8 +232,10 @@ class SubprocessKernel:
                     host_calls=host_calls,
                 )
             else:  # unexpected EOF or malformed frame
-                await self._restart()
-                return KernelResult(error="kernel produced no result", host_calls=host_calls)
+                note = await self._restart_and_restore()
+                return KernelResult(
+                    error=f"kernel produced no result{note}", host_calls=host_calls
+                )
 
     # ── frame IO ──
     async def _send(self, obj: dict) -> None:
