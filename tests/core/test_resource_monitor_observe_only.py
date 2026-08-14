@@ -66,6 +66,17 @@ def _clear_reaper_registry():
     sp._terminated_trees.clear()
 
 
+@pytest.fixture(autouse=True)
+def _fake_healthy_host_memory(monkeypatch):
+    """admission_check() reads REAL host MemAvailable via _host_available_mb(),
+    so on a loaded host every admission test spuriously refuses with "host low
+    on memory". Fake a healthy reading so outcomes depend only on the state each
+    test sets up; the low-memory refusal path is exercised explicitly in
+    test_admission_refuses_when_host_memory_low with a faked low reading.
+    """
+    monkeypatch.setattr(sp, "_host_available_mb", lambda: 8192.0)
+
+
 # ─── (a) Long-streaming LIVE session is NOT evicted ─────────────────────────
 
 
@@ -261,6 +272,24 @@ def test_admission_refuses_at_child_process_ceiling(monkeypatch):
         if child.poll() is None:
             child.kill()
             child.wait(timeout=5)
+
+
+def test_admission_refuses_when_host_memory_low(monkeypatch):
+    """When faked host MemAvailable is below the configured floor, admission
+    refuses with a 'host low on memory' reason — no real /proc/meminfo read."""
+    from app.core import config as cfg
+
+    pool = SessionPool(max_size=10)  # well below hard cap so only the floor bites
+    monkeypatch.setattr(
+        cfg.settings, "sdk_admission_min_available_mb", 1536, raising=False
+    )
+    monkeypatch.setattr(sp, "_host_available_mb", lambda: 512.0)
+
+    refusal = pool.admission_check()
+    assert refusal is not None
+    assert "host low on memory" in refusal
+    assert "512MB available" in refusal
+    assert "floor 1536MB" in refusal
 
 
 def test_admission_ceilings_disabled_by_default(monkeypatch):
