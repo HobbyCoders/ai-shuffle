@@ -1969,9 +1969,11 @@ class TestEdgeCases:
                     memory="Prefers concise answers.",
                     app_config_tools=True,
                     env={"FOO": "bar"},
+                    # Harness-honored knobs — must round-trip
+                    effort="xhigh",
+                    max_turns=20,
                     # Legacy SDK-era fields — tolerated on import, but ignored
                     thinking_mode="think_harder",
-                    max_turns=20,
                     max_buffer_size=50000,
                     setting_sources=["env", "file"],
                     enable_file_checkpointing=True,
@@ -1989,9 +1991,11 @@ class TestEdgeCases:
             assert config["memory"] == "Prefers concise answers."
             assert config["app_config_tools"] is True
             assert config["env"] == {"FOO": "bar"}
+            # Harness-honored knobs round-trip
+            assert config["effort"] == "xhigh"
+            assert config["max_turns"] == 20
             # Dead SDK-era fields never reach the stored config
             assert "thinking_mode" not in config
-            assert "max_turns" not in config
             assert "max_buffer_size" not in config
             assert "setting_sources" not in config
             assert "enable_file_checkpointing" not in config

@@ -886,6 +886,8 @@ async def export_profile(
         description=profile.get("description"),
         model=config.get("model", DEFAULT_MODEL),
         permission_mode=config.get("permission_mode", "default"),
+        effort=config.get("effort"),
+        max_turns=config.get("max_turns"),
         system_prompt_content=prompt_content or None,
         allowed_tools=config.get("allowed_tools"),
         disallowed_tools=config.get("disallowed_tools"),
@@ -982,14 +984,20 @@ async def import_profile(
             )
 
     # Build config from agent data — omni-honored fields only. Legacy SDK-era
-    # fields in old export files (thinking_mode, effort, max_turns,
-    # max_buffer_size, setting_sources, enable_file_checkpointing,
-    # continue_conversation, fork_session) are accepted but ignored.
+    # fields in old export files (thinking_mode, max_buffer_size,
+    # setting_sources, enable_file_checkpointing, continue_conversation,
+    # fork_session) are accepted but ignored.
     config = {
         "model": agent_data.model or DEFAULT_MODEL,
         "permission_mode": agent_data.permission_mode or "default",
         "include_partial_messages": agent_data.include_partial_messages if agent_data.include_partial_messages is not None else True,
     }
+    # Harness-honored reasoning depth / per-turn cap (also present in pre-A12
+    # legacy files, where they round-trip the same way).
+    if agent_data.effort in ("low", "medium", "high", "xhigh", "max"):
+        config["effort"] = agent_data.effort
+    if isinstance(agent_data.max_turns, int) and agent_data.max_turns > 0:
+        config["max_turns"] = agent_data.max_turns
 
     # System prompt — custom content only (ruling A12). Legacy preset-shaped
     # exports map their append text onto the custom content.

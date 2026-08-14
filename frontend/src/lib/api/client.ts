@@ -466,6 +466,8 @@ export interface AgentExportData {
 	description: string | null;
 	model: string | null;
 	permission_mode: string | null;
+	effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null;  // harness-honored reasoning depth
+	max_turns?: number | null;  // per-turn model-call cap (native legs)
 	system_prompt_content: string | null;
 	allowed_tools: string[] | null;
 	disallowed_tools: string[] | null;
@@ -479,12 +481,10 @@ export interface AgentExportData {
 	// text is mapped onto the custom prompt content; everything else is
 	// ignored by the importer.
 	thinking_mode?: string | null;
-	effort?: string | null;
 	system_prompt_type?: string | null;
 	system_prompt_preset?: string | null;
 	system_prompt_append?: string | null;
 	system_prompt_inject_env?: boolean | null;
-	max_turns?: number | null;
 	max_buffer_size?: number | null;
 	continue_conversation?: boolean | null;
 	fork_session?: boolean | null;

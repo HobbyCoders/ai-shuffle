@@ -175,8 +175,8 @@
 	});
 
 	// Profile form state — omni harness options only (ruling R3). SDK-era
-	// fields (thinking mode, effort, setting sources, checkpointing, …) are
-	// gone: the omni harness ignores them.
+	// fields (thinking mode, setting sources, checkpointing, …) are gone: the
+	// omni harness ignores them. effort and max_turns are harness-honored.
 	let profileForm = $state({
 		id: '',
 		name: '',
