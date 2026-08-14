@@ -302,16 +302,28 @@ class HarnessAdapter(ProviderAdapter):
             self._provider_http = provider_http
             # omni's bare Task builtin needs the app's dispatcher injected
             # (ruling A13: omni owns the shape, the app owns the spawning).
+            # UNCONDITIONAL + late-binding: this ctx is built once per connect
+            # and then lives for the whole pooled life of the engine, while the
+            # app session id may not be knowable here at all (a brand-new
+            # native session has neither options.session_id nor
+            # resume_session_id). Gating the injection on a connect-time id is
+            # what made Task report itself "not available in this environment"
+            # for every fresh native session. The supplier resolves the id at
+            # dispatch time instead — see _resolve_app_session_id.
             native_ctx = ToolCtx(cwd=options.cwd or ".", session_id=omni_session_id)
-            if omni_session_id:
-                try:
-                    from app.core.task_dispatch import make_omni_dispatcher
+            try:
+                from app.core.task_dispatch import make_omni_dispatcher
 
-                    native_ctx.extra["task_dispatch"] = make_omni_dispatcher(
-                        omni_session_id
-                    )
-                except Exception:  # noqa: BLE001 — Task degrades to "unavailable"
-                    logger.debug("task_dispatch injection failed", exc_info=True)
+                native_ctx.extra["task_dispatch"] = make_omni_dispatcher(
+                    self._resolve_app_session_id
+                )
+            except Exception:  # noqa: BLE001 — Task degrades to "unavailable"
+                logger.warning(
+                    "[HarnessAdapter] task_dispatch injection FAILED (omni "
+                    "session=%s, cwd=%s) — the Task tool will report itself "
+                    "unavailable on this native leg",
+                    omni_session_id, options.cwd, exc_info=True,
+                )
             # Engine caps the app can express today (plan wave W0a). Both are
             # omitted unless configured so omni keeps its own defaults
             # (max_model_calls_per_turn=50, max_tokens=8192).
@@ -351,6 +363,44 @@ class HarnessAdapter(ProviderAdapter):
 
         self._connected = True
 
+    def _resolve_app_session_id(self) -> Optional[str]:
+        """The app's ``sessions.id`` for this adapter, resolved lazily.
+
+        Task dispatch parents its worker onto an app session row, so it needs
+        the app id — NOT the omni session id (``ses_...``) the engine and
+        ``ToolCtx`` carry. Two sources, in order:
+
+        1. ``extra["app_session_id"]`` — stamped by ``query_options`` onto the
+           options object (``aih_session_id``) and projected in
+           ``connect_with_sdk_options``. Exact, and available before the
+           session has ever streamed a turn.
+        2. a reverse lookup of ``sessions.sdk_session_id`` against the omni
+           session id, for adapters built without the stamp.
+
+        Returns None when neither resolves — the dispatcher turns that into a
+        clear error instead of spawning a parentless worker.
+        """
+        opts = self._options
+        stamped = (opts.extra or {}).get("app_session_id") if opts is not None else None
+        if stamped:
+            return str(stamped)
+        omni_id = self._sdk_session_id
+        if not omni_id and opts is not None:
+            omni_id = opts.session_id or opts.resume_session_id
+        if not omni_id:
+            return None
+        try:
+            from app.db import database
+
+            row = database.get_session_by_sdk_id(omni_id)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "[HarnessAdapter] could not map omni session %s back to an app "
+                "session row for Task dispatch", omni_id, exc_info=True,
+            )
+            return None
+        return row.get("id") if row else None
+
     async def connect_with_sdk_options(self, sdk_options: Any) -> None:
         """Compat shim mirroring ClaudeAgentAdapter.connect_with_sdk_options.
 
@@ -385,6 +435,13 @@ class HarnessAdapter(ProviderAdapter):
         provider_id = getattr(sdk_options, "aih_provider_id", None)
         if provider_id:
             opts.extra["provider_id"] = provider_id
+        # The app's own session id (``sessions.id``) rides alongside it as
+        # ``aih_session_id``. Native legs need it for Task dispatch: the omni
+        # session id is a ``ses_...`` handle, not an app session row, and on a
+        # fresh session neither id exists at connect time.
+        app_session_id = getattr(sdk_options, "aih_session_id", None)
+        if app_session_id:
+            opts.extra["app_session_id"] = app_session_id
         # The app's permission prompt flow rides on this callback (see
         # _bridge_permission) — same wiring the SDK path uses.
         self._can_use_tool = getattr(sdk_options, "can_use_tool", None)
