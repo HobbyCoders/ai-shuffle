@@ -82,14 +82,6 @@ class TestToolMapping:
         assert get_model_for_domain("security") == "opus"  # Complex analysis
         assert get_model_for_domain("code-review") == "sonnet"  # Balanced
 
-    def test_get_thinking_mode_for_domain(self):
-        """Should return appropriate thinking mode for each domain."""
-        from app.core.generation.tool_mapping import get_thinking_mode_for_domain
-
-        assert get_thinking_mode_for_domain("planning") == "ultra_think"
-        assert get_thinking_mode_for_domain("security") == "think_harder"
-        assert get_thinking_mode_for_domain("exploration") == "default"
-
     def test_get_all_available_tools(self):
         """Should return all available tools."""
         from app.core.generation.tool_mapping import get_all_available_tools
@@ -326,8 +318,16 @@ class TestPrompts:
         assert "A Python development profile" in prompt
         assert "model" in prompt
         assert "permission_mode" in prompt
-        assert "thinking_mode" in prompt
-        assert "system_prompt" in prompt
+        assert "system_prompt_content" in prompt
+
+        # Dead SDK-era fields must not be offered to the generator —
+        # the omni harness ignores them (ruling A12)
+        assert "thinking_mode" not in prompt
+        assert "system_prompt_preset" not in prompt
+        assert "system_prompt_append" not in prompt
+        assert "setting_sources" not in prompt
+        assert "max_buffer_size" not in prompt
+        assert "enable_file_checkpointing" not in prompt
 
         # Should contain examples
         assert "Example" in prompt

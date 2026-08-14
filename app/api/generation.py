@@ -424,27 +424,26 @@ async def _generate_profile_internal(
         except Exception as e:
             logger.warning(f"Failed to parse ai_tools config: {e}")
 
-    # Build the export format
+    # Build the export format — omni-honored fields only (ruling A12). If a
+    # model still emits the retired preset shape, fold its append text into
+    # the custom prompt content; other SDK-era fields are dropped.
+    prompt_content = (
+        generated.get("system_prompt_content")
+        or generated.get("system_prompt_append")
+    )
     agent_data = AgentExportData(
         name=generated.get("name", "Generated Profile"),
         description=generated.get("description"),
         model=generated.get("model", DEFAULT_MODEL),
         permission_mode=generated.get("permission_mode", "default"),
-        system_prompt_type=generated.get("system_prompt_type", "preset"),
-        system_prompt_preset=generated.get("system_prompt_preset", "claude_code"),
-        system_prompt_content=generated.get("system_prompt_content"),
-        system_prompt_append=generated.get("system_prompt_append"),
-        system_prompt_inject_env=False,
+        system_prompt_content=prompt_content,
         allowed_tools=generated.get("allowed_tools"),
         disallowed_tools=generated.get("disallowed_tools"),
         enabled_agents=generated.get("enabled_agents"),
         ai_tools=ai_tools_config,
-        max_turns=generated.get("max_turns"),
-        max_buffer_size=None,
+        memory=generated.get("memory"),
         include_partial_messages=generated.get("include_partial_messages", True),
-        continue_conversation=generated.get("continue_conversation", False),
-        fork_session=generated.get("fork_session", False),
-        setting_sources=generated.get("setting_sources"),
+        app_config_tools=generated.get("app_config_tools", False),
         env=generated.get("env"),
     )
 

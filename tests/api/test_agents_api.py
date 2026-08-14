@@ -1450,9 +1450,12 @@ class TestExportProfileEndpoint:
 
                 import json
                 body = json.loads(result.body)
-                assert body["agent"]["system_prompt_type"] == "custom"
                 assert body["agent"]["system_prompt_content"] == "You are a custom assistant"
                 assert body["agent"]["allowed_tools"] == ["Bash", "Read"]
+                # SDK-era fields are no longer part of the export wire shape
+                assert "system_prompt_type" not in body["agent"]
+                assert "thinking_mode" not in body["agent"]
+                assert "setting_sources" not in body["agent"]
 
     @pytest.mark.asyncio
     async def test_export_profile_not_found(self):
@@ -1524,7 +1527,7 @@ class TestImportProfileEndpoint:
     async def test_import_profile_success(self):
         """Importing a profile should return the new profile."""
         from app.api.agents import import_profile
-        from app.core.models import AgentImportRequest, AgentExportData
+        from app.core.models import AgentImportRequest, AgentImportData
 
         now = datetime.now(timezone.utc).isoformat()
         created_profile = {
@@ -1544,7 +1547,7 @@ class TestImportProfileEndpoint:
             request = AgentImportRequest(
                 version="1.0",
                 type="ai-shuffle-agent",
-                agent=AgentExportData(
+                agent=AgentImportData(
                     name="Imported Agent",
                     description="An imported agent",
                     model="sonnet"
@@ -1559,7 +1562,7 @@ class TestImportProfileEndpoint:
     async def test_import_profile_with_new_id(self):
         """Importing with new_id should use that ID."""
         from app.api.agents import import_profile
-        from app.core.models import AgentImportRequest, AgentExportData
+        from app.core.models import AgentImportRequest, AgentImportData
 
         now = datetime.now(timezone.utc).isoformat()
         created_profile = {
@@ -1580,7 +1583,7 @@ class TestImportProfileEndpoint:
                 version="1.0",
                 type="ai-shuffle-agent",
                 new_id="custom-id",
-                agent=AgentExportData(name="Imported Agent")
+                agent=AgentImportData(name="Imported Agent")
             )
 
             result = await import_profile(request, token="test-token")
@@ -1593,7 +1596,7 @@ class TestImportProfileEndpoint:
     async def test_import_profile_id_increment(self):
         """Importing with conflicting ID should increment."""
         from app.api.agents import import_profile
-        from app.core.models import AgentImportRequest, AgentExportData
+        from app.core.models import AgentImportRequest, AgentImportData
 
         now = datetime.now(timezone.utc).isoformat()
         created_profile = {
@@ -1621,7 +1624,7 @@ class TestImportProfileEndpoint:
             request = AgentImportRequest(
                 version="1.0",
                 type="ai-shuffle-agent",
-                agent=AgentExportData(name="Imported Agent")
+                agent=AgentImportData(name="Imported Agent")
             )
 
             result = await import_profile(request, token="test-token")
@@ -1634,13 +1637,13 @@ class TestImportProfileEndpoint:
     async def test_import_profile_invalid_type(self):
         """Importing with invalid type should fail."""
         from app.api.agents import import_profile
-        from app.core.models import AgentImportRequest, AgentExportData
+        from app.core.models import AgentImportRequest, AgentImportData
         from fastapi import HTTPException
 
         request = AgentImportRequest(
             version="1.0",
             type="invalid-type",
-            agent=AgentExportData(name="Imported Agent")
+            agent=AgentImportData(name="Imported Agent")
         )
 
         with pytest.raises(HTTPException) as exc_info:
@@ -1653,13 +1656,13 @@ class TestImportProfileEndpoint:
     async def test_import_profile_unsupported_version(self):
         """Importing with unsupported version should fail."""
         from app.api.agents import import_profile
-        from app.core.models import AgentImportRequest, AgentExportData
+        from app.core.models import AgentImportRequest, AgentImportData
         from fastapi import HTTPException
 
         request = AgentImportRequest(
             version="99.0",
             type="ai-shuffle-agent",
-            agent=AgentExportData(name="Imported Agent")
+            agent=AgentImportData(name="Imported Agent")
         )
 
         with pytest.raises(HTTPException) as exc_info:
@@ -1672,7 +1675,7 @@ class TestImportProfileEndpoint:
     async def test_import_profile_empty_name(self):
         """Importing with empty agent name should fail."""
         from app.api.agents import import_profile
-        from app.core.models import AgentImportRequest, AgentExportData
+        from app.core.models import AgentImportRequest, AgentImportData
         from fastapi import HTTPException
 
         # AgentExportData.name is required and can't be None.
@@ -1680,7 +1683,7 @@ class TestImportProfileEndpoint:
         request = AgentImportRequest(
             version="1.0",
             type="ai-shuffle-agent",
-            agent=AgentExportData(name="", description="Empty name agent")
+            agent=AgentImportData(name="", description="Empty name agent")
         )
 
         with pytest.raises(HTTPException) as exc_info:
@@ -1693,7 +1696,7 @@ class TestImportProfileEndpoint:
     async def test_import_profile_with_custom_system_prompt(self):
         """Importing with custom system prompt should work."""
         from app.api.agents import import_profile
-        from app.core.models import AgentImportRequest, AgentExportData
+        from app.core.models import AgentImportRequest, AgentImportData
 
         now = datetime.now(timezone.utc).isoformat()
         created_profile = {
@@ -1713,7 +1716,7 @@ class TestImportProfileEndpoint:
             request = AgentImportRequest(
                 version="1.0",
                 type="ai-shuffle-agent",
-                agent=AgentExportData(
+                agent=AgentImportData(
                     name="Custom Prompt Agent",
                     system_prompt_type="custom",
                     system_prompt_content="You are a custom agent",
@@ -1730,9 +1733,10 @@ class TestImportProfileEndpoint:
 
     @pytest.mark.asyncio
     async def test_import_profile_with_preset_and_append(self):
-        """Importing with preset system prompt and append should work."""
+        """Legacy preset+append exports map the append text onto the custom
+        prompt content (ruling A12) — old files must still import."""
         from app.api.agents import import_profile
-        from app.core.models import AgentImportRequest, AgentExportData
+        from app.core.models import AgentImportRequest, AgentImportData
 
         now = datetime.now(timezone.utc).isoformat()
         created_profile = {
@@ -1752,7 +1756,7 @@ class TestImportProfileEndpoint:
             request = AgentImportRequest(
                 version="1.0",
                 type="ai-shuffle-agent",
-                agent=AgentExportData(
+                agent=AgentImportData(
                     name="Preset Append Agent",
                     system_prompt_type="preset",
                     system_prompt_preset="claude_code",
@@ -1764,14 +1768,14 @@ class TestImportProfileEndpoint:
 
             call_kwargs = mock_db.create_profile.call_args[1]
             config = call_kwargs["config"]
-            assert config["system_prompt"]["type"] == "preset"
-            assert config["system_prompt"]["append"] == "Extra instructions here"
+            assert config["system_prompt"]["type"] == "custom"
+            assert config["system_prompt"]["content"] == "Extra instructions here"
 
     @pytest.mark.asyncio
     async def test_import_profile_too_many_conflicts(self):
         """Importing when too many similar IDs exist should fail."""
         from app.api.agents import import_profile
-        from app.core.models import AgentImportRequest, AgentExportData
+        from app.core.models import AgentImportRequest, AgentImportData
         from fastapi import HTTPException
 
         with patch("app.api.agents.database") as mock_db:
@@ -1781,7 +1785,7 @@ class TestImportProfileEndpoint:
             request = AgentImportRequest(
                 version="1.0",
                 type="ai-shuffle-agent",
-                agent=AgentExportData(name="Conflict Agent")
+                agent=AgentImportData(name="Conflict Agent")
             )
 
             with pytest.raises(HTTPException) as exc_info:
@@ -1850,7 +1854,8 @@ class TestEdgeCases:
 
                 import json
                 body = json.loads(result.body)
-                assert body["agent"]["system_prompt_type"] == "preset"
+                assert body["agent"]["system_prompt_content"] is None
+                assert "system_prompt_type" not in body["agent"]
 
     @pytest.mark.asyncio
     async def test_create_agent_id_generation(self):
@@ -1893,7 +1898,7 @@ class TestEdgeCases:
     async def test_import_profile_special_characters_in_name(self):
         """Importing with special characters in name should sanitize ID."""
         from app.api.agents import import_profile
-        from app.core.models import AgentImportRequest, AgentExportData
+        from app.core.models import AgentImportRequest, AgentImportData
 
         now = datetime.now(timezone.utc).isoformat()
         created_profile = {
@@ -1913,7 +1918,7 @@ class TestEdgeCases:
             request = AgentImportRequest(
                 version="1.0",
                 type="ai-shuffle-agent",
-                agent=AgentExportData(name="Test Agent @#$% 2024!")
+                agent=AgentImportData(name="Test Agent @#$% 2024!")
             )
 
             await import_profile(request, token="test-token")
@@ -1927,7 +1932,7 @@ class TestEdgeCases:
     async def test_import_profile_with_all_optional_fields(self):
         """Importing with all optional fields should populate config correctly."""
         from app.api.agents import import_profile
-        from app.core.models import AgentImportRequest, AgentExportData, AIToolsConfig
+        from app.core.models import AgentImportRequest, AgentImportData, AIToolsConfig
 
         now = datetime.now(timezone.utc).isoformat()
         created_profile = {
@@ -1953,7 +1958,7 @@ class TestEdgeCases:
             request = AgentImportRequest(
                 version="1.0",
                 type="ai-shuffle-agent",
-                agent=AgentExportData(
+                agent=AgentImportData(
                     name="Full Agent",
                     description="Agent with all fields",
                     model="opus",
@@ -1961,9 +1966,15 @@ class TestEdgeCases:
                     disallowed_tools=["WebFetch"],
                     enabled_agents=["subagent-1", "subagent-2"],
                     ai_tools=AIToolsConfig(image_generation=True, web_search=True),
+                    memory="Prefers concise answers.",
+                    app_config_tools=True,
+                    env={"FOO": "bar"},
+                    # Legacy SDK-era fields — tolerated on import, but ignored
+                    thinking_mode="think_harder",
                     max_turns=20,
                     max_buffer_size=50000,
-                    setting_sources=["env", "file"]
+                    setting_sources=["env", "file"],
+                    enable_file_checkpointing=True,
                 )
             )
 
@@ -1975,15 +1986,21 @@ class TestEdgeCases:
             assert config["disallowed_tools"] == ["WebFetch"]
             assert config["enabled_agents"] == ["subagent-1", "subagent-2"]
             assert config["ai_tools"]["image_generation"] is True
-            assert config["max_turns"] == 20
-            assert config["max_buffer_size"] == 50000
-            assert config["setting_sources"] == ["env", "file"]
+            assert config["memory"] == "Prefers concise answers."
+            assert config["app_config_tools"] is True
+            assert config["env"] == {"FOO": "bar"}
+            # Dead SDK-era fields never reach the stored config
+            assert "thinking_mode" not in config
+            assert "max_turns" not in config
+            assert "max_buffer_size" not in config
+            assert "setting_sources" not in config
+            assert "enable_file_checkpointing" not in config
 
     @pytest.mark.asyncio
     async def test_import_profile_default_id_fallback(self):
         """Importing with name that sanitizes to empty should use default ID."""
         from app.api.agents import import_profile
-        from app.core.models import AgentImportRequest, AgentExportData
+        from app.core.models import AgentImportRequest, AgentImportData
 
         now = datetime.now(timezone.utc).isoformat()
         created_profile = {
@@ -2003,7 +2020,7 @@ class TestEdgeCases:
             request = AgentImportRequest(
                 version="1.0",
                 type="ai-shuffle-agent",
-                agent=AgentExportData(name="@#$%^")  # Name with only special chars
+                agent=AgentImportData(name="@#$%^")  # Name with only special chars
             )
 
             await import_profile(request, token="test-token")
