@@ -33,5 +33,6 @@ export {
 	getModelFamily,
 	inferModelFamily,
 	getModelBadgeClass,
-	hydrateModelRegistry
+	hydrateModelRegistry,
+	ensureModelRegistryHydrated
 } from './models.svelte';
