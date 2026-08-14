@@ -35,7 +35,13 @@ HONORED:
   * ``session_id``           → explicit omni session id
   * ``permission_mode``      → omni PermissionEngine approval policy + plan_mode
   * ``env``                  → delegated child env / native provider (via os.environ)
-  * ``mcp_servers``          → omni ``registry.connect_mcp`` (external stdio/sse/http)
+  * ``mcp_servers``          → omni ``registry.connect_mcp`` (external stdio/http).
+    App configs are SDK-shaped (``{"type": "http"|"sse", "url", "headers"}``)
+    while omni's client dispatches on ``transport``, so configs are normalized
+    at the seam (``_normalize_mcp_config_for_omni``): ``http`` →
+    ``streamable_http``; stdio passes through; ``sse`` is skipped with a loud
+    warning and ``headers`` are dropped with one, both pending upstream omni
+    support (ruling PA5).
   * ``include_partial_messages`` → omni always streams deltas (native); delegated
     passes ``--include-partial-messages`` (``extra["omni_partial"]`` overrides)
   * session store: DERIVED, not configured — PgOmniStore when the app has a
@@ -64,6 +70,8 @@ DEGRADED / NOT YET HONORED (documented gaps — mechanical follow-up):
   * ``task_budget`` / ``session_store`` / ``session_store_flush`` — SDK session-store
     concepts; omni persistence is the Pg/Memory store chosen above.
   * ``enable_file_checkpointing`` / ``stderr`` / ``max_buffer_size`` / ``user`` — ignored.
+  * MCP ``headers`` (remote servers) and the ``sse`` transport — omni's MCP
+    client supports neither yet; both are warned about at connect time.
 
 HONORED SINCE THE P1 COMPILER LANDED (2026-08-13):
   * ``add_dirs`` — projected onto SessionOptions and passed to the delegated
@@ -1148,8 +1156,14 @@ class HarnessAdapter(ProviderAdapter):
         for server in inproc_servers:
             registry.register_inproc(server)
         for name, config in external_mcp.items():
+            # The app speaks the SDK's config dialect; omni's MCP client speaks
+            # ``transport``. Normalize (never mutate — the delegated leg
+            # serializes the ORIGINAL map into its --mcp-config file).
+            normalized = _normalize_mcp_config_for_omni(name, config)
+            if normalized is None:
+                continue  # unsupported transport; already warned about
             try:
-                await registry.connect_mcp(name, config)
+                await registry.connect_mcp(name, normalized)
             except Exception as exc:  # best-effort; a bad MCP server must not fail connect
                 logger.warning("[HarnessAdapter] connect_mcp(%s) failed: %r", name, exc)
 
@@ -1222,6 +1236,70 @@ def _external_mcp_servers(mcp_servers: Optional[Dict[str, Any]]) -> Dict[str, An
             continue
         out[name] = cfg
     return out
+
+
+def _normalize_mcp_config_for_omni(name: str, config: Any) -> Optional[Dict[str, Any]]:
+    """Translate an SDK-shaped external MCP config into omni's client dialect.
+
+    The app emits SDK-shaped configs (``app/core/mcp_config.py``): stdio entries
+    carry ``command`` (+ optional ``args``/``env``) and no type marker, remote
+    entries carry ``{"type": "sse"|"http", "url", "headers"}``. omni's client
+    (``omni/tools/mcp/client.py``) dispatches on ``config["transport"]``
+    defaulting to ``"stdio"``, and implements only ``stdio`` and
+    ``http``/``streamable_http``. So an SDK ``{"type": "http", ...}`` entry used
+    to fall into the stdio branch and die on the missing ``command`` key, with
+    the failure swallowed by the best-effort warning at the call site — remote
+    MCP servers silently never connected on native legs.
+
+    Returns the config to hand ``connect_mcp``, or ``None`` when the server
+    cannot be connected on an omni leg at all. The input dict is never mutated:
+    the delegated leg JSON-serializes the same objects into its ``--mcp-config``
+    file, which must keep the SDK shape the CLI expects.
+
+    Gaps warned about here (upstream omni work, ruling PA5 / plan wave W0a):
+    SSE transport and per-server HTTP headers.
+    """
+    if not isinstance(config, dict):
+        return config
+    # An explicit transport means the caller already speaks omni's dialect.
+    if config.get("transport"):
+        return config
+
+    kind = str(config.get("type") or "stdio").lower()
+
+    if kind in ("stdio", ""):
+        return config
+
+    if kind == "sse":
+        logger.warning(
+            "[HarnessAdapter] MCP server %r uses the SSE transport, which the omni "
+            "MCP client does not support yet — skipping it for this session. Its "
+            "tools will be unavailable. Re-configure the server as streamable HTTP "
+            "if it offers one.",
+            name,
+        )
+        return None
+
+    if kind in ("http", "streamable_http"):
+        normalized = dict(config)
+        normalized.pop("type", None)
+        normalized["transport"] = "streamable_http"
+        if config.get("headers"):
+            logger.warning(
+                "[HarnessAdapter] MCP server %r defines HTTP headers, which the omni "
+                "MCP client does not support yet — connecting WITHOUT them. Requests "
+                "needing those headers (e.g. auth) will fail.",
+                name,
+            )
+        return normalized
+
+    logger.warning(
+        "[HarnessAdapter] MCP server %r has unknown transport type %r — passing it "
+        "through unchanged; omni will reject it if it cannot be handled.",
+        name,
+        config.get("type"),
+    )
+    return config
 
 
 def _decide_provider_kind(options: SessionOptions) -> str:

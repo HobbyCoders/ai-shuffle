@@ -1686,3 +1686,111 @@ async def test_non_contiguous_store_seeds_prefix_only(monkeypatch, tmp_path, cap
         )
     finally:
         await adapter.disconnect()
+
+
+# ─── W0a: native-leg MCP config normalization ────────────────────────────────
+#
+# The app emits SDK-shaped MCP configs while omni's client dispatches on
+# ``transport``; without normalization every remote server silently failed to
+# connect on native legs. See docs/PROVIDER_AGNOSTIC_PLAN.md wave W0a (PA5).
+
+import logging as _logging
+
+from app.core.provider.harness_adapter import _normalize_mcp_config_for_omni
+
+_HA_LOGGER = "app.core.provider.harness_adapter"
+
+
+def test_normalize_mcp_stdio_config_passes_through():
+    """stdio is already omni's default transport — nothing to translate."""
+    cfg = {"command": "node", "args": ["server.js"], "env": {"K": "v"}}
+    assert _normalize_mcp_config_for_omni("local", cfg) == cfg
+
+
+def test_normalize_mcp_http_config_becomes_streamable_http():
+    cfg = {"type": "http", "url": "https://example.test/mcp"}
+    out = _normalize_mcp_config_for_omni("remote", cfg)
+
+    assert out == {"url": "https://example.test/mcp", "transport": "streamable_http"}
+    # The caller's dict must survive untouched: the delegated leg serializes the
+    # same objects into its --mcp-config file, where the SDK shape is required.
+    assert cfg == {"type": "http", "url": "https://example.test/mcp"}
+
+
+def test_normalize_mcp_http_headers_warn_but_still_connect(caplog):
+    cfg = {
+        "type": "http",
+        "url": "https://example.test/mcp",
+        "headers": {"Authorization": "Bearer x"},
+    }
+    with caplog.at_level(_logging.WARNING, logger=_HA_LOGGER):
+        out = _normalize_mcp_config_for_omni("authed", cfg)
+
+    assert out is not None
+    assert out["transport"] == "streamable_http"
+    assert any(
+        "authed" in r.getMessage() and "headers" in r.getMessage().lower()
+        for r in caplog.records
+    )
+
+
+def test_normalize_mcp_sse_config_is_skipped_with_warning(caplog):
+    cfg = {"type": "sse", "url": "https://example.test/sse"}
+    with caplog.at_level(_logging.WARNING, logger=_HA_LOGGER):
+        out = _normalize_mcp_config_for_omni("streamer", cfg)
+
+    assert out is None
+    assert any(
+        "streamer" in r.getMessage() and "SSE" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_normalize_mcp_explicit_transport_is_respected():
+    """A caller already speaking omni's dialect is left alone."""
+    cfg = {"transport": "streamable_http", "url": "https://example.test/mcp"}
+    assert _normalize_mcp_config_for_omni("native-shaped", cfg) is cfg
+
+
+def test_normalize_mcp_unknown_shapes_pass_through(caplog):
+    with caplog.at_level(_logging.WARNING, logger=_HA_LOGGER):
+        assert _normalize_mcp_config_for_omni("weird", {"type": "carrier-pigeon"}) == {
+            "type": "carrier-pigeon"
+        }
+    assert any("weird" in r.getMessage() for r in caplog.records)
+    # Non-dict entries are somebody else's problem, not ours to reshape.
+    assert _normalize_mcp_config_for_omni("odd", "nonsense") == "nonsense"
+
+
+@pytest.mark.asyncio
+async def test_build_registry_normalizes_before_connect_mcp(monkeypatch):
+    """The seam fix, end to end: http reaches connect_mcp as streamable_http,
+    sse never reaches it at all, stdio is untouched."""
+    import app.core.provider.harness_adapter as ha
+
+    calls: list = []
+
+    async def fake_connect_mcp(self, name, config):
+        calls.append((name, dict(config)))
+        return []
+
+    monkeypatch.setattr(ha.ToolRegistry, "connect_mcp", fake_connect_mcp)
+
+    servers = {
+        "local": {"command": "node", "args": ["s.js"]},
+        "remote": {"type": "http", "url": "https://example.test/mcp"},
+        "streamer": {"type": "sse", "url": "https://example.test/sse"},
+    }
+    adapter = ha.HarnessAdapter()
+    await adapter._build_registry(
+        SessionOptions(model="gpt-4o", mcp_servers=servers), native=True
+    )
+
+    connected = dict(calls)
+    assert set(connected) == {"local", "remote"}
+    assert connected["local"] == {"command": "node", "args": ["s.js"]}
+    assert connected["remote"] == {
+        "url": "https://example.test/mcp",
+        "transport": "streamable_http",
+    }
+    # Original configs unmutated (the delegated leg reads the same dicts).
+    assert servers["remote"] == {"type": "http", "url": "https://example.test/mcp"}
