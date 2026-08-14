@@ -161,7 +161,13 @@ def build_request_body(request: ProviderRequest) -> dict[str, Any]:
     }
     if request.tools:
         body["tools"] = _translate_tools(request.tools)
-    if request.thinking:
+    if request.effort:
+        # Harness effort vocabulary is Anthropic-shaped (low..max); OpenRouter's
+        # unified reasoning param knows low/medium/high — clamp the top tiers.
+        clamped = {"xhigh": "high", "max": "high"}.get(request.effort, request.effort)
+        if clamped in ("minimal", "low", "medium", "high"):
+            body["reasoning"] = {"effort": clamped}
+    elif request.thinking:
         effort = request.thinking.get("effort")
         if effort in ("minimal", "low", "medium", "high"):
             body["reasoning"] = {"effort": effort}

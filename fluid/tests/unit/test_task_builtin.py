@@ -67,6 +67,27 @@ def test_delegated_disallowed_tools_argv():
     loop.add_dirs = None
     loop.disallowed_tools = ["Task", "Agent", "Workflow"]
     loop.partial = False
+    loop.effort = None
     argv = loop._build_argv()
     i = argv.index("--disallowed-tools")
     assert argv[i + 1] == "Task,Agent,Workflow"
+
+
+def test_delegated_effort_argv():
+    from omni.engine.delegated import DelegatedLoop
+
+    loop = DelegatedLoop.__new__(DelegatedLoop)
+    loop.claude_cmd = ["claude"]
+    loop.model = "fable"
+    loop.permission_mode = None
+    loop.cli_session_id = None
+    loop._mcp_config_path = None
+    loop.append_system_prompt = None
+    loop.system = None
+    loop.add_dirs = None
+    loop.disallowed_tools = None
+    loop.partial = False
+    loop.effort = "xhigh"
+    argv = loop._build_argv()
+    i = argv.index("--effort")
+    assert argv[i + 1] == "xhigh"

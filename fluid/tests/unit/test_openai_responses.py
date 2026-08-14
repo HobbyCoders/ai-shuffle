@@ -306,3 +306,28 @@ async def test_client_account_id_header_present() -> None:
     await http.aclose()
     assert captured["account"] == "acct_42"
     assert captured["auth"] == "Bearer tok"
+
+
+def test_effort_overrides_thinking_and_clamps() -> None:
+    from omni.messages import Message as _Msg, Text as _Text
+
+    request = ProviderRequest(
+        model="gpt-5.6",
+        messages=[_Msg(role="user", content=[_Text("hi")])],
+        thinking={"budget_tokens": 1024},
+        effort="xhigh",
+    )
+    body = build_request_body(request)
+    assert body["reasoning"] == {"effort": "high", "summary": "auto"}
+
+
+def test_thinking_effort_still_honored_without_explicit_effort() -> None:
+    from omni.messages import Message as _Msg, Text as _Text
+
+    request = ProviderRequest(
+        model="gpt-5.6",
+        messages=[_Msg(role="user", content=[_Text("hi")])],
+        thinking={"effort": "low"},
+    )
+    body = build_request_body(request)
+    assert body["reasoning"] == {"effort": "low", "summary": "auto"}

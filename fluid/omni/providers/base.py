@@ -46,6 +46,11 @@ class ProviderRequest:
     cache_breakpoints: int = 0  # how many trailing breakpoints the serializer may place
     max_tokens: int = 8192
     thinking: dict[str, Any] | None = None
+    # Reasoning-depth knob ("low" | "medium" | "high" | "xhigh" | "max").
+    # Each serializer maps it to its provider's shape: Anthropic
+    # output_config.effort (verbatim), OpenAI-shaped APIs reasoning.effort
+    # (clamped to their low/medium/high vocabulary).
+    effort: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 

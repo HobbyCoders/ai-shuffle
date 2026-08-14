@@ -90,6 +90,10 @@ def build_request_body(request: ProviderRequest) -> dict[str, Any]:
         body["tools"] = tools
     if request.thinking:
         body["thinking"] = request.thinking
+    if request.effort:
+        # Anthropic effort is GA and lives inside output_config, not top-level.
+        # Values pass through verbatim (low/medium/high/xhigh/max).
+        body["output_config"] = {"effort": request.effort}
     if breakpoints > 0 and messages:
         last = messages[-1]["content"]
         if last:

@@ -198,13 +198,29 @@ def _effort_from_budget(budget_tokens: int | None) -> str:
     return "high"
 
 
-def _reasoning_config(thinking: dict[str, Any] | None) -> dict[str, Any] | None:
+# The harness effort vocabulary is Anthropic-shaped (low..max); the Responses
+# API only knows minimal/low/medium/high, so the top tiers clamp to high.
+_EFFORT_CLAMP = {
+    "minimal": "minimal",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "high",
+    "max": "high",
+}
+
+
+def _reasoning_config(
+    thinking: dict[str, Any] | None, effort: str | None = None
+) -> dict[str, Any] | None:
+    if effort and effort in _EFFORT_CLAMP:
+        return {"effort": _EFFORT_CLAMP[effort], "summary": "auto"}
     if not thinking:
         return None
-    effort = thinking.get("effort")
-    if effort not in ("minimal", "low", "medium", "high"):
-        effort = _effort_from_budget(thinking.get("budget_tokens"))
-    return {"effort": effort, "summary": "auto"}
+    thinking_effort = thinking.get("effort")
+    if thinking_effort not in ("minimal", "low", "medium", "high"):
+        thinking_effort = _effort_from_budget(thinking.get("budget_tokens"))
+    return {"effort": thinking_effort, "summary": "auto"}
 
 
 def build_request_body(request: ProviderRequest) -> dict[str, Any]:
@@ -230,7 +246,7 @@ def build_request_body(request: ProviderRequest) -> dict[str, Any]:
     if request.tools:
         body["tools"] = _translate_tools(request.tools)
 
-    reasoning = _reasoning_config(request.thinking)
+    reasoning = _reasoning_config(request.thinking, request.effort)
     if reasoning is not None:
         body["reasoning"] = reasoning
 

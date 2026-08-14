@@ -117,6 +117,7 @@ class NativeLoop:
         model: str,
         system: str | None = None,
         max_tokens: int = 8192,
+        effort: str | None = None,
         registry: ToolRegistry | None = None,
         permissions: PermissionEngine | None = None,
         hooks: HookBus | None = None,
@@ -133,6 +134,9 @@ class NativeLoop:
         self.model = model
         self.system = system
         self.max_tokens = max_tokens
+        # Reasoning-depth knob, provider-mapped by each serializer (Anthropic
+        # output_config.effort; OpenAI-shaped reasoning.effort, clamped).
+        self.effort = effort
         self.registry = registry
         self.permissions = permissions
         self.hooks = hooks
@@ -483,6 +487,7 @@ class NativeLoop:
             system=self.system,
             tools=tools_api,
             max_tokens=self.max_tokens,
+            effort=self.effort,
             cache_breakpoints=plan.breakpoints,
         )
 

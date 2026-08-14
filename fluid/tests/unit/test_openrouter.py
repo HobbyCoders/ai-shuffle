@@ -211,3 +211,23 @@ async def test_client_end_to_end() -> None:
     assert chunks[0].kind == "message_start"
     assert chunks[-1].kind == "message_stop"
     assert any(c.kind == "tool_args_delta" for c in chunks)
+
+
+def test_effort_clamped_into_reasoning() -> None:
+    request = ProviderRequest(
+        model="meta-llama/llama-4",
+        messages=[Message(role="user", content=[Text("hi")])],
+        effort="max",
+    )
+    body = build_request_body(request)
+    assert body["reasoning"] == {"effort": "high"}
+
+
+def test_effort_passthrough_low() -> None:
+    request = ProviderRequest(
+        model="meta-llama/llama-4",
+        messages=[Message(role="user", content=[Text("hi")])],
+        effort="low",
+    )
+    body = build_request_body(request)
+    assert body["reasoning"] == {"effort": "low"}

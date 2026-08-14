@@ -87,6 +87,7 @@ class DelegatedLoop:
         env: dict[str, str] | None = None,
         add_dirs: list[str] | None = None,
         disallowed_tools: list[str] | None = None,
+        effort: str | None = None,
     ) -> None:
         self.store = store
         self.model = model
@@ -104,6 +105,8 @@ class DelegatedLoop:
         self.env = env
         self.add_dirs = add_dirs
         self.disallowed_tools = disallowed_tools
+        # Reasoning-depth knob — forwarded verbatim as the CLI's --effort flag.
+        self.effort = effort
         self.cli_version: str | None = None
 
         self._session: SessionMeta | None = None
@@ -300,6 +303,8 @@ class DelegatedLoop:
             argv += ["--add-dir", d]
         if self.disallowed_tools:
             argv += ["--disallowed-tools", ",".join(self.disallowed_tools)]
+        if self.effort:
+            argv += ["--effort", self.effort]
         if self.partial:
             argv += ["--include-partial-messages"]
         return argv

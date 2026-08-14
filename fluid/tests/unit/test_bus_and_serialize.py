@@ -94,3 +94,22 @@ def test_foreign_reasoning_dropped_anthropic_kept() -> None:
         {"type": "thinking", "thinking": "t", "signature": "s"},
         {"type": "text", "text": "answer"},
     ]
+
+
+def test_effort_maps_to_output_config() -> None:
+    request = ProviderRequest(
+        model="m",
+        messages=[Message(role="user", content=[Text("hi")])],
+        effort="xhigh",
+    )
+    body = build_request_body(request)
+    assert body["output_config"] == {"effort": "xhigh"}
+
+
+def test_no_effort_no_output_config() -> None:
+    request = ProviderRequest(
+        model="m",
+        messages=[Message(role="user", content=[Text("hi")])],
+    )
+    body = build_request_body(request)
+    assert "output_config" not in body
