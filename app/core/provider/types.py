@@ -53,6 +53,10 @@ class SessionOptions:
     # Permission mode
     permission_mode: Optional[str] = None
 
+    # Maximum model calls the engine may make inside one turn (None = engine
+    # default). Native legs map this onto omni's ``max_model_calls_per_turn``.
+    max_turns: Optional[int] = None
+
     # Streaming options
     include_partial_messages: bool = False
 

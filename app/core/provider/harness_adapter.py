@@ -34,7 +34,14 @@ HONORED:
     from the CLI's init frame. See ``_resolve_cli_session_id``.
   * ``session_id``           → explicit omni session id
   * ``permission_mode``      → omni PermissionEngine approval policy + plan_mode
-  * ``env``                  → delegated child env / native provider (via os.environ)
+  * ``env``                  → delegated child env / native provider (via os.environ).
+    On native legs one variable is additionally consumed directly:
+    ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` (positive int) becomes ``NativeLoop
+    (max_tokens=...)``, the interim escape hatch from omni's 8192 default
+    until the reasoning/output config wave lands (plan wave W0a).
+  * ``max_turns``            → native ``NativeLoop(max_model_calls_per_turn=...)``
+    when positive; omni's default (50) otherwise. The delegated leg's CLI
+    enforces its own turn budget, so nothing is passed there.
   * ``mcp_servers``          → omni ``registry.connect_mcp`` (external stdio/http).
     App configs are SDK-shaped (``{"type": "http"|"sse", "url", "headers"}``)
     while omni's client dispatches on ``transport``, so configs are normalized
@@ -305,10 +312,21 @@ class HarnessAdapter(ProviderAdapter):
                     )
                 except Exception:  # noqa: BLE001 — Task degrades to "unavailable"
                     logger.debug("task_dispatch injection failed", exc_info=True)
+            # Engine caps the app can express today (plan wave W0a). Both are
+            # omitted unless configured so omni keeps its own defaults
+            # (max_model_calls_per_turn=50, max_tokens=8192).
+            native_caps: Dict[str, Any] = {}
+            max_calls = _positive_int(getattr(options, "max_turns", None))
+            if max_calls is not None:
+                native_caps["max_model_calls_per_turn"] = max_calls
+            max_tokens = _native_max_output_tokens(options)
+            if max_tokens is not None:
+                native_caps["max_tokens"] = max_tokens
             self._engine = NativeLoop(
                 provider=provider_client,
                 store=self._store,
                 model=options.model,
+                **native_caps,
                 # Native legs have no Claude Code preset — they always run the
                 # omni-compiled prompt: the profile's configured prompt as the
                 # base (a preset-shaped profile has none) with the append text
@@ -355,6 +373,9 @@ class HarnessAdapter(ProviderAdapter):
             ),
             add_dirs=getattr(sdk_options, "add_dirs", None),
             disallowed_tools=getattr(sdk_options, "disallowed_tools", None),
+            # Profile ``max_turns`` (query_options puts it on the SDK options).
+            # Native legs map it onto omni's per-turn model-call budget.
+            max_turns=getattr(sdk_options, "max_turns", None),
         )
         # The session's bound model provider (``sessions.provider_id``) rides on
         # the SDK options object as ``aih_provider_id`` (stamped by
@@ -1300,6 +1321,42 @@ def _normalize_mcp_config_for_omni(name: str, config: Any) -> Optional[Dict[str,
         config.get("type"),
     )
     return config
+
+
+def _positive_int(value: Any) -> Optional[int]:
+    """``value`` as a positive int, or None (bools and junk included)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _native_max_output_tokens(options: SessionOptions) -> Optional[int]:
+    """Interim per-response output cap for native legs, from profile env.
+
+    ``NativeLoop`` otherwise runs at its ``max_tokens=8192`` default, silently
+    truncating long responses with no app-side control. Until the reasoning /
+    output-config wave lands, the profile env var the app already exposes
+    (``CLAUDE_CODE_MAX_OUTPUT_TOKENS``, honored by the delegated CLI child) acts
+    as the escape hatch here too.
+    """
+    env = getattr(options, "env", None)
+    if not isinstance(env, dict):
+        return None
+    raw = env.get("CLAUDE_CODE_MAX_OUTPUT_TOKENS")
+    if raw is None:
+        return None
+    parsed = _positive_int(raw)
+    if parsed is None:
+        logger.warning(
+            "[HarnessAdapter] ignoring CLAUDE_CODE_MAX_OUTPUT_TOKENS=%r "
+            "(not a positive integer) — keeping the engine default.",
+            raw,
+        )
+    return parsed
 
 
 def _decide_provider_kind(options: SessionOptions) -> str:

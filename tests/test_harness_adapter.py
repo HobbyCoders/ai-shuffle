@@ -1688,15 +1688,22 @@ async def test_non_contiguous_store_seeds_prefix_only(monkeypatch, tmp_path, cap
         await adapter.disconnect()
 
 
-# ─── W0a: native-leg MCP config normalization ────────────────────────────────
+# ─── W0a: native-leg MCP normalization + turn/output caps ────────────────────
 #
 # The app emits SDK-shaped MCP configs while omni's client dispatches on
 # ``transport``; without normalization every remote server silently failed to
-# connect on native legs. See docs/PROVIDER_AGNOSTIC_PLAN.md wave W0a (PA5).
+# connect on native legs. NativeLoop also ran at its own defaults regardless of
+# the profile's max_turns / output-token settings. See
+# docs/PROVIDER_AGNOSTIC_PLAN.md wave W0a (ruling PA5).
 
 import logging as _logging
+import types as _types
 
-from app.core.provider.harness_adapter import _normalize_mcp_config_for_omni
+from app.core.provider.harness_adapter import (
+    _native_max_output_tokens,
+    _normalize_mcp_config_for_omni,
+    _positive_int,
+)
 
 _HA_LOGGER = "app.core.provider.harness_adapter"
 
@@ -1794,3 +1801,99 @@ async def test_build_registry_normalizes_before_connect_mcp(monkeypatch):
     }
     # Original configs unmutated (the delegated leg reads the same dicts).
     assert servers["remote"] == {"type": "http", "url": "https://example.test/mcp"}
+
+
+async def _connect_capturing_native(monkeypatch, tmp_path, **option_kwargs):
+    """connect() a native leg whose NativeLoop kwargs are captured."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+    await ha.HarnessAdapter().connect(
+        SessionOptions(
+            model="gpt-4o",
+            cwd=str(tmp_path),
+            extra={"omni_provider": "openai_responses"},
+            **option_kwargs,
+        )
+    )
+    return _CapturingLoop.captured
+
+
+@pytest.mark.asyncio
+async def test_max_turns_becomes_model_call_budget(monkeypatch, tmp_path):
+    captured = await _connect_capturing_native(monkeypatch, tmp_path, max_turns=7)
+    assert captured["max_model_calls_per_turn"] == 7
+
+
+@pytest.mark.asyncio
+async def test_no_max_turns_keeps_omni_default(monkeypatch, tmp_path):
+    """Unset / non-positive values must not be passed — omni's default (50) wins."""
+    captured = await _connect_capturing_native(monkeypatch, tmp_path)
+    assert "max_model_calls_per_turn" not in captured
+
+    captured = await _connect_capturing_native(monkeypatch, tmp_path, max_turns=0)
+    assert "max_model_calls_per_turn" not in captured
+
+
+@pytest.mark.asyncio
+async def test_max_turns_projected_from_sdk_options(monkeypatch, tmp_path):
+    """query_engine hands ClaudeAgentOptions, where max_turns actually lives."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    sdk_options = _types.SimpleNamespace(
+        model="gpt-4o", cwd=str(tmp_path), max_turns=3, mcp_servers=None
+    )
+    await ha.HarnessAdapter().connect_with_sdk_options(sdk_options)
+
+    assert _CapturingLoop.captured["max_model_calls_per_turn"] == 3
+
+
+@pytest.mark.asyncio
+async def test_env_output_token_cap_reaches_native_loop(monkeypatch, tmp_path):
+    """Interim escape hatch from omni's silent 8192 output cap."""
+    captured = await _connect_capturing_native(
+        monkeypatch, tmp_path, env={"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "32000"}
+    )
+    assert captured["max_tokens"] == 32000
+
+
+@pytest.mark.asyncio
+async def test_no_env_cap_keeps_omni_default(monkeypatch, tmp_path):
+    captured = await _connect_capturing_native(monkeypatch, tmp_path)
+    assert "max_tokens" not in captured
+
+    captured = await _connect_capturing_native(
+        monkeypatch, tmp_path, env={"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "0"}
+    )
+    assert "max_tokens" not in captured
+
+
+def test_env_output_cap_parsing(caplog):
+    assert _native_max_output_tokens(SessionOptions(model="m")) is None
+    assert (
+        _native_max_output_tokens(
+            SessionOptions(model="m", env={"CLAUDE_CODE_MAX_OUTPUT_TOKENS": " 16000 "})
+        )
+        == 16000
+    )
+    with caplog.at_level(_logging.WARNING, logger=_HA_LOGGER):
+        assert (
+            _native_max_output_tokens(
+                SessionOptions(model="m", env={"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "lots"})
+            )
+            is None
+        )
+    assert any("CLAUDE_CODE_MAX_OUTPUT_TOKENS" in r.getMessage() for r in caplog.records)
+
+
+def test_positive_int_rejects_bools_and_junk():
+    assert _positive_int(5) == 5
+    assert _positive_int("5") == 5
+    assert _positive_int(True) is None
+    assert _positive_int(-1) is None
+    assert _positive_int(None) is None
+    assert _positive_int("abc") is None
