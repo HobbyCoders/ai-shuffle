@@ -27,6 +27,13 @@ export interface ModelProvider {
 	name: string;
 	provider_type: string;
 	base_url: string;
+	/**
+	 * Wire format a CUSTOM row's endpoint speaks: 'anthropic' (default when
+	 * null — Anthropic Messages at {base_url}/v1/messages) or 'openai' (OpenAI
+	 * chat/completions, e.g. xAI-direct / Groq / vLLM). Ignored on non-custom
+	 * rows, whose provider_type already pins the dialect.
+	 */
+	api_dialect?: 'anthropic' | 'openai' | null;
 	auth_token_set: boolean;
 	auth_token_masked: string;
 	models: ProviderModelEntry[];
@@ -61,6 +68,8 @@ export interface ModelProviderCreate {
 	name: string;
 	provider_type: string;
 	base_url: string;
+	/** Custom rows only: endpoint wire format ('anthropic' default | 'openai'). */
+	api_dialect?: 'anthropic' | 'openai' | null;
 	/** Omit or leave blank to store no token. */
 	auth_token?: string | null;
 	models?: ProviderModelEntry[];

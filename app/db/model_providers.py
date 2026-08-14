@@ -74,10 +74,11 @@ class ModelProviderRow(TypedDict, total=False):
 # Codex fields (auth_mode, codex_account_id, expiry/last_refresh timestamps,
 # needs_reauth) ARE public.
 _PUBLIC_COLUMNS = (
-    "id, name, provider_type, base_url, models_json, default_model, "
-    "small_fast_model, extra_env_json, context_window, max_output_tokens, "
-    "enabled, auth_mode, codex_account_id, codex_id_token_expires_at, "
-    "codex_last_refresh, needs_reauth, created_at, updated_at"
+    "id, name, provider_type, base_url, api_dialect, models_json, "
+    "default_model, small_fast_model, extra_env_json, context_window, "
+    "max_output_tokens, enabled, auth_mode, codex_account_id, "
+    "codex_id_token_expires_at, codex_last_refresh, needs_reauth, "
+    "created_at, updated_at"
 )
 
 # The encrypted write-only token blobs, appended to the SELECT only when a caller
@@ -95,6 +96,7 @@ _UPDATABLE_COLUMNS = (
     "name",
     "provider_type",
     "base_url",
+    "api_dialect",
     "auth_token",
     "models_json",
     "default_model",
@@ -154,6 +156,7 @@ def create_model_provider(
     context_window: Optional[int] = None,
     max_output_tokens: Optional[int] = None,
     enabled: bool = True,
+    api_dialect: Optional[str] = None,
 ) -> Optional[ModelProviderRow]:
     """Insert a new model-provider row and return it (without the token).
 
@@ -167,17 +170,18 @@ def create_model_provider(
         cursor.execute(
             """
             INSERT INTO model_providers
-                (id, name, provider_type, base_url, auth_token, models_json,
-                 default_model, small_fast_model, extra_env_json,
+                (id, name, provider_type, base_url, api_dialect, auth_token,
+                 models_json, default_model, small_fast_model, extra_env_json,
                  context_window, max_output_tokens, enabled,
                  created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 provider_id,
                 name,
                 provider_type,
                 base_url,
+                api_dialect,
                 auth_token,
                 json.dumps(models if models is not None else []),
                 default_model,

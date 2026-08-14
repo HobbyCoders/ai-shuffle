@@ -43,6 +43,13 @@ router = APIRouter(prefix="/api/v1/model-providers", tags=["Model Providers"])
 
 _VALID_PROVIDER_TYPES = ("openrouter", "custom", "openai", "chatgpt")
 
+# Wire formats a CUSTOM row's endpoint may speak. 'anthropic' (the default when
+# unset — the historic custom-row contract: Anthropic Messages at
+# {base_url}/v1/messages) or 'openai' (OpenAI chat/completions, for
+# xAI-direct / Groq / vLLM style endpoints). Ignored on non-custom rows, whose
+# provider_type already pins the dialect.
+_VALID_API_DIALECTS = ("anthropic", "openai")
+
 
 # ============================================================================
 # Pydantic models
@@ -53,6 +60,7 @@ class ModelProviderCreate(BaseModel):
     name: str
     provider_type: str
     base_url: str
+    api_dialect: Optional[str] = None
     auth_token: Optional[str] = None
     models: Optional[List[Dict[str, Any]]] = None
     default_model: Optional[str] = None
@@ -68,6 +76,7 @@ class ModelProviderUpdate(BaseModel):
     name: Optional[str] = None
     provider_type: Optional[str] = None
     base_url: Optional[str] = None
+    api_dialect: Optional[str] = None
     auth_token: Optional[str] = None
     models: Optional[List[Dict[str, Any]]] = None
     default_model: Optional[str] = None
@@ -84,6 +93,7 @@ class ModelProviderResponse(BaseModel):
     name: str
     provider_type: str
     base_url: str
+    api_dialect: Optional[str] = None
     auth_token_set: bool
     auth_token_masked: str
     models: List[Dict[str, Any]]
@@ -184,6 +194,14 @@ def _validate_provider_type(provider_type: Optional[str]) -> None:
         )
 
 
+def _validate_api_dialect(api_dialect: Optional[str]) -> None:
+    if api_dialect is not None and api_dialect not in _VALID_API_DIALECTS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"api_dialect must be one of {_VALID_API_DIALECTS}",
+        )
+
+
 def _validate_base_url(base_url: Optional[str], *, required: bool) -> None:
     if base_url is not None and not base_url.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
@@ -263,6 +281,7 @@ def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
         name=row["name"],
         provider_type=row["provider_type"],
         base_url=row["base_url"],
+        api_dialect=row.get("api_dialect"),
         auth_token_set=bool(row.get("_auth_token_set")),
         auth_token_masked=row.get("_auth_token_masked", ""),
         models=row.get("models_json") or [],
@@ -421,6 +440,7 @@ async def create_provider(body: ModelProviderCreate, token: str = Depends(requir
     """Create a new model provider."""
     _validate_provider_type(body.provider_type)
     _validate_base_url(body.base_url, required=True)
+    _validate_api_dialect(body.api_dialect)
     _validate_models(body.models)
     _validate_extra_env(body.extra_env)
 
@@ -438,6 +458,7 @@ async def create_provider(body: ModelProviderCreate, token: str = Depends(requir
         name=body.name,
         provider_type=body.provider_type,
         base_url=base_url,
+        api_dialect=body.api_dialect,
         auth_token=encrypted_token,
         models=body.models,
         default_model=body.default_model,
@@ -467,6 +488,7 @@ async def update_provider(
 
     _validate_provider_type(body.provider_type)
     _validate_base_url(body.base_url, required=False)
+    _validate_api_dialect(body.api_dialect)
     _validate_models(body.models)
     _validate_extra_env(body.extra_env)
 
@@ -482,6 +504,8 @@ async def update_provider(
             else existing.get("provider_type")
         )
         updates["base_url"] = _normalize_base_url(effective_type, body.base_url)
+    if body.api_dialect is not None:
+        updates["api_dialect"] = body.api_dialect
     if body.models is not None:
         updates["models_json"] = body.models
     if body.default_model is not None:

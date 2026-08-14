@@ -51,6 +51,10 @@
 	const originalProviderType = seed?.provider_type ?? null;
 
 	let formPreset: ProviderPreset = $state(seed?.provider_type === 'openrouter' ? 'openrouter' : 'custom');
+	// Custom rows only: which wire format the endpoint speaks. 'anthropic'
+	// (default — Messages at {base_url}/v1/messages) or 'openai'
+	// (chat/completions, e.g. xAI direct / Groq / vLLM).
+	let formApiDialect: 'anthropic' | 'openai' = $state(seed?.api_dialect === 'openai' ? 'openai' : 'anthropic');
 	let formName = $state(seed?.name ?? '');
 	let formBaseUrl = $state(seed?.base_url ?? OPENROUTER_BASE_URL);
 	let formToken = $state('');
@@ -189,10 +193,13 @@
 		formSaving = true;
 		formError = '';
 		try {
+			const providerType = resolvedProviderType();
 			const body = {
 				name,
-				provider_type: resolvedProviderType(),
+				provider_type: providerType,
 				base_url: baseUrl,
+				// Dialect only means anything on custom rows; other types pin it.
+				...(providerType === 'custom' ? { api_dialect: formApiDialect } : {}),
 				models,
 				default_model: formDefaultModel || null,
 				small_fast_model: formSmallFastModel || null,
@@ -230,6 +237,19 @@
 		<label class="mp-label" for="mp-baseurl">Base URL</label>
 		<input id="mp-baseurl" type="text" class="inp" bind:value={formBaseUrl} placeholder="https://openrouter.ai/api" spellcheck="false" autocapitalize="off" autocomplete="off" />
 	</div>
+
+	{#if formPreset === 'custom' && resolvedProviderType() === 'custom'}
+		<div class="mp-field">
+			<span class="mp-label">API dialect</span>
+			<div class="mp-presets">
+				<button type="button" class="ed-btn mp-preset" class:primary={formApiDialect === 'anthropic'} onclick={() => (formApiDialect = 'anthropic')}>Anthropic Messages</button>
+				<button type="button" class="ed-btn mp-preset" class:primary={formApiDialect === 'openai'} onclick={() => (formApiDialect = 'openai')}>OpenAI chat/completions</button>
+			</div>
+			<p class="mp-hint">
+				{#if formApiDialect === 'anthropic'}Requests go to <code>{'{base URL}'}/v1/messages</code> (Anthropic-compatible gateways).{:else}Requests go to <code>{'{base URL}'}/v1/chat/completions</code> (xAI, Groq, vLLM, and other OpenAI-compatible endpoints).{/if}
+			</p>
+		</div>
+	{/if}
 
 	<div class="mp-field">
 		<label class="mp-label" for="mp-token">Auth token</label>

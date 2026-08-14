@@ -166,7 +166,13 @@ def _safe_json(value):
 # 72 (2026-08-13): add pending_wakeups.model TEXT — the scheduling turn's
 #     effective model, replayed as the wake query's model override (wakes used to
 #     fire on the profile default and re-prime the prompt cache).
-SCHEMA_VERSION = 72
+# 73 (2026-08-14): add model_providers.api_dialect TEXT — the wire format a
+#     ``custom`` row's endpoint speaks: 'anthropic' (default when NULL;
+#     Messages at {base_url}/v1/messages, the historic custom-row contract) or
+#     'openai' (chat/completions — xAI-direct / Groq / vLLM). Read by the
+#     harness adapter's leg decision; lands via the always-run guarded ADD
+#     COLUMN in _run_column_migrations.
+SCHEMA_VERSION = 73
 
 
 def _migrate_profiles_to_agents(cursor):
@@ -782,6 +788,16 @@ def _run_column_migrations(cursor):
                     f"ALTER TABLE model_providers ADD COLUMN {_col} {_decl}"
                 )
                 migrations_applied.append(f"model_providers.{_col}")
+
+        # model_providers.api_dialect (2026-08-14): which wire format a
+        # ``custom`` row's endpoint speaks — 'anthropic' (default when NULL;
+        # Anthropic Messages at {base_url}/v1/messages, the historic custom-row
+        # contract) or 'openai' (OpenAI chat/completions, for xAI-direct /
+        # Groq / vLLM style endpoints). Read by the harness adapter's leg
+        # decision; meaningless on non-custom rows.
+        if not column_exists(cursor, "model_providers", "api_dialect"):
+            cursor.execute("ALTER TABLE model_providers ADD COLUMN api_dialect TEXT")
+            migrations_applied.append("model_providers.api_dialect")
 
     # projects.link_group_id (Phase D). Groups same-repo project rows across
     # installs into one logical project on the shared-DB sessions board. The id

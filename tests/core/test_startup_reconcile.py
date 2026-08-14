@@ -338,7 +338,11 @@ def test_schema_version_parity_v51():
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 72 for pending_wakeups.model: the scheduling turn's effective
+    # Bumped to 73 for model_providers.api_dialect: the wire format a custom
+    # row's endpoint speaks — 'anthropic' (default when NULL; Messages at
+    # {base_url}/v1/messages) or 'openai' (chat/completions — xAI-direct /
+    # Groq / vLLM), read by the harness adapter's leg decision. v72 added
+    # pending_wakeups.model: the scheduling turn's effective
     # model, replayed as the wake query's model override so a wake no longer
     # fires on the profile default and re-primes the prompt cache on the wrong
     # model. v71 was the agents unification (ruling A4): ``profiles`` renamed
@@ -374,8 +378,8 @@ def test_schema_version_parity_v51():
     # the Phase-2 turns table; v58 was the Phase-1 deletion (v2_stream forced
     # TRUE + default flipped); v57 added the opt-in flag; v56 added the Phase-0
     # primitives.
-    assert db_version == 72
-    assert pg_version == 72
+    assert db_version == 73
+    assert pg_version == 73
     assert db_version == pg_version
 
 

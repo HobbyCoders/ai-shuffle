@@ -445,6 +445,9 @@ class HarnessAdapter(ProviderAdapter):
             provider_auth_mode = getattr(sdk_options, "aih_provider_auth_mode", None)
             if provider_auth_mode:
                 opts.extra["provider_auth_mode"] = provider_auth_mode
+            provider_dialect = getattr(sdk_options, "aih_provider_dialect", None)
+            if provider_dialect:
+                opts.extra["provider_dialect"] = provider_dialect
         # The app's own session id (``sessions.id``) rides alongside it as
         # ``aih_session_id``. Native legs need it for Task dispatch: the omni
         # session id is a ``ses_...`` handle, not an app session row, and on a
@@ -1451,7 +1454,9 @@ def _native_max_output_tokens(options: SessionOptions) -> Optional[int]:
 # third-party use of subscription tokens, and ``resolve_provider_credentials``
 # raises for kind="anthropic" on such a row.
 def _provider_row_kind(
-    provider_type: Optional[str], auth_mode: Optional[str]
+    provider_type: Optional[str],
+    auth_mode: Optional[str],
+    api_dialect: Optional[str] = None,
 ) -> Optional[str]:
     """Leg kind implied by a ``model_providers`` row's shape, or None.
 
@@ -1462,6 +1467,7 @@ def _provider_row_kind(
 
     ptype = (provider_type or "").strip().lower()
     mode = (auth_mode or "").strip().lower()
+    dialect = (api_dialect or "").strip().lower()
 
     # A ChatGPT/Codex subscription row can wear provider_type "chatgpt" OR
     # "custom" + auth_mode "chatgpt" (mirrors _is_codex_subscription).
@@ -1470,14 +1476,17 @@ def _provider_row_kind(
     if ptype == "openrouter":
         return "openrouter"
     if ptype == "custom":
-        # A "custom" row is an Anthropic-Messages-compatible endpoint by the
-        # app's own contract (the delegated CLI pointed ANTHROPIC_BASE_URL at
-        # it; the catalog reads {base_url}/v1/models) — serve it with the
-        # native Anthropic client aimed at the row's base_url. Before this
-        # branch existed a custom row fell through to the model-string sniff,
-        # and any non-prefixed model id ("grok-4.5") landed on the REAL
-        # Anthropic API with the row's foreign key — an instant, silent 401.
-        return "anthropic"
+        # A "custom" row always runs NATIVELY at the row's base_url; its
+        # ``api_dialect`` picks the wire format. 'openai' → omni's generic
+        # chat/completions client (xAI-direct / Groq / vLLM endpoints).
+        # Default (unset/'anthropic') → the Anthropic Messages client, the
+        # historic custom-row contract (the delegated CLI pointed
+        # ANTHROPIC_BASE_URL at these; the catalog reads {base_url}/v1/models).
+        # Before this branch existed a custom row fell through to the
+        # model-string sniff, and any non-prefixed model id ("grok-4.5")
+        # landed on the REAL Anthropic API with the row's foreign key — an
+        # instant, silent 401.
+        return "openrouter" if dialect == "openai" else "anthropic"
     if ptype == "anthropic":
         # HARD CONSTRAINT: subscription auth stays on the delegated claude CLI.
         return "delegated" if mode in _SUBSCRIPTION_AUTH_MODES else "anthropic"
@@ -1485,7 +1494,8 @@ def _provider_row_kind(
 
 
 def _lookup_provider_row_shape(provider_id: str) -> tuple:
-    """(provider_type, auth_mode) for a provider row; (None, None) on any miss.
+    """(provider_type, auth_mode, api_dialect) for a provider row;
+    (None, None, None) on any miss.
 
     Only reached when a session carries ``extra["provider_id"]`` WITHOUT the
     shape fields ``query_options`` normally stamps alongside it (a hand-built
@@ -1503,10 +1513,10 @@ def _lookup_provider_row_shape(provider_id: str) -> tuple:
             provider_id,
             exc_info=True,
         )
-        return None, None
+        return None, None, None
     if not row:
-        return None, None
-    return row.get("provider_type"), row.get("auth_mode")
+        return None, None, None
+    return row.get("provider_type"), row.get("auth_mode"), row.get("api_dialect")
 
 
 def _decide_provider_kind(options: SessionOptions) -> str:
@@ -1536,9 +1546,12 @@ def _decide_provider_kind(options: SessionOptions) -> str:
     if bound_provider_id:
         provider_type = options.extra.get("provider_type")
         auth_mode = options.extra.get("provider_auth_mode")
+        api_dialect = options.extra.get("provider_dialect")
         if not provider_type:
-            provider_type, auth_mode = _lookup_provider_row_shape(str(bound_provider_id))
-        row_kind = _provider_row_kind(provider_type, auth_mode)
+            provider_type, auth_mode, api_dialect = _lookup_provider_row_shape(
+                str(bound_provider_id)
+            )
+        row_kind = _provider_row_kind(provider_type, auth_mode, api_dialect)
         if row_kind:
             return row_kind
 
@@ -1560,6 +1573,19 @@ def _decide_provider_kind(options: SessionOptions) -> str:
     if "/" in model:  # vendor/model OpenRouter slug, e.g. "meta-llama/llama-3.1-70b"
         return "openrouter"
     return "anthropic"
+
+
+def _chat_completions_url(base: str) -> str:
+    """Endpoint-root → full chat/completions URL.
+
+    Accepts either a bare root ("https://api.x.ai") or a root that already
+    carries the ``/v1`` segment ("https://api.x.ai/v1" — a common way users
+    enter OpenAI-compatible bases); both compose to ``.../v1/chat/completions``.
+    """
+    trimmed = base.rstrip("/")
+    if trimmed.endswith("/v1"):
+        trimmed = trimmed[: -len("/v1")]
+    return trimmed + "/v1/chat/completions"
 
 
 def _require_env_credential(env_var: str, kind: str) -> None:
@@ -1678,7 +1704,20 @@ async def _build_provider_client(
         _require_env_credential("OPENAI_API_KEY", kind)
         return OpenAIResponsesClient(), None
     if kind == "openrouter":
+        # omni's OpenRouterClient is the generic OpenAI chat/completions
+        # client — a row-level base_url redirects it (custom rows with
+        # api_dialect='openai': xAI-direct / Groq / vLLM). For openrouter-type
+        # rows the stored base ("https://openrouter.ai/api") composes to the
+        # client's own default URL, so honoring it is behavior-preserving.
         if creds is not None:
+            if creds.base_url:
+                return (
+                    OpenRouterClient(
+                        api_key=creds.api_key,
+                        base_url=_chat_completions_url(creds.base_url),
+                    ),
+                    None,
+                )
             return OpenRouterClient(api_key=creds.api_key), None
         _require_env_credential("OPENROUTER_API_KEY", kind)
         return OpenRouterClient(), None

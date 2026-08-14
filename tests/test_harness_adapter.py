@@ -686,10 +686,12 @@ def test_provider_kind_short_model_aliases():
 # ─── 4b. Provider-ROW-shape preference (PA13 / W-R4) ─────────────────────────
 
 
-def _bound(model, provider_type, auth_mode=None, provider_id="pid"):
+def _bound(model, provider_type, auth_mode=None, provider_id="pid", api_dialect=None):
     extra = {"provider_id": provider_id, "provider_type": provider_type}
     if auth_mode:
         extra["provider_auth_mode"] = auth_mode
+    if api_dialect:
+        extra["provider_dialect"] = api_dialect
     return SessionOptions(model=model, extra=extra)
 
 
@@ -750,6 +752,38 @@ def test_provider_kind_custom_row_is_the_anthropic_compatible_native_leg():
     assert _decide_provider_kind(_bound("claude-sonnet-4-5", "custom")) == "anthropic"
     # ...except the Codex-subscription shape (custom + chatgpt auth), which is
     # its own leg and is asserted in the row-outranks-sniff test above.
+
+
+def test_provider_kind_custom_row_openai_dialect_is_chat_completions():
+    """api_dialect='openai' flips a custom row onto omni's generic OpenAI
+    chat/completions client (the 'openrouter' kind) at the row's base_url —
+    xAI-direct / Groq / vLLM endpoints. An explicit 'anthropic' (or garbage)
+    keeps the default Messages leg."""
+    assert (
+        _decide_provider_kind(_bound("grok-4.5", "custom", api_dialect="openai"))
+        == "openrouter"
+    )
+    assert (
+        _decide_provider_kind(_bound("grok-4.5", "custom", api_dialect="anthropic"))
+        == "anthropic"
+    )
+    assert (
+        _decide_provider_kind(_bound("grok-4.5", "custom", api_dialect="weird"))
+        == "anthropic"
+    )
+
+
+def test_chat_completions_url_composition():
+    from app.core.provider.harness_adapter import _chat_completions_url
+
+    assert _chat_completions_url("https://api.x.ai") == "https://api.x.ai/v1/chat/completions"
+    assert _chat_completions_url("https://api.x.ai/") == "https://api.x.ai/v1/chat/completions"
+    assert _chat_completions_url("https://api.x.ai/v1") == "https://api.x.ai/v1/chat/completions"
+    # OpenRouter's stored base composes to the client's own default URL.
+    assert (
+        _chat_completions_url("https://openrouter.ai/api")
+        == "https://openrouter.ai/api/v1/chat/completions"
+    )
 
 
 def test_provider_kind_unknown_row_type_falls_back_to_the_sniff():
