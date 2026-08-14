@@ -966,7 +966,42 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			const toolUseId = str(event.tool_use_id);
 			if (!toolUseId) return state;
 			const existing = findByToolId(state.messages, toolUseId);
-			if (!existing) return state; // standalone tool_result is not rendered
+			if (!existing) {
+				// A Task launch that fails before spawning a worker may surface ONLY
+				// as an error/rejection tool.result joined to the card by toolId —
+				// without this belt the card spins forever.
+				const card = findSubagentByTask(state.messages, toolUseId);
+				if (!card || card.agentStatus !== 'running') return state;
+				const preview = str(event.content_preview);
+				let errorText: string | null = event.is_error ? preview : null;
+				const trimmed = preview.trim();
+				if (trimmed.startsWith('{')) {
+					try {
+						const parsed = JSON.parse(trimmed);
+						if (parsed && typeof parsed === 'object' && parsed.ok === false) {
+							errorText = parsed.error != null ? String(parsed.error) : preview;
+						}
+					} catch {
+						/* not JSON — fall back to the is_error verdict above */
+					}
+				}
+				if (errorText === null) return state; // non-failure: settles via its own events
+				const children = (card.agentChildren ?? []).map((c) =>
+					c.streaming ? { ...c, streaming: false } : c
+				);
+				const speculativelySettledCardIds = state.speculativelySettledCardIds.includes(card.id)
+					? state.speculativelySettledCardIds.filter((c) => c !== card.id)
+					: state.speculativelySettledCardIds;
+				return {
+					...state,
+					speculativelySettledCardIds,
+					messages: replaceById(state.messages, card.id, {
+						agentStatus: 'error',
+						agentChildren: children,
+						content: errorText,
+					}),
+				};
+			}
 			const rawResult = str(event.content_preview);
 			// On an API rejection (#612), swap the raw provider error text for a
 			// friendly message when we confidently recognize it; otherwise keep the

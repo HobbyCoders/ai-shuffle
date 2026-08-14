@@ -835,6 +835,52 @@ describe('subagent cards', () => {
 		expect(after.messages.filter((m) => m.type === 'tool_use')).toHaveLength(0);
 	});
 
+	it('a dispatch-rejection tool.result settles the spinning card to error', () => {
+		// The omni Task dispatcher rejects the launch before spawning a worker, so
+		// no terminal subagent event ever arrives — the rejection result joined by
+		// toolId is the only settle signal the card will ever get.
+		const s = fold([
+			ev('subagent.started', { task_id: 'call_1', description: 'bg work' }),
+			ev('tool.result', {
+				tool_use_id: 'call_1',
+				is_error: false,
+				content_preview: '{"ok": false, "error": "Model X not curated."}',
+			}),
+		]);
+		const card = s.messages.find((m) => m.type === 'subagent')!;
+		expect(card.agentStatus).toBe('error');
+		expect(card.content).toBe('Model X not curated.');
+	});
+
+	it('a non-error tool.result leaves the subagent card running', () => {
+		const s = fold([
+			ev('subagent.started', { task_id: 'call_1', description: 'bg work' }),
+			ev('tool.result', { tool_use_id: 'call_1', is_error: false, content_preview: 'launched ok' }),
+		]);
+		const card = s.messages.find((m) => m.type === 'subagent')!;
+		expect(card.agentStatus).toBe('running');
+	});
+
+	it('an is_error tool.result settles the card with the raw preview', () => {
+		const s = fold([
+			ev('subagent.started', { task_id: 'call_1', description: 'bg work' }),
+			ev('tool.result', { tool_use_id: 'call_1', is_error: true, content_preview: 'dispatcher exploded' }),
+		]);
+		const card = s.messages.find((m) => m.type === 'subagent')!;
+		expect(card.agentStatus).toBe('error');
+		expect(card.content).toBe('dispatcher exploded');
+	});
+
+	it('tool.result with neither a tool card nor a subagent card is ignored', () => {
+		const s = fold([
+			ev('subagent.started', { task_id: 'call_1', description: 'bg work' }),
+			ev('tool.result', { tool_use_id: 'ghost', is_error: true, content_preview: 'x' }),
+		]);
+		const card = s.messages.find((m) => m.type === 'subagent')!;
+		expect(card.agentStatus).toBe('running');
+		expect(s.messages.filter((m) => m.type === 'tool_use')).toHaveLength(0);
+	});
+
 	it('input_delta after the subagent card exists does not recreate a placeholder', () => {
 		const s = fold([
 			ev('subagent.started', { task_id: 'toolu-1', description: 'bg work' }),
