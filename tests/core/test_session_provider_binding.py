@@ -15,10 +15,15 @@ Covers:
   carries a provider — the pre-migration / native path;
 - the generation path threads an explicit per-session binding through
   ``build_generation_options`` (binding wins over config.provider; explicit None
-  keeps it native).
+  keeps it native);
+- (PA13 / W-R4) the composer's model override can REBIND the turn's provider: a
+  ``prov:<pid>:<mid>`` composite beats the session binding, a native Claude pick
+  CLEARS it, and an invalid composite fails loudly.
 """
 
 from unittest.mock import patch
+
+import pytest
 
 import app.core.query_options as qo
 from app.core import encryption
@@ -211,3 +216,216 @@ class TestGenerationBinding:
         env = opts.env
         assert env[BASE_URL_KEY] == "https://openrouter.ai/api"
         assert env[API_KEY] == ""
+
+
+# ---------------------------------------------------------------------------
+# PA13 / W-R4 — the composer's model override rebinds the provider
+# ---------------------------------------------------------------------------
+
+
+def _mk_anthropic_provider(provider_id="ap", *, token="ak-secret", models=None):
+    """An Anthropic-API-key provider row (servable), curating claude-* ids."""
+    return db.create_model_provider(
+        provider_id=provider_id,
+        name="Anthropic API",
+        provider_type="anthropic",
+        base_url="https://api.anthropic.com",
+        auth_token=encryption.encrypt_value(token),
+        models=models or [{"id": "claude-sonnet-4-5", "label": "Sonnet 4.5"}],
+        enabled=True,
+    )
+
+
+class TestProviderModelCodec:
+    """``decode_provider_model`` — the backend half of the shared codec."""
+
+    def test_round_trips_a_plain_id(self):
+        assert qo.decode_provider_model("prov:op:gpt-5.6") == ("op", "gpt-5.6")
+
+    def test_model_id_may_contain_slashes_and_colons(self):
+        """Split on the FIRST colon after the prefix only — OpenRouter slugs
+        carry both (`meta-llama/llama-3.1-8b-instruct:free`)."""
+        assert qo.decode_provider_model(
+            "prov:op:meta-llama/llama-3.1-8b-instruct:free"
+        ) == ("op", "meta-llama/llama-3.1-8b-instruct:free")
+
+    def test_non_composites_decode_to_none(self):
+        for value in (
+            None,
+            "",
+            "opus",
+            "claude-sonnet-4-5",
+            "openai/gpt-5.6",
+            "prov:",           # nothing after the prefix
+            "prov:op",         # no separator
+            "prov::gpt-5",     # empty provider id
+            "prov:op:",        # empty model id
+            123,
+        ):
+            assert qo.decode_provider_model(value) is None, value
+
+    def test_is_native_claude_model(self):
+        assert qo.is_native_claude_model("opus") is True
+        assert qo.is_native_claude_model("sonnet[1m]") is True
+        assert qo.is_native_claude_model("claude-sonnet-4-5") is True
+        assert qo.is_native_claude_model("openai/gpt-5.6") is False
+        assert qo.is_native_claude_model("gpt-5") is False
+        assert qo.is_native_claude_model(None) is False
+
+
+class TestCompositeOverrideRebindsProvider:
+    def test_composite_beats_the_session_binding(self, mock_db, tmp_path):
+        """Session bound to 'op' (OpenRouter). A `prov:ap:...` composite override
+        rebinds the turn to 'ap' and uses the DECODED model id."""
+        encryption.set_encryption_key("pw", db)
+        _mk_provider("op", token="gw-secret")
+        _mk_anthropic_provider("ap", token="ak-secret")
+        _mk_profile("prov", {"model": "openai/gpt-5.6", "provider": "op"})
+        db.create_session("s-x", profile_id="prov")
+
+        opts = _build_options(
+            {"id": "prov", "config": {"model": "openai/gpt-5.6", "cwd": str(tmp_path)}},
+            session_id="s-x",
+            overrides={"cwd": str(tmp_path), "model": "prov:ap:claude-sonnet-4-5"},
+        )
+
+        assert opts.model == "claude-sonnet-4-5"
+        assert opts.aih_provider_id == "ap"
+        assert opts.aih_provider_type == "anthropic"
+        assert opts.env[BASE_URL_KEY] == "https://api.anthropic.com"
+        assert opts.env[AUTH_TOKEN_KEY] == "ak-secret"
+
+    def test_composite_binds_a_native_session(self, mock_db, tmp_path):
+        """No binding at all → a composite still sets the provider for the turn."""
+        encryption.set_encryption_key("pw", db)
+        _mk_provider("op", token="gw-secret")
+        _mk_profile("nat", {"model": "opus"})
+        db.create_session("s-nat2", profile_id="nat")
+
+        opts = _build_options(
+            {"id": "nat", "config": {"model": "opus", "cwd": str(tmp_path)}},
+            session_id="s-nat2",
+            overrides={"cwd": str(tmp_path), "model": "prov:op:openai/gpt-5.6"},
+        )
+        assert opts.model == "openai/gpt-5.6"
+        assert opts.aih_provider_id == "op"
+        assert opts.env[BASE_URL_KEY] == "https://openrouter.ai/api"
+
+    def test_openrouter_composite_is_accepted(self, mock_db, tmp_path):
+        """OpenRouter rows fail ``is_provider_servable`` (that predicate gates
+        cross-provider WORKER models), but a MAIN session may bind to any enabled
+        provider — exactly as the profile editor has always allowed."""
+        encryption.set_encryption_key("pw", db)
+        _mk_provider("op", token="gw-secret")
+        _mk_profile("nat", {"model": "opus"})
+        db.create_session("s-or", profile_id="nat")
+
+        opts = _build_options(
+            {"id": "nat", "config": {"model": "opus", "cwd": str(tmp_path)}},
+            session_id="s-or",
+            overrides={"cwd": str(tmp_path), "model": "prov:op:openai/gpt-5.6"},
+        )
+        assert opts.aih_provider_id == "op"
+
+
+class TestNativePickClearsTheBinding:
+    def test_claude_override_clears_a_provider_binding(self, mock_db, tmp_path):
+        """The pre-PA13 `or`-chain could only SET a provider. A native Claude pick
+        on a provider-bound session now resolves the turn back to native."""
+        encryption.set_encryption_key("pw", db)
+        _mk_provider("op", token="gw-secret")
+        _mk_profile("prov", {"model": "openai/gpt-5.6", "provider": "op"})
+        db.create_session("s-clear", profile_id="prov")
+
+        opts = _build_options(
+            {"id": "prov", "config": {"model": "openai/gpt-5.6", "cwd": str(tmp_path)}},
+            session_id="s-clear",
+            overrides={"cwd": str(tmp_path), "model": "opus"},
+        )
+        assert opts.model == "opus"
+        assert opts.aih_provider_id is None
+        assert opts.aih_provider_type is None
+        assert BASE_URL_KEY not in opts.env
+
+    def test_plain_model_of_the_bound_provider_keeps_the_binding(
+        self, mock_db, tmp_path
+    ):
+        """A bare provider model id (today's same-provider hot-swap) is untouched."""
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(
+            "op",
+            token="gw-secret",
+        )
+        _mk_profile("prov", {"model": "openai/gpt-5.6", "provider": "op"})
+        db.create_session("s-keep", profile_id="prov")
+
+        opts = _build_options(
+            {"id": "prov", "config": {"model": "openai/gpt-5.6", "cwd": str(tmp_path)}},
+            session_id="s-keep",
+            overrides={"cwd": str(tmp_path), "model": "openai/gpt-5.6"},
+        )
+        assert opts.aih_provider_id == "op"
+        assert opts.env[BASE_URL_KEY] == "https://openrouter.ai/api"
+
+    def test_claude_id_curated_by_the_bound_provider_keeps_the_binding(
+        self, mock_db, tmp_path
+    ):
+        """An Anthropic-API provider row serves real ``claude-*`` ids. Picking one
+        of ITS curated ids must NOT be read as "go native" — the curated-id
+        exemption keeps the session on its own provider."""
+        encryption.set_encryption_key("pw", db)
+        _mk_anthropic_provider("ap", token="ak-secret")
+        _mk_profile("apx", {"model": "claude-sonnet-4-5", "provider": "ap"})
+        db.create_session("s-ap", profile_id="apx")
+
+        opts = _build_options(
+            {"id": "apx", "config": {"model": "claude-sonnet-4-5", "cwd": str(tmp_path)}},
+            session_id="s-ap",
+            overrides={"cwd": str(tmp_path), "model": "claude-sonnet-4-5"},
+        )
+        assert opts.aih_provider_id == "ap"
+
+    def test_explicit_provider_override_is_never_cleared(self, mock_db, tmp_path):
+        """Internal callers (ProviderAgent workers, generation) pin the provider
+        explicitly — a model pick must not unbind them."""
+        encryption.set_encryption_key("pw", db)
+        _mk_provider("op", token="gw-secret")
+        _mk_profile("nat", {"model": "opus"})
+        db.create_session("s-pin", profile_id="nat")
+
+        opts = _build_options(
+            {"id": "nat", "config": {"model": "opus", "cwd": str(tmp_path)}},
+            session_id="s-pin",
+            overrides={"cwd": str(tmp_path), "model": "opus", "provider": "op"},
+        )
+        assert opts.aih_provider_id == "op"
+
+
+class TestInvalidCompositeIsRejected:
+    """A bad composite raises ``ValueError`` — the channel both query engines
+    already turn into a user-visible ``{"type": "error"}`` frame, instead of
+    shipping a garbage model id upstream and 4xx-ing mid-turn."""
+
+    def _build_with(self, tmp_path, model):
+        return _build_options(
+            {"id": "nat", "config": {"model": "opus", "cwd": str(tmp_path)}},
+            overrides={"cwd": str(tmp_path), "model": model},
+        )
+
+    def test_unknown_provider(self, mock_db, tmp_path):
+        encryption.set_encryption_key("pw", db)
+        with pytest.raises(ValueError, match="does not exist"):
+            self._build_with(tmp_path, "prov:nope:some-model")
+
+    def test_uncurated_model(self, mock_db, tmp_path):
+        encryption.set_encryption_key("pw", db)
+        _mk_provider("op", token="gw-secret")
+        with pytest.raises(ValueError, match="curated"):
+            self._build_with(tmp_path, "prov:op:not-a-curated-model")
+
+    def test_disabled_provider(self, mock_db, tmp_path):
+        encryption.set_encryption_key("pw", db)
+        _mk_provider("op", token="gw-secret")
+        db.update_model_provider("op", enabled=False)
+        with pytest.raises(ValueError, match="disabled"):
+            self._build_with(tmp_path, "prov:op:openai/gpt-5.6")

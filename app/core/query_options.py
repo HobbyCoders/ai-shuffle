@@ -83,6 +83,59 @@ WORKER_DISALLOWED_TOOL = "AskUserQuestion"
 NON_CLAUDE_DISALLOWED_SKILL = "Skill(claude-api)"
 
 
+# ---------------------------------------------------------------------------
+# Provider-model composite codec (`prov:<providerId>:<modelId>`) — PA13
+# ---------------------------------------------------------------------------
+#
+# The frontend counterpart lives in
+# ``frontend/src/lib/constants/models.svelte.ts``
+# (``encodeProviderModel`` / ``decodeProviderModel``). Both the profile editor's
+# ModelPicker and the chat composer's model override emit this shape; only the
+# composer's value reaches here (as ``overrides["model"]``), where the decoded
+# provider id REBINDS the turn's provider.
+
+PROVIDER_MODEL_PREFIX = "prov:"
+
+
+def decode_provider_model(value: Any) -> Optional[tuple]:
+    """Decode ``prov:<providerId>:<modelId>`` → ``(provider_id, model_id)``.
+
+    Returns ``None`` when ``value`` is not a well-formed composite (a plain
+    model alias, a custom id, a non-string, an empty half, …).
+
+    Splits on the FIRST colon after the prefix only: provider model ids
+    routinely contain ``/`` and ``:`` themselves (e.g. OpenRouter's
+    ``meta-llama/llama-3.1-8b-instruct:free``), which a naive ``split(":")``
+    would corrupt.
+    """
+    if not isinstance(value, str) or not value.startswith(PROVIDER_MODEL_PREFIX):
+        return None
+    rest = value[len(PROVIDER_MODEL_PREFIX):]
+    sep = rest.find(":")
+    if sep <= 0:
+        return None
+    provider_id, model_id = rest[:sep], rest[sep + 1:]
+    if not provider_id or not model_id:
+        return None
+    return provider_id, model_id
+
+
+def is_native_claude_model(value: Any) -> bool:
+    """Whether ``value`` names a model the NATIVE/delegated Claude leg serves.
+
+    True for the registry's short aliases (``sonnet``/``opus``/``fable``/
+    ``haiku``, ``[1m]`` variants included) and for raw ``claude-*`` ids. Mirrors
+    the same test ``harness_adapter._decide_provider_kind`` applies to the model
+    string, so "the composer picked a Claude model" and "the leg decision routes
+    it to Claude" can never disagree.
+    """
+    if not isinstance(value, str) or not value:
+        return False
+    from app.core.model_registry import get_model_family
+
+    return get_model_family(value) is not None or value.lower().startswith("claude")
+
+
 # Back-compat aliases for tool names that were renamed. Applied at config-read
 # time only (never migrated in the DB) so saved profiles keep working. The
 # builtin ``PushNotification`` leaf tool was renamed to ``NotifyDevices`` to
@@ -583,6 +636,68 @@ def build_options_from_profile(
     else:
         provider_id = overrides.get("provider") or config.get("provider")
 
+    # ── PA13: the composer's model override may REBIND the provider ─────────
+    #
+    # Until W-R4 the ``or``-chain above could only ever SET a provider, never
+    # clear one, and ``model_to_use`` was taken verbatim — so the composer had to
+    # be locked to the session's own provider (R7). Two override shapes now
+    # re-resolve the binding for THIS turn (stickiness stays client-side, via the
+    # per-session ``modelOverride`` the composer already persists — there is no
+    # ``sessions.provider_id`` rebind):
+    #
+    #   1. a ``prov:<pid>:<mid>`` composite → provider_id = pid (beats the
+    #      session binding), model = mid. Validated against the provider row so
+    #      an unknown/disabled provider or an uncurated model fails LOUDLY here
+    #      (ValueError → a user-visible error frame in both query engines)
+    #      instead of shipping garbage upstream and 4xx-ing mid-turn.
+    #   2. a plain native-Claude pick (registry alias or ``claude-*``) on a
+    #      provider-bound session, where the bound provider does NOT curate that
+    #      id → provider_id = None, i.e. back to the native/delegated Claude leg.
+    #      The curated-id exemption keeps an Anthropic-API provider row that
+    #      serves real ``claude-*`` ids on its own provider (case 3).
+    #
+    #   3. anything else (a bare model id belonging to the bound provider, a
+    #      custom id, no override at all) keeps the pre-PA13 behavior verbatim.
+    #
+    # An explicit ``overrides["provider"]`` (internal callers: ProviderAgent
+    # workers, generation) still pins the provider and is never cleared by a
+    # model pick.
+    _override_model = overrides.get("model")
+    _decoded_model = decode_provider_model(_override_model)
+    _bound_provider_row = None
+    if _decoded_model is not None:
+        _decoded_pid, _decoded_mid = _decoded_model
+        from app.core.provider_agent import validate_provider_model
+
+        _validation = validate_provider_model(
+            _decoded_pid, _decoded_mid, require_servable=False
+        )
+        if not _validation.ok:
+            raise ValueError(
+                _validation.reason
+                or f"Model '{_decoded_mid}' is not available on provider "
+                   f"'{_decoded_pid}'."
+            )
+        provider_id = _decoded_pid
+        model_to_use = _decoded_mid
+        _bound_provider_row = _validation.provider
+    elif _override_model and provider_id and not overrides.get("provider"):
+        _bound_provider_row = database.get_model_provider(
+            provider_id, include_token=False
+        )
+        if is_native_claude_model(_override_model):
+            from app.core.provider_agent import curated_model_ids
+
+            if _override_model not in curated_model_ids(_bound_provider_row):
+                logger.info(
+                    "[Provider] Model override %r clears the session's provider "
+                    "binding %r for this turn (native Claude pick).",
+                    _override_model,
+                    provider_id,
+                )
+                provider_id = None
+                _bound_provider_row = None
+
     # (P2c) The D4-era subagent frontmatter-model resolution died with SDK
     # AgentDefinitions — the Task tool resolves the target agent's own binding
     # at dispatch time instead.
@@ -597,10 +712,15 @@ def build_options_from_profile(
     # and an anthropic-type provider row both serve real ``claude-*`` ids and
     # stay False. Consumed by the ``claude-api`` skill exclusion below.
     is_non_claude_provider_session = False
+    main_provider_row = None
     if provider_id:
-        main_provider_row = database.get_model_provider(
-            provider_id, include_token=False
-        )
+        # Reuse the row the PA13 resolution above already fetched (validated
+        # composite / binding-clear check) rather than hitting the DB twice.
+        main_provider_row = _bound_provider_row
+        if main_provider_row is None:
+            main_provider_row = database.get_model_provider(
+                provider_id, include_token=False
+            )
         is_non_claude_provider_session = (
             (main_provider_row or {}).get("provider_type") != "anthropic"
         )
@@ -1027,6 +1147,16 @@ def build_options_from_profile(
     # instead of failing with a missing-credential 401. Always stamped (None for
     # a native Anthropic session) so the attribute's presence is not a signal.
     options.aih_provider_id = provider_id
+
+    # The bound row's SHAPE, carried alongside the id so the omni
+    # HarnessAdapter can decide the leg from the provider row instead of
+    # sniffing the model string (PA13 / W-R4): a cross-provider pick like
+    # "claude-3.5-sonnet on an OpenRouter row" reads as delegated-Claude to the
+    # sniff, which is the wrong leg entirely. Both are None for a native
+    # session; the adapter falls back to a lookup (then the sniff) when a
+    # provider id arrives without them.
+    options.aih_provider_type = (main_provider_row or {}).get("provider_type")
+    options.aih_provider_auth_mode = (main_provider_row or {}).get("auth_mode")
 
     # Same trick for the app's own session id. The omni HarnessAdapter projects
     # it onto SessionOptions.extra["app_session_id"], which is how a native leg
