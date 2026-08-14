@@ -44,6 +44,14 @@
 	// ── Providers step state ─────────────────────────────────────────────
 	let addProviderOpen = $state(false);
 
+	// PA10: closing the add-provider modal may have added the install's first
+	// credential — refresh the auth status so $anyCredential (and the Connect
+	// step's continue gate) updates immediately.
+	function closeAddProvider() {
+		addProviderOpen = false;
+		auth.checkAuth().catch(() => {});
+	}
+
 	// ── Admin form state ─────────────────────────────────────────────────
 	let username = $state('');
 	let password = $state('');
@@ -319,6 +327,7 @@
 			currentStep = nextStep;
 			if (nextStep === 'cli-auth') {
 				loadCliAuthStatus();
+				providers.ensureLoaded();
 			}
 			if (nextStep === 'providers') {
 				providers.ensureLoaded();
@@ -594,13 +603,9 @@
 						<div class="flex items-center gap-2">
 							<Terminal size={16} strokeWidth={1.5} class="text-foreground" />
 							<span class="text-sm font-semibold text-foreground">Claude Code</span>
-							{#if $anyCredential}
-								<!-- PA10: another usable credential already exists, so this login
-								     is only needed to run claude-subscription agents. -->
-								<span class="text-xs px-2 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/30 font-medium">Recommended</span>
-							{:else}
-								<span class="text-xs px-2 py-0.5 rounded-full bg-destructive/10 text-destructive border border-destructive/30 font-medium">Required</span>
-							{/if}
+							<!-- PA10: the step-level requirement is "any usable credential" (see the
+							     Continue gate below) — claude connect itself is recommended, not required. -->
+							<span class="text-xs px-2 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/30 font-medium">Recommended</span>
 						</div>
 
 						{#if claudeIsAuthenticated}
@@ -664,6 +669,41 @@
 								{claudeError}
 							</div>
 						{/if}
+					</div>
+
+					<div class="border-t border-border"></div>
+
+					<!-- ── Model providers Section (PA10) ───────────────── -->
+					<!-- On a fresh install the Providers step is unreachable until this
+					     step's gate passes, so provider-only users need an entry point HERE. -->
+					<div class="space-y-3">
+						<div class="flex items-center gap-2">
+							<Plus size={16} strokeWidth={1.5} class="text-foreground" />
+							<span class="text-sm font-semibold text-foreground">Model providers</span>
+						</div>
+						<p class="text-xs text-muted-foreground">
+							Prefer OpenAI, OpenRouter, or an API key? Add a model provider — you can finish setup without a Claude login.
+						</p>
+
+						{#if providers.current.providers.length > 0}
+							<div class="space-y-2">
+								{#each providers.current.providers as provider (provider.id)}
+									<div class="flex items-center justify-between gap-2 bg-muted/30 border border-border rounded-lg px-3 py-2">
+										<span class="text-sm text-foreground truncate">{provider.name}</span>
+										<span class="text-xs text-muted-foreground flex-shrink-0">{provider.provider_type}</span>
+									</div>
+								{/each}
+							</div>
+						{/if}
+
+						<button
+							type="button"
+							onclick={() => (addProviderOpen = true)}
+							class="btn btn-secondary w-full py-2.5 text-sm flex items-center justify-center gap-2"
+						>
+							<Plus size={16} strokeWidth={1.5} />
+							Add a model provider
+						</button>
 					</div>
 
 					<div class="border-t border-border"></div>
@@ -865,10 +905,10 @@
 						</div>
 					</div>
 				</div>
+			{/if}
 
-				{#if addProviderOpen}
-					<AddProviderModal onClose={() => (addProviderOpen = false)} />
-				{/if}
+			{#if addProviderOpen}
+				<AddProviderModal onClose={closeAddProvider} />
 			{/if}
 		{/if}
 	</div>
