@@ -17,6 +17,7 @@ All public symbols from those modules are re-exported here for backward
 compatibility.
 """
 
+import json
 import logging
 import os
 import re
@@ -427,6 +428,36 @@ def _looks_like_subagent_launch_ack(output: Any) -> bool:
     text = output if isinstance(output, str) else str(output or "")
     low = text.lower()
     return any(phrase in low for phrase in _SUBAGENT_LAUNCH_ACK_PHRASES)
+
+
+def _task_launch_failure_error(output: Any, is_error: bool) -> Optional[str]:
+    """Did this Task ToolResult report a launch that DIED before spawning a worker?
+
+    The omni Task dispatcher (``app/core/task_dispatch.py`` ``dispatch_task_tool``)
+    returns ``{"ok": false, "error": ...}`` when it rejects a launch before any
+    worker exists (e.g. a model outside the provider's curated list). That — like
+    an ``is_error`` ToolResult — is POSITIVE evidence the launch is dead: no
+    TaskStarted and no terminal notification will ever follow. So the card must
+    settle to error right here at result time instead of deferring to the
+    end-of-turn flush, which an interrupt/restart mid-turn skips entirely,
+    leaving the card spinning forever on live AND on every replay.
+
+    Returns the error text to surface on the card, or None when this result is
+    not a launch failure.
+    """
+    text = output if isinstance(output, str) else str(output or "")
+    if is_error:
+        return text.strip() or "Task launch failed."
+    s = text.strip()
+    if not s.startswith("{"):
+        return None
+    try:
+        payload = json.loads(s)
+    except Exception:
+        return None
+    if isinstance(payload, dict) and payload.get("ok") is False:
+        return str(payload.get("error") or s)
+    return None
 
 
 def _should_defer_subagent_done(
@@ -3246,8 +3277,17 @@ async def _stream_to_websocket_impl(
                             # #660 defer-don't-terminate gate: emit ONLY on positive
                             # foreground evidence; DEFER when ambiguous (a reworded ACK
                             # no longer fires a premature subagent_done).
-                            _decision = _should_defer_subagent_done(
-                                session_id, tool_use_id, task_info, output
+                            # A launch-failure result (dispatch rejection / is_error) is
+                            # positive terminal evidence — nothing spawned — so it settles
+                            # immediately and is exempt from the defer policy.
+                            _launch_error = _task_launch_failure_error(
+                                output, bool(getattr(block, 'is_error', False))
+                            )
+                            _decision = (
+                                "emit" if _launch_error is not None
+                                else _should_defer_subagent_done(
+                                    session_id, tool_use_id, task_info, output
+                                )
                             )
                             if _decision == "emit":
                                 yield {
@@ -3255,8 +3295,8 @@ async def _stream_to_websocket_impl(
                                     "tool_id": tool_use_id,
                                     "agent_id": tool_use_id,  # Use tool_id as agent_id
                                     "agent_type": task_info.get("agent_type", "unknown"),
-                                    "result": output,
-                                    "is_error": getattr(block, 'is_error', False)
+                                    "result": _launch_error if _launch_error is not None else output,
+                                    "is_error": True if _launch_error is not None else getattr(block, 'is_error', False)
                                 }
                                 # Clean up tracking
                                 del task_tool_uses[tool_use_id]
@@ -3555,8 +3595,17 @@ async def _stream_to_websocket_impl(
                             # tracking, or the node renders "completed / no activity".
                             # #660 defer-don't-terminate gate (UserMessage lane): emit
                             # ONLY on positive foreground evidence; DEFER when ambiguous.
-                            _decision = _should_defer_subagent_done(
-                                session_id, tool_use_id, task_info, output
+                            # A launch-failure result (dispatch rejection / is_error) is
+                            # positive terminal evidence — nothing spawned — so it settles
+                            # immediately and is exempt from the defer policy.
+                            _launch_error = _task_launch_failure_error(
+                                output, bool(block.is_error)
+                            )
+                            _decision = (
+                                "emit" if _launch_error is not None
+                                else _should_defer_subagent_done(
+                                    session_id, tool_use_id, task_info, output
+                                )
                             )
                             if _decision == "emit":
                                 yield {
@@ -3564,8 +3613,8 @@ async def _stream_to_websocket_impl(
                                     "tool_id": tool_use_id,
                                     "agent_id": tool_use_id,  # Use tool_id as agent_id
                                     "agent_type": task_info.get("agent_type", "unknown"),
-                                    "result": output,
-                                    "is_error": block.is_error
+                                    "result": _launch_error if _launch_error is not None else output,
+                                    "is_error": True if _launch_error is not None else block.is_error
                                 }
                                 # Clean up tracking
                                 del task_tool_uses[tool_use_id]

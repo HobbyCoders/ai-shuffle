@@ -292,3 +292,48 @@ class TestShouldDeferSubagentDone:
         assert decision == "defer"
         assert info["run_in_background"] is False
         assert task_registry.was_background_launch("s1", "tu-1") is False
+
+
+# =============================================================================
+# _task_launch_failure_error — dispatch rejections settle immediately
+# =============================================================================
+
+from app.core.query_engine import _task_launch_failure_error  # noqa: E402
+
+
+class TestTaskLaunchFailureError:
+    """A Task launch that dies before a worker spawns is positive terminal
+    evidence — the classifier must recognise it so the card settles at result
+    time instead of parking on the end-of-turn flush (which an interrupt skips,
+    leaving the card spinning forever)."""
+
+    def test_rejection_json_returns_error_text(self):
+        out = ('{"ok": false, "error": "Model \'sonnet\' is not in provider '
+               '\'ChatGPT\'\'s curated model list."}')
+        assert _task_launch_failure_error(out, False) == (
+            "Model 'sonnet' is not in provider 'ChatGPT''s curated model list."
+        )
+
+    def test_rejection_json_without_error_field_returns_raw(self):
+        out = '{"ok": false}'
+        assert _task_launch_failure_error(out, False) == out
+
+    def test_successful_dispatch_is_not_a_failure(self):
+        assert _task_launch_failure_error('{"ok": true, "task_id": "t1"}', False) is None
+
+    def test_plain_prose_result_is_not_a_failure(self):
+        assert _task_launch_failure_error("Here is the full report.", False) is None
+
+    def test_malformed_json_is_not_a_failure(self):
+        assert _task_launch_failure_error('{"ok": false,', False) is None
+
+    def test_is_error_returns_the_text(self):
+        assert _task_launch_failure_error("boom", True) == "boom"
+
+    def test_is_error_with_empty_output_falls_back(self):
+        assert _task_launch_failure_error("", True) == "Task launch failed."
+
+    def test_non_str_output_does_not_raise(self):
+        # A dict coerced through str() is not JSON (single quotes) — the sniffer
+        # must degrade quietly rather than blow up the stream.
+        assert _task_launch_failure_error({"ok": False}, False) is None

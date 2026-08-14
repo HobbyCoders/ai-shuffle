@@ -125,6 +125,25 @@ def _is_background_subagent_ack(task_info: Dict[str, Any], output: str) -> bool:
     return any(p in text for p in _SUBAGENT_BG_ACK_PHRASES)
 
 
+def _is_task_launch_rejection(output: Any) -> bool:
+    """True if a Task tool_result is a dispatcher rejection (``{"ok": false, ...}``).
+
+    The launch died before a worker existed, so no terminal <task-notification>
+    will ever arrive — the card must replay as 'error', not 'completed'. Mirrors
+    ``_task_launch_failure_error`` in query_engine.py (the two files deliberately
+    mirror sniffers rather than import each other — see the ACK-sniff mirror).
+    """
+    text = output if isinstance(output, str) else str(output or "")
+    s = text.strip()
+    if not s.startswith("{"):
+        return False
+    try:
+        payload = json.loads(s)
+    except Exception:
+        return False
+    return isinstance(payload, dict) and payload.get("ok") is False
+
+
 def _extract_task_notification_field(content: str, tag: str) -> Optional[str]:
     """Pull a single ``<tag>value</tag>`` field out of a task-notification body."""
     import re
@@ -1359,6 +1378,10 @@ def _transform_entries(
                                     msg = messages[msg_idx]
                                     msg["content"] = output[:2000] if output else ""
                                     if is_error:
+                                        msg["agentStatus"] = "error"
+                                    elif _is_task_launch_rejection(output):
+                                        # Dispatcher rejected the launch before spawning
+                                        # a worker — terminal, never an ACK.
                                         msg["agentStatus"] = "error"
                                     elif _is_background_subagent_ack(_task_info, output):
                                         # Backgrounded sub-agent still running — this
