@@ -2191,3 +2191,67 @@ async def test_connect_with_sdk_options_projects_the_app_session_id(monkeypatch)
         )
     )
     assert adapter._options.extra["app_session_id"] == "app-sess-4"
+
+
+@pytest.mark.asyncio
+async def test_effort_reaches_the_delegated_loop(monkeypatch):
+    """Profile/override effort lands on DelegatedLoop(effort=...) → --effort."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+    monkeypatch.setattr(
+        HarnessAdapter, "_build_store", staticmethod(lambda _o: MemoryStore())
+    )
+
+    await ha.HarnessAdapter().connect(
+        SessionOptions(model="claude-sonnet-4-5", effort="xhigh")
+    )
+    assert _CapturingLoop.captured["effort"] == "xhigh"
+
+
+@pytest.mark.asyncio
+async def test_effort_reaches_the_native_loop(monkeypatch, tmp_path):
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+    monkeypatch.setattr(
+        HarnessAdapter, "_build_store", staticmethod(lambda _o: MemoryStore())
+    )
+
+    await ha.HarnessAdapter().connect(
+        SessionOptions(model="gpt-4o", cwd=str(tmp_path), effort="max")
+    )
+    assert _CapturingLoop.captured["effort"] == "max"
+
+
+@pytest.mark.asyncio
+async def test_junk_effort_is_dropped(monkeypatch):
+    """An unrecognized effort value must not reach the engine (it would 400
+    the provider request or fail the CLI spawn)."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+    monkeypatch.setattr(
+        HarnessAdapter, "_build_store", staticmethod(lambda _o: MemoryStore())
+    )
+
+    await ha.HarnessAdapter().connect(
+        SessionOptions(model="claude-sonnet-4-5", effort="turbo")
+    )
+    assert _CapturingLoop.captured["effort"] is None
+
+
+def test_effort_change_requires_reconnect():
+    adapter = HarnessAdapter()
+    adapter._options = SessionOptions(model="claude-sonnet-4-5", effort="high")
+    assert adapter.requires_reconnect(
+        SessionOptions(model="claude-sonnet-4-5", effort="low")
+    )
+    assert not adapter.requires_reconnect(
+        SessionOptions(model="claude-sonnet-4-5", effort="high")
+    )
+    # None means "no override" — keeps the old effort, no reconnect
+    assert not adapter.requires_reconnect(
+        SessionOptions(model="claude-sonnet-4-5")
+    )

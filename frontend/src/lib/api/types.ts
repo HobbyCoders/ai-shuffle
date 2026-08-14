@@ -17,17 +17,19 @@ export interface AuthStatus {
 }
 
 // Profile types — omni harness options only. SDK-era keys (thinking_mode,
-// setting_sources, max_turns, max_buffer_size, user, strict_mcp_config, …)
-// were dropped from the editor; the backend tolerates them on old rows but
-// the omni harness ignores them.
+// setting_sources, max_buffer_size, user, strict_mcp_config, …) were dropped
+// from the editor; the backend tolerates them on old rows but the omni
+// harness ignores them. effort and max_turns ARE honored (adapter maps them
+// onto --effort / provider effort params and the per-turn model-call cap).
 export interface ProfileConfig {
 	model?: string;
 	allowed_tools?: string[];
 	disallowed_tools?: string[];
 	permission_mode?: string;
+	effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';  // Reasoning depth — delegated CLI --effort / native provider effort param; chat can override per-turn
+	max_turns?: number;  // Per-turn model-call cap (native legs → omni max_model_calls_per_turn)
 	include_partial_messages?: boolean;
 	enable_file_checkpointing?: boolean;  // LEGACY (SDK-era): still read by chat rewind gating for old rows; no longer written
-	effort?: 'low' | 'medium' | 'high' | 'max';  // LEGACY (SDK-era): still read to seed the chat effort override for old rows; no longer written
 	ai_tools?: Record<string, boolean>;  // AI tool toggles (image_generation, video_generation, etc.)
 	enabled_agents?: string[];  // Optional invoke allowlist: agents this agent may dispatch via the Task tool; empty/unset = any
 	cwd?: string;  // Working directory override

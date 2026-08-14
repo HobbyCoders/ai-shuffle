@@ -66,11 +66,16 @@ HONORED:
     ToolRegistry with per-tool risk maps (see omni_tool_bridge.
     register_recorded_sdk_servers; tools recorded by sdk_compat.patch_sdk_server).
 
+  * ``effort``               → delegated: CLI ``--effort``; native: omni
+    serializers map it per provider (Anthropic ``output_config.effort``
+    verbatim, OpenAI-shaped ``reasoning.effort`` with xhigh/max clamped to
+    high). Validated app-side (``_valid_effort``); changes force reconnect.
+
 DEGRADED / NOT YET HONORED (documented gaps — mechanical follow-up):
   * ``allowed_tools`` / ``disallowed_tools`` — the app's SDK allow/deny lists
     are not auto-translated to registry filtering yet.
   * ``plugins`` — no omni equivalent.
-  * ``thinking`` / ``effort`` — omni manages thinking via provider caps, not passed through.
+  * ``thinking`` — omni manages thinking via provider caps, not passed through.
   * ``hooks`` / ``include_hook_events`` — omni has its own HookBus; app SDK hooks not wired.
   * ``agents`` (subagents) — not configured on the omni engine here.
   * ``betas`` / ``extra_args`` / ``setting_sources`` — SDK/CLI-specific, ignored.
@@ -273,6 +278,9 @@ class HarnessAdapter(ProviderAdapter):
                 cwd=options.cwd,
                 env=options.env,
                 add_dirs=list(options.add_dirs) if options.add_dirs else None,
+                # Reasoning depth (profile config or chat override) → CLI
+                # --effort. Validated app-side to the CLI's vocabulary.
+                effort=_valid_effort(getattr(options, "effort", None)),
                 # Ruling A6: the CLI's native subagent tools are BANNED — the
                 # app's Task tool (mcp__builtins__Task here) is the one
                 # orchestration surface. Profile-level disallows ride along.
@@ -338,6 +346,9 @@ class HarnessAdapter(ProviderAdapter):
                 provider=provider_client,
                 store=self._store,
                 model=options.model,
+                # Reasoning depth: omni's serializers map this per provider
+                # (Anthropic output_config.effort; OpenAI-shaped reasoning.effort).
+                effort=_valid_effort(getattr(options, "effort", None)),
                 **native_caps,
                 # Native legs have no Claude Code preset — they always run the
                 # omni-compiled prompt: the profile's configured prompt as the
@@ -426,6 +437,10 @@ class HarnessAdapter(ProviderAdapter):
             # Profile ``max_turns`` (query_options puts it on the SDK options).
             # Native legs map it onto omni's per-turn model-call budget.
             max_turns=getattr(sdk_options, "max_turns", None),
+            # Reasoning depth (profile config or chat override, resolved by
+            # query_options). Delegated leg → --effort; native legs → the
+            # provider's effort/reasoning param via omni's serializers.
+            effort=getattr(sdk_options, "effort", None),
         )
         # The session's bound model provider (``sessions.provider_id``) rides on
         # the SDK options object as ``aih_provider_id`` (stamped by
@@ -832,6 +847,12 @@ class HarnessAdapter(ProviderAdapter):
         if (old.plugins or []) != (new_options.plugins or []):
             return True
         if (old.tools or []) != (new_options.tools or []):
+            return True
+        # Effort is baked into the engine at construction (NativeLoop request
+        # builder / DelegatedLoop argv), so a change needs a rebuild.
+        if _valid_effort(old.effort) != _valid_effort(
+            new_options.effort if new_options.effort is not None else old.effort
+        ):
             return True
         # Resolved provider binding (PA13 / W-R4) — mirrors
         # ``session_pool.requires_reconnect``. The engine and its credentials are
@@ -1406,6 +1427,23 @@ def _normalize_mcp_config_for_omni(name: str, config: Any) -> Optional[Dict[str,
         config.get("type"),
     )
     return config
+
+
+_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
+
+
+def _valid_effort(value: Any) -> Optional[str]:
+    """``value`` when it is a recognized effort level, else None.
+
+    Guards the engine constructors against junk config values — an
+    unrecognized level would 400 the provider request (native) or fail the
+    CLI spawn (delegated), so it is dropped rather than forwarded.
+    """
+    if isinstance(value, str) and value in _EFFORT_LEVELS:
+        return value
+    if value is not None:
+        logger.warning("[HarnessAdapter] ignoring unrecognized effort=%r", value)
+    return None
 
 
 def _positive_int(value: Any) -> Optional[int]:
