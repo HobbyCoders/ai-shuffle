@@ -181,6 +181,7 @@ export type CommandId14 = string | null;
 export type CreatedAt14 = string;
 export type Description = string | null;
 export type Id14 = string;
+export type LaunchToolUseId = string | null;
 export type PromptPreview1 = string | null;
 export type RunId14 = string | null;
 export type Seq14 = number;
@@ -546,6 +547,7 @@ export interface SubagentStarted {
   created_at: CreatedAt14;
   description?: Description;
   id: Id14;
+  launch_tool_use_id?: LaunchToolUseId;
   prompt_preview?: PromptPreview1;
   run_id?: RunId14;
   seq: Seq14;

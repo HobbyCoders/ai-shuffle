@@ -303,6 +303,35 @@ def test_reap_requeues_user_and_queue_aborts_others(mock_db):
     assert aborted["stop_reason"] == "lease_expired"
 
 
+def test_reap_aborts_interrupted_user_turns_instead_of_requeueing(mock_db):
+    """A dead-lease turn the user asked to STOP must never be retried.
+
+    Requeueing an ``interrupting``/``draining`` user turn re-ran the very
+    prompt the user interrupted — the message re-appeared in the transcript
+    and its Task workers re-spawned on a session the UI showed as stopped
+    (the omni-leg interrupt-replay bug). Only ``running`` user/queue turns
+    (a genuine runner crash) are retried.
+    """
+    ti = turns.enqueue_turn("sInt", "user")
+    run_dead = runs.claim_run("sInt", "runner", -1)
+    turns.start_turn(ti["id"], run_id=run_dead["id"])
+    assert turns.interrupt_turn("sInt", "stop") is not None
+
+    td = turns.enqueue_turn("sDrain", "user")
+    run_dead2 = runs.claim_run("sDrain", "runner", -1)
+    turns.start_turn(td["id"], run_id=run_dead2["id"])
+    turns.interrupt_turn("sDrain", "stop")
+    turns.escalate_to_draining(td["id"])
+
+    reaped = turns.reap_expired()
+    reaped_ids = {r["id"] for r in reaped}
+    assert ti["id"] in reaped_ids and td["id"] in reaped_ids
+    for tid in (ti["id"], td["id"]):
+        row = turns.get_turn(tid)
+        assert row["state"] == "aborted"
+        assert row["stop_reason"] == "lease_expired"
+
+
 def test_reap_leaves_live_turn_with_valid_lease_alone(mock_db):
     t = turns.enqueue_turn("sLive", "user")
     run_live = runs.claim_run("sLive", "runner", 60)  # healthy lease

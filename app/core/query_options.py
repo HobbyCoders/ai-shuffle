@@ -1157,6 +1157,9 @@ def build_options_from_profile(
     # provider id arrives without them.
     options.aih_provider_type = (main_provider_row or {}).get("provider_type")
     options.aih_provider_auth_mode = (main_provider_row or {}).get("auth_mode")
+    # A custom row's wire format ('anthropic' default | 'openai') — decides
+    # which native client serves it. None everywhere else.
+    options.aih_provider_dialect = (main_provider_row or {}).get("api_dialect")
 
     # Same trick for the app's own session id. The omni HarnessAdapter projects
     # it onto SessionOptions.extra["app_session_id"], which is how a native leg

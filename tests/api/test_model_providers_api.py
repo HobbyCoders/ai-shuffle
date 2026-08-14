@@ -86,6 +86,40 @@ class TestCreate:
         assert body["models"] == []
         assert body["extra_env"] == {}
 
+    def test_create_and_update_api_dialect(self, authenticated_client, mock_db):
+        """Custom rows round-trip api_dialect ('anthropic'|'openai'); bad
+        values 400; absent stays null (the anthropic default)."""
+        resp = authenticated_client.post(ROOT, json={
+            "name": "xAI",
+            "provider_type": "custom",
+            "base_url": "https://api.x.ai",
+            "api_dialect": "openai",
+        })
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["api_dialect"] == "openai"
+        pid = body["id"]
+
+        resp = authenticated_client.patch(f"{ROOT}/{pid}", json={"api_dialect": "anthropic"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["api_dialect"] == "anthropic"
+
+        resp = authenticated_client.post(ROOT, json={
+            "name": "Bad dialect",
+            "provider_type": "custom",
+            "base_url": "https://gw.example",
+            "api_dialect": "bogus",
+        })
+        assert resp.status_code == 400
+
+        resp = authenticated_client.post(ROOT, json={
+            "name": "Default dialect",
+            "provider_type": "custom",
+            "base_url": "https://gw.example/api",
+        })
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["api_dialect"] is None
+
     @pytest.mark.parametrize("provider_type,base_url", [
         ("openai", "https://api.openai.com/v1"),
         ("chatgpt", "https://chatgpt.com/backend-api/codex"),

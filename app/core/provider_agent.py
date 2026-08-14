@@ -710,6 +710,7 @@ async def dispatch_worker(
     tool_use_id: Optional[str] = None,
     background: bool = False,
     context_session_id: Optional[str] = None,
+    launch_tool_use_id: Optional[str] = None,
 ) -> WorkerOutcome:
     """Run ``prompt`` in a fresh session bound to ``provider_id``/``model_id``.
 
@@ -844,6 +845,9 @@ async def dispatch_worker(
         provider_id=provider_id,
         model_id=model_id,
         prompt=prompt,
+        # The model's Task tool_use_id (omni native leg) — display-only: lets
+        # the card absorb the launch tool_use block. Join keys stay task_id.
+        launch_tool_use_id=launch_tool_use_id,
     )
 
     # Turn-lifetime safety (P3-A4). The supervisor is the ONLY thing that knows

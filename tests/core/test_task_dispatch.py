@@ -162,6 +162,32 @@ def test_background_mode_returns_immediately(agents):
     assert started.get("background") is True
 
 
+def test_launch_tool_use_id_threads_to_the_worker(agents):
+    """The omni dispatcher reads the engine-stamped ctx.extra['tool_use_id'] and
+    it reaches dispatch_worker as launch_tool_use_id — what lets the worker
+    card absorb the launch tool_use block instead of the UI rendering both."""
+    from types import SimpleNamespace
+
+    _mk_session(agents, "s-tuid", "root-agent")
+    seen = {}
+
+    async def fake_worker(**kwargs):
+        seen.update(kwargs)
+        return WorkerOutcome(ok=True, session_id="w-tuid", report="r")
+
+    dispatcher = td.make_omni_dispatcher("s-tuid")
+    ctx = SimpleNamespace(extra={"tool_use_id": "tu-99"})
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        asyncio.run(dispatcher({"agent": "helper", "prompt": "go"}, ctx))
+    assert seen["launch_tool_use_id"] == "tu-99"
+
+    # Without the stamp (delegated leg's bridged tool) it degrades to None.
+    seen.clear()
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        asyncio.run(dispatcher({"agent": "helper", "prompt": "go"}, SimpleNamespace(extra={})))
+    assert seen["launch_tool_use_id"] is None
+
+
 def test_root_routing_passes_root_as_parent(agents, monkeypatch):
     """Nested dispatch registers the worker under the ROOT session while
     inheriting context from the direct caller."""

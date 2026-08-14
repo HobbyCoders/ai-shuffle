@@ -218,6 +218,7 @@ async def dispatch_task_tool(
     *,
     caller_session_id: str,
     caller_profile_id: Optional[str] = None,
+    launch_tool_use_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Handle one ``Task`` tool call. Never raises — returns a payload dict
     with ``ok`` plus either a report/worker id or an ``error``."""
@@ -299,6 +300,9 @@ async def dispatch_task_tool(
         model_id=model_override,
         prompt=prompt,
         label=label,
+        # The model's Task tool_use_id (omni native leg) — lets the worker
+        # card absorb the launch tool_use block instead of rendering both.
+        launch_tool_use_id=launch_tool_use_id,
     )
 
     if mode == "background":
@@ -406,10 +410,21 @@ def make_omni_dispatcher(
                     "request; retry once the session is fully registered."
                 ),
             })
+        # Stamped by the engine for the duration of this dispatch (NativeLoop
+        # sets ctx.extra["tool_use_id"] per tool call; dispatches are
+        # sequential). Absent on the delegated leg's bridged mcp tool.
+        launch_tool_use_id = None
+        try:
+            candidate = (getattr(ctx, "extra", None) or {}).get("tool_use_id")
+            if isinstance(candidate, str) and candidate:
+                launch_tool_use_id = candidate
+        except Exception:  # noqa: BLE001 — display-only nicety
+            launch_tool_use_id = None
         payload = await dispatch_task_tool(
             input,
             caller_session_id=str(caller_session_id),
             caller_profile_id=profile_id,
+            launch_tool_use_id=launch_tool_use_id,
         )
         return json.dumps(payload, default=str)
 

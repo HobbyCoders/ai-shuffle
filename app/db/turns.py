@@ -9,7 +9,9 @@ through::
               running --------------------------> parked
               parked ---------------------------> completed
                   (settle_parked_turns — stale-park settlement / CLI-wake at rest)
-              running/interrupting/draining ----> requeued (back to queued)
+              running ---------------------------> requeued (back to queued)
+                  (dead-lease crash recovery; interrupting/draining dead-lease
+                   turns are aborted instead — see ``reap_expired``)
 
 At most one turn per session may occupy a *live* state
 (``running``/``interrupting``/``draining``) at a time — enforced by the partial
@@ -525,10 +527,14 @@ def reap_expired() -> List[Dict[str, Any]]:
     """Resolve every live turn whose run lease is dead (run missing, not active,
     or lapsed) — the crash/kill recovery sweep.
 
-    A dead-lease live turn is resolved by its ``source``:
+    A dead-lease live turn is resolved by its ``source`` and ``state``:
 
-    * ``user`` / ``queue`` turns are **re-queued** at their original position so
-      the work is retried (front of queue), and
+    * ``running`` ``user`` / ``queue`` turns are **re-queued** at their original
+      position so the crashed work is retried (front of queue);
+    * ``interrupting`` / ``draining`` turns are **aborted** regardless of
+      source: the user already asked this turn to stop, so retrying it would
+      re-run the very prompt they interrupted (replayed user message,
+      re-spawned Task workers) on a session the UI shows as stopped;
     * every other source is **aborted** (``stop_reason='lease_expired'``).
 
     Returns the list of turn rows as they were BEFORE resolution (so a caller
@@ -544,7 +550,7 @@ def reap_expired() -> List[Dict[str, Any]]:
         )
         dead = _rows(cursor.fetchall())
         for turn in dead:
-            if turn["source"] in ("user", "queue"):
+            if turn["state"] == "running" and turn["source"] in ("user", "queue"):
                 cursor.execute(
                     "UPDATE turns SET state='queued', run_id=NULL, instance_id=NULL, "
                     "started_at=NULL, interrupt_mode=NULL, stop_background=FALSE "

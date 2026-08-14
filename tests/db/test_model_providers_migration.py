@@ -68,6 +68,7 @@ def test_fresh_db_has_model_providers_table_index_and_version(mock_db):
     cols = _column_names(conn, "model_providers")
     for col in _CODEX_COLUMNS:
         assert col in cols, col
+    assert "api_dialect" in cols  # 2026-08-14 custom-row dialect column
     assert _schema_version(conn) == database.SCHEMA_VERSION
 
 
@@ -94,6 +95,7 @@ def test_init_upgrades_pre_v64_db(mock_db):
     cols = _column_names(conn, "model_providers")
     for col in _CODEX_COLUMNS:
         assert col in cols, col
+    assert "api_dialect" in cols  # 2026-08-14 custom-row dialect column
     assert _schema_version(conn) == database.SCHEMA_VERSION
 
 
@@ -147,6 +149,7 @@ def test_init_adds_codex_columns_to_existing_v64_table(mock_db):
     cols = _column_names(conn, "model_providers")
     for col in _CODEX_COLUMNS:
         assert col in cols, col
+    assert "api_dialect" in cols  # 2026-08-14 custom-row dialect column
     assert _schema_version(conn) == database.SCHEMA_VERSION
     # Existing row survived the ALTERs (new columns default NULL/FALSE).
     row = conn.execute(
