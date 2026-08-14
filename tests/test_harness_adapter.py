@@ -1803,6 +1803,44 @@ async def test_build_registry_normalizes_before_connect_mcp(monkeypatch):
     assert servers["remote"] == {"type": "http", "url": "https://example.test/mcp"}
 
 
+@pytest.mark.asyncio
+async def test_delegated_leg_never_connects_external_mcp(monkeypatch):
+    """Ruling PA5: the delegated leg passes external MCP servers to the claude
+    CLI via --mcp-config, and the CLI spawns them inside its child process.
+    connect_mcp'ing them in-process too would run every external server TWICE
+    per session — the in-app connection is never read on that leg (the bundled
+    socket only serves inproc/builtin specs)."""
+    import app.core.provider.harness_adapter as ha
+
+    calls: list = []
+
+    async def fake_connect_mcp(self, name, config):
+        calls.append(name)
+        return []
+
+    monkeypatch.setattr(ha.ToolRegistry, "connect_mcp", fake_connect_mcp)
+
+    servers = {
+        "local": {"command": "node", "args": ["s.js"]},
+        "remote": {"type": "http", "url": "https://example.test/mcp"},
+    }
+    adapter = ha.HarnessAdapter()
+    registry = await adapter._build_registry(
+        SessionOptions(model="fable", mcp_servers=servers), native=False
+    )
+    assert calls == []
+    # Still a registry, not None: DelegatedLoop._start_bundled_server bails on
+    # a None registry BEFORE writing --mcp-config, which would silently drop
+    # the external servers from the CLI child too.
+    assert registry is not None
+
+    # Same servers on a native leg DO connect in-process (the only path there).
+    await adapter._build_registry(
+        SessionOptions(model="gpt-4o", mcp_servers=servers), native=True
+    )
+    assert set(calls) == {"local", "remote"}
+
+
 async def _connect_capturing_native(monkeypatch, tmp_path, **option_kwargs):
     """connect() a native leg whose NativeLoop kwargs are captured."""
     import app.core.provider.harness_adapter as ha
