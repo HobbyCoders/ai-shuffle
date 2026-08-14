@@ -1199,6 +1199,21 @@ class TestBackgroundedSubagentStatus:
         ])
         assert subs[0]["agentStatus"] == "completed"
 
+    def test_dispatch_rejection_marks_error(self):
+        """A non-is_error ok:false dispatcher rejection is terminal → 'error'.
+
+        The launch never spawned a worker, so no <task-notification> follows —
+        without this the card replays 'completed' (or spins forever live).
+        """
+        subs = self._parse([
+            self._task_use(run_in_background=False),
+            {"type": "user", "uuid": "rej-res",
+             "message": {"role": "user", "content": [
+                 {"type": "tool_result", "tool_use_id": "task-bg-1",
+                  "content": '{"ok": false, "error": "Model \'sonnet\' is not curated."}'}]}},
+        ])
+        assert subs[0]["agentStatus"] == "error"
+
 
 class TestTaskNotificationEnrichment:
     """`_apply_task_notification_status` recovers usage + result on reload.
