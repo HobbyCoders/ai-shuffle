@@ -16,35 +16,30 @@ export interface AuthStatus {
 	username: string | null;
 }
 
-// Profile types
+// Profile types — omni harness options only. SDK-era keys (thinking_mode,
+// setting_sources, max_turns, max_buffer_size, user, strict_mcp_config, …)
+// were dropped from the editor; the backend tolerates them on old rows but
+// the omni harness ignores them.
 export interface ProfileConfig {
 	model?: string;
 	allowed_tools?: string[];
 	disallowed_tools?: string[];
-	tools?: string[];  // SDK 0.1.12+ - explicit tool list
-	tools_preset?: string;  // SDK 0.1.12+ - "claude_code" preset
 	permission_mode?: string;
-	max_turns?: number;
 	include_partial_messages?: boolean;
-	enable_file_checkpointing?: boolean;  // SDK 0.1.15+ - enable file snapshots for rewind
-	thinking_mode?: 'default' | 'disabled' | 'adaptive' | 'think' | 'think_harder' | 'ultra_think';  // Thinking config: default=SDK decides, disabled=off, adaptive=auto, think/think_harder/ultra_think=token budgets
-	effort?: 'low' | 'medium' | 'high' | 'max';  // Effort level for reasoning depth (independent of thinking config)
+	enable_file_checkpointing?: boolean;  // LEGACY (SDK-era): still read by chat rewind gating for old rows; no longer written
+	effort?: 'low' | 'medium' | 'high' | 'max';  // LEGACY (SDK-era): still read to seed the chat effort override for old rows; no longer written
 	ai_tools?: Record<string, boolean>;  // AI tool toggles (image_generation, video_generation, etc.)
-	enabled_agents?: string[];  // Subagents enabled for this profile
-	setting_sources?: string[];  // Where to load settings from (e.g., 'claude_code')
+	enabled_agents?: string[];  // Optional invoke allowlist: agents this agent may dispatch via the Task tool; empty/unset = any
 	cwd?: string;  // Working directory override
-	add_dirs?: string[];  // Additional directories to include
-	user?: string;  // User identifier override
-	max_buffer_size?: number;  // Maximum buffer size for output
+	add_dirs?: string[];  // Additional directories the agent may access
 	env?: Record<string, string>;  // Environment variables to set
 	app_config_tools?: boolean;  // Allow AI to configure hooks, automations, MCP, profiles via chat
-	strict_mcp_config?: boolean;  // SDK 0.1.81+ — fail-fast on misconfigured MCP servers
 	system_prompt?: {
-		type: string;
-		preset?: string;
+		type: string;  // always 'custom' when written by the editor; 'preset' only on legacy rows
+		preset?: string;  // LEGACY
 		content?: string;
-		append?: string;
-		inject_env_details?: boolean;
+		append?: string;  // LEGACY: preset-shape append text
+		inject_env_details?: boolean;  // LEGACY: env is omni-compiled now
 	} | null;
 }
 

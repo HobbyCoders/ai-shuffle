@@ -96,29 +96,17 @@
 		/** `model_providers.id` this profile's model belongs to, or `null` for native Anthropic. */
 		provider: string | null;
 		permission_mode: string;
-		max_turns: number | null;
 		allowed_tools: string[];
 		disallowed_tools: string[];
 		enabled_agents: string[];
 		memory: string;
 		include_partial_messages: boolean;
-		thinking_mode: 'default' | 'disabled' | 'adaptive' | 'think' | 'think_harder' | 'ultra_think';
-		effort: 'low' | 'medium' | 'high' | 'max' | 'xhigh' | null;
-		system_prompt_type: string;
-		system_prompt_preset: string;
-		system_prompt_append: string;
 		system_prompt_content: string;
-		system_prompt_inject_env: boolean;
 		enabled_ai_tools: string[];
-		setting_sources: string[];
 		cwd: string;
 		add_dirs: string;
-		user: string;
-		max_buffer_size: number | null;
 		env_vars: { key: string; value: string }[];
-		enable_file_checkpointing: boolean;
 		app_config_tools: boolean;
-		strict_mcp_config: boolean;
 		computer_use_enabled: boolean;
 	}
 
@@ -158,7 +146,6 @@
 		onToggleAgent: (agentId: string) => void;
 		/** Apply a system-prompt template by id (fills prompt + optional tools). */
 		onApplyTemplate: (templateId: string) => void;
-		onToggleSettingSource: (source: string) => void;
 		onAssignToGroup: (profileId: string, groupName: string) => void;
 		onRemoveFromGroup: (profileId: string) => void;
 		onCreateGroup: (category: string, name: string) => void;
@@ -197,7 +184,6 @@
 		onToggleSection,
 		onToggleAgent,
 		onApplyTemplate,
-		onToggleSettingSource,
 		onAssignToGroup,
 		onRemoveFromGroup,
 		onCreateGroup,
@@ -230,12 +216,6 @@
 		creatingGroup = false;
 		newGroupName = '';
 	}
-
-	const settingSources = [
-		{ id: 'user', label: 'User (~/.claude)' },
-		{ id: 'project', label: 'Project (.claude)' },
-		{ id: 'local', label: 'Local' }
-	];
 
 	// Invoke allowlist: every agent EXCEPT the one being edited (an agent can't
 	// dispatch itself). Empty selection = allow all.
@@ -321,9 +301,9 @@
 		</div>
 
 		<div class="set-group">
-			<div class="set-grouphead"><h3><Settings />Model &amp; reasoning</h3></div>
+			<div class="set-grouphead"><h3><Settings />Model &amp; permissions</h3></div>
 			<div class="set-row">
-				<div class="lab"><h4>Model</h4><p>The Claude model this agent runs on.</p></div>
+				<div class="lab"><h4>Model</h4><p>The model this agent runs on. Any signed-in provider's models are available.</p></div>
 				<div class="ctl ctl-col">
 					<div class="grp-row">
 						<ModelPicker
@@ -366,43 +346,10 @@
 				<div class="ctl">
 					<select class="sel" value={profileForm.permission_mode} onchange={(e) => onFormChange('permission_mode', (e.target as HTMLSelectElement).value)}>
 						<option value="default">Default</option>
-						<option value="auto">Auto</option>
 						<option value="acceptEdits">Accept Edits</option>
 						<option value="plan">Plan</option>
 						<option value="bypassPermissions">Bypass Permissions</option>
 					</select>
-				</div>
-			</div>
-			<div class="set-row">
-				<div class="lab"><h4>Thinking mode</h4><p>Extended reasoning budget for the model.</p></div>
-				<div class="ctl">
-					<select class="sel" value={profileForm.thinking_mode} onchange={(e) => onFormChange('thinking_mode', (e.target as HTMLSelectElement).value)}>
-						<option value="default">Default</option>
-						<option value="disabled">Off</option>
-						<option value="adaptive">Adaptive</option>
-						<option value="think">8K Budget</option>
-						<option value="think_harder">24K Budget</option>
-						<option value="ultra_think">64K Budget</option>
-					</select>
-				</div>
-			</div>
-			<div class="set-row">
-				<div class="lab"><h4>Effort level</h4><p>Trade speed against depth of work.</p></div>
-				<div class="ctl">
-					<select class="sel" value={profileForm.effort || ''} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; onFormChange('effort', v ? v : null); }}>
-						<option value="">Default</option>
-						<option value="low">Low</option>
-						<option value="medium">Medium</option>
-						<option value="high">High</option>
-						<option value="xhigh">XHigh</option>
-						<option value="max">Max</option>
-					</select>
-				</div>
-			</div>
-			<div class="set-row">
-				<div class="lab"><h4>Max turns</h4><p>Cap on agent turns per run. Empty = unlimited.</p></div>
-				<div class="ctl">
-					<input class="inp" type="number" value={profileForm.max_turns} oninput={(e) => { const v = (e.target as HTMLInputElement).value; onFormChange('max_turns', v ? Number(v) : null); }} placeholder="Unlimited" />
 				</div>
 			</div>
 		</div>
@@ -416,21 +363,9 @@
 				</div>
 			</div>
 			<div class="set-row">
-				<div class="lab"><h4>File checkpointing</h4><p>Create restore points before file modifications.</p></div>
-				<div class="ctl">
-					<button type="button" class="switch" class:on={profileForm.enable_file_checkpointing} role="switch" aria-checked={profileForm.enable_file_checkpointing} aria-label="Toggle file checkpointing" onclick={() => onFormChange('enable_file_checkpointing', !profileForm.enable_file_checkpointing)}><i></i></button>
-				</div>
-			</div>
-			<div class="set-row">
 				<div class="lab"><h4>App config via chat</h4><p>Allow AI to manage hooks, automations, MCP servers, and agents through conversation. Admin only.</p></div>
 				<div class="ctl">
 					<button type="button" class="switch" class:on={profileForm.app_config_tools} role="switch" aria-checked={profileForm.app_config_tools} aria-label="Toggle app configuration tools" onclick={() => onFormChange('app_config_tools', !profileForm.app_config_tools)}><i></i></button>
-				</div>
-			</div>
-			<div class="set-row">
-				<div class="lab"><h4>Strict MCP config</h4><p>Fail-fast if any MCP server is misconfigured. Recommended for production agents.</p></div>
-				<div class="ctl">
-					<button type="button" class="switch" class:on={profileForm.strict_mcp_config} role="switch" aria-checked={profileForm.strict_mcp_config} aria-label="Toggle strict MCP config" onclick={() => onFormChange('strict_mcp_config', !profileForm.strict_mcp_config)}><i></i></button>
 				</div>
 			</div>
 			<div class="set-row" class:disabled={!computerUse.available}>
@@ -547,14 +482,8 @@
 			</div>
 		{/if}
 		<ProfileSystemPrompt
-			systemPromptType={profileForm.system_prompt_type}
-			systemPromptAppend={profileForm.system_prompt_append}
 			systemPromptContent={profileForm.system_prompt_content}
-			systemPromptInjectEnv={profileForm.system_prompt_inject_env}
-			onSystemPromptTypeChange={(v) => onFormChange('system_prompt_type', v)}
-			onSystemPromptAppendChange={(v) => onFormChange('system_prompt_append', v)}
 			onSystemPromptContentChange={(v) => onFormChange('system_prompt_content', v)}
-			onSystemPromptInjectEnvToggle={() => onFormChange('system_prompt_inject_env', !profileForm.system_prompt_inject_env)}
 		/>
 
 		<div class="set-group">
@@ -583,35 +512,9 @@
 				<div class="lab"><h4>Working directory</h4><p>Where the agent runs by default.</p></div>
 				<div class="ctl"><input class="inp mono" value={profileForm.cwd} oninput={(e) => onFormChange('cwd', (e.target as HTMLInputElement).value)} placeholder="/home/user/projects/my-api" /></div>
 			</div>
-			<div class="set-row">
-				<div class="lab"><h4>Run as user</h4><p>System user the agent process runs under.</p></div>
-				<div class="ctl"><input class="inp" value={profileForm.user} oninput={(e) => onFormChange('user', (e.target as HTMLInputElement).value)} placeholder="default" /></div>
-			</div>
-		</div>
-
-		<div class="set-group">
-			<div class="set-grouphead"><h3>Performance &amp; limits</h3></div>
-			<div class="set-row">
-				<div class="lab"><h4>Max output buffer</h4><p>Maximum characters of tool output to retain.</p></div>
-				<div class="ctl"><input class="inp" type="number" value={profileForm.max_buffer_size} oninput={(e) => { const v = (e.target as HTMLInputElement).value; onFormChange('max_buffer_size', v ? Number(v) : null); }} placeholder="200,000 chars" /></div>
-			</div>
-		</div>
-
-		<div class="set-group">
-			<div class="set-grouphead"><h3>Settings sources</h3><p>Load settings from filesystem locations.</p></div>
 			<div class="set-row stack">
-				<div class="lab"><h4>Sources</h4></div>
-				<div class="ctl">
-					<div class="chips-select">
-						{#each settingSources as source}
-							{@const on = profileForm.setting_sources.includes(source.id)}
-							<button type="button" class="chsel" class:on onclick={() => onToggleSettingSource(source.id)}>
-								{#if on}<Check size={12} />{/if}
-								{source.label}
-							</button>
-						{/each}
-					</div>
-				</div>
+				<div class="lab"><h4>Additional directories</h4><p>Extra directories the agent may access, comma-separated.</p></div>
+				<div class="ctl"><input class="inp mono" value={profileForm.add_dirs} oninput={(e) => onFormChange('add_dirs', (e.target as HTMLInputElement).value)} placeholder="/home/user/notes, /home/user/docs" /></div>
 			</div>
 		</div>
 

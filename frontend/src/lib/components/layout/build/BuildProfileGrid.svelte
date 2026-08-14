@@ -164,11 +164,9 @@
 					<div class="bpg-tags">
 						<span class="bpg-pill bpg-pill--accent">{getModelDisplay(profile.config?.model)}</span>
 						<span class="bpg-pill">{permLabel(profile.config?.permission_mode)}</span>
-						{#if profile.config?.effort}<span class="bpg-pill">effort: {profile.config.effort}</span>{/if}
 						{#if groups?.profiles?.assignments?.[profile.id]}
 							<span class="bpg-pill">{groups.profiles.assignments[profile.id]}</span>
 						{/if}
-						{#if profile.config?.strict_mcp_config}<span class="bpg-pill bpg-pill--warn">Strict MCP</span>{/if}
 					</div>
 
 					{#if profile.description}<p class="bpg-desc">{profile.description}</p>{/if}
@@ -297,7 +295,6 @@
 		padding: 2px 8px; border-radius: 6px;
 	}
 	.bpg-pill--accent { color: var(--primary); background: color-mix(in oklch, var(--primary) 14%, transparent); font-weight: 600; }
-	.bpg-pill--warn { color: var(--warning, #d97706); background: color-mix(in oklch, var(--warning, #d97706) 14%, transparent); }
 
 	.bpg-desc {
 		margin: 0 0 12px; font-size: 0.78rem; line-height: 1.45; color: var(--muted-foreground);

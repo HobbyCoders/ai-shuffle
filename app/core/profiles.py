@@ -20,23 +20,19 @@ logger = logging.getLogger(__name__)
 # module to add or remove a model; it's the single source of truth across
 # backend and frontend (frontend/src/lib/constants/models.ts mirrors it).
 #
-# NOTE on setting_sources:
-# - "user": Loads user-level settings from ~/.claude/settings.json
-#   This is REQUIRED for auto-compact and other Claude Code defaults to work
-# - "project": Loads project-level settings from .claude/settings.json in the working directory
-# - "local": Loads local settings from .claude/settings.local.json
-#
-# Auto-compact is enabled by default in Claude Code's user settings.
-# Without "user" in setting_sources, auto-compact won't trigger automatically.
+# The configured system prompt IS the agent's base prompt (ruling A12): new
+# agents start empty and the omni compiler wraps whatever is configured with
+# environment, instruction files, and security context at runtime. SDK-era
+# keys (thinking_mode, setting_sources, enable_file_checkpointing, …) are
+# gone — the omni harness ignores them.
 DEFAULT_PROFILE_CONFIG: Dict[str, Any] = {
     "model": DEFAULT_MODEL,
     "allowed_tools": [],
     "permission_mode": "default",
     "system_prompt": {
-        "type": "preset",
-        "preset": "claude_code"
+        "type": "custom",
+        "content": ""
     },
-    "setting_sources": ["user", "project"],
     "enabled_agents": []
 }
 
@@ -60,10 +56,8 @@ DEFAULT_AI_PROFILE: Dict[str, Any] = {
     "config": {
         "model": DEFAULT_MODEL,
         "permission_mode": "bypassPermissions",
-        "thinking_mode": "default",
         "system_prompt": {
             "type": "custom",
-            "preset": "claude_code",
             "content": "",
         },
         "allowed_tools": [],
@@ -78,7 +72,6 @@ DEFAULT_AI_PROFILE: Dict[str, Any] = {
         "include_partial_messages": True,
         "continue_conversation": False,
         "fork_session": False,
-        "enable_file_checkpointing": False,
         "enabled_agents": [
             "chat-history-summarizer",
             "Explore",

@@ -174,7 +174,9 @@
 		if (embedded) onDetailChange?.(viewMode === 'form');
 	});
 
-	// Profile form state
+	// Profile form state — omni harness options only (ruling R3). SDK-era
+	// fields (thinking mode, effort, setting sources, checkpointing, …) are
+	// gone: the omni harness ignores them.
 	let profileForm = $state({
 		id: '',
 		name: '',
@@ -182,29 +184,17 @@
 		model: getDefaultModel(),
 		provider: null as string | null,
 		permission_mode: 'default',
-		max_turns: null as number | null,
 		allowed_tools: [] as string[],
 		disallowed_tools: [] as string[],
 		enabled_agents: [] as string[],
 		memory: '',
 		include_partial_messages: true,
-		thinking_mode: 'default' as 'default' | 'disabled' | 'adaptive' | 'think' | 'think_harder' | 'ultra_think',
-		effort: null as 'low' | 'medium' | 'high' | 'max' | null,
-		system_prompt_type: 'preset',
-		system_prompt_preset: 'claude_code',
-		system_prompt_append: '',
 		system_prompt_content: '',
-		system_prompt_inject_env: false,
 		enabled_ai_tools: [] as string[],
-		setting_sources: [] as string[],
 		cwd: '',
 		add_dirs: '',
-		user: '',
-		max_buffer_size: null as number | null,
 		env_vars: [] as { key: string; value: string }[],
-		enable_file_checkpointing: false,
 		app_config_tools: false,
-		strict_mcp_config: false,
 		computer_use_enabled: false
 	});
 
@@ -335,29 +325,17 @@
 			model: getDefaultModel(),
 			provider: null,
 			permission_mode: 'default',
-			max_turns: null,
 			allowed_tools: [],
 			disallowed_tools: [],
 			enabled_agents: [],
 			memory: '',
 			include_partial_messages: true,
-			thinking_mode: 'default' as 'default' | 'disabled' | 'adaptive' | 'think' | 'think_harder' | 'ultra_think',
-			effort: null,
-			system_prompt_type: 'preset',
-			system_prompt_preset: 'claude_code',
-			system_prompt_append: '',
 			system_prompt_content: '',
-			system_prompt_inject_env: false,
 			enabled_ai_tools: [],
-			setting_sources: [],
 			cwd: '',
 			add_dirs: '',
-			user: '',
-			max_buffer_size: null,
 			env_vars: [],
-			enable_file_checkpointing: false,
 			app_config_tools: false,
-			strict_mcp_config: false,
 			computer_use_enabled: false
 		};
 		toolSelectionMode = 'all';
@@ -419,7 +397,6 @@
 			model: normalizeModel(config.model) || getDefaultModel(),
 			provider: config.provider ?? null,
 			permission_mode: config.permission_mode || 'default',
-			max_turns: config.max_turns || null,
 			allowed_tools: allowedTools,
 			disallowed_tools: disallowedTools,
 			// Invoke allowlist: hydrate the stored ids as-is (minus self) — never
@@ -431,23 +408,15 @@
 			),
 			memory: (config as any).memory || '',
 			include_partial_messages: config.include_partial_messages !== false,
-			thinking_mode: (config as any).thinking_mode || 'default',
-			effort: (config as any).effort || null,
-			system_prompt_type: sp.type || 'preset',
-			system_prompt_preset: sp.preset || 'claude_code',
-			system_prompt_append: sp.append || '',
-			system_prompt_content: sp.content || '',
-			system_prompt_inject_env: sp.inject_env_details || false,
+			// Legacy preset-shaped prompts (`{type:'preset', append}`) surface their
+			// append text as the prompt — per ruling A12 the configured prompt IS
+			// the base, so saving converts them to the custom shape.
+			system_prompt_content: sp.content || sp.append || '',
 			enabled_ai_tools: enabledAITools,
-			setting_sources: (config as any).setting_sources || [],
 			cwd: (config as any).cwd || '',
 			add_dirs: ((config as any).add_dirs || []).join(', '),
-			user: (config as any).user || '',
-			max_buffer_size: (config as any).max_buffer_size || null,
 			env_vars: Object.entries((config as any).env || {}).map(([key, value]) => ({ key, value: value as string })),
-			enable_file_checkpointing: (config as any).enable_file_checkpointing || false,
 			app_config_tools: (config as any).app_config_tools || false,
-			strict_mcp_config: (config as any).strict_mcp_config || false,
 			computer_use_enabled: !!(config as any).computer_use?.enabled
 		};
 
@@ -565,14 +534,6 @@
 		}
 	}
 
-	function toggleSettingSource(source: string) {
-		if (profileForm.setting_sources.includes(source)) {
-			profileForm.setting_sources = profileForm.setting_sources.filter((s) => s !== source);
-		} else {
-			profileForm.setting_sources = [...profileForm.setting_sources, source];
-		}
-	}
-
 	// Model display delegates to the shared registry so dropdowns, badges
 	// and labels stay in sync everywhere.
 	const getModelDisplay = getModelLabel;
@@ -614,7 +575,6 @@
 	function applyTemplate(templateId: string) {
 		const tpl = templates.find((t) => t.id === templateId);
 		if (!tpl) return;
-		profileForm.system_prompt_type = 'custom';
 		profileForm.system_prompt_content = tpl.prompt;
 		if (Array.isArray(tpl.tools) && tpl.tools.length > 0) {
 			toolSelectionMode = 'allow';
@@ -633,17 +593,9 @@
 			// model_providers.id, or omitted (→ native Anthropic) when unset.
 			...(profileForm.provider ? { provider: profileForm.provider } : {}),
 			include_partial_messages: profileForm.include_partial_messages,
-			enable_file_checkpointing: profileForm.enable_file_checkpointing,
-			app_config_tools: profileForm.app_config_tools,
-			strict_mcp_config: profileForm.strict_mcp_config
+			app_config_tools: profileForm.app_config_tools
 		};
 
-		config.thinking_mode = profileForm.thinking_mode;
-		if (profileForm.effort) {
-			config.effort = profileForm.effort;
-		}
-
-		if (profileForm.max_turns) config.max_turns = profileForm.max_turns;
 		// Persist the dropdown mode explicitly so it round-trips even when the tool
 		// list is empty (e.g. "Allow Only Selected" before any tool is picked).
 		// The runtime still derives behavior from allowed_tools/disallowed_tools.
@@ -663,9 +615,6 @@
 			: profileForm.enabled_agents;
 		// Per-agent memory (plain text). Omit when empty so clearing it persists.
 		if (profileForm.memory.trim()) config.memory = profileForm.memory;
-		if (profileForm.setting_sources.length > 0) {
-			config.setting_sources = profileForm.setting_sources;
-		}
 		if (profileForm.cwd.trim()) config.cwd = profileForm.cwd;
 		if (profileForm.add_dirs.trim()) {
 			config.add_dirs = profileForm.add_dirs
@@ -673,8 +622,6 @@
 				.map((d) => d.trim())
 				.filter(Boolean);
 		}
-		if (profileForm.user.trim()) config.user = profileForm.user;
-		if (profileForm.max_buffer_size) config.max_buffer_size = profileForm.max_buffer_size;
 
 		const validEnvVars = profileForm.env_vars.filter(v => v.key.trim());
 		if (validEnvVars.length > 0) {
@@ -695,21 +642,13 @@
 
 		config.computer_use = { enabled: profileForm.computer_use_enabled };
 
-		if (profileForm.system_prompt_type === 'preset') {
-			config.system_prompt = {
-				type: 'preset',
-				preset: 'claude_code'
-			};
-			if (profileForm.system_prompt_append.trim()) {
-				config.system_prompt.append = profileForm.system_prompt_append;
-			}
-		} else {
-			config.system_prompt = {
-				type: 'custom',
-				content: profileForm.system_prompt_content,
-				inject_env_details: profileForm.system_prompt_inject_env
-			};
-		}
+		// The configured prompt IS the base (ruling A12) — always the custom
+		// shape. Env/instructions/security are compiled in at runtime by omni,
+		// so there is no preset mode and no inject_env_details flag anymore.
+		config.system_prompt = {
+			type: 'custom',
+			content: profileForm.system_prompt_content
+		};
 
 		const derivedId = profileForm.name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
 		const data = {
@@ -815,21 +754,13 @@
 			.filter(([_, enabled]) => enabled)
 			.map(([key]) => key);
 
-		let spType = 'preset';
-		let spPreset = 'claude_code';
-		let spAppend = '';
-		let spContent = '';
-		let spInjectEnv = false;
-
-		if (agent.system_prompt_type === 'custom') {
-			spType = 'custom';
-			spContent = agent.system_prompt_content || '';
-			spInjectEnv = agent.system_prompt_inject_env || false;
-		} else {
-			spType = 'preset';
-			spPreset = agent.system_prompt_preset || 'claude_code';
-			spAppend = agent.system_prompt_append || '';
-		}
+		// Legacy exports may carry a preset-shaped prompt — its append text
+		// becomes the configured prompt (ruling A12). SDK-era fields in the
+		// export (thinking_mode, setting_sources, …) are ignored.
+		const spContent =
+			agent.system_prompt_type === 'custom'
+				? agent.system_prompt_content || ''
+				: agent.system_prompt_append || '';
 
 		customModelMode = !isPresetModel(agent.model || getDefaultModel());
 
@@ -842,29 +773,17 @@
 			// the export format doesn't carry a provider id.
 			provider: null,
 			permission_mode: agent.permission_mode || 'default',
-			max_turns: agent.max_turns || null,
 			allowed_tools: allowedTools,
 			disallowed_tools: disallowedTools,
 			enabled_agents: agent.enabled_agents || [],
 			memory: (agent as any).memory || '',
 			include_partial_messages: agent.include_partial_messages !== false,
-			thinking_mode: (agent as any).thinking_mode || 'default',
-			effort: (agent as any).effort || null,
-			system_prompt_type: spType,
-			system_prompt_preset: spPreset,
-			system_prompt_append: spAppend,
 			system_prompt_content: spContent,
-			system_prompt_inject_env: spInjectEnv,
 			enabled_ai_tools: enabledAITools,
-			setting_sources: agent.setting_sources || [],
 			cwd: '',
 			add_dirs: '',
-			user: '',
-			max_buffer_size: agent.max_buffer_size || null,
 			env_vars: agent.env ? Object.entries(agent.env).map(([key, value]) => ({ key, value: value as string })) : [],
-			enable_file_checkpointing: false,
 			app_config_tools: false,
-			strict_mcp_config: false,
 			computer_use_enabled: false
 		};
 
@@ -943,7 +862,6 @@
 				onToggleSection={toggleSection}
 				onToggleAgent={toggleAgent}
 				onApplyTemplate={applyTemplate}
-				onToggleSettingSource={toggleSettingSource}
 				onAssignToGroup={assignToGroup}
 				onRemoveFromGroup={removeFromGroup}
 				onCreateGroup={createGroup}
