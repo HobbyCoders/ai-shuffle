@@ -1252,6 +1252,7 @@ class HarnessAdapter(ProviderAdapter):
             register_builtins(registry)
             builtins_registered = True
             logger.info("[HarnessAdapter] registered omni builtin tools for native leg")
+            _amend_native_task_spec(registry, options)
 
         # The app's own in-proc SDK servers (builtins, app-config, ai-tools,
         # computer-use, provider-agent): their @tool objects were recorded per
@@ -1555,6 +1556,71 @@ def _lookup_provider_row_shape(provider_id: str) -> tuple:
     if not row:
         return None, None, None
     return row.get("provider_type"), row.get("auth_mode"), row.get("api_dialect")
+
+
+def _amend_native_task_spec(registry: ToolRegistry, options: SessionOptions) -> None:
+    """Re-register omni's bare Task builtin with a provider-aware ``model`` hint.
+
+    The vendor spec's ``model`` property only says "Optional model override for
+    this run" — on a native (non-Claude) leg the model calling Task has no idea
+    what that means for ITS provider and reliably guesses a Claude shorthand
+    alias ("sonnet"/"opus"/"haiku"), which the dispatcher rejects, burning a
+    call for nothing. When the session is bound to a ``model_providers`` row we
+    know its curated model ids up front, so swap in a description that names
+    them explicitly. Unbound sessions (delegated/Claude default) are left alone
+    — the vendor description is already correct there.
+
+    Best-effort only: any failure here (bad row, bad curated list) must never
+    break session connect, so the vendor spec simply stays registered as-is.
+    """
+    try:
+        provider_id = (options.extra or {}).get("provider_id")
+        if not provider_id:
+            return
+
+        from app.db import database
+
+        try:
+            row = database.get_model_provider(str(provider_id), include_token=False)
+        except Exception:
+            return
+        if not row:
+            return
+
+        from app.core.provider_agent import curated_model_ids
+
+        ids = curated_model_ids(row)
+        if not ids:
+            return
+
+        if len(ids) > 12:
+            ids_str = ", ".join(ids[:12]) + ", …"
+        else:
+            ids_str = ", ".join(ids)
+
+        import copy
+        import dataclasses
+
+        from omni.tools.builtins.task import SPEC as _TASK_SPEC
+        from omni.tools.builtins.task import handler as _task_handler
+
+        schema = copy.deepcopy(_TASK_SPEC.input_schema)
+        schema["properties"]["model"]["description"] = (
+            f"Optional model override. For agents bound to this session's "
+            f"provider ('{provider_id}') it must be one of the curated ids: "
+            f"{ids_str}. Omit to use the target agent's configured model. "
+            f"Claude shorthand aliases (sonnet/opus/haiku) are NOT valid for "
+            f"non-Claude providers."
+        )
+        registry.register_builtin(
+            dataclasses.replace(_TASK_SPEC, input_schema=schema), _task_handler
+        )
+    except Exception:  # noqa: BLE001 — must never break session connect
+        logger.warning(
+            "[HarnessAdapter] failed to amend native Task spec's model "
+            "description; leaving the vendor spec as-is.",
+            exc_info=True,
+        )
 
 
 def _decide_provider_kind(options: SessionOptions) -> str:

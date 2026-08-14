@@ -2305,3 +2305,77 @@ def test_effort_change_requires_reconnect():
     assert not adapter.requires_reconnect(
         SessionOptions(model="claude-sonnet-4-5")
     )
+
+
+# ─── _amend_native_task_spec ───────────────────────────────────────────────────
+
+
+def test_amend_native_task_spec_names_the_curated_ids(monkeypatch):
+    """A native leg bound to a provider row gets a Task ``model`` description
+    naming that row's curated ids, so the model stops guessing Claude aliases."""
+    import app.core.provider.harness_adapter as ha
+    import app.db.database as db
+
+    monkeypatch.setattr(
+        db,
+        "get_model_provider",
+        lambda pid, include_token=False: {
+            "id": pid,
+            "models_json": [{"id": "gpt-5.6-sol"}, {"id": "gpt-5.6-mini"}],
+        },
+    )
+
+    registry = ha.ToolRegistry()
+    from omni.tools.builtins import register_builtins
+
+    register_builtins(registry)
+    options = SessionOptions(model="gpt-5.6-sol", extra={"provider_id": "prov1"})
+
+    ha._amend_native_task_spec(registry, options)
+
+    description = registry.get("Task").input_schema["properties"]["model"]["description"]
+    assert "gpt-5.6-sol" in description
+    assert "gpt-5.6-mini" in description
+    assert "NOT valid" in description
+
+
+def test_amend_native_task_spec_leaves_unbound_sessions_untouched(monkeypatch):
+    """No ``provider_id`` in ``extra`` means the session is delegated/Claude-
+    default — the vendor Task spec's own description must survive unmodified."""
+    import app.core.provider.harness_adapter as ha
+
+    from omni.tools.builtins import register_builtins
+    from omni.tools.builtins.task import SPEC as _TASK_SPEC
+
+    registry = ha.ToolRegistry()
+    register_builtins(registry)
+    options = SessionOptions(model="gpt-5.6-sol", extra={})
+
+    ha._amend_native_task_spec(registry, options)
+
+    description = registry.get("Task").input_schema["properties"]["model"]["description"]
+    assert description == _TASK_SPEC.input_schema["properties"]["model"]["description"]
+
+
+def test_amend_native_task_spec_swallows_provider_lookup_failure(monkeypatch):
+    """A DB error while resolving the bound provider row must never propagate
+    out of connect() — the vendor Task spec just stays registered as-is."""
+    import app.core.provider.harness_adapter as ha
+    import app.db.database as db
+
+    def _boom(pid, include_token=False):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(db, "get_model_provider", _boom)
+
+    from omni.tools.builtins import register_builtins
+    from omni.tools.builtins.task import SPEC as _TASK_SPEC
+
+    registry = ha.ToolRegistry()
+    register_builtins(registry)
+    options = SessionOptions(model="gpt-5.6-sol", extra={"provider_id": "prov1"})
+
+    ha._amend_native_task_spec(registry, options)  # must not raise
+
+    description = registry.get("Task").input_schema["properties"]["model"]["description"]
+    assert description == _TASK_SPEC.input_schema["properties"]["model"]["description"]
