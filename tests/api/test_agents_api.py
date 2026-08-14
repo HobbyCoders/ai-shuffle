@@ -558,269 +558,83 @@ class TestUpdateProfileEndpoint:
 
 
 # =============================================================================
-# Subagent Leg Validation Tests (Chunk F, ruling A2)
+# Retired cross-provider subagent leg (ruling D4, 2026-08-12)
 # =============================================================================
 
-class TestSubagentLegValidation:
-    """POST/PUT profile validation for the optional cross-provider subagent leg."""
+class TestRetiredSubagentLegKeys:
+    """The cross-provider subagent leg was removed with the translator gateway.
+
+    ``subagent_provider``/``subagent_model`` are no longer ProfileConfig fields
+    and there is no validator for them any more. Old stored agent rows still
+    carry the keys, and a full-config PUT round-trips them back at us — those
+    saves MUST succeed (they used to 400) and the keys must simply be dropped by
+    Pydantic rather than persisted.
+    """
 
     @pytest.mark.asyncio
-    async def test_create_leg_requires_subagent_model(self):
-        """subagent_provider set without a subagent_model → 400."""
+    async def test_legacy_subagent_leg_keys_are_ignored_on_create(self):
+        """POST with legacy leg keys succeeds; the keys are not saved."""
         from app.api.agents import create_profile
-        from app.core.models import ProfileCreate, ProfileConfig
-        from fastapi import HTTPException
-
-        with patch("app.api.agents.database") as mock_db:
-            request = ProfileCreate(
-                id="p", name="P",
-                config=ProfileConfig(
-                    model="op/main", provider="op", subagent_provider="sub",
-                ),
-            )
-            with pytest.raises(HTTPException) as exc_info:
-                await create_profile(request, token="test-token")
-            assert exc_info.value.status_code == 400
-            assert "model" in exc_info.value.detail.lower()
-            mock_db.create_profile.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_create_leg_requires_main_provider(self):
-        """A cross-provider subagent needs the main model on a provider too → 400
-        when config has no provider (native main)."""
-        from app.api.agents import create_profile
-        from app.core.models import ProfileCreate, ProfileConfig
-        from fastapi import HTTPException
-
-        with patch("app.api.agents.database") as mock_db:
-            request = ProfileCreate(
-                id="p", name="P",
-                config=ProfileConfig(
-                    model="opus", subagent_provider="sub", subagent_model="sub/model",
-                ),
-            )
-            with pytest.raises(HTTPException) as exc_info:
-                await create_profile(request, token="test-token")
-            assert exc_info.value.status_code == 400
-            assert "provider" in exc_info.value.detail.lower()
-            mock_db.create_profile.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_create_leg_provider_must_exist(self):
-        """A subagent provider that does not exist → 400 (main is servable)."""
-        from app.api.agents import create_profile
-        from app.core.models import ProfileCreate, ProfileConfig
-        from fastapi import HTTPException
-
-        with patch("app.api.agents.database") as mock_db:
-            # Main "op" is a servable anthropic provider; subagent "sub" is gone.
-            mock_db.get_model_provider.side_effect = lambda pid: (
-                {"id": "op", "name": "Main", "enabled": True, "provider_type": "anthropic"}
-                if pid == "op" else None
-            )
-            request = ProfileCreate(
-                id="p", name="P",
-                config=ProfileConfig(
-                    model="op/main", provider="op",
-                    subagent_provider="sub", subagent_model="sub/model",
-                ),
-            )
-            with pytest.raises(HTTPException) as exc_info:
-                await create_profile(request, token="test-token")
-            assert exc_info.value.status_code == 400
-            assert "subagent provider" in exc_info.value.detail.lower()
-            assert "does not exist" in exc_info.value.detail.lower()
-
-    @pytest.mark.asyncio
-    async def test_create_leg_provider_must_be_enabled(self):
-        """A disabled subagent provider → 400 (main is servable)."""
-        from app.api.agents import create_profile
-        from app.core.models import ProfileCreate, ProfileConfig
-        from fastapi import HTTPException
-
-        with patch("app.api.agents.database") as mock_db:
-            mock_db.get_model_provider.side_effect = lambda pid: (
-                {"id": "op", "name": "Main", "enabled": True, "provider_type": "anthropic"}
-                if pid == "op"
-                else {"id": "sub", "name": "Sub", "enabled": False, "provider_type": "chatgpt"}
-            )
-            request = ProfileCreate(
-                id="p", name="P",
-                config=ProfileConfig(
-                    model="op/main", provider="op",
-                    subagent_provider="sub", subagent_model="sub/model",
-                ),
-            )
-            with pytest.raises(HTTPException) as exc_info:
-                await create_profile(request, token="test-token")
-            assert exc_info.value.status_code == 400
-            assert "disabled" in exc_info.value.detail.lower()
-
-    @pytest.mark.asyncio
-    async def test_create_leg_main_provider_must_be_gateway_servable(self):
-        """A main provider that is not gateway-servable (e.g. openrouter/custom)
-        → 400 (the leg can only route through the translator gateway)."""
-        from app.api.agents import create_profile
-        from app.core.models import ProfileCreate, ProfileConfig
-        from fastapi import HTTPException
-
-        with patch("app.api.agents.database") as mock_db:
-            # Main "op" is a NON-servable custom provider; subagent is servable.
-            mock_db.get_model_provider.side_effect = lambda pid: (
-                {"id": "op", "name": "Main", "enabled": True, "provider_type": "openrouter"}
-                if pid == "op"
-                else {"id": "sub", "name": "Sub", "enabled": True, "provider_type": "chatgpt"}
-            )
-            request = ProfileCreate(
-                id="p", name="P",
-                config=ProfileConfig(
-                    model="op/main", provider="op",
-                    subagent_provider="sub", subagent_model="sub/model",
-                ),
-            )
-            with pytest.raises(HTTPException) as exc_info:
-                await create_profile(request, token="test-token")
-            assert exc_info.value.status_code == 400
-            assert "main model" in exc_info.value.detail.lower()
-            mock_db.create_profile.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_create_leg_subagent_provider_must_be_gateway_servable(self):
-        """A subagent provider that is not gateway-servable → 400."""
-        from app.api.agents import create_profile
-        from app.core.models import ProfileCreate, ProfileConfig
-        from fastapi import HTTPException
-
-        with patch("app.api.agents.database") as mock_db:
-            # Main servable (anthropic); subagent enabled but NON-servable.
-            mock_db.get_model_provider.side_effect = lambda pid: (
-                {"id": "op", "name": "Main", "enabled": True, "provider_type": "anthropic"}
-                if pid == "op"
-                else {"id": "sub", "name": "Sub", "enabled": True, "provider_type": "openrouter"}
-            )
-            request = ProfileCreate(
-                id="p", name="P",
-                config=ProfileConfig(
-                    model="op/main", provider="op",
-                    subagent_provider="sub", subagent_model="sub/model",
-                ),
-            )
-            with pytest.raises(HTTPException) as exc_info:
-                await create_profile(request, token="test-token")
-            assert exc_info.value.status_code == 400
-            assert "subagent model" in exc_info.value.detail.lower()
-            mock_db.create_profile.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_create_leg_happy_path(self):
-        """A legal cross-provider leg (anthropic-API main + Codex subagent)
-        creates the profile."""
-        from app.api.agents import create_profile
-        from app.core.models import ProfileCreate, ProfileConfig
+        from app.core.models import ProfileCreate
 
         now = datetime.now(timezone.utc).isoformat()
         created = {
             "id": "p", "name": "P", "description": None,
-            "config": {
-                "model": "op/main", "provider": "op",
-                "subagent_provider": "sub", "subagent_model": "sub/model",
-            },
+            "config": {"model": "op/main", "provider": "op"},
             "is_builtin": False, "created_at": now, "updated_at": now,
         }
         with patch("app.api.agents.database") as mock_db:
-            # Main is an Anthropic-API provider; subagent is an enabled Codex.
-            mock_db.get_model_provider.side_effect = lambda pid: (
-                {"id": "op", "name": "Claude API", "enabled": True, "provider_type": "anthropic"}
-                if pid == "op"
-                else {"id": "sub", "name": "Sub", "enabled": True, "provider_type": "chatgpt"}
-            )
             mock_db.get_profile.return_value = None  # id is free
             mock_db.create_profile.return_value = created
 
-            request = ProfileCreate(
-                id="p", name="P",
-                config=ProfileConfig(
-                    model="op/main", provider="op",
-                    subagent_provider="sub", subagent_model="sub/model",
-                ),
-            )
+            request = ProfileCreate.model_validate({
+                "id": "p", "name": "P",
+                "config": {
+                    "model": "op/main", "provider": "op", "max_turns": 10,
+                    "subagent_provider": "sub", "subagent_model": "sub/model",
+                },
+            })
             result = await create_profile(request, token="test-token")
+
             assert result["id"] == "p"
             mock_db.create_profile.assert_called_once()
-            saved = mock_db.create_profile.call_args.kwargs["config"]
-            assert saved["subagent_provider"] == "sub"
-            assert saved["subagent_model"] == "sub/model"
-
-    @pytest.mark.asyncio
-    async def test_create_no_leg_skips_validation(self):
-        """A profile with no subagent leg never touches provider validation."""
-        from app.api.agents import create_profile
-        from app.core.models import ProfileCreate, ProfileConfig
-
-        now = datetime.now(timezone.utc).isoformat()
-        created = {
-            "id": "p", "name": "P", "config": {"model": "sonnet"},
-            "is_builtin": False, "created_at": now, "updated_at": now,
-        }
-        with patch("app.api.agents.database") as mock_db:
-            mock_db.get_profile.return_value = None
-            mock_db.create_profile.return_value = created
-
-            request = ProfileCreate(
-                id="p", name="P", config=ProfileConfig(model="sonnet")
-            )
-            await create_profile(request, token="test-token")
+            # No provider lookups happen any more — the validator is gone.
             mock_db.get_model_provider.assert_not_called()
+            saved = mock_db.create_profile.call_args.kwargs["config"]
+            assert saved["model"] == "op/main"
+            assert saved["provider"] == "op"
+            assert saved["max_turns"] == 10
+            assert "subagent_provider" not in saved
+            assert "subagent_model" not in saved
 
     @pytest.mark.asyncio
-    async def test_update_leg_requires_subagent_model(self):
-        """PUT validation mirrors create: leg without a model → 400."""
+    async def test_legacy_subagent_leg_keys_are_ignored_on_update(self):
+        """PUT of an old row's full config succeeds; the keys are not saved."""
         from app.api.agents import update_profile
-        from app.core.models import ProfileUpdate, ProfileConfig
-        from fastapi import HTTPException
-
-        with patch("app.api.agents.database") as mock_db:
-            mock_db.get_profile.return_value = sample_profile()
-            request = ProfileUpdate(
-                config=ProfileConfig(
-                    model="op/main", provider="op", subagent_provider="sub",
-                )
-            )
-            with pytest.raises(HTTPException) as exc_info:
-                await update_profile("test-profile", request, token="test-token")
-            assert exc_info.value.status_code == 400
-            mock_db.update_profile.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_update_leg_happy_path(self):
-        """PUT with a legal cross-provider leg persists it."""
-        from app.api.agents import update_profile
-        from app.core.models import ProfileUpdate, ProfileConfig
+        from app.core.models import ProfileUpdate
 
         profile = sample_profile()
-        updated = {**profile, "config": {
-            "model": "op/main", "provider": "op",
-            "subagent_provider": "sub", "subagent_model": "sub/model",
-        }}
+        updated = {**profile, "config": {"model": "op/main", "provider": "op"}}
         with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile
-            mock_db.get_model_provider.side_effect = lambda pid: (
-                {"id": "op", "name": "Claude API", "enabled": True, "provider_type": "anthropic"}
-                if pid == "op"
-                else {"id": "sub", "name": "Sub", "enabled": True, "provider_type": "chatgpt"}
-            )
             mock_db.update_profile.return_value = updated
 
-            request = ProfileUpdate(
-                config=ProfileConfig(
-                    model="op/main", provider="op",
-                    subagent_provider="sub", subagent_model="sub/model",
-                )
-            )
+            request = ProfileUpdate.model_validate({
+                "config": {
+                    "model": "op/main", "provider": "op", "max_turns": 10,
+                    "subagent_provider": "sub", "subagent_model": "sub/model",
+                },
+            })
             result = await update_profile("test-profile", request, token="test-token")
-            assert result["config"]["subagent_provider"] == "sub"
+
+            assert result["config"]["model"] == "op/main"
+            mock_db.update_profile.assert_called_once()
+            mock_db.get_model_provider.assert_not_called()
             saved = mock_db.update_profile.call_args.kwargs["config"]
-            assert saved["subagent_model"] == "sub/model"
+            assert saved["provider"] == "op"
+            assert saved["max_turns"] == 10
+            assert "subagent_provider" not in saved
+            assert "subagent_model" not in saved
 
 
 # =============================================================================

@@ -97,16 +97,6 @@ class ProfileConfig(BaseModel):
     # with the provider's ANTHROPIC_BASE_URL / auth token and mitigation flags
     # (see ``environment.apply_provider_env``) instead of native Anthropic auth.
     provider: Optional[str] = None  # model_providers.id; None = native Anthropic
-    # Chunk F (ruling A2): an OPTIONAL cross-provider SUBAGENT leg.
-    # INERT since 2026-08-12 (ruling D4): the leg was served by the translator
-    # gateway, which is retired — ProviderAgent cross-provider workers replace
-    # it. These two fields are still accepted, stored and validated (see
-    # ``app/api/profiles.py::_validate_subagent_leg``) so saved profiles and the
-    # API contract keep working, but NOTHING routes off them any more: every
-    # subagent inherits the main provider. Removing the fields and their UI is
-    # tracked as follow-up.
-    subagent_provider: Optional[str] = None  # model_providers.id for the subagent leg
-    subagent_model: Optional[str] = None     # upstream model id served by the leg
     permission_mode: Optional[str] = "default"  # default, auto, acceptEdits, plan, bypassPermissions
     thinking_mode: Optional[str] = "default"  # default, disabled, adaptive, think, think_harder, ultra_think
     # Opus 4.6+ uses effort-based reasoning instead of token budgets

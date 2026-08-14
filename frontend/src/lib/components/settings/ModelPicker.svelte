@@ -18,7 +18,7 @@
 	 * schema change) — a per-install convenience across the pinned models.
 	 */
 	import { Search, Star, Check, ChevronDown } from 'lucide-svelte';
-	import { getModels, getProviders, CUSTOM_VALUE, INHERIT_VALUE } from '$lib/constants/models';
+	import { getModels, getProviders, CUSTOM_VALUE } from '$lib/constants/models';
 
 	interface Props {
 		/** Current composite selection value (see module comment). */
@@ -28,47 +28,13 @@
 		/** Optional id for the trigger button (a11y labelling). */
 		id?: string;
 		/**
-		 * When true, render an extra "Inherit (default)" option at the very top
-		 * with value `''` (INHERIT_VALUE), selected when `value` is `''`. Used by
-		 * the optional subagent-model leg. Default false; existing call sites keep
-		 * their current behavior.
-		 */
-		allowInherit?: boolean;
-		/**
 		 * When true, list only provider-curated models — suppress the native
 		 * Claude group and the `Custom…` entry. Additive, default false.
 		 */
 		providerModelsOnly?: boolean;
-		/**
-		 * When true, hide provider-curated models whose provider can't actually
-		 * be used for this selection — mirrors the backend's gateway-servability
-		 * check (`is_gateway_servable` in `app/core/environment.py`, enforced
-		 * server-side by `_validate_subagent_leg` with an HTTP 400) so the
-		 * profile-level subagent default-leg picker never offers a model the
-		 * save would reject. Pure UX: the registry payload doesn't carry
-		 * `auth_mode`, so this checks `provider_type` only — the one edge case
-		 * that slips through (a legacy Codex row enrolled as `provider_type:
-		 * 'custom'` with `auth_mode: 'chatgpt'`, see `model_catalog_presets.py`)
-		 * is still accepted by the backend, just not offered here. Additive,
-		 * default false — the main-model picker and the subagent-editor pin
-		 * picker stay intentionally unrestricted (S7 ruling) by never setting
-		 * this prop.
-		 */
-		servableOnly?: boolean;
 	}
 
-	let {
-		value,
-		onSelect,
-		id,
-		allowInherit = false,
-		providerModelsOnly = false,
-		servableOnly = false
-	}: Props = $props();
-
-	// Provider types the translator gateway can actually serve — kept in sync
-	// by hand with `is_gateway_servable()` in `app/core/environment.py`.
-	const GATEWAY_SERVABLE_PROVIDER_TYPES = new Set(['openai', 'chatgpt', 'anthropic']);
+	let { value, onSelect, id, providerModelsOnly = false }: Props = $props();
 
 	const PIN_STORAGE_KEY = 'aihub.pinnedModels';
 	const NATIVE_GROUP = 'Claude';
@@ -120,7 +86,6 @@
 			}
 		}
 		for (const p of getProviders()) {
-			if (servableOnly && !GATEWAY_SERVABLE_PROVIDER_TYPES.has(p.provider_type)) continue;
 			for (const pm of p.models) {
 				out.push({
 					value: `prov:${p.id}:${pm.id}`,
@@ -196,7 +161,6 @@
 
 	// Label shown on the collapsed trigger.
 	const currentLabel = $derived.by(() => {
-		if (allowInherit && value === INHERIT_VALUE) return 'Inherit (default)';
 		if (value === CUSTOM_VALUE) return 'Custom…';
 		const match = options.find((o) => o.value === value);
 		return match ? match.label : value || 'Select a model';
@@ -280,22 +244,6 @@
 			</div>
 
 			<div class="mpk-list">
-				{#if allowInherit}
-					<div class="mpk-group">
-						<button
-							type="button"
-							class="mpk-row"
-							class:selected={value === INHERIT_VALUE}
-							role="option"
-							aria-selected={value === INHERIT_VALUE}
-							onclick={() => selectOption(INHERIT_VALUE)}
-						>
-							<span class="mpk-check">{#if value === INHERIT_VALUE}<Check size={14} />{/if}</span>
-							<span class="mpk-label">Inherit (default)</span>
-						</button>
-					</div>
-				{/if}
-
 				{#if pinnedOptions.length > 0}
 					<div class="mpk-group">
 						<div class="mpk-grouphead">Pinned</div>
