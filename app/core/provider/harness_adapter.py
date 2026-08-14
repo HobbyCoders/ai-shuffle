@@ -1233,17 +1233,25 @@ class HarnessAdapter(ProviderAdapter):
 
         for server in inproc_servers:
             registry.register_inproc(server)
-        for name, config in external_mcp.items():
-            # The app speaks the SDK's config dialect; omni's MCP client speaks
-            # ``transport``. Normalize (never mutate — the delegated leg
-            # serializes the ORIGINAL map into its --mcp-config file).
-            normalized = _normalize_mcp_config_for_omni(name, config)
-            if normalized is None:
-                continue  # unsupported transport; already warned about
-            try:
-                await registry.connect_mcp(name, normalized)
-            except Exception as exc:  # best-effort; a bad MCP server must not fail connect
-                logger.warning("[HarnessAdapter] connect_mcp(%s) failed: %r", name, exc)
+        # External MCP servers are a NATIVE-leg concern only (ruling PA5). The
+        # delegated leg hands the same server map to the claude CLI via
+        # --mcp-config (DelegatedLoop.mcp_servers), and the CLI spawns/connects
+        # them itself inside the child; nothing on that leg ever reads the
+        # in-process connections (the bundled socket server only exposes
+        # inproc/builtin specs, and permissions ride the CLI's stdio bridge).
+        # Connecting here too would run every external server TWICE per session.
+        if native:
+            for name, config in external_mcp.items():
+                # The app speaks the SDK's config dialect; omni's MCP client
+                # speaks ``transport``. Normalize (never mutate — the delegated
+                # leg serializes the ORIGINAL map into its --mcp-config file).
+                normalized = _normalize_mcp_config_for_omni(name, config)
+                if normalized is None:
+                    continue  # unsupported transport; already warned about
+                try:
+                    await registry.connect_mcp(name, normalized)
+                except Exception as exc:  # best-effort; a bad MCP server must not fail connect
+                    logger.warning("[HarnessAdapter] connect_mcp(%s) failed: %r", name, exc)
 
         if not builtins_registered and not recorded and not inproc_servers and not external_mcp:
             return None
