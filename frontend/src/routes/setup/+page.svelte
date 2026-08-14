@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { onMount, onDestroy } from 'svelte';
-	import { auth, authLoading, authError, setupRequired } from '$lib/stores/auth.svelte';
+	import { auth, authLoading, authError, setupRequired, anyCredential } from '$lib/stores/auth.svelte';
 	import {
 		getWorkspaceConfig,
 		setWorkspaceConfig,
@@ -66,6 +66,12 @@
 	let claudeCompletingLogin = $state(false);
 	let claudeError = $state('');
 	let claudePollInterval = $state<ReturnType<typeof setInterval> | null>(null);
+
+	// PA10: the Connect step no longer HARD-requires the Claude login. Continuing
+	// is allowed as soon as the install has any usable credential — the Claude
+	// subscription just connected here, or an already-configured model provider
+	// (reported by the auth status as has_any_credential).
+	let canLeaveCliAuth = $derived(claudeIsAuthenticated || $anyCredential);
 
 	// ── GitHub auth state ────────────────────────────────────────────────
 	let githubIsAuthenticated = $state(false);
@@ -160,6 +166,12 @@
 		try {
 			const claudeStatus = await getClaudeAuthStatus();
 			claudeIsAuthenticated = claudeStatus.authenticated;
+		} catch { /* non-critical */ }
+
+		// Refresh the auth status so has_any_credential reflects providers that
+		// were configured before this run of the wizard (PA10 gate below).
+		try {
+			await auth.checkAuth();
 		} catch { /* non-critical */ }
 
 		try {
@@ -582,7 +594,13 @@
 						<div class="flex items-center gap-2">
 							<Terminal size={16} strokeWidth={1.5} class="text-foreground" />
 							<span class="text-sm font-semibold text-foreground">Claude Code</span>
-							<span class="text-xs px-2 py-0.5 rounded-full bg-destructive/10 text-destructive border border-destructive/30 font-medium">Required</span>
+							{#if $anyCredential}
+								<!-- PA10: another usable credential already exists, so this login
+								     is only needed to run claude-subscription agents. -->
+								<span class="text-xs px-2 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/30 font-medium">Recommended</span>
+							{:else}
+								<span class="text-xs px-2 py-0.5 rounded-full bg-destructive/10 text-destructive border border-destructive/30 font-medium">Required</span>
+							{/if}
 						</div>
 
 						{#if claudeIsAuthenticated}
@@ -782,14 +800,14 @@
 								type="button"
 								onclick={() => { completedSteps.add('cli-auth'); advanceStep(); }}
 								class="btn btn-primary flex-1 py-3"
-								disabled={!claudeIsAuthenticated}
+								disabled={!canLeaveCliAuth}
 							>
-								{claudeIsAuthenticated ? 'Continue' : 'Connect Claude to Continue'}
+								{canLeaveCliAuth ? 'Continue' : 'Connect an Account to Continue'}
 							</button>
 						</div>
-						{#if !claudeIsAuthenticated}
+						{#if !canLeaveCliAuth}
 							<p class="text-xs text-muted-foreground text-center mt-2">
-								Claude Code connection is required to continue.
+								Connect Claude Code or configure a model provider to continue.
 							</p>
 						{/if}
 					</div>

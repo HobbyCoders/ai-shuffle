@@ -13,7 +13,7 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 	import { profiles } from '$lib/stores/app-data.svelte';
-	import { claudeAuthenticated } from '$lib/stores/auth.svelte';
+	import { anyCredential } from '$lib/stores/auth.svelte';
 
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import { toast } from '$lib/stores/toast';
@@ -644,7 +644,7 @@
 								bind:this={editorRef}
 								placeholder="Message {selectedProfileName}..."
 								initialContent={initialComposerDraft}
-								disabled={!$claudeAuthenticated}
+								disabled={!$anyCredential}
 								onTextChange={(text) => {
 									inputValue = text;
 									// Also update plain text for autocomplete (without chip @path serialization)
@@ -660,7 +660,7 @@
 							<!-- Voice Input (delegated to VoiceRecorder component) -->
 							<VoiceRecorder
 								onTranscription={handleTranscription}
-								disabled={!$claudeAuthenticated || isUploading}
+								disabled={!$anyCredential || isUploading}
 								bind:isRecording
 								bind:isTranscribing
 							/>
@@ -702,7 +702,7 @@
 								<button
 									type="submit"
 									class="send-btn"
-									disabled={!inputValue.trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing}
+									disabled={!inputValue.trim() || !$anyCredential || isUploading || isRecording || isTranscribing}
 									title={isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : ($activeSession.worktreeIntent === "worktree" && !$activeSession.worktreeId) ? "Branch will be auto-created from your message" : "Send message"}
 								>
 									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">

@@ -1873,6 +1873,7 @@ from app.db.model_providers import (  # noqa: F401
     get_model_provider,
     get_all_model_providers,
     get_enabled_model_providers,
+    count_configured_model_providers,
     update_model_provider,
     delete_model_provider,
     set_model_provider_enabled,

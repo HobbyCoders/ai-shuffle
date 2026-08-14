@@ -236,6 +236,33 @@ def get_enabled_model_providers(include_token: bool = False) -> List[ModelProvid
         return [_parse_json_columns(r) for r in rows]  # type: ignore[return-value]
 
 
+def count_configured_model_providers() -> int:
+    """Count enabled providers that carry a usable stored credential.
+
+    "Usable" here means the row is enabled AND holds at least one non-empty
+    credential blob: the API-key ``auth_token`` (OpenRouter / custom /
+    Anthropic-API rows) or the ChatGPT-subscription ``codex_access_token``.
+    Rows that are disabled, or that were created without any credential, do
+    not count. Deliberately reads only the presence of the blobs — no
+    decryption, no network validation — so this stays a cheap gate for
+    "does this install have any way to run a model at all" (PA10).
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT COUNT(*) AS n FROM model_providers
+            WHERE enabled = TRUE
+              AND (
+                    (auth_token IS NOT NULL AND auth_token <> '')
+                 OR (codex_access_token IS NOT NULL AND codex_access_token <> '')
+              )
+            """
+        )
+        row = cursor.fetchone()
+        return int(row["n"]) if row else 0
+
+
 def update_model_provider(provider_id: str, **kwargs: Any) -> Optional[ModelProviderRow]:
     """Partially update a provider by id and return the fresh row.
 
