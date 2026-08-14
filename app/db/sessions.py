@@ -79,6 +79,9 @@ class SessionRow(TypedDict):
     working_set_ref: Optional[str]
     context_usage_json: Optional[Dict[str, Any]]
     provider_id: Optional[str]
+    # Interaction mode (v74, ruling VM4): 'voice' for an OpenAI Realtime call,
+    # NULL/'chat' for a normal chat session.
+    mode: Optional[str]
 
 
 class SessionSearchResult(TypedDict):
@@ -408,6 +411,7 @@ def create_session(
     *,
     is_active: bool = False,
     provider_id: Optional[str] = None,
+    mode: Optional[str] = None,
     _conn=None
 ) -> SessionRow:
     """Create a new session
@@ -435,6 +439,10 @@ def create_session(
             about (ProviderAgent cross-provider workers, phase-3 chunk P3-A).
             ``None`` (or "") keeps the pre-existing profile-derived behaviour
             exactly.
+        mode: Interaction mode for this session (ruling VM4) — ``'voice'`` for an
+            OpenAI Realtime voice call. ``None`` (the default, and every
+            pre-existing row) means chat; the API model coalesces NULL to
+            ``'chat'``.
         _conn: Optional existing DB connection for transaction grouping
     """
     from app.core.config import settings
@@ -462,11 +470,12 @@ def create_session(
                 resolved_provider_id = (_profile.get("config") or {}).get("provider") or None
         except Exception:  # noqa: BLE001 — binding is best-effort; NULL = native
             resolved_provider_id = None
+    resolved_mode = (mode or "").strip() or None
     _ph = ph()
-    _phs17 = ", ".join([_ph] * 17)
-    sql = f"""INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, v2_stream, created_at, updated_at, provider_id)
-               VALUES ({_phs17})"""
-    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, True, now, now, resolved_provider_id)
+    _phs18 = ", ".join([_ph] * 18)
+    sql = f"""INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, v2_stream, created_at, updated_at, provider_id, mode)
+               VALUES ({_phs18})"""
+    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, True, now, now, resolved_provider_id, resolved_mode)
     if _conn is not None:
         cursor = get_cursor(_conn)
         cursor.execute(sql, params)

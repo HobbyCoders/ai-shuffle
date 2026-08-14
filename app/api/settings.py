@@ -484,3 +484,150 @@ async def revert_security_instructions(token: str = Depends(require_admin)):
         "success": True,
         "message": "Security instructions reverted to default"
     }
+
+
+# ============================================================================
+# Voice mode (ruling VM13/VM17 — docs/VOICE_MODE_PLAN.md)
+# ============================================================================
+#
+# Four runtime-editable knobs stored as plain ``system_settings`` values (they
+# are NOT secrets — the OpenAI key itself lives encrypted on the model_providers
+# row the voice session is funded by, never here). Stored/read through the same
+# get_system_setting/set_system_setting helpers the security-instructions
+# section above uses, so a change takes effect without a restart.
+
+# The realtime models a voice session may run on. Anything outside this
+# allowlist is rejected on write, so a typo can never reach OpenAI.
+VOICE_MODELS = ("gpt-realtime-2.1", "gpt-realtime-2.1-mini", "gpt-realtime")
+DEFAULT_VOICE_MODEL = "gpt-realtime-2.1"
+# Total wall-clock budget for one call. OpenAI's own 60-minute session cap is
+# bridged by reconnect (VM15); this is the separate "don't leave a call running
+# all week" ceiling.
+DEFAULT_VOICE_MAX_CALL_MINUTES = 240
+
+VOICE_MODE_ENABLED_KEY = "voice_mode_enabled"
+VOICE_MODEL_KEY = "voice_model"
+VOICE_PROVIDER_ID_KEY = "voice_provider_id"
+VOICE_MAX_CALL_MINUTES_KEY = "voice_max_call_minutes"
+
+
+class VoiceSettingsResponse(BaseModel):
+    """Current voice-mode configuration."""
+    voice_mode_enabled: bool
+    voice_model: str
+    voice_provider_id: Optional[str] = None
+    voice_max_call_minutes: int
+
+
+class VoiceSettingsUpdateRequest(BaseModel):
+    """Partial update — only the keys present in the body are written.
+
+    ``voice_provider_id: null`` explicitly CLEARS the pinned provider (the
+    resolver then falls back to "the single eligible row"), which is why the
+    handler keys off ``model_fields_set`` rather than treating None as absent.
+    """
+    voice_mode_enabled: Optional[bool] = None
+    voice_model: Optional[str] = None
+    voice_provider_id: Optional[str] = None
+    voice_max_call_minutes: Optional[int] = None
+
+
+def _truthy_setting(raw: Optional[str]) -> bool:
+    return (raw or "").strip().lower() in ("1", "true", "on", "yes")
+
+
+def get_voice_settings() -> dict:
+    """Read the four voice knobs, applying defaults for unset/invalid values.
+
+    Plain function (no auth, no request) so the voice router can call it
+    directly; the endpoint below is a thin wrapper over it.
+    """
+    raw_minutes = database.get_system_setting(VOICE_MAX_CALL_MINUTES_KEY)
+    try:
+        max_minutes = int(raw_minutes) if raw_minutes else DEFAULT_VOICE_MAX_CALL_MINUTES
+    except (TypeError, ValueError):
+        max_minutes = DEFAULT_VOICE_MAX_CALL_MINUTES
+    if max_minutes <= 0:
+        max_minutes = DEFAULT_VOICE_MAX_CALL_MINUTES
+
+    model = (database.get_system_setting(VOICE_MODEL_KEY) or "").strip()
+    if model not in VOICE_MODELS:
+        model = DEFAULT_VOICE_MODEL
+
+    provider_id = (database.get_system_setting(VOICE_PROVIDER_ID_KEY) or "").strip() or None
+
+    return {
+        "voice_mode_enabled": _truthy_setting(database.get_system_setting(VOICE_MODE_ENABLED_KEY)),
+        "voice_model": model,
+        "voice_provider_id": provider_id,
+        "voice_max_call_minutes": max_minutes,
+    }
+
+
+@router.get("/voice", response_model=VoiceSettingsResponse)
+async def get_voice_settings_endpoint(token: str = Depends(require_auth)):
+    """Get the current voice-mode settings (defaults applied)."""
+    return VoiceSettingsResponse(**get_voice_settings())
+
+
+@router.put("/voice", response_model=VoiceSettingsResponse)
+async def update_voice_settings(
+    request: VoiceSettingsUpdateRequest,
+    token: str = Depends(require_admin)
+):
+    """Update voice-mode settings. Only the supplied keys are written.
+
+    Validation: ``voice_model`` must be in the allowlist, ``voice_max_call_minutes``
+    must be positive, and a non-empty ``voice_provider_id`` must name a provider
+    row that is eligible to fund realtime calls (an enabled ``openai`` API-key
+    row — never a ChatGPT/Codex subscription row, which cannot do Realtime).
+
+    Admin only.
+    """
+    provided = request.model_fields_set
+
+    if "voice_model" in provided:
+        model = (request.voice_model or "").strip()
+        if model not in VOICE_MODELS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"voice_model must be one of {list(VOICE_MODELS)}",
+            )
+        database.set_system_setting(VOICE_MODEL_KEY, model)
+
+    if "voice_max_call_minutes" in provided:
+        minutes = request.voice_max_call_minutes
+        if minutes is None or minutes <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="voice_max_call_minutes must be a positive integer",
+            )
+        database.set_system_setting(VOICE_MAX_CALL_MINUTES_KEY, str(minutes))
+
+    if "voice_mode_enabled" in provided:
+        database.set_system_setting(
+            VOICE_MODE_ENABLED_KEY, "true" if request.voice_mode_enabled else "false"
+        )
+
+    if "voice_provider_id" in provided:
+        # Imported lazily: app.api.voice imports this module for the reader
+        # above, so a module-level import here would be circular.
+        from app.api.voice import list_eligible_voice_providers
+
+        provider_id = (request.voice_provider_id or "").strip()
+        if not provider_id:
+            database.delete_system_setting(VOICE_PROVIDER_ID_KEY)
+        else:
+            eligible_ids = {p["id"] for p in list_eligible_voice_providers()}
+            if provider_id not in eligible_ids:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Provider {provider_id!r} cannot fund voice calls. Pick an "
+                        "enabled OpenAI provider that stores an API key (Realtime "
+                        "does not support ChatGPT-subscription logins)."
+                    ),
+                )
+            database.set_system_setting(VOICE_PROVIDER_ID_KEY, provider_id)
+
+    return VoiceSettingsResponse(**get_voice_settings())

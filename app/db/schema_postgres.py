@@ -20,7 +20,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 73
+SCHEMA_VERSION = 74
 
 
 def create_postgres_schema(cursor) -> None:
@@ -203,6 +203,7 @@ def create_postgres_schema(cursor) -> None:
             working_set_ref TEXT,
             context_usage_json JSONB,
             provider_id TEXT,
+            mode TEXT,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
             FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE SET NULL,
             FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL,

@@ -5,7 +5,7 @@ Pydantic models for API requests and responses
 from datetime import datetime
 from enum import Enum
 from typing import Optional, List, Dict, Any, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ============================================================================
@@ -368,6 +368,12 @@ class Session(SessionBase):
     # model so clients can tell a ProviderAgent-bound session from a native one
     # without a second round-trip.
     provider_id: Optional[str] = None
+    # Interaction mode (v74, ruling VM4 of docs/VOICE_MODE_PLAN.md): 'chat' (the
+    # default) or 'voice' (an OpenAI Realtime voice call). The column is
+    # nullable and NULL means chat, so the validator below coalesces — that
+    # covers every construction site at once (sessions are handed to FastAPI as
+    # raw row dicts through ``response_model``, never built field-by-field).
+    mode: str = "chat"
     created_at: datetime
     updated_at: datetime
     # Cross-install (cluster) annotation — populated by the API enrichment layer
@@ -399,6 +405,19 @@ class Session(SessionBase):
     # V2 streaming path marker. Forced TRUE on every session (V2 Phase 1
     # deletion); the model default stays False for unset/legacy construction.
     v2_stream: bool = False
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _coalesce_mode(cls, value):
+        """NULL/empty ``sessions.mode`` reads as 'chat' (ruling VM4).
+
+        Every session predating v74 carries NULL, and chat sessions keep
+        carrying NULL, so the coalesce lives here rather than at each of the
+        many places a row dict is fed to this response model.
+        """
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return "chat"
+        return value
 
 
 class SessionWithMessages(Session):

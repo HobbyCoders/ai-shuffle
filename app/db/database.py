@@ -172,7 +172,12 @@ def _safe_json(value):
 #     'openai' (chat/completions — xAI-direct / Groq / vLLM). Read by the
 #     harness adapter's leg decision; lands via the always-run guarded ADD
 #     COLUMN in _run_column_migrations.
-SCHEMA_VERSION = 73
+# 74 (2026-08-14): add sessions.mode TEXT — the session's interaction mode,
+#     'chat' (default when NULL — every pre-existing session) or 'voice' (an
+#     OpenAI Realtime voice call, ruling VM4 of docs/VOICE_MODE_PLAN.md).
+#     Additive/nullable with no index, same discipline as sessions.provider_id;
+#     lands via the always-run guarded ADD COLUMN in _run_column_migrations.
+SCHEMA_VERSION = 74
 
 
 def _migrate_profiles_to_agents(cursor):
@@ -1493,6 +1498,16 @@ def _run_column_migrations(cursor):
     if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "provider_id"):
         cursor.execute("ALTER TABLE sessions ADD COLUMN provider_id TEXT")
         migrations_applied.append("sessions.provider_id")
+
+    # Session interaction mode (v74, voice-mode ruling VM4). One nullable TEXT
+    # column: 'chat' (the implicit default — NULL means chat, so every existing
+    # row keeps working untouched) or 'voice' (an OpenAI Realtime voice call).
+    # Additive/nullable with NO index, exactly like provider_id above, so it is
+    # immune to the schema-pass-before-column-migrations ordering trap; guarded
+    # so the ALTER never re-runs.
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "mode"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN mode TEXT")
+        migrations_applied.append("sessions.mode")
 
     # Rename sessions.is_favorite -> is_active (v63). Favorites were reworked
     # into an "Active group": the flag now marks the session the user is

@@ -338,7 +338,12 @@ def test_schema_version_parity_v51():
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 73 for model_providers.api_dialect: the wire format a custom
+    # Bumped to 74 for sessions.mode: the session's interaction mode — 'chat'
+    # (the implicit default; NULL means chat, so every pre-existing session is
+    # unaffected) or 'voice' (an OpenAI Realtime voice call, ruling VM4 of
+    # docs/VOICE_MODE_PLAN.md, wave VW1). Additive/nullable with no index, the
+    # sessions.provider_id template. v73 added model_providers.api_dialect: the
+    # wire format a custom
     # row's endpoint speaks — 'anthropic' (default when NULL; Messages at
     # {base_url}/v1/messages) or 'openai' (chat/completions — xAI-direct /
     # Groq / vLLM), read by the harness adapter's leg decision. v72 added
@@ -378,8 +383,8 @@ def test_schema_version_parity_v51():
     # the Phase-2 turns table; v58 was the Phase-1 deletion (v2_stream forced
     # TRUE + default flipped); v57 added the opt-in flag; v56 added the Phase-0
     # primitives.
-    assert db_version == 73
-    assert pg_version == 73
+    assert db_version == 74
+    assert pg_version == 74
     assert db_version == pg_version
 
 
