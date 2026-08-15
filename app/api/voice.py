@@ -156,8 +156,19 @@ class VoiceSecretResponse(BaseModel):
 
 
 class VoiceCallRequest(BaseModel):
-    """The ``call_id`` the browser got back from OpenAI's WebRTC handshake."""
+    """The ``call_id`` the client got back from OpenAI's WebRTC handshake.
+
+    ``client_tools`` lets a native client (the Android app) declare extra
+    realtime function tools it will service ITSELF over its own data channel —
+    device-local actions like placing a call or sending a text. The sideband
+    merges them into its ``session.update`` (so the model can see them) and
+    skips servicing those names (so the client's answer is the only one).
+    ``client_instructions`` is appended to the coordinator instructions to
+    teach the model when/how to use those tools.
+    """
     call_id: str
+    client_tools: Optional[List[Dict[str, Any]]] = None
+    client_instructions: Optional[str] = None
 
 
 class VoicePreviewRequest(BaseModel):
@@ -651,6 +662,66 @@ async def mint_voice_session_secret(
     )
 
 
+# Client-declared tools are serviced by the app, but their schemas travel
+# through us into the realtime session — so bound them defensively.
+MAX_CLIENT_TOOLS = 32
+MAX_CLIENT_INSTRUCTIONS_CHARS = 6000
+_TOOL_NAME_MAX = 64
+
+
+def _sanitize_client_tools(
+    raw_tools: Optional[List[Dict[str, Any]]],
+    reserved_names: set,
+) -> List[Dict[str, Any]]:
+    """Validate and normalize client-declared realtime tools.
+
+    Raises a 400 on anything malformed rather than silently dropping it: a
+    tool the client thinks it declared but the model can't see is a confusing
+    half-working assistant, and the client is ours — it should be fixed.
+    """
+    if not raw_tools:
+        return []
+    if len(raw_tools) > MAX_CLIENT_TOOLS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"At most {MAX_CLIENT_TOOLS} client tools are allowed.",
+        )
+    sanitized: List[Dict[str, Any]] = []
+    seen: set = set()
+    for tool in raw_tools:
+        if not isinstance(tool, dict):
+            raise HTTPException(status_code=400, detail="Each client tool must be an object.")
+        name = tool.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise HTTPException(status_code=400, detail="Every client tool needs a name.")
+        name = name.strip()
+        if len(name) > _TOOL_NAME_MAX or not name.replace("_", "").replace("-", "").isalnum():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid client tool name {name!r}.",
+            )
+        if name in reserved_names:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Client tool name {name!r} collides with a server tool.",
+            )
+        if name in seen:
+            raise HTTPException(
+                status_code=400, detail=f"Duplicate client tool name {name!r}.",
+            )
+        seen.add(name)
+        description = tool.get("description")
+        parameters = tool.get("parameters")
+        sanitized.append({
+            "type": "function",
+            "name": name,
+            "description": description if isinstance(description, str) else "",
+            "parameters": parameters if isinstance(parameters, dict)
+            else {"type": "object", "properties": {}},
+        })
+    return sanitized
+
+
 @router.post("/sessions/{session_id}/call", response_model=VoiceOkResponse)
 async def attach_voice_call(
     session_id: str,
@@ -676,6 +747,20 @@ async def attach_voice_call(
     if not call_id:
         raise HTTPException(status_code=400, detail="call_id is required.")
 
+    client_tools = _sanitize_client_tools(
+        request.client_tools,
+        reserved_names={t["name"] for t in voice_bridge.VOICE_TOOLS},
+    )
+    client_instructions = (request.client_instructions or "").strip() or None
+    if client_instructions and len(client_instructions) > MAX_CLIENT_INSTRUCTIONS_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "client_instructions is limited to "
+                f"{MAX_CLIENT_INSTRUCTIONS_CHARS} characters."
+            ),
+        )
+
     provider_row = await run_sync(
         _resolve_provider_row,
         session_row.get("provider_id"),
@@ -692,6 +777,8 @@ async def attach_voice_call(
             max_call_minutes=voice_settings["voice_max_call_minutes"],
             # Fallback bearer for the handshake — see _remember_client_secret.
             client_secret=_recall_client_secret(session_id),
+            client_tools=client_tools,
+            client_instructions=client_instructions,
         )
     except HTTPException:
         raise

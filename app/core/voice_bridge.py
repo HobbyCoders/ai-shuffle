@@ -509,6 +509,8 @@ class VoiceBridge:
         call_started_at: Optional[float] = None,
         usage_totals: Optional[Dict[str, int]] = None,
         on_duration_cap: Optional[Callable[[], None]] = None,
+        client_tools: Optional[List[Dict[str, Any]]] = None,
+        client_instructions: Optional[str] = None,
     ) -> None:
         self.session_id = session_id
         self.call_id = call_id
@@ -558,6 +560,18 @@ class VoiceBridge:
         # Voice session's profile id, read lazily and cached (dispatch grants).
         self._profile_id: Optional[str] = None
         self._profile_loaded = False
+
+        # -- client-serviced tools (native app integration) ----------------
+        # Tools a native client (e.g. the Android app) declared on attach and
+        # services ITSELF over its own data channel: we declare them in our
+        # session.update so the model can call them, and we must NOT answer
+        # them — a second function_call_output for the same call would race
+        # the client's real result with our "Unknown tool" error.
+        self._client_tools: List[Dict[str, Any]] = list(client_tools or [])
+        self._client_tool_names: set = {
+            t.get("name") for t in self._client_tools if t.get("name")
+        }
+        self._client_instructions = (client_instructions or "").strip()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -724,6 +738,10 @@ class VoiceBridge:
         :meth:`_send_truncation_update`.
         """
         instructions = VOICE_INSTRUCTIONS
+        if self._client_instructions:
+            # The native client's appendix (device tools like calls/SMS) rides
+            # after the contract so the contract always leads.
+            instructions = f"{instructions}\n\n{self._client_instructions}"
         roster = await self._agent_roster()
         if roster:
             instructions = f"{instructions}\n\n{roster}"
@@ -738,7 +756,10 @@ class VoiceBridge:
                 "instructions": instructions,
                 # Declared HERE, on the sideband, not by the browser: the client
                 # can neither see nor tamper with the dispatch surface (VM2).
-                "tools": [dict(tool) for tool in VOICE_TOOLS],
+                # Client-declared device tools are appended verbatim (already
+                # sanitized by the route) and serviced by the client itself.
+                "tools": [dict(tool) for tool in VOICE_TOOLS]
+                + [dict(tool) for tool in self._client_tools],
                 "audio": {"input": {"turn_detection": dict(TURN_DETECTION_CONFIG)}},
             },
         })
@@ -935,6 +956,11 @@ class VoiceBridge:
         if not isinstance(call_id, str) or not call_id:
             return None
         if not isinstance(name, str) or not name:
+            return None
+        if name in self._client_tool_names:
+            # A client-serviced (device) tool: the native app answers it over
+            # its own data channel. Answering here too would race the app's
+            # real result with an "Unknown tool" error for the same call_id.
             return None
         if call_id in self._serviced_calls:
             return None
@@ -1664,6 +1690,8 @@ class VoiceCallRegistry:
         model: str,
         max_call_minutes: int,
         client_secret: Optional[str] = None,
+        client_tools: Optional[List[Dict[str, Any]]] = None,
+        client_instructions: Optional[str] = None,
     ) -> VoiceBridge:
         """Attach the sideband, REPLACING any existing attachment.
 
@@ -1699,6 +1727,8 @@ class VoiceCallRegistry:
                 on_duration_cap=lambda: self.mark_capped(
                     session_id, max_call_minutes,
                 ),
+                client_tools=client_tools,
+                client_instructions=client_instructions,
             )
             # Only record the epoch once the connect actually succeeded — a
             # failed attach must not leave a clock running for a call that never
