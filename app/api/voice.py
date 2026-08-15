@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.api.auth import require_auth
 from app.db import database
@@ -146,11 +146,19 @@ class VoiceOkResponse(BaseModel):
 
 
 class VoiceStateResponse(BaseModel):
-    """Whether a sideband bridge is attached to this session, and its health."""
+    """Whether a sideband bridge is attached to this session, and its health.
+
+    ``usage`` accumulates realtime token counters across the whole call (it
+    survives the FE's reconnect), and ``estimated_cost_usd`` prices them from a
+    static per-model table — an ESTIMATE, not billing: cached-input discounts
+    are ignored and an unpriced model yields ``null``.
+    """
     active: bool
     connected: bool
     started_at: Optional[float] = None
     model: Optional[str] = None
+    usage: Dict[str, int] = Field(default_factory=dict)
+    estimated_cost_usd: Optional[float] = None
 
 
 # ============================================================================
@@ -344,6 +352,28 @@ async def _require_voice_enabled() -> Dict[str, Any]:
     return voice_settings
 
 
+def _reject_when_capped(session_id: str) -> None:
+    """409 while the session sits inside the post-cap grace window (VW5).
+
+    The call-length cap is measured from the call's epoch, so the FE's silent
+    re-handshake would otherwise just re-attach and keep going. Answering 409
+    here — on BOTH the re-mint and the attach — is what forces a deliberate
+    hangup instead of an accidentally endless call.
+    """
+    from app.core import voice_bridge
+
+    minutes = voice_bridge.registry.capped_minutes(session_id)
+    if minutes is None:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"Call length cap reached ({minutes} minutes). Hang up and start a "
+            "new call."
+        ),
+    )
+
+
 async def _require_voice_session(session_id: str) -> Dict[str, Any]:
     """The session row, or a 404 when it is missing or is not a voice session.
 
@@ -429,6 +459,7 @@ async def mint_voice_session_secret(
     """
     voice_settings = await _require_voice_enabled()
     session_row = await _require_voice_session(session_id)
+    _reject_when_capped(session_id)
 
     provider_row = await run_sync(
         _resolve_provider_row,
@@ -457,12 +488,16 @@ async def attach_voice_call(
 
     Idempotent in the useful sense: posting a NEW ``call_id`` for a session that
     already has a bridge replaces it (the old attachment is closed first), which
-    is exactly what the reconnect path needs.
+    is exactly what the reconnect path needs — and the replacement keeps the
+    call's epoch, so the length cap is not restarted by reconnecting.
+
+    Answers 409 inside the post-cap grace window (see :func:`_reject_when_capped`).
     """
     from app.core import voice_bridge
 
     voice_settings = await _require_voice_enabled()
     session_row = await _require_voice_session(session_id)
+    _reject_when_capped(session_id)
 
     call_id = (request.call_id or "").strip()
     if not call_id:

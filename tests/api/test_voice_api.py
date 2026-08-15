@@ -395,9 +395,11 @@ def sidebands(monkeypatch):
 
     monkeypatch.setattr(voice_bridge, "_open_sideband", _open)
     yield sockets
-    # The module-level registry outlives a test — never leak a bridge into the
-    # next one.
+    # The module-level registry outlives a test — never leak a bridge, a call
+    # epoch or a cap marker into the next one.
     voice_bridge.registry._bridges.clear()
+    voice_bridge.registry._epochs.clear()
+    voice_bridge.registry._capped.clear()
 
 
 class TestVoiceSecretRemint:
@@ -592,6 +594,7 @@ class TestVoiceState:
         assert resp.status_code == 200, resp.text
         assert resp.json() == {
             "active": False, "connected": False, "started_at": None, "model": None,
+            "usage": {}, "estimated_cost_usd": None,
         }
 
     def test_state_while_attached(self, authenticated_client, mock_db, sidebands):
@@ -616,6 +619,7 @@ class TestVoiceState:
         ).json()
         assert after == {
             "active": False, "connected": False, "started_at": None, "model": None,
+            "usage": {}, "estimated_cost_usd": None,
         }
 
     def test_state_for_a_chat_session_returns_404(self, authenticated_client, mock_db):
@@ -623,3 +627,102 @@ class TestVoiceState:
         assert authenticated_client.get(
             f"{VOICE_ROOT}/sessions/chat-sess/state"
         ).status_code == 404
+
+    def test_state_reports_usage_and_a_cost_estimate(
+        self, authenticated_client, mock_db, sidebands
+    ):
+        from app.core import voice_bridge
+
+        _enable_voice(voice_model="gpt-realtime-2.1")
+        _make_provider()
+        _mk_voice_session()
+        authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={"call_id": "rtc_1"}
+        )
+
+        # Stand in for a `response.done` the fake socket cannot deliver.
+        voice_bridge.registry.get(SESSION_ID)._accumulate_usage({
+            "input_tokens": 1_000, "output_tokens": 500,
+            "input_token_details": {"text_tokens": 200, "audio_tokens": 800},
+            "output_token_details": {"text_tokens": 100, "audio_tokens": 400},
+        })
+
+        body = authenticated_client.get(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/state"
+        ).json()
+        assert body["usage"] == {
+            "input_tokens": 1_000, "output_tokens": 500,
+            "input_text_tokens": 200, "input_audio_tokens": 800,
+            "output_text_tokens": 100, "output_audio_tokens": 400,
+        }
+        # (200·$4 + 100·$24 + 800·$32 + 400·$64) / 1M tokens.
+        assert body["estimated_cost_usd"] == pytest.approx(0.0544)
+
+        authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
+
+
+# ============================================================================
+# VW5 — the post-cap grace window
+# ============================================================================
+
+CAP_DETAIL = "Call length cap reached (240 minutes). Hang up and start a new call."
+
+
+class TestCallLengthCapGrace:
+    """Once the cap fires, an automatic reconnect must not restart the clock."""
+
+    def _capped_session(self):
+        from app.core import voice_bridge
+
+        _enable_voice()
+        _make_provider()
+        _mk_voice_session()
+        voice_bridge.registry.mark_capped(SESSION_ID, 240)
+
+    def test_attach_returns_409_inside_the_window(
+        self, authenticated_client, mock_db, sidebands
+    ):
+        self._capped_session()
+        resp = authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={"call_id": "rtc_2"}
+        )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"] == CAP_DETAIL
+        assert sidebands == []                     # no new sideband was opened
+
+    def test_secret_remint_returns_409_inside_the_window(
+        self, authenticated_client, mock_db, sidebands, monkeypatch
+    ):
+        self._capped_session()
+        _install_mock_transport(monkeypatch, _secret_handler())
+        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/secret")
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"] == CAP_DETAIL
+
+    def test_hangup_clears_the_window_so_a_new_call_works(
+        self, authenticated_client, mock_db, sidebands
+    ):
+        self._capped_session()
+        assert authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup"
+        ).status_code == 200
+
+        resp = authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={"call_id": "rtc_3"}
+        )
+        assert resp.status_code == 200, resp.text
+        assert [s.call_id for s in sidebands] == ["rtc_3"]
+        authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
+
+    def test_the_window_expires(
+        self, authenticated_client, mock_db, sidebands, monkeypatch
+    ):
+        from app.core import voice_bridge
+
+        self._capped_session()
+        monkeypatch.setattr(voice_bridge, "CAP_GRACE_SECONDS", -1.0)
+        resp = authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={"call_id": "rtc_4"}
+        )
+        assert resp.status_code == 200, resp.text
+        authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")

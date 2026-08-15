@@ -29,6 +29,7 @@
 		toggleAgent,
 		toggleMic,
 	} from '$lib/services/voiceCall';
+	import { getVoiceCallState } from '$lib/api/voice';
 
 	interface Props {
 		sessionId: string;
@@ -71,8 +72,40 @@
 			ticker = null;
 		}
 	});
+	// Spend estimate (VW5) — read from the server, which is the only side that
+	// sees `response.done` usage. Deliberately slow (30s) and best-effort: this
+	// is a glanceable "what is this costing me", not a meter.
+	const COST_POLL_MS = 30_000;
+	let costUsd = $state<number | null>(null);
+	let costTimer: ReturnType<typeof setInterval> | null = null;
+
+	async function pollCost() {
+		try {
+			const state = await getVoiceCallState(sessionId);
+			costUsd = state?.estimated_cost_usd ?? null;
+		} catch {
+			/* a failed poll just leaves the last estimate on screen */
+		}
+	}
+
+	$effect(() => {
+		if (live) {
+			void pollCost();
+			costTimer ??= setInterval(() => void pollCost(), COST_POLL_MS);
+		} else if (costTimer) {
+			clearInterval(costTimer);
+			costTimer = null;
+		}
+	});
+
+	/** "~$0.12" once there is something to show; "<$0.01" while it is tiny. */
+	const costLabel = $derived(
+		costUsd === null || costUsd <= 0 ? '' : costUsd >= 0.01 ? `~$${costUsd.toFixed(2)}` : '<$0.01'
+	);
+
 	onDestroy(() => {
 		if (ticker) clearInterval(ticker);
+		if (costTimer) clearInterval(costTimer);
 	});
 
 	const elapsed = $derived.by(() => {
@@ -112,6 +145,11 @@
 				{statusLabel}
 				{#if elapsed}<span class="vp-elapsed">· {elapsed}</span>{/if}
 				{#if mine && call.model}<span class="vp-model">· {call.model}</span>{/if}
+				{#if mine && costLabel}<span
+						class="vp-cost"
+						title="Estimated OpenAI spend for this call (list prices, cached-input discounts ignored)"
+						>· {costLabel}</span
+					>{/if}
 			</p>
 		</div>
 
@@ -254,9 +292,13 @@
 		color: var(--muted-foreground);
 	}
 	.vp-elapsed,
-	.vp-model {
+	.vp-model,
+	.vp-cost {
 		font-family: var(--font-mono, monospace);
 		font-size: 11px;
+	}
+	.vp-cost {
+		cursor: help;
 	}
 
 	.vp-controls {

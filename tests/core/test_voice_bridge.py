@@ -394,6 +394,7 @@ async def test_registry_attach_and_state(mock_db, fake_sockets, registry):
     _mk_session()
     assert registry.state(SID) == {
         "active": False, "connected": False, "started_at": None, "model": None,
+        "usage": {}, "estimated_cost_usd": None,
     }
 
     bridge = await registry.attach(
@@ -1080,3 +1081,324 @@ async def test_stop_cancels_bridge_tasks_but_never_stops_a_worker(
     assert bridge._watchers == set() and bridge._call_tasks == set()
     assert bridge._approval_task is None
     assert torn_down == []                       # workers survive the hangup
+
+
+# ---------------------------------------------------------------------------
+# VW5 — the call epoch (cap spans reconnects)
+# ---------------------------------------------------------------------------
+
+async def test_replace_attach_preserves_the_call_epoch(mock_db, fake_sockets, registry):
+    _mk_session()
+    first = await registry.attach(SID, "call-1", api_key=KEY, model=MODEL, max_call_minutes=60)
+    await asyncio.sleep(0.02)
+    second = await registry.attach(SID, "call-2", api_key=KEY, model=MODEL, max_call_minutes=60)
+
+    # The FE's 50-minute re-handshake must NOT restart the clock.
+    assert second.call_started_at == first.call_started_at
+    assert registry.call_started_at(SID) == first.call_started_at
+    assert second.started_at > first.started_at   # but it IS a new attachment
+    await registry.detach(SID)
+
+
+async def test_hangup_clears_the_epoch_so_the_next_call_starts_fresh(
+    mock_db, fake_sockets, registry
+):
+    _mk_session()
+    first = await registry.attach(SID, "call-1", api_key=KEY, model=MODEL, max_call_minutes=60)
+    await registry.detach(SID)
+    assert registry.call_started_at(SID) is None
+
+    await asyncio.sleep(0.02)
+    third = await registry.attach(SID, "call-3", api_key=KEY, model=MODEL, max_call_minutes=60)
+    assert third.call_started_at > first.call_started_at
+    await registry.detach(SID)
+
+
+async def test_a_failed_attach_leaves_no_epoch_behind(mock_db, monkeypatch, registry):
+    _mk_session()
+
+    async def _boom(call_id, api_key):
+        raise ConnectionError("handshake refused")
+
+    monkeypatch.setattr(vb, "_open_sideband", _boom)
+    with pytest.raises(ConnectionError):
+        await registry.attach(SID, CALL, api_key=KEY, model=MODEL, max_call_minutes=60)
+    assert registry.call_started_at(SID) is None
+
+
+async def test_the_cap_counts_from_the_epoch_not_the_attachment(
+    mock_db, fake_sockets, registry, monkeypatch
+):
+    _mk_session()
+    monkeypatch.setattr(vb, "SECONDS_PER_MINUTE", 0.3)
+    await registry.attach(SID, "call-1", api_key=KEY, model=MODEL, max_call_minutes=1)
+    await asyncio.sleep(0.2)
+
+    # Reconnect two thirds of the way through the cap: the replacement inherits
+    # the REMAINING time, it does not get a fresh minute.
+    second = await registry.attach(SID, "call-2", api_key=KEY, model=MODEL, max_call_minutes=1)
+    assert second.remaining_seconds() < 0.15
+
+    await asyncio.sleep(0.25)
+    assert second.active is False
+    assert second.stop_reason == "duration_cap"
+    assert fake_sockets[1].closed is True
+    # And the session is now inside the post-cap grace window.
+    assert registry.capped_minutes(SID) == 1
+
+
+async def test_the_cap_marker_drops_the_epoch_and_expires(mock_db, registry, monkeypatch):
+    registry.mark_capped(SID, 240)
+    assert registry.capped_minutes(SID) == 240
+    assert registry.call_started_at(SID) is None   # a new call must start clean
+
+    monkeypatch.setattr(vb, "CAP_GRACE_SECONDS", -1.0)
+    assert registry.capped_minutes(SID) is None
+
+
+async def test_hangup_clears_the_cap_marker(mock_db, registry):
+    registry.mark_capped(SID, 240)
+    assert await registry.detach(SID) is False     # no bridge, but state clears
+    assert registry.capped_minutes(SID) is None
+
+
+async def test_shutdown_all_clears_epochs_and_cap_markers(mock_db, fake_sockets, registry):
+    _mk_session()
+    await registry.attach(SID, CALL, api_key=KEY, model=MODEL, max_call_minutes=60)
+    registry.mark_capped("other", 240)
+    await registry.shutdown_all()
+    assert registry.call_started_at(SID) is None
+    assert registry.capped_minutes("other") is None
+
+
+# ---------------------------------------------------------------------------
+# VW5 — deterministic default agent + roster
+# ---------------------------------------------------------------------------
+
+def test_default_agent_prefers_one_literally_called_default():
+    rows = [
+        {"id": "p1", "name": "Zeta"},
+        {"id": "p2", "name": "Default"},        # name match wins over ordering
+        {"id": "p3", "name": "Alpha"},
+    ]
+    assert vb._pick_default_agent(rows) == "p2"
+    assert vb._pick_default_agent([
+        {"id": "default", "name": "Coordinator"}, {"id": "p9", "name": "Alpha"},
+    ]) == "default"
+
+
+def test_default_agent_otherwise_takes_the_alphabetically_first_name():
+    rows = [{"id": "p3", "name": "Zeta"}, {"id": "p1", "name": "beta"},
+            {"id": "p2", "name": "Alpha"}]
+    assert vb._pick_default_agent(rows) == "p2"
+    # Order of the table read must not change the answer.
+    assert vb._pick_default_agent(list(reversed(rows))) == "p2"
+    assert vb._pick_default_agent([]) is None
+
+
+async def test_the_default_pick_is_stable_across_row_order(
+    mock_db, fake_sockets, fake_dispatch, idle_gate, monkeypatch
+):
+    from app.db import database
+
+    _mk_session()                                   # session profile = "default"
+    rows = [
+        {"id": "zeta", "name": "Zeta"},
+        {"id": "default", "name": "Default"},       # the caller — never eligible
+        {"id": "alpha", "name": "Alpha"},
+    ]
+    for ordering in (rows, list(reversed(rows))):
+        monkeypatch.setattr(database, "get_all_profiles", lambda o=ordering: list(o))
+        bridge = await _bridge(fake_sockets)
+        assert await bridge._default_agent_ref() == "alpha"
+        await bridge.stop()
+
+
+async def test_instructions_carry_the_dispatchable_agent_roster(
+    mock_db, fake_sockets, monkeypatch
+):
+    from app.db import database
+
+    _mk_session()
+    monkeypatch.setattr(database, "get_all_profiles", lambda: [
+        {"id": "default", "name": "Default"},       # the caller — excluded
+        {"id": "coder", "name": "Coder",
+         "description": "Writes code. Also reviews pull requests."},
+        {"id": "scout", "name": "Scout"},
+    ])
+    bridge = await _bridge(fake_sockets)
+    instructions = fake_sockets[0].session_update()["session"]["instructions"]
+
+    # The VM16 contract text still leads, verbatim.
+    assert instructions.startswith(vb.VOICE_INSTRUCTIONS)
+    roster = instructions[instructions.index(vb.ROSTER_HEADER):]
+    assert "- Coder — Writes code." in roster
+    assert "reviews pull requests" not in roster    # first sentence only
+    assert "- Scout" in roster
+    assert "Default" not in roster                  # the caller is not offered
+    await bridge.stop()
+
+
+def test_the_roster_is_capped():
+    rows = [
+        {"id": f"a{i}", "name": f"Agent {i:02d}", "description": "x" * 400}
+        for i in range(40)
+    ]
+    roster = vb._agent_roster_text(rows)
+    assert len(roster) <= vb.ROSTER_MAX_CHARS
+    assert roster.startswith(vb.ROSTER_HEADER)
+    assert "Agent 00" in roster                     # budgeted from the top
+    assert vb._agent_roster_text([]) == ""
+
+
+def test_the_dispatch_tool_points_at_the_roster():
+    tool = next(t for t in vb.VOICE_TOOLS if t["name"] == "dispatch_agent")
+    description = tool["parameters"]["properties"]["agent"]["description"]
+    assert "Agents you can dispatch" in description
+    assert "list_agents" in description
+
+
+# ---------------------------------------------------------------------------
+# VW5 — retention via a SECOND session.update
+# ---------------------------------------------------------------------------
+
+def _session_updates(sock: FakeSideband):
+    return [f for f in _frames(sock) if f.get("type") == "session.update"]
+
+
+async def test_truncation_travels_in_its_own_session_update(mock_db, fake_sockets):
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+
+    updates = _session_updates(fake_sockets[0])
+    assert len(updates) == 2
+    assert "truncation" not in updates[0]["session"]     # never bundled
+    assert updates[1]["session"] == {
+        "type": "realtime",
+        "truncation": {"type": "retention_ratio", "retention_ratio": 0.8},
+    }
+    await bridge.stop()
+
+
+async def test_a_rejected_truncation_update_costs_only_itself(
+    mock_db, fake_sockets, monkeypatch
+):
+    _mk_session()
+    original = vb.VoiceBridge._send
+
+    async def _send(self, payload):
+        if "truncation" in json.dumps(payload):
+            raise RuntimeError("Unknown parameter: session.truncation")
+        await original(self, payload)
+
+    monkeypatch.setattr(vb.VoiceBridge, "_send", _send)
+    bridge = await _bridge(fake_sockets)
+
+    assert bridge.connected is True                      # the call survives
+    updates = _session_updates(fake_sockets[0])
+    assert len(updates) == 1
+    assert updates[0]["session"]["instructions"].startswith(vb.VOICE_INSTRUCTIONS)
+    assert updates[0]["session"]["tools"]                # tools kept
+    await bridge.stop()
+
+
+async def test_a_truncation_error_event_is_logged_and_the_call_continues(
+    mock_db, fake_sockets, caplog
+):
+    import logging
+
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+    sock = fake_sockets[0]
+    sock.push({
+        "type": "error",
+        "error": {"message": "Unknown parameter: 'session.truncation'."},
+    })
+    sock.push({
+        "type": "conversation.item.input_audio_transcription.completed",
+        "transcript": "still listening",
+    })
+    sock.push({"type": "response.done", "response": {}})
+    with caplog.at_level(logging.WARNING, logger="app.core.voice_bridge"):
+        await _drain(bridge, sock)
+
+    assert any("truncation" in r.getMessage() for r in caplog.records)
+    assert _types() == ["turn.started", "message.user", "message.assistant",
+                        "turn.completed"]
+
+
+# ---------------------------------------------------------------------------
+# VW5 — usage + cost estimate
+# ---------------------------------------------------------------------------
+
+USAGE_BLOCK = {
+    "total_tokens": 100,
+    "input_tokens": 60,
+    "output_tokens": 40,
+    "input_token_details": {"text_tokens": 10, "audio_tokens": 50, "cached_tokens": 5},
+    "output_token_details": {"text_tokens": 8, "audio_tokens": 32},
+}
+
+
+async def test_usage_accumulates_across_a_replace_attach(
+    mock_db, fake_sockets, registry
+):
+    _mk_session()
+    await registry.attach(SID, "call-1", api_key=KEY, model=MODEL, max_call_minutes=60)
+    fake_sockets[0].push({"type": "response.done", "response": {"usage": USAGE_BLOCK}})
+    await asyncio.sleep(0.05)
+
+    second = await registry.attach(SID, "call-2", api_key=KEY, model=MODEL, max_call_minutes=60)
+    fake_sockets[1].push({"type": "response.done", "response": {"usage": USAGE_BLOCK}})
+    await asyncio.sleep(0.05)
+
+    state = registry.state(SID)
+    assert state["usage"] == {
+        "total_tokens": 200, "input_tokens": 120, "output_tokens": 80,
+        "input_text_tokens": 20, "input_audio_tokens": 100,
+        "input_cached_tokens": 10,
+        "output_text_tokens": 16, "output_audio_tokens": 64,
+    }
+    # The replacement bridge counts into the SAME record, it does not restart.
+    assert second.usage == state["usage"]
+    assert state["estimated_cost_usd"] == vb.estimate_cost_usd(MODEL, state["usage"])
+    assert state["estimated_cost_usd"] > 0
+    await registry.detach(SID)
+
+
+async def test_usage_starts_clean_on_a_new_call(mock_db, fake_sockets, registry):
+    _mk_session()
+    await registry.attach(SID, "call-1", api_key=KEY, model=MODEL, max_call_minutes=60)
+    fake_sockets[0].push({"type": "response.done", "response": {"usage": USAGE_BLOCK}})
+    await asyncio.sleep(0.05)
+    await registry.detach(SID)
+
+    await registry.attach(SID, "call-2", api_key=KEY, model=MODEL, max_call_minutes=60)
+    assert registry.state(SID)["usage"] == {}
+    await registry.detach(SID)
+
+
+def test_usage_deltas_ignore_absent_and_non_numeric_fields():
+    assert vb._usage_deltas({}) == {}
+    assert vb._usage_deltas({"input_tokens": None, "output_tokens": "12"}) == {}
+    assert vb._usage_deltas({"input_tokens": 7}) == {"input_tokens": 7}
+
+
+def test_estimated_cost_prices_every_allowlisted_model():
+    million = {
+        "input_text_tokens": 1_000_000, "input_audio_tokens": 1_000_000,
+        "output_text_tokens": 1_000_000, "output_audio_tokens": 1_000_000,
+    }
+    assert vb.estimate_cost_usd("gpt-realtime-2.1", million) == pytest.approx(124.0)
+    assert vb.estimate_cost_usd("gpt-realtime-2.1-mini", million) == pytest.approx(33.0)
+    assert vb.estimate_cost_usd("gpt-realtime", million) == pytest.approx(116.0)
+
+
+def test_estimated_cost_falls_back_and_declines_the_unknown():
+    # No token details: everything that isn't audio counts as text.
+    assert vb.estimate_cost_usd(
+        "gpt-realtime-2.1", {"input_tokens": 1_000_000, "output_tokens": 1_000_000},
+    ) == pytest.approx(28.0)
+    assert vb.estimate_cost_usd("gpt-4o-realtime-preview", {"input_tokens": 10}) is None
+    assert vb.estimate_cost_usd("gpt-realtime-2.1", {}) is None
+    assert vb.estimate_cost_usd(None, {"input_tokens": 10}) is None

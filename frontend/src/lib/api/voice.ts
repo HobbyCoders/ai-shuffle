@@ -77,12 +77,16 @@ export interface VoiceSecret {
 	model: string;
 }
 
-/** Server-side call state (VW3 contract). */
+/** Server-side call state (VW3 contract; usage + cost added in VW5). */
 export interface VoiceCallState {
 	active: boolean;
 	connected: boolean;
 	started_at: number | null;
 	model: string | null;
+	/** Realtime token counters for the whole call (survives a reconnect). */
+	usage: Record<string, number>;
+	/** List-price estimate for `usage`, or null for an unpriced model. */
+	estimated_cost_usd: number | null;
 }
 
 // ============================================================================

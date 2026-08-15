@@ -24,6 +24,12 @@
  * owned by the controller, not by a connection, so the swap needs no second
  * `getUserMedia` prompt.
  *
+ * That re-handshake is exactly why the backend's call-length cap answers **409**
+ * (VW5): the cap is measured from the call's start, not from the current
+ * attachment, so a 409 from `/secret` or `/call` means "this call is over". It
+ * is terminal by design — the call ends with the server's message shown and the
+ * reconnect loop stops. A 409 is never retried.
+ *
  * Everything that talks to a VW3-owned endpoint degrades gracefully — see
  * `$lib/api/voice`. With the bridge unmerged the call still connects and
  * speaks; it just has no backend brain and cannot re-handshake.
@@ -429,6 +435,31 @@ function closeConnection(conn: Connection | null): void {
 }
 
 // ============================================================================
+// Call-length cap (VW5) — a 409 ends the call, it is never retried
+// ============================================================================
+
+/**
+ * The server's message when a request was refused by the call-length cap, or
+ * `null` for any other failure.
+ */
+function callCapMessage(e: unknown): string | null {
+	const err = e as { status?: number; detail?: string } | null;
+	if (!err || typeof err !== 'object' || err.status !== 409) return null;
+	return err.detail || 'This call reached its length cap. Hang up and start a new call.';
+}
+
+/**
+ * End the call because the cap fired, leaving the reason on screen.
+ *
+ * The hangup notification matters: it is what clears the server's grace window,
+ * so the "start a new call" the message asks for actually works.
+ */
+async function endForCap(sessionIdIn: string | null, message: string): Promise<void> {
+	await teardown({ notifyBackend: true, status: 'ended' });
+	patch({ sessionId: sessionIdIn, notice: message });
+}
+
+// ============================================================================
 // Reconnect at the 60-minute wall (ruling VM15, FE half)
 // ============================================================================
 
@@ -495,6 +526,13 @@ async function reconnect(): Promise<void> {
 		armReconnectTimer();
 	} catch (e) {
 		if (myGeneration !== generation) return;
+		// The call-length cap is terminal: reconnecting is precisely what must
+		// NOT happen (it would restart the clock), so end the call instead.
+		const capped = callCapMessage(e);
+		if (capped) {
+			await endForCap(sessionId, capped);
+			return;
+		}
 		console.warn('[voice] reconnect failed:', e);
 		// The old connection is still up until the wall actually hits — stay live
 		// and tell the user what to expect.
@@ -589,6 +627,11 @@ export async function startCall(
 		armReconnectTimer();
 	} catch (e) {
 		if (myGeneration !== generation) return;
+		const capped = callCapMessage(e);
+		if (capped) {
+			await endForCap(sessionIdIn, capped);
+			return;
+		}
 		const message =
 			e instanceof Error && e.name ? micErrorOrMessage(e) : String(e ?? 'Unknown error');
 		console.error('[voice] failed to start call:', e);
@@ -616,6 +659,12 @@ export async function startCallForSession(sessionIdIn: string): Promise<void> {
 	try {
 		cred = await mintVoiceSecret(sessionIdIn);
 	} catch (e) {
+		const capped = callCapMessage(e);
+		if (capped) {
+			// Nothing is up yet, so there is nothing to tear down — just say why.
+			patch({ status: 'ended', notice: capped, error: null });
+			return;
+		}
 		const detail = (e as { detail?: string })?.detail;
 		patch({
 			status: 'error',

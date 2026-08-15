@@ -1,4 +1,4 @@
-"""Server-side sideband bridge for voice sessions (waves VW3 + VW4, ruling VM8).
+"""Server-side sideband bridge for voice sessions (waves VW3–VW5, ruling VM8).
 
 Transport shape (ruling VM2): the browser holds a WebRTC leg straight to
 OpenAI — audio never transits this process — and the backend joins the SAME
@@ -25,6 +25,24 @@ with ``function_call_output`` + ``response.create``, a per-worker WATCHER that
 injects "the agent finished" back into the conversation unprompted, and an
 approval poller that reads pending worker permission prompts out loud.
 
+VW5 hardens the whole thing:
+
+* **The call-length cap spans reconnects.** The registry stamps a per-session
+  *call epoch* on the first attach; a replace-attach (the FE's 50-minute
+  re-handshake) PRESERVES it and only an explicit hangup clears it, so the
+  bridge deadline is ``max_call_minutes`` measured from the epoch — not from
+  the attachment. When the cap fires the session is marked capped for a short
+  grace window and the call/secret routes answer 409, so an auto-reconnect
+  cannot silently restart the clock.
+* **Deterministic default agent + a roster in the instructions**, so "just get
+  an agent on it" always picks the same worker and the model knows the names
+  it may pass.
+* **Context retention** (``truncation.retention_ratio`` 0.8) sent as a SECOND,
+  isolated ``session.update`` — a rejected shape can never cost us the
+  instructions / VAD / tools of the first one.
+* **Per-call usage + a cost estimate**, accumulated across replace-attaches on
+  the epoch record and exposed through ``GET /voice/sessions/{id}/state``.
+
 Deliberately NOT here (scope fences):
 
 * No server-side reconnect. When the sideband drops, the bridge simply marks
@@ -47,8 +65,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.db import database
 from app.db.async_database import run_sync
@@ -108,8 +127,10 @@ VOICE_TOOLS: List[Dict[str, Any]] = [
                 "agent": {
                     "type": "string",
                     "description": (
-                        "Optional agent name or id from list_agents. Omit to use "
-                        "the default worker agent."
+                        "Optional. The name of one of the agents listed in your "
+                        "instructions under 'Agents you can dispatch'. Call "
+                        "list_agents if you are unsure which names are valid. "
+                        "Omit it to use the default worker agent."
                     ),
                 },
                 "label": {
@@ -185,6 +206,16 @@ TURN_DETECTION_CONFIG: Dict[str, Any] = {
     "create_response": True,
 }
 
+# Context retention (ruling VM8), sent as its OWN ``session.update`` — see
+# ``_send_truncation_update``. Shape verified against the OpenAI realtime docs
+# (Aug 2026): drop the oldest items only once the input-token limit is hit, and
+# then down to 80% of it, which amortises truncations across turns and keeps the
+# prompt cache warm.
+TRUNCATION_CONFIG: Dict[str, Any] = {
+    "type": "retention_ratio",
+    "retention_ratio": 0.8,
+}
+
 # Context seeding bounds — "last ~20 exchanges", hard-capped by chars so a long
 # session can never blow up the instruction payload.
 CONTEXT_SEED_MAX_MESSAGES = 40
@@ -230,6 +261,37 @@ APPROVAL_POLL_SECONDS = 2.0
 MAX_LISTED_AGENTS = 40
 MAX_LISTED_TASKS = 20
 AGENT_DESCRIPTION_MAX_CHARS = 160
+
+# The roster appended to the instructions at attach time (VW5). Named agents in
+# the prompt are what make ``dispatch_agent(agent=...)`` land on a real target
+# instead of a hallucinated one; the cap keeps a big profile list from crowding
+# out the contract itself.
+ROSTER_HEADER = "Agents you can dispatch:"
+ROSTER_MAX_CHARS = 1200
+
+# Agent id/name that wins the default-target pick outright (case-insensitive).
+DEFAULT_AGENT_NAME = "default"
+
+# Per-1M-token list prices for the three allowlisted realtime models, used for
+# the ESTIMATE surfaced in /state. Cached-input discounts are deliberately
+# ignored (the estimate reads high rather than low), and an unknown model simply
+# yields no estimate rather than a wrong one.
+MODEL_PRICES_PER_MTOK: Dict[str, Dict[str, float]] = {
+    "gpt-realtime-2.1": {
+        "text_in": 4.0, "text_out": 24.0, "audio_in": 32.0, "audio_out": 64.0,
+    },
+    "gpt-realtime-2.1-mini": {
+        "text_in": 0.60, "text_out": 2.40, "audio_in": 10.0, "audio_out": 20.0,
+    },
+    "gpt-realtime": {
+        "text_in": 4.0, "text_out": 16.0, "audio_in": 32.0, "audio_out": 64.0,
+    },
+}
+
+# How long after the duration cap fires the session stays "capped": inside this
+# window /call and /secret answer 409 so the FE's automatic reconnect cannot
+# start a fresh clock without the user hanging up first.
+CAP_GRACE_SECONDS = 300.0
 
 
 # ============================================================================
@@ -312,12 +374,26 @@ class VoiceBridge:
         api_key: str,
         model: str,
         max_call_minutes: int,
+        call_started_at: Optional[float] = None,
+        usage_totals: Optional[Dict[str, int]] = None,
+        on_duration_cap: Optional[Callable[[], None]] = None,
     ) -> None:
         self.session_id = session_id
         self.call_id = call_id
         self.model = model
         self.max_call_minutes = max_call_minutes
         self._api_key = api_key
+
+        # When the CALL (not this attachment) began. The registry passes the
+        # session's epoch so a replace-attach keeps counting down the same cap;
+        # a directly-constructed bridge just starts its own clock.
+        self.call_started_at: float = (
+            call_started_at if call_started_at is not None else time.time()
+        )
+        # Cumulative realtime token usage for the whole call. The registry hands
+        # in the epoch's dict so totals survive a replace-attach.
+        self.usage: Dict[str, int] = usage_totals if usage_totals is not None else {}
+        self._on_duration_cap = on_duration_cap
 
         self.started_at: Optional[float] = None
         self.ended_at: Optional[float] = None
@@ -361,6 +437,8 @@ class VoiceBridge:
             "connected": self.connected,
             "started_at": self.started_at,
             "model": self.model,
+            "usage": dict(self.usage),
+            "estimated_cost_usd": estimate_cost_usd(self.model, self.usage),
         }
 
     async def start(self) -> None:
@@ -385,6 +463,17 @@ class VoiceBridge:
             logger.warning(
                 "Voice: session.update failed for %s (call continues on defaults)",
                 self.session_id, exc_info=True,
+            )
+
+        # Deliberately a SECOND update: the retention knob is the one field whose
+        # shape we cannot re-verify from inside a call, and bundling it would let
+        # a schema rejection take the instructions, tools and VAD config with it.
+        try:
+            await self._send_truncation_update()
+        except Exception:
+            logger.warning(
+                "Voice: truncation session.update failed for %s (default "
+                "truncation applies)", self.session_id, exc_info=True,
             )
 
         self._reader_task = asyncio.create_task(
@@ -450,16 +539,37 @@ class VoiceBridge:
             self.session_id, self.call_id, reason,
         )
 
+    def remaining_seconds(self) -> float:
+        """Seconds left on the call cap, measured from the CALL's epoch (VW5).
+
+        Reconnecting mid-call re-attaches a new bridge to the same epoch, so the
+        deadline keeps counting down instead of starting over — the bug this
+        wave exists to fix.
+        """
+        window = max(int(self.max_call_minutes or 0), 0) * SECONDS_PER_MINUTE
+        return window - (time.time() - self.call_started_at)
+
     async def _duration_cap(self) -> None:
         """Close the call once it exceeds ``voice_max_call_minutes`` (VM13)."""
         try:
-            await asyncio.sleep(self.max_call_minutes * SECONDS_PER_MINUTE)
+            await asyncio.sleep(max(self.remaining_seconds(), 0.0))
         except asyncio.CancelledError:
             raise
         logger.warning(
             "Voice: session %s hit the %s-minute call cap — closing the sideband",
             self.session_id, self.max_call_minutes,
         )
+        # Mark the session capped BEFORE stopping: the FE reconnects on drop, and
+        # the grace window is what turns that reconnect into a 409 instead of a
+        # brand-new clock.
+        if self._on_duration_cap is not None:
+            try:
+                self._on_duration_cap()
+            except Exception:  # noqa: BLE001 — never let bookkeeping kill teardown
+                logger.debug(
+                    "Voice: cap bookkeeping failed for %s", self.session_id,
+                    exc_info=True,
+                )
         await self.stop(reason="duration_cap")
 
     # -- outbound ----------------------------------------------------------
@@ -467,13 +577,18 @@ class VoiceBridge:
     async def _send_session_update(self) -> None:
         """Send the initial ``session.update`` (instructions, tools, turn detection).
 
-        NOTE: the retention/truncation knob from ruling VM8 (``retention_ratio``
-        0.8) is deliberately NOT sent — the exact field shape for the current
-        realtime schema was not verifiable here, and a rejected ``session.update``
-        would silently drop instructions AND VAD config for the whole call. The
-        API's default truncation applies until a verified shape lands.
+        The instruction payload is the VM16 contract text VERBATIM, then the
+        dispatchable-agent roster (VW5), then the history seed — in that order,
+        so the contract always leads and the two appendices can be trimmed
+        independently.
+
+        Retention/truncation is NOT here on purpose: see
+        :meth:`_send_truncation_update`.
         """
         instructions = VOICE_INSTRUCTIONS
+        roster = await self._agent_roster()
+        if roster:
+            instructions = f"{instructions}\n\n{roster}"
         seed = await run_sync(build_context_seed, self.session_id)
         if seed:
             instructions = f"{instructions}\n\n{seed}"
@@ -487,6 +602,24 @@ class VoiceBridge:
                 # can neither see nor tamper with the dispatch surface (VM2).
                 "tools": [dict(tool) for tool in VOICE_TOOLS],
                 "audio": {"input": {"turn_detection": dict(TURN_DETECTION_CONFIG)}},
+            },
+        })
+
+    async def _send_truncation_update(self) -> None:
+        """Send the retention config as its own, isolated ``session.update``.
+
+        Ruling VM8 wants ``retention_ratio`` 0.8; the documented shape is
+        ``session.truncation = {"type": "retention_ratio", "retention_ratio": ...}``
+        (OpenAI realtime docs, Aug 2026). It travels alone so that a schema
+        rejection costs only the retention knob — never the instructions, tools
+        or VAD config of the first update. A rejection arrives asynchronously as
+        an ``error`` event and is logged by :meth:`_handle_event`.
+        """
+        await self._send({
+            "type": "session.update",
+            "session": {
+                "type": "realtime",
+                "truncation": dict(TRUNCATION_CONFIG),
             },
         })
 
@@ -565,19 +698,41 @@ class VoiceBridge:
                         item.get("call_id"), item.get("name"), item.get("arguments"),
                     )
             usage = response.get("usage")
-            await self._flush_exchange(usage if isinstance(usage, dict) else {})
+            usage = usage if isinstance(usage, dict) else {}
+            self._accumulate_usage(usage)
+            await self._flush_exchange(usage)
             return
 
         if etype == "error":
+            detail = str(event.get("error"))[:500]
+            if "truncation" in detail.lower() or "retention" in detail.lower():
+                # The isolated second update was rejected: the call runs on the
+                # API's default truncation and everything else is unaffected.
+                logger.warning(
+                    "Voice: the retention/truncation config was rejected for %s "
+                    "(default truncation applies): %s", self.session_id, detail,
+                )
+                return
             logger.warning(
                 "Voice: sideband reported an error for %s: %s",
-                self.session_id, str(event.get("error"))[:500],
+                self.session_id, detail,
             )
             return
 
         logger.debug(
             "Voice: ignoring sideband event type=%r for %s", etype, self.session_id,
         )
+
+    # -- usage accounting (VW5) --------------------------------------------
+
+    def _accumulate_usage(self, usage: Dict[str, Any]) -> None:
+        """Fold one ``response.done`` usage block into the call's totals.
+
+        Additive into the dict the registry owns, so a replace-attach keeps
+        counting the same call rather than starting from zero.
+        """
+        for key, value in _usage_deltas(usage).items():
+            self.usage[key] = self.usage.get(key, 0) + value
 
     # -- persistence -------------------------------------------------------
 
@@ -775,23 +930,32 @@ class VoiceBridge:
         return result
 
     async def _default_agent_ref(self) -> Optional[str]:
-        """Agent to use when the model omits ``agent``.
+        """Agent to use when the model omits ``agent`` — DETERMINISTIC (VW5).
 
-        The first agent definition that is not the voice session's own profile
-        (dispatching the caller's own agent is refused as a cycle by
-        ``task_dispatch``). Returns None when there is nothing to pick, and the
-        dispatch then fails with task_dispatch's own "needs a target" error.
+        Two rules, in order: an agent whose id or name is literally "default"
+        (case-insensitive), else the alphabetically first eligible agent by
+        name. "Eligible" excludes the voice session's own profile, because
+        dispatching the caller's own agent is refused as a cycle by
+        ``task_dispatch``.
+
+        Stability is the point: "just get an agent on it" must land on the same
+        worker every time, not on whatever the profile table happened to return
+        first. Returns None when there is nothing to pick, and the dispatch then
+        fails with task_dispatch's own "needs a target" error.
         """
-        try:
-            rows = await run_sync(database.get_all_profiles)
-        except Exception:  # noqa: BLE001
-            logger.debug("Voice: agent listing failed", exc_info=True)
-            return None
         caller = await self._caller_profile_id()
-        for row in rows or []:
-            if row.get("id") and row["id"] != caller:
-                return row["id"]
-        return None
+        rows = await run_sync(_eligible_agent_rows, caller)
+        return _pick_default_agent(rows)
+
+    async def _agent_roster(self) -> str:
+        """The "Agents you can dispatch:" block appended to the instructions.
+
+        Built from the SAME resolver the default pick and dispatch use, so a
+        name the model reads back is always a name dispatch accepts.
+        """
+        caller = await self._caller_profile_id()
+        rows = await run_sync(_eligible_agent_rows, caller)
+        return _agent_roster_text(rows)
 
     async def _tool_check_agent(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Status + bounded report for a dispatched worker.
@@ -972,6 +1136,130 @@ def _parse_arguments(arguments: Any) -> Dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _eligible_agent_rows(caller_profile_id: Optional[str]) -> List[Dict[str, Any]]:
+    """Agent definitions this voice session may dispatch to.
+
+    The caller's own profile is excluded — ``task_dispatch`` refuses it as a
+    cycle, so offering it would only produce a failed dispatch the model has to
+    explain out loud.
+    """
+    try:
+        rows = database.get_all_profiles() or []
+    except Exception:  # noqa: BLE001
+        logger.debug("Voice: agent listing failed", exc_info=True)
+        return []
+    return [
+        row for row in rows
+        if row.get("id") and row.get("id") != caller_profile_id
+    ]
+
+
+def _agent_sort_key(row: Dict[str, Any]) -> Tuple[str, str]:
+    """Stable alphabetical order by display name, id as the tiebreak."""
+    name = (row.get("name") or row.get("id") or "").strip().lower()
+    return (name, str(row.get("id") or ""))
+
+
+def _pick_default_agent(rows: List[Dict[str, Any]]) -> Optional[str]:
+    """Rule 1: an agent literally called "default". Rule 2: first by name."""
+    for row in rows:
+        for key in ("id", "name"):
+            value = row.get(key)
+            if isinstance(value, str) and value.strip().lower() == DEFAULT_AGENT_NAME:
+                return row["id"]
+    ordered = sorted(rows, key=_agent_sort_key)
+    return ordered[0]["id"] if ordered else None
+
+
+def _first_sentence(value: Any) -> str:
+    """First sentence of a description, whitespace-collapsed and bounded."""
+    text = " ".join(str(value or "").split())
+    if not text:
+        return ""
+    return re.split(r"(?<=[.!?])\s+", text, maxsplit=1)[0][:AGENT_DESCRIPTION_MAX_CHARS]
+
+
+def _agent_roster_text(rows: List[Dict[str, Any]]) -> str:
+    """One line per dispatchable agent, hard-capped at ``ROSTER_MAX_CHARS``."""
+    lines: List[str] = []
+    used = len(ROSTER_HEADER)
+    for row in sorted(rows, key=_agent_sort_key)[:MAX_LISTED_AGENTS]:
+        name = (row.get("name") or row.get("id") or "").strip()
+        if not name:
+            continue
+        summary = _first_sentence(row.get("description"))
+        line = f"- {name} — {summary}" if summary else f"- {name}"
+        if used + len(line) + 1 > ROSTER_MAX_CHARS:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    if not lines:
+        return ""
+    return ROSTER_HEADER + "\n" + "\n".join(lines)
+
+
+def _usage_deltas(usage: Dict[str, Any]) -> Dict[str, int]:
+    """Flatten one realtime usage block into the counters we accumulate.
+
+    Only fields actually present are returned — the realtime schema has grown
+    subfields over revisions and an absent one must not read as a zero.
+    """
+    out: Dict[str, int] = {}
+
+    def _put(key: str, value: Any) -> None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return
+        if value:
+            out[key] = int(value)
+
+    if not isinstance(usage, dict):
+        return out
+    _put("total_tokens", usage.get("total_tokens"))
+    _put("input_tokens", usage.get("input_tokens"))
+    _put("output_tokens", usage.get("output_tokens"))
+
+    details_in = usage.get("input_token_details")
+    if isinstance(details_in, dict):
+        _put("input_text_tokens", details_in.get("text_tokens"))
+        _put("input_audio_tokens", details_in.get("audio_tokens"))
+        _put("input_cached_tokens", details_in.get("cached_tokens"))
+    details_out = usage.get("output_token_details")
+    if isinstance(details_out, dict):
+        _put("output_text_tokens", details_out.get("text_tokens"))
+        _put("output_audio_tokens", details_out.get("audio_tokens"))
+    return out
+
+
+def estimate_cost_usd(model: Optional[str], usage: Dict[str, int]) -> Optional[float]:
+    """Rough per-call spend for ``usage``, or ``None`` for an unpriced model.
+
+    An ESTIMATE, and labelled as one everywhere it surfaces: cached-input
+    discounts are ignored (so it reads high, never low) and text/audio are split
+    from the token details when present, falling back to "whatever isn't audio
+    is text".
+    """
+    prices = MODEL_PRICES_PER_MTOK.get((model or "").strip())
+    if not prices or not usage:
+        return None
+
+    audio_in = int(usage.get("input_audio_tokens") or 0)
+    audio_out = int(usage.get("output_audio_tokens") or 0)
+    text_in = usage.get("input_text_tokens")
+    if text_in is None:
+        text_in = max(int(usage.get("input_tokens") or 0) - audio_in, 0)
+    text_out = usage.get("output_text_tokens")
+    if text_out is None:
+        text_out = max(int(usage.get("output_tokens") or 0) - audio_out, 0)
+
+    total = (
+        int(text_in) * prices["text_in"]
+        + int(text_out) * prices["text_out"]
+        + audio_in * prices["audio_in"]
+        + audio_out * prices["audio_out"]
+    ) / 1_000_000
+    return round(total, 6)
+
+
 def _agent_task_status(session_id: str, task_id: str) -> Dict[str, Any]:
     """Registry record + terminal outcome for one dispatched worker."""
     from app.core.task_registry import task_registry
@@ -1097,15 +1385,66 @@ def _cap(text: Optional[str]) -> Optional[str]:
 # Registry — one live bridge per session
 # ============================================================================
 
+class _CallEpoch:
+    """What survives a re-attachment: when the CALL started, and its usage.
+
+    One per session, stamped on the first attach, carried through every
+    replace-attach, dropped on hangup (or when the duration cap fires). It is
+    what makes "50 minutes in, re-handshake" continue the same call instead of
+    starting a new one.
+    """
+
+    __slots__ = ("started_at", "usage")
+
+    def __init__(self, started_at: float) -> None:
+        self.started_at = started_at
+        self.usage: Dict[str, int] = {}
+
+
 class VoiceCallRegistry:
     """In-process map of ``session_id -> VoiceBridge`` (ruling VM8)."""
 
     def __init__(self) -> None:
         self._bridges: Dict[str, VoiceBridge] = {}
+        self._epochs: Dict[str, _CallEpoch] = {}
+        # session_id -> (when the cap fired, the cap in minutes)
+        self._capped: Dict[str, Tuple[float, int]] = {}
         self._lock = asyncio.Lock()
 
     def get(self, session_id: str) -> Optional[VoiceBridge]:
         return self._bridges.get(session_id)
+
+    def call_started_at(self, session_id: str) -> Optional[float]:
+        """When the session's current call began, across re-attachments."""
+        epoch = self._epochs.get(session_id)
+        return epoch.started_at if epoch else None
+
+    # -- duration-cap grace window -----------------------------------------
+
+    def mark_capped(self, session_id: str, max_call_minutes: int) -> None:
+        """Record that ``session_id`` just hit its call-length cap.
+
+        Also drops the epoch: the only way forward is an explicit hangup and a
+        NEW call, so the next attach (once the grace window has expired) must
+        start a fresh clock rather than inherit an already-blown one.
+        """
+        self._capped[session_id] = (time.time(), int(max_call_minutes or 0))
+        self._epochs.pop(session_id, None)
+
+    def capped_minutes(self, session_id: str) -> Optional[int]:
+        """The cap in minutes while the grace window holds, else ``None``."""
+        entry = self._capped.get(session_id)
+        if entry is None:
+            return None
+        capped_at, minutes = entry
+        if time.time() - capped_at > CAP_GRACE_SECONDS:
+            self._capped.pop(session_id, None)
+            return None
+        return minutes
+
+    def clear_capped(self, session_id: str) -> None:
+        """Forget the cap — the user hung up, so a new call is allowed."""
+        self._capped.pop(session_id, None)
 
     def state(self, session_id: str) -> Dict[str, Any]:
         """State payload for a session, live bridge or not."""
@@ -1114,6 +1453,7 @@ class VoiceCallRegistry:
             return {
                 "active": False, "connected": False,
                 "started_at": None, "model": None,
+                "usage": {}, "estimated_cost_usd": None,
             }
         return bridge.state()
 
@@ -1133,6 +1473,11 @@ class VoiceCallRegistry:
         ``call_id`` and posts it here, the old attachment is closed, and the new
         one reseeds context from the persisted transcript.
 
+        The session's call EPOCH (start time + usage totals) is preserved across
+        that replacement, so the duration cap and the cost estimate span the
+        whole call rather than restarting with each attachment (VW5). Only a
+        hangup — or the cap itself — clears it.
+
         The lock is held across the connect so two concurrent posts cannot both
         end up registered.
         """
@@ -1145,18 +1490,34 @@ class VoiceCallRegistry:
                 )
                 await previous.stop(reason="replaced")
 
+            epoch = self._epochs.get(session_id) or _CallEpoch(time.time())
             bridge = VoiceBridge(
                 session_id, call_id,
                 api_key=api_key, model=model, max_call_minutes=max_call_minutes,
+                call_started_at=epoch.started_at,
+                usage_totals=epoch.usage,
+                on_duration_cap=lambda: self.mark_capped(
+                    session_id, max_call_minutes,
+                ),
             )
+            # Only record the epoch once the connect actually succeeded — a
+            # failed attach must not leave a clock running for a call that never
+            # started.
             await bridge.start()
+            self._epochs[session_id] = epoch
             self._bridges[session_id] = bridge
             return bridge
 
     async def detach(self, session_id: str) -> bool:
-        """Stop and drop the session's bridge. ``False`` when there was none."""
+        """Stop and drop the session's bridge. ``False`` when there was none.
+
+        This is the explicit end of a call: the epoch and any cap marker go with
+        it, so the next call starts a fresh clock.
+        """
         async with self._lock:
             bridge = self._bridges.pop(session_id, None)
+            self._epochs.pop(session_id, None)
+            self._capped.pop(session_id, None)
         if bridge is None:
             return False
         await bridge.stop(reason="hangup")
@@ -1167,6 +1528,8 @@ class VoiceCallRegistry:
         async with self._lock:
             bridges = list(self._bridges.values())
             self._bridges.clear()
+            self._epochs.clear()
+            self._capped.clear()
         for bridge in bridges:
             try:
                 await bridge.stop(reason="shutdown")
