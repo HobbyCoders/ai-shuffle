@@ -12,6 +12,7 @@
 	 */
 	import { onDestroy, untrack } from 'svelte';
 	import { activeSession, activeWsConnected } from '$lib/stores/active-session';
+	import { sessions } from '$lib/stores/app-data.svelte';
 	import { stopSessionTask } from '$lib/api/sessions';
 	import { notify } from '$lib/stores/notifications';
 	import { createConnectionBannerGrace } from '$lib/stores/session/connection-banner-grace';
@@ -24,6 +25,7 @@
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import WorkspaceSelector from './WorkspaceSelector.svelte';
+	import VoiceCallPanel from '$lib/components/voice/VoiceCallPanel.svelte';
 	import { RotateCcw } from 'lucide-svelte';
 	import { classifyChatSurface } from './chat-empty-state';
 
@@ -47,6 +49,18 @@
 	// brand-new "Let's build your project" workspace picker.
 	const isClearedSession = $derived(chatSurface === 'cleared');
 	const clearedTitle = $derived($activeSession.title?.trim() || 'Untitled');
+
+	// Voice mode (ruling VM4/VM7). `mode` is a sessions-LIST field — the active
+	// session store doesn't carry it — so read the board row for the open
+	// session, exactly as ContextPillBar reads `degraded`.
+	const isVoiceSession = $derived(
+		$sessions.find((s) => s.id === $activeSession.sessionId)?.mode === 'voice'
+	);
+
+	// A voice session is voice-ONLY in V1 (VM7): no composer, and no new-chat
+	// hero either — it always renders the call surface over its transcript, even
+	// before the first exchange lands.
+	const showEmptyHero = $derived(isEmptyState && !isVoiceSession);
 
 	// Animation: Track transition from empty → active state
 	let transitioningFromEmpty = $state(false);
@@ -167,8 +181,8 @@
 	});
 </script>
 
-<div class="chat-view" class:transitioning-from-empty={transitioningFromEmpty} class:is-empty={isEmptyState}>
-	{#if isEmptyState}
+<div class="chat-view" class:transitioning-from-empty={transitioningFromEmpty} class:is-empty={showEmptyHero}>
+	{#if showEmptyHero}
 		<!-- Empty state hero: workspace selector / cleared hint. The ChatInput is
 		     NOT rendered here — it lives in the always-mounted .input-slot below so
 		     its subtree (Tiptap draft, open context-usage popover, VoiceRecorder,
@@ -224,6 +238,12 @@
 				{#if $activeSession.sessionId}
 					<TeamStatusBar sessionId={$activeSession.sessionId} />
 				{/if}
+				{#if isVoiceSession && $activeSession.sessionId}
+					<!-- The call surface rides above the transcript (same slot as
+					     TeamStatusBar): live captions + the three contract controls
+					     here, durable history below. -->
+					<VoiceCallPanel sessionId={$activeSession.sessionId} />
+				{/if}
 				<!-- MessageArea handles session-switch scroll save/restore internally
 				     via $effect watching sessionId. No {#key} needed — avoiding
 				     component destruction prevents a Svelte 5 reactivity edge case
@@ -245,8 +265,9 @@
 	     prop and the surrounding layout classes change between states; the
 	     conditional strips below are siblings of ChatInput, not ancestors, so they
 	     never remount it. -->
-	<div class="input-slot" class:input-wrapper={!isEmptyState} class:empty-input-layout={isEmptyState}>
-		{#if !isEmptyState}
+	{#if !isVoiceSession}
+	<div class="input-slot" class:input-wrapper={!showEmptyHero} class:empty-input-layout={showEmptyHero}>
+		{#if !showEmptyHero}
 			<!-- In-flight background tasks (sub-agents + shell subprocesses).
 			     Renders nothing when empty; appears during a turn — and notably
 			     while the turn is PARKED waiting on tasks — so the user can see
@@ -257,10 +278,11 @@
 				</div>
 			{/if}
 		{/if}
-		<ChatInput compact={!isEmptyState} />
+		<ChatInput compact={!showEmptyHero} />
 	</div>
+	{/if}
 
-	{#if isEmptyState}
+	{#if showEmptyHero}
 		<!-- Balances the flex:1 hero above so the hero + persistent input pair sits
 		     vertically centered — reproduces the old .empty-state
 		     justify-content:center grouping without wrapping the input in a
@@ -271,7 +293,7 @@
 	<!-- Modal Overlay for Permission/Question Queues. Now anchored to .chat-view
 	     (position:absolute; inset:0; z-index:50) so it still overlays the whole
 	     surface, including the persistent input. Active-state only. -->
-	{#if !isEmptyState && (($activeSession.pendingPermissions && $activeSession.pendingPermissions.length > 0) || ($activeSession.pendingQuestions && $activeSession.pendingQuestions.length > 0))}
+	{#if !showEmptyHero && (($activeSession.pendingPermissions && $activeSession.pendingPermissions.length > 0) || ($activeSession.pendingQuestions && $activeSession.pendingQuestions.length > 0))}
 		<div class="modal-overlay">
 			<div class="modal-backdrop"></div>
 			<div class="modal-content">
