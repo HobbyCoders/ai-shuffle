@@ -9,10 +9,14 @@
 	 * - Empty: WorkspaceSelector + ChatInput centered (the ChatInput's
 	 *   ContextPillBar hosts the Local/Worktree execution-mode toggle above it)
 	 * - Active: MessageArea + ChatInput at bottom
+	 *
+	 * Plus one in-place substitution (ruling VM18): while a voice call is up on
+	 * the session being VIEWED, the composer slot hosts the call controls instead
+	 * of the text input. Voice is not a separate surface — the transcript above is
+	 * unchanged, and any terminal call status hands the composer straight back.
 	 */
 	import { onDestroy, untrack } from 'svelte';
 	import { activeSession, activeWsConnected } from '$lib/stores/active-session';
-	import { sessions } from '$lib/stores/app-data.svelte';
 	import { stopSessionTask } from '$lib/api/sessions';
 	import { notify } from '$lib/stores/notifications';
 	import { createConnectionBannerGrace } from '$lib/stores/session/connection-banner-grace';
@@ -26,6 +30,7 @@
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import WorkspaceSelector from './WorkspaceSelector.svelte';
 	import VoiceCallPanel from '$lib/components/voice/VoiceCallPanel.svelte';
+	import { voiceCallState, isCallSurfaceActive } from '$lib/services/voiceCall';
 	import { RotateCcw } from 'lucide-svelte';
 	import { classifyChatSurface } from './chat-empty-state';
 
@@ -50,17 +55,38 @@
 	const isClearedSession = $derived(chatSurface === 'cleared');
 	const clearedTitle = $derived($activeSession.title?.trim() || 'Untitled');
 
-	// Voice mode (ruling VM4/VM7). `mode` is a sessions-LIST field — the active
-	// session store doesn't carry it — so read the board row for the open
-	// session, exactly as ContextPillBar reads `degraded`.
-	const isVoiceSession = $derived(
-		$sessions.find((s) => s.id === $activeSession.sessionId)?.mode === 'voice'
+	// Voice (ruling VM18). The gate is the CALL, not the session's mode: a voice
+	// session with no call running is an ordinary chat, and only an in-flight call
+	// on the session currently being viewed takes over the composer slot. The
+	// singleton controller means the sessionId comparison is what stops a call on
+	// one session from swallowing another session's composer.
+	const voiceCallActive = $derived(
+		isCallSurfaceActive($voiceCallState, $activeSession.sessionId)
 	);
 
-	// A voice session is voice-ONLY in V1 (VM7): no composer, and no new-chat
-	// hero either — it always renders the call surface over its transcript, even
-	// before the first exchange lands.
-	const showEmptyHero = $derived(isEmptyState && !isVoiceSession);
+	// A live call also suppresses the new-chat hero: a freshly created voice
+	// session has no messages yet, and the workspace picker has nothing to offer
+	// mid-call. The transcript column takes over and fills in as the exchange
+	// lands.
+	const showEmptyHero = $derived(isEmptyState && !voiceCallActive);
+
+	// A call that ends by itself (transport error, or the VW5 length cap) unmounts
+	// the dock that was showing the reason, so surface it as a toast instead —
+	// otherwise the call would just silently vanish and the composer reappear.
+	// Keyed on the message so the same terminal state can't re-toast on unrelated
+	// store churn (level updates, caption appends).
+	let lastVoiceOutcome: string | null = null;
+	$effect(() => {
+		const call = $voiceCallState;
+		const message =
+			call.status === 'error' ? call.error : call.status === 'ended' ? call.notice : null;
+		const key = message ? `${call.status}:${call.sessionId}:${message}` : null;
+		if (key === lastVoiceOutcome) return;
+		lastVoiceOutcome = key;
+		if (!message) return;
+		if (call.status === 'error') notify.error(message);
+		else notify.warning(message);
+	});
 
 	// Animation: Track transition from empty → active state
 	let transitioningFromEmpty = $state(false);
@@ -238,12 +264,9 @@
 				{#if $activeSession.sessionId}
 					<TeamStatusBar sessionId={$activeSession.sessionId} />
 				{/if}
-				{#if isVoiceSession && $activeSession.sessionId}
-					<!-- The call surface rides above the transcript (same slot as
-					     TeamStatusBar): live captions + the three contract controls
-					     here, durable history below. -->
-					<VoiceCallPanel sessionId={$activeSession.sessionId} />
-				{/if}
+				<!-- No call surface here any more (VM18): the call controls live in the
+				     composer slot below, so the transcript column looks the same during
+				     a call as it does outside one. -->
 				<!-- MessageArea handles session-switch scroll save/restore internally
 				     via $effect watching sessionId. No {#key} needed — avoiding
 				     component destruction prevents a Svelte 5 reactivity edge case
@@ -265,7 +288,6 @@
 	     prop and the surrounding layout classes change between states; the
 	     conditional strips below are siblings of ChatInput, not ancestors, so they
 	     never remount it. -->
-	{#if !isVoiceSession}
 	<div class="input-slot" class:input-wrapper={!showEmptyHero} class:empty-input-layout={showEmptyHero}>
 		{#if !showEmptyHero}
 			<!-- In-flight background tasks (sub-agents + shell subprocesses).
@@ -278,9 +300,16 @@
 				</div>
 			{/if}
 		{/if}
-		<ChatInput compact={!showEmptyHero} />
+		{#if voiceCallActive && $activeSession.sessionId}
+			<!-- VM18: the call OWNS the composer slot while it is up. The ChatInput is
+			     unmounted here, not hidden — its draft is persisted on destroy (store
+			     + sessionStorage) and re-seeded on remount, which is the same
+			     round-trip a session switch already performs. -->
+			<VoiceCallPanel sessionId={$activeSession.sessionId} />
+		{:else}
+			<ChatInput compact={!showEmptyHero} />
+		{/if}
 	</div>
-	{/if}
 
 	{#if showEmptyHero}
 		<!-- Balances the flex:1 hero above so the hero + persistent input pair sits

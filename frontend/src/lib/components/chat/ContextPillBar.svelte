@@ -36,7 +36,7 @@
 	import { layout } from '$lib/stores/layout.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { createVoiceSession, isVoiceEnabled } from '$lib/api/voice';
-	import { startCall } from '$lib/services/voiceCall';
+	import { startCall, startCallForSession } from '$lib/services/voiceCall';
 	import { AudioLines, FolderClosed, GitBranch, Monitor, MonitorOff } from 'lucide-svelte';
 
 	const projectName = $derived(
@@ -114,9 +114,31 @@
 	let voiceEnabled = $state(false);
 	let startingVoice = $state(false);
 
+	// Ruling VM18 moved the call surface into the composer slot, and it is only
+	// mounted while a call is UP — so an existing voice session whose call has
+	// ended needs its "start the call again" affordance somewhere. This bar is it:
+	// the pill reads "Voice" on a new chat (create a voice session) and "Start
+	// call" on a voice session (re-mint onto the session that already exists).
+	// This bar is inside ChatInput, which the call replaces, so it is never on
+	// screen during a call — no extra live-call gating needed here.
+	const isVoiceSession = $derived(sessionRow?.mode === 'voice');
+	const showVoicePill = $derived(voiceEnabled && (isEmptyState || isVoiceSession));
+
 	onMount(async () => {
 		voiceEnabled = await isVoiceEnabled();
 	});
+
+	/** Re-open a call on the voice session already being viewed. */
+	async function resumeVoiceCall() {
+		const sessionId = $activeSession.sessionId;
+		if (startingVoice || !sessionId) return;
+		startingVoice = true;
+		try {
+			await startCallForSession(sessionId);
+		} finally {
+			startingVoice = false;
+		}
+	}
 
 	async function startVoiceSession() {
 		if (startingVoice) return;
@@ -165,18 +187,6 @@
 				onClickNewBranch={() => (showCreateBranchModal = true)}
 			/>
 		{/if}
-		{#if voiceEnabled}
-			<button
-				type="button"
-				class="voice-pill"
-				onclick={startVoiceSession}
-				disabled={startingVoice}
-				title="Start a voice session — talk to an agent that dispatches the work"
-			>
-				<AudioLines size={13} strokeWidth={1.5} />
-				<span class="pill-label">{startingVoice ? 'Starting…' : 'Voice'}</span>
-			</button>
-		{/if}
 	{:else if showBranch}
 		<BranchSelector
 			{projectName}
@@ -212,6 +222,27 @@
 				{/if}
 			{/if}
 		</span>
+	{/if}
+
+	<!-- Voice affordance (VM6, extended by VM18). On a new chat it starts a voice
+	     session; on a voice session whose call has ended it re-opens the call —
+	     the only start affordance now that the call surface is composer-slot-only
+	     and mounted just while a call is up. -->
+	{#if showVoicePill}
+		<button
+			type="button"
+			class="voice-pill"
+			onclick={isVoiceSession ? resumeVoiceCall : startVoiceSession}
+			disabled={startingVoice}
+			title={isVoiceSession
+				? 'Start a call on this voice session'
+				: 'Start a voice session — talk to an agent that dispatches the work'}
+		>
+			<AudioLines size={13} strokeWidth={1.5} />
+			<span class="pill-label"
+				>{startingVoice ? 'Starting…' : isVoiceSession ? 'Start call' : 'Voice'}</span
+			>
+		</button>
 	{/if}
 </div>
 

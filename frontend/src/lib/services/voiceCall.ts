@@ -718,11 +718,32 @@ async function teardown(opts: {
 	}
 }
 
-/** Is a call live (or coming up) for this session? Used by the panel's gating. */
+/**
+ * The statuses that own the composer slot (ruling VM18).
+ *
+ * `connecting`/`live`/`reconnecting` are "a call is up on this session" — the
+ * chat composer is replaced by the call controls for exactly these. Every
+ * terminal status (`idle`/`ended`/`error`) gives the composer straight back.
+ */
+const ACTIVE_CALL_STATUSES: readonly VoiceCallStatus[] = ['connecting', 'live', 'reconnecting'];
+
+/**
+ * Pure predicate: does `state` describe an in-flight call belonging to
+ * `sessionId`?
+ *
+ * The controller is a singleton, so the session check is what stops a call on
+ * one session from swallowing another session's composer when the user switches
+ * chats mid-call.
+ */
+export function isCallSurfaceActive(
+	state: VoiceCallStoreState,
+	sessionId: string | null | undefined
+): boolean {
+	if (!sessionId) return false;
+	return state.sessionId === sessionId && ACTIVE_CALL_STATUSES.includes(state.status);
+}
+
+/** Is a call live (or coming up) for this session? Snapshot read of the store. */
 export function isCallActiveFor(id: string | null | undefined): boolean {
-	if (!id) return false;
-	const s = get(voiceCallState);
-	return (
-		s.sessionId === id && (s.status === 'connecting' || s.status === 'live' || s.status === 'reconnecting')
-	);
+	return isCallSurfaceActive(get(voiceCallState), id);
 }

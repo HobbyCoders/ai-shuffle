@@ -1,10 +1,20 @@
 <script lang="ts">
 	/**
-	 * VoiceCallPanel — the call surface for a `mode='voice'` session (VW2).
+	 * VoiceCallPanel — the call surface for a LIVE voice call (VW2, reshaped by
+	 * ruling VM18).
 	 *
-	 * Mounted above MessageArea (same slot as TeamStatusBar) so the normal
-	 * transcript still renders below it: the panel is the LIVE layer, the feed is
-	 * the durable one (ruling VM9 — the backend writes the transcript, not us).
+	 * VM18 (user directive, 2026-08-14): voice is NOT a separate UI. This panel
+	 * lives in the CHAT COMPOSER'S SLOT and only while a call is up — it replaces
+	 * the text input in place, and the moment the call ends (hangup, error, cap)
+	 * the normal composer comes straight back. The transcript above is untouched
+	 * throughout: the panel is the LIVE layer, the feed is the durable one (ruling
+	 * VM9 — the backend writes the transcript, not us).
+	 *
+	 * The parent (`ChatView`) owns the gate — it mounts this only when
+	 * `isCallSurfaceActive(state, activeSessionId)`, so there is deliberately no
+	 * "no call running" / "Start call" state here any more. Starting (or
+	 * restarting) a call is the ContextPillBar's job, next to the other pre-send
+	 * controls.
 	 *
 	 * The interaction contract (§1 of docs/VOICE_MODE_PLAN.md) is binding and
 	 * says EXACTLY three controls while a call is live:
@@ -14,21 +24,10 @@
 	 * There is no push-to-talk and no per-utterance control: the channel is
 	 * always open once live and turn-taking is server-side VAD. Do not add a
 	 * fourth control here without re-opening that ruling.
-	 *
-	 * When the session is voice but no call is running, the panel collapses to a
-	 * single "Start call" button, which re-mints a credential through the VW3
-	 * route. While that route is unmerged the button reports it plainly instead
-	 * of erroring.
 	 */
 	import { onDestroy } from 'svelte';
-	import { Mic, MicOff, PhoneOff, Volume2, VolumeX, Phone } from 'lucide-svelte';
-	import {
-		voiceCallState,
-		hangup,
-		startCallForSession,
-		toggleAgent,
-		toggleMic,
-	} from '$lib/services/voiceCall';
+	import { Mic, MicOff, PhoneOff, Volume2, VolumeX } from 'lucide-svelte';
+	import { voiceCallState, hangup, toggleAgent, toggleMic } from '$lib/services/voiceCall';
 	import { getVoiceCallState } from '$lib/api/voice';
 
 	interface Props {
@@ -44,7 +43,6 @@
 	const mine = $derived(call.sessionId === sessionId);
 	const status = $derived(mine ? call.status : 'idle');
 	const live = $derived(status === 'live' || status === 'reconnecting');
-	const connecting = $derived(status === 'connecting');
 
 	const statusLabel = $derived(
 		status === 'live'
@@ -117,45 +115,65 @@
 	});
 
 	// Orb scale follows the mic level; muted or idle sits still.
-	const orbScale = $derived(
-		live && !call.micMuted ? 1 + Math.min(call.level, 1) * 0.55 : 1
-	);
-
-	let starting = $state(false);
-	async function onStart() {
-		if (starting) return;
-		starting = true;
-		try {
-			await startCallForSession(sessionId);
-		} finally {
-			starting = false;
-		}
-	}
+	const orbScale = $derived(live && !call.micMuted ? 1 + Math.min(call.level, 1) * 0.55 : 1);
 </script>
 
-<div class="voice-panel" class:live>
-	<div class="vp-head">
-		<div class="orb-wrap" aria-hidden="true">
-			<span class="orb-pulse" style={`transform: scale(${orbScale});`}></span>
-			<span class="orb" class:on={live} class:muted={call.micMuted}></span>
-		</div>
-		<div class="vp-title">
-			<h3>Voice agent</h3>
-			<p>
-				{statusLabel}
-				{#if elapsed}<span class="vp-elapsed">· {elapsed}</span>{/if}
-				{#if mine && call.model}<span class="vp-model">· {call.model}</span>{/if}
-				{#if mine && costLabel}<span
-						class="vp-cost"
-						title="Estimated OpenAI spend for this call (list prices, cached-input discounts ignored)"
-						>· {costLabel}</span
-					>{/if}
-			</p>
-		</div>
+<!-- Composer slot (VM18): same outer metrics as .chat-input-wrapper /
+     .chat-input-container in ChatInput, so the swap happens in place without the
+     chat column shifting. -->
+<div class="voice-dock-wrapper" data-testid="voice-call-dock">
+	<div class="voice-dock" class:live>
+		{#if live}
+			<div class="vp-captions" aria-live="polite" aria-label="Live captions">
+				{#if call.captions.length === 0}
+					<p class="vp-hint">Just start talking — the channel stays open.</p>
+				{:else}
+					{#each call.captions as caption (caption.role + caption.id)}
+						<p
+							class="cap"
+							class:assistant={caption.role === 'assistant'}
+							class:pending={!caption.final}
+						>
+							<span class="cap-who">{caption.role === 'assistant' ? 'Agent' : 'You'}</span>
+							<span class="cap-text">{caption.text}</span>
+						</p>
+					{/each}
+				{/if}
+				<p class="vp-foot">
+					Captions are live only — the saved transcript appears in the conversation above.
+				</p>
+			</div>
+		{/if}
 
-		<div class="vp-controls">
-			{#if live || connecting}
-				<!-- Contract control 1/3 — ends the call, keeps the session. -->
+		{#if mine && call.error}
+			<p class="vp-msg err" role="alert">{call.error}</p>
+		{/if}
+		{#if mine && call.notice}
+			<p class="vp-msg warn">{call.notice}</p>
+		{/if}
+
+		<div class="vp-head">
+			<div class="orb-wrap" aria-hidden="true">
+				<span class="orb-pulse" style={`transform: scale(${orbScale});`}></span>
+				<span class="orb" class:on={live} class:muted={call.micMuted}></span>
+			</div>
+			<div class="vp-title">
+				<h3>Voice agent</h3>
+				<p>
+					{statusLabel}
+					{#if elapsed}<span class="vp-elapsed">· {elapsed}</span>{/if}
+					{#if mine && call.model}<span class="vp-model">· {call.model}</span>{/if}
+					{#if mine && costLabel}<span
+							class="vp-cost"
+							title="Estimated OpenAI spend for this call (list prices, cached-input discounts ignored)"
+							>· {costLabel}</span
+						>{/if}
+				</p>
+			</div>
+
+			<div class="vp-controls">
+				<!-- Contract control 1/3 — ends the call, keeps the session. The
+				     composer returns the moment this lands. -->
 				<button
 					type="button"
 					class="vp-btn danger"
@@ -174,7 +192,10 @@
 					onclick={() => toggleMic()}
 					title={call.micMuted ? 'Unmute your microphone' : 'Mute your microphone'}
 				>
-					{#if call.micMuted}<MicOff size={15} strokeWidth={1.7} />{:else}<Mic size={15} strokeWidth={1.7} />{/if}
+					{#if call.micMuted}<MicOff size={15} strokeWidth={1.7} />{:else}<Mic
+							size={15}
+							strokeWidth={1.7}
+						/>{/if}
 					<span>{call.micMuted ? 'Mic muted' : 'Mute mic'}</span>
 				</button>
 				<!-- Contract control 3/3 -->
@@ -186,52 +207,40 @@
 					onclick={() => toggleAgent()}
 					title={call.agentMuted ? 'Unmute the agent' : 'Mute the agent audio'}
 				>
-					{#if call.agentMuted}<VolumeX size={15} strokeWidth={1.7} />{:else}<Volume2 size={15} strokeWidth={1.7} />{/if}
+					{#if call.agentMuted}<VolumeX size={15} strokeWidth={1.7} />{:else}<Volume2
+							size={15}
+							strokeWidth={1.7}
+						/>{/if}
 					<span>{call.agentMuted ? 'Agent muted' : 'Mute agent audio'}</span>
 				</button>
-			{:else}
-				<button type="button" class="vp-btn primary" onclick={onStart} disabled={starting}>
-					<Phone size={15} strokeWidth={1.7} />
-					<span>{starting ? 'Starting…' : 'Start call'}</span>
-				</button>
-			{/if}
+			</div>
 		</div>
 	</div>
-
-	{#if mine && call.error}
-		<p class="vp-msg err" role="alert">{call.error}</p>
-	{/if}
-	{#if mine && call.notice}
-		<p class="vp-msg warn">{call.notice}</p>
-	{/if}
-
-	{#if live}
-		<div class="vp-captions" aria-live="polite" aria-label="Live captions">
-			{#if call.captions.length === 0}
-				<p class="vp-hint">Just start talking — the channel stays open.</p>
-			{:else}
-				{#each call.captions as caption (caption.role + caption.id)}
-					<p class="cap" class:assistant={caption.role === 'assistant'} class:pending={!caption.final}>
-						<span class="cap-who">{caption.role === 'assistant' ? 'Agent' : 'You'}</span>
-						<span class="cap-text">{caption.text}</span>
-					</p>
-				{/each}
-			{/if}
-			<p class="vp-foot">Captions are live only — the saved transcript appears in the conversation below.</p>
-		</div>
-	{/if}
 </div>
 
 <style>
-	.voice-panel {
+	/* Mirrors .chat-input-wrapper / .chat-input-container so the dock occupies the
+	   composer's exact footprint (VM18). */
+	.voice-dock-wrapper {
+		padding: 0.5rem 0.75rem 0.75rem;
 		flex-shrink: 0;
-		margin: 8px 12px 4px;
-		padding: 12px 14px;
-		border: 1px solid var(--border);
-		border-radius: var(--radius, 0.75rem);
+	}
+
+	@media (min-width: 640px) {
+		.voice-dock-wrapper {
+			padding: 0.75rem 1rem 1rem;
+		}
+	}
+
+	.voice-dock {
+		max-width: 56rem;
+		margin: 0 auto;
+		padding: 10px 12px;
+		border: 1px solid var(--glass-border, var(--border));
+		border-radius: calc(var(--radius, 0.75rem) * 1.33);
 		background: color-mix(in oklch, var(--primary) 5%, var(--background));
 	}
-	.voice-panel.live {
+	.voice-dock.live {
 		border-color: color-mix(in oklch, var(--primary) 40%, var(--border));
 	}
 
@@ -272,7 +281,7 @@
 		background: color-mix(in oklch, var(--primary) 30%, transparent);
 		transition: transform 90ms linear;
 	}
-	.voice-panel:not(.live) .orb-pulse {
+	.voice-dock:not(.live) .orb-pulse {
 		opacity: 0;
 	}
 
@@ -337,14 +346,9 @@
 		color: var(--destructive);
 		border-color: color-mix(in oklch, var(--destructive) 40%, var(--border));
 	}
-	.vp-btn.primary {
-		color: var(--primary-foreground, #fff);
-		background: var(--primary);
-		border-color: var(--primary);
-	}
 
 	.vp-msg {
-		margin: 8px 0 0;
+		margin: 0 0 8px;
 		font-size: 12.5px;
 	}
 	.vp-msg.err {
@@ -354,10 +358,12 @@
 		color: var(--warning, #d97706);
 	}
 
+	/* Captions sit ABOVE the control row now (the dock is bottom-anchored in the
+	   composer slot, so the newest line stays closest to the controls). */
 	.vp-captions {
-		margin-top: 10px;
-		padding-top: 8px;
-		border-top: 1px solid var(--border);
+		margin-bottom: 10px;
+		padding-bottom: 8px;
+		border-bottom: 1px solid var(--border);
 		max-height: 180px;
 		overflow-y: auto;
 	}
