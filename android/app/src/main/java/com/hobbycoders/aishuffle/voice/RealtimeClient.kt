@@ -98,17 +98,6 @@ class RealtimeClient(
         configureAudioRouting()
     }
 
-    /** Device types that count as "the user is already listening there". */
-    private val externalTypes = intArrayOf(
-        AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
-        AudioDeviceInfo.TYPE_BLE_HEADSET,
-        AudioDeviceInfo.TYPE_WIRED_HEADSET,
-        AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
-        AudioDeviceInfo.TYPE_USB_HEADSET,
-        AudioDeviceInfo.TYPE_USB_DEVICE,
-        AudioDeviceInfo.TYPE_HEARING_AID,
-    )
-
     /**
      * Route call audio to whatever the user is already wearing. In
      * MODE_IN_COMMUNICATION Android does NOT follow media routing on its own —
@@ -120,7 +109,7 @@ class RealtimeClient(
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
             val devices = audioManager.availableCommunicationDevices
-            val preferred = devices.firstOrNull { it.type in externalTypes }
+            val preferred = devices.firstOrNull { it.type in EXTERNAL_TYPES }
                 ?: devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
             if (preferred != null) {
                 val ok = audioManager.setCommunicationDevice(preferred)
@@ -133,7 +122,7 @@ class RealtimeClient(
                         it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP
                 }
             val hasWired = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-                .any { it.type in externalTypes && it.type != AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+                .any { it.type in EXTERNAL_TYPES && it.type != AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
             @Suppress("DEPRECATION")
             when {
                 hasBt -> {
@@ -240,5 +229,22 @@ class RealtimeClient(
 
     private companion object {
         const val TAG = "RealtimeClient"
+
+        /**
+         * Device types that count as "the user is already listening there".
+         * Lives in the companion, NOT as an instance property: the init block
+         * calls configureAudioRouting() before later-declared instance
+         * properties would be initialized (that ordering bug shipped once —
+         * "ArraysKt.contains, parameter <this> is null").
+         */
+        val EXTERNAL_TYPES = intArrayOf(
+            AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+            AudioDeviceInfo.TYPE_BLE_HEADSET,
+            AudioDeviceInfo.TYPE_WIRED_HEADSET,
+            AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+            AudioDeviceInfo.TYPE_USB_HEADSET,
+            AudioDeviceInfo.TYPE_USB_DEVICE,
+            AudioDeviceInfo.TYPE_HEARING_AID,
+        )
     }
 }
