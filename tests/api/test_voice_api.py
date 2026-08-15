@@ -1,6 +1,6 @@
-"""API tests for voice mode (wave VW1 of docs/VOICE_MODE_PLAN.md).
+"""API tests for voice mode (waves VW1 + VW3 of docs/VOICE_MODE_PLAN.md).
 
-Covers the three surfaces VW1 ships:
+Covers:
 
 * ``GET/PUT /api/v1/settings/voice`` — the four runtime-editable knobs
   (VM13/VM17): roundtrip, model allowlist, provider-reference validation.
@@ -9,12 +9,18 @@ Covers the three surfaces VW1 ships:
   because Realtime is API-key only).
 * ``POST /api/v1/voice/sessions`` — flag gate, provider resolution, the
   ephemeral client-secret mint and the ``mode='voice'`` session row.
+* VW3's call surface — ``/secret`` re-mint, ``/call`` attach + replace,
+  ``/hangup`` and ``/state``.
 
-All upstream HTTP is stubbed via ``httpx.MockTransport`` — NO network. The
-shared client the route uses is swapped for a MockTransport-backed one via a
-monkeypatch on ``app.core.http_client.get_http_client`` (the route imports the
-name at call time), mirroring tests/api/test_fetch_models_api.py.
+NO network anywhere: upstream HTTP is stubbed via ``httpx.MockTransport`` (the
+shared client the route uses is swapped via a monkeypatch on
+``app.core.http_client.get_http_client``, which the route imports at call time,
+mirroring tests/api/test_fetch_models_api.py), and the sideband WebSocket is
+stubbed at ``app.core.voice_bridge._open_sideband``.
 """
+
+import asyncio
+import json
 
 import httpx
 import pytest
@@ -93,6 +99,10 @@ class TestUnauthenticated:
         ("put", VOICE_SETTINGS),
         ("get", f"{VOICE_ROOT}/providers"),
         ("post", f"{VOICE_ROOT}/sessions"),
+        ("post", f"{VOICE_ROOT}/sessions/s1/secret"),
+        ("post", f"{VOICE_ROOT}/sessions/s1/call"),
+        ("post", f"{VOICE_ROOT}/sessions/s1/hangup"),
+        ("get", f"{VOICE_ROOT}/sessions/s1/state"),
     ])
     def test_requires_auth(self, client, method, path):
         kwargs = {"json": {}} if method in ("post", "put") else {}
@@ -326,3 +336,290 @@ class TestCreateVoiceSession:
         _install_mock_transport(monkeypatch, _boom)
         resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={})
         assert resp.status_code == 502, resp.text
+
+
+# ============================================================================
+# VW3 — call surface (re-mint / attach / hangup / state)
+# ============================================================================
+
+SESSION_ID = "voice-sess-1"
+
+
+class FakeSideband:
+    """In-process stand-in for the sideband WebSocket (no OpenAI, no network)."""
+
+    def __init__(self):
+        self.sent = []
+        self.closed = False
+        self._queue: asyncio.Queue = asyncio.Queue()
+
+    async def send(self, data):
+        self.sent.append(json.loads(data))
+
+    async def close(self):
+        self.closed = True
+        await self._queue.put(None)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if await self._queue.get() is None:
+            raise StopAsyncIteration
+
+
+def _mk_voice_session(session_id=SESSION_ID, *, provider_id="prov-openai", mode="voice"):
+    db.create_session(
+        session_id=session_id,
+        profile_id="default",
+        title="Voice session",
+        provider_id=provider_id,
+        mode=mode,
+    )
+    return session_id
+
+
+@pytest.fixture
+def sidebands(monkeypatch):
+    """Stub the sideband transport; yields the sockets handed out."""
+    from app.core import voice_bridge
+
+    sockets = []
+
+    async def _open(call_id, api_key):
+        sock = FakeSideband()
+        sock.call_id = call_id
+        sock.api_key = api_key
+        sockets.append(sock)
+        return sock
+
+    monkeypatch.setattr(voice_bridge, "_open_sideband", _open)
+    yield sockets
+    # The module-level registry outlives a test — never leak a bridge into the
+    # next one.
+    voice_bridge.registry._bridges.clear()
+
+
+class TestVoiceSecretRemint:
+    def test_flag_off_returns_403(self, authenticated_client, mock_db):
+        _make_provider()
+        _mk_voice_session()
+        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/secret")
+        assert resp.status_code == 403, resp.text
+
+    def test_missing_session_returns_404(self, authenticated_client, mock_db):
+        _enable_voice()
+        _make_provider()
+        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions/nope/secret")
+        assert resp.status_code == 404, resp.text
+
+    def test_chat_session_returns_404(self, authenticated_client, mock_db):
+        _enable_voice()
+        _make_provider()
+        _mk_voice_session("chat-sess", mode="chat")
+        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions/chat-sess/secret")
+        assert resp.status_code == 404, resp.text
+
+    def test_remint_uses_the_sessions_own_provider(
+        self, authenticated_client, mock_db, monkeypatch
+    ):
+        _unlock(mock_db)
+        _enable_voice(voice_model="gpt-realtime-2.1-mini")
+        _make_provider("prov-a", name="A", auth_token=encryption.encrypt_value(RAW_KEY))
+        _make_provider("prov-b", name="B", auth_token=encryption.encrypt_value("sk-other"))
+        _mk_voice_session(provider_id="prov-b")
+        captured = {}
+        _install_mock_transport(monkeypatch, _secret_handler(captured))
+
+        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/secret")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {
+            "client_secret": "ek_test_secret",
+            "expires_at": 1786000000,
+            "model": "gpt-realtime-2.1-mini",
+        }
+        # Funded by the row the session was created on, not the ambiguous set.
+        assert captured["request"].headers["authorization"] == "Bearer sk-other"
+
+    def test_openai_failure_surfaces_as_502(self, authenticated_client, mock_db, monkeypatch):
+        _enable_voice()
+        _make_provider()
+        _mk_voice_session()
+        _install_mock_transport(monkeypatch, _secret_handler(status_code=500))
+        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/secret")
+        assert resp.status_code == 502, resp.text
+
+
+class TestVoiceCallAttach:
+    def test_flag_off_returns_403(self, authenticated_client, mock_db, sidebands):
+        _make_provider()
+        _mk_voice_session()
+        resp = authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={"call_id": "rtc_1"}
+        )
+        assert resp.status_code == 403, resp.text
+        assert sidebands == []
+
+    @pytest.mark.parametrize("session_id,mode", [("nope", None), ("chat-sess", "chat")])
+    def test_missing_or_chat_session_returns_404(
+        self, authenticated_client, mock_db, sidebands, session_id, mode
+    ):
+        _enable_voice()
+        _make_provider()
+        if mode:
+            _mk_voice_session(session_id, mode=mode)
+        resp = authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{session_id}/call", json={"call_id": "rtc_1"}
+        )
+        assert resp.status_code == 404, resp.text
+
+    def test_blank_call_id_returns_400(self, authenticated_client, mock_db, sidebands):
+        _enable_voice()
+        _make_provider()
+        _mk_voice_session()
+        resp = authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={"call_id": "  "}
+        )
+        assert resp.status_code == 400, resp.text
+
+    def test_attach_opens_the_sideband_and_configures_it(
+        self, authenticated_client, mock_db, sidebands
+    ):
+        _unlock(mock_db)
+        _enable_voice()
+        _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
+        _mk_voice_session()
+
+        resp = authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={"call_id": "rtc_1"}
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"ok": True}
+
+        assert len(sidebands) == 1
+        assert sidebands[0].call_id == "rtc_1"
+        assert sidebands[0].api_key == RAW_KEY       # decrypted server-side only
+        update = sidebands[0].sent[0]
+        assert update["type"] == "session.update"
+        assert update["session"]["audio"]["input"]["turn_detection"]["type"] == "semantic_vad"
+
+        authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
+
+    def test_second_call_id_replaces_the_first(
+        self, authenticated_client, mock_db, sidebands
+    ):
+        _enable_voice()
+        _make_provider()
+        _mk_voice_session()
+
+        authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={"call_id": "rtc_1"}
+        )
+        resp = authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={"call_id": "rtc_2"}
+        )
+        assert resp.status_code == 200, resp.text
+        assert [s.call_id for s in sidebands] == ["rtc_1", "rtc_2"]
+        assert sidebands[0].closed is True            # old attachment closed first
+        assert sidebands[1].closed is False
+
+        from app.core import voice_bridge
+        assert voice_bridge.registry.get(SESSION_ID).call_id == "rtc_2"
+        authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
+
+    def test_connect_failure_surfaces_as_502(
+        self, authenticated_client, mock_db, monkeypatch
+    ):
+        from app.core import voice_bridge
+
+        _enable_voice()
+        _make_provider()
+        _mk_voice_session()
+
+        async def _boom(call_id, api_key):
+            raise ConnectionError("handshake refused")
+
+        monkeypatch.setattr(voice_bridge, "_open_sideband", _boom)
+        resp = authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={"call_id": "rtc_1"}
+        )
+        assert resp.status_code == 502, resp.text
+        assert voice_bridge.registry.get(SESSION_ID) is None
+
+
+class TestVoiceHangup:
+    def test_hangup_without_a_bridge_is_ok(self, authenticated_client, mock_db, sidebands):
+        _enable_voice()
+        _mk_voice_session()
+        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"ok": True}
+
+    def test_hangup_stops_the_bridge_and_is_idempotent(
+        self, authenticated_client, mock_db, sidebands
+    ):
+        from app.core import voice_bridge
+
+        _enable_voice()
+        _make_provider()
+        _mk_voice_session()
+        authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={"call_id": "rtc_1"}
+        )
+
+        assert authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup"
+        ).status_code == 200
+        assert sidebands[0].closed is True
+        assert voice_bridge.registry.get(SESSION_ID) is None
+        # Hanging up twice is fine.
+        assert authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup"
+        ).status_code == 200
+
+    def test_hangup_on_a_missing_session_returns_404(self, authenticated_client, mock_db):
+        _enable_voice()
+        assert authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/nope/hangup"
+        ).status_code == 404
+
+
+class TestVoiceState:
+    def test_state_without_a_bridge(self, authenticated_client, mock_db):
+        _enable_voice()
+        _mk_voice_session()
+        resp = authenticated_client.get(f"{VOICE_ROOT}/sessions/{SESSION_ID}/state")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {
+            "active": False, "connected": False, "started_at": None, "model": None,
+        }
+
+    def test_state_while_attached(self, authenticated_client, mock_db, sidebands):
+        _enable_voice(voice_model="gpt-realtime-2.1-mini")
+        _make_provider()
+        _mk_voice_session()
+        authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={"call_id": "rtc_1"}
+        )
+
+        body = authenticated_client.get(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/state"
+        ).json()
+        assert body["active"] is True
+        assert body["connected"] is True
+        assert body["model"] == "gpt-realtime-2.1-mini"
+        assert isinstance(body["started_at"], float)
+
+        authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
+        after = authenticated_client.get(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/state"
+        ).json()
+        assert after == {
+            "active": False, "connected": False, "started_at": None, "model": None,
+        }
+
+    def test_state_for_a_chat_session_returns_404(self, authenticated_client, mock_db):
+        _mk_voice_session("chat-sess", mode="chat")
+        assert authenticated_client.get(
+            f"{VOICE_ROOT}/sessions/chat-sess/state"
+        ).status_code == 404

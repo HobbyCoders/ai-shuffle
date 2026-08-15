@@ -13,7 +13,7 @@
 	import { files } from '$lib/stores/files.svelte';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
-	import { hydrateModelRegistry } from '$lib/constants/models';
+	import { ensureModelRegistryHydrated } from '$lib/constants/models';
 	import { onDestroy } from 'svelte';
 	import type { Snippet } from 'svelte';
 	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
@@ -116,7 +116,7 @@
 					files.syncFromServer(),
 					gitActionPreferences.syncFromServer(),
 					timezonePreference.syncFromServer(),
-					hydrateModelRegistry(),
+					ensureModelRegistryHydrated(),
 					// Seed the notification bell from persisted history.
 					notify.loadHistory()
 				]);

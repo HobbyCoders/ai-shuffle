@@ -23,16 +23,21 @@
 	 *
 	 * The pill dropdowns open upward since this bar sits just above the input.
 	 */
+	import { onMount } from 'svelte';
 	import ProfileSelector from './ProfileSelector.svelte';
 	import BranchSelector from './BranchSelector.svelte';
 	import ExecutionModeBar from '$lib/components/layout/ExecutionModeBar.svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
 	import { computeContextBadge, shouldShowEmptyStateBranchPill } from './contextPills';
 	import { activeSession } from '$lib/stores/active-session';
-	import { projects, sessions } from '$lib/stores/app-data.svelte';
+	import { appData, projects, sessions } from '$lib/stores/app-data.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
 	import { git, gitStatus } from '$lib/stores/git.svelte';
-	import { FolderClosed, GitBranch, Monitor, MonitorOff } from 'lucide-svelte';
+	import { layout } from '$lib/stores/layout.svelte';
+	import { notify } from '$lib/stores/notifications';
+	import { createVoiceSession, isVoiceEnabled } from '$lib/api/voice';
+	import { startCall } from '$lib/services/voiceCall';
+	import { AudioLines, FolderClosed, GitBranch, Monitor, MonitorOff } from 'lucide-svelte';
 
 	const projectName = $derived(
 		$projects.find((p) => p.id === $activeSession.project)?.name ?? null
@@ -100,6 +105,52 @@
 	);
 
 	let showCreateBranchModal = $state(false);
+
+	// ---- Voice mode affordance (ruling VM6) -------------------------------
+	// A "Voice" pill in the pre-send control row starts a voice session with the
+	// profile/project already selected here — no modal session-type picker. The
+	// settings read is cached module-side, so the remounts this bar goes through
+	// cost one fetch per page load, not one per mount.
+	let voiceEnabled = $state(false);
+	let startingVoice = $state(false);
+
+	onMount(async () => {
+		voiceEnabled = await isVoiceEnabled();
+	});
+
+	async function startVoiceSession() {
+		if (startingVoice) return;
+		startingVoice = true;
+		try {
+			const created = await createVoiceSession({
+				profile_id: $activeSession.profile || null,
+				project_id: $activeSession.project || null
+			});
+			// The board row must exist before we switch: ChatView reads `mode`
+			// off the sessions list to decide the surface.
+			await appData.loadSessions();
+			activeSession.switchSession(
+				created.session_id,
+				$activeSession.project || null,
+				null,
+				'Voice session'
+			);
+			layout.openChat(created.session_id);
+			// Auto-start — the affordance IS the call (the channel is always open
+			// once live; there is no separate "connect" step for the user).
+			await startCall(created.session_id, {
+				client_secret: created.client_secret,
+				model: created.model
+			});
+		} catch (e) {
+			// The backend's 400/403 detail strings are written for the user
+			// (missing/ineligible provider, voice mode disabled) — show them as-is.
+			const detail = (e as { detail?: string } | null)?.detail;
+			notify.error(detail || 'Could not start a voice session.');
+		} finally {
+			startingVoice = false;
+		}
+	}
 </script>
 
 <div class="context-pill-bar">
@@ -113,6 +164,18 @@
 				{projectName}
 				onClickNewBranch={() => (showCreateBranchModal = true)}
 			/>
+		{/if}
+		{#if voiceEnabled}
+			<button
+				type="button"
+				class="voice-pill"
+				onclick={startVoiceSession}
+				disabled={startingVoice}
+				title="Start a voice session — talk to an agent that dispatches the work"
+			>
+				<AudioLines size={13} strokeWidth={1.5} />
+				<span class="pill-label">{startingVoice ? 'Starting…' : 'Voice'}</span>
+			</button>
 		{/if}
 	{:else if showBranch}
 		<BranchSelector
@@ -208,6 +271,35 @@
 	}
 
 	.context-badge :global(svg) {
+		flex-shrink: 0;
+	}
+
+	/* Voice affordance (VM6) — same pill metrics as the other empty-state
+	   controls, with the primary accent so it reads as a mode choice rather
+	   than another context selector. */
+	.voice-pill {
+		display: flex;
+		align-items: center;
+		gap: 5px;
+		height: 28px;
+		padding: 0 10px;
+		background: color-mix(in oklch, var(--primary) 8%, var(--background));
+		border: 1px solid color-mix(in oklch, var(--primary) 35%, var(--border));
+		border-radius: var(--radius, 0.75rem);
+		color: var(--primary);
+		font-size: 0.75rem;
+		font-weight: 500;
+		white-space: nowrap;
+		cursor: pointer;
+	}
+	.voice-pill:hover:not(:disabled) {
+		background: color-mix(in oklch, var(--primary) 14%, var(--background));
+	}
+	.voice-pill:disabled {
+		opacity: 0.6;
+		cursor: default;
+	}
+	.voice-pill :global(svg) {
 		flex-shrink: 0;
 	}
 

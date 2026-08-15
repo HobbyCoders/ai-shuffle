@@ -233,6 +233,13 @@ async def lifespan(app: FastAPI):
         await team_transcript_watcher.stop_all()
     except Exception:
         logger.exception("team_transcript_watcher.stop_all failed")
+    # Close any live voice sideband (VW3): the socket belongs to this process,
+    # so a restart must hang up rather than leak a half-open realtime call.
+    try:
+        from app.core import voice_bridge
+        await voice_bridge.shutdown_all()
+    except Exception:
+        logger.exception("voice_bridge.shutdown_all failed")
     await shutdown_services()
     try:
         from app.core.error_log_handler import uninstall_error_log_handler

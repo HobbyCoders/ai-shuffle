@@ -26,6 +26,7 @@
 		encodeProviderModel,
 		getProviderDisplay,
 		getClaudeDisplay,
+		decodeProviderModel,
 		CUSTOM_VALUE
 	} from '$lib/constants/models';
 
@@ -198,7 +199,10 @@
 	const currentLabel = $derived.by(() => {
 		if (value === CUSTOM_VALUE) return 'Custom…';
 		const match = options.find((o) => o.value === value);
-		return match ? match.label : value || 'Select a model';
+		if (match) return match.label;
+		// No matching option (registry not hydrated yet, or the provider/model was
+		// removed) — show the bare model id rather than the raw `prov:…` composite.
+		return decodeProviderModel(value)?.modelId ?? (value || 'Select a model');
 	});
 
 	function selectOption(optionValue: string) {

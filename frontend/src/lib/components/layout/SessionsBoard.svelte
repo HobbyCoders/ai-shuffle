@@ -12,7 +12,7 @@
 	 * Built on the app's theme tokens.
 	 */
 	import { onDestroy } from 'svelte';
-	import { Plus, X, CircleDot, Undo2, FolderClosed, MessageSquare, ChevronRight, ChevronDown, GitBranch, GitFork, Play, Monitor, MonitorOff, Link2, Unlink, Check, CalendarClock, Trash2, Pencil, ArrowRightLeft } from 'lucide-svelte';
+	import { Plus, X, CircleDot, Undo2, FolderClosed, MessageSquare, ChevronRight, ChevronDown, GitBranch, GitFork, Play, Monitor, MonitorOff, Link2, Unlink, Check, CalendarClock, Trash2, Pencil, ArrowRightLeft, AudioLines } from 'lucide-svelte';
 	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 	import { browser } from '$app/environment';
 	import { appData, sessions, projects } from '$lib/stores/app-data.svelte';
@@ -1025,6 +1025,14 @@
 						Automation
 					</span>
 				{/if}
+				{#if session.mode === 'voice'}
+					<!-- Voice-mode session (VM4/VM6): opens onto the call surface
+					     instead of a composer. -->
+					<span class="row-voice" title="Voice session — opens with the call surface, no typed input">
+						<AudioLines size={11} strokeWidth={1.6} />
+						Voice
+					</span>
+				{/if}
 				{#if session.is_remote && session.device_name}
 					<span
 						class="row-device"
@@ -1705,6 +1713,19 @@
 		background: color-mix(in oklch, var(--info) 14%, transparent);
 	}
 	.row-automation :global(svg) { flex-shrink: 0; }
+
+	.row-voice {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		flex-shrink: 0;
+		padding: 1px 7px;
+		border-radius: 999px;
+		white-space: nowrap;
+		color: color-mix(in oklch, var(--primary) 85%, var(--muted-foreground));
+		background: color-mix(in oklch, var(--primary) 14%, transparent);
+	}
+	.row-voice :global(svg) { flex-shrink: 0; }
 
 	.row-device {
 		display: inline-flex;
