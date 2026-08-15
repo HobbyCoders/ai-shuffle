@@ -68,9 +68,25 @@ class ServerListActivity : AppCompatActivity() {
         maybeRequestNotificationPermission()
     }
 
+    override fun onCreateOptionsMenu(menu: android.view.Menu): Boolean {
+        menuInflater.inflate(R.menu.menu_server_list, menu)
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: android.view.MenuItem): Boolean {
+        if (item.itemId == R.id.action_assist_settings) {
+            startActivity(Intent(this, AssistSettingsActivity::class.java))
+            return true
+        }
+        return super.onOptionsItemSelected(item)
+    }
+
     override fun onResume() {
         super.onResume()
         refresh()
+        // Bring the wake-word listener back if it was enabled (e.g. after an
+        // app update or a boot where the mic service couldn't start).
+        com.hobbycoders.aishuffle.wake.WakeWordService.startIfEnabled(this)
     }
 
     private fun refresh() {

@@ -10,6 +10,48 @@
     <!-- Re-establish the connection after a reboot. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!-- Voice assistant: wake-word listening + realtime call audio. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- Lets the wake word open the call screen from the background, and
+         exempts the app from background-start limits for the mic service. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+
+    <!-- Phone actions the voice agent can perform (each is optional at runtime;
+         the agent degrades gracefully when a permission is not granted). -->
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.WRITE_CALENDAR" />
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+
+    <!-- Package visibility (Android 11+): the voice agent's open_app /
+         set_alarm / set_timer / navigate_to tools need to see these targets. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SET_ALARM" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SET_TIMER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="google.navigation" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="geo" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
@@ -38,6 +80,64 @@
             android:exported="false"
             android:parentActivityName=".ui.ServerListActivity"
             android:configChanges="orientation|screenSize|keyboardHidden" />
+
+        <!-- Voice assistant -->
+        <activity
+            android:name=".voice.VoiceCallActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.AIShuffle">
+            <!-- Allows AI Shuffle to be chosen as the device assist app
+                 (long-press power / gesture invokes it). -->
+            <intent-filter>
+                <action android:name="android.intent.action.ASSIST" />
+                <action android:name="android.intent.action.VOICE_COMMAND" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".ui.AssistSettingsActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.ServerListActivity" />
+
+        <!-- Holds the live OpenAI Realtime call (mic + playback + tools). -->
+        <service
+            android:name=".voice.VoiceCallService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <!-- Always-on offline wake-word listener (Vosk). -->
+        <service
+            android:name=".wake.WakeWordService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <!-- Lets the agent read active notifications ("what did I miss?").
+             The user grants access in system settings; disabled until then. -->
+        <service
+            android:name=".voice.AssistNotificationListener"
+            android:exported="false"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <!-- Quick Settings tile: one tap to talk. -->
+        <service
+            android:name=".wake.AssistTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_notification"
+            android:label="@string/assist_tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
 
         <!-- Embedded push: holds the SSE connection(s) and posts notifications. -->
         <service
