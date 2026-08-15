@@ -137,6 +137,9 @@ class WakeWordService : Service(), RecognitionListener {
         stopRecognizer()
         val grammar = """["$phrase", "[unk]"]"""
         val recognizer = Recognizer(m, SAMPLE_RATE, grammar)
+        // Word-level output so results carry per-word confidence — the false-
+        // trigger gate in checkForPhrase needs it.
+        recognizer.setWords(true)
         val service = SpeechService(recognizer, SAMPLE_RATE)
         speechService = service
         service.startListening(this)
@@ -175,15 +178,17 @@ class WakeWordService : Service(), RecognitionListener {
     // ------------------------------------------------------------------
 
     override fun onPartialResult(hypothesis: String?) {
-        checkForPhrase(hypothesis, "partial")
+        // Deliberately ignored: partial hypotheses are jittery and ambient
+        // noise briefly decoding as the phrase caused false activations.
+        // Only finalized utterances (onResult) trigger.
     }
 
     override fun onResult(hypothesis: String?) {
-        checkForPhrase(hypothesis, "text")
+        checkForPhrase(hypothesis)
     }
 
     override fun onFinalResult(hypothesis: String?) {
-        checkForPhrase(hypothesis, "text")
+        checkForPhrase(hypothesis)
     }
 
     override fun onError(exception: Exception?) {
@@ -199,15 +204,39 @@ class WakeWordService : Service(), RecognitionListener {
         resumeListening()
     }
 
-    private fun checkForPhrase(hypothesis: String?, field: String) {
+    /**
+     * Trigger only on a finalized utterance that (a) contains the phrase and
+     * (b) decodes it with decent confidence. With the two-entry grammar the
+     * decoder is eager to force noise into the phrase; the per-word confidence
+     * (enabled via setWords) is what separates a real "hey shuffle" from a
+     * cough that vaguely rhymes with it.
+     */
+    private fun checkForPhrase(hypothesis: String?) {
         if (triggered || hypothesis.isNullOrBlank()) return
-        val heard = runCatching { JSONObject(hypothesis).optString(field) }
-            .getOrDefault("")
-            .lowercase()
-        if (heard.contains(phrase)) {
-            triggered = true
-            onWakeWord()
+        val json = runCatching { JSONObject(hypothesis) }.getOrNull() ?: return
+        val heard = json.optString("text").lowercase()
+        if (!heard.contains(phrase)) return
+
+        val words = json.optJSONArray("result")
+        if (words != null && words.length() > 0) {
+            val phraseWords = phrase.split(' ').toSet()
+            var sum = 0.0
+            var count = 0
+            for (i in 0 until words.length()) {
+                val w = words.optJSONObject(i) ?: continue
+                if (w.optString("word") in phraseWords) {
+                    sum += w.optDouble("conf", 0.0)
+                    count++
+                }
+            }
+            val avg = if (count > 0) sum / count else 0.0
+            if (count < phraseWords.size || avg < MIN_CONFIDENCE) {
+                Log.d(TAG, "Wake candidate rejected (conf=%.2f, words=$count)".format(avg))
+                return
+            }
         }
+        triggered = true
+        onWakeWord()
     }
 
     private fun onWakeWord() {
@@ -258,6 +287,9 @@ class WakeWordService : Service(), RecognitionListener {
         private const val NOTIFICATION_ID = 2002
         private const val WAKE_NOTIFICATION_ID = 2003
         private const val SAMPLE_RATE = 16000.0f
+
+        /** Minimum average per-word confidence for a wake trigger. */
+        private const val MIN_CONFIDENCE = 0.85
 
         /** Start listening if enabled + ready; safe to call any time. */
         fun startIfEnabled(context: Context) {

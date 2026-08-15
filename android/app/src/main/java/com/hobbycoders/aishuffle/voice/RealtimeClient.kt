@@ -95,31 +95,56 @@ class RealtimeClient(
 
         peer.addTrack(micTrack, listOf("mic-stream"))
 
-        // Communication mode gives us echo cancellation and lets the system
-        // route to whatever is already active (car Bluetooth, headset). Only
-        // force the speaker when NO external output is connected — otherwise
-        // leave routing alone so the audio stays where the user already is.
-        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-        if (!hasExternalOutput()) {
-            @Suppress("DEPRECATION")
-            audioManager.isSpeakerphoneOn = true
-        }
+        configureAudioRouting()
     }
 
-    /** True when a headset / Bluetooth / USB audio output is connected. */
-    private fun hasExternalOutput(): Boolean =
-        audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any {
-            it.type in intArrayOf(
-                AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
-                AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
-                AudioDeviceInfo.TYPE_WIRED_HEADSET,
-                AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
-                AudioDeviceInfo.TYPE_USB_HEADSET,
-                AudioDeviceInfo.TYPE_USB_DEVICE,
-                AudioDeviceInfo.TYPE_HEARING_AID,
-                AudioDeviceInfo.TYPE_BLE_HEADSET,
-            )
+    /** Device types that count as "the user is already listening there". */
+    private val externalTypes = intArrayOf(
+        AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+        AudioDeviceInfo.TYPE_BLE_HEADSET,
+        AudioDeviceInfo.TYPE_WIRED_HEADSET,
+        AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+        AudioDeviceInfo.TYPE_USB_HEADSET,
+        AudioDeviceInfo.TYPE_USB_DEVICE,
+        AudioDeviceInfo.TYPE_HEARING_AID,
+    )
+
+    /**
+     * Route call audio to whatever the user is already wearing. In
+     * MODE_IN_COMMUNICATION Android does NOT follow media routing on its own —
+     * a connected headset must be explicitly selected as the communication
+     * device or audio falls out of the phone. Speaker is only the fallback
+     * when nothing external is available.
+     */
+    private fun configureAudioRouting() {
+        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            val devices = audioManager.availableCommunicationDevices
+            val preferred = devices.firstOrNull { it.type in externalTypes }
+                ?: devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+            if (preferred != null) {
+                val ok = audioManager.setCommunicationDevice(preferred)
+                Log.i(TAG, "Comm device -> ${preferred.type} (ok=$ok)")
+            }
+        } else {
+            val hasBt = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                .any {
+                    it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                        it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP
+                }
+            val hasWired = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                .any { it.type in externalTypes && it.type != AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+            @Suppress("DEPRECATION")
+            when {
+                hasBt -> {
+                    audioManager.startBluetoothSco()
+                    audioManager.isBluetoothScoOn = true
+                }
+                hasWired -> Unit // wired routes automatically in comm mode
+                else -> audioManager.isSpeakerphoneOn = true
+            }
         }
+    }
 
     /** Create the local SDP offer (also sets it as the local description). */
     suspend fun createOffer(): String {
@@ -170,9 +195,17 @@ class RealtimeClient(
         runCatching { peer.close() }
         runCatching { audioSource.dispose() }
         runCatching { factory.dispose() }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            runCatching { audioManager.clearCommunicationDevice() }
+        } else {
+            @Suppress("DEPRECATION")
+            runCatching {
+                audioManager.stopBluetoothSco()
+                audioManager.isBluetoothScoOn = false
+                audioManager.isSpeakerphoneOn = false
+            }
+        }
         audioManager.mode = AudioManager.MODE_NORMAL
-        @Suppress("DEPRECATION")
-        audioManager.isSpeakerphoneOn = false
     }
 
     private inner class PeerObserver : PeerConnection.Observer {
