@@ -21,6 +21,7 @@ import { SERVER_INSTRUCTIONS } from "./instructions.js";
 import { TOOL_DEFINITIONS, TOOL_MAP } from "./tools/index.js";
 import { validateInput } from "./schemas.js";
 import { errorResult } from "./tools/result.js";
+import { reportCurrentTarget } from "./panel.js";
 
 async function main(): Promise<void> {
   const manager = new BrowserManager();
@@ -73,6 +74,8 @@ async function main(): Promise<void> {
   const shutdown = async (code = 0): Promise<void> => {
     if (cleaningUp) return;
     cleaningUp = true;
+    // Best-effort: let the panel know no target is being driven anymore.
+    reportCurrentTarget(null);
     try {
       await manager.cleanup();
     } finally {
