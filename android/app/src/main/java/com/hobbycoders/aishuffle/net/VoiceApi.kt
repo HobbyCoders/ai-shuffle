@@ -71,6 +71,10 @@ object VoiceApi {
      * POST /api/v1/voice/sessions/{id}/call — registers the OpenAI `call_id` so
      * the server's sideband bridge joins the call, declaring [clientTools] (the
      * phone tools THIS app services) alongside its own agent-dispatch tools.
+     *
+     * [sessionMode] ("command" | "chat") tells the server which instruction
+     * set to compose — the prompts themselves live in the server's voice
+     * settings, editable in the AI Shuffle web UI, not in this app.
      */
     suspend fun attachCall(
         server: Server,
@@ -78,12 +82,12 @@ object VoiceApi {
         sessionId: String,
         callId: String,
         clientTools: JSONArray,
-        clientInstructions: String,
+        sessionMode: String,
     ): ApiResult<Unit> = withContext(Dispatchers.IO) {
         val body = JSONObject().apply {
             put("call_id", callId)
             put("client_tools", clientTools)
-            put("client_instructions", clientInstructions)
+            put("session_mode", sessionMode)
         }
         val request = serverRequest(server, sessionCookie, "/api/v1/voice/sessions/$sessionId/call")
             .post(body.toString().toRequestBody(JSON_MEDIA.toMediaType()))

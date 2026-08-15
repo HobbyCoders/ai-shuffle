@@ -48,6 +48,11 @@ Vosk (offline, on-device)          your AI Shuffle server              OpenAI Re
   `POST /api/v1/voice/sessions/{id}/call` (requires the matching ai-shuffle
   server update). The sideband merges them into its `session.update` and
   skips servicing them; the app executes them natively.
+- **The agent's prompts live on the server** — the app only reports the
+  session mode (`command`/`chat`) on attach. Personality, ground rules, and
+  the per-mode behavior text are edited in the AI Shuffle web UI under
+  Settings → Voice (three prompts, each with a built-in default and a
+  reset button). Changes apply to the next call — nothing to reinstall.
 
 ## Safety
 

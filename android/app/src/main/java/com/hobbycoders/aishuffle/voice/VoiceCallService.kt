@@ -221,7 +221,10 @@ class VoiceCallService : Service() {
                 val attach = VoiceApi.attachCall(
                     srv, cookie, session.sessionId, callId,
                     clientTools = tools.declarations(),
-                    clientInstructions = PhoneTools.instructionsFor(mode),
+                    // The prompt text itself lives server-side (Settings →
+                    // Voice) — the app only reports which kind of session
+                    // this is.
+                    sessionMode = if (mode == SessionMode.COMMAND) "command" else "chat",
                 )
                 if (attach is ApiResult.Failure) {
                     Log.w(TAG, "Sideband attach failed: ${attach.message}")
