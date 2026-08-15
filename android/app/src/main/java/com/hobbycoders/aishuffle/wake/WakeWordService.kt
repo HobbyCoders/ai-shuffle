@@ -242,9 +242,15 @@ class WakeWordService : Service(), RecognitionListener {
     private fun onWakeWord() {
         Log.i(TAG, "Wake phrase detected")
         stopRecognizer() // free the mic for the call
+        // Quick full-volume ack ("phrase heard") — the louder ready tone
+        // follows from VoiceCallService once the agent is actually live.
         runCatching {
-            ToneGenerator(AudioManager.STREAM_NOTIFICATION, 80)
-                .startTone(ToneGenerator.TONE_PROP_ACK, 150)
+            val tone = ToneGenerator(AudioManager.STREAM_NOTIFICATION, ToneGenerator.MAX_VOLUME)
+            tone.startTone(ToneGenerator.TONE_PROP_ACK, 150)
+            scope.launch(Dispatchers.IO) {
+                kotlinx.coroutines.delay(400)
+                runCatching { tone.release() }
+            }
         }
 
         // COMMAND mode: one task, agent hangs itself up — pure hands-free.

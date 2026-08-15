@@ -4,13 +4,20 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.location.Geocoder
+import android.location.Location
+import android.location.LocationManager
 import android.net.Uri
+import android.os.Build
 import android.provider.AlarmClock
 import android.provider.CalendarContract
 import android.provider.ContactsContract
 import android.provider.Telephony
 import android.telephony.SmsManager
 import androidx.core.content.ContextCompat
+import java.util.Locale
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.Instant
@@ -152,6 +159,11 @@ class PhoneTools(private val context: Context) {
             str("location", "Optional location.")
         }
         tool(
+            "get_location",
+            "The phone's current GPS location: coordinates and street address. " +
+                "Use for 'where am I', sharing location, or navigation context.",
+        ) {}
+        tool(
             "end_session",
             "End this voice session. Call it when the task is done, when the user " +
                 "says goodbye, or when they go silent. Say your short wrap-up first.",
@@ -163,7 +175,7 @@ class PhoneTools(private val context: Context) {
     fun owns(name: String): Boolean = name in setOf(
         "find_contact", "place_call", "send_sms", "read_messages", "read_notifications",
         "open_app", "open_url", "navigate_to", "set_alarm", "set_timer",
-        "get_calendar_events", "create_calendar_event", "end_session",
+        "get_calendar_events", "create_calendar_event", "get_location", "end_session",
     )
 
     // ------------------------------------------------------------------
@@ -188,6 +200,7 @@ class PhoneTools(private val context: Context) {
             "get_calendar_events" ->
                 ToolOutcome(getCalendarEvents(args.optInt("days", 7).coerceIn(1, 31)))
             "create_calendar_event" -> ToolOutcome(createCalendarEvent(args))
+            "get_location" -> ToolOutcome(getLocation())
             "end_session" -> ToolOutcome(
                 ok("message" to "Session ending."),
                 endSession = true,
@@ -542,6 +555,55 @@ class PhoneTools(private val context: Context) {
             return fallback
         }
         return null
+    }
+
+    // -- location ------------------------------------------------------
+
+    /**
+     * Current position via the platform LocationManager (no Play Services
+     * dependency). Tries a fresh fix (bounded wait), falls back to the last
+     * known one, and reverse-geocodes to a street address when possible.
+     * Runs on the tool executor's IO thread, so the bounded block is fine.
+     */
+    private fun getLocation(): JSONObject {
+        requirePermission(Manifest.permission.ACCESS_FINE_LOCATION, "location")
+            ?.let { return it }
+        val lm = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        val providers = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
+            .filter { runCatching { lm.isProviderEnabled(it) }.getOrDefault(false) }
+        if (providers.isEmpty()) {
+            return fail("Location is turned off on the phone.")
+        }
+
+        var fix: Location? = null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val latch = CountDownLatch(1)
+            lm.getCurrentLocation(providers.first(), null, context.mainExecutor) { l ->
+                fix = l
+                latch.countDown()
+            }
+            latch.await(8, TimeUnit.SECONDS)
+        }
+        if (fix == null) {
+            fix = providers.firstNotNullOfOrNull { lm.getLastKnownLocation(it) }
+        }
+        val location = fix ?: return fail("Couldn't get a location fix right now.")
+
+        val result = ok(
+            "latitude" to location.latitude,
+            "longitude" to location.longitude,
+            "accuracy_m" to location.accuracy.toInt(),
+            "age_seconds" to ((System.currentTimeMillis() - location.time) / 1000),
+        )
+        runCatching {
+            @Suppress("DEPRECATION")
+            val addresses = Geocoder(context, Locale.getDefault())
+                .getFromLocation(location.latitude, location.longitude, 1)
+            addresses?.firstOrNull()?.getAddressLine(0)
+                ?.takeIf { it.isNotBlank() }
+                ?.let { result.put("address", it) }
+        }
+        return result
     }
 
     // -- helpers -------------------------------------------------------

@@ -28,6 +28,10 @@
     <uses-permission android:name="android.permission.READ_CALENDAR" />
     <uses-permission android:name="android.permission.WRITE_CALENDAR" />
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+    <!-- get_location tool: "where am I", location sharing, navigation context. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
 
     <!-- Package visibility (Android 11+): the voice agent's open_app /
          set_alarm / set_timer / navigate_to tools need to see these targets. -->
@@ -104,11 +108,13 @@
             android:exported="false"
             android:parentActivityName=".ui.ServerListActivity" />
 
-        <!-- Holds the live OpenAI Realtime call (mic + playback + tools). -->
+        <!-- Holds the live OpenAI Realtime call (mic + playback + tools).
+             The location type is only passed to startForeground when the
+             location permission is actually granted. -->
         <service
             android:name=".voice.VoiceCallService"
             android:exported="false"
-            android:foregroundServiceType="microphone" />
+            android:foregroundServiceType="microphone|location" />
 
         <!-- Always-on offline wake-word listener (Vosk). -->
         <service

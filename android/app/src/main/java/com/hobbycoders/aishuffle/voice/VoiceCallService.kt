@@ -116,10 +116,16 @@ class VoiceCallService : Service() {
     private fun startForegroundWithNotification() {
         val notification = buildNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID, notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
-            )
+            // Declaring the location type without the permission granted is a
+            // SecurityException on Android 14 — only add it when we have it.
+            var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            val locationGranted = androidx.core.content.ContextCompat.checkSelfPermission(
+                this, android.Manifest.permission.ACCESS_FINE_LOCATION,
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (locationGranted) {
+                type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+            }
+            startForeground(NOTIFICATION_ID, notification, type)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
@@ -240,14 +246,27 @@ class VoiceCallService : Service() {
         VoiceCallState.update { it.copy(status = CallStatus.LIVE) }
         lastActivityMs = System.currentTimeMillis()
 
+        playReadyTone()
         if (mode == SessionMode.COMMAND) {
-            // The "speak now" cue: the wake chime only meant "phrase heard" —
-            // this one means the agent is actually on the line.
-            runCatching {
-                ToneGenerator(AudioManager.STREAM_NOTIFICATION, 85)
-                    .startTone(ToneGenerator.TONE_PROP_BEEP2, 200)
-            }
             startIdleWatchdog()
+        }
+    }
+
+    /**
+     * The "speak now" cue — the wake chime only meant "phrase heard"; this
+     * one means the agent is actually on the line. Loud (full tone volume), a
+     * distinctive rising triple beep, and played on the VOICE_CALL stream so
+     * it comes out of whatever device the call itself uses (headset/car),
+     * not the phone speaker.
+     */
+    private fun playReadyTone() {
+        runCatching {
+            val tone = ToneGenerator(AudioManager.STREAM_VOICE_CALL, ToneGenerator.MAX_VOLUME)
+            tone.startTone(ToneGenerator.TONE_SUP_CONFIRM, 400)
+            scope.launch {
+                delay(600)
+                runCatching { tone.release() }
+            }
         }
     }
 

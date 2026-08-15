@@ -45,6 +45,7 @@ class AssistSettingsActivity : AppCompatActivity() {
         Manifest.permission.READ_SMS,
         Manifest.permission.READ_CALENDAR,
         Manifest.permission.WRITE_CALENDAR,
+        Manifest.permission.ACCESS_FINE_LOCATION,
     )
 
     private val permissionLauncher =
