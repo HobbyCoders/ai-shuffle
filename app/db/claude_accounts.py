@@ -203,6 +203,30 @@ def delete_claude_account(account_id: str) -> bool:
         return cursor.rowcount > 0
 
 
+def clear_claude_active_pointers(account_id: str) -> int:
+    """Delete every install's active-account pointer that names ``account_id``.
+
+    The active pointer is per-install (``claude_active_account:{instance_id}``)
+    but the account LIST is shared, so deleting a row on one install would leave
+    every OTHER install pointing at an id that no longer exists (a "ghost"
+    pointer). This clears all of them in one statement — including this
+    install's own, which makes it idempotent with the explicit pointer clear the
+    sole-active delete path already performs. Returns the number of pointers
+    removed.
+
+    The ``%%`` is a literal ``%`` for the LIKE prefix (psycopg2 un-escapes it
+    when parameters are bound).
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM system_settings "
+            "WHERE key LIKE 'claude_active_account:%%' AND value = %s",
+            (account_id,),
+        )
+        return cursor.rowcount
+
+
 def mark_claude_account_sync_pending(account_id: str) -> bool:
     """Flag that the file rotated but write-back was blocked (no encryption key).
 

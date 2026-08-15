@@ -1894,6 +1894,7 @@ from app.db.claude_accounts import (  # noqa: F401
     update_claude_account_credentials_only,
     rename_claude_account,
     delete_claude_account,
+    clear_claude_active_pointers,
     mark_claude_account_sync_pending,
     touch_claude_account_last_used,
     set_claude_account_subscription_type,

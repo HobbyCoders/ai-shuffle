@@ -36,11 +36,13 @@ def oauth_tmp(tmp_path):
     inst = DirectOAuth(config_dir=tmp_path)
     svc._last_synced_mtime = None
     svc._last_used_stamp_monotonic = None
+    svc._last_dangling_warn = 0.0
     with patch("app.core.claude_accounts.direct_oauth", inst), \
             patch("app.core.oauth.direct_oauth", inst):
         yield inst
     svc._last_synced_mtime = None
     svc._last_used_stamp_monotonic = None
+    svc._last_dangling_warn = 0.0
     set_post_write_hook(None)
 
 
@@ -952,3 +954,150 @@ class TestLastUsed:
         time.sleep(0.01)
         svc.record_active_account_used()  # within throttle window → no-op
         assert db.get_claude_account("acct-b")["last_used_at"] == first
+
+
+# ---------------------------------------------------------------------------
+# dangling active-pointer repair
+# ---------------------------------------------------------------------------
+
+class TestDanglingPointerRepair:
+    """The per-install active pointer can name an id with no row behind it —
+    typically because ANOTHER install deleted the (shared) account row. It used
+    to stay broken forever: sync-back returned ``no_active`` and usage snapshots
+    were stamped with an id that resolved to no email/name.
+    """
+
+    def _add_row(self, svc, db, account_id, *, access):
+        o = _oauth_dict(access=access)
+        db.create_claude_account(
+            account_id=account_id, name=account_id,
+            credentials=encryption.encrypt_value(json.dumps(o)),
+            credential_fingerprint=svc._fingerprint(o),
+            expires_at=o["expiresAt"], has_refresh_token=True,
+        )
+        return o
+
+    def _rotate_file_raw(self, svc, oauth_tmp, **kwargs):
+        """Rewrite the credentials file bypassing the post-write hook."""
+        rotated = _oauth_dict(**kwargs)
+        (oauth_tmp.config_dir / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": rotated})
+        )
+        svc._last_synced_mtime = None
+        return rotated
+
+    def test_no_pointer_resolves_to_none(self, mock_db, oauth_tmp):
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+
+        _set_key(db)
+        assert svc.resolve_active_account_row() is None
+
+    def test_fingerprint_match_repairs_pointer(self, mock_db, oauth_tmp):
+        """With several accounts stored, the row whose stored fingerprint equals
+        the on-disk credential is unambiguously the one in use — adopt it."""
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+
+        _set_key(db)
+        _write_file(oauth_tmp, _oauth_dict(access="A"))
+        a_id = svc.seed_from_credentials_file()
+        # A sibling with a DIFFERENT fingerprint, so the sole-account fallback
+        # cannot be what repairs the pointer.
+        self._add_row(svc, db, "acct-b", access="B")
+
+        svc._set_active_account_id("nonexistent")
+        row = svc.resolve_active_account_row()
+
+        assert row is not None
+        assert row["id"] == a_id
+        assert svc.get_active_account_id() == a_id
+
+    def test_sole_account_fallback_repairs_rotated_pointer(self, mock_db, oauth_tmp):
+        """The common case: while the pointer dangles nothing syncs back, so the
+        file rotates away from every stored fingerprint. One stored account = no
+        ambiguity, so adopt it anyway."""
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+
+        _set_key(db)
+        _write_file(oauth_tmp, _oauth_dict(access="A", refresh="old"))
+        a_id = svc.seed_from_credentials_file()
+        self._rotate_file_raw(svc, oauth_tmp, access="A", refresh="ROTATED")
+
+        svc._set_active_account_id("nonexistent")
+        row = svc.resolve_active_account_row()
+
+        assert row is not None
+        assert row["id"] == a_id
+        assert svc.get_active_account_id() == a_id
+
+    def test_multi_account_no_match_leaves_pointer_alone(self, mock_db, oauth_tmp):
+        """Two candidates and no fingerprint match → guessing could write one
+        account's tokens into another's row, so refuse and leave it dangling."""
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+
+        _set_key(db)
+        _write_file(oauth_tmp, _oauth_dict(access="A", refresh="old"))
+        svc.seed_from_credentials_file()
+        self._add_row(svc, db, "acct-b", access="B")
+        self._rotate_file_raw(svc, oauth_tmp, access="A", refresh="ROTATED")
+
+        svc._set_active_account_id("nonexistent")
+        assert svc.resolve_active_account_row() is None
+        assert svc.get_active_account_id() == "nonexistent"
+
+    def test_sync_back_self_heals_dangling_pointer(self, mock_db, oauth_tmp):
+        """End-to-end: a repaired pointer falls through to the normal sync flow,
+        so the adopted row's credentials are reconciled from disk immediately."""
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+
+        _set_key(db)
+        _write_file(oauth_tmp, _oauth_dict(access="A", refresh="old"))
+        a_id = svc.seed_from_credentials_file()
+        rotated = self._rotate_file_raw(svc, oauth_tmp, access="A", refresh="ROTATED")
+
+        svc._set_active_account_id("nonexistent")
+        assert svc.sync_back_active_account() == "synced"
+
+        assert svc.get_active_account_id() == a_id
+        row = db.get_claude_account(a_id, include_credentials=True)
+        assert row["credential_fingerprint"] == svc._fingerprint(rotated)
+        stored = json.loads(encryption.decrypt_value(row["credentials"]))
+        assert stored["refreshToken"] == "ROTATED"
+
+    def test_delete_clears_other_installs_pointers(self, mock_db, oauth_tmp):
+        """Deleting the row must not leave a peer install pointing at it."""
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+
+        _set_key(db)
+        _write_file(oauth_tmp, _oauth_dict(access="A"))
+        a_id = svc.seed_from_credentials_file()
+        db.set_system_setting("claude_active_account:other-install", a_id)
+
+        assert svc.delete_account(a_id)["success"]
+
+        assert db.get_system_setting("claude_active_account:other-install") is None
+        assert svc.get_active_account_id() is None
+
+    def test_usage_meta_all_none_on_unrepairable_dangle(self, mock_db, oauth_tmp):
+        """An unrepairable dangle must NOT stamp usage snapshots with an id that
+        resolves to no email/name."""
+        from app.core import claude_accounts as svc
+        from app.core.usage_limits import usage_limits_monitor
+        from app.db import database as db
+
+        _set_key(db)
+        _write_file(oauth_tmp, _oauth_dict(access="A", refresh="old"))
+        svc.seed_from_credentials_file()
+        self._add_row(svc, db, "acct-b", access="B")
+        self._rotate_file_raw(svc, oauth_tmp, access="A", refresh="ROTATED")
+        svc._set_active_account_id("nonexistent")
+
+        meta = usage_limits_monitor._resolve_account_meta()
+        assert meta == {
+            "account_id": None, "account_email": None, "account_name": None,
+        }

@@ -42,6 +42,10 @@ _last_synced_mtime: Optional[float] = None
 _last_pending_warn: float = 0.0
 _PENDING_WARN_INTERVAL = 300.0  # seconds
 
+# Same throttle, for the "active pointer dangles and could not be repaired"
+# warning. Pointer resolution runs on hot status endpoints too.
+_last_dangling_warn: float = 0.0
+
 # Throttle for last_used_at stamping. record_active_account_used() runs from the
 # hot sync-back path (every status poll / after every token refresh), so we cap
 # the DB write to at most once per interval. This is a write-rate optimization
@@ -133,6 +137,105 @@ def _oauth_expires_at(oauth_dict: Dict[str, Any]) -> Optional[int]:
         return None
 
 
+def _repair_dangling_pointer(dangling_id: str) -> Optional[Dict[str, Any]]:
+    """Re-point a dangling active pointer at a real account row, if we can.
+
+    The per-install pointer can end up naming an id with no row behind it — most
+    commonly because ANOTHER install deleted that account (the account list is
+    shared, the pointer is not). Nothing used to repair it, so the install stayed
+    permanently "active-but-rowless": sync-back returned ``no_active`` forever and
+    usage snapshots were stamped with an id that resolved to no email/name.
+
+    Two repair strategies, in order:
+
+    1. **Fingerprint match.** If the on-disk credential's fingerprint matches
+       exactly ONE stored row, that row IS the account currently on disk — adopt
+       it. This is the precise case but rarely fires in practice, which is why
+       (2) exists: while the pointer dangles, sync-back never writes any row, so
+       the on-disk credential keeps rotating (CLI subprocesses self-refresh it)
+       and drifts away from every stored fingerprint. The fingerprint therefore
+       only still matches when the dangle is fresh.
+    2. **Sole-account fallback.** If exactly one account row exists in total,
+       there is no ambiguity about which account this install is on — adopt it.
+       Its credentials may be stale relative to the file, but the very next
+       sync-back reconciles the row from disk.
+
+    With two or more rows and no fingerprint match we cannot tell which account
+    the file belongs to; guessing could write one account's tokens into another
+    account's row, so we leave the pointer alone and warn (throttled).
+
+    Returns the adopted row, or None. NEVER raises (hot status paths).
+    """
+    global _last_dangling_warn
+    try:
+        oauth_dict = _read_file_oauth()
+        if oauth_dict and oauth_dict.get("accessToken"):
+            file_fp = _fingerprint(oauth_dict)
+            matches = [
+                r for r in db.get_all_claude_accounts()
+                if r.get("credential_fingerprint") == file_fp
+            ]
+            if len(matches) == 1:
+                row = matches[0]
+                _set_active_account_id(row["id"])
+                logger.info(
+                    "Repaired dangling active Claude account pointer %s → %s "
+                    "(on-disk credential fingerprint matched that row)",
+                    dangling_id, row["id"],
+                )
+                return row
+
+        rows = db.get_all_claude_accounts()
+        if len(rows) == 1:
+            row = rows[0]
+            _set_active_account_id(row["id"])
+            logger.warning(
+                "Active Claude account pointer dangled at %s and the on-disk "
+                "credential matched no stored fingerprint; adopting the sole "
+                "remaining account %s (the next sync-back will reconcile its "
+                "credentials from disk).",
+                dangling_id, row["id"],
+            )
+            return row
+
+        now = time.monotonic()
+        if now - _last_dangling_warn > _PENDING_WARN_INTERVAL:
+            _last_dangling_warn = now
+            logger.warning(
+                "Active Claude account pointer references a missing account "
+                "(%s) and could not be repaired: %d accounts stored, none "
+                "matching the on-disk credential. Switch accounts to fix.",
+                dangling_id, len(rows),
+            )
+        return None
+    except Exception as e:  # noqa: BLE001 — must never break refresh/status
+        logger.warning(f"_repair_dangling_pointer failed (ignored): {e}")
+        return None
+
+
+def resolve_active_account_row() -> Optional[Dict[str, Any]]:
+    """Return the active account's row, repairing a dangling pointer if needed.
+
+    The single read path every caller should use instead of
+    ``get_active_account_id()`` + ``db.get_claude_account()``: it self-heals a
+    pointer whose row was deleted by another install (see
+    :func:`_repair_dangling_pointer`). Returns None when there is no pointer at
+    all (legacy single-account / API-key install) or the dangle is unrepairable.
+    NEVER raises.
+    """
+    try:
+        active_id = get_active_account_id()
+        if not active_id:
+            return None
+        row = db.get_claude_account(active_id)
+        if row is not None:
+            return row
+        return _repair_dangling_pointer(active_id)
+    except Exception as e:  # noqa: BLE001 — must never break refresh/status
+        logger.warning(f"resolve_active_account_row failed (ignored): {e}")
+        return None
+
+
 def sync_back_active_account(record_usage: bool = True) -> str:
     """Reconcile the on-disk credentials file back into the active account row.
 
@@ -164,11 +267,24 @@ def sync_back_active_account(record_usage: bool = True) -> str:
             # nothing (a force_reauth may be mid-flight, having deleted it).
             return "no_file"
 
+        row = db.get_claude_account(active_id)
+        if row is None:
+            # Active pointer references a row that no longer exists (typically
+            # another install deleted the shared account row). Try to re-point it
+            # at a real row; a successful repair falls through to the normal
+            # divergence/sync flow below, which immediately reconciles that row's
+            # credentials from the file. An unrepairable dangle stays inert.
+            row = _repair_dangling_pointer(active_id)
+            if row is None:
+                return "no_active"
+            active_id = row["id"]
+
         # The active account has a live credential on disk — it is the account
         # currently in use on this install. Record usage (throttled) so
         # last_used_at reflects real activity, not just the last manual switch.
         # Only the ACTIVE account's timestamp advances; siblings keep the time
-        # they were last active.
+        # they were last active. Stamped against the RESOLVED id so a repaired
+        # pointer credits the account we actually landed on.
         if record_usage:
             record_active_account_used(active_id)
 
@@ -176,12 +292,6 @@ def sync_back_active_account(record_usage: bool = True) -> str:
         mtime = _file_mtime()
         if mtime is not None and _last_synced_mtime is not None and mtime == _last_synced_mtime:
             return "clean"
-
-        row = db.get_claude_account(active_id)
-        if row is None:
-            # Active pointer references a row that no longer exists — don't
-            # fabricate one here; leave it to seed/switch to reconcile.
-            return "no_active"
 
         file_fp = _fingerprint(oauth_dict)
         if file_fp == row.get("credential_fingerprint"):
@@ -619,9 +729,12 @@ def delete_account(account_id: str) -> Dict[str, Any]:
 
     # ACCEPTED cross-install TOCTOU: count-then-act on a shared DB (same class as
     # the automation reconciler). Deleting a row that ANOTHER install has active
-    # leaves that install a ghost pointer, which degrades gracefully — its
-    # sync_back returns the no_active-equivalent and the credentials file is
-    # never touched.
+    # would leave that install a ghost pointer. That consequence is now mitigated
+    # from both ends: at the SOURCE, the delete below clears every install's
+    # pointer naming this account; and at READ time, resolve_active_account_row /
+    # sync_back repair a dangle that slipped through (e.g. a pointer written
+    # concurrently with the delete). The credentials file is still never touched
+    # for another install.
     active_id = get_active_account_id()
     is_active = active_id == account_id
     total = db.count_claude_accounts()
@@ -641,15 +754,26 @@ def delete_account(account_id: str) -> Dict[str, Any]:
         direct_oauth.invalidate_credentials_cache()
 
     db.delete_claude_account(account_id)
+
+    # Clear any install's active pointer that still names the deleted account, so
+    # no peer is left with a ghost pointer. Best-effort: the row is already gone
+    # and read-time repair covers the leftovers, so a failure here must never
+    # fail the delete.
+    try:
+        db.clear_claude_active_pointers(account_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not clear active pointers for deleted account: {e}")
+
     return {"success": True}
 
 
 def get_active_account_summary() -> Optional[Dict[str, Any]]:
-    """Return ``{"id", "name"}`` for the active account, or None."""
-    active_id = get_active_account_id()
-    if not active_id:
-        return None
-    row = db.get_claude_account(active_id)
+    """Return ``{"id", "name"}`` for the active account, or None.
+
+    Goes through :func:`resolve_active_account_row` so a pointer left dangling by
+    a cross-install delete self-heals instead of reporting "no active account".
+    """
+    row = resolve_active_account_row()
     if row is None:
         return None
     return {"id": row["id"], "name": row["name"]}

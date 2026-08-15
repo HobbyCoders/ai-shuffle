@@ -202,22 +202,25 @@ class UsageLimitsMonitor:
     def _resolve_account_meta(self) -> Dict[str, Optional[str]]:
         """Best-effort {account_id, account_email, account_name} for this install.
 
-        Legacy single-account / API-key installs have no active pointer, so all
-        three come back None. Never raises — callers persist Nones on any error.
+        Resolved through ``claude_accounts.resolve_active_account_row()``, which
+        repairs an active pointer left dangling by a cross-install delete. All
+        three fields come back None when there is no account row to name — a
+        legacy single-account / API-key install (no pointer), or a dangle we
+        could not repair. Deliberately all-or-nothing: stamping a snapshot with
+        an account_id that resolves to no email/name only produces unattributable
+        rows in the cluster usage view. Never raises — callers persist Nones on
+        any error.
         """
         meta: Dict[str, Optional[str]] = {
             "account_id": None, "account_email": None, "account_name": None,
         }
         try:
             from app.core import claude_accounts
-            from app.db import database as db
-            account_id = claude_accounts.get_active_account_id()
-            if account_id:
-                meta["account_id"] = account_id
-                row = db.get_claude_account(account_id)
-                if row:
-                    meta["account_email"] = row.get("email")
-                    meta["account_name"] = row.get("name")
+            row = claude_accounts.resolve_active_account_row()
+            if row:
+                meta["account_id"] = row.get("id")
+                meta["account_email"] = row.get("email")
+                meta["account_name"] = row.get("name")
         except Exception:  # noqa: BLE001 — metadata is best-effort
             pass
         return meta
