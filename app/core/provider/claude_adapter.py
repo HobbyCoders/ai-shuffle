@@ -350,8 +350,6 @@ class ClaudeAgentAdapter(ProviderAdapter):
             kwargs["extra_args"] = options.extra_args
         if options.setting_sources is not None:
             kwargs["setting_sources"] = options.setting_sources
-        if options.betas is not None:
-            kwargs["betas"] = options.betas
         if options.enable_file_checkpointing is not None:
             kwargs["enable_file_checkpointing"] = options.enable_file_checkpointing
         if options.stderr is not None:

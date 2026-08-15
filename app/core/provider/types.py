@@ -75,9 +75,6 @@ class SessionOptions:
     # Settings sources (for plugin auto-loading)
     setting_sources: Optional[list] = None
 
-    # Beta features
-    betas: Optional[list] = None
-
     # File checkpointing
     enable_file_checkpointing: Optional[bool] = None
 

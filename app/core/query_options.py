@@ -725,8 +725,6 @@ def build_options_from_profile(
             (main_provider_row or {}).get("provider_type") != "anthropic"
         )
 
-    betas_to_use = []
-
     # Build tool configuration (SDK 0.1.12+ supports new 'tools' parameter)
     # Priority: tools > tools_preset > allowed_tools (legacy)
     tools_config = config.get("tools")  # Explicit list of tools
@@ -1045,9 +1043,6 @@ def build_options_from_profile(
             config.get("setting_sources")
         ),
 
-        # Beta features - e.g., 1M context window
-        betas=betas_to_use,
-
         # File checkpointing for rewind (SDK 0.1.15+)
         enable_file_checkpointing=config.get("enable_file_checkpointing", False),
 
@@ -1058,7 +1053,7 @@ def build_options_from_profile(
     )
 
     deployment_mode = detect_deployment_mode()
-    logger.debug(f"Built options with model={model_to_use}, betas={betas_to_use}, permission_mode={permission_mode}, can_use_tool={options.can_use_tool is not None}, hooks={hooks is not None}, deployment_mode={deployment_mode}")
+    logger.debug(f"Built options with model={model_to_use}, permission_mode={permission_mode}, can_use_tool={options.can_use_tool is not None}, hooks={hooks is not None}, deployment_mode={deployment_mode}")
     logger.debug(f"Agents passed via SDK: {list(agents_dict.keys()) if agents_dict else 'None'}")
     if deployment_mode == DeploymentMode.LOCAL:
         logger.debug("Windows local mode: agents also written to filesystem for discovery")

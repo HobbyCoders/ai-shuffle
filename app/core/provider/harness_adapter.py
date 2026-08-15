@@ -78,7 +78,7 @@ DEGRADED / NOT YET HONORED (documented gaps — mechanical follow-up):
   * ``thinking`` — omni manages thinking via provider caps, not passed through.
   * ``hooks`` / ``include_hook_events`` — omni has its own HookBus; app SDK hooks not wired.
   * ``agents`` (subagents) — not configured on the omni engine here.
-  * ``betas`` / ``extra_args`` / ``setting_sources`` — SDK/CLI-specific, ignored.
+  * ``extra_args`` / ``setting_sources`` — SDK/CLI-specific, ignored.
   * ``task_budget`` / ``session_store`` / ``session_store_flush`` — SDK session-store
     concepts; omni persistence is the Pg/Memory store chosen above.
   * ``enable_file_checkpointing`` / ``stderr`` / ``max_buffer_size`` / ``user`` — ignored.
