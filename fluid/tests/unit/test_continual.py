@@ -16,7 +16,7 @@ import sys
 
 import pytest
 
-from omni.codemode import (
+from fluid.codemode import (
     HostBridge,
     KernelConfig,
     Projection,
@@ -25,12 +25,12 @@ from omni.codemode import (
     Synthesizer,
     validate_skill,
 )
-from omni.codemode.kernel import HostReply
-from omni.codemode.session import CodeModeSession, register_code_mode_tools
-from omni.codemode.skills import referenced_skills
-from omni.permissions.engine import PermissionEngine
-from omni.providers.base import StreamChunk
-from omni.tools.registry import ToolCtx, ToolRegistry
+from fluid.codemode.kernel import HostReply
+from fluid.codemode.session import CodeModeSession, register_code_mode_tools
+from fluid.codemode.skills import referenced_skills
+from fluid.permissions.engine import PermissionEngine
+from fluid.providers.base import StreamChunk
+from fluid.tools.registry import ToolCtx, ToolRegistry
 
 
 async def _no_tools(name: str, kwargs: dict) -> HostReply:

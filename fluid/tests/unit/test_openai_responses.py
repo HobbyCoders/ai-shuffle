@@ -5,11 +5,11 @@ from typing import Any, AsyncIterator
 
 import httpx
 
-from omni.messages import Message, Reasoning, Text, ToolResultBlock, ToolUseBlock
-from omni.providers._sse import sse_events
-from omni.providers.base import ProviderRequest, StreamChunk
-from omni.providers.openai_responses.client import OpenAIResponsesClient
-from omni.providers.openai_responses.serialize import (
+from fluid.messages import Message, Reasoning, Text, ToolResultBlock, ToolUseBlock
+from fluid.providers._sse import sse_events
+from fluid.providers.base import ProviderRequest, StreamChunk
+from fluid.providers.openai_responses.client import OpenAIResponsesClient
+from fluid.providers.openai_responses.serialize import (
     ResponsesStreamNormalizer,
     build_request_body,
 )
@@ -309,7 +309,7 @@ async def test_client_account_id_header_present() -> None:
 
 
 def test_effort_overrides_thinking_and_clamps() -> None:
-    from omni.messages import Message as _Msg, Text as _Text
+    from fluid.messages import Message as _Msg, Text as _Text
 
     request = ProviderRequest(
         model="gpt-5.6",
@@ -322,7 +322,7 @@ def test_effort_overrides_thinking_and_clamps() -> None:
 
 
 def test_thinking_effort_still_honored_without_explicit_effort() -> None:
-    from omni.messages import Message as _Msg, Text as _Text
+    from fluid.messages import Message as _Msg, Text as _Text
 
     request = ProviderRequest(
         model="gpt-5.6",

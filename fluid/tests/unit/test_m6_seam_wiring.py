@@ -5,15 +5,15 @@ on NativeLoop."""
 import io
 from typing import AsyncIterator
 
-from omni.cli.repl import Repl
-from omni.engine.native import NativeLoop
-from omni.events import SetModel, SetPermissionMode, UserTurn
-from omni.permissions.engine import PermissionEngine
-from omni.providers.base import ProviderCaps, ProviderRequest, StreamChunk
-from omni.store.base import MemoryStore
-from omni.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
-from omni.tools.builtins import register_builtins
-from omni.tools.builtins.skill import handler as skill_handler
+from fluid.cli.repl import Repl
+from fluid.engine.native import NativeLoop
+from fluid.events import SetModel, SetPermissionMode, UserTurn
+from fluid.permissions.engine import PermissionEngine
+from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
+from fluid.store.base import MemoryStore
+from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
+from fluid.tools.builtins import register_builtins
+from fluid.tools.builtins.skill import handler as skill_handler
 
 
 class ScriptedProvider:
@@ -87,7 +87,7 @@ async def test_set_model_and_permission_mode_ops() -> None:
     await loop.submit(SetPermissionMode(mode="bypassPermissions"))
     assert perms.approval_policy == "never_ask" and loop.plan_mode is False
 
-    # omni-native policy names pass straight through.
+    # fluid-native policy names pass straight through.
     await loop.submit(SetPermissionMode(mode="on_write"))
     assert perms.approval_policy == "on_write"
 
@@ -175,8 +175,8 @@ async def test_skill_tool_loads_body_on_demand(tmp_path) -> None:
 
 
 def test_skill_index_advertised_in_system_prompt(tmp_path, monkeypatch) -> None:
-    from omni.cli.config import resolved_system
-    from omni.config.model import HarnessConfig
+    from fluid.cli.config import resolved_system
+    from fluid.config.model import HarnessConfig
 
     skill_dir = tmp_path / ".claude" / "skills" / "deploy"
     skill_dir.mkdir(parents=True)

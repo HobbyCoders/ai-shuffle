@@ -9,10 +9,10 @@ it, and present in the assembled Message so ``text()`` is non-empty.
 
 from typing import AsyncIterator
 
-from omni.engine.native import NativeLoop
-from omni.events import TextDelta, TurnComplete, UserTurn
-from omni.providers.base import ProviderCaps, ProviderRequest, StreamChunk
-from omni.store.base import MemoryStore
+from fluid.engine.native import NativeLoop
+from fluid.events import TextDelta, TurnComplete, UserTurn
+from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
+from fluid.store.base import MemoryStore
 
 
 class OneScriptProvider:

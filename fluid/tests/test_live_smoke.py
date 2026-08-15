@@ -9,10 +9,10 @@ import os
 
 import pytest
 
-from omni.engine.native import NativeLoop
-from omni.events import TextDelta, TurnComplete, Usage, UserTurn
-from omni.providers.anthropic.client import AnthropicClient
-from omni.store.base import MemoryStore
+from fluid.engine.native import NativeLoop
+from fluid.events import TextDelta, TurnComplete, Usage, UserTurn
+from fluid.providers.anthropic.client import AnthropicClient
+from fluid.store.base import MemoryStore
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("ANTHROPIC_API_KEY"), reason="ANTHROPIC_API_KEY not set"
@@ -28,7 +28,7 @@ async def test_two_turn_cache_hit() -> None:
     loop = NativeLoop(
         provider=AnthropicClient(),
         store=MemoryStore(),
-        model=os.environ.get("OMNI_SMOKE_MODEL", "claude-haiku-4-5-20251001"),
+        model=os.environ.get("FLUID_SMOKE_MODEL", "claude-haiku-4-5-20251001"),
         system=SYSTEM,
         max_tokens=256,
     )

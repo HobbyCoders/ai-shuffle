@@ -2,14 +2,14 @@
 
 from typing import AsyncIterator
 
-from omni.context.trim import ToolResultTrimmer, TrimConfig
-from omni.engine.native import NativeLoop
-from omni.events import Handoff, HandoffCreated, UserTurn
-from omni.messages import Message, Text, ToolResultBlock, ToolUseBlock
-from omni.providers.base import ProviderCaps, ProviderRequest, StreamChunk
-from omni.store.base import MemoryStore, SessionNode
-from omni.tools.registry import ToolCtx
-from omni.tools.builtins.note import handler as note_handler
+from fluid.context.trim import ToolResultTrimmer, TrimConfig
+from fluid.engine.native import NativeLoop
+from fluid.events import Handoff, HandoffCreated, UserTurn
+from fluid.messages import Message, Text, ToolResultBlock, ToolUseBlock
+from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
+from fluid.store.base import MemoryStore, SessionNode
+from fluid.tools.registry import ToolCtx
+from fluid.tools.builtins.note import handler as note_handler
 
 
 def _node(nid: str, role: str, blocks: list) -> SessionNode:

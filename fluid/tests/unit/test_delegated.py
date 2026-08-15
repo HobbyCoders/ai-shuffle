@@ -19,10 +19,10 @@ from pathlib import Path
 
 import pytest
 
-from omni.engine.base import EngineCaps
-from omni.engine.delegated import DelegatedLoop
-from omni.engine.delegated_proto import StreamJsonMapper, stop_reason_from_subtype
-from omni.events import (
+from fluid.engine.base import EngineCaps
+from fluid.engine.delegated import DelegatedLoop
+from fluid.engine.delegated_proto import StreamJsonMapper, stop_reason_from_subtype
+from fluid.events import (
     BlockStart,
     BlockStop,
     ErrorEvent,
@@ -37,11 +37,11 @@ from omni.events import (
     Usage,
     UserTurn,
 )
-from omni.messages import Text
-from omni.store.base import MemoryStore
-from omni.store.jsonl import JsonlStore
-from omni.tools.inproc import create_inproc_server, tool
-from omni.tools.mcp.bundled_server import (
+from fluid.messages import Text
+from fluid.store.base import MemoryStore
+from fluid.store.jsonl import JsonlStore
+from fluid.tools.inproc import create_inproc_server, tool
+from fluid.tools.mcp.bundled_server import (
     _call_result,
     _field_name,
     _parse_address,
@@ -52,7 +52,7 @@ from omni.tools.mcp.bundled_server import (
     serve_registry_socket,
     write_bundled_config,
 )
-from omni.tools.registry import ToolCtx, ToolRegistry
+from fluid.tools.registry import ToolCtx, ToolRegistry
 
 FAKE = str(Path(__file__).parent.parent / "fixtures" / "fake_claude.py")
 GOLDEN = Path(__file__).parent.parent / "golden" / "simple_turn.jsonl"
@@ -168,7 +168,7 @@ async def test_simple_text_turn() -> None:
         assert done.cost_usd == pytest.approx(0.00042)
 
         # version guard + resume handle captured
-        assert loop.cli_version == "claude 2.0.0 (fake-omni)"
+        assert loop.cli_version == "claude 2.0.0 (fake-fluid)"
         assert loop.cli_session_id == "cli-sess-123"
 
         # nodes persisted: user + assistant, reload-able
@@ -254,11 +254,11 @@ async def _drive_permission(scenario_decision: str):
 async def test_permission_allow() -> None:
     loop, events = await _drive_permission("allow")
     perm = next(e for e in events if isinstance(e, PermissionRequest))
-    assert perm.name == "mcp__omni_bundled__get_weather"
+    assert perm.name == "mcp__fluid_bundled__get_weather"
     tool_use = next(e for e in events if isinstance(e, ToolUse))
-    assert tool_use.name == "mcp__omni_bundled__get_weather"
+    assert tool_use.name == "mcp__fluid_bundled__get_weather"
     result = next(e for e in events if isinstance(e, ToolResult))
-    assert result.name == "mcp__omni_bundled__get_weather"  # resolved via tool_use_id map
+    assert result.name == "mcp__fluid_bundled__get_weather"  # resolved via tool_use_id map
     assert result.output == "Paris: sunny, 21C" and not result.is_error
     assert any(isinstance(e, TurnComplete) for e in events)
     assert not any(isinstance(e, ErrorEvent) for e in events)
@@ -312,7 +312,7 @@ async def test_resume_second_loop() -> None:
 
 async def test_cli_session_id_persisted_to_store() -> None:
     """The --resume handle must outlive the engine object, or a restart resumes
-    the CLI with an omni session id it has never issued."""
+    the CLI with an fluid session id it has never issued."""
     store = MemoryStore()
     loop = _make_loop("a", store=store)
     try:
@@ -419,11 +419,11 @@ def test_write_bundled_config(tmp_path) -> None:
     on_disk = json.loads(path.read_text())
     assert on_disk == config
     servers = config["mcpServers"]
-    assert "omni_bundled" in servers and "other" in servers
-    bundled = servers["omni_bundled"]
+    assert "fluid_bundled" in servers and "other" in servers
+    bundled = servers["fluid_bundled"]
     assert bundled == bundled_server_config(sock)
     assert bundled["command"] == sys.executable
-    assert "-m" in bundled["args"] and "omni.tools.mcp.bundled_server" in bundled["args"]
+    assert "-m" in bundled["args"] and "fluid.tools.mcp.bundled_server" in bundled["args"]
     assert sock in bundled["args"]
 
 
@@ -457,11 +457,11 @@ async def _bridge(reg: ToolRegistry, transport: str, tmp_path):
 
 
 def _child_env() -> dict[str, str]:
-    """Env for a spawned bridge child that imports *this* omni, not whatever a
+    """Env for a spawned bridge child that imports *this* fluid, not whatever a
     global PYTHONPATH happens to point at."""
-    import omni
+    import fluid
 
-    root = str(Path(omni.__file__).resolve().parent.parent)
+    root = str(Path(fluid.__file__).resolve().parent.parent)
     env = dict(os.environ)
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = root + (os.pathsep + existing if existing else "")
@@ -478,7 +478,7 @@ async def _dial(address: str):
 def test_parse_address() -> None:
     assert _parse_address("tcp:127.0.0.1:8123") == ("127.0.0.1", 8123)
     assert _parse_address("tcp:127.0.0.1:0") == ("127.0.0.1", 0)
-    assert _parse_address("/tmp/omni/b.sock") is None
+    assert _parse_address("/tmp/fluid/b.sock") is None
     assert _parse_address(r"C:\Users\x\b.sock") is None  # a drive letter is not "tcp:"
     for bad in ("tcp:", "tcp:127.0.0.1", "tcp:127.0.0.1:http"):
         with pytest.raises(ValueError):
@@ -538,7 +538,7 @@ async def test_socket_rpc_round_trip(transport, tmp_path) -> None:
 async def test_bundled_child_subprocess_speaks_mcp(transport, tmp_path) -> None:
     """The real child process, driven by the mcp SDK's own stdio client.
 
-    Deliberately bypasses omni's ``tools.mcp.client`` wrapper: this test is
+    Deliberately bypasses fluid's ``tools.mcp.client`` wrapper: this test is
     about the child bridge itself (transport + the installed SDK's tool API),
     so a wrapper-side incompatibility must not be able to mask it.
     """
@@ -549,7 +549,7 @@ async def test_bundled_child_subprocess_speaks_mcp(transport, tmp_path) -> None:
     async with _bridge(reg, transport, tmp_path) as address:
         params = StdioServerParameters(
             command=sys.executable,
-            args=["-m", "omni.tools.mcp.bundled_server", "--socket", address],
+            args=["-m", "fluid.tools.mcp.bundled_server", "--socket", address],
             env=_child_env(),
         )
         async with stdio_client(params) as (read, write):
@@ -573,7 +573,7 @@ async def test_bundled_server_end_to_end_via_mcp(transport, tmp_path) -> None:
             config = {
                 "transport": "stdio",
                 "command": sys.executable,
-                "args": ["-m", "omni.tools.mcp.bundled_server", "--socket", address],
+                "args": ["-m", "fluid.tools.mcp.bundled_server", "--socket", address],
                 "env": _child_env(),
             }
             specs = await client_reg.connect_mcp("bundled", config)
@@ -598,7 +598,7 @@ async def test_delegated_start_bundled_server_uses_available_transport(tmp_path)
         await loop._start_bundled_server()
         assert loop._socket_server is not None
         address = json.loads(Path(loop._mcp_config_path).read_text())[
-            "mcpServers"]["omni_bundled"]["args"][-1]
+            "mcpServers"]["fluid_bundled"]["args"][-1]
         assert address == loop._socket_path
         if HAS_AF_UNIX:
             assert _parse_address(address) is None

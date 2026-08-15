@@ -2,18 +2,18 @@
 
 from typing import AsyncIterator
 
-from omni.config.loader import (
+from fluid.config.loader import (
     BUILTIN_DEFAULTS,
     build_engine,
     deep_merge,
     env_overrides,
     load_config,
 )
-from omni.config.model import HarnessConfig
-from omni.engine.delegated import DelegatedLoop
-from omni.engine.native import NativeLoop
-from omni.providers.base import ProviderCaps, ProviderRequest, StreamChunk
-from omni.store.base import MemoryStore
+from fluid.config.model import HarnessConfig
+from fluid.engine.delegated import DelegatedLoop
+from fluid.engine.native import NativeLoop
+from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
+from fluid.store.base import MemoryStore
 
 
 class FakeProvider:
@@ -48,18 +48,18 @@ def test_defaults_when_no_files(tmp_path) -> None:
 def test_project_overrides_user_overrides_default(tmp_path, monkeypatch) -> None:
     # User layer via XDG_CONFIG_HOME.
     user_home = tmp_path / "xdg"
-    (user_home / "omni").mkdir(parents=True)
+    (user_home / "fluid").mkdir(parents=True)
     _write_toml(
-        user_home / "omni" / "config.toml",
+        user_home / "fluid" / "config.toml",
         'default_model = "user-model"\ncode_mode = true\n'
         '[permission]\napproval_policy = "always_ask"\n',
     )
     monkeypatch.setenv("XDG_CONFIG_HOME", str(user_home))
 
-    # Project layer (./.omni/config.toml) wins over user for default_model.
+    # Project layer (./.fluid/config.toml) wins over user for default_model.
     proj = tmp_path / "proj"
-    (proj / ".omni").mkdir(parents=True)
-    _write_toml(proj / ".omni" / "config.toml", 'default_model = "project-model"\n')
+    (proj / ".fluid").mkdir(parents=True)
+    _write_toml(proj / ".fluid" / "config.toml", 'default_model = "project-model"\n')
 
     config = load_config(cwd=proj, include_system=False, env={})
     assert config.default_model == "project-model"  # project wins
@@ -69,13 +69,13 @@ def test_project_overrides_user_overrides_default(tmp_path, monkeypatch) -> None
 
 def test_env_override_beats_files(tmp_path, monkeypatch) -> None:
     proj = tmp_path / "proj"
-    (proj / ".omni").mkdir(parents=True)
-    _write_toml(proj / ".omni" / "config.toml", 'default_provider = "openai"\n')
+    (proj / ".fluid").mkdir(parents=True)
+    _write_toml(proj / ".fluid" / "config.toml", 'default_provider = "openai"\n')
 
     env = {
-        "OMNI_DEFAULT_PROVIDER": "openrouter",
-        "OMNI_CODE_MODE": "true",
-        "OMNI_APPROVAL_POLICY": "never_ask",
+        "FLUID_DEFAULT_PROVIDER": "openrouter",
+        "FLUID_CODE_MODE": "true",
+        "FLUID_APPROVAL_POLICY": "never_ask",
     }
     assert env_overrides(env)["default_provider"] == "openrouter"
     config = load_config(cwd=proj, include_system=False, include_user=False, env=env)
@@ -85,7 +85,7 @@ def test_env_override_beats_files(tmp_path, monkeypatch) -> None:
 
 
 def test_explicit_overrides_beat_env(tmp_path) -> None:
-    env = {"OMNI_DEFAULT_MODEL": "from-env"}
+    env = {"FLUID_DEFAULT_MODEL": "from-env"}
     config = load_config(
         cwd=tmp_path, include_system=False, include_user=False, env=env,
         overrides={"default_model": "from-cli"},
@@ -95,9 +95,9 @@ def test_explicit_overrides_beat_env(tmp_path) -> None:
 
 def test_toml_rules_parse(tmp_path) -> None:
     proj = tmp_path / "proj"
-    (proj / ".omni").mkdir(parents=True)
+    (proj / ".fluid").mkdir(parents=True)
     _write_toml(
-        proj / ".omni" / "config.toml",
+        proj / ".fluid" / "config.toml",
         '[permission]\napproval_policy = "on_write"\n'
         '[[permission.rules]]\ntool = "Bash"\ndecision = "deny"\n'
         '[permission.rules.input_globs]\ncommand = "rm *"\n',

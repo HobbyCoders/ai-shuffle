@@ -14,12 +14,12 @@ from typing import Any, AsyncIterator
 
 import pytest
 
-from omni.engine.native import NativeLoop
-from omni.events import QuestionRequest, RespondQuestion, ToolResult, TurnComplete, UserTurn
-from omni.permissions.engine import PermissionEngine
-from omni.providers.base import ProviderCaps, ProviderRequest, StreamChunk
-from omni.store.base import MemoryStore
-from omni.tools.registry import InputRequired, ToolOutcome, ToolRegistry, ToolSpec, _Entry
+from fluid.engine.native import NativeLoop
+from fluid.events import QuestionRequest, RespondQuestion, ToolResult, TurnComplete, UserTurn
+from fluid.permissions.engine import PermissionEngine
+from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
+from fluid.store.base import MemoryStore
+from fluid.tools.registry import InputRequired, ToolOutcome, ToolRegistry, ToolSpec, _Entry
 
 
 class ScriptedProvider:
@@ -181,7 +181,7 @@ async def test_interrupt_while_parked_on_question() -> None:
     async for e in loop.bus.subscribe(sid):
         if isinstance(e, QuestionRequest):
             # Interrupt instead of answering — the tool call must fail closed.
-            from omni.events import Interrupt
+            from fluid.events import Interrupt
             await loop.submit(Interrupt())
             break
     await loop.wait_turn()

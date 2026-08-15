@@ -1,4 +1,4 @@
-# omni
+# fluid
 
 A multi-provider AI agent harness. Headless, event-driven core; sessions as branching
 trees; cache-first context management; classic JSON tool-calling plus a code-as-actions
@@ -38,9 +38,9 @@ the explicitly permitted path — never raw OAuth token reuse.
   pure `_selftest()`, verified in a throwaway kernel on save and whenever the
   source changes; broken skills are unmounted and flagged. The kernel also
   checkpoints its namespace after every cell, so a timeout/OOM restart restores
-  the data instead of losing it. Enable with `--continual` / `OMNI_CONTINUAL=1`;
-  skills live in `~/.omni/skills` (`skills_dir` / `OMNI_SKILLS_DIR`); pin the
-  synthesis model with `continual_model` / `OMNI_CONTINUAL_MODEL`.
+  the data instead of losing it. Enable with `--continual` / `FLUID_CONTINUAL=1`;
+  skills live in `~/.fluid/skills` (`skills_dir` / `FLUID_SKILLS_DIR`); pin the
+  synthesis model with `continual_model` / `FLUID_CONTINUAL_MODEL`.
   Design rationale: [docs/agent-experience.md](docs/agent-experience.md).
 
 Status: early development (M0).

@@ -7,11 +7,11 @@ from typing import AsyncIterator
 import httpx
 import pytest
 
-from omni.messages import Image, Message, Reasoning, Text, ToolResultBlock, ToolUseBlock
-from omni.providers._sse import sse_events
-from omni.providers.base import ProviderRequest, StreamChunk
-from omni.providers.openrouter.client import OpenRouterClient
-from omni.providers.openrouter.serialize import (
+from fluid.messages import Image, Message, Reasoning, Text, ToolResultBlock, ToolUseBlock
+from fluid.providers._sse import sse_events
+from fluid.providers.base import ProviderRequest, StreamChunk
+from fluid.providers.openrouter.client import OpenRouterClient
+from fluid.providers.openrouter.serialize import (
     ChatCompletionsNormalizer,
     build_request_body,
 )

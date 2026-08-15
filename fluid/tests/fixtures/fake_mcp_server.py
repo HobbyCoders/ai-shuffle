@@ -8,7 +8,7 @@ handshake (2026-07-28) and the legacy ``initialize`` (echoing the client's
 requested protocolVersion so any client generation validates).
 
 Behavior knobs:
-  * ``OMNI_FAKE_TTL`` — advertise a ``tools/list`` freshness hint (``ttlMs``)
+  * ``FLUID_FAKE_TTL`` — advertise a ``tools/list`` freshness hint (``ttlMs``)
     so the client's TTL cache can be exercised.
   * the ``need_input`` tool — returns an MRTR ``input_required`` result
     (an elicitation round-trip) to test that path.
@@ -47,7 +47,7 @@ TOOLS = [
 
 def _tools_list_result() -> dict:
     result: dict = {"tools": TOOLS}
-    ttl = os.environ.get("OMNI_FAKE_TTL")
+    ttl = os.environ.get("FLUID_FAKE_TTL")
     if ttl:
         result["ttlMs"] = int(ttl)
         result["cacheScope"] = "private"

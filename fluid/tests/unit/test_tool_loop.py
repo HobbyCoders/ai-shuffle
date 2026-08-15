@@ -9,8 +9,8 @@ from typing import AsyncIterator
 
 import pytest
 
-from omni.engine.native import NativeLoop
-from omni.events import (
+from fluid.engine.native import NativeLoop
+from fluid.events import (
     Interrupt,
     Interrupted,
     PermissionRequest,
@@ -19,13 +19,13 @@ from omni.events import (
     TurnComplete,
     UserTurn,
 )
-from omni.hooks.bus import PRE_TOOL_USE, HookBus, HookDecision
-from omni.permissions.engine import PermissionEngine
-from omni.permissions.rules import Rule
-from omni.providers.base import ProviderCaps, ProviderRequest, StreamChunk
-from omni.store.base import MemoryStore
-from omni.tools.inproc import create_inproc_server, tool
-from omni.tools.registry import ToolCtx, ToolRegistry
+from fluid.hooks.bus import PRE_TOOL_USE, HookBus, HookDecision
+from fluid.permissions.engine import PermissionEngine
+from fluid.permissions.rules import Rule
+from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
+from fluid.store.base import MemoryStore
+from fluid.tools.inproc import create_inproc_server, tool
+from fluid.tools.registry import ToolCtx, ToolRegistry
 
 
 def _text(text: str) -> list[StreamChunk]:
@@ -164,7 +164,7 @@ async def test_dispatch_stamps_tool_use_id_on_ctx() -> None:
     """During each dispatch the engine exposes the call's tool_use_id via
     ctx.extra — host dispatchers (the Task tool) correlate their UI work with
     the launching tool_use block through it — and clears it afterwards."""
-    from omni.tools.registry import ToolOutcome, ToolSpec
+    from fluid.tools.registry import ToolOutcome, ToolSpec
 
     seen: dict = {}
     ctx = ToolCtx()
@@ -227,7 +227,7 @@ async def test_permission_ask_allow_and_deny() -> None:
 
 
 async def test_deny_rule_blocks_bash(tmp_path) -> None:
-    from omni.tools.builtins import register_builtins
+    from fluid.tools.builtins import register_builtins
 
     marker = tmp_path / "marker.txt"
     registry = ToolRegistry()
@@ -344,7 +344,7 @@ async def test_turn_cost_is_none_without_cost_or_estimator() -> None:
 
 
 def test_plan_mode_filters_write_tools() -> None:
-    from omni.tools.builtins import register_builtins
+    from fluid.tools.builtins import register_builtins
 
     registry = ToolRegistry()
     register_builtins(registry)

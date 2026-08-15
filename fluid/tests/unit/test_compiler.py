@@ -1,4 +1,4 @@
-"""Prompt-compiler unit tests (omni.context.compiler / environment)."""
+"""Prompt-compiler unit tests (fluid.context.compiler / environment)."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from omni.context.compiler import PromptInputs, compile_system_prompt, skills_index
-from omni.context.environment import environment_block, git_context
+from fluid.context.compiler import PromptInputs, compile_system_prompt, skills_index
+from fluid.context.environment import environment_block, git_context
 
 
 @pytest.fixture()

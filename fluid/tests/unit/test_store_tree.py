@@ -7,10 +7,10 @@ tracking, and the event log all survive a restart.
 
 from typing import AsyncIterator
 
-from omni.engine.native import NativeLoop
-from omni.events import Fork, Rewind, UserTurn
-from omni.providers.base import ProviderCaps, ProviderRequest, StreamChunk
-from omni.store.jsonl import JsonlStore
+from fluid.engine.native import NativeLoop
+from fluid.events import Fork, Rewind, UserTurn
+from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
+from fluid.store.jsonl import JsonlStore
 
 
 class ScriptedProvider:

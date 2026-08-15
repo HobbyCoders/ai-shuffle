@@ -1,10 +1,10 @@
-"""Task builtin (A6/A13): omni owns the shape, the host injects the dispatcher."""
+"""Task builtin (A6/A13): fluid owns the shape, the host injects the dispatcher."""
 
 import pytest
 
-from omni.tools.builtins import register_builtins
-from omni.tools.builtins.task import SPEC, handler
-from omni.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
+from fluid.tools.builtins import register_builtins
+from fluid.tools.builtins.task import SPEC, handler
+from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
 
 
 def test_task_registered_bare_named():
@@ -54,7 +54,7 @@ async def test_dispatcher_string_result_wrapped():
 
 
 def test_delegated_disallowed_tools_argv():
-    from omni.engine.delegated import DelegatedLoop
+    from fluid.engine.delegated import DelegatedLoop
 
     loop = DelegatedLoop.__new__(DelegatedLoop)
     loop.claude_cmd = ["claude"]
@@ -74,7 +74,7 @@ def test_delegated_disallowed_tools_argv():
 
 
 def test_delegated_effort_argv():
-    from omni.engine.delegated import DelegatedLoop
+    from fluid.engine.delegated import DelegatedLoop
 
     loop = DelegatedLoop.__new__(DelegatedLoop)
     loop.claude_cmd = ["claude"]

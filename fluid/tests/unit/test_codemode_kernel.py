@@ -8,8 +8,8 @@ tool dispatch (that is test_codemode_dispatch).
 
 import pytest
 
-from omni.codemode import SubprocessKernel
-from omni.codemode.kernel import HostReply
+from fluid.codemode import SubprocessKernel
+from fluid.codemode.kernel import HostReply
 
 
 async def _no_tools(name: str, kwargs: dict) -> HostReply:
@@ -92,6 +92,6 @@ async def test_timeout_kills_and_recovers() -> None:
 
 
 async def test_kernel_satisfies_protocol() -> None:
-    from omni.codemode.kernel import Kernel
+    from fluid.codemode.kernel import Kernel
 
     assert isinstance(SubprocessKernel(), Kernel)

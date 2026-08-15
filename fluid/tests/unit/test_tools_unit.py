@@ -2,12 +2,12 @@
 
 import pytest
 
-from omni.hooks.bus import PRE_TOOL_USE, HookBus, HookDecision
-from omni.permissions.engine import PermissionEngine, plan_mode_tools
-from omni.permissions.rules import Rule, evaluate_rules
-from omni.tools.builtins import register_builtins
-from omni.tools.inproc import create_inproc_server, tool
-from omni.tools.registry import ToolCtx, ToolRegistry, ToolSpec
+from fluid.hooks.bus import PRE_TOOL_USE, HookBus, HookDecision
+from fluid.permissions.engine import PermissionEngine, plan_mode_tools
+from fluid.permissions.rules import Rule, evaluate_rules
+from fluid.tools.builtins import register_builtins
+from fluid.tools.inproc import create_inproc_server, tool
+from fluid.tools.registry import ToolCtx, ToolRegistry, ToolSpec
 
 
 async def test_inproc_server_naming_and_dispatch() -> None:
@@ -20,13 +20,13 @@ async def test_inproc_server_naming_and_dispatch() -> None:
     assert registry.get("mcp__srv__hello") is not None
     assert [s.name for s in registry.list_tools()] == ["mcp__srv__hello"]
 
-    out = await registry.dispatch("mcp__srv__hello", {"name": "omni"}, ToolCtx())
-    assert out.text == "hi omni"
+    out = await registry.dispatch("mcp__srv__hello", {"name": "fluid"}, ToolCtx())
+    assert out.text == "hi fluid"
     assert not out.is_error
 
 
 async def test_inproc_accepts_plain_str_and_tooloutcome() -> None:
-    from omni.tools.registry import ToolOutcome
+    from fluid.tools.registry import ToolOutcome
 
     @tool("s", "returns str", {"type": "object"})
     async def s(args: dict):
@@ -169,7 +169,7 @@ def _tree(tmp_path):
 
 
 async def test_grep_fallback_prunes_heavy_directories(tmp_path, monkeypatch) -> None:
-    from omni.tools.builtins import grep as grep_mod
+    from fluid.tools.builtins import grep as grep_mod
 
     monkeypatch.setattr(grep_mod.shutil, "which", lambda _name: None)
 
@@ -186,7 +186,7 @@ async def test_grep_fallback_prunes_heavy_directories(tmp_path, monkeypatch) -> 
 
 
 async def test_grep_fallback_skips_binary_files(tmp_path, monkeypatch) -> None:
-    from omni.tools.builtins import grep as grep_mod
+    from fluid.tools.builtins import grep as grep_mod
 
     monkeypatch.setattr(grep_mod.shutil, "which", lambda _name: None)
 
@@ -202,7 +202,7 @@ async def test_grep_fallback_skips_binary_files(tmp_path, monkeypatch) -> None:
 
 
 async def test_grep_fallback_caps_matches_and_marks_truncation(tmp_path, monkeypatch) -> None:
-    from omni.tools.builtins import grep as grep_mod
+    from fluid.tools.builtins import grep as grep_mod
 
     monkeypatch.setattr(grep_mod.shutil, "which", lambda _name: None)
 
@@ -221,7 +221,7 @@ async def test_grep_fallback_caps_matches_and_marks_truncation(tmp_path, monkeyp
 
 
 async def test_grep_fallback_honours_glob_filter(tmp_path, monkeypatch) -> None:
-    from omni.tools.builtins import grep as grep_mod
+    from fluid.tools.builtins import grep as grep_mod
 
     monkeypatch.setattr(grep_mod.shutil, "which", lambda _name: None)
     (tmp_path / "a.py").write_text("needle\n")
@@ -236,7 +236,7 @@ async def test_grep_fallback_honours_glob_filter(tmp_path, monkeypatch) -> None:
 
 
 async def test_grep_fallback_deadline_returns_partial(tmp_path, monkeypatch) -> None:
-    from omni.tools.builtins import grep as grep_mod
+    from fluid.tools.builtins import grep as grep_mod
 
     monkeypatch.setattr(grep_mod.shutil, "which", lambda _name: None)
     monkeypatch.setattr(grep_mod, "FALLBACK_DEADLINE_S", 0.0)
@@ -251,7 +251,7 @@ async def test_grep_fallback_deadline_returns_partial(tmp_path, monkeypatch) -> 
 
 
 async def test_glob_deadline_returns_partial(tmp_path, monkeypatch) -> None:
-    from omni.tools.builtins import glob as glob_mod
+    from fluid.tools.builtins import glob as glob_mod
 
     monkeypatch.setattr(glob_mod, "DEADLINE_S", 0.0)
     (tmp_path / "a.py").write_text("x")
@@ -282,7 +282,7 @@ class _FakeProc:
 async def test_grep_rg_error_is_surfaced_and_args_are_safe(tmp_path, monkeypatch) -> None:
     import asyncio as _asyncio
 
-    from omni.tools.builtins import grep as grep_mod
+    from fluid.tools.builtins import grep as grep_mod
 
     monkeypatch.setattr(grep_mod.shutil, "which", lambda _name: "/usr/bin/rg")
     captured: list[str] = []
@@ -311,7 +311,7 @@ async def test_grep_rg_error_is_surfaced_and_args_are_safe(tmp_path, monkeypatch
 async def test_grep_rg_no_matches_is_not_an_error(tmp_path, monkeypatch) -> None:
     import asyncio as _asyncio
 
-    from omni.tools.builtins import grep as grep_mod
+    from fluid.tools.builtins import grep as grep_mod
 
     monkeypatch.setattr(grep_mod.shutil, "which", lambda _name: "/usr/bin/rg")
 
@@ -344,7 +344,7 @@ async def test_glob_matches_and_prunes(tmp_path) -> None:
 
 
 async def test_glob_caps_results(tmp_path) -> None:
-    from omni.tools.builtins import glob as glob_mod
+    from fluid.tools.builtins import glob as glob_mod
 
     for i in range(glob_mod.MAX_RESULTS + 25):
         (tmp_path / f"f{i:04d}.txt").write_text("x")

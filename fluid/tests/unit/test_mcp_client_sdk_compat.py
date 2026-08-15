@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from omni.tools.mcp.client import McpClient
+from fluid.tools.mcp.client import McpClient
 
 
 class _FakeStreams:

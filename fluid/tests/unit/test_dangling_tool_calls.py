@@ -11,15 +11,15 @@ rendered history at request-build time instead of mutating the store.
 
 from typing import AsyncIterator
 
-from omni.engine.native import (
+from fluid.engine.native import (
     LOST_TOOL_RESULT_TEXT,
     NativeLoop,
     repair_dangling_tool_calls,
 )
-from omni.events import TurnComplete, UserTurn
-from omni.messages import Message, Text, ToolResultBlock, ToolUseBlock
-from omni.providers.base import ProviderCaps, ProviderRequest, StreamChunk
-from omni.store.base import MemoryStore, SessionNode, new_id
+from fluid.events import TurnComplete, UserTurn
+from fluid.messages import Message, Text, ToolResultBlock, ToolUseBlock
+from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
+from fluid.store.base import MemoryStore, SessionNode, new_id
 
 
 def _assistant_call(*call_ids: str, text: str | None = None) -> Message:

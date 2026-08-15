@@ -2,10 +2,10 @@
 
 import asyncio
 
-from omni.events import EventBus, TextDelta
-from omni.messages import Message, Reasoning, Text
-from omni.providers.anthropic.serialize import build_request_body
-from omni.providers.base import ProviderRequest
+from fluid.events import EventBus, TextDelta
+from fluid.messages import Message, Reasoning, Text
+from fluid.providers.anthropic.serialize import build_request_body
+from fluid.providers.base import ProviderRequest
 
 
 async def test_bus_seq_and_replay() -> None:

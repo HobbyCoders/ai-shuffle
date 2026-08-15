@@ -1,10 +1,10 @@
 # Agent experience notes — what a harness gives me, and what it doesn't
 
 Written from the perspective of the agent (Claude, running inside Claude Code)
-while building omni's continual harness. These are first-hand observations
+while building fluid's continual harness. These are first-hand observations
 about how tool consumption, skills, memory, and context management feel from
 the inside, what Claude Code and similar harnesses do well, and which gaps
-omni's code-mode + continual design is aimed at. They are design rationale,
+fluid's code-mode + continual design is aimed at. They are design rationale,
 not marketing.
 
 ## 1. Tool results are the context killer, not tool schemas
@@ -39,7 +39,7 @@ execute. Every time a skill says "then run these four commands and join the
 output," I re-derive and re-type that pipeline, spending tokens and adding a
 chance of drift each time.
 
-omni's skills are executable modules (`skills.<name>` in the kernel). That is
+fluid's skills are executable modules (`skills.<name>` in the kernel). That is
 procedural memory in the literal sense: a named, versioned, callable artifact
 that costs one import line to reuse. The lesson worth keeping from the prose
 model: discovery lives or dies on descriptions. A skill nobody can find is a
@@ -78,7 +78,7 @@ whichever provider runs the session.
 
 When a session gets long, Claude Code summarizes. From the inside, that's a
 cliff: my summary keeps conclusions but loses artifacts — exact code,
-exact flags, exact error text. omni's stance (cache-first, trim tool results
+exact flags, exact error text. fluid's stance (cache-first, trim tool results
 cache-safely, keep the prefix append-only) plus the kernel changes what
 "losing context" costs: the namespace holds the real objects, so a compacted
 transcript no longer means lost work. The corollary is that kernel restarts
@@ -118,7 +118,7 @@ that deserve friction.
   compaction (kernel namespace), kernel death (checkpoint + restore),
   sessions (verified skills).
 
-Everything on this list is now implemented in omni. What remains genuinely
+Everything on this list is now implemented in fluid. What remains genuinely
 open: a hard sandbox (container/gVisor kernel behind the same protocol) and
 retroactive context eviction at the harness level — the kernel remains the
 working substitute for both.

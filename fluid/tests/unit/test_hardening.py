@@ -10,10 +10,10 @@ from typing import AsyncIterator
 import httpx
 import pytest
 
-from omni.config.loader import load_config
-from omni.context.trim import ToolResultTrimmer, TrimConfig, estimate_tokens
-from omni.engine.native import NativeLoop
-from omni.events import (
+from fluid.config.loader import load_config
+from fluid.context.trim import ToolResultTrimmer, TrimConfig, estimate_tokens
+from fluid.engine.native import NativeLoop
+from fluid.events import (
     ErrorEvent,
     Interrupt,
     Interrupted,
@@ -23,12 +23,12 @@ from omni.events import (
     TurnComplete,
     UserTurn,
 )
-from omni.messages import Message, Reasoning, Text, ToolUseBlock
-from omni.permissions.engine import PermissionEngine
-from omni.providers.base import ProviderCaps, ProviderRequest, StreamChunk
-from omni.store.base import MemoryStore, SessionNode
-from omni.tools.inproc import create_inproc_server, tool
-from omni.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
+from fluid.messages import Message, Reasoning, Text, ToolUseBlock
+from fluid.permissions.engine import PermissionEngine
+from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
+from fluid.store.base import MemoryStore, SessionNode
+from fluid.tools.inproc import create_inproc_server, tool
+from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
 
 GOLDEN = Path(__file__).parent.parent / "golden" / "anthropic_text_thinking_tool.sse"
 
@@ -153,7 +153,7 @@ async def test_responses_reasoning_and_args_round_trip() -> None:
     tool_use = next(b for b in assistant.content if isinstance(b, ToolUseBlock))
     assert tool_use.input == {"city": "Nice"}
 
-    from omni.providers.openai_responses.serialize import build_request_body
+    from fluid.providers.openai_responses.serialize import build_request_body
 
     items = build_request_body(provider.requests[1])["input"]
     types = [it["type"] for it in items]
@@ -312,7 +312,7 @@ def test_estimate_counts_tool_use_inputs() -> None:
 
 
 def test_force_trim_ignores_trigger() -> None:
-    from omni.messages import ToolResultBlock
+    from fluid.messages import ToolResultBlock
 
     trimmer = ToolResultTrimmer(config=TrimConfig(
         trigger_tokens=10_000_000, keep_recent_tool_results=0, min_result_chars=100))
@@ -370,7 +370,7 @@ async def test_context_overflow_force_trims_and_retries_once() -> None:
     assert done.stop_reason == "end_turn"
     assert provider.calls == 3
     # The retried request saw the trimmed view.
-    from omni.messages import ToolResultBlock
+    from fluid.messages import ToolResultBlock
     retry_texts = [
         "".join(getattr(c, "text", "") for c in b.content)
         for m in provider.requests[2].messages
@@ -392,8 +392,8 @@ async def test_non_overflow_error_still_surfaces() -> None:
 
 
 async def test_anthropic_client_retries_retriable_status() -> None:
-    from omni.providers._retry import RetryPolicy
-    from omni.providers.anthropic.client import AnthropicClient
+    from fluid.providers._retry import RetryPolicy
+    from fluid.providers.anthropic.client import AnthropicClient
 
     statuses = [529, 429, 200]
     seen: list[int] = []
@@ -422,8 +422,8 @@ async def test_anthropic_client_retries_retriable_status() -> None:
 
 
 async def test_anthropic_client_gives_up_after_max_retries() -> None:
-    from omni.providers._retry import RetryPolicy
-    from omni.providers.anthropic.client import AnthropicClient
+    from fluid.providers._retry import RetryPolicy
+    from fluid.providers.anthropic.client import AnthropicClient
 
     calls = {"n": 0}
 
@@ -448,7 +448,7 @@ async def test_anthropic_client_gives_up_after_max_retries() -> None:
 
 
 def _registry_with_deferred() -> ToolRegistry:
-    from omni.tools.registry import _Entry
+    from fluid.tools.registry import _Entry
 
     reg = ToolRegistry()
     spec = ToolSpec(
@@ -461,7 +461,7 @@ def _registry_with_deferred() -> ToolRegistry:
 
 
 async def test_tool_search_keyword_loads_schema() -> None:
-    from omni.tools.builtins.tool_search import handler
+    from fluid.tools.builtins.tool_search import handler
 
     reg = _registry_with_deferred()
     assert reg.list_tools(loaded_only=True) == []
@@ -473,7 +473,7 @@ async def test_tool_search_keyword_loads_schema() -> None:
 
 
 async def test_tool_search_select_and_unknown() -> None:
-    from omni.tools.builtins.tool_search import handler
+    from fluid.tools.builtins.tool_search import handler
 
     reg = _registry_with_deferred()
     ctx = ToolCtx(extra={"tool_registry": reg})
@@ -515,7 +515,7 @@ def test_config_mcp_section_round_trips(tmp_path) -> None:
 
 
 def test_tool_search_registered_as_builtin() -> None:
-    from omni.tools.builtins import register_builtins
+    from fluid.tools.builtins import register_builtins
 
     reg = ToolRegistry()
     register_builtins(reg)
@@ -524,7 +524,7 @@ def test_tool_search_registered_as_builtin() -> None:
 
 
 def test_render_deferred_catalog_truncates_and_sorts() -> None:
-    from omni.tools.builtins.tool_search import render_deferred_catalog
+    from fluid.tools.builtins.tool_search import render_deferred_catalog
 
     assert render_deferred_catalog([]) is None
     long_desc = "x" * 300 + "\nsecond line never shown"

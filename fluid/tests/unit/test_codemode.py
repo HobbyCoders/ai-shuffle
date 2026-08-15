@@ -15,17 +15,17 @@ from typing import AsyncIterator
 
 import pytest
 
-from omni.codemode.kernel import HostReply
-from omni.codemode.projection import Projection, func_name, stub_source
-from omni.codemode.session import CodeModeSession
-from omni.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
-from omni.engine.native import NativeLoop
-from omni.events import PermissionRequest, RespondPermission, ToolResult, ToolUse, TurnComplete, UserTurn
-from omni.permissions.engine import PermissionEngine
-from omni.providers.base import ProviderCaps, ProviderRequest, StreamChunk
-from omni.store.base import MemoryStore
-from omni.tools.inproc import create_inproc_server, tool
-from omni.tools.registry import ToolRegistry, ToolSpec
+from fluid.codemode.kernel import HostReply
+from fluid.codemode.projection import Projection, func_name, stub_source
+from fluid.codemode.session import CodeModeSession
+from fluid.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
+from fluid.engine.native import NativeLoop
+from fluid.events import PermissionRequest, RespondPermission, ToolResult, ToolUse, TurnComplete, UserTurn
+from fluid.permissions.engine import PermissionEngine
+from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
+from fluid.store.base import MemoryStore
+from fluid.tools.inproc import create_inproc_server, tool
+from fluid.tools.registry import ToolRegistry, ToolSpec
 
 
 # ── scripted provider (same shape as test_tool_loop) ──────────────────────

@@ -2,7 +2,7 @@
 
 import pytest
 
-from omni.providers.anthropic.pricing import estimate_cost
+from fluid.providers.anthropic.pricing import estimate_cost
 
 
 def test_known_model_applies_cache_multipliers() -> None:

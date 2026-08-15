@@ -9,16 +9,16 @@ import asyncio
 import io
 from typing import AsyncIterator
 
-from omni.cli.__main__ import run_once
-from omni.cli.config import list_sessions, make_engine, make_store
-from omni.cli.repl import Repl, stream_turn
-from omni.config.loader import BUILTIN_DEFAULTS, deep_merge
-from omni.config.model import HarnessConfig
-from omni.events.model import PermissionRequest, ToolResult, TurnComplete
-from omni.providers.base import ProviderCaps, ProviderRequest, StreamChunk
-from omni.store.base import MemoryStore
-from omni.tools.inproc import create_inproc_server, tool
-from omni.tools.registry import ToolRegistry
+from fluid.cli.__main__ import run_once
+from fluid.cli.config import list_sessions, make_engine, make_store
+from fluid.cli.repl import Repl, stream_turn
+from fluid.config.loader import BUILTIN_DEFAULTS, deep_merge
+from fluid.config.model import HarnessConfig
+from fluid.events.model import PermissionRequest, ToolResult, TurnComplete
+from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
+from fluid.store.base import MemoryStore
+from fluid.tools.inproc import create_inproc_server, tool
+from fluid.tools.registry import ToolRegistry
 
 
 def _text(text: str) -> list[StreamChunk]:
@@ -66,11 +66,11 @@ def _config() -> HarnessConfig:
 def test_run_once_streams_text_and_returns_zero() -> None:
     out = io.StringIO()
     store = MemoryStore()
-    provider = ScriptedProvider([_text("hello from omni")])
+    provider = ScriptedProvider([_text("hello from fluid")])
 
     rc = asyncio.run(run_once(_config(), store, "hi", provider=provider, out=out))
     assert rc == 0
-    assert "hello from omni" in out.getvalue()
+    assert "hello from fluid" in out.getvalue()
     assert "[done]" in out.getvalue()
 
 
