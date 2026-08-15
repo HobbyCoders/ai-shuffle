@@ -28,6 +28,9 @@ from app.core.oauth import (
     OAUTH_TOKEN_URL,
     OAUTH_REDIRECT_URI,
     OAUTH_SCOPES,
+    OAUTH_PROFILE_URL,
+    OAUTH_BETA_HEADER,
+    derive_plan_from_profile,
 )
 
 
@@ -1109,6 +1112,116 @@ class TestOAuthConstants:
     def test_scopes_include_inference(self):
         """Should include inference scope."""
         assert "user:inference" in OAUTH_SCOPES
+
+
+class TestDerivePlanFromProfile:
+    """The subscription tier is only reported by the OAuth ``/profile``
+    endpoint (the usage endpoint carries no plan field at all), and its shape
+    is not contractual — every read must be defensive."""
+
+    def test_claude_max_account(self):
+        data = {
+            "account": {"has_claude_max": True, "has_claude_pro": False},
+            "organization": {"organization_type": "claude_max"},
+        }
+        assert derive_plan_from_profile(data) == "max"
+
+    def test_claude_pro_account(self):
+        data = {"account": {"has_claude_max": False, "has_claude_pro": True}}
+        assert derive_plan_from_profile(data) == "pro"
+
+    def test_max_wins_over_pro(self):
+        data = {"account": {"has_claude_max": True, "has_claude_pro": True}}
+        assert derive_plan_from_profile(data) == "max"
+
+    def test_falls_back_to_organization_type_with_prefix_stripped(self):
+        """Neither boolean set → the org type names the tier; the redundant
+        ``claude_`` prefix is stripped so the UI subtext reads 'enterprise'."""
+        data = {
+            "account": {"has_claude_max": False, "has_claude_pro": False},
+            "organization": {"organization_type": "claude_enterprise"},
+        }
+        assert derive_plan_from_profile(data) == "enterprise"
+
+    def test_organization_type_without_prefix_passes_through(self):
+        data = {"organization": {"organization_type": "team"}}
+        assert derive_plan_from_profile(data) == "team"
+
+    def test_empty_payload_yields_none(self):
+        assert derive_plan_from_profile({}) is None
+
+    def test_non_dict_members_are_tolerated(self):
+        assert derive_plan_from_profile({"account": None, "organization": []}) is None
+        assert derive_plan_from_profile({"organization": {"organization_type": ""}}) is None
+        assert derive_plan_from_profile({"organization": {"organization_type": 7}}) is None
+
+    def test_non_dict_payload_yields_none(self):
+        assert derive_plan_from_profile(None) is None
+        assert derive_plan_from_profile("nope") is None
+
+
+class TestFetchSubscriptionPlan:
+    """The profile GET is advisory: any failure reports 'unknown' (None)
+    rather than raising into the usage poll / login path."""
+
+    @staticmethod
+    def _patched_client(response):
+        mock_instance = AsyncMock()
+        mock_instance.get = AsyncMock(return_value=response)
+        mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+        mock_instance.__aexit__ = AsyncMock(return_value=None)
+        return mock_instance
+
+    @pytest.mark.asyncio
+    async def test_returns_plan_on_200(self, temp_dir):
+        oauth = DirectOAuth(config_dir=temp_dir)
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"account": {"has_claude_max": True}}
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value = self._patched_client(response)
+            plan = await oauth.fetch_subscription_plan("tok")
+
+        assert plan == "max"
+
+    @pytest.mark.asyncio
+    async def test_sends_bearer_and_beta_header(self, temp_dir):
+        oauth = DirectOAuth(config_dir=temp_dir)
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {}
+        instance = self._patched_client(response)
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value = instance
+            await oauth.fetch_subscription_plan("tok-123")
+
+        args, kwargs = instance.get.call_args
+        assert args[0] == OAUTH_PROFILE_URL
+        assert kwargs["headers"]["Authorization"] == "Bearer tok-123"
+        assert kwargs["headers"]["anthropic-beta"] == OAUTH_BETA_HEADER
+
+    @pytest.mark.asyncio
+    async def test_non_200_yields_none(self, temp_dir):
+        oauth = DirectOAuth(config_dir=temp_dir)
+        response = MagicMock()
+        response.status_code = 401
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value = self._patched_client(response)
+            plan = await oauth.fetch_subscription_plan("tok")
+
+        assert plan is None
+
+    @pytest.mark.asyncio
+    async def test_transport_error_yields_none(self, temp_dir):
+        oauth = DirectOAuth(config_dir=temp_dir)
+
+        with patch("httpx.AsyncClient", side_effect=httpx.ConnectError("boom")):
+            plan = await oauth.fetch_subscription_plan("tok")
+
+        assert plan is None
 
 
 class TestEnsureFreshCredentials:

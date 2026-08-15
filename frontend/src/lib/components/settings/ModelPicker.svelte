@@ -26,6 +26,7 @@
 		encodeProviderModel,
 		getProviderDisplay,
 		getClaudeDisplay,
+		getClaudeAuth,
 		decodeProviderModel,
 		CUSTOM_VALUE
 	} from '$lib/constants/models';
@@ -99,7 +100,11 @@
 	const options = $derived.by<PickerOption[]>(() => {
 		const out: PickerOption[] = [];
 		if (!providerModelsOnly) {
-			const claude = getClaudeDisplay();
+			const claudeAuth = getClaudeAuth();
+			const claude = getClaudeDisplay({
+				planType: claudeAuth.plan_type,
+				authKind: claudeAuth.auth_kind
+			});
 			for (const m of getModels()) {
 				out.push({
 					value: m.value,

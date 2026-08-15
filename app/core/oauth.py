@@ -50,6 +50,49 @@ OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
 OAUTH_REDIRECT_URI = "https://console.anthropic.com/oauth/code/callback"
 OAUTH_SCOPES = ["user:inference", "user:profile", "org:create_api_key"]
 
+# Profile endpoint — the ONLY place that reports the subscription tier. The
+# usage endpoint (see app.core.usage_limits) carries no plan field at all, so
+# the account's "max"/"pro" plan has to come from here.
+OAUTH_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
+# The CLI sends this beta header on the OAuth-scoped API endpoints; mirrored
+# here (see the same constant in app.core.usage_limits).
+OAUTH_BETA_HEADER = "oauth-2025-04-20"
+
+
+def derive_plan_from_profile(data: Dict[str, Any]) -> Optional[str]:
+    """Extract the subscription tier from an OAuth ``/profile`` response.
+
+    The payload looks like::
+
+        {"account": {"has_claude_max": true, "has_claude_pro": false, ...},
+         "organization": {"organization_type": "claude_max", ...}}
+
+    Preference order: the explicit ``has_claude_max`` / ``has_claude_pro``
+    booleans, then the organization type with its ``claude_`` prefix stripped
+    (so ``claude_enterprise`` reads as ``enterprise``). Returns None when
+    nothing usable is present. Fully defensive — the shape is not contractual.
+    """
+    if not isinstance(data, dict):
+        return None
+
+    account = data.get("account")
+    if isinstance(account, dict):
+        if account.get("has_claude_max"):
+            return "max"
+        if account.get("has_claude_pro"):
+            return "pro"
+
+    organization = data.get("organization")
+    if isinstance(organization, dict):
+        org_type = organization.get("organization_type")
+        if isinstance(org_type, str) and org_type.strip():
+            org_type = org_type.strip()
+            if org_type.startswith("claude_"):
+                org_type = org_type[len("claude_"):]
+            return org_type or None
+
+    return None
+
 
 @dataclass
 class PKCEChallenge:
@@ -616,6 +659,34 @@ class DirectOAuth:
         """
         oauth_data = self._read_oauth_data() or {}
         return oauth_data.get("accessToken") or None
+
+    async def fetch_subscription_plan(self, token: str) -> Optional[str]:
+        """Fetch the account's subscription tier from the OAuth profile endpoint.
+
+        Returns ``"max"`` / ``"pro"`` / an organization-derived string, or None
+        when the endpoint is unreachable, answers non-200, or reports nothing
+        usable. Never raises — the caller treats None as "unknown", not as an
+        error. Security: the token is only ever sent as a Bearer header and is
+        NEVER logged.
+        """
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "anthropic-beta": OAUTH_BETA_HEADER,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                resp = await client.get(OAUTH_PROFILE_URL, headers=headers)
+            if resp.status_code != 200:
+                logger.debug(
+                    "OAuth profile fetch failed: HTTP %s (plan unknown)",
+                    resp.status_code,
+                )
+                return None
+            return derive_plan_from_profile(resp.json())
+        except Exception as e:  # noqa: BLE001 — plan is advisory, never fatal
+            logger.debug(f"OAuth profile fetch error (plan unknown): {e}")
+            return None
 
     async def ensure_fresh_credentials(self, buffer_seconds: int = 600) -> bool:
         """Proactively refresh the access token when it is at/near expiry.

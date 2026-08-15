@@ -51,7 +51,15 @@ const mocks = vi.hoisted(() => {
 			},
 		};
 	}
-	return { DEFAULT, activeSession: store({ ...DEFAULT }), getContextUsage: vi.fn() };
+	return {
+		DEFAULT,
+		activeSession: store({ ...DEFAULT }),
+		getContextUsage: vi.fn(),
+		// Stands in for the hydrated registry's native-Claude auth block; the
+		// real one needs a live `GET /models`. Reset in beforeEach, so every
+		// other test in this file sees the un-hydrated (all-null) state.
+		claudeAuth: { auth_kind: null as string | null, plan_type: null as string | null },
+	};
 });
 
 vi.mock('$lib/stores/active-session', async (importOriginal) => {
@@ -61,6 +69,10 @@ vi.mock('$lib/stores/active-session', async (importOriginal) => {
 vi.mock('$lib/api/sessions', async (importOriginal) => {
 	const actual = await importOriginal<Record<string, unknown>>();
 	return { ...actual, getContextUsage: mocks.getContextUsage };
+});
+vi.mock('$lib/constants/models', async (importOriginal) => {
+	const actual = await importOriginal<Record<string, unknown>>();
+	return { ...actual, getClaudeAuth: () => mocks.claudeAuth };
 });
 
 const future = () => new Date(Date.now() + 3_600_000).toISOString();
@@ -78,6 +90,7 @@ beforeEach(() => {
 	mocks.activeSession.set({ ...mocks.DEFAULT });
 	mocks.getContextUsage.mockReset();
 	mocks.getContextUsage.mockResolvedValue({ available: false, reason: 'not_connected' });
+	mocks.claudeAuth = { auth_kind: null, plan_type: null };
 });
 afterEach(() => cleanup());
 
@@ -659,6 +672,94 @@ describe('ContextUsageBar — plan usage limits', () => {
 		// Only the self window is shown (12%), not the worker's live 50%.
 		expect(container.querySelectorAll('.popover-row').length).toBe(1);
 		expect(container.textContent).not.toContain('50%');
+	});
+
+	it('subtexts the Claude header with the resolved install snapshot plan', async () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			self_instance_id: 'primary',
+			snapshots: [
+				{
+					instance_id: 'primary',
+					device_name: 'Studio',
+					plan_type: 'max',
+					available: true,
+					windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
+				},
+			],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
+		// The plan WINS over the device-name fallback — it is the more useful
+		// disambiguator, and it is what the model dropdown shows too.
+		expect(container.querySelector('.section-account')?.textContent).toBe('max');
+	});
+
+	it("prefers the resolved install's snapshot plan over the local registry's", async () => {
+		// The snapshot is per-install (it can describe a remote worker on a
+		// different account); the registry block only ever describes self. When
+		// both carry a plan, the snapshot wins.
+		mocks.claudeAuth = { auth_kind: 'subscription', plan_type: 'pro' };
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			self_instance_id: 'primary',
+			snapshots: [
+				{
+					instance_id: 'primary',
+					device_name: 'Studio',
+					plan_type: 'max',
+					available: true,
+					windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
+				},
+			],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.section-account')?.textContent).toBe('max');
+	});
+
+	it('subtexts the self Claude header "API" when the registry reports API-key auth', async () => {
+		mocks.claudeAuth = { auth_kind: 'api', plan_type: null };
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			self_instance_id: 'primary',
+			snapshots: [
+				{
+					instance_id: 'primary',
+					device_name: 'Studio',
+					available: true,
+					windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
+				},
+			],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
+		// "API" beats the device-name fallback: it says HOW this install bills.
+		expect(container.querySelector('.section-account')?.textContent).toBe('API');
+	});
+
+	it("subtexts the self Claude header with the registry's plan when no snapshot plan exists", async () => {
+		mocks.claudeAuth = { auth_kind: 'subscription', plan_type: 'pro' };
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			self_instance_id: 'primary',
+			snapshots: [
+				{
+					instance_id: 'primary',
+					available: true,
+					windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
+				},
+			],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.section-account')?.textContent).toBe('pro');
 	});
 
 	it('collapses the Claude plan section on header click: hides window rows and persists', async () => {

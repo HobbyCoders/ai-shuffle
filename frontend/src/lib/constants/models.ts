@@ -8,6 +8,7 @@ export type {
 	ProviderModel,
 	ProviderEntry,
 	ProviderAuthKind,
+	ClaudeAuthInfo,
 	ProviderDisplay,
 	ProviderDisplayInput,
 	DecodedProviderModel
@@ -28,6 +29,7 @@ export {
 	isProviderModel,
 	getModels,
 	getProviders,
+	getClaudeAuth,
 	getProviderModels,
 	isReroute,
 	getDefaultModel,

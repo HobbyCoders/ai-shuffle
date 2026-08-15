@@ -18,6 +18,7 @@
 		encodeProviderModel,
 		getProviderDisplay,
 		getClaudeDisplay,
+		getClaudeAuth,
 		isReroute,
 		type ModelFamily
 	} from '$lib/constants/models';
@@ -94,7 +95,11 @@
 			groupKey: string;
 			groupSubtext: string | null;
 		}[] = [];
-		const claude = getClaudeDisplay();
+		const claudeAuth = getClaudeAuth();
+		const claude = getClaudeDisplay({
+			planType: claudeAuth.plan_type,
+			authKind: claudeAuth.auth_kind
+		});
 		for (const m of getModels()) {
 			out.push({
 				value: m.value,

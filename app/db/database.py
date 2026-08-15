@@ -1896,6 +1896,7 @@ from app.db.claude_accounts import (  # noqa: F401
     delete_claude_account,
     mark_claude_account_sync_pending,
     touch_claude_account_last_used,
+    set_claude_account_subscription_type,
     count_claude_accounts,
 )
 

@@ -63,6 +63,8 @@ export interface UsageBucket {
 	accountEmail?: string | null;
 	accountName?: string | null;
 	deviceName?: string | null;
+	/** Claude subscription tier of that install's account (e.g. `'max'`). */
+	planType?: string | null;
 	/** Owning install seen recently (heartbeat). null = unknown. */
 	online?: boolean | null;
 	/** Monotonic generation tag from the backend for THIS install (see below). */
@@ -135,6 +137,12 @@ export interface SnapshotInstance {
 	account_id?: string | null;
 	account_email?: string | null;
 	account_name?: string | null;
+	/**
+	 * Claude subscription tier for that install's account, joined from
+	 * `claude_accounts.subscription_type`. Null when the install has no account
+	 * row or its plan isn't known yet.
+	 */
+	plan_type?: string | null;
 	windows: SnapshotWindow[];
 	/** Epoch MILLISECONDS (the legacy top-level `fetched_at` is seconds). */
 	fetched_at?: number | null;
@@ -585,6 +593,7 @@ export const rateLimit = {
 						accountEmail: entry.account_email ?? null,
 						accountName: entry.account_name ?? null,
 						deviceName: entry.device_name ?? null,
+						planType: entry.plan_type ?? null,
 						online: entry.online ?? null,
 						generation: gen ?? null,
 						fetchedAt: entry.fetched_at ?? null,

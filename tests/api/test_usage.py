@@ -157,6 +157,11 @@ class TestUsageLimitsEndpoint:
             )
             # A second install: registry entry + snapshot → joins device_name/online.
             db.register_install("worker-1", "Worker", "http://w:1455", "docker", "1.0", {})
+            db.create_claude_account(
+                account_id="acct-w", name="Worker Acct", credentials="enc:x",
+                credential_fingerprint=None, expires_at=None, has_refresh_token=True,
+                subscription_type="max",
+            )
             db.upsert_usage_snapshot(
                 "worker-1",
                 windows=[{"type": "five_hour", "utilization": 88.0, "resets_at": "r"}],
@@ -194,6 +199,11 @@ class TestUsageLimitsEndpoint:
         assert worker["online"] is True
         assert worker["account_email"] == "w@example.com"
         assert worker["account_name"] == "Worker Acct"
+        # The account's subscription tier survives the response model (the
+        # popover's Claude header reads it per install).
+        assert worker["plan_type"] == "max"
+        # Self has no account stamped on its row → null, never missing.
+        assert by_id[iid]["plan_type"] is None
         assert worker["windows"][0]["utilization"] == 88.0
         # Unknown install (no registry row) excluded.
         assert "ghost-9" not in by_id

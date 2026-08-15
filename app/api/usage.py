@@ -62,6 +62,9 @@ class InstallUsageSnapshot(BaseModel):
     account_id: Optional[str] = None
     account_email: Optional[str] = None
     account_name: Optional[str] = None
+    # Subscription tier of THAT install's account ("max"/"pro"), joined from
+    # claude_accounts. Names the plan in the usage popover's Claude header.
+    plan_type: Optional[str] = None
     windows: List[UsageWindow] = []
     fetched_at: Optional[int] = None
     available: bool = False

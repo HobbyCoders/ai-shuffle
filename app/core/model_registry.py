@@ -293,6 +293,42 @@ def _providers_payload() -> List[Dict[str, object]]:
     ]
 
 
+def _claude_payload() -> Dict[str, object]:
+    """Display metadata for NATIVE Claude — how this install authenticates.
+
+    Mirrors ``_providers_payload``'s ``auth_kind``/``plan_type`` pair for the
+    Anthropic side, which has no ``model_providers`` row to carry them:
+
+      * a stored ``anthropic_api_key`` wins over any connected account (see
+        ``environment.inject_claude_code_auth``) → ``auth_kind = "api"``, no plan;
+      * otherwise the connected OAuth account is used → ``auth_kind =
+        "subscription"`` with the account's ``subscription_type`` ("max"/"pro")
+        when known, else null.
+
+    Lazily imported and fully degrading: ANY failure yields nulls rather than
+    500-ing ``GET /api/models`` app-wide (same contract as ``_providers_payload``).
+    """
+    try:
+        from app.api.settings_crypto import get_decrypted_api_key
+
+        if get_decrypted_api_key("anthropic_api_key"):
+            return {"auth_kind": "api", "plan_type": None}
+
+        from app.core import claude_accounts
+        from app.db import database
+
+        account_id = claude_accounts.get_active_account_id()
+        plan = None
+        if account_id:
+            row = database.get_claude_account(account_id)
+            if row:
+                plan = row.get("subscription_type")
+        return {"auth_kind": "subscription", "plan_type": plan}
+    except Exception as e:  # noqa: BLE001 — display metadata is never fatal
+        logger.warning("Could not resolve Claude auth metadata for registry: %s", e)
+        return {"auth_kind": None, "plan_type": None}
+
+
 def registry_payload() -> Dict[str, object]:
     """Serialized registry for the ``GET /api/models`` endpoint."""
     return {
@@ -311,4 +347,5 @@ def registry_payload() -> Dict[str, object]:
         "context_1m_suffix": CONTEXT_1M_SUFFIX,
         "legacy_map": dict(LEGACY_MODEL_MAP),
         "providers": _providers_payload(),
+        "claude": _claude_payload(),
     }

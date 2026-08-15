@@ -169,6 +169,22 @@ export interface ProviderEntry {
 	plan_type: string | null;
 }
 
+/**
+ * How NATIVE Claude authenticates on THIS install, as reported by the registry
+ * (see `_claude_payload` in `app/core/model_registry.py`). There is no
+ * `model_providers` row for Anthropic, so this block is the only carrier of the
+ * Claude brand's auth kind + subscription plan.
+ *
+ * Both fields are `null` until hydration lands (and stay null if the backend
+ * couldn't resolve them), which the display rules read as "nothing to show".
+ */
+export interface ClaudeAuthInfo {
+	/** `'api'` on a stored Anthropic API key, `'subscription'` on OAuth account. */
+	auth_kind: ProviderAuthKind | null;
+	/** Subscription tier for account auth (e.g. `'max'`); null otherwise/unknown. */
+	plan_type: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // Reactive state — hydrated from `/api/v1/models` on boot.
 // ---------------------------------------------------------------------------
@@ -178,6 +194,7 @@ interface RegistryState {
 	default: string;
 	legacyMap: Record<string, string>;
 	providers: ProviderEntry[];
+	claude: ClaudeAuthInfo;
 	hydrated: boolean;
 }
 
@@ -186,6 +203,7 @@ const _registry = $state<RegistryState>({
 	default: STATIC_DEFAULT,
 	legacyMap: { ...STATIC_LEGACY_MAP },
 	providers: [],
+	claude: { auth_kind: null, plan_type: null },
 	hydrated: false
 });
 
@@ -215,6 +233,17 @@ export function isRegistryHydrated(): boolean {
  */
 export function getProviders(): readonly ProviderEntry[] {
 	return _registry.providers;
+}
+
+/**
+ * How native Claude authenticates on THIS install (auth kind + subscription
+ * plan). Nulls until hydration lands. Reactive in Svelte component contexts.
+ *
+ * It describes the LOCAL install only — a per-install usage snapshot's own
+ * `planType` is authoritative for any other install.
+ */
+export function getClaudeAuth(): ClaudeAuthInfo {
+	return _registry.claude;
 }
 
 // ---------------------------------------------------------------------------
@@ -501,6 +530,11 @@ interface RegistryProviderPayload {
 	plan_type?: string | null;
 }
 
+interface RegistryClaudePayload {
+	auth_kind?: string | null;
+	plan_type?: string | null;
+}
+
 interface RegistryPayload {
 	models: RegistryModelPayload[];
 	default: string;
@@ -508,6 +542,7 @@ interface RegistryPayload {
 	context_1m_suffix?: string;
 	legacy_map: Record<string, string>;
 	providers?: RegistryProviderPayload[];
+	claude?: RegistryClaudePayload;
 }
 
 function mapPayloadModel(m: RegistryModelPayload): ModelOption {
@@ -529,6 +564,19 @@ function mapPayloadProvider(p: RegistryProviderPayload): ProviderEntry {
 		default_model: p.default_model ?? null,
 		auth_kind: p.auth_kind ?? (p.provider_type === 'chatgpt' ? 'subscription' : 'api'),
 		plan_type: p.plan_type ?? null
+	};
+}
+
+/**
+ * Normalise the payload's `claude` block. Additive — an older backend omits it
+ * entirely, and only the two known auth kinds are accepted (anything else is
+ * treated as unknown rather than passed through to the display rules).
+ */
+function mapPayloadClaude(c: RegistryClaudePayload | undefined): ClaudeAuthInfo {
+	const kind = c?.auth_kind;
+	return {
+		auth_kind: kind === 'api' || kind === 'subscription' ? kind : null,
+		plan_type: c?.plan_type ?? null
 	};
 }
 
@@ -570,6 +618,7 @@ export async function hydrateModelRegistry(): Promise<boolean> {
 		_registry.providers = Array.isArray(payload.providers)
 			? payload.providers.map(mapPayloadProvider)
 			: [];
+		_registry.claude = mapPayloadClaude(payload.claude);
 		_registry.hydrated = true;
 		return true;
 	} catch (e) {

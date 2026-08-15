@@ -498,6 +498,65 @@ class TestPersistence:
         after = monitor._cluster_snapshot()
         assert any(s["instance_id"] == "peer-x" for s in after["snapshots"])
 
+    def test_cluster_rows_carry_each_installs_account_plan(self, monitor, mock_db):
+        """Each install's entry carries ITS OWN account's subscription tier, so
+        the popover can name a remote worker's plan (the local model registry
+        only speaks for the self install)."""
+        from app.db import database as db
+        self_id = settings.effective_instance_id
+
+        db.create_claude_account(
+            account_id="acct-max", name="Primary", credentials="enc:x",
+            credential_fingerprint=None, expires_at=None, has_refresh_token=True,
+            subscription_type="max",
+        )
+        db.create_claude_account(
+            account_id="acct-none", name="Secondary", credentials="enc:y",
+            credential_fingerprint=None, expires_at=None, has_refresh_token=True,
+        )
+        db.register_install("peer-x", "Peer", "http://p:1", "docker", "1", {})
+        db.register_install("peer-y", "Peer Y", "http://p:2", "docker", "1", {})
+        db.upsert_usage_snapshot(
+            self_id, windows=[], available=True, generation=1, fetched_at=1,
+            account_id="acct-max",
+        )
+        db.upsert_usage_snapshot(
+            "peer-x", windows=[], available=True, generation=1, fetched_at=1,
+            account_id="acct-none",
+        )
+        # No account stamped at all (legacy single-account / API-key install).
+        db.upsert_usage_snapshot(
+            "peer-y", windows=[], available=True, generation=1, fetched_at=1,
+        )
+
+        by_id = {s["instance_id"]: s for s in monitor._read_cluster_rows(self_id)}
+        assert by_id[self_id]["plan_type"] == "max"
+        # Account row exists but its plan isn't known yet → null, not missing.
+        assert by_id["peer-x"]["plan_type"] is None
+        # No account_id on the row → null (never a KeyError / stray join hit).
+        assert by_id["peer-y"]["plan_type"] is None
+
+    def test_cluster_rows_survive_a_failing_plan_join(self, monitor, mock_db, monkeypatch):
+        """The plan is advisory: an accounts-table read failure must degrade to
+        null plans, NOT drop the whole cluster read (which would blank the
+        frontend's per-install buckets)."""
+        from app.db import database as db
+        self_id = settings.effective_instance_id
+        db.upsert_usage_snapshot(
+            self_id, windows=[], available=True, generation=1, fetched_at=1,
+            account_id="acct-max",
+        )
+
+        def _raise(*_args, **_kwargs):
+            raise Exception('relation "claude_accounts" does not exist')
+
+        monkeypatch.setattr(db, "get_all_claude_accounts", _raise)
+        rows = monitor._read_cluster_rows(self_id)
+
+        assert rows is not None
+        assert [r["instance_id"] for r in rows] == [self_id]
+        assert rows[0]["plan_type"] is None
+
     def test_cluster_snapshot_omits_keys_on_db_read_failure(self, monitor):
         # Fix 1: a DB read failure must NOT emit `snapshots: []` alongside valid
         # top-level windows (the frontend's modern branch would wipe all buckets).

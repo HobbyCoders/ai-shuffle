@@ -544,7 +544,14 @@ class TestAddAccount:
                 expires_at=9999999999000, scopes=["user:inference"],
                 account_email="user@example.com",
             ), None
-        with patch.object(oauth_tmp, "exchange_code_for_tokens", _exchange):
+
+        # add_account also asks the OAuth profile endpoint what plan the new
+        # account is on — stubbed so the suite stays offline.
+        async def _plan(token):
+            return "max"
+
+        with patch.object(oauth_tmp, "exchange_code_for_tokens", _exchange), \
+                patch.object(oauth_tmp, "fetch_subscription_plan", _plan):
             yield
 
     async def test_add_inactive_never_touches_file(self, mock_db, oauth_tmp, fake_exchange):
@@ -577,11 +584,203 @@ class TestAddAccount:
         assert on_disk["claudeAiOauth"]["accessToken"] == "new-access"
         assert svc.get_active_account_id() == res["active_account_id"]
 
+    async def test_add_stores_the_subscription_plan(self, mock_db, oauth_tmp, fake_exchange):
+        """The token exchange doesn't report the plan, so add_account asks the
+        profile endpoint and seeds the row (and its credential blob) with it —
+        no waiting for the usage poller to heal a NULL."""
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+
+        _set_key(db)
+        res = await svc.add_account("code", "state", make_active=False)
+
+        assert res["account"]["subscription_type"] == "max"
+        row = db.get_claude_account(res["account"]["id"], include_credentials=True)
+        stored = json.loads(encryption.decrypt_value(row["credentials"]))
+        assert stored["subscriptionType"] == "max"
+
+    async def test_add_survives_an_unavailable_profile_endpoint(
+        self, mock_db, oauth_tmp
+    ):
+        """A failing plan lookup must never fail the login — the row lands with
+        a NULL plan and the usage poller heals it later."""
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+
+        async def _exchange(code, state):
+            return OAuthTokens(
+                access_token="new-access", refresh_token="new-refresh",
+                expires_at=9999999999000, scopes=["user:inference"],
+                account_email="user@example.com",
+            ), None
+
+        async def _boom(token):
+            raise RuntimeError("profile endpoint down")
+
+        _set_key(db)
+        with patch.object(oauth_tmp, "exchange_code_for_tokens", _exchange), \
+                patch.object(oauth_tmp, "fetch_subscription_plan", _boom):
+            res = await svc.add_account("code", "state", make_active=False)
+
+        assert res["success"]
+        assert res["account"]["subscription_type"] is None
+
     async def test_add_encryption_locked(self, mock_db, oauth_tmp):
         from app.core import claude_accounts as svc
         encryption.clear_encryption_key()
         res = await svc.add_account("code", "state")
         assert res == {"success": False, "error": "encryption_locked"}
+
+
+# ---------------------------------------------------------------------------
+# ensure_subscription_type (plan heal/refresh, driven by the usage poller)
+# ---------------------------------------------------------------------------
+
+class TestEnsureSubscriptionType:
+    @pytest.fixture(autouse=True)
+    def _reset_throttle(self):
+        from app.core import claude_accounts as svc
+        svc._plan_refresh = {"account_id": None, "at": 0.0}
+        yield
+        svc._plan_refresh = {"account_id": None, "at": 0.0}
+
+    def _seed_active(self, db, subscription_type=None):
+        from app.core import claude_accounts as svc
+        db.create_claude_account(
+            account_id="acct-1", name="Primary", credentials="enc:x",
+            credential_fingerprint=None, expires_at=None, has_refresh_token=True,
+            subscription_type=subscription_type,
+        )
+        svc._set_active_account_id("acct-1")
+
+    async def test_heals_a_null_plan(self, mock_db, oauth_tmp):
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+
+        self._seed_active(db)
+        _write_file(oauth_tmp, _oauth_dict())
+
+        async def _plan(token):
+            return "max"
+
+        with patch.object(oauth_tmp, "fetch_subscription_plan", _plan):
+            await svc.ensure_subscription_type()
+
+        assert db.get_claude_account("acct-1")["subscription_type"] == "max"
+
+    async def test_tracks_a_plan_change(self, mock_db, oauth_tmp):
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+
+        self._seed_active(db, subscription_type="pro")
+        _write_file(oauth_tmp, _oauth_dict())
+
+        async def _plan(token):
+            return "max"
+
+        with patch.object(oauth_tmp, "fetch_subscription_plan", _plan):
+            await svc.ensure_subscription_type()
+
+        assert db.get_claude_account("acct-1")["subscription_type"] == "max"
+
+    async def test_throttles_to_one_lookup_per_interval(self, mock_db, oauth_tmp):
+        """The plan changes about never; the poller runs every ~5 min. One
+        profile GET per hour per account, and a FAILED lookup waits too (the
+        stamp is recorded before the fetch)."""
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+
+        self._seed_active(db)
+        _write_file(oauth_tmp, _oauth_dict())
+        calls = []
+
+        async def _plan(token):
+            calls.append(token)
+            return None  # endpoint unavailable
+
+        with patch.object(oauth_tmp, "fetch_subscription_plan", _plan):
+            await svc.ensure_subscription_type()
+            await svc.ensure_subscription_type()
+            await svc.ensure_subscription_type()
+
+        assert len(calls) == 1
+
+    async def test_a_different_active_account_bypasses_the_throttle(
+        self, mock_db, oauth_tmp
+    ):
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+
+        self._seed_active(db)
+        db.create_claude_account(
+            account_id="acct-2", name="Second", credentials="enc:y",
+            credential_fingerprint=None, expires_at=None, has_refresh_token=True,
+        )
+        _write_file(oauth_tmp, _oauth_dict())
+        calls = []
+
+        async def _plan(token):
+            calls.append(token)
+            return "pro"
+
+        with patch.object(oauth_tmp, "fetch_subscription_plan", _plan):
+            await svc.ensure_subscription_type()
+            svc._set_active_account_id("acct-2")
+            await svc.ensure_subscription_type()
+
+        assert len(calls) == 2
+        assert db.get_claude_account("acct-2")["subscription_type"] == "pro"
+
+    async def test_no_token_makes_no_request(self, mock_db, oauth_tmp):
+        """API-key mode / logged out — nothing to ask the profile endpoint."""
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+
+        self._seed_active(db)
+        calls = []
+
+        async def _plan(token):
+            calls.append(token)
+            return "max"
+
+        with patch.object(oauth_tmp, "fetch_subscription_plan", _plan):
+            await svc.ensure_subscription_type()
+
+        assert calls == []
+        assert db.get_claude_account("acct-1")["subscription_type"] is None
+
+    async def test_no_active_account_is_a_noop(self, mock_db, oauth_tmp):
+        from app.core import claude_accounts as svc
+        await svc.ensure_subscription_type()  # must not raise
+
+    async def test_unknown_plan_leaves_the_row_alone(self, mock_db, oauth_tmp):
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+
+        self._seed_active(db, subscription_type="max")
+        _write_file(oauth_tmp, _oauth_dict())
+
+        async def _plan(token):
+            return None
+
+        with patch.object(oauth_tmp, "fetch_subscription_plan", _plan):
+            await svc.ensure_subscription_type()
+
+        # A failed lookup must never blank a known plan.
+        assert db.get_claude_account("acct-1")["subscription_type"] == "max"
+
+    async def test_never_raises_on_a_db_failure(self, mock_db, oauth_tmp, monkeypatch):
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+
+        self._seed_active(db)
+        _write_file(oauth_tmp, _oauth_dict())
+
+        def _raise(*_args, **_kwargs):
+            raise Exception("db down")
+
+        monkeypatch.setattr(db, "get_claude_account", _raise)
+        await svc.ensure_subscription_type()  # must not raise
 
 
 # ---------------------------------------------------------------------------

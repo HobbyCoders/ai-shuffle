@@ -67,6 +67,14 @@ _suppress_sync_back: bool = False
 # re-acquire this lock, so a plain non-reentrant Lock is safe.
 _switch_mutex = threading.Lock()
 
+# Throttle for the subscription-plan refresh. ensure_subscription_type() rides
+# along with the usage poll (every ~5 min), but the plan changes about never —
+# so we allow at most ONE profile GET per hour per active account. The stamp is
+# recorded BEFORE the fetch, so a failing endpoint also waits the full hour
+# instead of being retried on every poll.
+_plan_refresh: Dict[str, Any] = {"account_id": None, "at": 0.0}
+_PLAN_REFRESH_INTERVAL = 3600.0  # seconds
+
 
 def _active_pointer_key() -> str:
     """The per-install system_settings key holding the active account id."""
@@ -438,6 +446,50 @@ def switch_account(account_id: str) -> Dict[str, Any]:
         return {"success": True, "active_account_id": account_id}
 
 
+async def ensure_subscription_type() -> None:
+    """Heal/refresh the active account's ``subscription_type`` from OAuth.
+
+    The plan string ("max"/"pro") is what the UI shows as the native-Claude
+    subtext, but it is not part of the token exchange response — only the OAuth
+    ``/profile`` endpoint reports it. Accounts created before that lookup
+    existed carry NULL, and a plan can change under us (upgrade/downgrade), so
+    this runs periodically rather than once.
+
+    Called from the usage poller's success branch. Throttled to at most one
+    profile GET per hour per active account, writes only when the value
+    actually changed, and NEVER raises — the plan is advisory.
+    """
+    try:
+        account_id = get_active_account_id()
+        if not account_id:
+            return
+
+        now = time.monotonic()
+        if (
+            _plan_refresh["account_id"] == account_id
+            and (now - float(_plan_refresh["at"] or 0.0)) < _PLAN_REFRESH_INTERVAL
+        ):
+            return
+        # Stamp BEFORE fetching so a failure also waits out the full interval.
+        _plan_refresh["account_id"] = account_id
+        _plan_refresh["at"] = now
+
+        row = db.get_claude_account(account_id)
+        if not row:
+            return
+
+        token = direct_oauth.get_access_token()
+        if not token:
+            return  # API-key mode / logged out — no plan to read.
+
+        plan = await direct_oauth.fetch_subscription_plan(token)
+        if plan and plan != row.get("subscription_type"):
+            db.set_claude_account_subscription_type(account_id, plan)
+            logger.info("Claude account subscription type resolved as '%s'", plan)
+    except Exception as e:  # noqa: BLE001 — advisory metadata, never fatal
+        logger.debug(f"ensure_subscription_type skipped: {e}")
+
+
 async def add_account(
     code: str,
     state: str,
@@ -458,12 +510,21 @@ async def add_account(
     if error or tokens is None:
         return {"success": False, "error": error or "exchange_failed"}
 
+    # The token exchange doesn't report the plan; ask the OAuth profile endpoint
+    # so the new row starts out with its subscription tier. Best-effort — a
+    # failure here must not fail the login (the usage poller heals it later via
+    # ensure_subscription_type()).
+    try:
+        plan = await direct_oauth.fetch_subscription_plan(tokens.access_token)
+    except Exception:  # noqa: BLE001
+        plan = None
+
     oauth_dict = {
         "accessToken": tokens.access_token,
         "refreshToken": tokens.refresh_token,
         "expiresAt": tokens.expires_at,
         "scopes": tokens.scopes,
-        "subscriptionType": None,
+        "subscriptionType": plan,
     }
     fingerprint = _fingerprint(oauth_dict)
     encrypted = encryption.encrypt_value(json.dumps(oauth_dict))
@@ -479,7 +540,7 @@ async def add_account(
         expires_at=tokens.expires_at,
         has_refresh_token=bool(tokens.refresh_token),
         email=tokens.account_email,
-        subscription_type=None,
+        subscription_type=plan,
     )
 
     result: Dict[str, Any] = {"success": True, "account": row}

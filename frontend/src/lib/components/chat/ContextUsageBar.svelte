@@ -48,6 +48,7 @@
 		getProviders,
 		getProviderDisplay,
 		getClaudeDisplay,
+		getClaudeAuth,
 		type ProviderDisplay
 	} from '$lib/constants/models';
 	import { getContextUsage } from '$lib/api/sessions';
@@ -368,13 +369,25 @@
 	// agents-UI picker can never drift apart.
 	//
 	// Claude: "Claude" + its subscription plan ("max"/"pro"), or "API" on
-	// API-key auth. Neither is reachable from the usage store the section reads
-	// today (no snapshot field carries the Claude plan), so the subtext falls
-	// back to the resolved install's device name / "Other device" hint rather
-	// than dropping that disambiguation on the floor.
+	// API-key auth. Two sources feed that, in this order:
+	//
+	//   1. the RESOLVED INSTALL's own usage snapshot (`planType`, joined from
+	//      that install's `claude_accounts` row) — authoritative for any
+	//      install, including a remote worker on a different account;
+	//   2. the local registry's `claude` block — it describes THIS install only,
+	//      so it is consulted just for the self install (it is also the only
+	//      carrier of API-key auth, which snapshots never report).
+	//
+	// With neither known the subtext falls back to the resolved install's device
+	// name / "Other device" hint rather than dropping that disambiguation.
 	const isSelf = $derived(resolvedKey != null && resolvedKey === selfBucketKey($rateLimit));
 	const deviceLabel = $derived(resolvedBucket?.deviceName ?? null);
-	const claudeDisplay = $derived<ProviderDisplay>(getClaudeDisplay());
+	const claudeDisplay = $derived<ProviderDisplay>(
+		getClaudeDisplay({
+			planType: resolvedBucket?.planType ?? (isSelf ? getClaudeAuth().plan_type : null),
+			authKind: isSelf ? getClaudeAuth().auth_kind : null
+		})
+	);
 	const claudeSubtext = $derived(
 		claudeDisplay.subtext ?? deviceLabel ?? (isSelf ? null : 'Other device')
 	);

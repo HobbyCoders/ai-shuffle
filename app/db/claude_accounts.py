@@ -230,6 +230,25 @@ def touch_claude_account_last_used(account_id: str) -> None:
         )
 
 
+def set_claude_account_subscription_type(
+    account_id: str, subscription_type: Optional[str]
+) -> None:
+    """Set an account's ``subscription_type`` (the "max"/"pro" plan string).
+
+    Written by the healing path in ``app.core.claude_accounts`` once the OAuth
+    profile endpoint has been asked what plan the account is on — rows created
+    before that path existed carry NULL. Touches only that one column.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE claude_accounts SET subscription_type = %s, updated_at = %s "
+            "WHERE id = %s",
+            (subscription_type, now, account_id),
+        )
+
+
 def count_claude_accounts() -> int:
     """Return the number of Claude account rows."""
     with get_db() as conn:

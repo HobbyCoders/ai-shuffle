@@ -9,7 +9,9 @@ round-trip the suffix.
 
 import json
 
+from app.api import settings_crypto
 from app.core import model_registry as m
+from app.core.config import settings
 from app.db import database as db
 
 
@@ -326,6 +328,82 @@ class TestRegistryPayloadProviders:
         monkeypatch.setattr(db, "get_enabled_model_providers", _raise_generic)
         payload = m.registry_payload()
         assert payload["providers"] == []
+        # And the rest of the payload is intact.
+        assert payload["default"] == "sonnet"
+        assert isinstance(payload["models"], list)
+
+
+class TestRegistryPayloadClaude:
+    """``claude`` mirrors the providers' ``auth_kind``/``plan_type`` pair for
+    native Anthropic, which has no ``model_providers`` row to carry them. It is
+    what lets the UI render "Claude · max" instead of a bare "Claude"."""
+
+    def test_payload_always_carries_the_claude_block(self, mock_db):
+        payload = m.registry_payload()
+        assert "claude" in payload
+        assert set(payload["claude"]) == {"auth_kind", "plan_type"}
+
+    def test_api_key_install_reports_api_auth_and_no_plan(self, mock_db, monkeypatch):
+        """A stored Anthropic key overrides any connected account (see
+        ``environment.inject_claude_code_auth``) → API auth, no plan."""
+        iid = settings.effective_instance_id
+        db.create_claude_account(
+            account_id="acct-1", name="Primary", credentials="enc:x",
+            credential_fingerprint=None, expires_at=None, has_refresh_token=True,
+            subscription_type="max",
+        )
+        db.set_system_setting(f"claude_active_account:{iid}", "acct-1")
+        monkeypatch.setattr(
+            settings_crypto, "get_decrypted_api_key",
+            lambda name: "sk-ant-key" if name == "anthropic_api_key" else None,
+        )
+
+        claude = m.registry_payload()["claude"]
+        # The account's plan is deliberately NOT surfaced — the key is what
+        # authenticates, so the subtext must read "API".
+        assert claude == {"auth_kind": "api", "plan_type": None}
+
+    def test_account_install_reports_subscription_and_its_plan(self, mock_db, monkeypatch):
+        iid = settings.effective_instance_id
+        db.create_claude_account(
+            account_id="acct-1", name="Primary", credentials="enc:x",
+            credential_fingerprint=None, expires_at=None, has_refresh_token=True,
+            subscription_type="max",
+        )
+        db.set_system_setting(f"claude_active_account:{iid}", "acct-1")
+        monkeypatch.setattr(settings_crypto, "get_decrypted_api_key", lambda _name: None)
+
+        claude = m.registry_payload()["claude"]
+        assert claude == {"auth_kind": "subscription", "plan_type": "max"}
+
+    def test_account_without_a_known_plan_reports_null(self, mock_db, monkeypatch):
+        """A row created before the plan lookup existed carries NULL until the
+        usage poller heals it — subscription auth, unknown tier."""
+        iid = settings.effective_instance_id
+        db.create_claude_account(
+            account_id="acct-1", name="Primary", credentials="enc:x",
+            credential_fingerprint=None, expires_at=None, has_refresh_token=True,
+        )
+        db.set_system_setting(f"claude_active_account:{iid}", "acct-1")
+        monkeypatch.setattr(settings_crypto, "get_decrypted_api_key", lambda _name: None)
+
+        claude = m.registry_payload()["claude"]
+        assert claude == {"auth_kind": "subscription", "plan_type": None}
+
+    def test_no_active_account_reports_subscription_with_no_plan(self, mock_db, monkeypatch):
+        monkeypatch.setattr(settings_crypto, "get_decrypted_api_key", lambda _name: None)
+        claude = m.registry_payload()["claude"]
+        assert claude == {"auth_kind": "subscription", "plan_type": None}
+
+    def test_db_failure_degrades_to_nulls(self, monkeypatch):
+        """Same contract as ``_providers_payload``: never 500 GET /api/models."""
+
+        def _raise(*_args, **_kwargs):
+            raise Exception('relation "claude_accounts" does not exist')
+
+        monkeypatch.setattr(settings_crypto, "get_decrypted_api_key", _raise)
+        payload = m.registry_payload()
+        assert payload["claude"] == {"auth_kind": None, "plan_type": None}
         # And the rest of the payload is intact.
         assert payload["default"] == "sonnet"
         assert isinstance(payload["models"], list)

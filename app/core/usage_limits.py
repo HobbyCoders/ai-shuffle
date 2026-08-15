@@ -22,6 +22,7 @@ logged, printed, or included in the snapshot.
 import asyncio
 import logging
 import math
+import os
 import time
 from typing import Any, Dict, List, Optional
 
@@ -315,6 +316,22 @@ class UsageLimitsMonitor:
             # so peers can serve the correct per-account reset time for offloaded
             # sessions. Best-effort — never break the poll on a DB error.
             await run_sync(self._persist_snapshot)
+            # Ride along on the poll to keep the active account's subscription
+            # tier current: at most ONE profile GET per hour (self-throttled),
+            # which heals rows whose subscription_type is still NULL and tracks
+            # a plan change. Best-effort — never affects the usage snapshot.
+            #
+            # Suppressed under TESTING (conftest sets TESTING=1, mirroring
+            # app.core.startup_reconcile): this reads the REAL on-disk
+            # credential — which the test host has — so an unpatched
+            # monitor.fetch() test would issue a live authenticated request.
+            # ensure_subscription_type() itself is unit-tested directly.
+            if os.environ.get("TESTING") != "1":
+                try:
+                    from app.core import claude_accounts
+                    await claude_accounts.ensure_subscription_type()
+                except Exception as e:  # noqa: BLE001 — advisory metadata only
+                    logger.debug("Subscription-type refresh skipped: %s", e)
             logger.debug("Usage-limits snapshot updated: %d window(s)", len(self._windows))
             return self._snapshot()
 
@@ -343,7 +360,8 @@ class UsageLimitsMonitor:
 
           * ``snapshots`` — one entry per install (self always included), each
             ``{instance_id, device_name, online, account_id, account_email,
-            account_name, windows, fetched_at, available, generation}``.
+            account_name, plan_type, windows, fetched_at, available,
+            generation}``.
           * ``self_instance_id`` — this install's ``effective_instance_id``.
 
         Rows whose ``instance_id`` is not in the installs registry are skipped
@@ -377,6 +395,19 @@ class UsageLimitsMonitor:
             logger.debug("Usage cluster snapshot read skipped: %s", e)
             return None
 
+        # Subscription tier per Claude account, so each install's row can carry
+        # the plan its OWN account is on (the local model registry only speaks
+        # for the self install). Degrades to {} — a missing plan renders as no
+        # subtext, which must never cost us the whole cluster read.
+        plans: Dict[Any, Optional[str]] = {}
+        try:
+            for account in db.get_all_claude_accounts():
+                account_id = account.get("id")
+                if account_id:
+                    plans[account_id] = account.get("subscription_type")
+        except Exception as e:  # noqa: BLE001 — plan join is advisory
+            logger.debug("Usage cluster plan join skipped: %s", e)
+
         snapshots: List[Dict[str, Any]] = []
         for row in rows:
             iid = row.get("instance_id")
@@ -391,6 +422,9 @@ class UsageLimitsMonitor:
                 "account_id": row.get("account_id"),
                 "account_email": row.get("account_email"),
                 "account_name": row.get("account_name"),
+                # Subscription tier of THAT install's account (None when the
+                # row carries no account, or its plan isn't known yet).
+                "plan_type": plans.get(row.get("account_id")),
                 "windows": row.get("windows") or [],
                 "fetched_at": row.get("fetched_at"),
                 "available": bool(row.get("available")),

@@ -19,6 +19,7 @@ import {
 	getProviders,
 	getProviderDisplay,
 	getClaudeDisplay,
+	getClaudeAuth,
 	formatProviderDisplay,
 	hydrateModelRegistry,
 	isRegistryHydrated
@@ -155,6 +156,87 @@ describe('getProviders — hydration from GET /models', () => {
 		await hydrateModelRegistry();
 
 		expect(getProviders()).toEqual([]);
+	});
+});
+
+describe('getClaudeAuth — native-Claude auth block hydration', () => {
+	/** A minimal valid payload plus whatever `claude` block the case needs. */
+	function payload(claude?: unknown) {
+		return {
+			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', supports_1m: true }],
+			default: 'sonnet',
+			legacy_map: {},
+			...(claude === undefined ? {} : { claude })
+		};
+	}
+
+	it('is null/null before hydration', () => {
+		expect(getClaudeAuth()).toEqual({ auth_kind: null, plan_type: null });
+	});
+
+	it('carries a subscription block through hydration', async () => {
+		mocks.get.mockResolvedValueOnce(payload({ auth_kind: 'subscription', plan_type: 'max' }));
+
+		await hydrateModelRegistry();
+
+		expect(getClaudeAuth()).toEqual({ auth_kind: 'subscription', plan_type: 'max' });
+		// …and the display rules read it as the group subtext.
+		expect(
+			getClaudeDisplay({
+				planType: getClaudeAuth().plan_type,
+				authKind: getClaudeAuth().auth_kind
+			})
+		).toEqual({ name: 'Claude', subtext: 'max' });
+	});
+
+	it('carries an API-key block through hydration', async () => {
+		mocks.get.mockResolvedValueOnce(payload({ auth_kind: 'api', plan_type: null }));
+
+		await hydrateModelRegistry();
+
+		expect(getClaudeAuth()).toEqual({ auth_kind: 'api', plan_type: null });
+		expect(
+			getClaudeDisplay({
+				planType: getClaudeAuth().plan_type,
+				authKind: getClaudeAuth().auth_kind
+			})
+		).toEqual({ name: 'Claude', subtext: 'API' });
+	});
+
+	it('normalises to nulls when an older payload omits the block', async () => {
+		mocks.get.mockResolvedValueOnce(payload());
+
+		await hydrateModelRegistry();
+
+		expect(getClaudeAuth()).toEqual({ auth_kind: null, plan_type: null });
+	});
+
+	it('rejects an unrecognised auth_kind rather than passing it through', async () => {
+		mocks.get.mockResolvedValueOnce(payload({ auth_kind: 'wat', plan_type: 'max' }));
+
+		await hydrateModelRegistry();
+
+		// Unknown kind → null (the display rules must never see a third value);
+		// the plan string is still carried.
+		expect(getClaudeAuth()).toEqual({ auth_kind: null, plan_type: 'max' });
+	});
+
+	it('tolerates a null/degraded block from a backend that could not resolve it', async () => {
+		mocks.get.mockResolvedValueOnce(payload({ auth_kind: null, plan_type: null }));
+
+		await hydrateModelRegistry();
+
+		expect(getClaudeAuth()).toEqual({ auth_kind: null, plan_type: null });
+	});
+
+	it('re-hydration replaces the block (a plan change is picked up)', async () => {
+		mocks.get.mockResolvedValueOnce(payload({ auth_kind: 'subscription', plan_type: 'pro' }));
+		await hydrateModelRegistry();
+		expect(getClaudeAuth().plan_type).toBe('pro');
+
+		mocks.get.mockResolvedValueOnce(payload({ auth_kind: 'subscription', plan_type: 'max' }));
+		await hydrateModelRegistry();
+		expect(getClaudeAuth().plan_type).toBe('max');
 	});
 });
 
