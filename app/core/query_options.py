@@ -885,6 +885,7 @@ def build_options_from_profile(
         project_dir=Path(working_dir) if working_dir else None,
         ai_tools_config=ai_tools_config,
         tool_env=ai_tool_env,
+        session_id=session_id,
     ) or {}
 
     # Add app-config MCP server for admin sessions with the toggle enabled
