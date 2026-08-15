@@ -186,6 +186,40 @@ def nested_instructions(path: str | os.PathLike[str]) -> list[InstructionFile]:
     ]
 
 
+def build_instruction_blocks(
+    cwd: str | os.PathLike[str],
+    *,
+    include_global: bool = True,
+    include_project: bool = True,
+) -> list[tuple[InstructionFile, str]]:
+    """The instruction stack as ``(file, rendered block)`` pairs.
+
+    Same discovery, ordering and dedup rules as :func:`build_instruction_stack`
+    — which is this function joined with blank lines — but keeps per-file
+    attribution, so a caller (the context-usage breakdown) can price each
+    CLAUDE.md/AGENTS.md separately instead of only the merged stack.
+    """
+    files = discover_instruction_files(
+        cwd, include_global=include_global, include_project=include_project
+    )
+    blocks: list[tuple[InstructionFile, str]] = []
+    # Track content already emitted per directory so an identical sibling
+    # (CLAUDE.md vs AGENTS.md) is noted, not repeated.
+    seen: dict[tuple[str, str], str] = {}  # (dir, content) -> emitting path
+    for f in files:
+        directory = str(Path(f.path).parent)
+        key = (directory, f.content)
+        prior = seen.get(key)
+        if prior is not None and f.content.strip():
+            blocks.append(
+                (f, f"# From: {f.path}\n# (byte-identical to {prior}; not repeated)")
+            )
+            continue
+        seen[key] = f.path
+        blocks.append((f, f"# From: {f.path}\n{f.content.rstrip()}"))
+    return blocks
+
+
 def build_instruction_stack(
     cwd: str | os.PathLike[str],
     *,
@@ -198,25 +232,12 @@ def build_instruction_stack(
     byte-identical dedup note (rather than a duplicated body) when a CLAUDE.md and
     an AGENTS.md in the same directory carry identical content.
     """
-    files = discover_instruction_files(
-        cwd, include_global=include_global, include_project=include_project
+    return "\n\n".join(
+        block
+        for _, block in build_instruction_blocks(
+            cwd, include_global=include_global, include_project=include_project
+        )
     )
-    blocks: list[str] = []
-    # Track content already emitted per directory so an identical sibling
-    # (CLAUDE.md vs AGENTS.md) is noted, not repeated.
-    seen: dict[tuple[str, str], str] = {}  # (dir, content) -> emitting path
-    for f in files:
-        directory = str(Path(f.path).parent)
-        key = (directory, f.content)
-        prior = seen.get(key)
-        if prior is not None and f.content.strip():
-            blocks.append(
-                f"# From: {f.path}\n# (byte-identical to {prior}; not repeated)"
-            )
-            continue
-        seen[key] = f.path
-        blocks.append(f"# From: {f.path}\n{f.content.rstrip()}")
-    return "\n\n".join(blocks)
 
 
 # ─── frontmatter (tiny hand-rolled splitter — no yaml dep) ────────────────────

@@ -33,6 +33,19 @@ Frame vocabulary handled (see ``claude_agent_sdk`` message_parser + query.py):
   * ``{"type":"control_request","request":{"subtype":"can_use_tool",...}}`` —
     a PermissionRequest event plus a ``PermissionBridge`` the loop uses to answer
     with the matching ``control_response`` frame.
+  * ``{"type":"control_response","response":{...}}`` — the CLI's reply to a
+    control_request the LOOP sent (``get_context_usage``, ``mcp_status``, …),
+    surfaced as a ``ControlReply`` the loop correlates by request_id. Two
+    subtypes, both keyed by ``request_id`` inside the inner ``response``::
+
+        {"type":"control_response","response":{"subtype":"success",
+         "request_id":"req_1_ab12cd34","response":{<payload>}}}
+        {"type":"control_response","response":{"subtype":"error",
+         "request_id":"req_1_ab12cd34","error":"..."}}
+
+    (Shape verified against ``claude_agent_sdk._internal.query.Query`` —
+    ``_read_messages`` routes on ``response.request_id`` and
+    ``_send_control_request`` returns the inner ``response`` dict.)
 
 Unknown frame types are ignored (forward-compat). The mapping helpers are pure;
 the ``StreamJsonMapper`` is the small stateful driver (block indices, the
@@ -93,6 +106,30 @@ def flatten_tool_content(content: Any) -> str:
     return json.dumps(content, default=str)
 
 
+def parse_control_response(frame: dict[str, Any]) -> "ControlReply | None":
+    """``control_response`` frame → :class:`ControlReply` (None if unattributable).
+
+    Both subtypes key on ``request_id`` inside the inner ``response`` object;
+    ``success`` nests the payload under a second ``response`` key, ``error``
+    carries ``error`` instead. A frame with no usable request_id resolves
+    nothing and is dropped.
+    """
+    response = frame.get("response", {}) or {}
+    request_id = response.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        return None
+    if response.get("subtype") == "error":
+        return ControlReply(
+            request_id=request_id, ok=False,
+            error=str(response.get("error", "unknown control error")),
+        )
+    payload = response.get("response")
+    return ControlReply(
+        request_id=request_id, ok=True,
+        payload=payload if isinstance(payload, dict) else None,
+    )
+
+
 def usage_fields(usage: dict[str, Any]) -> dict[str, Any]:
     """Extract the four canonical token counters (CLI key names == fluid's)."""
     return {
@@ -118,15 +155,32 @@ class PermissionBridge:
     risk: str = "safe"
 
 
+@dataclass(frozen=True)
+class ControlReply:
+    """The CLI's answer to a control_request the loop sent.
+
+    ``ok`` distinguishes the two subtypes: on success ``payload`` is the inner
+    ``response`` dict (already in whatever shape that control call documents),
+    on error ``error`` carries the CLI's message and ``payload`` is None.
+    """
+
+    request_id: str
+    ok: bool
+    payload: dict[str, Any] | None = None
+    error: str | None = None
+
+
 @dataclass
 class Mapped:
     """Everything one frame produces: events to emit, an optional node to
-    persist, and (for permissions) the bridge the loop must answer."""
+    persist, (for permissions) the bridge the loop must answer, and (for
+    control replies) the answer the loop is awaiting."""
 
     events: list[Event] = field(default_factory=list)
     message: Message | None = None
     node_id: str | None = None
     permission: PermissionBridge | None = None
+    control_reply: ControlReply | None = None
     is_result: bool = False
 
 
@@ -191,7 +245,9 @@ class StreamJsonMapper:
             return self._on_rate_limit(frame)
         if ftype == "control_request":
             return self._on_control_request(frame)
-        # control_response (ours, echoed) and any unknown type: ignore.
+        if ftype == "control_response":
+            return self._on_control_response(frame)
+        # Unknown frame types: ignored (forward-compat).
         return Mapped()
 
     # ─── event builders (carry the fixed session/turn ids) ───────────────
@@ -422,3 +478,12 @@ class StreamJsonMapper:
             tool_use_id=tid, name=tool_name, input=inp, risk=risk,
         )
         return Mapped(events=[event], permission=bridge)
+
+    def _on_control_response(self, frame: dict[str, Any]) -> Mapped:
+        """Correlate the CLI's reply to a loop-issued control_request.
+
+        No event is emitted: control calls are request/response RPC riding the
+        same stream, answered to the caller awaiting them, not part of the
+        session's event history.
+        """
+        return Mapped(control_reply=parse_control_response(frame))

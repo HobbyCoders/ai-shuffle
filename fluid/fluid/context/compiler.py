@@ -23,6 +23,16 @@ Everything else the compiler gathers itself:
 Layering order (stable — prompt-cache friendly):
     base → instruction stack → skills index → environment → extra blocks
 
+Two views of the same compilation:
+
+* :func:`compile_system_prompt` — the joined string every engine consumes;
+* :func:`compile_prompt` — a :class:`CompiledPrompt` that keeps the same text
+  *plus* the labeled sections it was built from (one per instruction file, with
+  its path). ``compile_system_prompt`` is exactly ``compile_prompt(...).text``,
+  so the two can never drift. The sections exist for the context-usage
+  breakdown (``loop.get_context_usage()``): pricing "memory files" separately
+  from "system prompt" needs attribution the joined string has already lost.
+
 The delegated (claude CLI) leg in *append* mode must NOT use this compiler for
 env/instructions — the CLI gathers its own; compiling both would duplicate.
 Callers there pass the base + extra blocks straight through as the append text
@@ -36,7 +46,7 @@ from dataclasses import dataclass, field
 from typing import Sequence
 
 from fluid.context.environment import environment_block
-from fluid.context.instructions import build_instruction_stack, discover_skills
+from fluid.context.instructions import build_instruction_blocks, discover_skills
 
 SKILLS_HEADER = (
     "# Available skills\n"
@@ -58,6 +68,32 @@ class PromptInputs:
     include_skills: bool = True
 
 
+# Section kinds a compiled prompt can carry. ``memory`` sections additionally
+# carry the instruction file's ``path`` and ``scope``.
+SECTION_KINDS = ("base", "memory", "skills", "environment", "extra")
+
+
+@dataclass(frozen=True, kw_only=True)
+class PromptSection:
+    """One labeled slice of the compiled system prompt."""
+
+    kind: str  # one of SECTION_KINDS
+    text: str
+    path: str | None = None  # memory sections: the instruction file it came from
+    scope: str | None = None  # memory sections: "global" | "project" | "nested"
+
+
+@dataclass(frozen=True, kw_only=True)
+class CompiledPrompt:
+    """The compiled prompt in both views: joined text + its labeled sections."""
+
+    sections: tuple[PromptSection, ...] = ()
+    text: str | None = None
+
+    def of_kind(self, *kinds: str) -> tuple[PromptSection, ...]:
+        return tuple(s for s in self.sections if s.kind in kinds)
+
+
 def skills_index(cwd: str | os.PathLike[str], *, include_global: bool = True) -> str | None:
     """Progressive-disclosure skills listing (name + description only)."""
     skills = discover_skills(cwd, include_global=include_global)
@@ -67,29 +103,47 @@ def skills_index(cwd: str | os.PathLike[str], *, include_global: bool = True) ->
     return f"{SKILLS_HEADER}\n{lines}"
 
 
-def compile_system_prompt(inputs: PromptInputs) -> str | None:
-    """Assemble the final system prompt. Returns ``None`` only when every
-    section is disabled/empty (so callers can distinguish "no prompt at all")."""
-    parts: list[str] = []
+def compile_prompt(inputs: PromptInputs) -> CompiledPrompt:
+    """Assemble the system prompt, keeping the sections it was built from.
+
+    The instruction stack contributes ONE section per instruction file (in the
+    stack's own order), so per-file attribution survives; every other input is a
+    single section. ``text`` is the sections joined with blank lines — i.e. the
+    exact string :func:`compile_system_prompt` has always returned.
+    """
+    sections: list[PromptSection] = []
     if inputs.base and inputs.base.strip():
-        parts.append(inputs.base.rstrip())
+        sections.append(PromptSection(kind="base", text=inputs.base.rstrip()))
     if inputs.include_global_instructions or inputs.include_project_instructions:
-        stack = build_instruction_stack(
+        for file, block in build_instruction_blocks(
             inputs.cwd,
             include_global=inputs.include_global_instructions,
             include_project=inputs.include_project_instructions,
-        )
-        if stack.strip():
-            parts.append(stack)
+        ):
+            if block.strip():
+                sections.append(
+                    PromptSection(
+                        kind="memory", text=block, path=file.path, scope=file.scope
+                    )
+                )
     if inputs.include_skills:
         index = skills_index(
             inputs.cwd, include_global=inputs.include_global_instructions
         )
         if index:
-            parts.append(index)
+            sections.append(PromptSection(kind="skills", text=index))
     if inputs.include_env:
-        parts.append(environment_block(inputs.cwd))
+        sections.append(
+            PromptSection(kind="environment", text=environment_block(inputs.cwd))
+        )
     for block in inputs.extra_blocks:
         if block and block.strip():
-            parts.append(block.rstrip())
-    return "\n\n".join(parts) if parts else None
+            sections.append(PromptSection(kind="extra", text=block.rstrip()))
+    text = "\n\n".join(s.text for s in sections) if sections else None
+    return CompiledPrompt(sections=tuple(sections), text=text)
+
+
+def compile_system_prompt(inputs: PromptInputs) -> str | None:
+    """Assemble the final system prompt. Returns ``None`` only when every
+    section is disabled/empty (so callers can distinguish "no prompt at all")."""
+    return compile_prompt(inputs).text

@@ -20,7 +20,9 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
 from fluid.context.cache_plan import plan_cache
+from fluid.context.compiler import CompiledPrompt
 from fluid.context.trim import ToolResultTrimmer, TrimConfig
+from fluid.context.usage import MemoryFileUsage, build_context_usage, memory_file_usage
 from fluid.engine.base import EngineCaps
 from fluid.events.bus import EventBus
 from fluid.events.model import (
@@ -169,7 +171,7 @@ def repair_dangling_tool_calls(history: list[Message]) -> list[Message]:
 class NativeLoop:
     caps = EngineCaps(
         inproc_tools=True, schema_plan_mode=True,
-        fork=True, rewind=True, cache_metrics=True,
+        fork=True, rewind=True, cache_metrics=True, context_usage=True,
     )
 
     def __init__(
@@ -181,6 +183,8 @@ class NativeLoop:
         session_id: str | None = None,
         model: str,
         system: str | None = None,
+        system_sections: "CompiledPrompt | None" = None,
+        context_window: int | None = None,
         max_tokens: int = 8192,
         effort: str | None = None,
         registry: ToolRegistry | None = None,
@@ -198,6 +202,14 @@ class NativeLoop:
         self.bus = bus or EventBus()
         self.model = model
         self.system = system
+        # The compiled prompt's labeled sections, when the caller compiled one
+        # (fluid.context.compiler). Purely descriptive — the request always
+        # sends ``system`` — but it is what lets get_context_usage price memory
+        # files and skills separately instead of as one opaque blob.
+        self.system_sections = system_sections
+        # Model context window, when the host app knows it. None → the usage
+        # breakdown reports maxTokens/percentage as None rather than guessing.
+        self.context_window = context_window
         self.max_tokens = max_tokens
         # Reasoning-depth knob, provider-mapped by each serializer (Anthropic
         # output_config.effort; OpenAI-shaped reasoning.effort, clamped).
@@ -375,6 +387,52 @@ class NativeLoop:
         if self._codemode is not None:
             await self._codemode.aclose()
         await self.bus.close()
+
+    # ─── Context-usage snapshot ──────────────────────────────────────────
+
+    def memory_file_usage(self) -> list[MemoryFileUsage]:
+        """Per-instruction-file token estimates behind the "Memory files"
+        category, which carries only their total. Same list the breakdown
+        publishes as ``memoryFiles``, in :class:`MemoryFileUsage` form."""
+        if self.system_sections is None:
+            return []
+        return memory_file_usage(self.system_sections.sections)
+
+    async def get_context_usage(self) -> dict[str, Any] | None:
+        """Claude-Code-parity breakdown of what the NEXT request would carry.
+
+        A snapshot, safe between turns: it reads the store, renders the history
+        through the trimmer's read-only view (:meth:`ToolResultTrimmer.view` —
+        no batch is armed, nothing is trimmed as a side effect) and prices the
+        same tool schemas ``_build_request`` would send. No model call is made
+        and no node is written; a session that does not exist yet simply prices
+        as an empty history rather than being created here.
+
+        See :mod:`fluid.context.usage` for the category rules and the palette.
+        """
+        history: list[Message] = []
+        # Resolve the session READ-ONLY: _ensure_session would create one, and
+        # asking what the context looks like must not bring a session into being.
+        sid = self._session.session_id if self._session is not None else None
+        if sid is None and self._session_id is not None:
+            sid = self._session_id if await self.store.get_session(self._session_id) else None
+        if sid is not None:
+            nodes = await self.store.load_path(sid)
+            history = repair_dangling_tool_calls(self._trimmer.view(nodes))
+        deferred = (
+            [s.to_api() for s in self.registry.deferred_tools()]
+            if self.registry is not None and self._codemode is None
+            else []
+        )
+        return build_context_usage(
+            sections=self.system_sections.sections if self.system_sections else (),
+            system_text=self.system,
+            history=history,
+            tools_api=self._tools_api(),
+            deferred_tools_api=deferred,
+            model=self.model,
+            context_window=self.context_window,
+        )
 
     # ─── Turn lifecycle ──────────────────────────────────────────────────
 
@@ -560,22 +618,27 @@ class NativeLoop:
             usage=dict(total_usage), cost_usd=cost_total,
         ))
 
+    def _tools_api(self) -> list[dict[str, Any]]:
+        """The tool schemas the next request would carry (code-mode surface or
+        the loaded registry, plan-filtered). Pure — no request is built."""
+        if self.registry is None:
+            return []
+        if self._codemode is not None:
+            # Code-mode replaces N schemas with the four-tool surface; the
+            # work-tools stay in the registry (reachable via host calls) but
+            # never enter the prompt schema.
+            specs = [
+                s for s in self.registry.list_tools(loaded_only=True)
+                if s.source == "codemode"
+            ]
+        else:
+            specs = self.registry.list_tools(loaded_only=True)
+            if self.plan_mode:
+                specs = plan_mode_tools(specs)
+        return [s.to_api() for s in specs]
+
     def _build_request(self, history: list[Message]) -> ProviderRequest:
-        tools_api: list[dict[str, Any]] = []
-        if self.registry is not None:
-            if self._codemode is not None:
-                # Code-mode replaces N schemas with the four-tool surface; the
-                # work-tools stay in the registry (reachable via host calls) but
-                # never enter the prompt schema.
-                specs = [
-                    s for s in self.registry.list_tools(loaded_only=True)
-                    if s.source == "codemode"
-                ]
-            else:
-                specs = self.registry.list_tools(loaded_only=True)
-                if self.plan_mode:
-                    specs = plan_mode_tools(specs)
-            tools_api = [s.to_api() for s in specs]
+        tools_api = self._tools_api()
         plan = plan_cache(self.provider.caps, has_tools=bool(tools_api))
         return ProviderRequest(
             model=self.model,

@@ -36,6 +36,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "continual_model": None,
     "cwd": ".",
     "max_tokens": 8192,
+    "context_window": None,
     "system": None,
     "permission": {"approval_policy": "on_write", "rules": []},
     "instruction_files": {
@@ -132,6 +133,11 @@ def env_overrides(env: dict[str, str] | None = None) -> dict[str, Any]:
             out["max_tokens"] = int(env["FLUID_MAX_TOKENS"])
         except ValueError:
             pass
+    if "FLUID_CONTEXT_WINDOW" in env:
+        try:
+            out["context_window"] = int(env["FLUID_CONTEXT_WINDOW"])
+        except ValueError:
+            pass
     if "FLUID_APPROVAL_POLICY" in env:
         out["permission"] = {"approval_policy": env["FLUID_APPROVAL_POLICY"]}
     return out
@@ -226,6 +232,7 @@ def build_engine(
     bus=None,
     session_id: str | None = None,
     system: str | None = None,
+    system_sections: Any | None = None,
     provider: Any | None = None,
     registry: Any | None = None,
     permissions: Any | None = None,
@@ -240,7 +247,11 @@ def build_engine(
     Native kinds → :class:`NativeLoop`; ``delegated_claude`` → :class:`DelegatedLoop`.
     ``provider`` injects a ready ProviderClient (the test/offline hook), bypassing
     :func:`_build_provider_client`. ``registry``/``permissions``/``ctx`` are built
-    from ``config`` when not supplied.
+    from ``config`` when not supplied. ``system_sections`` is the
+    :class:`~fluid.context.compiler.CompiledPrompt` ``system`` was compiled from,
+    when the caller has it — it only feeds the context-usage breakdown's
+    per-section attribution (the delegated leg ignores it: the CLI compiles, and
+    reports on, its own prompt).
     """
     from fluid.tools.registry import ToolCtx, ToolRegistry
 
@@ -303,6 +314,8 @@ def build_engine(
         session_id=session_id,
         model=model,
         system=system if system is not None else config.system,
+        system_sections=system_sections,
+        context_window=config.context_window,
         max_tokens=config.max_tokens,
         registry=registry,
         permissions=permissions,

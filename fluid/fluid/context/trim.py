@@ -68,6 +68,13 @@ def estimate_tokens(nodes: list[SessionNode]) -> int:
     return chars // 4
 
 
+def estimate_tokens_of_text(text: str | None) -> int:
+    """The same chars/4 heuristic, for plain strings (prompt sections, tool
+    schemas). Every token count fluid reports comes from this one estimator —
+    there is no tokenizer and no counting round-trip to a provider."""
+    return len(text) // 4 if text else 0
+
+
 def _placeholder(chars: int) -> Text:
     return Text(
         f"[old tool result trimmed to save context — {chars} chars removed; "
@@ -150,6 +157,18 @@ class ToolResultTrimmer:
             return False
         self._trimmed.update(newly)
         return True
+
+    def view(self, nodes: list[SessionNode]) -> list[Message]:
+        """The CURRENT trimmed view, read-only.
+
+        Same rendering as :meth:`apply` minus the trigger check, so nothing is
+        armed and ``_trimmed`` is left alone: a snapshot caller (the
+        context-usage breakdown) sees exactly what the next request would carry
+        without changing what that request will be.
+        """
+        if not self.config.enabled:
+            return [n.message for n in nodes]
+        return self._render(nodes)
 
     def apply(self, nodes: list[SessionNode]) -> list[Message]:
         """Render history with sticky trims; arm a new batch when over trigger."""

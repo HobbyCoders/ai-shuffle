@@ -115,6 +115,11 @@ class HarnessConfig:
     instruction_files: InstructionFilesConfig = field(default_factory=InstructionFilesConfig)
     cwd: str = "."
     max_tokens: int = 8192
+    # Model context window, when the host app knows it (model ids come and go
+    # faster than any table fluid could ship, so nothing is inferred). Feeds
+    # maxTokens/rawMaxTokens/percentage in the context-usage breakdown; None
+    # leaves those None rather than guessing a window.
+    context_window: int | None = None
     system: str | None = None
     # MCP servers to connect at session start: name → transport config, e.g.
     # {"transport": "stdio", "command": "npx", "args": [...]} or
@@ -140,6 +145,9 @@ class HarnessConfig:
             instruction_files=InstructionFilesConfig.from_dict(d.get("instruction_files", {})),
             cwd=d.get("cwd", "."),
             max_tokens=int(d.get("max_tokens", 8192)),
+            context_window=(
+                int(d["context_window"]) if d.get("context_window") else None
+            ),
             system=d.get("system"),
             mcp={name: dict(cfg) for name, cfg in d.get("mcp", {}).items()},
         )
@@ -169,6 +177,7 @@ class HarnessConfig:
             "continual_model": self.continual_model,
             "cwd": self.cwd,
             "max_tokens": self.max_tokens,
+            "context_window": self.context_window,
             "system": self.system,
             "permission": {
                 "approval_policy": self.permission.approval_policy,

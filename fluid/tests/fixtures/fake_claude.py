@@ -16,6 +16,17 @@ sequence on stdout, selected by ``FAKE_CLAUDE_SCENARIO``:
                             → result  (drives the dedupe path)
   e  stale wake burst:      like (a), but after the first turn's result it emits
                             an unsolicited assistant+result burst (no prompt)
+  f  control replies:       like (a), and answers a ``get_context_usage``
+                            control_request with a success control_response
+  g  control error:         like (f), but answers with the error subtype
+  h  control silence:       like (a), and never answers a control_request
+                            (drives the caller's timeout path)
+  i  deferred control:      like (a), but a ``get_context_usage`` request is
+                            parked unanswered until the *next* user turn, whose
+                            frames it then interleaves with:
+                            assistant → control_response → result. Forces the
+                            reply to arrive through the turn's frame reader
+                            while a between-turns pump is still waiting on it.
 
 ``claude --version`` prints a version line and exits (the loop's version guard).
 Frames model the real vocabulary (``claude_agent_sdk`` message_parser + query.py).
@@ -136,6 +147,68 @@ def turn_tool(sid: str) -> None:
     emit(result_frame(sid))
 
 
+# What scenario (f) reports for get_context_usage — the SDK's
+# ContextUsageResponse shape, nested under the success frame's inner "response".
+CONTEXT_USAGE_PAYLOAD = {
+    "categories": [
+        {"name": "System prompt", "tokens": 2300, "color": "#6C5CE7"},
+        {"name": "Tools", "tokens": 9100, "color": "#FDCB6E"},
+        {"name": "Messages", "tokens": 600, "color": "#E17055"},
+        {"name": "Free space", "tokens": 188000, "color": "#2D3436"},
+    ],
+    "totalTokens": 12000,
+    "maxTokens": 200000,
+    "rawMaxTokens": 200000,
+    "percentage": 6.0,
+    "model": "claude-fake",
+    "isAutoCompactEnabled": True,
+}
+
+
+def context_usage_response(request_id: str) -> dict:
+    return {"type": "control_response", "response": {
+        "subtype": "success", "request_id": request_id,
+        "response": CONTEXT_USAGE_PAYLOAD,
+    }}
+
+
+def answer_control(msg: dict, scenario: str) -> str | None:
+    """Reply to a control_request the harness sent (scenarios f/g; h stays mute).
+
+    Returns a request_id when the reply is deliberately deferred (scenario i),
+    for the caller to emit inside the next turn.
+    """
+    if scenario == "h":
+        return None
+    request_id = msg.get("request_id", "")
+    subtype = (msg.get("request") or {}).get("subtype")
+    if subtype != "get_context_usage":
+        return None
+    if scenario == "i":
+        return request_id  # parked — the next turn carries it
+    if scenario == "g":
+        emit({"type": "control_response", "response": {
+            "subtype": "error", "request_id": request_id,
+            "error": "context usage unavailable",
+        }})
+        return None
+    emit(context_usage_response(request_id))
+    return None
+
+
+def turn_with_deferred_control(sid: str, request_id: str | None) -> None:
+    """A simple turn that carries a parked control reply in its frame stream.
+
+    Ordering matters: the assistant frame goes out *before* the reply, so a
+    reader that is still pumping for the reply would have to discard a real turn
+    frame to reach it.
+    """
+    emit(assistant_frame(sid, [{"type": "text", "text": "Hello from fake."}], "end_turn"))
+    if request_id is not None:
+        emit(context_usage_response(request_id))
+    emit(result_frame(sid))
+
+
 def turn_partial(sid: str) -> None:
     emit(stream_event(sid, {"type": "message_start", "message": {"usage": {"input_tokens": 9}}}))
     emit(stream_event(sid, {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}))
@@ -171,13 +244,20 @@ def main() -> int:
           "model": "claude-fake", "tools": [], "mcp_servers": []})
 
     wake_emitted = False
+    deferred_control: str | None = None
     while True:
         msg = read_line()
         if msg is None:
             return 0
+        if msg.get("type") == "control_request":
+            deferred_control = answer_control(msg, scenario) or deferred_control
+            continue
         if msg.get("type") != "user":
             continue
-        if scenario == "b":
+        if scenario == "i":
+            turn_with_deferred_control(session_id, deferred_control)
+            deferred_control = None
+        elif scenario == "b":
             turn_tool(session_id)
         elif scenario == "d":
             turn_partial(session_id)

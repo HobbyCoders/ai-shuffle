@@ -16,6 +16,15 @@ dispatches tools directly. Permission prompts arrive as ``can_use_tool``
 control_requests: the loop surfaces a ``PermissionRequest`` event, parks until
 ``RespondPermission``, and replies with the matching ``control_response`` frame.
 
+Exactly one reader owns the CLI's stdout at a time (``_stdout_lock``): a turn's
+frame reader, or — between turns — the control pump behind ``_request_control``.
+Ownership is not fixed for the life of a wait: the pump yields the lock as soon
+as a turn task exists, so a snapshot query can never stall a turn behind it. The
+handover needs no frame pushback buffer, because a turn cannot make the CLI emit
+anything until it writes its user frame, and it cannot write that frame until it
+holds the lock the pump is still holding — so every line the pump reads is
+either a control reply (routed by request_id) or genuinely stale.
+
 The process is kept alive across turns; ``cli_session_id`` (from the ``init``
 frame) is the ``--resume`` handle for reconnecting to the same CLI conversation.
 It is written back to the store's ``SessionMeta`` every time it changes, so a
@@ -26,6 +35,7 @@ fluid session id.
 from __future__ import annotations
 
 import asyncio
+import enum
 import json
 import logging
 import os
@@ -35,7 +45,12 @@ import tempfile
 from typing import Any, AsyncIterator
 
 from fluid.engine.base import EngineCaps
-from fluid.engine.delegated_proto import PermissionBridge, StreamJsonMapper
+from fluid.engine.delegated_proto import (
+    ControlReply,
+    PermissionBridge,
+    StreamJsonMapper,
+    parse_control_response,
+)
 from fluid.events.bus import EventBus
 from fluid.events.model import ErrorEvent, Event, TurnStarted
 from fluid.events.ops import (
@@ -52,6 +67,31 @@ from fluid.tools.registry import ToolCtx, ToolRegistry
 
 logger = logging.getLogger(__name__)
 
+# How long a control_request may wait for its control_response before the
+# caller gives up and reports "unavailable". Short on purpose: these are
+# snapshot queries a UI polls between turns, never something worth stalling on.
+CONTROL_TIMEOUT = 5.0
+
+# Poll interval while another reader (a live turn) owns stdout and is expected
+# to deliver our reply. Also caps a single pump read, so the pump notices a turn
+# starting within one interval instead of sitting in ``readline`` until the
+# control deadline.
+_CONTROL_POLL = 0.05
+
+
+class _PumpOutcome(enum.Enum):
+    """Why ``_pump_control_stdout`` stopped reading.
+
+    Four distinct reasons, four distinct values: overloading a bool here is what
+    made "the CLI is gone" and "a turn wants stdout back" indistinguishable to
+    the caller.
+    """
+
+    REPLY = "reply"  # the awaited control_response landed
+    DEADLINE = "deadline"  # the caller's timeout expired first
+    EOF = "eof"  # stdout closed — no reply will ever arrive
+    YIELDED = "yielded"  # a turn started; stdout handed back to its reader
+
 
 class DelegatedLoop:
     caps = EngineCaps(
@@ -62,6 +102,7 @@ class DelegatedLoop:
         rewind=False,
         subagents=True,
         cache_metrics=False,
+        context_usage=True,
     )
 
     provider = "claude"
@@ -116,6 +157,12 @@ class DelegatedLoop:
         self._interrupted = asyncio.Event()
         self._turn_task: asyncio.Task | None = None
         self._pending_permissions: dict[str, asyncio.Future] = {}
+        # Loop-issued control_requests awaiting their control_response, by
+        # request_id (the outbound mirror of _pending_permissions).
+        self._pending_controls: dict[str, asyncio.Future] = {}
+        # Only one reader may consume the CLI's stdout at a time: a turn's
+        # frame reader, or a between-turns control pump.
+        self._stdout_lock = asyncio.Lock()
         # Fire-and-forget writes of cli_session_id back to the store.
         self._cli_id_writes: set[asyncio.Task] = set()
 
@@ -178,6 +225,13 @@ class DelegatedLoop:
 
     async def aclose(self) -> None:
         self._interrupted.set()
+        # Settle anyone parked on a control reply: the CLI is going away, so
+        # they get "unavailable" now instead of waiting out the timeout.
+        for request_id, fut in list(self._pending_controls.items()):
+            if not fut.done():
+                fut.set_result(ControlReply(
+                    request_id=request_id, ok=False, error="engine closed",
+                ))
         if self._turn_task and not self._turn_task.done():
             self._turn_task.cancel()
             try:
@@ -337,7 +391,8 @@ class DelegatedLoop:
             await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id, message=f"spawn failed: {exc!r}"))
             return
         if reused:
-            await self._discard_stale_stdout()
+            async with self._stdout_lock:
+                await self._discard_stale_stdout()
 
         content = [Text(op.content)] if isinstance(op.content, str) else list(op.content)
         user_node = SessionNode(
@@ -362,7 +417,8 @@ class DelegatedLoop:
             await self._write_frame({"type": "user", "message": {
                 "role": "user", "content": _content_to_cli(content),
             }})
-            await self._read_until_result(sid, turn_id, mapper, user_node)
+            async with self._stdout_lock:
+                await self._read_until_result(sid, turn_id, mapper, user_node)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -423,8 +479,14 @@ class DelegatedLoop:
             if not line:  # EOF — let the turn's reader surface the closed stream
                 return
             text = line.decode(errors="replace").strip()
-            if text:
-                logger.warning("discarding stale between-turn CLI frame: %.300s", text)
+            if not text:
+                continue
+            if self._route_control_response(text):
+                # A control reply is never stale: some caller is awaiting that
+                # exact request_id (a context-usage snapshot taken as this turn
+                # was starting). Route it instead of dropping it on the floor.
+                continue
+            logger.warning("discarding stale between-turn CLI frame: %.300s", text)
         logger.warning("stale-frame drain hit its line cap; continuing turn anyway")
 
     async def _read_until_result(
@@ -458,6 +520,10 @@ class DelegatedLoop:
                 parent = node
             if mapped.permission is not None:
                 await self._handle_permission(mapped.permission)
+            if mapped.control_reply is not None:
+                # A control call issued while this turn runs: the turn owns
+                # stdout, so its reader is what delivers the answer.
+                self._resolve_control(mapped.control_reply)
             if mapped.is_result:
                 return
 
@@ -510,6 +576,7 @@ class DelegatedLoop:
         return f"req_{self._req_counter}_{os.urandom(4).hex()}"
 
     async def _send_control(self, request: dict[str, Any]) -> None:
+        """Fire-and-forget control_request (set_model, interrupt, …)."""
         if self._proc is None or self._proc.returncode is not None:
             return
         await self._write_frame({
@@ -517,6 +584,175 @@ class DelegatedLoop:
             "request_id": self._next_req_id(),
             "request": request,
         })
+
+    def _route_control_response(self, text: str) -> bool:
+        """Resolve a raw stdout line if it is a control_response; else False.
+
+        Used by every stdout consumer that is not the turn's frame mapper (the
+        stale-frame drain, the between-turns control pump), so a reply can never
+        be discarded by whichever reader happens to see it first.
+        """
+        try:
+            frame = json.loads(text)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(frame, dict) or frame.get("type") != "control_response":
+            return False
+        reply = parse_control_response(frame)
+        if reply is not None:
+            self._resolve_control(reply)
+        return True
+
+    def _resolve_control(self, reply: ControlReply) -> None:
+        """Hand a control_response to whoever is awaiting that request_id.
+
+        Replies nobody is waiting for (a timed-out caller, a request from a
+        previous engine object sharing the CLI process) are dropped.
+        """
+        fut = self._pending_controls.get(reply.request_id)
+        if fut is not None and not fut.done():
+            fut.set_result(reply)
+
+    async def _request_control(
+        self, request: dict[str, Any], *, timeout: float = CONTROL_TIMEOUT,
+    ) -> dict[str, Any] | None:
+        """Send a control_request and await its control_response.
+
+        Returns the reply's payload dict, or None when the CLI is not running,
+        answered with the error subtype, or did not answer within ``timeout``.
+        The pending entry is removed on every path — a late reply then simply
+        finds nothing to resolve.
+        """
+        if self._proc is None or self._proc.returncode is not None:
+            return None
+        request_id = self._next_req_id()
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending_controls[request_id] = fut
+        try:
+            await self._write_frame({
+                "type": "control_request",
+                "request_id": request_id,
+                "request": request,
+            })
+            await self._await_control_reply(fut, timeout)
+            reply: ControlReply = fut.result()
+        except asyncio.TimeoutError:
+            logger.debug("control_request %r timed out", request.get("subtype"))
+            return None
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("control_request %r failed", request.get("subtype"), exc_info=True)
+            return None
+        finally:
+            self._pending_controls.pop(request_id, None)
+        if not reply.ok:
+            logger.debug("control_request %r errored: %s", request.get("subtype"), reply.error)
+            return None
+        return reply.payload
+
+    def _turn_is_active(self) -> bool:
+        """True from the moment a turn task is created until it finishes.
+
+        Deliberately keyed on the task, not on the user frame having been
+        written: ``submit()`` creates the task before ``_run_turn`` writes
+        anything, so this flips at the earliest instant a turn can exist.
+        """
+        return self._turn_task is not None and not self._turn_task.done()
+
+    async def _await_control_reply(self, fut: asyncio.Future, timeout: float) -> None:
+        """Wait for ``fut``, pumping stdout ourselves when nobody else is.
+
+        Exactly one reader may consume the CLI's stdout. During a turn that is
+        the turn's frame reader (which routes control replies through
+        ``_resolve_control``), so here we only wait. Between turns nothing is
+        reading, so this pumps lines itself under ``_stdout_lock`` and discards
+        anything that is not the reply — matching ``_discard_stale_stdout``:
+        frames arriving with no turn active are stale by construction.
+
+        The two modes are not a one-time choice. A turn can start while we are
+        pumping, and the pump then *yields*: it drops out of its read loop and
+        releases the lock so the turn's own reader can take over (which is also
+        what delivers our reply, via ``mapped.control_reply``). Without that,
+        the pump would hold stdout for the rest of the deadline and the turn —
+        which blocks on ``_stdout_lock`` before it can write its user frame —
+        would stall for up to ``CONTROL_TIMEOUT`` behind a snapshot query.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while not fut.done():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            if self._turn_is_active() or self._stdout_lock.locked():
+                # Someone else owns stdout; poll so a turn ending mid-wait hands
+                # the pump back to us before the deadline.
+                await asyncio.wait({fut}, timeout=min(_CONTROL_POLL, remaining))
+                continue
+            async with self._stdout_lock:
+                outcome = await self._pump_control_stdout(fut, deadline)
+            if outcome is _PumpOutcome.EOF and not fut.done():
+                # stdout hit EOF: the CLI is gone and no reply is coming — stop
+                # rather than spinning on a closed stream until the deadline.
+                raise asyncio.TimeoutError
+            # REPLY / DEADLINE / YIELDED all fall back to the loop head, which
+            # re-derives the state: reply → exit, deadline → TimeoutError,
+            # yielded → poll while the turn's reader owns stdout.
+        if not fut.done():
+            raise asyncio.TimeoutError
+
+    async def _pump_control_stdout(
+        self, fut: asyncio.Future, deadline: float,
+    ) -> _PumpOutcome:
+        """Read frames until the reply lands, a turn wants stdout, or time is up.
+
+        Each read is capped at ``_CONTROL_POLL`` rather than the whole remaining
+        budget: the turn-active check below only helps if the loop actually
+        comes back around to it, and a bare ``readline`` would otherwise sit
+        blocked until the deadline. Cancelling ``readline`` on timeout consumes
+        nothing — ``readuntil`` only takes from the buffer when it returns a
+        complete line (same guarantee ``_discard_stale_stdout`` relies on).
+        """
+        assert self._proc is not None and self._proc.stdout is not None
+        loop = asyncio.get_running_loop()
+        while not fut.done():
+            if self._turn_is_active():
+                # Checked *before* the read on purpose: stopping here means we
+                # never hold a frame we cannot classify. Anything already read
+                # was read while no turn existed — and a turn cannot make the
+                # CLI emit until it writes its user frame, which it cannot do
+                # until we release this lock — so nothing in flight belongs to
+                # it (see the stdout-ownership note in the module docstring).
+                return _PumpOutcome.YIELDED
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return _PumpOutcome.DEADLINE
+            try:
+                line = await asyncio.wait_for(
+                    self._proc.stdout.readline(), timeout=min(remaining, _CONTROL_POLL),
+                )
+            except asyncio.TimeoutError:
+                continue  # nothing to read yet — re-check turn/deadline
+            if not line:  # EOF — the CLI is gone; no reply is coming
+                return _PumpOutcome.EOF
+            text = line.decode(errors="replace").strip()
+            if not text:
+                continue
+            if not self._route_control_response(text):
+                logger.warning("discarding between-turn CLI frame: %.300s", text)
+        return _PumpOutcome.REPLY
+
+    async def get_context_usage(self) -> dict[str, Any] | None:
+        """The CLI's own ``/context`` breakdown, proxied verbatim.
+
+        The delegated leg owns no context state — the CLI compiles the prompt,
+        counts the tokens and knows the window — so this asks it and passes the
+        answer straight through; it is already the documented shape (categories
+        / totalTokens / maxTokens / rawMaxTokens / percentage / model /
+        isAutoCompactEnabled). None when the CLI is not running, errored, or did
+        not answer within ``CONTROL_TIMEOUT``.
+        """
+        return await self._request_control({"subtype": "get_context_usage"})
 
     async def _send_interrupt(self) -> None:
         """Send the documented interrupt control_request; fall back to SIGINT."""

@@ -30,7 +30,7 @@ def make_store(directory: str | os.PathLike[str] | None = None):
     return JsonlStore(directory or default_store_dir())
 
 
-def resolved_system(config: HarnessConfig, *, extra_system: str | None = None) -> str | None:
+def resolved_prompt(config: HarnessConfig, *, extra_system: str | None = None):
     """CLI prompt assembly, delegated to the shared compiler.
 
     The CLI's historical layering (instruction stack first, then config/per-run
@@ -38,11 +38,14 @@ def resolved_system(config: HarnessConfig, *, extra_system: str | None = None) -
     ``extra_system`` therefore ride as ``extra_blocks``, preserving the CLI's
     observable ordering. The CLI keeps env injection off — its REPL banner
     already shows cwd/model, and pre-compiler behavior carried no env block.
+
+    Returns the :class:`~fluid.context.compiler.CompiledPrompt` (text + labeled
+    sections); :func:`resolved_system` is its ``.text``.
     """
-    from fluid.context.compiler import PromptInputs, compile_system_prompt
+    from fluid.context.compiler import PromptInputs, compile_prompt
 
     enabled = config.instruction_files.enabled
-    return compile_system_prompt(
+    return compile_prompt(
         PromptInputs(
             base=None,
             extra_blocks=[b for b in (config.system, extra_system) if b],
@@ -53,6 +56,11 @@ def resolved_system(config: HarnessConfig, *, extra_system: str | None = None) -
             include_skills=enabled and config.instruction_files.discover_skills,
         )
     )
+
+
+def resolved_system(config: HarnessConfig, *, extra_system: str | None = None) -> str | None:
+    """The compiled CLI system prompt as a plain string."""
+    return resolved_prompt(config, extra_system=extra_system).text
 
 
 def make_engine(
@@ -69,7 +77,7 @@ def make_engine(
     claude_cmd: list[str] | None = None,
 ):
     """Construct the engine for a CLI run with the instruction stack injected."""
-    system = resolved_system(config, extra_system=extra_system)
+    compiled = resolved_prompt(config, extra_system=extra_system)
     return build_engine(
         config,
         store,
@@ -77,7 +85,8 @@ def make_engine(
         provider=provider,
         bus=bus,
         session_id=session_id,
-        system=system,
+        system=compiled.text,
+        system_sections=compiled,
         plan_mode=plan_mode,
         registry=registry,
         claude_cmd=claude_cmd,
