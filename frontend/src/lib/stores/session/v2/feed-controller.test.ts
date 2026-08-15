@@ -58,6 +58,7 @@ vi.mock('./sse-feed', () => ({
 }));
 
 import { feedController } from './feed-controller';
+import { browserPanel } from '../../browser-panel.svelte';
 import type { ActiveSessionState } from '../../active-session';
 
 // ─── rAF stub: capture callbacks, flush on demand (never auto-fires) ──────────
@@ -138,6 +139,22 @@ function userMessage(id: string, turnId: string, content = 'queued text'): Recor
 // The history/live boundary sentinel emitted by the backend after backfill.
 function caughtUp(seq = 0): Record<string, unknown> {
 	return { type: 'caught_up', seq };
+}
+
+// A tool.use event. `name` is the fully-qualified tool name; the reducer + the
+// browser-panel auto-open hook both read `event.name`. tool_use_id is required
+// (the reducer drops a tool.use without one).
+function toolUse(id: string, name: string): Record<string, unknown> {
+	return {
+		type: 'tool.use',
+		id: `evt-${id}`,
+		seq: 0,
+		session_id: 's1',
+		created_at: '2026-07-12T00:00:00.000Z',
+		tool_use_id: id,
+		name,
+		input: {},
+	};
 }
 
 // Durable interaction lifecycle events (#606 item 4). The FE consumes these only
@@ -500,5 +517,61 @@ describe('feedController revive (half-open feed healing)', () => {
 
 		feedController.revive();
 		expect(hoisted.revives).toBe(1);
+	});
+});
+
+// ─── Browser-panel auto-open on a live browser tool.use ──────────────────────
+
+describe('feedController browser-panel auto-open', () => {
+	beforeEach(() => {
+		// Clean, closed baseline with no close-suppression for the fed session.
+		browserPanel.closePanel(null);
+	});
+
+	it('auto-opens on a LIVE mcp__browser__* tool.use', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0)); // enter live mode
+
+		expect(browserPanel.current.open).toBe(false);
+		hoisted.onEvent!(toolUse('t1', 'mcp__browser__browser_navigate'));
+		expect(browserPanel.current.open).toBe(true);
+	});
+
+	it('does NOT open for a non-browser tool.use', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+
+		hoisted.onEvent!(toolUse('t1', 'Bash'));
+		expect(browserPanel.current.open).toBe(false);
+	});
+
+	it('does NOT open during history backfill (before caught_up)', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+
+		// A backfilled browser tool.use (no caught_up yet) must not pop the panel.
+		hoisted.onEvent!(toolUse('t1', 'mcp__browser__browser_navigate'));
+		expect(browserPanel.current.open).toBe(false);
+
+		// Once caught up, the same backfilled event is not replayed, so still closed.
+		hoisted.onEvent!(caughtUp(1));
+		expect(browserPanel.current.open).toBe(false);
+	});
+
+	it('does NOT open after the user closed the panel for that session', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+
+		// User dismissed the panel for s1 → a later browser tool must not reopen it.
+		browserPanel.closePanel('s1');
+		hoisted.onEvent!(toolUse('t1', 'mcp__browser__browser_navigate'));
+		expect(browserPanel.current.open).toBe(false);
 	});
 });

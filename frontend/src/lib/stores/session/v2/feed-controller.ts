@@ -20,6 +20,10 @@ import { reduce, initialState, type V2SessionState, type WireEvent } from './red
 import { createSseFeed, type SseFeed } from './sse-feed';
 import type { ActiveSessionState } from '../../active-session';
 import type { QueuedMessage, Task } from '../../types';
+import { browserPanel } from '../../browser-panel.svelte';
+
+/** MCP browser-tool prefix — a live `tool.use` for one auto-opens the panel. */
+const BROWSER_TOOL_PREFIX = 'mcp__browser__';
 
 // ─── Injected writer deps ─────────────────────────────────────────────────────
 
@@ -338,7 +342,19 @@ export const feedController: FeedController = {
 				// During backfill (!caughtUp) accumulate silently — the single fold
 				// happens on `caught_up`. After catch-up, keep the existing
 				// incremental per-frame paint so live streaming is unchanged.
-				if (caughtUp) scheduleFlush();
+					if (
+						caughtUp &&
+						ev.type === 'tool.use' &&
+						typeof ev.name === 'string' &&
+						ev.name.startsWith(BROWSER_TOOL_PREFIX)
+					) {
+						// Auto-open the live browser panel the first time the agent drives
+						// a browser tool. LIVE events only (gated on `caughtUp`), so
+						// replaying a session's history never pops the panel open;
+						// `autoOpenFor` no-ops if the user closed it for this session.
+						browserPanel.autoOpenFor(currentSessionId);
+					}
+					if (caughtUp) scheduleFlush();
 			},
 			onError: (err) => {
 				console.debug('[feedController] feed error', err);
