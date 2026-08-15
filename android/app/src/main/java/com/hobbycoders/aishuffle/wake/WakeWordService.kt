@@ -30,27 +30,29 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import org.json.JSONArray
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
-import org.vosk.android.RecognitionListener
-import org.vosk.android.SpeechService
 
 /**
  * The always-on wake-word listener: a foreground service running Vosk's small
- * offline model, constrained to a grammar of just the wake phrase, so the only
- * thing it can "hear" is whether the phrase was said. Nothing is recorded or
- * sent anywhere — the realtime AI conversation only starts AFTER the phrase.
+ * offline model, constrained to a grammar of the wake phrase (plus decoys),
+ * so the only thing it can "hear" is whether the phrase was said. Nothing is
+ * recorded or sent anywhere — the realtime AI conversation only starts AFTER
+ * the phrase.
  *
- * While a voice call is live the recognizer is stopped (the call owns the mic)
- * and resumes when the call ends.
+ * Audio capture and the energy gate live in WakeAudioPipeline; this service
+ * owns the model, the trigger gates, and the call/device lifecycle. While a
+ * voice call is live the recognizer is stopped (the call owns the mic) and
+ * resumes when the call ends.
  */
-class WakeWordService : Service(), RecognitionListener {
+class WakeWordService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     private var model: Model? = null
-    private var speechService: SpeechService? = null
+    private var pipeline: WakeAudioPipeline? = null
     private var phrase: String = AssistPrefs.DEFAULT_PHRASE
 
     @Volatile
@@ -190,30 +192,47 @@ class WakeWordService : Service(), RecognitionListener {
 
     /**
      * Grammar-constrained recognizer: the decoder can only output the wake
-     * phrase's words or `[unk]`, which makes spotting cheap and reliable.
+     * phrase, its individual words, or `[unk]`. The lone-word decoys matter —
+     * with only the full phrase available, the decoder forces near-misses
+     * ("hey" alone, background chatter) into the phrase; giving it cheaper
+     * escapes makes a full-phrase result far more meaningful.
      */
     private fun startRecognizer(m: Model) {
         stopRecognizer()
-        val grammar = """["$phrase", "[unk]"]"""
-        val recognizer = Recognizer(m, SAMPLE_RATE, grammar)
-        // Word-level output so results carry per-word confidence — the false-
-        // trigger gate in checkForPhrase needs it.
-        recognizer.setWords(true)
-        val service = SpeechService(recognizer, SAMPLE_RATE)
-        speechService = service
-        service.startListening(this)
+        val entries = LinkedHashSet<String>()
+        entries.add(phrase)
+        phrase.split(' ').forEach { if (it.isNotBlank()) entries.add(it) }
+        entries.add("[unk]")
+        val grammar = JSONArray(entries.toList()).toString()
+        val p = WakeAudioPipeline(
+            m, grammar,
+            object : WakeAudioPipeline.Listener {
+                override fun onResult(json: String) = checkForPhrase(json)
+
+                override fun onError(e: Exception) {
+                    Log.w(TAG, "Wake recognizer error", e)
+                    // Recover after a beat — mic contention is usually transient.
+                    scope.launch(Dispatchers.IO) {
+                        kotlinx.coroutines.delay(3000)
+                        stopRecognizer()
+                        resumeListening()
+                    }
+                }
+            },
+        )
+        pipeline = p
+        p.start()
         Log.i(TAG, "Wake listening for \"$phrase\"")
     }
 
     private fun stopRecognizer() {
-        runCatching { speechService?.stop() }
-        runCatching { speechService?.shutdown() }
-        speechService = null
+        runCatching { pipeline?.stop() }
+        pipeline = null
     }
 
     private fun resumeListening() {
         val m = model ?: return
-        if (speechService == null && !VoiceCallState.isActive) {
+        if (pipeline == null && !VoiceCallState.isActive) {
             scope.launch(Dispatchers.IO) { runCatching { startRecognizer(m) } }
         }
     }
@@ -224,7 +243,7 @@ class WakeWordService : Service(), RecognitionListener {
             VoiceCallState.state.collect { state ->
                 if (VoiceCallState.isActive) {
                     stopRecognizer()
-                } else if (model != null && speechService == null) {
+                } else if (model != null && pipeline == null) {
                     triggered = false
                     resumeListening()
                 }
@@ -232,43 +251,13 @@ class WakeWordService : Service(), RecognitionListener {
         }
     }
 
-    // ------------------------------------------------------------------
-    // RecognitionListener
-    // ------------------------------------------------------------------
-
-    override fun onPartialResult(hypothesis: String?) {
-        // Deliberately ignored: partial hypotheses are jittery and ambient
-        // noise briefly decoding as the phrase caused false activations.
-        // Only finalized utterances (onResult) trigger.
-    }
-
-    override fun onResult(hypothesis: String?) {
-        checkForPhrase(hypothesis)
-    }
-
-    override fun onFinalResult(hypothesis: String?) {
-        checkForPhrase(hypothesis)
-    }
-
-    override fun onError(exception: Exception?) {
-        Log.w(TAG, "Wake recognizer error", exception)
-        // Try to recover after a beat — mic contention is usually transient.
-        scope.launch(Dispatchers.IO) {
-            kotlinx.coroutines.delay(3000)
-            resumeListening()
-        }
-    }
-
-    override fun onTimeout() {
-        resumeListening()
-    }
-
     /**
-     * Trigger only on a finalized utterance that (a) contains the phrase and
-     * (b) decodes it with decent confidence. With the two-entry grammar the
-     * decoder is eager to force noise into the phrase; the per-word confidence
-     * (enabled via setWords) is what separates a real "hey shuffle" from a
-     * cough that vaguely rhymes with it.
+     * Trigger only on a finalized utterance that survives every gate: it must
+     * contain the phrase, decode it with decent confidence, land in plausible
+     * human timing, and — the last word — survive a grammar-free second-pass
+     * decode of the raw audio. Even with the decoy grammar the decoder can be
+     * eager to hear the phrase in noise; the layered gates are what separate
+     * a real "hey shuffle" from a cough that vaguely rhymes with it.
      */
     private fun checkForPhrase(hypothesis: String?) {
         if (triggered || hypothesis.isNullOrBlank()) return
@@ -277,25 +266,110 @@ class WakeWordService : Service(), RecognitionListener {
         if (!heard.contains(phrase)) return
 
         val words = json.optJSONArray("result")
-        if (words != null && words.length() > 0) {
-            val phraseWords = phrase.split(' ').toSet()
-            var sum = 0.0
-            var count = 0
-            for (i in 0 until words.length()) {
-                val w = words.optJSONObject(i) ?: continue
-                if (w.optString("word") in phraseWords) {
-                    sum += w.optDouble("conf", 0.0)
-                    count++
-                }
-            }
-            val avg = if (count > 0) sum / count else 0.0
-            if (count < phraseWords.size || avg < MIN_CONFIDENCE) {
-                Log.d(TAG, "Wake candidate rejected (conf=%.2f, words=$count)".format(avg))
-                return
-            }
-        }
+        if (words != null && words.length() > 0 && !phrasePassesGates(words)) return
+        if (!verifyCandidate()) return
+
         triggered = true
         onWakeWord()
+    }
+
+    /** Confidence + timing gates over the word-level result entries. */
+    private fun phrasePassesGates(words: JSONArray): Boolean {
+        val phraseWords = phrase.split(' ')
+        // The phrase must appear as a contiguous run of result words — take
+        // the most recent run if it somehow appears twice.
+        var matchStart = -1
+        outer@ for (i in (words.length() - phraseWords.size) downTo 0) {
+            for (j in phraseWords.indices) {
+                val w = words.optJSONObject(i + j) ?: continue@outer
+                if (w.optString("word") != phraseWords[j]) continue@outer
+            }
+            matchStart = i
+            break
+        }
+        if (matchStart < 0) {
+            Log.d(TAG, "Wake candidate rejected (phrase words not contiguous)")
+            return false
+        }
+
+        var sum = 0.0
+        var prevEnd = -1.0
+        for (j in phraseWords.indices) {
+            val w = words.getJSONObject(matchStart + j)
+            sum += w.optDouble("conf", 0.0)
+            // A long pause mid-phrase means two unrelated sounds got stitched
+            // together, not one deliberate utterance.
+            val start = w.optDouble("start", 0.0)
+            if (prevEnd >= 0 && start - prevEnd > MAX_WORD_GAP_SEC) {
+                Log.d(TAG, "Wake candidate rejected (%.2fs gap between words)".format(start - prevEnd))
+                return false
+            }
+            prevEnd = w.optDouble("end", 0.0)
+        }
+        val avg = sum / phraseWords.size
+        if (avg < MIN_CONFIDENCE) {
+            Log.d(TAG, "Wake candidate rejected (conf=%.2f)".format(avg))
+            return false
+        }
+        // Humans can't say the phrase in a click, and don't stretch it over
+        // several seconds — spans outside that window are noise artifacts.
+        val span = words.getJSONObject(matchStart + phraseWords.size - 1).optDouble("end", 0.0) -
+            words.getJSONObject(matchStart).optDouble("start", 0.0)
+        if (span < MIN_PHRASE_SEC || span > MAX_PHRASE_SEC) {
+            Log.d(TAG, "Wake candidate rejected (span %.2fs)".format(span))
+            return false
+        }
+        return true
+    }
+
+    /**
+     * Second pass: re-decode the ring buffer (which still holds the candidate
+     * utterance) with NO grammar. The free decoder isn't biased toward the
+     * phrase, so noise the grammar decoder forced into "hey shuffle" comes
+     * out as whatever it really was. Fuzzy matching absorbs small model
+     * misspellings. Runs only on candidates, so the cost is negligible.
+     * Fails open — a broken verifier must not brick wake detection.
+     */
+    private fun verifyCandidate(): Boolean {
+        val m = model ?: return true
+        val audio = pipeline?.snapshot() ?: return true
+        if (audio.isEmpty()) return true
+        return try {
+            val verifier = Recognizer(m, SAMPLE_RATE)
+            try {
+                verifier.acceptWaveForm(audio, audio.size)
+                val text = JSONObject(verifier.finalResult).optString("text").lowercase()
+                val tokens = text.split(' ').filter { it.isNotBlank() }
+                val ok = phrase.split(' ').filter { it.isNotBlank() }.all { pw ->
+                    val maxDist = maxOf(1, pw.length / 3)
+                    tokens.any { levenshtein(pw, it) <= maxDist }
+                }
+                if (!ok) {
+                    Log.i(TAG, "Wake candidate failed verification (grammar heard \"$phrase\", free decode heard \"$text\")")
+                }
+                ok
+            } finally {
+                runCatching { verifier.close() }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Wake verification pass errored — allowing trigger", e)
+            true
+        }
+    }
+
+    private fun levenshtein(a: String, b: String): Int {
+        if (a == b) return 0
+        val prev = IntArray(b.length + 1) { it }
+        val cur = IntArray(b.length + 1)
+        for (i in 1..a.length) {
+            cur[0] = i
+            for (j in 1..b.length) {
+                val cost = if (a[i - 1] == b[j - 1]) 0 else 1
+                cur[j] = minOf(cur[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost)
+            }
+            System.arraycopy(cur, 0, prev, 0, cur.size)
+        }
+        return prev[b.length]
     }
 
     private fun onWakeWord() {
@@ -362,6 +436,13 @@ class WakeWordService : Service(), RecognitionListener {
 
         /** Minimum average per-word confidence for a wake trigger. */
         private const val MIN_CONFIDENCE = 0.85
+
+        /** Plausible-timing window for the whole phrase. */
+        private const val MIN_PHRASE_SEC = 0.3
+        private const val MAX_PHRASE_SEC = 2.5
+
+        /** Longest allowed pause between consecutive phrase words. */
+        private const val MAX_WORD_GAP_SEC = 0.6
 
         /** Start listening if enabled + ready; safe to call any time. */
         fun startIfEnabled(context: Context) {
