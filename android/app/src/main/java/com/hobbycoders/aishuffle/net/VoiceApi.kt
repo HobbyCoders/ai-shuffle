@@ -139,6 +139,10 @@ object VoiceApi {
         val builder = Request.Builder()
             .url("${server.baseUrl}$path")
             .header("Cookie", "session=$sessionCookie")
+            // Cookie-authenticated POSTs pass through the server's CSRF
+            // middleware, which requires an Origin matching the Host —
+            // browsers send this automatically, OkHttp doesn't.
+            .header("Origin", server.baseUrl)
         if (server.hasCfAccess) {
             builder.header("CF-Access-Client-Id", server.cfAccessClientId!!)
             builder.header("CF-Access-Client-Secret", server.cfAccessClientSecret!!)
