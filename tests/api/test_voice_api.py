@@ -386,10 +386,11 @@ def sidebands(monkeypatch):
 
     sockets = []
 
-    async def _open(call_id, api_key):
+    async def _open(call_id, api_key, client_secret=None):
         sock = FakeSideband()
         sock.call_id = call_id
         sock.api_key = api_key
+        sock.client_secret = client_secret
         sockets.append(sock)
         return sock
 
@@ -400,6 +401,9 @@ def sidebands(monkeypatch):
     voice_bridge.registry._bridges.clear()
     voice_bridge.registry._epochs.clear()
     voice_bridge.registry._capped.clear()
+    # Same reason: the minted-secret memory is module state on the route.
+    from app.api import voice as voice_api
+    voice_api._SESSION_CLIENT_SECRETS.clear()
 
 
 class TestVoiceSecretRemint:
@@ -507,6 +511,72 @@ class TestVoiceCallAttach:
 
         authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
 
+    def test_attach_hands_the_minted_secret_to_the_sideband(
+        self, authenticated_client, mock_db, sidebands, monkeypatch
+    ):
+        """The ek the browser created the call with is the handshake fallback.
+
+        OpenAI answers an API-key sideband handshake for a browser-created
+        WebRTC call with ``call_id_not_found``; the credential that reportedly
+        works is the ephemeral one, so the route has to keep it.
+        """
+        from app.api import voice as voice_api
+
+        _unlock(mock_db)
+        _enable_voice()
+        _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
+        _mk_voice_session()
+        _install_mock_transport(monkeypatch, _secret_handler(
+            # Far-future expiry: the route drops a secret that is already past
+            # its expires_at (see test_expired_secret_is_not_offered_...).
+            body={"value": "ek_test_secret", "expires_at": 4102444800},
+        ))
+
+        assert authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/secret"
+        ).status_code == 200
+
+        resp = authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={"call_id": "rtc_1"}
+        )
+        assert resp.status_code == 200, resp.text
+        assert sidebands[0].api_key == RAW_KEY
+        assert sidebands[0].client_secret == "ek_test_secret"
+
+        # Hanging up forgets it — a new call mints its own.
+        authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
+        assert voice_api._recall_client_secret(SESSION_ID) is None
+
+    def test_attach_without_a_minted_secret_still_works(
+        self, authenticated_client, mock_db, sidebands
+    ):
+        _enable_voice()
+        _make_provider()
+        _mk_voice_session()
+
+        resp = authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={"call_id": "rtc_1"}
+        )
+        assert resp.status_code == 200, resp.text
+        assert sidebands[0].client_secret is None
+        authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
+
+    def test_expired_secret_is_not_offered_to_the_sideband(
+        self, authenticated_client, mock_db, sidebands
+    ):
+        from app.api import voice as voice_api
+
+        _enable_voice()
+        _make_provider()
+        _mk_voice_session()
+        voice_api._SESSION_CLIENT_SECRETS[SESSION_ID] = ("ek_stale", 1.0)
+
+        authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={"call_id": "rtc_1"}
+        )
+        assert sidebands[0].client_secret is None
+        authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
+
     def test_second_call_id_replaces_the_first(
         self, authenticated_client, mock_db, sidebands
     ):
@@ -538,7 +608,7 @@ class TestVoiceCallAttach:
         _make_provider()
         _mk_voice_session()
 
-        async def _boom(call_id, api_key):
+        async def _boom(call_id, api_key, client_secret=None):
             raise ConnectionError("handshake refused")
 
         monkeypatch.setattr(voice_bridge, "_open_sideband", _boom)
