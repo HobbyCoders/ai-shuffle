@@ -74,10 +74,11 @@ def fake_sockets(monkeypatch):
     """Install the fake transport; yields the list of sockets handed out."""
     sockets = []
 
-    async def _open(call_id, api_key):
+    async def _open(call_id, api_key, client_secret=None):
         sock = FakeSideband()
         sock.call_id = call_id
         sock.api_key = api_key
+        sock.client_secret = client_secret
         sockets.append(sock)
         return sock
 
@@ -470,7 +471,7 @@ async def test_registry_shutdown_all_closes_every_bridge(mock_db, fake_sockets, 
 async def test_failed_attach_leaves_nothing_registered(mock_db, monkeypatch, registry):
     _mk_session()
 
-    async def _boom(call_id, api_key):
+    async def _boom(call_id, api_key, client_secret=None):
         raise ConnectionError("handshake refused")
 
     monkeypatch.setattr(vb, "_open_sideband", _boom)
@@ -1117,7 +1118,7 @@ async def test_hangup_clears_the_epoch_so_the_next_call_starts_fresh(
 async def test_a_failed_attach_leaves_no_epoch_behind(mock_db, monkeypatch, registry):
     _mk_session()
 
-    async def _boom(call_id, api_key):
+    async def _boom(call_id, api_key, client_secret=None):
         raise ConnectionError("handshake refused")
 
     monkeypatch.setattr(vb, "_open_sideband", _boom)
@@ -1402,3 +1403,173 @@ def test_estimated_cost_falls_back_and_declines_the_unknown():
     assert vb.estimate_cost_usd("gpt-4o-realtime-preview", {"input_tokens": 10}) is None
     assert vb.estimate_cost_usd("gpt-realtime-2.1", {}) is None
     assert vb.estimate_cost_usd(None, {"input_tokens": 10}) is None
+
+
+# ---------------------------------------------------------------------------
+# sideband handshake (the transport itself — corrected 2026-08-14)
+# ---------------------------------------------------------------------------
+
+class _FakeHandshakeResponse:
+    """Stand-in for ``websockets.http11.Response`` on a rejected handshake."""
+
+    def __init__(self, status_code, body=b""):
+        self.status_code = status_code
+        self.body = body
+
+
+class _FakeInvalidStatus(Exception):
+    """Stand-in for ``websockets.exceptions.InvalidStatus``."""
+
+    def __init__(self, status_code, body=b""):
+        super().__init__(f"server rejected WebSocket connection: HTTP {status_code}")
+        self.response = _FakeHandshakeResponse(status_code, body)
+
+
+CALL_NOT_FOUND = (
+    b'{"error":{"type":"invalid_request_error","code":"call_id_not_found",'
+    b'"message":"No session found for the provided call_id"}}'
+)
+
+
+@pytest.fixture
+def ws_connect(monkeypatch):
+    """Patch the ``websockets`` connect that the transport imports lazily.
+
+    Scripted through ``["results"]`` — one entry per attempt, an exception to
+    raise or an object to return, with the last entry repeating. Retry delays
+    are zeroed so the ladder never sleeps in tests.
+    """
+    import websockets.asyncio.client as wac
+
+    calls = []
+    script = {"results": []}
+
+    async def _connect(url, additional_headers=None, **kwargs):
+        calls.append((url, dict(additional_headers or {})))
+        result = script["results"][min(len(calls) - 1, len(script["results"]) - 1)]
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    monkeypatch.setattr(wac, "connect", _connect)
+    monkeypatch.setattr(vb, "SIDEBAND_RETRY_DELAYS", (0.0,))
+    script["calls"] = calls
+    return script
+
+
+def _bearer(entry):
+    return entry[1]["Authorization"]
+
+
+async def test_sideband_uses_the_documented_url_and_the_api_key_first(ws_connect):
+    sentinel = object()
+    ws_connect["results"] = [sentinel]
+
+    got = await vb._open_sideband("rtc_u1_abc", KEY, "ek_secret")
+
+    assert got is sentinel
+    url, headers = ws_connect["calls"][0]
+    assert url == "wss://api.openai.com/v1/realtime?call_id=rtc_u1_abc"
+    assert headers == {"Authorization": f"Bearer {KEY}"}
+    assert len(ws_connect["calls"]) == 1
+
+
+async def test_sideband_falls_back_to_the_client_secret_on_call_id_not_found(ws_connect):
+    sentinel = object()
+    ws_connect["results"] = [_FakeInvalidStatus(404, CALL_NOT_FOUND), sentinel]
+
+    got = await vb._open_sideband(CALL, KEY, "ek_secret")
+
+    assert got is sentinel
+    assert [_bearer(c) for c in ws_connect["calls"]] == [
+        f"Bearer {KEY}", "Bearer ek_secret",
+    ]
+
+
+async def test_sideband_retries_the_whole_ladder_while_the_call_is_not_found(ws_connect):
+    sentinel = object()
+    ws_connect["results"] = [
+        _FakeInvalidStatus(404, CALL_NOT_FOUND),   # attempt 1, api key
+        _FakeInvalidStatus(404, CALL_NOT_FOUND),   # attempt 1, client secret
+        sentinel,                                  # attempt 2, api key
+    ]
+
+    got = await vb._open_sideband(CALL, KEY, "ek_secret")
+
+    assert got is sentinel
+    assert len(ws_connect["calls"]) == 3
+
+
+async def test_sideband_gives_up_after_the_attempt_budget(ws_connect):
+    ws_connect["results"] = [_FakeInvalidStatus(404, CALL_NOT_FOUND)]
+
+    with pytest.raises(_FakeInvalidStatus):
+        await vb._open_sideband(CALL, KEY, "ek_secret")
+
+    # Two credentials x the attempt budget, and no more.
+    assert len(ws_connect["calls"]) == 2 * vb.SIDEBAND_CONNECT_ATTEMPTS
+
+
+async def test_sideband_does_not_retry_a_final_rejection(ws_connect):
+    ws_connect["results"] = [_FakeInvalidStatus(401, b'{"error":{"message":"bad key"}}')]
+
+    with pytest.raises(_FakeInvalidStatus):
+        await vb._open_sideband(CALL, KEY, "ek_secret")
+
+    assert len(ws_connect["calls"]) == 2      # one pass over the ladder only
+
+
+async def test_sideband_without_a_client_secret_tries_only_the_api_key(ws_connect):
+    ws_connect["results"] = [_FakeInvalidStatus(404, CALL_NOT_FOUND)]
+
+    with pytest.raises(_FakeInvalidStatus):
+        await vb._open_sideband(CALL, KEY, None)
+
+    assert len(ws_connect["calls"]) == vb.SIDEBAND_CONNECT_ATTEMPTS
+    assert {_bearer(c) for c in ws_connect["calls"]} == {f"Bearer {KEY}"}
+
+
+def test_sideband_credentials_order_and_dedupe():
+    assert vb._sideband_credentials(KEY, "ek_1") == [
+        ("api_key", KEY), ("client_secret", "ek_1"),
+    ]
+    assert vb._sideband_credentials(KEY, KEY) == [("api_key", KEY)]
+    assert vb._sideband_credentials(KEY, "   ") == [("api_key", KEY)]
+    assert vb._sideband_credentials("", "ek_1") == [("client_secret", "ek_1")]
+    with pytest.raises(RuntimeError):
+        vb._sideband_credentials("", None)
+
+
+def test_handshake_failure_surfaces_the_upstream_status_and_body():
+    status, detail = vb._handshake_failure(_FakeInvalidStatus(404, CALL_NOT_FOUND))
+    assert status == 404
+    assert "call_id_not_found" in detail
+
+    legacy = RuntimeError("nope")
+    legacy.status_code = 400
+    assert vb._handshake_failure(legacy) == (400, "nope")
+
+    assert vb._handshake_failure(OSError("connection refused")) == (
+        None, "connection refused",
+    )
+
+
+async def test_bridge_passes_the_client_secret_to_the_transport(mock_db, fake_sockets):
+    _mk_session()
+    bridge = vb.VoiceBridge(
+        SID, CALL, api_key=KEY, model=MODEL, max_call_minutes=60,
+        client_secret="ek_secret",
+    )
+    await bridge.start()
+    assert fake_sockets[0].client_secret == "ek_secret"
+    await bridge.stop()
+
+
+async def test_registry_attach_passes_the_client_secret(mock_db, fake_sockets, registry):
+    _mk_session()
+    await registry.attach(
+        SID, CALL, api_key=KEY, model=MODEL, max_call_minutes=60,
+        client_secret="ek_secret",
+    )
+    assert fake_sockets[0].client_secret == "ek_secret"
+    await registry.detach(SID)

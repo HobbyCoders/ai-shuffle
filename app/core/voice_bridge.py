@@ -3,10 +3,20 @@
 Transport shape (ruling VM2): the browser holds a WebRTC leg straight to
 OpenAI — audio never transits this process — and the backend joins the SAME
 realtime call over a *sideband* WebSocket
-(``wss://api.openai.com/v1/realtime?call_id=...``) authenticated with the real
-provider API key. That leg is where the backend owns instructions, VAD config
-and (from VW4) the tool declarations the client can neither see nor tamper
-with, and where both sides' final transcripts arrive for durable persistence.
+(``wss://api.openai.com/v1/realtime?call_id=...``). That leg is where the
+backend owns instructions, VAD config and (from VW4) the tool declarations the
+client can neither see nor tamper with, and where both sides' final transcripts
+arrive for durable persistence.
+
+Sideband handshake (corrected 2026-08-14 after a live 404): the URL is right and
+unchanged, but a single attempt with the provider API key is NOT enough in
+practice. ``_open_sideband`` now walks a credential ladder — the real API key
+first (what the docs prescribe), then the ephemeral client secret the browser
+used to create the call (what every reported fix in the wild uses) — and retries
+the "call not found yet" class of handshake failure with a short backoff,
+because the call takes a moment to become joinable after the SDP answer. Every
+failed attempt is logged with the upstream HTTP status and body so a dead
+handshake is diagnosable from the app log instead of a bare exception.
 
 This module ships:
 
@@ -68,6 +78,7 @@ import logging
 import re
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 from app.db import database
 from app.db.async_database import run_sync
@@ -75,8 +86,25 @@ from app.db.async_database import run_sync
 logger = logging.getLogger(__name__)
 
 # The sideband endpoint: same realtime call as the browser's WebRTC leg, joined
-# by call_id. Authenticated with the provider row's real API key.
+# by call_id. Verified current on 2026-08-14 against OpenAI's "Webhooks and
+# server-side controls" guide and the officially-generated openai-python client
+# (``client.realtime.connect(call_id=...)`` builds exactly this URL and sends
+# only the Authorization header — no OpenAI-Beta, no subprotocol).
 SIDEBAND_URL = "wss://api.openai.com/v1/realtime"
+
+# How many times the whole credential ladder is walked before giving up, and how
+# long to wait between walks. A freshly answered WebRTC call is not instantly
+# joinable — the official SDK ships a reconnecting client and OpenAI's own codex
+# retries its sideband join with backoff for the same reason.
+SIDEBAND_CONNECT_ATTEMPTS = 3
+SIDEBAND_RETRY_DELAYS: Tuple[float, ...] = (0.75, 1.5)
+
+# Handshake statuses worth another attempt. 404 (``call_id_not_found``) leads the
+# list deliberately: that is what a not-yet-registered call answers, and it is
+# the exact failure this ladder exists to survive. Anything else (401/403 — wrong
+# credential, 400 — wrong URL shape) is final for that credential and retrying it
+# only delays the error the user needs to see.
+SIDEBAND_RETRYABLE_STATUSES = frozenset({404, 408, 425, 429, 500, 502, 503, 504})
 
 # The delegation-first coordinator contract (ruling VM16, user-dictated text —
 # do not paraphrase it).
@@ -298,21 +326,126 @@ CAP_GRACE_SECONDS = 300.0
 # Sideband transport
 # ============================================================================
 
-async def _open_sideband(call_id: str, api_key: str):
+def _handshake_failure(exc: BaseException) -> Tuple[Optional[int], str]:
+    """``(HTTP status, detail)`` for a failed WebSocket handshake.
+
+    ``websockets`` raises ``InvalidStatus`` carrying the whole rejected HTTP
+    response; older revisions raised ``InvalidStatusCode`` with a bare
+    ``status_code``. Both are read defensively — the body is where OpenAI puts
+    the machine-readable reason (``call_id_not_found`` vs ``action_not_found``
+    vs an auth error), and losing it is what made this bug take a live probe to
+    diagnose in the first place.
+    """
+    status: Optional[int] = None
+    detail = ""
+
+    response = getattr(exc, "response", None)
+    if response is not None:
+        code = getattr(response, "status_code", None)
+        if isinstance(code, int):
+            status = code
+        body = getattr(response, "body", None)
+        if isinstance(body, (bytes, bytearray)):
+            detail = bytes(body).decode("utf-8", "replace").strip()[:500]
+        elif isinstance(body, str):
+            detail = body.strip()[:500]
+    if status is None:
+        code = getattr(exc, "status_code", None)
+        if isinstance(code, int):
+            status = code
+    if not detail:
+        detail = str(exc)[:500]
+    return status, detail
+
+
+def _sideband_credentials(
+    api_key: str, client_secret: Optional[str]
+) -> List[Tuple[str, str]]:
+    """The ``(label, bearer)`` ladder the sideband tries, in order.
+
+    The provider API key leads because that is what OpenAI's server-controls
+    guide prescribes and what the SIP path demonstrably works with. The
+    ephemeral client secret follows because every reported fix for a WebRTC
+    call answering ``call_id_not_found`` to an API-key handshake is "use the
+    ephemeral key the browser created the call with" — and because a call
+    created by an ``ek_`` credential plausibly belongs to that credential.
+
+    Order matters beyond correctness: a client secret expires (10 minutes by
+    default) while an API key does not, so a long call must prefer the key and
+    only fall back.
+    """
+    ladder: List[Tuple[str, str]] = []
+    seen: set = set()
+    for label, value in (("api_key", api_key), ("client_secret", client_secret)):
+        value = (value or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        ladder.append((label, value))
+    if not ladder:
+        raise RuntimeError("no credential is available for the voice sideband")
+    return ladder
+
+
+async def _open_sideband(
+    call_id: str, api_key: str, client_secret: Optional[str] = None
+):
     """Open the authenticated sideband WebSocket for ``call_id``.
 
     Split out as a module-level function so tests can substitute an in-process
     fake — nothing else in this module knows about the ``websockets`` package.
+
+    Walks :func:`_sideband_credentials` on each attempt and retries the whole
+    ladder while the failures stay in :data:`SIDEBAND_RETRYABLE_STATUSES`. The
+    exception that finally propagates is the last real one, so the ``/call``
+    route still turns a dead handshake into its 502.
     """
     # Imported lazily: the package ships with uvicorn[standard], but a missing
     # optional extra must fail the call, not the whole app import.
     from websockets.asyncio.client import connect
 
-    url = f"{SIDEBAND_URL}?call_id={call_id}"
-    return await connect(
-        url,
-        additional_headers={"Authorization": f"Bearer {api_key}"},
-    )
+    url = f"{SIDEBAND_URL}?call_id={quote(call_id, safe='')}"
+    ladder = _sideband_credentials(api_key, client_secret)
+    last_exc: Optional[BaseException] = None
+
+    for attempt in range(SIDEBAND_CONNECT_ATTEMPTS):
+        retryable = False
+        for label, bearer in ladder:
+            try:
+                socket = await connect(
+                    url,
+                    additional_headers={"Authorization": f"Bearer {bearer}"},
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — classified just below
+                last_exc = exc
+                status, detail = _handshake_failure(exc)
+                retryable = retryable or status is None or (
+                    status in SIDEBAND_RETRYABLE_STATUSES
+                )
+                logger.warning(
+                    "Voice: sideband handshake for call %s rejected with %s using "
+                    "the %s (attempt %s/%s): %s",
+                    call_id, status if status is not None else "no HTTP status",
+                    label, attempt + 1, SIDEBAND_CONNECT_ATTEMPTS, detail,
+                )
+                continue
+            if label != "api_key":
+                logger.info(
+                    "Voice: sideband for call %s attached using the %s "
+                    "(the provider API key was rejected)", call_id, label,
+                )
+            return socket
+
+        if not retryable or attempt >= SIDEBAND_CONNECT_ATTEMPTS - 1:
+            break
+        delay = SIDEBAND_RETRY_DELAYS[min(attempt, len(SIDEBAND_RETRY_DELAYS) - 1)]
+        await asyncio.sleep(delay)
+
+    if last_exc is None:  # pragma: no cover — the ladder is never empty
+        raise RuntimeError("the voice sideband made no connection attempt")
+    raise last_exc
 
 
 # ============================================================================
@@ -374,6 +507,7 @@ class VoiceBridge:
         api_key: str,
         model: str,
         max_call_minutes: int,
+        client_secret: Optional[str] = None,
         call_started_at: Optional[float] = None,
         usage_totals: Optional[Dict[str, int]] = None,
         on_duration_cap: Optional[Callable[[], None]] = None,
@@ -383,6 +517,10 @@ class VoiceBridge:
         self.model = model
         self.max_call_minutes = max_call_minutes
         self._api_key = api_key
+        # The ephemeral credential the browser created THIS call with, when the
+        # route still has it. Only ever used as the sideband's fallback bearer;
+        # it is never logged and never leaves the process.
+        self._client_secret = client_secret
 
         # When the CALL (not this attachment) began. The registry passes the
         # session's epoch so a replace-attach keeps counting down the same cap;
@@ -447,7 +585,9 @@ class VoiceBridge:
         Raises whatever the transport raises — the caller turns a failed connect
         into a 502 rather than registering a dead bridge.
         """
-        self._ws = await _open_sideband(self.call_id, self._api_key)
+        self._ws = await _open_sideband(
+            self.call_id, self._api_key, self._client_secret,
+        )
         self.connected = True
         self.started_at = time.time()
         logger.info(
@@ -1465,6 +1605,7 @@ class VoiceCallRegistry:
         api_key: str,
         model: str,
         max_call_minutes: int,
+        client_secret: Optional[str] = None,
     ) -> VoiceBridge:
         """Attach the sideband, REPLACING any existing attachment.
 
@@ -1494,6 +1635,7 @@ class VoiceCallRegistry:
             bridge = VoiceBridge(
                 session_id, call_id,
                 api_key=api_key, model=model, max_call_minutes=max_call_minutes,
+                client_secret=client_secret,
                 call_started_at=epoch.started_at,
                 usage_totals=epoch.usage,
                 on_duration_cap=lambda: self.mark_capped(

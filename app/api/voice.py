@@ -24,8 +24,9 @@ Deliberately small surface:
 """
 
 import logging
+import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -55,6 +56,11 @@ INPUT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 # Upstream mint is a single small request; fail fast rather than hanging the
 # user's "start call" click.
 MINT_TIMEOUT_SECONDS = 15.0
+
+# Most sessions that can have a live secret at once. A hard bound purely so a
+# long-lived process can never accumulate credentials for sessions that were
+# started and abandoned; expired entries are dropped first, then the oldest.
+MAX_REMEMBERED_SECRETS = 64
 
 
 # ============================================================================
@@ -244,6 +250,14 @@ async def _mint_client_secret(api_key: str, model: str) -> Dict[str, Any]:
 
     Our session config stays MINIMAL here (type/model/input transcription): the
     VW3 sideband owns instructions, tools and VAD via ``session.update``.
+
+    Checked again on 2026-08-14 against the ``POST /v1/realtime/client_secrets``
+    reference while chasing the sideband's ``call_id_not_found``: the request
+    body has NO sideband/observer/attach flag to set — the only session knobs
+    are audio/tools/instructions/tracing and none of them gate server-side
+    attachment. So the mint stays as-is; what the sideband needed was the minted
+    secret itself, kept by :func:`_remember_client_secret` as its fallback
+    bearer.
     """
     from app.core.http_client import get_http_client
 
@@ -316,6 +330,52 @@ def _extract_client_secret(body: Dict[str, Any]) -> tuple[str, Optional[int]]:
     except (TypeError, ValueError):
         expires_at = None
     return str(value), expires_at
+
+
+# ----------------------------------------------------------------------------
+# Minted-secret memory (sideband fallback credential)
+# ----------------------------------------------------------------------------
+#
+# ``session_id -> (client secret, unix expiry)``. The browser creates the WebRTC
+# call with this ``ek_`` credential, and when OpenAI answers an API-key sideband
+# handshake with ``call_id_not_found`` the bridge retries with it (see
+# ``voice_bridge._sideband_credentials``). In-process and short-lived on
+# purpose: it is the same short-lived token the browser already holds, it is
+# never returned by any route that did not mint it, and it is dropped on hangup.
+_SESSION_CLIENT_SECRETS: Dict[str, Tuple[str, float]] = {}
+
+
+def _remember_client_secret(
+    session_id: str, secret: str, expires_at: Optional[int]
+) -> None:
+    """Keep the secret just minted for ``session_id`` until it expires."""
+    if not session_id or not secret:
+        return
+    now = time.time()
+    expiry = float(expires_at) if expires_at else now + CLIENT_SECRET_TTL_SECONDS
+    for stale in [sid for sid, (_, exp) in _SESSION_CLIENT_SECRETS.items() if exp <= now]:
+        _SESSION_CLIENT_SECRETS.pop(stale, None)
+    _SESSION_CLIENT_SECRETS[session_id] = (secret, expiry)
+    while len(_SESSION_CLIENT_SECRETS) > MAX_REMEMBERED_SECRETS:
+        oldest = min(_SESSION_CLIENT_SECRETS, key=lambda sid: _SESSION_CLIENT_SECRETS[sid][1])
+        _SESSION_CLIENT_SECRETS.pop(oldest, None)
+
+
+def _recall_client_secret(session_id: str) -> Optional[str]:
+    """The session's last minted secret while it is still valid, else ``None``."""
+    entry = _SESSION_CLIENT_SECRETS.get(session_id)
+    if entry is None:
+        return None
+    secret, expiry = entry
+    if expiry <= time.time():
+        _SESSION_CLIENT_SECRETS.pop(session_id, None)
+        return None
+    return secret
+
+
+def _forget_client_secret(session_id: str) -> None:
+    """Drop the session's remembered secret (hangup)."""
+    _SESSION_CLIENT_SECRETS.pop(session_id, None)
 
 
 async def _provider_api_key(provider_row: Dict[str, Any]) -> str:
@@ -445,6 +505,7 @@ async def create_voice_session(
         "Voice: created session %s on provider %s (model %s)",
         session_id, provider_row["id"], model,
     )
+    _remember_client_secret(session_id, client_secret, expires_at)
 
     return VoiceSessionResponse(
         session_id=session_id,
@@ -487,6 +548,7 @@ async def mint_voice_session_secret(
     model = voice_settings["voice_model"]
     body = await _mint_client_secret(api_key, model)
     client_secret, expires_at = _extract_client_secret(body)
+    _remember_client_secret(session_id, client_secret, expires_at)
     logger.info("Voice: re-minted client secret for session %s", session_id)
 
     return VoiceSecretResponse(
@@ -533,6 +595,8 @@ async def attach_voice_call(
             api_key=api_key,
             model=voice_settings["voice_model"],
             max_call_minutes=voice_settings["voice_max_call_minutes"],
+            # Fallback bearer for the handshake — see _remember_client_secret.
+            client_secret=_recall_client_secret(session_id),
         )
     except HTTPException:
         raise
@@ -563,6 +627,7 @@ async def hangup_voice_call(
     from app.core import voice_bridge
 
     await _require_voice_session(session_id)
+    _forget_client_secret(session_id)
     stopped = await voice_bridge.registry.detach(session_id)
     logger.info(
         "Voice: hangup for session %s (%s)",
