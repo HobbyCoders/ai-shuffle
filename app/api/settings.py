@@ -9,7 +9,7 @@ This module re-exports symbols from sub-modules for backward compatibility:
 """
 
 import logging
-from typing import Optional
+from typing import Dict, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -521,14 +521,44 @@ VOICE_VOICE_KEY = "voice_voice"
 VOICE_PROVIDER_ID_KEY = "voice_provider_id"
 VOICE_MAX_CALL_MINUTES_KEY = "voice_max_call_minutes"
 
+# The voice agent's editable prompts. Empty/unset = use the built-in default
+# (the constants in app.core.voice_bridge). ``voice_instructions`` is the base
+# system prompt every voice call gets (web included); the command/chat variants
+# are appendices applied when a native client reports its ``session_mode`` on
+# call attach (the Android assistant's hands-free vs conversation modes).
+VOICE_INSTRUCTIONS_KEY = "voice_instructions"
+VOICE_INSTRUCTIONS_COMMAND_KEY = "voice_instructions_command"
+VOICE_INSTRUCTIONS_CHAT_KEY = "voice_instructions_chat"
+MAX_VOICE_INSTRUCTIONS_CHARS = 8000
+
+
+def _voice_instruction_defaults() -> dict:
+    """The built-in prompt texts (lazy import — voice_bridge is heavy)."""
+    from app.core import voice_bridge
+
+    return {
+        "base": voice_bridge.VOICE_INSTRUCTIONS,
+        "command": voice_bridge.DEFAULT_COMMAND_INSTRUCTIONS,
+        "chat": voice_bridge.DEFAULT_CHAT_INSTRUCTIONS,
+    }
+
 
 class VoiceSettingsResponse(BaseModel):
-    """Current voice-mode configuration."""
+    """Current voice-mode configuration.
+
+    The ``voice_instructions*`` fields are the STORED overrides — empty string
+    means "using the built-in default", whose text is provided alongside in
+    ``voice_instructions_defaults`` so a UI can show and reset to it.
+    """
     voice_mode_enabled: bool
     voice_model: str
     voice_voice: str
     voice_provider_id: Optional[str] = None
     voice_max_call_minutes: int
+    voice_instructions: str = ""
+    voice_instructions_command: str = ""
+    voice_instructions_chat: str = ""
+    voice_instructions_defaults: Dict[str, str] = {}
 
 
 class VoiceSettingsUpdateRequest(BaseModel):
@@ -537,12 +567,17 @@ class VoiceSettingsUpdateRequest(BaseModel):
     ``voice_provider_id: null`` explicitly CLEARS the pinned provider (the
     resolver then falls back to "the single eligible row"), which is why the
     handler keys off ``model_fields_set`` rather than treating None as absent.
+    An empty string for any ``voice_instructions*`` field clears the override
+    (back to the built-in default).
     """
     voice_mode_enabled: Optional[bool] = None
     voice_model: Optional[str] = None
     voice_voice: Optional[str] = None
     voice_provider_id: Optional[str] = None
     voice_max_call_minutes: Optional[int] = None
+    voice_instructions: Optional[str] = None
+    voice_instructions_command: Optional[str] = None
+    voice_instructions_chat: Optional[str] = None
 
 
 def _truthy_setting(raw: Optional[str]) -> bool:
@@ -579,6 +614,13 @@ def get_voice_settings() -> dict:
         "voice_voice": voice,
         "voice_provider_id": provider_id,
         "voice_max_call_minutes": max_minutes,
+        "voice_instructions":
+            (database.get_system_setting(VOICE_INSTRUCTIONS_KEY) or "").strip(),
+        "voice_instructions_command":
+            (database.get_system_setting(VOICE_INSTRUCTIONS_COMMAND_KEY) or "").strip(),
+        "voice_instructions_chat":
+            (database.get_system_setting(VOICE_INSTRUCTIONS_CHAT_KEY) or "").strip(),
+        "voice_instructions_defaults": _voice_instruction_defaults(),
     }
 
 
@@ -635,6 +677,24 @@ async def update_voice_settings(
         database.set_system_setting(
             VOICE_MODE_ENABLED_KEY, "true" if request.voice_mode_enabled else "false"
         )
+
+    for field, key in (
+        ("voice_instructions", VOICE_INSTRUCTIONS_KEY),
+        ("voice_instructions_command", VOICE_INSTRUCTIONS_COMMAND_KEY),
+        ("voice_instructions_chat", VOICE_INSTRUCTIONS_CHAT_KEY),
+    ):
+        if field in provided:
+            text = (getattr(request, field) or "").strip()
+            if len(text) > MAX_VOICE_INSTRUCTIONS_CHARS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"{field} is limited to "
+                        f"{MAX_VOICE_INSTRUCTIONS_CHARS} characters."
+                    ),
+                )
+            # Empty string clears the override → back to the built-in default.
+            database.set_system_setting(key, text)
 
     if "voice_provider_id" in provided:
         # Imported lazily: app.api.voice imports this module for the reader

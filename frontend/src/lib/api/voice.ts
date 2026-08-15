@@ -65,15 +65,27 @@ export interface VoiceSettings {
 	voice_voice: string;
 	voice_provider_id: string | null;
 	voice_max_call_minutes: number;
+	/** Stored prompt overrides — empty string means "using the default". */
+	voice_instructions: string;
+	voice_instructions_command: string;
+	voice_instructions_chat: string;
+	/** The built-in prompt texts, for placeholder display and reset. */
+	voice_instructions_defaults: { base: string; command: string; chat: string };
 }
 
-/** Partial update. An explicit `null` provider clears the pinned provider. */
+/**
+ * Partial update. An explicit `null` provider clears the pinned provider; an
+ * empty string for a `voice_instructions*` field clears that prompt override.
+ */
 export interface VoiceSettingsUpdate {
 	voice_mode_enabled?: boolean;
 	voice_model?: string;
 	voice_voice?: string;
 	voice_provider_id?: string | null;
 	voice_max_call_minutes?: number;
+	voice_instructions?: string;
+	voice_instructions_command?: string;
+	voice_instructions_chat?: string;
 }
 
 /** A `model_providers` row eligible to fund a realtime call (VM3). */

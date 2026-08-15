@@ -89,6 +89,58 @@
 		void save({ voice_max_call_minutes: parsed });
 	}
 
+	// ---- Agent prompts (voice agent config) -------------------------------
+	// Three editable prompts with the same mid-edit guard as the minutes
+	// field: a non-null pending value means the user owns the textarea. Empty
+	// saves clear the override (server falls back to the built-in default,
+	// shown as the placeholder).
+	type PromptField = 'voice_instructions' | 'voice_instructions_command' | 'voice_instructions_chat';
+	const PROMPTS: Array<{
+		field: PromptField;
+		defaultKey: 'base' | 'command' | 'chat';
+		title: string;
+		blurb: string;
+	}> = [
+		{
+			field: 'voice_instructions',
+			defaultKey: 'base',
+			title: 'Agent instructions',
+			blurb: 'The voice agent’s system prompt — personality and ground rules for every voice call (web and phone).'
+		},
+		{
+			field: 'voice_instructions_command',
+			defaultKey: 'command',
+			title: 'Hands-free (wake word) additions',
+			blurb: 'Appended when the phone app starts a session by wake word: one-shot tasks, hang up when done.'
+		},
+		{
+			field: 'voice_instructions_chat',
+			defaultKey: 'chat',
+			title: 'Conversation additions',
+			blurb: 'Appended when the phone app starts a session from the button, tile, or assist gesture.'
+		}
+	];
+	let pendingPrompts = $state<Record<string, string | null>>({});
+
+	function promptValue(field: PromptField): string {
+		return pendingPrompts[field] ?? settings?.[field] ?? '';
+	}
+
+	function commitPrompt(field: PromptField) {
+		const raw = pendingPrompts[field];
+		pendingPrompts[field] = null;
+		if (raw === null || raw === undefined) return;
+		const text = raw.trim();
+		if (text === (settings?.[field] ?? '')) return;
+		void save({ [field]: text });
+	}
+
+	function resetPrompt(field: PromptField) {
+		pendingPrompts[field] = null;
+		if (!settings?.[field]) return;
+		void save({ [field]: '' });
+	}
+
 	// ---- Voice preview (VM21) ---------------------------------------------
 	// One shared <audio> element; starting a preview stops whatever was playing.
 	// Fetched blobs are cached per voice so replays don't re-bill the TTS call.
@@ -273,6 +325,37 @@
 			</div>
 		</div>
 
+		{#each PROMPTS as prompt}
+			<div class="set-row stack">
+				<div class="lab">
+					<h4>{prompt.title}</h4>
+					<p>{prompt.blurb}</p>
+				</div>
+				<div class="ctl">
+					<textarea
+						class="inp prompt"
+						rows="5"
+						value={promptValue(prompt.field)}
+						placeholder={settings.voice_instructions_defaults?.[prompt.defaultKey] ?? ''}
+						disabled={saving}
+						oninput={(e) => (pendingPrompts[prompt.field] = e.currentTarget.value)}
+						onblur={() => commitPrompt(prompt.field)}
+						aria-label={prompt.title}
+					></textarea>
+					{#if settings[prompt.field]}
+						<button
+							type="button"
+							class="reset-btn"
+							disabled={saving}
+							onclick={() => resetPrompt(prompt.field)}
+						>Reset to default</button>
+					{:else}
+						<p class="msg dim">Using the built-in default (shown greyed above). Type to override.</p>
+					{/if}
+				</div>
+			</div>
+		{/each}
+
 		<div class="set-row">
 			<div class="lab">
 				<h4>Max call minutes</h4>
@@ -324,6 +407,34 @@
 	}
 	.minutes {
 		width: 110px;
+	}
+
+	/* Voice agent prompt editors */
+	.prompt {
+		width: 100%;
+		min-height: 96px;
+		resize: vertical;
+		font-size: 12.5px;
+		line-height: 1.45;
+		font-family: inherit;
+	}
+	.reset-btn {
+		margin-top: 6px;
+		padding: 4px 10px;
+		border: 1px solid var(--border);
+		border-radius: var(--radius, 0.75rem);
+		background: var(--background);
+		color: var(--muted-foreground);
+		font-size: 12px;
+		cursor: pointer;
+	}
+	.reset-btn:hover:not(:disabled) {
+		color: var(--primary);
+		border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
+	}
+	.msg.dim {
+		color: var(--muted-foreground);
+		margin-top: 6px;
 	}
 
 	/* Voice picker (VM21) — two-column grid of compact options, each carrying

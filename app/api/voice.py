@@ -165,10 +165,16 @@ class VoiceCallRequest(BaseModel):
     skips servicing those names (so the client's answer is the only one).
     ``client_instructions`` is appended to the coordinator instructions to
     teach the model when/how to use those tools.
+
+    ``session_mode`` ("command" | "chat") is how a native client reports what
+    kind of session this is; the route composes the matching instructions
+    appendix (Settings-overridable) into the sideband's system prompt.
+    Browser calls omit it and get the base prompt only.
     """
     call_id: str
     client_tools: Optional[List[Dict[str, Any]]] = None
     client_instructions: Optional[str] = None
+    session_mode: Optional[str] = None
 
 
 class VoicePreviewRequest(BaseModel):
@@ -761,6 +767,24 @@ async def attach_voice_call(
             ),
         )
 
+    session_mode = (request.session_mode or "").strip().lower() or None
+    if session_mode is not None and session_mode not in voice_bridge.DEFAULT_MODE_INSTRUCTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="session_mode must be 'command' or 'chat'.",
+        )
+
+    # Compose the agent's system prompt: the (Settings-overridable) base, plus
+    # the (Settings-overridable) appendix for the client's session mode. The
+    # bridge falls back to its built-in text when this comes out empty.
+    base = (voice_settings.get("voice_instructions") or "").strip() \
+        or voice_bridge.VOICE_INSTRUCTIONS
+    instructions_override = base
+    if session_mode is not None:
+        appendix = (voice_settings.get(f"voice_instructions_{session_mode}") or "").strip() \
+            or voice_bridge.DEFAULT_MODE_INSTRUCTIONS[session_mode]
+        instructions_override = f"{base}\n\n{appendix}"
+
     provider_row = await run_sync(
         _resolve_provider_row,
         session_row.get("provider_id"),
@@ -779,6 +803,7 @@ async def attach_voice_call(
             client_secret=_recall_client_secret(session_id),
             client_tools=client_tools,
             client_instructions=client_instructions,
+            instructions_override=instructions_override,
         )
     except HTTPException:
         raise

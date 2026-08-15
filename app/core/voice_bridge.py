@@ -126,6 +126,55 @@ VOICE_INSTRUCTIONS = (
 #: Back-compat alias — VW3 shipped the placeholder under this name.
 VOICE_INSTRUCTIONS_V1 = VOICE_INSTRUCTIONS
 
+# Default per-mode appendices for native-app sessions (the Android voice
+# assistant). A native client reports its launch mode on call attach
+# (``session_mode``); browser calls send none and get the base prompt only.
+# All three prompts (the base VOICE_INSTRUCTIONS and these two) are
+# runtime-overridable via Settings → Voice (voice_instructions*), stored in
+# system_settings; these constants are the fallbacks and the UI's
+# reset-to-default text.
+DEFAULT_COMMAND_INSTRUCTIONS = (
+    "You are also the user's hands-free phone assistant, speaking through "
+    "their Android phone, and this session was started by wake word — the "
+    "user may be driving and cannot touch the phone. You can act on the "
+    "phone with the device tools the session declares (calls, texts, "
+    "notifications, apps, navigation, alarms, timers, calendar, "
+    "end_session). Handle the request quickly, by voice alone, then say a "
+    "very short confirmation and call end_session — do not ask 'anything "
+    "else?' and do not keep the session open. If the user stays silent, "
+    "call end_session. Execute actions immediately without asking for "
+    "confirmation — EXCEPT send_sms: its body is transcribed speech, so "
+    "first call it without confirmed=true, read the message back in one "
+    "short sentence, and send with confirmed=true only after a spoken yes. "
+    "If a contact lookup is ambiguous the tool will say so — ask which one, "
+    "briefly. If a tool reports a missing permission, say so in a few words "
+    "and move on. NEVER speak first: stay completely silent until the user "
+    "says something. Keep every reply to ONE short sentence — no greetings, "
+    "no explanations of what you are doing."
+)
+
+DEFAULT_CHAT_INSTRUCTIONS = (
+    "You are also the user's phone assistant, speaking through their "
+    "Android phone. You can act on the phone with the device tools the "
+    "session declares (calls, texts, notifications, apps, navigation, "
+    "alarms, timers, calendar, end_session). Execute actions immediately "
+    "without asking for confirmation — EXCEPT send_sms: its body is "
+    "transcribed speech, so first call it without confirmed=true, read the "
+    "message back in one short sentence, and send with confirmed=true only "
+    "after a spoken yes. If a contact lookup is ambiguous the tool will say "
+    "so — ask which one, briefly. If a tool reports a missing permission, "
+    "say so in a few words and move on. NEVER speak first: stay silent "
+    "until the user says something. Keep replies short and spoken-style. "
+    "When the user says goodbye, \"that's all\", or asks you to hang up, "
+    "say a short goodbye and call end_session."
+)
+
+#: session_mode → default appendix (the route composes stored overrides).
+DEFAULT_MODE_INSTRUCTIONS: Dict[str, str] = {
+    "command": DEFAULT_COMMAND_INSTRUCTIONS,
+    "chat": DEFAULT_CHAT_INSTRUCTIONS,
+}
+
 # The whole tool surface (ruling VM10). Four calls, none of which does work
 # directly: three read/dispatch against the existing Task-dispatch layer and one
 # answers a worker's permission prompt. Realtime function-tool schema is flat —
@@ -511,6 +560,7 @@ class VoiceBridge:
         on_duration_cap: Optional[Callable[[], None]] = None,
         client_tools: Optional[List[Dict[str, Any]]] = None,
         client_instructions: Optional[str] = None,
+        instructions_override: Optional[str] = None,
     ) -> None:
         self.session_id = session_id
         self.call_id = call_id
@@ -572,6 +622,9 @@ class VoiceBridge:
             t.get("name") for t in self._client_tools if t.get("name")
         }
         self._client_instructions = (client_instructions or "").strip()
+        # The route-composed prompt (settings overrides + mode appendix).
+        # None → the built-in VOICE_INSTRUCTIONS.
+        self._instructions_override = (instructions_override or "").strip() or None
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -737,7 +790,7 @@ class VoiceBridge:
         Retention/truncation is NOT here on purpose: see
         :meth:`_send_truncation_update`.
         """
-        instructions = VOICE_INSTRUCTIONS
+        instructions = self._instructions_override or VOICE_INSTRUCTIONS
         if self._client_instructions:
             # The native client's appendix (device tools like calls/SMS) rides
             # after the contract so the contract always leads.
@@ -1692,6 +1745,7 @@ class VoiceCallRegistry:
         client_secret: Optional[str] = None,
         client_tools: Optional[List[Dict[str, Any]]] = None,
         client_instructions: Optional[str] = None,
+        instructions_override: Optional[str] = None,
     ) -> VoiceBridge:
         """Attach the sideband, REPLACING any existing attachment.
 
@@ -1729,6 +1783,7 @@ class VoiceCallRegistry:
                 ),
                 client_tools=client_tools,
                 client_instructions=client_instructions,
+                instructions_override=instructions_override,
             )
             # Only record the epoch once the connect actually succeeded — a
             # failed attach must not leave a clock running for a call that never
