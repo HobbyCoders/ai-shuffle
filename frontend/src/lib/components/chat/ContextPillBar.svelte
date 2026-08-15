@@ -23,21 +23,16 @@
 	 *
 	 * The pill dropdowns open upward since this bar sits just above the input.
 	 */
-	import { onMount } from 'svelte';
 	import ProfileSelector from './ProfileSelector.svelte';
 	import BranchSelector from './BranchSelector.svelte';
 	import ExecutionModeBar from '$lib/components/layout/ExecutionModeBar.svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
 	import { computeContextBadge, shouldShowEmptyStateBranchPill } from './contextPills';
 	import { activeSession } from '$lib/stores/active-session';
-	import { appData, projects, sessions } from '$lib/stores/app-data.svelte';
+	import { projects, sessions } from '$lib/stores/app-data.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
 	import { git, gitStatus } from '$lib/stores/git.svelte';
-	import { layout } from '$lib/stores/layout.svelte';
-	import { notify } from '$lib/stores/notifications';
-	import { createVoiceSession, isVoiceEnabled } from '$lib/api/voice';
-	import { startCall, startCallForSession } from '$lib/services/voiceCall';
-	import { AudioLines, FolderClosed, GitBranch, Monitor, MonitorOff } from 'lucide-svelte';
+	import { FolderClosed, GitBranch, Monitor, MonitorOff } from 'lucide-svelte';
 
 	const projectName = $derived(
 		$projects.find((p) => p.id === $activeSession.project)?.name ?? null
@@ -106,73 +101,9 @@
 
 	let showCreateBranchModal = $state(false);
 
-	// ---- Voice mode affordance (ruling VM6) -------------------------------
-	// A "Voice" pill in the pre-send control row starts a voice session with the
-	// profile/project already selected here — no modal session-type picker. The
-	// settings read is cached module-side, so the remounts this bar goes through
-	// cost one fetch per page load, not one per mount.
-	let voiceEnabled = $state(false);
-	let startingVoice = $state(false);
-
-	// Ruling VM18 moved the call surface into the composer slot, and it is only
-	// mounted while a call is UP — so an existing voice session whose call has
-	// ended needs its "start the call again" affordance somewhere. This bar is it:
-	// the pill reads "Voice" on a new chat (create a voice session) and "Start
-	// call" on a voice session (re-mint onto the session that already exists).
-	// This bar is inside ChatInput, which the call replaces, so it is never on
-	// screen during a call — no extra live-call gating needed here.
-	const isVoiceSession = $derived(sessionRow?.mode === 'voice');
-	const showVoicePill = $derived(voiceEnabled && (isEmptyState || isVoiceSession));
-
-	onMount(async () => {
-		voiceEnabled = await isVoiceEnabled();
-	});
-
-	/** Re-open a call on the voice session already being viewed. */
-	async function resumeVoiceCall() {
-		const sessionId = $activeSession.sessionId;
-		if (startingVoice || !sessionId) return;
-		startingVoice = true;
-		try {
-			await startCallForSession(sessionId);
-		} finally {
-			startingVoice = false;
-		}
-	}
-
-	async function startVoiceSession() {
-		if (startingVoice) return;
-		startingVoice = true;
-		try {
-			const created = await createVoiceSession({
-				profile_id: $activeSession.profile || null,
-				project_id: $activeSession.project || null
-			});
-			// The board row must exist before we switch: ChatView reads `mode`
-			// off the sessions list to decide the surface.
-			await appData.loadSessions();
-			activeSession.switchSession(
-				created.session_id,
-				$activeSession.project || null,
-				null,
-				'Voice session'
-			);
-			layout.openChat(created.session_id);
-			// Auto-start — the affordance IS the call (the channel is always open
-			// once live; there is no separate "connect" step for the user).
-			await startCall(created.session_id, {
-				client_secret: created.client_secret,
-				model: created.model
-			});
-		} catch (e) {
-			// The backend's 400/403 detail strings are written for the user
-			// (missing/ineligible provider, voice mode disabled) — show them as-is.
-			const detail = (e as { detail?: string } | null)?.detail;
-			notify.error(detail || 'Could not start a voice session.');
-		} finally {
-			startingVoice = false;
-		}
-	}
+	// The voice-call start affordance no longer lives here (ruling VM19): it is
+	// an action button in ChatInput's send-button cluster (VoiceCallButton),
+	// next to the STT mic and the send button.
 </script>
 
 <div class="context-pill-bar">
@@ -224,26 +155,6 @@
 		</span>
 	{/if}
 
-	<!-- Voice affordance (VM6, extended by VM18). On a new chat it starts a voice
-	     session; on a voice session whose call has ended it re-opens the call —
-	     the only start affordance now that the call surface is composer-slot-only
-	     and mounted just while a call is up. -->
-	{#if showVoicePill}
-		<button
-			type="button"
-			class="voice-pill"
-			onclick={isVoiceSession ? resumeVoiceCall : startVoiceSession}
-			disabled={startingVoice}
-			title={isVoiceSession
-				? 'Start a call on this voice session'
-				: 'Start a voice session — talk to an agent that dispatches the work'}
-		>
-			<AudioLines size={13} strokeWidth={1.5} />
-			<span class="pill-label"
-				>{startingVoice ? 'Starting…' : isVoiceSession ? 'Start call' : 'Voice'}</span
-			>
-		</button>
-	{/if}
 </div>
 
 {#if $activeSession.project}
@@ -302,35 +213,6 @@
 	}
 
 	.context-badge :global(svg) {
-		flex-shrink: 0;
-	}
-
-	/* Voice affordance (VM6) — same pill metrics as the other empty-state
-	   controls, with the primary accent so it reads as a mode choice rather
-	   than another context selector. */
-	.voice-pill {
-		display: flex;
-		align-items: center;
-		gap: 5px;
-		height: 28px;
-		padding: 0 10px;
-		background: color-mix(in oklch, var(--primary) 8%, var(--background));
-		border: 1px solid color-mix(in oklch, var(--primary) 35%, var(--border));
-		border-radius: var(--radius, 0.75rem);
-		color: var(--primary);
-		font-size: 0.75rem;
-		font-weight: 500;
-		white-space: nowrap;
-		cursor: pointer;
-	}
-	.voice-pill:hover:not(:disabled) {
-		background: color-mix(in oklch, var(--primary) 14%, var(--background));
-	}
-	.voice-pill:disabled {
-		opacity: 0.6;
-		cursor: default;
-	}
-	.voice-pill :global(svg) {
 		flex-shrink: 0;
 	}
 

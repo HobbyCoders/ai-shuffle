@@ -13,8 +13,13 @@
 	 * The parent (`ChatView`) owns the gate — it mounts this only when
 	 * `isCallSurfaceActive(state, activeSessionId)`, so there is deliberately no
 	 * "no call running" / "Start call" state here any more. Starting (or
-	 * restarting) a call is the ContextPillBar's job, next to the other pre-send
-	 * controls.
+	 * restarting) a call is the composer's VoiceCallButton (VM19), next to the
+	 * STT mic and send buttons.
+	 *
+	 * VM20 (user directive, 2026-08-15): NO live captions here. Voice mode uses
+	 * the chat UI — the transcript already renders in the conversation feed
+	 * above (backend-written, VM9), so the dock repeating it as captions was
+	 * duplication. The dock is status + the three controls, nothing more.
 	 *
 	 * The interaction contract (§1 of docs/VOICE_MODE_PLAN.md) is binding and
 	 * says EXACTLY three controls while a call is live:
@@ -123,28 +128,6 @@
      chat column shifting. -->
 <div class="voice-dock-wrapper" data-testid="voice-call-dock">
 	<div class="voice-dock" class:live>
-		{#if live}
-			<div class="vp-captions" aria-live="polite" aria-label="Live captions">
-				{#if call.captions.length === 0}
-					<p class="vp-hint">Just start talking — the channel stays open.</p>
-				{:else}
-					{#each call.captions as caption (caption.role + caption.id)}
-						<p
-							class="cap"
-							class:assistant={caption.role === 'assistant'}
-							class:pending={!caption.final}
-						>
-							<span class="cap-who">{caption.role === 'assistant' ? 'Agent' : 'You'}</span>
-							<span class="cap-text">{caption.text}</span>
-						</p>
-					{/each}
-				{/if}
-				<p class="vp-foot">
-					Captions are live only — the saved transcript appears in the conversation above.
-				</p>
-			</div>
-		{/if}
-
 		{#if mine && call.error}
 			<p class="vp-msg err" role="alert">{call.error}</p>
 		{/if}
@@ -356,45 +339,6 @@
 	}
 	.vp-msg.warn {
 		color: var(--warning, #d97706);
-	}
-
-	/* Captions sit ABOVE the control row now (the dock is bottom-anchored in the
-	   composer slot, so the newest line stays closest to the controls). */
-	.vp-captions {
-		margin-bottom: 10px;
-		padding-bottom: 8px;
-		border-bottom: 1px solid var(--border);
-		max-height: 180px;
-		overflow-y: auto;
-	}
-	.cap {
-		margin: 0 0 4px;
-		font-size: 12.5px;
-		line-height: 1.5;
-		color: var(--foreground);
-	}
-	.cap.assistant .cap-who {
-		color: var(--primary);
-	}
-	.cap.pending {
-		opacity: 0.75;
-	}
-	.cap-who {
-		display: inline-block;
-		min-width: 44px;
-		font-size: 11px;
-		font-weight: 600;
-		color: var(--muted-foreground);
-	}
-	.vp-hint,
-	.vp-foot {
-		margin: 0;
-		font-size: 11.5px;
-		color: var(--muted-foreground);
-	}
-	.vp-foot {
-		margin-top: 6px;
-		opacity: 0.75;
 	}
 
 	@media (max-width: 700px) {

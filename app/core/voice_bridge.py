@@ -1117,6 +1117,13 @@ class VoiceBridge:
         ``session_id`` is the VOICE session: worker approvals are redirected to
         the ROOT session (the one with a human watching), so the pending rows are
         parent-keyed. Passing the worker's id would find nothing.
+
+        Already-answered tolerance (VM23): the GUI modal is suppressed during a
+        live call, but any OTHER surface (another device, the call ending and
+        the modal returning) can still answer first. When the pending row is
+        gone, look the request up among the ANSWERED rows and report that
+        outcome as a success — the model should tell the user it is already
+        handled and move on, not apologise about a missing request id.
         """
         from app.core.permission_handler import permission_handler
 
@@ -1137,6 +1144,31 @@ class VoiceBridge:
             broadcast_func=None,
         )
         self._announced_approvals.add(request_id)
+
+        if isinstance(result, dict) and result.get("error"):
+            answered = await run_sync(
+                _answered_approval_decision, self.session_id, request_id,
+            )
+            if answered:
+                return {
+                    "ok": True,
+                    "request_id": request_id,
+                    "decision": answered,
+                    "note": (
+                        f"This request was already answered ({answered}) by the "
+                        "user in the app — nothing more to do; the worker is "
+                        "proceeding accordingly."
+                    ),
+                }
+            return {
+                "ok": False,
+                "request_id": request_id,
+                "error": (
+                    f"No pending approval with id {request_id} — it may have "
+                    "expired or been withdrawn."
+                ),
+            }
+
         return {"ok": True, "request_id": request_id, "decision": decision,
                 "result": result}
 
@@ -1204,8 +1236,10 @@ class VoiceBridge:
     async def _poll_approvals(self) -> None:
         """Read out each pending worker permission request exactly once.
 
-        The GUI modal fan-out happens elsewhere and is untouched — this is the
-        second, spoken leg of ruling VM11. Nothing here answers a prompt: only
+        This is the spoken leg of ruling VM11 — and during a live call it is
+        the ONLY leg: the FE suppresses the GUI permission modal while the call
+        surface is up (VM23), so the same request is never presented on two
+        surfaces at once. Nothing here answers a prompt: only
         ``respond_approval``, on the user's explicit spoken decision, does.
         """
         from app.core.permission_handler import permission_handler
@@ -1498,6 +1532,32 @@ def _list_agents_payload(session_id: str) -> Dict[str, Any]:
         logger.debug("Voice: task listing failed", exc_info=True)
 
     return {"ok": True, "agents": agents, "active_tasks": tasks}
+
+
+def _answered_approval_decision(session_id: str, request_id: str) -> Optional[str]:
+    """The decision an ALREADY-answered permission request settled on, if any.
+
+    Synchronous (call via ``run_sync``). Backs the VM23 already-answered
+    tolerance in ``respond_approval``: a request the user resolved from another
+    surface should read back as its outcome, not as "not found".
+    """
+    try:
+        from app.core.permission_handler import PERMISSION_KIND
+        from app.db import interactions
+
+        for row in interactions.get_answered_interactions(session_id, PERMISSION_KIND):
+            payload = row.get("payload") or {}
+            if payload.get("request_id") != request_id:
+                continue
+            decision = (row.get("answer") or {}).get("decision")
+            if isinstance(decision, str) and decision:
+                return decision
+    except Exception:  # noqa: BLE001 — a failed lookup just keeps the error path
+        logger.debug(
+            "Voice: answered-approval lookup failed for %s", session_id,
+            exc_info=True,
+        )
+    return None
 
 
 def _approval_summary(request: Dict[str, Any]) -> str:

@@ -23,6 +23,7 @@
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
 	import TiptapEditor from './TiptapEditor.svelte';
 	import VoiceRecorder from './VoiceRecorder.svelte';
+	import VoiceCallButton from './VoiceCallButton.svelte';
 	import StopButton from './StopButton.svelte';
 	import ControlsDock from './ControlsDock.svelte';
 	import ContextPillBar from './ContextPillBar.svelte';
@@ -657,6 +658,11 @@
 
 						<!-- Voice + Send buttons -->
 						<div class="send-button-wrapper">
+							<!-- Voice call (VM19): starts/resumes a voice call. Renders
+							     nothing when voice mode is off or the surface doesn't
+							     qualify (active non-voice chat). -->
+							<VoiceCallButton disabled={isUploading || isRecording || isTranscribing} />
+
 							<!-- Voice Input (delegated to VoiceRecorder component) -->
 							<VoiceRecorder
 								onTranscription={handleTranscription}

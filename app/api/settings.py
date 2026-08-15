@@ -490,7 +490,7 @@ async def revert_security_instructions(token: str = Depends(require_admin)):
 # Voice mode (ruling VM13/VM17 — docs/VOICE_MODE_PLAN.md)
 # ============================================================================
 #
-# Four runtime-editable knobs stored as plain ``system_settings`` values (they
+# Five runtime-editable knobs stored as plain ``system_settings`` values (they
 # are NOT secrets — the OpenAI key itself lives encrypted on the model_providers
 # row the voice session is funded by, never here). Stored/read through the same
 # get_system_setting/set_system_setting helpers the security-instructions
@@ -500,6 +500,16 @@ async def revert_security_instructions(token: str = Depends(require_admin)):
 # allowlist is rejected on write, so a typo can never reach OpenAI.
 VOICE_MODELS = ("gpt-realtime-2.1", "gpt-realtime-2.1-mini", "gpt-realtime")
 DEFAULT_VOICE_MODEL = "gpt-realtime-2.1"
+
+# The voices the realtime models can speak with (ruling VM21). Same allowlist
+# discipline as the models: rejected on write, defaulted on read, so an unknown
+# name can never reach the mint. ``marin``/``cedar`` are the gpt-realtime
+# generation's recommended pair; the rest are the classic realtime set.
+VOICE_VOICES = (
+    "marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "sage",
+    "shimmer", "verse",
+)
+DEFAULT_VOICE_VOICE = "marin"
 # Total wall-clock budget for one call. OpenAI's own 60-minute session cap is
 # bridged by reconnect (VM15); this is the separate "don't leave a call running
 # all week" ceiling.
@@ -507,6 +517,7 @@ DEFAULT_VOICE_MAX_CALL_MINUTES = 240
 
 VOICE_MODE_ENABLED_KEY = "voice_mode_enabled"
 VOICE_MODEL_KEY = "voice_model"
+VOICE_VOICE_KEY = "voice_voice"
 VOICE_PROVIDER_ID_KEY = "voice_provider_id"
 VOICE_MAX_CALL_MINUTES_KEY = "voice_max_call_minutes"
 
@@ -515,6 +526,7 @@ class VoiceSettingsResponse(BaseModel):
     """Current voice-mode configuration."""
     voice_mode_enabled: bool
     voice_model: str
+    voice_voice: str
     voice_provider_id: Optional[str] = None
     voice_max_call_minutes: int
 
@@ -528,6 +540,7 @@ class VoiceSettingsUpdateRequest(BaseModel):
     """
     voice_mode_enabled: Optional[bool] = None
     voice_model: Optional[str] = None
+    voice_voice: Optional[str] = None
     voice_provider_id: Optional[str] = None
     voice_max_call_minutes: Optional[int] = None
 
@@ -537,7 +550,7 @@ def _truthy_setting(raw: Optional[str]) -> bool:
 
 
 def get_voice_settings() -> dict:
-    """Read the four voice knobs, applying defaults for unset/invalid values.
+    """Read the voice knobs, applying defaults for unset/invalid values.
 
     Plain function (no auth, no request) so the voice router can call it
     directly; the endpoint below is a thin wrapper over it.
@@ -554,11 +567,16 @@ def get_voice_settings() -> dict:
     if model not in VOICE_MODELS:
         model = DEFAULT_VOICE_MODEL
 
+    voice = (database.get_system_setting(VOICE_VOICE_KEY) or "").strip()
+    if voice not in VOICE_VOICES:
+        voice = DEFAULT_VOICE_VOICE
+
     provider_id = (database.get_system_setting(VOICE_PROVIDER_ID_KEY) or "").strip() or None
 
     return {
         "voice_mode_enabled": _truthy_setting(database.get_system_setting(VOICE_MODE_ENABLED_KEY)),
         "voice_model": model,
+        "voice_voice": voice,
         "voice_provider_id": provider_id,
         "voice_max_call_minutes": max_minutes,
     }
@@ -594,6 +612,15 @@ async def update_voice_settings(
                 detail=f"voice_model must be one of {list(VOICE_MODELS)}",
             )
         database.set_system_setting(VOICE_MODEL_KEY, model)
+
+    if "voice_voice" in provided:
+        voice = (request.voice_voice or "").strip()
+        if voice not in VOICE_VOICES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"voice_voice must be one of {list(VOICE_VOICES)}",
+            )
+        database.set_system_setting(VOICE_VOICE_KEY, voice)
 
     if "voice_max_call_minutes" in provided:
         minutes = request.voice_max_call_minutes

@@ -98,6 +98,7 @@ class TestUnauthenticated:
         ("get", VOICE_SETTINGS),
         ("put", VOICE_SETTINGS),
         ("get", f"{VOICE_ROOT}/providers"),
+        ("post", f"{VOICE_ROOT}/preview"),
         ("post", f"{VOICE_ROOT}/sessions"),
         ("post", f"{VOICE_ROOT}/sessions/s1/secret"),
         ("post", f"{VOICE_ROOT}/sessions/s1/call"),
@@ -121,6 +122,7 @@ class TestVoiceSettings:
         assert resp.json() == {
             "voice_mode_enabled": False,
             "voice_model": "gpt-realtime-2.1",
+            "voice_voice": "marin",
             "voice_provider_id": None,
             "voice_max_call_minutes": 240,
         }
@@ -130,6 +132,7 @@ class TestVoiceSettings:
         resp = authenticated_client.put(VOICE_SETTINGS, json={
             "voice_mode_enabled": True,
             "voice_model": "gpt-realtime-2.1-mini",
+            "voice_voice": "cedar",
             "voice_provider_id": pid,
             "voice_max_call_minutes": 30,
         })
@@ -137,6 +140,7 @@ class TestVoiceSettings:
         assert resp.json() == {
             "voice_mode_enabled": True,
             "voice_model": "gpt-realtime-2.1-mini",
+            "voice_voice": "cedar",
             "voice_provider_id": pid,
             "voice_max_call_minutes": 30,
         }
@@ -161,6 +165,21 @@ class TestVoiceSettings:
         resp = authenticated_client.put(VOICE_SETTINGS, json={"voice_model": model})
         assert resp.status_code == 200, resp.text
         assert resp.json()["voice_model"] == model
+
+    def test_voice_allowlist_rejects_unknown(self, authenticated_client, mock_db):
+        resp = authenticated_client.put(VOICE_SETTINGS, json={"voice_voice": "hal9000"})
+        assert resp.status_code == 400
+        # Nothing was written.
+        assert authenticated_client.get(VOICE_SETTINGS).json()["voice_voice"] == "marin"
+
+    @pytest.mark.parametrize("voice", [
+        "marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "sage",
+        "shimmer", "verse",
+    ])
+    def test_voice_allowlist_accepts_each(self, authenticated_client, mock_db, voice):
+        resp = authenticated_client.put(VOICE_SETTINGS, json={"voice_voice": voice})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["voice_voice"] == voice
 
     def test_max_minutes_must_be_positive(self, authenticated_client, mock_db):
         assert authenticated_client.put(VOICE_SETTINGS, json={"voice_max_call_minutes": 0}).status_code == 400
@@ -221,6 +240,68 @@ class TestVoiceProviders:
 # Session creation
 # ============================================================================
 
+class TestVoicePreview:
+    def test_unknown_voice_returns_400(self, authenticated_client, mock_db):
+        _make_provider()
+        resp = authenticated_client.post(f"{VOICE_ROOT}/preview", json={"voice": "hal9000"})
+        assert resp.status_code == 400, resp.text
+
+    def test_no_eligible_provider_returns_400(self, authenticated_client, mock_db):
+        resp = authenticated_client.post(f"{VOICE_ROOT}/preview", json={"voice": "marin"})
+        assert resp.status_code == 400, resp.text
+        assert "OpenAI provider" in resp.json()["detail"]
+
+    def test_happy_path_streams_audio(self, authenticated_client, mock_db, monkeypatch):
+        _unlock(mock_db)
+        _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
+        captured = {}
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            captured["request"] = request
+            return httpx.Response(
+                200, content=b"\xff\xf3mp3-bytes", headers={"content-type": "audio/mpeg"}
+            )
+
+        _install_mock_transport(monkeypatch, _handler)
+        resp = authenticated_client.post(f"{VOICE_ROOT}/preview", json={"voice": "cedar"})
+        assert resp.status_code == 200, resp.text
+        assert resp.headers["content-type"].startswith("audio/mpeg")
+        assert resp.content == b"\xff\xf3mp3-bytes"
+
+        request = captured["request"]
+        assert str(request.url) == "https://api.openai.com/v1/audio/speech"
+        assert request.headers["authorization"] == f"Bearer {RAW_KEY}"
+        sent = json.loads(request.content)
+        assert sent["voice"] == "cedar"
+        assert sent["model"] == "gpt-4o-mini-tts"
+        assert sent["input"]
+
+    def test_does_not_require_voice_mode_enabled(self, authenticated_client, mock_db, monkeypatch):
+        # Picking a voice is part of setting the feature up before enabling it.
+        _unlock(mock_db)
+        _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
+        _install_mock_transport(
+            monkeypatch,
+            lambda request: httpx.Response(
+                200, content=b"ok", headers={"content-type": "audio/mpeg"}
+            ),
+        )
+        assert db.get_system_setting("voice_mode_enabled") is None
+        resp = authenticated_client.post(f"{VOICE_ROOT}/preview", json={"voice": "marin"})
+        assert resp.status_code == 200, resp.text
+
+    def test_upstream_rejection_surfaces_as_502(self, authenticated_client, mock_db, monkeypatch):
+        _unlock(mock_db)
+        _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
+        _install_mock_transport(
+            monkeypatch,
+            lambda request: httpx.Response(400, json={"error": {"message": "bad voice"}}),
+        )
+        resp = authenticated_client.post(f"{VOICE_ROOT}/preview", json={"voice": "verse"})
+        assert resp.status_code == 502, resp.text
+        assert "bad voice" in resp.json()["detail"]
+
+
 class TestCreateVoiceSession:
     def test_disabled_flag_returns_403(self, authenticated_client, mock_db):
         _make_provider()
@@ -276,7 +357,7 @@ class TestCreateVoiceSession:
 
     def test_happy_path(self, authenticated_client, mock_db, monkeypatch):
         _unlock(mock_db)
-        _enable_voice(voice_model="gpt-realtime-2.1-mini")
+        _enable_voice(voice_model="gpt-realtime-2.1-mini", voice_voice="cedar")
         # Store the key the way the provider API does — encrypted — to prove the
         # shared omni decryption path is what feeds the mint.
         _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
@@ -301,6 +382,9 @@ class TestCreateVoiceSession:
         assert sent["session"]["type"] == "realtime"
         assert sent["session"]["model"] == "gpt-realtime-2.1-mini"
         assert sent["session"]["audio"]["input"]["transcription"]["model"] == "gpt-4o-mini-transcribe"
+        # The configured voice rides on the mint (VM21) — it can only be set
+        # before the model first speaks.
+        assert sent["session"]["audio"]["output"]["voice"] == "cedar"
         assert sent["expires_after"]["anchor"] == "created_at"
 
         # The session row is real, badged voice, and bound to the provider.

@@ -442,6 +442,24 @@ def get_live_turn(session_id: str) -> Optional[Dict[str, Any]]:
     return _row(row)
 
 
+def get_latest_turn(session_id: str) -> Optional[Dict[str, Any]]:
+    """Return the session's most recently created turn (any state), or ``None``.
+
+    Used to read the caller's most recent per-turn ``overrides`` (e.g. the
+    permission mode the user picked in the composer) when a Task-dispatched
+    worker inherits its parent's effective permission level.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM turns WHERE session_id=%s "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (session_id,),
+        )
+        row = cursor.fetchone()
+    return _row(row)
+
+
 def get_queued_turns(session_id: str) -> List[Dict[str, Any]]:
     """Return all ``queued`` turns for a session, ordered front-to-back by
     ``position``."""

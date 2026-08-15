@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_auth
@@ -59,6 +60,16 @@ INPUT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 # Upstream mint is a single small request; fail fast rather than hanging the
 # user's "start call" click.
 MINT_TIMEOUT_SECONDS = 15.0
+
+# Voice-preview synthesis (ruling VM21). One short sample per click, generated
+# through OpenAI's speech endpoint with the same provider key that funds calls.
+# ``gpt-4o-mini-tts`` is the cheapest model that speaks the realtime voice set.
+OPENAI_SPEECH_URL = "https://api.openai.com/v1/audio/speech"
+PREVIEW_TTS_MODEL = "gpt-4o-mini-tts"
+PREVIEW_TIMEOUT_SECONDS = 20.0
+PREVIEW_SAMPLE_TEXT = (
+    "Hey! This is what your voice agent will sound like. Ready when you are."
+)
 
 # Most sessions that can have a live secret at once. A hard bound purely so a
 # long-lived process can never accumulate credentials for sessions that were
@@ -149,6 +160,12 @@ class VoiceCallRequest(BaseModel):
     call_id: str
 
 
+class VoicePreviewRequest(BaseModel):
+    """Which voice to synthesise a short sample for (VM21)."""
+    voice: str
+    provider_id: Optional[str] = None
+
+
 class VoiceOkResponse(BaseModel):
     """Acknowledgement for the call/hangup control endpoints."""
     ok: bool = True
@@ -182,6 +199,73 @@ async def get_voice_providers(token: str = Depends(require_auth)):
     setup pointer (ruling VM3).
     """
     return await run_sync(list_eligible_voice_providers)
+
+
+@router.post("/preview")
+async def preview_voice(
+    request: VoicePreviewRequest,
+    token: str = Depends(require_auth),
+):
+    """Synthesise a short "this is what I sound like" sample for one voice.
+
+    Settings-surface helper (ruling VM21): the audio comes back directly as
+    ``audio/mpeg`` for the browser to play. Uses the same provider resolution
+    as a call (explicit > pinned > single eligible), and deliberately does NOT
+    require ``voice_mode_enabled`` — picking a voice is part of setting the
+    feature up before switching it on.
+    """
+    from app.api.settings import VOICE_VOICES
+    from app.core.http_client import get_http_client
+
+    voice = (request.voice or "").strip()
+    if voice not in VOICE_VOICES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"voice must be one of {list(VOICE_VOICES)}",
+        )
+
+    from app.api.settings import get_voice_settings
+
+    voice_settings = await run_sync(get_voice_settings)
+    provider_row = await run_sync(
+        _resolve_provider_row, request.provider_id, voice_settings["voice_provider_id"]
+    )
+    api_key = await _provider_api_key(provider_row)
+
+    try:
+        response = await get_http_client().post(
+            OPENAI_SPEECH_URL,
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": PREVIEW_TTS_MODEL,
+                "voice": voice,
+                "input": PREVIEW_SAMPLE_TEXT,
+                "response_format": "mp3",
+            },
+            timeout=PREVIEW_TIMEOUT_SECONDS,
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("Voice: preview synthesis failed: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not reach OpenAI for the voice preview: {exc}",
+        ) from exc
+
+    if response.status_code >= 400:
+        body = (response.text or "").strip()
+        logger.warning(
+            "Voice: OpenAI rejected the voice preview (%s): %s",
+            response.status_code, body[:500],
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"OpenAI rejected the voice preview "
+                f"(HTTP {response.status_code}): {body[:300]}"
+            ),
+        )
+
+    return Response(content=response.content, media_type="audio/mpeg")
 
 
 def _resolve_provider_row(
@@ -248,11 +332,16 @@ def _resolve_provider_row(
     return row
 
 
-async def _mint_client_secret(api_key: str, model: str) -> Dict[str, Any]:
+async def _mint_client_secret(
+    api_key: str, model: str, voice: Optional[str] = None
+) -> Dict[str, Any]:
     """POST OpenAI's client-secrets endpoint and return the parsed body.
 
-    Our session config stays MINIMAL here (type/model/input transcription): the
-    VW3 sideband owns instructions, tools and VAD via ``session.update``.
+    Our session config stays MINIMAL here (type/model/voice/input
+    transcription): the VW3 sideband owns instructions, tools and VAD via
+    ``session.update``. The VOICE has to ride on the mint (VM21): it can only
+    be set before the model first speaks, and by the time the sideband attaches
+    the model may already be talking.
 
     Checked again on 2026-08-14 against the ``POST /v1/realtime/client_secrets``
     reference while chasing the sideband's ``call_id_not_found``: the request
@@ -264,14 +353,17 @@ async def _mint_client_secret(api_key: str, model: str) -> Dict[str, Any]:
     """
     from app.core.http_client import get_http_client
 
+    audio: Dict[str, Any] = {
+        "input": {"transcription": {"model": INPUT_TRANSCRIPTION_MODEL}}
+    }
+    if voice:
+        audio["output"] = {"voice": voice}
     payload = {
         "expires_after": {"anchor": "created_at", "seconds": CLIENT_SECRET_TTL_SECONDS},
         "session": {
             "type": "realtime",
             "model": model,
-            "audio": {
-                "input": {"transcription": {"model": INPUT_TRANSCRIPTION_MODEL}}
-            },
+            "audio": audio,
         },
     }
     try:
@@ -475,7 +567,7 @@ async def create_voice_session(
     api_key = await _provider_api_key(provider_row)
 
     model = voice_settings["voice_model"]
-    body = await _mint_client_secret(api_key, model)
+    body = await _mint_client_secret(api_key, model, voice_settings["voice_voice"])
     client_secret, expires_at = _extract_client_secret(body)
 
     # Resolve the profile the same way normal session creation does (explicit →
@@ -549,7 +641,7 @@ async def mint_voice_session_secret(
     api_key = await _provider_api_key(provider_row)
 
     model = voice_settings["voice_model"]
-    body = await _mint_client_secret(api_key, model)
+    body = await _mint_client_secret(api_key, model, voice_settings["voice_voice"])
     client_secret, expires_at = _extract_client_secret(body)
     _remember_client_secret(session_id, client_secret, expires_at)
     logger.info("Voice: re-minted client secret for session %s", session_id)

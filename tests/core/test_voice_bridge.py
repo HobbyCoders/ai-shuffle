@@ -903,6 +903,68 @@ async def test_respond_approval_rejects_a_bad_decision(
     await bridge.stop()
 
 
+async def test_respond_approval_reports_an_already_answered_request(
+    mock_db, fake_sockets, monkeypatch
+):
+    """VM23: the user answered from another surface first — the model should be
+    told it is handled (and the decision), not 'Request not found'."""
+    from app.core.permission_handler import permission_handler
+    from app.db import interactions
+
+    _mk_session()
+    row = interactions.create_interaction(
+        SID, "permission", {"request_id": "req-9", "tool_name": "Bash"}, 300,
+    )
+    assert interactions.answer_interaction(row["id"], {"decision": "allow"}, None)
+
+    async def _respond(**kwargs):
+        return {"error": "Request not found"}
+
+    monkeypatch.setattr(permission_handler, "respond", _respond)
+
+    bridge = await _bridge(fake_sockets)
+    sock = fake_sockets[0]
+    sock.push(_call_done(
+        call_id="c-race", name="respond_approval",
+        request_id="req-9", decision="allow",
+    ))
+    await _drain(bridge, sock)
+    await _settle(bridge)
+
+    payload = json.loads(_items(sock, "function_call_output")[0]["output"])
+    assert payload["ok"] is True
+    assert payload["decision"] == "allow"
+    assert "already answered" in payload["note"].lower()
+    await bridge.stop()
+
+
+async def test_respond_approval_on_a_truly_missing_request_is_an_error(
+    mock_db, fake_sockets, monkeypatch
+):
+    from app.core.permission_handler import permission_handler
+
+    _mk_session()
+
+    async def _respond(**kwargs):
+        return {"error": "Request not found"}
+
+    monkeypatch.setattr(permission_handler, "respond", _respond)
+
+    bridge = await _bridge(fake_sockets)
+    sock = fake_sockets[0]
+    sock.push(_call_done(
+        call_id="c-gone", name="respond_approval",
+        request_id="req-ghost", decision="deny",
+    ))
+    await _drain(bridge, sock)
+    await _settle(bridge)
+
+    payload = json.loads(_items(sock, "function_call_output")[0]["output"])
+    assert payload["ok"] is False
+    assert "req-ghost" in payload["error"]
+    await bridge.stop()
+
+
 async def test_pending_approval_is_announced_exactly_once(
     mock_db, fake_sockets, fake_dispatch, idle_gate, fake_permissions
 ):

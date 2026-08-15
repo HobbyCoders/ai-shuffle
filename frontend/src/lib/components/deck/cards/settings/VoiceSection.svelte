@@ -2,11 +2,11 @@
 	/**
 	 * VoiceSection — Settings → Voice (ruling VM17).
 	 *
-	 * Four runtime-editable knobs backed by `GET/PUT /api/v1/settings/voice`:
-	 * the enable flag, the realtime model, which OpenAI API-key provider row
-	 * funds calls, and a cap on total call length. Load once, PUT on change —
-	 * the PUT is a partial update, and an explicit `null` provider clears the
-	 * pin.
+	 * Runtime-editable knobs backed by `GET/PUT /api/v1/settings/voice`:
+	 * the enable flag, the realtime model, the agent's voice (with per-voice
+	 * preview playback, VM21), which OpenAI API-key provider row funds calls,
+	 * and a cap on total call length. Load once, PUT on change — the PUT is a
+	 * partial update, and an explicit `null` provider clears the pin.
 	 *
 	 * Two traps this section is written around:
 	 *
@@ -19,12 +19,14 @@
 	 *   server value is applied on commit (blur / Enter), never underneath the
 	 *   caret.
 	 */
-	import { onMount } from 'svelte';
-	import { AudioLines } from 'lucide-svelte';
+	import { onDestroy, onMount } from 'svelte';
+	import { AudioLines, Play, Square } from 'lucide-svelte';
 	import {
 		VOICE_MODELS,
+		VOICE_VOICES,
 		getVoiceProviders,
 		loadVoiceSettings,
+		previewVoice,
 		saveVoiceSettings,
 		type VoiceProvider,
 		type VoiceSettings,
@@ -86,6 +88,57 @@
 		if (parsed === settings?.voice_max_call_minutes) return;
 		void save({ voice_max_call_minutes: parsed });
 	}
+
+	// ---- Voice preview (VM21) ---------------------------------------------
+	// One shared <audio> element; starting a preview stops whatever was playing.
+	// Fetched blobs are cached per voice so replays don't re-bill the TTS call.
+	let previewingVoice = $state<string | null>(null);
+	let loadingPreview = $state<string | null>(null);
+	let previewAudio: HTMLAudioElement | null = null;
+	const previewCache = new Map<string, string>();
+
+	function stopPreview() {
+		previewAudio?.pause();
+		previewAudio = null;
+		previewingVoice = null;
+	}
+
+	async function playPreview(voiceId: string) {
+		if (previewingVoice === voiceId) {
+			stopPreview();
+			return;
+		}
+		stopPreview();
+		if (loadingPreview) return;
+		error = '';
+		try {
+			let url = previewCache.get(voiceId);
+			if (!url) {
+				loadingPreview = voiceId;
+				const blob = await previewVoice(voiceId);
+				url = URL.createObjectURL(blob);
+				previewCache.set(voiceId, url);
+			}
+			const audio = new Audio(url);
+			audio.onended = () => {
+				if (previewAudio === audio) stopPreview();
+			};
+			previewAudio = audio;
+			previewingVoice = voiceId;
+			await audio.play();
+		} catch (e: any) {
+			stopPreview();
+			error = e?.detail || 'Could not play the voice preview.';
+		} finally {
+			loadingPreview = null;
+		}
+	}
+
+	onDestroy(() => {
+		stopPreview();
+		for (const url of previewCache.values()) URL.revokeObjectURL(url);
+		previewCache.clear();
+	});
 </script>
 
 <div class="set-group">
@@ -139,6 +192,54 @@
 								onchange={() => save({ voice_model: model.id })}
 							/>
 							<span>{model.label}</span>
+						</label>
+					{/each}
+				</div>
+			</div>
+		</div>
+
+		<div class="set-row stack">
+			<div class="lab">
+				<h4>Voice</h4>
+				<p>How the agent sounds. Press play to hear a short sample of each voice.</p>
+			</div>
+			<div class="ctl">
+				<div class="voice-list" role="radiogroup" aria-label="Agent voice">
+					{#each VOICE_VOICES as voice}
+						<label class="voice-opt" class:on={settings.voice_voice === voice.id}>
+							<input
+								type="radio"
+								name="voice-voice"
+								value={voice.id}
+								checked={settings.voice_voice === voice.id}
+								disabled={saving}
+								onchange={() => save({ voice_voice: voice.id })}
+							/>
+							<span class="voice-name">{voice.label}</span>
+							<button
+								type="button"
+								class="preview-btn"
+								class:playing={previewingVoice === voice.id}
+								disabled={loadingPreview !== null && loadingPreview !== voice.id}
+								aria-label={previewingVoice === voice.id
+									? `Stop the ${voice.id} preview`
+									: `Preview the ${voice.id} voice`}
+								title={previewingVoice === voice.id ? 'Stop preview' : 'Preview this voice'}
+								onclick={(e) => {
+									// A click on the play button must not toggle the radio.
+									e.preventDefault();
+									e.stopPropagation();
+									void playPreview(voice.id);
+								}}
+							>
+								{#if loadingPreview === voice.id}
+									<span class="preview-spinner" aria-hidden="true"></span>
+								{:else if previewingVoice === voice.id}
+									<Square size={11} strokeWidth={2} />
+								{:else}
+									<Play size={11} strokeWidth={2} />
+								{/if}
+							</button>
 						</label>
 					{/each}
 				</div>
@@ -223,6 +324,75 @@
 	}
 	.minutes {
 		width: 110px;
+	}
+
+	/* Voice picker (VM21) — two-column grid of compact options, each carrying
+	   its own preview control. */
+	.voice-list {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+		gap: 6px;
+	}
+	.voice-opt {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 6px 8px 6px 10px;
+		border: 1px solid var(--border);
+		border-radius: var(--radius, 0.75rem);
+		font-size: 12.5px;
+		color: var(--foreground);
+		cursor: pointer;
+	}
+	.voice-opt.on {
+		border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
+		background: color-mix(in oklch, var(--primary) 8%, transparent);
+	}
+	.voice-name {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.preview-btn {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 22px;
+		height: 22px;
+		flex-shrink: 0;
+		border: 1px solid var(--border);
+		border-radius: 50%;
+		background: var(--background);
+		color: var(--muted-foreground);
+		cursor: pointer;
+	}
+	.preview-btn:hover:not(:disabled) {
+		color: var(--primary);
+		border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
+	}
+	.preview-btn:disabled {
+		opacity: 0.45;
+		cursor: not-allowed;
+	}
+	.preview-btn.playing {
+		color: var(--primary);
+		border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
+		background: color-mix(in oklch, var(--primary) 10%, transparent);
+	}
+	.preview-spinner {
+		width: 10px;
+		height: 10px;
+		border: 1.5px solid color-mix(in oklch, var(--primary) 35%, transparent);
+		border-top-color: var(--primary);
+		border-radius: 50%;
+		animation: preview-spin 0.8s linear infinite;
+	}
+	@keyframes preview-spin {
+		to {
+			transform: rotate(360deg);
+		}
 	}
 	.msg {
 		margin: 0;

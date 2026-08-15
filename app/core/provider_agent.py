@@ -599,6 +599,64 @@ def _parent_cwd(parent_row: Optional[Mapping[str, Any]]) -> Optional[str]:
         return None
 
 
+def _caller_permission_mode(caller_row: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """The caller's EFFECTIVE permission mode, for worker inheritance (VM22).
+
+    A Task-dispatched worker used to run on its own agent's configured
+    permission mode, so a call started with bypassPermissions still produced
+    approval prompts from its workers. Ruling VM22 (user directive,
+    2026-08-15): workers inherit the parent's permission level.
+
+    Resolution mirrors what actually governed the caller:
+
+    1. the caller's most recent turn's ``overrides.permission_mode`` — the
+       composer's per-session override, which the FE sends with every query;
+    2. else the caller PROFILE's configured ``permission_mode`` — the only
+       source for a voice session, which never runs turns (VM9).
+
+    ``plan`` is deliberately NOT inherited: it is a UI conversation mode, and a
+    worker dispatched to do work while forced into plan mode could only ever
+    produce a plan. Returns ``None`` (no override — the worker's own agent
+    config applies) when nothing resolves.
+    """
+    if not caller_row:
+        return None
+
+    mode: Optional[str] = None
+    session_id = caller_row.get("id")
+    if session_id:
+        try:
+            from app.db import turns as turns_db
+
+            latest = turns_db.get_latest_turn(str(session_id))
+            candidate = ((latest or {}).get("overrides") or {}).get("permission_mode")
+            if isinstance(candidate, str) and candidate.strip():
+                mode = candidate.strip()
+        except Exception:  # noqa: BLE001 — inheritance is best-effort
+            logger.debug(
+                "ProviderAgent: caller turn-override read failed", exc_info=True,
+            )
+
+    if not mode:
+        profile_id = caller_row.get("profile_id")
+        if profile_id:
+            try:
+                from app.db import database
+
+                profile = database.get_profile(profile_id)
+                candidate = ((profile or {}).get("config") or {}).get("permission_mode")
+                if isinstance(candidate, str) and candidate.strip():
+                    mode = candidate.strip()
+            except Exception:  # noqa: BLE001 — inheritance is best-effort
+                logger.debug(
+                    "ProviderAgent: caller profile read failed", exc_info=True,
+                )
+
+    if not mode or mode == "plan":
+        return None
+    return mode
+
+
 async def _await_worker_idle(
     worker_session_id: str, provider_id: Optional[str], timeout: float
 ) -> Tuple[bool, bool]:
@@ -819,6 +877,12 @@ async def dispatch_worker(
     cwd = _parent_cwd(parent_row)
     if cwd:
         overrides["cwd"] = cwd
+    # Permission inheritance (VM22): the worker runs at the CALLER's effective
+    # permission level, so a bypassPermissions parent (e.g. a voice call on a
+    # bypass profile) never has its workers stall on approval prompts.
+    inherited_mode = _caller_permission_mode(parent_row)
+    if inherited_mode:
+        overrides["permission_mode"] = inherited_mode
 
     timeout = float(timeout_seconds) if timeout_seconds else worker_timeout_seconds()
 

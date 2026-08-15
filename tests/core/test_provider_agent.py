@@ -451,6 +451,73 @@ class TestDispatchWorker:
         # cwd inherited from the parent's ALREADY-materialized checkout
         assert submitted["overrides"]["cwd"] == "/repo/feat-x"
 
+    def test_worker_inherits_the_callers_profile_permission_mode(
+        self, dispatch_env, monkeypatch
+    ):
+        """VM22 — the voice-session shape: no turns, so the caller PROFILE's
+        configured mode is what the worker inherits."""
+        from app.db import database as db
+        from app.db import turns as turns_db
+
+        monkeypatch.setattr(turns_db, "get_latest_turn", lambda sid: None)
+        monkeypatch.setattr(
+            db, "get_session",
+            lambda sid: {"id": sid, "profile_id": "caller-prof"},
+        )
+        monkeypatch.setattr(
+            db, "get_profile",
+            lambda pid: {"id": pid, "config": {"permission_mode": "bypassPermissions"}},
+        )
+
+        _dispatch()
+        submitted = dispatch_env.tm.submitted[0]
+        assert submitted["overrides"]["permission_mode"] == "bypassPermissions"
+
+    def test_the_callers_turn_override_wins_over_its_profile_config(
+        self, dispatch_env, monkeypatch
+    ):
+        """VM22 — a composer-picked mode (per-turn override) is what actually
+        governed the caller, so it beats the caller profile's config."""
+        from app.db import database as db
+        from app.db import turns as turns_db
+
+        monkeypatch.setattr(
+            turns_db, "get_latest_turn",
+            lambda sid: {"overrides": {"permission_mode": "acceptEdits"}},
+        )
+        monkeypatch.setattr(
+            db, "get_session",
+            lambda sid: {"id": sid, "profile_id": "caller-prof"},
+        )
+        monkeypatch.setattr(
+            db, "get_profile",
+            lambda pid: {"id": pid, "config": {"permission_mode": "bypassPermissions"}},
+        )
+
+        _dispatch()
+        submitted = dispatch_env.tm.submitted[0]
+        assert submitted["overrides"]["permission_mode"] == "acceptEdits"
+
+    def test_plan_mode_is_not_inherited(self, dispatch_env, monkeypatch):
+        """VM22 — a worker forced into plan mode could only produce a plan, so
+        `plan` never propagates; the worker's own agent config applies."""
+        from app.db import database as db
+        from app.db import turns as turns_db
+
+        monkeypatch.setattr(
+            turns_db, "get_latest_turn",
+            lambda sid: {"overrides": {"permission_mode": "plan"}},
+        )
+        monkeypatch.setattr(
+            db, "get_session",
+            lambda sid: {"id": sid, "profile_id": "caller-prof"},
+        )
+        monkeypatch.setattr(db, "get_profile", lambda pid: {"id": pid, "config": {}})
+
+        _dispatch()
+        submitted = dispatch_env.tm.submitted[0]
+        assert "permission_mode" not in submitted["overrides"]
+
     def test_worker_is_registered_for_the_nesting_guard(self, dispatch_env):
         outcome = _dispatch()
 

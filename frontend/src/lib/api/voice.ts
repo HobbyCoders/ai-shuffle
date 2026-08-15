@@ -42,9 +42,27 @@ export const VOICE_MODELS = [
 	},
 ] as const;
 
+/**
+ * The voices the realtime models can speak with (backend allowlist, VM21).
+ * Marin and cedar are the gpt-realtime generation's recommended pair.
+ */
+export const VOICE_VOICES = [
+	{ id: 'marin', label: 'Marin (default)' },
+	{ id: 'cedar', label: 'Cedar' },
+	{ id: 'alloy', label: 'Alloy' },
+	{ id: 'ash', label: 'Ash' },
+	{ id: 'ballad', label: 'Ballad' },
+	{ id: 'coral', label: 'Coral' },
+	{ id: 'echo', label: 'Echo' },
+	{ id: 'sage', label: 'Sage' },
+	{ id: 'shimmer', label: 'Shimmer' },
+	{ id: 'verse', label: 'Verse' },
+] as const;
+
 export interface VoiceSettings {
 	voice_mode_enabled: boolean;
 	voice_model: string;
+	voice_voice: string;
 	voice_provider_id: string | null;
 	voice_max_call_minutes: number;
 }
@@ -53,6 +71,7 @@ export interface VoiceSettings {
 export interface VoiceSettingsUpdate {
 	voice_mode_enabled?: boolean;
 	voice_model?: string;
+	voice_voice?: string;
 	voice_provider_id?: string | null;
 	voice_max_call_minutes?: number;
 }
@@ -165,6 +184,32 @@ export async function isVoiceEnabled(): Promise<boolean> {
 
 export function getVoiceProviders(): Promise<VoiceProvider[]> {
 	return api.get<VoiceProvider[]>('/voice/providers');
+}
+
+/**
+ * Fetch a short spoken sample for `voice` (VM21 settings preview).
+ *
+ * Returns the raw audio as a Blob — the ApiClient only speaks JSON, so this
+ * goes through fetch directly (same cookie auth, same error shape).
+ */
+export async function previewVoice(voice: string): Promise<Blob> {
+	const response = await fetch('/api/v1/voice/preview', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		credentials: 'include',
+		body: JSON.stringify({ voice }),
+	});
+	if (!response.ok) {
+		let detail = `Voice preview failed (HTTP ${response.status})`;
+		try {
+			const body = await response.json();
+			if (body?.detail) detail = body.detail;
+		} catch {
+			/* non-JSON error body — keep the generic message */
+		}
+		throw { detail, status: response.status } as ApiError;
+	}
+	return response.blob();
 }
 
 export function createVoiceSession(body: {

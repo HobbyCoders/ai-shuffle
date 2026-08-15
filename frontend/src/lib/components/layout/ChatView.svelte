@@ -70,6 +70,19 @@
 	// lands.
 	const showEmptyHero = $derived(isEmptyState && !voiceCallActive);
 
+	// VM23 (user directive, 2026-08-15): while a call is live, worker permission
+	// requests are the VOICE agent's to relay — it reads them out and answers via
+	// respond_approval on the user's spoken yes/no. Showing the GUI modal at the
+	// same time creates a race: the user clicks Allow, then says "go ahead", and
+	// the agent's respond_approval finds nothing to answer. So the modal's
+	// permission leg is suppressed for exactly the sessions/timespan the spoken
+	// leg covers; it returns the moment the call ends. Questions are unaffected.
+	const showPermissionModal = $derived(
+		!voiceCallActive &&
+			$activeSession.pendingPermissions &&
+			$activeSession.pendingPermissions.length > 0
+	);
+
 	// A call that ends by itself (transport error, or the VW5 length cap) unmounts
 	// the dock that was showing the reason, so surface it as a toast instead —
 	// otherwise the call would just silently vanish and the composer reappear.
@@ -322,11 +335,11 @@
 	<!-- Modal Overlay for Permission/Question Queues. Now anchored to .chat-view
 	     (position:absolute; inset:0; z-index:50) so it still overlays the whole
 	     surface, including the persistent input. Active-state only. -->
-	{#if !showEmptyHero && (($activeSession.pendingPermissions && $activeSession.pendingPermissions.length > 0) || ($activeSession.pendingQuestions && $activeSession.pendingQuestions.length > 0))}
+	{#if !showEmptyHero && (showPermissionModal || ($activeSession.pendingQuestions && $activeSession.pendingQuestions.length > 0))}
 		<div class="modal-overlay">
 			<div class="modal-backdrop"></div>
 			<div class="modal-content">
-				{#if $activeSession.pendingPermissions && $activeSession.pendingPermissions.length > 0}
+				{#if showPermissionModal}
 					<div class="modal-card-wrapper">
 						<PermissionQueue
 							requests={$activeSession.pendingPermissions}
