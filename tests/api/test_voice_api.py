@@ -25,12 +25,20 @@ import json
 import httpx
 import pytest
 
-from app.core import encryption
+from app.core import encryption, voice_bridge
 from app.db import database as db
 
 
 VOICE_SETTINGS = "/api/v1/settings/voice"
 VOICE_ROOT = "/api/v1/voice"
+
+# The built-in voice-agent prompt texts, echoed by GET /settings/voice so the
+# UI can show and reset to them.
+INSTRUCTION_DEFAULTS = {
+    "base": voice_bridge.VOICE_INSTRUCTIONS,
+    "command": voice_bridge.DEFAULT_COMMAND_INSTRUCTIONS,
+    "chat": voice_bridge.DEFAULT_CHAT_INSTRUCTIONS,
+}
 
 RAW_KEY = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
 
@@ -125,6 +133,10 @@ class TestVoiceSettings:
             "voice_voice": "marin",
             "voice_provider_id": None,
             "voice_max_call_minutes": 240,
+            "voice_instructions": "",
+            "voice_instructions_command": "",
+            "voice_instructions_chat": "",
+            "voice_instructions_defaults": INSTRUCTION_DEFAULTS,
         }
 
     def test_put_roundtrip(self, authenticated_client, mock_db):
@@ -143,9 +155,40 @@ class TestVoiceSettings:
             "voice_voice": "cedar",
             "voice_provider_id": pid,
             "voice_max_call_minutes": 30,
+            "voice_instructions": "",
+            "voice_instructions_command": "",
+            "voice_instructions_chat": "",
+            "voice_instructions_defaults": INSTRUCTION_DEFAULTS,
         }
         # Persisted: a fresh GET returns the same values.
         assert authenticated_client.get(VOICE_SETTINGS).json() == resp.json()
+
+    def test_instructions_roundtrip_and_reset(self, authenticated_client, mock_db):
+        # Override two of the three prompts.
+        resp = authenticated_client.put(VOICE_SETTINGS, json={
+            "voice_instructions": "You are Jarvis.",
+            "voice_instructions_command": "Be extremely fast.",
+        })
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["voice_instructions"] == "You are Jarvis."
+        assert body["voice_instructions_command"] == "Be extremely fast."
+        assert body["voice_instructions_chat"] == ""
+        # Defaults are still echoed for the UI regardless of overrides.
+        assert body["voice_instructions_defaults"] == INSTRUCTION_DEFAULTS
+
+        # Empty string clears an override back to the built-in default.
+        resp = authenticated_client.put(VOICE_SETTINGS, json={"voice_instructions": ""})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["voice_instructions"] == ""
+        # The untouched override survives the partial update.
+        assert resp.json()["voice_instructions_command"] == "Be extremely fast."
+
+    def test_instructions_length_cap(self, authenticated_client, mock_db):
+        resp = authenticated_client.put(VOICE_SETTINGS, json={
+            "voice_instructions": "x" * 8001,
+        })
+        assert resp.status_code == 400
 
     def test_partial_update_leaves_other_keys(self, authenticated_client, mock_db):
         authenticated_client.put(VOICE_SETTINGS, json={"voice_max_call_minutes": 15})
