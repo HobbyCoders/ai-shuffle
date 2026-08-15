@@ -15,9 +15,9 @@ import pytest
 
 from app.core.provider.omni_pg_store import PgOmniStore
 
-from omni.events.model import TextDelta
-from omni.messages.content import Message, Text
-from omni.store.base import SessionNode
+from fluid.events.model import TextDelta
+from fluid.messages.content import Message, Text
+from fluid.store.base import SessionNode
 
 
 def _node(node_id: str, parent_id, text: str) -> SessionNode:

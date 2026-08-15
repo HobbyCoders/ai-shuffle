@@ -137,9 +137,9 @@ from app.core.provider.events import (
 
 # omni imports (the library we wrap). Its top-level __init__ is intentionally
 # empty, so we import from submodules directly.
-from omni.engine.native import NativeLoop
-from omni.engine.delegated import DelegatedLoop
-from omni.events.ops import (
+from fluid.engine.native import NativeLoop
+from fluid.engine.delegated import DelegatedLoop
+from fluid.events.ops import (
     Interrupt,
     RespondPermission,
     RespondQuestion,
@@ -147,16 +147,16 @@ from omni.events.ops import (
     SetPermissionMode,
     UserTurn,
 )
-from omni.permissions.engine import PermissionEngine
-from omni.providers.anthropic.client import AnthropicClient
-from omni.providers.openai_responses.client import (
+from fluid.permissions.engine import PermissionEngine
+from fluid.providers.anthropic.client import AnthropicClient
+from fluid.providers.openai_responses.client import (
     API_URL as OPENAI_RESPONSES_URL,
     CODEX_RESPONSES_URL,
     OpenAIResponsesClient,
 )
-from omni.providers.openrouter.client import OpenRouterClient
-from omni.store.base import MemoryStore
-from omni.tools.registry import ToolCtx, ToolRegistry
+from fluid.providers.openrouter.client import OpenRouterClient
+from fluid.store.base import MemoryStore
+from fluid.tools.registry import ToolCtx, ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -1189,7 +1189,7 @@ class HarnessAdapter(ProviderAdapter):
         pre-compiler string so a session can always start.
         """
         try:
-            from omni.context.compiler import PromptInputs, compile_system_prompt
+            from fluid.context.compiler import PromptInputs, compile_system_prompt
 
             # A profile with ``inject_env_details`` on already carries the
             # app's <env> block (which knows worktree/execution mode omni
@@ -1247,7 +1247,7 @@ class HarnessAdapter(ProviderAdapter):
         # case, which is exactly why the native leg registers its own here.
         builtins_registered = False
         if native:
-            from omni.tools.builtins import register_builtins
+            from fluid.tools.builtins import register_builtins
 
             register_builtins(registry)
             builtins_registered = True
@@ -1601,8 +1601,8 @@ def _amend_native_task_spec(registry: ToolRegistry, options: SessionOptions) -> 
         import copy
         import dataclasses
 
-        from omni.tools.builtins.task import SPEC as _TASK_SPEC
-        from omni.tools.builtins.task import handler as _task_handler
+        from fluid.tools.builtins.task import SPEC as _TASK_SPEC
+        from fluid.tools.builtins.task import handler as _task_handler
 
         schema = copy.deepcopy(_TASK_SPEC.input_schema)
         schema["properties"]["model"]["description"] = (

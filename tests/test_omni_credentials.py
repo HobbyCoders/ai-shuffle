@@ -182,7 +182,7 @@ async def test_codex_subscription_builds_auth_object(monkeypatch):
 
     auth = FakeOpenAI.last["auth"]
     # Satisfies omni's ResponsesAuth protocol.
-    from omni.providers.openai_responses.client import ResponsesAuth
+    from fluid.providers.openai_responses.client import ResponsesAuth
 
     assert isinstance(auth, ResponsesAuth)
     assert auth.account_id == "acct_42"

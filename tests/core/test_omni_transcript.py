@@ -94,7 +94,7 @@ def _seed(session_id="ses_fixture"):
 def test_fixture_matches_real_omni_serialization():
     """The hand-written fixture JSON must equal what omni actually persists."""
     pytest.importorskip("omni")
-    from omni.messages.content import Message, Text, ToolResultBlock, ToolUseBlock
+    from fluid.messages.content import Message, Text, ToolResultBlock, ToolUseBlock
 
     assert Message(role="user", content=[Text(text="hi")]).to_dict() == _user("hi")
     assert Message(

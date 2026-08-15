@@ -27,7 +27,7 @@ from app.core.provider.sdk_tool_records import (
 )
 from app.mcp.sdk_compat import patch_sdk_server
 
-from omni.tools.registry import ToolRegistry
+from fluid.tools.registry import ToolRegistry
 
 
 class _Instance:

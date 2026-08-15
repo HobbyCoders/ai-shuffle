@@ -28,8 +28,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Iterable, List, Mapping, Optional
 
-from omni.tools.inproc import InprocServer, InprocTool, create_inproc_server
-from omni.tools.registry import ToolRegistry
+from fluid.tools.inproc import InprocServer, InprocTool, create_inproc_server
+from fluid.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 

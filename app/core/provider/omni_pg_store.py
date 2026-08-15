@@ -29,9 +29,9 @@ from psycopg2.extras import Json
 from app.db.async_database import run_sync
 from app.db.base import get_db
 
-from omni.events.model import Event, event_from_dict, event_to_dict
-from omni.messages import Message
-from omni.store.base import SessionMeta, SessionNode, new_id
+from fluid.events.model import Event, event_from_dict, event_to_dict
+from fluid.messages import Message
+from fluid.store.base import SessionMeta, SessionNode, new_id
 
 logger = logging.getLogger(__name__)
 

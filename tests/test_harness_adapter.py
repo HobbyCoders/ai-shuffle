@@ -41,10 +41,10 @@ from app.core.provider.events import (
     UserMessage,
 )
 
-from omni.events import model as lm
-from omni.events.ops import RespondPermission, UserTurn
-from omni.providers.base import ProviderCaps, StreamChunk
-from omni.store.base import MemoryStore
+from fluid.events import model as lm
+from fluid.events.ops import RespondPermission, UserTurn
+from fluid.providers.base import ProviderCaps, StreamChunk
+from fluid.store.base import MemoryStore
 
 SID = "ses_test"
 
@@ -513,8 +513,8 @@ async def test_delegated_loop_writes_deny_message_to_the_cli():
     """
     import asyncio
 
-    from omni.engine.delegated import DelegatedLoop
-    from omni.engine.delegated_proto import PermissionBridge
+    from fluid.engine.delegated import DelegatedLoop
+    from fluid.engine.delegated_proto import PermissionBridge
     from app.core.user_question_handler import DISMISS_MESSAGE
 
     loop = DelegatedLoop(store=MemoryStore(), model="claude-fake", claude_cmd=["true"])
@@ -526,7 +526,7 @@ async def test_delegated_loop_writes_deny_message_to_the_cli():
     loop._write_frame = _capture  # type: ignore[assignment]
 
     bridge = PermissionBridge(
-        cli_request_id="cli_1", omni_request_id="p1",
+        cli_request_id="cli_1", fluid_request_id="p1",
         tool_name="AskUserQuestion", tool_use_id="tuq",
         input={"questions": []},
     )
@@ -547,7 +547,7 @@ async def test_delegated_loop_writes_deny_message_to_the_cli():
 
 @pytest.mark.asyncio
 async def test_delegated_loop_deny_falls_back_to_generic_message():
-    from omni.engine.delegated import DelegatedLoop
+    from fluid.engine.delegated import DelegatedLoop
 
     loop = DelegatedLoop(store=MemoryStore(), model="claude-fake", claude_cmd=["true"])
     frames: list = []
@@ -572,8 +572,8 @@ async def test_delegated_loop_deny_falls_back_to_generic_message():
 async def test_delegated_loop_allow_uses_updated_input():
     import asyncio
 
-    from omni.engine.delegated import DelegatedLoop
-    from omni.engine.delegated_proto import PermissionBridge
+    from fluid.engine.delegated import DelegatedLoop
+    from fluid.engine.delegated_proto import PermissionBridge
 
     loop = DelegatedLoop(store=MemoryStore(), model="claude-fake", claude_cmd=["true"])
     frames: list = []
@@ -584,7 +584,7 @@ async def test_delegated_loop_allow_uses_updated_input():
     loop._write_frame = _capture  # type: ignore[assignment]
 
     bridge = PermissionBridge(
-        cli_request_id="cli_4", omni_request_id="p2",
+        cli_request_id="cli_4", fluid_request_id="p2",
         tool_name="AskUserQuestion", tool_use_id="tuq",
         input={"questions": []},
     )
@@ -609,7 +609,7 @@ async def test_delegated_loop_allow_uses_updated_input():
 
 @pytest.mark.asyncio
 async def test_native_loop_text_turn():
-    from omni.engine.native import NativeLoop
+    from fluid.engine.native import NativeLoop
 
     chunks = [
         StreamChunk("message_start", {"usage": {"input_tokens": 5}}),
@@ -831,7 +831,7 @@ async def test_delegated_loop_kwargs_filter_sdk_servers_and_stream_partial(monke
     import json
 
     import app.core.provider.harness_adapter as ha
-    from omni.tools.registry import ToolRegistry
+    from fluid.tools.registry import ToolRegistry
 
     captured: dict = {}
 
@@ -989,7 +989,7 @@ async def test_connect_native_leg_passes_builtin_registry_to_native_loop(monkeyp
 async def test_on_write_policy_gates_builtin_bash_but_not_read():
     """The permission prompt only becomes reachable once the builtins exist:
     Bash is risk='write' (ask), Read is risk='safe' (allow)."""
-    from omni.permissions.engine import PermissionEngine
+    from fluid.permissions.engine import PermissionEngine
 
     adapter = HarnessAdapter()
     registry = await adapter._build_registry(SessionOptions(model="gpt-4o"), native=True)
@@ -1097,7 +1097,7 @@ async def test_delegated_append_mode_bypasses_compiler(monkeypatch, tmp_path):
     """Flag off (default): the delegated leg's system/append pass through
     byte-identically — the CLI gathers its own env/instructions."""
     import app.core.provider.harness_adapter as ha
-    from omni.tools.registry import ToolRegistry
+    from fluid.tools.registry import ToolRegistry
 
     monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
 
@@ -1119,7 +1119,7 @@ async def test_delegated_full_replace_compiles(monkeypatch, tmp_path):
     via --system-prompt and no append."""
     import app.core.provider.harness_adapter as ha
     from app.core.config import settings
-    from omni.tools.registry import ToolRegistry
+    from fluid.tools.registry import ToolRegistry
 
     monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
     monkeypatch.setattr(settings, "prompt_full_replace", True)
@@ -1143,7 +1143,7 @@ async def test_delegated_leg_bans_cli_subagent_tools(monkeypatch, tmp_path):
     """Ruling A6: the CLI's native Task/Agent/Workflow are always disallowed;
     profile-level disallows merge in."""
     import app.core.provider.harness_adapter as ha
-    from omni.tools.registry import ToolRegistry
+    from fluid.tools.registry import ToolRegistry
 
     monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
 
@@ -1164,7 +1164,7 @@ async def test_delegated_leg_bans_cli_wake_tools(monkeypatch, tmp_path):
     """The CLI's native wake/cron tools fire turns the delegated client never
     reads — only the bridged app builtin may schedule wakes."""
     import app.core.provider.harness_adapter as ha
-    from omni.tools.registry import ToolRegistry
+    from fluid.tools.registry import ToolRegistry
 
     monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
 
@@ -1183,7 +1183,7 @@ async def test_delegated_leg_bans_cli_wake_tools(monkeypatch, tmp_path):
 async def test_add_dirs_reach_delegated_loop(monkeypatch, tmp_path):
     """add_dirs (notes dir et al.) must reach the CLI as --add-dir dirs."""
     import app.core.provider.harness_adapter as ha
-    from omni.tools.registry import ToolRegistry
+    from fluid.tools.registry import ToolRegistry
 
     monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
 
@@ -1204,7 +1204,7 @@ def test_store_derived_from_database_presence(monkeypatch):
     must be ignored."""
     from app.core.config import settings
     from app.core.provider.omni_pg_store import PgOmniStore
-    from omni.store.base import MemoryStore as OmniMemoryStore
+    from fluid.store.base import MemoryStore as OmniMemoryStore
 
     monkeypatch.setattr(settings, "database_url", "postgresql://REDACTED@h:5432/db")
     store = HarnessAdapter._build_store(SessionOptions(model="m"))
@@ -1236,7 +1236,7 @@ async def test_tool_bridge():
         register_sdk_tools,
         sdk_tool_to_inproc,
     )
-    from omni.tools.registry import ToolRegistry
+    from fluid.tools.registry import ToolRegistry
 
     class SdkToolLike:
         """Duck-typed clone of a claude_agent_sdk @tool object."""
@@ -1410,7 +1410,7 @@ def _thinking_then_text_frames(text: str = "Looks like you dismissed the prompt.
 
 
 def _map_frames(frames: list[dict]) -> list:
-    from omni.engine.delegated_proto import StreamJsonMapper
+    from fluid.engine.delegated_proto import StreamJsonMapper
 
     mapper = StreamJsonMapper(
         session_id=_SPLIT_SID, turn_id="turn_split", model="claude-fake",
@@ -2326,7 +2326,7 @@ def test_amend_native_task_spec_names_the_curated_ids(monkeypatch):
     )
 
     registry = ha.ToolRegistry()
-    from omni.tools.builtins import register_builtins
+    from fluid.tools.builtins import register_builtins
 
     register_builtins(registry)
     options = SessionOptions(model="gpt-5.6-sol", extra={"provider_id": "prov1"})
@@ -2344,8 +2344,8 @@ def test_amend_native_task_spec_leaves_unbound_sessions_untouched(monkeypatch):
     default — the vendor Task spec's own description must survive unmodified."""
     import app.core.provider.harness_adapter as ha
 
-    from omni.tools.builtins import register_builtins
-    from omni.tools.builtins.task import SPEC as _TASK_SPEC
+    from fluid.tools.builtins import register_builtins
+    from fluid.tools.builtins.task import SPEC as _TASK_SPEC
 
     registry = ha.ToolRegistry()
     register_builtins(registry)
@@ -2368,8 +2368,8 @@ def test_amend_native_task_spec_swallows_provider_lookup_failure(monkeypatch):
 
     monkeypatch.setattr(db, "get_model_provider", _boom)
 
-    from omni.tools.builtins import register_builtins
-    from omni.tools.builtins.task import SPEC as _TASK_SPEC
+    from fluid.tools.builtins import register_builtins
+    from fluid.tools.builtins.task import SPEC as _TASK_SPEC
 
     registry = ha.ToolRegistry()
     register_builtins(registry)

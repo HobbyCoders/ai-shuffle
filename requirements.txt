@@ -12,9 +12,9 @@ cryptography>=42.0.0
 claude-agent-sdk==0.2.126
 # omni agent harness — REQUIRED: it is the only provider backend
 # (app/core/provider/factory.py). Not listed here as a pinned dep because the
-# repo is private (Quickkill0/omni-harness): the Docker image vendors it via CI
+# repo is private (Quickkill0/fluid): the Docker image vendors it via CI
 # (see Dockerfile vendor/ stage); dev installs use
-# `pip install -e ./vendor/omni-harness`. Requires Python >=3.12.
+# `pip install -e ./vendor/fluid`. Requires Python >=3.12.
 # Native git reads (pygit2/libgit2) — falls back to CLI subprocess if unavailable
 pygit2>=1.19.0
 # Mobile support dependencies
