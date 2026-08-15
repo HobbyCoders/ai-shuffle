@@ -4,6 +4,10 @@ import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import com.konovalov.vad.webrtc.VadWebRTC
+import com.konovalov.vad.webrtc.config.FrameSize
+import com.konovalov.vad.webrtc.config.Mode
+import com.konovalov.vad.webrtc.config.SampleRate
 import org.vosk.Model
 import org.vosk.Recognizer
 import kotlin.math.max
@@ -14,11 +18,13 @@ import kotlin.math.sqrt
  * In-house replacement for org.vosk.android.SpeechService: a dedicated thread
  * reading the mic and feeding Vosk, plus two things SpeechService can't do —
  *
- *  - An energy gate: in a quiet room the recognizer is starved entirely (the
- *    mic keeps running, decoding doesn't), so idle CPU is near zero. A slow-
- *    adapting noise floor decides what counts as "quiet", and on wake-up the
- *    last half second of audio is replayed from the ring buffer so word
- *    onsets that opened the gate aren't clipped off.
+ *  - A two-stage gate in front of the recognizer: an energy gate (a slow-
+ *    adapting noise floor decides what counts as "quiet") and, on top of it,
+ *    a WebRTC voice-activity detector. Vosk only decodes while both agree
+ *    someone is speaking — silence, fans, traffic, and most music cost near
+ *    zero CPU even though the mic never closes. On wake-up the last half
+ *    second of audio is replayed from the ring buffer so word onsets that
+ *    opened the gate aren't clipped off.
  *
  *  - A rolling ring buffer of the last ~3 s of raw PCM, preallocated with no
  *    per-read allocations, so the service can run a second-pass verification
@@ -123,11 +129,25 @@ internal class WakeAudioPipeline(
     private fun captureLoop() {
         var record: AudioRecord? = null
         var recognizer: Recognizer? = null
+        var vad: VadWebRTC? = null
         try {
+            // Background priority keeps this thread on the little cores; the
+            // grammar-constrained decode is light enough to stay realtime
+            // there, and the big cores are what make the phone hot.
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+
             recognizer = Recognizer(model, SAMPLE_RATE.toFloat(), grammar)
             // Word-level output so results carry per-word confidence and
             // start/end times — the gates in the service need both.
             recognizer.setWords(true)
+
+            vad = VadWebRTC(
+                sampleRate = SampleRate.SAMPLE_RATE_16K,
+                frameSize = FrameSize.FRAME_SIZE_320,
+                mode = Mode.VERY_AGGRESSIVE,
+                speechDurationMs = VAD_SPEECH_MS,
+                silenceDurationMs = VAD_SILENCE_MS,
+            )
 
             val minBuf = AudioRecord.getMinBufferSize(
                 SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
@@ -135,7 +155,9 @@ internal class WakeAudioPipeline(
             record = AudioRecord(
                 MediaRecorder.AudioSource.VOICE_RECOGNITION,
                 SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
-                max(minBuf, CHUNK_SAMPLES * 2 * 4),
+                // A full second of hardware buffer: the background-priority
+                // thread may get scheduled late without dropping audio.
+                max(minBuf, SAMPLE_RATE * 2),
             )
             if (record.state != AudioRecord.STATE_INITIALIZED) {
                 throw IllegalStateException("AudioRecord failed to initialize")
@@ -146,9 +168,10 @@ internal class WakeAudioPipeline(
             }
 
             val buf = ShortArray(CHUNK_SAMPLES)
+            val frame = ShortArray(VAD_FRAME_SAMPLES)
             val flush = ShortArray(FLUSH_SAMPLES)
-            var feeding = true
-            var quietMs = 0
+            var feeding = false
+            var noSpeechMs = 0
             var noiseFloor = 0.0
 
             while (running) {
@@ -172,19 +195,33 @@ internal class WakeAudioPipeline(
                 // where the relative term collapses to nothing.
                 val threshold = noiseFloor * FLOOR_RATIO + FLOOR_MARGIN
                 val chunkMs = n * 1000 / SAMPLE_RATE
-                quietMs = if (rms < threshold) quietMs + chunkMs else 0
+
+                // Stage 2: the VAD only runs when the room isn't silent (or a
+                // decode is already in flight) — and Vosk only runs when the
+                // VAD hears actual speech. Every frame is fed even after a
+                // hit, because the detector smooths over its own history.
+                var speech = false
+                if (rms >= threshold || feeding) {
+                    var off = 0
+                    while (off + VAD_FRAME_SAMPLES <= n) {
+                        System.arraycopy(buf, off, frame, 0, VAD_FRAME_SAMPLES)
+                        if (vad.isSpeech(frame)) speech = true
+                        off += VAD_FRAME_SAMPLES
+                    }
+                }
+                noSpeechMs = if (speech) 0 else noSpeechMs + chunkMs
 
                 if (feeding) {
                     if (recognizer.acceptWaveForm(buf, n)) {
                         listener.onResult(recognizer.result)
                     }
-                    if (quietMs >= GATE_QUIET_MS) {
+                    if (noSpeechMs >= GATE_QUIET_MS) {
                         // Finalize before going idle so an utterance that
                         // trailed into the quiet stretch isn't lost.
                         listener.onResult(recognizer.finalResult)
                         feeding = false
                     }
-                } else if (rms >= threshold) {
+                } else if (speech && rms >= threshold) {
                     // Replay the recent past (which already includes this
                     // chunk) so the sound that opened the gate is decoded
                     // from its onset, not from mid-word.
@@ -206,14 +243,24 @@ internal class WakeAudioPipeline(
             runCatching { record?.stop() }
             runCatching { record?.release() }
             runCatching { recognizer?.close() }
+            runCatching { vad?.close() }
         }
     }
 
     companion object {
         private const val SAMPLE_RATE = 16000
 
-        /** 100 ms per read — small enough for a responsive gate. */
-        private const val CHUNK_SAMPLES = SAMPLE_RATE / 10
+        /** 200 ms per read — fewer syscall wakeups, still a responsive gate. */
+        private const val CHUNK_SAMPLES = SAMPLE_RATE / 5
+
+        /** WebRTC VAD operates on 20 ms frames at 16 kHz. */
+        private const val VAD_FRAME_SAMPLES = 320
+
+        /** Speech must persist this long before the VAD reports it. */
+        private const val VAD_SPEECH_MS = 60
+
+        /** ...and silence this long before it reports speech ended. */
+        private const val VAD_SILENCE_MS = 300
 
         /** ~3 s of 16 kHz mono 16-bit PCM (~96 KB). */
         private const val RING_SAMPLES = SAMPLE_RATE * 3

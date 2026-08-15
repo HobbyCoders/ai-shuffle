@@ -11,8 +11,8 @@ android {
         applicationId = "com.hobbycoders.aishuffle"
         minSdk = 26
         targetSdk = 34
-        versionCode = 7
-        versionName = "0.6.0-voice"
+        versionCode = 8
+        versionName = "0.6.1-voice"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -77,5 +77,8 @@ dependencies {
     implementation("io.getstream:stream-webrtc-android:1.1.3")
     // Offline wake-word spotting (Vosk small model, downloaded on first enable).
     implementation("com.alphacephei:vosk-android:0.3.47")
+    // WebRTC voice-activity detector: near-free C gate that keeps Vosk starved
+    // unless someone is actually speaking (fans/music/traffic don't count).
+    implementation("com.github.gkonovalov.android-vad:webrtc:2.0.6")
     implementation("net.java.dev.jna:jna:5.13.0@aar")
 }
