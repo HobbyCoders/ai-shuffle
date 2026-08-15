@@ -1,13 +1,13 @@
 # AI Shuffle
 
-> A self-hosted web UI for Claude Code — run locally on your desktop or deploy via Docker for remote access from any device.
+> A self-hosted web UI for AI Agents — run locally on your desktop or deploy via Docker for remote access from any device.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-1.2.1-green.svg)](https://github.com/HobbyCoders/ai-shuffle/releases)
 
 ## What Is AI Shuffle?
 
-AI Shuffle puts Claude Code in a browser. Instead of a terminal, you get a full GUI with persistent sessions, multi-tab workflows, voice input, AI-powered media generation, and a plugin system — all accessible from your phone, laptop, or any device with a browser.
+AI Shuffle puts AI agents in a browser. Instead of a terminal, you get a full GUI with persistent sessions, multi-tab workflows, voice input, AI-powered media generation, and a plugin system — all accessible from your phone, laptop, or any device with a browser.
 
 **Two ways to run it:**
 
