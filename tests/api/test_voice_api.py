@@ -437,6 +437,48 @@ class TestCreateVoiceSession:
         assert row["provider_id"] == "prov-openai"
         assert row["title"] == "Voice session"
 
+    def test_command_mode_creates_a_hidden_session(
+        self, authenticated_client, mock_db, monkeypatch
+    ):
+        """A wake-word command session is BORN list-hidden (v75) — it never
+        exists in a visible state — but stays fetchable by id."""
+        _enable_voice()
+        _make_provider()
+        _install_mock_transport(monkeypatch, _secret_handler())
+
+        resp = authenticated_client.post(
+            f"{VOICE_ROOT}/sessions", json={"session_mode": "command"}
+        )
+        assert resp.status_code == 200, resp.text
+        session_id = resp.json()["session_id"]
+
+        row = db.get_session(session_id)
+        assert row is not None
+        assert row["hidden"] in (True, 1)
+        assert session_id not in {s["id"] for s in db.get_sessions()}
+
+    def test_chat_mode_session_stays_visible(
+        self, authenticated_client, mock_db, monkeypatch
+    ):
+        _enable_voice()
+        _make_provider()
+        _install_mock_transport(monkeypatch, _secret_handler())
+
+        resp = authenticated_client.post(
+            f"{VOICE_ROOT}/sessions", json={"session_mode": "chat"}
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["session_id"] in {s["id"] for s in db.get_sessions()}
+
+    def test_invalid_session_mode_returns_400(self, authenticated_client, mock_db):
+        _enable_voice()
+        _make_provider()
+        resp = authenticated_client.post(
+            f"{VOICE_ROOT}/sessions", json={"session_mode": "party"}
+        )
+        assert resp.status_code == 400, resp.text
+        assert "session_mode" in resp.json()["detail"]
+
     def test_openai_error_surfaces_as_502(self, authenticated_client, mock_db, monkeypatch):
         _enable_voice()
         _make_provider()
@@ -635,6 +677,47 @@ class TestVoiceCallAttach:
         update = sidebands[0].sent[0]
         assert update["type"] == "session.update"
         assert update["session"]["audio"]["input"]["turn_detection"]["type"] == "semantic_vad"
+
+        authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
+
+    def test_command_attach_hides_the_session(
+        self, authenticated_client, mock_db, sidebands
+    ):
+        """The shipped app declares session_mode only at attach time — a
+        "command" attach backfills hidden=TRUE on the already-visible row."""
+        _unlock(mock_db)
+        _enable_voice()
+        _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
+        _mk_voice_session()
+        assert SESSION_ID in {s["id"] for s in db.get_sessions()}
+
+        resp = authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call",
+            json={"call_id": "rtc_1", "session_mode": "command"},
+        )
+        assert resp.status_code == 200, resp.text
+
+        assert SESSION_ID not in {s["id"] for s in db.get_sessions()}
+        # Still fully fetchable and attachable — list-visibility only.
+        assert db.get_session(SESSION_ID) is not None
+        assert len(sidebands) == 1
+
+        authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
+
+    def test_chat_attach_leaves_the_session_visible(
+        self, authenticated_client, mock_db, sidebands
+    ):
+        _unlock(mock_db)
+        _enable_voice()
+        _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
+        _mk_voice_session()
+
+        resp = authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call",
+            json={"call_id": "rtc_1", "session_mode": "chat"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert SESSION_ID in {s["id"] for s in db.get_sessions()}
 
         authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
 

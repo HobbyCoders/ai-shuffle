@@ -338,7 +338,12 @@ def test_schema_version_parity_v51():
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 74 for sessions.mode: the session's interaction mode — 'chat'
+    # Bumped to 75 for sessions.hidden: the list-visibility flag — TRUE keeps
+    # a session out of the sessions-list queries (wake-word "command" voice
+    # sessions are born hidden; the row stays fully fetchable by id), NULL/
+    # FALSE (every pre-existing row) stays visible. Additive/nullable with no
+    # index, the sessions.mode template. v74 added sessions.mode: the
+    # session's interaction mode — 'chat'
     # (the implicit default; NULL means chat, so every pre-existing session is
     # unaffected) or 'voice' (an OpenAI Realtime voice call, ruling VM4 of
     # docs/VOICE_MODE_PLAN.md, wave VW1). Additive/nullable with no index, the
@@ -383,8 +388,8 @@ def test_schema_version_parity_v51():
     # the Phase-2 turns table; v58 was the Phase-1 deletion (v2_stream forced
     # TRUE + default flipped); v57 added the opt-in flag; v56 added the Phase-0
     # primitives.
-    assert db_version == 74
-    assert pg_version == 74
+    assert db_version == 75
+    assert pg_version == 75
     assert db_version == pg_version
 
 

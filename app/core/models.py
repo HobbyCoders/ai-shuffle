@@ -374,6 +374,11 @@ class Session(SessionBase):
     # covers every construction site at once (sessions are handed to FastAPI as
     # raw row dicts through ``response_model``, never built field-by-field).
     mode: str = "chat"
+    # List-visibility flag (v75): True keeps the session out of the sessions
+    # list (wake-word "command" voice sessions are born hidden). The column is
+    # nullable and NULL means visible, so the validator below coalesces — same
+    # single-point coverage as ``mode`` above.
+    hidden: bool = False
     created_at: datetime
     updated_at: datetime
     # Cross-install (cluster) annotation — populated by the API enrichment layer
@@ -417,6 +422,19 @@ class Session(SessionBase):
         """
         if value is None or (isinstance(value, str) and not value.strip()):
             return "chat"
+        return value
+
+    @field_validator("hidden", mode="before")
+    @classmethod
+    def _coalesce_hidden(cls, value):
+        """NULL ``sessions.hidden`` reads as False (visible).
+
+        Every session predating v75 carries NULL, and normal sessions keep
+        carrying NULL/FALSE, so the coalesce lives here — the same
+        single-point coverage as ``_coalesce_mode`` above.
+        """
+        if value is None:
+            return False
         return value
 
 

@@ -82,6 +82,9 @@ class SessionRow(TypedDict):
     # Interaction mode (v74, ruling VM4): 'voice' for an OpenAI Realtime call,
     # NULL/'chat' for a normal chat session.
     mode: Optional[str]
+    # List-visibility flag (v75): TRUE keeps the row out of the sessions-list
+    # queries (wake-word "command" voice sessions); NULL/FALSE = visible.
+    hidden: Optional[bool]
 
 
 class SessionSearchResult(TypedDict):
@@ -191,9 +194,14 @@ def get_sessions(
     active_only: bool = False,
     tag_id: Optional[str] = None,
     limit: int = 50,
-    offset: int = 0
+    offset: int = 0,
+    include_hidden: bool = False
 ) -> List[SessionRow]:
-    """Get sessions with optional filters"""
+    """Get sessions with optional filters.
+
+    Hidden sessions (v75 — wake-word "command" voice sessions) are excluded
+    unless ``include_hidden`` is True; they stay fetchable via get_session.
+    """
     _ph = ph()
     if tag_id:
         # Join with session_tags when filtering by tag
@@ -227,6 +235,9 @@ def get_sessions(
             params.append(api_user_id)
         else:
             query += " AND s.api_user_id IS NULL" if tag_id else " AND api_user_id IS NULL"
+    if not include_hidden:
+        # NULL = visible (every pre-v75 row), so coalesce rather than = FALSE.
+        query += " AND COALESCE(s.hidden, FALSE) = FALSE" if tag_id else " AND COALESCE(hidden, FALSE) = FALSE"
 
     query += f" ORDER BY s.updated_at DESC LIMIT {_ph} OFFSET {_ph}" if tag_id else f" ORDER BY updated_at DESC LIMIT {_ph} OFFSET {_ph}"
     params.extend([limit, offset])
@@ -246,9 +257,14 @@ def get_sessions_paginated(
     active_only: bool = False,
     tag_id: Optional[str] = None,
     limit: int = 50,
-    offset: int = 0
+    offset: int = 0,
+    include_hidden: bool = False
 ) -> tuple[List[SessionRow], int]:
     """Get sessions with optional filters, returning items and total count.
+
+    Hidden sessions (v75) are excluded from BOTH the items and the total
+    unless ``include_hidden`` is True — the filter lives in the shared WHERE
+    clause so hidden rows never inflate the count.
 
     Returns:
         Tuple of (sessions list, total count)
@@ -287,6 +303,10 @@ def get_sessions_paginated(
             params.append(api_user_id)
         else:
             base_query += f" AND {col_prefix}api_user_id IS NULL"
+    if not include_hidden:
+        # NULL = visible (every pre-v75 row). Shared by the COUNT query below,
+        # so hidden rows never inflate the total.
+        base_query += f" AND COALESCE({col_prefix}hidden, FALSE) = FALSE"
 
     with get_db() as conn:
         cursor = get_cursor(conn)
@@ -322,10 +342,15 @@ def get_sessions_cursor(
     limit: int = 50,
     cursor: Optional[str] = None,
     cursor_id: Optional[str] = None,
+    include_hidden: bool = False,
 ) -> tuple[List[Dict[str, Any]], Optional[str], Optional[str], bool]:
     """Get sessions using cursor-based pagination (keyset pagination).
 
     Uses (updated_at, id) as the cursor key for deterministic ordering.
+
+    Hidden sessions (v75) are excluded unless ``include_hidden`` is True —
+    the filter is part of the shared WHERE clause, so the limit+1 has_more
+    probe never counts hidden rows.
 
     Returns:
         Tuple of (sessions, next_cursor, next_cursor_id, has_more)
@@ -363,6 +388,9 @@ def get_sessions_cursor(
             params.append(api_user_id)
         else:
             base_query += f" AND {col_prefix}api_user_id IS NULL"
+    if not include_hidden:
+        # NULL = visible (every pre-v75 row).
+        base_query += f" AND COALESCE({col_prefix}hidden, FALSE) = FALSE"
 
     # Cursor condition: seek past the last seen (updated_at, id)
     if cursor and cursor_id:
@@ -412,6 +440,7 @@ def create_session(
     is_active: bool = False,
     provider_id: Optional[str] = None,
     mode: Optional[str] = None,
+    hidden: bool = False,
     _conn=None
 ) -> SessionRow:
     """Create a new session
@@ -443,6 +472,10 @@ def create_session(
             OpenAI Realtime voice call. ``None`` (the default, and every
             pre-existing row) means chat; the API model coalesces NULL to
             ``'chat'``.
+        hidden: Keep this session out of the sessions-list queries (v75) —
+            wake-word "command" voice sessions are born hidden so they never
+            flash into "recent sessions". List-visibility only: the row is
+            still fetchable by id.
         _conn: Optional existing DB connection for transaction grouping
     """
     from app.core.config import settings
@@ -472,10 +505,10 @@ def create_session(
             resolved_provider_id = None
     resolved_mode = (mode or "").strip() or None
     _ph = ph()
-    _phs18 = ", ".join([_ph] * 18)
-    sql = f"""INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, v2_stream, created_at, updated_at, provider_id, mode)
-               VALUES ({_phs18})"""
-    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, True, now, now, resolved_provider_id, resolved_mode)
+    _phs19 = ", ".join([_ph] * 19)
+    sql = f"""INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, v2_stream, created_at, updated_at, provider_id, mode, hidden)
+               VALUES ({_phs19})"""
+    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, True, now, now, resolved_provider_id, resolved_mode, hidden)
     if _conn is not None:
         cursor = get_cursor(_conn)
         cursor.execute(sql, params)
@@ -899,6 +932,23 @@ def set_session_active(session_id: str, is_active: bool) -> Optional[SessionRow]
             f"""UPDATE sessions SET is_active = {_ph}, updated_at = {_ph}
                WHERE id = {_ph}""",
             (is_active, datetime.now(timezone.utc).isoformat(), session_id)
+        )
+        if cursor.rowcount == 0:
+            return None
+    return get_session(session_id)
+
+
+def set_session_hidden(session_id: str, hidden: bool) -> Optional[SessionRow]:
+    """Set the list-visibility flag (v75) for a session and return the updated
+    session. Hidden sessions drop out of the list queries but stay fully
+    functional and fetchable by id."""
+    _ph = ph()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"""UPDATE sessions SET hidden = {_ph}, updated_at = {_ph}
+               WHERE id = {_ph}""",
+            (hidden, datetime.now(timezone.utc).isoformat(), session_id)
         )
         if cursor.rowcount == 0:
             return None

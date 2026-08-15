@@ -9,7 +9,9 @@ Deliberately small surface:
 * ``POST /api/v1/voice/sessions`` — create the session row (ruling VM5: a voice
   session is a REAL ``sessions`` row, created eagerly, ``mode='voice'``) and
   mint a short-lived OpenAI client secret for the browser's WebRTC leg, so the
-  provider's API key never leaves this process.
+  provider's API key never leaves this process. A declared
+  ``session_mode='command'`` (hands-free wake-word one-shots) creates the row
+  list-hidden — fully functional, just not in "recent sessions".
 * ``POST /api/v1/voice/sessions/{id}/secret`` — re-mint that secret for an
   EXISTING voice session (rejoin, or the FE's reconnect near OpenAI's session
   wall). Same flag / eligibility / decrypt path as creation.
@@ -134,10 +136,17 @@ class VoiceProvider(BaseModel):
 
 
 class VoiceSessionCreateRequest(BaseModel):
-    """Start a voice session. Every field is optional."""
+    """Start a voice session. Every field is optional.
+
+    ``session_mode`` ("command" | "chat") declared at creation lets a
+    wake-word "command" session be born hidden (``sessions.hidden``, v75) so
+    the quick one-shot task never flashes into the sessions list. Chat and
+    browser sessions (no mode) are created visible as before.
+    """
     profile_id: Optional[str] = None
     project_id: Optional[str] = None
     provider_id: Optional[str] = None
+    session_mode: Optional[str] = None
 
 
 class VoiceSessionResponse(BaseModel):
@@ -168,7 +177,8 @@ class VoiceCallRequest(BaseModel):
 
     ``session_mode`` ("command" | "chat") is how a native client reports what
     kind of session this is; the route composes the matching instructions
-    appendix (Settings-overridable) into the sideband's system prompt.
+    appendix (Settings-overridable) into the sideband's system prompt, and
+    "command" additionally hides the session from the sessions list (v75).
     Browser calls omit it and get the base prompt only.
     """
     call_id: str
@@ -567,8 +577,19 @@ async def create_voice_session(
 
     Order matters: the upstream mint happens BEFORE the row is written, so a
     rejected mint leaves no orphaned session on the board.
+
+    A declared ``session_mode`` of "command" stamps ``hidden=TRUE`` at INSERT —
+    the row never exists in a visible state, so the list can't even flash it.
     """
     from app.api.settings import get_voice_settings
+    from app.core import voice_bridge
+
+    session_mode = (request.session_mode or "").strip().lower() or None
+    if session_mode is not None and session_mode not in voice_bridge.DEFAULT_MODE_INSTRUCTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="session_mode must be 'command' or 'chat'.",
+        )
 
     voice_settings = await run_sync(get_voice_settings)
     if not voice_settings["voice_mode_enabled"]:
@@ -612,6 +633,7 @@ async def create_voice_session(
         title="Voice session",
         provider_id=provider_row["id"],
         mode="voice",
+        hidden=(session_mode == "command"),
     )
     logger.info(
         "Voice: created session %s on provider %s (model %s)",
@@ -773,6 +795,12 @@ async def attach_voice_call(
             status_code=400,
             detail="session_mode must be 'command' or 'chat'.",
         )
+
+    # A "command" session is list-hidden (v75). Creation already stamps this
+    # when the mode is declared up front; the shipped app only declares it
+    # here at attach time, so backfill the flag for that client too.
+    if session_mode == "command" and not session_row.get("hidden"):
+        await run_sync(database.set_session_hidden, session_id, True)
 
     # Compose the agent's system prompt: the (Settings-overridable) base, plus
     # the (Settings-overridable) appendix for the client's session mode. The

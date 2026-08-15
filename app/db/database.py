@@ -177,7 +177,14 @@ def _safe_json(value):
 #     OpenAI Realtime voice call, ruling VM4 of docs/VOICE_MODE_PLAN.md).
 #     Additive/nullable with no index, same discipline as sessions.provider_id;
 #     lands via the always-run guarded ADD COLUMN in _run_column_migrations.
-SCHEMA_VERSION = 74
+# 75 (2026-08-15): add sessions.hidden BOOLEAN — list-visibility flag. TRUE
+#     keeps a session out of the sessions-list queries (wake-word "command"
+#     voice sessions are born hidden — quick one-shot tasks that would litter
+#     "recent sessions"); NULL/FALSE (every pre-existing row) stays visible.
+#     Hidden rows remain fully fetchable by id. Additive/nullable with no
+#     index, same discipline as sessions.mode; lands via the always-run
+#     guarded ADD COLUMN in _run_column_migrations.
+SCHEMA_VERSION = 75
 
 
 def _migrate_profiles_to_agents(cursor):
@@ -1509,6 +1516,16 @@ def _run_column_migrations(cursor):
         cursor.execute("ALTER TABLE sessions ADD COLUMN mode TEXT")
         migrations_applied.append("sessions.mode")
 
+    # Session list-visibility flag (v75). One nullable BOOLEAN column: TRUE
+    # keeps the row out of the sessions-list queries (wake-word "command"
+    # voice sessions are born hidden), NULL/FALSE — every pre-existing row —
+    # stays visible. Hidden rows are still fetchable by id; this is
+    # list-visibility only. Additive/nullable with NO index, exactly like
+    # mode above; guarded so the ALTER never re-runs.
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "hidden"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN hidden BOOLEAN")
+        migrations_applied.append("sessions.hidden")
+
     # Rename sessions.is_favorite -> is_active (v63). Favorites were reworked
     # into an "Active group": the flag now marks the session the user is
     # currently working in. Guarded so the rename runs exactly once (only when
@@ -1745,6 +1762,7 @@ from app.db.sessions import (  # noqa: F401
     get_session_context_usage_snapshot,
     delete_session,
     set_session_active,
+    set_session_hidden,
     set_session_parked_task_kind,
     adopt_session,
     set_session_project,

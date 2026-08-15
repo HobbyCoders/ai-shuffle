@@ -260,7 +260,9 @@ def _project_has_other_active_session(project_id: str, exclude_session_id: Optio
     from app.db import database
 
     try:
-        sessions = database.get_sessions(project_id=project_id, limit=500)
+        # Safety sweep, not a UI list — a list-hidden (voice command) session
+        # can be busy too, so it must be seen here.
+        sessions = database.get_sessions(project_id=project_id, limit=500, include_hidden=True)
     except Exception:
         logger.exception("Failed to look up sessions for project %s", project_id)
         return False
