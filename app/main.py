@@ -50,7 +50,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data: blob: https:; "
             "media-src 'self' blob:; "
-            "connect-src 'self' ws: wss: https://*.cloudflareaccess.com https://static.cloudflareinsights.com https://img.shields.io https://em-content.zobj.net; "
+            # api.openai.com: the voice call surface POSTs its WebRTC SDP offer
+            # directly from the browser to OpenAI Realtime (voiceCall.ts) —
+            # without this the fetch dies as a CSP block ("Failed to fetch").
+            "connect-src 'self' ws: wss: https://*.cloudflareaccess.com https://static.cloudflareinsights.com https://img.shields.io https://em-content.zobj.net https://api.openai.com; "
             "font-src 'self'; "
             "frame-ancestors 'self';"
         )
