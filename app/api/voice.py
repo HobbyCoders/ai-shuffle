@@ -415,11 +415,27 @@ async def create_voice_session(
     body = await _mint_client_secret(api_key, model)
     client_secret, expires_at = _extract_client_secret(body)
 
+    # Resolve the profile the same way normal session creation does (explicit →
+    # project default → first configured agent). A literal fallback id here hits
+    # the sessions.profile_id FK the moment no such agent row exists.
+    profile_id = request.profile_id
+    if not profile_id and request.project_id:
+        project = await run_sync(database.get_project, request.project_id)
+        profile_id = ((project or {}).get("settings") or {}).get("default_profile_id")
+    if not profile_id:
+        profiles = await run_sync(database.get_all_profiles)
+        if not profiles:
+            raise HTTPException(
+                status_code=409,
+                detail="No agents are configured; create an agent before starting a voice session.",
+            )
+        profile_id = profiles[0]["id"]
+
     session_id = str(uuid.uuid4())
     await run_sync(
         database.create_session,
         session_id=session_id,
-        profile_id=request.profile_id or "default",
+        profile_id=profile_id,
         project_id=request.project_id,
         title="Voice session",
         provider_id=provider_row["id"],
