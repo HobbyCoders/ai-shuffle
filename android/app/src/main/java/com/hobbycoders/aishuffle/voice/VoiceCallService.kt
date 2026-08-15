@@ -185,7 +185,8 @@ class VoiceCallService : Service() {
         // 2. Create the voice session (server mints the ephemeral ek_ secret).
         // No settings pre-check: it cost a round trip on every wake, and the
         // session create fails with a descriptive error when voice mode is off.
-        val session = when (val result = VoiceApi.createSession(srv, cookie)) {
+        val sessionMode = if (mode == SessionMode.COMMAND) "command" else "chat"
+        val session = when (val result = VoiceApi.createSession(srv, cookie, sessionMode)) {
             is ApiResult.Success -> result.data
             is ApiResult.NeedsCfAccess -> {
                 failCall(getString(R.string.cf_access_reauth)); return
@@ -230,7 +231,7 @@ class VoiceCallService : Service() {
                     // The prompt text itself lives server-side (Settings →
                     // Voice) — the app only reports which kind of session
                     // this is.
-                    sessionMode = if (mode == SessionMode.COMMAND) "command" else "chat",
+                    sessionMode = sessionMode,
                 )
                 if (attach is ApiResult.Failure) {
                     Log.w(TAG, "Sideband attach failed: ${attach.message}")

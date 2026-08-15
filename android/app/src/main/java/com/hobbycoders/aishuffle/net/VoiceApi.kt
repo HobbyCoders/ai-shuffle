@@ -52,11 +52,23 @@ object VoiceApi {
             execute(request) { json -> json.optBoolean("voice_mode_enabled", false) }
         }
 
-    /** POST /api/v1/voice/sessions — creates a session and mints an `ek_` secret. */
-    suspend fun createSession(server: Server, sessionCookie: String): ApiResult<VoiceSession> =
+    /**
+     * POST /api/v1/voice/sessions — creates a session and mints an `ek_` secret.
+     *
+     * [sessionMode] ("command" | "chat") is declared here as well as at attach:
+     * the server hides command sessions from the recent-sessions list, and
+     * declaring the mode at creation means they are born hidden instead of
+     * flashing into the list until the call attaches.
+     */
+    suspend fun createSession(
+        server: Server,
+        sessionCookie: String,
+        sessionMode: String,
+    ): ApiResult<VoiceSession> =
         withContext(Dispatchers.IO) {
+            val body = JSONObject().put("session_mode", sessionMode)
             val request = serverRequest(server, sessionCookie, "/api/v1/voice/sessions")
-                .post(JSONObject().toString().toRequestBody(JSON_MEDIA.toMediaType()))
+                .post(body.toString().toRequestBody(JSON_MEDIA.toMediaType()))
                 .build()
             execute(request) { json ->
                 VoiceSession(
