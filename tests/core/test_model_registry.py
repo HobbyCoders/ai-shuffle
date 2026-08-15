@@ -116,6 +116,37 @@ def test_model_values_includes_1m_for_supported_models():
     assert "haiku[1m]" not in values
 
 
+def test_resolve_api_model_id_maps_each_preset_alias():
+    # The registry stores short aliases; the native Anthropic leg needs the
+    # full API model id.
+    assert m.resolve_api_model_id("haiku") == "claude-haiku-4-5"
+    assert m.resolve_api_model_id("sonnet") == "claude-sonnet-5"
+    assert m.resolve_api_model_id("opus") == "claude-opus-5"
+    assert m.resolve_api_model_id("fable") == "claude-fable-5"
+
+
+def test_resolve_api_model_id_strips_the_1m_suffix():
+    # The [1m] window is a capability, not a distinct API model.
+    assert m.resolve_api_model_id("opus[1m]") == "claude-opus-5"
+
+
+def test_resolve_api_model_id_resolves_legacy_full_ids():
+    # Legacy stored ids normalize to their alias first, then to the API id.
+    assert m.resolve_api_model_id("claude-opus-4-6") == "claude-opus-5"
+    assert m.resolve_api_model_id("claude-sonnet-4-6[1m]") == "claude-sonnet-5"
+
+
+def test_resolve_api_model_id_passes_through_non_presets():
+    # Other providers' ids and custom models are never rewritten.
+    assert m.resolve_api_model_id("gpt-5-codex") == "gpt-5-codex"
+    assert m.resolve_api_model_id("meta-llama/llama-3.1-70b") == "meta-llama/llama-3.1-70b"
+    # A legacy-looking id that is NOT in LEGACY_MODEL_MAP stays as-is.
+    assert m.resolve_api_model_id("claude-sonnet-4-5") == "claude-sonnet-4-5"
+    # Inherit / empty round-trip untouched.
+    assert m.resolve_api_model_id(None) is None
+    assert m.resolve_api_model_id("") == ""
+
+
 def test_registry_payload_shape():
     payload = m.registry_payload()
     assert payload["context_1m_suffix"] == m.CONTEXT_1M_SUFFIX

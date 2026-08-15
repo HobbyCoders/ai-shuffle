@@ -1092,6 +1092,114 @@ async def test_native_leg_app_env_block_not_duplicated(monkeypatch, tmp_path):
     assert "# Environment" not in system
 
 
+# ─── Native Anthropic leg: registry alias → API model id ─────────────────────
+
+
+class _SwapLoop(_CapturingLoop):
+    """_CapturingLoop plus the NativeLoop hot-swap contract: ``submit`` is
+    unimplemented, so set_model falls through to the ``model`` attribute."""
+
+    model = None
+
+    async def submit(self, _op):
+        raise NotImplementedError
+
+
+@pytest.mark.asyncio
+async def test_anthropic_native_leg_canonicalizes_the_model_alias(monkeypatch, tmp_path):
+    """fluid's Anthropic client sends the model verbatim to the Messages API —
+    a bare registry alias would 404 there."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    await ha.HarnessAdapter().connect(
+        SessionOptions(
+            model="opus",
+            cwd=str(tmp_path),
+            extra={"omni_engine": "native", "omni_provider": "anthropic"},
+        )
+    )
+    assert _CapturingLoop.captured["model"] == "claude-opus-5"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_native_leg_canonicalizes_the_1m_variant(monkeypatch, tmp_path):
+    """The [1m] window is a capability, not a distinct API model id."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    await ha.HarnessAdapter().connect(
+        SessionOptions(
+            model="opus[1m]",
+            cwd=str(tmp_path),
+            extra={"omni_engine": "native", "omni_provider": "anthropic"},
+        )
+    )
+    assert _CapturingLoop.captured["model"] == "claude-opus-5"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_native_leg_passes_custom_models_through(monkeypatch, tmp_path):
+    """Only registry presets are rewritten — a custom id reaches the API as-is."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    await ha.HarnessAdapter().connect(
+        SessionOptions(
+            model="my-custom-model",
+            cwd=str(tmp_path),
+            extra={"omni_engine": "native", "omni_provider": "anthropic"},
+        )
+    )
+    assert _CapturingLoop.captured["model"] == "my-custom-model"
+
+
+@pytest.mark.asyncio
+async def test_other_native_kinds_are_not_canonicalized(monkeypatch, tmp_path):
+    """The gating is per provider kind: non-Anthropic native legs run
+    provider-native ids that must never be rewritten to a Claude API id."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    await ha.HarnessAdapter().connect(
+        SessionOptions(
+            model="opus",
+            cwd=str(tmp_path),
+            extra={"omni_engine": "native", "omni_provider": "openrouter"},
+        )
+    )
+    assert _CapturingLoop.captured["model"] == "opus"
+
+
+@pytest.mark.asyncio
+async def test_set_model_canonicalizes_on_the_anthropic_leg(monkeypatch, tmp_path):
+    """Mid-session hot swap lands on NativeLoop's raw model attribute — the
+    same verbatim-to-API path as connect."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _SwapLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(
+        SessionOptions(
+            model="opus",
+            cwd=str(tmp_path),
+            extra={"omni_engine": "native", "omni_provider": "anthropic"},
+        )
+    )
+    await adapter.set_model("sonnet")
+    assert adapter.engine.model == "claude-sonnet-5"
+
+
 @pytest.mark.asyncio
 async def test_delegated_append_mode_bypasses_compiler(monkeypatch, tmp_path):
     """Flag off (default): the delegated leg's system/append pass through

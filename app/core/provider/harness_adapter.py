@@ -103,6 +103,7 @@ from typing import Any, AsyncIterator, Dict, Optional
 
 import httpx
 
+from app.core.model_registry import DEFAULT_MODEL, resolve_api_model_id
 from app.core.provider.omni_credentials import (
     ProviderCredentialError,
     resolve_provider_credentials,
@@ -190,6 +191,7 @@ class HarnessAdapter(ProviderAdapter):
         # question event; kept for forward-compat with RespondQuestion).
         self._pending_question_id: Optional[str] = None
         self._is_delegated: bool = False
+        self._provider_kind: Optional[str] = None
         # ─ translation state (see _translate) ─
         # Model reported by the current turn's TurnStarted (AssistantMessage.model).
         self._current_model: Optional[str] = None
@@ -229,6 +231,7 @@ class HarnessAdapter(ProviderAdapter):
         # get them (the claude CLI ships its own).
         kind = _decide_provider_kind(options)
         self._is_delegated = kind == "delegated"
+        self._provider_kind = kind
 
         self._registry = await self._build_registry(options, native=not self._is_delegated)
 
@@ -342,10 +345,17 @@ class HarnessAdapter(ProviderAdapter):
             max_tokens = _native_max_output_tokens(options)
             if max_tokens is not None:
                 native_caps["max_tokens"] = max_tokens
+            # fluid's Anthropic client sends the model string verbatim to the
+            # Messages API — a bare registry alias ("opus") 404s there and never
+            # matches the pricing table. The other native kinds run provider-native
+            # ids that must pass through untouched.
+            native_model = (
+                resolve_api_model_id(options.model) if kind == "anthropic" else options.model
+            )
             self._engine = NativeLoop(
                 provider=provider_client,
                 store=self._store,
-                model=options.model,
+                model=native_model,
                 # Reasoning depth: omni's serializers map this per provider
                 # (Anthropic output_config.effort; OpenAI-shaped reasoning.effort).
                 effort=_valid_effort(getattr(options, "effort", None)),
@@ -422,7 +432,7 @@ class HarnessAdapter(ProviderAdapter):
         module docstring's degraded list).
         """
         opts = SessionOptions(
-            model=getattr(sdk_options, "model", None) or "claude-sonnet-4-5",
+            model=getattr(sdk_options, "model", None) or DEFAULT_MODEL,
             system_prompt=getattr(sdk_options, "system_prompt", None),
             cwd=getattr(sdk_options, "cwd", None),
             resume_session_id=getattr(sdk_options, "resume", None),
@@ -752,6 +762,10 @@ class HarnessAdapter(ProviderAdapter):
     async def set_model(self, model: str) -> None:
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
+        if self._provider_kind == "anthropic":
+            # Mid-session hot swap lands on NativeLoop's raw model attribute —
+            # same verbatim-to-API path as connect, same canonicalization.
+            model = resolve_api_model_id(model) or model
         try:
             await self._engine.submit(SetModel(model=model))
         except NotImplementedError:

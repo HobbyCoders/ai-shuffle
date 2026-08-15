@@ -189,6 +189,32 @@ def model_values() -> List[str]:
     return values
 
 
+# Anthropic API model ids for the selectable presets. The registry's canonical
+# stored form is the short Agent SDK alias ("opus"); the delegated leg's claude
+# CLI resolves aliases itself, but fluid's native Anthropic leg sends the model
+# string verbatim to the Messages API, where a bare alias 404s (and never
+# matches the pricing table). Dateless ids on purpose — they track the current
+# model in each family.
+API_MODEL_IDS: Dict[str, str] = {
+    "haiku": "claude-haiku-4-5",
+    "sonnet": "claude-sonnet-5",
+    "opus": "claude-opus-5",
+    "fable": "claude-fable-5",
+}
+
+
+def resolve_api_model_id(value: Optional[str]) -> Optional[str]:
+    """Anthropic API model id for a stored model value.
+
+    Presets — short aliases, their ``[1m]`` variants, and the
+    ``LEGACY_MODEL_MAP`` full ids — resolve to the pinned dateless API id.
+    Anything else (custom models, other providers' ids) passes through
+    verbatim, ``None``/``""`` included.
+    """
+    resolved = API_MODEL_IDS.get(strip_context_suffix(value))
+    return value if resolved is None else resolved
+
+
 def _is_subscription_row(row: Dict[str, object]) -> bool:
     """Whether a ``model_providers`` row authenticates as a ChatGPT subscription.
 
