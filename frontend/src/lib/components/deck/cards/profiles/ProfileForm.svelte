@@ -12,10 +12,7 @@
 	import ModelPicker from '$lib/components/settings/ModelPicker.svelte';
 	import {
 		CUSTOM_VALUE,
-		getBaseModel,
-		has1MContext,
-		withContextSuffix,
-		modelSupports1M,
+		normalizeModel,
 		encodeProviderModel,
 		decodeProviderModel
 	} from '$lib/constants/models';
@@ -313,7 +310,7 @@
 								? CUSTOM_VALUE
 								: profileForm.provider
 									? encodeProviderModel(profileForm.provider, profileForm.model)
-									: getBaseModel(profileForm.model)}
+									: normalizeModel(profileForm.model)}
 							onSelect={(v) => {
 								const composite = decodeProviderModel(v);
 								if (v === CUSTOM_VALUE) {
@@ -326,17 +323,11 @@
 									onCustomModelModeChange(false, composite.modelId);
 									onFormChange('provider', composite.providerId);
 								} else {
-									onCustomModelModeChange(false, withContextSuffix(v, modelSupports1M(v) && has1MContext(profileForm.model)));
+									onCustomModelModeChange(false, v);
 									onFormChange('provider', null);
 								}
 							}}
 						/>
-						{#if !customModelMode && modelSupports1M(profileForm.model)}
-							<label class="chk">
-								<input type="checkbox" checked={has1MContext(profileForm.model)} onchange={(e) => onFormChange('model', withContextSuffix(profileForm.model, (e.target as HTMLInputElement).checked))} />
-								<span>1M context</span>
-							</label>
-						{/if}
 					</div>
 					{#if customModelMode}
 						<input type="text" value={profileForm.model} oninput={(e) => onFormChange('model', (e.target as HTMLInputElement).value)} class="inp mono" placeholder="e.g. claude-sonnet-4-5" />
@@ -642,24 +633,6 @@
 	.icon-btn.danger:hover {
 		background: color-mix(in oklch, var(--destructive) 14%, transparent);
 		border-color: color-mix(in oklch, var(--destructive) 30%, transparent);
-	}
-
-	/* Inline checkbox label (1M context) */
-	.chk {
-		display: inline-flex;
-		align-items: center;
-		gap: 7px;
-		font-size: 12.5px;
-		color: var(--muted-foreground);
-		white-space: nowrap;
-		cursor: pointer;
-		flex-shrink: 0;
-	}
-	.chk input {
-		width: 15px;
-		height: 15px;
-		accent-color: var(--primary);
-		color-scheme: dark;
 	}
 
 	/* Group header with trailing actions */

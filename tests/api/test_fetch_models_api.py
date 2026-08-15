@@ -247,6 +247,41 @@ class TestHelperParsing:
         ]})
         assert out == [{"id": "keep", "label": "Keep"}]
 
+    def test_parse_carries_through_upstream_context_length(self):
+        """OpenRouter-shaped windows survive normalization as ``context_window``.
+        They used to be stripped, forcing every model onto the row's single
+        shared column."""
+        out = mp_api._parse_models_response({"data": [
+            {"id": "a", "label": "A", "context_length": 128000},
+            {"id": "b", "label": "B", "top_provider": {"context_length": 1000000}},
+            {"id": "c", "label": "C"},
+        ]})
+        assert out == [
+            {"id": "a", "label": "A", "context_window": 128000},
+            {"id": "b", "label": "B", "context_window": 1000000},
+            {"id": "c", "label": "C"},
+        ]
+
+    def test_parse_prefers_top_provider_context_length(self):
+        """``top_provider`` is the actual serving provider's window — it wins."""
+        out = mp_api._parse_models_response({"data": [
+            {"id": "a", "label": "A", "context_length": 128000,
+             "top_provider": {"context_length": 64000}},
+        ]})
+        assert out == [{"id": "a", "label": "A", "context_window": 64000}]
+
+    def test_parse_ignores_unusable_context_length(self):
+        out = mp_api._parse_models_response({"data": [
+            {"id": "a", "label": "A", "context_length": "huge"},
+            {"id": "b", "label": "B", "context_length": 0},
+            {"id": "c", "label": "C", "context_length": None},
+        ]})
+        assert out == [
+            {"id": "a", "label": "A"},
+            {"id": "b", "label": "B"},
+            {"id": "c", "label": "C"},
+        ]
+
     def test_parse_non_list_returns_empty(self):
         assert mp_api._parse_models_response({"data": "nope"}) == []
         assert mp_api._parse_models_response(123) == []

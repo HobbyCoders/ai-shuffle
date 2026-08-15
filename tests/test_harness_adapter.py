@@ -1125,8 +1125,9 @@ async def test_anthropic_native_leg_canonicalizes_the_model_alias(monkeypatch, t
 
 
 @pytest.mark.asyncio
-async def test_anthropic_native_leg_canonicalizes_the_1m_variant(monkeypatch, tmp_path):
-    """The [1m] window is a capability, not a distinct API model id."""
+async def test_anthropic_native_leg_canonicalizes_legacy_1m_values(monkeypatch, tmp_path):
+    """The retired [1m] suffix was never a distinct API model id — a persisted
+    value still carrying it must still reach the API as the base model."""
     import app.core.provider.harness_adapter as ha
 
     monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)

@@ -19,6 +19,16 @@ import { api } from './client';
 export interface ProviderModelEntry {
 	id: string;
 	label: string;
+	/**
+	 * Per-model context window (tokens), when known: carried through from the
+	 * upstream catalog (`context_length` / `top_provider.context_length`) or a
+	 * previous curation. Absent means "no per-model value" — the backend then
+	 * falls back to the preset roster and finally the row's own column (see
+	 * `model_registry.resolve_provider_context_window`). Editors MUST preserve
+	 * it when rebuilding entries; dropping it re-flattens every model onto the
+	 * row's single shared window.
+	 */
+	context_window?: number | null;
 }
 
 /** Public (token-free) representation of a `model_providers` row. */

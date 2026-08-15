@@ -44,7 +44,9 @@
 	let fetching = $state(false);
 	let fetchError = $state('');
 	let fetchSource = $state<'preset' | 'upstream' | ''>('');
-	let fetchResults = $state<{ id: string; label: string; checked: boolean }[]>([]);
+	let fetchResults = $state<
+		{ id: string; label: string; checked: boolean; context_window?: number | null }[]
+	>([]);
 	let saving = $state(false);
 	let filter = $state('');
 
@@ -86,7 +88,12 @@
 		try {
 			const res = await providers.fetchProviderModels(createdId);
 			fetchSource = res.source;
-			fetchResults = (res.models ?? []).map((m) => ({ id: m.id, label: m.label, checked: false }));
+			fetchResults = (res.models ?? []).map((m) => ({
+				id: m.id,
+				label: m.label,
+				checked: false,
+				context_window: m.context_window
+			}));
 		} catch (e) {
 			fetchError = getErrorMessage(e, 'Could not fetch models');
 		} finally {
@@ -110,9 +117,16 @@
 
 	async function useSelected() {
 		if (!createdId || saving) return;
+		// Preserve the upstream per-model window (OpenRouter publishes
+		// `context_length`); rebuilding as a bare {id,label} would drop it and
+		// flatten every model onto the row's single shared window.
 		const selected = fetchResults
 			.filter((r) => r.checked)
-			.map((r) => ({ id: r.id.trim(), label: (r.label || r.id).trim() }))
+			.map((r) => ({
+				id: r.id.trim(),
+				label: (r.label || r.id).trim(),
+				...(r.context_window != null ? { context_window: r.context_window } : {})
+			}))
 			.filter((m) => m.id && m.label);
 		saving = true;
 		fetchError = '';

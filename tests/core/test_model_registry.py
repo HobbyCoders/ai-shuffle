@@ -1,10 +1,12 @@
 """Tests for the model registry.
 
 The presets are Agent SDK shorthand aliases (``haiku``, ``sonnet``, ``opus``,
-``fable``). The 1M context window is a capability toggled on a base model by
-appending ``[1m]`` to the stored value. These tests pin the registry contents,
-the flipped legacy map (older full model IDs → shorthand), and the helpers that
-round-trip the suffix.
+``fable``) and each carries its NATIVE context window — the current Claude slugs
+run 1M by default and the old ``[1m]`` opt-in suffix is a retired mechanism that
+survives only as legacy-data normalization. These tests pin the registry
+contents, the flipped legacy map (older full model IDs → shorthand), that a
+stored ``[1m]`` id normalizes onto its base slug, and the per-MODEL provider
+context-window resolution shared with the spawn env overlay.
 """
 
 import json
@@ -18,26 +20,41 @@ from app.db import database as db
 def test_registry_contents_and_default():
     # Presets are the four SDK shorthand aliases, in this order.
     assert [opt.value for opt in m.MODELS] == ["haiku", "sonnet", "opus", "fable"]
-    # No registry entry carries the [1m] suffix — it's derived on demand.
-    assert all(not opt.value.endswith(m.CONTEXT_1M_SUFFIX) for opt in m.MODELS)
+    # No registry entry carries the retired [1m] suffix.
+    assert all(not opt.value.endswith("[1m]") for opt in m.MODELS)
     by_value = {opt.value: opt for opt in m.MODELS}
-    assert by_value["haiku"].supports_1m is False
-    assert by_value["sonnet"].supports_1m is True
-    assert by_value["opus"].supports_1m is True
-    assert by_value["fable"].supports_1m is True
+    # Current Claude slugs are natively 1M; haiku stays on the standard window.
+    assert by_value["haiku"].context_window == 200_000
+    assert by_value["sonnet"].context_window == 1_000_000
+    assert by_value["opus"].context_window == 1_000_000
+    assert by_value["fable"].context_window == 1_000_000
     assert by_value["fable"].label == "Fable"
     assert m.DEFAULT_MODEL == "sonnet"
+    # The retired capability flag is gone from the dataclass entirely.
+    assert not hasattr(by_value["sonnet"], "supports_1m")
 
 
 def test_legacy_map_flips_full_ids_to_shorthand():
     # Older stored full model IDs normalize to the shorthand alias.
     assert m.normalize_model("claude-haiku-4-5") == "haiku"
     assert m.normalize_model("claude-sonnet-4-6") == "sonnet"
-    assert m.normalize_model("claude-sonnet-4-6[1m]") == "sonnet[1m]"
     assert m.normalize_model("claude-opus-4-6") == "opus"
     assert m.normalize_model("claude-opus-4-7") == "opus"
     assert m.normalize_model("claude-opus-4-8") == "opus"
-    assert m.normalize_model("claude-opus-4-8[1m]") == "opus[1m]"
+
+
+def test_legacy_1m_ids_normalize_to_the_base_slug():
+    """Persisted profiles still hold ``"opus[1m]"``-style values — they must
+    resolve onto the base slug now that the suffix selects nothing."""
+    assert m.normalize_model("opus[1m]") == "opus"
+    assert m.normalize_model("sonnet[1m]") == "sonnet"
+    assert m.normalize_model("fable[1m]") == "fable"
+    # Legacy FULL id + suffix goes through the map to the same place.
+    assert m.normalize_model("claude-opus-4-8[1m]") == "opus"
+    assert m.normalize_model("claude-sonnet-4-6[1m]") == "sonnet"
+    assert m.normalize_model("claude-fable-5[1m]") == "fable"
+    # A custom id keeps its identity, minus the retired suffix.
+    assert m.normalize_model("my-model[1m]") == "my-model"
 
 
 def test_normalize_passes_through_custom_and_shorthand():
@@ -46,74 +63,52 @@ def test_normalize_passes_through_custom_and_shorthand():
     assert m.normalize_model("some-future-model") == "some-future-model"
     # Shorthand presets are already canonical — returned as-is.
     assert m.normalize_model("sonnet") == "sonnet"
-    assert m.normalize_model("fable[1m]") == "fable[1m]"
     # Inherit / empty.
     assert m.normalize_model("") == ""
     assert m.normalize_model(None) == ""
 
 
-def test_has_1m_context():
-    assert m.has_1m_context("opus[1m]") is True
-    assert m.has_1m_context("opus") is False
-    assert m.has_1m_context("") is False
-    assert m.has_1m_context(None) is False
-    # Legacy full ID normalizes to a 1M shorthand value.
-    assert m.has_1m_context("claude-opus-4-8[1m]") is True
+def test_the_suffix_helper_machinery_is_gone():
+    """The public opt-in helpers were deleted with the mechanism — reintroducing
+    one would resurrect a toggle the product no longer has."""
+    for name in (
+        "has_1m_context",
+        "strip_context_suffix",
+        "with_context_suffix",
+        "CONTEXT_1M_SUFFIX",
+        "CONTEXT_1M_WINDOW",
+    ):
+        assert not hasattr(m, name), name
 
 
-def test_strip_context_suffix():
-    assert m.strip_context_suffix("opus[1m]") == "opus"
-    assert m.strip_context_suffix("opus") == "opus"
-    assert m.strip_context_suffix("claude-opus-4-8[1m]") == "opus"
-    assert m.strip_context_suffix("") == ""
-
-
-def test_with_context_suffix_toggles():
-    assert m.with_context_suffix("opus", True) == "opus[1m]"
-    assert m.with_context_suffix("opus[1m]", False) == "opus"
-    # Idempotent — enabling an already-1M model does not double the suffix.
-    assert m.with_context_suffix("opus[1m]", True) == "opus[1m]"
-    # Inherit / empty has nothing to toggle.
-    assert m.with_context_suffix("", True) == ""
-    # Works on custom models too.
-    assert m.with_context_suffix("my-model", True) == "my-model[1m]"
-
-
-def test_preset_detection_includes_1m_variants():
+def test_preset_detection():
     assert m.is_preset_model("opus") is True
-    assert m.is_preset_model("opus[1m]") is True
     assert m.is_preset_model("fable") is True
-    # Legacy full ID resolves through the map to a preset.
-    assert m.is_preset_model("claude-opus-4-8[1m]") is True
+    # Legacy ids (with and without the retired suffix) resolve to a preset.
+    assert m.is_preset_model("claude-opus-4-8") is True
+    assert m.is_preset_model("opus[1m]") is True
     assert m.is_preset_model("totally-custom") is False
     assert m.is_preset_model("") is False
 
 
-def test_label_and_family_resolve_through_suffix():
+def test_label_and_family_resolve_through_legacy_ids():
     assert m.get_model_label("sonnet") == "Sonnet"
-    assert m.get_model_label("sonnet[1m]") == "Sonnet 1M"
+    # No more " 1M" decoration — the window is not a variant any more.
+    assert m.get_model_label("sonnet[1m]") == "Sonnet"
     assert m.get_model_family("fable") == "fable"
     assert m.get_model_family("opus[1m]") == "opus"
 
 
-def test_context_window_for_1m_variant():
-    assert m.get_context_window("sonnet") == 200_000
-    assert m.get_context_window("sonnet[1m]") == m.CONTEXT_1M_WINDOW
-    # Custom model with the suffix still reports the 1M window.
-    assert m.get_context_window("my-model[1m]") == m.CONTEXT_1M_WINDOW
+def test_context_window_lookup():
+    assert m.get_context_window("haiku") == 200_000
+    assert m.get_context_window("sonnet") == 1_000_000
+    assert m.get_context_window("opus[1m]") == 1_000_000
+    # Unknown/custom models fall back to the standard window.
+    assert m.get_context_window("my-model") == 200_000
 
 
-def test_model_values_includes_1m_for_supported_models():
-    values = m.model_values()
-    assert "sonnet" in values
-    assert "sonnet[1m]" in values
-    assert "fable" in values
-    assert "fable[1m]" in values
-    assert "opus" in values
-    assert "opus[1m]" in values
-    # Haiku has no 1M variant.
-    assert "haiku" in values
-    assert "haiku[1m]" not in values
+def test_model_values_has_no_suffix_variants():
+    assert m.model_values() == ["haiku", "sonnet", "opus", "fable"]
 
 
 def test_resolve_api_model_id_maps_each_preset_alias():
@@ -125,8 +120,9 @@ def test_resolve_api_model_id_maps_each_preset_alias():
     assert m.resolve_api_model_id("fable") == "claude-fable-5"
 
 
-def test_resolve_api_model_id_strips_the_1m_suffix():
-    # The [1m] window is a capability, not a distinct API model.
+def test_resolve_api_model_id_resolves_legacy_1m_values():
+    # The retired [1m] suffix was never a distinct API model — persisted values
+    # still carrying it normalize to the base slug, then to the API id.
     assert m.resolve_api_model_id("opus[1m]") == "claude-opus-5"
 
 
@@ -149,13 +145,86 @@ def test_resolve_api_model_id_passes_through_non_presets():
 
 def test_registry_payload_shape():
     payload = m.registry_payload()
-    assert payload["context_1m_suffix"] == m.CONTEXT_1M_SUFFIX
+    assert "context_1m_suffix" not in payload
     assert payload["default"] == "sonnet"
     models = payload["models"]
     assert isinstance(models, list)
-    assert "supports_1m" in models[0]
-    # Flipped legacy map is serialized for the frontend.
+    assert "supports_1m" not in models[0]
+    assert {"value", "label", "family", "context_window"} == set(models[0])
+    # Claude windows travel to the frontend so the context meter is right.
+    by_value = {entry["value"]: entry for entry in models}
+    assert by_value["sonnet"]["context_window"] == 1_000_000
+    assert by_value["haiku"]["context_window"] == 200_000
+    # Flipped legacy map is serialized for the frontend — [1m] ids land on base.
     assert payload["legacy_map"]["claude-opus-4-8"] == "opus"
+    assert payload["legacy_map"]["claude-opus-4-8[1m]"] == "opus"
+
+
+class TestResolveProviderContextWindow:
+    """Per-MODEL window resolution: the model's own value, then the preset
+    roster, then the provider row's column. Shared by the registry payload and
+    the spawn env overlay so the UI and the CLI can never disagree."""
+
+    def test_model_entry_wins_over_preset_and_row(self):
+        row = {
+            "provider_type": "chatgpt",
+            "context_window": 272000,
+            "models_json": [
+                {"id": "gpt-5.6-sol", "label": "Sol", "context_window": 400000}
+            ],
+        }
+        assert m.resolve_provider_context_window(row, "gpt-5.6-sol") == 400000
+
+    def test_preset_wins_over_the_row_column(self):
+        """The bug this fixes: a 1M model on a row whose column says 272k."""
+        row = {
+            "provider_type": "chatgpt",
+            "context_window": 272000,
+            "models_json": [{"id": "gpt-5.6-sol", "label": "Sol"}],
+        }
+        assert m.resolve_provider_context_window(row, "gpt-5.6-sol") == 1_000_000
+
+    def test_preset_applies_to_an_enrolled_codex_row_by_auth_mode(self):
+        row = {
+            "provider_type": "custom",
+            "auth_mode": "chatgpt",
+            "context_window": 272000,
+            "models_json": [{"id": "gpt-5.6-sol", "label": "Sol"}],
+        }
+        assert m.resolve_provider_context_window(row, "gpt-5.6-sol") == 1_000_000
+
+    def test_openai_public_api_roster_also_carries_the_1m_model(self):
+        row = {"provider_type": "openai", "context_window": 272000, "models_json": []}
+        assert m.resolve_provider_context_window(row, "gpt-5.6-sol") == 1_000_000
+
+    def test_model_without_a_preset_window_falls_back_to_the_row(self):
+        row = {
+            "provider_type": "chatgpt",
+            "context_window": 272000,
+            "models_json": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+        }
+        assert m.resolve_provider_context_window(row, "gpt-5.5") == 272000
+
+    def test_browsable_row_uses_its_own_column(self):
+        row = {
+            "provider_type": "openrouter",
+            "context_window": 128000,
+            "models_json": [{"id": "openai/gpt-5.6", "label": "GPT-5.6"}],
+        }
+        assert m.resolve_provider_context_window(row, "openai/gpt-5.6") == 128000
+
+    def test_nothing_known_returns_none(self):
+        row = {"provider_type": "openrouter", "context_window": None, "models_json": []}
+        assert m.resolve_provider_context_window(row, "openai/gpt-5.6") is None
+        assert m.resolve_provider_context_window(None, "anything") is None
+
+    def test_unusable_values_are_ignored(self):
+        row = {
+            "provider_type": "openrouter",
+            "context_window": 0,
+            "models_json": [{"id": "m", "label": "M", "context_window": "not-a-number"}],
+        }
+        assert m.resolve_provider_context_window(row, "m") is None
 
 
 class TestRegistryPayloadProviders:

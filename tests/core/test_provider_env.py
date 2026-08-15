@@ -9,9 +9,9 @@ Covers:
   a provider is set; injected on the native path).
 - ``query_options.build_options_from_profile`` and
   ``generation_options.build_generation_options``: the provider overlay is
-  applied (with ``CLAUDE_CODE_DISABLE_1M_CONTEXT`` absent), the native path is
-  unchanged (regression), and a query-level provider override wins over the
-  profile config.
+  applied, the NATIVE path sets no context-window env at all (the ``[1m]``
+  opt-in mechanism is retired — Claude slugs are natively 1M), and a
+  query-level provider override wins over the profile config.
 """
 
 import logging
@@ -199,22 +199,61 @@ class TestApplyProviderEnv:
         )
         assert env[MAX_CONTEXT_TOKENS_KEY] == "999999"
 
-    def test_row_context_window_overrides_1m_suffix(self, mock_db):
-        """The provider row's context_window is AUTHORITATIVE: a sub-1M row
-        clamps even an app [1m]-suffixed model id (the suffix is a
-        Claude-native-picker decoration, not provider config)."""
+    def test_row_context_window_is_the_last_resort(self, mock_db):
+        """With no per-model value and no preset entry, the row column applies to
+        every model on the row."""
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
         _mk_provider(db, context_window=272000)
-        env = apply_provider_env({}, "op", "claude-sonnet-4-5[1m]")
+        env = apply_provider_env({}, "op", "openai/gpt-5.6")
         assert env[DISABLE_1M_KEY] == "1"
         assert env[AUTO_COMPACT_KEY] == "272000"
         assert env[MAX_CONTEXT_TOKENS_KEY] == "272000"
 
+    def test_per_model_window_overrides_the_row_column(self, mock_db):
+        """THE FIX: the selected model's own ``models_json`` window wins over the
+        row's single shared column, so a 1M model on a 272k row runs at 1M."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(
+            db,
+            context_window=272000,
+            models=[
+                {"id": "openai/gpt-5.6", "label": "GPT-5.6"},
+                {"id": "big/model", "label": "Big", "context_window": 1_000_000},
+            ],
+        )
+        env = apply_provider_env({}, "op", "big/model")
+        assert env[DISABLE_1M_KEY] == "0"
+        assert env[AUTO_COMPACT_KEY] == "1000000"
+        assert env[MAX_CONTEXT_TOKENS_KEY] == "1000000"
+        assert env["CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE"] == "2000000"
+        # ... while a sibling model on the SAME row still gets the row value.
+        sibling = apply_provider_env({}, "op", "openai/gpt-5.6")
+        assert sibling[MAX_CONTEXT_TOKENS_KEY] == "272000"
+
+    def test_preset_window_overrides_the_row_column(self, mock_db):
+        """A Codex row whose column still says 272k must not clamp the 1M
+        ``gpt-5.6-sol`` \u2014 the preset roster supplies its real window."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        db.create_model_provider(
+            provider_id="cx", name="Codex", provider_type="chatgpt",
+            base_url="", auth_token=None,
+            models=[{"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol"}],
+            context_window=272000,
+        )
+        env = apply_provider_env({}, "cx", "gpt-5.6-sol")
+        assert env[DISABLE_1M_KEY] == "0"
+        assert env[AUTO_COMPACT_KEY] == "1000000"
+        assert env[MAX_CONTEXT_TOKENS_KEY] == "1000000"
+        # A model the roster says nothing about still falls back to the row.
+        other = apply_provider_env({}, "cx", "gpt-5.5")
+        assert other[MAX_CONTEXT_TOKENS_KEY] == "272000"
+
     def test_row_1m_context_window_enables_wide_window(self, mock_db):
-        """A row advertising a ≥1M window gets the wide window WITHOUT any [1m]
-        suffix — previously impossible (the gate universally forced 200k on
-        provider sessions) — and all pins carry the exact row value."""
+        """A row advertising a ≥1M window gets the wide window, and all pins
+        carry the exact row value."""
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
         _mk_provider(db, context_window=1_000_000)
@@ -246,10 +285,10 @@ class TestApplyProviderEnv:
         )
         assert env[AUTO_COMPACT_KEY] == "654321"
 
-    def test_disable_1m_set_for_codex_mode_provider(self, mock_db):
-        """A translated (codex/chatgpt-mode) provider with a foreign model id gets
-        DISABLE_1M="1"; with no context_window on the row, the auto-compact
-        window is left to the CLI (no hardcoded universal pin)."""
+    def test_unknown_window_sets_no_window_vars_at_all(self, mock_db):
+        """No per-model value, no preset entry, NULL row column \u2014 every window
+        var is left to the CLI's own defaults. This used to fall back to the
+        retired ``[1m]`` gate and force DISABLE_1M="1"."""
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
         db.create_model_provider(
@@ -258,17 +297,17 @@ class TestApplyProviderEnv:
             models=[{"id": "gpt-5-codex", "label": "GPT-5 Codex"}],
         )
         env = apply_provider_env({}, "gw", "gpt-5-codex", session_id="sess-cg")
-        assert env[DISABLE_1M_KEY] == "1"
+        assert DISABLE_1M_KEY not in env
         assert AUTO_COMPACT_KEY not in env
+        assert MAX_CONTEXT_TOKENS_KEY not in env
 
-    def test_1m_model_allows_wide_window_no_auto_compact_pin(self, mock_db):
-        """An app [1m]-opted model keeps the wide window (DISABLE_1M="0") and does
-        NOT pin auto-compaction — parity with the native path's early return."""
+    def test_legacy_1m_suffix_no_longer_moves_the_window(self, mock_db):
+        """A persisted ``[1m]`` id is inert here: the row's window decides."""
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
         _mk_provider(db, context_window=None)
         env = apply_provider_env({}, "op", "claude-sonnet-4-5[1m]")
-        assert env[DISABLE_1M_KEY] == "0"
+        assert DISABLE_1M_KEY not in env
         assert AUTO_COMPACT_KEY not in env
 
     def test_r4_fallback_default_model(self, mock_db):
@@ -523,7 +562,8 @@ class TestSubagentLegsRemoved:
         with patch.object(qo, "apply_provider_env") as m:
             env = _build_options(profile).env
         m.assert_not_called()
-        assert env[DISABLE_1M_KEY] == "1"
+        # Native leg: no window env at all (the [1m] gate is retired).
+        assert DISABLE_1M_KEY not in env
 
 
 class TestInjectClaudeCodeAuth:
@@ -562,7 +602,7 @@ class TestBuildOptionsFromProfile:
     def test_provider_profile_applies_overlay(self, mock_db, tmp_path):
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
-        _mk_provider(db, token="gw-secret")
+        _mk_provider(db, token="gw-secret", context_window=272000)
         profile = {
             "id": "t",
             "config": {
@@ -575,14 +615,15 @@ class TestBuildOptionsFromProfile:
         assert env[BASE_URL_KEY] == "https://openrouter.ai/api"
         assert env[AUTH_TOKEN_KEY] == "gw-secret"
         assert env[API_KEY] == ""
-        # Context-window safety pins now apply on the provider path too: a
-        # non-[1m] model forces the 200k guard so the CLI can't self-derive an
-        # auto-compact window off a foreign model id.
+        # Context-window safety pins apply on the provider path, resolved for
+        # the selected model, so the CLI can't self-derive an auto-compact
+        # window off a foreign model id.
         assert env[DISABLE_1M_KEY] == "1"
+        assert env[MAX_CONTEXT_TOKENS_KEY] == "272000"
 
-    def test_native_profile_unchanged(self, mock_db, tmp_path):
-        """Regression: a native profile still gets the 1M-guard and no gateway
-        overlay."""
+    def test_native_profile_sets_no_window_env(self, mock_db, tmp_path):
+        """A native profile gets NO gateway overlay and NO window pinning — the
+        CLI applies each Claude model's own (natively 1M) window."""
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
         profile = {
@@ -590,7 +631,9 @@ class TestBuildOptionsFromProfile:
             "config": {"model": "opus", "cwd": str(tmp_path)},
         }
         env = _build_options(profile).env
-        assert env[DISABLE_1M_KEY] == "1"
+        assert DISABLE_1M_KEY not in env
+        assert AUTO_COMPACT_KEY not in env
+        assert MAX_CONTEXT_TOKENS_KEY not in env
         assert BASE_URL_KEY not in env
         assert AUTH_TOKEN_KEY not in env
 
@@ -599,7 +642,7 @@ class TestBuildOptionsFromProfile:
         model override precedence)."""
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
-        _mk_provider(db, provider_id="op", token="gw-secret")
+        _mk_provider(db, provider_id="op", token="gw-secret", context_window=272000)
         profile = {  # profile config carries NO provider
             "id": "t",
             "config": {"model": "opus", "cwd": str(tmp_path)},
@@ -609,7 +652,7 @@ class TestBuildOptionsFromProfile:
         ).env
         assert env[BASE_URL_KEY] == "https://openrouter.ai/api"
         assert env[API_KEY] == ""
-        assert env[DISABLE_1M_KEY] == "1"  # provider path now pins the 200k guard
+        assert env[DISABLE_1M_KEY] == "1"  # provider path pins the resolved window
 
 
 # ---------------------------------------------------------------------------
@@ -620,7 +663,7 @@ class TestBuildGenerationOptions:
     def test_provider_config_applies_overlay(self, mock_db):
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
-        _mk_provider(db, token="gw-secret")
+        _mk_provider(db, token="gw-secret", context_window=272000)
         opts = build_generation_options(
             {"model": "openai/gpt-5.6", "provider": "op"}
         )
@@ -628,16 +671,17 @@ class TestBuildGenerationOptions:
         assert env[BASE_URL_KEY] == "https://openrouter.ai/api"
         assert env[AUTH_TOKEN_KEY] == "gw-secret"
         assert env[API_KEY] == ""
-        assert env[DISABLE_1M_KEY] == "1"  # provider path now pins the 200k guard
+        assert env[DISABLE_1M_KEY] == "1"  # provider path pins the resolved window
 
-    def test_native_config_unchanged(self, mock_db):
-        """Regression: native generation still pins the 200k window and has no
-        gateway overlay."""
+    def test_native_config_sets_no_window_env(self, mock_db):
+        """Regression: native generation has no gateway overlay and no window
+        pinning (Claude models carry their native window)."""
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
         opts = build_generation_options({"model": "opus"})
         env = opts.env
-        assert env[DISABLE_1M_KEY] == "1"
+        assert DISABLE_1M_KEY not in env
+        assert AUTO_COMPACT_KEY not in env
         assert BASE_URL_KEY not in env
 
 

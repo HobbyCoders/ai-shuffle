@@ -58,7 +58,9 @@
 	let fetching = $state(false);
 	let fetchError = $state('');
 	let fetchSource = $state<'preset' | 'upstream' | ''>('');
-	let results = $state<{ id: string; label: string; checked: boolean }[]>([]);
+	let results = $state<
+		{ id: string; label: string; checked: boolean; context_window?: number | null }[]
+	>([]);
 	let filter = $state('');
 
 	let saving = $state(false);
@@ -90,15 +92,25 @@
 			// so a save doesn't silently drop them — prepend with their stored label.
 			const extras = stored
 				.filter((m) => !catalogIds.has(m.id))
-				.map((m) => ({ id: m.id, label: m.label, checked: true }));
+				.map((m) => ({
+					id: m.id,
+					label: m.label,
+					checked: true,
+					context_window: m.context_window
+				}));
 
 			// Pre-check: if the row already has curated models, check exactly those ids.
 			// Otherwise pre-check the ENTIRE preset roster (source='preset') and NOTHING
 			// for an upstream fetch (plan §1.4).
+			//
+			// A stored per-model window wins over the freshly-fetched one (an admin
+			// curation is deliberate); otherwise take whatever the catalog advertises.
+			const storedWindows = new Map(stored.map((m) => [m.id, m.context_window]));
 			const catalogRows = catalog.map((m) => ({
 				id: m.id,
 				label: m.label,
-				checked: hasCurated ? curatedIds.has(m.id) : fetchSource === 'preset'
+				checked: hasCurated ? curatedIds.has(m.id) : fetchSource === 'preset',
+				context_window: storedWindows.get(m.id) ?? m.context_window
 			}));
 
 			results = [...extras, ...catalogRows];
@@ -106,7 +118,12 @@
 			fetchError = getErrorMessage(e, 'Could not fetch models');
 			// Keep the stored curation visible and checked so a Save after a
 			// failed fetch can't silently wipe the provider's models.
-			results = (seed.models ?? []).map((m) => ({ id: m.id, label: m.label, checked: true }));
+			results = (seed.models ?? []).map((m) => ({
+				id: m.id,
+				label: m.label,
+				checked: true,
+				context_window: m.context_window
+			}));
 		} finally {
 			fetching = false;
 		}
@@ -139,9 +156,17 @@
 
 	async function save() {
 		if (saving) return;
+		// Per-model `context_window` (from the upstream catalog or a previous
+		// curation) is PRESERVED — rebuilding entries as a bare {id,label} used to
+		// silently drop it, which forced every model back onto the row's single
+		// shared window. There is no editor for it here; we just don't lose it.
 		const models = results
 			.filter((r) => r.checked)
-			.map((r) => ({ id: r.id.trim(), label: (r.label || r.id).trim() }))
+			.map((r) => ({
+				id: r.id.trim(),
+				label: (r.label || r.id).trim(),
+				...(r.context_window != null ? { context_window: r.context_window } : {})
+			}))
 			.filter((m) => m.id && m.label);
 		saving = true;
 		saveError = '';

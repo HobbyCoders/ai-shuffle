@@ -17,7 +17,7 @@ from app.db import database
 from app.core.config import settings
 from app.core.platform import DeploymentMode
 from app.core import encryption
-from app.core.model_registry import has_1m_context
+from app.core.model_registry import resolve_provider_context_window
 
 logger = logging.getLogger(__name__)
 
@@ -381,35 +381,13 @@ def inject_claude_code_auth(
     return env
 
 
-def apply_context_window_env(env: Dict[str, str], model: Optional[str]) -> None:
-    """Force the standard 200k context window unless ``model`` explicitly opted
-    into the 1M window via the app's ``[1m]`` suffix.
-
-    The bundled Claude CLI runs natively-1M models (e.g. ``fable`` →
-    ``claude-fable-5``) AND every ``[1m]`` variant at 1M *by default*; the sole
-    lever that forces the standard 200k window back on is the
-    ``CLAUDE_CODE_DISABLE_1M_CONTEXT`` env var (truthy → 200k, per the CLI's
-    boolean-env parser). We set it explicitly in both directions so a value
-    inherited from the server's own environment can never leak the wrong window
-    into a spawn — and so a bare ``fable``/custom native-1M model does not
-    silently run at 1M when the user never enabled it.
-    """
-    if has_1m_context(model):
-        # 1M explicitly opted in — allow the wide window and DON'T touch
-        # auto-compaction: users who want 1M want the CLI's native (auto)
-        # compaction tuning, not a surprise 200k override.
-        env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = "0"
-        return
-
-    env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = "1"
-
-    # NOTE: we deliberately do NOT pin ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` here.
-    # Native model ids are real ``claude-*`` ids the CLI recognizes, so it
-    # derives the correct per-model auto-compact window itself; a hardcoded
-    # universal pin (the old 200000) forces every model onto one compaction
-    # threshold, which is wrong now that models/providers carry different
-    # context windows. A profile/user-supplied value (exposed as a profile
-    # preset) still flows through env untouched.
+# NOTE (retired): ``apply_context_window_env`` used to force
+# ``CLAUDE_CODE_DISABLE_1M_CONTEXT`` on every NATIVE spawn, derived from the
+# app's ``[1m]`` model-id suffix. The suffix mechanism is gone — current Claude
+# slugs run the 1M window natively — so native legs now set NO context-window
+# env at all and inherit the CLI's own per-model defaults. Do not reintroduce a
+# blanket 200k pin here. The PROVIDER path below still pins its window vars,
+# driven by the per-model resolution in ``model_registry``.
 
 
 def is_provider_servable(provider: Optional[Dict[str, Any]]) -> bool:
@@ -475,19 +453,18 @@ def apply_provider_env(
       ``CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC``,
       ``CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK``)
     - optional ``CLAUDE_CODE_MAX_OUTPUT_TOKENS``
-    - context-window vars (ALL provider modes), driven by the provider row's
-      ``context_window`` when set — the row is AUTHORITATIVE, the app's
-      Claude-specific ``[1m]`` suffix does not override it:
+    - context-window vars (ALL provider modes), driven by the window resolved
+      FOR ``model`` via ``model_registry.resolve_provider_context_window`` (the
+      model's own ``models_json`` entry → the preset roster → the row's
+      ``context_window`` column — never the raw row value, which is one number
+      shared by every model on the row):
       ``CLAUDE_CODE_DISABLE_1M_CONTEXT`` (``"0"`` iff the window is ≥1M),
       ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` and ``CLAUDE_CODE_MAX_CONTEXT_TOKENS``
       pinned to the EXACT window (no clamps, no hardcoded fallback — the
       max-context pin stops the CLI's 200k belief for non-``claude-*`` ids from
       truncating a larger window into "Prompt is too long"), and
-      ``CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE`` at 2x the window. A NULL
-      ``context_window`` sets only the 1M gate — from the app's ``[1m]``
-      opt-in, mirroring the native ``apply_context_window_env`` (inert for
-      foreign ids, protects claude-* ids on anthropic rows) — and leaves every
-      other window var to the CLI's own defaults.
+      ``CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE`` at 2x the window. When NO window
+      is known for the model, every window var is left unset (CLI defaults).
       All use ``setdefault`` so an explicit profile/user/extra_env value wins.
     - ``AIH_GATEWAY_TRANSLATED_MAIN=1`` — set IFF the MAIN provider is translated
       (openai/chatgpt ``provider_type`` or ``chatgpt`` ``auth_mode``); consumed by
@@ -621,24 +598,22 @@ def apply_provider_env(
     if max_output:
         env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_output)
 
-    # Context-window safety pins — mirror the native path's
-    # ``apply_context_window_env`` intent (see this module ~L390) so a
-    # provider-routed session NEVER lets the CLI self-derive an auto-compact
-    # window off an unrecognized model id (e.g. ``gpt-5.x-codex``) and
-    # autocompact immediately. Without this the native path pinned the window but
-    # the provider path only pinned when the row carried a ``context_window``
-    # (NULL by default → skipped), leaving the CLI to guess. The pins apply to
-    # ALL provider modes because every one of them faces the same risk:
+    # Context-window safety pins so a provider-routed session NEVER lets the CLI
+    # self-derive an auto-compact window off an unrecognized model id (e.g.
+    # ``gpt-5.x-codex``) and autocompact immediately. The pins apply to ALL
+    # provider modes because every one of them faces the same risk:
     #   - translated (codex/openai): the upstream model id is foreign, so the CLI
     #     cannot recognize it — pinning is exactly the fix.
     #   - anthropic_passthrough (anthropic main + foreign legs): the id is a real
-    #     ``claude-*`` id, so the native ``[1m]``-opt-in gate is correct here too.
+    #     ``claude-*`` id the CLI knows, so pinning is harmless.
     #   - direct openrouter/custom: same non-Anthropic-upstream risk.
-    # We honor the app's ``[1m]`` opt-in exactly like the native path: a ``[1m]``
-    # model keeps the wide window (``DISABLE_1M="0"``, auto-compaction left to the
-    # CLI's native tuning); everything else is forced back to the standard 200k
-    # window. ``setdefault`` throughout so an explicit profile/user/extra_env
-    # value still wins (preset-wins parity with the native path).
+    # The window is resolved FOR THE SELECTED MODEL (its own ``models_json``
+    # entry → the preset roster → the row's column) via the shared
+    # ``resolve_provider_context_window`` — the same resolution the registry
+    # payload shows the UI. Using the raw row column here was the bug: a row that
+    # advertises 272k pinned a 1M model down to 272k for every session.
+    # ``setdefault`` throughout so an explicit profile/user/extra_env value still
+    # wins (preset-wins parity with the native path).
     #
     # CAVEAT: the CLI applies the ``env`` block of the user's own
     # ``~/.claude/settings.json`` (via ``--setting-sources=user,...``) over its
@@ -647,15 +622,10 @@ def apply_provider_env(
     # correct and the session still dies with "Prompt is too long". If a
     # provider session compacts/errors near 200k despite a larger
     # context_window, check that file first.
-    context_window = provider.get("context_window")
+    context_window = resolve_provider_context_window(provider, model)
     if context_window:
-        # The provider row advertises a context_window — that value is
-        # AUTHORITATIVE for every window var, including the 1M gate. The app's
-        # ``[1m]`` model-id suffix is a Claude-native-picker decoration and must
-        # not override explicit provider config: a row with a ≥1M window gets the
-        # wide window whether or not the id carries the suffix (previously
-        # impossible — the gate universally forced 200k on provider sessions),
-        # and a row with a smaller window clamps a ``[1m]`` id back down.
+        # A window is known for THIS model — that value is AUTHORITATIVE for
+        # every window var, including the 1M gate.
         cw = int(context_window)
         env.setdefault(
             "CLAUDE_CODE_DISABLE_1M_CONTEXT", "0" if cw >= 1_000_000 else "1"
@@ -693,16 +663,12 @@ def apply_provider_env(
         # Autocompaction thresholds are unaffected (they key off
         # CLAUDE_CODE_AUTO_COMPACT_WINDOW above).
         env.setdefault("CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE", str(cw * 2))
-    else:
-        # No advertised window — fall back to the app's Claude-specific ``[1m]``
-        # opt-in gate (parity with the native path's apply_context_window_env).
-        # This is inert for foreign/translated model ids (the CLI's 1M logic
-        # only applies to claude-* models) but still protects claude-* ids
-        # served through anthropic-type rows from silently running at 1M, and
-        # leaves every window var to the CLI's own defaults otherwise.
-        env.setdefault(
-            "CLAUDE_CODE_DISABLE_1M_CONTEXT", "0" if has_1m_context(model) else "1"
-        )
+    # No window known for this model (no per-model value, no preset, NULL row
+    # column) → set NOTHING and leave every window var to the CLI's own
+    # defaults. This used to fall back to the app's ``[1m]`` opt-in gate; that
+    # mechanism is retired (Claude slugs are natively 1M), and forcing
+    # ``DISABLE_1M=1`` here would clamp a claude-* id on an anthropic row back
+    # to 200k — the opposite of the current ruling.
 
     # R4: point the small/fast model at something the gateway knows. Fall back to
     # a STABLE provider-scoped value (never the per-turn `model`): a within-provider

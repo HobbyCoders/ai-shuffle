@@ -329,7 +329,7 @@ SDK_BUILTIN_COMMANDS = {
         "type": "sdk_builtin"
     },
     "model": {
-        "description": "Switch Claude model (sonnet, opus, opus[1m], haiku)",
+        "description": "Switch Claude model (sonnet, opus, fable, haiku)",
         "type": "sdk_builtin",
         "argument_hint": "<model>"
     },

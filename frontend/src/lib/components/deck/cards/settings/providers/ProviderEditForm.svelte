@@ -60,7 +60,12 @@
 	let formToken = $state('');
 	// On edit, the masked existing token shown as the placeholder (blank = keep it).
 	let formTokenPlaceholder = $state(seed?.auth_token_set ? seed.auth_token_masked || '••••••••' : '');
-	let formModels: ProviderModelEntry[] = $state((seed?.models ?? []).map((m) => ({ id: m.id, label: m.label })));
+	// `context_window` is carried on each entry (per-model window, when known) so
+	// editing a provider never flattens its models back onto the row's single
+	// shared window. There is no editor for it — it is preserved, not authored.
+	let formModels: ProviderModelEntry[] = $state(
+		(seed?.models ?? []).map((m) => ({ id: m.id, label: m.label, context_window: m.context_window }))
+	);
 	let formDefaultModel = $state(seed?.default_model ?? '');
 	let formSmallFastModel = $state(seed?.small_fast_model ?? '');
 	let formContextWindow = $state(seed?.context_window != null ? String(seed.context_window) : '');
@@ -73,7 +78,9 @@
 	let fetchingModels = $state(false);
 	let fetchError = $state('');
 	let fetchSource = $state<'preset' | 'upstream' | ''>('');
-	let fetchResults = $state<{ id: string; label: string; checked: boolean }[]>([]);
+	let fetchResults = $state<
+		{ id: string; label: string; checked: boolean; context_window?: number | null }[]
+	>([]);
 	let fetchSaving = $state(false);
 
 	async function openFetchModels() {
@@ -85,11 +92,14 @@
 			const res = await providers.fetchProviderModels(editingProviderId);
 			const curated = new Set(formModels.map((m) => m.id.trim()).filter(Boolean));
 			fetchSource = res.source;
+			// A curated per-model window wins over the freshly-fetched one.
+			const curatedWindows = new Map(formModels.map((m) => [m.id.trim(), m.context_window]));
 			fetchResults = (res.models ?? []).map((m) => ({
 				id: m.id,
 				label: m.label,
 				// Preselect ids already in the curated set.
-				checked: curated.has(m.id)
+				checked: curated.has(m.id),
+				context_window: curatedWindows.get(m.id) ?? m.context_window
 			}));
 			showFetchPicker = true;
 		} catch (e) {
@@ -118,13 +128,17 @@
 		if (!editingProviderId) return;
 		const selected = fetchResults
 			.filter((r) => r.checked)
-			.map((r) => ({ id: r.id.trim(), label: (r.label || r.id).trim() }))
+			.map((r) => ({
+				id: r.id.trim(),
+				label: (r.label || r.id).trim(),
+				...(r.context_window != null ? { context_window: r.context_window } : {})
+			}))
 			.filter((m) => m.id && m.label);
 		fetchSaving = true;
 		fetchError = '';
 		try {
 			await updateModelProvider(editingProviderId, { models: selected });
-			formModels = selected.map((m) => ({ id: m.id, label: m.label }));
+			formModels = selected.map((m) => ({ ...m }));
 			showFetchPicker = false;
 			fetchResults = [];
 			fetchSource = '';
@@ -186,7 +200,11 @@
 		// Keep only fully-specified model rows so the backend never rejects a
 		// half-typed entry (both id and label are required).
 		const models = formModels
-			.map((m) => ({ id: m.id.trim(), label: m.label.trim() }))
+			.map((m) => ({
+				id: m.id.trim(),
+				label: m.label.trim(),
+				...(m.context_window != null ? { context_window: m.context_window } : {})
+			}))
 			.filter((m) => m.id && m.label);
 		const token = formToken.trim();
 

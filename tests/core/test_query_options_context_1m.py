@@ -1,16 +1,16 @@
 """
-Regression tests: profile-driven spawns get the 1M context window ONLY when the
-model was explicitly opted in via the app's ``[1m]`` suffix.
+Regression tests: NATIVE (Claude) profile spawns set NO context-window env.
 
-The bundled Claude CLI runs natively-1M models (``fable`` → ``claude-fable-5``)
-and every ``[1m]`` variant at 1M *by default*; the sole lever that forces the
-standard 200k window back on is the ``CLAUDE_CODE_DISABLE_1M_CONTEXT`` env var
-(truthy → 200k). So a bare ``fable`` profile silently ran at 1M even though the
-user never enabled it. ``build_options_from_profile`` must therefore set that env
-var explicitly in both directions:
+History — this file used to pin the opposite. The 1M window was an opt-in
+capability selected by appending ``[1m]`` to the stored model id, and
+``build_options_from_profile`` forced ``CLAUDE_CODE_DISABLE_1M_CONTEXT`` in both
+directions off that suffix. The current Claude slugs run 1M NATIVELY, so the
+suffix mechanism is retired: native legs must leave every window var untouched
+and inherit the CLI's own per-model defaults. Pinning ``DISABLE_1M=1`` here
+would clamp sonnet/opus/fable back to 200k — the exact bug this now guards.
 
-  - no ``[1m]`` suffix  → ``"1"`` (force 200k)
-  - ``[1m]`` suffix      → ``"0"`` (allow the 1M window)
+A persisted ``"opus[1m]"`` must still spawn (it normalizes to ``opus``); it just
+does not change the env.
 
 build_options_from_profile makes one unavoidable DB call
 (get_security_instructions); we patch that single boundary. A tmp cwd keeps the
@@ -25,9 +25,10 @@ import app.core.query_options as qo
 
 DISABLE_KEY = "CLAUDE_CODE_DISABLE_1M_CONTEXT"
 AUTO_COMPACT_KEY = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+MAX_CONTEXT_KEY = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
 
 
-def _env_for_model(model, tmp_path, base_env=None):
+def _build_for_model(model, tmp_path, base_env=None):
     profile = {
         "id": "t",
         "config": {"model": model, "tools_preset": "claude_code", "cwd": str(tmp_path)},
@@ -36,60 +37,50 @@ def _env_for_model(model, tmp_path, base_env=None):
         profile["config"]["env"] = base_env
     with patch.object(qo, "get_security_instructions", return_value=""):
         opts, _ = qo.build_options_from_profile(profile=profile)
-    return opts.env
+    return opts
 
 
 @pytest.mark.parametrize(
     "model",
-    ["fable", "opus", "sonnet", "haiku", "claude-opus-4-8"],
+    ["fable", "opus", "sonnet", "haiku", "claude-opus-4-8", ""],
 )
-def test_non_1m_models_force_200k(model, tmp_path):
-    """Bare presets (incl. natively-1M fable) and legacy full IDs disable 1M."""
-    env = _env_for_model(model, tmp_path)
-    assert env[DISABLE_KEY] == "1"
+def test_native_spawn_sets_no_context_window_env(model, tmp_path):
+    """Presets, legacy full IDs and inherit/empty alike: no window vars."""
+    env = _build_for_model(model, tmp_path).env
+    assert DISABLE_KEY not in env
+    assert AUTO_COMPACT_KEY not in env
+    assert MAX_CONTEXT_KEY not in env
 
 
 @pytest.mark.parametrize(
     "model",
     ["fable[1m]", "opus[1m]", "sonnet[1m]", "claude-opus-4-8[1m]"],
 )
-def test_1m_suffix_allows_1m(model, tmp_path):
-    """The explicit `[1m]` opt-in (including the legacy full-ID form) allows 1M."""
-    env = _env_for_model(model, tmp_path)
-    assert env[DISABLE_KEY] == "0"
-
-
-def test_inherit_empty_model_defaults_to_200k(tmp_path):
-    """An unset/inherit model is the safe 200k default, never a silent 1M."""
-    env = _env_for_model("", tmp_path)
-    assert env[DISABLE_KEY] == "1"
-
-
-# --- auto-compact window mitigation (native-1M-off compacts off the wrong window) ---
-
-
-@pytest.mark.parametrize("model", ["fable", "opus", "sonnet", "claude-opus-4-8", ""])
-def test_disable_path_leaves_auto_compact_unset(model, tmp_path):
-    """Native sessions no longer pin a hardcoded auto-compact window — the CLI
-    recognizes real ``claude-*`` ids and derives the per-model window itself
-    (a universal 200k pin is wrong now that models carry different windows)."""
-    env = _env_for_model(model, tmp_path)
-    assert env[DISABLE_KEY] == "1"
+def test_legacy_1m_suffix_is_inert(model, tmp_path):
+    """A persisted ``[1m]`` id is legacy data — it no longer sets any env."""
+    env = _build_for_model(model, tmp_path).env
+    assert DISABLE_KEY not in env
     assert AUTO_COMPACT_KEY not in env
 
 
-@pytest.mark.parametrize("model", ["fable[1m]", "opus[1m]", "claude-opus-4-8[1m]"])
-def test_1m_enabled_leaves_auto_compact_unset(model, tmp_path):
-    """1M opt-in must NOT surprise-override compaction — leave the window unset."""
-    env = _env_for_model(model, tmp_path)
-    assert env[DISABLE_KEY] == "0"
-    assert AUTO_COMPACT_KEY not in env
+@pytest.mark.parametrize(
+    "model,expected",
+    [("opus[1m]", "opus"), ("sonnet[1m]", "sonnet"), ("claude-opus-4-8[1m]", "opus")],
+)
+def test_legacy_1m_model_still_spawns(model, expected, tmp_path):
+    """The stored id normalizes onto its base slug rather than being rejected.
+
+    The SDK receives the id verbatim (the registry only canonicalizes for
+    lookups), so we assert on what the registry resolves it to.
+    """
+    from app.core.model_registry import normalize_model
+
+    assert normalize_model(model) == expected
+    assert _build_for_model(model, tmp_path).model == model
 
 
 def test_preexisting_auto_compact_window_preserved(tmp_path):
     """A profile/user-supplied window (PR #523 preset) passes through untouched."""
-    env = _env_for_model(
-        "fable", tmp_path, base_env={AUTO_COMPACT_KEY: "350000"}
-    )
-    assert env[DISABLE_KEY] == "1"
+    env = _build_for_model("fable", tmp_path, base_env={AUTO_COMPACT_KEY: "350000"}).env
     assert env[AUTO_COMPACT_KEY] == "350000"
+    assert DISABLE_KEY not in env

@@ -24,7 +24,7 @@ vi.mock('$lib/api/client', () => ({
 }));
 
 const OK_PAYLOAD = {
-	models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', supports_1m: true }],
+	models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', context_window: 1_000_000 }],
 	default: 'sonnet',
 	legacy_map: {},
 	providers: []

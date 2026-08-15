@@ -331,6 +331,31 @@ class UpstreamModelsError(Exception):
     maps this to a 502 — the gateway, not our request, is at fault."""
 
 
+def _upstream_context_length(entry: Dict[str, Any]) -> Optional[int]:
+    """Per-model context length advertised by an upstream catalog entry.
+
+    OpenRouter (and the gateways that copy its shape) publish it as
+    ``context_length`` at the top level and/or under ``top_provider``; the
+    latter is the more specific value (the actual serving provider's window) so
+    it wins. Returns ``None`` when absent or unusable — never a guessed default.
+    """
+    candidates = []
+    top_provider = entry.get("top_provider")
+    if isinstance(top_provider, dict):
+        candidates.append(top_provider.get("context_length"))
+    candidates.append(entry.get("context_length"))
+    for value in candidates:
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            window = int(value)
+        except (TypeError, ValueError):
+            continue
+        if window > 0:
+            return window
+    return None
+
+
 def _parse_models_response(payload: Any) -> List[Dict[str, Any]]:
     """Normalize an upstream ``/models`` body into ``[{id, label}]``.
 
@@ -338,6 +363,12 @@ def _parse_models_response(payload: Any) -> List[Dict[str, Any]]:
     entries. Each entry may be an object (``id`` required; ``label``/``name``
     optional, falling back to ``id``) or a bare string id. Entries without a
     usable id are skipped. The list is capped at ``_FETCH_MODELS_CAP``.
+
+    An upstream-advertised per-model window (``context_length`` /
+    ``top_provider.context_length``) is CARRIED THROUGH as ``context_window``.
+    It used to be dropped here, which forced every model on the row to share the
+    row's single ``context_window`` column — wrong the moment one model on the
+    row has a different window.
     """
     if isinstance(payload, dict):
         raw = payload.get("data")
@@ -347,6 +378,7 @@ def _parse_models_response(payload: Any) -> List[Dict[str, Any]]:
         return []
     models: List[Dict[str, Any]] = []
     for entry in raw:
+        context_window: Optional[int] = None
         if isinstance(entry, str):
             model_id = entry
             label = entry
@@ -357,11 +389,15 @@ def _parse_models_response(payload: Any) -> List[Dict[str, Any]]:
             label = entry.get("label") or entry.get("name") or model_id
             if not isinstance(label, str) or not label:
                 label = model_id
+            context_window = _upstream_context_length(entry)
         else:
             continue
         if not model_id:
             continue
-        models.append({"id": model_id, "label": label})
+        model: Dict[str, Any] = {"id": model_id, "label": label}
+        if context_window is not None:
+            model["context_window"] = context_window
+        models.append(model)
         if len(models) >= _FETCH_MODELS_CAP:
             break
     return models
@@ -514,10 +550,14 @@ async def update_provider(
         updates["small_fast_model"] = body.small_fast_model
     if body.extra_env is not None:
         updates["extra_env_json"] = body.extra_env
-    if body.context_window is not None:
-        updates["context_window"] = body.context_window
-    if body.max_output_tokens is not None:
-        updates["max_output_tokens"] = body.max_output_tokens
+    # NULLABLE columns: an explicit `null` must CLEAR them, an omitted field must
+    # leave them alone. `is not None` cannot tell those apart, so a row's window
+    # / output cap could be set but never unset from the UI. `model_fields_set`
+    # carries exactly that distinction (pydantic v2 records which keys the
+    # request body actually contained).
+    for field in ("context_window", "max_output_tokens"):
+        if field in body.model_fields_set:
+            updates[field] = getattr(body, field)
     if body.enabled is not None:
         updates["enabled"] = body.enabled
 

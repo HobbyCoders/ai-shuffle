@@ -105,7 +105,7 @@ describe('provider-model codec — PA13 shared encode/decode', () => {
 describe('getModelLabel — composite round-trip', () => {
 	it('resolves a composite inside its own provider after hydration', async () => {
 		mocks.get.mockResolvedValueOnce({
-			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', supports_1m: true }],
+			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', context_window: 1_000_000 }],
 			default: 'sonnet',
 			legacy_map: {},
 			providers: [
@@ -144,7 +144,7 @@ describe('getProviderModels — per-provider lookup (R7 scoping superseded by PA
 
 	it('returns only the matching provider’s curated models after hydration', async () => {
 		mocks.get.mockResolvedValueOnce({
-			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', supports_1m: true }],
+			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', context_window: 1_000_000 }],
 			default: 'sonnet',
 			legacy_map: {},
 			providers: [

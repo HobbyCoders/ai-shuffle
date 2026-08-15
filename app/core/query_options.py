@@ -45,7 +45,6 @@ from app.core.environment import (  # noqa: F401
     _get_hook_tool_names,
     _build_extra_args,
     _build_env_with_ai_tools,
-    apply_context_window_env,
     apply_provider_env,
     generate_environment_details,
 )
@@ -124,7 +123,8 @@ def is_native_claude_model(value: Any) -> bool:
     """Whether ``value`` names a model the NATIVE/delegated Claude leg serves.
 
     True for the registry's short aliases (``sonnet``/``opus``/``fable``/
-    ``haiku``, ``[1m]`` variants included) and for raw ``claude-*`` ids. Mirrors
+    ``haiku``, including legacy ids that normalize onto them) and for raw
+    ``claude-*`` ids. Mirrors
     the same test ``harness_adapter._decide_provider_kind`` applies to the model
     string, so "the composer picked a Claude model" and "the leg decision routes
     it to Claude" can never disagree.
@@ -611,9 +611,8 @@ def build_options_from_profile(
         logger.debug("[Claude CLI stderr] %s", line)
 
     # Process model selection.
-    # The preset model values (haiku, sonnet, opus, fable) and their [1m] variants
-    # are native Agent SDK / CLI shorthand aliases; custom model IDs pass through
-    # as-is too.
+    # The preset model values (haiku, sonnet, opus, fable) are native Agent SDK /
+    # CLI shorthand aliases; custom model IDs pass through as-is too.
     raw_model = overrides.get("model") or config.get("model")
     model_to_use = raw_model
     # Model provider (multi-provider phase-2 Chunk E, ruling G2-r). Resolution:
@@ -856,14 +855,7 @@ def build_options_from_profile(
         config.get("env"), ai_tools_config, api_user_id, provider_id
     )
 
-    if not provider_id:
-        # Force the standard 200k context window unless the profile opted into 1M
-        # via the model's `[1m]` suffix (natively-1M models like `fable` otherwise
-        # default to 1M in the CLI). See apply_context_window_env. The `[1m]`/1M
-        # logic is Claude-specific, so it is skipped for provider sessions —
-        # apply_provider_env owns the window vars there.
-        apply_context_window_env(full_env, model_to_use)
-    else:
+    if provider_id:
         # Overlay the model-provider env (base URL, bearer token, mitigation
         # flags, small-fast model, optional window/output caps). Raises
         # ProviderConfigError (a ValueError) for a missing/disabled provider or an

@@ -1,17 +1,13 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
 	getModels,
 	getDefaultModel,
 	normalizeModel,
 	isPresetModel,
-	has1MContext,
-	getBaseModel,
-	withContextSuffix,
-	modelSupports1M,
+	getClaudeContextWindow,
 	getModelLabel,
 	getModelFamily,
-	getModelBadgeClass,
-	CONTEXT_1M_SUFFIX
+	getModelBadgeClass
 } from './models';
 
 describe('model registry presets', () => {
@@ -23,16 +19,16 @@ describe('model registry presets', () => {
 		expect(getDefaultModel()).toBe('sonnet');
 	});
 
-	it('exposes only base models in the dropdown list', () => {
-		expect(getModels().every((mdl) => !mdl.value.endsWith(CONTEXT_1M_SUFFIX))).toBe(true);
+	it('exposes no [1m] variants in the dropdown list', () => {
+		expect(getModels().every((mdl) => !mdl.value.endsWith('[1m]'))).toBe(true);
 	});
 
-	it('flags which base models support 1M context', () => {
-		expect(modelSupports1M('sonnet')).toBe(true);
-		expect(modelSupports1M('opus')).toBe(true);
-		expect(modelSupports1M('fable')).toBe(true);
-		expect(modelSupports1M('haiku')).toBe(false);
-		expect(modelSupports1M('')).toBe(false);
+	it('carries each model native context window (Claude slugs are 1M)', () => {
+		const byValue = Object.fromEntries(getModels().map((mdl) => [mdl.value, mdl]));
+		expect(byValue.haiku.context_window).toBe(200_000);
+		expect(byValue.sonnet.context_window).toBe(1_000_000);
+		expect(byValue.opus.context_window).toBe(1_000_000);
+		expect(byValue.fable.context_window).toBe(1_000_000);
 	});
 });
 
@@ -40,11 +36,19 @@ describe('normalizeModel — flipped legacy map + pass-through', () => {
 	it('maps legacy full model IDs to the shorthand alias', () => {
 		expect(normalizeModel('claude-haiku-4-5')).toBe('haiku');
 		expect(normalizeModel('claude-sonnet-4-6')).toBe('sonnet');
-		expect(normalizeModel('claude-sonnet-4-6[1m]')).toBe('sonnet[1m]');
 		expect(normalizeModel('claude-opus-4-6')).toBe('opus');
 		expect(normalizeModel('claude-opus-4-7')).toBe('opus');
 		expect(normalizeModel('claude-opus-4-8')).toBe('opus');
-		expect(normalizeModel('claude-opus-4-8[1m]')).toBe('opus[1m]');
+	});
+
+	it('strips a stored legacy [1m] suffix down to the base slug', () => {
+		// The suffix was a retired opt-in toggle; persisted profiles still hold it.
+		expect(normalizeModel('opus[1m]')).toBe('opus');
+		expect(normalizeModel('sonnet[1m]')).toBe('sonnet');
+		expect(normalizeModel('fable[1m]')).toBe('fable');
+		expect(normalizeModel('claude-opus-4-8[1m]')).toBe('opus');
+		expect(normalizeModel('claude-sonnet-4-6[1m]')).toBe('sonnet');
+		expect(normalizeModel('my-model[1m]')).toBe('my-model');
 	});
 
 	it('passes unknown custom strings through unchanged', () => {
@@ -54,37 +58,13 @@ describe('normalizeModel — flipped legacy map + pass-through', () => {
 
 	it('leaves shorthand presets as-is and empties inherit', () => {
 		expect(normalizeModel('sonnet')).toBe('sonnet');
-		expect(normalizeModel('fable[1m]')).toBe('fable[1m]');
 		expect(normalizeModel('')).toBe('');
 		expect(normalizeModel(null)).toBe('');
 	});
 });
 
-describe('model registry 1M context handling', () => {
-	it('detects the 1M suffix, including via legacy IDs', () => {
-		expect(has1MContext('opus[1m]')).toBe(true);
-		expect(has1MContext('opus')).toBe(false);
-		expect(has1MContext('claude-opus-4-8[1m]')).toBe(true);
-		expect(has1MContext('')).toBe(false);
-		expect(has1MContext(null)).toBe(false);
-	});
-
-	it('strips the suffix to the base model', () => {
-		expect(getBaseModel('opus[1m]')).toBe('opus');
-		expect(getBaseModel('opus')).toBe('opus');
-		expect(getBaseModel('claude-opus-4-8[1m]')).toBe('opus');
-		expect(getBaseModel('')).toBe('');
-	});
-
-	it('toggles the suffix on and off idempotently', () => {
-		expect(withContextSuffix('opus', true)).toBe('opus[1m]');
-		expect(withContextSuffix('opus[1m]', false)).toBe('opus');
-		expect(withContextSuffix('opus[1m]', true)).toBe('opus[1m]');
-		expect(withContextSuffix('', true)).toBe('');
-		expect(withContextSuffix('my-model', true)).toBe('my-model[1m]');
-	});
-
-	it('treats 1M variants as presets, not custom', () => {
+describe('preset detection and Claude context windows', () => {
+	it('treats legacy [1m] ids as presets, not custom', () => {
 		expect(isPresetModel('opus')).toBe(true);
 		expect(isPresetModel('opus[1m]')).toBe(true);
 		expect(isPresetModel('fable')).toBe(true);
@@ -92,12 +72,21 @@ describe('model registry 1M context handling', () => {
 		expect(isPresetModel('totally-custom')).toBe(false);
 		expect(isPresetModel('')).toBe(false);
 	});
+
+	it('resolves the registered window, including through legacy ids', () => {
+		expect(getClaudeContextWindow('sonnet')).toBe(1_000_000);
+		expect(getClaudeContextWindow('opus[1m]')).toBe(1_000_000);
+		expect(getClaudeContextWindow('claude-opus-4-8')).toBe(1_000_000);
+		expect(getClaudeContextWindow('haiku')).toBe(200_000);
+		expect(getClaudeContextWindow('totally-custom')).toBe(null);
+		expect(getClaudeContextWindow('')).toBe(null);
+	});
 });
 
 describe('labels, families, and badge classes', () => {
-	it('labels and families resolve through the suffix', () => {
+	it('labels and families resolve through legacy ids, with no 1M decoration', () => {
 		expect(getModelLabel('sonnet')).toBe('Sonnet');
-		expect(getModelLabel('sonnet[1m]')).toBe('Sonnet 1M');
+		expect(getModelLabel('sonnet[1m]')).toBe('Sonnet');
 		expect(getModelFamily('fable')).toBe('fable');
 		expect(getModelFamily('opus[1m]')).toBe('opus');
 	});

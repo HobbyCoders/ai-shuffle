@@ -155,9 +155,10 @@ Subagents are specialized AI assistants that the main Claude agent can delegate 
 - **model**: Model override for this subagent
   - "haiku": Fast, cheap - use for simple searches, summaries, quick tasks
   - "sonnet": Balanced - use for most analysis, coding, moderate complexity
-  - "sonnet[1m]": Sonnet with 1M context window
-  - "opus" / "opus[1m]": Powerful - complex reasoning, architecture, security analysis
-  - "fable" / "fable[1m]": Most capable - hardest reasoning, security, long-running tasks
+  - "opus": Powerful - complex reasoning, architecture, security analysis
+  - "fable": Most capable - hardest reasoning, security, long-running tasks
+  (sonnet/opus/fable all run a 1M context window natively - there is no suffix
+  or flag to opt into it)
   - null: Inherit from parent (default)
   - Any other string is treated as a custom model ID and passed through unchanged
 
@@ -288,9 +289,10 @@ Profiles are pre-configured settings for Claude sessions. They control:
 - **model**: Claude model to use
   - "haiku": Fast, cheap - quick tasks, exploration
   - "sonnet": Balanced - general coding, analysis (default)
-  - "sonnet[1m]": Sonnet with 1M context - large codebases
-  - "opus" / "opus[1m]": Powerful - complex reasoning, architecture, deep reasoning
-  - "fable" / "fable[1m]": Most capable - hardest reasoning, long-running tasks
+  - "opus": Powerful - complex reasoning, architecture, deep reasoning
+  - "fable": Most capable - hardest reasoning, long-running tasks
+  (sonnet/opus/fable all run a 1M context window natively - there is no suffix
+  or flag to opt into it)
   - Any other string is treated as a custom model ID and passed through unchanged
 
 ### Permissions

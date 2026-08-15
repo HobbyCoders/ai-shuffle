@@ -24,7 +24,7 @@ const mocks = vi.hoisted(() => {
 		sessionId: null as string | null,
 		isStreaming: false,
 		executionMode: null,
-		modelOverride: null,
+		modelOverride: null as string | null,
 		profile: null,
 		contextUsed: null as number | null,
 		totalTokensIn: 0,
@@ -130,12 +130,14 @@ describe('ContextUsageBar — pill', () => {
 				isAutoCompactEnabled: true,
 			},
 		});
-		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1' });
+		// Pin the local model to haiku (200k) — sonnet/opus/fable are natively 1M,
+		// which would make this assertion pass for the wrong reason.
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1', modelOverride: 'haiku' });
 		const { container } = render(ContextUsageBar);
 		const pill = container.querySelector('.usage-indicator') as HTMLButtonElement;
 
-		// The local model ('sonnet', default) has a 200k window — if the title fell
-		// back to it, it would read "200k". It must read the breakdown's 1M instead.
+		// The local model (haiku) has a 200k window — if the title fell back to it,
+		// it would read "200k". It must read the breakdown's 1M instead.
 		await waitFor(() => expect(pill.getAttribute('title')).toContain('1M'));
 		expect(pill.getAttribute('title')).not.toContain('200k');
 	});
@@ -270,7 +272,7 @@ describe('ContextUsageBar — context breakdown', () => {
 		expect(container.querySelectorAll('.breakdown-row:not(.model-row)').length).toBe(5);
 		// Segment widths (as fractions of contextMax) plus the buffer sum to the
 		// same total the header reports — the invariant this fix restores.
-		const contextMax = 200_000; // default model's context window in tests
+		const contextMax = 1_000_000; // default model (sonnet) is natively 1M
 		const segTokens = Math.round(
 			segs
 				.filter((s) => !s.classList.contains('dim'))
@@ -428,7 +430,8 @@ describe('ContextUsageBar — context breakdown', () => {
 		expect(ring).not.toBeNull();
 		expect(ring.classList.contains('warning')).toBe(false);
 		expect(ring.classList.contains('danger')).toBe(false);
-		expect(pill.getAttribute('aria-label')).toMatch(/22% of context window used/);
+		// 10k used + the 33k auto-compaction reserve over sonnet's native 1M window.
+		expect(pill.getAttribute('aria-label')).toMatch(/4% of context window used/);
 
 		await openPopover(container);
 		const planPct = container.querySelector('.popover-row .row-pct') as HTMLElement;

@@ -1076,8 +1076,8 @@ def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> 
 
     # Provider identity/config (base URL, auth, model overlays) — a change here
     # means the subprocess would be talking to a different provider/account.
-    # Overlay-key comparison is scoped to provider sessions so native
-    # [1m]-boundary switches stay hot-swaps (see provider_env_requires_reconnect).
+    # Overlay-key comparison is scoped to provider sessions so a native model
+    # switch stays a hot-swap (see provider_env_requires_reconnect).
     if provider_env_requires_reconnect(old.env, new_options.env):
         return True
 

@@ -89,10 +89,10 @@ def test_overlay_env_keys_covered_individually_for_provider_sessions():
         )
 
 
-def test_native_1m_boundary_auto_compact_flip_is_hotswap():
-    """FIX 1: a native [1m]-boundary switch flips CLAUDE_CODE_AUTO_COMPACT_WINDOW
-    between "200000" and absent with NO ANTHROPIC_BASE_URL — must stay a hot-swap
-    (respawning would kill background subagents)."""
+def test_native_auto_compact_flip_is_hotswap():
+    """FIX 1: a native model switch can flip CLAUDE_CODE_AUTO_COMPACT_WINDOW
+    between a profile-preset value and absent with NO ANTHROPIC_BASE_URL — must
+    stay a hot-swap (respawning would kill background subagents)."""
     state = _make_state({"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "200000"})
     new = _new_options({})  # key absent after the switch
     assert requires_reconnect(state, new) is False

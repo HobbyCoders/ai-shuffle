@@ -313,6 +313,53 @@ class TestUpdate:
         row = db.get_model_provider(provider_id, include_token=True)
         assert encryption.decrypt_value(row["auth_token"]) == new_token
 
+    def test_explicit_null_clears_context_window(self, authenticated_client, mock_db):
+        """A nullable column must be CLEARABLE. The handler used to skip any
+        field that arrived as None, so a stored context_window / max_output_tokens
+        could be set but never unset from the UI. ``model_fields_set`` separates
+        "omitted" from "sent as null"."""
+        provider_id = self._create(
+            authenticated_client, mock_db, context_window=272000, max_output_tokens=8192
+        )
+
+        # Omitted → untouched.
+        resp = authenticated_client.patch(f"{ROOT}/{provider_id}", json={"name": "Kept"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["context_window"] == 272000
+        assert resp.json()["max_output_tokens"] == 8192
+
+        # Explicit null → cleared.
+        resp = authenticated_client.patch(
+            f"{ROOT}/{provider_id}",
+            json={"context_window": None, "max_output_tokens": None},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["context_window"] is None
+        assert body["max_output_tokens"] is None
+
+        from app.db import database as db
+        row = db.get_model_provider(provider_id)
+        assert row["context_window"] is None
+        assert row["max_output_tokens"] is None
+
+    def test_models_round_trip_per_model_context_window(self, authenticated_client, mock_db):
+        """A curated entry may carry its own ``context_window`` — the API must
+        persist and return it (the per-model window beats the row column)."""
+        provider_id = self._create(authenticated_client, mock_db)
+        resp = authenticated_client.patch(
+            f"{ROOT}/{provider_id}",
+            json={"models": [
+                {"id": "big/model", "label": "Big", "context_window": 1000000},
+                {"id": "small/model", "label": "Small"},
+            ]},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["models"] == [
+            {"id": "big/model", "label": "Big", "context_window": 1000000},
+            {"id": "small/model", "label": "Small"},
+        ]
+
     def test_update_unknown_id_404(self, authenticated_client, mock_db):
         _unlock_encryption(mock_db)
         resp = authenticated_client.patch(f"{ROOT}/nope", json={"name": "X"})

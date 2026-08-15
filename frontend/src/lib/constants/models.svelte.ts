@@ -27,28 +27,32 @@ export interface ModelOption {
 	label: string;
 	/** Badge family — maps to `.card-badge--{family}` CSS classes. */
 	family: ModelFamily;
-	/** Whether this model can run with the 1M context window (`[1m]` suffix). */
-	supports1m?: boolean;
+	/**
+	 * Maximum input context in tokens, as the model natively runs. The current
+	 * Claude slugs (sonnet/opus/fable) are 1M; haiku is 200k. There is no
+	 * opt-in toggle — the old `[1m]` suffix mechanism is retired.
+	 */
+	context_window?: number;
 }
 
 /**
- * The 1M context window is not a separate model — it is a capability toggled
- * on a base model by appending this suffix to the stored model ID. The UI
- * exposes it as a checkbox rather than as duplicate dropdown entries.
+ * RETIRED MECHANISM — legacy-data normalizer only. The 1M window used to be an
+ * opt-in capability toggled by appending this suffix to a stored model ID.
+ * Current Claude slugs run 1M natively, so nothing writes it any more; stored
+ * profiles can still hold e.g. `"opus[1m]"`, which `normalizeModel` strips.
  */
-export const CONTEXT_1M_SUFFIX = '[1m]';
+const LEGACY_1M_SUFFIX = '[1m]';
 
 // ---------------------------------------------------------------------------
 // Static fallback — mirrors `app/core/model_registry.py` at build time.
 // Keep in sync; drift is logged via `warnOnDrift` when hydration completes.
-// Only base models live here; the 1M variants are derived via CONTEXT_1M_SUFFIX.
 // ---------------------------------------------------------------------------
 
 const STATIC_MODELS: readonly ModelOption[] = [
-	{ value: 'haiku', label: 'Haiku', family: 'haiku', supports1m: false },
-	{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', supports1m: true },
-	{ value: 'opus', label: 'Opus', family: 'opus', supports1m: true },
-	{ value: 'fable', label: 'Fable', family: 'fable', supports1m: true }
+	{ value: 'haiku', label: 'Haiku', family: 'haiku', context_window: 200_000 },
+	{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', context_window: 1_000_000 },
+	{ value: 'opus', label: 'Opus', family: 'opus', context_window: 1_000_000 },
+	{ value: 'fable', label: 'Fable', family: 'fable', context_window: 1_000_000 }
 ] as const;
 
 const STATIC_DEFAULT = 'sonnet';
@@ -57,17 +61,17 @@ const STATIC_LEGACY_MAP: Readonly<Record<string, string>> = {
 	'claude-haiku-4-5': 'haiku',
 	'claude-haiku-4-5-20251001': 'haiku',
 	'claude-sonnet-4-6': 'sonnet',
-	'claude-sonnet-4-6[1m]': 'sonnet[1m]',
+	'claude-sonnet-4-6[1m]': 'sonnet',
 	'claude-sonnet-5': 'sonnet',
-	'claude-sonnet-5[1m]': 'sonnet[1m]',
+	'claude-sonnet-5[1m]': 'sonnet',
 	'claude-fable-5': 'fable',
-	'claude-fable-5[1m]': 'fable[1m]',
+	'claude-fable-5[1m]': 'fable',
 	'claude-opus-4-6': 'opus',
-	'claude-opus-4-6[1m]': 'opus[1m]',
+	'claude-opus-4-6[1m]': 'opus',
 	'claude-opus-4-7': 'opus',
-	'claude-opus-4-7[1m]': 'opus[1m]',
+	'claude-opus-4-7[1m]': 'opus',
 	'claude-opus-4-8': 'opus',
-	'claude-opus-4-8[1m]': 'opus[1m]'
+	'claude-opus-4-8[1m]': 'opus'
 };
 
 /** Sentinel value meaning "inherit from parent" (used by subagents). */
@@ -135,10 +139,11 @@ export interface ProviderModel {
 	id: string;
 	label: string;
 	/**
-	 * Provider-declared context window (tokens) for this model, carried through
-	 * from the registry payload (`app/core/model_registry.py`). One value shared
-	 * by all of a provider's models. Absent/null when the provider row declares
-	 * none — consumers fall back to the heuristic denominator.
+	 * Context window (tokens) resolved FOR THIS MODEL by the registry payload
+	 * (`app/core/model_registry.resolve_provider_context_window`): the model's
+	 * own curated/upstream value, then the built-in preset roster, then the
+	 * provider row's column. Absent/null when nothing declares one — consumers
+	 * fall back to the default window.
 	 */
 	context_window?: number | null;
 }
@@ -345,53 +350,38 @@ export function formatProviderDisplay(display: ProviderDisplay): string {
  *
  * - `null | undefined | ''` → `''` (inherit / unset)
  * - Legacy full model ID → shorthand alias
+ * - A trailing legacy `[1m]` suffix → stripped (retired mechanism)
  * - Any other string → returned as-is (custom models pass through)
  */
 export function normalizeModel(value: string | null | undefined): string {
 	if (!value) return INHERIT_VALUE;
-	return _registry.legacyMap[value] ?? value;
+	const mapped = _registry.legacyMap[value];
+	if (mapped !== undefined) return mapped;
+	return value.endsWith(LEGACY_1M_SUFFIX)
+		? value.slice(0, -LEGACY_1M_SUFFIX.length)
+		: value;
 }
 
-/** True when the (normalized) model opts into the 1M context window. */
-export function has1MContext(value: string | null | undefined): boolean {
-	const normalized = normalizeModel(value);
-	return !!normalized && normalized.endsWith(CONTEXT_1M_SUFFIX);
-}
-
-/** The base model ID with any `[1m]` suffix removed (normalized first). */
-export function getBaseModel(value: string | null | undefined): string {
-	const normalized = normalizeModel(value);
-	return normalized.endsWith(CONTEXT_1M_SUFFIX)
-		? normalized.slice(0, -CONTEXT_1M_SUFFIX.length)
-		: normalized;
+/** True when `value` maps to one of the selectable presets. */
+export function isPresetModel(value: string | null | undefined): boolean {
+	const base = normalizeModel(value);
+	return _registry.models.some((m) => m.value === base);
 }
 
 /**
- * Apply or remove the `[1m]` suffix on a model ID.
- * Inherit / empty values are returned untouched (nothing to toggle).
+ * Registered context window (tokens) for a Claude preset model, or `null` when
+ * the value isn't a preset. Claude slugs carry their NATIVE window here
+ * (sonnet/opus/fable = 1M, haiku = 200k) — there is no opt-in suffix.
  */
-export function withContextSuffix(value: string | null | undefined, enabled: boolean): string {
-	const base = getBaseModel(value);
-	if (!base) return base;
-	return enabled ? base + CONTEXT_1M_SUFFIX : base;
-}
-
-/** True when the base model supports the 1M context window. */
-export function modelSupports1M(value: string | null | undefined): boolean {
-	const base = getBaseModel(value);
-	return _registry.models.find((m) => m.value === base)?.supports1m ?? false;
-}
-
-/** True when `value` maps to one of the selectable presets (1M variants included). */
-export function isPresetModel(value: string | null | undefined): boolean {
-	const base = getBaseModel(value);
-	return _registry.models.some((m) => m.value === base);
+export function getClaudeContextWindow(value: string | null | undefined): number | null {
+	const base = normalizeModel(value);
+	if (!base) return null;
+	return _registry.models.find((m) => m.value === base)?.context_window ?? null;
 }
 
 /**
  * Human-readable label for a stored model value.
  * Falls back to the raw value, or `'Default'` when nothing is set.
- * 1M variants get a `" 1M"` suffix on the base label.
  *
  * A `prov:<providerId>:<modelId>` composite (the composer's cross-provider
  * override, the profile editor's selection) resolves inside its OWN provider so
@@ -406,9 +396,9 @@ export function getModelLabel(value: string | null | undefined): string {
 		const match = provider?.models.find((m) => m.id === composite.modelId);
 		return match?.label ?? composite.modelId;
 	}
-	const base = getBaseModel(value);
+	const base = normalizeModel(value);
 	const match = _registry.models.find((m) => m.value === base);
-	if (match) return has1MContext(value) ? `${match.label} 1M` : match.label;
+	if (match) return match.label;
 	for (const provider of _registry.providers) {
 		const providerMatch = provider.models.find((m) => m.id === base);
 		if (providerMatch) return providerMatch.label;
@@ -418,7 +408,7 @@ export function getModelLabel(value: string | null | undefined): string {
 
 /** Resolved family for a stored model value, or `null` for non-preset values. */
 export function getModelFamily(value: string | null | undefined): ModelFamily | null {
-	const base = getBaseModel(value);
+	const base = normalizeModel(value);
 	return _registry.models.find((m) => m.value === base)?.family ?? null;
 }
 
@@ -435,7 +425,7 @@ export function getModelFamily(value: string | null | undefined): ModelFamily | 
 export function inferModelFamily(value: string | null | undefined): ModelFamily | null {
 	const registryFamily = getModelFamily(value);
 	if (registryFamily) return registryFamily;
-	const base = getBaseModel(value).toLowerCase();
+	const base = normalizeModel(value).toLowerCase();
 	const families: ModelFamily[] = ['haiku', 'sonnet', 'opus', 'fable'];
 	return families.find((family) => base.includes(family)) ?? null;
 }
@@ -517,7 +507,6 @@ interface RegistryModelPayload {
 	label: string;
 	family: ModelFamily;
 	context_window?: number;
-	supports_1m?: boolean;
 }
 
 interface RegistryProviderPayload {
@@ -539,14 +528,13 @@ interface RegistryPayload {
 	models: RegistryModelPayload[];
 	default: string;
 	inherit_value?: string;
-	context_1m_suffix?: string;
 	legacy_map: Record<string, string>;
 	providers?: RegistryProviderPayload[];
 	claude?: RegistryClaudePayload;
 }
 
 function mapPayloadModel(m: RegistryModelPayload): ModelOption {
-	return { value: m.value, label: m.label, family: m.family, supports1m: m.supports_1m ?? false };
+	return { value: m.value, label: m.label, family: m.family, context_window: m.context_window };
 }
 
 /**

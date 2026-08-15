@@ -292,15 +292,6 @@ def build_generation_options(
         "fork_session": False,
     }
 
-    if not provider_id:
-        # Force the standard 200k context window unless the model opted into 1M
-        # via the `[1m]` suffix (natively-1M models like `fable` otherwise default
-        # to 1M in the CLI). The `[1m]`/1M logic is Claude-specific, so skip it for
-        # provider sessions — apply_provider_env owns the window vars there. Lazy
-        # import mirrors _resolve_env — keep environment wiring off the import path.
-        from app.core.environment import apply_context_window_env
-        apply_context_window_env(kwargs["env"], model)
-
     if max_turns is not None:
         kwargs["max_turns"] = max_turns
 

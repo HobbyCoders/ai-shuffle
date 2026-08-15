@@ -5,6 +5,11 @@ Add/remove a model here and every Pydantic default, MCP tool enum, and
 model-family check across the backend picks it up automatically.
 Callers should never hardcode a model ID inline — import from this module.
 
+Context windows are the models' NATIVE windows: the current Claude slugs
+(sonnet/opus/fable) run 1M by default and there is no ``[1m]`` opt-in suffix
+any more — see ``LEGACY_MODEL_MAP`` / ``_LEGACY_1M_SUFFIX`` for how stored
+legacy ids are normalized.
+
 Mirrors ``frontend/src/lib/constants/models.ts``. The two registries must
 stay in sync; the frontend can hydrate from ``GET /api/models`` to verify
 at runtime. Any addition/removal should land in both files in the same
@@ -15,7 +20,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
+
+from app.core.model_catalog_presets import preset_context_window, preset_kind_for
 
 logger = logging.getLogger(__name__)
 
@@ -37,22 +44,11 @@ class ModelOption:
     """Model family — drives badge colour."""
 
     context_window: int
-    """Maximum input context in tokens (always the standard 200k window;
-    the 1M window is opt-in via the ``[1m]`` suffix, see ``CONTEXT_1M_SUFFIX``)."""
+    """Maximum input context in tokens, as the model natively runs.
 
-    supports_1m: bool = False
-    """Whether this model can run with the 1M context window (``[1m]`` suffix)."""
-
-
-# ---------------------------------------------------------------------------
-# 1M context modifier
-# ---------------------------------------------------------------------------
-
-# The 1M context window is not a separate model — it is a capability toggled
-# on a base model by appending this suffix to the stored model ID. The UI
-# exposes it as a checkbox rather than as duplicate dropdown entries.
-CONTEXT_1M_SUFFIX = "[1m]"
-CONTEXT_1M_WINDOW = 1_000_000
+    The current Claude slugs (sonnet/opus/fable) run the 1M window by DEFAULT —
+    there is no opt-in toggle any more (the old ``[1m]`` suffix mechanism is
+    retired). Haiku stays on the standard 200k window."""
 
 
 # ---------------------------------------------------------------------------
@@ -60,13 +56,12 @@ CONTEXT_1M_WINDOW = 1_000_000
 # ---------------------------------------------------------------------------
 
 # Order here is the order shown in every dropdown in the UI and the order
-# reported by ``GET /api/models``. Only base models live here; the 1M variants
-# are derived on demand via ``CONTEXT_1M_SUFFIX``.
+# reported by ``GET /api/models``.
 MODELS: Tuple[ModelOption, ...] = (
-    ModelOption("haiku",  "Haiku",  "haiku",  200_000, supports_1m=False),
-    ModelOption("sonnet", "Sonnet", "sonnet", 200_000, supports_1m=True),
-    ModelOption("opus",   "Opus",   "opus",   200_000, supports_1m=True),
-    ModelOption("fable",  "Fable",  "fable",  200_000, supports_1m=True),
+    ModelOption("haiku",  "Haiku",  "haiku",     200_000),
+    ModelOption("sonnet", "Sonnet", "sonnet",  1_000_000),
+    ModelOption("opus",   "Opus",   "opus",    1_000_000),
+    ModelOption("fable",  "Fable",  "fable",   1_000_000),
 )
 
 DEFAULT_MODEL = "sonnet"
@@ -79,23 +74,33 @@ INHERIT_VALUE = ""
 # shorthand aliases. Map those to the closest shorthand so older
 # profiles/subagents round-trip cleanly. We treat these as read-only aliases —
 # storage is rewritten on the next save, never eagerly. Explicit [1m] entries
-# are required because normalize_model does an exact-string lookup.
+# are required because normalize_model does an exact-string lookup; they now
+# resolve to the BASE slug (the 1M window is the Claude default, so the suffix
+# no longer selects anything).
 LEGACY_MODEL_MAP: Dict[str, str] = {
     "claude-haiku-4-5": "haiku",
     "claude-haiku-4-5-20251001": "haiku",
     "claude-sonnet-4-6": "sonnet",
-    "claude-sonnet-4-6[1m]": "sonnet[1m]",
+    "claude-sonnet-4-6[1m]": "sonnet",
     "claude-sonnet-5": "sonnet",
-    "claude-sonnet-5[1m]": "sonnet[1m]",
+    "claude-sonnet-5[1m]": "sonnet",
     "claude-fable-5": "fable",
-    "claude-fable-5[1m]": "fable[1m]",
+    "claude-fable-5[1m]": "fable",
     "claude-opus-4-6": "opus",
-    "claude-opus-4-6[1m]": "opus[1m]",
+    "claude-opus-4-6[1m]": "opus",
     "claude-opus-4-7": "opus",
-    "claude-opus-4-7[1m]": "opus[1m]",
+    "claude-opus-4-7[1m]": "opus",
     "claude-opus-4-8": "opus",
-    "claude-opus-4-8[1m]": "opus[1m]",
+    "claude-opus-4-8[1m]": "opus",
 }
+
+# RETIRED MECHANISM — legacy-data normalizer only. The 1M context window used to
+# be an opt-in capability toggled by appending this suffix to a stored model ID.
+# Current Claude slugs run 1M natively, so the toggle is gone from every UI,
+# schema and env path. Persisted profiles/subagents can still hold e.g.
+# ``"opus[1m]"``, so ``normalize_model`` strips a trailing suffix to reach the
+# base slug. Do NOT reintroduce this as a public capability helper.
+_LEGACY_1M_SUFFIX = "[1m]"
 
 
 # ---------------------------------------------------------------------------
@@ -110,57 +115,35 @@ def normalize_model(value: Optional[str]) -> str:
 
     - ``None`` / empty → ``""`` (inherit / unset)
     - Legacy full model ID → shorthand alias
+    - A trailing legacy ``[1m]`` suffix → stripped (retired mechanism; see
+      ``_LEGACY_1M_SUFFIX``)
     - Any other string → returned as-is (custom models pass through).
     """
     if not value:
         return INHERIT_VALUE
-    return LEGACY_MODEL_MAP.get(value, value)
-
-
-def has_1m_context(value: Optional[str]) -> bool:
-    """True when the (normalized) model opts into the 1M context window."""
-    normalized = normalize_model(value)
-    return bool(normalized) and normalized.endswith(CONTEXT_1M_SUFFIX)
-
-
-def strip_context_suffix(value: Optional[str]) -> str:
-    """The base model ID with any ``[1m]`` suffix removed (normalized first)."""
-    normalized = normalize_model(value)
-    if normalized.endswith(CONTEXT_1M_SUFFIX):
-        return normalized[: -len(CONTEXT_1M_SUFFIX)]
-    return normalized
-
-
-def with_context_suffix(value: Optional[str], enabled: bool) -> str:
-    """Apply or remove the ``[1m]`` suffix on a model ID.
-
-    Inherit / empty values are returned untouched (nothing to toggle).
-    """
-    base = strip_context_suffix(value)
-    if not base:
-        return base
-    return base + CONTEXT_1M_SUFFIX if enabled else base
+    mapped = LEGACY_MODEL_MAP.get(value)
+    if mapped is not None:
+        return mapped
+    if value.endswith(_LEGACY_1M_SUFFIX):
+        return value[: -len(_LEGACY_1M_SUFFIX)]
+    return value
 
 
 def is_preset_model(value: Optional[str]) -> bool:
-    """True when ``value`` maps to one of the selectable presets (1M variants included)."""
-    return strip_context_suffix(value) in _BY_VALUE
+    """True when ``value`` maps to one of the selectable presets."""
+    return normalize_model(value) in _BY_VALUE
 
 
 def get_model(value: Optional[str]) -> Optional[ModelOption]:
-    """Look up the base ``ModelOption`` for a stored value, honouring legacy
-    slugs and the ``[1m]`` suffix."""
-    return _BY_VALUE.get(strip_context_suffix(value))
+    """Look up the ``ModelOption`` for a stored value, honouring legacy slugs."""
+    return _BY_VALUE.get(normalize_model(value))
 
 
 def get_model_label(value: Optional[str]) -> str:
-    """Human-readable label; falls back to the raw value, then 'Default'.
-
-    1M variants get a ``" 1M"`` suffix on the base label.
-    """
+    """Human-readable label; falls back to the raw value, then 'Default'."""
     match = get_model(value)
     if match is not None:
-        return f"{match.label} 1M" if has_1m_context(value) else match.label
+        return match.label
     return value if value else "Default"
 
 
@@ -171,22 +154,68 @@ def get_model_family(value: Optional[str]) -> Optional[ModelFamily]:
 
 
 def get_context_window(value: Optional[str]) -> int:
-    """Context window for the given model; 1M for ``[1m]`` variants, else 200k."""
-    if has_1m_context(value):
-        return CONTEXT_1M_WINDOW
+    """Registered context window for the given Claude model; 200k when unknown."""
     match = get_model(value)
     return match.context_window if match is not None else 200_000
 
 
 def model_values() -> List[str]:
-    """All selectable model IDs (base + 1M variants), for use in Pydantic
-    ``Literal`` / JSON-schema enums."""
-    values: List[str] = []
-    for m in MODELS:
-        values.append(m.value)
-        if m.supports_1m:
-            values.append(m.value + CONTEXT_1M_SUFFIX)
-    return values
+    """All selectable model IDs, for use in Pydantic ``Literal`` / JSON-schema
+    enums."""
+    return [m.value for m in MODELS]
+
+
+def _positive_int(value: Any) -> Optional[int]:
+    """``value`` as a positive int, or ``None`` (unusable / not set)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        window = int(value)
+    except (TypeError, ValueError):
+        return None
+    return window if window > 0 else None
+
+
+def resolve_provider_context_window(
+    provider_row: Optional[Dict[str, Any]],
+    model_id: Optional[str],
+    model_entry: Optional[Dict[str, Any]] = None,
+) -> Optional[int]:
+    """The context window (tokens) for ONE model on a provider row, or ``None``.
+
+    SINGLE SOURCE OF TRUTH — the registry payload (``_providers_payload``) and
+    the spawn env overlay (``environment.apply_provider_env``) both resolve
+    through here so what the UI displays is exactly what the CLI is pinned to.
+
+    Resolution order, most specific first:
+
+      1. the model's OWN ``context_window`` in ``models_json`` (an upstream
+         catalog fetch carries it through, and an admin can curate it);
+      2. the built-in preset roster for the row's kind
+         (``model_catalog_presets.preset_context_window``) — this is what makes
+         a 1M model like ``gpt-5.6-sol`` resolve correctly on a row whose column
+         still says 272k;
+      3. the provider row's ``context_window`` column — one value shared by
+         every model on the row, hence the LAST resort.
+
+    ``model_entry`` may be passed when the caller already holds the
+    ``models_json`` dict (avoids a rescan); otherwise it is looked up by id.
+    """
+    if not provider_row:
+        return None
+    if model_entry is None and model_id:
+        for entry in provider_row.get("models_json") or []:
+            if isinstance(entry, dict) and entry.get("id") == model_id:
+                model_entry = entry
+                break
+    if isinstance(model_entry, dict):
+        own = _positive_int(model_entry.get("context_window"))
+        if own is not None:
+            return own
+    from_preset = preset_context_window(preset_kind_for(provider_row), model_id)
+    if from_preset is not None:
+        return from_preset
+    return _positive_int(provider_row.get("context_window"))
 
 
 # Anthropic API model ids for the selectable presets. The registry's canonical
@@ -206,12 +235,12 @@ API_MODEL_IDS: Dict[str, str] = {
 def resolve_api_model_id(value: Optional[str]) -> Optional[str]:
     """Anthropic API model id for a stored model value.
 
-    Presets — short aliases, their ``[1m]`` variants, and the
-    ``LEGACY_MODEL_MAP`` full ids — resolve to the pinned dateless API id.
-    Anything else (custom models, other providers' ids) passes through
-    verbatim, ``None``/``""`` included.
+    Presets — short aliases, the ``LEGACY_MODEL_MAP`` full ids, and persisted
+    legacy ``[1m]``-suffixed values — resolve to the pinned dateless API id via
+    ``normalize_model``. Anything else (custom models, other providers' ids)
+    passes through verbatim, ``None``/``""`` included.
     """
-    resolved = API_MODEL_IDS.get(strip_context_suffix(value))
+    resolved = API_MODEL_IDS.get(normalize_model(value))
     return value if resolved is None else resolved
 
 
@@ -305,10 +334,15 @@ def _providers_payload() -> List[Dict[str, object]]:
                 {
                     "id": model.get("id"),
                     "label": model.get("label"),
-                    # Additive per-model metadata (Chunk D.4). Only what the
-                    # provider row itself carries — one value shared by all of
-                    # that provider's models (no per-model store, no models.dev).
-                    "context_window": row.get("context_window"),
+                    # Per-model context window: the model's own value, then the
+                    # preset roster, then the row's column (see
+                    # ``resolve_provider_context_window``). The row column alone
+                    # is WRONG for a row whose models have different windows —
+                    # it made a 1M model display/run at the row's stale value.
+                    "context_window": resolve_provider_context_window(
+                        row, model.get("id"), model_entry=model
+                    ),
+                    # Still per-ROW (no per-model output cap is modelled).
                     "max_output_tokens": row.get("max_output_tokens"),
                 }
                 for model in (row.get("models_json") or [])
@@ -364,13 +398,11 @@ def registry_payload() -> Dict[str, object]:
                 "label": m.label,
                 "family": m.family,
                 "context_window": m.context_window,
-                "supports_1m": m.supports_1m,
             }
             for m in MODELS
         ],
         "default": DEFAULT_MODEL,
         "inherit_value": INHERIT_VALUE,
-        "context_1m_suffix": CONTEXT_1M_SUFFIX,
         "legacy_map": dict(LEGACY_MODEL_MAP),
         "providers": _providers_payload(),
         "claude": _claude_payload(),

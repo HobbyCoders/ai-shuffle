@@ -37,9 +37,13 @@ DISABLE_1M_KEY = "CLAUDE_CODE_DISABLE_1M_CONTEXT"
 AUTO_COMPACT_KEY = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
 
 
-def _mk_provider(provider_id="op", *, token="gw-secret"):
+def _mk_provider(provider_id="op", *, token="gw-secret", context_window=272000):
     """Create an enabled provider row with an encrypted token (mirrors
-    tests/core/test_provider_env.py::_mk_provider)."""
+    tests/core/test_provider_env.py::_mk_provider).
+
+    A ``context_window`` is seeded by default so the overlay's window pins are
+    exercised: with no window resolvable for the model (no per-model value, no
+    preset, NULL column) the provider path deliberately sets no window vars."""
     return db.create_model_provider(
         provider_id=provider_id,
         name="OpenRouter",
@@ -47,6 +51,7 @@ def _mk_provider(provider_id="op", *, token="gw-secret"):
         base_url="https://openrouter.ai/api",
         auth_token=encryption.encrypt_value(token),
         models=[{"id": "openai/gpt-5.6", "label": "GPT-5.6"}],
+        context_window=context_window,
         enabled=True,
     )
 
@@ -119,11 +124,9 @@ class TestSpawnResolvesFromBinding:
         assert env[BASE_URL_KEY] == "https://openrouter.ai/api"  # binding won
         assert env[AUTH_TOKEN_KEY] == "gw-secret"
         assert env[API_KEY] == ""
-        # Provider path pins the 1M gate (non-[1m] model → 200k guard on) but —
-        # the provider row carries no context_window — leaves the auto-compact
-        # window to the CLI (no hardcoded universal pin).
+        # Provider path pins the window resolved for the selected model.
         assert env[DISABLE_1M_KEY] == "1"
-        assert AUTO_COMPACT_KEY not in env
+        assert env[AUTO_COMPACT_KEY] == "272000"
 
     def test_null_binding_is_native_even_if_profile_has_provider(
         self, mock_db, tmp_path
@@ -155,7 +158,7 @@ class TestSpawnResolvesFromBinding:
 
         assert BASE_URL_KEY not in env
         assert AUTH_TOKEN_KEY not in env
-        assert env[DISABLE_1M_KEY] == "1"  # native 1M guard applied
+        assert DISABLE_1M_KEY not in env  # native leg sets no window env
 
     def test_sessionless_build_still_uses_config_provider(self, mock_db, tmp_path):
         """Regression: with no session_id (e.g. tests / project-only builds) the
@@ -190,10 +193,9 @@ class TestGenerationBinding:
         assert env[BASE_URL_KEY] == "https://openrouter.ai/api"
         assert env[AUTH_TOKEN_KEY] == "gw-secret"
         assert env[API_KEY] == ""
-        # Provider path pins the 1M gate (non-[1m] model → 200k guard on); no
-        # context_window on the row → auto-compact window left to the CLI.
+        # Provider path pins the window resolved for the selected model.
         assert env[DISABLE_1M_KEY] == "1"
-        assert AUTO_COMPACT_KEY not in env
+        assert env[AUTO_COMPACT_KEY] == "272000"
 
     def test_explicit_none_binding_keeps_native(self, mock_db):
         """An explicit None binding keeps the call native even though the profile
@@ -205,7 +207,7 @@ class TestGenerationBinding:
         )
         env = opts.env
         assert BASE_URL_KEY not in env
-        assert env[DISABLE_1M_KEY] == "1"
+        assert DISABLE_1M_KEY not in env  # native leg sets no window env
 
     def test_default_uses_config_provider(self, mock_db):
         """Regression: omitting session_provider_id keeps today's behavior —

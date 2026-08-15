@@ -32,7 +32,7 @@ describe('getProviders — hydration from GET /models', () => {
 
 	it('populates from the registry payload on successful hydration', async () => {
 		mocks.get.mockResolvedValueOnce({
-			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', supports_1m: true }],
+			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', context_window: 1_000_000 }],
 			default: 'sonnet',
 			legacy_map: {},
 			providers: [
@@ -66,7 +66,7 @@ describe('getProviders — hydration from GET /models', () => {
 
 	it('carries auth_kind/plan_type through hydration', async () => {
 		mocks.get.mockResolvedValueOnce({
-			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', supports_1m: true }],
+			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', context_window: 1_000_000 }],
 			default: 'sonnet',
 			legacy_map: {},
 			providers: [
@@ -104,7 +104,7 @@ describe('getProviders — hydration from GET /models', () => {
 
 	it('infers auth_kind from provider_type when an older payload omits it', async () => {
 		mocks.get.mockResolvedValueOnce({
-			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', supports_1m: true }],
+			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', context_window: 1_000_000 }],
 			default: 'sonnet',
 			legacy_map: {},
 			providers: [
@@ -124,9 +124,9 @@ describe('getProviders — hydration from GET /models', () => {
 		expect(getProviders()[0].plan_type).toBeNull();
 	});
 
-	it('carries per-model context_window through hydration onto getProviders()', async () => {
+	it('carries DIFFERENT per-model context_windows through hydration', async () => {
 		mocks.get.mockResolvedValueOnce({
-			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', supports_1m: true }],
+			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', context_window: 1_000_000 }],
 			default: 'sonnet',
 			legacy_map: {},
 			providers: [
@@ -134,7 +134,14 @@ describe('getProviders — hydration from GET /models', () => {
 					id: 'prov-1',
 					name: 'OpenRouter',
 					provider_type: 'openrouter',
-					models: [{ id: 'openai/gpt-5.6', label: 'GPT-5.6', context_window: 400000 }],
+					models: [
+						{ id: 'openai/gpt-5.6', label: 'GPT-5.6', context_window: 400000 },
+						// The backend resolves per MODEL now (own value → preset → row
+						// column), so two models on ONE row can disagree — the payload
+						// must carry that through instead of flattening it.
+						{ id: 'vendor/big', label: 'Big', context_window: 1_000_000 },
+						{ id: 'vendor/plain', label: 'Plain', context_window: null }
+					],
 					default_model: 'openai/gpt-5.6'
 				}
 			]
@@ -142,12 +149,15 @@ describe('getProviders — hydration from GET /models', () => {
 
 		await hydrateModelRegistry();
 
-		expect(getProviders()[0].models[0].context_window).toBe(400000);
+		const models = getProviders()[0].models;
+		expect(models[0].context_window).toBe(400000);
+		expect(models[1].context_window).toBe(1_000_000);
+		expect(models[2].context_window).toBeNull();
 	});
 
 	it('falls back to an empty provider list when the payload omits providers', async () => {
 		mocks.get.mockResolvedValueOnce({
-			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', supports_1m: true }],
+			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', context_window: 1_000_000 }],
 			default: 'sonnet',
 			legacy_map: {}
 			// no `providers` key — mirrors an older/degraded backend response.
@@ -163,7 +173,7 @@ describe('getClaudeAuth — native-Claude auth block hydration', () => {
 	/** A minimal valid payload plus whatever `claude` block the case needs. */
 	function payload(claude?: unknown) {
 		return {
-			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', supports_1m: true }],
+			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', context_window: 1_000_000 }],
 			default: 'sonnet',
 			legacy_map: {},
 			...(claude === undefined ? {} : { claude })
@@ -317,7 +327,7 @@ describe('getProviderDisplay / getClaudeDisplay — brand + auth-kind subtext', 
 describe('getModelLabel — provider registry fallback', () => {
 	it('resolves a provider-curated model id to its label after hydration, and falls back to the raw id for an unknown id', async () => {
 		mocks.get.mockResolvedValueOnce({
-			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', supports_1m: true }],
+			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', context_window: 1_000_000 }],
 			default: 'sonnet',
 			legacy_map: {},
 			providers: [
