@@ -7,10 +7,14 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -52,6 +56,56 @@ class WakeWordService : Service(), RecognitionListener {
     @Volatile
     private var triggered = false
 
+    /**
+     * Holding the microphone while a Bluetooth headset connects can stop the
+     * system from settling the headset into its media (A2DP) profile — on
+     * some OEMs that silences EVERY app's audio, not just ours. When the
+     * output topology changes and no call is live, release the mic briefly,
+     * clear any stale communication-mode state, and resume listening once
+     * the system has settled.
+     */
+    private var deviceCallbackRegistered = false
+    private var sawInitialDeviceCallback = false
+    private val deviceCallback = object : AudioDeviceCallback() {
+        override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>) {
+            onAudioTopologyChanged()
+        }
+
+        override fun onAudioDevicesRemoved(removed: Array<out AudioDeviceInfo>) {
+            onAudioTopologyChanged()
+        }
+    }
+
+    private fun onAudioTopologyChanged() {
+        // Registration replays the current devices once — that's not a change.
+        if (!sawInitialDeviceCallback) {
+            sawInitialDeviceCallback = true
+            return
+        }
+        if (VoiceCallState.isActive || model == null) return
+        Log.i(TAG, "Audio devices changed — releasing the mic to let routing settle")
+        stopRecognizer()
+        resetStaleAudioMode()
+        scope.launch(Dispatchers.IO) {
+            kotlinx.coroutines.delay(1500)
+            resumeListening()
+        }
+    }
+
+    /** Clear leaked call-audio state; only ever outside a live call. */
+    private fun resetStaleAudioMode() {
+        runCatching {
+            val am = getSystemService(AUDIO_SERVICE) as AudioManager
+            if (am.mode != AudioManager.MODE_NORMAL) {
+                Log.w(TAG, "Audio mode was ${am.mode} with no live call — resetting")
+                am.mode = AudioManager.MODE_NORMAL
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                am.clearCommunicationDevice()
+            }
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -73,6 +127,11 @@ class WakeWordService : Service(), RecognitionListener {
         if (!prefs.wakeWordEnabled || !hasMicPermission() || !VoskModelManager.isReady(this)) {
             stopSelf()
             return START_NOT_STICKY
+        }
+        if (!deviceCallbackRegistered) {
+            deviceCallbackRegistered = true
+            (getSystemService(AUDIO_SERVICE) as AudioManager)
+                .registerAudioDeviceCallback(deviceCallback, Handler(Looper.getMainLooper()))
         }
         if (model == null) {
             scope.launch(Dispatchers.IO) { loadAndListen() }
@@ -281,6 +340,13 @@ class WakeWordService : Service(), RecognitionListener {
     }
 
     override fun onDestroy() {
+        if (deviceCallbackRegistered) {
+            runCatching {
+                (getSystemService(AUDIO_SERVICE) as AudioManager)
+                    .unregisterAudioDeviceCallback(deviceCallback)
+            }
+            deviceCallbackRegistered = false
+        }
         stopRecognizer()
         runCatching { model?.close() }
         model = null
