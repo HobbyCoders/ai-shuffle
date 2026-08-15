@@ -20,8 +20,8 @@ data class VoiceSession(
 )
 
 /**
- * Client for the server's voice endpoints (`/api/v1/voice/*`) and the OpenAI
- * Realtime SDP handshake.
+ * Client for the server's voice endpoints (under `/api/v1/voice`) and the
+ * OpenAI Realtime SDP handshake.
  *
  * The voice endpoints do NOT accept the mobile `aim_` key — they require the
  * web `session` cookie minted by [ApiClient.createWebSession]. The OpenAI leg
