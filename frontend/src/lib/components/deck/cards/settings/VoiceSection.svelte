@@ -91,9 +91,11 @@
 
 	// ---- Agent prompts (voice agent config) -------------------------------
 	// Three editable prompts with the same mid-edit guard as the minutes
-	// field: a non-null pending value means the user owns the textarea. Empty
-	// saves clear the override (server falls back to the built-in default,
-	// shown as the placeholder).
+	// field: a non-null pending value means the user owns the textarea. The
+	// textarea always shows REAL text — the stored override, or the built-in
+	// default when none is set — so the user can edit parts of the default
+	// instead of retyping it. Committing text identical to the default (or
+	// clearing the field) stores no override; Reset restores the default.
 	type PromptField = 'voice_instructions' | 'voice_instructions_command' | 'voice_instructions_chat';
 	const PROMPTS: Array<{
 		field: PromptField;
@@ -122,17 +124,24 @@
 	];
 	let pendingPrompts = $state<Record<string, string | null>>({});
 
-	function promptValue(field: PromptField): string {
-		return pendingPrompts[field] ?? settings?.[field] ?? '';
+	function promptDefault(defaultKey: 'base' | 'command' | 'chat'): string {
+		return settings?.voice_instructions_defaults?.[defaultKey] ?? '';
 	}
 
-	function commitPrompt(field: PromptField) {
+	function promptValue(field: PromptField, defaultKey: 'base' | 'command' | 'chat'): string {
+		return pendingPrompts[field] ?? (settings?.[field] || promptDefault(defaultKey));
+	}
+
+	function commitPrompt(field: PromptField, defaultKey: 'base' | 'command' | 'chat') {
 		const raw = pendingPrompts[field];
 		pendingPrompts[field] = null;
 		if (raw === null || raw === undefined) return;
 		const text = raw.trim();
-		if (text === (settings?.[field] ?? '')) return;
-		void save({ [field]: text });
+		const stored = settings?.[field] ?? '';
+		// Text matching the default (or an emptied field) means "no override".
+		const next = text === promptDefault(defaultKey) ? '' : text;
+		if (next === stored) return;
+		void save({ [field]: next });
 	}
 
 	function resetPrompt(field: PromptField) {
@@ -335,11 +344,10 @@
 					<textarea
 						class="inp prompt"
 						rows="5"
-						value={promptValue(prompt.field)}
-						placeholder={settings.voice_instructions_defaults?.[prompt.defaultKey] ?? ''}
+						value={promptValue(prompt.field, prompt.defaultKey)}
 						disabled={saving}
 						oninput={(e) => (pendingPrompts[prompt.field] = e.currentTarget.value)}
-						onblur={() => commitPrompt(prompt.field)}
+						onblur={() => commitPrompt(prompt.field, prompt.defaultKey)}
 						aria-label={prompt.title}
 					></textarea>
 					{#if settings[prompt.field]}
@@ -350,7 +358,7 @@
 							onclick={() => resetPrompt(prompt.field)}
 						>Reset to default</button>
 					{:else}
-						<p class="msg dim">Using the built-in default (shown greyed above). Type to override.</p>
+						<p class="msg dim">This is the built-in default — edit any part of it to customize.</p>
 					{/if}
 				</div>
 			</div>
