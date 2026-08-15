@@ -24,12 +24,13 @@ import java.time.format.DateTimeFormatter
  * happens HERE, on the phone, when a `function_call` event for one of these
  * names arrives on the app's data channel.
  *
- * Safety model: anything that contacts another human or changes the calendar
- * (`place_call`, `send_sms`, `create_calendar_event`) is confirm-gated — the
- * first call without `confirmed:true` returns a `needs_confirmation` preview
- * that instructs the model to read the action back and get a spoken yes before
- * calling again with `confirmed:true`. The gate is enforced in code, not just
- * in the prompt, so a mishearing can never fire one of these directly.
+ * Safety model: only `send_sms` is confirm-gated — its body is transcribed
+ * speech, so the first call without `confirmed:true` returns a
+ * `needs_confirmation` preview the model must read back and get a spoken yes
+ * for. The gate is enforced in code, not just in the prompt. Everything else
+ * (including calls — user decision, 2026-08-15) executes immediately;
+ * ambiguous contact matches still come back as errors for the model to
+ * resolve by asking.
  */
 /** How the voice session was started; changes the agent's contract. */
 enum class SessionMode {
@@ -66,11 +67,15 @@ class PhoneTools(private val context: Context) {
             read_messages, read_notifications, open_app, open_url, navigate_to,
             set_alarm, set_timer, get_calendar_events, create_calendar_event,
             end_session).
-            For calling, texting, or creating calendar events you MUST first call the
-            tool without confirmed=true, read the returned preview back to the user in
-            one short sentence, and only after their explicit spoken yes call it again
-            with confirmed=true. If a tool reports a missing permission, tell the user
-            briefly and move on. Keep using short spoken-style replies.
+            Execute actions immediately without asking for confirmation — EXCEPT
+            send_sms: because the message body is transcribed speech, first call it
+            without confirmed=true, read the message back in one short sentence, and
+            send with confirmed=true only after a spoken yes. If a contact lookup is
+            ambiguous the tool will say so — ask which one, briefly. If a tool reports
+            a missing permission, say so in a few words and move on.
+            NEVER speak first: after the session starts, stay completely silent until
+            the user says something. Keep every reply to ONE short sentence — no
+            greetings, no explanations of what you are doing, no "anything else".
         """.trimIndent().replace("\n", " ")
 
         private val COMMAND_MODE_TEXT = """
@@ -126,13 +131,11 @@ class PhoneTools(private val context: Context) {
         }
         tool(
             "place_call",
-            "Place a phone call. Confirm-gated: call once without confirmed to get a " +
-                "preview to read back, then again with confirmed=true after the user " +
-                "says yes.",
+            "Place a phone call immediately. No confirmation needed — dial as soon " +
+                "as the contact resolves.",
         ) {
             str("contact", "Contact name to call (resolved via contacts).")
             str("number", "Explicit phone number to call (use instead of contact).")
-            bool("confirmed", "true only after the user verbally confirmed the call.")
         }
         tool(
             "send_sms",
@@ -175,16 +178,11 @@ class PhoneTools(private val context: Context) {
         tool("get_calendar_events", "List upcoming calendar events.") {
             int("days", "How many days ahead to look, default 7.")
         }
-        tool(
-            "create_calendar_event",
-            "Create a calendar event. Confirm-gated: call once without confirmed to " +
-                "get a preview to read back, then again with confirmed=true.",
-        ) {
+        tool("create_calendar_event", "Create a calendar event immediately.") {
             str("title", "Event title.")
             str("start", "Start date-time, ISO format like 2026-08-20T14:00.")
             str("end", "Optional end date-time, ISO format. Defaults to one hour after start.")
             str("location", "Optional location.")
-            bool("confirmed", "true only after the user verbally confirmed the event.")
         }
         tool(
             "end_session",
@@ -333,9 +331,6 @@ class PhoneTools(private val context: Context) {
                 fail("Couldn't resolve who to call. Use find_contact first or provide a number."),
             )
         val (number, label) = target
-        if (!args.optBoolean("confirmed", false)) {
-            return ToolOutcome(needsConfirmation("Call $label at $number"))
-        }
         val intent = Intent(Intent.ACTION_CALL, Uri.parse("tel:$number"))
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         context.startActivity(intent)
@@ -540,11 +535,6 @@ class PhoneTools(private val context: Context) {
             ?: return fail("A valid start like 2026-08-20T14:00 is required.")
         val end = parseLocalDateTime(args.optString("end")) ?: start.plusHours(1)
         val location = args.optString("location").trim()
-
-        if (!args.optBoolean("confirmed", false)) {
-            val pretty = start.format(DateTimeFormatter.ofPattern("EEE MMM d 'at' h:mm a"))
-            return needsConfirmation("Create event \"$title\" on $pretty")
-        }
 
         val calendarId = primaryCalendarId()
             ?: return fail("No writable calendar was found on this device.")

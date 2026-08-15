@@ -1,6 +1,7 @@
 package com.hobbycoders.aishuffle.voice
 
 import android.content.Context
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.util.Log
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -94,11 +95,31 @@ class RealtimeClient(
 
         peer.addTrack(micTrack, listOf("mic-stream"))
 
-        // Route the call like a speakerphone voice call.
+        // Communication mode gives us echo cancellation and lets the system
+        // route to whatever is already active (car Bluetooth, headset). Only
+        // force the speaker when NO external output is connected — otherwise
+        // leave routing alone so the audio stays where the user already is.
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-        @Suppress("DEPRECATION")
-        audioManager.isSpeakerphoneOn = true
+        if (!hasExternalOutput()) {
+            @Suppress("DEPRECATION")
+            audioManager.isSpeakerphoneOn = true
+        }
     }
+
+    /** True when a headset / Bluetooth / USB audio output is connected. */
+    private fun hasExternalOutput(): Boolean =
+        audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any {
+            it.type in intArrayOf(
+                AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+                AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+                AudioDeviceInfo.TYPE_WIRED_HEADSET,
+                AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+                AudioDeviceInfo.TYPE_USB_HEADSET,
+                AudioDeviceInfo.TYPE_USB_DEVICE,
+                AudioDeviceInfo.TYPE_HEARING_AID,
+                AudioDeviceInfo.TYPE_BLE_HEADSET,
+            )
+        }
 
     /** Create the local SDP offer (also sets it as the local description). */
     suspend fun createOffer(): String {

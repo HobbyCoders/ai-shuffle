@@ -176,15 +176,9 @@ class VoiceCallService : Service() {
         }
         sessionCookie = cookie
 
-        // 2. Voice mode must be enabled and funded server-side.
-        when (val enabled = VoiceApi.isVoiceModeEnabled(srv, cookie)) {
-            is ApiResult.Success -> if (!enabled.data) {
-                failCall(getString(R.string.voice_error_disabled)); return
-            }
-            else -> { /* can't read settings — try the session anyway */ }
-        }
-
-        // 3. Create the voice session (server mints the ephemeral ek_ secret).
+        // 2. Create the voice session (server mints the ephemeral ek_ secret).
+        // No settings pre-check: it cost a round trip on every wake, and the
+        // session create fails with a descriptive error when voice mode is off.
         val session = when (val result = VoiceApi.createSession(srv, cookie)) {
             is ApiResult.Success -> result.data
             is ApiResult.NeedsCfAccess -> {
@@ -196,7 +190,7 @@ class VoiceCallService : Service() {
         }
         voiceSessionId = session.sessionId
 
-        // 4. WebRTC leg to OpenAI.
+        // 3. WebRTC leg to OpenAI.
         val client = try {
             RealtimeClient(this, onEvent = ::handleRealtimeEvent, onDisconnected = {
                 scope.launch { endCall(userInitiated = false) }
@@ -221,7 +215,7 @@ class VoiceCallService : Service() {
             }
             client.acceptAnswer(answer)
 
-            // 5. Attach the server's sideband, declaring OUR phone tools so the
+            // 4. Attach the server's sideband, declaring OUR phone tools so the
             // model sees them and the sideband leaves their servicing to us.
             if (callId != null) {
                 val attach = VoiceApi.attachCall(
