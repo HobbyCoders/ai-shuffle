@@ -369,6 +369,15 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			return;
 		}
 
+		// A session's list-facing metadata changed without any device watching
+		// it — e.g. the voice attach backfill hiding a wake-word "command"
+		// session (the list queries exclude hidden rows, so a refetch drops the
+		// card that flashed during the create→attach window).
+		if (msgType === 'user_session_updated') {
+			appLoadSessions();
+			return;
+		}
+
 		// Unified notification funnel: server emitted a user-facing message via
 		// app/services/notification_service.emit_notification. Already persisted
 		// server-side — feed it to the store for live render + the bell. Actions

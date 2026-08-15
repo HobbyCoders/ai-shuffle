@@ -681,15 +681,25 @@ class TestVoiceCallAttach:
         authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
 
     def test_command_attach_hides_the_session(
-        self, authenticated_client, mock_db, sidebands
+        self, authenticated_client, mock_db, sidebands, monkeypatch
     ):
         """The shipped app declares session_mode only at attach time — a
-        "command" attach backfills hidden=TRUE on the already-visible row."""
+        "command" attach backfills hidden=TRUE on the already-visible row AND
+        broadcasts the flip, so a list that rendered the card during the
+        create→attach window drops it live."""
         _unlock(mock_db)
         _enable_voice()
         _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
         _mk_voice_session()
         assert SESSION_ID in {s["id"] for s in db.get_sessions()}
+
+        from app.core.sync_engine import sync_engine
+        broadcasts = []
+
+        async def _record(user_id, session_id, updates, source_device_id=None):
+            broadcasts.append((user_id, session_id, updates))
+
+        monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", _record)
 
         resp = authenticated_client.post(
             f"{VOICE_ROOT}/sessions/{SESSION_ID}/call",
@@ -701,6 +711,16 @@ class TestVoiceCallAttach:
         # Still fully fetchable and attachable — list-visibility only.
         assert db.get_session(SESSION_ID) is not None
         assert len(sidebands) == 1
+        assert broadcasts == [("admin", SESSION_ID, {"hidden": True})]
+
+        # A reconnect re-declaring "command" finds the row already hidden —
+        # no redundant write, no repeat broadcast.
+        resp = authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call",
+            json={"call_id": "rtc_2", "session_mode": "command"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert broadcasts == [("admin", SESSION_ID, {"hidden": True})]
 
         authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
 

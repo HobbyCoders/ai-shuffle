@@ -1463,6 +1463,23 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	describe('user_session_updated handler (hidden flip)', () => {
+		// The voice attach backfill hides a wake-word "command" session after
+		// the row already existed visibly (create→attach window). The flip is
+		// fanned user-wide (nobody watches a wake-word session, so the
+		// session-scoped channel would reach no device) and must make a list
+		// that rendered the card drop it live via a refetch.
+		it('refetches the sessions list when a hidden flip arrives', () => {
+			handlers.handleMessage({
+				type: 'user_session_updated',
+				session_id: 'voice-session',
+				updates: { hidden: true },
+			});
+
+			expect(deps.appLoadSessions).toHaveBeenCalled();
+		});
+	});
+
 	describe('session_not_found handler', () => {
 		it('should trigger new chat when current session is not found', () => {
 			const state = mockState();

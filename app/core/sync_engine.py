@@ -724,6 +724,30 @@ class SyncEngine:
             source_device_id=source_device_id
         )
 
+    async def broadcast_user_session_updated(
+        self,
+        user_id: str,
+        session_id: str,
+        updates: Dict[str, Any],
+        source_device_id: Optional[str] = None
+    ):
+        """Broadcast a session metadata change to all of a user's devices.
+
+        Unlike ``broadcast_session_updated``, this does NOT require any device
+        to be watching the session — which is exactly the voice command-session
+        case: its hidden backfill must reach lists on devices that never opened
+        the session (nobody ever watches a wake-word one-shot).
+        """
+        await self._broadcast_user_message(
+            user_id=user_id,
+            message={
+                "type": "user_session_updated",
+                "session_id": session_id,
+                "updates": updates,
+            },
+            source_device_id=source_device_id
+        )
+
     async def broadcast_notification(
         self,
         user_id: str,

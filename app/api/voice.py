@@ -798,9 +798,26 @@ async def attach_voice_call(
 
     # A "command" session is list-hidden (v75). Creation already stamps this
     # when the mode is declared up front; the shipped app only declares it
-    # here at attach time, so backfill the flag for that client too.
+    # here at attach time, so backfill the flag for that client too — and
+    # broadcast the flip, so a list that rendered the card during the
+    # create→attach window drops it live instead of on the next refetch.
+    # User-level fan-out on purpose: no device ever watches a wake-word
+    # session, so the session-scoped broadcast would reach nobody.
     if session_mode == "command" and not session_row.get("hidden"):
         await run_sync(database.set_session_hidden, session_id, True)
+        try:
+            from app.core.sync_engine import sync_engine
+            await sync_engine.broadcast_user_session_updated(
+                user_id=session_row.get("api_user_id") or "admin",
+                session_id=session_id,
+                updates={"hidden": True},
+                source_device_id=None,
+            )
+        except Exception:
+            logger.warning(
+                "Voice: hidden-backfill broadcast failed for session %s",
+                session_id, exc_info=True,
+            )
 
     # Compose the agent's system prompt: the (Settings-overridable) base, plus
     # the (Settings-overridable) appendix for the client's session mode. The

@@ -628,6 +628,14 @@ export interface WsServerUserSessionCreated {
 	session_id: string;
 }
 
+/** A session's list-facing metadata changed (e.g. a hidden flip) — fanned to
+ * every device because nobody may be watching the session itself. */
+export interface WsServerUserSessionUpdated {
+	type: 'user_session_updated';
+	session_id: string;
+	updates: Record<string, unknown>;
+}
+
 /** A session's streaming state changed (for side panel indicators). */
 export interface WsServerUserStreamingChanged {
 	type: 'user_streaming_changed';
@@ -841,6 +849,7 @@ export type ServerMessage =
 	// User-level broadcasts
 	| WsServerTabsSync
 	| WsServerUserSessionCreated
+	| WsServerUserSessionUpdated
 	| WsServerUserStreamingChanged
 	| WsServerUserStreamingSessions
 	| WsServerUserBranchChanged;
