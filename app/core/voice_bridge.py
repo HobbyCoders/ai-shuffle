@@ -363,20 +363,18 @@ def _sideband_credentials(
 ) -> List[Tuple[str, str]]:
     """The ``(label, bearer)`` ladder the sideband tries, in order.
 
-    The provider API key leads because that is what OpenAI's server-controls
-    guide prescribes and what the SIP path demonstrably works with. The
-    ephemeral client secret follows because every reported fix for a WebRTC
-    call answering ``call_id_not_found`` to an API-key handshake is "use the
-    ephemeral key the browser created the call with" — and because a call
-    created by an ``ek_`` credential plausibly belongs to that credential.
-
-    Order matters beyond correctness: a client secret expires (10 minutes by
-    default) while an API key does not, so a long call must prefer the key and
-    only fall back.
+    The ephemeral client secret leads: live validation (2026-08-14, real
+    browser-created WebRTC call, gpt-realtime-2.1) showed the API key answers
+    ``call_id_not_found`` on EVERY attempt while the secret that created the
+    call connects on its FIRST — the docs' server-controls guide describes the
+    SIP path, not browser-created calls. The API key stays as the fallback for
+    exactly that SIP/other-call-shape case, and as the last resort should the
+    secret have expired mid-call (the mint TTL is sized to outlive the call cap
+    precisely so that stays theoretical).
     """
     ladder: List[Tuple[str, str]] = []
     seen: set = set()
-    for label, value in (("api_key", api_key), ("client_secret", client_secret)):
+    for label, value in (("client_secret", client_secret), ("api_key", api_key)):
         value = (value or "").strip()
         if not value or value in seen:
             continue

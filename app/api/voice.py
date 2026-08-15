@@ -44,9 +44,12 @@ router = APIRouter(prefix="/api/v1/voice", tags=["Voice"])
 # browser uses to open its WebRTC connection; the real API key stays here.
 OPENAI_CLIENT_SECRETS_URL = "https://api.openai.com/v1/realtime/client_secrets"
 
-# How long a minted secret stays usable (OpenAI's own default is 600s). It only
-# has to survive the browser's connect handshake.
-CLIENT_SECRET_TTL_SECONDS = 600
+# How long a minted secret stays usable (OpenAI default 600s, max 7200s). The
+# secret is ALSO the sideband's primary credential (live-validated 2026-08-14:
+# an API-key sideband handshake 404s on browser-created calls, the call's own
+# secret connects), so it must outlive the whole call — cap is 60 minutes
+# (voice_max_call_minutes) plus reconnect headroom, hence the maximum.
+CLIENT_SECRET_TTL_SECONDS = 7200
 
 # Input-transcription model for the user's side of the conversation. Kept here
 # because VW1 mints with a MINIMAL session config — the VW3 sideband owns the

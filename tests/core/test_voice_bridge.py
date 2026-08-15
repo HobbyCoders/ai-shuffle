@@ -1461,7 +1461,9 @@ def _bearer(entry):
     return entry[1]["Authorization"]
 
 
-async def test_sideband_uses_the_documented_url_and_the_api_key_first(ws_connect):
+async def test_sideband_uses_the_documented_url_and_the_client_secret_first(ws_connect):
+    # URL form per the docs; credential order per live validation 2026-08-14
+    # (the call's own ephemeral secret is what joins a browser-created call).
     sentinel = object()
     ws_connect["results"] = [sentinel]
 
@@ -1470,11 +1472,12 @@ async def test_sideband_uses_the_documented_url_and_the_api_key_first(ws_connect
     assert got is sentinel
     url, headers = ws_connect["calls"][0]
     assert url == "wss://api.openai.com/v1/realtime?call_id=rtc_u1_abc"
-    assert headers == {"Authorization": f"Bearer {KEY}"}
+    assert headers == {"Authorization": "Bearer ek_secret"}
     assert len(ws_connect["calls"]) == 1
 
 
-async def test_sideband_falls_back_to_the_client_secret_on_call_id_not_found(ws_connect):
+async def test_sideband_falls_back_to_the_api_key_on_call_id_not_found(ws_connect):
+    # Ladder order is client_secret → api_key (live-validated 2026-08-14).
     sentinel = object()
     ws_connect["results"] = [_FakeInvalidStatus(404, CALL_NOT_FOUND), sentinel]
 
@@ -1482,16 +1485,16 @@ async def test_sideband_falls_back_to_the_client_secret_on_call_id_not_found(ws_
 
     assert got is sentinel
     assert [_bearer(c) for c in ws_connect["calls"]] == [
-        f"Bearer {KEY}", "Bearer ek_secret",
+        "Bearer ek_secret", f"Bearer {KEY}",
     ]
 
 
 async def test_sideband_retries_the_whole_ladder_while_the_call_is_not_found(ws_connect):
     sentinel = object()
     ws_connect["results"] = [
-        _FakeInvalidStatus(404, CALL_NOT_FOUND),   # attempt 1, api key
         _FakeInvalidStatus(404, CALL_NOT_FOUND),   # attempt 1, client secret
-        sentinel,                                  # attempt 2, api key
+        _FakeInvalidStatus(404, CALL_NOT_FOUND),   # attempt 1, api key
+        sentinel,                                  # attempt 2, client secret
     ]
 
     got = await vb._open_sideband(CALL, KEY, "ek_secret")
@@ -1530,10 +1533,12 @@ async def test_sideband_without_a_client_secret_tries_only_the_api_key(ws_connec
 
 
 def test_sideband_credentials_order_and_dedupe():
+    # Ephemeral first — live-validated 2026-08-14: only the call's own client
+    # secret can join a browser-created call's sideband; the API key 404s.
     assert vb._sideband_credentials(KEY, "ek_1") == [
-        ("api_key", KEY), ("client_secret", "ek_1"),
+        ("client_secret", "ek_1"), ("api_key", KEY),
     ]
-    assert vb._sideband_credentials(KEY, KEY) == [("api_key", KEY)]
+    assert vb._sideband_credentials(KEY, KEY) == [("client_secret", KEY)]
     assert vb._sideband_credentials(KEY, "   ") == [("api_key", KEY)]
     assert vb._sideband_credentials("", "ek_1") == [("client_secret", "ek_1")]
     with pytest.raises(RuntimeError):
