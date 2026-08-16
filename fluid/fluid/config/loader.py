@@ -75,6 +75,14 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
             "model": "openai/gpt-5-mini",
             "api_key_env": "OPENROUTER_API_KEY",
         },
+        # Local OpenAI-compatible server (llama.cpp llama-server on its default
+        # port; for Ollama set base_url to http://127.0.0.1:11434 and model to
+        # an installed model name). llama-server ignores the model field; set
+        # tool_style = "text" for models without reliable native tool calling.
+        "local": {
+            "kind": "local",
+            "base_url": "http://127.0.0.1:8080",
+        },
         "claude": {
             "kind": "delegated_claude",
             "model": "claude-sonnet-5",
@@ -229,22 +237,41 @@ def _build_provider_client(config: HarnessConfig, provider_name: str):
         kwargs: dict[str, Any] = {"api_key": api_key}
         if pc.base_url:
             kwargs["base_url"] = pc.base_url
-        return AnthropicClient(**kwargs)
-    if pc.kind == "openai_responses":
+        client: Any = AnthropicClient(**kwargs)
+    elif pc.kind == "openai_responses":
         from fluid.providers.openai_responses.client import OpenAIResponsesClient
 
         kwargs = {"api_key": api_key}
         if pc.base_url:
             kwargs["base_url"] = pc.base_url
-        return OpenAIResponsesClient(**kwargs)
-    if pc.kind == "openrouter":
+        client = OpenAIResponsesClient(**kwargs)
+    elif pc.kind == "openrouter":
         from fluid.providers.openrouter.client import OpenRouterClient
 
         kwargs = {"api_key": api_key}
         if pc.base_url:
             kwargs["base_url"] = pc.base_url
-        return OpenRouterClient(**kwargs)
-    raise ValueError(f"{pc.kind!r} is not a native provider kind")
+        client = OpenRouterClient(**kwargs)
+    elif pc.kind == "local":
+        from fluid.providers.local.client import LocalClient
+
+        if not pc.base_url:
+            raise ValueError(
+                f"provider {provider_name!r} (kind 'local') requires base_url "
+                "(e.g. http://127.0.0.1:8080 for llama-server, "
+                "http://127.0.0.1:11434 for Ollama)"
+            )
+        client = LocalClient(api_key, base_url=pc.base_url)
+    else:
+        raise ValueError(f"{pc.kind!r} is not a native provider kind")
+
+    if pc.tool_style == "text":
+        # Opt-in text-protocol tool calling for models without reliable native
+        # tool calls — a decorating ProviderClient; the engine loop is unaware.
+        from fluid.providers.local.text_tools import TextToolsAdapter
+
+        client = TextToolsAdapter(client)
+    return client
 
 
 def build_engine(

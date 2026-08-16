@@ -12,8 +12,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # Provider kinds the engine factory knows how to build.
-PROVIDER_KINDS = ("anthropic", "openai_responses", "openrouter", "delegated_claude")
+PROVIDER_KINDS = ("anthropic", "openai_responses", "openrouter", "local", "delegated_claude")
 APPROVAL_POLICIES = ("never_ask", "on_write", "always_ask")
+# How the model calls tools: "native" = provider tool_calls (the default);
+# "text" = the <tool_call> text protocol for local models that can't do
+# reliable native tool calling (see fluid.providers.local.text_tools).
+TOOL_STYLES = ("native", "text")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -22,17 +26,24 @@ class ProviderConfig:
     model: str = ""  # empty → fall back to HarnessConfig.default_model
     base_url: str | None = None
     api_key_env: str | None = None
+    tool_style: str = "native"  # one of TOOL_STYLES
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "ProviderConfig":
         kind = d.get("kind", "anthropic")
         if kind not in PROVIDER_KINDS:
             raise ValueError(f"unknown provider kind: {kind!r} (expected one of {PROVIDER_KINDS})")
+        tool_style = d.get("tool_style", "native")
+        if tool_style not in TOOL_STYLES:
+            raise ValueError(
+                f"unknown tool_style: {tool_style!r} (expected one of {TOOL_STYLES})"
+            )
         return cls(
             kind=kind,
             model=d.get("model", ""),
             base_url=d.get("base_url"),
             api_key_env=d.get("api_key_env"),
+            tool_style=tool_style,
         )
 
 
@@ -261,6 +272,7 @@ class HarnessConfig:
                     "model": pc.model,
                     "base_url": pc.base_url,
                     "api_key_env": pc.api_key_env,
+                    "tool_style": pc.tool_style,
                 }
                 for name, pc in self.providers.items()
             },
