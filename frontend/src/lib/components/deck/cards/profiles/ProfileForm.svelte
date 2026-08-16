@@ -109,11 +109,6 @@
 		computer_use_enabled: boolean;
 	}
 
-	interface EnvVarPreset {
-		key: string;
-		placeholder: string;
-	}
-
 	interface Props {
 		activeTab: string;
 		editingProfile: Profile | null;
@@ -133,7 +128,6 @@
 		aiToolCount: number;
 		effectiveToolCount: number;
 		expandedSections: Record<string, boolean>;
-		envVarPresets: EnvVarPreset[];
 		onFormChange: (field: string, value: any) => void;
 		onToolSelectionModeChange: (mode: 'all' | 'none' | 'allow' | 'disallow') => void;
 		onCustomModelModeChange: (custom: boolean, model: string) => void;
@@ -172,7 +166,6 @@
 		aiToolCount,
 		effectiveToolCount,
 		expandedSections,
-		envVarPresets,
 		onFormChange,
 		onToolSelectionModeChange,
 		onCustomModelModeChange,
@@ -529,42 +522,6 @@
 				<div class="ctl"><input class="inp mono" value={profileForm.add_dirs} oninput={(e) => onFormChange('add_dirs', (e.target as HTMLInputElement).value)} placeholder="/home/user/notes, /home/user/docs" /></div>
 			</div>
 		</div>
-
-		<div class="set-group">
-			<div class="set-grouphead grouphead-row">
-				<div><h3>Environment variables</h3><p>Set environment variables for the agent's runtime.</p></div>
-				<button type="button" class="lnk" onclick={() => onFormChange('env_vars', [...profileForm.env_vars, { key: '', value: '' }])}>+ Add variable</button>
-			</div>
-			<div class="set-row stack">
-				<div class="lab"><h4>Known variables</h4><p>Pick a recognized variable to add it quickly.</p></div>
-				<div class="ctl">
-					<select class="sel fld" onchange={(e) => { const target = e.target as HTMLSelectElement; const key = target.value; if (key && !profileForm.env_vars.some((v) => v.key === key)) { onFormChange('env_vars', [...profileForm.env_vars, { key, value: '' }]); } target.value = ''; }}>
-						<option value="">Select a known variable to add…</option>
-						{#each envVarPresets as preset}
-							{#if !profileForm.env_vars.some((v) => v.key === preset.key)}
-								<option value={preset.key}>{preset.key}</option>
-							{/if}
-						{/each}
-					</select>
-					{#if profileForm.env_vars.length > 0}
-						<div class="env-list">
-							{#each profileForm.env_vars as envVar, index}
-								{@const preset = envVarPresets.find((p) => p.key === envVar.key)}
-								<div class="env-row">
-									<input type="text" value={envVar.key} class="inp mono env-key" placeholder="VARIABLE_NAME" oninput={(e) => { const target = e.target as HTMLInputElement; let val = target.value.replace(/,/g, ''); const updated = [...profileForm.env_vars]; updated[index] = { ...updated[index], key: val }; onFormChange('env_vars', updated); }} />
-									<input type="text" value={envVar.value} class="inp mono env-val" placeholder={preset?.placeholder || 'value'} oninput={(e) => { const target = e.target as HTMLInputElement; let val = target.value.replace(/,/g, ''); const updated = [...profileForm.env_vars]; updated[index] = { ...updated[index], value: val }; onFormChange('env_vars', updated); }} />
-									<button type="button" class="icon-btn danger" title="Remove variable" onclick={() => onFormChange('env_vars', profileForm.env_vars.filter((_, i) => i !== index))}>
-										<Trash2 size={14} />
-									</button>
-								</div>
-							{/each}
-						</div>
-					{:else}
-						<p class="empty">No environment variables configured.</p>
-					{/if}
-				</div>
-			</div>
-		</div>
 	{/if}
 </div>
 
@@ -672,38 +629,6 @@
 		opacity: 0.6;
 	}
 
-	/* Environment variable rows */
-	.env-list {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-		margin-top: 10px;
-	}
-	.env-row {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-	}
-	/* Extra `.env-list` qualifier raises specificity above the shell's
-	   `.set-row.stack .ctl .inp { width: 100% }` rule, which otherwise ties
-	   and (by source order) forces the no-shrink key input to 100% width —
-	   pushing the value input and delete button off the right edge. */
-	.env-list .env-row :global(.inp.env-key) {
-		min-width: 0;
-		width: auto;
-		flex: 1 1 0;
-	}
-	.env-list .env-row :global(.inp.env-val) {
-		min-width: 0;
-		width: 150px;
-		flex: 0 0 150px;
-	}
-	.empty {
-		margin: 10px 0 0;
-		font-size: 12.5px;
-		color: var(--muted-foreground);
-	}
-
 	/* Memory section (prompt tab) */
 	.lab-row {
 		display: flex;
@@ -719,30 +644,5 @@
 	}
 	textarea.memory-area {
 		min-height: 180px;
-	}
-
-	@media (max-width: 560px) {
-		.env-row {
-			display: grid;
-			grid-template-columns: 1fr auto;
-			grid-template-rows: auto auto;
-		}
-		.env-list .env-row :global(.inp.env-key) {
-			width: 100%;
-			flex: none;
-			grid-column: 1;
-			grid-row: 1;
-		}
-		.env-list .env-row :global(.inp.env-val) {
-			width: 100%;
-			flex: none;
-			grid-column: 1;
-			grid-row: 2;
-		}
-		.env-row .icon-btn {
-			grid-column: 2;
-			grid-row: 1 / 3;
-			align-self: center;
-		}
 	}
 </style>

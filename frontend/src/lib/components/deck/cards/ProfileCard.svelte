@@ -200,19 +200,6 @@
 		computer_use_enabled: false
 	});
 
-	// Common environment variable presets with valid ranges
-	const envVarPresets = [
-		{ key: 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', placeholder: '1 - 64000' },
-		{ key: 'MAX_THINKING_TOKENS', placeholder: '1024 - 128000' },
-		{ key: 'CLAUDE_CODE_AUTO_COMPACT_WINDOW', placeholder: 'tokens (context-window threshold to auto-compact)' },
-		{ key: 'MAX_MCP_OUTPUT_TOKENS', placeholder: '1 - 25000 (default)' },
-		{ key: 'BASH_DEFAULT_TIMEOUT_MS', placeholder: 'ms (default: 120000)' },
-		{ key: 'BASH_MAX_TIMEOUT_MS', placeholder: 'ms (default: 600000)' },
-		{ key: 'MCP_TIMEOUT', placeholder: 'ms for server startup' },
-		{ key: 'MCP_TOOL_TIMEOUT', placeholder: 'ms for tool execution' },
-		{ key: 'CLAUDE_CODE_STREAM_CLOSE_TIMEOUT', placeholder: 'ms for stream close (SDK 0.1.10+)' }
-	];
-
 	// Tool selection mode. The single visible dropdown drives both built-in and
 	// AI tool behavior — there is no separate AI-tool mode (see ./profiles/toolAccess).
 	let toolSelectionMode = $state<'all' | 'none' | 'allow' | 'disallow'>('all');
@@ -865,7 +852,6 @@
 				{aiToolCount}
 				{effectiveToolCount}
 				{expandedSections}
-				{envVarPresets}
 				onFormChange={handleFormChange}
 				onToolSelectionModeChange={handleToolSelectionModeChange}
 				onCustomModelModeChange={handleCustomModelModeChange}
