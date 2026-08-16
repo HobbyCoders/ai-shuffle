@@ -141,7 +141,7 @@ class TestSecurityHeadersMiddleware:
         assert "default-src 'self'" in csp
         assert "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com" in csp
         assert "style-src 'self' 'unsafe-inline'" in csp
-        assert "img-src 'self' data: blob:" in csp
+        assert "img-src 'self' data: blob: https: http:" in csp
         assert "connect-src 'self' ws: wss: https://*.cloudflareaccess.com" in csp
         assert "font-src 'self'" in csp
         assert "frame-ancestors 'self'" in csp

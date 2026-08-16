@@ -3,6 +3,8 @@
 Covers the security-critical surface of cross-install trust:
 - ``verify_cluster_secret`` is a constant-time compare that rejects empties.
 - ``require_cluster_auth`` gates peer endpoints on a Bearer cluster secret.
+- ``mint_artifact_token``/``verify_artifact_token`` sign a cross-install
+  artifact-download redirect and reject tampered/expired/garbage inputs.
 - ``cluster_headers`` presents the Bearer scheme + install id to peers.
 - ``advertise_url`` resolves env override → per-install DB override → host
   guess → none, and the DB override is scoped per install (never leaks across
@@ -12,6 +14,9 @@ The secret is never returned by any helper here — only compared. Everything is
 mocked at the secret/registry boundary; no DB, no network.
 """
 
+import hashlib
+import hmac
+import time
 from unittest.mock import patch
 
 import pytest
@@ -65,6 +70,60 @@ def test_require_cluster_auth_rejects_missing_and_wrong_secret():
             with pytest.raises(HTTPException) as exc:
                 cluster.require_cluster_auth(FakeRequest(headers))
             assert exc.value.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# mint/verify_artifact_token — signed cross-install download redirect
+# ---------------------------------------------------------------------------
+
+def test_artifact_token_roundtrip():
+    with patch.object(cluster, "get_cluster_secret", return_value="s3cr3t"):
+        h = "a" * 64
+        exp, sig = cluster.mint_artifact_token(h)
+        assert cluster.verify_artifact_token(h, str(exp), sig) is True
+
+
+def test_artifact_token_rejects_wrong_hash():
+    with patch.object(cluster, "get_cluster_secret", return_value="s3cr3t"):
+        exp, sig = cluster.mint_artifact_token("a" * 64)
+        assert cluster.verify_artifact_token("b" * 64, str(exp), sig) is False
+
+
+def test_artifact_token_rejects_tampered_signature():
+    with patch.object(cluster, "get_cluster_secret", return_value="s3cr3t"):
+        h = "a" * 64
+        exp, sig = cluster.mint_artifact_token(h)
+        flipped = ("f" if sig[0] != "f" else "0") + sig[1:]
+        assert cluster.verify_artifact_token(h, str(exp), flipped) is False
+
+
+def test_artifact_token_rejects_non_digit_exp():
+    with patch.object(cluster, "get_cluster_secret", return_value="s3cr3t"):
+        h = "a" * 64
+        _exp, sig = cluster.mint_artifact_token(h)
+        assert cluster.verify_artifact_token(h, "not-a-number", sig) is False
+
+
+def test_artifact_token_rejects_expired_exp():
+    with patch.object(cluster, "get_cluster_secret", return_value="s3cr3t"):
+        h = "a" * 64
+        past = int(time.time()) - 10
+        sig = hmac.new(
+            b"s3cr3t",
+            f"artifact-download:{h}:{past}".encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        assert cluster.verify_artifact_token(h, str(past), sig) is False
+
+
+def test_artifact_token_verify_never_raises_on_garbage():
+    with patch.object(cluster, "get_cluster_secret", return_value="s3cr3t"):
+        h = "a" * 64
+        assert cluster.verify_artifact_token(h, None, None) is False
+        assert cluster.verify_artifact_token(h, "", "") is False
+        assert cluster.verify_artifact_token(h, "123", None) is False
+        assert cluster.verify_artifact_token(h, None, "deadbeef") is False
+        assert cluster.verify_artifact_token(h, 12345, "deadbeef") is False
 
 
 # ---------------------------------------------------------------------------

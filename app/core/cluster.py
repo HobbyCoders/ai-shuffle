@@ -19,10 +19,12 @@ same boundary as sharing a Postgres today.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import logging
 import secrets
 import socket
+import time
 from typing import Optional
 
 from fastapi import HTTPException, Request, status
@@ -39,6 +41,10 @@ CLUSTER_SECRET_SETTING = "cluster_secret"
 # ``_get_advertise_override``); new values are stored per-install under
 # ``cluster_advertise_url:<instance_id>``.
 CLUSTER_ADVERTISE_URL_SETTING = "cluster_advertise_url"
+
+# Lifetime of a signed artifact-download redirect. Long enough for a browser to
+# follow the 307, short enough that a leaked URL expires almost immediately.
+ARTIFACT_TOKEN_TTL_SECONDS = 300
 
 
 def get_cluster_secret() -> str:
@@ -75,6 +81,42 @@ def verify_cluster_secret(presented: Optional[str]) -> bool:
     if not presented:
         return False
     return hmac.compare_digest(presented, get_cluster_secret())
+
+
+def mint_artifact_token(hash: str) -> tuple[int, str]:
+    """Sign a cross-install artifact-download redirect with the cluster secret.
+
+    The session cookie is host-only, so a browser following a 307 to the holder
+    install sends no credentials; this ``(exp, sig)`` pair travels in the
+    redirect URL and lets the holder authorize that otherwise-cookieless request.
+    """
+    exp = int(time.time()) + ARTIFACT_TOKEN_TTL_SECONDS
+    sig = hmac.new(
+        get_cluster_secret().encode(),
+        f"artifact-download:{hash}:{exp}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return exp, sig
+
+
+def verify_artifact_token(hash: str, exp: str, sig: str) -> bool:
+    """Constant-time check of a signed artifact-download redirect (never raises).
+
+    Returns False for anything malformed, expired, or signed for a different
+    hash — the caller falls back to normal per-user auth.
+    """
+    if not isinstance(exp, str) or not exp.isdigit():
+        return False
+    if not isinstance(sig, str) or not sig:
+        return False
+    if int(exp) < time.time():
+        return False
+    expected = hmac.new(
+        get_cluster_secret().encode(),
+        f"artifact-download:{hash}:{exp}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(sig, expected)
 
 
 def require_cluster_auth(request: Request) -> str:

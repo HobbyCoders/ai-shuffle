@@ -48,7 +48,13 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "default-src 'self'; "
             "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com; "
             "style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data: blob: https:; "
+            # http:: cross-install artifact requests answer with a 307 to the
+            # peer install that actually holds the blob, and cluster peers
+            # advertise plain-http LAN base_urls. https: is already a blanket
+            # image wildcard here and img-src grants no script execution, so
+            # this only lets those images render — mixed-content rules still
+            # govern them on an https page.
+            "img-src 'self' data: blob: https: http:; "
             "media-src 'self' blob:; "
             # api.openai.com: the voice call surface POSTs its WebRTC SDP offer
             # directly from the browser to OpenAI Realtime (voiceCall.ts) —
