@@ -1,0 +1,353 @@
+"""CE4 — Claude Code settings.json: three-scope merge, permissions, env.
+
+The project walk is bounded by a ``.git`` marker (same convention as
+test_instructions.py) and HOME is redirected to a tmp dir so the developer's
+real ~/.claude never leaks into an assertion.
+"""
+
+import json
+import logging
+from pathlib import Path
+
+from fluid.context.claude_settings import (
+    enabled_plugins,
+    layered_env,
+    load_claude_settings,
+    mcp_toggles,
+    parse_permission_entry,
+    permission_rules,
+    settings_env,
+)
+from fluid.permissions.rules import evaluate_rules
+
+
+def _set_home(monkeypatch, home) -> None:
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(Path(home) / ".config"))
+
+
+def _write_settings(directory: Path, name: str, data: dict) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+def _scoped(tmp_path, monkeypatch, *, user=None, project=None, local=None):
+    """Lay out all three scopes and return the project dir."""
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    _set_home(monkeypatch, home)
+    if user is not None:
+        _write_settings(home / ".claude", "settings.json", user)
+
+    proj = tmp_path / "proj"
+    proj.mkdir(parents=True, exist_ok=True)
+    (proj / ".git").mkdir(exist_ok=True)
+    if project is not None:
+        _write_settings(proj / ".claude", "settings.json", project)
+    if local is not None:
+        _write_settings(proj / ".claude", "settings.local.json", local)
+    return proj
+
+
+# ─── merge ───────────────────────────────────────────────────────────────────
+
+
+def test_three_scope_merge_lists_accumulate_scalars_override(tmp_path, monkeypatch) -> None:
+    proj = _scoped(
+        tmp_path,
+        monkeypatch,
+        user={
+            "model": "user-model",
+            "permissions": {"allow": ["Read(./src/**)"]},
+            "env": {"FROM_USER": "1", "SHARED": "user"},
+        },
+        project={
+            "model": "project-model",
+            "permissions": {"allow": ["Bash(npm run *)"]},
+            "env": {"SHARED": "project"},
+        },
+        local={
+            "permissions": {"allow": ["Bash(git *)"], "deny": ["Bash(rm *)"]},
+            "env": {"SHARED": "local", "FROM_LOCAL": "1"},
+        },
+    )
+
+    settings = load_claude_settings(proj)
+    # Scalars: highest scope that sets them wins.
+    assert settings["model"] == "project-model"
+    # Lists accumulate in scope order.
+    assert settings["permissions"]["allow"] == [
+        "Read(./src/**)",
+        "Bash(npm run *)",
+        "Bash(git *)",
+    ]
+    assert settings["permissions"]["deny"] == ["Bash(rm *)"]
+    # Dicts merge per key, higher scope winning the conflict.
+    assert settings["env"] == {"FROM_USER": "1", "SHARED": "local", "FROM_LOCAL": "1"}
+
+
+def test_local_scope_outranks_project(tmp_path, monkeypatch) -> None:
+    proj = _scoped(
+        tmp_path, monkeypatch,
+        project={"model": "project-model"},
+        local={"model": "local-model"},
+    )
+    assert load_claude_settings(proj)["model"] == "local-model"
+
+
+def test_inner_project_dir_outranks_outer(tmp_path, monkeypatch) -> None:
+    proj = _scoped(tmp_path, monkeypatch, project={"model": "outer", "env": {"A": "outer"}})
+    inner = proj / "pkg"
+    inner.mkdir()
+    _write_settings(inner / ".claude", "settings.json", {"model": "inner"})
+
+    settings = load_claude_settings(inner)
+    assert settings["model"] == "inner"
+    assert settings["env"] == {"A": "outer"}  # outer keys survive
+
+
+def test_no_claude_setup_yields_empty(tmp_path, monkeypatch) -> None:
+    proj = _scoped(tmp_path, monkeypatch)
+    assert load_claude_settings(proj) == {}
+
+
+def test_malformed_json_is_skipped_with_a_warning(tmp_path, monkeypatch, caplog) -> None:
+    proj = _scoped(tmp_path, monkeypatch, user={"model": "user-model"})
+    (proj / ".claude").mkdir(parents=True, exist_ok=True)
+    (proj / ".claude" / "settings.json").write_text("{not json", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        settings = load_claude_settings(proj)
+    assert settings == {"model": "user-model"}  # the good scope still loads
+    assert any("malformed" in r.getMessage() for r in caplog.records)
+
+
+def test_non_object_json_is_skipped(tmp_path, monkeypatch) -> None:
+    proj = _scoped(tmp_path, monkeypatch, user={"model": "user-model"})
+    _write_settings(proj / ".claude", "settings.json", {})
+    (proj / ".claude" / "settings.json").write_text("[1, 2, 3]", encoding="utf-8")
+    assert load_claude_settings(proj) == {"model": "user-model"}
+
+
+# ─── permissions ─────────────────────────────────────────────────────────────
+
+
+def test_permission_entry_grammar() -> None:
+    bash = parse_permission_entry("Bash(npm run *)", "allow")
+    assert bash.tool == "Bash" and bash.input_globs == {"command": "npm run *"}
+
+    read = parse_permission_entry("Read(./src/**)", "deny")
+    assert read.tool == "Read" and read.input_globs == {"file_path": "./src/**"}
+
+    bare = parse_permission_entry("mcp__pencil", "allow")
+    assert bare.tool == "mcp__pencil" and bare.input_globs == {}
+
+    # An unknown tool's pattern cannot be mapped to an input field, so the rule
+    # widens to the whole tool rather than being dropped.
+    unknown = parse_permission_entry("WebFetch(domain:example.com)", "ask")
+    assert unknown.tool == "WebFetch" and unknown.input_globs == {}
+
+    assert parse_permission_entry("", "allow") is None
+
+
+def test_permission_rules_emit_allow_then_ask_then_deny(tmp_path, monkeypatch) -> None:
+    proj = _scoped(
+        tmp_path, monkeypatch,
+        project={
+            "permissions": {
+                "deny": ["Bash(rm *)"],
+                "allow": ["Bash(git *)"],
+                "ask": ["Bash(git push *)"],
+            }
+        },
+    )
+    rules = permission_rules(load_claude_settings(proj))
+    assert [r.decision for r in rules] == ["allow", "ask", "deny"]
+
+
+def test_deny_beats_ask_beats_allow_under_last_match_wins(tmp_path, monkeypatch) -> None:
+    proj = _scoped(
+        tmp_path, monkeypatch,
+        project={
+            "permissions": {
+                "allow": ["Bash(*)"],
+                "ask": ["Bash(git push *)"],
+                "deny": ["Bash(rm *)"],
+            }
+        },
+    )
+    rules = permission_rules(load_claude_settings(proj))
+
+    assert evaluate_rules(rules, "Bash", {"command": "git status"}) == "allow"
+    assert evaluate_rules(rules, "Bash", {"command": "git push origin"}) == "ask"
+    assert evaluate_rules(rules, "Bash", {"command": "rm -rf /"}) == "deny"
+    assert evaluate_rules(rules, "Read", {"file_path": "x"}) is None  # untouched
+
+
+def test_no_permissions_key_yields_no_rules() -> None:
+    assert permission_rules({}) == []
+    assert permission_rules({"permissions": "nonsense"}) == []
+
+
+# ─── accessors ───────────────────────────────────────────────────────────────
+
+
+def test_settings_env_accessor(tmp_path, monkeypatch) -> None:
+    proj = _scoped(tmp_path, monkeypatch, project={"env": {"FOO": "bar", "N": 3}})
+    assert settings_env(load_claude_settings(proj)) == {"FOO": "bar", "N": "3"}
+    assert settings_env({}) == {}
+    assert settings_env({"env": "nonsense"}) == {}
+
+
+def test_enabled_plugins_accessor(tmp_path, monkeypatch) -> None:
+    proj = _scoped(
+        tmp_path, monkeypatch,
+        user={"enabledPlugins": {"a@mp": True, "b@mp": True}},
+        project={"enabledPlugins": {"b@mp": False}},
+    )
+    assert enabled_plugins(load_claude_settings(proj)) == {"a@mp": True, "b@mp": False}
+    assert enabled_plugins({}) == {}
+
+
+def test_mcp_toggles_accessor(tmp_path, monkeypatch) -> None:
+    proj = _scoped(
+        tmp_path, monkeypatch,
+        user={"enabledMcpjsonServers": ["alpha"], "disabledMcpServers": ["beta"]},
+        project={"enabledMcpjsonServers": ["gamma"]},
+    )
+    enabled, disabled = mcp_toggles(load_claude_settings(proj))
+    assert enabled == ["alpha", "gamma"]
+    assert disabled == ["beta"]
+    assert mcp_toggles({}) == ([], [])
+
+
+# ─── session seams (NativeLoop / Bash / MCP) ─────────────────────────────────
+
+
+def _loop(cwd, *, rules=None, claude_settings=True):
+    from fluid.engine.native import NativeLoop
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.providers.base import ProviderCaps
+    from fluid.store.base import MemoryStore
+    from fluid.tools.registry import ToolCtx
+
+    class _Provider:
+        name = "anthropic"
+        caps = ProviderCaps()
+
+        async def stream(self, request):  # pragma: no cover - never streamed
+            if False:
+                yield None
+
+    return NativeLoop(
+        provider=_Provider(),
+        store=MemoryStore(),
+        model="m",
+        ctx=ToolCtx(cwd=str(cwd)),
+        permissions=PermissionEngine("never_ask", rules=list(rules or [])),
+        claude_settings=claude_settings,
+    )
+
+
+def test_native_loop_seeds_settings_env_and_rules(tmp_path, monkeypatch) -> None:
+    proj = _scoped(
+        tmp_path, monkeypatch,
+        project={
+            "env": {"FLUID_ENV_PROBE": "from-settings"},
+            "permissions": {"deny": ["Bash(rm *)"]},
+        },
+    )
+    loop = _loop(proj)
+    assert loop.ctx.extra["settings_env"] == {"FLUID_ENV_PROBE": "from-settings"}
+    assert loop.permissions.evaluate(_spec("Bash"), {"command": "rm -rf /"}) == "deny"
+
+
+def test_native_loop_toggle_off_reads_nothing(tmp_path, monkeypatch) -> None:
+    proj = _scoped(
+        tmp_path, monkeypatch,
+        project={"env": {"FLUID_ENV_PROBE": "x"}, "permissions": {"deny": ["Bash(rm *)"]}},
+    )
+    loop = _loop(proj, claude_settings=False)
+    assert loop.claude_settings == {}
+    assert "settings_env" not in loop.ctx.extra
+    assert loop.permissions.rules == []
+
+
+def test_host_rules_outrank_settings_rules(tmp_path, monkeypatch) -> None:
+    """Settings rules go *before* host rules — last-match-wins leaves the host
+    with the final say over its own session."""
+    from fluid.permissions.rules import Rule
+
+    proj = _scoped(tmp_path, monkeypatch, project={"permissions": {"deny": ["Bash(rm *)"]}})
+    host_rule = Rule(tool="Bash", decision="allow", input_globs={"command": "rm *"})
+    loop = _loop(proj, rules=[host_rule])
+
+    assert loop.permissions.rules[-1] is host_rule
+    assert loop.permissions.evaluate(_spec("Bash"), {"command": "rm -rf /"}) == "allow"
+
+
+def _spec(name: str):
+    from fluid.tools.registry import ToolSpec
+
+    return ToolSpec(name=name, description="", input_schema={}, risk="write")
+
+
+async def test_bash_builtin_runs_with_the_settings_env(tmp_path, monkeypatch) -> None:
+    import sys
+
+    from fluid.tools.builtins.bash import handler
+
+    proj = _scoped(tmp_path, monkeypatch, project={"env": {"FLUID_ENV_PROBE": "from-settings"}})
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import os; print(os.environ.get('FLUID_ENV_PROBE', 'MISSING'))", encoding="utf-8"
+    )
+    command = f'"{sys.executable}" "{probe}"'
+
+    loop = _loop(proj)
+    outcome = await handler({"command": command}, loop.ctx)
+    assert "from-settings" in outcome.text
+    assert "FLUID_ENV_PROBE" not in __import__("os").environ  # os.environ untouched
+
+    # Without the overlay the child simply inherits, and the var is absent.
+    bare = _loop(proj, claude_settings=False)
+    assert "MISSING" in (await handler({"command": command}, bare.ctx)).text
+
+
+def test_mcp_stdio_config_layers_settings_env(tmp_path, monkeypatch) -> None:
+    import os
+
+    from fluid.engine.native import NativeLoop
+
+    merged = NativeLoop._mcp_config({"command": "srv"}, {"FLUID_ENV_PROBE": "1"})
+    assert merged["env"]["FLUID_ENV_PROBE"] == "1"
+    # Layered over the inherited environment, not a bare replacement — a stdio
+    # server handed a partial env would lose PATH.
+    assert set(os.environ) <= set(merged["env"])
+    assert merged["command"] == "srv"
+
+    # An explicit server env is the base; settings win the overlap.
+    explicit = NativeLoop._mcp_config(
+        {"command": "srv", "env": {"A": "1", "FLUID_ENV_PROBE": "old"}},
+        {"FLUID_ENV_PROBE": "new"},
+    )
+    assert explicit["env"] == {"A": "1", "FLUID_ENV_PROBE": "new"}
+
+    # http servers spawn nothing, and no overlay means no rewrite at all.
+    assert "env" not in NativeLoop._mcp_config({"transport": "http", "url": "u"}, {"X": "1"})
+    assert NativeLoop._mcp_config({"command": "srv"}, None) == {"command": "srv"}
+
+
+def test_layered_env_never_mutates_os_environ() -> None:
+    import os
+
+    before = dict(os.environ)
+    merged = layered_env({"FLUID_TEST_ONLY": "1"})
+    assert merged["FLUID_TEST_ONLY"] == "1"
+    assert "FLUID_TEST_ONLY" not in os.environ
+    assert os.environ == before
+    # An explicit base replaces the inherited environment.
+    assert layered_env({"B": "2"}, base={"A": "1"}) == {"A": "1", "B": "2"}

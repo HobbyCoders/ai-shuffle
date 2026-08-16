@@ -99,6 +99,31 @@ class InstructionFilesConfig:
 
 
 @dataclass(frozen=True, kw_only=True)
+class ClaudeEcosystemConfig:
+    """Opt-out switches for Claude Code ecosystem pickup (ruling CE9).
+
+    Discovery is filesystem-native and on by default (CE1) — a host app can
+    only *disable* a piece, never has to wire one up. ``plugins`` and ``agents``
+    are declared here but dormant until their waves land.
+    """
+
+    settings: bool = True
+    plugins: bool = True
+    agents: bool = True
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "ClaudeEcosystemConfig":
+        def pick(key: str, *, default: bool) -> bool:
+            return bool(d[key]) if key in d else default
+
+        return cls(
+            settings=pick("settings", default=True),
+            plugins=pick("plugins", default=True),
+            agents=pick("agents", default=True),
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
 class HarnessConfig:
     default_provider: str = "anthropic"
     default_model: str = "claude-sonnet-5"
@@ -113,6 +138,7 @@ class HarnessConfig:
     continual: bool = False
     continual_model: str | None = None
     instruction_files: InstructionFilesConfig = field(default_factory=InstructionFilesConfig)
+    claude_ecosystem: ClaudeEcosystemConfig = field(default_factory=ClaudeEcosystemConfig)
     cwd: str = "."
     max_tokens: int = 8192
     # Model context window, when the host app knows it (model ids come and go
@@ -143,6 +169,7 @@ class HarnessConfig:
             continual=bool(d.get("continual", False)),
             continual_model=d.get("continual_model"),
             instruction_files=InstructionFilesConfig.from_dict(d.get("instruction_files", {})),
+            claude_ecosystem=ClaudeEcosystemConfig.from_dict(d.get("claude_ecosystem", {})),
             cwd=d.get("cwd", "."),
             max_tokens=int(d.get("max_tokens", 8192)),
             context_window=(
@@ -193,6 +220,11 @@ class HarnessConfig:
                 "skills": self.instruction_files.discover_skills,
                 "commands": self.instruction_files.discover_commands,
                 "nested": self.instruction_files.discover_nested,
+            },
+            "claude_ecosystem": {
+                "settings": self.claude_ecosystem.settings,
+                "plugins": self.claude_ecosystem.plugins,
+                "agents": self.claude_ecosystem.agents,
             },
             "providers": {
                 name: {

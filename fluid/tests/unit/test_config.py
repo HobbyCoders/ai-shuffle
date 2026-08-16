@@ -110,6 +110,70 @@ def test_toml_rules_parse(tmp_path) -> None:
     assert rule.input_globs == {"command": "rm *"}
 
 
+def test_claude_ecosystem_toggles_default_on() -> None:
+    config = HarnessConfig.from_dict(BUILTIN_DEFAULTS)
+    assert config.claude_ecosystem.settings is True
+    assert config.claude_ecosystem.plugins is True
+    assert config.claude_ecosystem.agents is True
+    assert config.to_dict()["claude_ecosystem"] == {
+        "settings": True, "plugins": True, "agents": True,
+    }
+
+
+def test_claude_ecosystem_toggles_from_toml(tmp_path) -> None:
+    proj = tmp_path / "proj"
+    (proj / ".fluid").mkdir(parents=True)
+    _write_toml(
+        proj / ".fluid" / "config.toml",
+        "[claude_ecosystem]\nsettings = false\nplugins = false\n",
+    )
+    config = load_config(cwd=proj, include_system=False, include_user=False, env={})
+    assert config.claude_ecosystem.settings is False
+    assert config.claude_ecosystem.plugins is False
+    assert config.claude_ecosystem.agents is True  # untouched key keeps its default
+
+
+def test_claude_ecosystem_env_overrides() -> None:
+    env = {
+        "FLUID_CLAUDE_SETTINGS": "false",
+        "FLUID_CLAUDE_PLUGINS": "0",
+        "FLUID_CLAUDE_AGENTS": "true",
+    }
+    assert env_overrides(env)["claude_ecosystem"] == {
+        "settings": False, "plugins": False, "agents": True,
+    }
+    config = load_config(cwd=".", include_system=False, include_user=False, env=env)
+    assert config.claude_ecosystem.settings is False
+    assert config.claude_ecosystem.agents is True
+    # No FLUID_CLAUDE_* set → the key is absent from the overlay entirely.
+    assert "claude_ecosystem" not in env_overrides({})
+
+
+def test_build_engine_threads_the_settings_toggle(tmp_path, monkeypatch) -> None:
+    # A settings.json that would contribute a rule if the toggle were on.
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text(
+        '{"permissions": {"deny": ["Bash(rm *)"]}, "env": {"FLUID_TOGGLE_TEST": "1"}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    off = HarnessConfig.from_dict(
+        deep_merge(BUILTIN_DEFAULTS, {"cwd": str(tmp_path), "claude_ecosystem": {"settings": False}})
+    )
+    engine = build_engine(off, MemoryStore(), provider=FakeProvider())
+    assert engine.claude_settings == {}
+    assert "settings_env" not in engine.ctx.extra
+    assert all(r.tool != "Bash" for r in engine.permissions.rules)
+
+    on = HarnessConfig.from_dict(deep_merge(BUILTIN_DEFAULTS, {"cwd": str(tmp_path)}))
+    engine = build_engine(on, MemoryStore(), provider=FakeProvider())
+    assert engine.ctx.extra["settings_env"] == {"FLUID_TOGGLE_TEST": "1"}
+    assert any(r.tool == "Bash" and r.decision == "deny" for r in engine.permissions.rules)
+
+
 def test_build_engine_native_for_anthropic(tmp_path) -> None:
     config = HarnessConfig.from_dict(BUILTIN_DEFAULTS)
     store = MemoryStore()

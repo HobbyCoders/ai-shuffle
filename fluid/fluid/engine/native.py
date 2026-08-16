@@ -197,6 +197,7 @@ class NativeLoop:
         trim: TrimConfig | None = None,
         mcp_servers: dict[str, dict[str, Any]] | None = None,
         agents: Sequence[dict[str, Any]] | None = None,
+        claude_settings: bool = True,
     ) -> None:
         self.provider = provider
         self.store = store
@@ -252,6 +253,39 @@ class NativeLoop:
         # constructor is sync; connecting needs the event loop).
         self._mcp_servers = dict(mcp_servers or {})
         self._mcp_connected = False
+        # The user's Claude Code settings.json stack, read once per session from
+        # ctx.cwd (ruling CE4). On by default — a host app opts *out*, it never
+        # has to opt in (CE1).
+        self.claude_settings: dict[str, Any] = {}
+        if claude_settings:
+            self._apply_claude_settings()
+
+    def _apply_claude_settings(self) -> None:
+        """Fold ~/.claude + project settings.json into this session.
+
+        ``permissions.{allow,ask,deny}`` become rules and ``env`` becomes the
+        child-process overlay carried on ``ctx.extra["settings_env"]`` (the Bash
+        builtin and the MCP stdio spawn read it; ``os.environ`` is untouched).
+
+        Settings rules are placed *before* host-supplied rules: rule evaluation
+        is last-match-wins, so this leaves the host's explicit configuration
+        with the final say.
+        """
+        from fluid.context.claude_settings import (
+            load_claude_settings,
+            permission_rules,
+            settings_env,
+        )
+
+        self.claude_settings = load_claude_settings(self.ctx.cwd or ".")
+        if not self.claude_settings:
+            return
+        env = settings_env(self.claude_settings)
+        if env:
+            self.ctx.extra.setdefault("settings_env", env)
+        rules = permission_rules(self.claude_settings)
+        if rules and self.permissions is not None:
+            self.permissions.rules = [*rules, *self.permissions.rules]
 
     async def _ensure_session(self) -> SessionMeta:
         if self._session is None:
@@ -493,15 +527,32 @@ class NativeLoop:
         if self._mcp_connected or not self._mcp_servers or self.registry is None:
             return
         self._mcp_connected = True
+        settings_env = self.ctx.extra.get("settings_env")
         for name, cfg in self._mcp_servers.items():
             try:
-                await self.registry.connect_mcp(name, dict(cfg))
+                await self.registry.connect_mcp(name, self._mcp_config(cfg, settings_env))
             except Exception as exc:
                 await self._emit(ErrorEvent(
                     session_id=sid, turn_id=turn_id,
                     message=f"mcp server {name!r} failed to connect: {exc!r}",
                     retriable=False,
                 ))
+
+    @staticmethod
+    def _mcp_config(cfg: dict[str, Any], settings_env: dict[str, str] | None) -> dict[str, Any]:
+        """A server's connect config with settings.json ``env`` layered on.
+
+        The overlay is materialized against the *inherited* environment, because
+        a stdio spawn given a partial env dict gets exactly that dict — a server
+        would lose PATH. Servers that already carry an explicit ``env`` keep it
+        as the base; settings win the overlapping keys.
+        """
+        out = dict(cfg)
+        if settings_env and out.get("transport", "stdio") == "stdio":
+            from fluid.context.claude_settings import layered_env
+
+            out["env"] = layered_env(settings_env, base=out.get("env"))
+        return out
 
     def _deferred_catalog_reminder(self) -> str | None:
         """Announce known-but-unloaded tools, once per tool (name + one-liner).

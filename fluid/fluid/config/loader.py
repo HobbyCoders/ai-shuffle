@@ -47,6 +47,11 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
         "commands": True,
         "nested": True,
     },
+    "claude_ecosystem": {
+        "settings": True,
+        "plugins": True,
+        "agents": True,
+    },
     "providers": {
         "anthropic": {
             "kind": "anthropic",
@@ -140,6 +145,17 @@ def env_overrides(env: dict[str, str] | None = None) -> dict[str, Any]:
             pass
     if "FLUID_APPROVAL_POLICY" in env:
         out["permission"] = {"approval_policy": env["FLUID_APPROVAL_POLICY"]}
+    ecosystem = {
+        key: _coerce_bool(env[var])
+        for key, var in (
+            ("settings", "FLUID_CLAUDE_SETTINGS"),
+            ("plugins", "FLUID_CLAUDE_PLUGINS"),
+            ("agents", "FLUID_CLAUDE_AGENTS"),
+        )
+        if var in env
+    }
+    if ecosystem:
+        out["claude_ecosystem"] = ecosystem
     return out
 
 
@@ -324,4 +340,5 @@ def build_engine(
         plan_mode=plan_mode,
         codemode=codemode,
         mcp_servers=config.mcp,
+        claude_settings=config.claude_ecosystem.settings,
     )
