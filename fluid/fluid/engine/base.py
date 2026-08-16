@@ -42,7 +42,20 @@ class ExecutionEngine(Protocol):
              "rawMaxTokens": int | None,
              "percentage": float | None,   # None when maxTokens is unknown
              "model": str,
-             "isAutoCompactEnabled": bool}
+             "isAutoCompactEnabled": bool,
+             # Per-item detail behind the category rows (each row equals the
+             # sum of its list; empty source → [], never a missing key):
+             "memoryFiles": [{"path": str, "type": str, "tokens": int}, ...],
+             "systemTools": [{"name": str, "tokens": int}, ...],
+             "mcpTools": [{"name": str, "serverName": str, "tokens": int,
+                           "isLoaded": bool}, ...],   # loaded AND deferred
+             "deferredBuiltinTools": [{"name": str, "tokens": int}, ...],
+             "agents": [{"agentType": str, "source": str, "tokens": int}, ...]}
+
+        Category names match Claude Code's ``/context`` labels: "System
+        prompt", "Memory files", "Skills", "System tools", "MCP tools",
+        "Custom agents", "Messages", "Free space", plus the excluded-from-total
+        "System tools (deferred)" / "MCP tools (deferred)" rows.
 
         A snapshot: no model request is issued and no history is mutated, so it
         is safe to call between turns.

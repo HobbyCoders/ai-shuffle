@@ -10,8 +10,8 @@ Everything is estimated with the shared chars/4 heuristic
 trimmer triggers on. No tokenizer, no counting round-trip, so this is cheap
 enough to call between every turn.
 
-Categories
-----------
+Categories — the same labels Claude Code's ``/context`` uses
+------------------------------------------------------------
 ``System prompt``   base prompt + environment block + app "extra" blocks.
 ``Memory files``    the instruction stack (CLAUDE.md / AGENTS.md), summed.
                     The category row carries only the total, exactly like the
@@ -21,18 +21,47 @@ Categories
                     rather than part of "System prompt": it is a distinct
                     compiled section, and it grows with the skill catalog
                     rather than with the agent's configuration.
-``Tools``           serialized JSON schemas of the tools actually sent.
-``Deferred tools``  schemas of known-but-unloaded tools (ToolSearch's catalog).
-                    Marked ``isDeferred`` and — matching Claude Code — EXCLUDED
-                    from ``totalTokens``: those schemas are not in the prompt,
-                    they are what could still be loaded into it. Counting them
-                    would understate free space.
+``System tools``    serialized JSON schemas of the loaded bare-named builtins
+                    (``Read``, ``Edit``, …). Per-tool detail: ``systemTools``.
+``MCP tools``       loaded ``mcp__<server>__<tool>`` schemas (MCP + in-proc
+                    servers — the naming convention IS the classifier, same as
+                    Claude Code's). Per-tool detail: ``mcpTools``.
+``Custom agents``   host-declared agent definitions that ride in the context
+                    (fluid owns no agent registry — rulings A6/A8: dispatch is
+                    host-app territory — so the host passes descriptors for
+                    whatever agent catalog text it injected). Per-agent detail:
+                    ``agents``.
 ``Messages``        the TRIMMED history view (what a request would actually
                     carry), not the full stored tree.
+``MCP tools (deferred)`` / ``System tools (deferred)``
+                    schemas of known-but-unloaded tools (ToolSearch's catalog),
+                    split by the same naming convention. Marked ``isDeferred``
+                    and — matching Claude Code — EXCLUDED from ``totalTokens``:
+                    those schemas are not in the prompt, they are what could
+                    still be loaded into it. Counting them would understate
+                    free space.
 ``Free space``      ``maxTokens - totalTokens``, floored at 0. Omitted entirely
                     when the context window is unknown.
 
 Empty categories are omitted (a session with no skills shows no "Skills" row).
+
+Per-item detail keys (SDK ``ContextUsageResponse`` parity) — always present so
+a host widget needs no key checks; an empty source is ``[]``, never missing:
+
+``memoryFiles``           ``[{path, type, tokens}]``
+``systemTools``           ``[{name, tokens}]`` — loaded builtins
+``mcpTools``              ``[{name, serverName, tokens, isLoaded}]`` — loaded
+                          AND deferred MCP tools (deferred → ``isLoaded`` False,
+                          same list the CLI ships)
+``deferredBuiltinTools``  ``[{name, tokens}]`` — deferred bare-named tools
+``agents``                ``[{agentType, source, tokens}]``
+
+Each category row equals the sum of its own detail list, so a UI can expand a
+row without the numbers disagreeing.
+
+``gridRows`` (the CLI's pre-rendered visual grid) is NOT fabricated here — it
+is a display artifact of the CLI's own renderer; the delegated leg proxies it
+when the CLI sends it.
 
 There is no "Autocompact buffer" category: fluid has cache-safe trimming, not
 autocompaction, and ``isAutoCompactEnabled`` is reported False rather than
@@ -41,20 +70,23 @@ fabricating a buffer the engine would never apply.
 Palette — fixed hex per category, stable across calls so a UI can colour rows
 without a legend lookup, and distinct enough to stay readable side by side:
 
-    System prompt   #6C5CE7  violet
-    Memory files    #00B894  green
-    Skills          #0984E3  blue
-    Tools           #FDCB6E  amber
-    Deferred tools  #B2BEC3  grey   (deferred → deliberately muted)
-    Messages        #E17055  orange
-    Free space      #2D3436  near-black
+    System prompt            #6C5CE7  violet
+    Memory files             #00B894  green
+    Skills                   #0984E3  blue
+    System tools             #FDCB6E  amber
+    MCP tools                #E84393  pink
+    Custom agents            #00CEC9  teal
+    System tools (deferred)  #B2BEC3  grey   (deferred → deliberately muted)
+    MCP tools (deferred)     #636E72  slate  (muted, distinct from the above)
+    Messages                 #E17055  orange
+    Free space               #2D3436  near-black
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 from fluid.context.compiler import PromptSection
 from fluid.context.trim import estimate_tokens_of_messages, estimate_tokens_of_text
@@ -63,8 +95,11 @@ from fluid.messages import Message
 SYSTEM_PROMPT = "System prompt"
 MEMORY_FILES = "Memory files"
 SKILLS = "Skills"
-TOOLS = "Tools"
-DEFERRED_TOOLS = "Deferred tools"
+SYSTEM_TOOLS = "System tools"
+MCP_TOOLS = "MCP tools"
+CUSTOM_AGENTS = "Custom agents"
+SYSTEM_TOOLS_DEFERRED = "System tools (deferred)"
+MCP_TOOLS_DEFERRED = "MCP tools (deferred)"
 MESSAGES = "Messages"
 FREE_SPACE = "Free space"
 
@@ -72,8 +107,11 @@ CATEGORY_COLORS: dict[str, str] = {
     SYSTEM_PROMPT: "#6C5CE7",
     MEMORY_FILES: "#00B894",
     SKILLS: "#0984E3",
-    TOOLS: "#FDCB6E",
-    DEFERRED_TOOLS: "#B2BEC3",
+    SYSTEM_TOOLS: "#FDCB6E",
+    MCP_TOOLS: "#E84393",
+    CUSTOM_AGENTS: "#00CEC9",
+    SYSTEM_TOOLS_DEFERRED: "#B2BEC3",
+    MCP_TOOLS_DEFERRED: "#636E72",
     MESSAGES: "#E17055",
     FREE_SPACE: "#2D3436",
 }
@@ -88,6 +126,11 @@ _SYSTEM_KINDS = ("base", "environment", "extra")
 # a file in the tree, so it labels "Project" too.
 _MEMORY_TYPES = {"global": "User", "project": "Project", "nested": "Project"}
 _DEFAULT_MEMORY_TYPE = "Project"
+
+# The Claude Code naming convention the registry keeps for ecosystem compat:
+# MCP and in-process-server tools are ``mcp__<server>__<tool>``; builtins keep
+# bare names. The prefix therefore IS the System-vs-MCP classifier.
+_MCP_PREFIX = "mcp__"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -106,12 +149,23 @@ class MemoryFileUsage:
         return {"path": self.path, "type": self.type, "tokens": self.tokens}
 
 
-def tools_schema_tokens(tools_api: Iterable[dict[str, Any]] | None) -> int:
-    """Estimated cost of a tool list as the provider receives it (its JSON)."""
-    tools = list(tools_api or ())
-    if not tools:
-        return 0
-    return estimate_tokens_of_text(json.dumps(tools, default=str))
+def tool_schema_tokens(tool_api: dict[str, Any]) -> int:
+    """Estimated cost of ONE tool as the provider receives it (its JSON).
+
+    Priced per tool — not the joined list — so category totals equal the sum
+    of their per-tool detail rows exactly.
+    """
+    return estimate_tokens_of_text(json.dumps(tool_api, default=str))
+
+
+def _is_mcp(name: str) -> bool:
+    return name.startswith(_MCP_PREFIX)
+
+
+def _server_name(tool_name: str) -> str:
+    # mcp__<server>__<tool> → <server>; malformed names degrade to "".
+    parts = tool_name.split("__", 2)
+    return parts[1] if len(parts) >= 3 else ""
 
 
 def memory_file_usage(sections: Sequence[PromptSection]) -> list[MemoryFileUsage]:
@@ -127,6 +181,27 @@ def memory_file_usage(sections: Sequence[PromptSection]) -> list[MemoryFileUsage
     ]
 
 
+def agent_usage(agents: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalize host-declared agent descriptors into the SDK ``agents`` shape.
+
+    A descriptor names its agent (``agentType`` or ``name``), where it came
+    from (``source``, defaulting to "app" — fluid discovered nothing, the host
+    declared it), and its cost: an explicit ``tokens`` wins; otherwise the
+    injected ``text``/``description`` is estimated.
+    """
+    out: list[dict[str, Any]] = []
+    for a in agents:
+        tokens = a.get("tokens")
+        if tokens is None:
+            tokens = estimate_tokens_of_text(a.get("text") or a.get("description"))
+        out.append({
+            "agentType": a.get("agentType") or a.get("name") or "",
+            "source": a.get("source") or "app",
+            "tokens": int(tokens),
+        })
+    return out
+
+
 def build_context_usage(
     *,
     sections: Sequence[PromptSection] = (),
@@ -134,6 +209,7 @@ def build_context_usage(
     history: Sequence[Message] = (),
     tools_api: Sequence[dict[str, Any]] = (),
     deferred_tools_api: Sequence[dict[str, Any]] = (),
+    agents: Sequence[dict[str, Any]] = (),
     model: str,
     context_window: int | None = None,
 ) -> dict[str, Any]:
@@ -143,6 +219,10 @@ def build_context_usage(
     the joined prompt string (an app that passed ``system=`` straight through,
     never compiling), pass it as ``system_text`` instead: the whole thing then
     prices as "System prompt", with no memory/skills split to be had.
+
+    ``agents`` is host-declared (see :func:`agent_usage`): pass a descriptor
+    per agent definition the host injected into the context — and only then,
+    or the row would double-count text already priced elsewhere.
     """
     system_tokens = sum(
         estimate_tokens_of_text(s.text) for s in sections if s.kind in _SYSTEM_KINDS
@@ -154,15 +234,50 @@ def build_context_usage(
     skills_tokens = sum(
         estimate_tokens_of_text(s.text) for s in sections if s.kind == "skills"
     )
-    tool_tokens = tools_schema_tokens(tools_api)
-    deferred_tokens = tools_schema_tokens(deferred_tools_api)
+
+    # Loaded tools, split by the naming convention; per-tool detail kept.
+    system_tools = [
+        {"name": t.get("name", ""), "tokens": tool_schema_tokens(t)}
+        for t in tools_api
+        if not _is_mcp(t.get("name", ""))
+    ]
+    mcp_tools = [
+        {
+            "name": t.get("name", ""),
+            "serverName": _server_name(t.get("name", "")),
+            "tokens": tool_schema_tokens(t),
+            "isLoaded": True,
+        }
+        for t in tools_api
+        if _is_mcp(t.get("name", ""))
+    ]
+    deferred_builtin = [
+        {"name": t.get("name", ""), "tokens": tool_schema_tokens(t)}
+        for t in deferred_tools_api
+        if not _is_mcp(t.get("name", ""))
+    ]
+    deferred_mcp = [
+        {
+            "name": t.get("name", ""),
+            "serverName": _server_name(t.get("name", "")),
+            "tokens": tool_schema_tokens(t),
+            "isLoaded": False,
+        }
+        for t in deferred_tools_api
+        if _is_mcp(t.get("name", ""))
+    ]
+
+    agent_entries = agent_usage(agents)
+    agent_tokens = sum(a["tokens"] for a in agent_entries)
     message_tokens = estimate_tokens_of_messages(list(history))
 
     counted = [
         (SYSTEM_PROMPT, system_tokens),
         (MEMORY_FILES, memory_tokens),
         (SKILLS, skills_tokens),
-        (TOOLS, tool_tokens),
+        (SYSTEM_TOOLS, sum(t["tokens"] for t in system_tools)),
+        (MCP_TOOLS, sum(t["tokens"] for t in mcp_tools)),
+        (CUSTOM_AGENTS, agent_tokens),
         (MESSAGES, message_tokens),
     ]
     total = sum(tokens for _, tokens in counted)
@@ -172,12 +287,17 @@ def build_context_usage(
         for name, tokens in counted
         if tokens > 0
     ]
-    if deferred_tokens > 0:
-        # Outside the accounting on purpose — see the module docstring.
-        categories.append({
-            "name": DEFERRED_TOOLS, "tokens": deferred_tokens,
-            "color": CATEGORY_COLORS[DEFERRED_TOOLS], "isDeferred": True,
-        })
+    for name, entries in (
+        (MCP_TOOLS_DEFERRED, deferred_mcp),
+        (SYSTEM_TOOLS_DEFERRED, deferred_builtin),
+    ):
+        tokens = sum(t["tokens"] for t in entries)
+        if tokens > 0:
+            # Outside the accounting on purpose — see the module docstring.
+            categories.append({
+                "name": name, "tokens": tokens,
+                "color": CATEGORY_COLORS[name], "isDeferred": True,
+            })
     if context_window:
         categories.append({
             "name": FREE_SPACE, "tokens": max(0, context_window - total),
@@ -198,8 +318,14 @@ def build_context_usage(
         # fluid trims tool results; it never autocompacts. Reported False rather
         # than inventing an "Autocompact buffer" the engine would never apply.
         "isAutoCompactEnabled": False,
-        # Per-file detail behind the "Memory files" category. Always present —
-        # the CLI's schema makes it a required list, so an empty stack is [],
-        # never a missing key, and a host widget needs no key check.
+        # Per-item detail behind the category rows. Always present — the CLI's
+        # schema makes memoryFiles/mcpTools/agents required lists, so an empty
+        # source is [], never a missing key, and a host widget needs no key
+        # check. mcpTools carries loaded AND deferred entries (isLoaded flags
+        # which), exactly like the CLI's.
         "memoryFiles": [m.to_dict() for m in memory],
+        "systemTools": system_tools,
+        "mcpTools": mcp_tools + deferred_mcp,
+        "deferredBuiltinTools": deferred_builtin,
+        "agents": agent_entries,
     }

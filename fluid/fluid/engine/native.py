@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Sequence
 
 from fluid.context.cache_plan import plan_cache
 from fluid.context.compiler import CompiledPrompt
@@ -196,6 +196,7 @@ class NativeLoop:
         max_model_calls_per_turn: int = 50,
         trim: TrimConfig | None = None,
         mcp_servers: dict[str, dict[str, Any]] | None = None,
+        agents: Sequence[dict[str, Any]] | None = None,
     ) -> None:
         self.provider = provider
         self.store = store
@@ -210,6 +211,11 @@ class NativeLoop:
         # Model context window, when the host app knows it. None → the usage
         # breakdown reports maxTokens/percentage as None rather than guessing.
         self.context_window = context_window
+        # Host-declared agent-definition descriptors (fluid owns no agent
+        # registry — dispatch is host territory, ruling A6/A8). Only what the
+        # host actually injected into the context belongs here; it becomes the
+        # "Custom agents" row of get_context_usage(). See usage.agent_usage.
+        self.agents = list(agents or ())
         self.max_tokens = max_tokens
         # Reasoning-depth knob, provider-mapped by each serializer (Anthropic
         # output_config.effort; OpenAI-shaped reasoning.effort, clamped).
@@ -430,6 +436,7 @@ class NativeLoop:
             history=history,
             tools_api=self._tools_api(),
             deferred_tools_api=deferred,
+            agents=self.agents,
             model=self.model,
             context_window=self.context_window,
         )

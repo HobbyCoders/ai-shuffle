@@ -11,7 +11,6 @@ history basis, known/unknown context window), snapshot purity, and the caps bit.
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 from pathlib import Path
 
@@ -25,14 +24,18 @@ from fluid.context.compiler import (
 )
 from fluid.context.trim import TrimConfig, estimate_tokens_of_text
 from fluid.context.usage import (
-    DEFERRED_TOOLS,
+    CUSTOM_AGENTS,
     FREE_SPACE,
+    MCP_TOOLS,
+    MCP_TOOLS_DEFERRED,
     MEMORY_FILES,
     MESSAGES,
     SKILLS,
     SYSTEM_PROMPT,
-    TOOLS,
+    SYSTEM_TOOLS,
+    SYSTEM_TOOLS_DEFERRED,
     build_context_usage,
+    tool_schema_tokens,
 )
 from fluid.engine.delegated import DelegatedLoop
 from fluid.engine.delegated_proto import StreamJsonMapper, parse_control_response
@@ -120,7 +123,7 @@ def test_categories_sum_to_total_and_carry_colors(tmp_path) -> None:
         model="claude-sonnet-5",
     )
     cats = _by_name(usage)
-    assert set(cats) == {SYSTEM_PROMPT, MEMORY_FILES, SKILLS, TOOLS, MESSAGES}
+    assert set(cats) == {SYSTEM_PROMPT, MEMORY_FILES, SKILLS, SYSTEM_TOOLS, MESSAGES}
     assert sum(c["tokens"] for c in cats.values()) == usage["totalTokens"]
     assert all(c["color"].startswith("#") and len(c["color"]) == 7 for c in cats.values())
     assert cats[MESSAGES]["tokens"] == 100  # 400 chars / 4
@@ -162,18 +165,77 @@ def test_free_space_floors_at_zero() -> None:
     assert usage["percentage"] == 1000.0  # over budget is reported, not clamped
 
 
-def test_deferred_tools_are_flagged_and_excluded_from_the_total() -> None:
-    deferred = [{"name": "mcp__x__big", "description": "d" * 400, "input_schema": {}}]
+def test_deferred_tools_are_flagged_split_and_excluded_from_the_total() -> None:
+    deferred = [
+        {"name": "mcp__x__big", "description": "d" * 400, "input_schema": {}},
+        {"name": "Hidden", "description": "h" * 400, "input_schema": {}},
+    ]
     with_deferred = build_context_usage(
         deferred_tools_api=deferred, model="m", context_window=10_000,
     )
     cats = _by_name(with_deferred)
-    assert cats[DEFERRED_TOOLS]["isDeferred"] is True
-    assert cats[DEFERRED_TOOLS]["tokens"] > 0
+    # Split by the naming convention, exactly like Claude Code's two rows.
+    assert cats[MCP_TOOLS_DEFERRED]["isDeferred"] is True
+    assert cats[SYSTEM_TOOLS_DEFERRED]["isDeferred"] is True
+    assert cats[MCP_TOOLS_DEFERRED]["tokens"] > 0
+    assert cats[SYSTEM_TOOLS_DEFERRED]["tokens"] > 0
     # Not in the prompt → not in the total, and free space is untouched by it.
     assert with_deferred["totalTokens"] == 0
     assert cats[FREE_SPACE]["tokens"] == 10_000
     assert "isDeferred" not in cats[FREE_SPACE]
+    # Deferred MCP tools ride in mcpTools with isLoaded False; deferred
+    # builtins get their own detail list.
+    assert with_deferred["mcpTools"] == [
+        {"name": "mcp__x__big", "serverName": "x",
+         "tokens": cats[MCP_TOOLS_DEFERRED]["tokens"], "isLoaded": False},
+    ]
+    assert with_deferred["deferredBuiltinTools"] == [
+        {"name": "Hidden", "tokens": cats[SYSTEM_TOOLS_DEFERRED]["tokens"]},
+    ]
+
+
+def test_loaded_tools_split_into_system_and_mcp_with_per_tool_detail() -> None:
+    read = {"name": "Read", "description": "r", "input_schema": {}}
+    slack = {"name": "mcp__slack__send", "description": "s" * 100, "input_schema": {}}
+    usage = build_context_usage(tools_api=[read, slack], model="m")
+    cats = _by_name(usage)
+    assert cats[SYSTEM_TOOLS]["tokens"] == tool_schema_tokens(read)
+    assert cats[MCP_TOOLS]["tokens"] == tool_schema_tokens(slack)
+    # Category rows equal the sum of their own detail lists.
+    assert usage["systemTools"] == [
+        {"name": "Read", "tokens": tool_schema_tokens(read)},
+    ]
+    assert usage["mcpTools"] == [
+        {"name": "mcp__slack__send", "serverName": "slack",
+         "tokens": tool_schema_tokens(slack), "isLoaded": True},
+    ]
+
+
+def test_agents_are_priced_as_custom_agents() -> None:
+    """Host-declared agent definitions become the "Custom agents" row, counted
+    in the total (they represent text the host injected into the context)."""
+    usage = build_context_usage(
+        agents=[
+            {"agentType": "reviewer", "source": "project", "tokens": 60},
+            {"name": "writer", "text": "w" * 80},  # estimated: 20 tokens
+        ],
+        model="m",
+    )
+    cats = _by_name(usage)
+    assert cats[CUSTOM_AGENTS]["tokens"] == 80
+    assert usage["totalTokens"] == 80
+    assert usage["agents"] == [
+        {"agentType": "reviewer", "source": "project", "tokens": 60},
+        {"agentType": "writer", "source": "app", "tokens": 20},
+    ]
+
+
+def test_detail_lists_are_always_present_even_when_empty() -> None:
+    """SDK-required keys: an empty source is [], never a missing key."""
+    usage = build_context_usage(model="m")
+    for key in ("memoryFiles", "systemTools", "mcpTools",
+                "deferredBuiltinTools", "agents"):
+        assert usage[key] == []
 
 
 def test_memory_files_carry_the_sdk_per_file_shape(tmp_path) -> None:
@@ -296,11 +358,15 @@ async def test_native_breakdown_matches_the_compiled_prompt(tmp_path) -> None:
         set(e) == {"path", "type", "tokens"} and e["type"] == "Project"
         for e in usage["memoryFiles"]
     )
-    assert cats[TOOLS]["tokens"] == estimate_tokens_of_text(
-        json.dumps([{"name": "Read", "description": "Read a file",
-                     "input_schema": {"type": "object"}}], default=str)
+    assert cats[SYSTEM_TOOLS]["tokens"] == tool_schema_tokens(
+        {"name": "Read", "description": "Read a file",
+         "input_schema": {"type": "object"}}
     )
-    assert cats[DEFERRED_TOOLS]["isDeferred"] is True
+    # "Hidden" is a deferred BUILTIN — it lands in the system-tools deferred
+    # row (and its detail list), not the MCP one.
+    assert cats[SYSTEM_TOOLS_DEFERRED]["isDeferred"] is True
+    assert [t["name"] for t in usage["deferredBuiltinTools"]] == ["Hidden"]
+    assert MCP_TOOLS_DEFERRED not in cats
     assert usage["maxTokens"] == 200_000 and usage["percentage"] is not None
     assert usage["model"] == "claude-sonnet-5"
 
