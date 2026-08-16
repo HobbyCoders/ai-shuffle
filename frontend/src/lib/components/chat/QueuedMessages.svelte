@@ -10,13 +10,19 @@
 	 * sync — the same store the background-tasks tray uses) so it persists across
 	 * turns, reloads, and devices.
 	 */
+	import { get } from 'svelte/store';
 	import { activeSession } from '$lib/stores/active-session';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
+	import { queuedMessageEdit } from '$lib/stores/queued-message-edit';
 
 	// Persisted via the chat-preferences store (instant localStorage + debounced
 	// server sync), so the minimized state survives reloads and follows the user
 	// across devices — identical to the background-tasks tray.
 	const collapsed = $derived(chatPreferences.current.queuedMessagesCollapsed);
+
+	// Which chip (if any) is expanded to show its full text + actions. Only one
+	// at a time so the tray never balloons.
+	let expandedId = $state<string | null>(null);
 
 	function toggleCollapsed() {
 		chatPreferences.setQueuedMessagesCollapsed(!collapsed);
@@ -27,9 +33,16 @@
 	}
 
 	function editMessage(msg: { id: string; content: string }) {
-		activeSession.removeQueuedMessage(msg.id);
-		// Dispatch a custom event so ChatInput can pick up the content
-		window.dispatchEvent(new CustomEvent('queued-message-edit', { detail: { content: msg.content } }));
+		// Non-destructive: the queued row STAYS in the queue. ChatInput owns the
+		// lifecycle — it marks the edit in the shared store and removes the queued
+		// copy only once the edited message is actually sent.
+		window.dispatchEvent(
+			new CustomEvent('queued-message-edit', { detail: { id: msg.id, content: msg.content } })
+		);
+		// dispatchEvent runs ChatInput's listener synchronously — including any
+		// window.confirm it shows — so by the time we get here the store already
+		// reflects whether the user accepted or cancelled the edit.
+		if (get(queuedMessageEdit)?.id === msg.id) expandedId = null;
 	}
 
 	function clearAll() {
@@ -79,22 +92,43 @@
 			{#if !collapsed}
 				<div class="queued-chips">
 					{#each $activeSession.queuedMessages as msg (msg.id)}
-						<button class="queued-chip" onclick={() => editMessage(msg)} title="Click to edit message">
-							<span class="chip-text">{truncate(msg.content)}</span>
-							<span
-								class="chip-remove"
-								role="button"
-								tabindex="0"
-								aria-label="Remove from queue"
-								title="Remove from queue"
-								onclick={(e) => { e.stopPropagation(); removeMessage(msg.id); }}
-								onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); e.preventDefault(); removeMessage(msg.id); } }}
-							>
-								<svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12" />
-								</svg>
-							</span>
-						</button>
+						<div class="queued-chip" class:is-expanded={expandedId === msg.id}>
+							<div class="chip-head">
+								<button
+									type="button"
+									class="chip-main"
+									aria-expanded={expandedId === msg.id}
+									title="Show message"
+									onclick={() => (expandedId = expandedId === msg.id ? null : msg.id)}
+								>
+									<span class="chip-text">{truncate(msg.content)}</span>
+									{#if $queuedMessageEdit?.id === msg.id}
+										<span
+											class="chip-editing-badge"
+											title="Loaded in the composer — will be replaced when you send"
+										>editing</span>
+									{/if}
+								</button>
+								<button
+									type="button"
+									class="chip-remove"
+									aria-label="Remove from queue"
+									title="Remove from queue"
+									onclick={() => removeMessage(msg.id)}
+								>
+									<svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12" />
+									</svg>
+								</button>
+							</div>
+							{#if expandedId === msg.id}
+								<div class="chip-full">{msg.content}</div>
+								<div class="chip-actions">
+									<button type="button" class="chip-action" onclick={() => editMessage(msg)}>Edit</button>
+									<button type="button" class="chip-action is-destructive" onclick={() => removeMessage(msg.id)}>Remove</button>
+								</div>
+							{/if}
+						</div>
 					{/each}
 				</div>
 			{/if}
@@ -216,8 +250,8 @@
 
 	.queued-chip {
 		display: flex;
-		align-items: center;
-		gap: 0.375rem;
+		flex-direction: column;
+		gap: 0.25rem;
 		padding: 0.25rem 0.5rem;
 		background: var(--muted);
 		border: 1px solid var(--border-subtle);
@@ -226,13 +260,47 @@
 		font-family: inherit;
 		color: var(--foreground);
 		max-width: 100%;
-		cursor: pointer;
 		transition: border-color 0.15s, background 0.15s;
 	}
 
 	.queued-chip:hover {
 		border-color: var(--border);
 		background: color-mix(in srgb, var(--muted) 80%, var(--foreground) 5%);
+	}
+
+	/* Expanded chips take the full tray width so the message body is readable. */
+	.queued-chip.is-expanded {
+		flex: 1 1 100%;
+	}
+
+	.chip-head {
+		display: flex;
+		align-items: center;
+		gap: 0.375rem;
+		min-width: 0;
+	}
+
+	.chip-main {
+		display: flex;
+		align-items: center;
+		gap: 0.375rem;
+		flex: 1 1 auto;
+		min-width: 0;
+		padding: 0;
+		border: none;
+		background: transparent;
+		font: inherit;
+		color: inherit;
+		text-align: left;
+		cursor: pointer;
+	}
+
+	.chip-main:focus-visible,
+	.chip-remove:focus-visible,
+	.chip-action:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+		border-radius: 0.25rem;
 	}
 
 	.chip-text {
@@ -242,6 +310,17 @@
 		max-width: 24rem;
 	}
 
+	.chip-editing-badge {
+		flex-shrink: 0;
+		font-size: 0.625rem;
+		line-height: 1;
+		padding: 0.125rem 0.25rem;
+		border-radius: 0.25rem;
+		border: 1px solid var(--border-subtle);
+		color: var(--muted-foreground);
+		background: color-mix(in srgb, var(--foreground) 6%, transparent);
+	}
+
 	.chip-remove {
 		flex-shrink: 0;
 		display: flex;
@@ -249,13 +328,57 @@
 		justify-content: center;
 		width: 1rem;
 		height: 1rem;
+		padding: 0;
+		border: none;
+		background: transparent;
 		border-radius: 50%;
 		color: var(--muted-foreground);
+		cursor: pointer;
 		transition: color 0.15s, background 0.15s;
 	}
 
 	.queued-chip:hover .chip-remove {
 		color: var(--destructive);
 		background: color-mix(in srgb, var(--destructive) 15%, transparent);
+	}
+
+	.chip-full {
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+		max-height: 10rem;
+		overflow-y: auto;
+		text-align: left;
+		font-size: 0.6875rem;
+		line-height: 1.4;
+		color: var(--muted-foreground);
+		border-top: 1px solid var(--border-subtle);
+		padding-top: 0.25rem;
+	}
+
+	.chip-actions {
+		display: flex;
+		gap: 0.25rem;
+	}
+
+	.chip-action {
+		font-size: 0.625rem;
+		font-family: inherit;
+		color: var(--muted-foreground);
+		background: none;
+		border: none;
+		cursor: pointer;
+		padding: 0.125rem 0.25rem;
+		border-radius: 0.25rem;
+		transition: color 0.15s, background 0.15s;
+	}
+
+	.chip-action:hover {
+		color: var(--foreground);
+		background: color-mix(in srgb, var(--foreground) 8%, transparent);
+	}
+
+	.chip-action.is-destructive:hover {
+		color: var(--destructive);
+		background: color-mix(in srgb, var(--destructive) 10%, transparent);
 	}
 </style>

@@ -11,6 +11,7 @@
 	import { tick, onDestroy, onMount } from 'svelte';
 	import { get } from 'svelte/store';
 	import { activeSession } from '$lib/stores/active-session';
+	import { queuedMessageEdit } from '$lib/stores/queued-message-edit';
 	import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 	import { profiles } from '$lib/stores/app-data.svelte';
 	import { anyCredential } from '$lib/stores/auth.svelte';
@@ -204,15 +205,45 @@
 	// Get selected profile name for display in placeholder
 	const selectedProfileName = $derived($profiles.find(p => p.id === $activeSession.profile)?.name || 'Profile');
 
-	// Handle queued message edit events from QueuedMessages component
+	// Handle queued message edit events from QueuedMessages component.
+	// The queued row is NOT removed up front — we only mark which queued message
+	// is loaded here, and drop the server-side copy once the edit is actually sent.
 	function handleQueuedMessageEdit(e: Event) {
-		const content = (e as CustomEvent<{ content: string }>).detail.content;
+		const { id, content } = (e as CustomEvent<{ id: string; content: string }>).detail;
+		// Never silently clobber a draft the user is in the middle of writing.
+		const draft = plainTextValue.trim();
+		if (draft && draft !== content.trim()) {
+			const ok = window.confirm(
+				'Replace your current draft with this queued message? The queued copy stays in the queue until you send.'
+			);
+			if (!ok) return;
+		}
 		inputValue = content;
 		plainTextValue = content;
 		editorRef?.setContent(content);
 		// Focus the editor after setting content
 		tick().then(() => editorRef?.focus());
+		queuedMessageEdit.set({ id });
 	}
+
+	// Emptying the composer abandons the edit — drop the marker so the queued
+	// chip stops showing the "editing" badge and a later send can't remove it.
+	$effect(() => {
+		if ($queuedMessageEdit && plainTextValue.trim() === '') {
+			queuedMessageEdit.set(null);
+		}
+	});
+
+	// Switching sessions abandons the edit too. Tracked with a plain variable so
+	// unrelated reruns of this effect can't clear a live marker.
+	let queuedEditSessionId = $activeSession.sessionId;
+	$effect(() => {
+		const sessionId = $activeSession.sessionId;
+		if (sessionId !== queuedEditSessionId) {
+			queuedEditSessionId = sessionId;
+			queuedMessageEdit.set(null);
+		}
+	});
 
 	onMount(() => {
 		window.addEventListener('queued-message-edit', handleQueuedMessageEdit);
@@ -301,6 +332,12 @@
 		// This is critical for the first message when the component gets destroyed/recreated
 		messageSent = true;
 
+		// Capture (and clear) the queued-message edit marker BEFORE the composer is
+		// cleared below — clearing the editor empties plainTextValue, which trips the
+		// abandon-edit effect and would wipe the marker before we could use it.
+		const editingId = get(queuedMessageEdit)?.id ?? null;
+		queuedMessageEdit.set(null);
+
 		// Collect pending upload paths before clearing state — needed for auto-worktree
 		// to migrate files from main project to the new worktree directory.
 		// Extract from both uploadedFiles (legacy) and inline file chips in the editor.
@@ -336,6 +373,18 @@
 			editorRef?.setContent(finalPrompt);
 			saveDraftImmediately(finalPrompt);
 			messageSent = false;
+			// The edit never landed — keep the marker so the chip still reads "editing".
+			if (editingId) queuedMessageEdit.set({ id: editingId });
+		};
+
+		// The edited copy has landed, so the original queued row is now a duplicate.
+		// Only drop it if it's STILL queued — it may have been dispatched (or removed)
+		// while the user was editing, in which case there's nothing to clean up.
+		const dropEditedOriginal = () => {
+			if (!editingId) return;
+			if (get(activeSession).queuedMessages?.some(m => m.id === editingId)) {
+				activeSession.removeQueuedMessage(editingId);
+			}
 		};
 
 		try {
@@ -343,6 +392,7 @@
 				// Queue for when current stream completes naturally
 				const queued = await activeSession.queueMessage(finalPrompt);
 				if (queued === false) restoreOnFailure();
+				else dropEditedOriginal();
 			} else {
 				// Send immediately (interrupt → confirm → query if streaming, normal query if not)
 				const sent = await activeSession.sendMessage(
@@ -350,6 +400,7 @@
 					pendingPaths?.length ? { pendingUploadPaths: pendingPaths } : undefined,
 				);
 				if (sent === false) restoreOnFailure();
+				else dropEditedOriginal();
 			}
 		} catch (err) {
 			console.error('[ChatInput] sendMessage threw', err);
