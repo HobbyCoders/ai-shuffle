@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from typing import Any, AsyncIterator, Sequence
 
 from fluid.context.cache_plan import plan_cache
@@ -95,6 +96,17 @@ _OVERFLOW_MARKERS = (
     "exceed context limit",
     "context window",
 )
+
+
+def _matches_tool_pattern(name: str, patterns: Sequence[str]) -> bool:
+    """Exact name match, or a case-sensitive fnmatch pattern (ruling CE12).
+
+    ``mcp__chrome-devtools__*`` is the motivating shape; plain names carry no
+    wildcards and fall out of ``fnmatchcase`` as exact comparisons anyway, but
+    the equality check is kept so a name containing ``[`` (legal in MCP tool
+    names, a character class to fnmatch) still matches itself.
+    """
+    return any(name == p or fnmatchcase(name, p) for p in patterns)
 
 
 def _is_context_overflow(message: str) -> bool:
@@ -200,6 +212,8 @@ class NativeLoop:
         trim: TrimConfig | None = None,
         mcp_servers: dict[str, dict[str, Any]] | None = None,
         agents: Sequence[dict[str, Any]] | None = None,
+        allowed_tools: Sequence[str] | None = None,
+        disallowed_tools: Sequence[str] | None = None,
         claude_settings: bool = True,
         claude_plugins: bool = True,
         claude_agents: bool = True,
@@ -235,6 +249,23 @@ class NativeLoop:
         if registry is not None:
             # The ToolSearch builtin reaches the registry through the ctx.
             self.ctx.extra.setdefault("tool_registry", registry)
+        # Session-static tool restriction (ruling CE12). ``allowed_tools=None``
+        # means "everything"; a list makes the exposed surface exactly that set,
+        # and ``disallowed_tools`` subtracts afterwards (deny beats allow). Both
+        # accept exact names and fnmatch patterns. Frozen here on purpose: a
+        # worker's tool surface is decided when the session is created, never
+        # renegotiated mid-turn. Nothing is ever re-added — a restricted set that
+        # omits an "essential" tool simply does not get it.
+        self.allowed_tools: list[str] | None = (
+            list(allowed_tools) if allowed_tools is not None else None
+        )
+        self.disallowed_tools: list[str] = list(disallowed_tools or ())
+        if self.allowed_tools is not None or self.disallowed_tools:
+            # The ToolSearch builtin (and any other registry-reading tool) sees
+            # this session's *view* of the shared registry through this
+            # predicate. The registry itself stays unfiltered — a host app may
+            # share one registry across sessions with different restrictions.
+            self.ctx.extra["tool_filter"] = self._tool_permitted
         self.plan_mode = plan_mode
         self._codemode = codemode
         if codemode is not None and registry is not None:
@@ -556,7 +587,10 @@ class NativeLoop:
             nodes = await self.store.load_path(sid)
             history = repair_dangling_tool_calls(self._trimmer.view(nodes))
         deferred = (
-            [s.to_api() for s in self.registry.deferred_tools()]
+            [
+                s.to_api() for s in self.registry.deferred_tools()
+                if self._tool_permitted(s.name)
+            ]
             if self.registry is not None and self._codemode is None
             else []
         )
@@ -663,7 +697,7 @@ class NativeLoop:
             return None
         specs = [
             s for s in self.registry.deferred_tools()
-            if s.name not in self._deferred_announced
+            if s.name not in self._deferred_announced and self._tool_permitted(s.name)
         ]
         if not specs:
             return None
@@ -777,9 +811,24 @@ class NativeLoop:
             usage=dict(total_usage), cost_usd=cost_total,
         ))
 
+    def _tool_permitted(self, name: str) -> bool:
+        """Is ``name`` inside this session's tool surface? (ruling CE12)
+
+        Enforced at three points — the request schemas (:meth:`_tools_api`), the
+        deferred catalog + ToolSearch (via ``ctx.extra["tool_filter"]``), and
+        dispatch (:meth:`_gated_call`) — so a filtered tool is invisible,
+        unloadable, and uncallable rather than merely discouraged.
+        """
+        if self.allowed_tools is not None and not _matches_tool_pattern(
+            name, self.allowed_tools
+        ):
+            return False
+        return not _matches_tool_pattern(name, self.disallowed_tools)
+
     def _tools_api(self) -> list[dict[str, Any]]:
         """The tool schemas the next request would carry (code-mode surface or
-        the loaded registry, plan-filtered). Pure — no request is built."""
+        the loaded registry, plan-filtered, then CE12 tool-restriction filtered).
+        Pure — no request is built."""
         if self.registry is None:
             return []
         if self._codemode is not None:
@@ -794,7 +843,7 @@ class NativeLoop:
             specs = self.registry.list_tools(loaded_only=True)
             if self.plan_mode:
                 specs = plan_mode_tools(specs)
-        return [s.to_api() for s in specs]
+        return [s.to_api() for s in specs if self._tool_permitted(s.name)]
 
     def _build_request(self, history: list[Message]) -> ProviderRequest:
         tools_api = self._tools_api()
@@ -1068,6 +1117,21 @@ class NativeLoop:
         ``code_mode_allowed=False`` escape hatch).
         """
         assert self.registry is not None
+
+        # CE12 enforcement point 3: a call naming a tool outside this session's
+        # surface never reaches the registry. The model should never emit one
+        # (the schema was never sent), so this is the defense against
+        # hallucinated and stale-transcript names — it answers in-context
+        # instead of crashing the turn. Placed ahead of the hook and permission
+        # gates so the same wall covers the code-mode bridge, which enters the
+        # dispatch path here rather than through ``_dispatch_tool``.
+        if not self._tool_permitted(name):
+            return await self._finish_tool(
+                sid, turn_id, name, tool_use_id,
+                ToolOutcome(
+                    text=f"tool not available in this session: {name}", is_error=True
+                ),
+            )
         spec = self.registry.get(name)
 
         # PreToolUse hook: deny short-circuits with an in-context error result;

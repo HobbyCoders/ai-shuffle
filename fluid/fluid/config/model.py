@@ -125,6 +125,28 @@ class ClaudeEcosystemConfig:
 
 
 @dataclass(frozen=True, kw_only=True)
+class ToolsConfig:
+    """Session tool restriction (ruling CE12), from ``[tools]``.
+
+    ``allowed = None`` (the default, and what a missing key means) exposes every
+    registered tool; a list — including an empty one — makes the surface exactly
+    that set. ``disallowed`` subtracts afterwards, so deny beats allow. Entries
+    are exact names or fnmatch patterns (``mcp__chrome-devtools__*``).
+    """
+
+    allowed: tuple[str, ...] | None = None
+    disallowed: tuple[str, ...] = ()
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "ToolsConfig":
+        allowed = d.get("allowed")
+        return cls(
+            allowed=tuple(allowed) if allowed is not None else None,
+            disallowed=tuple(d.get("disallowed") or ()),
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
 class HarnessConfig:
     default_provider: str = "anthropic"
     default_model: str = "claude-sonnet-5"
@@ -140,6 +162,7 @@ class HarnessConfig:
     continual_model: str | None = None
     instruction_files: InstructionFilesConfig = field(default_factory=InstructionFilesConfig)
     claude_ecosystem: ClaudeEcosystemConfig = field(default_factory=ClaudeEcosystemConfig)
+    tools: ToolsConfig = field(default_factory=ToolsConfig)
     cwd: str = "."
     max_tokens: int = 8192
     # Model context window, when the host app knows it (model ids come and go
@@ -171,6 +194,7 @@ class HarnessConfig:
             continual_model=d.get("continual_model"),
             instruction_files=InstructionFilesConfig.from_dict(d.get("instruction_files", {})),
             claude_ecosystem=ClaudeEcosystemConfig.from_dict(d.get("claude_ecosystem", {})),
+            tools=ToolsConfig.from_dict(d.get("tools", {})),
             cwd=d.get("cwd", "."),
             max_tokens=int(d.get("max_tokens", 8192)),
             context_window=(
@@ -226,6 +250,10 @@ class HarnessConfig:
                 "settings": self.claude_ecosystem.settings,
                 "plugins": self.claude_ecosystem.plugins,
                 "agents": self.claude_ecosystem.agents,
+            },
+            "tools": {
+                "allowed": list(self.tools.allowed) if self.tools.allowed is not None else None,
+                "disallowed": list(self.tools.disallowed),
             },
             "providers": {
                 name: {

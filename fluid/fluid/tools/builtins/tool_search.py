@@ -8,6 +8,13 @@ tools enter ``list_tools(loaded_only=True)`` and are therefore callable from
 the NEXT model call onward.
 
 The registry is injected by the engine as ``ctx.extra["tool_registry"]``.
+
+A restricted session (``NativeLoop(allowed_tools=...)``, ruling CE12) also
+injects ``ctx.extra["tool_filter"]``: a ``(name) -> bool`` predicate that is
+this session's *view* of the shared registry. The registry stays unfiltered —
+one registry may back several sessions with different surfaces — so every read
+path here goes through the predicate, and a filtered tool is neither searchable
+nor loadable.
 """
 
 from __future__ import annotations
@@ -103,17 +110,24 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     if not query:
         return ToolOutcome(text="empty query", is_error=True)
     limit = int(input.get("max_results") or 5)
+    # Session tool restriction (CE12): a tool the session may not use is
+    # reported exactly like one that does not exist — the restriction is not a
+    # thing for the model to argue with.
+    tool_filter = (ctx.extra or {}).get("tool_filter")
+
+    def visible(name: str) -> bool:
+        return tool_filter is None or bool(tool_filter(name))
 
     if query.startswith("select:"):
         names = [n.strip() for n in query[len("select:"):].split(",") if n.strip()]
-        missing = [n for n in names if registry.get(n) is None]
+        missing = [n for n in names if registry.get(n) is None or not visible(n)]
         if missing:
             return ToolOutcome(
                 text=f"unknown tool(s): {', '.join(missing)}", is_error=True
             )
         specs = [registry.load_schema(n) for n in names]
     else:
-        specs = registry.search_tools(query)[:limit]
+        specs = [s for s in registry.search_tools(query) if visible(s.name)][:limit]
         specs = [registry.load_schema(s.name) for s in specs]
 
     if not specs:

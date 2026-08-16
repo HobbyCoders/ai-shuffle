@@ -52,6 +52,13 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
         "plugins": True,
         "agents": True,
     },
+    # Session tool restriction (ruling CE12). ``allowed = None`` → every
+    # registered tool; a list makes the surface exactly that set, and
+    # ``disallowed`` subtracts from it. Names or fnmatch patterns.
+    "tools": {
+        "allowed": None,
+        "disallowed": [],
+    },
     "providers": {
         "anthropic": {
             "kind": "anthropic",
@@ -298,6 +305,10 @@ def build_engine(
             cwd=config.cwd,
             claude_cmd=claude_cmd,
             permission_mode="plan" if plan_mode else None,
+            allowed_tools=(
+                list(config.tools.allowed) if config.tools.allowed is not None else None
+            ),
+            disallowed_tools=list(config.tools.disallowed) or None,
         )
 
     # Native providers.
@@ -340,6 +351,8 @@ def build_engine(
         plan_mode=plan_mode,
         codemode=codemode,
         mcp_servers=config.mcp,
+        allowed_tools=config.tools.allowed,
+        disallowed_tools=config.tools.disallowed,
         claude_settings=config.claude_ecosystem.settings,
         claude_plugins=config.claude_ecosystem.plugins,
         claude_agents=config.claude_ecosystem.agents,

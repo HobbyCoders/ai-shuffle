@@ -127,6 +127,7 @@ class DelegatedLoop:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         add_dirs: list[str] | None = None,
+        allowed_tools: list[str] | None = None,
         disallowed_tools: list[str] | None = None,
         effort: str | None = None,
     ) -> None:
@@ -145,6 +146,10 @@ class DelegatedLoop:
         self.cwd = cwd
         self.env = env
         self.add_dirs = add_dirs
+        # Tool restriction (ruling CE12), the CLI's own flags: allowed is the
+        # whole surface when set, disallowed subtracts. The native leg enforces
+        # the same pair itself; here the child CLI does the enforcing.
+        self.allowed_tools = allowed_tools
         self.disallowed_tools = disallowed_tools
         # Reasoning-depth knob — forwarded verbatim as the CLI's --effort flag.
         self.effort = effort
@@ -355,6 +360,8 @@ class DelegatedLoop:
             argv += ["--system-prompt", self.system]
         for d in self.add_dirs or ():
             argv += ["--add-dir", d]
+        if self.allowed_tools:
+            argv += ["--allowed-tools", ",".join(self.allowed_tools)]
         if self.disallowed_tools:
             argv += ["--disallowed-tools", ",".join(self.disallowed_tools)]
         if self.effort:
