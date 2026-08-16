@@ -5,6 +5,7 @@ call, so the whole loop runs offline.
 """
 
 import asyncio
+import json
 from typing import AsyncIterator
 
 import pytest
@@ -233,7 +234,7 @@ async def test_deny_rule_blocks_bash(tmp_path) -> None:
     registry = ToolRegistry()
     register_builtins(registry)
     provider = ScriptedProvider([
-        _tool("t1", "Bash", '{"command": "touch %s"}' % marker),
+        _tool("t1", "Bash", json.dumps({"command": f"touch {marker}"})),
         _text("blocked"),
     ])
     store = MemoryStore()

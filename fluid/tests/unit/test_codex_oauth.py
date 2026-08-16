@@ -5,6 +5,7 @@ All offline — the token endpoint is an ``httpx.MockTransport``; no network."""
 import base64
 import json
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -67,7 +68,8 @@ def test_token_file_round_trip_and_perms(tmp_path) -> None:
         last_refresh=_now_iso(),
     )
     save_bundle(bundle, path)
-    assert (os.stat(path).st_mode & 0o777) == 0o600
+    if sys.platform != "win32":  # POSIX file modes don't exist on Windows
+        assert (os.stat(path).st_mode & 0o777) == 0o600
     loaded = load_bundle(path)
     assert loaded == bundle
 
