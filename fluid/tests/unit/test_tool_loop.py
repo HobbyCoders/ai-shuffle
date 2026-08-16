@@ -11,6 +11,7 @@ import pytest
 
 from fluid.engine.native import NativeLoop
 from fluid.events import (
+    ErrorEvent,
     Interrupt,
     Interrupted,
     PermissionRequest,
@@ -341,6 +342,106 @@ async def test_turn_cost_is_none_without_cost_or_estimator() -> None:
     ])
     done = await _run_two_call_turn(provider)
     assert done.cost_usd is None
+
+
+# ─── partial cost on turn-ending Interrupted / ErrorEvent ────────────────────
+#
+# These turns end without a TurnComplete (they stay open-ended), so the spend
+# they already incurred has to ride the terminating event or it is lost.
+
+
+def _error(message: str, usage: dict) -> list[StreamChunk]:
+    """A call that streams some usage and then fails."""
+    return [
+        StreamChunk("message_start", {"usage": usage}),
+        StreamChunk("error", {"message": message, "retriable": False}),
+    ]
+
+
+async def _interrupt_during_dispatch(provider: ScriptedProvider) -> Interrupted:
+    """Run a turn whose single model call requests a tool that hangs, then
+    interrupt it mid-dispatch, and return the Interrupted event."""
+    started = asyncio.Event()
+
+    @tool("hang", "Hang until cancelled", {"type": "object", "properties": {}})
+    async def hang(args: dict) -> dict:
+        started.set()
+        await asyncio.sleep(3600)
+        return {"content": [{"type": "text", "text": "never"}]}
+
+    registry = ToolRegistry()
+    registry.register_inproc(create_inproc_server("m", [hang]))
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="claude-sonnet-5",
+        registry=registry, permissions=PermissionEngine("never_ask"),
+    )
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(started.wait(), timeout=5)
+    await loop.submit(Interrupt())
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+
+    events = loop.bus.log(loop.session_id)
+    assert not any(isinstance(e, TurnComplete) for e in events)  # turn stays open-ended
+    assert provider.calls == 1
+    return next(e for e in events if isinstance(e, Interrupted))
+
+
+async def test_interrupted_turn_reports_accumulated_cost() -> None:
+    provider = ScriptedProvider([
+        _with_cost(_tool("t1", "mcp__m__hang", "{}"), 0.002),
+        _text("should never be requested"),
+    ])
+    ev = await _interrupt_during_dispatch(provider)
+    assert ev.cost_usd == pytest.approx(0.002)
+    assert "cost_usd" not in ev.usage
+    assert ev.usage["input_tokens"] == 10
+    assert ev.usage["output_tokens"] == 5
+
+
+async def test_interrupted_turn_falls_back_to_provider_estimate() -> None:
+    provider = EstimatingProvider([
+        _tool("t1", "mcp__m__hang", "{}"),
+        _text("should never be requested"),
+    ])
+    ev = await _interrupt_during_dispatch(provider)
+    assert ev.cost_usd == pytest.approx(0.5)
+    assert "cost_usd" not in ev.usage
+
+
+async def test_provider_error_turn_reports_accumulated_cost() -> None:
+    """The costed first call plus the failed call's partial tokens both land on
+    the ErrorEvent that ends the turn."""
+    registry = ToolRegistry()
+    registry.register_inproc(_weather_server())
+    provider = ScriptedProvider([
+        _with_cost(_tool("t1", "mcp__wx__get_weather", '{"city": "Paris"}'), 0.002),
+        _error("upstream exploded", {"input_tokens": 7}),
+    ])
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="claude-sonnet-5",
+        registry=registry, permissions=PermissionEngine("never_ask"),
+    )
+    await loop.submit(UserTurn(content="weather in Paris?"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+
+    events = loop.bus.log(loop.session_id)
+    assert not any(isinstance(e, TurnComplete) for e in events)  # turn stays open-ended
+    err = next(e for e in events if isinstance(e, ErrorEvent))
+    assert "upstream exploded" in err.message
+    assert err.cost_usd == pytest.approx(0.002)
+    assert "cost_usd" not in err.usage
+    assert err.usage["input_tokens"] == 17  # 10 from the good call + 7 from the failed one
+    assert err.usage["output_tokens"] == 5
+
+
+def test_interrupted_usage_survives_the_durable_codec() -> None:
+    from fluid.events.model import event_from_dict, event_to_dict
+
+    ev = Interrupted(
+        session_id="s1", turn_id="t1", node_id="n1",
+        usage={"input_tokens": 10, "output_tokens": 5}, cost_usd=0.002,
+    )
+    assert event_from_dict(event_to_dict(ev)) == ev
 
 
 def test_plan_mode_filters_write_tools() -> None:

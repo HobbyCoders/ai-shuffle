@@ -599,21 +599,18 @@ class NativeLoop:
                     # eligible and retry the call once on the smaller view.
                     overflow_retried = True
                     continue
+                # The failed call still streamed (and billed) partial tokens —
+                # fold them in so the turn's spend is not lost with the error.
+                self._fold_call_usage(total_usage, result.usage)
+                partial, partial_cost = self._partial_usage(total_usage)
                 await self._emit(ErrorEvent(
                     session_id=sid, turn_id=turn_id,
                     message=result.error_message or "provider error",
                     retriable=result.error_retriable,
+                    usage=partial, cost_usd=partial_cost,
                 ))
                 return  # leave the turn open-ended
-            if "cost_usd" not in result.usage:
-                # No provider-reported cost — fall back to the provider's
-                # optional pricing-table estimate for this call.
-                est = getattr(self.provider, "estimate_cost", None)
-                if est is not None:
-                    cost = est(self.model, result.usage)
-                    if cost is not None:
-                        result.usage["cost_usd"] = cost
-            self._accumulate_usage(total_usage, result.usage)
+            self._fold_call_usage(total_usage, result.usage)
 
             node = SessionNode(
                 node_id=new_id("node"), parent_id=parent.node_id, message=result.message
@@ -630,7 +627,12 @@ class NativeLoop:
             parent = node
 
             if result.interrupted:
-                await self._emit(Interrupted(session_id=sid, node_id=node.node_id, turn_id=turn_id))
+                # This call's usage is already folded in above — snapshot, don't re-fold.
+                partial, partial_cost = self._partial_usage(total_usage)
+                await self._emit(Interrupted(
+                    session_id=sid, node_id=node.node_id, turn_id=turn_id,
+                    usage=partial, cost_usd=partial_cost,
+                ))
                 return
 
             # Only run the tool loop when tools are actually configured; without
@@ -659,8 +661,11 @@ class NativeLoop:
             if self._interrupted.is_set():
                 # Interrupt landed during tool dispatch (e.g. while parked on a
                 # permission prompt) — stop before issuing another model call.
+                partial, partial_cost = self._partial_usage(total_usage)
                 await self._emit(Interrupted(
-                    session_id=sid, node_id=parent.node_id, turn_id=turn_id))
+                    session_id=sid, node_id=parent.node_id, turn_id=turn_id,
+                    usage=partial, cost_usd=partial_cost,
+                ))
                 return
 
         if self._codemode is not None:
@@ -1159,6 +1164,26 @@ class NativeLoop:
                 continue
             if isinstance(value, int):
                 totals[key] = max(totals.get(key, 0), value)
+
+    def _fold_call_usage(self, totals: dict[str, Any], usage: dict[str, Any]) -> None:
+        """Fold one model call's usage into the turn totals, filling in an
+        estimated cost when the provider reported none."""
+        if "cost_usd" not in usage:
+            # No provider-reported cost — fall back to the provider's
+            # optional pricing-table estimate for this call.
+            est = getattr(self.provider, "estimate_cost", None)
+            if est is not None:
+                cost = est(self.model, usage)
+                if cost is not None:
+                    usage["cost_usd"] = cost
+        self._accumulate_usage(totals, usage)
+
+    @staticmethod
+    def _partial_usage(totals: dict[str, Any]) -> tuple[dict[str, Any], float | None]:
+        """Split turn totals into a token-shaped usage dict and its cost, for
+        turn-ending emissions that are not TurnComplete. Non-destructive."""
+        snapshot = dict(totals)
+        return snapshot, snapshot.pop("cost_usd", None)
 
     @staticmethod
     def _accumulate_usage(totals: dict[str, Any], usage: dict[str, Any]) -> None:

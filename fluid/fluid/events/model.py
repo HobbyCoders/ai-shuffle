@@ -61,12 +61,22 @@ class TurnComplete(Event):
 @dataclass(frozen=True, kw_only=True)
 class Interrupted(Event):
     message: str = "interrupted"
+    # A turn-ending Interrupted carries the turn's accumulated partial
+    # usage/cost — parity with the delegated leg, whose CLI result frame
+    # reports total_cost_usd even when the turn was interrupted.
+    usage: dict[str, Any] = field(default_factory=dict)
+    cost_usd: float | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
 class ErrorEvent(Event):
     message: str
     retriable: bool = False
+    # Set only when the error ends the turn: the turn's accumulated partial
+    # usage/cost (same parity rationale as Interrupted). Mid-turn, non-fatal
+    # ErrorEvents leave these at their defaults.
+    usage: dict[str, Any] = field(default_factory=dict)
+    cost_usd: float | None = None
 
 
 # ─── Streaming content ───────────────────────────────────────────────────────
