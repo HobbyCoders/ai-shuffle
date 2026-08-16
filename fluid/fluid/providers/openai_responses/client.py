@@ -23,6 +23,7 @@ import httpx
 from fluid.providers._retry import RETRIABLE_STATUSES, RetryPolicy
 from fluid.providers._sse import sse_events
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
+from fluid.providers.openai_responses.pricing import estimate_cost as _estimate_cost
 from fluid.providers.openai_responses.serialize import (
     ResponsesStreamNormalizer,
     build_request_body,
@@ -65,6 +66,10 @@ class OpenAIResponsesClient:
         self._timeout = timeout
         self._http = http_client
         self._retry = retry or RetryPolicy()
+
+    def estimate_cost(self, model: str, usage: dict) -> float | None:
+        """Optional engine cost hook: list-price estimate for one model call."""
+        return _estimate_cost(model, usage)
 
     async def _headers(self) -> dict[str, str]:
         headers = {
