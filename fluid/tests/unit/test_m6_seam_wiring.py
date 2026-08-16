@@ -3,6 +3,7 @@ loading (Skill builtin), slash-command execution, /model + permission-mode ops
 on NativeLoop."""
 
 import io
+import json
 from typing import AsyncIterator
 
 from fluid.cli.repl import Repl
@@ -106,8 +107,8 @@ async def test_nested_instructions_ride_tool_result_once(tmp_path) -> None:
     registry = ToolRegistry()
     register_builtins(registry)
     provider = ScriptedProvider([
-        _tool_call("t1", "Read", f'{{"file_path": "{nested / "f.txt"}"}}'),
-        _tool_call("t2", "Read", f'{{"file_path": "{nested / "f.txt"}"}}'),
+        _tool_call("t1", "Read", json.dumps({"file_path": str(nested / "f.txt")})),
+        _tool_call("t2", "Read", json.dumps({"file_path": str(nested / "f.txt")})),
         _text("done"),
     ])
     store = MemoryStore()
@@ -137,7 +138,7 @@ async def test_project_root_instructions_not_reinjected(tmp_path) -> None:
     registry = ToolRegistry()
     register_builtins(registry)
     provider = ScriptedProvider([
-        _tool_call("t1", "Read", f'{{"file_path": "{project / "f.txt"}"}}'),
+        _tool_call("t1", "Read", json.dumps({"file_path": str(project / "f.txt")})),
         _text("done"),
     ])
     store = MemoryStore()
