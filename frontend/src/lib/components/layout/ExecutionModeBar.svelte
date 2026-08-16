@@ -18,8 +18,9 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import type { ExecutionMode } from '$lib/stores/types';
 	import { syncWorktrees, type Worktree, type Branch } from '$lib/api/git';
+	import { listInstalls, type Install } from '$lib/api/installs';
 	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch, gitStatus } from '$lib/stores/git.svelte';
-	import { ChevronDown, GitBranch, Monitor, GitFork, Plus, Loader2, Check } from 'lucide-svelte';
+	import { ChevronDown, ChevronRight, Cloud, GitBranch, Monitor, GitFork, Plus, Loader2, Check } from 'lucide-svelte';
 	import { untrack } from 'svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
 	import Banner from '$lib/components/Banner.svelte';
@@ -155,17 +156,62 @@
 
 	function toggleModeDropdown() {
 		showModeDropdown = !showModeDropdown;
+		// Refresh on every open so the online flags are current when the Cloud
+		// section is expanded (the list is small and the call is cheap).
+		if (showModeDropdown) loadInstalls();
 	}
 
 	function selectBaseMode() {
-		// Local is the only base mode; clicking it just closes the menu (the
-		// worktree checkbox is the orthogonal modifier).
+		// Local is the base mode; picking it drops any device choice so the
+		// session is created on (and owned by) this install.
+		activeSession.setDeviceIntent(null);
+		cloudExpanded = false;
 		showModeDropdown = false;
 	}
 
 	function toggleWorktree() {
 		activeSession.setWorktreeIntent(worktreeOn ? 'local' : 'worktree');
 		// Leave the menu open so the user sees the checkbox flip and can keep going.
+	}
+
+	// --- Cloud (other devices) section ---
+	//
+	// An inline accordion INSIDE the mode menu, not a flyout submenu: this
+	// codebase has no submenu primitive, and a nested floating panel would need
+	// its own outside-click/placement handling on mobile.
+	let cloudExpanded = $state(false);
+	let installs = $state<Install[]>([]);
+	let installsLoading = $state(false);
+
+	// Other installs only — "this device" is the Local item above.
+	const otherInstalls = $derived(installs.filter(i => !i.is_self));
+
+	const deviceIntent = $derived($activeSession.deviceIntent);
+
+	// Worktree and device compose freely (D7): picking a device sends the
+	// worktree request to that install, which materializes the checkout on its
+	// own disk via the durable git-ops queue. Neither choice constrains the other.
+
+	async function loadInstalls() {
+		installsLoading = true;
+		try {
+			installs = (await listInstalls()).installs;
+		} catch (e) {
+			console.warn('[ExecutionModeBar] Failed to list devices:', e);
+			installs = [];
+		} finally {
+			installsLoading = false;
+		}
+	}
+
+	function toggleCloud() {
+		cloudExpanded = !cloudExpanded;
+	}
+
+	function selectDevice(install: Install) {
+		if (!install.online) return;
+		activeSession.setDeviceIntent({ id: install.id, name: install.device_name });
+		showModeDropdown = false;
 	}
 
 	function selectWorktree(wt: Worktree) {
@@ -259,12 +305,16 @@
 				class="mode-trigger"
 				class:open={showModeDropdown}
 				onclick={toggleModeDropdown}
-				title="Run this session on this device"
+				title={deviceIntent ? `Run this session on ${deviceIntent.name}` : 'Run this session on this device'}
 				aria-haspopup="menu"
 				aria-expanded={showModeDropdown}
 			>
-				<Monitor size={13} strokeWidth={1.5} />
-				<span class="mode-trigger-label">Local</span>
+				{#if deviceIntent}
+					<Cloud size={13} strokeWidth={1.5} />
+				{:else}
+					<Monitor size={13} strokeWidth={1.5} />
+				{/if}
+				<span class="mode-trigger-label">{deviceIntent ? deviceIntent.name : 'Local'}</span>
 				{#if worktreeOn}
 					<GitFork size={12} strokeWidth={1.5} class="wt-marker" />
 				{/if}
@@ -276,14 +326,65 @@
 					<!-- Base mode: Local -->
 					<button
 						type="button"
-						class="branch-item active"
+						class="branch-item"
+						class:active={!deviceIntent}
 						onclick={() => selectBaseMode()}
+						title="Run this session on this device"
 						role="menuitemradio"
-						aria-checked="true"
+						aria-checked={!deviceIntent}
 					>
 						<Monitor size={13} strokeWidth={1.5} />
 						<span class="branch-item-name">Local</span>
 					</button>
+
+					<!-- Cloud: inline accordion listing the other installs. Creating
+					     the session there stamps it with that device's ownership. -->
+					<button
+						type="button"
+						class="branch-item cloud-item"
+						onclick={toggleCloud}
+						title="Run this session on another device"
+						aria-expanded={cloudExpanded}
+					>
+						<Cloud size={13} strokeWidth={1.5} />
+						<span class="branch-item-name">Cloud</span>
+						<ChevronRight size={12} strokeWidth={1.5} class={cloudExpanded ? 'cloud-caret open' : 'cloud-caret'} />
+					</button>
+
+					{#if cloudExpanded}
+						<div class="cloud-section">
+							{#if installsLoading}
+								<div class="branch-loading">
+									<Loader2 size={14} class="animate-spin" />
+									<span>Loading...</span>
+								</div>
+							{:else if otherInstalls.length === 0}
+								<p class="branch-empty">No other devices</p>
+							{:else}
+								{#each otherInstalls as install (install.id)}
+									<button
+										type="button"
+										class="branch-item device-item"
+										class:active={deviceIntent?.id === install.id}
+										class:disabled={!install.online}
+										onclick={() => selectDevice(install)}
+										title={install.online
+											? `Run this session on ${install.device_name}`
+											: `${install.device_name} is offline`}
+										role="menuitemradio"
+										aria-checked={deviceIntent?.id === install.id}
+										aria-disabled={!install.online}
+									>
+										<Cloud size={13} strokeWidth={1.5} />
+										<span class="branch-item-name">{install.device_name}</span>
+										{#if !install.online}
+											<span class="device-offline">offline</span>
+										{/if}
+									</button>
+								{/each}
+							{/if}
+						</div>
+					{/if}
 
 					<!-- Worktree modifier: orthogonal checkbox at the bottom. -->
 					{#if isGitRepo}
@@ -549,6 +650,41 @@
 	   reads as white on the filled primary box. */
 	.wt-checkbox :global(svg) {
 		color: var(--primary-foreground) !important;
+	}
+
+	/* Cloud accordion: an inline section inside the mode menu (no flyout). */
+	.cloud-section {
+		padding-left: 12px;
+		border-left: 1px solid var(--border);
+		margin-left: 10px;
+	}
+
+	.cloud-item :global(svg.cloud-caret) {
+		transition: transform 120ms ease;
+	}
+
+	.cloud-item :global(svg.cloud-caret.open) {
+		transform: rotate(90deg);
+	}
+
+	/* Unavailable rows stay in the menu (so the reason is visible via title)
+	   but read and behave as inert. */
+	.branch-item.disabled {
+		opacity: 0.45;
+		cursor: not-allowed;
+	}
+
+	.branch-item.disabled:hover {
+		background: transparent;
+	}
+
+	.device-offline {
+		font-size: 0.5625rem;
+		font-weight: 500;
+		padding: 1px 5px;
+		border-radius: 4px;
+		background: color-mix(in oklch, var(--muted-foreground) 15%, transparent);
+		color: var(--muted-foreground);
 	}
 
 	.mode-trigger-label {
@@ -824,6 +960,10 @@
 		.branch-dropdown,
 		:global(.animate-spin) {
 			animation: none;
+		}
+
+		.cloud-item :global(svg.cloud-caret) {
+			transition: none;
 		}
 	}
 </style>

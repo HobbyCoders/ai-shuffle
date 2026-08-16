@@ -6,7 +6,7 @@
  * Memory-only (not persisted to backend).
  */
 
-import type { ExecutionMode } from './types';
+import type { DeviceIntent, ExecutionMode } from './types';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -19,6 +19,10 @@ export interface SessionEphemeral {
 	permissionModeOverride: string | null;
 	effortLevelOverride: string | null;
 	worktreeIntent: ExecutionMode;
+	/** Compose-time device pick — memory-only, exactly like the rest of this
+	 *  cache, so a draft keeps its device across a switch away and back without
+	 *  ever becoming a durable default. */
+	deviceIntent: DeviceIntent | null;
 	worktreeId: string | null;
 	worktreeBranch: string;
 	worktreeBaseBranch: string;

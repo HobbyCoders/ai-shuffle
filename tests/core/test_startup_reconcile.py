@@ -338,7 +338,15 @@ def test_schema_version_parity_v51():
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 75 for sessions.hidden: the list-visibility flag — TRUE keeps
+    # Bumped to 76 for the two cross-install carrier tables (docs/
+    # DEVICE_GIT_CONTROL_PLAN.md, W2): ``git_ops`` — the durable git-operation
+    # queue each install claims ops off (D5; first op ``ensure_worktree``, whose
+    # params row is the durable carrier of the caller's create_new_branch
+    # intent) — and ``upload_blobs`` — DB-mediated upload delivery modeled on
+    # note_attachments, so an attachment staged on one install's disk reaches a
+    # turn executing on another (D8). Both are new tables landed by guarded
+    # idempotent blocks in _run_column_migrations. v75 added sessions.hidden:
+    # the list-visibility flag — TRUE keeps
     # a session out of the sessions-list queries (wake-word "command" voice
     # sessions are born hidden; the row stays fully fetchable by id), NULL/
     # FALSE (every pre-existing row) stays visible. Additive/nullable with no
@@ -388,8 +396,8 @@ def test_schema_version_parity_v51():
     # the Phase-2 turns table; v58 was the Phase-1 deletion (v2_stream forced
     # TRUE + default flipped); v57 added the opt-in flag; v56 added the Phase-0
     # primitives.
-    assert db_version == 75
-    assert pg_version == 75
+    assert db_version == 76
+    assert pg_version == 76
     assert db_version == pg_version
 
 

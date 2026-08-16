@@ -97,6 +97,243 @@ def _resolve_default_profile_id(project: dict, body_profile_id: Optional[str]) -
     return profiles[0]["id"] if profiles else "claude-code"
 
 
+async def _persist_and_broadcast_first_message(
+    session_id: str, prompt: str, profile_id: str
+) -> None:
+    """Store the compose-time first message + backfill the title, then broadcast.
+
+    Shared verbatim by the local and remote branch-session paths so the two can
+    never drift on what a new worktree session's history looks like.
+    """
+    title = prompt[:100].strip()
+    if len(prompt) > 100:
+        title = title.rsplit(' ', 1)[0] + "..."
+    msg_role, msg_meta = _detect_command_meta(prompt)
+
+    def _persist_first_message():
+        existing = database.get_session(session_id) or {}
+        if not (existing.get("title") or "").strip() and title:
+            database.update_session(session_id=session_id, title=title)
+        database.add_session_message(
+            session_id=session_id,
+            role=msg_role,
+            content=prompt,
+            metadata=msg_meta,
+            profile_id=profile_id,
+        )
+
+    await run_sync(_persist_first_message)
+
+    try:
+        from app.core.sync_engine import sync_engine
+        await sync_engine.broadcast_message_added(
+            session_id=session_id,
+            message={"role": "user", "content": prompt, "profile_id": profile_id},
+            source_device_id=None,
+        )
+        if title:
+            await sync_engine.broadcast_session_updated(
+                session_id=session_id,
+                updates={"title": title},
+                source_device_id=None,
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Failed to broadcast first message: {e}")
+
+
+def _broadcast_session_created(session_id: str) -> None:
+    """Fire-and-forget sidebar refresh for a freshly created session."""
+    try:
+        from app.core.sync_engine import sync_engine
+        import asyncio as _asyncio
+        _asyncio.ensure_future(sync_engine.broadcast_user_session_created(
+            user_id="admin",
+            session_id=session_id,
+            source_device_id=None,
+        ))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Failed to broadcast session creation: {e}")
+
+
+async def _preflight_remote_target(
+    target_instance_id: str, pv2: dict
+) -> None:
+    """Refuse a device pick that cannot possibly run this branch session (D4).
+
+    DB-ONLY and BEFORE anything is created — a session pinned to a device that
+    can't materialize its checkout is stranded, not merely slow. Two gates:
+
+      * the target is a registered install that is currently online;
+      * the target has an ACTIVE **BASE** checkout of this project. This is
+        deliberately NOT ``capable_runners``: that helper matches ANY active
+        checkout row for the project, including a branch-only worktree row, and
+        Phase 3 never clones — creating a branch needs a base checkout to fork
+        from, so a branch-only match would queue an op that can only fail.
+
+    Raises HTTPException(409) with wording matching the local 409 family.
+    """
+    from app.db import checkouts as checkouts_db
+
+    install = await run_sync(database.get_install, target_instance_id)
+    if not install:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Unknown device — pick another device.",
+        )
+    device = install.get("device_name") or target_instance_id
+    if not install.get("online"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"{device} is offline. Bring it online or pick another device.",
+        )
+
+    base = await run_sync(
+        checkouts_db.get_checkout_with_legacy_fallback,
+        pv2["id"],
+        target_instance_id,
+        None,
+    )
+    if not base or (base.get("status") or "active") != "active":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"This project isn't checked out on {device} yet. Clone the "
+                f"repository there and open the project, then create the branch "
+                f"session."
+            ),
+        )
+
+
+async def _create_remote_branch_session(
+    body: CreateWorktreeSessionRequest,
+    project: dict,
+    api_user_id: Optional[str],
+    pv2: dict,
+    target_instance_id: str,
+) -> WorktreeSessionResponse:
+    """Create a branch session that will materialize on ANOTHER install (D4).
+
+    Nothing is written to this machine's disk: no ``ensure_checkout``, no upload
+    migration. Instead the session is created PINNED to the target (D1), a
+    durable ``ensure_worktree`` git op is queued for it (D5 — that row is the
+    carrier of the ``create_new_branch`` intent), and any pending uploads are
+    lifted into D8 blobs attached to the first turn. The first turn is submitted
+    ``no_kick`` + a claim-loop wake, exactly like the WS remote path.
+
+    ``worktree_path`` comes back None — the path will exist on the target, not
+    here, and inventing one would be a lie.
+    """
+    from app.core import turn_claim, turn_manager, upload_transfer
+    from app.db import git_ops as git_ops_db
+
+    branch_name = body.branch_name
+
+    # 1. Preflight BEFORE creating anything.
+    await _preflight_remote_target(target_instance_id, pv2)
+
+    # 2. Mint the session id up front so the upload lift (which can fail the
+    #    whole request) happens before a session row exists — a refused create
+    #    must leave nothing behind.
+    session_id = str(uuid.uuid4())
+    profile_id = _resolve_default_profile_id(project, body.profile_id)
+    prompt = (body.prompt or "").strip()
+
+    # Blobs are carried BY A TURN (D8), so they are only lifted when this
+    # request also supplies the first prompt. The promptless compose flow
+    # (createWorktree, which POSTs first and sends the message over the WS
+    # afterwards) carries its paths on that follow-up query instead — lifting
+    # them here would orphan them with no turn to attach them to.
+    upload_blob_ids: List[str] = []
+    if body.pending_upload_paths and prompt:
+        try:
+            upload_blob_ids = await run_sync(
+                upload_transfer.lift_paths_to_blobs,
+                body.pending_upload_paths,
+                project,
+                session_id,
+                pv2["id"],
+            )
+        except Exception as e:  # noqa: BLE001 — refuse, never half-create
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Couldn't send your attachments to the other device: {e}"
+                ),
+            ) from e
+
+    # 3. Create the session OWNED BY + PINNED TO the target (D1) and bind it to
+    #    the branch, exactly as the local path does.
+    def _create() -> None:
+        database.create_session(
+            session_id=session_id,
+            profile_id=profile_id,
+            project_id=body.project_id,
+            title="",
+            api_user_id=api_user_id,
+            is_active=True,
+            target_instance_id=target_instance_id,
+        )
+        database.set_session_branch(session_id, branch_name, pv2["id"])
+
+    await run_sync(_create)
+    _broadcast_session_created(session_id)
+
+    # 4. Queue the checkout work for the target. This row carries
+    #    ``create_new_branch`` — a brand-new branch exists on no disk anywhere,
+    #    so the intent has to travel durably or the session can never spawn.
+    await run_sync(
+        git_ops_db.insert_op,
+        target_instance_id,
+        "ensure_worktree",
+        project_v2_id=pv2["id"],
+        params={
+            "branch": branch_name,
+            "base_branch": body.base_branch,
+            "create_new_branch": bool(body.create_new_branch),
+        },
+    )
+
+    query_started = False
+    if prompt:
+        await _persist_and_broadcast_first_message(session_id, prompt, profile_id)
+        try:
+            payload: dict = {}
+            if api_user_id:
+                payload["api_user_id"] = api_user_id
+            if upload_blob_ids:
+                payload["upload_blob_ids"] = upload_blob_ids
+            turn_manager.submit(
+                session_id,
+                "worktree",
+                prompt=prompt,
+                # The 'claude-code' no-profile sentinel is install-local and must
+                # never ride a turn another install executes.
+                profile_id=None if profile_id == "claude-code" else profile_id,
+                project_id=body.project_id,
+                overrides=body.overrides,
+                payload=payload or None,
+                no_kick=True,
+            )
+            await run_sync(turn_claim.notify_turns_changed, session_id)
+            query_started = True
+        except Exception as e:  # noqa: BLE001
+            logger.exception(f"Failed to submit remote branch-session turn: {e}")
+            query_started = False
+
+    actual_base = body.base_branch if body.create_new_branch else branch_name
+    return WorktreeSessionResponse(
+        session_id=session_id,
+        worktree_id=None,
+        branch_name=branch_name,
+        base_branch=actual_base,
+        # The checkout lives on the target's disk; there is no local path.
+        worktree_path=None,
+        status="active",
+        query_started=query_started,
+        upload_migration_errors=None,
+    )
+
+
 async def _create_v2_branch_session(
     request: Request,
     body: CreateWorktreeSessionRequest,
@@ -115,8 +352,16 @@ async def _create_v2_branch_session(
     sessions (existing rows) keep working through the unchanged legacy path.
     """
     from app.core import project_resolver, checkout_manager
+    from app.core.config import settings
 
     branch_name = body.branch_name
+
+    # 0. Composer device pick (D4). A target that is not us takes the remote
+    #    path: nothing is materialized here, a durable git op carries the
+    #    checkout work to the target, and uploads travel as D8 blobs.
+    target_instance_id = (body.target_instance_id or "").strip() or None
+    if target_instance_id == settings.effective_instance_id:
+        target_instance_id = None
 
     # 1. Resolve the origin-keyed project_v2 for this legacy project (self-heals /
     #    self-seeds a project created after the v60 collapse).
@@ -129,6 +374,11 @@ async def _create_v2_branch_session(
                 f"Could not resolve an origin-keyed project for '{body.project_id}'. "
                 f"The project may not be fully initialized on this device."
             ),
+        )
+
+    if target_instance_id:
+        return await _create_remote_branch_session(
+            body, project, api_user_id, pv2, target_instance_id
         )
 
     # 2. Materialize the deterministic (project, branch) checkout. Idempotent with
@@ -180,16 +430,7 @@ async def _create_v2_branch_session(
     await run_sync(_create)
 
     # Broadcast so sidebars update immediately (mirrors the legacy path).
-    try:
-        from app.core.sync_engine import sync_engine
-        import asyncio as _asyncio
-        _asyncio.ensure_future(sync_engine.broadcast_user_session_created(
-            user_id="admin",
-            session_id=session_id,
-            source_device_id=None,
-        ))
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"Failed to broadcast session creation: {e}")
+    _broadcast_session_created(session_id)
 
     query_started = False
     upload_migration_errors: Optional[List[str]] = None
@@ -216,46 +457,11 @@ async def _create_v2_branch_session(
 
     prompt = (body.prompt or "").strip()
     if prompt:
-        # 1. Persist the user message + title backfill.
-        title = prompt[:100].strip()
-        if len(prompt) > 100:
-            title = title.rsplit(' ', 1)[0] + "..."
-        msg_role, msg_meta = _detect_command_meta(prompt)
+        await _persist_and_broadcast_first_message(session_id, prompt, profile_id)
 
-        def _persist_first_message():
-            existing = database.get_session(session_id) or {}
-            if not (existing.get("title") or "").strip() and title:
-                database.update_session(session_id=session_id, title=title)
-            database.add_session_message(
-                session_id=session_id,
-                role=msg_role,
-                content=prompt,
-                metadata=msg_meta,
-                profile_id=profile_id,
-            )
-
-        await run_sync(_persist_first_message)
-
-        # 2. Broadcast the user message + title.
-        try:
-            from app.core.sync_engine import sync_engine
-            await sync_engine.broadcast_message_added(
-                session_id=session_id,
-                message={"role": "user", "content": prompt, "profile_id": profile_id},
-                source_device_id=None,
-            )
-            if title:
-                await sync_engine.broadcast_session_updated(
-                    session_id=session_id,
-                    updates={"title": title},
-                    source_device_id=None,
-                )
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"Failed to broadcast first message: {e}")
-
-        # 3. Submit a durable ``source=worktree`` turn. NO worktree_id — the spawn
-        #    path resolves cwd via the origin resolver off sessions.branch +
-        #    project_v2_id (materializing the same checkout idempotently).
+        # Submit a durable ``source=worktree`` turn. NO worktree_id — the spawn
+        # path resolves cwd via the origin resolver off sessions.branch +
+        # project_v2_id (materializing the same checkout idempotently).
         try:
             from app.core import turn_manager
             turn_manager.submit(

@@ -655,6 +655,13 @@ class SessionRuntime:
                 broadcast_func=self._broadcast,
                 api_user_id=self.api_user_id,
                 user_id=self.user_id,
+                # Cross-install uploads (D8). The lifting install put the blob
+                # ids on the turn payload; the pump materializes them into the
+                # resolved working dir and rewrites the prompt. Absent for every
+                # locally-sent turn (the files are already on this disk).
+                upload_blob_ids=(self.turn.get("payload") or {}).get(
+                    "upload_blob_ids"
+                ),
             ):
                 await recorder.on_event(event)
                 etype = event.get("type") if isinstance(event, dict) else None

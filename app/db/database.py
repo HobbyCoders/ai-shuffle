@@ -184,7 +184,12 @@ def _safe_json(value):
 #     Hidden rows remain fully fetchable by id. Additive/nullable with no
 #     index, same discipline as sessions.mode; lands via the always-run
 #     guarded ADD COLUMN in _run_column_migrations.
-SCHEMA_VERSION = 75
+#   v76 git_ops + upload_blobs — the durable cross-install git-operation queue
+#     (D5) and the DB-mediated upload delivery blobs (D8). Both are NEW tables
+#     created idempotently by the guarded blocks in _run_column_migrations, so
+#     an upgrade from any older version lands them without needing the bootstrap
+#     path to fire.
+SCHEMA_VERSION = 76
 
 
 def _migrate_profiles_to_agents(cursor):
@@ -1533,6 +1538,55 @@ def _run_column_migrations(cursor):
     # via guarded DROP+CREATE rather than ALTER INDEX: SQLite (the test pg_shim)
     # has no ALTER INDEX ... RENAME, and DROP/CREATE IF [NOT] EXISTS is
     # equivalent and idempotent on both backends.
+    # git_ops (v76) — the durable cross-install git-operation queue (D5). Each
+    # install's claim loop polls for rows targeted at itself and flips
+    # queued -> running with a single conditional UPDATE. Idempotent so upgrades
+    # from any older version land the table without needing the SCHEMA_VERSION
+    # bump to fire the bootstrap path (same defensive pattern as the
+    # background_tasks / v2-core blocks above).
+    if not table_exists(cursor, "git_ops"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS git_ops (
+                id TEXT PRIMARY KEY,
+                runner_id TEXT NOT NULL,
+                project_v2_id TEXT,
+                op TEXT NOT NULL,
+                params JSONB NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'queued',
+                result JSONB,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        migrations_applied.append("git_ops")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_git_ops_runner_status "
+        "ON git_ops(runner_id, status)"
+    )
+
+    # upload_blobs (v76) — DB-mediated cross-install upload delivery (D8),
+    # modeled on note_attachments (bytes in the shared DB are the source of
+    # truth; local disk is a cache). Same idempotent guard as git_ops above.
+    if not table_exists(cursor, "upload_blobs"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS upload_blobs (
+                id TEXT PRIMARY KEY,
+                project_v2_id TEXT,
+                session_id TEXT,
+                source_path TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                size BIGINT NOT NULL DEFAULT 0,
+                data BYTEA,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                materialized_at TIMESTAMP WITH TIME ZONE
+            )
+        """)
+        migrations_applied.append("upload_blobs")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_upload_blobs_session "
+        "ON upload_blobs(session_id)"
+    )
+
     if (
         table_exists(cursor, "sessions")
         and column_exists(cursor, "sessions", "is_favorite")
@@ -1635,6 +1689,26 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
                 results[f"cleaned_{table}"] = cursor.rowcount
             except Exception as e:
                 results[f"cleaned_{table}"] = f"error: {e}"
+
+        # 2a. Cross-install carrier tables (D5/D8). Both are transport, not
+        # history: a terminal git_op has already been executed and its result
+        # read, and an upload blob is materialized (data NULLed) at spawn. The
+        # 7-day cutoff bounds growth without touching in-flight work —
+        # queued/running ops are never swept, only done/error rows.
+        try:
+            cursor.execute(
+                "DELETE FROM git_ops WHERE status IN ('done', 'error') "
+                "AND updated_at < %s",
+                (cutoff_7d,),
+            )
+            results["cleaned_git_ops"] = cursor.rowcount
+        except Exception as e:
+            results["cleaned_git_ops"] = f"error: {e}"
+        try:
+            cursor.execute("DELETE FROM upload_blobs WHERE created_at < %s", (cutoff_7d,))
+            results["cleaned_upload_blobs"] = cursor.rowcount
+        except Exception as e:
+            results["cleaned_upload_blobs"] = f"error: {e}"
 
         # 2b. Notifications retention: drop anything older than 30 days, then cap
         # each user to the most recent N rows so the table can't grow unbounded.
@@ -1765,6 +1839,7 @@ from app.db.sessions import (  # noqa: F401
     set_session_hidden,
     set_session_parked_task_kind,
     adopt_session,
+    adopt_session_follow,
     set_session_project,
     set_session_branch,
     session_has_forks,

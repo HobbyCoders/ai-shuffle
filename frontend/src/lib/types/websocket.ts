@@ -37,6 +37,20 @@ export interface WsClientQuery {
 	};
 	worktree_id?: string | null;
 	/**
+	 * Composer device pick: create this session on another install (its
+	 * instance_id). Honored for NEW sessions only — the server drops it when
+	 * `session_id` names an existing session.
+	 */
+	target_instance_id?: string;
+	/**
+	 * Absolute paths of the staged upload files this prompt references. Used only
+	 * when the turn ends up running on ANOTHER install: the server lifts those
+	 * files into durable upload blobs and the executing install materializes
+	 * them into the session working dir, rewriting the prompt's paths. Ignored
+	 * for a turn that runs locally — the files are already on that disk.
+	 */
+	upload_paths?: string[];
+	/**
 	 * "Send now": set when this query is the replacement fired right after an
 	 * `interrupt_for_query` was confirmed. Tells the server the origin socket may
 	 * have dropped during the interrupt drain, so a failed `start` frame must not

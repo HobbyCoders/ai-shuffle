@@ -20,7 +20,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 75
+SCHEMA_VERSION = 76
 
 
 def create_postgres_schema(cursor) -> None:
@@ -1721,6 +1721,66 @@ def create_postgres_schema(cursor) -> None:
     )
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_turns_session_state ON turns(session_id, state)"
+    )
+
+    # ------------------------------------------------------------------
+    # 57. git_ops — the durable cross-install git-operation queue (D5).
+    #
+    # An *op* is one unit of git work targeted at ONE install (``runner_id`` =
+    # that install's ``effective_instance_id``). The serving install writes a
+    # ``queued`` row; the target's git-ops claim loop flips it to ``running``
+    # with a single conditional UPDATE (losers get nothing), executes it, and
+    # records ``done``/``error`` + ``result``. First op: ``ensure_worktree``
+    # with ``params {branch, base_branch, create_new_branch}`` — the durable
+    # carrier of the caller's create-new-branch intent, which is why the spawn
+    # path claims a matching queued op INLINE before failing a branch session.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS git_ops (
+            id TEXT PRIMARY KEY,
+            runner_id TEXT NOT NULL,
+            project_v2_id TEXT,
+            op TEXT NOT NULL,
+            params JSONB NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'queued',
+            result JSONB,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_git_ops_runner_status "
+        "ON git_ops(runner_id, status)"
+    )
+
+    # ------------------------------------------------------------------
+    # 58. upload_blobs — cross-install upload delivery (D8).
+    #
+    # Modeled on ``note_attachments``: the bytes in shared Postgres are the
+    # source of truth, local disk is a cache. At SEND time a turn placed on
+    # another install lifts the staged upload files referenced by the prompt
+    # into these rows; the executing install materializes them into the session
+    # working dir, rewrites the prompt (``source_path`` -> local path), and
+    # NULLs ``data``. ``source_path`` is the UPLOADER-absolute path exactly as
+    # embedded in the prompt, which is what makes the rewrite an exact-string
+    # replacement. A sweeper drops rows older than 7 days.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS upload_blobs (
+            id TEXT PRIMARY KEY,
+            project_v2_id TEXT,
+            session_id TEXT,
+            source_path TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            size BIGINT NOT NULL DEFAULT 0,
+            data BYTEA,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            materialized_at TIMESTAMP WITH TIME ZONE
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_upload_blobs_session "
+        "ON upload_blobs(session_id)"
     )
 
     # ==================================================================

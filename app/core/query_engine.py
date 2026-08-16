@@ -1861,7 +1861,8 @@ async def _stream_to_websocket_impl(
     overrides: Optional[Dict[str, Any]] = None,
     broadcast_func: Optional[callable] = None,
     api_user_id: Optional[str] = None,
-    user_id: Optional[str] = None
+    user_id: Optional[str] = None,
+    upload_blob_ids: Optional[List[str]] = None,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Stream Claude response directly to WebSocket.
@@ -1887,6 +1888,11 @@ async def _stream_to_websocket_impl(
         api_user_id: Optional API user ID for user-specific credential resolution
         user_id: Optional user ID for user-level broadcasts (e.g. lighting up the
             "awaiting input" indicator on every one of the user's devices)
+        upload_blob_ids: Durable ``upload_blobs`` ids carried by the turn (D8).
+            The uploads were staged on ANOTHER install's disk; they are
+            materialized into this session's working dir (once the cwd is
+            resolved, below) and the prompt's uploader-absolute paths are
+            rewritten to the local ones before anything reaches the engine.
     """
     # Get profile. Log at ERROR: consumers may have no surface for this yield
     # (headless path has no 'error' dispatch handler and force-cleans the live
@@ -1968,6 +1974,33 @@ async def _stream_to_websocket_impl(
     _build_opts_elapsed = time.monotonic() - _build_opts_start
     if _build_opts_elapsed > 0.5:
         logger.warning(f"[WS] build_options_from_profile took {_build_opts_elapsed:.2f}s for session {session_id}")
+
+    # Cross-install uploads (D8): the turn's blobs were lifted on the SENDING
+    # install; write them into the now-resolved working dir and rewrite the
+    # prompt's uploader-absolute paths to the local ones. Done here — after the
+    # cwd authority (build_session_options) has spoken and before the prompt
+    # reaches any engine — so there is exactly one resolved cwd in play. A
+    # failure REFUSES the turn the same way an unavailable worktree does:
+    # running with dead attachment paths is the silent loss D8 prevents.
+    if upload_blob_ids:
+        from app.core import upload_transfer
+
+        try:
+            _mapping = await asyncio.to_thread(
+                upload_transfer.materialize_blobs_for_turn,
+                list(upload_blob_ids),
+                str(getattr(options, "cwd", "") or ""),
+            )
+            prompt = upload_transfer.rewrite_prompt(prompt, _mapping)
+        except Exception as e:  # noqa: BLE001 — surface, never run with dead paths
+            logger.error(
+                f"[WS] Upload materialization failed for {session_id}: {e}"
+            )
+            yield {
+                "type": "error",
+                "message": f"Couldn't prepare this message's attachments: {e}",
+            }
+            return
 
     if existing_state and existing_state.is_connected and is_subprocess_alive(existing_state):
         # Busy-write guard backstop: a client that is mid-turn must NEVER get a

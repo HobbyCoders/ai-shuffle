@@ -28,6 +28,7 @@ from app.core.user_question_handler import user_question_handler
 from app.core.webhook_service import dispatch_session_complete, dispatch_session_error
 from app.db import database
 from app.db.async_database import run_sync
+from app.db.sessions import SessionRow
 from app.api.worktree_session_meta import enrich_session_worktree_meta
 from app.api.ws_utils import safe_ws_send, WSPayloadEncodeError
 
@@ -519,6 +520,168 @@ class ChatWebSocketHandler:
     # handle_query
     # ------------------------------------------------------------------
 
+    async def _try_auto_adopt(
+        self, session_id: str, session_row: "SessionRow"
+    ) -> bool:
+        """Take ownership of a remotely-owned session so THIS send runs locally.
+
+        Sending from a second device is the user saying "continue here", so a
+        session that merely INHERITED its owner (raw ``placement`` NULL — the
+        A11 implicit pin) follows them. Guards, all required:
+
+          * raw ``placement`` is NULL/blank — an explicit ``{"where": …}`` is a
+            deliberate placement (composer device pick, /move, /adopt, a claim
+            pin) and is NEVER overridden here;
+          * no live run — never wrestle an in-flight turn away from its owner
+            (same rule the /adopt endpoint enforces);
+          * the project's base checkout exists HERE, or the session has no
+            project — otherwise the turn would spawn against a path that does
+            not exist on this disk.
+
+        The write is ``adopt_session_follow`` (instance_id only, no pin) so the
+        session stays freely adoptable by the next device. Returns True when the
+        turn should now run locally; False — for a failed guard OR any error —
+        leaves the caller on today's remote-dispatch path (fail-open).
+        """
+        me = settings.effective_instance_id
+        try:
+            from app.core import placement as placement_mod
+
+            # Reuse the resolver's own normalizer: Postgres JSONB hands back a
+            # dict, the SQLite test shim a JSON string.
+            if placement_mod._normalize_placement(session_row.get("placement")):
+                return False
+
+            from app.core import streaming_status
+
+            if await run_sync(streaming_status.has_active_run, session_id):
+                return False
+
+            if session_row.get("project_v2_id") or session_row.get("project_id"):
+                from app.core import project_resolver
+
+                has_base = await run_sync(
+                    project_resolver.has_local_base_checkout, session_row, me
+                )
+                if not has_base:
+                    return False
+
+            updated = await run_sync(
+                database.adopt_session_follow, session_id, me
+            )
+            if not updated:
+                return False
+        except Exception:  # noqa: BLE001 — auto-adopt is an optimization only
+            logger.debug(
+                "Auto-adopt skipped for session %s — dispatching remotely",
+                session_id, exc_info=True,
+            )
+            return False
+
+        # Keep the caller's copy of the row consistent with what was just
+        # written, so anything reading it downstream sees the new owner.
+        session_row["instance_id"] = me
+        logger.info(
+            "Auto-adopted session %s on send (owner -> %s, placement left NULL)",
+            session_id, me,
+        )
+        return True
+
+    async def _validate_target_install(
+        self, target_instance_id: str, project_id: Optional[str]
+    ) -> bool:
+        """Preflight the composer's device pick for a NEW session.
+
+        Mirrors the ``POST /sessions/{id}/move`` preflight — the target must be
+        a registered install that is online, and (when the session carries a
+        project) must have that project checked out, or the very first send
+        would die on a path that does not exist there. The project half fails
+        OPEN on resolver trouble, exactly like /move: a preflight bug must not
+        make a usable device unpickable. Sends the refusal frame itself and
+        returns False when the pick cannot be honored.
+        """
+        async def _refuse(message: str) -> bool:
+            await self.send_json({"type": "error", "message": message})
+            return False
+
+        install = await run_sync(database.get_install, target_instance_id)
+        if not install:
+            return await _refuse("Unknown device — pick another device.")
+        device = install.get("device_name") or target_instance_id
+        if not install.get("online"):
+            return await _refuse(
+                f"{device} is offline. Bring it online or pick another device."
+            )
+
+        if project_id:
+            from app.core import project_resolver
+            from app.core.placement import capable_runners
+
+            try:
+                resolved = await run_sync(
+                    project_resolver.resolve_project_v2, {"project_id": project_id}
+                )
+                project_v2_id = (resolved or {}).get("id")
+                if project_v2_id and target_instance_id not in await run_sync(
+                    capable_runners, project_v2_id, {}
+                ):
+                    return await _refuse(
+                        f"This project isn't checked out on {device} yet. Open "
+                        "the project there once (or clone it), then try again."
+                    )
+            except Exception:  # noqa: BLE001 — fail open on resolver trouble
+                logger.warning(
+                    "Device-pick preflight errored for project %s on %s; "
+                    "proceeding fail-open", project_id, target_instance_id,
+                    exc_info=True,
+                )
+        return True
+
+    async def _lift_uploads(
+        self,
+        upload_paths: List[str],
+        project_id: Optional[str],
+        session_id: str,
+    ) -> List[str]:
+        """Lift this send's staged uploads into durable blobs (D8).
+
+        Raises ``UploadLiftError`` (or anything the DB layer raises) so the
+        caller can refuse the send — never returns partial results.
+        """
+        from app.core import upload_transfer
+
+        if not project_id:
+            raise upload_transfer.UploadLiftError(
+                "Attachments can only be sent to another device from a project "
+                "session."
+            )
+        project = await run_sync(database.get_project, project_id)
+        if not project:
+            raise upload_transfer.UploadLiftError(
+                f"Project not found: {project_id}"
+            )
+        project_v2_id = None
+        try:
+            from app.core import project_resolver
+
+            resolved = await run_sync(
+                project_resolver.resolve_project_v2,
+                {"project_id": project_id, "id": session_id},
+            )
+            project_v2_id = (resolved or {}).get("id")
+        except Exception:  # noqa: BLE001 — the v2 id is bookkeeping, not a gate
+            logger.debug(
+                "Upload lift: project_v2 resolve failed for %s", project_id,
+                exc_info=True,
+            )
+        return await run_sync(
+            upload_transfer.lift_paths_to_blobs,
+            upload_paths,
+            project,
+            session_id,
+            project_v2_id,
+        )
+
     async def handle_query(self, data: dict) -> None:
         """Handle 'query' message type."""
 
@@ -534,6 +697,18 @@ class ChatWebSocketHandler:
         # drain) unparking on the shared device socket during its awaiting window.
         # Only meaningful for a new session (session_id is None); ignored otherwise.
         request_id = data.get("request_id")
+        # Composer device pick: run this NEW session on another install. Only
+        # honored at creation — an existing session's placement is settled, so
+        # the key is dropped rather than allowed to silently re-route history.
+        target_instance_id = (data.get("target_instance_id") or "").strip() or None
+        if session_id or target_instance_id == settings.effective_instance_id:
+            target_instance_id = None
+        # Staged upload paths referenced by this prompt (D8). They are absolute
+        # paths on THIS install's disk, so they only need carrying when the turn
+        # ends up running somewhere else; a local turn ignores them entirely.
+        upload_paths = [
+            p for p in (data.get("upload_paths") or []) if isinstance(p, str) and p
+        ]
 
         if not prompt:
             await self.send_json({"type": "error", "message": "Empty prompt"})
@@ -595,10 +770,27 @@ class ChatWebSocketHandler:
                     and decision.kind == "runner"
                     and decision.runner_id != settings.effective_instance_id
                 ):
-                    placed_remote = True
+                    # Sending from a device that does not own this session
+                    # ADOPTS it (ownership follows the user) when the session
+                    # was never explicitly placed. Anything in the way — an
+                    # explicit pin, a live run, a missing local checkout, an
+                    # error — leaves today's remote-dispatch behaviour intact.
+                    adopted = await self._try_auto_adopt(session_id, cloud_sess)
+                    placed_remote = not adopted
 
         # Create or get session
         if not session_id:
+            if target_instance_id:
+                # Refuse BEFORE creating anything — a session pinned to a device
+                # that cannot run it is stranded, not merely slow.
+                if not await self._validate_target_install(
+                    target_instance_id, project_id
+                ):
+                    return
+                # The session is born owned by (and pinned to) the target, so
+                # this turn hands off exactly like any remotely-placed one.
+                placed_remote = True
+
             # Create new session
             session_id = str(uuid.uuid4())
             is_new_session = True
@@ -620,6 +812,7 @@ class ChatWebSocketHandler:
                         api_user_id=self.api_user_id,
                         title=title,
                         is_active=True,
+                        target_instance_id=target_instance_id,
                         _conn=txn
                     )
                     _msg_role = "user"
@@ -791,6 +984,32 @@ class ChatWebSocketHandler:
         submit_profile_id = profile_id
         if placed_remote and submit_profile_id == "claude-code":
             submit_profile_id = None
+
+        # Uploads travel as durable blobs (D8) — but ONLY when the turn is
+        # actually leaving this install. A local turn's files are already on the
+        # disk the agent will read, so lifting them would just duplicate bytes.
+        # A lift failure FAILS THE SEND: submitting a turn whose prompt points at
+        # files the executing install cannot see is exactly the silent loss this
+        # mechanism exists to prevent.
+        if placed_remote and upload_paths:
+            try:
+                blob_ids = await self._lift_uploads(
+                    upload_paths, project_id, session_id
+                )
+            except Exception as lift_exc:  # noqa: BLE001 — refuse, never half-send
+                logger.warning(
+                    "Upload lift failed for session %s: %s", session_id, lift_exc
+                )
+                await self.send_json({
+                    "type": "error",
+                    "message": (
+                        f"Couldn't send your attachments to the other device: "
+                        f"{lift_exc}"
+                    ),
+                })
+                return
+            if blob_ids:
+                payload["upload_blob_ids"] = blob_ids
 
         turn_manager.submit(
             session_id,

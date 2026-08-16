@@ -76,6 +76,13 @@ class SessionRow(TypedDict):
     parent_session_id: Optional[str]
     fork_point_message_index: Optional[int]
     v2_stream: bool
+    # Owning install (v40). Stamped at creation — this install's
+    # ``effective_instance_id``, or the composer's device pick.
+    instance_id: Optional[str]
+    # Explicit placement (v61), e.g. ``{"where": "runner:<id>"}``. NULL means the
+    # implicit "follows its owner" default; a non-NULL value is a deliberate pin
+    # (device pick / /move / /adopt) and is never auto-overridden.
+    placement: Optional[Dict[str, Any]]
     working_set_ref: Optional[str]
     context_usage_json: Optional[Dict[str, Any]]
     provider_id: Optional[str]
@@ -441,6 +448,7 @@ def create_session(
     provider_id: Optional[str] = None,
     mode: Optional[str] = None,
     hidden: bool = False,
+    target_instance_id: Optional[str] = None,
     _conn=None
 ) -> SessionRow:
     """Create a new session
@@ -476,11 +484,21 @@ def create_session(
             wake-word "command" voice sessions are born hidden so they never
             flash into "recent sessions". List-visibility only: the row is
             still fetchable by id.
+        target_instance_id: Create this session OWNED BY another install (the
+            composer's device picker). The row is stamped with that install as
+            ``instance_id`` AND with an EXPLICIT sticky ``placement`` pin
+            (``{"where": "runner:<id>"}``), exactly like
+            :func:`pin_session_placement` writes — the user chose this device,
+            so the choice must survive sends from any other device (an implicit
+            NULL-placement pin would be auto-adoptable). ``None`` (the default)
+            keeps the pre-existing behaviour byte-for-byte: this install owns
+            the row and ``placement`` stays NULL.
         _conn: Optional existing DB connection for transaction grouping
     """
     from app.core.config import settings
     now = datetime.now(timezone.utc).isoformat()
-    instance_id = settings.effective_instance_id
+    target_instance_id = (target_instance_id or "").strip() or None
+    instance_id = target_instance_id or settings.effective_instance_id
     # Per-session provider binding (Chunk E / G2-r): resolve the profile's
     # configured provider ONCE, at creation, and stamp it into
     # sessions.provider_id. Every subsequent turn/spawn reads THIS binding (see
@@ -505,10 +523,17 @@ def create_session(
             resolved_provider_id = None
     resolved_mode = (mode or "").strip() or None
     _ph = ph()
-    _phs19 = ", ".join([_ph] * 19)
-    sql = f"""INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, v2_stream, created_at, updated_at, provider_id, mode, hidden)
-               VALUES ({_phs19})"""
-    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, True, now, now, resolved_provider_id, resolved_mode, hidden)
+    columns = ["id", "profile_id", "project_id", "title", "api_user_id", "parent_session_id", "fork_point_message_index", "worktree_id", "worktree_branch", "worktree_path", "automation_id", "instance_id", "is_active", "v2_stream", "created_at", "updated_at", "provider_id", "mode", "hidden"]
+    params = [session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, True, now, now, resolved_provider_id, resolved_mode, hidden]
+    if target_instance_id:
+        # Serialized to a JSON string (not a dict) so the SQLite test shim, which
+        # stores JSONB columns as TEXT, round-trips identically to Postgres —
+        # same handling as pin_session_placement / adopt_session.
+        columns.append("placement")
+        params.append(json.dumps({"where": f"runner:{target_instance_id}"}))
+    sql = f"""INSERT INTO sessions ({", ".join(columns)})
+               VALUES ({", ".join([_ph] * len(columns))})"""
+    params = tuple(params)
     if _conn is not None:
         cursor = get_cursor(_conn)
         cursor.execute(sql, params)
@@ -746,6 +771,36 @@ def adopt_session(session_id: str, instance_id: str) -> Optional[SessionRow]:
             f"UPDATE sessions SET instance_id = {_ph}, placement = {_ph}, "
             f"updated_at = {_ph} WHERE id = {_ph}",
             (instance_id, placement_json, now, session_id),
+        )
+        if cursor.rowcount == 0:
+            return None
+    return get_session(session_id)
+
+
+def adopt_session_follow(session_id: str, instance_id: str) -> Optional[SessionRow]:
+    """Take over a session's ownership WITHOUT pinning it (send-path auto-adopt).
+
+    The quiet counterpart of :func:`adopt_session`: the sending install becomes
+    the owner (``instance_id``) so the turn runs here, but ``placement`` is
+    deliberately LEFT ALONE. Callers only ever reach this for a session whose
+    placement is already NULL — an IMPLICIT A11 pin — so not writing one keeps
+    the session implicitly pinned to whoever last sent from it, i.e. still
+    auto-adoptable by the next device. Writing a ``runner:<id>`` pin here would
+    silently upgrade a "follows me" session into a sticky one.
+
+    ``sdk_session_id`` / ``worktree_*`` / ``cloud_branch`` stay untouched exactly
+    like ``adopt_session`` (history resumes; OD-9 keeps ``cloud_branch`` unwritten).
+    ``updated_at`` IS bumped, mirroring adopt. Returns the updated row, or
+    ``None`` if no such session exists.
+    """
+    _ph = ph()
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"UPDATE sessions SET instance_id = {_ph}, updated_at = {_ph} "
+            f"WHERE id = {_ph}",
+            (instance_id, now, session_id),
         )
         if cursor.rowcount == 0:
             return None

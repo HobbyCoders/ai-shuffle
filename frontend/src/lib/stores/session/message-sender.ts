@@ -129,13 +129,19 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 	// ─── Internal helper for worktree existing branch sessions ──────
 
-	async function startSessionOnExistingWorktree(prompt: string) {
+	async function startSessionOnExistingWorktree(prompt: string, pendingUploadPaths?: string[]) {
 		const _state = getState();
 		if (!_state.profile) { update(s => ({ ...s, error: 'Please select a profile' })); return; }
 		if (!_state.project) { update(s => ({ ...s, error: 'Please select a project' })); return; }
 		if (!_state.worktreeId) { update(s => ({ ...s, error: 'Please select an existing worktree' })); return; }
 
-		await getActiveSession().sendMessage(prompt, { skipWorktreeSetup: true });
+		// The plain WS query path carries both the device pick and the upload
+		// paths, so an existing-worktree session composes with a device choice
+		// exactly like any other send.
+		await getActiveSession().sendMessage(prompt, {
+			skipWorktreeSetup: true,
+			pendingUploadPaths,
+		});
 	}
 
 	// ─── Build overrides from state ─────────────────────────────────
@@ -203,7 +209,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// Worktree setup on first message
 			if (!options?.skipWorktreeSetup && _state.worktreeIntent === 'worktree' && !_state.sessionId && _state.messages.length === 0) {
 				if (_state.worktreeMode === 'existing' && _state.worktreeId) {
-					await startSessionOnExistingWorktree(prompt);
+					await startSessionOnExistingWorktree(prompt, options?.pendingUploadPaths);
 					return true;
 				} else if (_state.worktreeBranch) {
 					await getActiveSession().createWorktree(prompt, options?.pendingUploadPaths);
@@ -399,6 +405,14 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				profile: _state.profile,
 				project: _state.project || undefined,
 				worktree_id: _state.worktreeId || undefined,
+				// Composer device pick. Creation-time only: the backend ignores it
+				// for an existing session.
+				target_instance_id: _state.deviceIntent?.id || undefined,
+				// Staged upload paths this prompt references (D8). The backend
+				// only acts on them when the turn is placed on another install.
+				upload_paths: options?.pendingUploadPaths?.length
+					? options.pendingUploadPaths
+					: undefined,
 				// Adoption token — present only for a new-session query (see requestId).
 				// The backend echoes it in session_created + the first start frame.
 				request_id: requestId || undefined,
@@ -421,6 +435,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				}));
 				return false;
 			}
+			// The pick is spent: the session now exists and its row carries the
+			// ownership, so follow-up sends must not re-assert a target. (Left
+			// intact on a failed send so a retry still goes to the chosen device.)
+			if (_state.deviceIntent) update(s => ({ ...s, deviceIntent: null }));
 			return true;
 		},
 
@@ -489,7 +507,14 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					profile_id: queryProfileId,
 					create_new_branch: _state.worktreeCreateNewBranch,
 					pending_upload_paths: pendingUploadPaths?.length ? pendingUploadPaths : undefined,
+					// Composer device pick composes with the worktree checkbox: the
+					// target install materializes the checkout itself (durable git-ops
+					// queue) and the uploads travel as DB blobs.
+					target_instance_id: _state.deviceIntent?.id || undefined,
 				});
+
+				// The pick is spent once the session row carries the ownership.
+				if (_state.deviceIntent) update(s => ({ ...s, deviceIntent: null }));
 
 				appData.loadSessions();
 				appData.loadApiUserSessions();
@@ -507,6 +532,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							session_id: response.session_id,
 							profile: queryProfileId,
 							project: projectId,
+							upload_paths: pendingUploadPaths?.length ? pendingUploadPaths : undefined,
 						});
 					}
 					return;
@@ -538,11 +564,19 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							session_id: response.session_id,
 							profile: queryProfileId,
 							project: projectId,
+							upload_paths: pendingUploadPaths?.length ? pendingUploadPaths : undefined,
 						});
 						return;
 					}
 
-					getActiveSession().sendMessage(prompt, { skipWorktreeSetup: true });
+					// The POST created the session but carried no prompt, so it had no
+					// turn to attach uploads to — this follow-up query is that turn.
+					// Locally the files are already in the checkout and the backend
+					// ignores the list; on a remote target it lifts them into blobs.
+					getActiveSession().sendMessage(prompt, {
+						skipWorktreeSetup: true,
+						pendingUploadPaths,
+					});
 				}
 			} catch (error) {
 				if (creationGen !== internal.worktreeCreationGeneration) return;
@@ -572,6 +606,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			const modelOverrideSnap = _state.modelOverride;
 			const permissionModeOverrideSnap = _state.permissionModeOverride;
 			const effortLevelOverrideSnap = _state.effortLevelOverride;
+			const deviceIntentSnap = _state.deviceIntent;
 			const userMsgId = `user-${Date.now()}`;
 
 			const creationGen = internal.worktreeCreationGeneration;
@@ -638,7 +673,13 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					prompt,
 					overrides: Object.keys(overridesPayload).length > 0 ? overridesPayload : undefined,
 					pending_upload_paths: pendingUploadPaths?.length ? pendingUploadPaths : undefined,
+					// Composer device pick composes with the worktree checkbox (see
+					// createWorktree above).
+					target_instance_id: deviceIntentSnap?.id || undefined,
 				}, { keepalive: true });
+
+				// The pick is spent once the session row carries the ownership.
+				if (deviceIntentSnap) update(s => ({ ...s, deviceIntent: null }));
 
 				appData.loadSessions();
 				appData.loadApiUserSessions();

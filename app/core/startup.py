@@ -641,6 +641,13 @@ def install_v2_turns_wiring() -> None:
 
     turn_claim.start()
 
+    # Cross-install git-ops claim loop (D5). Poll-only (no NOTIFY wiring — the
+    # spawn path's inline claim covers the one latency-critical case), so it is
+    # a separate loop from turn_claim rather than a second pass inside it.
+    from app.core import git_ops_runner
+
+    git_ops_runner.start()
+
     # Pending-interaction expiry sweeper (V2 Phase 4, Q4-4) — dedicated ~10s
     # loop that flips lapsed permission/question rows to ``expired`` and wakes
     # their waiters. Belt to the in-process waiter's own local deadline
@@ -689,6 +696,17 @@ async def shutdown_services() -> None:
         if turn_claim_mod is not None:
             await turn_claim_mod.stop()
             logger.info("V2 turn-claim loop stopped")
+    except Exception:
+        pass
+
+    # Stop the git-ops claim loop alongside it — a pass racing teardown could
+    # otherwise start a git worktree add mid-shutdown. Looked up via sys.modules
+    # so a process that never started it stays import-free here too.
+    try:
+        git_ops_mod = sys.modules.get("app.core.git_ops_runner")
+        if git_ops_mod is not None:
+            await git_ops_mod.stop()
+            logger.info("Git-ops claim loop stopped")
     except Exception:
         pass
 

@@ -118,6 +118,7 @@ function mockState(): ActiveSessionState {
 		scrollTop: 0,
 		streamStartTime: null,
 		worktreeIntent: 'local',
+	deviceIntent: null,
 		worktreeBranch: '',
 		worktreeBaseBranch: '',
 		worktreeCreateNewBranch: true,

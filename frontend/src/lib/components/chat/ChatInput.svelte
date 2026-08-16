@@ -338,11 +338,15 @@
 		const editingId = get(queuedMessageEdit)?.id ?? null;
 		queuedMessageEdit.set(null);
 
-		// Collect pending upload paths before clearing state — needed for auto-worktree
-		// to migrate files from main project to the new worktree directory.
+		// Collect the staged upload paths this message references, BEFORE the
+		// composer state is cleared below. Two consumers, both server-side:
+		// auto-worktree migrates them into the new worktree directory, and a turn
+		// placed on another device lifts them into durable upload blobs. Neither
+		// applies to a plain local turn — the backend simply ignores the list
+		// then — so they are always collected and the decision is made there.
 		// Extract from both uploadedFiles (legacy) and inline file chips in the editor.
 		let pendingPaths: string[] | undefined;
-		if ($activeSession.worktreeIntent === 'worktree' && !$activeSession.worktreeId) {
+		{
 			const chipPaths = editorRef?.getEditor()
 				? extractFileChips(editorRef.getEditor()!).map(c => c.fullPath).filter(Boolean)
 				: [];

@@ -47,7 +47,7 @@ import { ensureModelRegistryHydrated } from '$lib/constants/models.svelte';
 // Shared types
 import type {
 	ChatMessage, MessageType,
-	QueuedMessage, ExecutionMode, Task
+	QueuedMessage, ExecutionMode, DeviceIntent, Task
 } from './types';
 
 // ─── Module-Level Exports ────────────────────────────────────────────────────
@@ -150,6 +150,11 @@ export interface ActiveSessionState {
 	 *  worktree fields (contrast with the existing-session worktree-ness checks
 	 *  elsewhere, which read worktreeId/worktreeBranch directly). */
 	worktreeIntent: ExecutionMode;
+	/** Compose-time device pick for a NEW session — `null` = this device.
+	 *  Mutually exclusive with worktreeIntent 'worktree' (a worktree is created
+	 *  on local disk), and cleared as soon as the query is sent: the session row
+	 *  itself then carries the ownership. */
+	deviceIntent: DeviceIntent | null;
 	worktreeBranch: string;
 	worktreeBaseBranch: string;
 	worktreeCreateNewBranch: boolean;
@@ -251,6 +256,8 @@ function defaultState(): ActiveSessionState {
 		scrollTop: 0,
 		streamStartTime: null,
 		worktreeIntent: getPersistedWorktreeIntent(),
+		// Never restored from a preference: every new chat starts on this device.
+		deviceIntent: null,
 		worktreeBranch: '',
 		worktreeBaseBranch: 'main',
 		worktreeCreateNewBranch: false,
@@ -711,6 +718,8 @@ export const activeSession = {
 			// Keep the user's preferred mode; only the project-specific worktree
 			// selection below is reset since it doesn't apply to the new project.
 			worktreeIntent: getPersistedWorktreeIntent(),
+			// The picked device was validated against the OLD project's checkout.
+			deviceIntent: null,
 			worktreeBranch: '',
 			worktreeBaseBranch: 'main',
 			worktreeCreateNewBranch: false,
@@ -778,6 +787,17 @@ export const activeSession = {
 			worktreeIntent: mode,
 		}));
 	},
+	/**
+	 * Pick the device a NEW session runs on (`null` = this device).
+	 *
+	 * Deliberately NOT persisted anywhere durable (contrast with
+	 * setWorktreeIntent's localStorage preference): a device pick applies to the
+	 * chat being composed, never to the next one.
+	 */
+	setDeviceIntent(intent: DeviceIntent | null) {
+		_update(s => ({ ...s, deviceIntent: intent }));
+	},
+
 	setWorktreeBranch(branch: string) { _update(s => ({ ...s, worktreeBranch: branch })); },
 	setWorktreeBaseBranch(branch: string) { _update(s => ({ ...s, worktreeBaseBranch: branch })); },
 	setWorktreeMode(mode: 'new' | 'existing') { _update(s => ({ ...s, worktreeMode: mode })); },

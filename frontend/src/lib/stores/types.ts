@@ -136,3 +136,19 @@ export interface Project {
 
 // Execution mode for chat sessions
 export type ExecutionMode = 'local' | 'worktree';
+
+/**
+ * The device a NEW session should be created on, chosen in the composer.
+ * `null` (the absence of an intent) means "this device" — the default.
+ *
+ * Creation-time only: the picked install is stamped onto the session row, so
+ * this is cleared once the query is sent. Deliberately never persisted to
+ * localStorage — a one-off "run this one over there" must not silently become
+ * the default device for every future chat.
+ */
+export interface DeviceIntent {
+	/** Target install id (= instance_id). */
+	id: string;
+	/** Friendly device name, for the pill label. */
+	name: string;
+}

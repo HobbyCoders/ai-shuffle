@@ -171,6 +171,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			permissionModeOverride: state.permissionModeOverride,
 			effortLevelOverride: state.effortLevelOverride,
 			worktreeIntent: state.worktreeIntent,
+			deviceIntent: state.deviceIntent,
 			worktreeId: state.worktreeId,
 			worktreeBranch: state.worktreeBranch,
 			worktreeBaseBranch: state.worktreeBaseBranch,
@@ -429,6 +430,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			effortLevelOverride: ephemeral?.effortLevelOverride ?? null,
 			// Worktree fields: ephemeral > worktreeInfo from session list > safe defaults
 			worktreeIntent: ephemeral?.worktreeIntent ?? worktreeInfo?.worktreeIntent ?? 'local',
+			// Compose-time only: an existing session's device is already settled
+			// on its row, so a cache miss means "no pick" rather than a default.
+			deviceIntent: ephemeral?.deviceIntent ?? null,
 			worktreeId: ephemeral?.worktreeId ?? worktreeInfo?.worktreeId ?? null,
 			worktreeBranch: ephemeral?.worktreeBranch ?? worktreeInfo?.worktreeBranch ?? '',
 			worktreeBaseBranch: ephemeral?.worktreeBaseBranch ?? 'main',
@@ -596,6 +600,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			streamStartTime: null,
 			// Restore the user's last-toggled mode (Local/Worktree) for new chats
 			worktreeIntent: getPersistedWorktreeIntent(),
+			// The device pick rides the new-chat draft's ephemeral entry (memory
+			// only) — restored alongside the draft, never from a preference.
+			deviceIntent: newChatEphemeral?.deviceIntent ?? null,
 			worktreeBranch: '',
 			worktreeBaseBranch: 'main',
 			worktreeCreateNewBranch: false,

@@ -194,6 +194,102 @@ class WorktreeUnavailableError(Exception):
         )
 
 
+def _claim_and_run_pending_checkout(
+    project_v2: Dict[str, Any], branch: Optional[str]
+) -> bool:
+    """Spawn-path inline claim of a queued ``ensure_worktree`` git op (D5).
+
+    Returns True when an op for (this runner, this project, this branch) was
+    found, won, and executed successfully — meaning a retry of ``resolve_cwd``
+    is worth attempting. Returns False for "nothing queued", "someone else won
+    the claim", or "the op failed"; every one of those leaves the caller on its
+    normal refusal path.
+
+    Never raises: a bug here must degrade to the honest
+    ``WorktreeUnavailableError``, never to an opaque spawn crash.
+    """
+    if not branch:
+        return False
+    try:
+        from app.core import git_ops_runner
+        from app.core.config import settings as _settings
+        from app.db import git_ops as git_ops_db
+
+        me = _settings.effective_instance_id
+        pending = git_ops_db.find_queued(
+            me, project_v2.get("id"), "ensure_worktree", branch=branch
+        )
+        if pending is None:
+            return False
+        claimed = git_ops_db.claim_op(pending["id"], me)
+        if claimed is None:
+            # The git-ops loop got there first; it is materializing the checkout
+            # right now. Refuse this turn honestly rather than double-running
+            # ``git worktree add`` against the same path.
+            return False
+        # This is the EXPECTED path for a session created from another device,
+        # so it is announced as ordinary work (INFO) before it runs — not as the
+        # aftermath of a failure.
+        logger.info(
+            "Materializing worktree via queued ensure_worktree op %s (branch %s)",
+            claimed["id"], branch,
+        )
+        try:
+            result = git_ops_runner.execute_ensure_worktree(claimed)
+        except Exception as exc:  # noqa: BLE001 — the failure belongs on the row
+            logger.warning(
+                "Inline ensure_worktree claim failed for branch %s: %s", branch, exc
+            )
+            git_ops_db.fail_op(claimed["id"], str(exc))
+            return False
+        git_ops_db.complete_op(claimed["id"], result)
+        logger.info(
+            "Queued ensure_worktree op %s materialized branch %s -> %s",
+            claimed["id"], branch, result.get("path"),
+        )
+        return True
+    except Exception:  # noqa: BLE001 — degrade to the normal refusal path
+        logger.warning(
+            "Inline git-op claim errored for branch %s", branch, exc_info=True
+        )
+        return False
+
+
+def _rescue_pending_checkout(session_row: Dict[str, Any]) -> bool:
+    """Pre-flight half of the D5 race guard: materialize this session's checkout
+    from a queued ``ensure_worktree`` op BEFORE the cwd resolver runs.
+
+    Running first matters for the logs, not the outcome: letting
+    ``resolve_cwd`` try and fail first records the checkout as "branch … not
+    materializable on this runner" — a WARNING for the case that is about to
+    succeed. The probe is one small indexed read, and a spawn with nothing
+    queued (the overwhelming majority) pays only that, resolving the project
+    only once an op is actually waiting.
+
+    Never raises: any trouble here simply leaves the post-resolve guard —
+    unchanged, still the authority on refusing — to run as before.
+    """
+    try:
+        branch = session_row.get("branch") or session_row.get("worktree_branch")
+        if not branch:
+            return False
+        from app.core import project_resolver
+        from app.db import git_ops as git_ops_db
+
+        probe = git_ops_db.find_queued(
+            settings.effective_instance_id, None, "ensure_worktree", branch=branch
+        )
+        if probe is None:
+            return False
+        project_v2 = project_resolver.resolve_project_v2(session_row)
+        if project_v2 is None:
+            return False
+        return _claim_and_run_pending_checkout(project_v2, branch)
+    except Exception:  # noqa: BLE001 — degrade to the post-resolve guard
+        logger.warning("Pending-checkout pre-flight errored", exc_info=True)
+        return False
+
+
 # Operating guidance appended to the system prompt when computer-use is active.
 COMPUTER_USE_GUIDANCE = (
     "## Computer use\n"
@@ -396,6 +492,17 @@ def build_options_from_profile(
 
         from app.core import project_resolver
 
+        # RACE GUARD (D5), first half. A branch session created FROM ANOTHER
+        # DEVICE arrives with a queued ``ensure_worktree`` op instead of a
+        # materialized checkout, and its first turn can be claimed before the
+        # git-ops loop's next 5s tick. Run that op HERE, so the expected remote
+        # path materializes the checkout instead of tripping the resolver's
+        # not-materializable warning on the way to the same result. Nothing
+        # queued → no-op; the post-resolve guard below still covers ops that
+        # appear after this point.
+        if session_row:
+            _rescue_pending_checkout(session_row)
+
         v2_cwd = project_resolver.resolve_cwd(session_row) if session_row else None
         if v2_cwd is not None:
             working_dir = v2_cwd
@@ -436,19 +543,48 @@ def build_options_from_profile(
                 row = session_row or {}
                 branch = row.get("branch") or row.get("worktree_branch")
                 if branch or row.get("worktree_id") or row.get("worktree_path"):
-                    raise WorktreeUnavailableError(
-                        session_id,
-                        branch_name=branch,
-                        reason=(
-                            "its checkout is not materialized on this device "
-                            "(or could not be prepared — see server logs)"
-                        ),
+                    # RACE GUARD (D5). A branch session created FROM ANOTHER
+                    # DEVICE leaves a queued ``ensure_worktree`` git op for us
+                    # instead of a materialized checkout, and its first turn can
+                    # be claimed before the git-ops loop's next 5s tick. That op
+                    # row is the DURABLE CARRIER of the caller's
+                    # ``create_new_branch`` intent — a brand-new branch exists
+                    # nowhere yet, so failing here would strand the session
+                    # permanently rather than merely delay it. Claim and execute
+                    # the matching op INLINE (the claim is the same conditional
+                    # UPDATE the loop uses, so exactly one of us ever runs it),
+                    # then retry cwd resolution ONCE.
+                    retry_cwd = None
+                    if session_row and _claim_and_run_pending_checkout(
+                        project_v2, branch
+                    ):
+                        retry_cwd = project_resolver.resolve_cwd(session_row)
+                    if retry_cwd is None:
+                        raise WorktreeUnavailableError(
+                            session_id,
+                            branch_name=branch,
+                            reason=(
+                                "its checkout is not materialized on this device "
+                                "(or could not be prepared — see server logs)"
+                            ),
+                        )
+                    working_dir = retry_cwd
+                    working_dir_source = "project-v2"
+                    execution_mode = "worktree"
+                    base_branch = "main"
+                    try:
+                        wt_row = database.get_worktree_by_session(session_id)
+                        if wt_row and wt_row.get("base_branch"):
+                            base_branch = wt_row["base_branch"]
+                    except Exception:  # noqa: BLE001 — best-effort enrichment
+                        pass
+                    worktree_info = {"branch": branch, "base_branch": base_branch}
+                else:
+                    raise ValueError(
+                        f"This session's project is not checked out on this device "
+                        f"(project '{project_v2.get('name') or project_v2.get('origin')}'). "
+                        f"Clone the repository here and open the project, then try again."
                     )
-                raise ValueError(
-                    f"This session's project is not checked out on this device "
-                    f"(project '{project_v2.get('name') or project_v2.get('origin')}'). "
-                    f"Clone the repository here and open the project, then try again."
-                )
             elif config.get("cwd"):
                 working_dir = config.get("cwd")
                 working_dir_source = "profile config"

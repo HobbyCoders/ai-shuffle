@@ -153,6 +153,13 @@ class CreateWorktreeSessionRequest(BaseModel):
     prompt: Optional[str] = None
     overrides: Optional[dict] = None
     pending_upload_paths: Optional[List[str]] = None
+    # Composer device pick (D4). When set to another install's id the session is
+    # created PINNED to it: no local checkout is materialized, a durable
+    # ``ensure_worktree`` git op is queued for that install instead, and any
+    # ``pending_upload_paths`` travel as D8 upload blobs on the first turn. The
+    # response's ``worktree_path`` is None for a remote target — the path does
+    # not exist on this machine and never will.
+    target_instance_id: Optional[str] = None
 
 
 class WorktreeSessionResponse(BaseModel):

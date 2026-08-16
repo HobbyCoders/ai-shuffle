@@ -1,17 +1,14 @@
 /**
- * Behavior tests for the SessionsBoard action rail — specifically the inline
- * Resume / Fork icon buttons that replaced the old right-click context menu.
+ * Behavior tests for the SessionsBoard action rail — the inline Fork / Rename /
+ * Active-toggle / Delete icon buttons that replaced the old right-click context
+ * menu.
  *
  * These mount the real board with its store/api dependencies mocked, then drive
  * the rail buttons that appear on every session row. Covered:
- *  - Fork/Active-toggle/Delete render on every row; Resume renders ONLY on remote
- *    (cross-install) rows — a local row's own click already opens it, so a
- *    same-device "Open" button would be redundant and is hidden entirely
- *  - the Resume tooltip on a remote row reads "Resume here …" tagged with the
- *    owning device
+ *  - Fork/Active-toggle/Delete render on every row; no cross-device action is
+ *    offered (ownership follows the user automatically on send)
  *  - clicking Fork forks that row's session and opens the NEW one, and does NOT
  *    open the clicked row (stopPropagation) — the row click would open its own id
- *  - clicking Resume on a remote row adopts-then-opens
  *  - the state-based Active toggle: "Complete" on an active row (→ is_active=false)
  *    and "Move to Active" on an inactive row (→ is_active=true) each fires the API
  */
@@ -56,7 +53,6 @@ const mocks = vi.hoisted(() => {
 		backgroundPermissions: store<Set<string>>(new Set()),
 		isAdmin: store<boolean>(false),
 		forkSession: vi.fn(),
-		adoptSession: vi.fn(),
 		setSessionActive: vi.fn(),
 		loadSessions: vi.fn(),
 		loadProjects: vi.fn(),
@@ -100,7 +96,6 @@ vi.mock('$lib/stores/active-session', () => ({
 }));
 vi.mock('$lib/api/client', () => ({
 	forkSession: mocks.forkSession,
-	adoptSession: mocks.adoptSession,
 	api: { post: mocks.apiPost, delete: mocks.apiDelete }
 }));
 vi.mock('$lib/stores/auth.svelte', () => ({ isAdmin: mocks.isAdmin }));
@@ -133,7 +128,8 @@ function makeSession(over: AnySession = {}): AnySession {
 	};
 }
 
-// Row A: local (tooltip "Open"). Row B: remote on "Mac Studio" (tooltip "Resume here …").
+// Row A: local. Row B: owned by another install ("Mac Studio") — it renders the
+// same rail; the device only shows as a badge.
 const localSession = makeSession({ id: 'a', title: 'Local one', updated_at: '2026-07-08T12:00:00Z' });
 const remoteSession = makeSession({
 	id: 'b',
@@ -165,7 +161,6 @@ function rowFor(title: string): HTMLElement {
 beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.forkSession.mockResolvedValue({ session_id: 'forked-a' });
-	mocks.adoptSession.mockResolvedValue({ session_id: 'b', adopted: true });
 	mocks.setSessionActive.mockResolvedValue({});
 	mocks.loadSessions.mockResolvedValue(undefined);
 	mocks.clearSession.mockResolvedValue(undefined);
@@ -187,20 +182,6 @@ describe('SessionsBoard action rail', () => {
 		expect(screen.getAllByTitle('Move to Active')).toHaveLength(2);
 	});
 
-	it('hides the Resume/Open action for a same-device (local) session row', () => {
-		renderBoard();
-		const localRow = rowFor('Local one');
-		expect(localRow.querySelector('[title="Open"]')).toBeNull();
-		expect(localRow.querySelector('[title^="Resume here"]')).toBeNull();
-		// The row still carries its other actions — only Resume is gone.
-		expect(localRow.querySelector('[title="Fork session"]')).toBeTruthy();
-	});
-
-	it('shows the Resume action, tagged with the owning device, for a remote session row', () => {
-		renderBoard();
-		expect(rowFor('Remote one').querySelector('[title="Resume here (Mac Studio)"]')).toBeTruthy();
-	});
-
 	it('forks the row and opens the NEW session, without opening the clicked row', async () => {
 		const { onOpenSession } = renderBoard();
 		const fork = rowFor('Local one').querySelector('[title="Fork session"]') as HTMLElement;
@@ -211,16 +192,6 @@ describe('SessionsBoard action rail', () => {
 		await vi.waitFor(() => expect(onOpenSession).toHaveBeenCalledWith('forked-a'));
 		// stopPropagation: the row's own click (which would open 'a') never fired.
 		expect(onOpenSession).not.toHaveBeenCalledWith('a');
-	});
-
-	it('resumes a remote session by adopting it, then opening it', async () => {
-		const { onOpenSession } = renderBoard();
-		const resume = rowFor('Remote one').querySelector('[title="Resume here (Mac Studio)"]') as HTMLElement;
-
-		await fireEvent.click(resume);
-
-		expect(mocks.adoptSession).toHaveBeenCalledWith('b');
-		await vi.waitFor(() => expect(onOpenSession).toHaveBeenCalledWith('b'));
 	});
 
 	it('shows "Complete" on an active row and completing it calls the API with is_active=false', async () => {
@@ -511,15 +482,6 @@ describe('SessionsBoard armed delete confirm freezes the rail', () => {
 		expect((row.querySelector('[title="Confirm delete"]') as HTMLButtonElement).disabled).toBe(false);
 	});
 
-	it('disables the remote Resume action too while armed', async () => {
-		renderBoard();
-		await arm('Remote one');
-		const resume = rowFor('Remote one').querySelector(
-			'[title="Resume here (Mac Studio)"]'
-		) as HTMLButtonElement;
-		expect(resume.disabled).toBe(true);
-	});
-
 	it('does not open the session when a click lands on the armed row', async () => {
 		// A real browser swallows a click on a `disabled` button but can route it to
 		// the parent row; jsdom's fireEvent bypasses the disabled swallow entirely,
@@ -588,14 +550,6 @@ describe('SessionsBoard action tray open/close state', () => {
 		const fork = rowFor('Local one').querySelector('[title="Fork session"]') as HTMLElement;
 		await fireEvent.click(fork);
 		expect(isTrayOpen('Local one')).toBe(false);
-	});
-
-	it('closes the tray after Resume (on a remote row)', async () => {
-		renderBoard();
-		await openTray('Remote one');
-		const resume = rowFor('Remote one').querySelector('[title^="Resume here"]') as HTMLElement;
-		await fireEvent.click(resume);
-		expect(isTrayOpen('Remote one')).toBe(false);
 	});
 
 	it('keeps the tray open on the first Delete-session click, closes on Confirm', async () => {
