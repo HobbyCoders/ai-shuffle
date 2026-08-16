@@ -7,8 +7,8 @@
 	 * close / session switch, and folds `status` / `frame` frames into the
 	 * browser-panel store + the BrowserLiveView canvas.
 	 *
-	 * Layout: a docked, left-edge-resizable column on wide screens; a fullscreen
-	 * overlay at/under the app's 1080px handheld cutoff (JS class + CSS backstop).
+	 * Layout: a right-aligned, left-edge-resizable overlay on wide screens; a
+	 * fullscreen overlay at/under the app's 1080px handheld cutoff.
 	 */
 	import { X, Loader2, MonitorOff, Globe, PlugZap, MousePointer2 } from 'lucide-svelte';
 	import { browserPanel } from '$lib/stores/browser-panel.svelte';
@@ -199,9 +199,9 @@
 
 <style>
 	.browser-panel {
-		position: relative;
-		flex: 0 0 auto;
-		height: 100%;
+		position: absolute;
+		inset: 0 0 0 auto;
+		z-index: 20;
 		min-height: 0;
 		display: flex;
 		flex-direction: column;

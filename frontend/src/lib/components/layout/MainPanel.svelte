@@ -965,8 +965,9 @@
 		}
 	}
 
-	/* Chat + live browser panel share one flex row under the page header. */
+	/* Anchor the live browser overlay below the page header. */
 	.chat-row {
+		position: relative;
 		display: flex;
 		flex: 1;
 		min-height: 0;
