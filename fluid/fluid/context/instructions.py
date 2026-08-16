@@ -34,6 +34,9 @@ Wiring (M6 seams, now closed):
   * ``nested_instructions(path)`` — injected by ``NativeLoop._dispatch_tool``:
     a tool call touching a path whose directory carries its own instruction
     file rides those instructions into that tool result, once per session.
+  * ``discover_skills``/``discover_commands`` also surface the components of
+    enabled Claude Code plugins (``fluid.context.plugins``, ruling CE5), named
+    ``<plugin>:<component>`` and appended after the user's own.
   * ``discover_skills`` returns ``Skill`` records with ``body_loaded=False``;
     the CLI advertises name+description in the system prompt and the ``Skill``
     builtin loads a body on demand (progressive disclosure).
@@ -86,7 +89,7 @@ class Skill:
     name: str
     description: str
     path: str
-    scope: str = "project"  # "global" | "project"
+    scope: str = "project"  # "global" | "project" | "plugin"
     body_loaded: bool = False  # progressive disclosure: body read on demand
 
 
@@ -94,7 +97,7 @@ class Skill:
 class Command:
     name: str
     path: str
-    scope: str = "project"
+    scope: str = "project"  # "global" | "project" | "plugin"
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
@@ -440,13 +443,27 @@ def _skill_dirs(cwd: str | os.PathLike[str], include_global: bool) -> list[tuple
     return dirs
 
 
+def _plugin_components(cwd: str | os.PathLike[str], attr: str) -> list:
+    """Plugin-provided skills/commands (ruling CE5), or ``[]`` when plugins are
+    absent. Imported lazily: ``fluid.context.plugins`` imports this module."""
+    from fluid.context.plugins import discover_plugins
+
+    return [item for plugin in discover_plugins(cwd) for item in getattr(plugin, attr)]
+
+
 def discover_skills(
-    cwd: str | os.PathLike[str], *, include_global: bool = True
+    cwd: str | os.PathLike[str],
+    *,
+    include_global: bool = True,
+    include_plugins: bool = True,
 ) -> list[Skill]:
     """Discover ``<skills-dir>/*/SKILL.md`` and parse name+description only.
 
     Bodies are left unread (``body_loaded=False``) — progressive disclosure:
     the ``Skill`` builtin loads a body on demand.
+
+    Enabled Claude Code plugins contribute their own skills last, named
+    ``<plugin>:<skill>`` so they can never shadow a user's own (CE5).
     """
     out: list[Skill] = []
     seen: set[str] = set()
@@ -469,14 +486,26 @@ def discover_skills(
                     body_loaded=False,
                 )
             )
+    if include_plugins:
+        for skill in _plugin_components(cwd, "skills"):
+            resolved = str(Path(skill.path).resolve())
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            out.append(skill)
     return out
 
 
 def discover_commands(
-    cwd: str | os.PathLike[str], *, include_global: bool = True
+    cwd: str | os.PathLike[str],
+    *,
+    include_global: bool = True,
+    include_plugins: bool = True,
 ) -> list[Command]:
     """Discover slash-command files: ``.claude/commands/*.md`` and
-    ``.agents/commands/*.md``. The REPL executes these (``$ARGUMENTS`` substituted)."""
+    ``.agents/commands/*.md``. The REPL executes these (``$ARGUMENTS`` substituted).
+
+    Enabled plugins contribute ``<plugin>:<command>`` entries last (CE5)."""
     out: list[Command] = []
     seen: set[str] = set()
     bases: list[tuple[Path, str]] = []
@@ -494,4 +523,11 @@ def discover_commands(
                 continue
             seen.add(resolved)
             out.append(Command(name=cmd.stem, path=str(cmd), scope=scope))
+    if include_plugins:
+        for command in _plugin_components(cwd, "commands"):
+            resolved = str(Path(command.path).resolve())
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            out.append(command)
     return out

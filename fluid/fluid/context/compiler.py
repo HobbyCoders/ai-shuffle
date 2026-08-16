@@ -95,11 +95,19 @@ class CompiledPrompt:
 
 
 def skills_index(cwd: str | os.PathLike[str], *, include_global: bool = True) -> str | None:
-    """Progressive-disclosure skills listing (name + description only)."""
+    """Progressive-disclosure skills listing (name + description only).
+
+    Sorted by name (ruling CE7): the index feeds the cached prompt prefix, so
+    its order must not depend on filesystem walk order — plugin skills, which
+    arrive last from discovery, would otherwise shuffle the listing whenever a
+    plugin is installed or removed.
+    """
     skills = discover_skills(cwd, include_global=include_global)
     if not skills:
         return None
-    lines = "\n".join(f"- {s.name}: {s.description}" for s in skills)
+    lines = "\n".join(
+        f"- {s.name}: {s.description}" for s in sorted(skills, key=lambda s: s.name)
+    )
     return f"{SKILLS_HEADER}\n{lines}"
 
 

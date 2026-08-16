@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Sequence
 
@@ -68,6 +69,8 @@ from fluid.codemode.session import CodeModeSession, register_code_mode_tools
 from fluid.store.base import SessionMeta, SessionNode, SessionStore, new_id
 from fluid.tools.builtins.tool_search import render_deferred_catalog
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -198,6 +201,7 @@ class NativeLoop:
         mcp_servers: dict[str, dict[str, Any]] | None = None,
         agents: Sequence[dict[str, Any]] | None = None,
         claude_settings: bool = True,
+        claude_plugins: bool = True,
     ) -> None:
         self.provider = provider
         self.store = store
@@ -259,6 +263,12 @@ class NativeLoop:
         self.claude_settings: dict[str, Any] = {}
         if claude_settings:
             self._apply_claude_settings()
+        # Enabled Claude Code plugins (ruling CE5). Their MCP servers join the
+        # lazy-connect set below; skills/commands ride the discovery functions,
+        # and the agent definitions sit here for the host to consume.
+        self.claude_plugins: list[Any] = []
+        if claude_plugins:
+            self._apply_claude_plugins()
 
     def _apply_claude_settings(self) -> None:
         """Fold ~/.claude + project settings.json into this session.
@@ -286,6 +296,35 @@ class NativeLoop:
         rules = permission_rules(self.claude_settings)
         if rules and self.permissions is not None:
             self.permissions.rules = [*rules, *self.permissions.rules]
+
+    def _apply_claude_plugins(self) -> None:
+        """Load the user's enabled plugins and adopt their MCP servers.
+
+        The servers are merged into the lazy-connect set *before* the first turn
+        connects it, so a plugin server needs no host wiring at all (CE1). A
+        host-supplied server of the same name always wins: the app configured
+        that connection deliberately, and silently repointing it at a plugin's
+        would be a security surprise.
+
+        The settings stack is reused when this session already read it; with the
+        settings toggle off it is read here, because plugin *enablement* lives
+        in settings.json regardless of whether its permissions and env applied.
+        """
+        from fluid.context.plugins import discover_plugins
+
+        self.claude_plugins = discover_plugins(
+            self.ctx.cwd or ".", settings=self.claude_settings or None
+        )
+        for plugin in self.claude_plugins:
+            for name, cfg in plugin.mcp_servers.items():
+                if name in self._mcp_servers:
+                    log.warning(
+                        "plugin %s declares MCP server %r, which the host already "
+                        "configured — keeping the host's",
+                        plugin.ref, name,
+                    )
+                    continue
+                self._mcp_servers[name] = cfg
 
     async def _ensure_session(self) -> SessionMeta:
         if self._session is None:

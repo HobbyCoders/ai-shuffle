@@ -341,4 +341,5 @@ def build_engine(
         codemode=codemode,
         mcp_servers=config.mcp,
         claude_settings=config.claude_ecosystem.settings,
+        claude_plugins=config.claude_ecosystem.plugins,
     )

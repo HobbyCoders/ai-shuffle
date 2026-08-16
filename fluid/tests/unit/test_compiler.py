@@ -109,6 +109,53 @@ def test_project_instruction_files_injected(git_repo: Path):
     assert f"# From: {git_repo / 'AGENTS.md'}" in out
 
 
+def _skill(path: Path, name: str, description: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\nname: {name}\ndescription: {description}\n---\nBODY", encoding="utf-8")
+
+
+def test_skills_index_is_sorted_by_name(git_repo: Path, tmp_path: Path, monkeypatch):
+    """CE7: the index feeds the cached prefix, so its order must not depend on
+    the filesystem walk (or on which plugins happen to be installed)."""
+    # Plugin discovery reads ~/.claude regardless of include_global, so point
+    # HOME at an empty dir (USERPROFILE is what expanduser reads on Windows).
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "empty-home"))
+    for name in ("zulu", "alpha", "mike"):
+        _skill(git_repo / ".claude" / "skills" / name / "SKILL.md", name, f"the {name} skill")
+    idx = skills_index(git_repo, include_global=False)
+    assert idx is not None
+    listed = [line[2:].split(":")[0] for line in idx.splitlines() if line.startswith("- ")]
+    assert listed == ["alpha", "mike", "zulu"]
+
+
+def test_plugin_skills_appear_in_the_index(git_repo: Path, tmp_path: Path, monkeypatch):
+    """A skill from an enabled Claude Code plugin is advertised like any other,
+    under its ``<plugin>:<skill>`` name (CE5)."""
+    import json
+
+    home = tmp_path / "home"
+    plugin = home / ".claude" / "plugins" / "cache" / "mp" / "demoplug" / "1.0.0"
+    _skill(plugin / "skills" / "packaged" / "SKILL.md", "packaged", "from a plugin")
+    (plugin / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    (plugin / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "demoplug"}), encoding="utf-8"
+    )
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    (home / ".claude" / "settings.json").write_text(
+        json.dumps({"enabledPlugins": {"demoplug@mp": True}}), encoding="utf-8"
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    _skill(git_repo / ".claude" / "skills" / "local" / "SKILL.md", "local", "the project's own")
+
+    idx = skills_index(git_repo, include_global=False)
+    assert idx is not None
+    assert "demoplug:packaged: from a plugin" in idx
+    # Sorted by name, so the plugin entry sits where its name belongs.
+    assert idx.index("demoplug:packaged") < idx.index("local:")
+
+
 def test_skills_index_progressive_disclosure(git_repo: Path):
     skill = git_repo / ".claude" / "skills" / "demo" / "SKILL.md"
     skill.parent.mkdir(parents=True)
