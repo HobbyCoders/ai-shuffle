@@ -2,24 +2,21 @@
 
 httpx streaming POST, same shape as ``AnthropicClient``. OpenRouter speaks the
 OpenAI chat/completions wire format at a custom ``base_url``; the api key comes
-from the arg or ``OPENROUTER_API_KEY``.
+from the arg or ``OPENROUTER_API_KEY``. The streaming/retry loop is the shared
+``stream_chat_completions`` from ``fluid.providers._chat_completions``.
 """
 
 from __future__ import annotations
 
-import asyncio
 import os
 from typing import AsyncIterator
 
 import httpx
 
-from fluid.providers._retry import RETRIABLE_STATUSES, RetryPolicy
-from fluid.providers._sse import sse_events
+from fluid.providers._chat_completions import stream_chat_completions
+from fluid.providers._retry import RetryPolicy
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
-from fluid.providers.openrouter.serialize import (
-    ChatCompletionsNormalizer,
-    build_request_body,
-)
+from fluid.providers.openrouter.serialize import build_request_body
 
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -60,51 +57,12 @@ class OpenRouterClient:
             "accept": "text/event-stream",
         }
         body = build_request_body(request)
-        client = self._http or httpx.AsyncClient(timeout=self._timeout)
-        owns_client = self._http is None
-        attempt = 0
-        try:
-            while True:
-                yielded = False
-                try:
-                    async with client.stream(
-                        "POST", self._base_url, json=body, headers=headers
-                    ) as resp:
-                        if resp.status_code != 200:
-                            text = (await resp.aread()).decode(errors="replace")
-                            retriable = resp.status_code in RETRIABLE_STATUSES
-                            if retriable and attempt < self._retry.max_retries:
-                                await asyncio.sleep(self._retry.delay(
-                                    attempt, resp.headers.get("retry-after")))
-                                attempt += 1
-                                continue
-                            yield StreamChunk(
-                                "error",
-                                {
-                                    "status": resp.status_code,
-                                    "message": text[:2000],
-                                    "retriable": retriable,
-                                },
-                            )
-                            return
-                        normalizer = ChatCompletionsNormalizer()
-                        async for event_name, data in sse_events(resp.aiter_lines()):
-                            for chunk in normalizer.consume(event_name, data):
-                                yielded = True
-                                yield chunk
-                        return
-                except httpx.TransportError as exc:
-                    # Pre-stream connection failures retry; mid-stream ones
-                    # don't (chunks were already delivered downstream).
-                    if not yielded and attempt < self._retry.max_retries:
-                        await asyncio.sleep(self._retry.delay(attempt))
-                        attempt += 1
-                        continue
-                    yield StreamChunk(
-                        "error",
-                        {"message": f"{type(exc).__name__}: {exc}", "retriable": False},
-                    )
-                    return
-        finally:
-            if owns_client:
-                await client.aclose()
+        async for chunk in stream_chat_completions(
+            self._base_url,
+            body,
+            headers,
+            http_client=self._http,
+            timeout=self._timeout,
+            retry=self._retry,
+        ):
+            yield chunk
