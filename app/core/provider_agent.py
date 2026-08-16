@@ -770,6 +770,7 @@ async def dispatch_worker(
     context_session_id: Optional[str] = None,
     launch_tool_use_id: Optional[str] = None,
     system_prompt_append: Optional[str] = None,
+    tool_allowlist: Optional[List[str]] = None,
 ) -> WorkerOutcome:
     """Run ``prompt`` in a fresh session bound to ``provider_id``/``model_id``.
 
@@ -891,6 +892,14 @@ async def dispatch_worker(
     # connectors use, so it lands after the profile's own instructions.
     if system_prompt_append:
         overrides["system_prompt_append"] = system_prompt_append
+    # Tool-surface restriction for this worker (ruling CE12). Today's only
+    # source is a file/plugin agent definition's ``tools:`` frontmatter, which
+    # the caller's profile knows nothing about — so it rides the turn rather
+    # than the profile row. Non-empty = the worker's ENTIRE tool surface; absent
+    # = inherit the profile's. See app/core/query_options (stamping) and
+    # app/core/provider/harness_adapter (per-leg enforcement).
+    if tool_allowlist:
+        overrides["tool_allowlist"] = list(tool_allowlist)
 
     timeout = float(timeout_seconds) if timeout_seconds else worker_timeout_seconds()
 

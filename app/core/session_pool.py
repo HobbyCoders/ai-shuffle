@@ -1096,6 +1096,25 @@ def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> 
     ):
         return True
 
+    # Tool-surface restriction (ruling CE12) — stamped by ``query_options`` as
+    # ``aih_tool_allowlist`` and frozen into the engine at connect time (fluid
+    # never renegotiates a session's tool surface mid-flight), so a change can
+    # only be honored by a rebuild. Also compared directly: None means
+    # unrestricted, which is a real and distinct value.
+    if getattr(old, "aih_tool_allowlist", None) != getattr(
+        new_options, "aih_tool_allowlist", None
+    ):
+        return True
+
+    # The blocklist is spawn-time on BOTH legs now: a CLI arg
+    # (``--disallowed-tools``) on the delegated one, and since CE12 a
+    # construction-time filter on the native one. Order-insensitive so a
+    # reshuffled list is not mistaken for a change.
+    if sorted(getattr(old, "disallowed_tools", None) or []) != sorted(
+        getattr(new_options, "disallowed_tools", None) or []
+    ):
+        return True
+
     # NOTE: on-disk OAuth credential rotation is deliberately NOT a reconnect
     # reason. Respawning kills every background task/sub-agent parented to the
     # subprocess, and the delegated CLI re-reads credentials from its config dir

@@ -37,8 +37,17 @@ class SessionOptions:
 
     # Tool configuration
     tools: Optional[list] = None
+    # PERMISSION allowlist (SDK vocabulary): entries that may run without
+    # prompting. NOT a tool-surface restriction — see ``tool_allowlist``.
     allowed_tools: Optional[list] = None
     disallowed_tools: Optional[list] = None
+    # TOOL-SURFACE restriction (ruling CE12). A non-empty list is the session's
+    # ENTIRE tool surface: on a native leg it becomes
+    # ``NativeLoop(allowed_tools=...)``, so a filtered tool's schema is never
+    # sent, ToolSearch will not load it, and calling it errors in-context. None
+    # (the default) means unrestricted. Set today by Task dispatch for a
+    # file/plugin agent whose definition carries a ``tools:`` list.
+    tool_allowlist: Optional[list] = None
 
     # MCP servers: {name: {command, args, env, ...}}
     mcp_servers: Optional[Dict[str, Any]] = None

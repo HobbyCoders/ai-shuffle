@@ -339,8 +339,9 @@ def test_file_agent_unknown_name_still_errors(agents):
 
 
 def test_file_agent_model_and_tools(agents):
-    """``model:`` rides through on an unbound (delegated) caller; ``tools:`` is
-    advisory and says so in the result note and the injected prompt."""
+    """``model:`` rides through on an unbound (delegated) caller; ``tools:``
+    becomes the worker's ENFORCED tool surface (CE12) and is stated in both the
+    result note and the injected prompt."""
     _mk_session(agents, "s-model", "root-agent")
     seen = {}
 
@@ -358,7 +359,83 @@ def test_file_agent_model_and_tools(agents):
 
     assert seen["model_id"] == "sonnet"
     assert "Read, Grep" in seen["system_prompt_append"]
-    assert "advisory" in payload["note"]
+    assert "advisory" not in payload["note"]
+    assert "restricted" in payload["note"] and "Read, Grep" in payload["note"]
+
+
+# ─── CE12: the definition's tools list is the worker's tool surface ──────────
+
+
+def test_file_agent_tools_become_the_workers_allowlist(agents):
+    """``tools: [Read, Grep]`` reaches dispatch_worker as ``tool_allowlist`` —
+    the seam that becomes ``NativeLoop(allowed_tools=...)`` (ruling CE12)."""
+    _mk_session(agents, "s-ce12", "root-agent")
+    seen = {}
+
+    async def fake_worker(**kwargs):
+        seen.update(kwargs)
+        return WorkerOutcome(ok=True, session_id="w-ce12", report="r")
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        payload = asyncio.run(_dispatch(
+            {"agent": "researcher", "prompt": "go"}, "s-ce12",
+            agent_registry={"researcher": _definition(tools=("Read", "Grep"))},
+        ))
+
+    assert payload["ok"] is True
+    assert seen["tool_allowlist"] == ["Read", "Grep"]
+    # The prompt block states the restriction as enforced, not advisory.
+    assert "enforced by the runtime" in seen["system_prompt_append"]
+
+
+def test_file_agent_without_tools_inherits_everything(agents):
+    """Empty/absent ``tools:`` = inherit the caller's toolset: no allowlist is
+    passed at all (fluid reads ``allowed_tools=None`` as unrestricted)."""
+    _mk_session(agents, "s-ce12-open", "root-agent")
+    seen = {}
+
+    async def fake_worker(**kwargs):
+        seen.update(kwargs)
+        return WorkerOutcome(ok=True, session_id="w-open", report="r")
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        asyncio.run(_dispatch(
+            {"agent": "researcher", "prompt": "go"}, "s-ce12-open",
+            agent_registry={"researcher": _definition(tools=())},
+        ))
+    assert "tool_allowlist" not in seen
+
+    seen.clear()
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        asyncio.run(_dispatch(
+            {"agent": "researcher", "prompt": "go"}, "s-ce12-open",
+            agent_registry={"researcher": _definition(tools=None)},
+        ))
+    assert "tool_allowlist" not in seen
+
+
+def test_app_agent_dispatch_carries_no_tool_allowlist(agents):
+    """An app agent owns its profile (and its tool config) — a Task dispatch
+    must not narrow it with a per-turn allowlist."""
+    _mk_session(agents, "s-ce12-app", "root-agent")
+    seen = {}
+
+    async def fake_worker(**kwargs):
+        seen.update(kwargs)
+        return WorkerOutcome(ok=True, session_id="w-app", report="r")
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        asyncio.run(_dispatch({"agent": "helper", "prompt": "go"}, "s-ce12-app"))
+    assert "tool_allowlist" not in seen
+
+
+def test_definition_tool_allowlist_normalizes():
+    """Blank entries are dropped; an all-blank list degrades to unrestricted."""
+    assert td._definition_tool_allowlist(_definition(tools=("Read", " ", "Grep "))) == [
+        "Read", "Grep",
+    ]
+    assert td._definition_tool_allowlist(_definition(tools=("", "  "))) is None
+    assert td._definition_tool_allowlist(_definition(tools=())) is None
 
 
 def test_file_agent_respects_the_invoke_allowlist(agents):

@@ -71,9 +71,28 @@ HONORED:
     verbatim, OpenAI-shaped ``reasoning.effort`` with xhigh/max clamped to
     high). Validated app-side (``_valid_effort``); changes force reconnect.
 
+  * ``disallowed_tools``     → native ``NativeLoop(disallowed_tools=...)``, which
+    filters the tool at the provider schema, the deferred/ToolSearch catalog and
+    dispatch (ruling CE12) — the profile blocklist is now a wall, not just a
+    permission-callback denial. Delegated: the CLI's ``--disallowed-tools``,
+    unioned with the banned-tool set (Task/Agent/wake family, ruling A6).
+  * ``tool_allowlist``       → native ``NativeLoop(allowed_tools=...)``: the
+    session's ENTIRE tool surface when set, None = unrestricted (CE12). Set for
+    a worker dispatched onto a file/plugin agent whose definition carries a
+    ``tools:`` list (``app.core.task_dispatch`` → ``overrides["tool_allowlist"]``
+    → ``ClaudeAgentOptions.aih_tool_allowlist``). On the delegated leg it rides
+    ``--allowed-tools``, which the claude CLI reads as PERMISSION rules — that
+    leg therefore grants rather than restricts, because the CLI owns its own
+    tool surface and fluid cannot filter it.
+
 DEGRADED / NOT YET HONORED (documented gaps — mechanical follow-up):
-  * ``allowed_tools`` / ``disallowed_tools`` — the app's SDK allow/deny lists
-    are not auto-translated to registry filtering yet.
+  * ``allowed_tools`` — the SDK's PERMISSION allowlist (every MCP tool name plus
+    the profile's legacy list) is still enforced only by the app's own
+    ``can_use_tool`` callback. It is NOT projected onto the engines: fluid's
+    ``allowed_tools`` is a tool-SURFACE restriction, and this list is empty of
+    builtins whenever a tools preset is active, so projecting it would delete
+    Read/Bash/Edit from every native session. The surface channel is
+    ``tool_allowlist`` above.
   * ``thinking`` — omni manages thinking via provider caps, not passed through.
   * ``hooks`` / ``include_hook_events`` — omni has its own HookBus; app SDK hooks not wired.
   * ``extra_args`` / ``setting_sources`` — SDK/CLI-specific, ignored.
@@ -336,6 +355,14 @@ class HarnessAdapter(ProviderAdapter):
                     }
                     | set(options.disallowed_tools or [])
                 ),
+                # CE12: the definition's tool list for a file-agent worker. The
+                # CLI reads --allowed-tools as PERMISSION rules, so on this leg
+                # the list grants (no prompt for those tools) rather than
+                # restricting — the enforced surface wall exists only on the
+                # native leg, where fluid owns the registry. Passed anyway so
+                # the two legs agree on intent and the CLI stops prompting for
+                # exactly the tools the definition sanctioned.
+                allowed_tools=_tool_allowlist(options),
                 claude_cmd=_resolve_claude_cmd(),
             )
         else:
@@ -423,6 +450,16 @@ class HarnessAdapter(ProviderAdapter):
                 ctx=native_ctx,
                 plan_mode=plan_mode,
                 session_id=omni_session_id,
+                # Tool restriction, ENFORCED (ruling CE12): fluid filters the
+                # request schemas, the deferred/ToolSearch catalog AND dispatch,
+                # so a filtered tool is invisible, unloadable and uncallable.
+                # ``allowed_tools`` is the whole surface when set (None = every
+                # registered tool); ``disallowed_tools`` — the profile's own
+                # blocklist, previously honored only by the app's permission
+                # callback — subtracts afterwards, deny beating allow. Both
+                # accept fnmatch patterns (``mcp__chrome-devtools__*``).
+                allowed_tools=_tool_allowlist(options),
+                disallowed_tools=list(options.disallowed_tools or ()) or None,
                 # fluid's folding of the host's ~/.claude settings stack is left
                 # ON (its default) deliberately, per ruling CE4 — see the
                 # settings.json bullet in the module docstring: the user's
@@ -512,6 +549,12 @@ class HarnessAdapter(ProviderAdapter):
             ),
             add_dirs=getattr(sdk_options, "add_dirs", None),
             disallowed_tools=getattr(sdk_options, "disallowed_tools", None),
+            # CE12 tool-surface restriction, stamped by query_options as
+            # ``aih_tool_allowlist``. NOT ``sdk_options.allowed_tools``: that is
+            # the SDK's permission allowlist (MCP names + legacy config) and
+            # reading it as a surface would strip the builtins from every native
+            # session. See query_options for the full reasoning.
+            tool_allowlist=getattr(sdk_options, "aih_tool_allowlist", None),
             # Profile ``max_turns`` (query_options puts it on the SDK options).
             # Native legs map it onto omni's per-turn model-call budget.
             max_turns=getattr(sdk_options, "max_turns", None),
@@ -934,6 +977,15 @@ class HarnessAdapter(ProviderAdapter):
         if (old.plugins or []) != (new_options.plugins or []):
             return True
         if (old.tools or []) != (new_options.tools or []):
+            return True
+        # Tool restriction is session-STATIC by design (ruling CE12): fluid
+        # freezes allowed/disallowed at construction and never renegotiates them
+        # mid-session, so a changed surface can only be honored by a rebuild.
+        if _tool_allowlist(old) != _tool_allowlist(new_options):
+            return True
+        if sorted(old.disallowed_tools or []) != sorted(
+            new_options.disallowed_tools or []
+        ):
             return True
         # Effort is baked into the engine at construction (NativeLoop request
         # builder / DelegatedLoop argv), so a change needs a rebuild.
@@ -1595,6 +1647,23 @@ def _valid_effort(value: Any) -> Optional[str]:
     if value is not None:
         logger.warning("[HarnessAdapter] ignoring unrecognized effort=%r", value)
     return None
+
+
+def _tool_allowlist(options: SessionOptions) -> Optional[list]:
+    """This session's ENTIRE tool surface, or None for "unrestricted" (CE12).
+
+    Reads ``SessionOptions.tool_allowlist`` — deliberately not
+    ``allowed_tools``, which carries the SDK's permission vocabulary (see the
+    field docs in ``provider/types.py``). Blank entries are dropped and an empty
+    result degrades to None, so an accidental ``[]`` never blanks a session's
+    toolset — CE12's "restriction is exactly the list" only applies to a list
+    that actually names something.
+    """
+    raw = getattr(options, "tool_allowlist", None)
+    if not raw:
+        return None
+    names = [str(t).strip() for t in raw if str(t).strip()]
+    return names or None
 
 
 def _positive_int(value: Any) -> Optional[int]:

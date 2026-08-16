@@ -1156,4 +1156,23 @@ def build_options_from_profile(
     # omni id at connect time at all.
     options.aih_session_id = session_id
 
+    # Per-turn TOOL-SURFACE restriction (ruling CE12), set today by Task
+    # dispatch when the target is a file/plugin agent whose definition carries a
+    # ``tools:`` list. Deliberately NOT ``allowed_tools`` above: that field is
+    # the SDK's PERMISSION allowlist (it holds every MCP tool name so MCP calls
+    # do not prompt, and is empty of builtins whenever a tools preset is
+    # active), so reading it as a surface restriction would strip Read/Bash/Edit
+    # from every native session. This one means exactly what it says — a
+    # non-empty list is the whole tool surface. Inert on the SDK path.
+    _tool_allowlist = overrides.get("tool_allowlist")
+    _surface = (
+        [str(t).strip() for t in _tool_allowlist if str(t).strip()]
+        if isinstance(_tool_allowlist, (list, tuple))
+        else []
+    )
+    # An all-blank list degrades to None rather than to an empty allowlist: [] on
+    # the engine would mean "no tools at all", which is never what a malformed
+    # ``tools:`` line asked for.
+    options.aih_tool_allowlist = _surface or None
+
     return options, agents_dict

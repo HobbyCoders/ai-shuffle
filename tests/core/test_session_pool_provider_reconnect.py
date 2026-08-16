@@ -373,3 +373,44 @@ def test_harness_adapter_native_both_sides_no_reconnect():
     adapter = HarnessAdapter()
     adapter._options = SessionOptions(model="m")
     assert adapter.requires_reconnect(SessionOptions(model="m2")) is False
+
+
+# ─── CE12: a changed tool surface is a spawn-time change ─────────────────────
+
+
+def _tool_state(allowlist=None, disallowed=None) -> SessionState:
+    opts = ClaudeAgentOptions(
+        model="claude-sonnet-4-5", disallowed_tools=disallowed or []
+    )
+    opts.aih_tool_allowlist = allowlist
+    return SessionState(adapter=MagicMock(), connect_options=opts)
+
+
+def _tool_options(allowlist=None, disallowed=None) -> ClaudeAgentOptions:
+    opts = ClaudeAgentOptions(
+        model="claude-sonnet-4-5", disallowed_tools=disallowed or []
+    )
+    opts.aih_tool_allowlist = allowlist
+    return opts
+
+
+def test_tool_allowlist_change_forces_reconnect():
+    """fluid freezes ``allowed_tools`` at engine construction (ruling CE12), so
+    a worker's restricted surface can never be a ``set_model`` hot-swap."""
+    assert requires_reconnect(_tool_state(["Read"]), _tool_options(["Read"])) is False
+    assert requires_reconnect(_tool_state(["Read"]), _tool_options(["Read", "Bash"])) is True
+    # Restricted → unrestricted (and back) is a real change, not a default.
+    assert requires_reconnect(_tool_state(["Read"]), _tool_options(None)) is True
+    assert requires_reconnect(_tool_state(None), _tool_options(["Read"])) is True
+
+
+def test_disallowed_tools_change_forces_reconnect_order_insensitively():
+    """The blocklist is a CLI arg on the delegated leg and a construction-time
+    filter on the native one — spawn-time either way. Order is not a change."""
+    assert requires_reconnect(
+        _tool_state(disallowed=["Bash", "Write"]),
+        _tool_options(disallowed=["Write", "Bash"]),
+    ) is False
+    assert requires_reconnect(
+        _tool_state(disallowed=["Bash"]), _tool_options(disallowed=[])
+    ) is True

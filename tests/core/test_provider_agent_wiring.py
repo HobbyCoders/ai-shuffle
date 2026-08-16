@@ -75,3 +75,39 @@ def test_worker_cannot_ask_user_questions():
 def test_non_worker_session_keeps_ask_user_question():
     opts = _build(session_id="parent-1")
     assert qo.WORKER_DISALLOWED_TOOL not in (opts.disallowed_tools or [])
+
+
+# ─── CE12: the tool-surface override reaches the options object ─────────────
+
+
+def _build_with(overrides, session_id="worker-1"):
+    with patch.object(qo, "get_security_instructions", return_value=""):
+        opts, _ = qo.build_options_from_profile(
+            profile=_profile(), session_id=session_id, overrides=overrides
+        )
+    return opts
+
+
+def test_tool_allowlist_override_is_stamped_for_the_harness():
+    """``dispatch_worker`` puts a file agent's ``tools:`` list on the turn's
+    overrides; ``build_options_from_profile`` stamps it as
+    ``aih_tool_allowlist``, which the HarnessAdapter turns into
+    ``NativeLoop(allowed_tools=...)`` (ruling CE12)."""
+    opts = _build_with({"tool_allowlist": ["Read", "Grep"]})
+    assert opts.aih_tool_allowlist == ["Read", "Grep"]
+
+
+def test_no_override_leaves_the_surface_unrestricted():
+    """Absent / empty / all-blank all mean "inherit the profile's toolset"."""
+    assert _build_with({}).aih_tool_allowlist is None
+    assert _build_with({"tool_allowlist": []}).aih_tool_allowlist is None
+    assert _build_with({"tool_allowlist": ["", "  "]}).aih_tool_allowlist is None
+
+
+def test_the_permission_allowlist_is_not_the_tool_surface():
+    """``allowed_tools`` keeps its SDK PERMISSION meaning — it is full of MCP
+    names and (under a tools preset) holds no builtins at all, so it must never
+    be read as the session's tool surface."""
+    opts = _build_with({"tool_allowlist": ["Read"]})
+    assert "mcp__builtins__Task" in set(opts.allowed_tools or [])
+    assert "Read" not in set(opts.allowed_tools or [])

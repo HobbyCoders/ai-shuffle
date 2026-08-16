@@ -2918,3 +2918,186 @@ def test_amend_native_task_spec_swallows_provider_lookup_failure(monkeypatch):
 
     description = registry.get("Task").input_schema["properties"]["model"]["description"]
     assert description == _TASK_SPEC.input_schema["properties"]["model"]["description"]
+
+
+# ─── 7. CE12 — enforced tool restriction projected onto the engines ──────────
+
+
+class _RecordingEngine:
+    """Stands in for NativeLoop/DelegatedLoop and captures its kwargs.
+
+    Deliberately has no ``_ensure_session``: connect() primes the session only
+    when the engine offers one, so omitting it keeps these tests off the store.
+    """
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+
+@pytest.fixture()
+def recording_adapter(monkeypatch):
+    """A HarnessAdapter whose engine construction is captured, with the store,
+    registry, provider client and prompt compiler stubbed out."""
+    import app.core.provider.harness_adapter as ha
+
+    made: dict = {}
+
+    class _Native(_RecordingEngine):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            made["native"] = kwargs
+
+    class _Delegated(_RecordingEngine):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            made["delegated"] = kwargs
+
+    monkeypatch.setattr(ha, "NativeLoop", _Native)
+    monkeypatch.setattr(ha, "DelegatedLoop", _Delegated)
+    monkeypatch.setattr(HarnessAdapter, "_build_store", lambda self, o: MemoryStore())
+
+    async def _registry(self, options, native):
+        return ha.ToolRegistry()
+
+    async def _client(kind, options):
+        return object(), None
+
+    async def _cli_sid(self, omni_session_id, options):
+        return None
+
+    monkeypatch.setattr(HarnessAdapter, "_build_registry", _registry)
+    monkeypatch.setattr(HarnessAdapter, "_compile_prompt_sections", lambda *a, **k: None)
+    monkeypatch.setattr(HarnessAdapter, "_resolve_cli_session_id", _cli_sid)
+    monkeypatch.setattr(ha, "_build_provider_client", _client)
+    monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: ["true"])
+    return HarnessAdapter(), made
+
+
+def _native_opts(**kw):
+    """Options that route to the native anthropic leg."""
+    kw.setdefault("model", "claude-sonnet-4-5")
+    extra = kw.pop("extra", None) or {}
+    extra.setdefault("omni_engine", "native")
+    extra.setdefault("omni_provider", "anthropic")
+    return SessionOptions(extra=extra, **kw)
+
+
+@pytest.mark.asyncio
+async def test_native_loop_gets_the_tool_allowlist(recording_adapter):
+    """A worker spawned from a file agent with ``tools: [Read, Grep]`` reaches
+    NativeLoop as ``allowed_tools=["Read", "Grep"]`` (ruling CE12)."""
+    adapter, made = recording_adapter
+    await adapter.connect(_native_opts(tool_allowlist=["Read", "Grep"]))
+    assert made["native"]["allowed_tools"] == ["Read", "Grep"]
+
+
+@pytest.mark.asyncio
+async def test_native_loop_unrestricted_without_an_allowlist(recording_adapter):
+    """No allowlist (and a blank one) = None: fluid reads that as "every tool".
+    Passing [] instead would blank the whole session's tool surface."""
+    adapter, made = recording_adapter
+    await adapter.connect(_native_opts())
+    assert made["native"]["allowed_tools"] is None
+
+    await HarnessAdapter().connect(_native_opts(tool_allowlist=["", "  "]))
+    assert made["native"]["allowed_tools"] is None
+
+
+@pytest.mark.asyncio
+async def test_native_loop_gets_the_profile_blocklist(recording_adapter):
+    """``disallowed_tools`` is no longer degraded on native legs — it reaches
+    NativeLoop, which filters schema, catalog and dispatch."""
+    adapter, made = recording_adapter
+    await adapter.connect(_native_opts(disallowed_tools=["Bash", "Write"]))
+    assert made["native"]["disallowed_tools"] == ["Bash", "Write"]
+
+    await HarnessAdapter().connect(_native_opts(disallowed_tools=[]))
+    assert made["native"]["disallowed_tools"] is None
+
+
+@pytest.mark.asyncio
+async def test_delegated_leg_forwards_the_allowlist_and_keeps_its_bans(
+    recording_adapter,
+):
+    """The CLI leg passes the same list as ``--allowed-tools`` while the A6 ban
+    set (Task/Agent/wake family) stays in ``disallowed_tools``."""
+    adapter, made = recording_adapter
+    await adapter.connect(
+        SessionOptions(
+            model="claude-sonnet-4-5",
+            tool_allowlist=["Read"],
+            disallowed_tools=["Write"],
+        )
+    )
+    assert made["delegated"]["allowed_tools"] == ["Read"]
+    assert "Task" in made["delegated"]["disallowed_tools"]
+    assert "Write" in made["delegated"]["disallowed_tools"]
+
+
+@pytest.mark.asyncio
+async def test_connect_with_sdk_options_threads_aih_tool_allowlist(recording_adapter):
+    """``aih_tool_allowlist`` is the surface channel through the projection
+    shim. ``allowed_tools`` — the SDK's PERMISSION allowlist, full of MCP names
+    and empty of builtins under a tools preset — must NOT become one: projecting
+    it would delete Read/Bash/Edit from every native session."""
+    from types import SimpleNamespace
+
+    adapter, made = recording_adapter
+    sdk_options = SimpleNamespace(
+        model="claude-sonnet-4-5",
+        system_prompt=None,
+        cwd=None,
+        resume=None,
+        permission_mode=None,
+        mcp_servers=None,
+        env=None,
+        include_partial_messages=False,
+        add_dirs=None,
+        disallowed_tools=None,
+        max_turns=None,
+        effort=None,
+        allowed_tools=["mcp__builtins__Task", "mcp__ai-tools"],
+        aih_tool_allowlist=["Read"],
+        aih_provider_id=None,
+        aih_session_id="app-sess",
+    )
+    await adapter.connect_with_sdk_options(sdk_options)
+    assert made["delegated"]["allowed_tools"] == ["Read"]
+    assert adapter._options.tool_allowlist == ["Read"]
+    assert adapter._options.allowed_tools is None
+
+
+def test_requires_reconnect_on_a_changed_tool_surface():
+    """The restriction is frozen at construction (CE12), so a change can only be
+    honored by a rebuild — never a model hot-swap."""
+    adapter = HarnessAdapter()
+    adapter._options = _native_opts(tool_allowlist=["Read"])
+    assert adapter.requires_reconnect(_native_opts(tool_allowlist=["Read"])) is False
+    assert adapter.requires_reconnect(_native_opts(tool_allowlist=["Read", "Bash"])) is True
+    assert adapter.requires_reconnect(_native_opts()) is True
+
+    adapter._options = _native_opts(disallowed_tools=["Bash"])
+    assert adapter.requires_reconnect(_native_opts(disallowed_tools=["Bash"])) is False
+    assert adapter.requires_reconnect(_native_opts(disallowed_tools=[])) is True
+
+
+def test_vendored_native_loop_accepts_the_restriction_kwargs():
+    """Pins the vendored seam itself (fluid 020a1d6, ruling CE12)."""
+    import inspect
+
+    from fluid.engine.delegated import DelegatedLoop as _RealDelegated
+    from fluid.engine.native import NativeLoop as _RealNative
+
+    native_params = inspect.signature(_RealNative.__init__).parameters
+    assert "allowed_tools" in native_params and "disallowed_tools" in native_params
+    assert "allowed_tools" in inspect.signature(_RealDelegated.__init__).parameters
+
+    loop = _RealNative(
+        provider=FakeProvider([]), store=MemoryStore(), model="fake",
+        allowed_tools=["Read", "mcp__x__*"], disallowed_tools=["mcp__x__danger"],
+        claude_settings=False, claude_plugins=False, claude_agents=False,
+    )
+    assert loop._tool_permitted("Read") is True
+    assert loop._tool_permitted("Bash") is False            # outside the allowlist
+    assert loop._tool_permitted("mcp__x__safe") is True     # fnmatch pattern
+    assert loop._tool_permitted("mcp__x__danger") is False  # deny beats allow

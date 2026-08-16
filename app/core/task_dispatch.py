@@ -40,9 +40,15 @@ A file agent has no ``agents`` row, so it borrows the CALLER's profile (and with
 it the provider binding, tools and MCP surface) and its markdown body rides the
 worker's system prompt as an override block. Consequences, deliberate:
 
-* ``tools:`` in the frontmatter is ADVISORY — the app has no per-turn tool
-  allowlist seam (tools come from the profile), so the worker spawns with the
-  caller's toolset and the restriction is stated in its prompt instead;
+* ``tools:`` in the frontmatter is ENFORCED (ruling CE12), not advisory: the
+  list rides the worker's turn as a ``tool_allowlist`` override and becomes
+  ``NativeLoop(allowed_tools=...)`` on the native leg — a filtered tool's schema
+  never reaches the model, ToolSearch will not load it, and a call naming it
+  comes back as an in-context error. An empty/absent list inherits the caller's
+  full toolset. On the DELEGATED (claude CLI) leg the same list is passed as
+  ``--allowed-tools``, which the CLI reads as permission rules rather than a
+  surface restriction — see :func:`app.core.provider.harness_adapter` for the
+  exact per-leg semantics;
 * ``model:`` is honored when the caller's provider curates it, and dropped with
   a note when it does not (a definition written for Claude should not fail a
   dispatch on an OpenAI-bound session);
@@ -257,12 +263,29 @@ def _file_agent_prompt(definition: Any) -> str:
         lines.append(
             "This definition restricts the agent to these tools: "
             + ", ".join(str(t) for t in tools)
-            + ". That restriction is not enforced by the runtime here — honor it "
-            "yourself and do not reach for tools outside the list."
+            + ". The restriction is enforced by the runtime — tools outside the "
+            "list are not part of your tool surface and calling one fails."
         )
     if body:
         lines.append(body)
     return "\n\n".join(lines)
+
+
+def _definition_tool_allowlist(definition: Any) -> Optional[List[str]]:
+    """The definition's ``tools:`` frontmatter as a worker tool allowlist.
+
+    Ruling CE12: a non-empty list is the worker's ENTIRE tool surface; an empty
+    or absent list means "inherit everything the caller has" and is signalled by
+    None (fluid's ``allowed_tools=None`` = unrestricted). Blank entries are
+    dropped; nothing is ever added back — a definition that omits an "essential"
+    tool simply does not get it.
+    """
+    names = [
+        str(t).strip()
+        for t in (_def_field(definition, "tools", ()) or ())
+        if str(t).strip()
+    ]
+    return names or None
 
 
 def _caller_provider_id(caller_row: Dict[str, Any], caller_profile_id: Optional[str]) -> Optional[str]:
@@ -468,10 +491,11 @@ async def dispatch_task_tool(
                     )
             elif wanted:
                 model_override = wanted
-        if _def_field(definition, "tools", ()):
+        tool_allowlist = _definition_tool_allowlist(definition)
+        if tool_allowlist:
             notes.append(
-                "The definition's tools list is advisory here: the worker runs "
-                "with the calling profile's toolset."
+                "The worker's tool surface is restricted to the definition's "
+                "tools list: " + ", ".join(tool_allowlist) + "."
             )
         system_prompt_append = _file_agent_prompt(definition)
         logger.info(
@@ -488,6 +512,9 @@ async def dispatch_task_tool(
         profile_id = target["id"]
         provider_id = (target.get("config") or {}).get("provider") or None
         system_prompt_append = None
+        # An app agent carries its own profile (and with it its own
+        # allowed/disallowed tool config) — nothing to override per-dispatch.
+        tool_allowlist = None
 
     kwargs: Dict[str, Any] = dict(
         parent_session_id=root_session_id,
@@ -503,6 +530,8 @@ async def dispatch_task_tool(
     )
     if system_prompt_append:
         kwargs["system_prompt_append"] = system_prompt_append
+    if tool_allowlist:
+        kwargs["tool_allowlist"] = tool_allowlist
 
     if mode == "background":
         task = asyncio.create_task(
