@@ -65,6 +65,7 @@ def _mk_provider(db, provider_id="op", *, token="gw-secret", encrypt=True, **kwa
         context_window=kwargs.pop("context_window", None),
         max_output_tokens=kwargs.pop("max_output_tokens", None),
         enabled=kwargs.pop("enabled", True),
+        api_dialect=kwargs.pop("api_dialect", None),
     )
 
 
@@ -683,6 +684,58 @@ class TestBuildGenerationOptions:
         assert DISABLE_1M_KEY not in env
         assert AUTO_COMPACT_KEY not in env
         assert BASE_URL_KEY not in env
+
+    def test_provider_binding_is_stamped_onto_the_options(self, mock_db):
+        """The four ``aih_*`` attrs chat stamps must ride on generation options.
+
+        The HarnessAdapter reads them in ``connect_with_sdk_options`` and
+        projects them onto ``SessionOptions.extra``, which is how
+        ``_decide_provider_kind`` picks the leg from the provider ROW instead
+        of sniffing the model string. Without the stamp a generation call on a
+        non-Claude profile model still fell through to the delegated
+        ``claude.exe`` leg and hung.
+        """
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, token="gw-secret")
+        opts = build_generation_options(
+            {"model": "openai/gpt-5.6", "provider": "op"}
+        )
+        assert opts.aih_provider_id == "op"
+        assert opts.aih_provider_type == "openrouter"
+        # Not a subscription row → no auth_mode; no custom wire format either.
+        assert opts.aih_provider_auth_mode is None
+        assert opts.aih_provider_dialect is None
+
+    def test_provider_dialect_is_stamped_for_custom_rows(self, mock_db):
+        """A ``custom`` row's wire format decides which native client serves it."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(
+            db,
+            provider_id="cust",
+            token="gw-secret",
+            provider_type="custom",
+            api_dialect="openai",
+            base_url="https://api.x.ai",
+            models=[{"id": "grok-4.5", "label": "Grok"}],
+        )
+        opts = build_generation_options({"model": "grok-4.5", "provider": "cust"})
+        assert opts.aih_provider_id == "cust"
+        assert opts.aih_provider_type == "custom"
+        assert opts.aih_provider_dialect == "openai"
+
+    def test_native_config_stamps_all_four_as_none(self, mock_db):
+        """A profile with no provider stays native: all four attrs present and
+        None, exactly like ``query_options`` does — the attribute's PRESENCE is
+        never itself a signal."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        opts = build_generation_options({"model": "opus"})
+        assert opts.aih_provider_id is None
+        assert opts.aih_provider_type is None
+        assert opts.aih_provider_auth_mode is None
+        assert opts.aih_provider_dialect is None
 
 
 # ---------------------------------------------------------------------------

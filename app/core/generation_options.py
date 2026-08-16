@@ -5,8 +5,11 @@ Builds a `ClaudeAgentOptions` for one-shot AI generation calls (commit
 messages, PR descriptions, branch names, profile / subagent generation,
 etc.) from the Default AI profile.
 
-All generation calls spawn a fresh `claude.exe` subprocess via the SDK's
-top-level `query()` — no warm pool, no cross-call context bleed.
+All generation calls run through the provider adapter seam
+(`app.core.provider.factory.make_adapter`), exactly like chat: a
+Claude-subscription binding takes the delegated `claude.exe` leg, anything else
+takes the fluid native leg. One throwaway adapter per call — no warm pool, no
+cross-call context bleed.
 
 Profile honoring:
 - Honored from the Default AI profile config: model, permission_mode,
@@ -343,4 +346,34 @@ def build_generation_options(
     # persisted to the session store (would pollute the transcript history).
     kwargs["strict_mcp_config"] = False
 
-    return ClaudeAgentOptions(**kwargs)
+    options = ClaudeAgentOptions(**kwargs)
+
+    # ── Provider binding stamp ───────────────────────────────────────────────
+    # Mirrors `app.core.query_options` (the chat path): the HarnessAdapter reads
+    # these four attributes in `connect_with_sdk_options` and projects them onto
+    # SessionOptions.extra, which is how `_decide_provider_kind` picks the leg
+    # from the bound provider ROW instead of sniffing the model string. Without
+    # them a generation call on a non-Claude profile model still fell through to
+    # the delegated `claude.exe` leg and hung.
+    #
+    # The env overlay above (`_resolve_env` → `apply_provider_env`) has already
+    # validated the row for a provider-bound call, so this lookup cannot see a
+    # missing/disabled provider that the overlay let through. Always stamped
+    # (None everywhere for a native Anthropic call) so the attribute's presence
+    # is never itself a signal.
+    main_provider_row = None
+    if provider_id:
+        from app.db import database
+
+        main_provider_row = database.get_model_provider(
+            provider_id, include_token=False
+        )
+
+    options.aih_provider_id = provider_id
+    options.aih_provider_type = (main_provider_row or {}).get("provider_type")
+    options.aih_provider_auth_mode = (main_provider_row or {}).get("auth_mode")
+    # A custom row's wire format ('anthropic' default | 'openai') — decides
+    # which native client serves it. None everywhere else.
+    options.aih_provider_dialect = (main_provider_row or {}).get("api_dialect")
+
+    return options

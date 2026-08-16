@@ -4,8 +4,95 @@ Tests for AI generation API endpoints.
 Tests the profile and subagent generation functionality.
 """
 
+import asyncio
 import pytest
 from unittest.mock import patch, MagicMock
+
+
+# ---------------------------------------------------------------------------
+# Adapter test doubles
+#
+# Generation runs through the provider adapter seam (make_adapter ->
+# HarnessAdapter), NOT the SDK's query(). The adapter emits the app-local
+# mirror classes from app.core.provider.events, so the doubles below yield
+# those — SDK message classes would not match the isinstance chain.
+# make_adapter is patched at the CONSUMER module (app.api.generation).
+# ---------------------------------------------------------------------------
+
+class FakeAdapter:
+    """Minimal stand-in for HarnessAdapter's generate_with_claude lifecycle."""
+
+    def __init__(
+        self,
+        messages=None,
+        connect_error=None,
+        send_error=None,
+        hang=False,
+    ):
+        self.messages = list(messages or [])
+        self.connect_error = connect_error
+        self.send_error = send_error
+        self.hang = hang
+        self.connected = False
+        self.disconnect_calls = 0
+        self.options = None
+        self.prompts = []
+
+    async def connect_with_sdk_options(self, options):
+        self.options = options
+        if self.connect_error is not None:
+            raise self.connect_error
+        self.connected = True
+
+    async def send_query(self, prompt):
+        self.prompts.append(prompt)
+        if self.send_error is not None:
+            raise self.send_error
+
+    async def receive_events(self):
+        if self.hang:
+            await asyncio.sleep(3600)
+        for message in self.messages:
+            yield message
+
+    async def disconnect(self):
+        self.disconnect_calls += 1
+
+
+def assistant_text(text):
+    """One AssistantMessage carrying a single TextBlock."""
+    from app.core.provider.events import AssistantMessage, TextBlock
+
+    return AssistantMessage(content=[TextBlock(text=text)], model="test-model")
+
+
+def success_result():
+    """A clean turn-terminal ResultMessage."""
+    from app.core.provider.events import ResultMessage
+
+    return ResultMessage(subtype="success", is_error=False)
+
+
+def error_result(message="upstream exploded"):
+    """A failed turn-terminal ResultMessage (harness ErrorEvent shape)."""
+    from app.core.provider.events import ResultMessage
+
+    return ResultMessage(
+        subtype="error_during_execution",
+        is_error=True,
+        result=message,
+        errors=[message],
+    )
+
+
+def text_turn(text):
+    """The usual event sequence for a one-shot generation turn."""
+    return [assistant_text(text), success_result()]
+
+
+def patch_adapter(adapter):
+    """Patch make_adapter at the consumer module to return `adapter`."""
+    return patch("app.api.generation.make_adapter", return_value=adapter)
 
 
 class TestExtractJsonFromResponse:
@@ -135,52 +222,56 @@ That's the generated config!'''
 
 
 class TestGenerateWithClaude:
-    """Test the Claude SDK integration.
+    """Test the provider-adapter integration.
 
-    AI generation always runs through the throwaway Claude Agent SDK
-    ``query()`` subprocess — there is no direct-HTTP path. The subprocess
-    authenticates the same way as the rest of Claude Code (the stored
-    anthropic_api_key, when set, is injected as ANTHROPIC_API_KEY by the
-    options builder; otherwise the OAuth account is used). These tests patch
-    the profile lookup and options builder so they need no DB and assert the
-    SDK path is the ONLY path.
+    AI generation runs through the SAME seam as chat
+    (``app.core.provider.factory.make_adapter`` -> HarnessAdapter), so a
+    Claude-subscription binding takes the delegated ``claude.exe`` leg and
+    anything else takes the fluid native leg. There is no direct-HTTP path and
+    no direct SDK ``query()`` call. These tests patch the profile lookup, the
+    options builder and ``make_adapter`` so they need no DB and no subprocess.
     """
-
-    @staticmethod
-    def _mock_query_yielding(text):
-        """Build an async-generator factory yielding one AssistantMessage."""
-        from claude_agent_sdk import AssistantMessage, TextBlock
-
-        mock_text_block = MagicMock(spec=TextBlock)
-        mock_text_block.text = text
-        mock_message = MagicMock(spec=AssistantMessage)
-        mock_message.content = [mock_text_block]
-
-        async def mock_query_gen(*args, **kwargs):
-            yield mock_message
-
-        return mock_query_gen
 
     @pytest.mark.asyncio
     async def test_generate_with_claude_success(self):
-        """Should return text response from Claude via the SDK query() path."""
+        """Should return text collected from the adapter's event stream."""
         from app.api.generation import generate_with_claude
 
+        adapter = FakeAdapter(text_turn('{"name": "Generated"}'))
         with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
                 patch("app.core.generation_options.build_generation_options", return_value=MagicMock()), \
-                patch("app.api.generation.query", return_value=self._mock_query_yielding('{"name": "Generated"}')()):
+                patch_adapter(adapter):
             result = await generate_with_claude("Test prompt")
 
         assert result == '{"name": "Generated"}'
+        assert adapter.connected is True
+        assert adapter.prompts == ["Test prompt"]
+        assert adapter.disconnect_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_generate_with_claude_uses_app_local_event_classes(self):
+        """Regression guard: the loop must match app.core.provider.events.
+
+        The adapter emits the app-local mirror classes. If the isinstance
+        checks were left pointing at ``claude_agent_sdk``'s classes the loop
+        would silently collect nothing and generation would return "".
+        """
+        import app.api.generation as generation_mod
+        from app.core.provider import events as provider_events
+
+        assert generation_mod.AssistantMessage is provider_events.AssistantMessage
+        assert generation_mod.TextBlock is provider_events.TextBlock
+        assert generation_mod.ResultMessage is provider_events.ResultMessage
 
     @pytest.mark.asyncio
     async def test_generate_with_claude_with_model(self):
         """Should forward the model override into build_generation_options."""
         from app.api.generation import generate_with_claude
 
+        adapter = FakeAdapter(text_turn('{"result": "ok"}'))
         with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
                 patch("app.core.generation_options.build_generation_options", return_value=MagicMock()) as mock_build, \
-                patch("app.api.generation.query", return_value=self._mock_query_yielding('{"result": "ok"}')()):
+                patch_adapter(adapter):
             result = await generate_with_claude("Test prompt", model="opus")
 
         assert '{"result": "ok"}' in result
@@ -188,29 +279,82 @@ class TestGenerateWithClaude:
         assert mock_build.call_args.kwargs.get("model_override") == "opus"
 
     @pytest.mark.asyncio
-    async def test_generate_with_claude_sdk_error(self):
-        """Should raise HTTPException(500) when the SDK query() fails."""
+    async def test_generate_with_claude_stops_at_result_message(self):
+        """The ResultMessage is turn-terminal — later events are not collected."""
+        from app.api.generation import generate_with_claude
+
+        adapter = FakeAdapter([
+            assistant_text("first"),
+            success_result(),
+            assistant_text("after-the-end"),
+        ])
+        with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
+                patch("app.core.generation_options.build_generation_options", return_value=MagicMock()), \
+                patch_adapter(adapter):
+            result = await generate_with_claude("Test prompt")
+
+        assert result == "first"
+
+    @pytest.mark.asyncio
+    async def test_generate_with_claude_adapter_error(self):
+        """Should raise HTTPException(500) when the adapter turn fails."""
         from app.api.generation import generate_with_claude
         from fastapi import HTTPException
 
+        adapter = FakeAdapter(send_error=RuntimeError("harness connection failed"))
         with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
                 patch("app.core.generation_options.build_generation_options", return_value=MagicMock()), \
-                patch("app.api.generation.query", side_effect=RuntimeError("SDK connection failed")):
+                patch_adapter(adapter):
             with pytest.raises(HTTPException) as exc_info:
                 await generate_with_claude("Test prompt")
 
         assert exc_info.value.status_code == 500
         # api_error_handler("run AI generation") -> "Failed to run AI generation"
         assert "run AI generation" in exc_info.value.detail
+        # The adapter is still torn down on the failure path.
+        assert adapter.disconnect_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_generate_with_claude_error_result_message_surfaces(self):
+        """An is_error ResultMessage must not read back as an empty generation."""
+        from app.api.generation import generate_with_claude
+        from fastapi import HTTPException
+
+        adapter = FakeAdapter([error_result("provider rejected the request")])
+        with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
+                patch("app.core.generation_options.build_generation_options", return_value=MagicMock()), \
+                patch_adapter(adapter):
+            with pytest.raises(HTTPException) as exc_info:
+                await generate_with_claude("Test prompt")
+
+        assert exc_info.value.status_code == 500
+        assert adapter.disconnect_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_generate_with_claude_timeout_is_504_and_disconnects(self):
+        """A stuck leg must 504 quickly AND still tear the adapter down."""
+        from app.api.generation import generate_with_claude
+        from fastapi import HTTPException
+
+        adapter = FakeAdapter(hang=True)
+        with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
+                patch("app.core.generation_options.build_generation_options", return_value=MagicMock()), \
+                patch_adapter(adapter):
+            with pytest.raises(HTTPException) as exc_info:
+                await generate_with_claude("Test prompt", timeout_seconds=0.05)
+
+        assert exc_info.value.status_code == 504
+        assert exc_info.value.detail == "AI generation timed out"
+        assert adapter.disconnect_calls == 1
 
     @pytest.mark.asyncio
     async def test_generate_with_claude_never_uses_http_path(self):
         """Should NOT call the removed direct-HTTP generation path.
 
         Regression guard for the refactor: even if a stored anthropic_api_key
-        exists, generation must go through query() (the SDK subprocess), never
-        an api.anthropic.com HTTP POST. We assert query() is invoked and that
-        no HTTP generation symbols are importable from the generation module.
+        exists, generation must go through the adapter seam, never an
+        api.anthropic.com HTTP POST from this module. We assert the adapter is
+        used and that no HTTP generation symbols are importable here.
         """
         import app.api.generation as generation_mod
         from app.api.generation import generate_with_claude
@@ -219,22 +363,18 @@ class TestGenerateWithClaude:
         assert not hasattr(generation_mod, "generate_via_http")
         assert not hasattr(generation_mod, "is_http_generation_available")
         assert not hasattr(generation_mod, "_extract_system_prompt_text")
+        # The SDK one-shot entrypoint is gone from this module entirely.
+        assert not hasattr(generation_mod, "query")
 
-        query_called = {"n": 0}
-
-        def _spy_query(*args, **kwargs):
-            query_called["n"] += 1
-            return self._mock_query_yielding('{"ok": true}')()
-
-        # Even with a key "set", no HTTP client is constructed — query() runs.
+        adapter = FakeAdapter(text_turn('{"ok": true}'))
         with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
                 patch("app.core.generation_options.build_generation_options", return_value=MagicMock()), \
-                patch("app.api.generation.query", side_effect=_spy_query), \
+                patch_adapter(adapter), \
                 patch("httpx.AsyncClient.post", side_effect=AssertionError("HTTP path must not be used")):
             result = await generate_with_claude("Test prompt")
 
         assert result == '{"ok": true}'
-        assert query_called["n"] == 1
+        assert adapter.connected is True
 
     @pytest.mark.asyncio
     async def test_generate_with_claude_provider_config_error_is_400(self):
@@ -260,19 +400,46 @@ class TestGenerateWithClaude:
         assert "Model provider 'op' is disabled." in exc_info.value.detail
 
     @pytest.mark.asyncio
+    async def test_generate_with_claude_credential_error_is_400(self):
+        """A provider-credential failure at connect must be an actionable 400.
+
+        ProviderCredentialError subclasses ProviderConfigError, so the connect
+        guard catches both shapes.
+        """
+        from app.api.generation import generate_with_claude
+        from app.core.provider.omni_credentials import ProviderCredentialError
+        from fastapi import HTTPException
+
+        adapter = FakeAdapter(
+            connect_error=ProviderCredentialError(
+                "Model provider 'gpt-row' has no credentials configured."
+            )
+        )
+        with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
+                patch("app.core.generation_options.build_generation_options", return_value=MagicMock()), \
+                patch_adapter(adapter):
+            with pytest.raises(HTTPException) as exc_info:
+                await generate_with_claude("Test prompt")
+
+        assert exc_info.value.status_code == 400
+        assert "no credentials configured" in exc_info.value.detail
+        assert adapter.disconnect_calls == 1
+
+    @pytest.mark.asyncio
     async def test_generate_with_claude_does_not_depend_on_stored_key(self):
         """Generation must succeed whether or not an Anthropic key is stored.
 
         The key is now an auth credential consumed by the options/env builder,
         not a precondition for generation. With the key lookup patched to
-        return a value, generation still routes through query() unchanged.
+        return a value, generation still routes through the adapter unchanged.
         """
         from app.api.generation import generate_with_claude
 
+        adapter = FakeAdapter(text_turn('{"name": "X"}'))
         with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
                 patch("app.core.generation_options.build_generation_options", return_value=MagicMock()), \
                 patch("app.api.settings_crypto.get_decrypted_api_key", return_value="sk-ant-stored"), \
-                patch("app.api.generation.query", return_value=self._mock_query_yielding('{"name": "X"}')()):
+                patch_adapter(adapter):
             result = await generate_with_claude("Test prompt")
 
         assert result == '{"name": "X"}'
@@ -311,8 +478,6 @@ class TestGenerateProfileEndpoint:
 
     def test_generate_profile_success(self, authenticated_client):
         """Should generate profile configuration from description."""
-        from claude_agent_sdk import AssistantMessage, TextBlock
-
         mock_response = '''{
             "name": "Python Developer",
             "description": "A profile for Python development",
@@ -325,16 +490,7 @@ class TestGenerateProfileEndpoint:
             "system_prompt_preset": "claude_code"
         }'''
 
-        mock_text_block = MagicMock(spec=TextBlock)
-        mock_text_block.text = mock_response
-
-        mock_message = MagicMock(spec=AssistantMessage)
-        mock_message.content = [mock_text_block]
-
-        async def mock_query_gen(*args, **kwargs):
-            yield mock_message
-
-        with patch("app.api.generation.query", return_value=mock_query_gen()):
+        with patch_adapter(FakeAdapter(text_turn(mock_response))):
             response = authenticated_client.post(
                 "/api/v1/generate/profile",
                 json={
@@ -371,20 +527,9 @@ class TestGenerateProfileEndpoint:
 
     def test_generate_profile_with_model_param(self, authenticated_client):
         """Should accept optional model parameter."""
-        from claude_agent_sdk import AssistantMessage, TextBlock
-
         mock_response = '{"name": "Test", "description": "Test profile", "model": "sonnet"}'
 
-        mock_text_block = MagicMock(spec=TextBlock)
-        mock_text_block.text = mock_response
-
-        mock_message = MagicMock(spec=AssistantMessage)
-        mock_message.content = [mock_text_block]
-
-        async def mock_query_gen(*args, **kwargs):
-            yield mock_message
-
-        with patch("app.api.generation.query", return_value=mock_query_gen()):
+        with patch_adapter(FakeAdapter(text_turn(mock_response))):
             response = authenticated_client.post(
                 "/api/v1/generate/profile",
                 json={
@@ -400,18 +545,7 @@ class TestGenerateProfileEndpoint:
 
     def test_generate_profile_invalid_ai_response(self, authenticated_client):
         """Should handle invalid AI response gracefully."""
-        from claude_agent_sdk import AssistantMessage, TextBlock
-
-        mock_text_block = MagicMock(spec=TextBlock)
-        mock_text_block.text = "This is not valid JSON at all"
-
-        mock_message = MagicMock(spec=AssistantMessage)
-        mock_message.content = [mock_text_block]
-
-        async def mock_query_gen(*args, **kwargs):
-            yield mock_message
-
-        with patch("app.api.generation.query", return_value=mock_query_gen()):
+        with patch_adapter(FakeAdapter(text_turn("This is not valid JSON at all"))):
             response = authenticated_client.post(
                 "/api/v1/generate/profile",
                 json={
@@ -425,20 +559,9 @@ class TestGenerateProfileEndpoint:
 
     def test_generate_profile_missing_name(self, authenticated_client):
         """Should handle AI response missing required name field."""
-        from claude_agent_sdk import AssistantMessage, TextBlock
-
         mock_response = '{"description": "No name field", "model": "sonnet"}'
 
-        mock_text_block = MagicMock(spec=TextBlock)
-        mock_text_block.text = mock_response
-
-        mock_message = MagicMock(spec=AssistantMessage)
-        mock_message.content = [mock_text_block]
-
-        async def mock_query_gen(*args, **kwargs):
-            yield mock_message
-
-        with patch("app.api.generation.query", return_value=mock_query_gen()):
+        with patch_adapter(FakeAdapter(text_turn(mock_response))):
             response = authenticated_client.post(
                 "/api/v1/generate/profile",
                 json={
@@ -475,8 +598,6 @@ class TestGenerateSubagentEndpoint:
 
     def test_generate_subagent_success(self, authenticated_client):
         """Should generate subagent configuration from description."""
-        from claude_agent_sdk import AssistantMessage, TextBlock
-
         mock_response = '''{
             "id": "code-reviewer",
             "name": "Code Reviewer",
@@ -486,16 +607,7 @@ class TestGenerateSubagentEndpoint:
             "model": "sonnet"
         }'''
 
-        mock_text_block = MagicMock(spec=TextBlock)
-        mock_text_block.text = mock_response
-
-        mock_message = MagicMock(spec=AssistantMessage)
-        mock_message.content = [mock_text_block]
-
-        async def mock_query_gen(*args, **kwargs):
-            yield mock_message
-
-        with patch("app.api.generation.query", return_value=mock_query_gen()):
+        with patch_adapter(FakeAdapter(text_turn(mock_response))):
             response = authenticated_client.post(
                 "/api/v1/generate/subagent",
                 json={
@@ -529,8 +641,6 @@ class TestGenerateSubagentEndpoint:
 
     def test_generate_subagent_sanitizes_id(self, authenticated_client):
         """Should sanitize generated subagent ID."""
-        from claude_agent_sdk import AssistantMessage, TextBlock
-
         mock_response = '''{
             "id": "Code_Review Agent!!",
             "name": "Code Review Agent",
@@ -540,16 +650,7 @@ class TestGenerateSubagentEndpoint:
             "model": null
         }'''
 
-        mock_text_block = MagicMock(spec=TextBlock)
-        mock_text_block.text = mock_response
-
-        mock_message = MagicMock(spec=AssistantMessage)
-        mock_message.content = [mock_text_block]
-
-        async def mock_query_gen(*args, **kwargs):
-            yield mock_message
-
-        with patch("app.api.generation.query", return_value=mock_query_gen()):
+        with patch_adapter(FakeAdapter(text_turn(mock_response))):
             response = authenticated_client.post(
                 "/api/v1/generate/subagent",
                 json={
@@ -567,21 +668,10 @@ class TestGenerateSubagentEndpoint:
 
     def test_generate_subagent_missing_required_fields(self, authenticated_client):
         """Should handle AI response missing required fields."""
-        from claude_agent_sdk import AssistantMessage, TextBlock
-
         # Missing id, name, description, and prompt
         mock_response = '{"tools": ["Read"]}'
 
-        mock_text_block = MagicMock(spec=TextBlock)
-        mock_text_block.text = mock_response
-
-        mock_message = MagicMock(spec=AssistantMessage)
-        mock_message.content = [mock_text_block]
-
-        async def mock_query_gen(*args, **kwargs):
-            yield mock_message
-
-        with patch("app.api.generation.query", return_value=mock_query_gen()):
+        with patch_adapter(FakeAdapter(text_turn(mock_response))):
             response = authenticated_client.post(
                 "/api/v1/generate/subagent",
                 json={
@@ -595,8 +685,6 @@ class TestGenerateSubagentEndpoint:
 
     def test_generate_subagent_with_model_param(self, authenticated_client):
         """Should accept optional model parameter."""
-        from claude_agent_sdk import AssistantMessage, TextBlock
-
         mock_response = '''{
             "id": "test-agent",
             "name": "Test Agent",
@@ -606,16 +694,7 @@ class TestGenerateSubagentEndpoint:
             "model": "haiku"
         }'''
 
-        mock_text_block = MagicMock(spec=TextBlock)
-        mock_text_block.text = mock_response
-
-        mock_message = MagicMock(spec=AssistantMessage)
-        mock_message.content = [mock_text_block]
-
-        async def mock_query_gen(*args, **kwargs):
-            yield mock_message
-
-        with patch("app.api.generation.query", return_value=mock_query_gen()):
+        with patch_adapter(FakeAdapter(text_turn(mock_response))):
             response = authenticated_client.post(
                 "/api/v1/generate/subagent",
                 json={
@@ -631,18 +710,7 @@ class TestGenerateSubagentEndpoint:
 
     def test_generate_subagent_invalid_ai_response(self, authenticated_client):
         """Should handle invalid AI response gracefully."""
-        from claude_agent_sdk import AssistantMessage, TextBlock
-
-        mock_text_block = MagicMock(spec=TextBlock)
-        mock_text_block.text = "Not JSON"
-
-        mock_message = MagicMock(spec=AssistantMessage)
-        mock_message.content = [mock_text_block]
-
-        async def mock_query_gen(*args, **kwargs):
-            yield mock_message
-
-        with patch("app.api.generation.query", return_value=mock_query_gen()):
+        with patch_adapter(FakeAdapter(text_turn("Not JSON"))):
             response = authenticated_client.post(
                 "/api/v1/generate/subagent",
                 json={
@@ -687,8 +755,6 @@ class TestGenerationRequestModels:
 
     def test_subagent_request_valid_length(self, authenticated_client):
         """Description within valid length should be accepted (if generation works)."""
-        from claude_agent_sdk import AssistantMessage, TextBlock
-
         mock_response = '''{
             "id": "test",
             "name": "Test",
@@ -698,16 +764,7 @@ class TestGenerationRequestModels:
             "model": null
         }'''
 
-        mock_text_block = MagicMock(spec=TextBlock)
-        mock_text_block.text = mock_response
-
-        mock_message = MagicMock(spec=AssistantMessage)
-        mock_message.content = [mock_text_block]
-
-        async def mock_query_gen(*args, **kwargs):
-            yield mock_message
-
-        with patch("app.api.generation.query", return_value=mock_query_gen()):
+        with patch_adapter(FakeAdapter(text_turn(mock_response))):
             response = authenticated_client.post(
                 "/api/v1/generate/subagent",
                 json={

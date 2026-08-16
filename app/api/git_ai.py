@@ -325,7 +325,14 @@ Return ONLY the branch name, nothing else."""
         # Keeps the generation pool client reusable across all AI calls — any
         # explicit model override here would force a pool recycle if the default
         # model differs.
-        response_text = await generate_with_claude(prompt)
+        #
+        # Shorter-than-default budget: branch naming sits in front of an
+        # interactive "create branch" flow and has a perfectly good non-AI
+        # fallback (slugify_branch, below), so a slow/stuck leg should degrade
+        # to the fallback in seconds rather than stall the UI for the full
+        # generation default. Commit messages and PR descriptions keep the
+        # default — they have no equivalent fallback.
+        response_text = await generate_with_claude(prompt, timeout_seconds=45)
         branch_name = response_text.strip().strip('"').strip("'").strip('`')
 
         # Validate the generated name

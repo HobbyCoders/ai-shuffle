@@ -5,6 +5,7 @@ Uses Claude to generate configurations based on user descriptions.
 Features comprehensive prompts, domain awareness, and interactive clarification.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -15,8 +16,12 @@ from typing import Optional, Dict
 from fastapi import APIRouter, HTTPException, Depends, status
 from pydantic import BaseModel, Field
 
-from claude_agent_sdk import query, ClaudeAgentOptions
-from claude_agent_sdk import AssistantMessage, TextBlock
+# App-local mirror classes, NOT the SDK ones. Generation runs through the
+# provider adapter seam (see `generate_with_claude`), and the adapter emits
+# `app.core.provider.events` instances — isinstance checks against the
+# `claude_agent_sdk` classes would silently match nothing and collect no text.
+from app.core.provider.events import AssistantMessage, ResultMessage, TextBlock
+from app.core.provider.factory import make_adapter
 
 from app.api.auth import require_auth
 from app.api.common import api_error_handler
@@ -241,35 +246,69 @@ def extract_json_from_response(text: str) -> dict:
         raise ValueError(f"Invalid JSON in response: {e}")
 
 
-async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
+def _result_message_error(message: ResultMessage) -> Optional[str]:
+    """Return an error detail string when a ResultMessage reports a failure.
+
+    The harness emits `is_error=True` with `errors=[...]` / `result=<text>` for
+    an ErrorEvent (see `HarnessAdapter._translate`); a normal turn ends with
+    `subtype="success", is_error=False`. Returns None for a clean result.
     """
-    Generate a response using Claude, honoring the Default AI profile.
+    if not getattr(message, "is_error", False):
+        return None
+    errors = getattr(message, "errors", None)
+    if errors:
+        return "; ".join(str(e) for e in errors)
+    result = getattr(message, "result", None)
+    if result:
+        return str(result)
+    api_error_status = getattr(message, "api_error_status", None)
+    if api_error_status is not None:
+        return f"provider returned HTTP {api_error_status}"
+    return str(getattr(message, "subtype", None) or "unknown error")
+
+
+async def generate_with_claude(
+    prompt: str,
+    model: Optional[str] = None,
+    timeout_seconds: float = 120.0,
+) -> str:
+    """
+    Generate a response using AI, honoring the Default AI profile.
 
     The Default AI profile is the user-facing control for all internal AI
     generation (commit messages, PR descriptions, branch names, profile /
-    subagent generation, etc.). This function pulls the profile's model and
-    system prompt, then runs a throwaway Claude Agent SDK `query()`.
+    subagent generation, etc.). This function pulls the profile's model,
+    provider binding and system prompt, then runs a throwaway turn through the
+    provider adapter seam (`app.core.provider.factory.make_adapter`).
 
-    All generation goes through the Claude Agent SDK's `query()` — a fresh
-    `claude.exe` subprocess using the full profile config (permission_mode,
-    setting_sources, thinking_mode, effort, env, extra_args). Tools / MCP /
-    agents / hooks are always forced off for one-shot generation.
+    ROUTING — identical to chat. The adapter's `_decide_provider_kind` reads the
+    provider binding stamped onto the options by `build_generation_options`
+    (`aih_provider_id` / `aih_provider_type` / `aih_provider_auth_mode` /
+    `aih_provider_dialect`): a Claude-subscription binding takes the delegated
+    `claude.exe` leg, anything else (an OpenAI/OpenRouter/custom row, an
+    API-key Anthropic row) takes the fluid native leg. This function used to
+    call the SDK's `query()` directly, which always spawned `claude.exe` even
+    when the profile pointed at e.g. `gpt-5.6-terra` — a guaranteed hang.
 
-    The subprocess authenticates the same way as every other Claude Code
-    session in this app: if an Anthropic API key is configured in Settings it
-    is injected as `ANTHROPIC_API_KEY` (see
-    `app.core.environment.inject_claude_code_auth`); otherwise the connected
-    Claude account / OAuth credentials are used. There is NO direct-HTTP path
-    here — the stored key is an auth credential for Claude Code, not a separate
-    generation transport.
+    Tools / MCP / agents / hooks are always forced off for one-shot generation,
+    and nothing is persisted to the session store.
+
+    Auth follows the bound provider: a native leg resolves the provider row's
+    decrypted credentials; the delegated leg authenticates like every other
+    Claude Code session (stored `ANTHROPIC_API_KEY`, else the connected OAuth
+    account). There is NO direct-HTTP path here.
 
     Args:
-        prompt: The prompt to send to Claude
-        model: Optional model override (haiku, sonnet, opus). If None, uses
-               the model from the Default AI profile.
+        prompt: The prompt to send.
+        model: Optional model override. If None, uses the model from the
+               Default AI profile.
+        timeout_seconds: Wall-clock budget for the send+receive phase. On expiry
+               the adapter is torn down and an HTTP 504 is raised. Latency-
+               sensitive callers (branch names) pass a shorter budget so their
+               non-AI fallback fires quickly.
 
     Returns:
-        Text response from Claude
+        Text response from the model.
     """
     from app.core.profiles import get_default_ai_profile
     from app.core.generation_options import build_generation_options
@@ -279,8 +318,7 @@ async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
     profile_config = (profile or {}).get("config") if profile else None
     effective_model = model or (profile_config or {}).get("model") or DEFAULT_MODEL
 
-    # SDK subprocess path — full profile config applied.
-    # Single-shot subprocess: max_turns=1 since we only send one prompt.
+    # Single-shot turn: max_turns=1 since we only send one prompt.
     try:
         options = build_generation_options(
             profile_config,
@@ -297,23 +335,34 @@ async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
     response_text: list[str] = []
 
     # [gen-debug] Per-message timing. Capture time-to-first-event and
-    # time-to-first-text so we can split "subprocess boot + init handshake"
-    # from "model reasoning + token streaming." Expect:
-    #   t_first_event  = SDK connect + CLI init + initialize RPC
-    #   t_first_text   = above + model inference latency
-    #   t_last_event   = above + full response streaming
+    # time-to-first-text so we can split "leg startup + init handshake" from
+    # "model reasoning + token streaming."
     t_first_event: Optional[float] = None
     t_first_text: Optional[float] = None
     msg_count = 0
     msg_types: list[str] = []
 
+    # The decided routing INPUTS. If a generation call is slow or lands on the
+    # wrong backend, this line says why before any subprocess/HTTP work starts.
     logger.info(
-        f"[gen-debug] entering query() model={effective_model} "
-        f"prompt_bytes={len(prompt)}"
+        "[generate_with_claude] routing model=%r provider_id=%r "
+        "provider_type=%r auth_mode=%r dialect=%r timeout=%.0fs "
+        "prompt_bytes=%d",
+        effective_model,
+        getattr(options, "aih_provider_id", None),
+        getattr(options, "aih_provider_type", None),
+        getattr(options, "aih_provider_auth_mode", None),
+        getattr(options, "aih_provider_dialect", None),
+        timeout_seconds,
+        len(prompt),
     )
 
-    async with api_error_handler("run AI generation"):
-        async for message in query(prompt=prompt, options=options):
+    adapter = make_adapter()
+
+    async def _run_turn() -> None:
+        nonlocal t_first_event, t_first_text, msg_count
+        await adapter.send_query(prompt)
+        async for message in adapter.receive_events():
             now = time.perf_counter()
             if t_first_event is None:
                 t_first_event = now - t0
@@ -334,10 +383,54 @@ async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
                                 f"len={len(block.text)}"
                             )
                         response_text.append(block.text)
+            elif isinstance(message, ResultMessage):
+                # Turn-terminal. A failed turn must not read back as an empty
+                # generation — surface the harness's error text so
+                # api_error_handler renders something actionable.
+                detail = _result_message_error(message)
+                if detail:
+                    raise RuntimeError(f"AI generation failed: {detail}")
+                break
+
+    async with api_error_handler("run AI generation"):
+        try:
+            try:
+                await adapter.connect_with_sdk_options(options)
+            except ProviderConfigError as e:
+                # Missing/undecryptable provider credentials (ProviderCredentialError
+                # subclasses ProviderConfigError) or any other provider-config
+                # failure raised while building the native client. Actionable 400,
+                # not a generic 500.
+                raise HTTPException(status_code=400, detail=str(e)) from e
+
+            try:
+                await asyncio.wait_for(_run_turn(), timeout=timeout_seconds)
+            except asyncio.TimeoutError as e:
+                logger.warning(
+                    "[generate_with_claude] timed out after %.0fs "
+                    "model=%r provider_id=%r",
+                    timeout_seconds,
+                    effective_model,
+                    getattr(options, "aih_provider_id", None),
+                )
+                raise HTTPException(
+                    status_code=504, detail="AI generation timed out"
+                ) from e
+        finally:
+            # One-shot lifecycle: this call owns the adapter outright (never
+            # pooled), so tear it down here — including on the timeout and
+            # crash paths.
+            try:
+                await adapter.disconnect()
+            except Exception as disconnect_err:  # noqa: BLE001 - teardown is best-effort
+                logger.warning(
+                    f"[generate_with_claude] adapter disconnect failed: "
+                    f"{disconnect_err}"
+                )
 
     t_total = time.perf_counter() - t0
     logger.info(
-        f"[generate_with_claude] SDK path model={effective_model} "
+        f"[generate_with_claude] adapter path model={effective_model} "
         f"took {t_total * 1000:.0f}ms"
     )
     logger.info(

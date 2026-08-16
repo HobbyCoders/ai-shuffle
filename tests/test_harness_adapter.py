@@ -3101,3 +3101,78 @@ def test_vendored_native_loop_accepts_the_restriction_kwargs():
     assert loop._tool_permitted("Bash") is False            # outside the allowlist
     assert loop._tool_permitted("mcp__x__safe") is True     # fnmatch pattern
     assert loop._tool_permitted("mcp__x__danger") is False  # deny beats allow
+
+
+# ─── Generation-path binding projection ──────────────────────────────────────
+
+
+class _GenOptions:
+    """The shape ``generation_options.build_generation_options`` returns.
+
+    Only the attributes ``connect_with_sdk_options`` reads are modelled; the
+    real object is a ``ClaudeAgentOptions`` carrying the same ``aih_*`` stamps.
+    """
+
+    def __init__(self, model, provider_id=None, provider_type=None,
+                 auth_mode=None, dialect=None):
+        self.model = model
+        self.env = {}
+        self.max_turns = 1
+        self.aih_provider_id = provider_id
+        self.aih_provider_type = provider_type
+        self.aih_provider_auth_mode = auth_mode
+        self.aih_provider_dialect = dialect
+
+
+async def _kind_for_generation_options(gen_options, monkeypatch):
+    """Decide the leg the way a real generation call does.
+
+    Runs the REAL projection (``HarnessAdapter.connect_with_sdk_options``) with
+    only the engine-building ``connect`` stubbed out, then asks
+    ``_decide_provider_kind`` — so this covers the stamp -> extra -> decision
+    chain end to end rather than re-deriving the projection in the test.
+    """
+    captured = {}
+
+    async def _fake_connect(self, opts):
+        captured["opts"] = opts
+
+    monkeypatch.setattr(HarnessAdapter, "connect", _fake_connect, raising=True)
+    await HarnessAdapter().connect_with_sdk_options(gen_options)
+    return _decide_provider_kind(captured["opts"])
+
+
+@pytest.mark.asyncio
+async def test_generation_options_route_like_chat(monkeypatch):
+    """AI generation must pick the SAME leg chat would for the same binding.
+
+    Regression for the 190s hang: generation used to call the SDK's ``query()``
+    directly, so EVERY generation call spawned ``claude.exe`` — including when
+    the Default AI profile pointed at a GPT model.
+    """
+    async def kind(opts):
+        return await _kind_for_generation_options(opts, monkeypatch)
+
+    # Non-Claude provider row → fluid native leg, no claude.exe anywhere.
+    assert await kind(
+        _GenOptions("gpt-5.6-terra", provider_id="op", provider_type="openai")
+    ) == "openai_responses"
+    assert await kind(
+        _GenOptions("meta-llama/llama-3.1-70b", provider_id="op",
+                    provider_type="openrouter")
+    ) == "openrouter"
+    # An Anthropic API-KEY row also runs natively.
+    assert await kind(
+        _GenOptions("claude-sonnet-4-5", provider_id="op",
+                    provider_type="anthropic")
+    ) == "anthropic"
+    # ...but a Claude SUBSCRIPTION row stays on the delegated claude CLI —
+    # Anthropic bans third-party use of subscription tokens.
+    for mode in ("oauth", "subscription", "claude_subscription", "max", "pro"):
+        assert await kind(
+            _GenOptions("claude-sonnet-4-5", provider_id="op",
+                        provider_type="anthropic", auth_mode=mode)
+        ) == "delegated", mode
+    # A provider-less (native Claude) profile keeps the delegated leg via the
+    # model sniff, exactly as before the fix.
+    assert await kind(_GenOptions("opus")) == "delegated"
