@@ -23,6 +23,28 @@ What this module adds on top of raw ``dispatch_worker``:
 * modes (A8) — ``sync`` blocks and returns the worker's report;
   ``background`` returns the worker session id immediately (collect later via
   TaskList/TaskOutput — background workers survive the caller's turn end).
+
+File-defined agents (Claude-ecosystem compat, ruling CE6)
+---------------------------------------------------------
+On a native (fluid) leg the engine reads the user's ``.claude/agents/**/*.md``
+definitions — project, global, and namespaced ``<plugin>:<agent>`` ones — and
+publishes them on ``ctx.extra["agent_registry"]``. fluid never spawns anything;
+this module is what makes those names dispatchable, as a FALLBACK behind the
+app's own ``agents`` table (host wins a name collision, matching fluid's own
+doctrine and its registry-seam precedence).
+
+A file agent has no ``agents`` row, so it borrows the CALLER's profile (and with
+it the provider binding, tools and MCP surface) and its markdown body rides the
+worker's system prompt as an override block. Consequences, deliberate:
+
+* ``tools:`` in the frontmatter is ADVISORY — the app has no per-turn tool
+  allowlist seam (tools come from the profile), so the worker spawns with the
+  caller's toolset and the restriction is stated in its prompt instead;
+* ``model:`` is honored when the caller's provider curates it, and dropped with
+  a note when it does not (a definition written for Claude should not fail a
+  dispatch on an OpenAI-bound session);
+* the profile-id cycle check does not apply (the worker runs on the caller's own
+  profile by construction); depth, worker budget and invoke grants all do.
 """
 
 from __future__ import annotations
@@ -176,6 +198,86 @@ def resolve_target_agent(ref: str) -> Tuple[Optional[Dict[str, Any]], Optional[s
     return None, f"Unknown agent: '{ref}'. List agents via the agents API/UI."
 
 
+def _def_field(definition: Any, field: str, default: Any = None) -> Any:
+    """One field off an agent definition — dataclass attr or mapping key.
+
+    The registry holds fluid ``AgentDefinition`` records, but this module never
+    imports fluid (it also serves the delegated leg, which has no engine
+    objects at all): duck-typing keeps the seam honest and the tests trivial.
+    """
+    if isinstance(definition, dict):
+        value = definition.get(field, default)
+    else:
+        value = getattr(definition, field, default)
+    return default if value is None else value
+
+
+def resolve_registry_agent(ref: str, registry: Any) -> Optional[Any]:
+    """A file/plugin agent definition matching ``ref``, or None.
+
+    Exact name first, then a unique case-insensitive match — the same
+    forgiveness ``resolve_target_agent`` grants app agents, because the model
+    reads these names out of a prompt index and re-types them.
+    """
+    if not isinstance(registry, dict) or not registry:
+        return None
+    ref = (ref or "").strip()
+    if not ref:
+        return None
+    if ref in registry:
+        return registry[ref]
+    matches = [d for name, d in registry.items() if name.strip().lower() == ref.lower()]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _file_agent_prompt(definition: Any) -> str:
+    """The worker's system-prompt override block for a file-defined agent."""
+    name = str(_def_field(definition, "name", "") or "agent")
+    path = str(_def_field(definition, "path", "") or "")
+    body = str(_def_field(definition, "body", "") or "").strip()
+    tools = tuple(_def_field(definition, "tools", ()) or ())
+
+    lines = [
+        f"## Agent definition — you are running as the '{name}' agent",
+        (
+            f"These instructions come from the agent definition at {path}. "
+            "They describe the role you are dispatched for and take precedence "
+            "over your profile's general instructions for this task."
+            if path
+            else
+            "The instructions below define the role you are dispatched for and "
+            "take precedence over your profile's general instructions for this "
+            "task."
+        ),
+    ]
+    if tools:
+        lines.append(
+            "This definition restricts the agent to these tools: "
+            + ", ".join(str(t) for t in tools)
+            + ". That restriction is not enforced by the runtime here — honor it "
+            "yourself and do not reach for tools outside the list."
+        )
+    if body:
+        lines.append(body)
+    return "\n\n".join(lines)
+
+
+def _caller_provider_id(caller_row: Dict[str, Any], caller_profile_id: Optional[str]) -> Optional[str]:
+    """The provider the caller is bound to — session row first, profile after."""
+    provider_id = (caller_row or {}).get("provider_id")
+    if provider_id:
+        return str(provider_id)
+    if not caller_profile_id:
+        return None
+    try:
+        from app.db import database
+
+        profile = database.get_profile(caller_profile_id) or {}
+    except Exception:  # noqa: BLE001 — binding lookup is best-effort
+        return None
+    return ((profile.get("config") or {}).get("provider")) or None
+
+
 def _validate_target(agent: Dict[str, Any], model_override: Optional[str]) -> Optional[str]:
     """Provider/model admission for the target agent. None = OK."""
     from app.core import provider_agent
@@ -219,9 +321,17 @@ async def dispatch_task_tool(
     caller_session_id: str,
     caller_profile_id: Optional[str] = None,
     launch_tool_use_id: Optional[str] = None,
+    agent_registry: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Handle one ``Task`` tool call. Never raises — returns a payload dict
-    with ``ok`` plus either a report/worker id or an ``error``."""
+    with ``ok`` plus either a report/worker id or an ``error``.
+
+    ``agent_registry`` is the native leg's ``ctx.extra["agent_registry"]`` —
+    file/plugin agent definitions fluid discovered on disk. It is consulted only
+    when the name matches no app agent (host wins), and the resulting worker
+    borrows the caller's profile with the definition's body as its system
+    prompt (see the module docstring).
+    """
     from app.core import provider_agent
     from app.core.config import settings
 
@@ -232,20 +342,42 @@ async def dispatch_task_tool(
     if mode not in ("sync", "background"):
         return {"ok": False, "error": f"Unknown mode '{mode}' (sync|background)."}
 
-    target, err = resolve_target_agent(args.get("agent") or "")
-    if err:
+    ref = (args.get("agent") or "").strip()
+    target, err = resolve_target_agent(ref)
+    # Fallback ONLY after the app's own agents had their say (CE6 host-wins).
+    definition = resolve_registry_agent(ref, agent_registry) if err else None
+    if err and definition is None:
         return {"ok": False, "error": err}
-    assert target is not None
 
-    # Invoke grants (A10): open by default, optional caller allowlist.
     caller_row = _session_row(caller_session_id) or {}
     caller_pid = caller_profile_id or caller_row.get("profile_id")
+
+    if definition is not None:
+        target = None
+        target_name = str(_def_field(definition, "name", ref) or ref)
+        if not caller_pid:
+            return {
+                "ok": False,
+                "error": (
+                    f"Agent '{target_name}' is defined in a file, so its worker "
+                    "runs on the calling session's profile — but this session "
+                    "has no profile to inherit. Open the session with a profile "
+                    "and retry."
+                ),
+            }
+    else:
+        assert target is not None
+        target_name = str(target.get("name") or target["id"])
+
+    # Invoke grants (A10): open by default, optional caller allowlist. A file
+    # agent is checked by NAME — the allowlist is the host's policy either way.
+    grant_key = target["id"] if target is not None else target_name
     if caller_pid:
         from app.db import database
 
         caller_agent = database.get_profile(caller_pid)
         allowlist = ((caller_agent or {}).get("config") or {}).get("enabled_agents")
-        if isinstance(allowlist, list) and allowlist and target["id"] not in allowlist:
+        if isinstance(allowlist, list) and allowlist and grant_key not in allowlist:
             return {
                 "ok": False,
                 "error": (
@@ -262,15 +394,18 @@ async def dispatch_task_tool(
             "ok": False,
             "error": f"Nesting limit reached ({max_depth} levels of agent-invokes-agent).",
         }
-    active_agents = _chain_agent_ids(caller_session_id)
-    if target["id"] in active_agents:
-        return {
-            "ok": False,
-            "error": (
-                f"Cycle refused: agent '{target['id']}' is already active in "
-                "this dispatch chain."
-            ),
-        }
+    # Cycles (A9) are a PROFILE-id property; a file agent has no profile of its
+    # own (it borrows the caller's), so the check would refuse every dispatch.
+    if target is not None:
+        active_agents = _chain_agent_ids(caller_session_id)
+        if target["id"] in active_agents:
+            return {
+                "ok": False,
+                "error": (
+                    f"Cycle refused: agent '{target['id']}' is already active in "
+                    "this dispatch chain."
+                ),
+            }
 
     # Worker budget (A9), counted across the whole root tree.
     max_workers = int(getattr(settings, "task_tool_max_workers", 8) or 8)
@@ -284,18 +419,56 @@ async def dispatch_task_tool(
         }
 
     model_override = (args.get("model") or "").strip() or None
-    admission_error = _validate_target(target, model_override)
-    if admission_error:
-        return {"ok": False, "error": admission_error}
+    label = (args.get("label") or "").strip() or f"Task · {target_name}"
+    #: Non-fatal deviations reported back to the model with the result.
+    notes: List[str] = []
 
-    target_config = target.get("config") or {}
-    provider_id = target_config.get("provider") or None
-    label = (args.get("label") or "").strip() or f"Task · {target.get('name') or target['id']}"
+    if definition is not None:
+        # The worker rides the CALLER's profile and provider binding; only the
+        # system prompt (and, when curated, the model) come from the file.
+        profile_id = str(caller_pid)
+        provider_id = _caller_provider_id(caller_row, profile_id)
+        if not model_override:
+            wanted = str(_def_field(definition, "model", "") or "").strip() or None
+            if wanted and provider_id:
+                validation = provider_agent.validate_provider_model(
+                    provider_id, wanted, require_servable=False
+                )
+                if validation.ok:
+                    model_override = wanted
+                else:
+                    notes.append(
+                        f"The definition asks for model '{wanted}', which provider "
+                        f"'{provider_id}' does not curate — the worker inherits the "
+                        "session's model instead."
+                    )
+            elif wanted:
+                model_override = wanted
+        if _def_field(definition, "tools", ()):
+            notes.append(
+                "The definition's tools list is advisory here: the worker runs "
+                "with the calling profile's toolset."
+            )
+        system_prompt_append = _file_agent_prompt(definition)
+        logger.info(
+            "task_dispatch: dispatching file-defined agent %r (scope=%s, path=%s) "
+            "on caller profile %s",
+            target_name, _def_field(definition, "scope", "?"),
+            _def_field(definition, "path", "?"), profile_id,
+        )
+    else:
+        assert target is not None
+        admission_error = _validate_target(target, model_override)
+        if admission_error:
+            return {"ok": False, "error": admission_error}
+        profile_id = target["id"]
+        provider_id = (target.get("config") or {}).get("provider") or None
+        system_prompt_append = None
 
     kwargs: Dict[str, Any] = dict(
         parent_session_id=root_session_id,
         context_session_id=caller_session_id,
-        profile_id=target["id"],
+        profile_id=profile_id,
         provider_id=provider_id,
         model_id=model_override,
         prompt=prompt,
@@ -304,6 +477,8 @@ async def dispatch_task_tool(
         # card absorb the launch tool_use block instead of rendering both.
         launch_tool_use_id=launch_tool_use_id,
     )
+    if system_prompt_append:
+        kwargs["system_prompt_append"] = system_prompt_append
 
     if mode == "background":
         task = asyncio.create_task(
@@ -317,21 +492,24 @@ async def dispatch_task_tool(
         return {
             "ok": True,
             "mode": "background",
-            "agent": target["id"],
+            "agent": target["id"] if target is not None else target_name,
             "worker_session_id": worker_id,
-            "note": (
+            "note": " ".join([
                 "Worker dispatched in the background. Poll with TaskList/"
-                "TaskOutput (task id = worker session id)."
-            ),
+                "TaskOutput (task id = worker session id).",
+                *notes,
+            ]),
         }
 
     outcome = await provider_agent.dispatch_worker(**kwargs)
     payload: Dict[str, Any] = {
         "ok": outcome.ok,
         "mode": "sync",
-        "agent": target["id"],
+        "agent": target["id"] if target is not None else target_name,
         "worker_session_id": outcome.session_id,
     }
+    if notes:
+        payload["note"] = " ".join(notes)
     if outcome.ok:
         payload["report"] = outcome.report or "(no report)"
         if outcome.truncated:
@@ -414,17 +592,27 @@ def make_omni_dispatcher(
         # sets ctx.extra["tool_use_id"] per tool call; dispatches are
         # sequential). Absent on the delegated leg's bridged mcp tool.
         launch_tool_use_id = None
+        agent_registry = None
         try:
-            candidate = (getattr(ctx, "extra", None) or {}).get("tool_use_id")
+            extra = getattr(ctx, "extra", None) or {}
+            candidate = extra.get("tool_use_id")
             if isinstance(candidate, str) and candidate:
                 launch_tool_use_id = candidate
-        except Exception:  # noqa: BLE001 — display-only nicety
+            # File/plugin agent definitions fluid discovered for this session
+            # (ruling CE6). Read at CALL time, not closure time: NativeLoop
+            # populates it while constructing itself, which happens AFTER this
+            # dispatcher is built and injected into the very same ctx.
+            registry = extra.get("agent_registry")
+            if isinstance(registry, dict) and registry:
+                agent_registry = registry
+        except Exception:  # noqa: BLE001 — display-only nicety + optional seam
             launch_tool_use_id = None
         payload = await dispatch_task_tool(
             input,
             caller_session_id=str(caller_session_id),
             caller_profile_id=profile_id,
             launch_tool_use_id=launch_tool_use_id,
+            agent_registry=agent_registry,
         )
         return json.dumps(payload, default=str)
 

@@ -74,10 +74,8 @@ HONORED:
 DEGRADED / NOT YET HONORED (documented gaps — mechanical follow-up):
   * ``allowed_tools`` / ``disallowed_tools`` — the app's SDK allow/deny lists
     are not auto-translated to registry filtering yet.
-  * ``plugins`` — no omni equivalent.
   * ``thinking`` — omni manages thinking via provider caps, not passed through.
   * ``hooks`` / ``include_hook_events`` — omni has its own HookBus; app SDK hooks not wired.
-  * ``agents`` (subagents) — not configured on the omni engine here.
   * ``extra_args`` / ``setting_sources`` — SDK/CLI-specific, ignored.
   * ``task_budget`` / ``session_store`` / ``session_store_flush`` — SDK session-store
     concepts; omni persistence is the Pg/Memory store chosen above.
@@ -92,6 +90,32 @@ HONORED SINCE THE P1 COMPILER LANDED (2026-08-13):
   * system prompts on native legs (and the delegated leg under
     PROMPT_FULL_REPLACE) run through ``omni.context.compiler`` — instruction
     files, skills index, and environment are omni-gathered (ruling A1).
+
+SUPPLIED BY FLUID ITSELF, WITH NO WIRING HERE (Claude-ecosystem compat, CE1):
+  fluid's discovery is filesystem-native and defaults ON, so a native leg picks
+  the user's existing Claude Code setup up for free. Nothing below is passed by
+  this adapter — the only lever it would have is turning a piece OFF:
+  * ``plugins`` — enabled plugins (``enabledPlugins`` in the settings stack) are
+    resolved from ``~/.claude/plugins``; their skills and commands join the
+    compiled prompt namespaced ``<plugin>:<name>``, their agents join the agent
+    registry, and their MCP servers join ``NativeLoop``'s lazy-connect set
+    (``fluid.context.plugins``, ruling CE5). App-configured servers of the same
+    name always win — see ``_prune_duplicate_plugin_mcp_servers``.
+  * ``settings.json`` — the user/project/local stack is merged and applied:
+    ``permissions.{allow,ask,deny,defaultMode}`` become PermissionEngine rules
+    placed BEFORE the app's (last match wins, so the app keeps the final say),
+    and ``env`` becomes a child-process overlay for the Bash builtin and stdio
+    MCP spawns — never an ``os.environ`` mutation (``fluid.context.
+    claude_settings``, ruling CE4).
+  * ``CLAUDE.md`` ``@path`` imports, ``CLAUDE.local.md`` and codex
+    ``AGENTS.override.md`` are expanded/collected by the instruction gatherer
+    (rulings CE2/CE3) — so the compiled prompt this adapter builds already
+    contains them.
+  * ``agents`` (subagents) — ``.claude/agents/**/*.md`` plus plugin agents are
+    read into ``ctx.extra["agent_registry"]`` by ``NativeLoop`` and advertised in
+    the prompt's agents index (ruling CE6). Dispatch stays ours: the Task
+    dispatcher injected below resolves app agents first and falls back to that
+    registry (``app.core.task_dispatch``).
 """
 
 from __future__ import annotations
@@ -404,6 +428,16 @@ class HarnessAdapter(ProviderAdapter):
                 # True) is not adopted here; turning it on is a separate,
                 # deliberate decision.
                 claude_settings=False,
+            )
+            # An enabled plugin may declare an MCP server under a name the app
+            # also configures. fluid's own host-wins check only sees servers
+            # passed as ``NativeLoop(mcp_servers=...)``, and the app connects
+            # its servers itself (``_build_registry`` → ``registry.connect_mcp``,
+            # already done above) — so without this the same name would be
+            # connected twice onto the same registry: two child processes, the
+            # second overwriting the first's catalog entries and orphaning it.
+            _prune_duplicate_plugin_mcp_servers(
+                self._engine, _external_mcp_servers(options.mcp_servers)
             )
 
         # Prime the session so ``session_id`` and ``events()`` are usable
@@ -1447,6 +1481,38 @@ def _external_mcp_servers(mcp_servers: Optional[Dict[str, Any]]) -> Dict[str, An
             continue
         out[name] = cfg
     return out
+
+
+def _prune_duplicate_plugin_mcp_servers(
+    engine: Any, app_servers: Optional[Dict[str, Any]]
+) -> list:
+    """Drop plugin-discovered MCP servers the app already owns. App wins.
+
+    fluid merges an enabled plugin's ``.mcp.json`` servers into ``NativeLoop``'s
+    lazy-connect set (ruling CE5), skipping any name the HOST passed as
+    ``mcp_servers=``. This adapter passes none — it connects the app's external
+    servers eagerly onto the shared ``ToolRegistry`` inside ``_build_registry``
+    — so fluid cannot see the collision and both would connect under one name.
+
+    Name-keyed, app wins (the app's server is the one its profile/config
+    deliberately configured, and its tools are what the prompt advertises).
+    Returns the dropped names, for tests and logging.
+    """
+    if not app_servers:
+        return []
+    servers = getattr(engine, "_mcp_servers", None)
+    if not isinstance(servers, dict) or not servers:
+        return []
+    dropped = [name for name in servers if name in app_servers]
+    for name in dropped:
+        servers.pop(name, None)
+        logger.warning(
+            "[HarnessAdapter] a Claude Code plugin declares MCP server %r, which "
+            "this session already configures — keeping the app's server and "
+            "skipping the plugin's",
+            name,
+        )
+    return dropped
 
 
 def _normalize_mcp_config_for_omni(name: str, config: Any) -> Optional[Dict[str, Any]]:

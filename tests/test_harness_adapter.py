@@ -2240,6 +2240,7 @@ from app.core.provider.harness_adapter import (
     _native_max_output_tokens,
     _normalize_mcp_config_for_omni,
     _positive_int,
+    _prune_duplicate_plugin_mcp_servers as ha_prune,
 )
 
 _HA_LOGGER = "app.core.provider.harness_adapter"
@@ -2376,6 +2377,82 @@ async def test_delegated_leg_never_connects_external_mcp(monkeypatch):
         SessionOptions(model="gpt-4o", mcp_servers=servers), native=True
     )
     assert set(calls) == {"local", "remote"}
+
+
+class _PluginMcpLoop(_CapturingLoop):
+    """A NativeLoop that did what fluid does: merged an enabled plugin's MCP
+    servers into its own lazy-connect set at construction time."""
+
+    plugin_servers: dict = {
+        "chrome-devtools": {"command": "npx", "args": ["chrome-devtools-mcp"]},
+        "plugin-only": {"command": "npx", "args": ["other"]},
+    }
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._mcp_servers = dict(kwargs.get("mcp_servers") or {})
+        for name, cfg in type(self).plugin_servers.items():
+            if name in self._mcp_servers:
+                continue
+            self._mcp_servers[name] = cfg
+
+
+def test_prune_duplicate_plugin_mcp_servers_is_name_keyed_and_app_wins(caplog):
+    engine = _types.SimpleNamespace(
+        _mcp_servers={"chrome-devtools": {"command": "npx"}, "solo": {"command": "x"}}
+    )
+    with caplog.at_level(_logging.WARNING, logger=_HA_LOGGER):
+        dropped = ha_prune(engine, {"chrome-devtools": {"command": "app-side"}})
+
+    assert dropped == ["chrome-devtools"]
+    assert set(engine._mcp_servers) == {"solo"}
+    assert any("chrome-devtools" in r.getMessage() for r in caplog.records)
+
+
+def test_prune_duplicate_plugin_mcp_servers_no_op_cases():
+    """No app servers, no plugin servers, or an engine without the attribute at
+    all (delegated leg / a future fluid) — all inert, never raising."""
+    engine = _types.SimpleNamespace(_mcp_servers={"solo": {"command": "x"}})
+    assert ha_prune(engine, None) == []
+    assert ha_prune(engine, {}) == []
+    assert ha_prune(_types.SimpleNamespace(), {"solo": {}}) == []
+    assert set(engine._mcp_servers) == {"solo"}
+
+
+@pytest.mark.asyncio
+async def test_connect_drops_plugin_mcp_servers_the_app_already_connected(
+    monkeypatch, tmp_path
+):
+    """A plugin server whose name matches an app-configured one must not be
+    connected a second time: the app connects its servers eagerly onto the
+    shared registry, so fluid's own host-wins check (which only sees servers
+    passed as mcp_servers=) cannot see the collision."""
+    import app.core.provider.harness_adapter as ha
+
+    connected: list = []
+
+    async def fake_connect_mcp(self, name, config):
+        connected.append(name)
+        return []
+
+    monkeypatch.setattr(ha.ToolRegistry, "connect_mcp", fake_connect_mcp)
+    monkeypatch.setattr(ha, "NativeLoop", _PluginMcpLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(
+        SessionOptions(
+            model="gpt-4o",
+            cwd=str(tmp_path),
+            extra={"omni_provider": "openai_responses"},
+            mcp_servers={"chrome-devtools": {"command": "app-configured"}},
+        )
+    )
+
+    # The app connected its own copy...
+    assert connected == ["chrome-devtools"]
+    # ...and the engine's lazy set keeps only the plugin server nobody owns.
+    assert set(adapter._engine._mcp_servers) == {"plugin-only"}
 
 
 async def _connect_capturing_native(monkeypatch, tmp_path, **option_kwargs):
@@ -2521,7 +2598,7 @@ async def test_task_dispatch_uses_the_stamped_app_session_id(monkeypatch, tmp_pa
 
     seen: dict = {}
 
-    async def _fake_dispatch(args, *, caller_session_id, caller_profile_id=None, launch_tool_use_id=None):
+    async def _fake_dispatch(args, *, caller_session_id, caller_profile_id=None, launch_tool_use_id=None, agent_registry=None):
         seen["caller"] = caller_session_id
         return {"ok": True}
 
@@ -2543,7 +2620,7 @@ async def test_task_dispatch_falls_back_to_the_sdk_id_lookup(monkeypatch, tmp_pa
 
     seen: dict = {}
 
-    async def _fake_dispatch(args, *, caller_session_id, caller_profile_id=None, launch_tool_use_id=None):
+    async def _fake_dispatch(args, *, caller_session_id, caller_profile_id=None, launch_tool_use_id=None, agent_registry=None):
         seen["caller"] = caller_session_id
         return {"ok": True}
 
@@ -2597,7 +2674,7 @@ async def test_pooled_engine_dispatcher_picks_up_a_late_session_id(
     seen: dict = {}
     mapped: dict = {}
 
-    async def _fake_dispatch(args, *, caller_session_id, caller_profile_id=None, launch_tool_use_id=None):
+    async def _fake_dispatch(args, *, caller_session_id, caller_profile_id=None, launch_tool_use_id=None, agent_registry=None):
         seen["caller"] = caller_session_id
         return {"ok": True}
 

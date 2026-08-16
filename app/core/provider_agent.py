@@ -769,6 +769,7 @@ async def dispatch_worker(
     background: bool = False,
     context_session_id: Optional[str] = None,
     launch_tool_use_id: Optional[str] = None,
+    system_prompt_append: Optional[str] = None,
 ) -> WorkerOutcome:
     """Run ``prompt`` in a fresh session bound to ``provider_id``/``model_id``.
 
@@ -883,6 +884,13 @@ async def dispatch_worker(
     inherited_mode = _caller_permission_mode(parent_row)
     if inherited_mode:
         overrides["permission_mode"] = inherited_mode
+    # A role definition the worker's profile does not carry — today: an agent
+    # defined in a ``.claude/agents`` markdown file or a plugin, dispatched on
+    # the caller's profile because it has no ``agents`` row of its own (ruling
+    # CE6, see app/core/task_dispatch). Rides the same append seam the
+    # connectors use, so it lands after the profile's own instructions.
+    if system_prompt_append:
+        overrides["system_prompt_append"] = system_prompt_append
 
     timeout = float(timeout_seconds) if timeout_seconds else worker_timeout_seconds()
 

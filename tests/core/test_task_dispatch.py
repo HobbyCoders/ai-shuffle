@@ -204,3 +204,129 @@ def test_root_routing_passes_root_as_parent(agents, monkeypatch):
     assert seen["parent_session_id"] == "the-root"
     assert seen["context_session_id"] == "nested-caller"
     assert seen["profile_id"] == "helper"
+
+
+# ─── file/plugin agent definitions (CE6 registry seam) ───────────────────────
+
+
+def _definition(name="researcher", **kw):
+    """A stand-in for fluid's AgentDefinition (duck-typed on purpose)."""
+    from types import SimpleNamespace
+
+    fields = dict(
+        name=name,
+        description="Researches things",
+        path=f"/proj/.claude/agents/{name}.md",
+        scope="project",
+        model=None,
+        tools=(),
+        body="You are a careful researcher. Read before you write.",
+    )
+    fields.update(kw)
+    return SimpleNamespace(**fields)
+
+
+def test_file_agent_dispatched_on_the_callers_profile(agents):
+    """A name only fluid knows resolves through the registry and spawns on the
+    caller's profile with the definition body as a system-prompt override."""
+    _mk_session(agents, "s-file", "root-agent")
+    seen = {}
+
+    async def fake_worker(**kwargs):
+        seen.update(kwargs)
+        return WorkerOutcome(ok=True, session_id="w-file", report="found it")
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        payload = asyncio.run(_dispatch(
+            {"agent": "researcher", "prompt": "go"}, "s-file",
+            agent_registry={"researcher": _definition()},
+        ))
+
+    assert payload["ok"] is True and payload["agent"] == "researcher"
+    assert seen["profile_id"] == "root-agent"  # borrowed, not invented
+    assert "careful researcher" in seen["system_prompt_append"]
+    assert "researcher" in seen["label"]
+
+
+def test_app_agent_wins_a_name_collision_with_a_file_agent(agents):
+    """Host wins (CE6): an app agent row shadows a same-named file agent."""
+    _mk_session(agents, "s-collide", "root-agent")
+    seen = {}
+
+    async def fake_worker(**kwargs):
+        seen.update(kwargs)
+        return WorkerOutcome(ok=True, session_id="w-c", report="r")
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        payload = asyncio.run(_dispatch(
+            {"agent": "helper", "prompt": "go"}, "s-collide",
+            agent_registry={"helper": _definition(name="helper", body="FILE BODY")},
+        ))
+
+    assert payload["ok"] is True
+    assert seen["profile_id"] == "helper"
+    assert seen.get("system_prompt_append") is None
+
+
+def test_file_agent_unknown_name_still_errors(agents):
+    _mk_session(agents, "s-unknown", "root-agent")
+    payload = asyncio.run(_dispatch(
+        {"agent": "ghost", "prompt": "go"}, "s-unknown",
+        agent_registry={"researcher": _definition()},
+    ))
+    assert payload["ok"] is False and "Unknown agent" in payload["error"]
+
+
+def test_file_agent_model_and_tools(agents):
+    """``model:`` rides through on an unbound (delegated) caller; ``tools:`` is
+    advisory and says so in the result note and the injected prompt."""
+    _mk_session(agents, "s-model", "root-agent")
+    seen = {}
+
+    async def fake_worker(**kwargs):
+        seen.update(kwargs)
+        return WorkerOutcome(ok=True, session_id="w-m", report="r")
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        payload = asyncio.run(_dispatch(
+            {"agent": "researcher", "prompt": "go"}, "s-model",
+            agent_registry={
+                "researcher": _definition(model="sonnet", tools=("Read", "Grep")),
+            },
+        ))
+
+    assert seen["model_id"] == "sonnet"
+    assert "Read, Grep" in seen["system_prompt_append"]
+    assert "advisory" in payload["note"]
+
+
+def test_file_agent_respects_the_invoke_allowlist(agents):
+    """enabled_agents is host policy — it gates file agents by name too."""
+    _mk_session(agents, "s-locked-file", "locked")
+    payload = asyncio.run(_dispatch(
+        {"agent": "researcher", "prompt": "go"}, "s-locked-file",
+        agent_registry={"researcher": _definition()},
+    ))
+    assert payload["ok"] is False and "allowlist" in payload["error"]
+
+
+def test_dispatcher_reads_the_agent_registry_off_the_ctx(agents):
+    """NativeLoop seeds ctx.extra['agent_registry'] AFTER this dispatcher is
+    built into the same ctx, so the read must happen at call time."""
+    from types import SimpleNamespace
+
+    _mk_session(agents, "s-ctx", "root-agent")
+    seen = {}
+
+    async def fake_worker(**kwargs):
+        seen.update(kwargs)
+        return WorkerOutcome(ok=True, session_id="w-ctx", report="r")
+
+    dispatcher = td.make_omni_dispatcher("s-ctx")
+    ctx = SimpleNamespace(extra={})  # empty at injection time
+    ctx.extra["agent_registry"] = {"researcher": _definition()}  # seeded later
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        asyncio.run(dispatcher({"agent": "researcher", "prompt": "go"}, ctx))
+
+    assert seen["profile_id"] == "root-agent"
+    assert "careful researcher" in seen["system_prompt_append"]
