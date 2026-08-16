@@ -24,7 +24,12 @@
 	} from '$lib/constants/models';
 	import { computerUse } from '$lib/stores/computerUse.svelte';
 	import { getUsageLimits } from '$lib/api/client';
-	import { rateLimit, resolveBucketKey, isBucketStale } from '$lib/stores/rate-limit';
+	import {
+		rateLimit,
+		resolveBucketKey,
+		isBucketStale,
+		BUCKET_STALE_MS
+	} from '$lib/stores/rate-limit';
 	import { usageTargetInstance } from '$lib/stores/usage-target';
 
 	interface Props {
@@ -206,10 +211,18 @@
 		const state = rateLimit.current;
 		const key = resolveBucketKey(state, target);
 		const bucket = key ? state.buckets[key] : null;
+		const now = Date.now();
 		const isStale =
 			(key != null && (state.staleByInstance[key] ?? false)) ||
-			(bucket != null && isBucketStale(bucket, Date.now()));
-		if (firstRun || !bucket || !bucket.available || isStale) {
+			(bucket != null && isBucketStale(bucket, now));
+		// Provider buckets are provider-scoped, not install-scoped, so the Claude
+		// staleness check above never covers them: without this, a provider's
+		// credits/windows could sit stale for the whole session (the poller's
+		// snapshot is not broadcast over WS — only the REST GET refreshes them).
+		const providerStale = Object.values(state.providerBuckets ?? {}).some(
+			(pb) => pb.fetchedAt != null && now - pb.fetchedAt > BUCKET_STALE_MS
+		);
+		if (firstRun || !bucket || !bucket.available || isStale || providerStale) {
 			refreshUsageLimits();
 		}
 	});

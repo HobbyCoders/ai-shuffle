@@ -137,6 +137,15 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
 
         entries: List[ProviderUsageEntry] = []
         for row in rows:
+            # OpenAI API-key snapshots are excluded from the response: their
+            # only content is per-minute x-ratelimit headroom (~always 0%),
+            # and OpenAI exposes no credits/usage endpoint a secret key may
+            # call (dashboard billing = session-key-only 403; org cost
+            # reports = separate admin key, and still no balance). Verified
+            # live 2026-08-16; capture itself stays — it doubles as the 429
+            # breaker seam.
+            if row.get("provider_type") == "openai":
+                continue
             entries.append(
                 ProviderUsageEntry(
                     provider_id=row["provider_id"],

@@ -310,8 +310,23 @@
 	// Provider credits (non-Claude): render a single muted line from the opaque
 	// credits blob when there's no window denominator to draw a bar, or when the
 	// provider reports meaningful credit balances. All reads are shape-guarded.
+	/** A finite number from the untyped credits blob, else null. */
+	function creditsNum(credits: Record<string, unknown> | null, key: string): number | null {
+		const v = credits?.[key];
+		return typeof v === 'number' && Number.isFinite(v) ? v : null;
+	}
+
 	function creditsSummary(credits: Record<string, unknown> | null): string | null {
 		if (!credits || typeof credits !== 'object') return null;
+		// An account credit BALANCE (OpenRouter's /credits ledger) is the headline
+		// figure and outranks the key-scoped usage/limit fields below it.
+		const remaining = creditsNum(credits, 'balance_remaining');
+		if (remaining != null) {
+			const spent = creditsNum(credits, 'total_usage');
+			return spent != null
+				? `$${remaining.toFixed(2)} left · $${spent.toFixed(2)} used`
+				: `$${remaining.toFixed(2)} left`;
+		}
 		if (credits.unlimited === true) return 'Credits: unlimited';
 		const used = typeof credits.usage === 'number' ? credits.usage : null;
 		const left = typeof credits.limit_remaining === 'number' ? credits.limit_remaining : null;
@@ -324,12 +339,15 @@
 		return null;
 	}
 
-	// Compact one-value credits chip for a collapsed provider header — used as the
-	// fallback summary when the provider has no rate-limit windows to draw a pct
-	// from (e.g. OpenRouter, which reports only dollar credits). Same field
-	// semantics as creditsSummary; prefers usage, then remaining, then balance.
+	// Compact one-value credits chip for a collapsed provider header — shown
+	// whenever the account balance is known, and otherwise as the fallback when
+	// the provider has no rate-limit windows to draw a pct from. Same field
+	// semantics as creditsSummary: the account balance first, then usage,
+	// key-limit remaining, and a plain balance.
 	function creditsShort(credits: Record<string, unknown> | null): string | null {
 		if (!credits || typeof credits !== 'object') return null;
+		const remaining = creditsNum(credits, 'balance_remaining');
+		if (remaining != null) return `$${remaining.toFixed(2)} left`;
 		const used = typeof credits.usage === 'number' ? credits.usage : null;
 		if (used != null) return `$${used.toFixed(2)} used`;
 		const left = typeof credits.limit_remaining === 'number' ? credits.limit_remaining : null;
@@ -626,13 +644,16 @@
 							{/if}
 						</span>
 						{#if !pbOpen}
-							{#if pbMaxPct != null}
+							{@const pbCreditsShort = creditsShort(pb.credits)}
+							<!-- An account credit balance is the headline the user cares
+							     about, so it outranks the window pct (which an OpenRouter
+							     key-spend limit would otherwise produce). -->
+							{#if creditsNum(pb.credits, 'balance_remaining') != null && pbCreditsShort}
+								<span class="sec-summary sec-credits">{pbCreditsShort}</span>
+							{:else if pbMaxPct != null}
 								<span class="row-pct {usageSeverity(pbMaxPct)} sec-summary">{pbMaxPct}%</span>
-							{:else}
-								{@const pbCreditsShort = creditsShort(pb.credits)}
-								{#if pbCreditsShort}
-									<span class="sec-summary sec-credits">{pbCreditsShort}</span>
-								{/if}
+							{:else if pbCreditsShort}
+								<span class="sec-summary sec-credits">{pbCreditsShort}</span>
 							{/if}
 						{/if}
 						<svg

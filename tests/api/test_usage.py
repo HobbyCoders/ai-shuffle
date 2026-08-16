@@ -336,6 +336,30 @@ class TestUsageLimitsProviders:
         # The raw blob's contents must not appear anywhere in the response body.
         assert "should-not-leak" not in resp.text
 
+    def test_openai_snapshots_excluded_from_response(self):
+        """OpenAI API-key snapshots never surface: their windows are per-minute
+        rate-limit headroom (~always 0%), and OpenAI has no key-accessible
+        credits/usage endpoint to show instead. Other types are unaffected."""
+        from app.db import database as db
+
+        db.upsert_provider_usage_snapshot(
+            provider_id="prov-openai", provider_type="openai", plan_type=None,
+            windows=[{"type": "requests", "utilization": 0.2, "resets_at": None}],
+            credits=None, raw=None, fetched_at=5,
+        )
+        db.upsert_provider_usage_snapshot(
+            provider_id="prov-or", provider_type="openrouter", plan_type=None,
+            windows=[], credits={"balance_remaining": 18.11}, raw=None, fetched_at=6,
+        )
+
+        with patch("app.api.usage.usage_limits_monitor") as mon:
+            mon.get_cluster_snapshot = AsyncMock(return_value=dict(_CLAUDE_SNAPSHOT))
+            resp = _client().get("/api/v1/usage/limits")
+
+        assert resp.status_code == 200
+        providers = resp.json()["providers"]
+        assert [p["provider_id"] for p in providers] == ["prov-or"]
+
     def test_provider_load_exception_yields_empty_providers_with_200(self):
         """A DB hiccup inside _load_provider_usage degrades to providers: [] and
         must NOT turn the endpoint into an error or drop Claude fields."""

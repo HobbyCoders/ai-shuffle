@@ -1008,6 +1008,77 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		expect(container.querySelector('.sec-summary')).toBeNull();
 	});
 
+	it('headlines the account balance when the provider reports balance_remaining', async () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [
+				{
+					provider_id: 'or-balance',
+					provider_name: 'OpenRouter',
+					provider_type: 'openrouter',
+					windows: [],
+					// /key figures (usage / limit_remaining) plus the /credits ledger.
+					credits: {
+						usage: 3.1,
+						limit_remaining: 6.9,
+						total_credits: 25,
+						total_usage: 4.25,
+						balance_remaining: 20.75,
+					},
+				},
+			],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		// Balance outranks the key-scoped usage/limit_remaining pair.
+		expect(container.textContent).toContain('$20.75 left · $4.25 used');
+		expect(container.textContent).not.toContain('$3.10 used · $6.90 left');
+	});
+
+	it('collapsed balance provider shows a compact "$X left" chip', async () => {
+		localStorage.setItem('aihub.usageSectionOpen:provider:or-balance-collapsed', '0');
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [
+				{
+					provider_id: 'or-balance-collapsed',
+					provider_name: 'OpenRouter',
+					provider_type: 'openrouter',
+					windows: [],
+					credits: { usage: 3.1, total_usage: 4.25, balance_remaining: 20.75 },
+				},
+			],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		expect(container.querySelector('.sec-credits')?.textContent).toBe('$20.75 left');
+	});
+
+	it('falls back to the usage/limit line when balance_remaining is absent or non-numeric', async () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [
+				{
+					provider_id: 'or-no-balance',
+					provider_name: 'OpenRouter',
+					provider_type: 'openrouter',
+					windows: [],
+					// A malformed blob must not swallow the existing behaviour.
+					credits: { usage: 3.1, limit_remaining: 6.9, balance_remaining: 'oops' },
+				},
+			],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		expect(container.textContent).toContain('$3.10 used · $6.90 left');
+	});
+
 	it('collapsed provider WITH windows keeps the % chip (not the credits summary)', async () => {
 		localStorage.setItem('aihub.usageSectionOpen:provider:or-both', '0');
 		rateLimit.applySnapshot({
