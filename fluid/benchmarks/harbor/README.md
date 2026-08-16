@@ -84,6 +84,27 @@ Both sides can route through OpenRouter (set `OPENROUTER_API_KEY` instead of
   as Claude Code sees it (see the
   [OpenRouter Claude Code guide](https://openrouter.ai/docs/cookbook/coding-agents/claude-code-integration)).
 
+### Claude Code on a Pro/Max subscription
+
+Harbor's claude-code agent can bill the Claude Code leg to a subscription
+instead of the API. Generate a long-lived OAuth token once with
+`claude setup-token` (interactive browser login), then:
+
+```bash
+CLAUDE_FORCE_OAUTH=1 CLAUDE_CODE_OAUTH_TOKEN=<token> harbor run -d terminal-bench/terminal-bench-2 -a claude-code -m anthropic/claude-haiku-4-5
+```
+
+Subscription-leg caveats:
+
+- **Usage limits, not invoices.** A full 89-task trial can exhaust a Pro
+  plan's 5-hour usage window mid-run; Max plans have more headroom. Add
+  `--max-retries 3` so rate-limit stalls retry instead of failing the trial.
+- **Wall-clock skew.** Rate-limit waits inflate the subscription leg's task
+  times — don't compare wall clock across legs in this configuration.
+- **Cost skew.** `cost_usd` on the subscription leg is Claude Code's estimate
+  of what the tokens *would* cost on the API, not money spent. Compare token
+  counts and resolve rate; treat cross-leg cost as indicative only.
+
 **Caching caveat:** fluid's OpenRouter leg currently sends no explicit
 `cache_control` breakpoints, so Anthropic models get no prompt caching on the
 fluid side, while Claude Code's own breakpoints pass through OpenRouter's
