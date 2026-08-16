@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 
 from fluid.context.claude_settings import (
+    default_permission_mode,
     enabled_plugins,
     layered_env,
     load_claude_settings,
@@ -210,6 +211,36 @@ def test_enabled_plugins_accessor(tmp_path, monkeypatch) -> None:
     )
     assert enabled_plugins(load_claude_settings(proj)) == {"a@mp": True, "b@mp": False}
     assert enabled_plugins({}) == {}
+
+
+def test_default_permission_mode_maps_known_values(tmp_path, monkeypatch) -> None:
+    for mode in ("default", "plan", "acceptEdits", "bypassPermissions"):
+        proj = _scoped(
+            tmp_path / mode, monkeypatch, project={"permissions": {"defaultMode": mode}}
+        )
+        assert default_permission_mode(load_claude_settings(proj)) == mode
+
+
+def test_default_permission_mode_refuses_unknown_values(caplog) -> None:
+    with caplog.at_level(logging.WARNING):
+        assert default_permission_mode({"permissions": {"defaultMode": "dontAsk"}}) is None
+    assert any("defaultMode" in r.getMessage() for r in caplog.records)
+
+    assert default_permission_mode({"permissions": {"defaultMode": "auto"}}) is None
+    assert default_permission_mode({"permissions": {}}) is None
+    assert default_permission_mode({"permissions": "nonsense"}) is None
+    assert default_permission_mode({}) is None
+
+
+def test_default_permission_mode_is_not_applied_to_a_session(tmp_path, monkeypatch) -> None:
+    """Carry-over from W2: the value is mapped, not yet enforced — the engine
+    has no way to tell a deliberate host policy from the default one, and
+    overriding a host's configured policy would be the worse failure."""
+    proj = _scoped(tmp_path, monkeypatch, project={"permissions": {"defaultMode": "plan"}})
+    loop = _loop(proj)
+    assert default_permission_mode(loop.claude_settings) == "plan"
+    assert loop.permissions.approval_policy == "never_ask"  # as the host built it
+    assert loop.plan_mode is False
 
 
 def test_mcp_toggles_accessor(tmp_path, monkeypatch) -> None:

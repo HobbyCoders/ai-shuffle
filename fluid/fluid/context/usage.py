@@ -12,7 +12,9 @@ enough to call between every turn.
 
 Categories — the same labels Claude Code's ``/context`` uses
 ------------------------------------------------------------
-``System prompt``   base prompt + environment block + app "extra" blocks.
+``System prompt``   base prompt + environment block + app "extra" blocks + the
+                    agent-types index (CE7 — the index is prompt text; the
+                    definitions behind it price under "Custom agents").
 ``Memory files``    the instruction stack (CLAUDE.md / AGENTS.md), summed.
                     The category row carries only the total, exactly like the
                     CLI's; per-file detail rides alongside in the top-level
@@ -26,11 +28,11 @@ Categories — the same labels Claude Code's ``/context`` uses
 ``MCP tools``       loaded ``mcp__<server>__<tool>`` schemas (MCP + in-proc
                     servers — the naming convention IS the classifier, same as
                     Claude Code's). Per-tool detail: ``mcpTools``.
-``Custom agents``   host-declared agent definitions that ride in the context
-                    (fluid owns no agent registry — rulings A6/A8: dispatch is
-                    host-app territory — so the host passes descriptors for
-                    whatever agent catalog text it injected). Per-agent detail:
-                    ``agents``.
+``Custom agents``   agent definitions the session carries — host-declared
+                    descriptors, or (CE6) the ``.claude/agents`` definitions the
+                    native loop discovered when the host declared none.
+                    Dispatch stays host-app territory (rulings A6/A8); this row
+                    only prices the definitions. Per-agent detail: ``agents``.
 ``Messages``        the TRIMMED history view (what a request would actually
                     carry), not the full stored tree.
 ``MCP tools (deferred)`` / ``System tools (deferred)``
@@ -116,8 +118,11 @@ CATEGORY_COLORS: dict[str, str] = {
     FREE_SPACE: "#2D3436",
 }
 
-# Sections that make up the "System prompt" category (memory/skills get their own).
-_SYSTEM_KINDS = ("base", "environment", "extra")
+# Sections that make up the "System prompt" category (memory/skills get their
+# own). The ``agents`` index rides here per ruling CE7: it is a compiled
+# section of the prompt, while the "Custom agents" category prices the agent
+# DEFINITIONS a session carries — counting the index there would double-count.
+_SYSTEM_KINDS = ("base", "environment", "extra", "agents")
 
 # Discovery scope → the CLI's ``memoryFiles[].type`` vocabulary. Claude Code
 # labels an instruction file by where it came from: "User" (the user's home

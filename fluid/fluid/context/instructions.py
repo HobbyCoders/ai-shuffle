@@ -50,6 +50,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 # Ordered per-directory candidates. Order is significant: it fixes the order
 # blocks appear within a single scope and which file "wins" the byte-identical
@@ -408,16 +409,36 @@ def build_instruction_stack(
 # ─── frontmatter (tiny hand-rolled splitter — no yaml dep) ────────────────────
 
 
-def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
+def _unquote(raw: str) -> str:
+    return raw.strip().strip('"').strip("'")
+
+
+def _frontmatter_value(raw: str) -> str | list[str]:
+    """One frontmatter value: an inline ``[a, b, c]`` array, else a scalar.
+
+    Minimal by design (ruling CE6) — an agent's ``tools: [Read, Grep]`` is the
+    only list shape the ecosystem actually writes, and a real YAML dependency
+    would buy nothing else the harness reads. A value that is not bracketed is
+    returned exactly as before, so every existing caller is unaffected.
+    """
+    value = raw.strip()
+    if value.startswith("[") and value.endswith("]"):
+        return [item for part in value[1:-1].split(",") if (item := _unquote(part))]
+    return _unquote(value)
+
+
+def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     """Split ``---`` frontmatter and parse simple ``key: value`` lines.
 
     Returns ``(fields, body)``. Only flat ``key: value`` pairs are understood —
-    enough for a skill's ``name``/``description`` (~100-token) header.
+    enough for a skill's ``name``/``description`` (~100-token) header — plus
+    inline ``[a, b]`` arrays (see :func:`_frontmatter_value`), so an agent's
+    ``tools:`` list parses without a YAML dependency.
     """
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         return {}, text
-    fields: dict[str, str] = {}
+    fields: dict[str, Any] = {}
     body_start = len(lines)
     for i in range(1, len(lines)):
         if lines[i].strip() == "---":
@@ -428,7 +449,7 @@ def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
             key, _, value = raw.partition(":")
             key = key.strip()
             if key:
-                fields[key] = value.strip().strip('"').strip("'")
+                fields[key] = _frontmatter_value(value)
     body = "\n".join(lines[body_start:])
     return fields, body
 

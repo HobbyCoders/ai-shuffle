@@ -18,10 +18,14 @@ Everything else the compiler gathers itself:
 * instruction stack — CLAUDE.md / AGENTS.md discovery
                       (``fluid.context.instructions.build_instruction_stack``);
 * skills index      — name+description only; bodies load on demand via the
-                      ``Skill`` builtin (progressive disclosure).
+                      ``Skill`` builtin (progressive disclosure);
+* agents index      — the discovered ``.claude/agents`` catalog (CE6), again
+                      name+description only; the definitions themselves reach a
+                      host dispatcher via ``ctx.extra["agent_registry"]``.
 
 Layering order (stable — prompt-cache friendly):
-    base → instruction stack → skills index → environment → extra blocks
+    base → instruction stack → skills index → agents index → environment →
+    extra blocks
 
 Two views of the same compilation:
 
@@ -45,6 +49,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Sequence
 
+from fluid.context.agents import discover_agents
 from fluid.context.environment import environment_block
 from fluid.context.instructions import build_instruction_blocks, discover_skills
 
@@ -52,6 +57,13 @@ SKILLS_HEADER = (
     "# Available skills\n"
     "Load a skill's full instructions with the Skill tool before doing a task "
     "it covers."
+)
+
+AGENTS_HEADER = (
+    "# Available agent types\n"
+    "These agent types can be delegated to with the Task tool. Each runs in "
+    "its own session with its own system prompt and tools and reports back — "
+    "pick the one whose description matches the work."
 )
 
 
@@ -66,11 +78,17 @@ class PromptInputs:
     include_global_instructions: bool = True
     include_project_instructions: bool = True
     include_skills: bool = True
+    # Agent-definition index (CE6): the ``.claude/agents`` catalog advertised
+    # for Task delegation.
+    include_agents: bool = True
+    # Whether enabled Claude Code plugins contribute their skills and agents to
+    # those indexes (CE5) — the discovery functions' own ``include_plugins``.
+    include_plugins: bool = True
 
 
 # Section kinds a compiled prompt can carry. ``memory`` sections additionally
 # carry the instruction file's ``path`` and ``scope``.
-SECTION_KINDS = ("base", "memory", "skills", "environment", "extra")
+SECTION_KINDS = ("base", "memory", "skills", "agents", "environment", "extra")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -94,7 +112,12 @@ class CompiledPrompt:
         return tuple(s for s in self.sections if s.kind in kinds)
 
 
-def skills_index(cwd: str | os.PathLike[str], *, include_global: bool = True) -> str | None:
+def skills_index(
+    cwd: str | os.PathLike[str],
+    *,
+    include_global: bool = True,
+    include_plugins: bool = True,
+) -> str | None:
     """Progressive-disclosure skills listing (name + description only).
 
     Sorted by name (ruling CE7): the index feeds the cached prompt prefix, so
@@ -102,13 +125,38 @@ def skills_index(cwd: str | os.PathLike[str], *, include_global: bool = True) ->
     arrive last from discovery, would otherwise shuffle the listing whenever a
     plugin is installed or removed.
     """
-    skills = discover_skills(cwd, include_global=include_global)
+    skills = discover_skills(cwd, include_global=include_global, include_plugins=include_plugins)
     if not skills:
         return None
     lines = "\n".join(
         f"- {s.name}: {s.description}" for s in sorted(skills, key=lambda s: s.name)
     )
     return f"{SKILLS_HEADER}\n{lines}"
+
+
+def agents_index(
+    cwd: str | os.PathLike[str],
+    *,
+    include_global: bool = True,
+    include_plugins: bool = True,
+) -> str | None:
+    """Delegation catalog: the discovered agent types (name + description).
+
+    Same shape and the same name sort as :func:`skills_index` (CE7) — one line
+    per agent, bodies left out. The bodies are system prompts for the *worker*
+    session; the caller only needs to know what exists to delegate to. The
+    definitions themselves reach a host dispatcher through
+    ``ctx.extra["agent_registry"]``, not through this text.
+    """
+    agents = discover_agents(
+        cwd, include_global=include_global, include_plugins=include_plugins
+    )
+    if not agents:
+        return None
+    lines = "\n".join(
+        f"- {a.name}: {a.description}" for a in sorted(agents, key=lambda a: a.name)
+    )
+    return f"{AGENTS_HEADER}\n{lines}"
 
 
 def compile_prompt(inputs: PromptInputs) -> CompiledPrompt:
@@ -136,10 +184,20 @@ def compile_prompt(inputs: PromptInputs) -> CompiledPrompt:
                 )
     if inputs.include_skills:
         index = skills_index(
-            inputs.cwd, include_global=inputs.include_global_instructions
+            inputs.cwd,
+            include_global=inputs.include_global_instructions,
+            include_plugins=inputs.include_plugins,
         )
         if index:
             sections.append(PromptSection(kind="skills", text=index))
+    if inputs.include_agents:
+        index = agents_index(
+            inputs.cwd,
+            include_global=inputs.include_global_instructions,
+            include_plugins=inputs.include_plugins,
+        )
+        if index:
+            sections.append(PromptSection(kind="agents", text=index))
     if inputs.include_env:
         sections.append(
             PromptSection(kind="environment", text=environment_block(inputs.cwd))

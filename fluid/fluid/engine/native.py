@@ -202,6 +202,7 @@ class NativeLoop:
         agents: Sequence[dict[str, Any]] | None = None,
         claude_settings: bool = True,
         claude_plugins: bool = True,
+        claude_agents: bool = True,
     ) -> None:
         self.provider = provider
         self.store = store
@@ -216,11 +217,13 @@ class NativeLoop:
         # Model context window, when the host app knows it. None → the usage
         # breakdown reports maxTokens/percentage as None rather than guessing.
         self.context_window = context_window
-        # Host-declared agent-definition descriptors (fluid owns no agent
-        # registry — dispatch is host territory, ruling A6/A8). Only what the
-        # host actually injected into the context belongs here; it becomes the
-        # "Custom agents" row of get_context_usage(). See usage.agent_usage.
+        # Agent-definition descriptors behind the "Custom agents" row of
+        # get_context_usage() (see usage.agent_usage). Host-declared when the
+        # host passed any; otherwise auto-filled from the discovered
+        # ``.claude/agents`` definitions below (CE6). Dispatch remains host
+        # territory either way (rulings A6/A8).
         self.agents = list(agents or ())
+        self._host_declared_agents = bool(self.agents)
         self.max_tokens = max_tokens
         # Reasoning-depth knob, provider-mapped by each serializer (Anthropic
         # output_config.effort; OpenAI-shaped reasoning.effort, clamped).
@@ -269,6 +272,13 @@ class NativeLoop:
         self.claude_plugins: list[Any] = []
         if claude_plugins:
             self._apply_claude_plugins()
+        # Agent definitions from .claude/agents + plugin agents (ruling CE6):
+        # published on ctx.extra for the host's Task dispatcher and priced in
+        # the context-usage breakdown. Loaded after plugins — it reuses the
+        # plugin list this session already read.
+        self.claude_agents: list[Any] = []
+        if claude_agents:
+            self._apply_claude_agents()
 
     def _apply_claude_settings(self) -> None:
         """Fold ~/.claude + project settings.json into this session.
@@ -325,6 +335,53 @@ class NativeLoop:
                     )
                     continue
                 self._mcp_servers[name] = cfg
+
+    # Discovery scope → the ``source`` label carried on a usage agent row.
+    _AGENT_SOURCES = {"project": "project", "global": "user", "plugin": "plugin"}
+
+    def _apply_claude_agents(self) -> None:
+        """Discover agent definitions and publish them to the session.
+
+        Two seams, both non-dispatching (task.py doctrine — fluid discovers and
+        surfaces, the host spawns):
+
+        * ``ctx.extra["agent_registry"]`` — ``{name: AgentDefinition}`` for the
+          host's Task dispatcher. Host-provided entries WIN: an app that
+          declared an agent under a name a file also uses keeps its own, with a
+          warning, because its dispatcher is what actually runs the thing.
+        * ``self.agents`` — descriptors for the "Custom agents" usage row, but
+          only when the host declared none: a host that passed its own catalog
+          already priced what it injected, and adding to it would double-count.
+        """
+        from fluid.context.agents import discover_agents
+
+        self.claude_agents = discover_agents(
+            self.ctx.cwd or ".", plugins=self.claude_plugins
+        )
+        if not self.claude_agents:
+            return
+        registry = self.ctx.extra.get("agent_registry")
+        if not isinstance(registry, dict):
+            registry = {}
+            self.ctx.extra["agent_registry"] = registry
+        for definition in self.claude_agents:
+            if definition.name in registry:
+                log.warning(
+                    "agent %r discovered at %s is already declared by the host — "
+                    "keeping the host's definition",
+                    definition.name, definition.path,
+                )
+                continue
+            registry[definition.name] = definition
+        if not self._host_declared_agents:
+            self.agents = [
+                {
+                    "agentType": d.name,
+                    "source": self._AGENT_SOURCES.get(d.scope, d.scope or "app"),
+                    "text": d.body,
+                }
+                for d in self.claude_agents
+            ]
 
     async def _ensure_session(self) -> SessionMeta:
         if self._session is None:

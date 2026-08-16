@@ -36,7 +36,10 @@ def resolved_prompt(config: HarnessConfig, *, extra_system: str | None = None):
     The CLI's historical layering (instruction stack first, then config/per-run
     system text) predates the compiler's base-first order; ``config.system`` and
     ``extra_system`` therefore ride as ``extra_blocks``, preserving the CLI's
-    observable ordering. The CLI keeps env injection off — its REPL banner
+    observable ordering. The Claude-ecosystem toggles (CE9) ride through as
+    ``include_agents`` / ``include_plugins``: turning plugins off in config must
+    drop plugin skills and plugin agents from the compiled indexes too, not just
+    from the engine. The CLI keeps env injection off — its REPL banner
     already shows cwd/model, and pre-compiler behavior carried no env block.
 
     Returns the :class:`~fluid.context.compiler.CompiledPrompt` (text + labeled
@@ -54,6 +57,8 @@ def resolved_prompt(config: HarnessConfig, *, extra_system: str | None = None):
             include_global_instructions=enabled and config.instruction_files.discover_global,
             include_project_instructions=enabled and config.instruction_files.discover_project,
             include_skills=enabled and config.instruction_files.discover_skills,
+            include_agents=config.claude_ecosystem.agents,
+            include_plugins=config.claude_ecosystem.plugins,
         )
     )
 

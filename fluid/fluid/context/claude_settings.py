@@ -14,9 +14,11 @@ Scopes, lowest → highest precedence:
 Merge rules: lists accumulate in scope order, dicts merge shallowly per key
 with the higher scope winning a scalar conflict, scalars override outright.
 
-What v1 consumes: ``permissions.{allow,ask,deny}``, ``env``, ``enabledPlugins``
-(accessor only until W3), ``enabledMcpjsonServers`` / ``disabledMcpServers``.
-Not consumed yet: hooks, model/outputStyle/UI keys, ``permissions.defaultMode``.
+What v1 consumes: ``permissions.{allow,ask,deny}``, ``env``, ``enabledPlugins``,
+``enabledMcpjsonServers`` / ``disabledMcpServers``. ``permissions.defaultMode``
+is *mapped* here (:func:`default_permission_mode`) but not yet applied to a
+session — see the note on that function's caller-side precedence question.
+Not consumed: hooks, model/outputStyle/UI keys.
 
 Nothing here raises (CE11): a malformed or unreadable settings file is skipped
 with a ``logging`` warning, because session assembly must never fail on it.
@@ -52,6 +54,11 @@ _PATTERN_FIELD: dict[str, str] = {
 # allow → ask → deny, so fluid's last-match-wins evaluation reproduces Claude's
 # deny > ask > allow precedence.
 _DECISION_ORDER = ("allow", "ask", "deny")
+
+# ``permissions.defaultMode`` values fluid's SetPermissionMode op understands
+# verbatim (see NativeLoop.submit). Anything outside this set is refused rather
+# than approximated — see :func:`default_permission_mode`.
+_PERMISSION_MODES = ("default", "plan", "acceptEdits", "bypassPermissions")
 
 
 # ─── loading ─────────────────────────────────────────────────────────────────
@@ -140,6 +147,39 @@ def settings_env(settings: dict[str, Any]) -> dict[str, str]:
     if not isinstance(raw, dict):
         return {}
     return {str(k): str(v) for k, v in raw.items() if v is not None}
+
+
+def default_permission_mode(settings: dict[str, Any]) -> str | None:
+    """``permissions.defaultMode`` as a fluid ``SetPermissionMode`` value.
+
+    Claude Code and fluid already share this vocabulary — ``NativeLoop``'s
+    ``SetPermissionMode`` handler accepts ``default`` / ``plan`` /
+    ``acceptEdits`` / ``bypassPermissions`` verbatim — so a recognized value
+    passes straight through.
+
+    Anything else (``dontAsk``, a future mode, a typo) returns ``None`` with a
+    warning rather than a guess: silently mapping an unknown mode onto the
+    nearest known one could widen a user's permissions, which is exactly the
+    failure this table must not have.
+
+    Applying the result to a session is deliberately NOT done here or in
+    ``NativeLoop`` yet: the setting must lose to an explicit host choice, and
+    the engine currently has no way to tell a host that deliberately passed
+    ``PermissionEngine("on_write")`` from one that simply took the default —
+    both arrive as an approval policy with a value. Wiring it without that
+    signal could silently override a host's configured policy.
+    """
+    perms = settings.get("permissions")
+    if not isinstance(perms, dict):
+        return None
+    raw = perms.get("defaultMode")
+    if raw is None:
+        return None
+    mode = str(raw).strip()
+    if mode in _PERMISSION_MODES:
+        return mode
+    log.warning("ignoring unsupported permissions.defaultMode %r", raw)
+    return None
 
 
 def mcp_toggles(settings: dict[str, Any]) -> tuple[list[str], list[str]]:

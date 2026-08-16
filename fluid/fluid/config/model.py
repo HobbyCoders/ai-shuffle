@@ -103,8 +103,9 @@ class ClaudeEcosystemConfig:
     """Opt-out switches for Claude Code ecosystem pickup (ruling CE9).
 
     Discovery is filesystem-native and on by default (CE1) — a host app can
-    only *disable* a piece, never has to wire one up. ``plugins`` and ``agents``
-    are declared here but dormant until their waves land.
+    only *disable* a piece, never has to wire one up. ``settings`` reads the
+    settings.json stack (CE4), ``plugins`` loads enabled plugins' components
+    (CE5), ``agents`` discovers ``.claude/agents`` definitions (CE6).
     """
 
     settings: bool = True

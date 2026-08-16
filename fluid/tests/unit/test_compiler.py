@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from fluid.context.compiler import PromptInputs, compile_system_prompt, skills_index
+from fluid.context.compiler import (
+    PromptInputs,
+    agents_index,
+    compile_prompt,
+    compile_system_prompt,
+    skills_index,
+)
 from fluid.context.environment import environment_block, git_context
 
 
@@ -154,6 +160,97 @@ def test_plugin_skills_appear_in_the_index(git_repo: Path, tmp_path: Path, monke
     assert "demoplug:packaged: from a plugin" in idx
     # Sorted by name, so the plugin entry sits where its name belongs.
     assert idx.index("demoplug:packaged") < idx.index("local:")
+
+
+def _agent(path: Path, name: str, description: str, body: str = "AGENT PROMPT") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n{body}", encoding="utf-8"
+    )
+
+
+def _empty_home(tmp_path: Path, monkeypatch) -> Path:
+    """Point HOME (USERPROFILE on Windows) at a fresh dir so the developer's own
+    ~/.claude never reaches an assertion."""
+    home = tmp_path / "empty-home"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    return home
+
+
+def test_agents_index_is_sorted_and_body_free(git_repo: Path, tmp_path: Path, monkeypatch):
+    """CE6/CE7: name+description only, sorted — the bodies are the workers'
+    system prompts, not the caller's business."""
+    _empty_home(tmp_path, monkeypatch)
+    for name in ("zulu", "alpha", "mike"):
+        _agent(git_repo / ".claude" / "agents" / f"{name}.md", name, f"the {name} agent")
+
+    idx = agents_index(git_repo)
+    assert idx is not None
+    listed = [line[2:].split(":")[0] for line in idx.splitlines() if line.startswith("- ")]
+    assert listed == ["alpha", "mike", "zulu"]
+    assert "Task tool" in idx  # the header explains what the list is for
+    assert "AGENT PROMPT" not in idx
+
+
+def test_agents_index_none_without_definitions(git_repo: Path, tmp_path: Path, monkeypatch):
+    _empty_home(tmp_path, monkeypatch)
+    assert agents_index(git_repo) is None
+
+
+def test_agents_section_sits_after_skills_before_environment(
+    git_repo: Path, tmp_path: Path, monkeypatch
+):
+    _empty_home(tmp_path, monkeypatch)
+    _skill(git_repo / ".claude" / "skills" / "deploy" / "SKILL.md", "deploy", "Ship it")
+    _agent(git_repo / ".claude" / "agents" / "reviewer.md", "reviewer", "Reviews code")
+
+    compiled = compile_prompt(PromptInputs(base="B", cwd=git_repo))
+    kinds = [s.kind for s in compiled.sections]
+    assert kinds.index("skills") < kinds.index("agents") < kinds.index("environment")
+    assert "- reviewer: Reviews code" in (compiled.text or "")
+
+
+def test_include_agents_false_omits_the_index(git_repo: Path, tmp_path: Path, monkeypatch):
+    _empty_home(tmp_path, monkeypatch)
+    _agent(git_repo / ".claude" / "agents" / "reviewer.md", "reviewer", "Reviews code")
+
+    compiled = compile_prompt(PromptInputs(base="B", cwd=git_repo, include_agents=False))
+    assert compiled.of_kind("agents") == ()
+    assert "reviewer" not in (compiled.text or "")
+
+
+def test_include_plugins_false_omits_plugin_skills_and_agents(
+    git_repo: Path, tmp_path: Path, monkeypatch
+):
+    """The CE9 plugins toggle reaches the compiled indexes, not just the engine."""
+    import json
+
+    home = _empty_home(tmp_path, monkeypatch)
+    plugin = home / ".claude" / "plugins" / "cache" / "mp" / "demoplug" / "1.0.0"
+    _skill(plugin / "skills" / "packaged" / "SKILL.md", "packaged", "from a plugin")
+    _agent(plugin / "agents" / "packaged-agent.md", "packaged-agent", "from a plugin")
+    (plugin / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    (plugin / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "demoplug"}), encoding="utf-8"
+    )
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    (home / ".claude" / "settings.json").write_text(
+        json.dumps({"enabledPlugins": {"demoplug@mp": True}}), encoding="utf-8"
+    )
+    _skill(git_repo / ".claude" / "skills" / "local" / "SKILL.md", "local", "the project's own")
+
+    with_plugins = compile_system_prompt(PromptInputs(base="B", cwd=git_repo)) or ""
+    assert "demoplug:packaged" in with_plugins
+    assert "demoplug:packaged-agent" in with_plugins
+
+    without = compile_system_prompt(
+        PromptInputs(base="B", cwd=git_repo, include_plugins=False)
+    ) or ""
+    assert "demoplug" not in without
+    assert "- local: the project's own" in without
 
 
 def test_skills_index_progressive_disclosure(git_repo: Path):
