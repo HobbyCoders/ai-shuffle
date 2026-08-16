@@ -270,10 +270,10 @@ async def scan_once() -> List[str]:
 
     For each structurally-eligible candidate (idle, active, snapshot present, no
     live turn, no pending wakeup — :func:`db.wakeups.idle_edge_candidates`) that
-    is over the configured context fraction, off cooldown, has visibly dropped
-    fraction since its last nudge (or was never nudged), and has not hit its
-    lifetime nudge cap, arm ONE synthetic nudge through the durable wakeup
-    machinery.
+    has autocompaction enabled, is over the configured context fraction, off
+    cooldown, has visibly dropped fraction since its last nudge (or was never
+    nudged), and has not hit its lifetime nudge cap, arm ONE synthetic nudge
+    through the durable wakeup machinery.
     """
     from app.core import compact_continue
 
@@ -293,6 +293,11 @@ async def scan_once() -> List[str]:
         if not session_id:
             continue
         usage = compact_continue._persisted_usage(session_id)
+        # No autocompaction → no compaction edge to nudge past: fluid's native
+        # legs trim instead of autocompacting and always report False. Mirrors
+        # the same guard in compact_continue.usage_over_threshold.
+        if usage is not None and usage.get("isAutoCompactEnabled") is False:
+            continue
         frac = compact_continue.usage_fraction(usage)
         if frac is None or frac < fraction_gate:
             continue

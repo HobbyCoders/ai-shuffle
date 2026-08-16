@@ -247,6 +247,57 @@ async def test_watchdog_skips_session_with_pending_wakeup(mock_db, monkeypatch):
     assert scheduled == []
 
 
+async def test_watchdog_skips_autocompact_disabled(mock_db, monkeypatch):
+    """Fluid's native legs trim instead of autocompacting, so there is no
+    compaction edge to nudge past — the watchdog must not burn a nudge turn."""
+    from app.core import wakeup_service
+    from app.db import database
+
+    sid = "wd-noac"
+    database.create_session(session_id=sid, profile_id="default")
+    # fluid-native shape: no autoCompactThreshold key, 90% (over the ~85% gate)
+    database.set_session_context_usage(session_id=sid, data={
+        "totalTokens": 180_000,
+        "maxTokens": 200_000,
+        "isAutoCompactEnabled": False,
+    })
+
+    scheduled = []
+    monkeypatch.setattr(wakeup_service, "schedule",
+                        lambda **kw: scheduled.append(kw))
+
+    nudged = await wakeup_service.scan_once()
+
+    assert nudged == []
+    assert scheduled == []
+
+
+async def test_watchdog_nudges_when_autocompact_flag_absent(mock_db, monkeypatch):
+    from app.core import wakeup_service
+    from app.db import database
+
+    sid = "wd-legacy"
+    database.create_session(session_id=sid, profile_id="default")
+    # absent flag ⇒ assume enabled (backward compat with pre-existing snapshots)
+    database.set_session_context_usage(session_id=sid, data={
+        "totalTokens": 180_000,
+        "maxTokens": 200_000,
+    })
+
+    scheduled = []
+
+    async def _fake_schedule(**kwargs):
+        scheduled.append(kwargs)
+        return {"id": "x", "fire_at": 0}
+
+    monkeypatch.setattr(wakeup_service, "schedule", _fake_schedule)
+
+    nudged = await wakeup_service.scan_once()
+
+    assert sid in nudged
+    assert len(scheduled) == 1
+
+
 async def test_watchdog_cooldown_blocks_immediate_renudge(mock_db, monkeypatch):
     from app.core import wakeup_service
     from app.db import database
