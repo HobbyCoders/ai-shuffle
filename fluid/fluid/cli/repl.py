@@ -54,7 +54,9 @@ def render_event(event: Event, out: TextIO) -> None:
     elif isinstance(event, Usage):
         out.write(
             f"\n  [usage] in={event.input_tokens} out={event.output_tokens} "
-            f"cache_read={event.cache_read_tokens} hit_rate={event.cache_hit_rate:.2f}\n"
+            f"cache_read={event.cache_read_tokens} "
+            f"cache_write={event.cache_creation_tokens} "
+            f"hit_rate={event.cache_hit_rate:.2f}\n"
         )
     elif isinstance(event, TurnComplete):
         cost = f" cost=${event.cost_usd:.4f}" if event.cost_usd is not None else ""
