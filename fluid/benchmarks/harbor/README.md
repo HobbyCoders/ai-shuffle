@@ -69,6 +69,29 @@ PYTHONPATH=. harbor run -d terminal-bench/terminal-bench-2 -a benchmarks.harbor.
 harbor run -d terminal-bench/terminal-bench-2 -a claude-code -m anthropic/claude-sonnet-5
 ```
 
+### Running through OpenRouter instead
+
+Both sides can route through OpenRouter (set `OPENROUTER_API_KEY` instead of
+`ANTHROPIC_API_KEY`):
+
+- **fluid**: just use the OpenRouter model slug —
+  `-m openrouter/anthropic/claude-haiku-4.5`. Harbor resolves
+  `OPENROUTER_API_KEY` from the prefix and passes it through to fluid's
+  native `openrouter` backend.
+- **claude-code**: use OpenRouter's Anthropic-compatible endpoint:
+  `--agent-env ANTHROPIC_BASE_URL=https://openrouter.ai/api`
+  `--agent-env ANTHROPIC_AUTH_TOKEN=$OPENROUTER_API_KEY` with the model slug
+  as Claude Code sees it (see the
+  [OpenRouter Claude Code guide](https://openrouter.ai/docs/cookbook/coding-agents/claude-code-integration)).
+
+**Caching caveat:** fluid's OpenRouter leg currently sends no explicit
+`cache_control` breakpoints, so Anthropic models get no prompt caching on the
+fluid side, while Claude Code's own breakpoints pass through OpenRouter's
+Anthropic-compatible endpoint and cache normally. Through OpenRouter, fluid's
+cache-hit and cost numbers are therefore a *floor*, not a fair reading — use
+the direct Anthropic API for the real efficiency comparison until the
+OpenRouter provider gains cache breakpoints.
+
 Useful variants:
 
 - Single task: `--include-task-name "<task-name>"`
