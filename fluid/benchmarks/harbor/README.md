@@ -84,6 +84,13 @@ Both sides can route through OpenRouter (set `OPENROUTER_API_KEY` instead of
   as Claude Code sees it (see the
   [OpenRouter Claude Code guide](https://openrouter.ai/docs/cookbook/coding-agents/claude-code-integration)).
 
+**Caching note:** fluid's OpenRouter leg places `cache_control` breakpoints
+(system tail + newest history block) for `anthropic/…` models, so both sides
+cache through OpenRouter. Placement granularity still differs slightly from
+the direct Anthropic API (chat/completions has no tool-defs cache slot), so
+for the tightest efficiency comparison the direct Anthropic API remains the
+reference run.
+
 ### Claude Code on a Pro/Max subscription
 
 Harbor's claude-code agent can bill the Claude Code leg to a subscription
@@ -104,14 +111,6 @@ Subscription-leg caveats:
 - **Cost skew.** `cost_usd` on the subscription leg is Claude Code's estimate
   of what the tokens *would* cost on the API, not money spent. Compare token
   counts and resolve rate; treat cross-leg cost as indicative only.
-
-**Caching caveat:** fluid's OpenRouter leg currently sends no explicit
-`cache_control` breakpoints, so Anthropic models get no prompt caching on the
-fluid side, while Claude Code's own breakpoints pass through OpenRouter's
-Anthropic-compatible endpoint and cache normally. Through OpenRouter, fluid's
-cache-hit and cost numbers are therefore a *floor*, not a fair reading — use
-the direct Anthropic API for the real efficiency comparison until the
-OpenRouter provider gains cache breakpoints.
 
 Useful variants:
 
