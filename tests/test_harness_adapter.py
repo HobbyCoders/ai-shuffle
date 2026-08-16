@@ -273,7 +273,10 @@ async def test_turn_complete_zero_cost_is_preserved():
 @pytest.mark.asyncio
 async def test_non_turn_complete_terminals_carry_float_cost():
     """Interrupted / ErrorEvent synthesize their own ResultMessage; the SDK path
-    always carries a float there, so these must not inherit the None default."""
+    always carries a float there, so these must not inherit the None default.
+
+    These events carry no cost (cost_usd defaults to None), which exercises the
+    None -> 0.0 coercion the session-row `col + value` update depends on."""
     got = await _collect(_adapter_with(FakeEngine([
         lm.Interrupted(session_id=SID, message="stopped")])))
     assert got[0].total_cost_usd == 0.0
@@ -281,6 +284,34 @@ async def test_non_turn_complete_terminals_carry_float_cost():
     got = await _collect(_adapter_with(FakeEngine([
         lm.ErrorEvent(session_id=SID, message="boom", retriable=True)])))
     assert got[0].total_cost_usd == 0.0
+
+
+@pytest.mark.asyncio
+async def test_interrupted_carries_partial_usage_and_cost():
+    """A turn-ending Interrupted carries the turn's accumulated partial
+    usage/cost; both must reach the ResultMessage so the interrupted turn stops
+    undercounting the session totals."""
+    got = await _collect(_adapter_with(FakeEngine([
+        lm.Interrupted(session_id=SID, message="stopped",
+                       usage={"input_tokens": 10, "output_tokens": 5},
+                       cost_usd=0.002)])))
+    assert len(got) == 1 and isinstance(got[0], ResultMessage)
+    assert got[0].total_cost_usd == pytest.approx(0.002)
+    assert got[0].usage["input_tokens"] == 10
+    assert got[0].usage["output_tokens"] == 5
+
+
+@pytest.mark.asyncio
+async def test_error_event_carries_partial_usage_and_cost():
+    got = await _collect(_adapter_with(FakeEngine([
+        lm.ErrorEvent(session_id=SID, message="boom", retriable=False,
+                      usage={"input_tokens": 7, "output_tokens": 2},
+                      cost_usd=0.0015)])))
+    assert len(got) == 1 and isinstance(got[0], ResultMessage)
+    assert got[0].is_error is True
+    assert got[0].total_cost_usd == pytest.approx(0.0015)
+    assert got[0].usage["input_tokens"] == 7
+    assert got[0].usage["output_tokens"] == 2
 
 
 # ─── 1c. Context usage ───────────────────────────────────────────────────────

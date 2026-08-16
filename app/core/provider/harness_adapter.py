@@ -399,6 +399,11 @@ class HarnessAdapter(ProviderAdapter):
                 ctx=native_ctx,
                 plan_mode=plan_mode,
                 session_id=omni_session_id,
+                # The app owns permission/env wiring for native legs, so fluid's
+                # folding of the host's ~/.claude settings (upstream default
+                # True) is not adopted here; turning it on is a separate,
+                # deliberate decision.
+                claude_settings=False,
             )
 
         # Prime the session so ``session_id`` and ``events()`` are usable
@@ -1183,23 +1188,31 @@ class HarnessAdapter(ProviderAdapter):
             # SDK parity: an interrupted turn still ends in a ResultMessage;
             # the loops detect the interrupt via state.interrupt_requested and
             # terminal_reason, not via a distinct message type.
+            #
+            # A turn-ending Interrupted carries the turn's accumulated partial
+            # usage/cost, so the interrupted turn's tokens and spend reach the
+            # session-row increments the same way TurnComplete's do. The cost can
+            # still be None (no usage seen yet, or a leg that reports no cost);
+            # the session-row update does `col + value`, so a None would NULL the
+            # column — coerce it to 0.0.
+            cost = getattr(event, "cost_usd", None)
             return [
                 ResultMessage(
                     subtype="success",
                     is_error=False,
                     session_id=getattr(event, "session_id", "") or "",
                     result=event.message,
-                    # ResultMessage.total_cost_usd defaults to None; the SDK path
-                    # always carries a float here (the CLI's result frame makes
-                    # total_cost_usd mandatory), and the session-row update does
-                    # `col + value`, so a None would NULL the column.
-                    total_cost_usd=0.0,
+                    total_cost_usd=cost if cost is not None else 0.0,
+                    usage=dict(getattr(event, "usage", None) or {}),
                     uuid=self._uuid(event),
                     terminal_reason="aborted_streaming",
                 )
             ]
 
         if cls == "ErrorEvent":
+            # Same partial-usage/cost carry as the Interrupted branch above
+            # (including the None → 0.0 coercion rationale).
+            cost = getattr(event, "cost_usd", None)
             return [
                 ResultMessage(
                     subtype="error_during_execution",
@@ -1207,7 +1220,8 @@ class HarnessAdapter(ProviderAdapter):
                     session_id=getattr(event, "session_id", "") or "",
                     result=event.message,
                     errors=[event.message],
-                    total_cost_usd=0.0,  # see the Interrupted branch above
+                    total_cost_usd=cost if cost is not None else 0.0,
+                    usage=dict(getattr(event, "usage", None) or {}),
                     uuid=self._uuid(event),
                 )
             ]
