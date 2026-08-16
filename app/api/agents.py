@@ -892,6 +892,7 @@ async def export_profile(
         allowed_tools=config.get("allowed_tools"),
         disallowed_tools=config.get("disallowed_tools"),
         enabled_agents=config.get("enabled_agents"),
+        agent_invoke_mode=config.get("agent_invoke_mode"),
         ai_tools=ai_tools,
         memory=config.get("memory"),
         include_partial_messages=config.get("include_partial_messages", True),
@@ -1014,19 +1015,26 @@ async def import_profile(
         config["allowed_tools"] = agent_data.allowed_tools
     if agent_data.disallowed_tools:
         config["disallowed_tools"] = agent_data.disallowed_tools
-    if agent_data.enabled_agents:
+    # Invoke grants (A10). An explicit mode in the file is authoritative: under
+    # "custom" the allowlist is exact, so it is written even when it filters to
+    # empty ("may invoke no agents"). Files with no mode keep legacy behavior.
+    invoke_mode = agent_data.agent_invoke_mode if agent_data.agent_invoke_mode in ("all", "custom") else None
+    if invoke_mode:
+        config["agent_invoke_mode"] = invoke_mode
+    if agent_data.enabled_agents or invoke_mode == "custom":
         # Filter out subagent IDs that don't exist in the current environment
         # to prevent ghost agents from inflating the count
+        incoming_agents = agent_data.enabled_agents or []
         all_subagents = database.get_all_subagents()
         valid_agent_ids = {s["id"] for s in all_subagents}
-        valid_enabled = [aid for aid in agent_data.enabled_agents if aid in valid_agent_ids]
-        skipped = [aid for aid in agent_data.enabled_agents if aid not in valid_agent_ids]
+        valid_enabled = [aid for aid in incoming_agents if aid in valid_agent_ids]
+        skipped = [aid for aid in incoming_agents if aid not in valid_agent_ids]
         if skipped:
             logger.warning(
                 "Import: skipped %d subagent(s) not found in environment: %s",
                 len(skipped), ", ".join(skipped)
             )
-        if valid_enabled:
+        if valid_enabled or invoke_mode == "custom":
             config["enabled_agents"] = valid_enabled
     if agent_data.ai_tools:
         config["ai_tools"] = agent_data.ai_tools.model_dump()

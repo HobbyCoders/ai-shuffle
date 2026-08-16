@@ -40,6 +40,7 @@ describe('AI Generation API', () => {
 			allowed_tools: null,
 			disallowed_tools: null,
 			enabled_agents: null,
+			agent_invoke_mode: null,
 			ai_tools: null,
 			memory: null,
 			include_partial_messages: true,

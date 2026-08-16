@@ -131,7 +131,8 @@ The top-level object has `id`, `name`, `description`, `is_builtin`, `is_modified
 | `allowed_tools` | string[] | Tool whitelist (empty/null = all tools allowed) |
 | `disallowed_tools` | string[] | Tool blacklist |
 | `enabled_plugins` | string[] | Plugin paths to enable |
-| `enabled_agents` | string[] | IDs of this agent's nested agents (formerly "subagents") to enable — see below |
+| `enabled_agents` | string[] | Invoke allowlist for the Task tool — IDs of the agents this agent is permitted to dispatch. Read together with `agent_invoke_mode` |
+| `agent_invoke_mode` | string | Invoke-grant mode: `all` (no restriction), `custom` (`enabled_agents` is the exact allowlist — an empty list means the agent may invoke no agents), or omitted/null (legacy: a non-empty `enabled_agents` restricts, otherwise open) |
 | `memory` | string | Durable per-agent memory text, injected into the compiled system prompt on every run |
 | `setting_sources` | string[] | Config sources: `user`, `project`, `local` |
 | `cwd` | string | Override working directory |

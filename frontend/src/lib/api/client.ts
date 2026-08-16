@@ -302,6 +302,7 @@ export interface ProfileConfig {
 	ai_tools?: Record<string, boolean>;  // AI tool toggles (image_generation, video_generation, etc.)
 	computer_use?: { enabled?: boolean; target_display?: number | null; require_confirmation?: boolean };  // Host desktop control (native mode only)
 	enabled_agents?: string[];  // Optional invoke allowlist: agents this agent may dispatch via the Task tool; empty/unset = any
+	agent_invoke_mode?: 'all' | 'custom' | null;  // Invoke-grant mode: 'all' = unrestricted, 'custom' = enabled_agents is the exact allowlist (empty = none), null/unset = legacy (non-empty list restricts)
 	memory?: string;  // Per-agent memory (plain text); agent-editable at runtime via the Memory tool, injected into the system prompt
 	cwd?: string;  // Working directory override
 	add_dirs?: string[];  // Additional directories the agent may access
@@ -472,6 +473,7 @@ export interface AgentExportData {
 	allowed_tools: string[] | null;
 	disallowed_tools: string[] | null;
 	enabled_agents: string[] | null;
+	agent_invoke_mode: string | null;  // 'all' | 'custom' | null — see ProfileConfig.agent_invoke_mode
 	ai_tools: Record<string, boolean> | null;
 	memory?: string | null;
 	include_partial_messages: boolean | null;

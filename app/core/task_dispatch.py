@@ -9,8 +9,11 @@ supervisor teardown, progress feed, bounded report).
 What this module adds on top of raw ``dispatch_worker``:
 
 * target resolution — agent id first, then unambiguous case-insensitive name;
-* invoke grants (A10) — open by default; a caller agent with a non-empty
-  ``enabled_agents`` list may only invoke agents on that list;
+* invoke grants (A10) — driven by the caller agent's ``agent_invoke_mode``:
+  ``"all"`` places no restriction; ``"custom"`` makes ``enabled_agents`` the
+  exact allowlist (an empty/missing list means the agent may invoke nobody);
+  unset (None) keeps the legacy behavior — a non-empty ``enabled_agents``
+  list restricts, anything else is open;
 * nesting depth (A9) — max ``settings.task_tool_max_depth`` (5) levels of
   agent-invokes-agent, counted by walking worker-created ancestor sessions;
 * cycle detection (A9) — an agent already active in the ancestor chain cannot
@@ -369,15 +372,36 @@ async def dispatch_task_tool(
         assert target is not None
         target_name = str(target.get("name") or target["id"])
 
-    # Invoke grants (A10): open by default, optional caller allowlist. A file
-    # agent is checked by NAME — the allowlist is the host's policy either way.
+    # Invoke grants (A10): mode-aware. "all" = open, "custom" = enabled_agents
+    # is the exact allowlist (empty means invoke nobody), unset = legacy
+    # (non-empty list restricts, otherwise open). A file agent is checked by
+    # NAME — the allowlist is the host's policy either way.
     grant_key = target["id"] if target is not None else target_name
     if caller_pid:
         from app.db import database
 
         caller_agent = database.get_profile(caller_pid)
-        allowlist = ((caller_agent or {}).get("config") or {}).get("enabled_agents")
-        if isinstance(allowlist, list) and allowlist and grant_key not in allowlist:
+        caller_config = ((caller_agent or {}).get("config") or {})
+        invoke_mode = caller_config.get("agent_invoke_mode")
+        allowlist = caller_config.get("enabled_agents")
+        if invoke_mode == "custom":
+            allowed = allowlist if isinstance(allowlist, list) else []
+            if grant_key not in allowed:
+                if not allowed:
+                    error = (
+                        f"Agent '{caller_pid}' may not invoke any agents "
+                        "(invoke mode: custom, empty allowlist)."
+                    )
+                else:
+                    error = (
+                        f"Agent '{caller_pid}' may only invoke: "
+                        f"{', '.join(allowed)} (enabled_agents allowlist)."
+                    )
+                return {"ok": False, "error": error}
+        elif invoke_mode == "all":
+            pass  # No restriction.
+        elif isinstance(allowlist, list) and allowlist and grant_key not in allowlist:
+            # Legacy: a non-empty list restricts; empty/None stays open.
             return {
                 "ok": False,
                 "error": (

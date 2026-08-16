@@ -189,6 +189,8 @@
 		allowed_tools: [] as string[],
 		disallowed_tools: [] as string[],
 		enabled_agents: [] as string[],
+		// 'all' = unrestricted; 'custom' = enabled_agents is the exact allowlist.
+		agent_invoke_mode: 'all' as 'all' | 'custom',
 		memory: '',
 		include_partial_messages: true,
 		system_prompt_content: '',
@@ -319,6 +321,7 @@
 			allowed_tools: [],
 			disallowed_tools: [],
 			enabled_agents: [],
+			agent_invoke_mode: 'all',
 			memory: '',
 			include_partial_messages: true,
 			system_prompt_content: '',
@@ -399,6 +402,16 @@
 			enabled_agents: ((config as any).enabled_agents || []).filter(
 				(id: string) => id !== profile.id
 			),
+			// Stored mode wins; legacy rows (no mode) infer it from the allowlist —
+			// a non-empty list meant "restrict to these", empty meant "any agent".
+			agent_invoke_mode:
+				(config as any).agent_invoke_mode === 'custom'
+					? 'custom'
+					: (config as any).agent_invoke_mode === 'all'
+						? 'all'
+						: ((config as any).enabled_agents?.length ?? 0) > 0
+							? 'custom'
+							: 'all',
 			memory: (config as any).memory || '',
 			include_partial_messages: config.include_partial_messages !== false,
 			// Legacy preset-shaped prompts (`{type:'preset', append}`) surface their
@@ -606,12 +619,15 @@
 		} else if (toolSelectionMode === 'disallow') {
 			config.disallowed_tools = profileForm.disallowed_tools;
 		}
-		// Invoke allowlist (empty = may invoke any agent). Prune ids of deleted
-		// agents, but only when the agent list actually loaded — pruning against
-		// an empty/unloaded list would wipe the allowlist.
+		// Invoke allowlist. Prune ids of deleted agents, but only when the agent
+		// list actually loaded — pruning against an empty/unloaded list would wipe
+		// the allowlist.
 		config.enabled_agents = allSubagents.length > 0
 			? profileForm.enabled_agents.filter((id) => allSubagents.some((a) => a.id === id))
 			: profileForm.enabled_agents;
+		// Persist the invoke-grant mode explicitly so "custom with nothing selected"
+		// (= may invoke no agents) round-trips instead of reading as unrestricted.
+		config.agent_invoke_mode = profileForm.agent_invoke_mode;
 		// Per-agent memory (plain text). Omit when empty so clearing it persists.
 		if (profileForm.memory.trim()) config.memory = profileForm.memory;
 		if (profileForm.cwd.trim()) config.cwd = profileForm.cwd;
@@ -777,6 +793,16 @@
 			allowed_tools: allowedTools,
 			disallowed_tools: disallowedTools,
 			enabled_agents: agent.enabled_agents || [],
+			// Export/generated payloads carry the fields flat (no `.config`). Stored
+			// mode wins; legacy payloads infer it from the allowlist.
+			agent_invoke_mode:
+				agent.agent_invoke_mode === 'custom'
+					? 'custom'
+					: agent.agent_invoke_mode === 'all'
+						? 'all'
+						: (agent.enabled_agents?.length ?? 0) > 0
+							? 'custom'
+							: 'all',
 			memory: agent.memory || '',
 			include_partial_messages: agent.include_partial_messages !== false,
 			system_prompt_content: spContent,

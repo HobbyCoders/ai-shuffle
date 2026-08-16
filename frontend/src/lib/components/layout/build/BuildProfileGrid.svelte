@@ -104,7 +104,14 @@
 	}
 	function agentCount(p: Profile): number {
 		const enabled = p.config?.enabled_agents?.filter((id: string) => allSubagents.some((a) => a.id === id))?.length || 0;
+		// 'custom' = the pruned list IS the grant (0 really means none). 'all' and
+		// legacy rows keep the previous unrestricted/inferred display.
+		if (p.config?.agent_invoke_mode === 'custom') return enabled;
 		return Math.max(enabled, builtinAgentIds.length);
+	}
+	function agentLabel(p: Profile): string {
+		const n = agentCount(p);
+		return n === 0 && p.config?.agent_invoke_mode === 'custom' ? 'No agents invocable' : `${n} agents`;
 	}
 	async function confirmDelete() {
 		if (!deletingId) return;
@@ -174,7 +181,7 @@
 					<div class="bpg-meta">
 						<span>{getProfileToolCount(profile)} tools</span>
 						<span class="bpg-sep">·</span>
-						<span>{agentCount(profile)} agents</span>
+						<span>{agentLabel(profile)}</span>
 						<span class="bpg-sep">·</span>
 						<span>{profile.session_count || 0} sessions</span>
 					</div>

@@ -2146,3 +2146,160 @@ class TestSeededDefaultAIProfileStreams:
         assert (
             DEFAULT_AI_PROFILE["config"]["include_partial_messages"] is True
         ), "seeded Default AI profile must stream partial messages for live chat UX"
+
+
+# =============================================================================
+# Invoke-grant mode (agent_invoke_mode, ruling A10 addendum 2026-08-16)
+# =============================================================================
+
+class TestAgentInvokeMode:
+    """agent_invoke_mode must round-trip through config PUT/GET and export/import.
+
+    The interesting case is mode "custom" with an EMPTY allowlist ("may invoke
+    no agents") — the import path used to drop it via a truthiness gate.
+    """
+
+    def test_agent_invoke_mode_rejects_unknown_value(self):
+        """Only None / "all" / "custom" are storable."""
+        from pydantic import ValidationError
+        from app.core.models import ProfileConfig
+
+        assert ProfileConfig().agent_invoke_mode is None
+        assert ProfileConfig(agent_invoke_mode="all").agent_invoke_mode == "all"
+        assert ProfileConfig(agent_invoke_mode="custom").agent_invoke_mode == "custom"
+        with pytest.raises(ValidationError):
+            ProfileConfig(agent_invoke_mode="none-of-the-above")
+
+    @pytest.mark.asyncio
+    async def test_update_profile_persists_agent_invoke_mode(self):
+        """PUT then GET must return the stored mode + empty allowlist."""
+        from app.api.agents import update_profile, get_profile
+        from app.core.models import ProfileUpdate, ProfileConfig
+
+        profile = sample_profile()
+        stored_config = {
+            "model": "sonnet",
+            "agent_invoke_mode": "custom",
+            "enabled_agents": [],
+        }
+        updated_profile = {**profile, "config": stored_config}
+
+        with patch("app.api.agents.database") as mock_db:
+            mock_db.get_profile.return_value = profile
+            mock_db.update_profile.return_value = updated_profile
+
+            request = ProfileUpdate(
+                config=ProfileConfig(
+                    model="sonnet", agent_invoke_mode="custom", enabled_agents=[]
+                )
+            )
+            result = await update_profile("test-profile", request, token="test-token")
+
+            assert result["config"]["agent_invoke_mode"] == "custom"
+            assert result["config"]["enabled_agents"] == []
+            # The mode must actually be handed to the DB layer, not dropped.
+            saved = mock_db.update_profile.call_args[1]["config"]
+            assert saved["agent_invoke_mode"] == "custom"
+            assert saved["enabled_agents"] == []
+
+        with patch("app.api.agents.database") as mock_db:
+            mock_db.get_profile.return_value = updated_profile
+            mock_request = create_mock_request()
+            fetched = await get_profile(mock_request, "test-profile", token="test-token")
+            assert fetched["config"]["agent_invoke_mode"] == "custom"
+
+    @pytest.mark.asyncio
+    async def test_export_includes_agent_invoke_mode(self):
+        """Export must carry the mode alongside the allowlist."""
+        from app.api.agents import export_profile
+
+        mock_request = create_mock_request()
+        profile = {
+            **sample_profile(),
+            "config": {
+                "model": "sonnet",
+                "agent_invoke_mode": "custom",
+                "enabled_agents": [],
+            },
+        }
+
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
+                mock_api_user.return_value = None
+                mock_db.get_profile.return_value = profile
+
+                result = await export_profile(mock_request, "test-profile", token="test-token")
+
+                import json
+                body = json.loads(result.body)
+                assert body["agent"]["agent_invoke_mode"] == "custom"
+                assert body["agent"]["enabled_agents"] == []
+
+    @pytest.mark.asyncio
+    async def test_import_preserves_custom_mode_with_empty_allowlist(self):
+        """mode 'custom' + empty allowlist must survive import (was dropped)."""
+        from app.api.agents import import_profile
+        from app.core.models import AgentImportRequest, AgentImportData
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        with patch("app.api.agents.database") as mock_db:
+            mock_db.get_profile.return_value = None
+            mock_db.get_all_subagents.return_value = []
+            mock_db.create_profile.side_effect = lambda **kw: {
+                "id": kw["profile_id"],
+                "name": kw["name"],
+                "description": kw["description"],
+                "config": kw["config"],
+                "is_builtin": False,
+                "created_at": now,
+                "updated_at": now,
+            }
+
+            request = AgentImportRequest(
+                version="1.0",
+                type="ai-shuffle-agent",
+                agent=AgentImportData(
+                    name="Sealed Agent",
+                    model="sonnet",
+                    enabled_agents=[],
+                    agent_invoke_mode="custom",
+                ),
+            )
+
+            result = await import_profile(request, token="test-token")
+
+            assert result["config"]["agent_invoke_mode"] == "custom"
+            assert result["config"]["enabled_agents"] == []
+
+    @pytest.mark.asyncio
+    async def test_import_without_mode_keeps_legacy_behavior(self):
+        """No mode in the file -> no mode key, empty allowlist still dropped."""
+        from app.api.agents import import_profile
+        from app.core.models import AgentImportRequest, AgentImportData
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        with patch("app.api.agents.database") as mock_db:
+            mock_db.get_profile.return_value = None
+            mock_db.get_all_subagents.return_value = []
+            mock_db.create_profile.side_effect = lambda **kw: {
+                "id": kw["profile_id"],
+                "name": kw["name"],
+                "description": kw["description"],
+                "config": kw["config"],
+                "is_builtin": False,
+                "created_at": now,
+                "updated_at": now,
+            }
+
+            request = AgentImportRequest(
+                version="1.0",
+                type="ai-shuffle-agent",
+                agent=AgentImportData(name="Legacy Agent", model="sonnet", enabled_agents=[]),
+            )
+
+            result = await import_profile(request, token="test-token")
+
+            assert "agent_invoke_mode" not in result["config"]
+            assert "enabled_agents" not in result["config"]

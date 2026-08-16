@@ -23,6 +23,23 @@ def agents(mock_db):
         "gpt-bound", "GPT Bound", None,
         {"model": "gpt-5", "provider": "prov-x"},
     )
+    # Explicit invoke-grant modes (agent_invoke_mode).
+    database.create_profile(
+        "custom-empty", "Custom Empty", None,
+        {"model": "opus", "agent_invoke_mode": "custom"},
+    )
+    database.create_profile(
+        "custom-empty-list", "Custom Empty List", None,
+        {"model": "opus", "agent_invoke_mode": "custom", "enabled_agents": []},
+    )
+    database.create_profile(
+        "custom-listed", "Custom Listed", None,
+        {"model": "opus", "agent_invoke_mode": "custom", "enabled_agents": ["helper"]},
+    )
+    database.create_profile(
+        "mode-all", "Mode All", None,
+        {"model": "opus", "agent_invoke_mode": "all", "enabled_agents": ["helper"]},
+    )
     return database
 
 
@@ -90,6 +107,50 @@ def test_allowlist_restricts(agents):
     with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
         allowed = asyncio.run(_dispatch({"agent": "helper", "prompt": "go"}, "s-locked"))
     assert allowed["ok"] is True
+
+
+@pytest.mark.parametrize("caller_pid", ["custom-empty", "custom-empty-list"])
+def test_invoke_mode_custom_empty_blocks_everything(agents, caller_pid):
+    """mode 'custom' with a missing/empty allowlist = may invoke NO agents."""
+    session_id = f"s-{caller_pid}"
+    _mk_session(agents, session_id, caller_pid)
+
+    for target in ("helper", "root-agent"):
+        payload = asyncio.run(_dispatch({"agent": target, "prompt": "go"}, session_id))
+        assert payload["ok"] is False
+        assert "may not invoke any agents" in payload["error"]
+
+
+def test_invoke_mode_custom_allows_listed_blocks_unlisted(agents):
+    _mk_session(agents, "s-custom-listed", "custom-listed")
+
+    blocked = asyncio.run(
+        _dispatch({"agent": "root-agent", "prompt": "go"}, "s-custom-listed")
+    )
+    assert blocked["ok"] is False
+    assert "may only invoke: helper" in blocked["error"]
+
+    async def fake_worker(**kwargs):
+        return WorkerOutcome(ok=True, session_id="w1", report="ok")
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        allowed = asyncio.run(
+            _dispatch({"agent": "helper", "prompt": "go"}, "s-custom-listed")
+        )
+    assert allowed["ok"] is True
+
+
+def test_invoke_mode_all_ignores_allowlist(agents):
+    """mode 'all' places no restriction even with a non-empty enabled_agents."""
+    _mk_session(agents, "s-mode-all", "mode-all")
+
+    async def fake_worker(**kwargs):
+        return WorkerOutcome(ok=True, session_id="w1", report="done")
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        payload = asyncio.run(_dispatch({"agent": "root-agent", "prompt": "go"}, "s-mode-all"))
+    assert payload["ok"] is True
+    assert payload["agent"] == "root-agent"
 
 
 def test_depth_limit(agents, monkeypatch):

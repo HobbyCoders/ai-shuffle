@@ -98,6 +98,8 @@
 		allowed_tools: string[];
 		disallowed_tools: string[];
 		enabled_agents: string[];
+		/** 'all' = may invoke any agent; 'custom' = enabled_agents is the exact allowlist (empty = none). */
+		agent_invoke_mode: 'all' | 'custom';
 		memory: string;
 		include_partial_messages: boolean;
 		system_prompt_content: string;
@@ -210,10 +212,12 @@
 	}
 
 	// Invoke allowlist: every agent EXCEPT the one being edited (an agent can't
-	// dispatch itself). Empty selection = allow all.
+	// dispatch itself). The mode decides how the selection is read: 'all' ignores
+	// it entirely, 'custom' treats it as the exact allowlist (empty = none).
 	const invocableAgents = $derived(
 		allSubagents.filter((a) => a.id !== editingProfile?.id)
 	);
+	const invokeAll = $derived(profileForm.agent_invoke_mode !== 'custom');
 	const allInvocableSelected = $derived(
 		invocableAgents.length > 0 &&
 			invocableAgents.every((a) => profileForm.enabled_agents.includes(a.id))
@@ -419,28 +423,36 @@
 			<div class="set-grouphead grouphead-row">
 				<div>
 					<h3><Bot />Invocable agents</h3>
-					<p>Agents this agent may dispatch via the Task tool. Leave empty to allow all agents.</p>
+					<p>Choose whether this agent may dispatch other agents via the Task tool.</p>
 				</div>
-				{#if invocableAgents.length > 0}
+				{#if invocableAgents.length > 0 && !invokeAll}
 					<div class="head-acts">
 						<button type="button" class="lnk" onclick={() => onFormChange('enabled_agents', invocableAgents.map((a) => a.id))}>Select all</button>
 						<button type="button" class="lnk muted" onclick={() => onFormChange('enabled_agents', [])}>Clear</button>
 					</div>
 				{/if}
 			</div>
+			<div class="set-row">
+				<div class="lab"><h4>Access</h4><p>Allow every agent, or only the ones you pick below.</p></div>
+				<div class="ctl">
+					<div class="seg">
+						<button type="button" class:on={invokeAll} onclick={() => onFormChange('agent_invoke_mode', 'all')}>All agents</button>
+						<button type="button" class:on={!invokeAll} onclick={() => onFormChange('agent_invoke_mode', 'custom')}>Selected only</button>
+					</div>
+				</div>
+			</div>
 			{#if invocableAgents.length === 0}
 				<div class="set-row"><div class="lab"><p>No other agents to invoke.</p></div></div>
 			{:else}
-				{@const allowAll = profileForm.enabled_agents.length === 0}
 				{#each invocableAgents as agent (agent.id)}
-					{@const isSelected = profileForm.enabled_agents.includes(agent.id)}
-					<div class="set-row">
+					{@const isSelected = !invokeAll && profileForm.enabled_agents.includes(agent.id)}
+					<div class="set-row" class:disabled={invokeAll}>
 						<div class="lab">
-							<h4>{agent.name}{#if allowAll}<span class="hint"> · Allowed (all)</span>{/if}</h4>
+							<h4>{agent.name}{#if invokeAll}<span class="hint"> · Allowed (all)</span>{/if}</h4>
 							<p>{getModelDisplay(agent.model)}</p>
 						</div>
 						<div class="ctl">
-							<button type="button" class="switch" class:on={isSelected} aria-checked={isSelected} role="switch" aria-label={`Toggle ${agent.name}`} onclick={() => onToggleAgent(agent.id)}><i></i></button>
+							<button type="button" class="switch" class:on={isSelected} aria-checked={isSelected} role="switch" aria-label={`Toggle ${agent.name}`} disabled={invokeAll} onclick={() => onToggleAgent(agent.id)}><i></i></button>
 						</div>
 					</div>
 				{/each}
@@ -451,8 +463,10 @@
 			<div class="ed-note">
 				<Bot />
 				<span>
-					{#if profileForm.enabled_agents.length === 0}
+					{#if invokeAll}
 						No restriction — this agent may invoke any of the {invocableAgents.length} agents.
+					{:else if profileForm.enabled_agents.length === 0}
+						This agent may not invoke any agents.
 					{:else}
 						{profileForm.enabled_agents.length} of {invocableAgents.length} agents invocable{allInvocableSelected ? ' (all)' : ''}.
 					{/if}

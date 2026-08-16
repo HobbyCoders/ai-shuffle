@@ -152,8 +152,15 @@ class ProfileConfig(BaseModel):
     # User identification
     user: Optional[str] = None  # User identifier
 
-    # Enabled subagent IDs - references global subagents by ID
+    # Invoke allowlist for the unified Task tool (ruling A10): agent IDs this
+    # agent is permitted to dispatch. Interpreted together with
+    # ``agent_invoke_mode`` below.
     enabled_agents: Optional[List[str]] = None
+
+    # Invoke-grant mode for the Task tool — "all" = no restriction, "custom" =
+    # enabled_agents is the exact allowlist (empty = may invoke no agents),
+    # None = legacy (non-empty enabled_agents restricts, otherwise open).
+    agent_invoke_mode: Optional[str] = None
 
     # Per-agent memory (agents-program ruling A11): durable text owned by THIS
     # agent, injected into the compiled system prompt whenever the agent runs,
@@ -179,6 +186,18 @@ class ProfileConfig(BaseModel):
     # When True, the SDK validates that no MCP server is added or removed
     # mid-session; prevents tool-set drift across turns.
     strict_mcp_config: bool = False
+
+    @field_validator("agent_invoke_mode")
+    @classmethod
+    def _check_agent_invoke_mode(cls, value):
+        """Only the three documented invoke-grant modes are storable.
+
+        None keeps legacy behavior (a non-empty ``enabled_agents`` restricts,
+        otherwise the agent may invoke anything).
+        """
+        if value is not None and value not in ("all", "custom"):
+            raise ValueError("agent_invoke_mode must be one of: all, custom (or null)")
+        return value
 
 
 
@@ -860,6 +879,7 @@ class AgentExportData(BaseModel):
     allowed_tools: Optional[List[str]] = None
     disallowed_tools: Optional[List[str]] = None
     enabled_agents: Optional[List[str]] = None
+    agent_invoke_mode: Optional[str] = None  # None | "all" | "custom" (see ProfileConfig)
     ai_tools: Optional[AIToolsConfig] = None
     memory: Optional[str] = None
     include_partial_messages: Optional[bool] = True
