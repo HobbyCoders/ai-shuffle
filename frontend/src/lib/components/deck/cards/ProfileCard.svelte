@@ -910,7 +910,6 @@
 			{profiles}
 			{groups}
 			{allSubagents}
-			{builtinAgentIds}
 			importing={profileImporting}
 			onEditProfile={openEditForm}
 			onNewProfile={openNewForm}
