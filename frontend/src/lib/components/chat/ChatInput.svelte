@@ -341,7 +341,7 @@
 		try {
 			if (sendLater && $activeSession.isStreaming) {
 				// Queue for when current stream completes naturally
-				const queued = activeSession.queueMessage(finalPrompt);
+				const queued = await activeSession.queueMessage(finalPrompt);
 				if (queued === false) restoreOnFailure();
 			} else {
 				// Send immediately (interrupt → confirm → query if streaming, normal query if not)

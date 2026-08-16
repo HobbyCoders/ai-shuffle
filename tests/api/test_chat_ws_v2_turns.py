@@ -262,6 +262,9 @@ async def test_handle_queue_message_submits_queue_turn_and_broadcasts(mock_db):
 
     queued = turns_db.get_queued_turns("sess-1")
     assert [(t["source"], t["prompt"]) for t in queued] == [("queue", "later work")]
+    # transport context rides the turn at parity with handle_message, so a
+    # drained queue turn keeps the attention bump + AskUserQuestion fanout
+    assert queued[0]["payload"].get("user_id") == "admin"
     frames = _queue_frames(handler)
     assert frames and [m["content"] for m in frames[-1]["data"]["queued_messages"]] == [
         "later work"

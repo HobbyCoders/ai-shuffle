@@ -304,6 +304,22 @@ async def _evict_pooled_client(session_id: str) -> None:
         logger.debug("SessionRuntime: evict failed for %s", session_id, exc_info=True)
 
 
+async def _broadcast_queue_after_start(session_id: str) -> None:
+    """Re-source + fan out the queue view after a turn leaves the queued
+    set, so Send-later chips clear the moment the drained turn starts
+    (the SSE self-heal remains the fallback). Best-effort."""
+    try:
+        from app.api.chat_ws_handler import _v2_queue_view  # lazy: no core→api at module load
+        from app.core.sync_engine import sync_engine
+        queue = await asyncio.to_thread(_v2_queue_view, session_id)
+        await sync_engine.broadcast_queue_updated(session_id, queue)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "SessionRuntime: queue_updated broadcast failed for %s",
+            session_id, exc_info=True,
+        )
+
+
 # ---------------------------------------------------------------------------
 # SessionRuntime
 # ---------------------------------------------------------------------------
@@ -439,6 +455,16 @@ class SessionRuntime:
             # boot-wired executor → get_live_runtime(sid).interrupt(mode)) can
             # reach us. Self-guarded pop in the outer finally.
             _live_runtimes[sid] = self
+
+            logger.info(
+                "SessionRuntime: started %s turn %s (source=%s)",
+                sid, tid, self.source,
+            )
+            # The row has just left the queued set — fan the queue view out now
+            # so Send-later chips clear on every watching device. Fire-and-
+            # forget: nothing may add latency in front of the pump.
+            broadcast_task = asyncio.create_task(_broadcast_queue_after_start(sid))
+            broadcast_task.add_done_callback(lambda t: t.cancelled() or t.exception())
 
             # 3. Sticky pin (V2 Phase 4, OD-6/OD-9): the FIRST winner of an
             #    "anywhere"/capability placement pins the session to itself

@@ -803,7 +803,7 @@ export const activeSession = {
 
 	// ── Queued Messages (delegated to message-sender) ──────────────
 
-	queueMessage: (content: string) => messageSender.queueMessage(content),
+	queueMessage: (content: string): Promise<boolean> => messageSender.queueMessage(content),
 	removeQueuedMessage: (id: string) => messageSender.removeQueuedMessage(id),
 	clearQueuedMessages: () => messageSender.clearQueuedMessages(),
 

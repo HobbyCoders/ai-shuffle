@@ -757,7 +757,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 		// ── Queued Messages (server-side queue) ─────────────────────────
 
-		queueMessage(content: string): boolean {
+		async queueMessage(content: string): Promise<boolean> {
 			const _state = getState();
 			if (!_state.sessionId) return false;
 
@@ -770,6 +770,23 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					queuedAt: Date.now(),
 				}],
 			}));
+
+			// Mirror sendMessage's preamble: the socket may be closed (idle
+			// tab, backgrounded device) when the user hits Send later, and a
+			// bare send() on a dead socket silently drops the queue request.
+			if (!wsConn.isConnected()) {
+				wsConn.resetReconnectAttempts();
+				wsConn.connect();
+				const connected = await waitForConnection();
+				if (!connected) {
+					update(s => ({
+						...s,
+						queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticId),
+						error: 'Unable to connect. Please check your connection and try again.',
+					}));
+					return false;
+				}
+			}
 
 			const sent = wsConn.send({
 				type: 'queue_message',

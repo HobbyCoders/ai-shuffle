@@ -1469,12 +1469,21 @@ class ChatWebSocketHandler:
         queue_profile_id = profile_id
         if placed_remote and queue_profile_id == "claude-code":
             queue_profile_id = None
+        # Transport context, at parity with handle_message: without it a drained
+        # queue turn runs with user_id/api_user_id None, so session_runtime skips
+        # the attention bump and the AskUserQuestion fanout.
+        payload: Dict[str, Any] = {}
+        if self.api_user_id:
+            payload["api_user_id"] = self.api_user_id
+        if getattr(self, "user_id", None):
+            payload["user_id"] = self.user_id
         turn_manager.submit(
             session_id,
             "queue",
             prompt=content,
             profile_id=queue_profile_id,
             project_id=project_id,
+            payload=payload or None,
             no_kick=placed_remote,
         )
         if placed_remote:
