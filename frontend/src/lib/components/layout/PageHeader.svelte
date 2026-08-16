@@ -6,15 +6,15 @@
 	 *
 	 * Layout:
 	 * - Desktop: a single row. Left cluster (sidebar toggle, profile selector,
-	 *   Claude status, download) sits at the start; git actions sit at the right
-	 *   edge; the chat title is an in-flow flex item filling the space between the
-	 *   two clusters — it centers itself and shrinks/ellipsizes so it can never
-	 *   overlap the side clusters on narrow screens.
+	 *   download) sits at the start; git actions sit at the right edge; the chat
+	 *   title is an in-flow flex item filling the space between the two clusters —
+	 *   it centers itself and shrinks/ellipsizes so it can never overlap the side
+	 *   clusters on narrow screens.
 	 * - Mobile: a single row. The chat name moves to the global app bar
-	 *   (AppTopBar), so the title is hidden here; the row carries Claude status +
-	 *   download pinned at the start with the git actions in a horizontal scroll
-	 *   rail filling the rest. Both <div class="hdr-row*"> wrappers use
-	 *   `display:contents` so all items share one flex row on every width.
+	 *   (AppTopBar), so the title is hidden here; the row carries download pinned
+	 *   at the start with the git actions in a horizontal scroll rail filling the
+	 *   rest. Both <div class="hdr-row*"> wrappers use `display:contents` so all
+	 *   items share one flex row on every width.
 	 *
 	 * The project/worktree context badge that used to render here now lives in the
 	 * ContextPillBar above the chat input, alongside the profile + branch pills.
@@ -22,7 +22,6 @@
 	import { Mic } from 'lucide-svelte';
 	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
 	import { globalSttState, triggerToggle } from '$lib/services/globalStt';
-	import ClaudeStatusIndicator from '$lib/components/ClaudeStatusIndicator.svelte';
 
 	import type { Snippet } from 'svelte';
 
@@ -56,7 +55,6 @@
 		<h1 class="header-title">{title}</h1>
 
 		<div class="hdr-meta">
-			<ClaudeStatusIndicator />
 			{#if showStt}
 				<button
 					class="header-btn mic"
@@ -222,7 +220,7 @@
 	/* ===================================================================
 	   Mobile: a single row. The chat name now lives in the global app bar
 	   (AppTopBar), so the title is hidden here and the row carries the
-	   original actions — Claude status + download pinned at the start, with
+	   original actions — download pinned at the start, with
 	   the git actions in a horizontal touch-scroll rail filling the rest.
 	   =================================================================== */
 	/* Mobile breakpoint: 1080px covers phones AND unfolded foldables (Z Fold 6/7
@@ -234,8 +232,7 @@
 			min-height: 44px;
 			padding: 0 8px;
 			gap: 8px;
-			/* Header overflow stays visible so the Claude status popover isn't
-			   clipped; only the git rail (.hdr-right) scrolls. */
+			/* Only the git rail (.hdr-right) scrolls. */
 			overflow: visible;
 		}
 
@@ -250,7 +247,7 @@
 			display: none;
 		}
 
-		/* Pinned, non-scrolling: Claude status + download. */
+		/* Pinned, non-scrolling meta actions such as download. */
 		.hdr-meta {
 			order: 1;
 			flex-shrink: 0;
@@ -273,7 +270,7 @@
 			flex-wrap: nowrap;
 			/* Reset the desktop `flex-end`: with flex-end + overflow-x the content
 			   overflows past the START (left) edge, which is unreachable by scroll —
-			   so the git actions slide under the pinned status/download cluster
+			   so the git actions slide under the pinned meta-actions cluster
 			   instead of scrolling. flex-start sends the overflow to the END so the
 			   rail scrolls left→right and never overlaps the meta cluster. */
 			justify-content: flex-start;

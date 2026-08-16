@@ -1,7 +1,7 @@
 /**
  * header-dropdowns - Coordinates the single-open-at-a-time behavior of the
  * PageHeader's popover-style controls (profile selector, branch selector,
- * Claude status indicator).
+ * notifications, and git actions).
  *
  * Each control reads `openHeaderDropdown` to decide whether it is open, and
  * sets it to its own id when toggled open. Because exclusivity is driven by
@@ -14,7 +14,6 @@ import { writable } from 'svelte/store';
 type HeaderDropdownId =
 	| 'profile'
 	| 'branch'
-	| 'claude-status'
 	| 'notifications'
 	// Git-action option popovers (split-button chevrons). Listing them here means
 	// opening any one closes every other header dropdown — including the branch

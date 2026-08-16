@@ -9,12 +9,12 @@
 	 * - Dropdown panel listing persisted notifications (newest first) with
 	 *   per-item mark-read + dismiss, plus mark-all-read and clear-all.
 	 * - Uses the shared `header-dropdowns` store so opening this closes the
-	 *   profile / branch / claude-status popovers (single-open-at-a-time).
+	 *   profile, branch, and git-action popovers (single-open-at-a-time).
 	 * - Desktop: the panel is right-anchored under the button (the bell sits in the
 	 *   top-bar right cluster) so it expands leftward and can't clip off-screen.
 	 * - Outside-click + Escape to close. On mobile (≤1080px — the foldable-aware
 	 *   header breakpoint) the panel is `position: fixed` so the right-edge anchor
-	 *   can't clip it, mirroring ClaudeStatusIndicator.
+	 *   can't clip it.
 	 */
 	import { onDestroy } from 'svelte';
 	import {
@@ -475,7 +475,7 @@
 
 	/* Mobile / foldable (≤1080px, coarse pointer): the header reflows and an
 	   absolutely-positioned panel anchored to this button would clip. Pin it as a
-	   fixed near-full-width panel below the header — mirrors ClaudeStatusIndicator. */
+	   fixed near-full-width panel below the header. */
 	@media (max-width: 1080px) and (pointer: coarse) {
 		.notif-btn {
 			width: 36px;

@@ -19,7 +19,6 @@
 	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
 	import ToastViewport from '$lib/components/ToastViewport.svelte';
 	import BannerHost from '$lib/components/BannerHost.svelte';
-	import { claudeStatus } from '$lib/stores/claude-status';
 	import { notify } from '$lib/stores/notifications';
 	import { installGlobalErrorHandlers } from '$lib/services/error-reporter';
 
@@ -146,16 +145,10 @@
 		// Start visibility-aware auth polling
 		startAuthPoll();
 		document.addEventListener('visibilitychange', handleAuthVisibility);
-
-		// Start Claude status polling (only when authenticated)
-		if ($isAuthenticated) {
-			claudeStatus.start();
-		}
 	});
 
 	onDestroy(() => {
 		stopAuthPoll();
-		claudeStatus.stop();
 		document.removeEventListener('visibilitychange', handleAuthVisibility);
 		teardownErrorHandlers?.();
 		teardownErrorHandlers = null;
