@@ -37,10 +37,17 @@ conversion.
 | Anthropic Messages API | native loop | API key |
 | OpenAI Responses API | native loop | API key or Codex/ChatGPT-subscription OAuth |
 | OpenRouter / OpenAI-compatible | native loop | API key |
+| Local (llama.cpp `llama-server`, Ollama, any OpenAI-compatible server) | native loop | optional API key (`--api-key` servers) |
 | Claude Pro/Max subscription | delegated (official `claude` CLI as subprocess) | the CLI's own OAuth |
 
 Subscription traffic always goes through the official CLI — the explicitly
 permitted path — never raw token reuse.
+
+The local backend points at any OpenAI-compatible `chat/completions` endpoint
+(`base_url` accepts an origin, a `/v1` prefix, or the full endpoint) and adds an
+opt-in `tool_style = "text"` that runs tool calling over a `<tool_call>` text
+protocol — so small local models without reliable native tool calls still work
+as full agents. See [docs/local-models.md](docs/local-models.md).
 
 ## Under the hood
 
@@ -87,7 +94,7 @@ for free.
 ## Status
 
 Early development, moving fast. Working today: both engine legs (native API loop
-and delegated Claude CLI), all four provider backends, the code-as-actions
+and delegated Claude CLI), all five provider backends, the code-as-actions
 kernel with continual skills, MCP 2.0 (spec 2026-07-28), permissions, hooks, and
 the TUI/REPL. Claude Code ecosystem compatibility is landing in waves —
 instruction files, settings, plugins, skills, agents, and slash commands are in;
