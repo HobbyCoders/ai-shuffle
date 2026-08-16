@@ -423,11 +423,12 @@ class HarnessAdapter(ProviderAdapter):
                 ctx=native_ctx,
                 plan_mode=plan_mode,
                 session_id=omni_session_id,
-                # The app owns permission/env wiring for native legs, so fluid's
-                # folding of the host's ~/.claude settings (upstream default
-                # True) is not adopted here; turning it on is a separate,
-                # deliberate decision.
-                claude_settings=False,
+                # fluid's folding of the host's ~/.claude settings stack is left
+                # ON (its default) deliberately, per ruling CE4 — see the
+                # settings.json bullet in the module docstring: the user's
+                # permission rules are prepended (last match wins, so the app's
+                # own rules keep the final say) and ``env`` rides as a
+                # child-process overlay, never an os.environ mutation.
             )
             # An enabled plugin may declare an MCP server under a name the app
             # also configures. fluid's own host-wins check only sees servers

@@ -2455,6 +2455,71 @@ async def test_connect_drops_plugin_mcp_servers_the_app_already_connected(
     assert set(adapter._engine._mcp_servers) == {"plugin-only"}
 
 
+@pytest.mark.asyncio
+async def test_connect_native_leg_folds_the_hosts_claude_settings(monkeypatch, tmp_path):
+    """Ruling CE4: a native leg adopts the user's settings.json stack.
+
+    Asserted over a REAL NativeLoop (the pin lifted in this change is a
+    constructor kwarg, so a capturing fake could only prove the kwarg's
+    absence): ``env`` lands on ``ctx.extra["settings_env"]`` as the
+    child-process overlay, and the settings permission rules are PREPENDED to
+    the app's own — evaluation is last-match-wins, so the app keeps the final
+    say over its session.
+    """
+    import json
+
+    import app.core.provider.harness_adapter as ha
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.permissions.rules import Rule
+
+    # HOME redirected so the developer's real ~/.claude never leaks in.
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    proj = tmp_path / "proj"
+    (proj / ".claude").mkdir(parents=True)
+    (proj / ".git").mkdir()
+    (proj / ".claude" / "settings.json").write_text(
+        json.dumps(
+            {
+                "env": {"AIH_SETTINGS_PROBE": "from-settings"},
+                "permissions": {"allow": ["Bash(npm run *)"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # One host rule that contradicts the settings rule, so the ordering is
+    # observable rather than incidental.
+    host_rule = Rule(tool="Bash", decision="deny", input_globs={"command": "npm run *"})
+    monkeypatch.setattr(
+        ha.HarnessAdapter,
+        "_build_permissions",
+        lambda self, options: (PermissionEngine("on_write", rules=[host_rule]), False),
+    )
+    monkeypatch.setattr(
+        ha.HarnessAdapter, "_build_store", staticmethod(lambda options: MemoryStore())
+    )
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(
+        SessionOptions(
+            model="gpt-4o",
+            cwd=str(proj),
+            extra={"omni_provider": "openai_responses"},
+        )
+    )
+
+    engine = adapter._engine
+    assert engine.ctx.extra["settings_env"] == {"AIH_SETTINGS_PROBE": "from-settings"}
+    # Settings rule first, host rule last — the host's deny is what evaluates.
+    assert [r.decision for r in engine.permissions.rules] == ["allow", "deny"]
+    assert engine.permissions.rules[-1] is host_rule
+
+
 async def _connect_capturing_native(monkeypatch, tmp_path, **option_kwargs):
     """connect() a native leg whose NativeLoop kwargs are captured."""
     import app.core.provider.harness_adapter as ha
