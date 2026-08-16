@@ -1263,6 +1263,70 @@ async def test_native_leg_preset_append_rides_as_block(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_native_leg_passes_compiled_sections_for_context_usage(
+    monkeypatch, tmp_path
+):
+    """connect() hands NativeLoop the SAME compilation twice: the joined text
+    as ``system`` and its labeled sections as ``system_sections`` — the latter
+    is what lets get_context_usage() price Memory files / Skills as their own
+    rows (Claude-Code-style source split) instead of one opaque blob."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    (tmp_path / "CLAUDE.md").write_text("Project rule: be terse.", encoding="utf-8")
+    await ha.HarnessAdapter().connect(
+        SessionOptions(
+            model="gpt-4o",
+            system_prompt="I am the configured agent prompt.",
+            cwd=str(tmp_path),
+            extra={"omni_provider": "openai_responses"},
+        )
+    )
+    compiled = _CapturingLoop.captured["system_sections"]
+    assert compiled is not None
+    # Same compilation, two views — the text the engine sends is exactly the
+    # joined sections, so the breakdown can never price a different prompt.
+    assert compiled.text == _CapturingLoop.captured["system"]
+    kinds = [s.kind for s in compiled.sections]
+    assert "base" in kinds and "environment" in kinds
+    assert any(
+        s.kind == "memory" and s.path and s.path.endswith("CLAUDE.md")
+        for s in compiled.sections
+    )
+
+
+@pytest.mark.asyncio
+async def test_native_leg_compiler_failure_degrades_sections_to_none(
+    monkeypatch, tmp_path
+):
+    """Compiler failure keeps the string fallback AND passes sections=None —
+    the breakdown then prices the whole prompt as "System prompt" instead of
+    the session failing to start."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+    monkeypatch.setattr(
+        ha.HarnessAdapter,
+        "_compile_prompt_sections",
+        staticmethod(lambda system, append_system, options: None),
+    )
+
+    await ha.HarnessAdapter().connect(
+        SessionOptions(
+            model="gpt-4o",
+            system_prompt="I am the configured agent prompt.",
+            cwd=str(tmp_path),
+            extra={"omni_provider": "openai_responses"},
+        )
+    )
+    assert _CapturingLoop.captured["system_sections"] is None
+    assert _CapturingLoop.captured["system"] == "I am the configured agent prompt."
+
+
+@pytest.mark.asyncio
 async def test_native_leg_app_env_block_not_duplicated(monkeypatch, tmp_path):
     """inject_env_details profiles already carry the app's <env> block —
     omni's env section must be skipped, not doubled."""

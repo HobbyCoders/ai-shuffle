@@ -358,6 +358,11 @@ class HarnessAdapter(ProviderAdapter):
             native_model = (
                 resolve_api_model_id(options.model) if kind == "anthropic" else options.model
             )
+            # Compiled ONCE, used twice below: the joined text is the prompt
+            # the engine sends; the labeled sections feed get_context_usage().
+            compiled_prompt = self._compile_prompt_sections(
+                system, append_system, options
+            )
             self._engine = NativeLoop(
                 provider=provider_client,
                 store=self._store,
@@ -377,7 +382,18 @@ class HarnessAdapter(ProviderAdapter):
                 # base (a preset-shaped profile has none) with the append text
                 # (security + profile instructions) riding as an extra block,
                 # plus omni's own instruction-file/skills/env gathering.
-                system=self._compile_prompt(system, append_system, options),
+                system=(
+                    compiled_prompt.text
+                    if compiled_prompt is not None
+                    else (system if system is not None else append_system)
+                ),
+                # The same compilation's labeled sections — what lets fluid's
+                # get_context_usage() price Memory files / Skills as their own
+                # category rows (with per-file memoryFiles detail) instead of
+                # folding everything into "System prompt". None (compiler
+                # failure) degrades to the opaque-blob pricing, matching the
+                # string fallback above.
+                system_sections=compiled_prompt,
                 registry=self._registry,
                 permissions=permissions,
                 ctx=native_ctx,
@@ -1202,6 +1218,40 @@ class HarnessAdapter(ProviderAdapter):
     # ─── Internal builders ────────────────────────────────────────────
 
     @staticmethod
+    def _compile_prompt_sections(
+        system: Optional[str],
+        append_system: Optional[str],
+        options: SessionOptions,
+    ) -> Any:
+        """Run the omni prompt compiler, keeping the labeled sections.
+
+        Returns fluid's ``CompiledPrompt`` (joined text + one section per
+        input: base, instruction files, skills index, environment, extras) or
+        ``None`` on compiler failure. The sections are what let the native
+        leg's ``get_context_usage()`` price "Memory files"/"Skills" as their
+        own rows instead of one opaque "System prompt" blob — the same
+        source-by-source split Claude Code's ``/context`` shows.
+        """
+        try:
+            from fluid.context.compiler import PromptInputs, compile_prompt
+
+            # A profile with ``inject_env_details`` on already carries the
+            # app's <env> block (which knows worktree/execution mode omni
+            # doesn't) — skip omni's env section rather than injecting twice.
+            has_app_env = bool(system) and "<env>" in system
+            return compile_prompt(
+                PromptInputs(
+                    base=system,
+                    extra_blocks=[append_system] if append_system else [],
+                    cwd=options.cwd or ".",
+                    include_env=not has_app_env,
+                )
+            )
+        except Exception:
+            logger.exception("prompt compiler failed; falling back to raw parts")
+            return None
+
+    @staticmethod
     def _compile_prompt(
         system: Optional[str],
         append_system: Optional[str],
@@ -1216,24 +1266,12 @@ class HarnessAdapter(ProviderAdapter):
         environment. Never raises — a compiler failure falls back to the
         pre-compiler string so a session can always start.
         """
-        try:
-            from fluid.context.compiler import PromptInputs, compile_system_prompt
-
-            # A profile with ``inject_env_details`` on already carries the
-            # app's <env> block (which knows worktree/execution mode omni
-            # doesn't) — skip omni's env section rather than injecting twice.
-            has_app_env = bool(system) and "<env>" in system
-            return compile_system_prompt(
-                PromptInputs(
-                    base=system,
-                    extra_blocks=[append_system] if append_system else [],
-                    cwd=options.cwd or ".",
-                    include_env=not has_app_env,
-                )
-            )
-        except Exception:
-            logger.exception("prompt compiler failed; falling back to raw parts")
+        compiled = HarnessAdapter._compile_prompt_sections(
+            system, append_system, options
+        )
+        if compiled is None:
             return system if system is not None else append_system
+        return compiled.text
 
     @staticmethod
     def _build_store(options: SessionOptions) -> Any:
