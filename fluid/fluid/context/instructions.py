@@ -13,8 +13,14 @@ Global (per user):
   ~/.codex/AGENTS.md            (only if present)
 
 Project (walk up from cwd to the git root, else the filesystem root):
-  CLAUDE.md, AGENTS.md, AGENT.md
+  CLAUDE.md, CLAUDE.local.md, AGENTS.md, AGENT.md
   .claude/CLAUDE.md, .agents/AGENTS.md
+  AGENTS.override.md — replaces AGENTS.md in the same directory (codex)
+
+@-imports:
+  ``@path`` tokens inside a discovered instruction file inline that file's
+  content (see :func:`expand_imports`) — so a CLAUDE.md that says
+  ``@communication-style.md`` ports over unchanged.
 
 Merge rule (per the plan):
   Global entries come first, then project entries ordered outermost → cwd (so
@@ -38,19 +44,29 @@ Wiring (M6 seams, now closed):
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 # Ordered per-directory candidates. Order is significant: it fixes the order
 # blocks appear within a single scope and which file "wins" the byte-identical
 # dedup (the earlier one is kept, the later one noted).
-_CLAUDE_NAMES = ("CLAUDE.md", ".claude/CLAUDE.md")
+#
+# ``CLAUDE.local.md`` is Claude Code's gitignored per-developer sibling of
+# CLAUDE.md; it loads *after* the CLAUDE.md variants in the same directory.
+_CLAUDE_NAMES = ("CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md")
 _AGENTS_NAMES = ("AGENTS.md", "AGENT.md", ".agents/AGENTS.md")
+
+# Codex convention: an ``AGENTS.override.md`` REPLACES the ``AGENTS.md`` in the
+# same directory (it does not stack on top of it).
+_AGENTS_OVERRIDE = "AGENTS.override.md"
+
+_CLAUDE_BASENAMES = ("CLAUDE.md", "CLAUDE.local.md")
 
 
 def _kind_for(rel_name: str) -> str:
     base = os.path.basename(rel_name)
-    if base == "CLAUDE.md":
+    if base in _CLAUDE_BASENAMES:
         return "claude"
     if base == "AGENT.md":
         return "agent"
@@ -91,15 +107,150 @@ def _read(path: Path) -> str:
         return ""
 
 
+def _read_opt(path: Path) -> str | None:
+    """``_read`` that distinguishes "empty file" from "could not read"."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+
+
+# ─── @-imports ───────────────────────────────────────────────────────────────
+
+# Claude Code's ``@path`` import token: at the start of a line or preceded by
+# whitespace, path = everything up to the next whitespace.
+_IMPORT_RE = re.compile(r"(?<![^\s])@(\S+)")
+
+# Hops, not nesting levels: the root file is hop 0, so a token sitting in a file
+# already five hops deep is left literal.
+MAX_IMPORT_DEPTH = 5
+
+
+def _resolved(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except OSError:
+        return path
+
+
+def _import_target(raw: str, source_dir: Path) -> Path:
+    """Resolve an ``@`` token's path: ``~/`` expands, absolute stays, else it is
+    relative to the *containing file's* directory (not the cwd)."""
+    if raw.startswith("~"):
+        return Path(raw).expanduser()
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        return candidate
+    return source_dir / raw
+
+
+def expand_imports(
+    text: str,
+    source_path: Path,
+    *,
+    _depth: int = 0,
+    _seen: frozenset[Path] | None = None,
+) -> str:
+    """Expand Claude Code ``@path`` import tokens in ``text``.
+
+    A token expands only when it sits at the start of a line or is preceded by
+    whitespace, and is outside both fenced code blocks (``` / ~~~) and inline
+    code spans — so documentation *about* imports stays inert. The referenced
+    file's content replaces just the token; the rest of the line survives.
+
+    Expansion is recursive up to :data:`MAX_IMPORT_DEPTH` hops and is guarded by
+    the set of already-visited files, so a cycle cuts silently. Anything that
+    cannot be expanded — too deep, cyclic, missing, unreadable — keeps its
+    literal token. This never raises: instruction assembly must not be able to
+    fail on a stray ``@``.
+    """
+    if "@" not in text:
+        return text
+
+    seen = _seen if _seen is not None else frozenset({_resolved(source_path)})
+    source_dir = source_path.parent
+
+    def _expand_token(match: re.Match[str]) -> str:
+        literal = match.group(0)
+        if _depth >= MAX_IMPORT_DEPTH:
+            return literal
+        target = _import_target(match.group(1), source_dir)
+        resolved = _resolved(target)
+        if resolved in seen:  # cycle — cut silently
+            return literal
+        if not target.is_file():
+            return literal
+        content = _read_opt(target)
+        if content is None:
+            return literal
+        return expand_imports(
+            content,
+            target,
+            _depth=_depth + 1,
+            _seen=seen | {resolved},
+        ).rstrip("\n")
+
+    out: list[str] = []
+    fence: str | None = None
+    for line in text.split("\n"):
+        stripped = line.lstrip()
+        if fence is not None:
+            if stripped.startswith(fence):
+                fence = None
+            out.append(line)
+            continue
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            fence = stripped[:3]
+            out.append(line)
+            continue
+        out.append(_expand_outside_code_spans(line, _expand_token))
+    return "\n".join(out)
+
+
+def _expand_outside_code_spans(line: str, expand) -> str:
+    """Apply ``expand`` to the parts of ``line`` that are not inside `backticks`.
+
+    Splitting on backticks puts the code-span interiors at odd indices; the even
+    segments are live text. Segments after the first cannot begin a token —
+    their first character is preceded by a backtick, not whitespace — so a
+    sentinel guards the lookbehind.
+    """
+    if "@" not in line:
+        return line
+    parts = line.split("`")
+    for i in range(0, len(parts), 2):
+        if "@" not in parts[i]:
+            continue
+        if i == 0:
+            parts[i] = _IMPORT_RE.sub(expand, parts[i])
+        else:
+            parts[i] = _IMPORT_RE.sub(expand, "\x00" + parts[i])[1:]
+    return "`".join(parts)
+
+
+def _agents_names_for(directory: Path) -> tuple[str, ...]:
+    """The AGENTS-family candidates for ``directory``.
+
+    ``AGENTS.override.md`` takes ``AGENTS.md``'s slot outright — the codex
+    override convention replaces rather than stacks.
+    """
+    if (directory / _AGENTS_OVERRIDE).is_file():
+        return (_AGENTS_OVERRIDE, *_AGENTS_NAMES[1:])
+    return _AGENTS_NAMES
+
+
 def _files_in_dir(directory: Path, scope: str) -> list[InstructionFile]:
     """Discover instruction files directly under ``directory`` in canonical order."""
     found: list[InstructionFile] = []
-    for rel in (*_CLAUDE_NAMES, *_AGENTS_NAMES):
+    for rel in (*_CLAUDE_NAMES, *_agents_names_for(directory)):
         p = directory / rel
         if p.is_file():
             found.append(
                 InstructionFile(
-                    path=str(p), scope=scope, kind=_kind_for(rel), content=_read(p)
+                    path=str(p),
+                    scope=scope,
+                    kind=_kind_for(rel),
+                    content=expand_imports(_read(p), p),
                 )
             )
     return found
@@ -135,16 +286,27 @@ def discover_global_instruction_files() -> list[InstructionFile]:
     home = Path.home()
     xdg = os.environ.get("XDG_CONFIG_HOME")
     config_base = Path(xdg) if xdg else home / ".config"
+    codex = home / ".codex"
+    # Same override rule as the project walk: ~/.codex/AGENTS.override.md
+    # replaces ~/.codex/AGENTS.md rather than stacking with it.
+    codex_agents = codex / _AGENTS_OVERRIDE
+    if not codex_agents.is_file():
+        codex_agents = codex / "AGENTS.md"
     candidates = [
         (home / ".claude" / "CLAUDE.md", "claude"),
         (config_base / "fluid" / "AGENTS.md", "agents"),
-        (home / ".codex" / "AGENTS.md", "agents"),
+        (codex_agents, "agents"),
     ]
     out: list[InstructionFile] = []
     for path, kind in candidates:
         if path.is_file():
             out.append(
-                InstructionFile(path=str(path), scope="global", kind=kind, content=_read(path))
+                InstructionFile(
+                    path=str(path),
+                    scope="global",
+                    kind=kind,
+                    content=expand_imports(_read(path), path),
+                )
             )
     return out
 
