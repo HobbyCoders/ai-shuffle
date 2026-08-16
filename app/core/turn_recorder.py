@@ -528,12 +528,16 @@ class TurnRecorder:
         _last_turn_recorders[session_id] = recorder
         return recorder
 
-    async def start(self, user_message: str) -> None:
+    async def start(self, user_message: str, profile_id: str | None = None) -> None:
         """Append ``turn.started`` then ``message.user``."""
         try:
             await self._append([
-                self._event(contract.TurnStarted),
-                self._event(contract.MessageUser, content=user_message or ""),
+                self._event(contract.TurnStarted, profile_id=profile_id),
+                self._event(
+                    contract.MessageUser,
+                    content=user_message or "",
+                    profile_id=profile_id,
+                ),
             ])
         except Exception:
             logger.warning(

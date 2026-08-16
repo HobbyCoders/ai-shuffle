@@ -8,7 +8,7 @@
 	 * - Keyboard shortcuts for sending messages
 	 */
 	import { onMount, onDestroy, tick } from 'svelte';
-	import { createChatEditor, type Editor } from './tiptap/editorConfig';
+	import { createChatEditor, setEditorPlaceholder, type Editor } from './tiptap/editorConfig';
 	import type { FileChipAttributes } from './tiptap/FileChipNode';
 	import { serializeToMessage, isEditorEmpty, findActiveAtMention, getSlashCommand } from './tiptap/serialization';
 
@@ -78,12 +78,7 @@
 	$effect(() => {
 		const newPlaceholder = placeholder;
 		if (!editor) return;
-		const ext = editor.extensionManager.extensions.find(e => e.name === 'placeholder');
-		if (ext) {
-			ext.options.placeholder = newPlaceholder;
-		}
-		// Force decorations to re-run so the new placeholder text is visible
-		editor.view.dispatch(editor.state.tr);
+		setEditorPlaceholder(editor, newPlaceholder);
 	});
 
 	function handleEditorKeyDown(event: KeyboardEvent) {

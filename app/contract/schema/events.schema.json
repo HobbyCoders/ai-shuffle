@@ -2681,6 +2681,18 @@
           "title": "Id",
           "type": "string"
         },
+        "profile_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Profile Id"
+        },
         "run_id": {
           "anyOf": [
             {

@@ -104,6 +104,19 @@ async def test_start_appends_turn_started_then_message_user(mock_db):
     await rec.close()
 
 
+async def test_start_stamps_profile_id_on_both_events(mock_db):
+    # Per-message agent attribution: the live SSE path stamps the turn's
+    # profile onto turn.started so the FE can pin streamed messages to it.
+    _mk_session()
+    rec = await _recorder(command_id="cmd-p")
+    await rec.start("hello", profile_id="prof-7")
+    rows = _rows()
+    assert [r["event_type"] for r in rows] == ["turn.started", "message.user"]
+    assert rows[0]["payload"]["profile_id"] == "prof-7"
+    assert rows[1]["payload"]["profile_id"] == "prof-7"
+    await rec.close()
+
+
 # ---------------------------------------------------------------------------
 # §3 golden translations (non-delta rows append immediately)
 # ---------------------------------------------------------------------------

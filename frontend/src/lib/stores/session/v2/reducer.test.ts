@@ -298,6 +298,92 @@ describe('message.user reconcile', () => {
 		);
 		expect(s.messages).toHaveLength(2);
 	});
+
+	it('prefers the event profile_id over the live turn profile', () => {
+		const s = fold([
+			ev('turn.started', { turn_id: 't-1', profile_id: 'p-turn' }),
+			ev('message.user', { id: 'srv-12', content: 'hi', command_id: null, profile_id: 'p-event' }),
+		]);
+		expect(s.messages[0].profileId).toBe('p-event');
+	});
+
+	it('falls back to the live turn profile when the event carries none', () => {
+		const s = fold([
+			ev('turn.started', { turn_id: 't-1', profile_id: 'p-turn' }),
+			ev('message.user', { id: 'srv-13', content: 'hi', command_id: null }),
+		]);
+		expect(s.messages[0].profileId).toBe('p-turn');
+	});
+
+	it('reconcile keeps the optimistic profileId when the event has none', () => {
+		const optimistic: ChatMessage = {
+			id: 'local-ghi',
+			role: 'user',
+			type: 'text',
+			content: 'hello',
+			commandId: 'req-p',
+			profileId: 'p-optimistic',
+			timestamp: '2026-07-12T00:00:00.000Z',
+		};
+		const seeded = { ...initialState(), messages: [optimistic] };
+		const s = reduce(seeded, ev('message.user', { id: 'srv-14', content: 'hello', command_id: 'req-p' }));
+		expect(s.messages[0].profileId).toBe('p-optimistic');
+	});
+
+	it('reconcile prefers the event profile_id over the optimistic one', () => {
+		const optimistic: ChatMessage = {
+			id: 'local-jkl',
+			role: 'user',
+			type: 'text',
+			content: 'hello',
+			commandId: 'req-q',
+			profileId: 'p-optimistic',
+			timestamp: '2026-07-12T00:00:00.000Z',
+		};
+		const seeded = { ...initialState(), messages: [optimistic] };
+		const s = reduce(
+			seeded,
+			ev('message.user', { id: 'srv-15', content: 'hello', command_id: 'req-q', profile_id: 'p-event' })
+		);
+		expect(s.messages[0].profileId).toBe('p-event');
+	});
+});
+
+// ─── Per-message agent attribution on the live path ──────────────────────────
+
+describe('live turn profile attribution', () => {
+	it('stamps streamed text and thinking messages with the turn profile', () => {
+		const s = fold([
+			ev('turn.started', { turn_id: 't-1', profile_id: 'p-agent' }),
+			ev('assistant.thinking_delta', { text: 'hmm' }),
+			ev('assistant.text_delta', { text: 'hi' }),
+		]);
+		expect(s.messages.map((m) => m.profileId)).toEqual(['p-agent', 'p-agent']);
+	});
+
+	it('leaves profileId absent when the turn carries no profile', () => {
+		const s = fold([ev('turn.started', { turn_id: 't-1' }), ev('assistant.text_delta', { text: 'hi' })]);
+		expect(s.liveTurnProfileId).toBeNull();
+		expect(s.messages[0].profileId).toBeUndefined();
+	});
+
+	it('clears liveTurnProfileId on turn.completed and turn.aborted', () => {
+		const started = reduce(initialState(), ev('turn.started', { turn_id: 't-1', profile_id: 'p-agent' }));
+		expect(started.liveTurnProfileId).toBe('p-agent');
+		expect(reduce(started, ev('turn.completed', {})).liveTurnProfileId).toBeNull();
+		expect(reduce(started, ev('turn.aborted', { reason: 'interrupt' })).liveTurnProfileId).toBeNull();
+	});
+
+	it('a later turn does not restamp the previous turn messages', () => {
+		const s = fold([
+			ev('turn.started', { turn_id: 't-1', profile_id: 'p-one' }),
+			ev('assistant.text_delta', { text: 'first' }),
+			ev('turn.completed', {}),
+			ev('turn.started', { turn_id: 't-2', profile_id: 'p-two' }),
+			ev('assistant.text_delta', { text: 'second' }),
+		]);
+		expect(s.messages.map((m) => m.profileId)).toEqual(['p-one', 'p-two']);
+	});
 });
 
 // ─── Task-notification wake prompts ───────────────────────────────────────────

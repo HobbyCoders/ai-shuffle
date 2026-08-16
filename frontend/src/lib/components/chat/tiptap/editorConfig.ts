@@ -26,6 +26,23 @@ function parseInitialContent(content: string): string | Record<string, unknown> 
 	};
 }
 
+/**
+ * Live placeholder text per editor instance. The Placeholder extension reads its
+ * text through a callback, so updating the box makes the next decoration pass
+ * pick up the new text without recreating the editor.
+ */
+const editorPlaceholders = new WeakMap<Editor, { text: string }>();
+
+/**
+ * Update the placeholder text of a live editor and force decorations to recompute.
+ */
+export function setEditorPlaceholder(editor: Editor, text: string): void {
+	const box = editorPlaceholders.get(editor);
+	if (!box || box.text === text) return;
+	box.text = text;
+	editor.view.dispatch(editor.state.tr);
+}
+
 export interface EditorOptions {
 	element: HTMLElement;
 	placeholder?: string;
@@ -45,7 +62,11 @@ export interface EditorOptions {
 export function createChatEditor(options: EditorOptions): Editor {
 	const { element, placeholder = 'Message...', initialContent = '', onUpdate, onTransaction, onFocus, onBlur } = options;
 
-	return new Editor({
+	// Captured by the placeholder callback so the first decoration pass (which runs
+	// inside `new Editor`, before the instance exists to key the WeakMap on) is correct.
+	const placeholderBox = { text: placeholder };
+
+	const editor = new Editor({
 		element,
 		extensions: [
 			StarterKit.configure({
@@ -66,7 +87,7 @@ export function createChatEditor(options: EditorOptions): Editor {
 				// document, paragraph, text, history, hardBreak are enabled by default
 			}),
 			Placeholder.configure({
-				placeholder,
+				placeholder: () => placeholderBox.text,
 				emptyEditorClass: 'is-editor-empty'
 			}),
 			FileChipNode
@@ -101,6 +122,9 @@ export function createChatEditor(options: EditorOptions): Editor {
 			onBlur?.();
 		}
 	});
+
+	editorPlaceholders.set(editor, placeholderBox);
+	return editor;
 }
 
 export type { Editor };

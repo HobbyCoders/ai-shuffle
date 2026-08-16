@@ -60,6 +60,13 @@ export interface V2SessionState {
 	 *  settled then no-ops server-side instead of interrupting the successor
 	 *  (GitHub #585). */
 	liveTurnId: string | null;
+	/** Profile (agent) id the live turn is running as, from `turn.started`.
+	 *  Messages created on the live SSE path (streaming deltas, and a
+	 *  `message.user` whose event carries no profile) are stamped with it at
+	 *  CREATION time, so their name header stays pinned to the agent that
+	 *  actually produced them instead of following the current selection.
+	 *  Cleared on turn end — safe because stamping happens at creation. */
+	liveTurnProfileId: string | null;
 	/** Quiet-pump "ok" ack suppression. When a `message.user` renders a
 	 *  `kind==='pump'` task-notification card we begin watching the live turn's
 	 *  assistant reply: an exact "ok" ack is a bookkeeping artifact of the pump
@@ -118,6 +125,7 @@ export function initialState(): V2SessionState {
 		openTextId: null,
 		openThinkingId: null,
 		liveTurnId: null,
+		liveTurnProfileId: null,
 		pendingPumpAck: null,
 		pumpAckBuffer: '',
 		liveModel: null,
@@ -507,6 +515,8 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				isStreaming: true,
 				parked: false,
 				liveTurnId: typeof event.turn_id === 'string' ? event.turn_id : state.liveTurnId,
+				liveTurnProfileId:
+					typeof event.profile_id === 'string' && event.profile_id ? event.profile_id : null,
 				pendingPumpAck: null,
 				pumpAckBuffer: '',
 				liveModel: null,
@@ -569,6 +579,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					isStreaming: false,
 					parked: false,
 					liveTurnId: null,
+					liveTurnProfileId: null,
 					pendingPumpAck: null,
 					pumpAckBuffer: '',
 					usage: obj(event.usage) ?? state.usage,
@@ -682,6 +693,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				isStreaming: false,
 				parked: false,
 				liveTurnId: null,
+				liveTurnProfileId: null,
 				pendingPumpAck: null,
 				pumpAckBuffer: '',
 			};
@@ -749,6 +761,14 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				});
 			}
 			const stamp = stampTs(event, createdAt);
+			// Pin the sending agent at creation time: the event's own profile wins,
+			// then the optimistic message's (the reconcile branch already knows who
+			// sent it), then the live turn's.
+			const senderProfileId =
+				str(event.profile_id) ||
+				(idx >= 0 ? state.messages[idx].profileId : '') ||
+				state.liveTurnProfileId ||
+				'';
 			const userMsg = (id: string): ChatMessage => ({
 				id,
 				role: 'user',
@@ -756,6 +776,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				content,
 				timestamp: stamp || undefined,
 				...(commandId ? { commandId } : {}),
+				...(senderProfileId ? { profileId: senderProfileId } : {}),
 			});
 			if (idx >= 0) {
 				// Replace in place — keep the optimistic id for stable Svelte keying.
@@ -798,6 +819,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					content: buffer,
 					streaming: true,
 					timestamp: createdAt || undefined,
+					...(next.liveTurnProfileId ? { profileId: next.liveTurnProfileId } : {}),
 				};
 				return {
 					...appendMessage({ ...next, pendingPumpAck: null, pumpAckBuffer: '' }, revealMsg, seq),
@@ -821,6 +843,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				content: text,
 				streaming: true,
 				timestamp: createdAt || undefined,
+				...(next.liveTurnProfileId ? { profileId: next.liveTurnProfileId } : {}),
 			};
 			return { ...appendMessage(next, msg, seq), openTextId: id };
 		}
@@ -887,6 +910,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				content: text,
 				streaming: true,
 				timestamp: createdAt || undefined,
+				...(next.liveTurnProfileId ? { profileId: next.liveTurnProfileId } : {}),
 			};
 			return { ...appendMessage(next, msg, seq), openThinkingId: id };
 		}

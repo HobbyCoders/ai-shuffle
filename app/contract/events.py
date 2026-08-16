@@ -27,6 +27,7 @@ class TurnQueued(EventBase):
 
 class TurnStarted(EventBase):
     type: Literal["turn.started"] = "turn.started"
+    profile_id: str | None = None
 
 
 class TurnInterrupting(EventBase):

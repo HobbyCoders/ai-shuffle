@@ -1833,7 +1833,7 @@ async def stream_to_websocket(
 
     recorder = await TurnRecorder.maybe_create(session_id, command_id=v2_command_id)
     if recorder:
-        await recorder.start(prompt)
+        await recorder.start(prompt, profile_id=profile_id)
     try:
         async for event in _stream_to_websocket_impl(
             prompt=prompt,

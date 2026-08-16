@@ -639,7 +639,7 @@ class SessionRuntime:
         from app.core.query_engine import _stream_to_websocket_impl
 
         prompt = self.turn.get("prompt") or ""
-        await recorder.start(prompt)
+        await recorder.start(prompt, profile_id=self.turn.get("profile_id"))
         try:
             async for event in _stream_to_websocket_impl(
                 prompt=prompt,

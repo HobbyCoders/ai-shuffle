@@ -83,7 +83,7 @@ async def _run_background_query(
 
     recorder = await TurnRecorder.maybe_create(session_id)
     if recorder:
-        await recorder.start(prompt)
+        await recorder.start(prompt, profile_id=profile.get("id"))
     try:
         await _run_background_query_impl(
             session_id=session_id,
