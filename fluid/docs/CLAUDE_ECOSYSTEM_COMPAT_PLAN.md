@@ -86,6 +86,21 @@ Context sources for this plan:
   before any wave lands. Vendor snapshot already contains it.
 - CE11 — Never crash session assembly: malformed JSON/frontmatter/manifest →
   skip that unit, `logging` warning. No exceptions escape discovery.
+- CE12 (added 2026-08-16, W6) — Tool-restriction seam, ENFORCED not advisory:
+  `NativeLoop(allowed_tools: Sequence[str] | None = None, disallowed_tools:
+  Sequence[str] | None = None)`. Names support exact match plus fnmatch
+  patterns (e.g. `mcp__chrome-devtools__*`). Semantics: allowed_tools=None →
+  everything; otherwise the exposed tool surface is exactly the allowed set;
+  disallowed subtracts afterwards (deny beats allow). Enforcement at THREE
+  points: (1) `_tools_api` — filtered tools' schemas are never sent to the
+  model; (2) the deferred-tool catalog + ToolSearch — filtered tools are
+  neither listed nor loadable; (3) `_dispatch_tool` — a call to a filtered
+  tool returns an is_error outcome (defense against hallucinated tools).
+  Restriction is session-static (set at construction, not mutable mid-turn).
+  Host mapping: AgentDefinition.tools → worker session's allowed_tools; the
+  delegated leg additionally passes `--allowed-tools` (it already passes
+  `--disallowed-tools`). A restricted set never silently re-adds essentials —
+  what the definition says is what the worker gets.
 
 ## WAVES
 
