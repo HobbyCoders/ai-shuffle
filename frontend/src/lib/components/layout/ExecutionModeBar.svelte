@@ -18,7 +18,7 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import type { ExecutionMode } from '$lib/stores/types';
 	import { syncWorktrees, type Worktree, type Branch } from '$lib/api/git';
-	import { listInstalls, type Install } from '$lib/api/installs';
+	import { listInstalls, getClusterGitState, type Install } from '$lib/api/installs';
 	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch, gitStatus } from '$lib/stores/git.svelte';
 	import { ChevronDown, ChevronRight, Cloud, GitBranch, Monitor, GitFork, Plus, Loader2, Check } from 'lucide-svelte';
 	import { untrack } from 'svelte';
@@ -183,6 +183,13 @@
 	let installs = $state<Install[]>([]);
 	let installsLoading = $state(false);
 
+	// Per-install checkout eligibility for the selected project (ruling D6),
+	// keyed by install id. `null` = UNKNOWN — no project selected, the git-state
+	// call failed, or the project has no cluster git state. Ruling W3-3 is
+	// fail-open: unknown means no badges and no extra disabling, so a backend
+	// hiccup can never lock the user out of their own devices.
+	let eligibility = $state<Record<string, boolean> | null>(null);
+
 	// Other installs only — "this device" is the Local item above.
 	const otherInstalls = $derived(installs.filter(i => !i.is_self));
 
@@ -192,8 +199,41 @@
 	// worktree request to that install, which materializes the checkout on its
 	// own disk via the durable git-ops queue. Neither choice constrains the other.
 
+	// Only devices the backend explicitly reported as ineligible count — an
+	// install missing from the git-state payload stays unknown (fail-open).
+	function isIneligible(id: string): boolean {
+		return eligibility !== null && eligibility[id] === false;
+	}
+
+	// A worktree has to be materialized from a checkout of this project on the
+	// target device, so in worktree mode an ineligible device is unusable and
+	// reads as disabled. In plain mode the badge is purely informational.
+	function isBlocked(install: Install): boolean {
+		return !install.online || (worktreeOn && isIneligible(install.id));
+	}
+
+	function deviceTitle(install: Install): string {
+		if (!install.online) return `${install.device_name} is offline`;
+		if (isIneligible(install.id)) {
+			return worktreeOn
+				? `No checkout of this project on ${install.device_name} — a worktree can't be created there`
+				: `No checkout of this project on ${install.device_name}`;
+		}
+		return `Run this session on ${install.device_name}`;
+	}
+
 	async function loadInstalls() {
 		installsLoading = true;
+		// Eligibility rides along with the registry refresh on every open so the
+		// badges match the picked project. Errors are swallowed at the source so a
+		// rejection can never surface while the installs call is still in flight.
+		const projectId = $activeSession.project;
+		const gitStateReq = projectId
+			? getClusterGitState(projectId).catch(e => {
+				console.warn('[ExecutionModeBar] Failed to load git state:', e);
+				return null;
+			})
+			: Promise.resolve(null);
 		try {
 			installs = (await listInstalls()).installs;
 		} catch (e) {
@@ -202,6 +242,14 @@
 		} finally {
 			installsLoading = false;
 		}
+		const gitState = await gitStateReq;
+		if (!gitState || gitState.project_v2_id === null) {
+			eligibility = null;
+			return;
+		}
+		const map: Record<string, boolean> = {};
+		for (const row of gitState.installs) map[row.id] = row.eligible;
+		eligibility = map;
 	}
 
 	function toggleCloud() {
@@ -209,7 +257,7 @@
 	}
 
 	function selectDevice(install: Install) {
-		if (!install.online) return;
+		if (isBlocked(install)) return;
 		activeSession.setDeviceIntent({ id: install.id, name: install.device_name });
 		showModeDropdown = false;
 	}
@@ -366,19 +414,19 @@
 										type="button"
 										class="branch-item device-item"
 										class:active={deviceIntent?.id === install.id}
-										class:disabled={!install.online}
+										class:disabled={isBlocked(install)}
 										onclick={() => selectDevice(install)}
-										title={install.online
-											? `Run this session on ${install.device_name}`
-											: `${install.device_name} is offline`}
+										title={deviceTitle(install)}
 										role="menuitemradio"
 										aria-checked={deviceIntent?.id === install.id}
-										aria-disabled={!install.online}
+										aria-disabled={isBlocked(install)}
 									>
 										<Cloud size={13} strokeWidth={1.5} />
 										<span class="branch-item-name">{install.device_name}</span>
 										{#if !install.online}
 											<span class="device-offline">offline</span>
+										{:else if isIneligible(install.id)}
+											<span class="device-nocheckout">no checkout</span>
 										{/if}
 									</button>
 								{/each}
@@ -685,6 +733,19 @@
 		border-radius: 4px;
 		background: color-mix(in oklch, var(--muted-foreground) 15%, transparent);
 		color: var(--muted-foreground);
+	}
+
+	/* Informational sibling of .device-offline: the device is reachable, it just
+	   has no checkout of this project. Deliberately subtler (outline only, no
+	   fill) since in plain mode the row stays selectable. */
+	.device-nocheckout {
+		font-size: 0.5625rem;
+		font-weight: 500;
+		padding: 1px 5px;
+		border-radius: 4px;
+		border: 1px solid color-mix(in oklch, var(--muted-foreground) 25%, transparent);
+		color: var(--muted-foreground);
+		opacity: 0.75;
 	}
 
 	.mode-trigger-label {

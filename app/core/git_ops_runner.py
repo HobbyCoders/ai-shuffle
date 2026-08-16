@@ -47,6 +47,47 @@ _sweep_task: Optional[asyncio.Task] = None
 # Executors
 # ---------------------------------------------------------------------------
 
+def _record_checkout_state(
+    project_v2_id: str, path: str, branch: Optional[str]
+) -> None:
+    """Stamp ``head_sha``/``dirty`` onto the checkout row we just materialized.
+
+    W3-5: this is the ONLY place git subprocesses are added for git-state. The
+    hot spawn/refresh paths stay subprocess-free — an op has already paid for a
+    ``git worktree add``, so two more cheap reads here are free, whereas a
+    per-send ``git status`` would not be.
+
+    Best-effort by construction: ANY failure (git missing, repo in a weird
+    state, DB hiccup) is swallowed with a debug log. Populating a display field
+    must never turn a successful checkout into a failed op.
+    """
+    from app.core.config import settings
+    from app.core.git_service import git_service
+    from app.db import checkouts as checkouts_db
+
+    try:
+        rev = git_service._run_git(path, ["rev-parse", "HEAD"], timeout=10)
+        head_sha = rev.stdout.strip() if rev.returncode == 0 else None
+
+        st = git_service._run_git(path, ["status", "--porcelain"], timeout=15)
+        dirty = bool(st.stdout.strip()) if st.returncode == 0 else None
+
+        if head_sha is None and dirty is None:
+            return
+        checkouts_db.upsert_checkout(
+            project_v2_id,
+            settings.effective_instance_id,
+            path,
+            branch=branch or None,
+            head_sha=head_sha,
+            dirty=dirty,
+        )
+    except Exception:  # noqa: BLE001 — display metadata, never the op's problem.
+        logger.debug(
+            "git_ops: head_sha/dirty capture skipped for %s", path, exc_info=True
+        )
+
+
 def execute_ensure_worktree(op_row: Dict[str, Any]) -> Dict[str, Any]:
     """Run one claimed ``ensure_worktree`` op on THIS install (sync).
 
@@ -82,6 +123,7 @@ def execute_ensure_worktree(op_row: Dict[str, Any]) -> Dict[str, Any]:
             f"(no base checkout here, or the branch exists neither locally nor "
             f"on origin)."
         )
+    _record_checkout_state(project_v2_id, path, branch)
     return {"path": path, "branch": branch}
 
 

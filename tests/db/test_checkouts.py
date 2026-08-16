@@ -151,3 +151,73 @@ def test_legacy_fallback_empty_runner_query_no_double_lookup(project):
     # Querying with runner_id='' directly: no exact row → must NOT re-query '' as
     # its own fallback (returns None cleanly).
     assert checkouts.get_checkout_with_legacy_fallback(project["id"], "") is None
+
+
+# ---------------------------------------------------------------------------
+# has_active_base_checkout — THE shared eligibility predicate (W3-2). The
+# with-worktree remote preflight and the cluster git-state API both ask this
+# one function, so the composer badge can never disagree with the 409.
+# ---------------------------------------------------------------------------
+
+def test_active_base_checkout_is_eligible(project):
+    checkouts.upsert_checkout(project["id"], "runnerA", "/work/repo")
+    assert checkouts.has_active_base_checkout(project["id"], "runnerA") is True
+
+
+def test_no_checkout_at_all_is_not_eligible(project):
+    assert checkouts.has_active_base_checkout(project["id"], "runnerA") is False
+
+
+def test_branch_only_checkout_is_not_a_base_checkout(project):
+    # ``capable_runners`` would accept this row; the base gate must not —
+    # Phase 3 never clones, so a new branch has nothing to fork from here.
+    checkouts.upsert_checkout(
+        project["id"], "runnerA", "/work/feat", branch="feature-x"
+    )
+    assert checkouts.has_active_base_checkout(project["id"], "runnerA") is False
+
+
+def test_archived_base_checkout_is_not_eligible(project):
+    c = checkouts.upsert_checkout(project["id"], "runnerA", "/work/repo")
+    checkouts.set_checkout_status(c["id"], "archived")
+    assert checkouts.has_active_base_checkout(project["id"], "runnerA") is False
+
+
+def test_legacy_empty_runner_base_row_makes_any_runner_eligible(project):
+    # Matches get_checkout_with_legacy_fallback semantics: the pre-instance_id
+    # '' row is the fallback for every runner.
+    checkouts.upsert_checkout(project["id"], "", "/work/legacy")
+    assert checkouts.has_active_base_checkout(project["id"], "runnerA") is True
+    assert checkouts.has_active_base_checkout(project["id"], "runnerB") is True
+
+
+def test_archived_old_base_row_does_not_mask_newer_active_one(project):
+    # A moved project path leaves TWO base rows on the same runner (uniqueness
+    # is per (project, runner, path)): the old one archived, the new one active.
+    # get_checkout returns the OLDEST row, so the predicate must scan ALL base
+    # rows rather than judge the first one it finds.
+    old = checkouts.upsert_checkout(project["id"], "runnerA", "/old/repo")
+    checkouts.set_checkout_status(old["id"], "archived")
+    checkouts.upsert_checkout(project["id"], "runnerA", "/new/repo")
+    assert checkouts.has_active_base_checkout(project["id"], "runnerA") is True
+
+
+def test_archived_own_base_row_blocks_legacy_fallback(project):
+    """Only-archived own base rows do NOT fall back to the legacy '' row.
+
+    Matches get_checkout_with_legacy_fallback's actual semantics: it falls back
+    ONLY when the exact-runner lookup returns no row at all — an exact-runner
+    row WINS regardless of its status. So a runner whose only base row is
+    archived stays ineligible even though a legacy '' active base row exists.
+    """
+    own = checkouts.upsert_checkout(project["id"], "runnerA", "/work/mine")
+    checkouts.set_checkout_status(own["id"], "archived")
+    checkouts.upsert_checkout(project["id"], "", "/work/legacy")
+    assert checkouts.has_active_base_checkout(project["id"], "runnerA") is False
+    # A runner with no base rows of its own still gets the legacy fallback.
+    assert checkouts.has_active_base_checkout(project["id"], "runnerB") is True
+
+
+def test_a_base_checkout_on_another_runner_does_not_count(project):
+    checkouts.upsert_checkout(project["id"], "runnerA", "/work/repo")
+    assert checkouts.has_active_base_checkout(project["id"], "runnerB") is False

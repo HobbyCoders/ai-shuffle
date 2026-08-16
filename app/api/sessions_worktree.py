@@ -164,8 +164,11 @@ async def _preflight_remote_target(
     can't materialize its checkout is stranded, not merely slow. Two gates:
 
       * the target is a registered install that is currently online;
-      * the target has an ACTIVE **BASE** checkout of this project. This is
-        deliberately NOT ``capable_runners``: that helper matches ANY active
+      * the target has an ACTIVE **BASE** checkout of this project, asked via
+        the shared ``checkouts.has_active_base_checkout`` predicate — the SAME
+        function the cluster git-state API uses for its per-device ``eligible``
+        flag, so the composer badge and this gate can never disagree (W3-2).
+        Deliberately NOT ``capable_runners``: that helper matches ANY active
         checkout row for the project, including a branch-only worktree row, and
         Phase 3 never clones — creating a branch needs a base checkout to fork
         from, so a branch-only match would queue an op that can only fail.
@@ -187,13 +190,12 @@ async def _preflight_remote_target(
             detail=f"{device} is offline. Bring it online or pick another device.",
         )
 
-    base = await run_sync(
-        checkouts_db.get_checkout_with_legacy_fallback,
+    eligible = await run_sync(
+        checkouts_db.has_active_base_checkout,
         pv2["id"],
         target_instance_id,
-        None,
     )
-    if not base or (base.get("status") or "active") != "active":
+    if not eligible:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(

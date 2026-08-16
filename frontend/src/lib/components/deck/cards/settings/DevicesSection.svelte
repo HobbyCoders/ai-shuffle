@@ -12,8 +12,9 @@
 	 * links open on other devices.
 	 */
 	import { onMount } from 'svelte';
-	import { MonitorSmartphone, RefreshCw, Pencil, Trash2, Check, X, KeyRound, Globe } from 'lucide-svelte';
+	import { MonitorSmartphone, RefreshCw, Pencil, Trash2, Check, X, KeyRound, Globe, GitBranch } from 'lucide-svelte';
 	import { getErrorMessage } from '$lib/api/client';
+	import { appData, projects } from '$lib/stores/app-data.svelte';
 	import {
 		listInstalls,
 		renameInstall,
@@ -23,10 +24,12 @@
 		getAdvertiseStatus,
 		setAdvertiseUrl,
 		testAdvertiseReachability,
+		getClusterGitState,
 		type Install,
 		type ClusterSecretStatus,
 		type AdvertiseStatus,
-		type AdvertiseReachability
+		type AdvertiseReachability,
+		type ClusterGitState
 	} from '$lib/api/installs';
 
 	let installs = $state<Install[]>([]);
@@ -54,7 +57,42 @@
 
 	const onlineCount = $derived(installs.filter((i) => i.online).length);
 
-	onMount(load);
+	// ── Git state (ruling D6) ──────────────────────────────────────────────
+	// Read-only view of which devices hold a checkout of a given project, plus
+	// the recent git-ops queue activity. The project choice is a transient
+	// viewing filter — nothing about it is persisted.
+	let gsProjectId = $state('');
+	let gsState = $state<ClusterGitState | null>(null);
+	let gsLoading = $state(false);
+	let gsError = $state('');
+
+	onMount(() => {
+		load();
+		// The project list is normally loaded at app boot; make sure it's there
+		// when this panel is the first thing to need it.
+		if ($projects.length === 0) appData.loadProjects();
+	});
+
+	async function loadGitState() {
+		gsError = '';
+		if (!gsProjectId) {
+			gsState = null;
+			return;
+		}
+		gsLoading = true;
+		try {
+			gsState = await getClusterGitState(gsProjectId);
+		} catch (e: unknown) {
+			gsState = null;
+			gsError = getErrorMessage(e, 'Failed to load git state');
+		} finally {
+			gsLoading = false;
+		}
+	}
+
+	function shortSha(sha: string | null): string {
+		return sha ? sha.slice(0, 8) : '—';
+	}
 
 	async function load() {
 		loading = true;
@@ -332,6 +370,98 @@
 	{/if}
 </div>
 
+<!-- Git state: per-install checkouts for one project + recent git-ops activity.
+     Read-only; the composer's device picker consumes the same endpoint to mark
+     which devices can actually run a project. -->
+<div class="set-group">
+	<div class="set-grouphead">
+		<h3><GitBranch />Git state</h3>
+		<p>Which devices hold a checkout of a project — the same signal the composer's device picker uses. Also shows the recent cross-install git operations queued for this project.</p>
+	</div>
+
+	<div class="set-row">
+		<div class="lab">
+			<h4>Project</h4>
+			<p>Pick a project to inspect. Nothing here is saved.</p>
+		</div>
+		<div class="ctl gs-ctl">
+			<select class="sel" bind:value={gsProjectId} onchange={loadGitState} aria-label="Project">
+				<option value="">Select a project…</option>
+				{#each $projects as p (p.id)}
+					<option value={p.id}>{p.name}</option>
+				{/each}
+			</select>
+			<button
+				type="button"
+				class="ic-btn"
+				title="Refresh git state"
+				onclick={loadGitState}
+				disabled={!gsProjectId || gsLoading}
+			><RefreshCw size={13} /></button>
+		</div>
+	</div>
+
+	{#if gsError}
+		<div class="kc-foot err">{gsError}</div>
+	{:else if gsLoading}
+		<div class="sg-body"><p class="muted">Loading git state…</p></div>
+	{:else if !gsProjectId}
+		<div class="sg-body"><p class="muted">Select a project to see where it's checked out.</p></div>
+	{:else if gsState && gsState.project_v2_id === null}
+		<div class="sg-body"><p class="muted">No cluster git state (not a git project).</p></div>
+	{:else if gsState}
+		<div class="gs-list">
+			{#each gsState.installs as inst (inst.id)}
+				<div class="gs-dev">
+					<div class="gs-dev-head">
+						<span class="dev-dot" class:online={inst.online} title={inst.online ? 'Online' : 'Offline'}></span>
+						<span class="dev-name">{inst.device_name}</span>
+						{#if inst.is_self}<span class="b b-muted">This install</span>{/if}
+						{#if inst.eligible}
+							<span class="b b-on" title="Has a base checkout of this project">Has checkout</span>
+						{:else}
+							<span class="b b-muted" title="No base checkout of this project on this device">No checkout</span>
+						{/if}
+					</div>
+					{#if inst.checkouts.length === 0}
+						<p class="gs-empty">No checkouts recorded.</p>
+					{:else}
+						{#each inst.checkouts as co (co.path)}
+							<div class="gs-co">
+								<span class="gs-branch">{co.branch || 'base'}</span>
+								<span class="gs-path mono" title={co.path}>{co.path}</span>
+								{#if co.status}<span class="gs-tag">{co.status}</span>{/if}
+								{#if co.dirty}<span class="gs-tag dirty">dirty</span>{/if}
+								<span class="gs-sha mono">{shortSha(co.head_sha)}</span>
+								<span class="gs-when">{relTime(co.updated_at)}</span>
+							</div>
+						{/each}
+					{/if}
+				</div>
+			{/each}
+			{#if gsState.installs.length === 0}
+				<p class="gs-empty">No installs reported for this project.</p>
+			{/if}
+		</div>
+
+		<div class="gs-ops">
+			<div class="gs-ops-head">Recent git ops</div>
+			{#if gsState.recent_ops.length === 0}
+				<p class="gs-empty">No git operations recorded.</p>
+			{:else}
+				{#each gsState.recent_ops as op (op.id)}
+					<div class="gs-op">
+						<span class="gs-branch">{op.op}</span>
+						<span class="gs-tag" class:dirty={op.status === 'error'}>{op.status}</span>
+						{#if op.params?.branch}<span class="gs-path mono">{op.params.branch}</span>{/if}
+						<span class="gs-when">{relTime(op.created_at)}</span>
+					</div>
+				{/each}
+			{/if}
+		</div>
+	{/if}
+</div>
+
 <style>
 	.sg-body {
 		padding: 14px 18px 16px;
@@ -491,6 +621,86 @@
 	.b-muted {
 		color: var(--muted-foreground);
 		background: var(--muted);
+	}
+	/* ── Git state ── */
+	.gs-ctl {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+	.gs-list {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		padding: 4px 8px 0;
+	}
+	.gs-dev {
+		padding: 8px 10px;
+		border-radius: 10px;
+		background: color-mix(in oklch, var(--muted-foreground) 5%, transparent);
+	}
+	.gs-dev-head {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		flex-wrap: wrap;
+	}
+	.gs-co,
+	.gs-op {
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+		margin-top: 6px;
+		font-size: 11.5px;
+		color: var(--muted-foreground);
+		min-width: 0;
+	}
+	.gs-branch {
+		font-weight: 600;
+		color: var(--foreground);
+		flex-shrink: 0;
+	}
+	.gs-path {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.mono {
+		font-family: var(--font-mono, monospace);
+	}
+	.gs-tag {
+		flex-shrink: 0;
+		padding: 1px 6px;
+		border-radius: 999px;
+		font-size: 10px;
+		background: var(--muted);
+		color: var(--muted-foreground);
+	}
+	.gs-tag.dirty {
+		color: var(--warning, #d97706);
+		background: color-mix(in oklch, var(--warning, #d97706) 15%, transparent);
+	}
+	.gs-sha,
+	.gs-when {
+		flex-shrink: 0;
+		opacity: 0.8;
+	}
+	.gs-ops {
+		padding: 10px 18px 4px;
+	}
+	.gs-ops-head {
+		font-size: 11px;
+		font-weight: 600;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		color: var(--muted-foreground);
+	}
+	.gs-empty {
+		margin: 6px 0 0;
+		font-size: 12px;
+		color: var(--muted-foreground);
 	}
 	.kc-foot {
 		padding: 8px 18px 12px;

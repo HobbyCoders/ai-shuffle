@@ -16,12 +16,13 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
 
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_auth
+from app.api.common import check_project_access
 from app.core import cluster
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,105 @@ async def list_installs(token: str = Depends(require_auth)) -> Dict[str, Any]:
     for row in installs:
         row["is_self"] = row.get("id") == me
     return {"installs": installs, "self_instance_id": me}
+
+
+def _iso(value: Any) -> Optional[str]:
+    """Timestamps arrive as ``str`` from the SQLite shim but ``datetime`` from
+    real Postgres — coerce to an ISO string either way."""
+    if value is None or isinstance(value, str):
+        return value
+    return value.isoformat()
+
+
+@router.get("/git-state")
+async def git_state(
+    request: Request,
+    project_id: str = Query(..., description="Legacy project id"),
+    token: str = Depends(require_auth),
+) -> Dict[str, Any]:
+    """Per-device git state for one project — the read side of D6 (W3-1).
+
+    Answers, for every registered install, "can this device run a worktree
+    session for this project, and what does it already have checked out?".
+    ``eligible`` is ``checkouts.has_active_base_checkout`` — the SAME predicate
+    the with-worktree remote preflight enforces, so a device the composer shows
+    as eligible is exactly a device whose send will not 409 (W3-2).
+
+    A project with no ``projects_v2`` row (a non-git project) is not an error:
+    it answers 200 with ``project_v2_id: null`` and every device ineligible.
+    """
+    from app.core import project_resolver
+    from app.core.config import settings
+    from app.db import checkouts as checkouts_db
+    from app.db import git_ops as git_ops_db
+
+    check_project_access(request, project_id)
+
+    project = await run_sync(database.get_project, project_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project not found: {project_id}",
+        )
+
+    # Resolve the origin-keyed project_v2 exactly as the with-worktree path does
+    # (self-heals / self-seeds), so this API and the preflight look at the same
+    # project. ``None`` = non-git project: no checkouts, no ops, nobody eligible.
+    pv2 = await run_sync(project_resolver.resolve_project_v2, {"project_id": project_id})
+    pv2_id = pv2["id"] if pv2 else None
+
+    installs = await run_sync(database.get_installs)
+    me = settings.effective_instance_id
+
+    if pv2_id:
+        rows = await run_sync(checkouts_db.list_checkouts, pv2_id)
+        recent = await run_sync(git_ops_db.list_recent_for_project, pv2_id, 20)
+    else:
+        rows, recent = [], []
+
+    # ONE list_checkouts read, grouped in Python — no per-install query fan-out.
+    by_runner: Dict[str, list] = {}
+    for row in rows:
+        by_runner.setdefault(row.get("runner_id") or "", []).append({
+            "branch": row.get("branch"),
+            "path": row.get("path"),
+            "head_sha": row.get("head_sha"),
+            "dirty": row.get("dirty"),
+            "status": row.get("status"),
+            "updated_at": _iso(row.get("updated_at")),
+        })
+
+    out = []
+    for install in installs:
+        install_id = install.get("id")
+        entry = dict(install)
+        entry["is_self"] = install_id == me
+        entry["eligible"] = bool(
+            pv2_id
+            and await run_sync(
+                checkouts_db.has_active_base_checkout, pv2_id, install_id
+            )
+        )
+        entry["checkouts"] = by_runner.get(install_id or "", [])
+        out.append(entry)
+
+    return {
+        "project_v2_id": pv2_id,
+        "installs": out,
+        "recent_ops": [
+            {
+                "id": op.get("id"),
+                "runner_id": op.get("runner_id"),
+                "op": op.get("op"),
+                "status": op.get("status"),
+                "params": op.get("params"),
+                "result": op.get("result"),
+                "created_at": _iso(op.get("created_at")),
+                "updated_at": _iso(op.get("updated_at")),
+            }
+            for op in recent
+        ],
+    }
 
 
 @router.patch("/installs/{install_id}")

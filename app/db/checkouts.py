@@ -150,6 +150,55 @@ def get_checkout_with_legacy_fallback(
     return get_checkout(project_id, "", branch=branch)
 
 
+def _base_checkout_statuses(cursor: Any, project_id: str, runner_id: str) -> List[str]:
+    """Statuses of EVERY base row (``branch`` NULL or '') for a (project, runner).
+
+    A missing/NULL ``status`` normalizes to ``'active'`` — same coercion the
+    eligibility predicate has always applied to a single row.
+    """
+    cursor.execute(
+        "SELECT status FROM checkouts "
+        "WHERE project_id = %s AND runner_id = %s "
+        "AND (branch IS NULL OR branch = '')",
+        (project_id, runner_id),
+    )
+    return [(dict(r).get("status") or "active") for r in cursor.fetchall()]
+
+
+def has_active_base_checkout(project_id: str, runner_id: str) -> bool:
+    """True iff ``runner_id`` has ANY ACTIVE **BASE** checkout of this project.
+
+    THE eligibility predicate, shared by the with-worktree remote preflight
+    (``app.api.sessions_worktree._preflight_remote_target``) and the cluster
+    git-state API (``GET /api/v1/cluster/git-state``) — D6/W3-2. They must never
+    diverge: the composer badge that says a device is eligible and the preflight
+    that decides whether the send 409s are the same question, so they ask it
+    with the same function.
+
+    "Base" is ``branch`` NULL or ''. **ANY** matters: uniqueness is
+    ``(project_id, runner_id, path)``, so one runner can hold SEVERAL base rows
+    once a project's path moves — an archived row at the old path plus a live
+    one at the new path. :func:`get_checkout` returns only the OLDEST base row,
+    so asking it would read the stale archived row and call an eligible runner
+    ineligible. This scans every base row instead and answers on the best one.
+
+    The legacy fallback of :func:`get_checkout_with_legacy_fallback` is
+    preserved exactly: the ``runner_id=''`` sentinel rows are consulted ONLY
+    when the runner owns no base row at all (a real-runner row always wins,
+    even an archived one), and never when ``runner_id`` is itself ''.
+
+    Deliberately NOT ``capable_runners``: that matches ANY active checkout row
+    including a branch-only worktree, and Phase 3 never clones — a new branch
+    needs a base checkout to fork from.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        statuses = _base_checkout_statuses(cursor, project_id, runner_id)
+        if not statuses and runner_id != "":
+            statuses = _base_checkout_statuses(cursor, project_id, "")
+        return any(s == "active" for s in statuses)
+
+
 def list_checkouts(project_id: str) -> List[Dict[str, Any]]:
     """Return every checkout for a project across all runners."""
     with get_db() as conn:

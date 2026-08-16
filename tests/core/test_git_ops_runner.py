@@ -110,6 +110,106 @@ def test_executor_raises_when_the_branch_is_not_materializable(project):
             git_ops_runner.execute_ensure_worktree(claimed)
 
 
+# ═══ head_sha / dirty capture (W3-5) ═════════════════════════════════════════
+#
+# The ensure_worktree executor is the ONLY place allowed to spend git
+# subprocesses on git-state display fields — the hot spawn/refresh paths stay
+# subprocess-free. And because it is display metadata, it must never be able to
+# fail an otherwise-successful op.
+
+
+def _completed(stdout: str = "", returncode: int = 0):
+    import subprocess
+
+    return subprocess.CompletedProcess(
+        args=["git"], returncode=returncode, stdout=stdout, stderr=""
+    )
+
+
+def _git_replies(**by_subcommand):
+    """A ``_run_git`` stub keyed on the first git argument."""
+    def _run(working_dir, args, **kwargs):
+        reply = by_subcommand.get(args[0])
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+    return MagicMock(side_effect=_run)
+
+
+def test_executor_records_head_sha_and_dirty_on_the_checkout(project):
+    from app.core import checkout_manager
+    from app.core.git_service import git_service
+    from app.db import checkouts as checkouts_db
+
+    op = _queue(project, branch="feat/x")
+    claimed = _claimed(op["id"])
+
+    with patch.object(
+        checkout_manager, "ensure_checkout", MagicMock(return_value="/w/feat-x")
+    ), patch.object(
+        git_service,
+        "_run_git",
+        _git_replies(**{
+            "rev-parse": _completed("abc123def456\n"),
+            "status": _completed(" M app/main.py\n"),
+        }),
+    ):
+        result = git_ops_runner.execute_ensure_worktree(claimed)
+
+    assert result == {"path": "/w/feat-x", "branch": "feat/x"}
+    row = checkouts_db.get_checkout(project["id"], ME, branch="feat/x")
+    assert row is not None
+    assert row["head_sha"] == "abc123def456"
+    assert row["dirty"] is True
+    assert row["path"] == "/w/feat-x"
+
+
+def test_a_clean_tree_records_dirty_false(project):
+    from app.core import checkout_manager
+    from app.core.git_service import git_service
+    from app.db import checkouts as checkouts_db
+
+    op = _queue(project, branch="feat/x")
+    claimed = _claimed(op["id"])
+
+    with patch.object(
+        checkout_manager, "ensure_checkout", MagicMock(return_value="/w/feat-x")
+    ), patch.object(
+        git_service,
+        "_run_git",
+        _git_replies(**{
+            "rev-parse": _completed("abc123\n"),
+            "status": _completed("\n"),
+        }),
+    ):
+        git_ops_runner.execute_ensure_worktree(claimed)
+
+    row = checkouts_db.get_checkout(project["id"], ME, branch="feat/x")
+    assert row is not None and row["dirty"] is False
+
+
+async def test_a_head_sha_failure_does_not_fail_the_op(project):
+    """git blowing up on the state read must leave the op ``done`` — the
+    checkout was materialized, and head_sha is only ever a display field."""
+    from app.core import checkout_manager
+    from app.core.git_service import git_service
+
+    op = _queue(project, branch="feat/x")
+
+    with patch.object(
+        checkout_manager, "ensure_checkout", MagicMock(return_value="/w/feat-x")
+    ), patch.object(
+        git_service,
+        "_run_git",
+        MagicMock(side_effect=OSError("git not found")),
+    ):
+        assert await git_ops_runner.claim_once() == 1
+
+    settled = _got(op["id"])
+    assert settled["status"] == "done"
+    assert settled["result"]["path"] == "/w/feat-x"
+
+
 def test_executor_raises_for_an_unknown_project(mock_db):
     op = git_ops_db.insert_op(
         ME, "ensure_worktree", project_v2_id="pv2-gone", params={"branch": "b"}

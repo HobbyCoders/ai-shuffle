@@ -151,9 +151,10 @@ export interface ActiveSessionState {
 	 *  elsewhere, which read worktreeId/worktreeBranch directly). */
 	worktreeIntent: ExecutionMode;
 	/** Compose-time device pick for a NEW session — `null` = this device.
-	 *  Mutually exclusive with worktreeIntent 'worktree' (a worktree is created
-	 *  on local disk), and cleared as soon as the query is sent: the session row
-	 *  itself then carries the ownership. */
+	 *  Composes freely with worktreeIntent 'worktree' (ruling D7): the worktree
+	 *  request travels to the picked install, which materializes the checkout on
+	 *  its own disk via the durable git-ops queue. Cleared as soon as the query
+	 *  is sent: the session row itself then carries the ownership. */
 	deviceIntent: DeviceIntent | null;
 	worktreeBranch: string;
 	worktreeBaseBranch: string;

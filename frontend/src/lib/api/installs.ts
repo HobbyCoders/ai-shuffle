@@ -76,6 +76,55 @@ export async function setAdvertiseUrl(base_url: string): Promise<AdvertiseStatus
 	return api.put<AdvertiseStatus>('/cluster/advertise', { base_url });
 }
 
+// ─── Cluster git state (W3 / ruling D6) ──────────────────────────────────────
+//
+// `GET /cluster/git-state?project_id=<legacy project id>` reports, per install,
+// whether that device can run this project (`eligible` — it holds an ACTIVE base
+// checkout) plus every checkout row it owns, and the project's recent `git_ops`.
+// Consumed by the composer device picker (eligibility badges) and the Devices
+// panel's git-state surface.
+
+/** One `checkouts` row: the base checkout (`branch` null/'') or a worktree. */
+export interface CheckoutRow {
+	branch: string | null; // null / '' = the project's base checkout
+	path: string;
+	head_sha: string | null;
+	dirty: boolean;
+	status: string | null;
+	updated_at: string | null;
+}
+
+/** An install row annotated with this project's git state on that device. */
+export interface GitStateInstall extends Install {
+	eligible: boolean; // has an ACTIVE base checkout of this project
+	checkouts: CheckoutRow[];
+}
+
+/** A row from the durable `git_ops` queue (ruling D5). */
+export interface GitOpRow {
+	id: string;
+	runner_id: string;
+	op: string;
+	status: 'queued' | 'running' | 'done' | 'error' | (string & {});
+	params: { branch?: string; [key: string]: unknown } | null;
+	result: Record<string, unknown> | null;
+	created_at: string;
+	updated_at: string | null;
+}
+
+export interface ClusterGitState {
+	project_v2_id: string | null; // null = not a git project (no cluster git state)
+	installs: GitStateInstall[];
+	recent_ops: GitOpRow[];
+}
+
+/** Per-install git state for a project (eligibility, checkouts, recent ops). */
+export async function getClusterGitState(projectId: string): Promise<ClusterGitState> {
+	return api.get<ClusterGitState>(
+		`/cluster/git-state?project_id=${encodeURIComponent(projectId)}`
+	);
+}
+
 export interface AdvertiseReachability {
 	ok: boolean;
 	url: string | null;
