@@ -170,9 +170,12 @@ class Repl:
             await self._submit_or_report(Rewind(to_node_id=arg), "rewind")
         else:
             # User-defined slash commands: .claude/commands/*.md and
-            # .agents/commands/*.md files run as a turn, with $ARGUMENTS
-            # substituted (Claude Code convention).
-            rendered = self._render_user_command(cmd.lstrip("/"), arg)
+            # .agents/commands/*.md files run as a turn, rendered per the
+            # Claude Code conventions ($ARGUMENTS/$1/$2, !`bash`, @file).
+            # Off-thread because rendering may run inline bash.
+            rendered = await asyncio.to_thread(
+                self._render_user_command, cmd.lstrip("/"), arg
+            )
             if rendered is not None:
                 await self.run_turn(rendered)
             else:
@@ -181,8 +184,8 @@ class Repl:
         return True
 
     def _render_user_command(self, name: str, arg: str) -> str | None:
-        """Resolve a discovered command file to its prompt body, or None."""
-        from fluid.context.instructions import discover_commands, parse_frontmatter
+        """Resolve a discovered command file to its rendered prompt, or None."""
+        from fluid.context.instructions import discover_commands, render_command
 
         cwd = getattr(getattr(self.engine, "ctx", None), "cwd", None) or "."
         match = next((c for c in discover_commands(cwd) if c.name == name), None)
@@ -192,8 +195,7 @@ class Repl:
             raw = Path(match.path).read_text(encoding="utf-8")
         except OSError:
             return None
-        _, body = parse_frontmatter(raw)
-        return body.replace("$ARGUMENTS", arg).strip()
+        return render_command(raw, arg, cwd=cwd)
 
     async def _submit_or_report(self, op, label: str) -> None:
         try:

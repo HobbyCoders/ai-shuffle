@@ -41,13 +41,16 @@ Wiring (M6 seams, now closed):
     the CLI advertises name+description in the system prompt and the ``Skill``
     builtin loads a body on demand (progressive disclosure).
   * ``discover_commands`` — the REPL runs ``/name args`` from a discovered
-    command file with ``$ARGUMENTS`` substituted.
+    command file through :func:`render_command`: ``$ARGUMENTS``/``$1``/``$2``…
+    substitution, inline ``!`cmd``` bash execution (when frontmatter
+    ``allowed-tools`` grants Bash), and ``@path`` file references.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -194,6 +197,11 @@ def expand_imports(
             _seen=seen | {resolved},
         ).rstrip("\n")
 
+    return _map_unfenced_lines(text, lambda line: _expand_outside_code_spans(line, _expand_token))
+
+
+def _map_unfenced_lines(text: str, fn) -> str:
+    """Apply ``fn`` per line, passing through fenced code blocks (``` / ~~~)."""
     out: list[str] = []
     fence: str | None = None
     for line in text.split("\n"):
@@ -207,7 +215,7 @@ def expand_imports(
             fence = stripped[:3]
             out.append(line)
             continue
-        out.append(_expand_outside_code_spans(line, _expand_token))
+        out.append(fn(line))
     return "\n".join(out)
 
 
@@ -524,7 +532,7 @@ def discover_commands(
     include_plugins: bool = True,
 ) -> list[Command]:
     """Discover slash-command files: ``.claude/commands/*.md`` and
-    ``.agents/commands/*.md``. The REPL executes these (``$ARGUMENTS`` substituted).
+    ``.agents/commands/*.md``. The REPL executes these via :func:`render_command`.
 
     Enabled plugins contribute ``<plugin>:<command>`` entries last (CE5)."""
     out: list[Command] = []
@@ -552,3 +560,121 @@ def discover_commands(
             seen.add(resolved)
             out.append(command)
     return out
+
+
+# ─── slash-command rendering ─────────────────────────────────────────────────
+
+# ``$ARGUMENTS`` or ``$<n>`` in one alternation: a single pass, so argument
+# values that themselves contain ``$1`` are never re-substituted.
+_SUBST_RE = re.compile(r"\$ARGUMENTS\b|\$(\d+)")
+
+# Inline bash: ``!`command```, single line, non-empty.
+_BASH_RE = re.compile(r"!`([^`\n]+)`")
+
+# Positional-argument tokenizer: whitespace-separated words, with double- or
+# single-quoted grouping. Deliberately no backslash escaping (unlike shlex) so
+# Windows paths pass through intact.
+_ARG_TOKEN_RE = re.compile(r'"([^"]*)"|\'([^\']*)\'|(\S+)')
+
+INLINE_BASH_TIMEOUT_S = 30.0
+
+
+def split_command_args(arg: str) -> list[str]:
+    """Split a slash-command argument string into positional arguments."""
+    return [
+        next(g for g in match.groups() if g is not None)
+        for match in _ARG_TOKEN_RE.finditer(arg)
+    ]
+
+
+def _bash_allowed(allowed: Any) -> bool:
+    """Claude Code gates ``!`cmd``` execution on frontmatter ``allowed-tools``
+    granting Bash (e.g. ``Bash(git status:*)``); mirror that as a whole-file
+    yes/no rather than per-pattern matching."""
+    items = allowed if isinstance(allowed, list) else [allowed]
+    return any("bash" in str(item).lower() for item in items if item)
+
+
+def _run_inline_bash(command: str, cwd: str, timeout: float) -> str:
+    try:
+        proc = subprocess.run(
+            command,
+            shell=True,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+        )
+        return proc.stdout.decode(errors="replace").strip()
+    except subprocess.TimeoutExpired:
+        return f"[command timed out after {timeout:g}s]"
+    except OSError:
+        return "[command failed to run]"
+
+
+def _file_references(body: str) -> list[str]:
+    """``@path`` tokens in ``body``, in order, deduped — same placement rules as
+    instruction imports (start-of-line/whitespace-preceded, outside code)."""
+    refs: list[str] = []
+
+    def _record(match: re.Match[str]) -> str:
+        raw = match.group(1)
+        if raw not in refs:
+            refs.append(raw)
+        return match.group(0)
+
+    _map_unfenced_lines(body, lambda line: _expand_outside_code_spans(line, _record))
+    return refs
+
+
+def render_command(
+    text: str,
+    arg: str,
+    *,
+    cwd: str | os.PathLike[str],
+    timeout: float = INLINE_BASH_TIMEOUT_S,
+) -> str:
+    """Render a slash-command file into the prompt for one turn (Claude Code
+    conventions). Never raises — anything unresolvable stays literal.
+
+    * ``$ARGUMENTS`` → the full argument string; ``$1``/``$2``… → positional
+      arguments (quoted grouping honored, missing → empty string).
+    * ``!`cmd``` → replaced with the command's combined output, run via the
+      shell in ``cwd`` — only when frontmatter ``allowed-tools`` grants Bash,
+      and never inside fenced code blocks.
+    * ``@path`` (cwd-relative, ``~``/absolute ok, outside code) → the file's
+      contents are appended after the body under a provenance header; the
+      token itself stays in place so the prose still reads.
+    """
+    fields, body = parse_frontmatter(text)
+    args = split_command_args(arg)
+
+    def _sub(match: re.Match[str]) -> str:
+        if match.group(1) is None:
+            return arg
+        index = int(match.group(1))
+        return args[index - 1] if 1 <= index <= len(args) else ""
+
+    body = _SUBST_RE.sub(_sub, body)
+
+    # Collect @-references before bash runs so command output cannot mint new ones.
+    refs = _file_references(body)
+
+    if _bash_allowed(fields.get("allowed-tools")):
+        body = _map_unfenced_lines(
+            body,
+            lambda line: _BASH_RE.sub(
+                lambda m: _run_inline_bash(m.group(1), str(cwd), timeout), line
+            ),
+        )
+
+    blocks = [body.strip()]
+    for ref in refs:
+        target = _import_target(ref, Path(cwd))
+        try:
+            content = _read_opt(target) if target.is_file() else None
+        except (OSError, ValueError):
+            content = None
+        if content is not None:
+            blocks.append(f"Contents of {ref}:\n{content.rstrip()}")
+    return "\n\n".join(blocks)

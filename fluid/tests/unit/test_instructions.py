@@ -15,6 +15,8 @@ from fluid.context.instructions import (
     expand_imports,
     nested_instructions,
     parse_frontmatter,
+    render_command,
+    split_command_args,
 )
 
 
@@ -363,3 +365,62 @@ def test_discover_commands(tmp_path) -> None:
 
     names = {c.name for c in discover_commands(proj, include_global=False)}
     assert names == {"review", "deploy"}
+
+
+# ─── render_command ──────────────────────────────────────────────────────────
+
+
+def test_split_command_args_quotes_and_backslashes() -> None:
+    assert split_command_args("a b c") == ["a", "b", "c"]
+    assert split_command_args('one "two words" three') == ["one", "two words", "three"]
+    assert split_command_args("'a b'") == ["a b"]
+    # No backslash escaping — Windows paths survive intact.
+    assert split_command_args(r"C:\dev\x.py") == [r"C:\dev\x.py"]
+    assert split_command_args("") == []
+
+
+def test_render_command_positional_and_arguments(tmp_path) -> None:
+    body = "---\ndescription: d\n---\nFix $1 in $2; all: $ARGUMENTS; missing: [$3]"
+    out = render_command(body, 'bug-42 "src dir"', cwd=tmp_path)
+    assert out == 'Fix bug-42 in src dir; all: bug-42 "src dir"; missing: []'
+
+
+def test_render_command_arg_value_not_resubstituted(tmp_path) -> None:
+    # A user argument containing $2 must not expand into another argument.
+    out = render_command("first: $1 second: $2", "$2 real", cwd=tmp_path)
+    assert out == "first: $2 second: real"
+
+
+def test_render_command_inline_bash_requires_allowed_tools(tmp_path) -> None:
+    raw = "Status: !`echo hi`"
+    # No allowed-tools frontmatter → literal.
+    assert render_command(raw, "", cwd=tmp_path) == "Status: !`echo hi`"
+    gated = f"---\nallowed-tools: Bash(echo:*)\n---\n{raw}"
+    assert render_command(gated, "", cwd=tmp_path) == "Status: hi"
+
+
+def test_render_command_bash_skips_fenced_blocks(tmp_path) -> None:
+    raw = "---\nallowed-tools: Bash\n---\n```\n!`echo hi`\n```\n!`echo yes`"
+    out = render_command(raw, "", cwd=tmp_path)
+    assert "!`echo hi`" in out  # fenced example stayed literal
+    assert "yes" in out and "!`echo yes`" not in out
+
+
+def test_render_command_bash_sees_substituted_args(tmp_path) -> None:
+    raw = "---\nallowed-tools: Bash\n---\nOut: !`echo $1`"
+    assert render_command(raw, "hello", cwd=tmp_path) == "Out: hello"
+
+
+def test_render_command_file_references(tmp_path) -> None:
+    (tmp_path / "notes.md").write_text("the notes body", encoding="utf-8")
+    out = render_command("Review @notes.md and @missing.md please", "", cwd=tmp_path)
+    # Tokens stay in place; existing file's contents are appended, missing skipped.
+    assert out.startswith("Review @notes.md and @missing.md please")
+    assert "Contents of notes.md:\nthe notes body" in out
+    assert "Contents of missing.md" not in out
+
+
+def test_render_command_file_reference_in_code_span_inert(tmp_path) -> None:
+    (tmp_path / "notes.md").write_text("body", encoding="utf-8")
+    out = render_command("Docs about `@notes.md` syntax", "", cwd=tmp_path)
+    assert "Contents of" not in out
