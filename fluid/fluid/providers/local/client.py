@@ -10,6 +10,10 @@ Tuned for local servers:
   :func:`fluid.providers.local.serialize.normalize_base_url` for the rule.
 * Long default timeout (600s): local prompt processing on big contexts can
   stall far longer than a hosted API would.
+* ``extra`` — standing server-specific knobs (llama.cpp ``cache_prompt``,
+  samplers, Ollama ``options``, …) merged into every request body; a
+  per-request ``ProviderRequest.extra`` merges after it and wins. The config
+  layer feeds ``[providers.<name>.extra]`` here.
 * No cost estimation — local tokens are free.
 
 Usage parsing (prompt_tokens / completion_tokens /
@@ -19,7 +23,7 @@ chat/completions normalizer.
 
 from __future__ import annotations
 
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import httpx
 
@@ -44,12 +48,14 @@ class LocalClient:
         timeout: float = 600.0,
         http_client: httpx.AsyncClient | None = None,
         retry: RetryPolicy | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         self._api_key = api_key or "local"
         self._url = normalize_base_url(base_url)
         self._timeout = timeout
         self._http = http_client
         self._retry = retry or RetryPolicy()
+        self._extra = dict(extra) if extra else {}
 
     @property
     def url(self) -> str:
@@ -62,7 +68,7 @@ class LocalClient:
             "content-type": "application/json",
             "accept": "text/event-stream",
         }
-        body = build_request_body(request)
+        body = build_request_body(request, extra=self._extra)
         async for chunk in stream_chat_completions(
             self._url,
             body,

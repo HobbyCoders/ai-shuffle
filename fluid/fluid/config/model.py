@@ -27,6 +27,10 @@ class ProviderConfig:
     base_url: str | None = None
     api_key_env: str | None = None
     tool_style: str = "native"  # one of TOOL_STYLES
+    # Standing server-specific request-body knobs, merged into every request
+    # (llama.cpp cache_prompt/samplers, Ollama options, …). Currently honoured
+    # by the "local" kind.
+    extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "ProviderConfig":
@@ -44,6 +48,7 @@ class ProviderConfig:
             base_url=d.get("base_url"),
             api_key_env=d.get("api_key_env"),
             tool_style=tool_style,
+            extra=dict(d.get("extra") or {}),
         )
 
 
@@ -273,6 +278,7 @@ class HarnessConfig:
                     "base_url": pc.base_url,
                     "api_key_env": pc.api_key_env,
                     "tool_style": pc.tool_style,
+                    "extra": dict(pc.extra),
                 }
                 for name, pc in self.providers.items()
             },

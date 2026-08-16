@@ -104,6 +104,16 @@ def test_extra_merges_last_and_wins() -> None:
     assert body["max_tokens"] == 512  # extra overrides the default
 
 
+def test_config_extra_merges_and_request_extra_wins() -> None:
+    # Standing (client/config-level) knobs merge in; per-request extra beats them.
+    body = build_request_body(
+        _request(extra={"temperature": 0.9}),
+        extra={"cache_prompt": True, "temperature": 0.2},
+    )
+    assert body["cache_prompt"] is True
+    assert body["temperature"] == 0.9  # request-level wins
+
+
 def test_tools_translate_to_openai_function_specs() -> None:
     body = build_request_body(
         _request(
@@ -256,3 +266,31 @@ def test_tool_style_round_trips_to_dict() -> None:
         {"providers": {"llama": {"kind": "local", "base_url": "http://x", "tool_style": "text"}}}
     )
     assert config.to_dict()["providers"]["llama"]["tool_style"] == "text"
+
+
+async def test_config_extra_reaches_the_request_body() -> None:
+    # [providers.local.extra] in TOML → standing knobs on every request.
+    from fluid.config.loader import BUILTIN_DEFAULTS, deep_merge, _build_provider_client
+    from fluid.config.model import HarnessConfig
+
+    merged = deep_merge(
+        BUILTIN_DEFAULTS,
+        {"providers": {"local": {"extra": {"cache_prompt": True}}}},
+    )
+    config = HarnessConfig.from_dict(merged)
+    assert config.to_dict()["providers"]["local"]["extra"] == {"cache_prompt": True}
+
+    client = _build_provider_client(config, "local")
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200, content=_SSE.encode(), headers={"content-type": "text/event-stream"}
+        )
+
+    client._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async for _ in client.stream(_request()):
+        pass
+    await client._http.aclose()
+    assert seen["body"]["cache_prompt"] is True

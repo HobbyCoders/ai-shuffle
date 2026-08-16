@@ -42,8 +42,14 @@ def normalize_base_url(base_url: str) -> str:
     return url + "/v1/chat/completions"
 
 
-def build_request_body(request: ProviderRequest) -> dict[str, Any]:
-    """Plain OpenAI chat/completions body; ``request.extra`` merges last."""
+def build_request_body(
+    request: ProviderRequest, *, extra: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Plain OpenAI chat/completions body.
+
+    ``extra`` is the client's standing config-level knobs; ``request.extra``
+    is per-request and merges after it — both override the defaults above.
+    """
     messages: list[dict[str, Any]] = []
     system = system_message(request.system)
     if system is not None:
@@ -62,6 +68,9 @@ def build_request_body(request: ProviderRequest) -> dict[str, Any]:
     if request.tools:
         body["tools"] = translate_tools(request.tools)
     # Escape hatch for server-specific knobs (llama.cpp cache_prompt, samplers,
-    # grammar, Ollama options, …) — merged last, overrides anything above.
+    # grammar, Ollama options, …): the client's standing config extra first,
+    # then per-request extra — merged last, overriding anything above.
+    if extra:
+        body.update(extra)
     body.update(request.extra)
     return body

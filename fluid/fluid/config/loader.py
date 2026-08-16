@@ -261,7 +261,7 @@ def _build_provider_client(config: HarnessConfig, provider_name: str):
                 "(e.g. http://127.0.0.1:8080 for llama-server, "
                 "http://127.0.0.1:11434 for Ollama)"
             )
-        client = LocalClient(api_key, base_url=pc.base_url)
+        client = LocalClient(api_key, base_url=pc.base_url, extra=pc.extra)
     else:
         raise ValueError(f"{pc.kind!r} is not a native provider kind")
 
