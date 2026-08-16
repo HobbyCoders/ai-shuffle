@@ -20,7 +20,7 @@ jobs:
     # Keep a hard job timeout to bound silent backend wedges and surface a useful failure rather than waiting
     # for the platform default.
     timeout-minutes: 20
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: [self-hosted, aish-ci]
     steps:
       - uses: actions/checkout@v4
 
@@ -49,7 +49,7 @@ jobs:
     name: Frontend build & type-check
     # Choose a frontend runner suited to the suite parallelism and keep a bounded job timeout.
     timeout-minutes: 15
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: [self-hosted, aish-ci]
     defaults:
       run:
         working-directory: frontend
