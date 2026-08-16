@@ -63,7 +63,15 @@ from fluid.hooks.bus import (
     TURN_START,
     HookBus,
 )
-from fluid.messages import Message, Reasoning, Text, Thinking, ToolResultBlock, ToolUseBlock
+from fluid.messages import (
+    Image,
+    Message,
+    Reasoning,
+    Text,
+    Thinking,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 from fluid.permissions.engine import PermissionEngine, plan_mode_tools
 from fluid.providers.base import ProviderClient, ProviderRequest
 from fluid.codemode.session import CodeModeSession, register_code_mode_tools
@@ -1047,7 +1055,13 @@ class NativeLoop:
             outcome = await self._gated_call(sid, turn_id, tu["name"], tool_use_id, tu["input"])
         finally:
             self.ctx.extra.pop("tool_use_id", None)
-        content = [Text(outcome.text)]
+        content: list[Any] = [Text(outcome.text)]
+        # Image payloads (file reads, MCP screenshots) become Image blocks on
+        # the result; the base64 never rides the event bus — ToolResult events
+        # carry only ``outcome.text``.
+        content.extend(
+            Image(media_type=img.media_type, data=img.data) for img in outcome.images
+        )
         # Nested-instruction injection (instruction-file seam): when a tool
         # touches a path whose own directory carries a CLAUDE.md/AGENTS.md not
         # in the project stack, ride those instructions into context on this

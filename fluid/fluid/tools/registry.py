@@ -76,6 +76,19 @@ class InputRequired:
 
 
 @dataclass(frozen=True, kw_only=True)
+class ToolImage:
+    """Binary image output (file reads, screenshots) carried alongside text.
+
+    Kept as (media_type, base64) rather than a ``fluid.messages`` block so the
+    tools layer stays independent of the conversation model; the engine turns
+    these into ``Image`` content blocks on the tool result.
+    """
+
+    media_type: str
+    data: str  # base64
+
+
+@dataclass(frozen=True, kw_only=True)
 class ToolOutcome:
     """Dual-output tool result: ``text`` for the model, ``ui`` for clients."""
 
@@ -83,6 +96,7 @@ class ToolOutcome:
     ui: Any = None
     is_error: bool = False
     input_required: InputRequired | None = None
+    images: tuple[ToolImage, ...] = ()
 
 
 @dataclass
@@ -104,13 +118,22 @@ def _normalize(result: Any) -> ToolOutcome:
     if isinstance(result, str):
         return ToolOutcome(text=result)
     if isinstance(result, dict) and "content" in result:
-        parts = [
-            c.get("text", "")
-            for c in result.get("content", [])
-            if isinstance(c, dict) and c.get("type") == "text"
-        ]
+        parts: list[str] = []
+        images: list[ToolImage] = []
+        for c in result.get("content", []):
+            if not isinstance(c, dict):
+                continue
+            if c.get("type") == "text":
+                parts.append(c.get("text", ""))
+            elif c.get("type") == "image" and c.get("data"):
+                images.append(ToolImage(
+                    media_type=c.get("mimeType") or c.get("media_type") or "image/png",
+                    data=c["data"],
+                ))
         is_error = bool(result.get("isError") or result.get("is_error"))
-        return ToolOutcome(text="".join(parts), ui=result, is_error=is_error)
+        return ToolOutcome(
+            text="".join(parts), ui=result, is_error=is_error, images=tuple(images),
+        )
     return ToolOutcome(text=json.dumps(result, default=str))
 
 

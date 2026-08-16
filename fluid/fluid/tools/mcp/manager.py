@@ -39,7 +39,7 @@ class McpManager:
         request_state: str | None = None,
     ) -> "Any":
         # Imported here to avoid a cycle (registry imports the manager).
-        from fluid.tools.registry import InputRequired, ToolOutcome
+        from fluid.tools.registry import InputRequired, ToolImage, ToolOutcome
 
         client = self._clients.get(server)
         if client is None:
@@ -62,7 +62,13 @@ class McpManager:
                 text=f"[input_required] server {server} needs input before completing {tool}",
                 input_required=marker,
             )
-        return ToolOutcome(text=raw.get("text", ""), is_error=raw.get("is_error", False))
+        images = tuple(
+            ToolImage(media_type=i["media_type"], data=i["data"])
+            for i in raw.get("images", [])
+        )
+        return ToolOutcome(
+            text=raw.get("text", ""), is_error=raw.get("is_error", False), images=images,
+        )
 
     async def aclose(self) -> None:
         for client in self._clients.values():

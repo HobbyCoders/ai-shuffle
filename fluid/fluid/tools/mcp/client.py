@@ -265,13 +265,23 @@ def _map_call_result(result: Any) -> dict[str, Any]:
             "requests": requests,
         }
     content = _field(result, "content") or []
-    text_parts = [
-        _field(c, "text") for c in content
-        if (_field(c, "type") == "text") and _field(c, "text") is not None
-    ]
+    text_parts: list[str] = []
+    images: list[dict[str, str]] = []
+    for c in content:
+        ctype = _field(c, "type")
+        if ctype == "text" and _field(c, "text") is not None:
+            text_parts.append(_field(c, "text"))
+        elif ctype == "image" and _field(c, "data"):
+            # ImageContent: base64 ``data`` + ``mimeType`` — dropped before this
+            # existed, which silently blanked screenshot-style tool results.
+            images.append({
+                "media_type": _field(c, "mime_type", "mimeType") or "image/png",
+                "data": _field(c, "data"),
+            })
     return {
         "kind": "result",
         "text": "".join(text_parts),
+        "images": images,
         "is_error": bool(_field(result, "is_error", "isError")),
         "structured": _model_dump(_field(result, "structured_content", "structuredContent")),
     }

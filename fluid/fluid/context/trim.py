@@ -57,6 +57,12 @@ def _block_chars(block: Any) -> int:
         inner_text = getattr(inner, "text", None)
         if isinstance(inner_text, str):
             total += len(inner_text)
+        # Image blocks: base64 length is a wild overestimate of provider image
+        # tokens, so charge a flat ≈1500-token weight instead. This keeps the
+        # estimate sane AND makes image-bearing results eligible for trimming
+        # (they'd otherwise sit under min_result_chars forever).
+        elif isinstance(getattr(inner, "data", None), str):
+            total += 6_000
     return total
 
 
