@@ -5,6 +5,12 @@ blocks from ANY origin are dropped (chat/completions has no verbatim reasoning
 round-trip — OpenRouter caps declare no stateful reasoning). ``stream_options.
 include_usage`` is set so the terminal chunk carries a usage object.
 
+Cache breakpoints: OpenRouter forwards Anthropic-style ``cache_control`` markers
+placed on text content parts. Placement mirrors the native Anthropic serializer's
+trailing-stable-position strategy (system tail, newest history block), gated to
+models that honor the markers (``anthropic/`` prefix) — other models ignore or
+reject the field, so the breakpoint budget is dropped for them.
+
 Response side: chat/completions SSE chunks (``choices[].delta``; the ``[DONE]``
 sentinel is already stripped by fluid's sse reader) → normalized ``StreamChunk``s.
 Blocks (text / reasoning / one per tool-call index) open lazily and are all closed
@@ -140,13 +146,64 @@ def _translate_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+# Model families that honor Anthropic-style ``cache_control`` breakpoints when
+# routed through OpenRouter's chat/completions endpoint.
+_CACHE_CONTROL_MODEL_PREFIXES = ("anthropic/",)
+
+
+def _supports_cache_control(model: str) -> bool:
+    return model.startswith(_CACHE_CONTROL_MODEL_PREFIXES)
+
+
+def _mark_trailing_breakpoint(messages: list[dict[str, Any]]) -> None:
+    """Attach ``cache_control`` to the newest markable content — the same
+    last-history breakpoint the native Anthropic serializer places.
+
+    chat/completions carries ``cache_control`` only on text content parts, so
+    string content is upgraded to a one-part list; assistant ``tool_calls``
+    arrays and image parts can't hold the marker, so the walk skips past them.
+    """
+    for msg in reversed(messages):
+        if msg["role"] == "system":
+            return  # nothing markable after system; its tail has its own marker
+        content = msg.get("content")
+        if isinstance(content, str) and content:
+            msg["content"] = [
+                {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
+            ]
+            return
+        if isinstance(content, list):
+            for part in reversed(content):
+                if part.get("type") == "text":
+                    part["cache_control"] = {"type": "ephemeral"}
+                    return
+
+
 def build_request_body(request: ProviderRequest) -> dict[str, Any]:
+    breakpoints = (
+        request.cache_breakpoints if _supports_cache_control(request.model) else 0
+    )
     messages: list[dict[str, Any]] = []
     system = _system_message(request.system)
     if system is not None:
+        if breakpoints > 0 and system["content"]:
+            # System tail is the most stable prefix position. OpenRouter's
+            # Anthropic transform orders tool defs before system, so this one
+            # marker also covers the tool schemas (chat/completions has no
+            # tool-defs cache slot of its own).
+            system["content"] = [
+                {
+                    "type": "text",
+                    "text": system["content"],
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+            breakpoints -= 1
         messages.append(system)
     for msg in request.messages:
         messages.extend(_translate_message(msg))
+    if breakpoints > 0:
+        _mark_trailing_breakpoint(messages)
 
     body: dict[str, Any] = {
         "model": request.model,

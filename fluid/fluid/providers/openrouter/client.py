@@ -26,9 +26,17 @@ API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 class OpenRouterClient:
     name = "openrouter"
-    # OpenAI-compatible: no explicit cache breakpoints, no stateful reasoning, no
-    # signed thinking; parallel tool calls are supported.
-    caps = ProviderCaps(parallel_tool_calls=True)
+    # OpenAI-compatible: no stateful reasoning, no signed thinking; parallel
+    # tool calls are supported. Explicit cache breakpoints are advertised
+    # because OpenRouter forwards Anthropic-style ``cache_control`` markers in
+    # message content parts (limit 4); the serializer only places them for
+    # models that honor them (``anthropic/`` prefix) and drops the budget
+    # elsewhere, where providers cache automatically or not at all.
+    caps = ProviderCaps(
+        explicit_cache_breakpoints=True,
+        max_cache_breakpoints=4,
+        parallel_tool_calls=True,
+    )
 
     def __init__(
         self,

@@ -190,6 +190,96 @@ def test_request_body_image_content_parts() -> None:
     }
 
 
+# ─── cache breakpoints ───────────────────────────────────────────────────────
+
+
+def _cacheable_request(model: str, breakpoints: int) -> ProviderRequest:
+    return ProviderRequest(
+        model=model,
+        system="be terse",
+        messages=[
+            Message(role="user", content=[Text("weather?")]),
+            Message(
+                role="assistant",
+                content=[
+                    Text("checking"),
+                    ToolUseBlock(id="call_1", name="get_weather", input={"city": "Paris"}),
+                ],
+            ),
+            Message(
+                role="user",
+                content=[ToolResultBlock(tool_use_id="call_1", content=[Text("sunny")])],
+            ),
+        ],
+        tools=[
+            {
+                "name": "get_weather",
+                "description": "Get weather",
+                "input_schema": {"type": "object", "properties": {}},
+            }
+        ],
+        cache_breakpoints=breakpoints,
+    )
+
+
+def test_cache_breakpoints_placed_for_anthropic_model() -> None:
+    body = build_request_body(_cacheable_request("anthropic/claude-haiku-4.5", 3))
+    system = body["messages"][0]
+    assert system["role"] == "system"
+    assert system["content"] == [
+        {"type": "text", "text": "be terse", "cache_control": {"type": "ephemeral"}}
+    ]
+    last = body["messages"][-1]
+    assert last["role"] == "tool"
+    assert last["content"] == [
+        {"type": "text", "text": "sunny", "cache_control": {"type": "ephemeral"}}
+    ]
+    # Exactly two markers: system tail + newest history block, nowhere else.
+    marked = [
+        part
+        for msg in body["messages"]
+        if isinstance(msg.get("content"), list)
+        for part in msg["content"]
+        if "cache_control" in part
+    ]
+    assert len(marked) == 2
+    assert "cache_control" not in json.dumps(body["tools"])
+
+
+def test_cache_breakpoints_ignored_for_non_anthropic_model() -> None:
+    body = build_request_body(_cacheable_request("openai/gpt-4o", 3))
+    assert body["messages"][0] == {"role": "system", "content": "be terse"}
+    assert "cache_control" not in json.dumps(body)
+
+
+def test_zero_breakpoints_is_a_noop() -> None:
+    body = build_request_body(_cacheable_request("anthropic/claude-haiku-4.5", 0))
+    assert "cache_control" not in json.dumps(body)
+
+
+def test_single_breakpoint_goes_to_system_tail() -> None:
+    body = build_request_body(_cacheable_request("anthropic/claude-haiku-4.5", 1))
+    assert body["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert body["messages"][-1]["content"] == "sunny"  # budget spent on system
+
+
+def test_trailing_breakpoint_lands_on_text_part_not_image() -> None:
+    request = ProviderRequest(
+        model="anthropic/claude-haiku-4.5",
+        messages=[
+            Message(
+                role="user",
+                content=[Text("what is this?"), Image(media_type="image/png", data="AAAA")],
+            )
+        ],
+        cache_breakpoints=2,
+    )
+    body = build_request_body(request)
+    text_part, image_part = body["messages"][0]["content"]
+    assert text_part["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in image_part
+
+
 # ─── fake-transport end-to-end ───────────────────────────────────────────────
 
 
