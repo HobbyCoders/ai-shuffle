@@ -460,6 +460,73 @@ describe('mapSdkContextUsage', () => {
 		expect(withoutMax.totalUsed).toBe(76_000);
 		expect(withoutMax.totalPercent).toBe(38);
 	});
+
+	it('survives a NULL maxTokens/percentage (native leg with no resolvable window)', () => {
+		// A fluid native leg reports an unknown context window as null rather
+		// than guessing. Leaving null on contextMax used to reach
+		// formatTokenCount and throw on null.toString(), killing the whole pill
+		// (not just the popover). It must normalise to the 0 "unknown" sentinel.
+		const b = mapSdkContextUsage(
+			sdk({
+				categories: [
+					{ name: 'System prompt', tokens: 4_000, color: '#111' },
+					{ name: 'Messages', tokens: 76_000, color: '#333' },
+				],
+				totalTokens: 80_000,
+				maxTokens: null,
+				rawMaxTokens: null,
+				percentage: null,
+			})
+		);
+		expect(b.contextMax).toBe(0);
+		expect(b.totalUsed).toBe(80_000);
+		expect(b.totalPercent).toBe(0);
+		// Rows still render — only the window-relative percentages go to 0.
+		expect(b.rows.map((r) => r.label)).toEqual(['Messages', 'System prompt']);
+		expect(b.rows.every((r) => r.barPercent === 0)).toBe(true);
+		// The contract the component relies on: contextMax is always a number.
+		expect(typeof b.contextMax).toBe('number');
+		expect(formatTokenCount(b.contextMax)).toBe('0');
+	});
+
+	it('passes fluid native category names through verbatim', () => {
+		// The native leg emits its OWN category vocabulary ("Skills",
+		// "Deferred tools", "Memory files") — the mapper must not hard-key on
+		// Claude Code's names and silently drop the rest.
+		const b = mapSdkContextUsage(
+			sdk({
+				categories: [
+					{ name: 'System prompt', tokens: 4_000, color: '#6C5CE7' },
+					{ name: 'Memory files', tokens: 9_000, color: '#00B894' },
+					{ name: 'Skills', tokens: 2_000, color: '#0984E3' },
+					{ name: 'Tools', tokens: 12_000, color: '#FDCB6E' },
+					{ name: 'Messages', tokens: 76_000, color: '#E17055' },
+					{ name: 'Deferred tools', tokens: 30_000, color: '#B2BEC3', isDeferred: true },
+					{ name: 'Free space', tokens: 897_000, color: '#2D3436' },
+				],
+				totalTokens: 103_000,
+				maxTokens: 1_000_000,
+				rawMaxTokens: 1_000_000,
+				percentage: 10.3,
+				isAutoCompactEnabled: false,
+			})
+		);
+		expect(b.rows.map((r) => r.label)).toEqual([
+			'Messages',
+			'Tools',
+			'Memory files',
+			'System prompt',
+			'Skills',
+			'Free space',
+			'Deferred tools',
+		]);
+		// No autocompact category and isAutoCompactEnabled:false -> no buffer fold.
+		expect(b.autocompactTokens).toBe(0);
+		expect(b.totalUsed).toBe(103_000);
+		// Deferred tokens stay OUT of the bar accounting.
+		const inBarTokens = b.rows.filter((r) => r.inBar).reduce((sum, r) => sum + r.tokens, 0);
+		expect(inBarTokens).toBe(103_000);
+	});
 });
 
 describe('decideBreakdownRefresh', () => {

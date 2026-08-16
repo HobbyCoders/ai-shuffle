@@ -295,10 +295,16 @@ export interface ContextUsageCategory {
 export interface SdkContextUsage {
 	categories: ContextUsageCategory[];
 	totalTokens: number;
-	maxTokens: number;
-	rawMaxTokens: number;
-	/** 0–100. */
-	percentage: number;
+	/**
+	 * The context window, or `null` when the backend cannot resolve one — a
+	 * fluid NATIVE leg running a model with no registered/curated window
+	 * reports the window as unknown rather than guessing at it. Consumers must
+	 * treat null as "unknown" (see `mapSdkContextUsage`), never as a number.
+	 */
+	maxTokens: number | null;
+	rawMaxTokens: number | null;
+	/** 0–100, or `null` when `maxTokens` is unknown. */
+	percentage: number | null;
 	model: string;
 	isAutoCompactEnabled: boolean;
 }

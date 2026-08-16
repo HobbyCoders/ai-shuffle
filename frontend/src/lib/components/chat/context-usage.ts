@@ -330,7 +330,13 @@ export function decideBreakdownRefresh(
  *   space, then deferred categories (also descending token count).
  */
 export function mapSdkContextUsage(usage: SdkContextUsage): ContextBreakdown {
-	const max = usage.maxTokens;
+	// An unknown window arrives as null (a native leg on a model with no
+	// resolvable context window). Normalise to 0 — the same "unknown" sentinel
+	// the rest of this module already handles (barPercent returns 0, the
+	// popover renders "0" rather than throwing). Leaving it null would reach
+	// formatTokenCount via contextMax and throw on null.toString(), taking the
+	// whole pill down, not just the popover.
+	const max = usage.maxTokens ?? 0;
 	const isAutocompact = (name: string) => name.toLowerCase() === 'autocompact buffer';
 	const isFreeSpace = (name: string) => name === 'Free space';
 
@@ -338,7 +344,7 @@ export function mapSdkContextUsage(usage: SdkContextUsage): ContextBreakdown {
 	const autocompactTokens = Math.max(autocompact?.tokens ?? 0, 0);
 	const totalUsed = usage.totalTokens + autocompactTokens;
 	const totalPercent =
-		max > 0 ? barPercent(totalUsed, max) : Math.min(Math.max(usage.percentage, 0), 100);
+		max > 0 ? barPercent(totalUsed, max) : Math.min(Math.max(usage.percentage ?? 0, 0), 100);
 
 	const kept = usage.categories
 		.filter((c) => !isAutocompact(c.name))

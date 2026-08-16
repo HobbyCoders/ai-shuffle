@@ -103,7 +103,13 @@ from typing import Any, AsyncIterator, Dict, Optional
 
 import httpx
 
-from app.core.model_registry import DEFAULT_MODEL, resolve_api_model_id
+from app.core.model_registry import (
+    DEFAULT_MODEL,
+    get_context_window,
+    get_model,
+    resolve_api_model_id,
+    resolve_provider_context_window,
+)
 from app.core.provider.omni_credentials import (
     ProviderCredentialError,
     resolve_provider_credentials,
@@ -359,6 +365,12 @@ class HarnessAdapter(ProviderAdapter):
                 # Reasoning depth: omni's serializers map this per provider
                 # (Anthropic output_config.effort; OpenAI-shaped reasoning.effort).
                 effort=_valid_effort(getattr(options, "effort", None)),
+                # The model's INPUT window (distinct from native_caps'
+                # max_tokens, which caps OUTPUT). Drives the maxTokens /
+                # percentage / "Free space" fields of the leg's
+                # get_context_usage() breakdown; None when unresolvable, which
+                # fluid reports as an unknown window instead of guessing.
+                context_window=_native_context_window(kind, options),
                 **native_caps,
                 # Native legs have no Claude Code preset — they always run the
                 # omni-compiled prompt: the profile's configured prompt as the
@@ -795,20 +807,22 @@ class HarnessAdapter(ProviderAdapter):
         tolerates None and falls back to stored usage. Returning None is the
         contract for "the backend can't answer", not an error.
 
-        No omni engine answers this today:
+        BOTH fluid legs answer this now (vendored a6957a1), in the same
+        SDK-parity shape, so this forwards verbatim:
 
-        * ``NativeLoop`` owns the conversation itself and has no equivalent of
-          the CLI's per-category ``/context`` breakdown.
-        * ``DelegatedLoop`` delegates to the ``claude`` CLI, which *does*
-          understand the ``{"subtype": "get_context_usage"}`` control_request
-          the SDK uses — but the engine has no request/response correlation for
-          control frames (``_send_control`` is fire-and-forget and
-          ``StreamJsonMapper`` drops ``control_response``), so there is nothing
-          to forward the call through. Wiring that up is an omni-side change.
+        * ``DelegatedLoop`` proxies the claude CLI's own ``/context``
+          breakdown over the ``{"subtype": "get_context_usage"}`` control
+          request (the leg gained request/response correlation for control
+          frames, which is what used to make this impossible).
+        * ``NativeLoop`` computes the same shape itself from the compiled
+          prompt sections, the tool schemas and the trimmed history. Its
+          ``maxTokens``/``percentage`` come from the ``context_window`` the
+          adapter resolves at connect (see ``_native_context_window``); with
+          no window known it reports ``maxTokens: None``.
 
-        The method probes the engine anyway so that it starts forwarding for
-        free once an engine grows the capability. It never estimates from
-        stored usage — a fabricated breakdown would be worse than None.
+        The ``getattr`` probe stays for engines/doubles without the method. It
+        never estimates from stored usage — a fabricated breakdown would be
+        worse than None.
         """
         engine = self._engine
         if engine is None:
@@ -1546,6 +1560,26 @@ def _provider_row_kind(
     return None
 
 
+def _lookup_provider_row(provider_id: str) -> Optional[Dict[str, Any]]:
+    """The ``model_providers`` row for ``provider_id``, or ``None`` on any miss.
+
+    Never raises: every caller treats a failed lookup as "no row", which each
+    degrades from differently (the kind sniff falls back to the model string,
+    the context-window resolution falls back to the Claude registry).
+    """
+    try:
+        from app.db import database as db
+
+        return db.get_model_provider(provider_id, include_token=False) or None
+    except Exception:  # noqa: BLE001 — a lookup failure reads as "no row"
+        logger.debug(
+            "[HarnessAdapter] provider row lookup failed for %s.",
+            provider_id,
+            exc_info=True,
+        )
+        return None
+
+
 def _lookup_provider_row_shape(provider_id: str) -> tuple:
     """(provider_type, auth_mode, api_dialect) for a provider row;
     (None, None, None) on any miss.
@@ -1555,21 +1589,46 @@ def _lookup_provider_row_shape(provider_id: str) -> tuple:
     SessionOptions, a test). Never raises — a failed lookup just means the
     model-string sniff decides.
     """
-    try:
-        from app.db import database as db
-
-        row = db.get_model_provider(provider_id, include_token=False)
-    except Exception:  # noqa: BLE001 — a lookup failure reads as "no row shape"
-        logger.debug(
-            "[HarnessAdapter] provider row lookup failed for %s; "
-            "falling back to the model-string sniff.",
-            provider_id,
-            exc_info=True,
-        )
-        return None, None, None
+    row = _lookup_provider_row(provider_id)
     if not row:
         return None, None, None
     return row.get("provider_type"), row.get("auth_mode"), row.get("api_dialect")
+
+
+def _native_context_window(kind: str, options: SessionOptions) -> Optional[int]:
+    """Context window (tokens) for a NATIVE leg's model, or ``None`` if unknown.
+
+    Feeds ``NativeLoop(context_window=...)``, which is what lets fluid's
+    ``get_context_usage()`` report ``maxTokens``/``percentage`` and a
+    "Free space" row. ``None`` is the honest answer for an unknown model:
+    fluid then reports ``maxTokens: None`` rather than inventing a window.
+
+    NOT a new source of truth — this reuses the app's existing resolution so
+    the number the native leg prices against is the same one the UI shows and
+    the delegated leg gets pinned to:
+
+      * a bound ``model_providers`` row → ``resolve_provider_context_window``
+        (the model's own ``models_json`` entry → the preset roster → the row's
+        column), identical to ``environment.apply_provider_env``'s pin and the
+        registry payload;
+      * otherwise a registered Claude slug → ``model_registry.get_context_window``.
+
+    Resolves against ``options.model`` — the REGISTRY value ("opus"), NOT the
+    ``resolve_api_model_id`` output handed to the loop: both registries key on
+    the slug, and the API id ("claude-opus-4-8") would miss every lookup.
+    """
+    provider_id = (options.extra or {}).get("provider_id")
+    if provider_id:
+        window = resolve_provider_context_window(
+            _lookup_provider_row(str(provider_id)), options.model
+        )
+        if window is not None:
+            return window
+    # Fall through for env-credentialed native Claude (no row) and for a row
+    # that knows nothing about this model but still runs a Claude slug.
+    if get_model(options.model) is not None:
+        return get_context_window(options.model)
+    return None
 
 
 def _amend_native_task_spec(registry: ToolRegistry, options: SessionOptions) -> None:

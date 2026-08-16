@@ -24,6 +24,7 @@ import dataclasses
 
 import pytest
 
+from app.core.model_registry import resolve_api_model_id
 from app.core.provider.harness_adapter import HarnessAdapter, _decide_provider_kind
 from app.core.provider.types import PermissionRequestEvent, SessionOptions
 from app.core.provider.events import (
@@ -292,12 +293,99 @@ async def test_get_context_usage_none_without_engine():
 
 @pytest.mark.asyncio
 async def test_get_context_usage_none_when_engine_cannot_answer():
-    """No omni engine implements the CLI's get_context_usage control request
-    today; callers all tolerate None, so the adapter degrades instead of
-    raising AttributeError (which used to 500 GET .../context-usage)."""
+    """An engine double WITHOUT the method still degrades to None instead of
+    raising AttributeError (which used to 500 GET .../context-usage).
+
+    The real engines all answer now — see
+    ``test_vendored_engines_expose_get_context_usage``. This only pins the
+    getattr-probe fallback that keeps doubles and any future leg safe."""
     adapter = _adapter_with(FakeEngine([]))
     assert not hasattr(adapter._engine, "get_context_usage")
     assert await adapter.get_context_usage() is None
+
+
+def test_vendored_engines_expose_get_context_usage():
+    """Premise flip (vendored fluid a6957a1): BOTH legs implement the breakdown
+    now — the native loop computes it, the delegated loop proxies the claude
+    CLI's. The adapter's probe is a live forwarding path, not dead code.
+
+    This test is the tripwire if a future vendor sync drops the capability.
+    """
+    from fluid.engine.delegated import DelegatedLoop
+    from fluid.engine.native import NativeLoop
+
+    assert callable(getattr(NativeLoop, "get_context_usage", None))
+    assert callable(getattr(DelegatedLoop, "get_context_usage", None))
+
+
+@pytest.mark.asyncio
+async def test_get_context_usage_forwards_real_native_breakdown():
+    """Over a REAL NativeLoop the adapter returns fluid's category breakdown,
+    priced against the context_window the adapter resolved at connect."""
+    from fluid.engine.native import NativeLoop
+
+    loop = NativeLoop(
+        provider=FakeProvider([]),
+        store=MemoryStore(),
+        model="fake",
+        system="You are a helpful assistant.",
+        context_window=1_000_000,
+    )
+    adapter = HarnessAdapter()
+    adapter._engine = loop
+    adapter._options = SessionOptions(model="fake")
+    await loop._ensure_session()
+    adapter._connected = True
+
+    usage = await adapter.get_context_usage()
+    assert usage is not None
+
+    # Rich per-category rows (what the UI renders instead of a token-type
+    # estimate), not a bare total.
+    names = {c["name"] for c in usage["categories"]}
+    assert "System prompt" in names
+    assert "Free space" in names
+    assert all({"name", "tokens", "color"} <= set(c) for c in usage["categories"])
+
+    # The window flows through to every window-derived field.
+    assert usage["maxTokens"] == 1_000_000
+    assert usage["rawMaxTokens"] == 1_000_000
+    assert 0 < usage["totalTokens"] < 1_000_000
+    assert usage["percentage"] == pytest.approx(
+        round(usage["totalTokens"] / 1_000_000 * 100, 1)
+    )
+
+    # Keys the app's consumers read. fluid trims rather than autocompacting,
+    # so isAutoCompactEnabled is False and memoryFiles is always a list.
+    assert usage["model"] == "fake"
+    assert usage["isAutoCompactEnabled"] is False
+    assert usage["memoryFiles"] == []
+
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_get_context_usage_unknown_window_reports_none_maxtokens():
+    """No resolvable window → fluid reports maxTokens None rather than
+    guessing, and omits the "Free space" row. The adapter forwards that
+    honestly; the UI's own fallback takes over."""
+    from fluid.engine.native import NativeLoop
+
+    loop = NativeLoop(
+        provider=FakeProvider([]), store=MemoryStore(), model="fake", system="hi"
+    )
+    adapter = HarnessAdapter()
+    adapter._engine = loop
+    adapter._options = SessionOptions(model="fake")
+    await loop._ensure_session()
+    adapter._connected = True
+
+    usage = await adapter.get_context_usage()
+    assert usage["maxTokens"] is None
+    assert usage["percentage"] is None
+    assert "Free space" not in {c["name"] for c in usage["categories"]}
+
+    await adapter.disconnect()
 
 
 @pytest.mark.asyncio
@@ -983,6 +1071,111 @@ async def test_connect_native_leg_passes_builtin_registry_to_native_loop(monkeyp
     )
     assert adapter._is_delegated is False
     assert _OMNI_BUILTINS <= _names(captured["registry"])
+
+
+# ─── Native-leg context window (feeds get_context_usage) ─────────────────────
+
+
+def test_native_context_window_uses_the_claude_registry_for_claude_slugs():
+    """No bound provider row (env-credentialed native Claude) → the model
+    registry's window. Resolution keys on the REGISTRY slug, not the API id."""
+    from app.core.provider.harness_adapter import _native_context_window
+
+    for slug in ("sonnet", "opus", "fable"):
+        opts = SessionOptions(model=slug, extra={"omni_engine": "native"})
+        assert _native_context_window("anthropic", opts) == 1_000_000
+    haiku = SessionOptions(model="haiku", extra={"omni_engine": "native"})
+    assert _native_context_window("anthropic", haiku) == 200_000
+
+
+def test_native_context_window_none_for_an_unknown_model():
+    """An unregistered model on no row has no knowable window. None (not a
+    200k guess) — fluid then reports maxTokens None instead of pricing against
+    a window that isn't real."""
+    from app.core.provider.harness_adapter import _native_context_window
+
+    assert _native_context_window("openrouter", SessionOptions(model="mystery-9")) is None
+
+
+def test_native_context_window_resolves_through_the_bound_provider_row(monkeypatch):
+    """Provider-backed native legs resolve via the SHARED
+    ``resolve_provider_context_window`` — the model's own models_json entry
+    beats the row's column, which is the whole point of #874 (a row that
+    advertises 272k must not pin a 1M model down to 272k)."""
+    import app.core.provider.harness_adapter as ha
+    from app.db import database as db
+
+    row = {
+        "id": "pid",
+        "provider_type": "openai",
+        "context_window": 272_000,
+        "models_json": [{"id": "gpt-5.6-sol", "context_window": 1_000_000}],
+    }
+    monkeypatch.setattr(db, "get_model_provider", lambda pid, include_token=False: row)
+
+    bound = SessionOptions(model="gpt-5.6-sol", extra={"provider_id": "pid"})
+    assert ha._native_context_window("openai_responses", bound) == 1_000_000
+
+    # A model with no entry of its own falls back to the row's column.
+    other = SessionOptions(model="gpt-4o-mini", extra={"provider_id": "pid"})
+    assert ha._native_context_window("openai_responses", other) == 272_000
+
+
+def test_native_context_window_survives_a_broken_row_lookup(monkeypatch):
+    """A DB failure must never break connect: it degrades to the Claude
+    registry (or None), it does not raise."""
+    import app.core.provider.harness_adapter as ha
+    from app.db import database as db
+
+    def _boom(pid, include_token=False):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(db, "get_model_provider", _boom)
+
+    claude = SessionOptions(model="opus", extra={"provider_id": "pid"})
+    assert ha._native_context_window("anthropic", claude) == 1_000_000
+    other = SessionOptions(model="mystery-9", extra={"provider_id": "pid"})
+    assert ha._native_context_window("openrouter", other) is None
+
+
+@pytest.mark.asyncio
+async def test_connect_native_leg_passes_resolved_context_window(monkeypatch):
+    """End of the wire: connect() hands NativeLoop the resolved window, which
+    is what makes the leg's get_context_usage() report a real maxTokens."""
+    import app.core.provider.harness_adapter as ha
+
+    captured: dict = {}
+
+    class FakeNativeLoop:
+        def __init__(self, **kwargs):
+            captured.clear()
+            captured.update(kwargs)
+
+        async def _ensure_session(self):
+            class _Meta:
+                session_id = "ses_native"
+
+            return _Meta()
+
+        async def aclose(self):
+            pass
+
+    async def fake_client(kind, options):
+        return FakeProvider([]), None
+
+    monkeypatch.setattr(ha, "NativeLoop", FakeNativeLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", fake_client)
+
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(
+        SessionOptions(model="opus", extra={"omni_engine": "native"})
+    )
+    assert captured["context_window"] == 1_000_000
+    # The window is the INPUT budget — it must not be confused with max_tokens
+    # (the OUTPUT cap), which stays unset so fluid keeps its own default.
+    assert "max_tokens" not in captured
+    # The loop still gets the API-resolved model id, not the registry slug.
+    assert captured["model"] == resolve_api_model_id("opus")
 
 
 @pytest.mark.asyncio
