@@ -6,3 +6,4 @@ dist/
 uv.lock
 .env
 .fluid/notes/
+jobs/

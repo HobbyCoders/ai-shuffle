@@ -66,10 +66,11 @@ _DONE_RE = re.compile(r"\[done\] stop=(\S+) calls=(\d+)(?: cost=\$([\d.]+))?")
 class FluidAgent(BaseInstalledAgent):
     """Runs fluid's native API loop inside the Terminal-Bench task container."""
 
-    MODEL_CONNECTION = ModelConnectionSpec(
-        default_provider="anthropic",
-        api_key_envs=("ANTHROPIC_API_KEY",),
-    )
+    # passthrough: the provider is inferred from the model prefix
+    # (anthropic/..., openrouter/...) and the matching provider env var
+    # (ANTHROPIC_API_KEY, OPENROUTER_API_KEY, ...) is resolved and passed
+    # through unchanged — which is exactly the name fluid reads.
+    MODEL_CONNECTION = ModelConnectionSpec(passthrough=True)
 
     CLI_FLAGS = [
         CliFlag("code_mode", cli="--code-mode", type="bool",
