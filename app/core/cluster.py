@@ -312,9 +312,39 @@ def _build_capabilities(source: str) -> dict:
     return caps
 
 
+def _warn_if_stray_instance() -> None:
+    """Warn when an UNREGISTERED instance boots against an already-populated
+    registry — best-effort, never raises, never blocks registration.
+
+    The classic footgun: an ad-hoc dev/debug instance started with a fresh
+    instance_id but the PRODUCTION ``DATABASE_URL``. It is not just a viewer —
+    its background workers act on SHARED credentials (the Codex token-refresh
+    worker rotates the refresh token on a provider row every install sees), so
+    the operator should know before it does anything.
+    """
+    try:
+        me = database.get_install(settings.effective_instance_id)
+        if me is not None:
+            return  # known install — nothing unusual about this boot
+        peers = database.get_installs()
+        if not peers:
+            return  # first install on a fresh database
+        logger.warning(
+            "instance_id %s is not yet registered in a shared database that "
+            "already has %d install(s) — if this is an ad-hoc dev/debug instance "
+            "pointed at a production DATABASE_URL, its background workers (Codex "
+            "token refresh, etc.) will act on shared credentials.",
+            settings.effective_instance_id,
+            len(peers),
+        )
+    except Exception:  # noqa: BLE001 — a diagnostic must never block startup
+        logger.debug("Stray-instance check failed", exc_info=True)
+
+
 def register_self() -> None:
     """Self-register this install's registry row (called once on startup)."""
     url, source = advertise_url()
+    _warn_if_stray_instance()
     try:
         database.register_install(
             install_id=settings.effective_instance_id,

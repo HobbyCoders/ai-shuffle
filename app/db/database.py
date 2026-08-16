@@ -789,6 +789,13 @@ def _run_column_migrations(cursor):
     # ``codex_refresh_token`` are encrypted (``enc:``) write-only blobs, never
     # exposed on public reads (mirrors ``auth_token``). No index is added on any
     # of these, so there is no schema-pass-before-column ordering trap here.
+    #
+    # 2026-08-16: cross-instance refresh lease. ``codex_refresh_lease_owner`` /
+    # ``codex_refresh_lease_expires_at`` let the periodic refresh worker claim a
+    # provider row via a conditional UPDATE on the DB clock before POSTing — the
+    # Codex refresh token rotates, so two installs sharing this database
+    # refreshing the same row kills the credential. Still no index on any of
+    # these columns, so the "no ordering trap" property above is preserved.
     if table_exists(cursor, "model_providers"):
         _codex_provider_columns = (
             ("auth_mode", "TEXT"),
@@ -798,6 +805,8 @@ def _run_column_migrations(cursor):
             ("codex_id_token_expires_at", "TIMESTAMP WITH TIME ZONE"),
             ("codex_last_refresh", "TIMESTAMP WITH TIME ZONE"),
             ("needs_reauth", "BOOLEAN DEFAULT FALSE"),
+            ("codex_refresh_lease_owner", "TEXT"),
+            ("codex_refresh_lease_expires_at", "TIMESTAMP WITH TIME ZONE"),
         )
         for _col, _decl in _codex_provider_columns:
             if not column_exists(cursor, "model_providers", _col):
@@ -2005,6 +2014,8 @@ from app.db.model_providers import (  # noqa: F401
     set_model_provider_enabled,
     set_codex_token_bundle,
     get_codex_tokens,
+    try_claim_codex_refresh,
+    release_codex_refresh_claim,
 )
 
 from app.db.usage_snapshots import (  # noqa: F401

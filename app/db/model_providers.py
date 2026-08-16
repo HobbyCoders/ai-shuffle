@@ -407,3 +407,65 @@ def get_codex_tokens(provider_id: str) -> Optional[Dict[str, Any]]:
             (provider_id,),
         )
         return row_to_dict(cursor.fetchone())
+
+
+def try_claim_codex_refresh(
+    provider_id: str, owner: str, ttl_seconds: int = 120
+) -> bool:
+    """Try to take the durable cross-install refresh lease on a provider row.
+
+    The Codex refresh token ROTATES on every use: the moment two installs
+    sharing this database POST a refresh for the same provider, the loser gets
+    ``refresh_token_reused`` and the credential is permanently dead. An
+    in-process ``asyncio.Lock`` only serializes ONE process, so the refresh
+    worker claims the row here first — a single conditional UPDATE that at most
+    one install can win.
+
+    The lease is evaluated entirely on the DATABASE clock (``NOW()``), exactly
+    like ``installs._ONLINE_EXPR``: install clocks on a shared DB drift, so a
+    process wall clock must never decide who holds the lease. The claim succeeds
+    when the row is unleased, when the previous lease has expired (crash
+    backstop — nobody has to release it), or when WE already hold it. Same-owner
+    reclaim is deliberate: after a crash-restart the same instance may need to
+    re-claim inside the TTL, and its in-process lock still serializes locally.
+
+    Returns ``True`` iff this call took (or kept) the lease.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE model_providers
+               SET codex_refresh_lease_owner = %s,
+                   codex_refresh_lease_expires_at = NOW() + make_interval(secs => %s)
+             WHERE id = %s
+               AND (codex_refresh_lease_expires_at IS NULL
+                    OR codex_refresh_lease_expires_at < NOW()
+                    OR codex_refresh_lease_owner = %s)
+            """,
+            (owner, ttl_seconds, provider_id, owner),
+        )
+        return cursor.rowcount > 0
+
+
+def release_codex_refresh_claim(provider_id: str, owner: str) -> None:
+    """Release the Codex refresh lease — but only if ``owner`` still holds it.
+
+    Owner-scoped on purpose: if our TTL already expired and a peer install
+    claimed the row, an unconditional clear would silently strip THEIR lease and
+    re-open the double-refresh window this lease exists to close. Releasing a
+    lease we no longer hold is therefore a no-op; TTL expiry remains the backstop
+    for a process that dies mid-refresh.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE model_providers
+               SET codex_refresh_lease_owner = NULL,
+                   codex_refresh_lease_expires_at = NULL
+             WHERE id = %s
+               AND codex_refresh_lease_owner = %s
+            """,
+            (provider_id, owner),
+        )

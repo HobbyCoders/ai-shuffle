@@ -9,12 +9,18 @@ Responsibilities:
   - when the access-token JWT ``exp`` is within **5 minutes** (F3);
   - on demand, exactly once, after an upstream 401 (``refresh_on_401_once`` — the
     future gateway upstream client calls this).
-* Serialize refreshes **per provider** with an asyncio lock. The Codex refresh
-  token ROTATES, so two concurrent refreshes of the SAME provider race and one
-  gets ``refresh_token_reused`` → permanent credential death. This lock is
-  SHIP-BLOCKING (plan G9 / risk R-refresh): with one account per provider
-  (amendment A1) it is the only thing standing between a double-refresh and a
-  dead credential.
+* Serialize refreshes **per provider**, at two levels. The Codex refresh token
+  ROTATES, so two concurrent refreshes of the SAME provider race and one gets
+  ``refresh_token_reused`` → permanent credential death (plan G9 / risk
+  R-refresh; with one account per provider, amendment A1, nothing else stands
+  between a double-refresh and a dead credential).
+  - An asyncio lock serializes refreshes WITHIN one process.
+  - A durable lease on the provider row
+    (``codex_refresh_lease_owner`` / ``codex_refresh_lease_expires_at``, claimed
+    via ``db.try_claim_codex_refresh``) serializes them ACROSS installs sharing
+    one database — the in-process lock is blind to peers (observed 2026-08-16:
+    stray dev instances pointed at the production DATABASE_URL all ran this
+    worker against the same provider row).
 * Decrypt the stored blobs, refresh, RE-ENCRYPT, and persist the rotated bundle
   ATOMICALLY via a single ``set_codex_token_bundle`` call (the DB layer writes
   access+refresh in one UPDATE — no torn write between the two rotated tokens).
@@ -36,12 +42,23 @@ from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from app.core import codex_oauth, encryption
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 # Refresh policy thresholds (F3).
 PROACTIVE_REFRESH_AFTER_SECONDS = 8 * 24 * 3600  # 8 days
 EXP_SKEW_SECONDS = 5 * 60  # refresh when the access-token exp is within 5 min
+
+# TTL of the durable cross-install refresh lease. Generous on purpose: it
+# outlives any plausible refresh POST, so the only case where the TTL matters is
+# an install that CRASHED mid-refresh — then a peer may retry after two minutes
+# instead of the row staying leased forever.
+CLAIM_TTL_SECONDS = 120
+# Bounded claim retry for the 401 path only (a caller is blocked on the answer):
+# lose the claim → wait → re-read → maybe the holder already rotated for us.
+CLAIM_ATTEMPTS_ON_401 = 3
+CLAIM_RETRY_SLEEP_SECONDS = 2
 
 # Per-provider refresh locks. Keyed by provider_id so two concurrent refreshes of
 # the SAME provider serialize (rotating refresh token — a double POST is fatal),
@@ -194,6 +211,45 @@ async def _notify_reauth(provider_id: str) -> None:
         logger.debug("codex reauth notification emit failed", exc_info=True)
 
 
+def _stored_access_differs(
+    stored: dict, stale_access_token: Optional[str]
+) -> bool:
+    """True when the STORED access token is readable and no longer the one that
+    got the 401 — i.e. somebody (another coroutine here, or a peer install)
+    already rotated the bundle, so no further POST is warranted.
+
+    Returns False when no stale token was supplied or the stored blob cannot be
+    decrypted (an undecryptable blob must not be mistaken for a rotation).
+    """
+    if stale_access_token is None:
+        return False
+    enc_access = stored.get("codex_access_token")
+    try:
+        cur_access = encryption.decrypt_value(enc_access) if enc_access else None
+    except Exception:  # noqa: BLE001
+        cur_access = None
+    return cur_access is not None and cur_access != stale_access_token
+
+
+async def _release_claim(provider_id: str, owner: str) -> None:
+    """Drop our durable refresh lease — best-effort, never raises.
+
+    A failed release is not a correctness problem: the lease carries a TTL, so a
+    row we cannot clear simply frees itself in ``CLAIM_TTL_SECONDS``.
+    """
+    from app.db.async_database import run_sync
+    from app.db import database as db
+
+    try:
+        await run_sync(db.release_codex_refresh_claim, provider_id, owner)
+    except Exception:  # noqa: BLE001 — TTL expiry is the backstop
+        logger.warning(
+            "codex refresh: could not release claim for provider %s "
+            "(lease will expire in %ss)", provider_id, CLAIM_TTL_SECONDS,
+            exc_info=True,
+        )
+
+
 def _usable_codex_bundle(stored: Optional[dict]) -> bool:
     """A stored bundle we may auto-refresh: has a refresh blob, is chatgpt mode,
     and is not already flagged dead."""
@@ -211,10 +267,14 @@ async def _do_refresh_locked(provider_id: str, stored: dict, client) -> bool:
 
     Decrypt the refresh token → ``codex_oauth.refresh_tokens`` (ROTATES) →
     re-encrypt + persist the rotated bundle atomically. Permanent failure codes
-    flip ``needs_reauth`` (bundle preserved) + notify. Returns True iff a rotated
-    bundle was persisted.
+    flip ``needs_reauth`` (bundle preserved) + notify — UNLESS the row's
+    ``codex_last_refresh`` moved while our POST was in flight, which means a peer
+    install rotated the bundle underneath us and the "permanent" failure is
+    self-inflicted, not a dead credential. Returns True iff a rotated bundle was
+    persisted (or a peer's rotation left us with a fresh one).
     """
-    from app.db import database as db  # noqa: F401 — kept parallel to callers
+    from app.db.async_database import run_sync
+    from app.db import database as db
 
     try:
         refresh_plain = encryption.decrypt_value(stored["codex_refresh_token"])
@@ -229,6 +289,26 @@ async def _do_refresh_locked(provider_id: str, stored: dict, client) -> bool:
         new_bundle = await codex_oauth.refresh_tokens(refresh_plain, client=client)
     except codex_oauth.CodexAuthError as e:
         if e.is_permanent:
+            # Before condemning the credential, check whether a PEER install
+            # rotated the bundle while our POST was in flight: if
+            # codex_last_refresh moved, the token we sent was already superseded
+            # and "reused" is self-inflicted — the stored credential is fine.
+            fresh = await run_sync(db.get_codex_tokens, provider_id)
+            if fresh is None:
+                logger.warning(
+                    "codex refresh: permanent failure (%s) for provider %s, but "
+                    "the provider is gone — nothing to mark", e.code, provider_id,
+                )
+                return False
+            if str(fresh.get("codex_last_refresh")) != str(
+                stored.get("codex_last_refresh")
+            ):
+                logger.info(
+                    "codex refresh: %s for provider %s, but a peer install "
+                    "rotated the bundle in the meantime — the stored credential "
+                    "is current; NOT flagging needs_reauth", e.code, provider_id,
+                )
+                return True
             logger.warning(
                 "codex refresh: permanent failure (%s) for provider %s — "
                 "marking needs_reauth", e.code, provider_id,
@@ -257,12 +337,14 @@ async def refresh_provider(
 ) -> bool:
     """Refresh one provider's Codex token if needed (or ``force``).
 
-    Serialized by the per-provider lock. Steps: read the stored bundle → decide
-    (unless ``force``) → refresh + persist. On a permanent failure code: mark
-    ``needs_reauth`` (bundle preserved) + notify + stop.
+    Serialized by the per-provider lock (in-process) AND the durable lease on the
+    provider row (cross-install). Steps: read the stored bundle → decide (unless
+    ``force``) → claim the row → re-read → refresh + persist → release. On a
+    permanent failure code: mark ``needs_reauth`` (bundle preserved) + notify +
+    stop.
 
     Returns ``True`` if a refresh was performed, ``False`` if skipped (not due,
-    no bundle, or already flagged ``needs_reauth``).
+    no bundle, already flagged ``needs_reauth``, or the claim went to a peer).
     """
     from app.db.async_database import run_sync
     from app.db import database as db
@@ -287,7 +369,39 @@ async def refresh_provider(
             if not _needs_refresh(stored, access_plain):
                 return False
 
-        return await _do_refresh_locked(provider_id, stored, client)
+        # Durable cross-install claim: the lock above only covers THIS process.
+        owner = settings.effective_instance_id
+        claimed = await run_sync(
+            db.try_claim_codex_refresh, provider_id, owner, CLAIM_TTL_SECONDS
+        )
+        if not claimed:
+            logger.debug(
+                "codex refresh: claim lost to a peer install for provider %s — "
+                "skipping (the holder is refreshing it)", provider_id,
+            )
+            return False
+
+        try:
+            # Re-read AFTER winning the claim — the cross-install analogue of the
+            # re-read-inside-the-lock above: a peer may have refreshed between our
+            # read and our claim, so the due condition can already be cleared.
+            stored = await run_sync(db.get_codex_tokens, provider_id)
+            if not _usable_codex_bundle(stored):
+                return False
+            if not force:
+                enc_access = stored.get("codex_access_token")
+                try:
+                    access_plain = (
+                        encryption.decrypt_value(enc_access) if enc_access else None
+                    )
+                except Exception:  # noqa: BLE001
+                    access_plain = None
+                if not _needs_refresh(stored, access_plain):
+                    return False
+
+            return await _do_refresh_locked(provider_id, stored, client)
+        finally:
+            await _release_claim(provider_id, owner)
 
 
 async def refresh_on_401_once(
@@ -306,6 +420,10 @@ async def refresh_on_401_once(
     rotating refresh token means a redundant POST would be wasteful and could
     trip reuse detection. Returns ``True`` when a fresh token is available (we
     rotated it, or a peer did) so the caller retries the upstream once.
+
+    The same reasoning extends across installs via the durable claim: a caller
+    that loses the claim waits briefly and re-reads instead of POSTing, because
+    the peer holding it is about to rotate the very token we would have sent.
     """
     from app.db.async_database import run_sync
     from app.db import database as db
@@ -319,18 +437,49 @@ async def refresh_on_401_once(
         # If a peer 401-handler already refreshed while we waited on the lock, the
         # stored access token will differ from the one that got the 401 — skip the
         # redundant POST and let the caller retry with the fresh token.
-        if stale_access_token is not None:
-            enc_access = stored.get("codex_access_token")
-            try:
-                cur_access = (
-                    encryption.decrypt_value(enc_access) if enc_access else None
-                )
-            except Exception:  # noqa: BLE001
-                cur_access = None
-            if cur_access is not None and cur_access != stale_access_token:
-                return True
+        if _stored_access_differs(stored, stale_access_token):
+            return True
 
-        return await _do_refresh_locked(provider_id, stored, client)
+        # Durable cross-install claim. Unlike the periodic sweep, a 401 handler
+        # has a caller waiting on an answer, so losing the claim is worth a short
+        # bounded wait: the peer that holds it is refreshing THIS provider, and
+        # its rotated token is exactly what our caller needs.
+        owner = settings.effective_instance_id
+        claimed = False
+        for attempt in range(CLAIM_ATTEMPTS_ON_401):
+            claimed = await run_sync(
+                db.try_claim_codex_refresh, provider_id, owner, CLAIM_TTL_SECONDS
+            )
+            if claimed:
+                break
+            if attempt == CLAIM_ATTEMPTS_ON_401 - 1:
+                break
+            await asyncio.sleep(CLAIM_RETRY_SLEEP_SECONDS)
+            stored = await run_sync(db.get_codex_tokens, provider_id)
+            if not _usable_codex_bundle(stored):
+                return False
+            if _stored_access_differs(stored, stale_access_token):
+                # The claim holder rotated: the caller can retry upstream now.
+                return True
+        if not claimed:
+            logger.warning(
+                "codex refresh: 401 handler could not claim provider %s after "
+                "%d attempts — a peer install holds the refresh lease",
+                provider_id, CLAIM_ATTEMPTS_ON_401,
+            )
+            return False
+
+        try:
+            # Re-read AFTER winning the claim: a peer may have rotated between
+            # our last read and the claim.
+            stored = await run_sync(db.get_codex_tokens, provider_id)
+            if not _usable_codex_bundle(stored):
+                return False
+            if _stored_access_differs(stored, stale_access_token):
+                return True
+            return await _do_refresh_locked(provider_id, stored, client)
+        finally:
+            await _release_claim(provider_id, owner)
 
 
 async def refresh_due_providers(*, client=None) -> int:

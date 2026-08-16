@@ -277,3 +277,93 @@ class TestCodexTokenBundle:
         assert bundle["codex_account_id"] is None
         # auth_mode is NULL until a Codex bundle is stored (NULL == legacy apikey).
         assert bundle["auth_mode"] is None
+
+
+def _lease(conn, provider_id="prov-1"):
+    """(owner, expires_at) straight off the row — there is no public reader."""
+    row = conn.execute(
+        "SELECT codex_refresh_lease_owner, codex_refresh_lease_expires_at "
+        "FROM model_providers WHERE id = ?",
+        (provider_id,),
+    ).fetchone()
+    return row["codex_refresh_lease_owner"], row["codex_refresh_lease_expires_at"]
+
+
+def _expire_lease(conn, provider_id="prov-1"):
+    """Backdate the lease so it reads as expired on the DB clock."""
+    conn.execute(
+        "UPDATE model_providers SET codex_refresh_lease_expires_at = ? WHERE id = ?",
+        ("2000-01-01 00:00:00", provider_id),
+    )
+    conn.commit()
+
+
+class TestCodexRefreshClaim:
+    """The durable cross-install refresh lease. The Codex refresh token rotates,
+    so two installs sharing this database must not refresh the same row at once;
+    the claim is a single conditional UPDATE evaluated on the DATABASE clock."""
+
+    def test_first_claimer_wins(self, mock_db):
+        _create()
+        assert db.try_claim_codex_refresh("prov-1", "install-a", 120) is True
+        owner, expires = _lease(mock_db)
+        assert owner == "install-a"
+        assert expires is not None
+
+    def test_second_claimer_loses_while_lease_is_live(self, mock_db):
+        _create()
+        assert db.try_claim_codex_refresh("prov-1", "install-a", 300) is True
+        assert db.try_claim_codex_refresh("prov-1", "install-b", 300) is False
+        # The holder is untouched.
+        assert _lease(mock_db)[0] == "install-a"
+
+    def test_expired_lease_is_reclaimable_by_a_peer(self, mock_db):
+        _create()
+        assert db.try_claim_codex_refresh("prov-1", "install-a", 300) is True
+        _expire_lease(mock_db)
+        # TTL expiry is the crash backstop: nobody has to release the row.
+        assert db.try_claim_codex_refresh("prov-1", "install-b", 300) is True
+        assert _lease(mock_db)[0] == "install-b"
+
+    def test_same_owner_reclaim_succeeds(self, mock_db):
+        _create()
+        assert db.try_claim_codex_refresh("prov-1", "install-a", 300) is True
+        # Deliberate: after a crash-restart the same instance may re-claim inside
+        # the TTL (its in-process lock still serializes locally).
+        assert db.try_claim_codex_refresh("prov-1", "install-a", 300) is True
+        assert _lease(mock_db)[0] == "install-a"
+
+    def test_claim_on_missing_provider_returns_false(self, mock_db):
+        assert db.try_claim_codex_refresh("nope", "install-a", 120) is False
+
+    def test_release_clears_own_lease(self, mock_db):
+        _create()
+        db.try_claim_codex_refresh("prov-1", "install-a", 300)
+        db.release_codex_refresh_claim("prov-1", "install-a")
+        assert _lease(mock_db) == (None, None)
+        # Row is immediately claimable again.
+        assert db.try_claim_codex_refresh("prov-1", "install-b", 300) is True
+
+    def test_release_with_wrong_owner_leaves_peer_lease_intact(self, mock_db):
+        _create()
+        db.try_claim_codex_refresh("prov-1", "install-a", 300)
+        # A late release from an install whose TTL already lapsed must NOT strip
+        # the current holder's lease.
+        db.release_codex_refresh_claim("prov-1", "install-b")
+        owner, expires = _lease(mock_db)
+        assert owner == "install-a"
+        assert expires is not None
+        assert db.try_claim_codex_refresh("prov-1", "install-b", 300) is False
+
+    def test_claim_does_not_disturb_the_token_bundle(self, mock_db):
+        _create()
+        db.set_codex_token_bundle(
+            "prov-1", access_token="enc:a", refresh_token="enc:r",
+            account_id="acct-1", last_refresh="2026-08-16T10:00:00+00:00",
+        )
+        db.try_claim_codex_refresh("prov-1", "install-a", 300)
+        db.release_codex_refresh_claim("prov-1", "install-a")
+        bundle = db.get_codex_tokens("prov-1")
+        assert bundle["codex_access_token"] == "enc:a"
+        assert bundle["codex_refresh_token"] == "enc:r"
+        assert bundle["codex_last_refresh"] == "2026-08-16T10:00:00+00:00"

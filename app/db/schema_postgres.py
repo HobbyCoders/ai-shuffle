@@ -1162,6 +1162,14 @@ def create_postgres_schema(cursor) -> None:
     #     created_at/updated_at), and ``needs_reauth`` (permanent-refresh-failure
     #     flag). All nullable/defaulted so the fresh CREATE and the additive
     #     _run_column_migrations bootstrap agree.
+    #
+    #     2026-08-16: cross-instance refresh lease columns
+    #     (``codex_refresh_lease_owner`` / ``codex_refresh_lease_expires_at``).
+    #     The periodic refresh worker claims the row via a conditional UPDATE on
+    #     the database clock before POSTing, because the Codex refresh token
+    #     rotates and a double refresh across installs sharing this database
+    #     kills the credential. Nullable, no index — added additively in
+    #     _run_column_migrations too.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS model_providers (
             id TEXT PRIMARY KEY,
@@ -1184,6 +1192,8 @@ def create_postgres_schema(cursor) -> None:
             codex_id_token_expires_at TIMESTAMP WITH TIME ZONE,
             codex_last_refresh TIMESTAMP WITH TIME ZONE,
             needs_reauth BOOLEAN DEFAULT FALSE,
+            codex_refresh_lease_owner TEXT,
+            codex_refresh_lease_expires_at TIMESTAMP WITH TIME ZONE,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )

@@ -241,6 +241,16 @@ def translate_sql(sql: str) -> str:
         s,
         flags=re.I,
     )
+    # Same construct with a PLUS: `NOW() + make_interval(secs => X)` computes a
+    # lease EXPIRY from a ttl-in-seconds param (app.db.model_providers'
+    # Codex-refresh claim). Mirrors the minus rule above — the bound placeholder
+    # stays in place so parameter order is preserved.
+    s = re.sub(
+        r"(?:CURRENT_TIMESTAMP|NOW\(\))\s*\+\s*make_interval\(\s*secs\s*=>\s*([^)]+)\)",
+        r"datetime('now', '+' || \1 || ' seconds')",
+        s,
+        flags=re.I,
+    )
     # `NOW() + (<n> * INTERVAL '1 second')` — used by app.db.runs to compute a
     # lease expiry from a ttl-in-seconds param. SQLite has no INTERVAL literal;
     # rewrite to datetime() second-modifier arithmetic. The bound placeholder
