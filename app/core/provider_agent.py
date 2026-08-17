@@ -832,9 +832,11 @@ async def _notify_caller_terminal(
     which passes because dispatch registers the launch key, see
     ``mark_background_launch`` at the dispatch site), the one-wake-per-task
     ``mark_woken`` latch, the A-3 late-frame guard, and the batching/merge
-    branches. Fired for EVERY terminal status (completed / error / killed), and
-    only on the non-teardown path — supervisor teardown coalesces its kills into
-    one system note by ruling P12 and must not also spawn N wakes.
+    branches. Fired for EVERY terminal status (completed / error / killed) of a
+    BACKGROUND dispatch, and only on the non-teardown path — a synchronous
+    dispatch has no detached caller to wake (its report is the tool result of a
+    turn that is still running), and supervisor teardown coalesces its kills
+    into one system note by ruling P12 and must not also spawn N wakes.
 
     ``task_id`` is MANDATORY on the frame (the contentless-frame choke drops a
     frame carrying nothing renderable) and is the worker's session id — the same
@@ -1037,6 +1039,14 @@ async def dispatch_worker(
     # caller was never told its worker finished. Registering the SAME key the
     # registry row carries (``launch_key``) is what makes the gate pass.
     #
+    # BACKGROUND DISPATCHES ONLY (2026-08-17 ruling). A SYNCHRONOUS dispatch
+    # hands its report back inline as the tool result, in the caller's own
+    # turn — the caller is neither parked nor uninformed, so a terminal chip and
+    # a wake would both be noise (and the wake would target a turn that is still
+    # running). Only the background mode detaches the outcome from the call, and
+    # only it needs the notification lanes. The ``finally`` below fires the wake
+    # under the same condition, so the two halves cannot disagree.
+    #
     # Park-gate safety (PR #765 / #803 rulings): ``_background_launches`` is
     # CUMULATIVE and is NOT pruned in ``complete_task``, but the ``_finalize``
     # gate counts only UNRESOLVED launches — a launch whose registry record has
@@ -1045,7 +1055,8 @@ async def dispatch_worker(
     # session forever. The teardown path additionally purges the id outright
     # (``provider_agent_supervisor._purge_park_gate_residue`` discards
     # ``{tool_use_id, task_id, worker_session_id}`` — a superset of this key).
-    task_registry.mark_background_launch(parent_session_id, launch_key)
+    if background:
+        task_registry.mark_background_launch(parent_session_id, launch_key)
 
     feed = WorkerFeed(
         parent_session_id=parent_session_id,
@@ -1289,18 +1300,26 @@ async def dispatch_worker(
                         "ProviderAgent: failed-status write failed for worker %s",
                         worker_session_id,
                     )
-            # Wake the CALLER. Shielded for the same reason the terminal frames
-            # above are: this ``finally`` can run while the handler is already
-            # cancelling (parent client eviction / interrupt), and a wake lost
-            # to that cancellation leaves a parked parent with nobody to unpark
-            # it. See _notify_caller_terminal for the guard inventory.
-            await emit_shielded(_notify_caller_terminal(
-                parent_session_id,
-                worker_session_id,
-                launch_key,
-                status,
-                terminal_summary or preview,
-            ))
+            # Wake the CALLER — BACKGROUND dispatches only, the same condition
+            # that registered the launch key above. A synchronous dispatch
+            # returns its report inline as the tool result of a turn that is
+            # still running, so there is nothing to wake; only a background
+            # dispatch detaches the outcome from the call and can leave the
+            # caller parked with nobody to unpark it.
+            #
+            # Shielded for the same reason the terminal frames above are: this
+            # ``finally`` can run while the handler is already cancelling
+            # (parent client eviction / interrupt), and a wake lost to that
+            # cancellation leaves a parked parent stranded. See
+            # _notify_caller_terminal for the guard inventory.
+            if background:
+                await emit_shielded(_notify_caller_terminal(
+                    parent_session_id,
+                    worker_session_id,
+                    launch_key,
+                    status,
+                    terminal_summary or preview,
+                ))
             # Attribution: the authoritative per-provider numbers, recorded
             # while the record is still live so the parent's turn can read them.
             provider_agent_supervisor.record_usage(

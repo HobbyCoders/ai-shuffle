@@ -448,6 +448,18 @@ def _dispatch(**overrides):
     return asyncio.run(pa.dispatch_worker(**kwargs))
 
 
+def _dispatch_bg(**overrides):
+    """``_dispatch`` in BACKGROUND mode.
+
+    The notification lanes (ownership registration + the proactive caller wake)
+    are gated on this flag: a synchronous dispatch hands its report back inline
+    as the tool result of a turn that is still running, so it has neither a
+    parked caller to wake nor a detached outcome to chip.
+    """
+    overrides.setdefault("background", True)
+    return _dispatch(**overrides)
+
+
 class TestDispatchWorker:
 
     def test_happy_path(self, dispatch_env):
@@ -1287,9 +1299,12 @@ class TestWorkerFailedStatus:
 @pytest.mark.usefixtures("_clean_parent_registry")
 class TestWorkerWakesItsCaller:
     """FEATURE 2 — an MCP-dispatched worker has no SDK task, so nothing in the
-    notification pipeline ever fires for it. Dispatch therefore (a) claims
-    OWNERSHIP of the worker's terminal for the parent's notification lanes and
-    (b) calls the scheduler seam itself on every terminal status."""
+    notification pipeline ever fires for it. A BACKGROUND dispatch therefore
+    (a) claims OWNERSHIP of the worker's terminal for the parent's notification
+    lanes and (b) calls the scheduler seam itself on every terminal status.
+
+    Both halves are gated on the background mode — see
+    :class:`TestSyncDispatchNeedsNoWake` for the synchronous counterpart."""
 
     def test_dispatch_claims_ownership_of_the_worker_task(self, dispatch_env):
         """``is_own_background_task`` is the gate on BOTH the terminal chip and
@@ -1297,7 +1312,7 @@ class TestWorkerWakesItsCaller:
         (no SDK task, no recorded launch), so both lanes dropped it."""
         from app.core.task_registry import task_registry
 
-        outcome = _dispatch()
+        outcome = _dispatch_bg()
 
         assert task_registry.is_own_background_task("parent-1", outcome.session_id)
 
@@ -1307,7 +1322,7 @@ class TestWorkerWakesItsCaller:
         A mismatch would either drop the wake or park the session forever."""
         from app.core.task_registry import task_registry
 
-        outcome = _dispatch(tool_use_id="toolu-abc")
+        outcome = _dispatch_bg(tool_use_id="toolu-abc")
 
         record = task_registry.get_task("parent-1", outcome.session_id)
         assert record["toolUseId"] == "toolu-abc"
@@ -1318,7 +1333,7 @@ class TestWorkerWakesItsCaller:
     def test_launch_key_defaults_to_the_worker_session_id(self, dispatch_env):
         from app.core.task_registry import task_registry
 
-        outcome = _dispatch()
+        outcome = _dispatch_bg()
 
         assert task_registry.was_background_launch("parent-1", outcome.session_id)
         (_sid, frame), = dispatch_env.wakes
@@ -1330,13 +1345,13 @@ class TestWorkerWakesItsCaller:
         terminal. Verify the two agree, or the caller parks forever."""
         from app.core.task_registry import task_registry
 
-        _dispatch()
+        _dispatch_bg()
 
         assert not task_registry.has_unresolved_background_launches("parent-1")
         assert not task_registry.has_active_background_work("parent-1")
 
     def test_completed_worker_wakes_the_caller(self, dispatch_env):
-        outcome = _dispatch()
+        outcome = _dispatch_bg()
 
         (sid, frame), = dispatch_env.wakes
         assert sid == "parent-1"
@@ -1358,7 +1373,7 @@ class TestWorkerWakesItsCaller:
             },
         )
 
-        outcome = _dispatch()
+        outcome = _dispatch_bg()
 
         (sid, frame), = dispatch_env.wakes
         assert sid == "parent-1"
@@ -1385,13 +1400,13 @@ class TestWorkerWakesItsCaller:
 
         monkeypatch.setattr(sup, "register_worker", _register_and_tear_down)
 
-        outcome = _dispatch()
+        outcome = _dispatch_bg()
 
         assert not outcome.ok
         assert dispatch_env.wakes == []
         assert dispatch_env.status_updates == []
 
-    def test_wake_failure_never_breaks_the_dispatch(
+    def test_wake_failure_never_breaks_the_dispatch_bg(
         self, dispatch_env, monkeypatch
     ):
         from app.core import turn_scheduler as ts_mod
@@ -1401,7 +1416,63 @@ class TestWorkerWakesItsCaller:
 
         monkeypatch.setattr(ts_mod, "on_task_terminal", _boom)
 
-        outcome = _dispatch()
+        outcome = _dispatch_bg()
 
         assert outcome.ok
         assert outcome.report == "the worker's report"
+
+
+@pytest.mark.usefixtures("_clean_parent_registry")
+class TestSyncDispatchNeedsNoWake:
+    """The gate (2026-08-17 ruling). A SYNCHRONOUS dispatch returns its report
+    inline as the tool result, inside the caller's own still-running turn — the
+    caller is neither parked nor uninformed. Registering a background launch or
+    firing a terminal frame there would be pure noise, and the launch key would
+    arm the park gate for a turn that never parks."""
+
+    def test_sync_dispatch_does_not_wake_the_caller(self, dispatch_env):
+        outcome = _dispatch()
+
+        assert outcome.ok
+        assert dispatch_env.wakes == []
+
+    def test_sync_dispatch_registers_no_background_launch(self, dispatch_env):
+        from app.core.task_registry import task_registry
+
+        outcome = _dispatch()
+
+        assert not task_registry.was_background_launch(
+            "parent-1", outcome.session_id
+        )
+        assert not task_registry.is_own_background_task(
+            "parent-1", outcome.session_id
+        )
+
+    def test_errored_sync_dispatch_still_marks_the_worker_failed(
+        self, dispatch_env, monkeypatch
+    ):
+        """The failed-status verdict is about the WORKER's own row and is NOT
+        gated on the dispatch mode — only the caller-notification lanes are."""
+        monkeypatch.setattr(
+            pa, "final_turn_outcome",
+            lambda sid: {
+                "usage": {}, "error": "provider blew up", "interrupted": False,
+                "terminal_found": True,
+            },
+        )
+
+        outcome = _dispatch()
+
+        assert not outcome.ok
+        assert dispatch_env.status_updates == [
+            {"session_id": outcome.session_id, "status": "failed"}
+        ]
+        assert dispatch_env.wakes == []
+
+    def test_background_dispatch_is_the_only_one_that_wakes(self, dispatch_env):
+        """Direct A/B on the one flag."""
+        _dispatch()
+        assert dispatch_env.wakes == []
+
+        _dispatch_bg()
+        assert len(dispatch_env.wakes) == 1
