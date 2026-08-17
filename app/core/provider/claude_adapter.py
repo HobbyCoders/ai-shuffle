@@ -17,10 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional, cast
 
 from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
-from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
+from claude_agent_sdk.types import PermissionMode, PermissionResultAllow, PermissionResultDeny
 
 from app.core.expected_shutdown import mark_expected_shutdown
 from app.core.provider.protocol import ProviderAdapter
@@ -217,7 +217,7 @@ class ClaudeAgentAdapter(ProviderAdapter):
     async def set_permission_mode(self, mode: str) -> None:
         if not self._client:
             raise RuntimeError("Adapter not connected")
-        await self._client.set_permission_mode(mode)
+        await self._client.set_permission_mode(cast(PermissionMode, mode))
 
     async def get_context_usage(self) -> Optional[Dict[str, Any]]:
         """Get context window usage by category (SDK 0.1.52+).
@@ -260,7 +260,9 @@ class ClaudeAgentAdapter(ProviderAdapter):
             return True
         if old.cwd != (new_options.cwd or old.cwd):
             return True
-        if not mcp_servers_equivalent(old.mcp_servers, new_options.mcp_servers):
+        # We only ever store dict-shaped mcp_servers on ClaudeAgentOptions; the
+        # SDK type also admits str | Path (a config-file path) which we never use.
+        if not mcp_servers_equivalent(cast(Optional[Dict[str, Any]], old.mcp_servers), new_options.mcp_servers):
             return True
         if (old.plugins or []) != (new_options.plugins or []):
             return True
@@ -288,7 +290,7 @@ class ClaudeAgentAdapter(ProviderAdapter):
             return True
         if old.cwd != new_sdk_options.cwd:
             return True
-        if not mcp_servers_equivalent(old.mcp_servers, new_sdk_options.mcp_servers):
+        if not mcp_servers_equivalent(cast(Optional[Dict[str, Any]], old.mcp_servers), cast(Optional[Dict[str, Any]], new_sdk_options.mcp_servers)):
             return True
         if (old.plugins or []) != (new_sdk_options.plugins or []):
             return True

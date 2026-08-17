@@ -265,10 +265,10 @@ def _get_hook_tool_names(hooks: Optional[Dict[str, list]]) -> list:
 
 
 def _build_extra_args(
-    base_extra_args: Dict[str, str],
+    base_extra_args: Dict[str, Optional[str]],
     hooks: Optional[Dict[str, list]],
     deployment_mode: Optional["DeploymentMode"] = None,
-) -> Dict[str, str]:
+) -> Dict[str, Optional[str]]:
     """
     Build extra_args dict, adding --allowed-tools for any hooked tools.
 
