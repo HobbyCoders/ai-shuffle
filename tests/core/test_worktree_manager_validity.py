@@ -60,3 +60,64 @@ def test_invalid_for_empty_or_missing_worktree():
     """Defensive: a falsy/empty worktree is never valid."""
     assert worktree_manager.is_worktree_valid({}) is False
     assert worktree_manager.is_worktree_valid(None) is False
+
+
+# ---------------------------------------------------------------------------
+# active-session election vs. the 'failed' session status
+# ---------------------------------------------------------------------------
+
+def test_failed_session_never_wins_the_active_session_election(
+    tmp_path, monkeypatch
+):
+    """``sessions.status = 'failed'`` (ProviderAgent's verdict on a worker whose
+    dispatch errored) must not be elected the worktree's active session. The
+    election tests for the ``WorktreeStatus.ACTIVE`` string, which is also
+    exactly why the value is "failed" and not "completed" — ``COMPLETED`` is a
+    live member of that same enum and would have aliased a worktree state."""
+    (tmp_path / ".git").write_text("gitdir: /repo/.git/worktrees/wt-1\n")
+
+    monkeypatch.setattr(
+        wm_module.database, "get_git_repository_by_project",
+        lambda pid: {"id": "repo-1"},
+    )
+    monkeypatch.setattr(
+        wm_module.database, "get_active_worktrees_for_repository",
+        lambda rid: [{"id": "wt-1", "worktree_path": str(tmp_path)}],
+    )
+    monkeypatch.setattr(
+        wm_module.database, "get_sessions_for_worktree",
+        lambda wid: [
+            {"id": "s-failed", "title": "worker", "status": "failed"},
+            {"id": "s-live", "title": "chat", "status": "active"},
+        ],
+    )
+
+    (wt,) = worktree_manager.get_available_worktrees("proj-1")
+
+    assert wt["active_session"]["id"] == "s-live"
+    # The failed worker is still LISTED — only the election skips it.
+    assert [s["id"] for s in wt["sessions"]] == ["s-failed", "s-live"]
+
+
+def test_only_failed_sessions_leave_the_worktree_with_no_active_session(
+    tmp_path, monkeypatch
+):
+    (tmp_path / ".git").write_text("gitdir: /repo/.git/worktrees/wt-1\n")
+
+    monkeypatch.setattr(
+        wm_module.database, "get_git_repository_by_project",
+        lambda pid: {"id": "repo-1"},
+    )
+    monkeypatch.setattr(
+        wm_module.database, "get_active_worktrees_for_repository",
+        lambda rid: [{"id": "wt-1", "worktree_path": str(tmp_path)}],
+    )
+    monkeypatch.setattr(
+        wm_module.database, "get_sessions_for_worktree",
+        lambda wid: [{"id": "s-failed", "title": "worker", "status": "failed"}],
+    )
+
+    (wt,) = worktree_manager.get_available_worktrees("proj-1")
+
+    assert wt["active_session"] is None
+    assert wt["session_count"] == 1

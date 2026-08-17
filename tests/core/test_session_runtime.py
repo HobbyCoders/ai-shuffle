@@ -319,6 +319,90 @@ async def test_turn_start_self_heal_spares_park_with_running_bg_work(mock_db):
 
 
 # ---------------------------------------------------------------------------
+# 3c. Failed-worker revive (turn start un-fails the session)
+# ---------------------------------------------------------------------------
+
+def _seed_session(sid, status):
+    """A real sessions row with an explicit status."""
+    from app.db import database
+
+    # profile_id stays NULL: this module's ``mock_db`` is a bare shim connection
+    # (no seeded "default" profile), and sessions.profile_id is a FK.
+    database.create_session(session_id=sid, profile_id=None, title="worker")
+    from app.db.base import get_db
+
+    with get_db() as conn:
+        conn.cursor().execute(
+            "UPDATE sessions SET status = %s WHERE id = %s", (status, sid)
+        )
+
+
+def _status_of(sid):
+    from app.db import database
+
+    return database.get_session(sid)["status"]
+
+
+async def test_turn_start_revives_a_failed_worker_session(mock_db):
+    """A worker session ProviderAgent stamped ``'failed'`` is a verdict about a
+    run that is OVER. A new turn STARTING on it — a user message typed into the
+    worker session, a SendMessage-style resume, a scheduler wake — is proof the
+    session is live again, so the status flips back to ``'active'``."""
+    sid = "s4failed"
+    _seed_session(sid, "failed")
+    turn = turns_db.enqueue_turn(sid, "user", prompt="carry on")
+
+    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+        outcome = await session_runtime.SessionRuntime(turn).execute()
+
+    assert outcome == "completed"
+    assert _status_of(sid) == "active"
+
+
+async def test_turn_start_revives_on_a_server_originated_wake(mock_db):
+    """The revive is at the ONE choke point every turn passes through, so a
+    server-originated wake (``source='unpark'``) revives too — the caller-wake
+    turn a failed worker's own background work could produce must not run against
+    a session still marked failed."""
+    sid = "s4failedwake"
+    _seed_session(sid, "failed")
+    turn = turns_db.enqueue_turn(sid, "unpark", prompt="<task-notification/>")
+
+    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+        await session_runtime.SessionRuntime(turn).execute()
+
+    assert _status_of(sid) == "active"
+
+
+async def test_turn_start_leaves_a_non_failed_status_alone(mock_db):
+    """Archived is not a run verdict — the revive must not touch it."""
+    sid = "s4archived"
+    _seed_session(sid, "archived")
+    turn = turns_db.enqueue_turn(sid, "user", prompt="hi")
+
+    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+        await session_runtime.SessionRuntime(turn).execute()
+
+    assert _status_of(sid) == "archived"
+
+
+async def test_queued_turn_that_never_starts_does_not_revive(mock_db):
+    """The revive is keyed on the turn STARTING, not on it being enqueued: a
+    turn that loses the run claim leaves the verdict standing."""
+    sid = "s4failedqueued"
+    _seed_session(sid, "failed")
+    turn = turns_db.enqueue_turn(sid, "user", prompt="hi")
+    # Another runner owns the session's active run → execute bails before 4c.
+    assert runs_db.claim_run(sid, "other-runner", 60) is not None
+
+    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+        outcome = await session_runtime.SessionRuntime(turn).execute()
+
+    assert outcome is None
+    assert _status_of(sid) == "failed"
+
+
+# ---------------------------------------------------------------------------
 # 4. finalize always runs (pump crash → aborted)
 # ---------------------------------------------------------------------------
 

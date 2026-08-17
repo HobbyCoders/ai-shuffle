@@ -961,6 +961,94 @@ async def test_completed_top_level_agent_no_app_unpark_cli_owns(mock_db):
     execute.assert_not_awaited()
 
 
+async def test_completed_provider_agent_worker_is_never_cli_owned(mock_db):
+    """A ProviderAgent worker is registered ``kind == "agent"`` (load-bearing —
+    it pins the parent in the session pool), so a COMPLETED worker resting under
+    a PARKED parent matches every other condition of the A-1 suppression. But
+    there is no CLI task behind it at all: the worker is a separate session
+    dispatched from an MCP tool handler, so no CLI follow-up turn is ever coming
+    and suppressing the app wake would strand the parent parked forever. The
+    ``origin`` marker on the frame is what keeps A-1 scoped to genuine CLI-native
+    sub-agents."""
+    parked = turns_db.enqueue_turn("pw1", "user", prompt="dispatch a worker")
+    turns_db.start_turn(parked["id"], None, "runner")
+    turns_db.park_turn(parked["id"], ["worker-1"])
+    task_registry.start_task("pw1", "worker-1", "agent", "worker", tool_use_id="tu-pw1")
+    task_registry.mark_background_launch("pw1", "tu-pw1")
+    frame = {
+        "task_id": "worker-1", "status": "completed", "tool_use_id": "tu-pw1",
+        "summary": "the worker's report",
+        "origin": turn_scheduler.PROVIDER_AGENT_ORIGIN,
+    }
+
+    with ExitStack() as stack:
+        execute = stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        signal = await turn_scheduler.on_task_terminal("pw1", frame)
+        await _drain_kicks()
+
+    assert signal is None  # never the cli-owned-wake grace signal
+    (wake,) = _by_source("pw1", "unpark")
+    assert "<task-id>worker-1</task-id>" in wake["prompt"]
+    assert "<summary>the worker's report</summary>" in wake["prompt"]
+    assert wake["parent_turn_id"] == parked["id"]
+    execute.assert_awaited_once()
+
+
+async def test_second_provider_agent_frame_does_not_double_wake(mock_db):
+    """The one-wake-per-task ``mark_woken`` latch is untouched: a duplicate
+    terminal frame for the same worker (a retry, a racing teardown) finds the
+    latch set and produces no second wake."""
+    parked = turns_db.enqueue_turn("pw2", "user", prompt="dispatch a worker")
+    turns_db.start_turn(parked["id"], None, "runner")
+    turns_db.park_turn(parked["id"], ["worker-2"])
+    task_registry.start_task("pw2", "worker-2", "agent", "worker", tool_use_id="tu-pw2")
+    task_registry.mark_background_launch("pw2", "tu-pw2")
+    frame = {
+        "task_id": "worker-2", "status": "error", "tool_use_id": "tu-pw2",
+        "summary": "worker failed: provider blew up",
+        "origin": turn_scheduler.PROVIDER_AGENT_ORIGIN,
+    }
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("pw2", frame)
+        await _drain_kicks()
+        first = _by_source("pw2", "unpark")
+        await turn_scheduler.on_task_terminal("pw2", dict(frame))
+        await _drain_kicks()
+
+    assert len(first) <= 1
+    assert len(_by_source("pw2", "unpark")) == len(first)
+
+
+async def test_origin_marker_leaves_cli_native_suppression_intact(mock_db):
+    """Guard the scope of the marker: an ordinary CLI-native frame (no
+    ``origin``) still takes the A-1 suppression branch."""
+    parked = turns_db.enqueue_turn("pw3", "user", prompt="kick off bg")
+    turns_db.start_turn(parked["id"], None, "runner")
+    turns_db.park_turn(parked["id"], ["agent-3"])
+    task_registry.start_task("pw3", "agent-3", "agent", "bg", tool_use_id="tu-pw3")
+    task_registry.mark_background_launch("pw3", "tu-pw3")
+    frame = {"task_id": "agent-3", "status": "completed", "tool_use_id": "tu-pw3"}
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        signal = await turn_scheduler.on_task_terminal("pw3", frame)
+        await _drain_kicks()
+
+    assert signal == "cli-owned-wake"
+    assert _by_source("pw3", "unpark") == []
+
+
 async def test_own_shell_completion_still_enqueues_unpark(mock_db):
     # A-1 conservatism: a backgrounded SHELL (kind "shell") completing while parked
     # is NOT a CLI-owned agent at-rest wake — the CLI does not own a shell's resume,

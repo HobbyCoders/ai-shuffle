@@ -462,6 +462,22 @@ def _session_has_parked_turn(session_id: str) -> bool:
         return cursor.fetchone() is not None
 
 
+#: ``frame["origin"]`` stamped by :mod:`app.core.provider_agent` on the terminal
+#: frame it hands to :func:`on_task_terminal`. Additive — no other frame producer
+#: sets ``origin``, so every pre-existing frame behaves exactly as before.
+#:
+#: It exists for ONE decision: a ProviderAgent worker is registered
+#: ``kind == "agent"`` (load-bearing — it is what pins the parent in the session
+#: pool), so a COMPLETED worker resting under a parked parent matches every
+#: condition of the A-1 CLI-owned-wake suppression below. But that suppression is
+#: predicated on the CLI delivering its own rich ``<task-notification>`` follow-up
+#: turn, and there is NO CLI task here at all: the worker is a separate session
+#: dispatched from an MCP tool handler. Suppressing the app's wake would strand
+#: the parent parked forever. The marker keeps the suppression's scope exactly as
+#: written for genuine CLI-native sub-agents.
+PROVIDER_AGENT_ORIGIN = "provider_agent"
+
+
 # A-1 (bug 1): the CLI-native duplicate. When a TOP-LEVEL backgrounded Task/Agent
 # comes to rest while the parent turn is PARKED, the CLI itself starts a follow-up
 # turn injecting the rich ``[SYSTEM NOTIFICATION] … <task-notification>`` string
@@ -484,9 +500,16 @@ def _session_has_parked_turn(session_id: str) -> bool:
 # (query_engine marks agents whose launch was a background launch), so that flag
 # does NOT distinguish agent-from-shell — the ``kind == "agent"`` record field is
 # the reliable discriminator.
+# ALSO EXCLUDED: a ProviderAgent worker frame (``origin`` marker) — it satisfies
+# every condition above but has no CLI task behind it at all. See
+# PROVIDER_AGENT_ORIGIN.
 def _cli_owns_at_rest_wake(session_id: str, frame: Dict[str, Any]) -> bool:
     """True iff the CLI owns this completion's at-rest wake (so the app must NOT
     also enqueue one). Caller is already inside the OWN (top-level) branch."""
+    if frame.get("origin") == PROVIDER_AGENT_ORIGIN:
+        # A ProviderAgent worker has no CLI task behind it — see
+        # PROVIDER_AGENT_ORIGIN. The app's wake is the ONLY delivery.
+        return False
     if frame.get("status") != "completed":
         return False
     from app.core.task_registry import task_registry

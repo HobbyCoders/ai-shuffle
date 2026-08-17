@@ -82,6 +82,21 @@ logger = logging.getLogger(__name__)
 #: silently restart.
 WORKER_TURN_SOURCE = "provider_agent"
 
+#: ``sessions.status`` stamped on a WORKER session whose dispatch ended in the
+#: registry status ``"error"`` — the worker ran (or tried to) and did not
+#: deliver. Deliberately NOT ``"completed"``: ``worktree_manager`` compares a
+#: session's status against the ``WorktreeStatus`` enum strings, where
+#: ``COMPLETED`` is a WORKTREE state, so re-using it here would alias two
+#: unrelated vocabularies. Workers only — an ordinary chat session never gets
+#: this status, and a new turn on the session flips it back to ``"active"``
+#: (``app/core/session_runtime.py``, the turn-start revive).
+#:
+#: The status is EXCLUDED from session SEARCH (``app/db/sessions.py``) but NOT
+#: from the session lists: a failed worker stays visible so its transcript can
+#: be read. It also drops out of the worktree active-session election and the
+#: idle-edge wakeup candidates for free — both test for ``"active"``.
+WORKER_FAILED_STATUS = "failed"
+
 #: Cap on the report handed back to the PARENT's context (plan §2 C.5). The
 #: full transcript lives in the worker session; only this much rides the tool
 #: result, so uncapped fan-out cannot dominate the parent's context window.
@@ -847,6 +862,64 @@ def _provider_display_name(provider_id: Optional[str]) -> str:
     return str((row or {}).get("name") or provider_id)
 
 
+async def _notify_caller_terminal(
+    parent_session_id: str,
+    worker_session_id: str,
+    launch_key: str,
+    status: str,
+    summary: Optional[str],
+) -> None:
+    """Proactively wake the CALLER now that this worker reached a terminal state.
+
+    ProviderAgent workers are dispatched from an MCP tool handler, so NOTHING in
+    the SDK-driven notification pipeline ever sees them: there is no SDK task and
+    no ``TaskNotificationMessage``, which is why ``idle_reader`` — the only other
+    producer of terminal frames — never fires for a worker. Without this call a
+    parent that parked on a background worker is woken by nobody: the worker's
+    result lands in the registry row and the subagent card, and the parent sits
+    parked until a human types something.
+
+    So ``dispatch_worker``'s ``finally`` calls the SAME scheduler seam the idle
+    reader uses, with an equivalent frame. Every guard on the far side is left
+    alone and still applies: the ownership gate (``is_own_background_task`` —
+    which passes because dispatch registers the launch key, see
+    ``mark_background_launch`` at the dispatch site), the one-wake-per-task
+    ``mark_woken`` latch, the A-3 late-frame guard, and the batching/merge
+    branches. Fired for EVERY terminal status (completed / error / killed) of a
+    BACKGROUND dispatch, and only on the non-teardown path — a synchronous
+    dispatch has no detached caller to wake (its report is the tool result of a
+    turn that is still running), and supervisor teardown coalesces its kills
+    into one system note by ruling P12 and must not also spawn N wakes.
+
+    ``task_id`` is MANDATORY on the frame (the contentless-frame choke drops a
+    frame carrying nothing renderable) and is the worker's session id — the same
+    value ``start_task`` registered, so the registry lookup behind the ownership
+    gate resolves.
+
+    ``origin`` marks the frame as ProviderAgent-produced so
+    ``turn_scheduler._cli_owns_at_rest_wake`` does not mistake a COMPLETED worker
+    for a CLI-native backgrounded sub-agent and suppress the app's wake in favour
+    of a CLI follow-up turn that will never come (there is no CLI task here).
+
+    Never raises — a wake failure must not change how the worker's dispatch
+    reports.
+    """
+    try:
+        from app.core import turn_scheduler
+
+        await turn_scheduler.on_task_terminal(parent_session_id, {
+            "task_id": worker_session_id,
+            "status": status,
+            "tool_use_id": launch_key,
+            "summary": summary or "",
+            "origin": turn_scheduler.PROVIDER_AGENT_ORIGIN,
+        })
+    except Exception:  # noqa: BLE001 — the worker's own outcome stands regardless
+        logger.exception(
+            "ProviderAgent: caller wake failed for worker %s", worker_session_id
+        )
+
+
 async def dispatch_worker(
     *,
     parent_session_id: str,
@@ -1009,15 +1082,44 @@ async def dispatch_worker(
     # overlay and the terminal task-settle to the card through ``tool_use_id``
     # (SubagentMessage.svelte:37-44, reducer.ts:1203), so a registry entry with
     # no tool_use_id — as shipped by P3-A1 — could never settle its card.
+    launch_key = tool_use_id or worker_session_id
     task_registry.start_task(
         parent_session_id,
         worker_session_id,
         "agent",
         title,
         summary=f"{provider_tag} · {model_tag}",
-        tool_use_id=tool_use_id or worker_session_id,
+        tool_use_id=launch_key,
         agent=agent_name,
     )
+
+    # Ownership of this worker's terminal, for the parent's notification lanes.
+    # ``is_own_background_task`` — the gate on BOTH the terminal chip
+    # (``complete_task``) and the scheduler wake (``on_task_terminal``) — admits a
+    # task only when it is an SDK-backgrounded shell or its registry record's
+    # ``tool_use_id`` was recorded as a background launch. An MCP-dispatched
+    # worker is neither by default, so both lanes silently dropped it and the
+    # caller was never told its worker finished. Registering the SAME key the
+    # registry row carries (``launch_key``) is what makes the gate pass.
+    #
+    # BACKGROUND DISPATCHES ONLY (2026-08-17 ruling). A SYNCHRONOUS dispatch
+    # hands its report back inline as the tool result, in the caller's own
+    # turn — the caller is neither parked nor uninformed, so a terminal chip and
+    # a wake would both be noise (and the wake would target a turn that is still
+    # running). Only the background mode detaches the outcome from the call, and
+    # only it needs the notification lanes. The ``finally`` below fires the wake
+    # under the same condition, so the two halves cannot disagree.
+    #
+    # Park-gate safety (PR #765 / #803 rulings): ``_background_launches`` is
+    # CUMULATIVE and is NOT pruned in ``complete_task``, but the ``_finalize``
+    # gate counts only UNRESOLVED launches — a launch whose registry record has
+    # reached a terminal status no longer arms it. This worker's ``finally``
+    # ALWAYS completes the row, so the launch resolves and cannot re-park the
+    # session forever. The teardown path additionally purges the id outright
+    # (``provider_agent_supervisor._purge_park_gate_residue`` discards
+    # ``{tool_use_id, task_id, worker_session_id}`` — a superset of this key).
+    if background:
+        task_registry.mark_background_launch(parent_session_id, launch_key)
 
     feed = WorkerFeed(
         parent_session_id=parent_session_id,
@@ -1044,7 +1146,7 @@ async def dispatch_worker(
             parent_session_id=parent_session_id,
             worker_session_id=worker_session_id,
             task_id=worker_session_id,
-            tool_use_id=tool_use_id or worker_session_id,
+            tool_use_id=launch_key,
             provider_id=provider_id or "",
             model_id=model_id or "",
             label=label,
@@ -1234,15 +1336,55 @@ async def dispatch_worker(
                 summary=f"{provider_tag} · {model_tag}",
                 usage=usage_seen,
             ))
+            terminal_summary = _failure_summary(
+                status, preview, feed.frames_forwarded
+            )
             try:
                 task_registry.complete_task(
                     parent_session_id,
                     worker_session_id,
                     status,
-                    summary=_failure_summary(status, preview, feed.frames_forwarded),
+                    summary=terminal_summary,
                 )
             except Exception:  # noqa: BLE001
                 logger.exception("ProviderAgent: registry completion failed")
+            # The worker session's OWN row records the verdict. Only the
+            # ``"error"`` status — the worker ran and did not deliver — is
+            # stamped: ``"killed"`` is a teardown (the supervisor's own path,
+            # which never reaches this branch) and ``"completed"`` leaves the
+            # row exactly as it was. See WORKER_FAILED_STATUS for why the value
+            # is "failed" and not "completed". Best-effort: a status write must
+            # never change what the dispatch reports to the caller.
+            if status == "error":
+                try:
+                    database.update_session(
+                        worker_session_id, status=WORKER_FAILED_STATUS
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "ProviderAgent: failed-status write failed for worker %s",
+                        worker_session_id,
+                    )
+            # Wake the CALLER — BACKGROUND dispatches only, the same condition
+            # that registered the launch key above. A synchronous dispatch
+            # returns its report inline as the tool result of a turn that is
+            # still running, so there is nothing to wake; only a background
+            # dispatch detaches the outcome from the call and can leave the
+            # caller parked with nobody to unpark it.
+            #
+            # Shielded for the same reason the terminal frames above are: this
+            # ``finally`` can run while the handler is already cancelling
+            # (parent client eviction / interrupt), and a wake lost to that
+            # cancellation leaves a parked parent stranded. See
+            # _notify_caller_terminal for the guard inventory.
+            if background:
+                await emit_shielded(_notify_caller_terminal(
+                    parent_session_id,
+                    worker_session_id,
+                    launch_key,
+                    status,
+                    terminal_summary or preview,
+                ))
             # Attribution: the authoritative per-provider numbers, recorded
             # while the record is still live so the parent's turn can read them.
             provider_agent_supervisor.record_usage(

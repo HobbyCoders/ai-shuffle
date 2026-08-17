@@ -1671,6 +1671,13 @@ def search_sessions(
     Uses Postgres tsvector for content search (fast indexed lookup) with ILIKE
     for title search (titles are short, always fast).
     Returns sessions with matching snippets showing where the match was found.
+
+    Every CTE excludes ``status IN ('archived','failed')``. ``'failed'`` is the
+    ProviderAgent verdict on a worker session whose dispatch errored (see
+    ``app.core.provider_agent.WORKER_FAILED_STATUS``): the transcript stays
+    readable from the session lists, but a dead worker must not compete with
+    real conversations for search hits. A new turn on such a session revives it
+    to ``'active'`` and it becomes searchable again.
     """
     if not query or not query.strip():
         return []
@@ -1705,7 +1712,7 @@ def search_sessions(
                 s.updated_at as match_time
             FROM sessions s
             WHERE {sql_ilike('s.title')}
-            AND s.status != 'archived'{inst_sql}
+            AND s.status NOT IN ('archived','failed'){inst_sql}
         ),
         content_matches AS (
             SELECT DISTINCT ON (s.id)
@@ -1720,7 +1727,7 @@ def search_sessions(
             INNER JOIN sessions s ON s.id = sm.session_id
             WHERE sm.content_tsv @@ plainto_tsquery('english', {_ph})
             AND sm.role IN ('user', 'assistant')
-            AND s.status != 'archived'{inst_sql}
+            AND s.status NOT IN ('archived','failed'){inst_sql}
             ORDER BY s.id, sm.created_at DESC
         ),
         store_matches AS (
@@ -1736,7 +1743,7 @@ def search_sessions(
             INNER JOIN sessions s ON s.sdk_session_id = sse.session_id
             WHERE sse.subpath IS NULL
             AND to_tsvector('english', sse_entry_text(sse.entry)) @@ plainto_tsquery('english', {_ph})
-            AND s.status != 'archived'{inst_sql}
+            AND s.status NOT IN ('archived','failed'){inst_sql}
             ORDER BY s.id, sse.created_at DESC
         ),
         all_matches AS (
@@ -1803,6 +1810,9 @@ def search_sessions_paginated(
     Uses Postgres tsvector for content search (fast indexed lookup) with ILIKE
     for title search.
 
+    Excludes ``status IN ('archived','failed')`` in every CTE, for the reasons
+    spelled out on :func:`search_sessions`.
+
     Returns:
         Tuple of (results list, total count)
     """
@@ -1837,7 +1847,7 @@ def search_sessions_paginated(
                 s.updated_at as match_time
             FROM sessions s
             WHERE {sql_ilike('s.title')}
-            AND s.status != 'archived'{inst_sql}
+            AND s.status NOT IN ('archived','failed'){inst_sql}
         ),
         content_matches AS (
             SELECT DISTINCT ON (s.id)
@@ -1850,7 +1860,7 @@ def search_sessions_paginated(
             INNER JOIN sessions s ON s.id = sm.session_id
             WHERE sm.content_tsv @@ plainto_tsquery('english', {_ph})
             AND sm.role IN ('user', 'assistant')
-            AND s.status != 'archived'{inst_sql}
+            AND s.status NOT IN ('archived','failed'){inst_sql}
             ORDER BY s.id, sm.created_at DESC
         ),
         store_matches AS (
@@ -1864,7 +1874,7 @@ def search_sessions_paginated(
             INNER JOIN sessions s ON s.sdk_session_id = sse.session_id
             WHERE sse.subpath IS NULL
             AND to_tsvector('english', sse_entry_text(sse.entry)) @@ plainto_tsquery('english', {_ph})
-            AND s.status != 'archived'{inst_sql}
+            AND s.status NOT IN ('archived','failed'){inst_sql}
             ORDER BY s.id, sse.created_at DESC
         ),
         all_matches AS (

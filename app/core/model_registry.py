@@ -247,7 +247,7 @@ def resolve_api_model_id(value: Optional[str]) -> Optional[str]:
     return value if resolved is None else resolved
 
 
-def _is_subscription_row(row: Dict[str, object]) -> bool:
+def _is_subscription_row(row: ModelProviderRow) -> bool:
     """Whether a ``model_providers`` row authenticates as a ChatGPT subscription.
 
     Mirrors ``app.core.provider.fluid_credentials._is_codex_subscription``:
@@ -322,16 +322,16 @@ def _providers_payload() -> List[Dict[str, object]]:
     plan_types = _provider_plan_types() if any(_is_subscription_row(r) for r in rows) else {}
     return [
         {
-            "id": row["id"],
-            "name": row["name"],
-            "provider_type": row["provider_type"],
+            "id": row.get("id"),
+            "name": row.get("name"),
+            "provider_type": row.get("provider_type"),
             # Display metadata (brand + auth-kind subtext). ``auth_kind`` says
             # HOW the row authenticates; ``plan_type`` names the subscription
             # tier for subscription rows (null for API-key rows, and for a
             # subscription row whose usage snapshot hasn't landed yet).
             "auth_kind": "subscription" if _is_subscription_row(row) else "api",
             "plan_type": (
-                plan_types.get(row["id"]) if _is_subscription_row(row) else None
+                plan_types.get(row.get("id", "")) if _is_subscription_row(row) else None
             ),
             "models": [
                 {
