@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
 from app.db import database
+from app.db.model_providers import ModelProviderRow
 from app.core.config import settings
 from app.core.platform import DeploymentMode
 from app.core import encryption
@@ -390,7 +391,7 @@ def inject_claude_code_auth(
 # driven by the per-model resolution in ``model_registry``.
 
 
-def is_provider_servable(provider: Optional[Dict[str, Any]]) -> bool:
+def is_provider_servable(provider: Optional[ModelProviderRow]) -> bool:
     """Whether the app can serve a provider row as a first-class model source.
 
     True iff ``provider_type`` is one of ``openai`` / ``chatgpt`` / ``anthropic``
@@ -428,7 +429,7 @@ def is_provider_servable(provider: Optional[Dict[str, Any]]) -> bool:
     )
 
 
-def _small_fast_model(provider: Optional[Dict[str, Any]]) -> Optional[str]:
+def _small_fast_model(provider: Optional[ModelProviderRow]) -> Optional[str]:
     """The STABLE provider-scoped small/fast model id, or None.
 
     Resolution chain (never the per-turn ``model``): the provider's
@@ -704,7 +705,7 @@ def apply_provider_env(
     return env
 
 
-def _first_curated_model_id(provider: Dict[str, Any]) -> Optional[str]:
+def _first_curated_model_id(provider: ModelProviderRow) -> Optional[str]:
     """First curated model id from a provider row, or None.
 
     Defensive about the row shape: ``models_json`` is normally a parsed list of

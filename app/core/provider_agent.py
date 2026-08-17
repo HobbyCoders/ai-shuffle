@@ -58,9 +58,14 @@ import logging
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Tuple
 
 from app.core import rate_limit_breaker
+
+if TYPE_CHECKING:  # pragma: no cover — annotation-only; the DB imports in this
+    # module are all lazy (inside functions), and ``from __future__ import
+    # annotations`` above makes the row types free to name here.
+    from app.db.sessions import SessionRow
 
 logger = logging.getLogger(__name__)
 
@@ -840,7 +845,7 @@ async def dispatch_worker(
     # ``parent_session_id`` is the ROUTING parent — for nested Task-tool
     # dispatch it is the ROOT session, whose UI renders the card and answers
     # approvals (ruling A9 multi-level routing). They coincide for depth-1.
-    parent_row: Optional[Dict[str, Any]] = None
+    parent_row: Optional[SessionRow] = None
     try:
         parent_row = database.get_session(context_session_id or parent_session_id)
     except Exception:  # noqa: BLE001 — inheritance is best-effort

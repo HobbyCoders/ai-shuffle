@@ -33,7 +33,7 @@ edit in place as the public lineup settles; nothing downstream hardcodes these.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 # ChatGPT/Codex-subscription preset roster (LIVE-CONFIRMED 2026-07-18 — see module
 # docstring + docs/CODEX_SPIKE_FINDINGS.md). Shape mirrors ``models_json``:
@@ -76,7 +76,7 @@ _PRESET_ROSTERS: Dict[str, List[Dict[str, Any]]] = {
 }
 
 
-def preset_kind_for(provider_row: Optional[Dict[str, Any]]) -> Optional[str]:
+def preset_kind_for(provider_row: Optional[Mapping[str, Any]]) -> Optional[str]:
     """Normalized preset classification for a provider row, or ``None``.
 
     Keys on ``auth_mode`` FIRST, then ``provider_type`` (plan ruling PR1 — the
