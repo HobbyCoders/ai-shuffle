@@ -20,9 +20,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple
 
 from app.core.model_catalog_presets import preset_context_window, preset_kind_for
+
+if TYPE_CHECKING:  # pragma: no cover — annotation-only, avoids an import cycle
+    from app.db.model_providers import ModelProviderRow
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +180,7 @@ def _positive_int(value: Any) -> Optional[int]:
 
 
 def resolve_provider_context_window(
-    provider_row: Optional[Dict[str, Any]],
+    provider_row: Optional[ModelProviderRow],
     model_id: Optional[str],
     model_entry: Optional[Dict[str, Any]] = None,
 ) -> Optional[int]:

@@ -79,7 +79,7 @@ class ProviderAdapter(ABC):
         """
 
     @abstractmethod
-    async def receive_events(self) -> AsyncIterator[ProviderEvent]:
+    def receive_events(self) -> AsyncIterator[ProviderEvent]:
         """Yield provider events for the current query.
 
         Events are provider-agnostic dataclasses. The caller is responsible
@@ -87,6 +87,12 @@ class ProviderAdapter(ABC):
 
         This iterator completes when the query finishes (ResultEvent),
         is interrupted (InterruptedEvent), or errors (ErrorEvent).
+
+        Declared with ``def`` rather than ``async def``: every implementation is
+        an async GENERATOR, so calling it returns the async iterator directly
+        (``async for ev in adapter.receive_events()``) and never a coroutine to
+        await. The abstract body is a docstring only, so this is a signature
+        correction — nothing calls it.
         """
 
     @abstractmethod

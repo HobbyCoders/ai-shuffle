@@ -49,6 +49,7 @@ class ModelProviderRow(TypedDict, total=False):
     name: str
     provider_type: str
     base_url: str
+    api_dialect: Optional[str]
     auth_token: Optional[str]
     models_json: List[Any]
     default_model: Optional[str]
