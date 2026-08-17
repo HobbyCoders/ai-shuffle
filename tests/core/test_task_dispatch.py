@@ -600,7 +600,7 @@ def test_discover_agent_registry_shape(file_agent_project):
 
 @pytest.fixture()
 def providers(agents):
-    """Three servable providers plus one that is not, all credentialed."""
+    """Four servable providers plus one that is not, all credentialed."""
     from app.db import database
 
     database.create_model_provider(
@@ -615,11 +615,19 @@ def providers(agents):
         "xai-1", "xAI", "openai", "https://api.x.ai",
         auth_token="enc:key", models=[{"id": "grok-9"}],
     )
-    # OpenRouter is deliberately NOT servable for cross-provider workers
-    # (environment.is_provider_servable), so it must never be picked.
+    # OpenRouter IS servable for cross-provider workers as of the 2026-08-17
+    # ruling (environment.is_provider_servable) — fluid drives it natively.
     database.create_model_provider(
         "openrouter-1", "OpenRouter", "openrouter", "https://openrouter.ai/api",
-        auth_token="enc:key", models=[{"id": "grok-9"}, {"id": "gpt-4o"}],
+        auth_token="enc:key", models=[{"id": "moonshotai/kimi-k2"}],
+    )
+    # A ``custom`` row is the remaining non-servable kind (its leg depends on a
+    # user-supplied base_url, not on the type), so it must never be picked. Its
+    # name sorts FIRST, so any test it does not win proves the servable gate ran
+    # rather than the (name, id) ordering.
+    database.create_model_provider(
+        "custom-1", "Custom Endpoint", "custom", "https://custom.example",
+        auth_token="enc:key", models=[{"id": "gpt-4o"}, {"id": "grok-9"}],
     )
 
     database.create_profile(
@@ -749,19 +757,66 @@ def test_claude_sub_caller_override_stays_on_the_targets_provider(providers):
     assert "note" not in payload
 
 
-def test_claude_sub_caller_to_openrouter_bound_target_is_refused(providers):
-    """CURRENT admission rule, recorded rather than endorsed: an OpenRouter row
-    is not ``environment.is_provider_servable``, so an agent bound to one cannot
-    be a worker target — from ANY caller, Claude-sub included. Widening that set
-    is a product decision (see the is_provider_servable docstring)."""
+def test_claude_sub_caller_to_openrouter_bound_target_keeps_the_targets_binding(
+    providers,
+):
+    """2026-08-17 ruling: an OpenRouter row IS
+    ``environment.is_provider_servable``, so an agent bound to one is a legal
+    worker target — rule 1 applies to it like any other native leg."""
     from app.db import database
 
     database.create_profile(
         "openrouter-agent", "OpenRouter Agent", None,
-        {"model": "grok-9", "provider": "openrouter-1"},
+        {"model": "moonshotai/kimi-k2", "provider": "openrouter-1"},
     )
     payload, seen = _spawn(
         providers, {"agent": "openrouter-agent", "prompt": "go"}, "s-cs6", "root-agent",
+    )
+    assert payload["ok"] is True
+    assert seen["provider_id"] == "openrouter-1"
+    # None = inherit the TARGET profile's own model (moonshotai/kimi-k2).
+    assert seen["model_id"] is None
+    assert "note" not in payload
+
+
+def test_openrouter_bound_target_is_servable_from_a_native_caller_too(providers):
+    """Not just the Claude-sub direction: an OpenAI-bound caller reaches it, and
+    an explicit override on an OpenRouter slug resolves to that row."""
+    from app.db import database
+
+    database.create_profile(
+        "openrouter-agent2", "OpenRouter Agent 2", None,
+        {"model": "moonshotai/kimi-k2", "provider": "openrouter-1"},
+    )
+    payload, seen = _spawn(
+        providers,
+        {"agent": "openrouter-agent2", "prompt": "go"}, "s-cs7", "openai-agent",
+    )
+    assert payload["ok"] is True
+    assert seen["provider_id"] == "openrouter-1"
+
+    payload, seen = _spawn(
+        providers,
+        {"agent": "claude-alias", "prompt": "go", "model": "moonshotai/kimi-k2"},
+        "s-cs8", "openai-agent",
+    )
+    assert payload["ok"] is True
+    assert seen["provider_id"] == "openrouter-1"
+    assert seen["model_id"] == "moonshotai/kimi-k2"
+
+
+def test_custom_bound_target_is_still_refused(providers):
+    """The narrowed refusal that survives: a ``custom`` row's leg is not implied
+    by its type (base_url + api_dialect decide), so it cannot be a worker
+    target."""
+    from app.db import database
+
+    database.create_profile(
+        "custom-agent", "Custom Agent", None,
+        {"model": "grok-9", "provider": "custom-1"},
+    )
+    payload, seen = _spawn(
+        providers, {"agent": "custom-agent", "prompt": "go"}, "s-cs9", "root-agent",
     )
     assert payload["ok"] is False
     assert "cannot serve worker sessions" in payload["error"]
@@ -807,7 +862,8 @@ def test_rule2_falls_back_to_the_delegated_cli_with_a_note(providers):
 
 
 def test_rule2_never_picks_a_non_servable_provider(providers):
-    """OpenRouter curates 'gpt-4o' too, but is not servable for workers."""
+    """The custom row curates 'gpt-4o' too and sorts FIRST by name, but is not
+    servable for workers, so the OpenAI row still wins."""
     binding = td.resolve_dispatch_binding(
         target_provider_id=None, target_model=None,
         model_override="gpt-4o", caller_provider_id=None,

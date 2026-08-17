@@ -179,13 +179,24 @@ class TestValidateProviderModel:
         assert "disabled" in result.reason
 
     def test_non_servable_provider(self):
+        """A ``custom`` row: its leg comes from base_url + api_dialect, not from
+        the type, so it is the kind that stays out of the servable set."""
         result = pa.validate_provider_model(
-            "prov-or", "gpt-5.5", provider_row=_provider(provider_type="openrouter")
+            "prov-custom", "gpt-5.5", provider_row=_provider(provider_type="custom")
         )
 
         assert not result.ok
         assert result.code == pa.PROVIDER_NOT_SERVABLE
         assert "not servable" in result.reason
+
+    def test_openrouter_is_servable(self):
+        """2026-08-17 ruling: OpenRouter rows are worker-target providers (fluid
+        drives them natively via OpenRouterClient)."""
+        result = pa.validate_provider_model(
+            "prov-or", "gpt-5.5", provider_row=_provider(provider_type="openrouter")
+        )
+
+        assert result.ok
 
     def test_chatgpt_auth_mode_is_servable(self):
         """``auth_mode == 'chatgpt'`` is servable even with an odd type — mirrors

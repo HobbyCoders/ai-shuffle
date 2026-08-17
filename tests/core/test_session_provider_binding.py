@@ -314,9 +314,9 @@ class TestCompositeOverrideRebindsProvider:
         assert opts.env[BASE_URL_KEY] == "https://openrouter.ai/api"
 
     def test_openrouter_composite_is_accepted(self, mock_db, tmp_path):
-        """OpenRouter rows fail ``is_provider_servable`` (that predicate gates
-        cross-provider WORKER models), but a MAIN session may bind to any enabled
-        provider — exactly as the profile editor has always allowed."""
+        """OpenRouter rows bind a MAIN session fine — and since the 2026-08-17
+        ruling they also pass ``is_provider_servable`` (the cross-provider WORKER
+        gate), so nothing about this path is a special case any more."""
         encryption.set_encryption_key("pw", db)
         _mk_provider("op", token="gw-secret")
         _mk_profile("nat", {"model": "opus"})

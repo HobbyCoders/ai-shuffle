@@ -355,10 +355,10 @@ def validate_provider_model(
 
     ``require_servable=False`` skips ONLY the
     :func:`~app.core.environment.is_provider_servable` gate. That predicate is
-    the admission rule for *cross-provider WORKER* models, and it deliberately
-    excludes ``openrouter`` — but a MAIN session may bind to any enabled
-    provider (the profile editor has always allowed it, and fluid serves
-    OpenRouter natively). The composer's model override (PA13) validates
+    the admission rule for *cross-provider WORKER* models, and it still excludes
+    ``custom`` rows (whose leg depends on a user-supplied ``base_url``) — but a
+    MAIN session may bind to any enabled provider (the profile editor has always
+    allowed it). The composer's model override (PA13) validates
     existence + enabled + curated-membership only, so it can offer exactly the
     grouped library the profile editor offers instead of a strict subset.
 
@@ -407,8 +407,8 @@ def validate_provider_model(
             code=PROVIDER_NOT_SERVABLE,
             reason=(
                 f"The provider '{label}' is not servable: a cross-provider "
-                f"model requires an OpenAI-, ChatGPT-, or Anthropic-API-type "
-                f"provider."
+                f"model requires an OpenAI-, ChatGPT-, OpenRouter-, or "
+                f"Anthropic-API-type provider."
             ),
             provider=dict(row),
             provider_label=label,

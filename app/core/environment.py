@@ -394,22 +394,38 @@ def is_provider_servable(provider: Optional[Dict[str, Any]]) -> bool:
     """Whether the app can serve a provider row as a first-class model source.
 
     True iff ``provider_type`` is one of ``openai`` / ``chatgpt`` / ``anthropic``
-    (or ``auth_mode == "chatgpt"``).
+    / ``openrouter`` (or ``auth_mode == "chatgpt"``).
 
     Formerly ``is_gateway_servable``: the accepted set was defined by what the
     translator gateway could translate. The gateway is gone, but the predicate
     outlived it as the admission rule for cross-provider MODEL selection —
     ProviderAgent worker models (``provider_agent.validate_provider_model``) and
-    the profile-level subagent-leg validator both gate on it. The accepted set is
-    deliberately unchanged by the retirement: loosening it (e.g. to admit
-    ``openrouter``, which fluid can now serve natively) is a product decision, not
-    a mechanical consequence of deleting the gateway.
+    the profile-level subagent-leg validator both gate on it.
+
+    ``openrouter`` was admitted by the 2026-08-17 ruling ("an agent bound to an
+    OpenRouter model must be spawnable as a subagent"). The criterion for the set
+    is now mechanical: a ``provider_type`` is admitted when it alone names a fluid
+    client the native leg can drive — see
+    ``provider.harness_adapter._provider_row_kind``, which maps
+    ``openai``/``chatgpt`` → ``OpenAIResponsesClient``, ``openrouter`` →
+    ``OpenRouterClient``, and ``anthropic`` → ``AnthropicClient`` (or the
+    delegated CLI leg for a subscription ``auth_mode``).
+
+    ``custom`` stays OUT on purpose: its leg is not implied by the type at all —
+    it depends on the row's ``api_dialect`` plus a user-supplied ``base_url``
+    whose wire format the app cannot vouch for, so a worker bound to one can
+    still 401 at connect. The ``auth_mode == "chatgpt"`` clause below is the
+    deliberate exception: such a custom row IS a Codex subscription row wearing a
+    different type, and its leg is known.
     """
     if not provider:
         return False
     ptype = provider.get("provider_type")
     auth_mode = provider.get("auth_mode")
-    return ptype in ("openai", "chatgpt", "anthropic") or auth_mode == "chatgpt"
+    return (
+        ptype in ("openai", "chatgpt", "anthropic", "openrouter")
+        or auth_mode == "chatgpt"
+    )
 
 
 def _small_fast_model(provider: Optional[Dict[str, Any]]) -> Optional[str]:
