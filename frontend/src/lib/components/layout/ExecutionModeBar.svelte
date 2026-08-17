@@ -190,8 +190,9 @@
 	// hiccup can never lock the user out of their own devices.
 	let eligibility = $state<Record<string, boolean> | null>(null);
 
-	// Other installs only — "this device" is the Local item above.
-	const otherInstalls = $derived(installs.filter(i => !i.is_self));
+	// Only online installs can accept a new cloud session. "This device" stays
+	// represented by the Local item above rather than appearing twice.
+	const onlineInstalls = $derived(installs.filter(i => !i.is_self && i.online));
 
 	const deviceIntent = $derived($activeSession.deviceIntent);
 
@@ -406,10 +407,10 @@
 									<Loader2 size={14} class="animate-spin" />
 									<span>Loading...</span>
 								</div>
-							{:else if otherInstalls.length === 0}
-								<p class="branch-empty">No other devices</p>
+							{:else if onlineInstalls.length === 0}
+								<p class="branch-empty">No online devices</p>
 							{:else}
-								{#each otherInstalls as install (install.id)}
+								{#each onlineInstalls as install (install.id)}
 									<button
 										type="button"
 										class="branch-item device-item"
@@ -423,9 +424,7 @@
 									>
 										<Cloud size={13} strokeWidth={1.5} />
 										<span class="branch-item-name">{install.device_name}</span>
-										{#if !install.online}
-											<span class="device-offline">offline</span>
-										{:else if isIneligible(install.id)}
+										{#if isIneligible(install.id)}
 											<span class="device-nocheckout">no checkout</span>
 										{/if}
 									</button>
@@ -726,18 +725,8 @@
 		background: transparent;
 	}
 
-	.device-offline {
-		font-size: 0.5625rem;
-		font-weight: 500;
-		padding: 1px 5px;
-		border-radius: 4px;
-		background: color-mix(in oklch, var(--muted-foreground) 15%, transparent);
-		color: var(--muted-foreground);
-	}
-
-	/* Informational sibling of .device-offline: the device is reachable, it just
-	   has no checkout of this project. Deliberately subtler (outline only, no
-	   fill) since in plain mode the row stays selectable. */
+	/* The device is reachable but has no checkout of this project. The outline is
+	   deliberately subtle because the row stays selectable in plain mode. */
 	.device-nocheckout {
 		font-size: 0.5625rem;
 		font-weight: 500;
