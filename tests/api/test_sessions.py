@@ -1588,7 +1588,11 @@ class TestExportSession:
             {"role": "user", "content": "Hello"}
         ]
 
-        response = client.get("/api/v1/sessions/test-session-id/export?format=json")
+        with patch(
+            "app.api.sessions_helpers.parse_session_history_via_store",
+            return_value=([], {}),
+        ):
+            response = client.get("/api/v1/sessions/test-session-id/export?format=json")
 
         assert response.status_code == 200
         assert "application/json" in response.headers["content-type"]
@@ -1606,7 +1610,11 @@ class TestExportSession:
             {"role": "assistant", "content": "Hi there!"}
         ]
 
-        response = client.get("/api/v1/sessions/test-session-id/export?format=markdown")
+        with patch(
+            "app.api.sessions_helpers.parse_session_history_via_store",
+            return_value=([], {}),
+        ):
+            response = client.get("/api/v1/sessions/test-session-id/export?format=markdown")
 
         assert response.status_code == 200
         assert "text/markdown" in response.headers["content-type"]
@@ -1644,7 +1652,11 @@ class TestExportSession:
             }
         ]
 
-        response = client.get("/api/v1/sessions/test-session-id/export?format=markdown")
+        with patch(
+            "app.api.sessions_helpers.parse_session_history_via_store",
+            return_value=([], {}),
+        ):
+            response = client.get("/api/v1/sessions/test-session-id/export?format=markdown")
 
         assert response.status_code == 200
         content = response.text
@@ -1672,15 +1684,84 @@ class TestExportSession:
         # Content must be the file bytes verbatim, not re-serialized.
         assert response.text == raw
 
-    def test_export_session_jsonl_no_file(self, client, mock_database, sample_session):
-        """Should return 404 when no JSONL history file exists for the session."""
-        mock_database.get_session.return_value = sample_session
+    def test_export_session_jsonl_from_fluid_transcript(
+        self, client, mock_database, sample_session
+    ):
+        """Should serialize Fluid transcript entries when no Claude file exists."""
+        fluid_session = {**sample_session, "sdk_session_id": "ses_deadbeefcafe"}
+        mock_database.get_session.return_value = fluid_session
+        entries = [
+            {
+                "type": "user",
+                "uuid": "n1",
+                "sessionId": "ses_deadbeefcafe",
+                "message": {"role": "user", "content": [{"type": "text", "text": "Hello"}]},
+            },
+            {
+                "type": "assistant",
+                "uuid": "n2",
+                "sessionId": "ses_deadbeefcafe",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Hi"}],
+                },
+            },
+        ]
 
-        with patch("app.core.jsonl_parser.get_session_jsonl_path", return_value=None):
+        with patch(
+            "app.core.provider.fluid_transcript.is_fluid_session", return_value=True
+        ), patch(
+            "app.core.provider.fluid_transcript.fluid_transcript_entries",
+            return_value=entries,
+        ):
+            response = client.get("/api/v1/sessions/test-session-id/export?format=jsonl")
+
+        assert response.status_code == 200
+        assert [json.loads(line) for line in response.text.splitlines()] == entries
+
+    def test_export_session_json_uses_fluid_messages(
+        self, client, mock_database, sample_session
+    ):
+        """JSON export should include assistant and tool history from Fluid."""
+        fluid_session = {**sample_session, "sdk_session_id": "ses_deadbeefcafe"}
+        mock_database.get_session.return_value = fluid_session
+        messages = [
+            {"role": "user", "type": "text", "content": "Hello"},
+            {"role": "assistant", "type": "text", "content": "Hi from Fluid"},
+        ]
+
+        with patch(
+            "app.core.provider.fluid_transcript.is_fluid_session", return_value=True
+        ), patch(
+            "app.core.provider.fluid_transcript.fluid_live_messages",
+            return_value=(messages, {}),
+        ):
+            response = client.get("/api/v1/sessions/test-session-id/export?format=json")
+
+        assert response.status_code == 200
+        assert response.json()["messages"] == messages
+        mock_database.get_session_messages.assert_not_called()
+
+    def test_export_session_jsonl_no_history(self, client, mock_database, sample_session):
+        """Should return 404 only when no transcript source has any history."""
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_session_messages.return_value = []
+
+        with patch(
+            "app.core.provider.fluid_transcript.is_fluid_session", return_value=False
+        ), patch(
+            "app.core.jsonl_parser.get_session_jsonl_path", return_value=None
+        ), patch(
+            "app.core.pg_session_store._load_entries_by_session_id_sync",
+            return_value=[],
+        ), patch(
+            "app.api.sessions_helpers.parse_session_history_via_store",
+            return_value=([], {}),
+        ):
             response = client.get("/api/v1/sessions/test-session-id/export?format=jsonl")
 
         assert response.status_code == 404
-        assert "JSONL" in response.json()["detail"]
+        assert "history" in response.json()["detail"].lower()
 
 
 # =============================================================================

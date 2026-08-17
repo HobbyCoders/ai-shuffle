@@ -27,6 +27,108 @@ logger = logging.getLogger(__name__)
 export_router = APIRouter(tags=["Sessions"])
 
 
+async def _load_legacy_messages(session_id: str) -> list:
+    db_messages = await run_sync(database.get_session_messages, session_id)
+    messages = []
+    for m in db_messages:
+        msg = dict(m)
+        if msg.get("tool_name"):
+            msg["type"] = "tool_use"
+            msg["toolName"] = msg.get("tool_name")
+            msg["toolInput"] = msg.get("tool_input")
+        elif msg.get("role") == "assistant":
+            msg["type"] = "text"
+        messages.append(msg)
+    return messages
+
+
+async def _load_export_messages(session: dict, working_dir: str) -> list:
+    """Load the complete transcript through the same source chain as chat views."""
+    session_id = session["id"]
+    sdk_session_id = session.get("sdk_session_id")
+
+    if sdk_session_id:
+        try:
+            from app.core.provider.fluid_transcript import is_fluid_session, fluid_live_messages
+
+            if await run_sync(is_fluid_session, sdk_session_id):
+                messages, _usage = await run_sync(
+                    fluid_live_messages, sdk_session_id, working_dir
+                )
+            else:
+                from app.api.sessions_helpers import parse_session_history_via_store
+
+                messages, _usage = await run_sync(
+                    parse_session_history_via_store, sdk_session_id, working_dir
+                )
+            if messages:
+                return messages
+        except Exception:
+            logger.exception("Failed to load transcript for export session %s", session_id)
+
+    return await _load_legacy_messages(session_id)
+
+
+async def _load_jsonl_content(session: dict, working_dir: str) -> str:
+    """Return the best authoritative transcript as newline-delimited JSON."""
+    import json
+
+    session_id = session["id"]
+    sdk_session_id = session.get("sdk_session_id")
+    entries = []
+
+    if sdk_session_id:
+        try:
+            from app.core.provider.fluid_transcript import (
+                is_fluid_session,
+                fluid_transcript_entries,
+            )
+
+            if await run_sync(is_fluid_session, sdk_session_id):
+                entries = await run_sync(fluid_transcript_entries, sdk_session_id)
+            else:
+                from app.core.jsonl_parser import get_session_jsonl_path
+
+                jsonl_path = await run_sync(
+                    get_session_jsonl_path, sdk_session_id, working_dir
+                )
+                if jsonl_path:
+                    try:
+                        return jsonl_path.read_text(encoding="utf-8")
+                    except Exception as exc:
+                        logger.error(
+                            "Failed to read JSONL file for session %s: %s",
+                            session_id,
+                            exc,
+                        )
+                        raise HTTPException(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail="Failed to read JSONL history file",
+                        ) from exc
+
+                from app.core.pg_session_store import _load_entries_by_session_id_sync
+
+                entries = await run_sync(
+                    _load_entries_by_session_id_sync, sdk_session_id
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            logger.exception("Failed to load JSONL transcript for session %s", session_id)
+
+    if entries:
+        return "".join(json.dumps(entry, default=str) + "\n" for entry in entries)
+
+    messages = await _load_export_messages(session, working_dir)
+    if messages:
+        return "".join(json.dumps(message, default=str) + "\n" for message in messages)
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="No chat history found for this session",
+    )
+
+
 @export_router.get("/{session_id}/export")
 async def export_session(
     request: Request,
@@ -44,7 +146,8 @@ async def export_session(
     Returns:
         - For markdown: Plain text Markdown representation
         - For JSON: Full session data including metadata and messages
-        - For JSONL: The raw Claude session history (.jsonl) file
+        - For JSONL: The authoritative transcript as newline-delimited JSON;
+          raw Claude history files are returned verbatim when available
     """
     from datetime import datetime, timezone
     from fastapi.responses import Response
@@ -59,15 +162,9 @@ async def export_session(
 
     session = await require_session(request, session_id)
 
-    sdk_session_id = session.get("sdk_session_id")
+    from app.core.message_resolver import resolve_working_dir
 
-    # Resolve working dir from project if available (used by JSONL lookups below)
-    working_dir = "/workspace"
-    project_id = session.get("project_id")
-    if project_id:
-        project = await run_sync(database.get_project, project_id)
-        if project:
-            working_dir = get_project_working_dir(project)
+    working_dir = await run_sync(resolve_working_dir, dict(session))
 
     # Generate base filename
     title = session.get("title") or "untitled-session"
@@ -76,29 +173,8 @@ async def export_session(
     safe_title = safe_title.strip().replace(" ", "-")[:50]
     date_str = datetime.now().strftime("%Y%m%d")
 
-    # Raw JSONL export — stream the original Claude session history file verbatim.
     if format == "jsonl":
-        from app.core.jsonl_parser import get_session_jsonl_path
-
-        jsonl_path = None
-        if sdk_session_id:
-            jsonl_path = await run_sync(get_session_jsonl_path, sdk_session_id, working_dir)
-
-        if not jsonl_path:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="No JSONL history file found for this session"
-            )
-
-        try:
-            content = jsonl_path.read_text(encoding="utf-8")
-        except Exception as e:
-            logger.error(f"Failed to read JSONL file for session {session_id}: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to read JSONL history file"
-            )
-
+        content = await _load_jsonl_content(session, working_dir)
         filename = f"{safe_title}-{date_str}.jsonl"
         return Response(
             content=content,
@@ -108,32 +184,7 @@ async def export_session(
             }
         )
 
-    # Load messages from JSONL (same logic as get_session)
-    messages = []
-
-    if sdk_session_id:
-        try:
-            from app.core.jsonl_parser import parse_session_history
-
-            jsonl_messages, _usage = await run_sync(parse_session_history, sdk_session_id, working_dir)
-            if jsonl_messages:
-                messages = jsonl_messages
-        except Exception as e:
-            logger.error(f"Failed to parse JSONL for session {session_id}: {e}")
-            messages = []
-
-    # Fall back to database if JSONL not available
-    if not messages:
-        db_messages = await run_sync(database.get_session_messages, session_id)
-        for m in db_messages:
-            msg = dict(m)
-            if msg.get("tool_name"):
-                msg["type"] = "tool_use"
-                msg["toolName"] = msg.get("tool_name")
-                msg["toolInput"] = msg.get("tool_input")
-            elif msg.get("role") == "assistant":
-                msg["type"] = "text"
-            messages.append(msg)
+    messages = await _load_export_messages(session, working_dir)
 
     if format == "json":
         # JSON export - include full session data
