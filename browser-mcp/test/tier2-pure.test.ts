@@ -238,6 +238,39 @@ describe("runBatch", () => {
     expect(body.results[0].error).toMatch(/missing required/);
   });
 
+  it("normalizes optional placeholders before dispatching a nested tool", async () => {
+    let received: Record<string, unknown> | undefined;
+    const tool = {
+      inputSchema: {
+        type: "object",
+        properties: {
+          kind: { type: "string" },
+          ref: { type: "string" },
+          coordinate: { type: "array", items: { type: "number" } },
+        },
+        required: ["kind"],
+        additionalProperties: false,
+      } as JsonSchema,
+      run: async (_session: Session, input: Record<string, unknown>): Promise<McpToolResult> => {
+        received = input;
+        return { content: [{ type: "text", text: '{"ok":true}' }] };
+      },
+    };
+
+    const res = await runBatch(
+      session,
+      {
+        actions: [
+          '{"tool":"browser_act","input":{"kind":"hover","ref":"e6","coordinate":[]}}',
+        ],
+      },
+      () => tool,
+    );
+
+    expect(res.isError).not.toBe(true);
+    expect(received).toEqual({ kind: "hover", ref: "e6" });
+  });
+
   it("rejects empty and over-cap action lists", async () => {
     expect((await runBatch(session, { actions: [] }, () => okTool)).isError).toBe(true);
     const many = Array.from({ length: BATCH_MAX_ACTIONS + 1 }, () => '{"tool":"a"}');

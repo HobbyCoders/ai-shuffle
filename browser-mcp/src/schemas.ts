@@ -318,6 +318,30 @@ export interface ValidationResult {
 }
 
 /**
+ * Translated Responses tool schemas are strict and require every property, so
+ * callers fill optional strings and arrays with empty placeholders. Remove only
+ * those placeholders before validation and dispatch. `value` is exempt because
+ * an empty value intentionally clears an input in browser_act.
+ */
+export function normalizeOptionalInput(
+  schema: JsonSchema,
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  const required = new Set(schema.required ?? []);
+  const normalized: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(input)) {
+    const isOptional = key in schema.properties && !required.has(key);
+    const isEmptyPlaceholder =
+      (value === "" && key !== "value") || (Array.isArray(value) && value.length === 0);
+    if (isOptional && isEmptyPlaceholder) continue;
+    normalized[key] = value;
+  }
+
+  return normalized;
+}
+
+/**
  * Minimal validator for the flat schema subset above. Enforces: unknown keys,
  * required keys, primitive types, enum membership, array item primitives, and
  * numeric bounds. Intentionally does not implement JSON Schema at large.

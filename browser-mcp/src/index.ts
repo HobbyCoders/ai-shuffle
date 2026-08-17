@@ -19,7 +19,7 @@ import { BrowserManager, BROWSER_RESTARTING, BrowserRestartingError } from "./br
 import { Session } from "./session.js";
 import { SERVER_INSTRUCTIONS } from "./instructions.js";
 import { TOOL_DEFINITIONS, TOOL_MAP } from "./tools/index.js";
-import { validateInput } from "./schemas.js";
+import { normalizeOptionalInput, validateInput } from "./schemas.js";
 import { errorResult } from "./tools/result.js";
 import { reportCurrentTarget } from "./panel.js";
 
@@ -50,7 +50,8 @@ async function main(): Promise<void> {
     const def = TOOL_MAP.get(request.params.name);
     if (!def) return errorResult(`unknown tool: ${request.params.name}`);
 
-    const args = (request.params.arguments ?? {}) as Record<string, unknown>;
+    const rawArgs = (request.params.arguments ?? {}) as Record<string, unknown>;
+    const args = normalizeOptionalInput(def.inputSchema, rawArgs);
     const valid = validateInput(def.inputSchema, args);
     if (!valid.ok) return errorResult(valid.error ?? "invalid input");
 

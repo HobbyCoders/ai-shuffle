@@ -12,7 +12,7 @@
 
 import type { Session } from "../session.js";
 import { jsonResult, errorResult, type McpToolResult, type McpContent } from "./result.js";
-import { validateInput, type JsonSchema } from "../schemas.js";
+import { normalizeOptionalInput, validateInput, type JsonSchema } from "../schemas.js";
 
 export const BATCH_MAX_ACTIONS = 20;
 /** Chars of each item's result text surfaced in the batch summary. */
@@ -117,7 +117,8 @@ export async function runBatch(
       allOk = false;
       break;
     }
-    const valid = validateInput(tool.inputSchema, action.input);
+    const normalizedInput = normalizeOptionalInput(tool.inputSchema, action.input);
+    const valid = validateInput(tool.inputSchema, normalizedInput);
     if (!valid.ok) {
       results.push({ tool: action.tool, ok: false, error: valid.error ?? "invalid input" });
       allOk = false;
@@ -127,7 +128,7 @@ export async function runBatch(
     let res: McpToolResult;
     try {
       // Direct call — the batch itself already holds the runExclusive turn.
-      res = await tool.run(session, action.input);
+      res = await tool.run(session, normalizedInput);
     } catch (err) {
       results.push({
         tool: action.tool,

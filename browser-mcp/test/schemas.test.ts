@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   TOOL_SCHEMAS,
+  normalizeOptionalInput,
   validateInput,
   navigateSchema,
   snapshotSchema,
@@ -70,6 +71,45 @@ describe("schema floor (OpenAI strict / Gemini compat)", () => {
         }
       }
     }
+  });
+});
+
+describe("normalizeOptionalInput", () => {
+  it("removes strict-schema placeholders from optional fields", () => {
+    expect(
+      normalizeOptionalInput(actSchema, {
+        kind: "hover",
+        ref: "e6",
+        coordinate: [],
+        value: "",
+        key: "",
+        modifiers: [],
+        to_coordinate: [],
+      }),
+    ).toEqual({ kind: "hover", ref: "e6", value: "" });
+
+    expect(
+      normalizeOptionalInput(networkSchema, {
+        url_pattern: "",
+        request_id: "",
+        limit: 20,
+        clear: false,
+      }),
+    ).toEqual({ limit: 20, clear: false });
+
+    expect(normalizeOptionalInput(screenshotSchema, { region: [], full_page: false })).toEqual({
+      full_page: false,
+    });
+  });
+
+  it("preserves required empties, meaningful empty values, and unknown properties", () => {
+    expect(normalizeOptionalInput(consoleSchema, { pattern: "" })).toEqual({ pattern: "" });
+    expect(normalizeOptionalInput(actSchema, { kind: "fill", ref: "e1", value: "" })).toEqual({
+      kind: "fill",
+      ref: "e1",
+      value: "",
+    });
+    expect(normalizeOptionalInput(networkSchema, { bogus: "" })).toEqual({ bogus: "" });
   });
 });
 
