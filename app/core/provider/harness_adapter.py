@@ -152,7 +152,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional, Tuple, cast
 
 import httpx
 
@@ -217,6 +217,11 @@ from fluid.providers.openai_responses.client import (
 from fluid.providers.openrouter.client import OpenRouterClient
 from fluid.store.base import MemoryStore
 from fluid.tools.registry import ToolCtx, ToolRegistry
+
+if TYPE_CHECKING:  # pragma: no cover — annotation-only; the DB import below is
+    # deliberately lazy (inside ``_lookup_provider_row``), and this module has
+    # ``from __future__ import annotations``, so naming the row type is free.
+    from app.db.model_providers import ModelProviderRow
 
 logger = logging.getLogger(__name__)
 
@@ -295,7 +300,12 @@ class HarnessAdapter(ProviderAdapter):
     async def connect(self, options: SessionOptions) -> None:
         """Build the fluid engine from SessionOptions and prime its session."""
         self._options = options
-        self._store = self._build_store(options)
+        # Kept in a local as well as on ``self``: the engine constructors below
+        # take a non-optional store, and the local is what carries that
+        # non-optional fact to a reader (``self._store`` stays Optional because
+        # it is None before connect and after disconnect).
+        store = self._build_store(options)
+        self._store = store
 
         # Decide the leg BEFORE building the registry: the native legs need
         # fluid's builtin file/shell tools registered, the delegated leg must not
@@ -338,7 +348,7 @@ class HarnessAdapter(ProviderAdapter):
                     system, append_system, agents_index
                 )
             self._engine = DelegatedLoop(
-                store=self._store,
+                store=store,
                 model=options.model,
                 system=delegated_system,
                 append_system_prompt=delegated_append,
@@ -454,8 +464,12 @@ class HarnessAdapter(ProviderAdapter):
             )
             self._engine = NativeLoop(
                 provider=provider_client,
-                store=self._store,
-                model=native_model,
+                store=store,
+                # fluid's NativeLoop annotates ``model`` as ``str`` while
+                # SessionOptions carries Optional[str]. The value is handed over
+                # exactly as before — the cast bridges the annotations only and
+                # deliberately does NOT substitute a default for None.
+                model=cast(str, native_model),
                 # Reasoning depth: fluid's serializers map this per provider
                 # (Anthropic output_config.effort; OpenAI-shaped reasoning.effort).
                 effort=_valid_effort(getattr(options, "effort", None)),
@@ -699,7 +713,10 @@ class HarnessAdapter(ProviderAdapter):
     async def send_query(self, prompt: str) -> None:
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
-        await self._engine.submit(UserTurn(content=prompt))
+        # fluid annotates ``UserTurn.content`` as a list, but its own callers and
+        # tests pass the prompt string straight through (the loops normalize it),
+        # so the cast bridges the vendor annotation without touching the value.
+        await self._engine.submit(UserTurn(content=cast(Any, prompt)))
 
     async def receive_events(self) -> AsyncIterator[ProviderEvent]:
         """Translate the fluid Event stream into ProviderEvents for one turn.
@@ -838,7 +855,10 @@ class HarnessAdapter(ProviderAdapter):
         message: Optional[str] = None
         updated_input: Optional[Dict[str, Any]] = None
         try:
-            result = await self._can_use_tool(
+            # Only reached from receive_events(), which spawns this bridge under
+            # an ``and self._can_use_tool`` guard — non-None by construction.
+            can_use_tool = cast(Any, self._can_use_tool)
+            result = await can_use_tool(
                 ev.name,
                 ev.input,
                 SimpleNamespace(tool_use_id=ev.tool_use_id, agent_id=None),
@@ -1291,7 +1311,7 @@ class HarnessAdapter(ProviderAdapter):
                         **common,
                     )
                 ]
-            status = {"finished": "completed"}.get(event.kind, event.kind)
+            status = cast(str, {"finished": "completed"}.get(event.kind, event.kind))
             return [
                 TaskNotificationMessage(
                     subtype="task_notification",
@@ -1824,7 +1844,7 @@ def _provider_row_kind(
     return None
 
 
-def _lookup_provider_row(provider_id: str) -> Optional[Dict[str, Any]]:
+def _lookup_provider_row(provider_id: str) -> Optional[ModelProviderRow]:
     """The ``model_providers`` row for ``provider_id``, or ``None`` on any miss.
 
     Never raises: every caller treats a failed lookup as "no row", which each

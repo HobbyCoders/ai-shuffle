@@ -76,7 +76,14 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:  # pragma: no cover — annotation-only; every DB import here is
+    # deliberately lazy (see the function bodies), so the row types ride the
+    # string annotations ``from __future__ import annotations`` already gives us.
+    from app.db.model_providers import ModelProviderRow
+    from app.db.profiles import ProfileRow
+    from app.db.sessions import SessionRow
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +98,7 @@ _BACKGROUND_TASKS: set = set()
 # Chain / depth helpers
 # ---------------------------------------------------------------------------
 
-def _session_row(session_id: str) -> Optional[Dict[str, Any]]:
+def _session_row(session_id: str) -> Optional[SessionRow]:
     try:
         from app.db import database
 
@@ -128,7 +135,7 @@ def _is_worker_session(session_id: str) -> bool:
     return _first_turn_source(session_id) == provider_agent.WORKER_TURN_SOURCE
 
 
-def caller_chain(session_id: str) -> Tuple[List[Dict[str, Any]], str, int]:
+def caller_chain(session_id: str) -> Tuple[List[SessionRow], str, int]:
     """Walk the parent chain upward from ``session_id``.
 
     Returns ``(worker_ancestor_rows, root_session_id, depth)`` where ``depth``
@@ -136,7 +143,7 @@ def caller_chain(session_id: str) -> Tuple[List[Dict[str, Any]], str, int]:
     itself (0 for a top-level human session), and ``root_session_id`` is the
     top non-worker session (falls back to the highest reachable ancestor).
     """
-    rows: List[Dict[str, Any]] = []
+    rows: List[SessionRow] = []
     depth = 0
     current_id = session_id
     root_id = session_id
@@ -197,7 +204,7 @@ def _live_worker_count_for_root(root_session_id: str) -> int:
 # Target resolution
 # ---------------------------------------------------------------------------
 
-def resolve_target_agent(ref: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+def resolve_target_agent(ref: str) -> Tuple[Optional[ProfileRow], Optional[str]]:
     """Resolve ``ref`` (agent id, else unambiguous name) to an agent row.
 
     Returns ``(agent_row, error_message)`` — exactly one is non-None.
@@ -259,7 +266,7 @@ def _file_agent_prompt(definition: Any) -> str:
     name = str(_def_field(definition, "name", "") or "agent")
     path = str(_def_field(definition, "path", "") or "")
     body = str(_def_field(definition, "body", "") or "").strip()
-    tools = tuple(_def_field(definition, "tools", ()) or ())
+    tools: Tuple[Any, ...] = tuple(_def_field(definition, "tools", ()) or ())
 
     lines = [
         f"## Agent definition — you are running as the '{name}' agent",
@@ -303,7 +310,9 @@ def _definition_tool_allowlist(definition: Any) -> Optional[List[str]]:
     return names or None
 
 
-def _caller_provider_id(caller_row: Dict[str, Any], caller_profile_id: Optional[str]) -> Optional[str]:
+def _caller_provider_id(
+    caller_row: Optional[SessionRow], caller_profile_id: Optional[str]
+) -> Optional[str]:
     """The provider the caller is bound to — session row first, profile after."""
     provider_id = (caller_row or {}).get("provider_id")
     if provider_id:
@@ -319,7 +328,7 @@ def _caller_provider_id(caller_row: Dict[str, Any], caller_profile_id: Optional[
     return ((profile.get("config") or {}).get("provider")) or None
 
 
-def _validate_target(agent: Dict[str, Any]) -> Optional[str]:
+def _validate_target(agent: ProfileRow) -> Optional[str]:
     """Provider admission for the target agent. None = OK.
 
     MODEL admission is NOT decided here (2026-08-17 ruling): a ``model``
@@ -402,7 +411,7 @@ class ModelBinding:
     error: Optional[str] = None
 
 
-def _servable_providers_curating(model_id: str) -> List[Dict[str, Any]]:
+def _servable_providers_curating(model_id: str) -> List[ModelProviderRow]:
     """Enabled + servable provider rows whose curated list holds ``model_id``.
 
     Reuses the two existing admission helpers rather than re-deriving them:
@@ -453,7 +462,7 @@ def _model_family(model_id: Optional[str]) -> Optional[str]:
     return None
 
 
-def _servable_providers_curating_family(family: str) -> List[Tuple[Dict[str, Any], str]]:
+def _servable_providers_curating_family(family: str) -> List[Tuple[ModelProviderRow, str]]:
     """``(provider row, curated model id)`` pairs serving ``family``.
 
     Same admission rules and same ``(name, id)`` ordering as
@@ -470,7 +479,7 @@ def _servable_providers_curating_family(family: str) -> List[Tuple[Dict[str, Any
         logger.debug("task_dispatch: provider enumeration failed", exc_info=True)
         return []
     rows.sort(key=lambda row: ((row.get("name") or ""), str(row.get("id") or "")))
-    out: List[Tuple[Dict[str, Any], str]] = []
+    out: List[Tuple[ModelProviderRow, str]] = []
     for row in rows:
         if not is_provider_servable(row):
             continue
@@ -505,8 +514,8 @@ def _example_model_slugs(limit: int = 10) -> List[str]:
 
 
 def _prefer_caller(
-    rows: List[Dict[str, Any]], caller_provider_id: Optional[str]
-) -> Dict[str, Any]:
+    rows: List[ModelProviderRow], caller_provider_id: Optional[str]
+) -> ModelProviderRow:
     """The caller's own provider row when it is among ``rows``, else the first.
 
     ``rows`` arrives sorted by ``(name, id)``, so the fallback is deterministic:
@@ -758,8 +767,8 @@ async def dispatch_task_tool(
     if err and definition is None:
         return {"ok": False, "error": err}
 
-    caller_row = _session_row(caller_session_id) or {}
-    caller_pid = caller_profile_id or caller_row.get("profile_id")
+    caller_row = _session_row(caller_session_id)
+    caller_pid = caller_profile_id or (caller_row or {}).get("profile_id")
 
     if definition is not None:
         target = None
