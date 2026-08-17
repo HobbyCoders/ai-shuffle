@@ -55,6 +55,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -768,6 +769,32 @@ _REGISTRY_FAILURE_STATUSES = ("error", "killed")
 #: How much of a failure message rides the registry row's one-line summary.
 _FAILURE_SUMMARY_CHARS = 240
 
+#: The ``"message": "..."`` / ``'message': '...'`` pair inside a provider error
+#: repr. Provider SDKs stringify the whole HTTP failure — status line, the
+#: response-header dict, THEN the body — so the one sentence a human needs sits
+#: last and got clipped away by the cap (the live rate-limit incident spent the
+#: entire 240-char budget on ``x-ratelimit-*`` headers).
+_ERROR_MESSAGE_RE = re.compile(r"['\"]message['\"]\s*:\s*['\"](.+?)['\"]", re.DOTALL)
+
+
+def _message_first(text: str) -> str:
+    """Re-order a provider error so its human message LEADS, headers after.
+
+    Returns ``text`` untouched when no ``message`` field can be found — this may
+    only ever improve the ordering, never invent or drop information (the
+    remainder is kept verbatim behind the message, so the cap trims the header
+    dump instead of the sentence).
+    """
+    match = _ERROR_MESSAGE_RE.search(text)
+    if not match:
+        return text
+    message = " ".join(match.group(1).split())
+    if not message:
+        return text
+    rest = " ".join((text[: match.start()] + " " + text[match.end():]).split())
+    rest = rest.strip(" ,{}")
+    return f"{message} — {rest}" if rest else message
+
 
 def _failure_summary(
     status: str, preview: Optional[str], frames_forwarded: int
@@ -784,14 +811,40 @@ def _failure_summary(
     died at or before provider connect (the ``ProviderCredentialError`` case) —
     worth saying explicitly, because "failed to start" and "failed while working"
     call for very different responses from the parent.
+
+    The text is re-ordered MESSAGE-FIRST (:func:`_message_first`) before the cap
+    so the sentence that explains the failure survives it.
     """
     if status not in _REGISTRY_FAILURE_STATUSES:
         return None
-    text = " ".join((preview or "").split()) or "no error detail was recorded"
+    text = _message_first(" ".join((preview or "").split())) \
+        or "no error detail was recorded"
     if len(text) > _FAILURE_SUMMARY_CHARS:
         text = text[: _FAILURE_SUMMARY_CHARS - 1].rstrip() + "…"
     prefix = "worker failed to start" if not frames_forwarded else "worker failed"
     return f"{prefix}: {text}"
+
+
+def _provider_display_name(provider_id: Optional[str]) -> str:
+    """A provider row's display NAME for user-facing summaries.
+
+    ``None`` (the delegated Claude-subscription leg) reads as "agent", matching
+    the placeholder the summary carried before. Any lookup failure falls back to
+    the id — a summary must never be the thing that breaks a dispatch.
+    """
+    if not provider_id:
+        return "agent"
+    try:
+        from app.db import database
+
+        row = database.get_model_provider(provider_id, include_token=False)
+    except Exception:  # noqa: BLE001 — cosmetic lookup, fail to the id
+        logger.debug(
+            "ProviderAgent: provider name lookup failed for %s",
+            provider_id, exc_info=True,
+        )
+        return str(provider_id)
+    return str((row or {}).get("name") or provider_id)
 
 
 async def dispatch_worker(
@@ -809,6 +862,7 @@ async def dispatch_worker(
     launch_tool_use_id: Optional[str] = None,
     system_prompt_append: Optional[str] = None,
     tool_allowlist: Optional[List[str]] = None,
+    agent_name: Optional[str] = None,
 ) -> WorkerOutcome:
     """Run ``prompt`` in a fresh session bound to ``provider_id``/``model_id``.
 
@@ -835,6 +889,11 @@ async def dispatch_worker(
     card renders the worker live; see that module for the fencing/bounding
     rules. Forwarding is strictly best-effort — it can degrade the card, never
     the worker.
+
+    ``agent_name`` is the dispatched agent's DISPLAY NAME ("Frontend Designer").
+    It rides the feed's ``subagent.started`` and the task-registry row so the
+    card names the agent rather than the model slug it happens to run on
+    (2026-08-17 ruling); purely presentational, never a join key.
     """
     from app.core import provider_agent_supervisor, turn_manager
     from app.core.provider_agent_feed import WorkerFeed, emit_shielded
@@ -865,7 +924,10 @@ async def dispatch_worker(
     # runs through the claude CLI like any other delegated session).
     worker_session_id = str(uuid.uuid4())
     title = (label or "").strip() or f"Task worker · {model_id or profile_id}"
-    provider_tag = provider_id or "agent"
+    # The provider's NAME, not its row id: the registry summary and the card's
+    # settle frame are user-facing, and a raw `model_providers` UUID told nobody
+    # anything (2026-08-17 incident).
+    provider_tag = _provider_display_name(provider_id)
     model_tag = model_id or "inherit"
 
     try:
@@ -954,6 +1016,7 @@ async def dispatch_worker(
         title,
         summary=f"{provider_tag} · {model_tag}",
         tool_use_id=tool_use_id or worker_session_id,
+        agent=agent_name,
     )
 
     feed = WorkerFeed(
@@ -963,6 +1026,7 @@ async def dispatch_worker(
         label=label,
         provider_id=provider_id,
         model_id=model_id,
+        agent_name=agent_name,
         prompt=prompt,
         # The model's Task tool_use_id (fluid native leg) — display-only: lets
         # the card absorb the launch tool_use block. Join keys stay task_id.
@@ -1168,6 +1232,7 @@ async def dispatch_worker(
                 status,
                 result_preview=preview,
                 summary=f"{provider_tag} · {model_tag}",
+                usage=usage_seen,
             ))
             try:
                 task_registry.complete_task(

@@ -143,10 +143,58 @@ class TestParentTriple:
         payload = _parent_rows()[0]["payload"]
         assert payload["task_id"] == WORKER
         assert payload["agent_id"] == WORKER
-        # Unknown agent types render as their raw string badge on the card.
+        # Unknown agent types render as their raw string badge on the card;
+        # agent_type keeps carrying the MODEL id for compatibility.
         assert payload["agent_type"] == "gpt-5.5"
         assert payload["description"] == "reviewer"
         assert payload["prompt_preview"] == "review the diff"
+
+    def test_started_carries_the_agent_name_when_one_was_dispatched(self, db):
+        """The card's IDENTITY (2026-08-17 ruling): the agent's display name
+        rides ``subagent.started`` alongside — not instead of — the model id."""
+        f = _feed(agent_name="Frontend Designer")
+        asyncio.run(f.started())
+
+        payload = _parent_rows()[0]["payload"]
+        assert payload["agent_name"] == "Frontend Designer"
+        assert payload["agent_type"] == "gpt-5.5"
+
+    def test_completed_forwards_the_workers_usage(self, db):
+        """The card's token/duration row rendered nothing for ProviderAgent
+        workers because the terminal frame carried no usage at all."""
+        f = _feed()
+
+        async def run():
+            await f.started()
+            await f.completed(
+                "completed", result_preview="done",
+                usage={"input_tokens": 120, "output_tokens": 40},
+            )
+
+        asyncio.run(run())
+        done = [r for r in _parent_rows() if r["event_type"] == "subagent.completed"]
+        assert done[0]["payload"]["usage"] == {
+            "input_tokens": 120, "output_tokens": 40,
+        }
+
+    def test_completed_without_usage_stays_null(self, db):
+        f = _feed()
+
+        async def run():
+            await f.started()
+            await f.completed("completed", result_preview="done", usage={})
+
+        asyncio.run(run())
+        done = [r for r in _parent_rows() if r["event_type"] == "subagent.completed"]
+        assert done[0]["payload"].get("usage") is None
+
+    def test_started_without_an_agent_name_leaves_the_field_empty(self, db):
+        """A bare ProviderAgent worker has no agent behind it — the card falls
+        back to the model badge exactly as it always did."""
+        f = _feed()
+        asyncio.run(f.started())
+
+        assert _parent_rows()[0]["payload"].get("agent_name") in (None, "")
 
     def test_started_falls_back_to_provider_and_model_without_a_label(self, db):
         f = _feed(label=None)

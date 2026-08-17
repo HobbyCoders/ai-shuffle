@@ -455,13 +455,16 @@ def create_builtin_tools_server(
     # Delegated-leg surface (mcp__builtins__Task); native legs get fluid's
     # bare-named Task builtin instead (the bridge filters this copy out).
     # ------------------------------------------------------------------
+    from app.core.task_dispatch import TASK_MODEL_OVERRIDE_DESCRIPTION
+
     @tool(
         "Task",
         "Dispatch work to another agent. The target agent runs in its own "
         "session with its own configuration, memory, and tools, and reports "
         "back. mode='sync' (default) waits for the result; mode='background' "
-        "returns immediately with the worker session id (poll with TaskList/"
-        "TaskOutput). Use background mode to fan out parallel work.",
+        "returns immediately with the worker session id (poll with "
+        "mcp__builtins__TaskList / mcp__builtins__TaskOutput). Use background "
+        "mode to fan out parallel work.",
         {
             "type": "object",
             "properties": {
@@ -469,7 +472,10 @@ def create_builtin_tools_server(
                 "prompt": {"type": "string", "description": "Self-contained task for the target agent."},
                 "mode": {"type": "string", "enum": ["sync", "background"],
                          "description": "sync (default) waits; background returns at once."},
-                "model": {"type": "string", "description": "Optional model override."},
+                # Same wording the native leg's bare Task builtin gets — one
+                # policy statement, two legs (see harness_adapter).
+                "model": {"type": "string",
+                          "description": TASK_MODEL_OVERRIDE_DESCRIPTION},
                 "label": {"type": "string", "description": "Short display label."},
             },
             "required": ["agent", "prompt"],

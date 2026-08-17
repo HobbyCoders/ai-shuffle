@@ -154,6 +154,13 @@ class TestToolUseId:
         assert reg._tasks["s1"]["t1"]["tool_use_id"] is None
         assert reg.get_active("s1")[0]["toolUseId"] is None
 
+    def test_agent_name_rides_the_row_and_the_wire(self, reg):
+        reg.start_task("s1", "t1", "agent", "bg", agent="Frontend Designer")
+        assert reg.get_active("s1")[0]["agent"] == "Frontend Designer"
+        # Re-registering (a resume) never clobbers an agent already recorded.
+        reg.start_task("s1", "t1", "agent", "bg", agent="Something Else")
+        assert reg._tasks["s1"]["t1"]["agent"] == "Frontend Designer"
+
     def test_reregister_binds_missing_tool_use_id(self, reg):
         # First start had no id; a later re-register carries it -> now bound.
         reg.start_task("s1", "t1", "agent", "bg")
@@ -498,6 +505,14 @@ class TestToWire:
             "id", "subject", "status", "kind", "summary", "startedAt",
             "updatedAt", "toolUseId",
         }
+
+    def test_agent_name_is_additive(self):
+        """Task-tool workers carry the dispatched agent's display NAME; every
+        other task kind keeps the exact shape above."""
+        record = {"task_id": "t1", "kind": "agent", "status": "running"}
+        assert "agent" not in to_wire(record)
+        record["agent"] = "Frontend Designer"
+        assert to_wire(record)["agent"] == "Frontend Designer"
 
 
 # =============================================================================

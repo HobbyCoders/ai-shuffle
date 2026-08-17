@@ -119,6 +119,10 @@ class SubagentStarted(EventBase):
     task_id: str  # the Task/Agent tool_use_id — join key to the tool card
     agent_id: str | None = None
     agent_type: str | None = None
+    # The dispatched agent's display NAME ("Frontend Designer") — the card's
+    # identity. ``agent_type`` keeps carrying the model slug (unchanged for
+    # compatibility), which the card renders as a secondary detail.
+    agent_name: str | None = None
     description: str | None = None
     prompt_preview: str | None = None
     # The model's launch tool_use_id when it differs from task_id (fluid-leg

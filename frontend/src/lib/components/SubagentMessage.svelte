@@ -7,6 +7,8 @@
 	import { extractToolResultMedia, mediaHtml } from '$lib/utils/media';
 	import { isSubagentRunning } from '$lib/utils/subagent-status';
 	import ToolScreenshot from '$lib/components/chat/ToolScreenshot.svelte';
+	import ToolIcon from '$lib/components/chat/ToolIcon.svelte';
+	import { displayToolName } from '$lib/utils/tool-icons';
 
 	interface Props {
 		message: ChatMessage;
@@ -21,16 +23,20 @@
 		(message.agentChildren || []).filter(c => c && c.id)
 	);
 
-	// Count children by type
+	// Count children by type. `errorTools` mirrors the main feed's tool GROUP
+	// chip ("17/21 tools (4 failed)") — a collapsed failed card used to give no
+	// hint of failures beyond the tiny red X in its header.
 	const childCounts = $derived.by(() => {
 		const children = validChildren;
 		const toolUseChildren = children.filter(c => c.type === 'tool_use');
 		const completedTools = toolUseChildren.filter(c => c.toolStatus === 'complete').length;
+		const errorTools = toolUseChildren.filter(c => c.toolStatus === 'error').length;
 
 		return {
 			total: children.length,
 			toolUse: toolUseChildren.length,
-			completedTools
+			completedTools,
+			errorTools
 		};
 	});
 
@@ -48,7 +54,7 @@
 		'general-purpose': 'General',
 		'explore': 'Explore',
 		'plan': 'Plan',
-'frontend-designer': 'Frontend',
+		'frontend-designer': 'Frontend',
 		'chat-history-summarizer': 'Summarizer',
 		'statusline-setup': 'Status Line',
 		'plugin-dev:create-plugin': 'Plugin',
@@ -81,10 +87,14 @@
 		if (!usage) return null;
 		const parts: string[] = [];
 		if (usage.tool_uses) parts.push(`${usage.tool_uses} tools`);
-		if (usage.total_tokens) {
-			const k = usage.total_tokens >= 1000
-				? `${(usage.total_tokens / 1000).toFixed(0)}k`
-				: String(usage.total_tokens);
+		// ProviderAgent workers report raw input/output counts and no
+		// `total_tokens`, which used to render as nothing at all.
+		const totalTokens =
+			usage.total_tokens || (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0);
+		if (totalTokens) {
+			const k = totalTokens >= 1000
+				? `${(totalTokens / 1000).toFixed(0)}k`
+				: String(totalTokens);
 			parts.push(`${k} tokens`);
 		}
 		if (usage.duration_ms && usage.duration_ms > 1000) {
@@ -121,7 +131,9 @@
 		// Try complete input first
 		if (child.toolInput) {
 			const input = child.toolInput;
-			const candidates = ['description', 'file_path', 'path', 'pattern', 'command', 'query', 'prompt', 'url', 'skill', 'glob'];
+			// Note/Skill-style rows carry their argument under other keys; without
+			// them those child rows rendered as a bare tool name, no preview.
+			const candidates = ['description', 'file_path', 'path', 'pattern', 'command', 'query', 'prompt', 'url', 'skill', 'glob', 'note', 'content', 'text', 'name'];
 			for (const key of candidates) {
 				if (input[key]) {
 					const val = String(input[key]);
@@ -132,7 +144,9 @@
 		}
 		// Fall back to partial JSON extraction during streaming
 		if (child.partialToolInput) {
-			const candidates = ['description', 'file_path', 'path', 'pattern', 'command', 'query', 'prompt', 'url', 'skill', 'glob'];
+			// Note/Skill-style rows carry their argument under other keys; without
+			// them those child rows rendered as a bare tool name, no preview.
+			const candidates = ['description', 'file_path', 'path', 'pattern', 'command', 'query', 'prompt', 'url', 'skill', 'glob', 'note', 'content', 'text', 'name'];
 			for (const key of candidates) {
 				const regex = new RegExp(`"${key}"\\s*:\\s*"([^"]*)"?`);
 				const match = child.partialToolInput.match(regex);
@@ -148,6 +162,33 @@
 	function truncateContent(content: string, maxLength: number = 500): string {
 		if (content.length <= maxLength) return content;
 		return content.substring(0, maxLength) + '...';
+	}
+
+	/**
+	 * Split a worker result that is really a payload object into
+	 * `{ message, rest }`.
+	 *
+	 * A failed worker's result arrives as a JSON object — or, from the Python
+	 * side, a dict repr with single quotes — whose `message`/`error` field is the
+	 * only part a human needs; everything else (status codes, rate-limit headers)
+	 * is noise that used to be dumped verbatim into a <pre>. Returns `null` when
+	 * the content is ordinary prose, which is the common case.
+	 *
+	 * Deliberately regex-based and dependency-free: a dict repr is not JSON, and
+	 * pulling in a parser for a display nicety is not worth it.
+	 */
+	function splitResultPayload(content: string): { message: string; rest: string } | null {
+		const text = (content ?? '').trim();
+		if (!(text.startsWith('{') || text.includes("'message'") || text.includes('"message"')))
+			return null;
+		const match = /['"](?:message|error_message)['"]\s*:\s*['"]([\s\S]+?)['"]\s*[,}]/.exec(text);
+		if (!match?.[1]) return null;
+		const message = match[1].replace(/\\n/g, '\n').trim();
+		if (!message) return null;
+		const rest = (text.slice(0, match.index) + text.slice(match.index + match[0].length))
+			.replace(/\s+/g, ' ')
+			.trim();
+		return { message, rest };
 	}
 
 	// Check if a tool result contains embeddable media (image/video/audio)
@@ -188,8 +229,20 @@
 			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
 		</svg>
 
-		<!-- Agent type badge -->
-		{#if message.agentType}
+		<!-- IDENTITY badge: the AGENT's name when the dispatcher supplied one
+		     (2026-08-17 ruling), otherwise the historical model/type badge. -->
+		{#if message.agentName}
+			<span class="px-1.5 py-0.5 text-xs font-medium bg-primary/20 text-primary rounded-full flex-shrink-0">
+				{message.agentName}
+			</span>
+			<!-- The model slug stays visible, demoted to a secondary chip. -->
+			{#if message.agentType}
+				<span
+					class="px-1.5 py-0.5 text-[10px] font-medium bg-muted text-muted-foreground rounded-full flex-shrink-0 hidden sm:inline"
+					title="Model: {message.agentType}"
+				>{getModelBadge(message.agentType).label}</span>
+			{/if}
+		{:else if message.agentType}
 			{@const badge = getModelBadge(message.agentType)}
 			<span class="px-1.5 py-0.5 text-xs font-medium {badge.color} rounded-full flex-shrink-0">
 				{badge.label}
@@ -201,12 +254,16 @@
 			{message.agentDescription || 'Subagent'}
 		</span>
 
-		<!-- Tool count (if any) -->
+		<!-- Tool count (if any), with failures called out like the main feed's
+		     tool group chip — a collapsed failed card showed no count at all. -->
 		{#if childCounts.toolUse > 0}
 			<span class="text-muted-foreground flex-shrink-0">•</span>
 			<span class="text-xs text-muted-foreground flex-shrink-0">
 				{childCounts.completedTools}/{childCounts.toolUse} tools
 			</span>
+			{#if childCounts.errorTools > 0}
+				<span class="text-xs text-red-500 flex-shrink-0">({childCounts.errorTools} failed)</span>
+			{/if}
 		{/if}
 
 		<!-- Usage stats from task_progress (tokens, duration) -->
@@ -257,11 +314,10 @@
 											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
 										</svg>
 									{/if}
-									<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-									</svg>
-									<span class="text-sm font-medium text-foreground">{child.toolName || 'Tool'}</span>
+									<!-- Per-tool icon, same mapping as the main feed (every child
+									     row used to draw one hard-coded cog). -->
+									<ToolIcon name={child.toolName || ''} />
+									<span class="text-sm font-medium text-foreground" title={child.toolName || 'Tool'}>{displayToolName(child.toolName || '') || 'Tool'}</span>
 									{#if getChildSummary(child)}
 										<span class="text-sm text-muted-foreground truncate min-w-0">{getChildSummary(child)}</span>
 									{/if}
@@ -357,14 +413,43 @@
 				</div>
 			{/if}
 
-			<!-- Final result section -->
+			<!-- Final result section. A FAILED worker's result gets error chrome
+			     (the header read exactly like a success before), and a payload
+			     object is shown message-first with the raw dict collapsed. -->
 			{#if message.content && message.agentStatus !== 'running'}
-				<div class="px-4 py-3 border-t border-border/50">
-					<div class="text-xs text-muted-foreground mb-1 font-medium">Result</div>
+				{@const payload = statusInfo.isError ? splitResultPayload(message.content) : null}
+				<div
+					class="px-4 py-3 border-t {statusInfo.isError
+						? 'border-red-500/40 bg-red-500/5'
+						: 'border-border/50'}"
+				>
+					<div
+						class="text-xs mb-1 font-medium {statusInfo.isError
+							? 'text-red-500'
+							: 'text-muted-foreground'}"
+					>
+						{statusInfo.isError ? 'Error' : 'Result'}
+					</div>
 					{#if toolResultHasMedia(message.content)}
 						{@html sanitizeHtml(renderToolResult(message.content))}
+					{:else if payload}
+						<div class="text-sm text-foreground whitespace-pre-wrap break-words">
+							{payload.message}
+						</div>
+						{#if payload.rest}
+							<details class="mt-2">
+								<summary class="text-xs text-muted-foreground cursor-pointer list-none">
+									Show raw error payload
+								</summary>
+								<pre class="mt-1 text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{payload.rest}</pre>
+							</details>
+						{/if}
 					{:else}
-						<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{message.content}</pre>
+						<pre
+							class="text-xs overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono {statusInfo.isError
+								? 'text-foreground'
+								: 'text-muted-foreground'}"
+						>{message.content}</pre>
 					{/if}
 				</div>
 			{/if}

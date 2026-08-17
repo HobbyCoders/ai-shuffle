@@ -258,6 +258,7 @@ def _translate_shared(
             task_id=event.get("tool_id") or event.get("agent_id") or "",
             agent_id=event.get("agent_id"),
             agent_type=event.get("agent_type"),
+            agent_name=event.get("agent_name") or None,
             description=event.get("description"),
             prompt_preview=_truncate(event.get("prompt")),
             launch_tool_use_id=event.get("launch_tool_use_id") or None,
@@ -287,6 +288,7 @@ def _translate_shared(
             task_id=event.get("tool_id") or event.get("agent_id") or "",
             status="failed" if event.get("is_error") else "completed",
             result_preview=_truncate(event.get("result")),
+            usage=event.get("usage") if isinstance(event.get("usage"), dict) else None,
             **kw,
         )]
 

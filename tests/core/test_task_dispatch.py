@@ -717,35 +717,41 @@ def test_claude_sub_caller_reaches_every_bound_provider(providers):
     assert seen["model_id"] is None
 
 
-def test_claude_sub_caller_override_resolves_to_the_curating_provider(providers):
-    """Rule 3 from the subscription side: the SLUG picks the leg, so an override
-    no Claude leg could serve binds the worker to the provider that curates it."""
+def test_claude_sub_caller_cannot_spend_a_non_claude_override(providers):
+    """(2026-08-17 override policy) A Claude-sub caller has no provider row, so
+    its only currency is the Claude family: an OpenAI slug is DROPPED and the
+    target runs as configured."""
     payload, seen = _spawn(
         providers,
         {"agent": "claude-alias", "prompt": "go", "model": "gpt-4o"},
         "s-cs3", "root-agent",
     )
     assert payload["ok"] is True
-    assert seen["provider_id"] == "openai-1"
-    assert seen["model_id"] == "gpt-4o"
+    assert seen["provider_id"] is None       # the target's own (claude-sub) leg
+    assert seen["model_id"] is None          # inherit 'opus', the configured one
+    assert "isn't curated on your provider" in payload["note"]
 
 
-def test_claude_sub_caller_override_can_leave_the_targets_provider(providers):
-    """A provider-BOUND target plus a slug its own provider does not curate:
-    the override still resolves, to the provider that does."""
+def test_claude_sub_caller_override_cannot_move_a_bound_target(providers):
+    """A provider-BOUND target plus a slug the CALLER cannot vouch for: the
+    override is dropped and the target keeps its own binding."""
     payload, seen = _spawn(
         providers,
         {"agent": "openai-agent", "prompt": "go", "model": "grok-9"},
         "s-cs4", "root-agent",
     )
     assert payload["ok"] is True
-    assert seen["provider_id"] == "xai-1"
-    assert seen["model_id"] == "grok-9"
-    assert "xAI" in payload["note"]
+    assert seen["provider_id"] == "openai-1"
+    assert seen["model_id"] is None
+    assert "isn't curated on your provider" in payload["note"]
+    assert "OpenAI Agent" in payload["note"]  # the note names the agent
 
 
-def test_claude_sub_caller_override_stays_on_the_targets_provider(providers):
-    """...and when the target's own provider curates the slug, it stays put."""
+def test_claude_sub_caller_override_dropped_even_on_the_targets_own_provider(
+    providers,
+):
+    """Step (a) no longer stands on its own: the target's provider curating the
+    slug is irrelevant when the CALLER has no row that curates it."""
     payload, seen = _spawn(
         providers,
         {"agent": "openai-agent", "prompt": "go", "model": "gpt-5.6-terra"},
@@ -753,8 +759,8 @@ def test_claude_sub_caller_override_stays_on_the_targets_provider(providers):
     )
     assert payload["ok"] is True
     assert seen["provider_id"] == "openai-1"
-    assert seen["model_id"] == "gpt-5.6-terra"
-    assert "note" not in payload
+    assert seen["model_id"] is None
+    assert "isn't curated on your provider" in payload["note"]
 
 
 def test_claude_sub_caller_to_openrouter_bound_target_keeps_the_targets_binding(
@@ -795,14 +801,17 @@ def test_openrouter_bound_target_is_servable_from_a_native_caller_too(providers)
     assert payload["ok"] is True
     assert seen["provider_id"] == "openrouter-1"
 
+    # ...but an OpenAI-bound caller may NOT hand that same slug to another agent
+    # as an override: its own provider does not curate it (2026-08-17 policy).
     payload, seen = _spawn(
         providers,
-        {"agent": "claude-alias", "prompt": "go", "model": "moonshotai/kimi-k2"},
+        {"agent": "openrouter-agent2", "prompt": "go", "model": "moonshotai/kimi-k2"},
         "s-cs8", "openai-agent",
     )
     assert payload["ok"] is True
-    assert seen["provider_id"] == "openrouter-1"
-    assert seen["model_id"] == "moonshotai/kimi-k2"
+    assert seen["provider_id"] == "openrouter-1"   # the target's own binding
+    assert seen["model_id"] is None
+    assert "isn't curated on your provider" in payload["note"]
 
 
 def test_custom_bound_target_is_still_refused(providers):
@@ -862,13 +871,38 @@ def test_rule2_falls_back_to_the_delegated_cli_with_a_note(providers):
 
 
 def test_rule2_never_picks_a_non_servable_provider(providers):
-    """The custom row curates 'gpt-4o' too and sorts FIRST by name, but is not
-    servable for workers, so the OpenAI row still wins."""
+    """The custom row curates 'grok-9' too and sorts FIRST by name, but is not
+    servable for workers, so the xAI row still wins the rule-2 reroute."""
     binding = td.resolve_dispatch_binding(
-        target_provider_id=None, target_model=None,
-        model_override="gpt-4o", caller_provider_id=None,
+        target_provider_id=None, target_model="grok-9",
+        model_override=None, caller_provider_id="openai-1",
     )
-    assert binding.provider_id == "openai-1"
+    assert binding.provider_id == "xai-1"
+
+
+def test_rule2_prefers_a_subscription_row_over_an_api_row(providers):
+    """Fallback ordering: when the caller's own provider is not among the rows
+    curating the model, a SUBSCRIPTION-auth row beats a metered API-key one —
+    even though its name sorts last."""
+    from app.db import database
+
+    database.create_model_provider(
+        "codex-1", "ZZZ Codex", "chatgpt", "https://chatgpt.com/backend-api",
+        models=[{"id": "claude-opus-4-6"}],
+    )
+    database.update_model_provider("codex-1", codex_access_token="enc:tok")
+
+    binding = td.resolve_dispatch_binding(
+        target_provider_id=None, target_model="claude-opus-4-6",
+        model_override=None, caller_provider_id="openai-1",
+    )
+    assert binding.provider_id == "codex-1"
+    # The API row is still the pick once the subscription row is gone.
+    database.update_model_provider("codex-1", enabled=False)
+    assert td.resolve_dispatch_binding(
+        target_provider_id=None, target_model="claude-opus-4-6",
+        model_override=None, caller_provider_id="openai-1",
+    ).provider_id == "anthropic-1"
 
 
 # --- rule 3: an explicit model override --------------------------------------
@@ -887,53 +921,63 @@ def test_rule3_override_binds_the_worker_to_the_callers_provider(providers):
     assert seen["model_id"] == "gpt-4o"
 
 
-def test_rule3_override_binds_to_a_third_provider(providers):
-    """The slug belongs to neither the caller's nor the target's provider - it
-    still resolves, to the one provider that curates it."""
+def test_rule3_override_onto_a_third_provider_is_dropped(providers):
+    """THE regression the policy exists for (live incident, gpt-5.4-mini shape):
+    a caller names a slug only some OTHER provider curates. It is DROPPED — the
+    target keeps its own configured provider+model — and the caller is told."""
     payload, seen = _spawn(
         providers,
-        {"agent": "claude-alias", "prompt": "go", "model": "grok-9"},
+        {"agent": "xai-agent", "prompt": "go", "model": "gpt-5.4-mini"},
         "s-r3b", "openai-agent",
     )
     assert payload["ok"] is True
-    assert seen["provider_id"] == "xai-1"
-    assert seen["model_id"] == "grok-9"
-    assert "xAI" in payload["note"]
+    assert seen["provider_id"] == "xai-1"     # the TARGET's own binding
+    assert seen["model_id"] is None           # ...and its own configured model
+    assert "gpt-5.4-mini" in payload["note"]
+    assert "isn't curated on your provider" in payload["note"]
+    assert "xAI Agent" in payload["note"]
 
 
-def test_rule3_unknown_slug_fails_synchronously(providers):
-    """The live failure this whole change exists for: an unservable slug used to
-    reach the worker and 401 half a second after ok:true."""
-    seen = {}
-
-    async def fake_worker(**kwargs):  # pragma: no cover - must never run
-        seen.update(kwargs)
-        return WorkerOutcome(ok=True, session_id="w", report="r")
-
-    _mk_session(providers, "s-r3c", "openai-agent")
-    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
-        payload = asyncio.run(_dispatch(
-            {"agent": "claude-alias", "prompt": "go", "model": "gpt-5.6-nope"},
-            "s-r3c",
-        ))
-    assert payload["ok"] is False
-    assert payload["error"].startswith(
-        "Model 'gpt-5.6-nope' is not available on any configured provider. "
-        "The target agent's default is 'opus' — omit 'model' to use it."
+def test_rule3_override_the_caller_curates_is_honored(providers):
+    """The other side of the gate: the caller's OWN provider curates the slug,
+    so the override binds — a caller may redirect onto what it already pays for."""
+    payload, seen = _spawn(
+        providers,
+        {"agent": "claude-alias", "prompt": "go", "model": "gpt-5.6-terra"},
+        "s-r3b2", "openai-agent",
     )
-    assert "Valid model ids include:" in payload["error"]
-    assert seen == {}  # nothing was spawned
+    assert payload["ok"] is True
+    assert seen["provider_id"] == "openai-1"
+    assert seen["model_id"] == "gpt-5.6-terra"
 
 
-def test_rule3_background_mode_also_fails_synchronously(providers):
-    """Background dispatch must not answer ok:true for a slug it cannot serve."""
-    _mk_session(providers, "s-r3c2", "openai-agent")
-    payload = asyncio.run(_dispatch(
-        {"agent": "claude-alias", "prompt": "go", "model": "nope-9",
+def test_rule3_unknown_slug_is_dropped_not_fatal(providers):
+    """A slug NO provider has ever heard of must never fail a dispatch — the
+    worker runs the target as configured with a note."""
+    payload, seen = _spawn(
+        providers,
+        {"agent": "xai-agent", "prompt": "go", "model": "gpt-5.6-nope"},
+        "s-r3c", "openai-agent",
+    )
+    assert payload["ok"] is True
+    assert seen["provider_id"] == "xai-1"
+    assert seen["model_id"] is None
+    assert "gpt-5.6-nope" in payload["note"]
+
+
+def test_rule3_background_mode_also_drops_rather_than_fails(providers):
+    """Background dispatch answers ok:true too — the drop is a note, not an
+    error, on both modes."""
+    payload, seen = _spawn(
+        providers,
+        {"agent": "xai-agent", "prompt": "go", "model": "nope-9",
          "mode": "background"},
-        "s-r3c2",
-    ))
-    assert payload["ok"] is False and "not available" in payload["error"]
+        "s-r3c2", "openai-agent",
+    )
+    assert payload["ok"] is True
+    assert "isn't curated on your provider" in payload["note"]
+    assert seen["provider_id"] == "xai-1"
+    assert seen["model_id"] is None
 
 
 def test_rule3_claude_slug_stays_delegated_for_a_claude_sub_caller(providers):
@@ -963,16 +1007,30 @@ def test_rule3_claude_slug_off_claude_sub_prefers_an_api_provider(providers):
 
 
 def test_rule3_file_agent_takes_the_same_resolution(providers):
-    """The file-agent branch resolves cross-provider too, instead of silently
-    dropping a model its caller's provider does not curate."""
+    """The file-agent branch runs the same gate: its ``model:`` binds when the
+    borrowed (caller's) provider curates it..."""
     payload, seen = _spawn(
         providers,
         {"agent": "researcher", "prompt": "go"}, "s-r3f", "openai-agent",
+        agent_registry={"researcher": _definition(model="gpt-5.6-terra")},
+    )
+    assert payload["ok"] is True
+    assert seen["provider_id"] == "openai-1"
+    assert seen["model_id"] == "gpt-5.6-terra"
+
+
+def test_rule3_file_agent_model_the_caller_cannot_serve_is_dropped(providers):
+    """...and degrades to the session's own model when it does not, instead of
+    binding the worker to a provider the caller never chose."""
+    payload, seen = _spawn(
+        providers,
+        {"agent": "researcher", "prompt": "go"}, "s-r3f2", "openai-agent",
         agent_registry={"researcher": _definition(model="grok-9")},
     )
     assert payload["ok"] is True
-    assert seen["provider_id"] == "xai-1"
-    assert seen["model_id"] == "grok-9"
+    assert seen["provider_id"] == "openai-1"      # the caller's own binding
+    assert seen["model_id"] is None
+    assert "inherits the session's model" in payload["note"]
 
 
 def test_rule3_file_agent_still_spawns_when_nothing_serves_its_model(providers):
@@ -1043,21 +1101,34 @@ def test_model_family_resolves_aliases_and_dated_ids():
 
 
 def test_multiple_curating_providers_resolve_deterministically(providers):
-    """Two servable providers curate the same slug - the pick is stable, and the
-    CALLER's own provider wins when it is one of them."""
+    """Two servable providers curate the same slug - the enumeration order is
+    stable, and the CALLER's own provider wins when it is one of them."""
     from app.db import database
 
     database.create_model_provider(
         "azure-1", "Azure OpenAI", "openai", "https://azure.example",
         auth_token="enc:key", models=[{"id": "gpt-4o"}],
     )
-    # No caller binding: stable (name, id) order -> "Azure OpenAI" before "OpenAI".
+    # Stable (name, id) order -> "Azure OpenAI" before "OpenAI"; the non-servable
+    # "Custom Endpoint" curates gpt-4o too and sorts first, but never appears.
+    assert [
+        r["id"] for r in td._servable_providers_curating("gpt-4o")
+    ] == ["azure-1", "openai-1"]
+    # The caller's own provider wins the tie when the override is admitted.
     assert td.resolve_dispatch_binding(
-        target_provider_id=None, target_model=None,
-        model_override="gpt-4o", caller_provider_id=None,
-    ).provider_id == "azure-1"
-    # The caller's own provider wins the tie.
-    assert td.resolve_dispatch_binding(
-        target_provider_id=None, target_model=None,
+        target_provider_id=None, target_model="claude-opus-4-6",
         model_override="gpt-4o", caller_provider_id="openai-1",
     ).provider_id == "openai-1"
+
+
+def test_note_names_the_subscription_when_a_row_wins_over_it(providers):
+    """The note used to compare the chosen row against the TARGET only, so
+    "your own subscription was passed over" could never be said. Branch (c) now
+    compares against the CALLER's leg too and names BOTH."""
+    binding = td.resolve_dispatch_binding(
+        target_provider_id="openai-1", target_model="gpt-4o",
+        model_override="claude-opus-4-6", caller_provider_id=None,
+    )
+    assert binding.provider_id == "anthropic-1"
+    assert "the target agent's own binding" in (binding.note or "")
+    assert "Claude subscription" in (binding.note or "")

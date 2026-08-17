@@ -405,6 +405,7 @@ def _convert_subagent(session_id: str, msg: Dict[str, Any]) -> List[Dict[str, An
         task_id=task_id,
         agent_id=msg.get("agentId"),
         agent_type=msg.get("agentType"),
+        agent_name=msg.get("agentName") or None,
         description=msg.get("agentDescription"),
         prompt_preview=_truncate(msg.get("agentPrompt")),
     )]
