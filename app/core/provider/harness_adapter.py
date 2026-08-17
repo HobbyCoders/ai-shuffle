@@ -1,10 +1,10 @@
-"""HarnessAdapter — concrete ProviderAdapter backed by the ``omni`` harness.
+"""HarnessAdapter — concrete ProviderAdapter backed by the ``fluid`` harness.
 
 This is the app's only provider backend, and the successor to
-:class:`ClaudeAgentAdapter`. It wraps a omni execution engine (``NativeLoop`` for direct-API providers, or
+:class:`ClaudeAgentAdapter`. It wraps a fluid execution engine (``NativeLoop`` for direct-API providers, or
 ``DelegatedLoop`` for the Claude-subscription ``claude`` CLI) and translates the
-omni ``Event`` stream into the app's provider-agnostic ``ProviderEvent`` types,
-so the rest of AI-Shuffle never sees a omni type.
+fluid ``Event`` stream into the app's provider-agnostic ``ProviderEvent`` types,
+so the rest of AI-Shuffle never sees a fluid type.
 
 ``factory.make_adapter()`` returns it unconditionally for every spawn path.
 
@@ -12,8 +12,8 @@ Design mirrors ClaudeAgentAdapter: connect/disconnect/health/reconnect lifecycle
 send_query/receive_events for streaming, and interrupt/respond/set_* controls.
 
 Provider-kind decision (from SessionOptions):
-  * ``extra["omni_engine"] == "delegated"``  → DelegatedLoop (claude CLI)
-  * ``extra["omni_provider"]`` / env ``AIH_OMNI_PROVIDER`` in
+  * ``extra["fluid_engine"] == "delegated"``  → DelegatedLoop (claude CLI)
+  * ``extra["fluid_provider"]`` / env ``AIH_FLUID_PROVIDER`` in
     {anthropic, openai_responses, openrouter} → NativeLoop with that client
   * otherwise inferred from the model string:
       - "claude*" or any model-registry alias ("fable"/"opus"/"sonnet"/"haiku")
@@ -28,45 +28,45 @@ HONORED:
   * ``model``                → engine model (native: request model; delegated: --model)
   * ``system_prompt`` (str)  → engine ``system`` (dict system prompts are stringified)
   * ``cwd``                  → ToolCtx.cwd (native) / DelegatedLoop cwd
-  * ``resume_session_id``    → omni session id (both engines). For the delegated
+  * ``resume_session_id``    → fluid session id (both engines). For the delegated
     engine the CLI's ``--resume`` handle is NOT this id — it is read off the
     stored session meta (``cli_session_id``), which DelegatedLoop writes back
     from the CLI's init frame. See ``_resolve_cli_session_id``.
-  * ``session_id``           → explicit omni session id
-  * ``permission_mode``      → omni PermissionEngine approval policy + plan_mode
+  * ``session_id``           → explicit fluid session id
+  * ``permission_mode``      → fluid PermissionEngine approval policy + plan_mode
   * ``env``                  → delegated child env / native provider (via os.environ).
     On native legs one variable is additionally consumed directly:
     ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` (positive int) becomes ``NativeLoop
-    (max_tokens=...)``, the interim escape hatch from omni's 8192 default
+    (max_tokens=...)``, the interim escape hatch from fluid's 8192 default
     until the reasoning/output config wave lands (plan wave W0a).
   * ``max_turns``            → native ``NativeLoop(max_model_calls_per_turn=...)``
-    when positive; omni's default (50) otherwise. The delegated leg's CLI
+    when positive; fluid's default (50) otherwise. The delegated leg's CLI
     enforces its own turn budget, so nothing is passed there.
-  * ``mcp_servers``          → omni ``registry.connect_mcp`` (external stdio/http).
+  * ``mcp_servers``          → fluid ``registry.connect_mcp`` (external stdio/http).
     App configs are SDK-shaped (``{"type": "http"|"sse", "url", "headers"}``)
-    while omni's client dispatches on ``transport``, so configs are normalized
-    at the seam (``_normalize_mcp_config_for_omni``): ``http`` →
+    while fluid's client dispatches on ``transport``, so configs are normalized
+    at the seam (``_normalize_mcp_config_for_fluid``): ``http`` →
     ``streamable_http``; stdio passes through; ``sse`` is skipped with a loud
-    warning and ``headers`` are dropped with one, both pending upstream omni
+    warning and ``headers`` are dropped with one, both pending upstream fluid
     support (ruling PA5).
-  * ``include_partial_messages`` → omni always streams deltas (native); delegated
-    passes ``--include-partial-messages`` (``extra["omni_partial"]`` overrides)
-  * session store: DERIVED, not configured — PgOmniStore when the app has a
+  * ``include_partial_messages`` → fluid always streams deltas (native); delegated
+    passes ``--include-partial-messages`` (``extra["fluid_partial"]`` overrides)
+  * session store: DERIVED, not configured — PgFluidStore when the app has a
     database (always, in real deployments), MemoryStore in DB-less unit tests
-  * ``extra["omni_inproc_servers"]`` → omni in-process tool servers (see omni_tool_bridge)
-  * ``extra["omni_registry"]``       → caller-supplied prebuilt ToolRegistry (escape hatch)
+  * ``extra["fluid_inproc_servers"]`` → fluid in-process tool servers (see fluid_tool_bridge)
+  * ``extra["fluid_registry"]``       → caller-supplied prebuilt ToolRegistry (escape hatch)
   * ``extra["provider_id"]``         → the session's bound ``model_providers`` row;
     its decrypted credentials authenticate the native client (API key, or a
     Codex OAuth auth object for a ChatGPT-subscription row). Threaded from
     ``query_options`` via ``ClaudeAgentOptions.aih_provider_id``. Absent → the
-    omni client's env-var fallback (see ``omni_credentials``).
+    fluid client's env-var fallback (see ``fluid_credentials``).
 
   * in-proc SDK servers in ``mcp_servers`` (type="sdk": builtins, app-config,
-    ai-tools, computer-use, provider-agent) → auto-bridged onto the omni
-    ToolRegistry with per-tool risk maps (see omni_tool_bridge.
+    ai-tools, computer-use, provider-agent) → auto-bridged onto the fluid
+    ToolRegistry with per-tool risk maps (see fluid_tool_bridge.
     register_recorded_sdk_servers; tools recorded by sdk_compat.patch_sdk_server).
 
-  * ``effort``               → delegated: CLI ``--effort``; native: omni
+  * ``effort``               → delegated: CLI ``--effort``; native: fluid
     serializers map it per provider (Anthropic ``output_config.effort``
     verbatim, OpenAI-shaped ``reasoning.effort`` with xhigh/max clamped to
     high). Validated app-side (``_valid_effort``); changes force reconnect.
@@ -93,22 +93,22 @@ DEGRADED / NOT YET HONORED (documented gaps — mechanical follow-up):
     builtins whenever a tools preset is active, so projecting it would delete
     Read/Bash/Edit from every native session. The surface channel is
     ``tool_allowlist`` above.
-  * ``thinking`` — omni manages thinking via provider caps, not passed through.
-  * ``hooks`` / ``include_hook_events`` — omni has its own HookBus; app SDK hooks not wired.
+  * ``thinking`` — fluid manages thinking via provider caps, not passed through.
+  * ``hooks`` / ``include_hook_events`` — fluid has its own HookBus; app SDK hooks not wired.
   * ``extra_args`` / ``setting_sources`` — SDK/CLI-specific, ignored.
   * ``task_budget`` / ``session_store`` / ``session_store_flush`` — SDK session-store
-    concepts; omni persistence is the Pg/Memory store chosen above.
+    concepts; fluid persistence is the Pg/Memory store chosen above.
   * ``enable_file_checkpointing`` / ``stderr`` / ``max_buffer_size`` / ``user`` — ignored.
-  * MCP ``headers`` (remote servers) and the ``sse`` transport — omni's MCP
+  * MCP ``headers`` (remote servers) and the ``sse`` transport — fluid's MCP
     client supports neither yet; both are warned about at connect time.
 
 HONORED SINCE THE P1 COMPILER LANDED (2026-08-13):
   * ``add_dirs`` — projected onto SessionOptions and passed to the delegated
-    leg as repeated ``--add-dir`` flags (native-leg omni tools are not
+    leg as repeated ``--add-dir`` flags (native-leg fluid tools are not
     path-sandboxed, so no equivalent is needed there).
   * system prompts on native legs (and the delegated leg under
-    PROMPT_FULL_REPLACE) run through ``omni.context.compiler`` — instruction
-    files, skills index, and environment are omni-gathered (ruling A1).
+    PROMPT_FULL_REPLACE) run through ``fluid.context.compiler`` — instruction
+    files, skills index, and environment are fluid-gathered (ruling A1).
 
 SUPPLIED BY FLUID ITSELF, WITH NO WIRING HERE (Claude-ecosystem compat, CE1):
   fluid's discovery is filesystem-native and defaults ON, so a native leg picks
@@ -153,7 +153,7 @@ from app.core.model_registry import (
     resolve_api_model_id,
     resolve_provider_context_window,
 )
-from app.core.provider.omni_credentials import (
+from app.core.provider.fluid_credentials import (
     ProviderCredentialError,
     resolve_provider_credentials,
 )
@@ -166,7 +166,7 @@ from app.core.provider.types import (
 )
 # The streaming loops dispatch on the provider mirror vocabulary (identical
 # names/shapes to the SDK message classes — see events.py). _translate
-# synthesizes these from the omni Event stream so a flag-on session flows
+# synthesizes these from the fluid Event stream so a flag-on session flows
 # through the exact same loop branches as the SDK path.
 from app.core.provider.events import (
     AssistantMessage,
@@ -185,7 +185,7 @@ from app.core.provider.events import (
     UserMessage,
 )
 
-# omni imports (the library we wrap). Its top-level __init__ is intentionally
+# fluid imports (the library we wrap). Its top-level __init__ is intentionally
 # empty, so we import from submodules directly.
 from fluid.engine.native import NativeLoop
 from fluid.engine.delegated import DelegatedLoop
@@ -212,7 +212,19 @@ logger = logging.getLogger(__name__)
 
 _ENGINE_CLOSE_GRACE_SECONDS = 5.0
 
-# app permission_mode → omni PermissionEngine approval policy
+
+def _extra_opt(options: SessionOptions, key: str, default: Any = None) -> Any:
+    """Read ``extra["fluid_<key>"]``, falling back to the legacy ``omni_<key>``.
+
+    The harness was renamed omni -> fluid (2026-08); pre-rename callers and
+    scripts that still pass the old key keep working.
+    """
+    val = options.extra.get(f"fluid_{key}")
+    if val is None:
+        val = options.extra.get(f"omni_{key}", default)
+    return val
+
+# app permission_mode → fluid PermissionEngine approval policy
 _PERMISSION_POLICY = {
     "bypassPermissions": "never_ask",
     "acceptEdits": "on_write",
@@ -222,7 +234,7 @@ _PERMISSION_POLICY = {
 
 
 class HarnessAdapter(ProviderAdapter):
-    """ProviderAdapter implementation backed by the omni harness."""
+    """ProviderAdapter implementation backed by the fluid harness."""
 
     def __init__(self) -> None:
         self._engine: Optional[Any] = None  # NativeLoop | DelegatedLoop
@@ -231,12 +243,12 @@ class HarnessAdapter(ProviderAdapter):
         self._connected: bool = False
         self._options: Optional[SessionOptions] = None
         self._sdk_session_id: Optional[str] = None
-        # receive_events replay cursor: omni's EventBus replays from ``since_seq``,
+        # receive_events replay cursor: fluid's EventBus replays from ``since_seq``,
         # so we advance this per delivered event to avoid re-yielding prior turns.
         self._event_cursor: int = 0
-        # app tool_use_id -> omni permission request_id (respond_to_permission map)
+        # app tool_use_id -> fluid permission request_id (respond_to_permission map)
         self._perm_requests: Dict[str, str] = {}
-        # last pending user-question request_id (omni core does not yet emit a
+        # last pending user-question request_id (fluid core does not yet emit a
         # question event; kept for forward-compat with RespondQuestion).
         self._pending_question_id: Optional[str] = None
         self._is_delegated: bool = False
@@ -247,36 +259,36 @@ class HarnessAdapter(ProviderAdapter):
         # Open streaming blocks: index -> block_type, and accumulated delta text.
         self._block_types: Dict[int, str] = {}
         self._block_buffers: Dict[int, list] = {}
-        # Last omni Usage reading, attached to the next synthesized
+        # Last fluid Usage reading, attached to the next synthesized
         # AssistantMessage (the loops read per-call usage off that message).
         self._pending_usage: Optional[Dict[str, Any]] = None
         # App-side permission callback (ClaudeAgentOptions.can_use_tool). When
-        # present, omni PermissionRequests are bridged to it out-of-band (SDK
+        # present, fluid PermissionRequests are bridged to it out-of-band (SDK
         # parity — the loops never see a permission event); when absent they
         # surface in-stream as PermissionRequestEvent.
         self._can_use_tool: Optional[Any] = None
         self._perm_bridge_tasks: set = set()
         # httpx client injected into the native provider client purely to
         # capture upstream usage/quota headers (see _usage_capture_http_client).
-        # The omni client does not own it, so disconnect() closes it.
+        # The fluid client does not own it, so disconnect() closes it.
         self._provider_http: Optional[httpx.AsyncClient] = None
 
     # ─── Transition helper ────────────────────────────────────────────
 
     @property
     def engine(self) -> Optional[Any]:
-        """Direct access to the underlying omni engine (parallels sdk_client)."""
+        """Direct access to the underlying fluid engine (parallels sdk_client)."""
         return self._engine
 
     # ─── Connection Lifecycle ─────────────────────────────────────────
 
     async def connect(self, options: SessionOptions) -> None:
-        """Build the omni engine from SessionOptions and prime its session."""
+        """Build the fluid engine from SessionOptions and prime its session."""
         self._options = options
         self._store = self._build_store(options)
 
         # Decide the leg BEFORE building the registry: the native legs need
-        # omni's builtin file/shell tools registered, the delegated leg must not
+        # fluid's builtin file/shell tools registered, the delegated leg must not
         # get them (the claude CLI ships its own).
         kind = _decide_provider_kind(options)
         self._is_delegated = kind == "delegated"
@@ -284,15 +296,15 @@ class HarnessAdapter(ProviderAdapter):
 
         self._registry = await self._build_registry(options, native=not self._is_delegated)
 
-        omni_session_id = options.session_id or options.resume_session_id
+        fluid_session_id = options.session_id or options.resume_session_id
         system, append_system = _system_parts(options.system_prompt)
         permissions, plan_mode = self._build_permissions(options)
 
         if self._is_delegated:
-            cli_session_id = await self._resolve_cli_session_id(omni_session_id, options)
+            cli_session_id = await self._resolve_cli_session_id(fluid_session_id, options)
             # Staged flip (ruling A3): append mode (default) keeps the CLI's
             # own preset + env/instruction gathering and passes our text
-            # through untouched; full-replace hands the CLI the omni-compiled
+            # through untouched; full-replace hands the CLI the fluid-compiled
             # prompt instead. Compiling env/instructions in append mode would
             # duplicate what the CLI gathers itself, so the compiler is only
             # invoked under full-replace.
@@ -310,16 +322,16 @@ class HarnessAdapter(ProviderAdapter):
                 append_system_prompt=delegated_append,
                 permission_mode=options.permission_mode,
                 registry=self._registry,
-                ctx=ToolCtx(cwd=options.cwd or ".", session_id=omni_session_id),
-                session_id=omni_session_id,
+                ctx=ToolCtx(cwd=options.cwd or ".", session_id=fluid_session_id),
+                session_id=fluid_session_id,
                 cli_session_id=cli_session_id,
                 # Honor the SDK-level streaming option (the app turns it on by
                 # default). Without it the delegated CLI never gets
                 # --include-partial-messages and the UI only sees whole messages
-                # at turn end. extra["omni_partial"] stays a manual override.
+                # at turn end. extra["fluid_partial"] stays a manual override.
                 partial=bool(
                     getattr(options, "include_partial_messages", False)
-                    or options.extra.get("omni_partial", False)
+                    or _extra_opt(options, "partial", False)
                 ),
                 # ONLY external transports. The raw map also holds type='sdk'
                 # entries wrapping live in-proc Server instances, and the
@@ -368,8 +380,8 @@ class HarnessAdapter(ProviderAdapter):
         else:
             provider_client, provider_http = await _build_provider_client(kind, options)
             self._provider_http = provider_http
-            # omni's bare Task builtin needs the app's dispatcher injected
-            # (ruling A13: omni owns the shape, the app owns the spawning).
+            # fluid's bare Task builtin needs the app's dispatcher injected
+            # (ruling A13: fluid owns the shape, the app owns the spawning).
             # UNCONDITIONAL + late-binding: this ctx is built once per connect
             # and then lives for the whole pooled life of the engine, while the
             # app session id may not be knowable here at all (a brand-new
@@ -378,22 +390,22 @@ class HarnessAdapter(ProviderAdapter):
             # what made Task report itself "not available in this environment"
             # for every fresh native session. The supplier resolves the id at
             # dispatch time instead — see _resolve_app_session_id.
-            native_ctx = ToolCtx(cwd=options.cwd or ".", session_id=omni_session_id)
+            native_ctx = ToolCtx(cwd=options.cwd or ".", session_id=fluid_session_id)
             try:
-                from app.core.task_dispatch import make_omni_dispatcher
+                from app.core.task_dispatch import make_fluid_dispatcher
 
-                native_ctx.extra["task_dispatch"] = make_omni_dispatcher(
+                native_ctx.extra["task_dispatch"] = make_fluid_dispatcher(
                     self._resolve_app_session_id
                 )
             except Exception:  # noqa: BLE001 — Task degrades to "unavailable"
                 logger.warning(
-                    "[HarnessAdapter] task_dispatch injection FAILED (omni "
+                    "[HarnessAdapter] task_dispatch injection FAILED (fluid "
                     "session=%s, cwd=%s) — the Task tool will report itself "
                     "unavailable on this native leg",
-                    omni_session_id, options.cwd, exc_info=True,
+                    fluid_session_id, options.cwd, exc_info=True,
                 )
             # Engine caps the app can express today (plan wave W0a). Both are
-            # omitted unless configured so omni keeps its own defaults
+            # omitted unless configured so fluid keeps its own defaults
             # (max_model_calls_per_turn=50, max_tokens=8192).
             native_caps: Dict[str, Any] = {}
             max_calls = _positive_int(getattr(options, "max_turns", None))
@@ -418,7 +430,7 @@ class HarnessAdapter(ProviderAdapter):
                 provider=provider_client,
                 store=self._store,
                 model=native_model,
-                # Reasoning depth: omni's serializers map this per provider
+                # Reasoning depth: fluid's serializers map this per provider
                 # (Anthropic output_config.effort; OpenAI-shaped reasoning.effort).
                 effort=_valid_effort(getattr(options, "effort", None)),
                 # The model's INPUT window (distinct from native_caps'
@@ -429,10 +441,10 @@ class HarnessAdapter(ProviderAdapter):
                 context_window=_native_context_window(kind, options),
                 **native_caps,
                 # Native legs have no Claude Code preset — they always run the
-                # omni-compiled prompt: the profile's configured prompt as the
+                # fluid-compiled prompt: the profile's configured prompt as the
                 # base (a preset-shaped profile has none) with the append text
                 # (security + profile instructions) riding as an extra block,
-                # plus omni's own instruction-file/skills/env gathering.
+                # plus fluid's own instruction-file/skills/env gathering.
                 system=(
                     compiled_prompt.text
                     if compiled_prompt is not None
@@ -449,7 +461,7 @@ class HarnessAdapter(ProviderAdapter):
                 permissions=permissions,
                 ctx=native_ctx,
                 plan_mode=plan_mode,
-                session_id=omni_session_id,
+                session_id=fluid_session_id,
                 # Tool restriction, ENFORCED (ruling CE12): fluid filters the
                 # request schemas, the deferred/ToolSearch catalog AND dispatch,
                 # so a filtered tool is invisible, unloadable and uncallable.
@@ -493,14 +505,14 @@ class HarnessAdapter(ProviderAdapter):
         """The app's ``sessions.id`` for this adapter, resolved lazily.
 
         Task dispatch parents its worker onto an app session row, so it needs
-        the app id — NOT the omni session id (``ses_...``) the engine and
+        the app id — NOT the fluid session id (``ses_...``) the engine and
         ``ToolCtx`` carry. Two sources, in order:
 
         1. ``extra["app_session_id"]`` — stamped by ``query_options`` onto the
            options object (``aih_session_id``) and projected in
            ``connect_with_sdk_options``. Exact, and available before the
            session has ever streamed a turn.
-        2. a reverse lookup of ``sessions.sdk_session_id`` against the omni
+        2. a reverse lookup of ``sessions.sdk_session_id`` against the fluid
            session id, for adapters built without the stamp.
 
         Returns None when neither resolves — the dispatcher turns that into a
@@ -510,19 +522,19 @@ class HarnessAdapter(ProviderAdapter):
         stamped = (opts.extra or {}).get("app_session_id") if opts is not None else None
         if stamped:
             return str(stamped)
-        omni_id = self._sdk_session_id
-        if not omni_id and opts is not None:
-            omni_id = opts.session_id or opts.resume_session_id
-        if not omni_id:
+        fluid_id = self._sdk_session_id
+        if not fluid_id and opts is not None:
+            fluid_id = opts.session_id or opts.resume_session_id
+        if not fluid_id:
             return None
         try:
             from app.db import database
 
-            row = database.get_session_by_sdk_id(omni_id)
+            row = database.get_session_by_sdk_id(fluid_id)
         except Exception:  # noqa: BLE001
             logger.warning(
-                "[HarnessAdapter] could not map omni session %s back to an app "
-                "session row for Task dispatch", omni_id, exc_info=True,
+                "[HarnessAdapter] could not map fluid session %s back to an app "
+                "session row for Task dispatch", fluid_id, exc_info=True,
             )
             return None
         return row.get("id") if row else None
@@ -531,9 +543,9 @@ class HarnessAdapter(ProviderAdapter):
         """Compat shim mirroring ClaudeAgentAdapter.connect_with_sdk_options.
 
         Callers that still build ``ClaudeAgentOptions`` directly (query_engine,
-        query_background) can hand them here; the fields omni can honor are
+        query_background) can hand them here; the fields fluid can honor are
         projected onto a SessionOptions. This lets ``make_adapter()`` be a
-        drop-in at those sites. Fields omni cannot honor are ignored (see the
+        drop-in at those sites. Fields fluid cannot honor are ignored (see the
         module docstring's degraded list).
         """
         opts = SessionOptions(
@@ -556,11 +568,11 @@ class HarnessAdapter(ProviderAdapter):
             # session. See query_options for the full reasoning.
             tool_allowlist=getattr(sdk_options, "aih_tool_allowlist", None),
             # Profile ``max_turns`` (query_options puts it on the SDK options).
-            # Native legs map it onto omni's per-turn model-call budget.
+            # Native legs map it onto fluid's per-turn model-call budget.
             max_turns=getattr(sdk_options, "max_turns", None),
             # Reasoning depth (profile config or chat override, resolved by
             # query_options). Delegated leg → --effort; native legs → the
-            # provider's effort/reasoning param via omni's serializers.
+            # provider's effort/reasoning param via fluid's serializers.
             effort=getattr(sdk_options, "effort", None),
         )
         # The session's bound model provider (``sessions.provider_id``) rides on
@@ -585,7 +597,7 @@ class HarnessAdapter(ProviderAdapter):
             if provider_dialect:
                 opts.extra["provider_dialect"] = provider_dialect
         # The app's own session id (``sessions.id``) rides alongside it as
-        # ``aih_session_id``. Native legs need it for Task dispatch: the omni
+        # ``aih_session_id``. Native legs need it for Task dispatch: the fluid
         # session id is a ``ses_...`` handle, not an app session row, and on a
         # fresh session neither id exists at connect time.
         app_session_id = getattr(sdk_options, "aih_session_id", None)
@@ -602,7 +614,7 @@ class HarnessAdapter(ProviderAdapter):
         *,
         session_id: Optional[str] = None,
     ) -> None:
-        """Close the omni engine (cancels any running turn, flushes the bus)."""
+        """Close the fluid engine (cancels any running turn, flushes the bus)."""
         engine = self._engine
         if engine is None:
             return
@@ -634,7 +646,7 @@ class HarnessAdapter(ProviderAdapter):
     def is_alive(self) -> bool:
         """Whether the engine exists and hasn't been closed.
 
-        omni engines are in-process (native) or supervise a subprocess
+        fluid engines are in-process (native) or supervise a subprocess
         (delegated). We treat "connected and not torn down" as alive; the
         delegated subprocess health is managed internally by the engine.
         """
@@ -651,11 +663,11 @@ class HarnessAdapter(ProviderAdapter):
         await self._engine.submit(UserTurn(content=prompt))
 
     async def receive_events(self) -> AsyncIterator[ProviderEvent]:
-        """Translate the omni Event stream into ProviderEvents for one turn.
+        """Translate the fluid Event stream into ProviderEvents for one turn.
 
         Subscribes at the current replay cursor, yields translated mirror
         messages, and completes on the turn-terminal ResultMessage (synthesized
-        from omni's TurnComplete / Interrupted / ErrorEvent), mirroring the SDK
+        from fluid's TurnComplete / Interrupted / ErrorEvent), mirroring the SDK
         adapter's iterator-completion contract.
         """
         if self._engine is None:
@@ -682,28 +694,28 @@ class HarnessAdapter(ProviderAdapter):
                     return
 
     async def _resolve_cli_session_id(
-        self, omni_session_id: Optional[str], options: SessionOptions
+        self, fluid_session_id: Optional[str], options: SessionOptions
     ) -> Optional[str]:
         """Resolve the delegated CLI's ``--resume`` handle from the store.
 
-        ``resume_session_id`` is the app's *omni* session id (``ses_...``); the
+        ``resume_session_id`` is the app's *fluid* session id (``ses_...``); the
         CLI only recognises the uuid it minted itself and reported in its
         ``init`` frame. DelegatedLoop persists that uuid onto the session meta,
         so a resumed session reads it back from here.
 
         Returns None when there is nothing stored — a fresh CLI conversation is
-        the correct degraded behavior. Passing the omni id through instead
+        the correct degraded behavior. Passing the fluid id through instead
         (the old bug) makes the CLI reject the resume and the turn dies in ~1s.
         """
-        if not options.resume_session_id or not omni_session_id or self._store is None:
+        if not options.resume_session_id or not fluid_session_id or self._store is None:
             return None
         try:
-            meta = await self._store.get_session(omni_session_id)
+            meta = await self._store.get_session(fluid_session_id)
         except Exception:
             logger.warning(
-                "[HarnessAdapter] could not load omni session %s for the CLI resume "
+                "[HarnessAdapter] could not load fluid session %s for the CLI resume "
                 "handle — starting a fresh CLI conversation",
-                omni_session_id, exc_info=True,
+                fluid_session_id, exc_info=True,
             )
             return None
         return getattr(meta, "cli_session_id", None) if meta is not None else None
@@ -711,14 +723,14 @@ class HarnessAdapter(ProviderAdapter):
     async def _seed_event_log(self, session_id: str) -> None:
         """Seed the engine's in-memory event log from the durable store.
 
-        WHY this exists: omni's EventBus numbers events ``seq = len(log) + 1``
+        WHY this exists: fluid's EventBus numbers events ``seq = len(log) + 1``
         off its *in-memory* log. A freshly built engine over a RESUMED session
         starts with an empty log, so its first new event is numbered 1 — even
         though the store already holds seq 1..N for that session. The durable
-        append is idempotent per ``(session_id, seq)`` (PgOmniStore's
+        append is idempotent per ``(session_id, seq)`` (PgFluidStore's
         ``ON CONFLICT DO NOTHING``), so those re-used numbers collide with the
         existing rows and the first N events of every post-resume turn are
-        silently DROPPED from ``omni_session_events``.
+        silently DROPPED from ``fluid_session_events``.
 
         Headless one-shot turns (ScheduleWakeup wakes, automations) build a
         fresh adapter per turn, so they hit this on EVERY turn and the wake's
@@ -771,14 +783,14 @@ class HarnessAdapter(ProviderAdapter):
         self._event_cursor = max(self._event_cursor, stored[-1].seq)
 
     async def _bridge_permission(self, ev: PermissionRequestEvent) -> None:
-        """Route one omni permission request through the app's can_use_tool
+        """Route one fluid permission request through the app's can_use_tool
         callback and submit the decision back to the engine.
 
         The callback duck-types its ``context`` argument via getattr (see
         can_use_tool_callback in query_engine), so a SimpleNamespace carrying
         tool_use_id is sufficient. The result is detected by class name to keep
         claude_agent_sdk types out of this module. Any failure denies —
-        omni blocks the tool until a decision arrives, so silence would hang
+        fluid blocks the tool until a decision arrives, so silence would hang
         the turn.
         """
         from types import SimpleNamespace
@@ -844,7 +856,7 @@ class HarnessAdapter(ProviderAdapter):
         request_id = self._perm_requests.pop(tool_use_id, None)
         if request_id is None:
             logger.warning(
-                "[HarnessAdapter] no pending omni permission for tool_use_id=%s", tool_use_id
+                "[HarnessAdapter] no pending fluid permission for tool_use_id=%s", tool_use_id
             )
             return
         decision = ("allow_always" if remember else "allow") if allow else "deny"
@@ -859,7 +871,7 @@ class HarnessAdapter(ProviderAdapter):
         )
 
     async def respond_to_user_question(self, answer: str) -> None:
-        # omni's core Event model does not yet emit a user-question event, so
+        # fluid's core Event model does not yet emit a user-question event, so
         # there is normally no request_id to answer. This is wired for
         # forward-compat: if a question id was recorded, respond to it.
         if self._engine is None or self._pending_question_id is None:
@@ -1005,11 +1017,11 @@ class HarnessAdapter(ProviderAdapter):
             return True
         return False
 
-    # ─── Translation: omni Event → ProviderEvent mirrors ──────────────
+    # ─── Translation: fluid Event → ProviderEvent mirrors ──────────────
 
     def _uuid(self, event: Any) -> str:
-        """Stable synthetic uuid for a omni event (mirrors carry uuid fields)."""
-        return f"omni-{getattr(event, 'seq', -1)}"
+        """Stable synthetic uuid for a fluid event (mirrors carry uuid fields)."""
+        return f"fluid-{getattr(event, 'seq', -1)}"
 
     def _stream_event(self, event: Any, raw: Dict[str, Any]) -> StreamEvent:
         return StreamEvent(
@@ -1034,7 +1046,7 @@ class HarnessAdapter(ProviderAdapter):
 
     def _translate(self, event: Any) -> list:
         """The core mapping table. Returns a list of mirror events (possibly
-        empty) — one omni event can fan out to a StreamEvent plus a complete
+        empty) — one fluid event can fan out to a StreamEvent plus a complete
         message, exactly like the SDK's partial-message mode."""
         cls = type(event).__name__
         partial = bool(self._options and self._options.include_partial_messages)
@@ -1119,7 +1131,7 @@ class HarnessAdapter(ProviderAdapter):
                 )
             # Complete text/thinking blocks surface as an AssistantMessage
             # (SDK parity: complete messages follow the deltas). tool_use
-            # blocks are covered by the discrete ToolUse omni event.
+            # blocks are covered by the discrete ToolUse fluid event.
             if block_type == "text" and text:
                 out.append(self._assistant(event, [TextBlock(text=text)]))
             elif block_type == "thinking" and text:
@@ -1158,7 +1170,7 @@ class HarnessAdapter(ProviderAdapter):
             ]
 
         if cls == "QuestionRequest":
-            # MRTR input_required round-trip (omni engine). Record the id so
+            # MRTR input_required round-trip (fluid engine). Record the id so
             # respond_to_user_question routes the answer back; surface the
             # prompt through the permission-event channel (name/input carry the
             # question text + schema) until a dedicated question UI lands.
@@ -1175,7 +1187,7 @@ class HarnessAdapter(ProviderAdapter):
 
         if cls == "PermissionRequest":
             # Record the tool_use_id -> request_id link so respond_to_permission
-            # can route the decision back to the right omni future.
+            # can route the decision back to the right fluid future.
             self._perm_requests[event.tool_use_id] = event.request_id
             return [
                 PermissionRequestEvent(
@@ -1261,7 +1273,7 @@ class HarnessAdapter(ProviderAdapter):
                     num_turns=event.num_model_calls,
                     session_id=event.session_id,
                     stop_reason=event.stop_reason,
-                    # omni can report cost_usd=None (e.g. the delegated-Claude
+                    # fluid can report cost_usd=None (e.g. the delegated-Claude
                     # leg on subscription auth); the sessions row and the
                     # response model both require a float, so coerce here.
                     total_cost_usd=event.cost_usd if event.cost_usd is not None else 0.0,
@@ -1313,7 +1325,7 @@ class HarnessAdapter(ProviderAdapter):
                 )
             ]
 
-        # Unknown / no-analog omni event — skip.
+        # Unknown / no-analog fluid event — skip.
         return []
 
     # ─── Internal builders ────────────────────────────────────────────
@@ -1324,7 +1336,7 @@ class HarnessAdapter(ProviderAdapter):
         append_system: Optional[str],
         options: SessionOptions,
     ) -> Any:
-        """Run the omni prompt compiler, keeping the labeled sections.
+        """Run the fluid prompt compiler, keeping the labeled sections.
 
         Returns fluid's ``CompiledPrompt`` (joined text + one section per
         input: base, instruction files, skills index, environment, extras) or
@@ -1337,8 +1349,8 @@ class HarnessAdapter(ProviderAdapter):
             from fluid.context.compiler import PromptInputs, compile_prompt
 
             # A profile with ``inject_env_details`` on already carries the
-            # app's <env> block (which knows worktree/execution mode omni
-            # doesn't) — skip omni's env section rather than injecting twice.
+            # app's <env> block (which knows worktree/execution mode fluid
+            # doesn't) — skip fluid's env section rather than injecting twice.
             has_app_env = bool(system) and "<env>" in system
             return compile_prompt(
                 PromptInputs(
@@ -1358,12 +1370,12 @@ class HarnessAdapter(ProviderAdapter):
         append_system: Optional[str],
         options: SessionOptions,
     ) -> Optional[str]:
-        """Run the omni prompt compiler over the app's system-prompt parts.
+        """Run the fluid prompt compiler over the app's system-prompt parts.
 
         ``system`` (a custom/plain-string profile prompt) is the base — the
         agent's configured prompt, ruling A12. ``append_system`` (the preset
         shape's security+instructions text) rides as an extra block. The
-        compiler adds omni's own gathering: instruction files, skills index,
+        compiler adds fluid's own gathering: instruction files, skills index,
         environment. Never raises — a compiler failure falls back to the
         pre-compiler string so a session can always start.
         """
@@ -1379,7 +1391,7 @@ class HarnessAdapter(ProviderAdapter):
         # Derived, not configured (2026-08-13 ruling: no permanent flags — the
         # retired AIH_OMNI_STORE/AIH_OMNI_STORE_DIR env vars are ignored).
         # Whenever the app has a database — which every real deployment does,
-        # a DB connection is required to boot — omni sessions persist in
+        # a DB connection is required to boot — fluid sessions persist in
         # Postgres, exactly like the SDK path's PgSessionStore: cross-restart
         # resume, fork, and event replay from any app instance sharing the DB.
         # The only DB-less environments are unit tests, which get MemoryStore.
@@ -1388,8 +1400,8 @@ class HarnessAdapter(ProviderAdapter):
         from app.core.config import settings
 
         if settings.database_url or settings.postgres_password:
-            from app.core.provider.omni_pg_store import PgOmniStore
-            return PgOmniStore()
+            from app.core.provider.fluid_pg_store import PgFluidStore
+            return PgFluidStore()
         return MemoryStore()
 
     async def _build_registry(
@@ -1397,16 +1409,16 @@ class HarnessAdapter(ProviderAdapter):
     ) -> Optional[ToolRegistry]:
         # Escape hatch: a caller may hand a fully-built registry — its contents
         # are then entirely the caller's responsibility (builtins included).
-        prebuilt = options.extra.get("omni_registry")
+        prebuilt = _extra_opt(options, "registry")
         if isinstance(prebuilt, ToolRegistry):
             return prebuilt
 
-        inproc_servers = options.extra.get("omni_inproc_servers") or []
+        inproc_servers = _extra_opt(options, "inproc_servers") or []
         external_mcp = _external_mcp_servers(options.mcp_servers)
 
         registry = ToolRegistry()
         # Constraint: native legs (anthropic / openai_responses / openrouter)
-        # get omni's builtin Read/Grep/Write/Edit/Bash/Skill/Note as first-class
+        # get fluid's builtin Read/Grep/Write/Edit/Bash/Skill/Note as first-class
         # tools — without them a native session can only reach the app's bridged
         # MCP servers and has no file/shell access at all. The delegated leg must
         # NOT get them: the claude CLI supplies its own copies. Conversely the
@@ -1418,15 +1430,15 @@ class HarnessAdapter(ProviderAdapter):
 
             register_builtins(registry)
             builtins_registered = True
-            logger.info("[HarnessAdapter] registered omni builtin tools for native leg")
+            logger.info("[HarnessAdapter] registered fluid builtin tools for native leg")
             _amend_native_task_spec(registry, options)
 
         # The app's own in-proc SDK servers (builtins, app-config, ai-tools,
         # computer-use, provider-agent): their @tool objects were recorded per
         # instance when patch_sdk_server assembled them; re-register the same
-        # tools on omni's registry with the bridge's risk maps.
-        from app.core.provider.omni_tool_bridge import register_recorded_sdk_servers
-        # Native legs run omni's bare-named Task builtin (ruling A13) and its
+        # tools on fluid's registry with the bridge's risk maps.
+        from app.core.provider.fluid_tool_bridge import register_recorded_sdk_servers
+        # Native legs run fluid's bare-named Task builtin (ruling A13) and its
         # ToolSearch (the functional deferred-schema loader for THIS registry)
         # — the bridged mcp__builtins__ copies are excluded so the model sees
         # ONE of each. The delegated leg keeps the MCP copies (the CLI can
@@ -1439,7 +1451,7 @@ class HarnessAdapter(ProviderAdapter):
         )
         if recorded:
             logger.info(
-                "[HarnessAdapter] bridged in-proc sdk servers onto omni registry: %s",
+                "[HarnessAdapter] bridged in-proc sdk servers onto fluid registry: %s",
                 ", ".join(recorded),
             )
 
@@ -1454,10 +1466,10 @@ class HarnessAdapter(ProviderAdapter):
         # Connecting here too would run every external server TWICE per session.
         if native:
             for name, config in external_mcp.items():
-                # The app speaks the SDK's config dialect; omni's MCP client
+                # The app speaks the SDK's config dialect; fluid's MCP client
                 # speaks ``transport``. Normalize (never mutate — the delegated
                 # leg serializes the ORIGINAL map into its --mcp-config file).
-                normalized = _normalize_mcp_config_for_omni(name, config)
+                normalized = _normalize_mcp_config_for_fluid(name, config)
                 if normalized is None:
                     continue  # unsupported transport; already warned about
                 try:
@@ -1525,9 +1537,9 @@ def _system_parts(system_prompt: Any) -> tuple[Optional[str], Optional[str]]:
 
 
 def _external_mcp_servers(mcp_servers: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Only external transports (stdio/sse/http) can be connected via omni's
+    """Only external transports (stdio/sse/http) can be connected via fluid's
     McpManager. SDK in-process servers (type='sdk') are skipped — those port
-    through ``omni_tool_bridge`` into ``omni_inproc_servers`` instead."""
+    through ``fluid_tool_bridge`` into ``fluid_inproc_servers`` instead."""
     out: Dict[str, Any] = {}
     for name, cfg in (mcp_servers or {}).items():
         if isinstance(cfg, dict) and cfg.get("type") == "sdk":
@@ -1568,13 +1580,13 @@ def _prune_duplicate_plugin_mcp_servers(
     return dropped
 
 
-def _normalize_mcp_config_for_omni(name: str, config: Any) -> Optional[Dict[str, Any]]:
-    """Translate an SDK-shaped external MCP config into omni's client dialect.
+def _normalize_mcp_config_for_fluid(name: str, config: Any) -> Optional[Dict[str, Any]]:
+    """Translate an SDK-shaped external MCP config into fluid's client dialect.
 
     The app emits SDK-shaped configs (``app/core/mcp_config.py``): stdio entries
     carry ``command`` (+ optional ``args``/``env``) and no type marker, remote
-    entries carry ``{"type": "sse"|"http", "url", "headers"}``. omni's client
-    (``omni/tools/mcp/client.py``) dispatches on ``config["transport"]``
+    entries carry ``{"type": "sse"|"http", "url", "headers"}``. fluid's client
+    (``fluid/tools/mcp/client.py``) dispatches on ``config["transport"]``
     defaulting to ``"stdio"``, and implements only ``stdio`` and
     ``http``/``streamable_http``. So an SDK ``{"type": "http", ...}`` entry used
     to fall into the stdio branch and die on the missing ``command`` key, with
@@ -1582,16 +1594,16 @@ def _normalize_mcp_config_for_omni(name: str, config: Any) -> Optional[Dict[str,
     MCP servers silently never connected on native legs.
 
     Returns the config to hand ``connect_mcp``, or ``None`` when the server
-    cannot be connected on an omni leg at all. The input dict is never mutated:
+    cannot be connected on a fluid leg at all. The input dict is never mutated:
     the delegated leg JSON-serializes the same objects into its ``--mcp-config``
     file, which must keep the SDK shape the CLI expects.
 
-    Gaps warned about here (upstream omni work, ruling PA5 / plan wave W0a):
+    Gaps warned about here (upstream fluid work, ruling PA5 / plan wave W0a):
     SSE transport and per-server HTTP headers.
     """
     if not isinstance(config, dict):
         return config
-    # An explicit transport means the caller already speaks omni's dialect.
+    # An explicit transport means the caller already speaks fluid's dialect.
     if config.get("transport"):
         return config
 
@@ -1602,7 +1614,7 @@ def _normalize_mcp_config_for_omni(name: str, config: Any) -> Optional[Dict[str,
 
     if kind == "sse":
         logger.warning(
-            "[HarnessAdapter] MCP server %r uses the SSE transport, which the omni "
+            "[HarnessAdapter] MCP server %r uses the SSE transport, which the fluid "
             "MCP client does not support yet — skipping it for this session. Its "
             "tools will be unavailable. Re-configure the server as streamable HTTP "
             "if it offers one.",
@@ -1616,7 +1628,7 @@ def _normalize_mcp_config_for_omni(name: str, config: Any) -> Optional[Dict[str,
         normalized["transport"] = "streamable_http"
         if config.get("headers"):
             logger.warning(
-                "[HarnessAdapter] MCP server %r defines HTTP headers, which the omni "
+                "[HarnessAdapter] MCP server %r defines HTTP headers, which the fluid "
                 "MCP client does not support yet — connecting WITHOUT them. Requests "
                 "needing those headers (e.g. auth) will fail.",
                 name,
@@ -1625,7 +1637,7 @@ def _normalize_mcp_config_for_omni(name: str, config: Any) -> Optional[Dict[str,
 
     logger.warning(
         "[HarnessAdapter] MCP server %r has unknown transport type %r — passing it "
-        "through unchanged; omni will reject it if it cannot be handled.",
+        "through unchanged; fluid will reject it if it cannot be handled.",
         name,
         config.get("type"),
     )
@@ -1703,7 +1715,7 @@ def _native_max_output_tokens(options: SessionOptions) -> Optional[int]:
 
 
 # ``auth_mode`` values meaning "this provider row carries a subscription OAuth
-# login, not an API key". Mirrors ``omni_credentials._SUBSCRIPTION_AUTH_MODES``
+# login, not an API key". Mirrors ``fluid_credentials._SUBSCRIPTION_AUTH_MODES``
 # (imported rather than re-listed so the two can never drift): an anthropic row
 # in one of these modes MUST land on the delegated CLI leg — Anthropic bans
 # third-party use of subscription tokens, and ``resolve_provider_credentials``
@@ -1718,7 +1730,7 @@ def _provider_row_kind(
     None means "this row shape says nothing" and the caller falls back to the
     model-string sniff.
     """
-    from app.core.provider.omni_credentials import _SUBSCRIPTION_AUTH_MODES
+    from app.core.provider.fluid_credentials import _SUBSCRIPTION_AUTH_MODES
 
     ptype = (provider_type or "").strip().lower()
     mode = (auth_mode or "").strip().lower()
@@ -1732,7 +1744,7 @@ def _provider_row_kind(
         return "openrouter"
     if ptype == "custom":
         # A "custom" row always runs NATIVELY at the row's base_url; its
-        # ``api_dialect`` picks the wire format. 'openai' → omni's generic
+        # ``api_dialect`` picks the wire format. 'openai' → fluid's generic
         # chat/completions client (xAI-direct / Groq / vLLM endpoints).
         # Default (unset/'anthropic') → the Anthropic Messages client, the
         # historic custom-row contract (the delegated CLI pointed
@@ -1820,7 +1832,7 @@ def _native_context_window(kind: str, options: SessionOptions) -> Optional[int]:
 
 
 def _amend_native_task_spec(registry: ToolRegistry, options: SessionOptions) -> None:
-    """Re-register omni's bare Task builtin with a provider-aware ``model`` hint.
+    """Re-register fluid's bare Task builtin with a provider-aware ``model`` hint.
 
     The vendor spec's ``model`` property only says "Optional model override for
     this run" — on a native (non-Claude) leg the model calling Task has no idea
@@ -1886,14 +1898,19 @@ def _amend_native_task_spec(registry: ToolRegistry, options: SessionOptions) -> 
 
 def _decide_provider_kind(options: SessionOptions) -> str:
     """Return one of: 'delegated' | 'anthropic' | 'openai_responses' | 'openrouter'."""
-    engine_hint = options.extra.get("omni_engine")
+    engine_hint = _extra_opt(options, "engine")
     if engine_hint == "delegated":
         return "delegated"
     if engine_hint == "native":
         # fall through to provider selection below
         pass
 
-    provider_hint = options.extra.get("omni_provider") or os.environ.get("AIH_OMNI_PROVIDER")
+    provider_hint = (
+        _extra_opt(options, "provider")
+        or os.environ.get("AIH_FLUID_PROVIDER")
+        # legacy env name from before the omni -> fluid harness rename
+        or os.environ.get("AIH_OMNI_PROVIDER")
+    )
     if provider_hint in ("anthropic", "openai_responses", "openrouter"):
         return provider_hint
     if provider_hint == "delegated":
@@ -1931,7 +1948,7 @@ def _decide_provider_kind(options: SessionOptions) -> str:
 
     if get_model_family(options.model) is not None or model.startswith("claude"):
         # Subscription default: the claude CLI (delegated). Set
-        # extra["omni_provider"]="anthropic" for the direct-API-key native path.
+        # extra["fluid_provider"]="anthropic" for the direct-API-key native path.
         return "delegated" if engine_hint != "native" else "anthropic"
     if model.startswith(("gpt", "o1", "o3", "o4", "codex")):
         return "openai_responses"
@@ -1972,7 +1989,7 @@ def _usage_capture_http_client(provider_id: str, use_codex_backend: bool) -> htt
     """An ``httpx.AsyncClient`` that passively captures usage/quota headers and
     records upstream rate limits.
 
-    Native legs talk to the upstream provider directly (the omni client owns the
+    Native legs talk to the upstream provider directly (the fluid client owns the
     HTTP call), so injecting this client is what keeps
     ``provider_usage_snapshots`` fresh: httpx fires the ``response`` event hook
     with headers populated before the streamed body is consumed
@@ -1982,7 +1999,7 @@ def _usage_capture_http_client(provider_id: str, use_codex_backend: bool) -> htt
     Deliberately no status-code guard on the capture: ``capture_*`` already
     no-ops when no allowlisted header is present, and error responses (notably
     429) carry the freshest quota headers of all. ``timeout=600.0`` matches the
-    vendored omni client's own default, which it bypasses whenever a client is
+    vendored fluid client's own default, which it bypasses whenever a client is
     injected.
 
     RATE-LIMIT BREAKER (ruling D2, 2026-08-12). This hook is also the app's
@@ -2029,21 +2046,21 @@ def _usage_capture_http_client(provider_id: str, use_codex_backend: bool) -> htt
 async def _build_provider_client(
     kind: str, options: SessionOptions
 ) -> tuple[Any, Optional[httpx.AsyncClient]]:
-    """Construct the omni native client for ``kind``, authenticated.
+    """Construct the fluid native client for ``kind``, authenticated.
 
     Returns ``(client, injected_http_client)``. The second element is any
-    ``httpx.AsyncClient`` injected into the omni client (the usage-header
+    ``httpx.AsyncClient`` injected into the fluid client (the usage-header
     capture client on openai_responses rows; the Bearer-header client on
     custom/base_url anthropic rows), or ``None`` when no client was injected —
-    the caller owns closing it (the omni client does not, since it did not
+    the caller owns closing it (the fluid client does not, since it did not
     create it).
 
-    Credential resolution order (see ``omni_credentials``):
+    Credential resolution order (see ``fluid_credentials``):
       1. the session's bound ``model_providers`` row (``extra["provider_id"]``,
          threaded from ``query_options`` through ``connect_with_sdk_options``) —
          decrypted API key, or a Codex OAuth auth object for a
          ChatGPT-subscription row;
-      2. otherwise the omni client's own env-var fallback (dev mode), which is
+      2. otherwise the fluid client's own env-var fallback (dev mode), which is
          required to be present.
 
     A bound-but-uncredentialed provider raises ``ProviderCredentialError``
@@ -2069,7 +2086,7 @@ async def _build_provider_client(
         _require_env_credential("OPENAI_API_KEY", kind)
         return OpenAIResponsesClient(), None
     if kind == "openrouter":
-        # omni's OpenRouterClient is the generic OpenAI chat/completions
+        # fluid's OpenRouterClient is the generic OpenAI chat/completions
         # client — a row-level base_url redirects it (custom rows with
         # api_dialect='openai': xAI-direct / Groq / vLLM). For openrouter-type
         # rows the stored base ("https://openrouter.ai/api") composes to the
@@ -2095,7 +2112,7 @@ async def _build_provider_client(
     if creds is not None:
         if creds.base_url:
             # Gateways behind a custom base_url were authenticated by the CLI
-            # via ``Authorization: Bearer`` (ANTHROPIC_AUTH_TOKEN); omni's
+            # via ``Authorization: Bearer`` (ANTHROPIC_AUTH_TOKEN); fluid's
             # client only sends ``x-api-key``. Inject an httpx client carrying
             # the Bearer header too so either scheme works. Returned as the
             # second element — the adapter owns closing an injected client.

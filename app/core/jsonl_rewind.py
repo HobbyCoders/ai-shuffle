@@ -159,8 +159,8 @@ def extract_entry_text(entry: Mapping[str, Any]) -> str:
     """Extract the text content from a transcript entry.
 
     Source-agnostic: ``entry`` is any raw transcript dict (a JSONL line, a
-    session-store ``entry`` JSONB, or an omni node projected by
-    ``app.core.provider.omni_transcript``).
+    session-store ``entry`` JSONB, or a fluid node projected by
+    ``app.core.provider.fluid_transcript``).
     """
     message = entry.get('message', {})
     content = message.get('content', '')
@@ -185,8 +185,8 @@ def checkpoints_from_entries(
     """Build the rewind checkpoint list from raw transcript entries.
 
     The pure, source-agnostic core of :meth:`JSONLRewindService.get_checkpoints`
-    — extracted so the omni node-tree transcript
-    (:func:`app.core.provider.omni_transcript.get_omni_checkpoints`) produces a
+    — extracted so the fluid node-tree transcript
+    (:func:`app.core.provider.fluid_transcript.get_fluid_checkpoints`) produces a
     checkpoint list with IDENTICAL population and ordering rules. That identity
     is load-bearing: the rewind content guard compares a client-side occurrence
     ordinal against this list, so any divergence in which entries qualify would

@@ -1057,7 +1057,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			if (!taskId) return state;
 			let next = closeOpen(state);
 			if (findSubagentByTask(next.messages, taskId)) return next; // idempotent
-			// Reverse ordering of the same omni dispatch: the worker-keyed card
+			// Reverse ordering of the same fluid dispatch: the worker-keyed card
 			// already landed and absorbed THIS launch id, so a late launch-keyed
 			// `subagent.started` would duplicate it. The surviving card records the
 			// absorption on agentLaunchToolUseId — treat it as the idempotency key.
@@ -1067,7 +1067,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// tool.use/tool.result), opening a `tooluse-${taskId}` placeholder
 			// that would spin forever. The subagent card is the designed surface
 			// for the launch — drop the orphan placeholder now the card exists.
-			// Omni-leg Task workers key task_id on the WORKER session id, so the
+			// Fluid-leg Task workers key task_id on the WORKER session id, so the
 			// model's actual launch tool_use_id rides separately as
 			// launch_tool_use_id — absorb that block too, or the transcript shows
 			// both a Task tool call and the worker card for one dispatch. That id

@@ -4,7 +4,7 @@ plus the #757 follow-up: passive OpenAI/Anthropic API-key header capture).
 Four data paths land in this module, per ``docs/PROVIDER_USAGE_CONTEXT_PLAN.md``
 (Codex/OpenRouter) and GitHub issue #757 (OpenAI/Anthropic API-key providers):
 
-**Codex passive capture (U2).** The omni harness's native Codex leg receives
+**Codex passive capture (U2).** The fluid harness's native Codex leg receives
 ``x-codex-*`` plan/rate-limit headers on every response. The response event
 hook installed by ``provider/harness_adapter.py::_usage_capture_http_client``
 calls ``capture_codex_headers``, which normalizes those headers into the shared
@@ -12,7 +12,7 @@ calls ``capture_codex_headers``, which normalizes those headers into the shared
 the streaming hot path. (Before the translator gateway was retired the same
 capture ran inside its Codex upstream leg.)
 
-**OpenAI passive capture (#757).** The omni harness's native OpenAI-platform
+**OpenAI passive capture (#757).** The fluid harness's native OpenAI-platform
 leg receives standard ``x-ratelimit-*`` headers; the same response hook calls
 ``capture_openai_headers``, which follows the exact same fire-and-forget
 pattern as the Codex capture above, persisting ``provider_type="openai"``.

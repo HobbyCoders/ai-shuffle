@@ -6,13 +6,13 @@ retry loops INSIDE the CLI processes.
 
 This module (and this test file) was ``translator_gateway/circuit_breaker.py``
 until the gateway was retired. The policy is unchanged; the RECORDING seam moved
-to the omni harness's usage-capture response hook, which is what now observes
+to the fluid harness's usage-capture response hook, which is what now observes
 every native-leg response.
 
 Covered here:
   * the policy unit (trip on 429, Retry-After in BOTH forms, default cooldown,
     max-cooldown cap, expiry, reset, thread safety);
-  * the omni response-hook wiring (a 429 passing through
+  * the fluid response-hook wiring (a 429 passing through
     ``_usage_capture_http_client`` trips the breaker with its ``Retry-After``;
     200/401/5xx do NOT);
   * the kill switch restoring the previous behavior exactly.
@@ -276,9 +276,9 @@ class TestConcurrency:
 
 
 
-# ─── omni response-hook wiring (D2 port) ─────────────────────────────────────
+# ─── fluid response-hook wiring (D2 port) ─────────────────────────────────────
 # The retired gateway trapped 429s in ``upstream._note_rate_limit``. Its
-# replacement is the omni usage-capture response hook, which sees every native
+# replacement is the fluid usage-capture response hook, which sees every native
 # leg response and already carries the bound ``provider_id``. These tests drive
 # the REAL hook through ``httpx.MockTransport`` — no network, no provider row.
 
@@ -299,8 +299,8 @@ def _mock_response_client(response_factory, *, use_codex_backend: bool = False):
     return client
 
 
-class TestOmniResponseHookTripsOnlyOn429:
-    """D2: a 429 on a native omni leg trips the breaker via the response hook."""
+class TestFluidResponseHookTripsOnlyOn429:
+    """D2: a 429 on a native fluid leg trips the breaker via the response hook."""
 
     async def test_429_through_the_hook_trips_the_breaker(self):
         def handler(request):

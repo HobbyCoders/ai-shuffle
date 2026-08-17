@@ -1,6 +1,6 @@
 """P1.5 (ruling A11): the profile's `memory` config field is injected into the
 system prompt on every shape — preset (append field, so the delegated CLI sees
-it) and custom/string (folded into the string the omni compiler treats as
+it) and custom/string (folded into the string the fluid compiler treats as
 base+blocks)."""
 
 from unittest.mock import patch

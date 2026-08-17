@@ -121,7 +121,7 @@ class SubagentStarted(EventBase):
     agent_type: str | None = None
     description: str | None = None
     prompt_preview: str | None = None
-    # The model's launch tool_use_id when it differs from task_id (omni-leg
+    # The model's launch tool_use_id when it differs from task_id (fluid-leg
     # Task workers key task_id on the worker session id) — lets the reducer
     # absorb the launch tool_use placeholder into this card.
     launch_tool_use_id: str | None = None

@@ -402,7 +402,7 @@ class TestCreateVoiceSession:
         _unlock(mock_db)
         _enable_voice(voice_model="gpt-realtime-2.1-mini", voice_voice="cedar")
         # Store the key the way the provider API does — encrypted — to prove the
-        # shared omni decryption path is what feeds the mint.
+        # shared fluid decryption path is what feeds the mint.
         _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
         captured = {}
         _install_mock_transport(monkeypatch, _secret_handler(captured))

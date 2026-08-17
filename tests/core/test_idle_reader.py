@@ -142,8 +142,8 @@ async def test_drain_mode_settles_aborted_on_result(mock_db):
     scheduler.assert_called_once_with("s1", turn["id"], "aborted")
 
 
-async def test_drain_mode_settles_omni_adapter_without_sdk_client(mock_db):
-    """Omni/harness adapters expose no SDK client (state.client is None). The
+async def test_drain_mode_settles_fluid_adapter_without_sdk_client(mock_db):
+    """Fluid/harness adapters expose no SDK client (state.client is None). The
     drain used to return without settling, leaving the turn 'draining' after
     execute() released its lease — reap_expired then requeued and RE-RAN the
     interrupted user turn (replayed prompt, re-spawned Task workers). The
@@ -155,7 +155,7 @@ async def test_drain_mode_settles_omni_adapter_without_sdk_client(mock_db):
     session_runtime.register_scheduler(scheduler)
 
     pool, state = _make_pool([])
-    state.client = None  # omni adapter: no SDK receive_messages() stream
+    state.client = None  # fluid adapter: no SDK receive_messages() stream
 
     with patch("app.core.session_pool.get_session_pool", return_value=pool):
         await idle_reader.run_idle_reader("s1", drain_turn_id=turn["id"])

@@ -1,9 +1,9 @@
-"""End-to-end guard for the in-proc SDK tool port onto omni's ToolRegistry.
+"""End-to-end guard for the in-proc SDK tool port onto fluid's ToolRegistry.
 
 Chain under test:
   patch_sdk_server(cfg, tools)                # records tools per instance
     → sdk_tool_records.recorded_sdk_server_tools
-    → omni_tool_bridge.register_recorded_sdk_servers
+    → fluid_tool_bridge.register_recorded_sdk_servers
     → HarnessAdapter._build_registry          # flag-on connect path
 
 The recording is keyed by server INSTANCE (tools are closures over per-session
@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.core.provider.omni_tool_bridge import (
+from app.core.provider.fluid_tool_bridge import (
     SERVER_RISK_MAPS,
     register_recorded_sdk_servers,
 )

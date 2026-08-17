@@ -517,7 +517,7 @@ async def _generate_profile_internal(
         except Exception as e:
             logger.warning(f"Failed to parse ai_tools config: {e}")
 
-    # Build the export format — omni-honored fields only (ruling A12). If a
+    # Build the export format — fluid-honored fields only (ruling A12). If a
     # model still emits the retired preset shape, fold its append text into
     # the custom prompt content; other SDK-era fields are dropped.
     prompt_content = (

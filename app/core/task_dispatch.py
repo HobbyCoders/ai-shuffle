@@ -1,6 +1,6 @@
 """Task-tool dispatch — the unified agent-orchestration surface (rulings A6-A10).
 
-The ``Task`` tool (omni builtin on native legs, ``mcp__builtins__Task`` on the
+The ``Task`` tool (fluid builtin on native legs, ``mcp__builtins__Task`` on the
 delegated leg) resolves its target against the unified ``agents`` table and
 runs it as a worker session via :func:`app.core.provider_agent.dispatch_worker`
 — the proven ProviderAgent machinery (real session rows, approval routing,
@@ -524,7 +524,7 @@ async def dispatch_task_tool(
         model_id=model_override,
         prompt=prompt,
         label=label,
-        # The model's Task tool_use_id (omni native leg) — lets the worker
+        # The model's Task tool_use_id (fluid native leg) — lets the worker
         # card absorb the launch tool_use block instead of rendering both.
         launch_tool_use_id=launch_tool_use_id,
     )
@@ -592,11 +592,11 @@ async def _await_worker_registration(
 # Tool-surface adapters
 # ---------------------------------------------------------------------------
 
-def make_omni_dispatcher(
+def make_fluid_dispatcher(
     session_id: "str | Callable[[], Optional[str]]",
     profile_id: Optional[str] = None,
 ):
-    """The ``ctx.extra['task_dispatch']`` callable for omni's bare Task builtin
+    """The ``ctx.extra['task_dispatch']`` callable for fluid's bare Task builtin
     (native legs).
 
     ``session_id`` is the caller's **app** session id (``sessions.id``) — the
@@ -610,7 +610,7 @@ def make_omni_dispatcher(
     forever and every Task call would report the tool unavailable.
 
     ``ctx.session_id`` is deliberately NOT used as a fallback: on a native leg
-    it holds the *omni* session id (``ses_...``), which is not a
+    it holds the *fluid* session id (``ses_...``), which is not a
     ``sessions.id`` — dispatching against it would parent the worker onto a
     session row that does not exist.
     """

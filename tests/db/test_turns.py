@@ -309,7 +309,7 @@ def test_reap_aborts_interrupted_user_turns_instead_of_requeueing(mock_db):
     Requeueing an ``interrupting``/``draining`` user turn re-ran the very
     prompt the user interrupted — the message re-appeared in the transcript
     and its Task workers re-spawned on a session the UI showed as stopped
-    (the omni-leg interrupt-replay bug). Only ``running`` user/queue turns
+    (the fluid-leg interrupt-replay bug). Only ``running`` user/queue turns
     (a genuine runner crash) are retried.
     """
     ti = turns.enqueue_turn("sInt", "user")

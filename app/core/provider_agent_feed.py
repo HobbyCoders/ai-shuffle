@@ -172,7 +172,7 @@ class WorkerFeed:
         self.provider_id = provider_id
         self.model_id = model_id
         self.prompt = prompt
-        # The model's Task tool_use_id (omni native leg), when known. Rides the
+        # The model's Task tool_use_id (fluid native leg), when known. Rides the
         # subagent.started event so the reducer can absorb the launch tool_use
         # placeholder into the card; NOT a join key for settles (those stay on
         # task_id — the worker session id).

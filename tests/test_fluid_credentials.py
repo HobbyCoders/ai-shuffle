@@ -1,29 +1,29 @@
-"""Unit tests for the omni native-client credential bridge.
+"""Unit tests for the fluid native-client credential bridge.
 
-Covers ``app/core/provider/omni_credentials.py`` (provider-row → auth bundle)
-and ``harness_adapter._build_provider_client`` (auth bundle → omni client):
+Covers ``app/core/provider/fluid_credentials.py`` (provider-row → auth bundle)
+and ``harness_adapter._build_provider_client`` (auth bundle → fluid client):
 
   1. API-key rows: the decrypted ``auth_token`` reaches each client's ``api_key``.
   2. A ChatGPT-subscription (Codex) row yields a ``ResponsesAuth``-shaped object
      whose ``get_access_token`` decrypts the stored token and whose ``on_401``
      drives the shared refresh worker — and points the client at the Codex
      backend.
-  3. No provider bound → the omni client's env-var fallback is kept.
+  3. No provider bound → the fluid client's env-var fallback is kept.
   4. No credentials anywhere → a clear ``ProviderCredentialError``.
   5. The hard constraint: a subscription-auth row never reaches AnthropicClient.
 
-NO live API calls: the omni client constructors are patched and every DB /
+NO live API calls: the fluid client constructors are patched and every DB /
 crypto / refresh call is faked.
 
-Run:  python -m pytest tests/test_omni_credentials.py -q
+Run:  python -m pytest tests/test_fluid_credentials.py -q
 """
 
 from __future__ import annotations
 
 import pytest
 
-from app.core.provider import harness_adapter, omni_credentials
-from app.core.provider.omni_credentials import (
+from app.core.provider import harness_adapter, fluid_credentials
+from app.core.provider.fluid_credentials import (
     CodexSubscriptionAuth,
     ProviderCredentialError,
     resolve_provider_credentials,
@@ -37,7 +37,7 @@ PID = "prov_1"
 
 
 class FakeClient:
-    """Records the kwargs an omni client constructor was called with."""
+    """Records the kwargs a fluid client constructor was called with."""
 
     last: dict = {}
 
@@ -61,7 +61,7 @@ class FakeAnthropic(FakeClient):
 
 @pytest.fixture(autouse=True)
 def patch_clients(monkeypatch):
-    """Patch the omni client constructors — never construct a real one."""
+    """Patch the fluid client constructors — never construct a real one."""
     monkeypatch.setattr(harness_adapter, "OpenAIResponsesClient", FakeOpenAI)
     monkeypatch.setattr(harness_adapter, "OpenRouterClient", FakeOpenRouter)
     monkeypatch.setattr(harness_adapter, "AnthropicClient", FakeAnthropic)
@@ -87,10 +87,10 @@ def fake_provider_rows(monkeypatch, row, codex=None):
     # Stored blobs are ``enc:``-prefixed; the crypto service is reused as-is, so
     # only its two entry points are stubbed here.
     monkeypatch.setattr(
-        omni_credentials.encryption, "is_encrypted", lambda v: bool(v) and v.startswith("enc:")
+        fluid_credentials.encryption, "is_encrypted", lambda v: bool(v) and v.startswith("enc:")
     )
     monkeypatch.setattr(
-        omni_credentials.encryption, "decrypt_value", lambda v: v[len("enc:"):]
+        fluid_credentials.encryption, "decrypt_value", lambda v: v[len("enc:"):]
     )
 
 
@@ -181,7 +181,7 @@ async def test_codex_subscription_builds_auth_object(monkeypatch):
     assert FakeOpenAI.last["base_url"] == harness_adapter.CODEX_RESPONSES_URL
 
     auth = FakeOpenAI.last["auth"]
-    # Satisfies omni's ResponsesAuth protocol.
+    # Satisfies fluid's ResponsesAuth protocol.
     from fluid.providers.openai_responses.client import ResponsesAuth
 
     assert isinstance(auth, ResponsesAuth)
@@ -254,7 +254,7 @@ async def test_env_fallback_when_no_provider_bound(monkeypatch, kind, env_var, f
     client, http_client = await harness_adapter._build_provider_client(
         kind, _opts(provider_id=None)
     )
-    # Constructed bare — the omni client reads the env var itself.
+    # Constructed bare — the fluid client reads the env var itself.
     assert http_client is None
     assert isinstance(client, fake)
     assert fake.last == {"api_key": None}

@@ -224,7 +224,7 @@ def test_background_mode_returns_immediately(agents):
 
 
 def test_launch_tool_use_id_threads_to_the_worker(agents):
-    """The omni dispatcher reads the engine-stamped ctx.extra['tool_use_id'] and
+    """The fluid dispatcher reads the engine-stamped ctx.extra['tool_use_id'] and
     it reaches dispatch_worker as launch_tool_use_id — what lets the worker
     card absorb the launch tool_use block instead of the UI rendering both."""
     from types import SimpleNamespace
@@ -236,7 +236,7 @@ def test_launch_tool_use_id_threads_to_the_worker(agents):
         seen.update(kwargs)
         return WorkerOutcome(ok=True, session_id="w-tuid", report="r")
 
-    dispatcher = td.make_omni_dispatcher("s-tuid")
+    dispatcher = td.make_fluid_dispatcher("s-tuid")
     ctx = SimpleNamespace(extra={"tool_use_id": "tu-99"})
     with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
         asyncio.run(dispatcher({"agent": "helper", "prompt": "go"}, ctx))
@@ -460,7 +460,7 @@ def test_dispatcher_reads_the_agent_registry_off_the_ctx(agents):
         seen.update(kwargs)
         return WorkerOutcome(ok=True, session_id="w-ctx", report="r")
 
-    dispatcher = td.make_omni_dispatcher("s-ctx")
+    dispatcher = td.make_fluid_dispatcher("s-ctx")
     ctx = SimpleNamespace(extra={})  # empty at injection time
     ctx.extra["agent_registry"] = {"researcher": _definition()}  # seeded later
     with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):

@@ -402,7 +402,7 @@ def is_provider_servable(provider: Optional[Dict[str, Any]]) -> bool:
     ProviderAgent worker models (``provider_agent.validate_provider_model``) and
     the profile-level subagent-leg validator both gate on it. The accepted set is
     deliberately unchanged by the retirement: loosening it (e.g. to admit
-    ``openrouter``, which omni can now serve natively) is a product decision, not
+    ``openrouter``, which fluid can now serve natively) is a product decision, not
     a mechanical consequence of deleting the gateway.
     """
     if not provider:
@@ -486,9 +486,9 @@ def apply_provider_env(
     Codex/OpenAI-subscription providers (``provider_type`` in
     ``{"openai", "chatgpt"}`` or ``auth_mode == "chatgpt"``) do NOT speak the
     Anthropic wire protocol. They used to be pointed at the loopback translator
-    gateway with a per-session routing token; the gateway is retired and the omni
+    gateway with a per-session routing token; the gateway is retired and the fluid
     harness now serves them natively, resolving their REAL credentials itself
-    (``provider/omni_credentials.resolve_provider_credentials`` reads the row /
+    (``provider/fluid_credentials.resolve_provider_credentials`` reads the row /
     the Codex OAuth bundle). So no upstream secret belongs in the CLI env for
     these rows: ``ANTHROPIC_BASE_URL``/``ANTHROPIC_AUTH_TOKEN`` are left empty
     (their credentials are not Anthropic-wire usable anyway) while every
@@ -520,7 +520,7 @@ def apply_provider_env(
         )
 
     # A Codex/OpenAI-subscription provider does NOT speak the Anthropic wire
-    # protocol. Its session is served by the omni harness's NATIVE
+    # protocol. Its session is served by the fluid harness's NATIVE
     # openai_responses leg, which resolves the row's real credentials itself
     # (decrypted API key, or the Codex OAuth bundle) — so nothing usable, and no
     # secret, goes into the CLI env here. Before the translator gateway was

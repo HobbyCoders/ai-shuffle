@@ -880,7 +880,7 @@ async def export_profile(
     else:
         prompt_content = system_prompt.get("append")
 
-    # Build export data - omni-honored fields only, sanitize sensitive paths
+    # Build export data - fluid-honored fields only, sanitize sensitive paths
     agent_data = AgentExportData(
         name=profile.get("name", profile_id),
         description=profile.get("description"),
@@ -904,7 +904,7 @@ async def export_profile(
         # - user (user identifier)
         # - extra_args (may contain sensitive data)
         # - enabled_plugins (plugin paths are system-specific)
-        # SDK-era fields the omni harness ignores (thinking_mode, preset
+        # SDK-era fields the fluid harness ignores (thinking_mode, preset
         # prompts, setting_sources, max_buffer_size, …) are not exported.
     )
 
@@ -984,7 +984,7 @@ async def import_profile(
                 detail=f"Too many profiles with similar ID: {base_id}"
             )
 
-    # Build config from agent data — omni-honored fields only. Legacy SDK-era
+    # Build config from agent data — fluid-honored fields only. Legacy SDK-era
     # fields in old export files (thinking_mode, max_buffer_size,
     # setting_sources, enable_file_checkpointing, continue_conversation,
     # fork_session) are accepted but ignored.

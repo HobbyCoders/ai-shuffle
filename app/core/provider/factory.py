@@ -1,8 +1,8 @@
 """Adapter factory — the single construction site for the provider backend.
 
-``make_adapter()`` returns a :class:`HarnessAdapter` (the omni harness) for
-every spawn path. There is no feature flag and no fallback: omni is the only
-backend. If the omni import fails the process must fail loudly here rather
+``make_adapter()`` returns a :class:`HarnessAdapter` (the fluid harness) for
+every spawn path. There is no feature flag and no fallback: fluid is the only
+backend. If the fluid import fails the process must fail loudly here rather
 than silently degrading to the legacy Claude Agent SDK adapter — a degraded
 session is far harder to diagnose than a startup error.
 
@@ -24,5 +24,5 @@ logger = logging.getLogger(__name__)
 
 
 def make_adapter() -> ProviderAdapter:
-    """Return the provider adapter: always the omni :class:`HarnessAdapter`."""
+    """Return the provider adapter: always the fluid :class:`HarnessAdapter`."""
     return HarnessAdapter()

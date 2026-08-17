@@ -413,7 +413,7 @@ class TestSessionOperations:
         A None passes `!= 0`, so the old guards emitted
         `total_cost_usd = total_cost_usd + NULL`, which NULLs the column for
         good and then fails pydantic validation on GET /sessions/cursor.
-        Providers that report no cost/usage (e.g. the omni delegated leg) hit
+        Providers that report no cost/usage (e.g. the fluid delegated leg) hit
         this on every turn.
         """
         db.create_session("session-1", setup_profile)

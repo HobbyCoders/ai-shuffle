@@ -249,9 +249,9 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
         return
     client = state.client
     if client is None:
-        # Omni/harness adapters expose no SDK client, so there is no
+        # Fluid/harness adapters expose no SDK client, so there is no
         # receive_messages() stream to drain between turns. Porting the tail to
-        # the omni engine is a known follow-up; but a DRAINING turn must still
+        # the fluid engine is a known follow-up; but a DRAINING turn must still
         # be settled here. Returning without settling used to leave the turn
         # 'draining' after execute() released its run lease — 15s later
         # ``reap_expired`` requeued the user turn and the scheduler RE-RAN it
@@ -266,14 +266,14 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
             while not _should_evict_after_escalation(session_id):
                 await asyncio.sleep(IDLE_READ_POLL_SECONDS)
             logger.info(
-                "idle_reader: omni drain wedge resolved — evicting + settling "
+                "idle_reader: fluid drain wedge resolved — evicting + settling "
                 "turn %s aborted [session=%s]", drain_turn_id, session_id,
             )
             await _evict_broken_client(session_id)
             await _settle_drained(session_id, drain_turn_id)
             return
         logger.debug(
-            "idle drain skipped: adapter has no sdk client (omni) [session=%s]",
+            "idle drain skipped: adapter has no sdk client (fluid) [session=%s]",
             session_id,
         )
         return

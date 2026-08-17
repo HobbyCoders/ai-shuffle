@@ -21,10 +21,10 @@ logger = logging.getLogger(__name__)
 # backend and frontend (frontend/src/lib/constants/models.ts mirrors it).
 #
 # The configured system prompt IS the agent's base prompt (ruling A12): new
-# agents start empty and the omni compiler wraps whatever is configured with
+# agents start empty and the fluid compiler wraps whatever is configured with
 # environment, instruction files, and security context at runtime. SDK-era
 # keys (thinking_mode, setting_sources, enable_file_checkpointing, …) are
-# gone — the omni harness ignores them.
+# gone — the fluid harness ignores them.
 DEFAULT_PROFILE_CONFIG: Dict[str, Any] = {
     "model": DEFAULT_MODEL,
     "allowed_tools": [],

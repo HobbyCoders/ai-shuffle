@@ -3,7 +3,7 @@
 	 * ProfileSystemPrompt — System prompt editor section (Studio-v2 grouped fields)
 	 *
 	 * One prompt field, per ruling A12: the configured prompt IS the agent's base
-	 * prompt. The omni compiler wraps it with environment, instruction files,
+	 * prompt. The fluid compiler wraps it with environment, instruction files,
 	 * skills, and security context on every leg — there is no preset/append mode
 	 * and no separate env-injection toggle anymore.
 	 */

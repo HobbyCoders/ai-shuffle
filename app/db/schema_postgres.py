@@ -20,7 +20,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 76
+SCHEMA_VERSION = 77
 
 
 def create_postgres_schema(cursor) -> None:
@@ -812,14 +812,14 @@ def create_postgres_schema(cursor) -> None:
         ON pending_wakeups(session_id)
     """)
 
-    # omni harness session store (v69): branching node-tree sessions + durable
-    # event log, mirroring omni.store.base.SessionStore / JsonlStore semantics.
-    # Used whenever the app has a database (the omni pg store is derived, not flagged).
+    # fluid harness session store (v69): branching node-tree sessions + durable
+    # event log, mirroring fluid.store.base.SessionStore / JsonlStore semantics.
+    # Used whenever the app has a database (the fluid pg store is derived, not flagged).
     # cli_session_id (v70): the delegated engine's ``claude --resume`` handle —
-    # a CLI uuid, NOT the omni session id — so a restart can reconnect to the
+    # a CLI uuid, NOT the fluid session id — so a restart can reconnect to the
     # same CLI conversation instead of resuming a handle the CLI never issued.
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS omni_sessions (
+        CREATE TABLE IF NOT EXISTS fluid_sessions (
             session_id TEXT PRIMARY KEY,
             head_node_id TEXT,
             created_at DOUBLE PRECISION NOT NULL,
@@ -827,7 +827,7 @@ def create_postgres_schema(cursor) -> None:
         )
     """)
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS omni_session_nodes (
+        CREATE TABLE IF NOT EXISTS fluid_session_nodes (
             session_id TEXT NOT NULL,
             node_id TEXT NOT NULL,
             parent_id TEXT,
@@ -837,7 +837,7 @@ def create_postgres_schema(cursor) -> None:
         )
     """)
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS omni_session_events (
+        CREATE TABLE IF NOT EXISTS fluid_session_events (
             session_id TEXT NOT NULL,
             seq BIGINT NOT NULL,
             event JSONB NOT NULL,

@@ -247,7 +247,7 @@ def resolve_api_model_id(value: Optional[str]) -> Optional[str]:
 def _is_subscription_row(row: Dict[str, object]) -> bool:
     """Whether a ``model_providers`` row authenticates as a ChatGPT subscription.
 
-    Mirrors ``app.core.provider.omni_credentials._is_codex_subscription``:
+    Mirrors ``app.core.provider.fluid_credentials._is_codex_subscription``:
     ``provider_type == "chatgpt"`` OR ``auth_mode == "chatgpt"`` (a ``custom``
     row can carry the Codex auth mode). Everything else is API-key auth.
     """

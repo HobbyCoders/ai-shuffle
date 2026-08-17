@@ -407,7 +407,7 @@ class TestGenerateWithClaude:
         guard catches both shapes.
         """
         from app.api.generation import generate_with_claude
-        from app.core.provider.omni_credentials import ProviderCredentialError
+        from app.core.provider.fluid_credentials import ProviderCredentialError
         from fastapi import HTTPException
 
         adapter = FakeAdapter(
@@ -519,7 +519,7 @@ class TestGenerateProfileEndpoint:
         assert agent["model"] == "sonnet"
         assert agent["system_prompt_content"] == "You are a Python development assistant."
         # Dead SDK-era fields emitted by the model must not survive into the
-        # generated config — the omni harness ignores them (ruling A12)
+        # generated config — the fluid harness ignores them (ruling A12)
         assert "thinking_mode" not in agent
         assert "system_prompt_preset" not in agent
         assert "system_prompt_type" not in agent

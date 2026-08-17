@@ -338,7 +338,11 @@ def test_schema_version_parity_v51():
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 76 for the two cross-install carrier tables (docs/
+    # Bumped to 77 for the harness rename omni -> fluid: omni_sessions /
+    # omni_session_nodes / omni_session_events renamed in place to fluid_*
+    # by _migrate_omni_tables_to_fluid(), which runs before the bootstrap DDL
+    # so the idempotent CREATE TABLE IF NOT EXISTS fluid_* can never strand
+    # the old tables' rows. v76 added the two cross-install carrier tables (docs/
     # DEVICE_GIT_CONTROL_PLAN.md, W2): ``git_ops`` — the durable git-operation
     # queue each install claims ops off (D5; first op ``ensure_worktree``, whose
     # params row is the durable carrier of the caller's create_new_branch
@@ -365,13 +369,13 @@ def test_schema_version_parity_v51():
     # fires on the profile default and re-primes the prompt cache on the wrong
     # model. v71 was the agents unification (ruling A4): ``profiles`` renamed
     # in place to ``agents`` (FKs follow), ``subagents`` rows folded into
-    # ``agents`` and the table dropped. v70 added omni_sessions.cli_session_id:
+    # ``agents`` and the table dropped. v70 added fluid_sessions.cli_session_id:
     # the delegated engine's ``claude --resume`` handle, which is a CLI-issued
-    # uuid and NOT the omni session id. It used to live only on the in-process
-    # engine, so after a restart the adapter resumed the CLI with the omni
-    # session id and the turn died immediately. v69 added the omni harness
-    # session store (omni_sessions /
-    # omni_session_nodes / omni_session_events — PG-backed branching node
+    # uuid and NOT the fluid session id. It used to live only on the in-process
+    # engine, so after a restart the adapter resumed the CLI with the fluid
+    # session id and the turn died immediately. v69 added the fluid harness
+    # session store (fluid_sessions /
+    # fluid_session_nodes / fluid_session_events — PG-backed branching node
     # trees + durable event log for AIH_OMNI_STORE=pg; purely additive). v68
     # added the pending_wakeups table (#598 — durable per-session
     # wakeups so ScheduleWakeup / idle-at-edge watchdog nudges survive an app
@@ -396,8 +400,8 @@ def test_schema_version_parity_v51():
     # the Phase-2 turns table; v58 was the Phase-1 deletion (v2_stream forced
     # TRUE + default flipped); v57 added the opt-in flag; v56 added the Phase-0
     # primitives.
-    assert db_version == 76
-    assert pg_version == 76
+    assert db_version == 77
+    assert pg_version == 77
     assert db_version == pg_version
 
 

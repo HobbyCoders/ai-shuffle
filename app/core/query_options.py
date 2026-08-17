@@ -706,7 +706,7 @@ def build_options_from_profile(
     # Per-agent memory (ruling A11): the profile's durable memory text rides
     # into the prompt on every leg — as append text on the preset shape (so the
     # delegated CLI sees it) and as part of the string prompt otherwise (the
-    # omni compiler folds it into the compiled output on native legs). The
+    # fluid compiler folds it into the compiled output on native legs). The
     # Memory builtin tool is the write path.
     agent_memory = (config.get("memory") or "").strip()
     if agent_memory:
@@ -914,7 +914,7 @@ def build_options_from_profile(
     mcp_allowed_tools.extend(get_builtin_tool_names())
 
     # P2c: the standalone ProviderAgent tool is superseded by the unified Task
-    # tool (mcp__builtins__Task / omni's bare Task builtin), which is depth-
+    # tool (mcp__builtins__Task / fluid's bare Task builtin), which is depth-
     # gated in app.core.task_dispatch rather than denied to workers outright —
     # workers may dispatch sub-workers up to settings.task_tool_max_depth (A9).
     if settings.provider_agent_enabled and session_id:
@@ -1052,7 +1052,7 @@ def build_options_from_profile(
 
     # (P2c) The standalone ProviderAgent MCP server is retired: the unified
     # Task tool rides the builtins server above (mcp__builtins__Task) and, on
-    # native legs, omni's bare-named Task builtin. Workers get it too —
+    # native legs, fluid's bare-named Task builtin. Workers get it too —
     # nesting is depth-gated in app.core.task_dispatch (max_depth=5, A9)
     # instead of denied at registration (the old P14 one-level rule).
 
@@ -1265,14 +1265,14 @@ def build_options_from_profile(
 
     # Carry the resolved model-provider binding on the options object. The Agent
     # SDK ignores unknown attributes, so this is inert on the default (flag-off)
-    # path; the omni HarnessAdapter reads it in connect_with_sdk_options and
+    # path; the fluid HarnessAdapter reads it in connect_with_sdk_options and
     # projects it onto SessionOptions.extra["provider_id"], which is how a native
-    # (non-delegated) omni leg gets the provider row's decrypted credentials
+    # (non-delegated) fluid leg gets the provider row's decrypted credentials
     # instead of failing with a missing-credential 401. Always stamped (None for
     # a native Anthropic session) so the attribute's presence is not a signal.
     options.aih_provider_id = provider_id
 
-    # The bound row's SHAPE, carried alongside the id so the omni
+    # The bound row's SHAPE, carried alongside the id so the fluid
     # HarnessAdapter can decide the leg from the provider row instead of
     # sniffing the model string (PA13 / W-R4): a cross-provider pick like
     # "claude-3.5-sonnet on an OpenRouter row" reads as delegated-Claude to the
@@ -1285,11 +1285,11 @@ def build_options_from_profile(
     # which native client serves it. None everywhere else.
     options.aih_provider_dialect = (main_provider_row or {}).get("api_dialect")
 
-    # Same trick for the app's own session id. The omni HarnessAdapter projects
+    # Same trick for the app's own session id. The fluid HarnessAdapter projects
     # it onto SessionOptions.extra["app_session_id"], which is how a native leg
-    # knows which `sessions` row to parent a Task worker onto — the omni engine
+    # knows which `sessions` row to parent a Task worker onto — the fluid engine
     # only ever knows its own `ses_...` handle, and a brand-new session has no
-    # omni id at connect time at all.
+    # fluid id at connect time at all.
     options.aih_session_id = session_id
 
     # Per-turn TOOL-SURFACE restriction (ruling CE12), set today by Task

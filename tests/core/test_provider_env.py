@@ -445,7 +445,7 @@ class TestApplyProviderEnv:
     # ── translated (Codex/OpenAI) rows after the gateway retirement ─────────
     #
     # These rows used to be pointed at the loopback translator gateway with a
-    # per-session routing token. The gateway is gone and omni serves them
+    # per-session routing token. The gateway is gone and fluid serves them
     # natively, so the CLI env carries NO upstream credential for them — but the
     # overlay must still apply every guard/window/small-fast key, and must NOT
     # raise for a row that has neither an auth_token nor a base_url (a ChatGPT

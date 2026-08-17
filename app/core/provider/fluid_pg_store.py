@@ -1,20 +1,20 @@
-"""PgOmniStore — Postgres-backed implementation of omni's SessionStore protocol.
+"""PgFluidStore — Postgres-backed implementation of fluid's SessionStore protocol.
 
-Persists omni's branching session node-tree and durable event log in the app's
-PostgreSQL database (tables ``omni_sessions`` / ``omni_session_nodes`` /
-``omni_session_events``, schema v70), giving flag-on sessions the same
+Persists fluid's branching session node-tree and durable event log in the app's
+PostgreSQL database (tables ``fluid_sessions`` / ``fluid_session_nodes`` /
+``fluid_session_events``, schema v70), giving flag-on sessions the same
 cross-restart durability the SDK path gets from PgSessionStore — resume, fork,
 and event replay all survive a process restart and work from any app instance
 sharing the database.
 
-Semantics mirror ``omni.store.jsonl.JsonlStore``: per-session lazy load into a
+Semantics mirror ``fluid.store.jsonl.JsonlStore``: per-session lazy load into a
 memory cache, then write-through on every mutation. The cache makes the hot
 read paths (``load_path`` on every prompt build, ``events_since`` on every
 receive loop) synchronous-fast; Postgres writes ride ``run_sync`` so the event
 loop never blocks on the driver.
 
 Event appends are idempotent per (session_id, seq) — ``ON CONFLICT DO
-NOTHING`` — because omni's EventBus can replay a tail after reconnect and the
+NOTHING`` — because fluid's EventBus can replay a tail after reconnect and the
 store must not duplicate rows.
 """
 
@@ -47,7 +47,7 @@ def _as_dict(value: Any) -> Dict[str, Any]:
 def _create_session_sync(meta: SessionMeta) -> None:
     with get_db() as conn:
         conn.cursor().execute(
-            "INSERT INTO omni_sessions "
+            "INSERT INTO fluid_sessions "
             "(session_id, head_node_id, created_at, cli_session_id) "
             "VALUES (%s, %s, %s, %s) ON CONFLICT (session_id) DO NOTHING",
             (meta.session_id, meta.head_node_id, meta.created_at,
@@ -61,20 +61,20 @@ def _load_session_sync(session_id: str) -> Optional[Dict[str, Any]]:
         cur = conn.cursor()
         cur.execute(
             "SELECT session_id, head_node_id, created_at, cli_session_id "
-            "FROM omni_sessions WHERE session_id = %s",
+            "FROM fluid_sessions WHERE session_id = %s",
             (session_id,),
         )
         meta_row = cur.fetchone()
         if meta_row is None:
             return None
         cur.execute(
-            "SELECT node_id, parent_id, ts, message FROM omni_session_nodes "
+            "SELECT node_id, parent_id, ts, message FROM fluid_session_nodes "
             "WHERE session_id = %s",
             (session_id,),
         )
         node_rows = cur.fetchall()
         cur.execute(
-            "SELECT event FROM omni_session_events WHERE session_id = %s "
+            "SELECT event FROM fluid_session_events WHERE session_id = %s "
             "ORDER BY seq",
             (session_id,),
         )
@@ -89,7 +89,7 @@ def _append_node_sync(session_id: str, node: SessionNode) -> None:
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO omni_session_nodes "
+            "INSERT INTO fluid_session_nodes "
             "(session_id, node_id, parent_id, ts, message) "
             "VALUES (%s, %s, %s, %s, %s) "
             "ON CONFLICT (session_id, node_id) DO NOTHING",
@@ -97,7 +97,7 @@ def _append_node_sync(session_id: str, node: SessionNode) -> None:
              Json(node.message.to_dict())),
         )
         cur.execute(
-            "UPDATE omni_sessions SET head_node_id = %s WHERE session_id = %s",
+            "UPDATE fluid_sessions SET head_node_id = %s WHERE session_id = %s",
             (node.node_id, session_id),
         )
 
@@ -105,7 +105,7 @@ def _append_node_sync(session_id: str, node: SessionNode) -> None:
 def _set_head_sync(session_id: str, node_id: Optional[str]) -> None:
     with get_db() as conn:
         conn.cursor().execute(
-            "UPDATE omni_sessions SET head_node_id = %s WHERE session_id = %s",
+            "UPDATE fluid_sessions SET head_node_id = %s WHERE session_id = %s",
             (node_id, session_id),
         )
 
@@ -113,7 +113,7 @@ def _set_head_sync(session_id: str, node_id: Optional[str]) -> None:
 def _set_cli_session_id_sync(session_id: str, cli_session_id: Optional[str]) -> None:
     with get_db() as conn:
         conn.cursor().execute(
-            "UPDATE omni_sessions SET cli_session_id = %s WHERE session_id = %s",
+            "UPDATE fluid_sessions SET cli_session_id = %s WHERE session_id = %s",
             (cli_session_id, session_id),
         )
 
@@ -122,7 +122,7 @@ def _append_event_sync(session_id: str, event_dict: Dict[str, Any], seq: int) ->
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO omni_session_events (session_id, seq, event) "
+            "INSERT INTO fluid_session_events (session_id, seq, event) "
             "VALUES (%s, %s, %s) ON CONFLICT (session_id, seq) DO NOTHING",
             (session_id, seq, Json(event_dict)),
         )
@@ -132,7 +132,7 @@ def _append_event_sync(session_id: str, event_dict: Dict[str, Any], seq: int) ->
         # vanish. Never let that be silent again.
         if cur.rowcount == 0:
             logger.warning(
-                "omni event DROPPED by seq collision: session=%s seq=%s "
+                "fluid event DROPPED by seq collision: session=%s seq=%s "
                 "type=%s (a row with that seq already exists)",
                 session_id, seq, event_dict.get("_cls"),
             )
@@ -140,8 +140,8 @@ def _append_event_sync(session_id: str, event_dict: Dict[str, Any], seq: int) ->
 
 # ─── Async SessionStore ──────────────────────────────────────────────────────
 
-class PgOmniStore:
-    """omni ``SessionStore`` over the app's PostgreSQL database."""
+class PgFluidStore:
+    """fluid ``SessionStore`` over the app's PostgreSQL database."""
 
     def __init__(self) -> None:
         self._sessions: Dict[str, SessionMeta] = {}
@@ -236,7 +236,7 @@ class PgOmniStore:
 
         DelegatedLoop calls this every time the CLI's ``init`` frame reports a
         new id. Without it the handle only ever lived on the engine object, so
-        a restart resumed the CLI with the omni session id and the turn died.
+        a restart resumed the CLI with the fluid session id and the turn died.
         """
         await self._ensure_loaded(session_id)
         meta = self._sessions.get(session_id)

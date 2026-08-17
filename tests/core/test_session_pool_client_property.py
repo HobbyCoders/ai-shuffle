@@ -1,7 +1,7 @@
 """`SessionState.client` must tolerate adapters that have no SDK client.
 
-The omni `HarnessAdapter` exposes an `engine`, not an `sdk_client`, so the
-transitional `state.client` shim used to raise AttributeError on every omni
+The fluid `HarnessAdapter` exposes an `engine`, not an `sdk_client`, so the
+transitional `state.client` shim used to raise AttributeError on every fluid
 session — killing the between-turns idle drain and the per-task stop path.
 It now degrades to None and callers handle that.
 """
@@ -12,7 +12,7 @@ from app.core.session_pool import SessionState
 
 
 class _AdapterWithoutSdkClient:
-    """Stand-in for the omni harness adapter: engine only, no sdk_client."""
+    """Stand-in for the fluid harness adapter: engine only, no sdk_client."""
 
     def __init__(self):
         self.engine = object()

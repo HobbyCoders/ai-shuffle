@@ -702,20 +702,20 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
             # and relies on a cross-dir scan to recover.
             working_dir = await run_sync(resolve_working_dir, dict(session))
 
-            from app.core.provider.omni_transcript import (
-                is_omni_session,
-                omni_live_messages,
+            from app.core.provider.fluid_transcript import (
+                is_fluid_session,
+                fluid_live_messages,
             )
 
-            if await run_sync(is_omni_session, sdk_session_id):
-                # omni (flag-on) session: the transcript is omni's node tree, so
+            if await run_sync(is_fluid_session, sdk_session_id):
+                # fluid (flag-on) session: the transcript is fluid's node tree, so
                 # neither the store parser nor the JSONL parser finds anything
                 # and this read would fall through to the legacy-DB rescue and
                 # render an empty (or user-rows-only) chat. Serve the node tree
                 # through the SAME _transform_entries core, so the rendered
                 # shape is identical. Mirrors the /live read path.
                 jsonl_messages, usage_data = await run_sync(
-                    omni_live_messages, sdk_session_id, working_dir
+                    fluid_live_messages, sdk_session_id, working_dir
                 )
             else:
                 # Postgres (session_store_entries) is the source of truth. Load
@@ -1038,20 +1038,20 @@ async def get_live_session(
             # Worktree-aware working dir (worktree → project → default).
             working_dir = await run_sync(resolve_working_dir, dict(session))
 
-            from app.core.provider.omni_transcript import (
-                is_omni_session,
-                omni_live_messages,
+            from app.core.provider.fluid_transcript import (
+                is_fluid_session,
+                fluid_live_messages,
             )
 
-            if await run_sync(is_omni_session, sdk_session_id):
-                # omni (flag-on) session: the transcript is omni's node tree,
+            if await run_sync(is_fluid_session, sdk_session_id):
+                # fluid (flag-on) session: the transcript is fluid's node tree,
                 # so neither the store parser nor the JSONL parser finds
                 # anything and the read fell through to the legacy-DB rescue
                 # below ("postgres_only store empty for ... — serving legacy DB
                 # transcript"). Serve the node tree, run through the SAME
                 # _transform_entries core, so the rendered shape is identical.
                 jsonl_messages, usage_data = await run_sync(
-                    omni_live_messages, sdk_session_id, working_dir
+                    fluid_live_messages, sdk_session_id, working_dir
                 )
             else:
                 # Store-backed parser (SAME transform as the old JSONL path).

@@ -298,7 +298,7 @@ async def _run_background_query_impl(
         )
 
         # Backend selection via the provider seam (see
-        # app/core/provider/factory.py): make_adapter() always returns the omni
+        # app/core/provider/factory.py): make_adapter() always returns the fluid
         # HarnessAdapter.
         from app.core.provider.factory import make_adapter
         adapter = make_adapter()

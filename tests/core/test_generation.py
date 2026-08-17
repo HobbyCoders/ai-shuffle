@@ -321,7 +321,7 @@ class TestPrompts:
         assert "system_prompt_content" in prompt
 
         # Dead SDK-era fields must not be offered to the generator —
-        # the omni harness ignores them (ruling A12)
+        # the fluid harness ignores them (ruling A12)
         assert "thinking_mode" not in prompt
         assert "system_prompt_preset" not in prompt
         assert "system_prompt_append" not in prompt

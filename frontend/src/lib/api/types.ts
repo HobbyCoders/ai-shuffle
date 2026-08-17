@@ -16,9 +16,9 @@ export interface AuthStatus {
 	username: string | null;
 }
 
-// Profile types — omni harness options only. SDK-era keys (thinking_mode,
+// Profile types — fluid harness options only. SDK-era keys (thinking_mode,
 // setting_sources, max_buffer_size, user, strict_mcp_config, …) were dropped
-// from the editor; the backend tolerates them on old rows but the omni
+// from the editor; the backend tolerates them on old rows but the fluid
 // harness ignores them. effort and max_turns ARE honored (adapter maps them
 // onto --effort / provider effort params and the per-turn model-call cap).
 export interface ProfileConfig {
@@ -27,7 +27,7 @@ export interface ProfileConfig {
 	disallowed_tools?: string[];
 	permission_mode?: string;
 	effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';  // Reasoning depth — delegated CLI --effort / native provider effort param; chat can override per-turn
-	max_turns?: number;  // Per-turn model-call cap (native legs → omni max_model_calls_per_turn)
+	max_turns?: number;  // Per-turn model-call cap (native legs → fluid max_model_calls_per_turn)
 	include_partial_messages?: boolean;
 	enable_file_checkpointing?: boolean;  // LEGACY (SDK-era): still read by chat rewind gating for old rows; no longer written
 	ai_tools?: Record<string, boolean>;  // AI tool toggles (image_generation, video_generation, etc.)
@@ -41,7 +41,7 @@ export interface ProfileConfig {
 		preset?: string;  // LEGACY
 		content?: string;
 		append?: string;  // LEGACY: preset-shape append text
-		inject_env_details?: boolean;  // LEGACY: env is omni-compiled now
+		inject_env_details?: boolean;  // LEGACY: env is fluid-compiled now
 	} | null;
 }
 

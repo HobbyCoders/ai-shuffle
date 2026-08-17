@@ -88,10 +88,10 @@ def _is_eligible_voice_provider(row: Dict[str, Any]) -> bool:
 
     Requires an enabled ``provider_type='openai'`` row carrying a stored API
     key. ChatGPT/Codex subscription rows are excluded via the same discriminator
-    the omni credential layer uses — Realtime has no subscription-OAuth path
+    the fluid credential layer uses — Realtime has no subscription-OAuth path
     (ruling VM3).
     """
-    from app.core.provider.omni_credentials import _is_codex_subscription
+    from app.core.provider.fluid_credentials import _is_codex_subscription
 
     if row.get("provider_type") != "openai":
         return False
@@ -503,11 +503,11 @@ def _forget_client_secret(session_id: str) -> None:
 async def _provider_api_key(provider_row: Dict[str, Any]) -> str:
     """Decrypt the row's stored API key, or raise a 400 explaining the fix.
 
-    Reuses the omni credential layer's decryption so crypto lives in exactly one
+    Reuses the fluid credential layer's decryption so crypto lives in exactly one
     place; an eligible row always HAS a token, but a locked encryption service
     can still yield nothing.
     """
-    from app.core.provider.omni_credentials import _decrypt_auth_token
+    from app.core.provider.fluid_credentials import _decrypt_auth_token
 
     api_key = await run_sync(_decrypt_auth_token, provider_row)
     if not api_key:

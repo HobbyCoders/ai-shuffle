@@ -63,7 +63,7 @@ class SessionOptions:
     permission_mode: Optional[str] = None
 
     # Maximum model calls the engine may make inside one turn (None = engine
-    # default). Native legs map this onto omni's ``max_model_calls_per_turn``.
+    # default). Native legs map this onto fluid's ``max_model_calls_per_turn``.
     max_turns: Optional[int] = None
 
     # Streaming options
@@ -182,7 +182,7 @@ class PermissionRequestEvent(ProviderEvent):
     """A tool invocation is blocked awaiting a permission decision.
 
     Emitted by adapters that surface permission gating as a stream event (the
-    omni HarnessAdapter). The caller responds via
+    fluid HarnessAdapter). The caller responds via
     ``adapter.respond_to_permission(tool_use_id, allow, remember=...)``.
 
     The Claude Agent SDK path does NOT emit this — it handles permissions

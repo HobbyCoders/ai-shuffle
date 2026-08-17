@@ -134,7 +134,7 @@ def _load_legacy_history(session_id: str) -> List[Dict[str, Any]]:
     Mirrors the ``/live`` persistent fallback chain (``app.api.sessions``
     get_live_session):
 
-      0. omni store (flag-on sessions) — short-circuits everything below
+      0. fluid store (flag-on sessions) — short-circuits everything below
       1. Postgres session store parse
       2. legacy rescue: empty store → legacy ``session_messages``
     """
@@ -144,27 +144,27 @@ def _load_legacy_history(session_id: str) -> List[Dict[str, Any]]:
 
     sdk_session_id = session.get("sdk_session_id")
 
-    # Step 0 — omni (flag-on) session: the transcript is omni's parent-linked
+    # Step 0 — fluid (flag-on) session: the transcript is fluid's parent-linked
     # node DAG, which EVERY loader below is blind to (they read
     # session_messages / JSONL / session_store_entries). Without this the chain
-    # returns [] for a forked or reloaded omni session, the event log gets
+    # returns [] for a forked or reloaded fluid session, the event log gets
     # seeded with nothing, and the V2 frontend — which renders from the event
     # feed, not from /live — shows an EMPTY conversation. Same branch (and same
     # lazy import) the /live read path already carries.
     if sdk_session_id:
         try:
-            from app.core.provider.omni_transcript import (
-                is_omni_session,
-                omni_live_messages,
+            from app.core.provider.fluid_transcript import (
+                is_fluid_session,
+                fluid_live_messages,
             )
-            if is_omni_session(sdk_session_id):
+            if is_fluid_session(sdk_session_id):
                 from app.core.message_resolver import resolve_working_dir
                 working_dir = resolve_working_dir(dict(session))
-                msgs, _usage = omni_live_messages(sdk_session_id, working_dir)
+                msgs, _usage = fluid_live_messages(sdk_session_id, working_dir)
                 return msgs
         except Exception:
             logger.warning(
-                "[history_backfill] omni transcript load failed for %s", session_id,
+                "[history_backfill] fluid transcript load failed for %s", session_id,
                 exc_info=True,
             )
 

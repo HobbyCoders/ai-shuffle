@@ -421,7 +421,7 @@ def create_builtin_tools_server(
 
     # ------------------------------------------------------------------
     # Task — dispatch work to another agent (P2c, rulings A6/A8/A9/A10).
-    # Delegated-leg surface (mcp__builtins__Task); native legs get omni's
+    # Delegated-leg surface (mcp__builtins__Task); native legs get fluid's
     # bare-named Task builtin instead (the bridge filters this copy out).
     # ------------------------------------------------------------------
     @tool(

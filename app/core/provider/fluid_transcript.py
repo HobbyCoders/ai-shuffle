@@ -1,48 +1,48 @@
-"""Transcript / checkpoint facade for omni-harness sessions.
+"""Transcript / checkpoint facade for fluid-harness sessions.
 
 Background
 ----------
 With a database configured (every real deployment) a session's transcript
 is NOT the legacy pair (CLI JSONL under ``~/.claude/projects`` + the
-``session_store_entries`` mirror). It is omni's parent-linked node DAG:
-``omni_sessions.head_node_id`` points at the leaf, and ``omni_session_nodes``
+``session_store_entries`` mirror). It is fluid's parent-linked node DAG:
+``fluid_sessions.head_node_id`` points at the leaf, and ``fluid_session_nodes``
 holds ``(node_id, parent_id, ts, message)`` rows. ``sessions.sdk_session_id``
-then carries the omni session id (``ses_<hex12>``), not a CLI UUID.
+then carries the fluid session id (``ses_<hex12>``), not a CLI UUID.
 
 Every app feature that reads "the transcript" (rewind checkpoint resolution,
 fork, the ``/live`` reload path) was written against the legacy sources and
-therefore sees an EMPTY transcript for an omni session. This module is the
-one place that knows how to read the omni store for those features.
+therefore sees an EMPTY transcript for a fluid session. This module is the
+one place that knows how to read the fluid store for those features.
 
-The central trick: omni nodes are projected into **JSONL-shaped transcript
+The central trick: fluid nodes are projected into **JSONL-shaped transcript
 entries** — the same ``{"uuid", "type", "message": {"role", "content": [...]}}``
 dicts the JSONL parser, the session-store parser, the rewind slicer
 (:func:`app.core.jsonl_rewind.compute_rewind_keep_count`), the checkpoint
 builder (:func:`app.core.jsonl_rewind.checkpoints_from_entries`) and the DB
 anchor matcher (``rewind_db_sync``) already consume. Nothing about slicing,
-checkpoint selection or message rendering is re-implemented for omni; only the
-*source* changes, so omni sessions inherit the exact semantics the legacy path
+checkpoint selection or message rendering is re-implemented for fluid; only the
+*source* changes, so fluid sessions inherit the exact semantics the legacy path
 has today.
 
 Projection is 1:1 and order-preserving: ``entries[i]`` is always
-``load_omni_path()[i]``. Rewind depends on that (a keep-count over entries maps
+``load_fluid_path()[i]``. Rewind depends on that (a keep-count over entries maps
 straight back to the node that must become the new head).
 
-Legacy-session safety: nothing here runs for a pre-omni session. Every public entry
-point is gated on :func:`looks_like_omni_session_id` (a cheap ``ses_`` prefix
+Legacy-session safety: nothing here runs for a pre-fluid session. Every public entry
+point is gated on :func:`looks_like_fluid_session_id` (a cheap ``ses_`` prefix
 test that a CLI UUID can never satisfy) before any DB work, and the module is
 imported lazily at each call site.
 
-One thing here writes OUTSIDE the omni store: the delegated-CLI re-seed (ruling
+One thing here writes OUTSIDE the fluid store: the delegated-CLI re-seed (ruling
 R5). The ``claude`` CLI keeps its own conversation and only reconnects to it by
 uuid, so a head-move alone would leave it replaying the rewound-away turns —
-the module therefore also materializes omni's post-rewind path as a CLI session
+the module therefore also materializes fluid's post-rewind path as a CLI session
 file and repoints the session's ``--resume`` handle at it. See the "Delegated-CLI
 re-seed" section.
 
 Reads go straight to SQL rather than through
-:class:`~app.core.provider.omni_pg_store.PgOmniStore` on purpose: these callers
-are synchronous request-path helpers, they must work when ``omni`` itself is not
+:class:`~app.core.provider.fluid_pg_store.PgFluidStore` on purpose: these callers
+are synchronous request-path helpers, they must work when ``fluid`` itself is not
 importable, and the store's per-instance memory cache would just be cold anyway.
 """
 
@@ -68,42 +68,42 @@ from app.core.jsonl_rewind import (
 
 logger = logging.getLogger(__name__)
 
-# omni's ``new_id("ses")`` (omni.store.base) — the only id shape a session
+# fluid's ``new_id("ses")`` (fluid.store.base) — the only id shape a session
 # created by the harness can have. A Claude CLI session id is a UUID, so this
 # prefix is an exact discriminator between the two transcript worlds.
-OMNI_SESSION_ID_PREFIX = "ses_"
+FLUID_SESSION_ID_PREFIX = "ses_"
 
 
 # ─── Session identity ────────────────────────────────────────────────────────
 
-def looks_like_omni_session_id(sdk_session_id: Optional[str]) -> bool:
-    """Cheap, DB-free "could this be an omni session?" test."""
+def looks_like_fluid_session_id(sdk_session_id: Optional[str]) -> bool:
+    """Cheap, DB-free "could this be a fluid session?" test."""
     return bool(sdk_session_id) and str(sdk_session_id).startswith(
-        OMNI_SESSION_ID_PREFIX
+        FLUID_SESSION_ID_PREFIX
     )
 
 
-def new_omni_session_id() -> str:
-    """Mint an id in omni's own format (``omni.store.base.new_id('ses')``)."""
-    return f"{OMNI_SESSION_ID_PREFIX}{_uuid.uuid4().hex[:12]}"
+def new_fluid_session_id() -> str:
+    """Mint an id in fluid's own format (``fluid.store.base.new_id('ses')``)."""
+    return f"{FLUID_SESSION_ID_PREFIX}{_uuid.uuid4().hex[:12]}"
 
 
-def is_omni_session(sdk_session_id: Optional[str]) -> bool:
-    """True when *sdk_session_id* names a real row in ``omni_sessions``.
+def is_fluid_session(sdk_session_id: Optional[str]) -> bool:
+    """True when *sdk_session_id* names a real row in ``fluid_sessions``.
 
     Prefix-gated so a legacy session never pays for a query, then CONFIRMED
     against the store. The confirmation matters: the id shape alone would make
-    every caller treat a typo'd/deleted id as omni and serve an empty
+    every caller treat a typo'd/deleted id as fluid and serve an empty
     transcript, whereas an unconfirmed id falls through to the legacy readers
-    exactly as before — sessions recorded before the omni cutover keep
+    exactly as before — sessions recorded before the fluid cutover keep
     resolving through the JSONL/session-store path.
     """
-    if not looks_like_omni_session_id(sdk_session_id):
+    if not looks_like_fluid_session_id(sdk_session_id):
         return False
     try:
         return _session_row(str(sdk_session_id)) is not None
     except Exception as exc:  # a DB hiccup must not break the legacy fallback
-        logger.debug("omni session probe failed for %s: %s", sdk_session_id, exc)
+        logger.debug("fluid session probe failed for %s: %s", sdk_session_id, exc)
         return False
 
 
@@ -116,7 +116,7 @@ def _session_row(session_id: str) -> Optional[Dict[str, Any]]:
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            f"SELECT session_id, head_node_id, created_at FROM omni_sessions "
+            f"SELECT session_id, head_node_id, created_at FROM fluid_sessions "
             f"WHERE session_id = {ph()}",
             (session_id,),
         )
@@ -131,7 +131,7 @@ def _node_rows(session_id: str) -> List[Dict[str, Any]]:
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            f"SELECT node_id, parent_id, ts, message FROM omni_session_nodes "
+            f"SELECT node_id, parent_id, ts, message FROM fluid_session_nodes "
             f"WHERE session_id = {ph()}",
             (session_id,),
         )
@@ -141,7 +141,7 @@ def _node_rows(session_id: str) -> List[Dict[str, Any]]:
 
 def _as_dict(value: Any) -> Dict[str, Any]:
     """``jsonb`` arrives as a dict from psycopg2 but as a JSON string from the
-    test shim's SQLite — normalize (mirrors ``omni_pg_store._as_dict``)."""
+    test shim's SQLite — normalize (mirrors ``fluid_pg_store._as_dict``)."""
     if isinstance(value, dict):
         return value
     try:
@@ -150,7 +150,7 @@ def _as_dict(value: Any) -> Dict[str, Any]:
         return {}
 
 
-def load_omni_path(sdk_session_id: str) -> List[Dict[str, Any]]:
+def load_fluid_path(sdk_session_id: str) -> List[Dict[str, Any]]:
     """The session's on-path nodes, root-first (``head`` walked to the root).
 
     Mirrors ``SessionStore.load_path``: off-path nodes (siblings left behind by
@@ -176,10 +176,10 @@ def load_omni_path(sdk_session_id: str) -> List[Dict[str, Any]]:
     return path
 
 
-# ─── omni node → JSONL-shaped transcript entry ───────────────────────────────
+# ─── fluid node → JSONL-shaped transcript entry ───────────────────────────────
 
 def _block_to_transcript(block: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """One omni content block (``ContentBlock.to_dict``) → an Anthropic-shaped
+    """One fluid content block (``ContentBlock.to_dict``) → an Anthropic-shaped
     transcript block. ``Reasoning`` has no transcript analogue (it is opaque
     provider state, never rendered) and maps to None."""
     kind = block.get("kind")
@@ -259,7 +259,7 @@ def _node_to_entry(node: Dict[str, Any], sdk_session_id: str) -> Dict[str, Any]:
     }
 
 
-def omni_transcript_entries(sdk_session_id: str) -> List[Dict[str, Any]]:
+def fluid_transcript_entries(sdk_session_id: str) -> List[Dict[str, Any]]:
     """The session's transcript as JSONL-shaped entries, root-first.
 
     This is the facade's core: hand the result to any existing entries-based
@@ -267,18 +267,18 @@ def omni_transcript_entries(sdk_session_id: str) -> List[Dict[str, Any]]:
     ``jsonl_parser._transform_entries``, ``rewind_db_sync``'s matchers) and it
     behaves exactly as it does for a legacy transcript.
     """
-    if not looks_like_omni_session_id(sdk_session_id):
+    if not looks_like_fluid_session_id(sdk_session_id):
         return []
     return [
         _node_to_entry(node, sdk_session_id)
-        for node in load_omni_path(sdk_session_id)
+        for node in load_fluid_path(sdk_session_id)
     ]
 
 
 # ─── Checkpoints ─────────────────────────────────────────────────────────────
 
-def get_omni_checkpoints(sdk_session_id: str) -> List[Checkpoint]:
-    """Rewind checkpoints for an omni session (uuid == omni ``node_id``).
+def get_fluid_checkpoints(sdk_session_id: str) -> List[Checkpoint]:
+    """Rewind checkpoints for a fluid session (uuid == fluid ``node_id``).
 
     Same population and ordering rules as
     :meth:`JSONLRewindService.get_checkpoints` — they share
@@ -286,7 +286,7 @@ def get_omni_checkpoints(sdk_session_id: str) -> List[Checkpoint]:
     excluded and the occurrence ordinals the content guard computes line up
     with the ones the client sees.
     """
-    return checkpoints_from_entries(omni_transcript_entries(sdk_session_id))
+    return checkpoints_from_entries(fluid_transcript_entries(sdk_session_id))
 
 
 # ─── Rewind ──────────────────────────────────────────────────────────────────
@@ -295,15 +295,15 @@ def _count_user_prompts(entries: List[Dict[str, Any]]) -> int:
     return len([cp for cp in checkpoints_from_entries(entries) if cp.role == "user"])
 
 
-def rewind_omni_session(
+def rewind_fluid_session(
     sdk_session_id: str,
     target_uuid: str,
     include_response: bool = True,
     target_role: str = "user",
 ) -> RewindResult:
-    """Rewind an omni session by moving its head to an earlier node.
+    """Rewind a fluid session by moving its head to an earlier node.
 
-    This is omni's native rewind (``omni.events.ops.Rewind`` /
+    This is fluid's native rewind (``fluid.events.ops.Rewind`` /
     ``NativeLoop``'s handler): nothing is deleted, the head simply moves back
     up the parent chain. Nodes after the new head stay in the tree but off-path,
     so ``load_path`` — and therefore the prompt the next turn builds — stops at
@@ -311,14 +311,14 @@ def rewind_omni_session(
 
     WHERE it cuts is decided by :func:`compute_rewind_keep_count`, the same
     function the JSONL truncation and the session-store truncation use, so a
-    rewind lands on the same message under omni as it does on the legacy path.
+    rewind lands on the same message under fluid as it does on the legacy path.
     """
-    path = load_omni_path(sdk_session_id)
+    path = load_fluid_path(sdk_session_id)
     if not path:
         return RewindResult(
             success=False,
-            message="Omni rewind failed",
-            error=f"No omni transcript found for session {sdk_session_id}",
+            message="Fluid rewind failed",
+            error=f"No fluid transcript found for session {sdk_session_id}",
         )
     entries = [_node_to_entry(node, sdk_session_id) for node in path]
 
@@ -327,7 +327,7 @@ def rewind_omni_session(
     )
     if keep_count is None:
         return RewindResult(
-            success=False, message="Omni rewind failed", error=error
+            success=False, message="Fluid rewind failed", error=error
         )
 
     new_head = path[keep_count - 1]["node_id"] if keep_count > 0 else None
@@ -335,7 +335,7 @@ def rewind_omni_session(
 
     return RewindResult(
         success=True,
-        message="Omni session head moved",
+        message="Fluid session head moved",
         checkpoint_uuid=target_uuid,
         messages_removed=len(entries) - keep_count,
         remaining_user_turns=_count_user_prompts(entries[:keep_count]),
@@ -349,7 +349,7 @@ def _set_head(session_id: str, node_id: Optional[str]) -> None:
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            f"UPDATE omni_sessions SET head_node_id = {ph()} "
+            f"UPDATE fluid_sessions SET head_node_id = {ph()} "
             f"WHERE session_id = {ph()}",
             (node_id, session_id),
         )
@@ -357,17 +357,17 @@ def _set_head(session_id: str, node_id: Optional[str]) -> None:
 
 # ─── Delegated-CLI re-seed (ruling R5) ───────────────────────────────────────
 #
-# The rewind above moves omni's head, which is the whole truth for a NATIVE
-# session: omni rebuilds the prompt from ``load_path`` on every turn, so the
+# The rewind above moves fluid's head, which is the whole truth for a NATIVE
+# session: fluid rebuilds the prompt from ``load_path`` on every turn, so the
 # rewound-away turns are simply gone.
 #
 # The DELEGATED (claude CLI) engine is different. It does not receive the
 # conversation — it receives only the new user turn and reconnects to its own
 # history via ``--resume <cli_session_id>`` (see ``DelegatedLoop._build_argv``;
 # ``EngineCaps.rewind = False``). So after a head-move the CLI happily replays
-# the turns omni just dropped. PR #815 surfaced that as a warning; ruling R5
-# (docs/OMNI_AGENTS_PLAN.md) resolves it instead: **omni owns the context**, so
-# the rewind materializes omni's post-rewind path as a CLI-format session file
+# the turns fluid just dropped. PR #815 surfaced that as a warning; ruling R5
+# (docs/FLUID_AGENTS_PLAN.md) resolves it instead: **fluid owns the context**, so
+# the rewind materializes fluid's post-rewind path as a CLI-format session file
 # under a FRESH CLI uuid and points the session at it. The next turn's
 # ``--resume`` then reconnects to a conversation that ends exactly where the
 # user rewound to.
@@ -383,7 +383,7 @@ def _set_head(session_id: str, node_id: Optional[str]) -> None:
 # binary; see the PR body).
 
 
-#: CLI transcript entry kinds we can materialize. Everything else omni's
+#: CLI transcript entry kinds we can materialize. Everything else fluid's
 #: projection can produce (or a future projection might) is provenance, not
 #: conversation, and is dropped rather than guessed at.
 _RESEEDABLE_TYPES = ("user", "assistant")
@@ -396,7 +396,7 @@ class ReseedResult:
     ``status`` is one of:
 
     * ``"reseeded"`` — a synthetic transcript was written and
-      ``omni_sessions.cli_session_id`` now points at it.
+      ``fluid_sessions.cli_session_id`` now points at it.
     * ``"cleared"``  — the rewind emptied the transcript, so the stored handle
       was dropped; the next turn starts a fresh CLI conversation (which is
       exactly an empty context).
@@ -420,7 +420,7 @@ class ReseedResult:
 
 
 def get_cli_session_id(sdk_session_id: str) -> Optional[str]:
-    """The delegated CLI's ``--resume`` handle for this omni session, if any.
+    """The delegated CLI's ``--resume`` handle for this fluid session, if any.
 
     Non-NULL only for a session whose delegated engine actually spawned the CLI
     (``DelegatedLoop`` writes the uuid back off the ``init`` frame — PR #811),
@@ -433,7 +433,7 @@ def get_cli_session_id(sdk_session_id: str) -> Optional[str]:
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            f"SELECT cli_session_id FROM omni_sessions WHERE session_id = {ph()}",
+            f"SELECT cli_session_id FROM fluid_sessions WHERE session_id = {ph()}",
             (sdk_session_id,),
         )
         row = cursor.fetchone()
@@ -446,8 +446,8 @@ def _set_cli_session_id(sdk_session_id: str, cli_session_id: Optional[str]) -> N
     """Store the handle the next turn will ``--resume``.
 
     Plain SQL for the same reason every other write here is (module docstring):
-    this runs on a synchronous request path that must work without ``omni``
-    importable. ``PgOmniStore``'s per-instance cache is not a hazard — the
+    this runs on a synchronous request path that must work without ``fluid``
+    importable. ``PgFluidStore``'s per-instance cache is not a hazard — the
     rewind endpoint evicts the pooled client before touching the transcript, so
     the next turn builds a fresh store that reads this row from the database.
     """
@@ -457,7 +457,7 @@ def _set_cli_session_id(sdk_session_id: str, cli_session_id: Optional[str]) -> N
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            f"UPDATE omni_sessions SET cli_session_id = {ph()} "
+            f"UPDATE fluid_sessions SET cli_session_id = {ph()} "
             f"WHERE session_id = {ph()}",
             (cli_session_id, sdk_session_id),
         )
@@ -498,7 +498,7 @@ def _reseed_blocks(
 
     Returns None when nothing survives (the entry itself is then dropped).
 
-    * ``thinking`` blocks go: omni's projection carries no ``signature`` and the
+    * ``thinking`` blocks go: fluid's projection carries no ``signature`` and the
       API rejects an unsigned thinking block on replay. They are model scratch
       space, not conversation, so losing them costs the re-seeded context
       nothing.
@@ -537,7 +537,7 @@ def build_cli_transcript_entries(
     cli_session_id: str,
     working_dir: str,
 ) -> List[Dict[str, Any]]:
-    """Project omni transcript entries onto CLI session-file entries.
+    """Project fluid transcript entries onto CLI session-file entries.
 
     Pure — no DB, no filesystem — so the shape is unit-testable on its own.
 
@@ -545,7 +545,7 @@ def build_cli_transcript_entries(
 
     * every entry carries a fresh ``uuid``; ``parentUuid`` is the previous
       kept entry's uuid and ``None`` on the first, so the file is one
-      unbroken chain (omni node ids are ``nod_...``, not uuids, and reusing
+      unbroken chain (fluid node ids are ``nod_...``, not uuids, and reusing
       them would also make two different conversations share message ids);
     * every entry's ``sessionId`` is *this* file's uuid — the CLI keys its
       resume on the filename and cross-checks the field;
@@ -648,23 +648,23 @@ def reseed_delegated_cli_session(
     working_dir: str,
     projects_dir: Optional[Path] = None,
 ) -> ReseedResult:
-    """Re-seed the delegated CLI from omni's (already rewound) context.
+    """Re-seed the delegated CLI from fluid's (already rewound) context.
 
-    Call AFTER :func:`rewind_omni_session` has moved the head — the transcript
+    Call AFTER :func:`rewind_fluid_session` has moved the head — the transcript
     this materializes is whatever ``load_path`` returns now.
 
     Never raises: a failed re-seed is a degraded rewind (the store is still
     correct, only the CLI's own history is stale), and the caller reports that
     to the user rather than failing an operation the user explicitly asked for.
     """
-    if not looks_like_omni_session_id(sdk_session_id):
+    if not looks_like_fluid_session_id(sdk_session_id):
         return ReseedResult(status="skipped")
 
     try:
         previous = get_cli_session_id(sdk_session_id)
     except Exception as exc:
         logger.error(
-            "omni re-seed could not read the CLI handle for %s: %s",
+            "fluid re-seed could not read the CLI handle for %s: %s",
             sdk_session_id, exc, exc_info=True,
         )
         return ReseedResult(status="failed", error=str(exc))
@@ -675,14 +675,14 @@ def reseed_delegated_cli_session(
         return ReseedResult(status="skipped")
 
     try:
-        entries = omni_transcript_entries(sdk_session_id)
+        entries = fluid_transcript_entries(sdk_session_id)
         new_cli_session_id = str(_uuid.uuid4())
         lines = build_cli_transcript_entries(
             entries, new_cli_session_id, working_dir
         )
     except Exception as exc:
         logger.error(
-            "omni re-seed could not materialize a CLI transcript for %s: %s",
+            "fluid re-seed could not materialize a CLI transcript for %s: %s",
             sdk_session_id, exc, exc_info=True,
         )
         return ReseedResult(status="failed", error=str(exc))
@@ -695,7 +695,7 @@ def reseed_delegated_cli_session(
             _set_cli_session_id(sdk_session_id, None)
         except Exception as exc:
             logger.error(
-                "omni re-seed could not clear the CLI handle for %s: %s",
+                "fluid re-seed could not clear the CLI handle for %s: %s",
                 sdk_session_id, exc, exc_info=True,
             )
             return ReseedResult(status="failed", error=str(exc))
@@ -707,7 +707,7 @@ def reseed_delegated_cli_session(
         )
     except Exception as exc:
         logger.error(
-            "omni re-seed could not write the CLI transcript for %s: %s",
+            "fluid re-seed could not write the CLI transcript for %s: %s",
             sdk_session_id, exc, exc_info=True,
         )
         return ReseedResult(status="failed", error=str(exc))
@@ -716,13 +716,13 @@ def reseed_delegated_cli_session(
         _set_cli_session_id(sdk_session_id, new_cli_session_id)
     except Exception as exc:
         logger.error(
-            "omni re-seed wrote %s but could not store the handle for %s: %s",
+            "fluid re-seed wrote %s but could not store the handle for %s: %s",
             path, sdk_session_id, exc, exc_info=True,
         )
         return ReseedResult(status="failed", error=str(exc))
 
     logger.info(
-        "omni re-seed: session=%s cli_session=%s -> %s (%d entries) at %s",
+        "fluid re-seed: session=%s cli_session=%s -> %s (%d entries) at %s",
         sdk_session_id, previous, new_cli_session_id, len(lines), path,
     )
     return ReseedResult(
@@ -735,31 +735,31 @@ def reseed_delegated_cli_session(
 
 # ─── Fork ────────────────────────────────────────────────────────────────────
 
-def fork_omni_session(
+def fork_fluid_session(
     source_sdk_session_id: str,
     fork_node_id: str,
     new_sdk_session_id: Optional[str] = None,
 ) -> Tuple[str, int]:
-    """Create a new omni session whose transcript is the source's ancestry up
+    """Create a new fluid session whose transcript is the source's ancestry up
     to (and including) ``fork_node_id``. Returns ``(new_session_id, node_count)``.
 
-    omni's in-engine ``Fork`` op only moves the head *within one session* —
+    fluid's in-engine ``Fork`` op only moves the head *within one session* —
     it exists so a single conversation can branch. The app's fork is a
     different product concept: a SECOND session row the user can drive
-    independently. Since ``omni_session_nodes`` is keyed by
+    independently. Since ``fluid_session_nodes`` is keyed by
     ``(session_id, node_id)``, two sessions cannot literally share rows, so the
     ancestry prefix is copied — but every ``node_id``/``parent_id``/``ts``/
     ``message`` is preserved verbatim, so the forked prefix is byte-identical
     to the original's (which is what keeps provider prompt caching warm) and
     node handles stay comparable across the two sessions.
 
-    The durable event log (``omni_session_events``) is deliberately NOT copied:
+    The durable event log (``fluid_session_events``) is deliberately NOT copied:
     it is a replay bus for live subscribers keyed to the run that produced it,
     not transcript state, and the fork starts its own run at seq 0.
 
     Raises ``ValueError`` when the fork point is not on the source's path.
     """
-    path = load_omni_path(source_sdk_session_id)
+    path = load_fluid_path(source_sdk_session_id)
     index = next(
         (i for i, node in enumerate(path) if node["node_id"] == fork_node_id), None
     )
@@ -768,7 +768,7 @@ def fork_omni_session(
             f"fork node {fork_node_id} is not on session {source_sdk_session_id}'s path"
         )
     prefix = path[: index + 1]
-    new_id = new_sdk_session_id or new_omni_session_id()
+    new_id = new_sdk_session_id or new_fluid_session_id()
 
     from psycopg2.extras import Json
 
@@ -779,13 +779,13 @@ def fork_omni_session(
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            f"INSERT INTO omni_sessions (session_id, head_node_id, created_at) "
+            f"INSERT INTO fluid_sessions (session_id, head_node_id, created_at) "
             f"VALUES ({_ph}, {_ph}, {_ph}) ON CONFLICT (session_id) DO NOTHING",
             (new_id, fork_node_id, time.time()),
         )
         for node in prefix:
             cursor.execute(
-                f"INSERT INTO omni_session_nodes "
+                f"INSERT INTO fluid_session_nodes "
                 f"(session_id, node_id, parent_id, ts, message) "
                 f"VALUES ({_ph}, {_ph}, {_ph}, {_ph}, {_ph}) "
                 f"ON CONFLICT (session_id, node_id) DO NOTHING",
@@ -794,7 +794,7 @@ def fork_omni_session(
                     node["node_id"],
                     node.get("parent_id"),
                     node.get("ts"),
-                    # Same jsonb adaptation PgOmniStore uses on the write path.
+                    # Same jsonb adaptation PgFluidStore uses on the write path.
                     Json(_as_dict(node.get("message"))),
                 ),
             )
@@ -803,20 +803,20 @@ def fork_omni_session(
 
 # ─── Live transcript rendering ───────────────────────────────────────────────
 
-def omni_live_messages(
+def fluid_live_messages(
     sdk_session_id: str, working_dir: str = "/workspace"
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """``(messages, usage_data)`` for an omni session, in the shape the
+    """``(messages, usage_data)`` for a fluid session, in the shape the
     session read paths expect.
 
     Runs the projected entries through ``jsonl_parser._transform_entries`` —
     the pure, source-agnostic core already shared by the JSONL parser and the
-    Postgres session-store parser — so an omni transcript renders through the
+    Postgres session-store parser — so a fluid transcript renders through the
     identical transform (tool cards, thinking blocks, subagent rows, usage
     accounting) as every other source. Subagent children are not resolvable
     from the node tree yet, so no children loader is supplied.
     """
-    entries = omni_transcript_entries(sdk_session_id)
+    entries = fluid_transcript_entries(sdk_session_id)
     if not entries:
         return [], {}
     from app.core.jsonl_parser import _transform_entries

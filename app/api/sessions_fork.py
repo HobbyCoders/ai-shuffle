@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 fork_router = APIRouter(tags=["Sessions"])
 
 
-async def _fork_omni_session(
+async def _fork_fluid_session(
     *,
     request: Request,
     session_id: str,
@@ -34,26 +34,26 @@ async def _fork_omni_session(
     sdk_session_id: str,
     message_index,
 ) -> ForkSessionResponse:
-    """Fork an omni-harness session through its node tree.
+    """Fork a fluid-harness session through its node tree.
 
     Same product behavior as the JSONL fork below — a new session row whose
     transcript is the original's history up to the chosen message — expressed
-    in omni's model: the new omni session's head is set to the fork node and the
+    in fluid's model: the new fluid session's head is set to the fork node and the
     ancestry prefix is copied verbatim (same node ids, same parents, same
     messages), so the shared prefix stays byte-identical and prompt caching
     survives the fork.
 
     ``message_index`` keeps its existing meaning: an index into the session's
-    display entries, which for omni is exactly the on-path node list (the node
+    display entries, which for fluid is exactly the on-path node list (the node
     tree has no meta/sidechain/queue-operation entries to filter out). ``None``
     means "fork the whole session" — the sessions-board Fork action.
     """
-    from app.core.provider.omni_transcript import (
-        fork_omni_session,
-        omni_transcript_entries,
+    from app.core.provider.fluid_transcript import (
+        fork_fluid_session,
+        fluid_transcript_entries,
     )
 
-    entries = await run_sync(omni_transcript_entries, sdk_session_id)
+    entries = await run_sync(fluid_transcript_entries, sdk_session_id)
     if not entries:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -85,10 +85,10 @@ async def _fork_omni_session(
     # clean up (the JSONL fork below has to delete the row it already created).
     try:
         new_sdk_session_id, node_count = await run_sync(
-            fork_omni_session, sdk_session_id, fork_node_id
+            fork_fluid_session, sdk_session_id, fork_node_id
         )
     except Exception:
-        logger.exception("Failed to fork omni node tree for session %s", session_id)
+        logger.exception("Failed to fork fluid node tree for session %s", session_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create forked session",
@@ -112,7 +112,7 @@ async def _fork_omni_session(
     )
 
     logger.debug(
-        "Forked omni session %s -> %s (omni %s, %d nodes) at message index %d",
+        "Forked fluid session %s -> %s (fluid %s, %d nodes) at message index %d",
         session_id, new_session_id, new_sdk_session_id, node_count,
         fork_message_index,
     )
@@ -170,13 +170,13 @@ async def fork_session(
         if project:
             working_dir = get_project_working_dir(project)
 
-    # omni (flag-on) sessions keep their transcript in omni's node tree, not in
+    # fluid (flag-on) sessions keep their transcript in fluid's node tree, not in
     # a CLI JSONL — the lookup below would fail with "JSONL file not found" and
     # the fork never happens. Fork them through the node tree instead.
-    from app.core.provider.omni_transcript import is_omni_session
+    from app.core.provider.fluid_transcript import is_fluid_session
 
-    if await run_sync(is_omni_session, sdk_session_id):
-        return await _fork_omni_session(
+    if await run_sync(is_fluid_session, sdk_session_id):
+        return await _fork_fluid_session(
             request=request,
             session_id=session_id,
             original_session=original_session,

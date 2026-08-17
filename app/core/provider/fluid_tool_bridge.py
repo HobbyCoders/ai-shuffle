@@ -1,4 +1,4 @@
-"""omni_tool_bridge — port AI-Shuffle's SDK ``@tool`` modules onto omni's registry.
+"""fluid_tool_bridge — port AI-Shuffle's SDK ``@tool`` modules onto fluid's registry.
 
 AI-Shuffle's ~10 in-process tool modules under ``app/mcp/`` all follow the
 Claude Agent SDK pattern:
@@ -11,12 +11,12 @@ Claude Agent SDK pattern:
 
     server = create_sdk_mcp_server(name="builtins", version="1.0.0", tools=[handler, ...])
 
-omni's ``omni.tools.inproc`` mirrors that surface deliberately, and its
+fluid's ``fluid.tools.inproc`` mirrors that surface deliberately, and its
 ``ToolRegistry._normalize`` already accepts the SDK envelope
 (``{"content":[{"type":"text","text":...}]}``) as a handler return. So porting a
 module is *mechanical*: hand this bridge the same list of ``@tool``-decorated
 objects the module already passes to ``create_sdk_mcp_server`` and it produces a
-omni ``InprocServer`` that ``ToolRegistry.register_inproc`` accepts.
+fluid ``InprocServer`` that ``ToolRegistry.register_inproc`` accepts.
 
 This module ships the generic converters used to port every module, plus a
 worked example (``bridge_builtins_tools``) proving the pattern for
@@ -35,11 +35,11 @@ logger = logging.getLogger(__name__)
 
 
 def sdk_tool_to_inproc(sdk_tool: Any, *, risk: str = "safe") -> InprocTool:
-    """Convert one Claude-Agent-SDK ``@tool`` object into a omni ``InprocTool``.
+    """Convert one Claude-Agent-SDK ``@tool`` object into a fluid ``InprocTool``.
 
     The SDK ``@tool`` decorator yields an object with ``.name``, ``.description``,
     ``.input_schema`` and ``.handler`` (an ``async def(args: dict)``) — the exact
-    shape omni's ``InprocTool`` needs. Attribute access is defensive so this also
+    shape fluid's ``InprocTool`` needs. Attribute access is defensive so this also
     works with any duck-typed equivalent.
     """
     name = getattr(sdk_tool, "name", None)
@@ -64,11 +64,11 @@ def sdk_tools_to_inproc_server(
     version: str = "1.0.0",
     risk_map: Optional[Mapping[str, str]] = None,
 ) -> InprocServer:
-    """Bundle a list of SDK ``@tool`` objects into a named omni ``InprocServer``.
+    """Bundle a list of SDK ``@tool`` objects into a named fluid ``InprocServer``.
 
     ``risk_map`` optionally assigns per-tool risk (``"safe"|"write"|"destructive"``)
     by tool name; anything unlisted defaults to ``"safe"``. This is where a
-    module declares that, e.g., ``CronDelete`` is ``destructive`` so omni's
+    module declares that, e.g., ``CronDelete`` is ``destructive`` so fluid's
     PermissionEngine gates it.
     """
     risk_map = risk_map or {}
@@ -89,7 +89,7 @@ def register_sdk_tools(
     default_risk: str = "safe",
 ) -> InprocServer:
     """Convert + register in one call. Each tool surfaces as
-    ``mcp__<server_name>__<tool>`` (omni's naming, matching Claude Code).
+    ``mcp__<server_name>__<tool>`` (fluid's naming, matching Claude Code).
 
     ``default_risk`` applies to tools absent from ``risk_map`` — used by
     servers whose tool set is dynamic (connector gateway tools on ``builtins``,
@@ -121,8 +121,8 @@ def register_sdk_tools(
 #
 # Every server passes through sdk_compat.patch_sdk_server, which records the
 # raw @tool objects (see provider/sdk_tool_records.py);
-# ``register_recorded_sdk_servers`` below re-registers them on an omni
-# ToolRegistry with the risk classifications here, so omni's PermissionEngine
+# ``register_recorded_sdk_servers`` below re-registers them on a fluid
+# ToolRegistry with the risk classifications here, so fluid's PermissionEngine
 # gates writes/deletes the way the SDK path's permission callback did.
 
 BUILTINS_RISK_MAP: Mapping[str, str] = {
@@ -236,7 +236,7 @@ def register_recorded_sdk_servers(
     This is the whole port of the app's in-proc tool modules: the tools were
     recorded (per server INSTANCE, so per-session closures stay correct) when
     ``patch_sdk_server`` assembled each server; here they are re-registered on
-    omni's ToolRegistry with the risk maps above. Servers with no recording
+    fluid's ToolRegistry with the risk maps above. Servers with no recording
     (e.g. built before sdk_compat imported, or non-dict configs) are skipped —
     the external stdio/sse/http entries are handled by ``connect_mcp`` instead.
     """
@@ -249,12 +249,12 @@ def register_recorded_sdk_servers(
         tools = recorded_sdk_server_tools(cfg)
         if not tools:
             logger.warning(
-                "[omni_tool_bridge] no recorded tools for sdk server %r — skipped",
+                "[fluid_tool_bridge] no recorded tools for sdk server %r — skipped",
                 name,
             )
             continue
         # ``skip_tools``: {server_name: {tool names}} exclusions — used by the
-        # native leg to drop mcp__builtins__Task when omni's own bare-named
+        # native leg to drop mcp__builtins__Task when fluid's own bare-named
         # Task builtin is registered (one orchestration tool, not two).
         excluded = set((skip_tools or {}).get(name) or ())
         if excluded:

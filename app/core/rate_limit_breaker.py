@@ -3,9 +3,9 @@
 RELOCATION NOTE (2026-08-12)
 ----------------------------
 This module was ``app/core/translator_gateway/circuit_breaker.py`` until the
-translator gateway was retired (omni now serves every provider natively). The
+translator gateway was retired (fluid now serves every provider natively). The
 state machine below is unchanged; only its RECORDING seam moved. 429s are now
-observed by the omni harness's usage-capture response hook
+observed by the fluid harness's usage-capture response hook
 (``app/core/provider/harness_adapter.py::_usage_capture_http_client``), which
 sees every native-leg response — the forensics below still describe exactly
 what the breaker is for, with "the gateway" now meaning "the app process that
@@ -51,10 +51,10 @@ DESIGN (decided, not to be redesigned here)
 * **While tripped (current consumers):**
   :func:`app.core.provider_agent` stops waiting on a ProviderAgent worker whose
   provider is rate limited and reports it to the parent immediately. The
-  gateway's request-level pre-flight refusal died with the gateway — under omni
+  gateway's request-level pre-flight refusal died with the gateway — under fluid
   there is no single in-app chokepoint in front of the CLI's own retry loop, so
   today the breaker is a RECORD + SIGNAL surface rather than a hard request
-  gate. Re-adding a pre-dispatch refusal in the omni adapter is deliberately
+  gate. Re-adding a pre-dispatch refusal in the fluid adapter is deliberately
   left as follow-up work, not smuggled into the retirement.
 
 State is in-memory and process-local, which is sufficient for the failure mode

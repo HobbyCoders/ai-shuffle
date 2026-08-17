@@ -1,20 +1,20 @@
-"""Unit tests for HarnessAdapter — the omni-backed ProviderAdapter.
+"""Unit tests for HarnessAdapter — the fluid-backed ProviderAdapter.
 
-These tests are runnable with the omni venv (no claude_agent_sdk required, no
+These tests are runnable with the fluid venv (no claude_agent_sdk required, no
 live API calls). They exercise:
 
-  1. The omni Event -> ProviderEvent translation table, one case per event type.
-  2. Iterator completion on terminal omni events (TurnComplete/Interrupted/Error).
-  3. The permission round-trip: a omni PermissionRequest surfaces as a
+  1. The fluid Event -> ProviderEvent translation table, one case per event type.
+  2. Iterator completion on terminal fluid events (TurnComplete/Interrupted/Error).
+  3. The permission round-trip: a fluid PermissionRequest surfaces as a
      PermissionRequestEvent, and respond_to_permission() submits a matching
-     omni RespondPermission op back to the engine (tool_use_id -> request_id).
+     fluid RespondPermission op back to the engine (tool_use_id -> request_id).
   4. An end-to-end turn over a REAL NativeLoop driven by a fake provider that
      replays StreamChunks (text turn -> deltas + usage + result).
   5. The provider-kind decision logic.
-  6. The SDK @tool -> omni InprocTool bridge.
+  6. The SDK @tool -> fluid InprocTool bridge.
 
 Run:  cd /home/owner/Documents/AI-Shuffle && \
-      /path/to/omni-harness/.venv/bin/python -m pytest \
+      /home/owner/Documents/fluid-harness/.venv/bin/python -m pytest \
           tests/test_harness_adapter.py -q
 """
 
@@ -54,7 +54,7 @@ SID = "ses_test"
 
 
 class FakeEngine:
-    """Minimal stand-in for a omni engine: scripted events + recorded ops."""
+    """Minimal stand-in for a fluid engine: scripted events + recorded ops."""
 
     def __init__(self, events: list) -> None:
         # assign monotonic seq like the EventBus would
@@ -79,7 +79,7 @@ class FakeEngine:
 
 
 class FakeProvider:
-    """A omni ProviderClient replaying a fixed list of StreamChunks."""
+    """A fluid ProviderClient replaying a fixed list of StreamChunks."""
 
     name = "fake"
     caps = ProviderCaps()
@@ -189,7 +189,7 @@ async def test_translation_non_partial_buffers_deltas():
 
 @pytest.mark.asyncio
 async def test_usage_attaches_to_next_assistant_message():
-    # A omni Usage reading rides on the next synthesized AssistantMessage in
+    # A fluid Usage reading rides on the next synthesized AssistantMessage in
     # the SDK's field names, where the loops read per-call token counts.
     events = [
         lm.TurnStarted(session_id=SID, model="m", provider="fake"),
@@ -240,7 +240,7 @@ async def test_error_is_terminal():
 
 @pytest.mark.asyncio
 async def test_turn_complete_none_cost_becomes_zero():
-    """omni may report cost_usd=None (NativeLoop never sets it; the delegated
+    """fluid may report cost_usd=None (NativeLoop never sets it; the delegated
     leg can too). None would flow into `total_cost_usd = total_cost_usd + NULL`
     and NULL the session row, so the adapter coerces it to 0.0."""
     events = [
@@ -474,7 +474,7 @@ async def test_permission_round_trip():
 
 @pytest.mark.asyncio
 async def test_permission_bridged_to_can_use_tool():
-    """With an app can_use_tool callback wired (the WS/chat path), a omni
+    """With an app can_use_tool callback wired (the WS/chat path), a fluid
     PermissionRequest never surfaces in-stream; the callback's decision is
     submitted back as a RespondPermission op (SDK out-of-band parity)."""
     events = [
@@ -528,9 +528,9 @@ async def test_permission_deny_mapping():
     assert engine.ops[0].message is None
 
 
-# ─── 3b. Question dismissal / answers survive the omni permission bridge ─────
+# ─── 3b. Question dismissal / answers survive the fluid permission bridge ─────
 #
-# On the omni path an AskUserQuestion call is gated as a PermissionRequest, so
+# On the fluid path an AskUserQuestion call is gated as a PermissionRequest, so
 # the modal's "X" resolves through the *permission* deny path. The dismissal
 # only reads as a dismissal (rather than "permission denied") if the callback's
 # PermissionResultDeny.message rides along on the RespondPermission op — and
@@ -759,7 +759,7 @@ async def test_native_loop_text_turn():
     assert text == "Hello world"
     assert isinstance(got[-1], ResultMessage) and got[-1].stop_reason == "end_turn"
 
-    # sdk_session_id resolves to the live omni session id.
+    # sdk_session_id resolves to the live fluid session id.
     assert adapter.sdk_session_id == loop.session_id
     await adapter.disconnect()
 
@@ -774,10 +774,10 @@ def test_provider_kind_decision():
     assert _decide_provider_kind(SessionOptions(model="meta-llama/llama-3.1-70b")) == "openrouter"
     # explicit hints win
     assert _decide_provider_kind(
-        SessionOptions(model="claude-x", extra={"omni_engine": "native", "omni_provider": "anthropic"})
+        SessionOptions(model="claude-x", extra={"fluid_engine": "native", "fluid_provider": "anthropic"})
     ) == "anthropic"
     assert _decide_provider_kind(
-        SessionOptions(model="gpt-4o", extra={"omni_provider": "openrouter"})
+        SessionOptions(model="gpt-4o", extra={"fluid_provider": "openrouter"})
     ) == "openrouter"
 
 
@@ -797,7 +797,7 @@ def test_provider_kind_short_model_aliases():
     )
     # engine_hint="native" overrides the subscription default for aliases too.
     assert (
-        _decide_provider_kind(SessionOptions(model="fable", extra={"omni_engine": "native"}))
+        _decide_provider_kind(SessionOptions(model="fable", extra={"fluid_engine": "native"}))
         == "anthropic"
     )
 
@@ -847,7 +847,18 @@ def test_provider_kind_anthropic_row_respects_the_subscription_constraint():
 
 
 def test_provider_kind_explicit_hints_still_outrank_the_row():
-    """The omni_engine / omni_provider escape hatches keep top priority."""
+    """The fluid_engine / fluid_provider escape hatches keep top priority."""
+    opts = _bound("claude-3.5-sonnet", "openrouter")
+    opts.extra["fluid_engine"] = "delegated"
+    assert _decide_provider_kind(opts) == "delegated"
+
+    opts2 = _bound("gpt-5", "openai")
+    opts2.extra["fluid_provider"] = "openrouter"
+    assert _decide_provider_kind(opts2) == "openrouter"
+
+
+def test_provider_kind_legacy_omni_keys_still_honored(monkeypatch):
+    """Pre-rename ``omni_*`` extra keys and AIH_OMNI_PROVIDER keep working."""
     opts = _bound("claude-3.5-sonnet", "openrouter")
     opts.extra["omni_engine"] = "delegated"
     assert _decide_provider_kind(opts) == "delegated"
@@ -855,6 +866,16 @@ def test_provider_kind_explicit_hints_still_outrank_the_row():
     opts2 = _bound("gpt-5", "openai")
     opts2.extra["omni_provider"] = "openrouter"
     assert _decide_provider_kind(opts2) == "openrouter"
+
+    # the new key outranks a stale legacy one
+    opts3 = _bound("gpt-5", "openai")
+    opts3.extra["fluid_provider"] = "anthropic"
+    opts3.extra["omni_provider"] = "openrouter"
+    assert _decide_provider_kind(opts3) == "anthropic"
+
+    monkeypatch.setenv("AIH_OMNI_PROVIDER", "openrouter")
+    opts4 = _bound("gpt-5", "openai")
+    assert _decide_provider_kind(opts4) == "openrouter"
 
 
 def test_provider_kind_custom_row_is_the_anthropic_compatible_native_leg():
@@ -874,7 +895,7 @@ def test_provider_kind_custom_row_is_the_anthropic_compatible_native_leg():
 
 
 def test_provider_kind_custom_row_openai_dialect_is_chat_completions():
-    """api_dialect='openai' flips a custom row onto omni's generic OpenAI
+    """api_dialect='openai' flips a custom row onto fluid's generic OpenAI
     chat/completions client (the 'openrouter' kind) at the row's base_url —
     xAI-direct / Groq / vLLM endpoints. An explicit 'anthropic' (or garbage)
     keeps the default Messages leg."""
@@ -983,7 +1004,7 @@ async def test_delegated_loop_kwargs_filter_sdk_servers_and_stream_partial(monke
         model="fable",
         mcp_servers=mcp_servers,
         include_partial_messages=True,
-        extra={"omni_registry": ToolRegistry()},
+        extra={"fluid_registry": ToolRegistry()},
     )
 
     adapter = ha.HarnessAdapter()
@@ -999,12 +1020,12 @@ async def test_delegated_loop_kwargs_filter_sdk_servers_and_stream_partial(monke
     # include_partial_messages drives --include-partial-messages on the CLI.
     assert captured["partial"] is True
 
-    # extra["omni_partial"] remains a manual override when the SDK flag is off.
+    # extra["fluid_partial"] remains a manual override when the SDK flag is off.
     await adapter.connect(
         dataclasses.replace(
             options,
             include_partial_messages=False,
-            extra={"omni_registry": ToolRegistry(), "omni_partial": True},
+            extra={"fluid_registry": ToolRegistry(), "fluid_partial": True},
         )
     )
     assert captured["partial"] is True
@@ -1015,7 +1036,7 @@ async def test_delegated_loop_kwargs_filter_sdk_servers_and_stream_partial(monke
 
 # ─── 7. Builtin file/shell tools on the native leg ───────────────────────────
 
-_OMNI_BUILTINS = {"Read", "Grep", "Write", "Edit", "Bash", "Skill", "Note"}
+_FLUID_BUILTINS = {"Read", "Grep", "Write", "Edit", "Bash", "Skill", "Note"}
 
 
 class _FakeInprocTool:
@@ -1041,28 +1062,28 @@ def _names(registry) -> set:
 
 
 @pytest.mark.asyncio
-async def test_native_leg_registry_has_omni_builtins():
-    """Native legs talk to the provider API directly — without omni's builtins
+async def test_native_leg_registry_has_fluid_builtins():
+    """Native legs talk to the provider API directly — without fluid's builtins
     the model has no file/shell tools at all."""
     adapter = HarnessAdapter()
     registry = await adapter._build_registry(SessionOptions(model="gpt-4o"), native=True)
     assert registry is not None
-    assert _OMNI_BUILTINS <= _names(registry)
+    assert _FLUID_BUILTINS <= _names(registry)
 
 
 @pytest.mark.asyncio
-async def test_delegated_leg_registry_has_no_omni_builtins():
-    """The claude CLI ships its own Read/Bash/... — registering omni's here
+async def test_delegated_leg_registry_has_no_fluid_builtins():
+    """The claude CLI ships its own Read/Bash/... — registering fluid's here
     would double up on the delegated leg."""
     adapter = HarnessAdapter()
     options = SessionOptions(
-        model="fable", extra={"omni_inproc_servers": [_FakeInprocServer()]}
+        model="fable", extra={"fluid_inproc_servers": [_FakeInprocServer()]}
     )
     registry = await adapter._build_registry(options, native=False)
     assert registry is not None
     names = _names(registry)
     assert "mcp__fake__Ping" in names
-    assert not (_OMNI_BUILTINS & names)
+    assert not (_FLUID_BUILTINS & names)
 
     # With nothing to bridge at all the delegated leg still gets no registry.
     assert await adapter._build_registry(SessionOptions(model="fable"), native=False) is None
@@ -1098,10 +1119,10 @@ async def test_connect_native_leg_passes_builtin_registry_to_native_loop(monkeyp
 
     adapter = ha.HarnessAdapter()
     await adapter.connect(
-        SessionOptions(model="gpt-4o", extra={"omni_provider": "openai_responses"})
+        SessionOptions(model="gpt-4o", extra={"fluid_provider": "openai_responses"})
     )
     assert adapter._is_delegated is False
-    assert _OMNI_BUILTINS <= _names(captured["registry"])
+    assert _FLUID_BUILTINS <= _names(captured["registry"])
 
 
 # ─── Native-leg context window (feeds get_context_usage) ─────────────────────
@@ -1113,9 +1134,9 @@ def test_native_context_window_uses_the_claude_registry_for_claude_slugs():
     from app.core.provider.harness_adapter import _native_context_window
 
     for slug in ("sonnet", "opus", "fable"):
-        opts = SessionOptions(model=slug, extra={"omni_engine": "native"})
+        opts = SessionOptions(model=slug, extra={"fluid_engine": "native"})
         assert _native_context_window("anthropic", opts) == 1_000_000
-    haiku = SessionOptions(model="haiku", extra={"omni_engine": "native"})
+    haiku = SessionOptions(model="haiku", extra={"fluid_engine": "native"})
     assert _native_context_window("anthropic", haiku) == 200_000
 
 
@@ -1199,7 +1220,7 @@ async def test_connect_native_leg_passes_resolved_context_window(monkeypatch):
 
     adapter = ha.HarnessAdapter()
     await adapter.connect(
-        SessionOptions(model="opus", extra={"omni_engine": "native"})
+        SessionOptions(model="opus", extra={"fluid_engine": "native"})
     )
     assert captured["context_window"] == 1_000_000
     # The window is the INPUT budget — it must not be confused with max_tokens
@@ -1250,8 +1271,8 @@ async def _fake_provider_client(kind, options):
 
 @pytest.mark.asyncio
 async def test_native_leg_system_prompt_is_compiled(monkeypatch, tmp_path):
-    """Native legs always run the omni-compiled prompt: base first, append
-    text as a block, env gathered by omni."""
+    """Native legs always run the fluid-compiled prompt: base first, append
+    text as a block, env gathered by fluid."""
     import app.core.provider.harness_adapter as ha
 
     monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
@@ -1262,7 +1283,7 @@ async def test_native_leg_system_prompt_is_compiled(monkeypatch, tmp_path):
             model="gpt-4o",
             system_prompt="I am the configured agent prompt.",
             cwd=str(tmp_path),
-            extra={"omni_provider": "openai_responses"},
+            extra={"fluid_provider": "openai_responses"},
         )
     )
     system = _CapturingLoop.captured["system"]
@@ -1285,7 +1306,7 @@ async def test_native_leg_preset_append_rides_as_block(monkeypatch, tmp_path):
             model="gpt-4o",
             system_prompt={"type": "preset", "preset": "claude_code", "append": "SECURITY BLOCK"},
             cwd=str(tmp_path),
-            extra={"omni_provider": "openai_responses"},
+            extra={"fluid_provider": "openai_responses"},
         )
     )
     system = _CapturingLoop.captured["system"]
@@ -1312,7 +1333,7 @@ async def test_native_leg_passes_compiled_sections_for_context_usage(
             model="gpt-4o",
             system_prompt="I am the configured agent prompt.",
             cwd=str(tmp_path),
-            extra={"omni_provider": "openai_responses"},
+            extra={"fluid_provider": "openai_responses"},
         )
     )
     compiled = _CapturingLoop.captured["system_sections"]
@@ -1350,7 +1371,7 @@ async def test_native_leg_compiler_failure_degrades_sections_to_none(
             model="gpt-4o",
             system_prompt="I am the configured agent prompt.",
             cwd=str(tmp_path),
-            extra={"omni_provider": "openai_responses"},
+            extra={"fluid_provider": "openai_responses"},
         )
     )
     assert _CapturingLoop.captured["system_sections"] is None
@@ -1360,7 +1381,7 @@ async def test_native_leg_compiler_failure_degrades_sections_to_none(
 @pytest.mark.asyncio
 async def test_native_leg_app_env_block_not_duplicated(monkeypatch, tmp_path):
     """inject_env_details profiles already carry the app's <env> block —
-    omni's env section must be skipped, not doubled."""
+    fluid's env section must be skipped, not doubled."""
     import app.core.provider.harness_adapter as ha
 
     monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
@@ -1372,7 +1393,7 @@ async def test_native_leg_app_env_block_not_duplicated(monkeypatch, tmp_path):
             model="gpt-4o",
             system_prompt=base,
             cwd=str(tmp_path),
-            extra={"omni_provider": "openai_responses"},
+            extra={"fluid_provider": "openai_responses"},
         )
     )
     system = _CapturingLoop.captured["system"]
@@ -1406,7 +1427,7 @@ async def test_anthropic_native_leg_canonicalizes_the_model_alias(monkeypatch, t
         SessionOptions(
             model="opus",
             cwd=str(tmp_path),
-            extra={"omni_engine": "native", "omni_provider": "anthropic"},
+            extra={"fluid_engine": "native", "fluid_provider": "anthropic"},
         )
     )
     assert _CapturingLoop.captured["model"] == "claude-opus-5"
@@ -1425,7 +1446,7 @@ async def test_anthropic_native_leg_canonicalizes_legacy_1m_values(monkeypatch, 
         SessionOptions(
             model="opus[1m]",
             cwd=str(tmp_path),
-            extra={"omni_engine": "native", "omni_provider": "anthropic"},
+            extra={"fluid_engine": "native", "fluid_provider": "anthropic"},
         )
     )
     assert _CapturingLoop.captured["model"] == "claude-opus-5"
@@ -1443,7 +1464,7 @@ async def test_anthropic_native_leg_passes_custom_models_through(monkeypatch, tm
         SessionOptions(
             model="my-custom-model",
             cwd=str(tmp_path),
-            extra={"omni_engine": "native", "omni_provider": "anthropic"},
+            extra={"fluid_engine": "native", "fluid_provider": "anthropic"},
         )
     )
     assert _CapturingLoop.captured["model"] == "my-custom-model"
@@ -1462,7 +1483,7 @@ async def test_other_native_kinds_are_not_canonicalized(monkeypatch, tmp_path):
         SessionOptions(
             model="opus",
             cwd=str(tmp_path),
-            extra={"omni_engine": "native", "omni_provider": "openrouter"},
+            extra={"fluid_engine": "native", "fluid_provider": "openrouter"},
         )
     )
     assert _CapturingLoop.captured["model"] == "opus"
@@ -1482,7 +1503,7 @@ async def test_set_model_canonicalizes_on_the_anthropic_leg(monkeypatch, tmp_pat
         SessionOptions(
             model="opus",
             cwd=str(tmp_path),
-            extra={"omni_engine": "native", "omni_provider": "anthropic"},
+            extra={"fluid_engine": "native", "fluid_provider": "anthropic"},
         )
     )
     await adapter.set_model("sonnet")
@@ -1503,7 +1524,7 @@ async def test_delegated_append_mode_bypasses_compiler(monkeypatch, tmp_path):
             model="fable",
             system_prompt={"type": "preset", "append": "APPEND TEXT"},
             cwd=str(tmp_path),
-            extra={"omni_registry": ToolRegistry()},
+            extra={"fluid_registry": ToolRegistry()},
         )
     )
     assert _CapturingLoop.captured["system"] is None
@@ -1526,7 +1547,7 @@ async def test_delegated_full_replace_compiles(monkeypatch, tmp_path):
             model="fable",
             system_prompt={"type": "preset", "append": "APPEND TEXT"},
             cwd=str(tmp_path),
-            extra={"omni_registry": ToolRegistry()},
+            extra={"fluid_registry": ToolRegistry()},
         )
     )
     system = _CapturingLoop.captured["system"]
@@ -1549,7 +1570,7 @@ async def test_delegated_leg_bans_cli_subagent_tools(monkeypatch, tmp_path):
             model="fable",
             cwd=str(tmp_path),
             disallowed_tools=["WebSearch"],
-            extra={"omni_registry": ToolRegistry()},
+            extra={"fluid_registry": ToolRegistry()},
         )
     )
     banned = set(_CapturingLoop.captured["disallowed_tools"])
@@ -1569,7 +1590,7 @@ async def test_delegated_leg_bans_cli_wake_tools(monkeypatch, tmp_path):
         SessionOptions(
             model="fable",
             cwd=str(tmp_path),
-            extra={"omni_registry": ToolRegistry()},
+            extra={"fluid_registry": ToolRegistry()},
         )
     )
     banned = set(_CapturingLoop.captured["disallowed_tools"])
@@ -1589,28 +1610,28 @@ async def test_add_dirs_reach_delegated_loop(monkeypatch, tmp_path):
             model="fable",
             cwd=str(tmp_path),
             add_dirs=["/notes", "/extra"],
-            extra={"omni_registry": ToolRegistry()},
+            extra={"fluid_registry": ToolRegistry()},
         )
     )
     assert _CapturingLoop.captured["add_dirs"] == ["/notes", "/extra"]
 
 
 def test_store_derived_from_database_presence(monkeypatch):
-    """No store flags (2026-08-13 ruling): DATABASE_URL set -> PgOmniStore;
+    """No store flags (2026-08-13 ruling): DATABASE_URL set -> PgFluidStore;
     DB-less (unit tests) -> MemoryStore. The retired AIH_OMNI_STORE env var
     must be ignored."""
     from app.core.config import settings
-    from app.core.provider.omni_pg_store import PgOmniStore
-    from fluid.store.base import MemoryStore as OmniMemoryStore
+    from app.core.provider.fluid_pg_store import PgFluidStore
+    from fluid.store.base import MemoryStore as FluidMemoryStore
 
     monkeypatch.setattr(settings, "database_url", "postgresql://REDACTED@h:5432/db")
     store = HarnessAdapter._build_store(SessionOptions(model="m"))
-    assert isinstance(store, PgOmniStore)
+    assert isinstance(store, PgFluidStore)
 
     monkeypatch.setattr(settings, "database_url", None)
     monkeypatch.setenv("AIH_OMNI_STORE", "pg")  # retired flag — ignored
     store = HarnessAdapter._build_store(SessionOptions(model="m"))
-    assert isinstance(store, OmniMemoryStore)
+    assert isinstance(store, FluidMemoryStore)
 
 
 def test_requires_reconnect():
@@ -1624,12 +1645,12 @@ def test_requires_reconnect():
     assert a.requires_reconnect(SessionOptions(model="m", system_prompt="Different")) is True
 
 
-# ─── 5. SDK @tool -> omni InprocTool bridge ──────────────────────────────────
+# ─── 5. SDK @tool -> fluid InprocTool bridge ──────────────────────────────────
 
 
 @pytest.mark.asyncio
 async def test_tool_bridge():
-    from app.core.provider.omni_tool_bridge import (
+    from app.core.provider.fluid_tool_bridge import (
         register_sdk_tools,
         sdk_tool_to_inproc,
     )
@@ -1700,7 +1721,7 @@ async def _connect_delegated(monkeypatch, store, options) -> HarnessAdapter:
 
 @pytest.mark.asyncio
 async def test_delegated_resume_uses_stored_cli_session_id(monkeypatch):
-    """A resumed session must pass the CLI's own uuid, never the omni id."""
+    """A resumed session must pass the CLI's own uuid, never the fluid id."""
     store = MemoryStore()
     await store.create_session("ses_resume")
     await store.set_cli_session_id("ses_resume", "cli-uuid-from-init-frame")
@@ -1919,7 +1940,7 @@ async def test_adapter_surfaces_one_assistant_message_for_split_frames():
 # Flag-on native traffic never touches the translator gateway, so the gateway's
 # passive header capture (upstream.py) never runs and provider_usage_snapshots
 # goes stale. _usage_capture_http_client restores it via an httpx response hook
-# injected into the omni client.
+# injected into the fluid client.
 
 
 CODEX_HEADERS = {
@@ -2014,9 +2035,9 @@ async def test_usage_capture_hook_swallows_capture_errors(monkeypatch):
 @pytest.mark.asyncio
 async def test_build_provider_client_injects_capture_client(monkeypatch):
     """A bound openai_responses provider gets the capture client wired into the
-    omni client (client._http) and handed back for the caller to close."""
+    fluid client (client._http) and handed back for the caller to close."""
     import app.core.provider.harness_adapter as ha
-    from app.core.provider.omni_credentials import ProviderCredentials
+    from app.core.provider.fluid_credentials import ProviderCredentials
 
     class _DummyAuth:
         account_id = "acct_1"
@@ -2047,7 +2068,7 @@ async def test_build_provider_client_injects_capture_client(monkeypatch):
 @pytest.mark.asyncio
 async def test_build_provider_client_env_fallback_has_no_capture_client(monkeypatch):
     """No bound provider row → nothing to attribute usage to, so no capture
-    client is injected and the omni client keeps its own default transport."""
+    client is injected and the fluid client keeps its own default transport."""
     import app.core.provider.harness_adapter as ha
 
     monkeypatch.setenv("OPENAI_API_KEY", "test")
@@ -2062,7 +2083,7 @@ async def test_build_provider_client_env_fallback_has_no_capture_client(monkeypa
 
 @pytest.mark.asyncio
 async def test_disconnect_closes_capture_http_client():
-    """Teardown owns the injected client — the omni client never closes one it
+    """Teardown owns the injected client — the fluid client never closes one it
     did not create."""
     closed = {"count": 0}
 
@@ -2088,12 +2109,12 @@ async def test_disconnect_closes_capture_http_client():
 
 # ─── 9. Bus seq seeding on resume (durable-event-loss regression) ────────────
 #
-# omni's EventBus numbers events off its IN-MEMORY log (seq = len(log) + 1). A
+# fluid's EventBus numbers events off its IN-MEMORY log (seq = len(log) + 1). A
 # freshly built engine over a resumed session starts with an empty log, so it
 # re-uses seq 1..N — and the durable append is idempotent per (session_id, seq),
 # so those events are silently dropped. Headless one-shot turns (ScheduleWakeup
 # wakes, automations) build a new adapter per turn and hit this EVERY turn, so
-# whole wake turns never reached omni_session_events (and the live feed).
+# whole wake turns never reached fluid_session_events (and the live feed).
 # connect() now seeds the bus log from the store, restoring seq continuity.
 
 _SEED_CHUNKS = [
@@ -2133,7 +2154,7 @@ async def _connect_native(monkeypatch, store, tmp_path, **option_kwargs) -> Harn
             model="gpt-4o",
             cwd=str(tmp_path),
             include_partial_messages=True,
-            extra={"omni_provider": "openai_responses"},
+            extra={"fluid_provider": "openai_responses"},
             **option_kwargs,
         )
     )
@@ -2227,7 +2248,7 @@ async def test_non_contiguous_store_seeds_prefix_only(monkeypatch, tmp_path, cap
 
 # ─── W0a: native-leg MCP normalization + turn/output caps ────────────────────
 #
-# The app emits SDK-shaped MCP configs while omni's client dispatches on
+# The app emits SDK-shaped MCP configs while fluid's client dispatches on
 # ``transport``; without normalization every remote server silently failed to
 # connect on native legs. NativeLoop also ran at its own defaults regardless of
 # the profile's max_turns / output-token settings. See
@@ -2238,7 +2259,7 @@ import types as _types
 
 from app.core.provider.harness_adapter import (
     _native_max_output_tokens,
-    _normalize_mcp_config_for_omni,
+    _normalize_mcp_config_for_fluid,
     _positive_int,
     _prune_duplicate_plugin_mcp_servers as ha_prune,
 )
@@ -2247,14 +2268,14 @@ _HA_LOGGER = "app.core.provider.harness_adapter"
 
 
 def test_normalize_mcp_stdio_config_passes_through():
-    """stdio is already omni's default transport — nothing to translate."""
+    """stdio is already fluid's default transport — nothing to translate."""
     cfg = {"command": "node", "args": ["server.js"], "env": {"K": "v"}}
-    assert _normalize_mcp_config_for_omni("local", cfg) == cfg
+    assert _normalize_mcp_config_for_fluid("local", cfg) == cfg
 
 
 def test_normalize_mcp_http_config_becomes_streamable_http():
     cfg = {"type": "http", "url": "https://example.test/mcp"}
-    out = _normalize_mcp_config_for_omni("remote", cfg)
+    out = _normalize_mcp_config_for_fluid("remote", cfg)
 
     assert out == {"url": "https://example.test/mcp", "transport": "streamable_http"}
     # The caller's dict must survive untouched: the delegated leg serializes the
@@ -2269,7 +2290,7 @@ def test_normalize_mcp_http_headers_warn_but_still_connect(caplog):
         "headers": {"Authorization": "Bearer x"},
     }
     with caplog.at_level(_logging.WARNING, logger=_HA_LOGGER):
-        out = _normalize_mcp_config_for_omni("authed", cfg)
+        out = _normalize_mcp_config_for_fluid("authed", cfg)
 
     assert out is not None
     assert out["transport"] == "streamable_http"
@@ -2282,7 +2303,7 @@ def test_normalize_mcp_http_headers_warn_but_still_connect(caplog):
 def test_normalize_mcp_sse_config_is_skipped_with_warning(caplog):
     cfg = {"type": "sse", "url": "https://example.test/sse"}
     with caplog.at_level(_logging.WARNING, logger=_HA_LOGGER):
-        out = _normalize_mcp_config_for_omni("streamer", cfg)
+        out = _normalize_mcp_config_for_fluid("streamer", cfg)
 
     assert out is None
     assert any(
@@ -2291,19 +2312,19 @@ def test_normalize_mcp_sse_config_is_skipped_with_warning(caplog):
 
 
 def test_normalize_mcp_explicit_transport_is_respected():
-    """A caller already speaking omni's dialect is left alone."""
+    """A caller already speaking fluid's dialect is left alone."""
     cfg = {"transport": "streamable_http", "url": "https://example.test/mcp"}
-    assert _normalize_mcp_config_for_omni("native-shaped", cfg) is cfg
+    assert _normalize_mcp_config_for_fluid("native-shaped", cfg) is cfg
 
 
 def test_normalize_mcp_unknown_shapes_pass_through(caplog):
     with caplog.at_level(_logging.WARNING, logger=_HA_LOGGER):
-        assert _normalize_mcp_config_for_omni("weird", {"type": "carrier-pigeon"}) == {
+        assert _normalize_mcp_config_for_fluid("weird", {"type": "carrier-pigeon"}) == {
             "type": "carrier-pigeon"
         }
     assert any("weird" in r.getMessage() for r in caplog.records)
     # Non-dict entries are somebody else's problem, not ours to reshape.
-    assert _normalize_mcp_config_for_omni("odd", "nonsense") == "nonsense"
+    assert _normalize_mcp_config_for_fluid("odd", "nonsense") == "nonsense"
 
 
 @pytest.mark.asyncio
@@ -2444,7 +2465,7 @@ async def test_connect_drops_plugin_mcp_servers_the_app_already_connected(
         SessionOptions(
             model="gpt-4o",
             cwd=str(tmp_path),
-            extra={"omni_provider": "openai_responses"},
+            extra={"fluid_provider": "openai_responses"},
             mcp_servers={"chrome-devtools": {"command": "app-configured"}},
         )
     )
@@ -2509,7 +2530,7 @@ async def test_connect_native_leg_folds_the_hosts_claude_settings(monkeypatch, t
         SessionOptions(
             model="gpt-4o",
             cwd=str(proj),
-            extra={"omni_provider": "openai_responses"},
+            extra={"fluid_provider": "openai_responses"},
         )
     )
 
@@ -2530,7 +2551,7 @@ async def _connect_capturing_native(monkeypatch, tmp_path, **option_kwargs):
         SessionOptions(
             model="gpt-4o",
             cwd=str(tmp_path),
-            extra={"omni_provider": "openai_responses"},
+            extra={"fluid_provider": "openai_responses"},
             **option_kwargs,
         )
     )
@@ -2544,8 +2565,8 @@ async def test_max_turns_becomes_model_call_budget(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_no_max_turns_keeps_omni_default(monkeypatch, tmp_path):
-    """Unset / non-positive values must not be passed — omni's default (50) wins."""
+async def test_no_max_turns_keeps_fluid_default(monkeypatch, tmp_path):
+    """Unset / non-positive values must not be passed — fluid's default (50) wins."""
     captured = await _connect_capturing_native(monkeypatch, tmp_path)
     assert "max_model_calls_per_turn" not in captured
 
@@ -2571,7 +2592,7 @@ async def test_max_turns_projected_from_sdk_options(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_env_output_token_cap_reaches_native_loop(monkeypatch, tmp_path):
-    """Interim escape hatch from omni's silent 8192 output cap."""
+    """Interim escape hatch from fluid's silent 8192 output cap."""
     captured = await _connect_capturing_native(
         monkeypatch, tmp_path, env={"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "32000"}
     )
@@ -2579,7 +2600,7 @@ async def test_env_output_token_cap_reaches_native_loop(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_no_env_cap_keeps_omni_default(monkeypatch, tmp_path):
+async def test_no_env_cap_keeps_fluid_default(monkeypatch, tmp_path):
     captured = await _connect_capturing_native(monkeypatch, tmp_path)
     assert "max_tokens" not in captured
 
@@ -2621,7 +2642,7 @@ def test_positive_int_rejects_bools_and_junk():
 # Regression cover for the live bug: a codex-native session called the bare
 # ``Task`` builtin and got "Task dispatch is not available in this environment
 # — no dispatcher was injected by the host application", because connect() only
-# injected the dispatcher when an omni session id already existed.
+# injected the dispatcher when a fluid session id already existed.
 
 
 async def _connect_native_leg(monkeypatch, tmp_path, **extra) -> HarnessAdapter:
@@ -2635,7 +2656,7 @@ async def _connect_native_leg(monkeypatch, tmp_path, **extra) -> HarnessAdapter:
         SessionOptions(
             model="gpt-4o",
             cwd=str(tmp_path),
-            extra={"omni_provider": "openai_responses", **extra},
+            extra={"fluid_provider": "openai_responses", **extra},
         )
     )
     return adapter
@@ -2658,7 +2679,7 @@ async def test_native_leg_injects_task_dispatch_without_a_session_id(
 @pytest.mark.asyncio
 async def test_task_dispatch_uses_the_stamped_app_session_id(monkeypatch, tmp_path):
     """query_options stamps the app session id; the dispatcher must dispatch
-    against THAT, not the omni ``ses_...`` handle riding on the ctx."""
+    against THAT, not the fluid ``ses_...`` handle riding on the ctx."""
     import app.core.task_dispatch as td
 
     seen: dict = {}
@@ -2671,7 +2692,7 @@ async def test_task_dispatch_uses_the_stamped_app_session_id(monkeypatch, tmp_pa
     await _connect_native_leg(monkeypatch, tmp_path, app_session_id="app-sess-1")
 
     ctx = _CapturingLoop.captured["ctx"]
-    assert ctx.session_id != "app-sess-1"  # the omni id is NOT the app id
+    assert ctx.session_id != "app-sess-1"  # the fluid id is NOT the app id
     await _injected_dispatcher()({"agent": "helper", "prompt": "go"}, ctx)
     assert seen["caller"] == "app-sess-1"
 
@@ -2679,7 +2700,7 @@ async def test_task_dispatch_uses_the_stamped_app_session_id(monkeypatch, tmp_pa
 @pytest.mark.asyncio
 async def test_task_dispatch_falls_back_to_the_sdk_id_lookup(monkeypatch, tmp_path):
     """Without the stamp, the app session is recovered by reverse-mapping the
-    omni session id through ``sessions.sdk_session_id``."""
+    fluid session id through ``sessions.sdk_session_id``."""
     import app.core.task_dispatch as td
     from app.db import database
 
@@ -2962,7 +2983,7 @@ def recording_adapter(monkeypatch):
     async def _client(kind, options):
         return object(), None
 
-    async def _cli_sid(self, omni_session_id, options):
+    async def _cli_sid(self, fluid_session_id, options):
         return None
 
     monkeypatch.setattr(HarnessAdapter, "_build_registry", _registry)
@@ -2977,8 +2998,8 @@ def _native_opts(**kw):
     """Options that route to the native anthropic leg."""
     kw.setdefault("model", "claude-sonnet-4-5")
     extra = kw.pop("extra", None) or {}
-    extra.setdefault("omni_engine", "native")
-    extra.setdefault("omni_provider", "anthropic")
+    extra.setdefault("fluid_engine", "native")
+    extra.setdefault("fluid_provider", "anthropic")
     return SessionOptions(extra=extra, **kw)
 
 

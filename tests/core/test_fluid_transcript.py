@@ -1,13 +1,13 @@
-"""omni transcript/checkpoint facade — the read+rewind+fork path for flag-on sessions.
+"""fluid transcript/checkpoint facade — the read+rewind+fork path for flag-on sessions.
 
-Seeds ``omni_sessions`` / ``omni_session_nodes`` rows directly against the
+Seeds ``fluid_sessions`` / ``fluid_session_nodes`` rows directly against the
 pg_shim, then drives the facade the app's rewind, fork and /live paths now call.
 
 The fixtures are written as raw ``Message.to_dict()``-shaped JSON rather than
-built through omni's dataclasses on purpose: the facade reads the store with
-plain SQL and never imports ``omni``, so neither should its tests (CI installs
-the app without the harness). ``test_fixture_matches_real_omni_serialization``
-pins the hand-written shape against the real serializer wherever omni IS
+built through fluid's dataclasses on purpose: the facade reads the store with
+plain SQL and never imports ``fluid``, so neither should its tests (CI installs
+the app without the harness). ``test_fixture_matches_real_fluid_serialization``
+pins the hand-written shape against the real serializer wherever fluid IS
 importable, so the fixtures cannot silently drift from what the harness writes.
 """
 
@@ -15,15 +15,15 @@ from __future__ import annotations
 
 import pytest
 
-from app.core.provider.omni_transcript import (
-    fork_omni_session,
-    get_omni_checkpoints,
-    is_omni_session,
-    load_omni_path,
-    new_omni_session_id,
-    omni_live_messages,
-    omni_transcript_entries,
-    rewind_omni_session,
+from app.core.provider.fluid_transcript import (
+    fork_fluid_session,
+    get_fluid_checkpoints,
+    is_fluid_session,
+    load_fluid_path,
+    new_fluid_session_id,
+    fluid_live_messages,
+    fluid_transcript_entries,
+    rewind_fluid_session,
 )
 
 
@@ -40,7 +40,7 @@ def _assistant(text):
 
 
 def _insert(session_id, nodes):
-    """Write a session and its nodes exactly as PgOmniStore would."""
+    """Write a session and its nodes exactly as PgFluidStore would."""
     from psycopg2.extras import Json
 
     from app.db.base import get_cursor, get_db
@@ -48,13 +48,13 @@ def _insert(session_id, nodes):
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            "INSERT INTO omni_sessions (session_id, head_node_id, created_at) "
+            "INSERT INTO fluid_sessions (session_id, head_node_id, created_at) "
             "VALUES (%s, %s, %s)",
             (session_id, nodes[-1][0], 1000.0),
         )
         for i, (node_id, parent_id, message) in enumerate(nodes):
             cursor.execute(
-                "INSERT INTO omni_session_nodes "
+                "INSERT INTO fluid_session_nodes "
                 "(session_id, node_id, parent_id, ts, message) "
                 "VALUES (%s, %s, %s, %s, %s)",
                 (session_id, node_id, parent_id, 1000.0 + i, Json(message)),
@@ -91,9 +91,9 @@ def _seed(session_id="ses_fixture"):
     return session_id
 
 
-def test_fixture_matches_real_omni_serialization():
-    """The hand-written fixture JSON must equal what omni actually persists."""
-    pytest.importorskip("omni")
+def test_fixture_matches_real_fluid_serialization():
+    """The hand-written fixture JSON must equal what fluid actually persists."""
+    pytest.importorskip("fluid")
     from fluid.messages.content import Message, Text, ToolResultBlock, ToolUseBlock
 
     assert Message(role="user", content=[Text(text="hi")]).to_dict() == _user("hi")
@@ -120,7 +120,7 @@ def _head(session_id):
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            "SELECT head_node_id FROM omni_sessions WHERE session_id = %s",
+            "SELECT head_node_id FROM fluid_sessions WHERE session_id = %s",
             (session_id,),
         )
         return dict(cursor.fetchone())["head_node_id"]
@@ -128,30 +128,30 @@ def _head(session_id):
 
 # ─── session detection ───────────────────────────────────────────────────────
 
-def test_legacy_session_id_is_never_omni(mock_db):
+def test_legacy_session_id_is_never_fluid(mock_db):
     # A CLI session id is a UUID — the prefix gate rejects it without a query,
     # which is what keeps the flag-off path byte-identical.
-    assert is_omni_session("6f1c9e2a-6f0f-4a5e-9a4f-2b6c0d5e7a11") is False
-    assert is_omni_session(None) is False
-    assert is_omni_session("") is False
+    assert is_fluid_session("6f1c9e2a-6f0f-4a5e-9a4f-2b6c0d5e7a11") is False
+    assert is_fluid_session(None) is False
+    assert is_fluid_session("") is False
 
 
-def test_omni_shaped_id_must_still_exist(mock_db):
+def test_fluid_shaped_id_must_still_exist(mock_db):
     # Shape alone is not enough: an unknown ses_ id falls through to the legacy
     # readers rather than silently serving an empty transcript.
-    assert is_omni_session("ses_deadbeefcafe") is False
+    assert is_fluid_session("ses_deadbeefcafe") is False
 
 
-def test_known_omni_session_is_detected(mock_db):
+def test_known_fluid_session_is_detected(mock_db):
     session_id = _seed()
-    assert is_omni_session(session_id) is True
+    assert is_fluid_session(session_id) is True
 
 
 # ─── checkpoints ─────────────────────────────────────────────────────────────
 
-def test_checkpoints_from_omni_nodes(mock_db):
+def test_checkpoints_from_fluid_nodes(mock_db):
     session_id = _seed()
-    checkpoints = get_omni_checkpoints(session_id)
+    checkpoints = get_fluid_checkpoints(session_id)
 
     # node_id is the stable rewind handle; the tool-result user node (n4) and
     # the tool_use-only assistant node (n3) are not rewind points.
@@ -171,20 +171,20 @@ def test_entries_stay_aligned_with_the_node_path(mock_db):
     # Load-bearing for rewind: a keep-count over entries maps back positionally
     # to the node that must become the new head.
     session_id = _seed()
-    entries = omni_transcript_entries(session_id)
-    path = load_omni_path(session_id)
+    entries = fluid_transcript_entries(session_id)
+    path = load_fluid_path(session_id)
     assert [e["uuid"] for e in entries] == [n["node_id"] for n in path]
 
 
 def test_entries_empty_for_unknown_session(mock_db):
-    assert omni_transcript_entries("ses_nothinghere") == []
+    assert fluid_transcript_entries("ses_nothinghere") == []
 
 
 # ─── rewind ──────────────────────────────────────────────────────────────────
 
 def test_rewind_keeping_response_moves_head_to_end_of_turn(mock_db):
     session_id = _seed()
-    result = rewind_omni_session(session_id, "n1", include_response=True)
+    result = rewind_fluid_session(session_id, "n1", include_response=True)
 
     # Keep the first prompt and everything it produced; drop from the next
     # human turn (n6) onward.
@@ -192,14 +192,14 @@ def test_rewind_keeping_response_moves_head_to_end_of_turn(mock_db):
     assert _head(session_id) == "n5"
     assert result.messages_removed == 2  # n6, n7
     assert result.remaining_user_turns == 1
-    assert [n["node_id"] for n in load_omni_path(session_id)] == [
+    assert [n["node_id"] for n in load_fluid_path(session_id)] == [
         "n1", "n2", "n3", "n4", "n5",
     ]
 
 
 def test_rewind_dropping_target_moves_head_to_its_parent(mock_db):
     session_id = _seed()
-    result = rewind_omni_session(session_id, "n6", include_response=False)
+    result = rewind_fluid_session(session_id, "n6", include_response=False)
 
     assert result.success is True
     assert _head(session_id) == "n5"
@@ -208,28 +208,28 @@ def test_rewind_dropping_target_moves_head_to_its_parent(mock_db):
 
 def test_rewind_to_first_prompt_can_empty_the_session(mock_db):
     session_id = _seed()
-    result = rewind_omni_session(session_id, "n1", include_response=False)
+    result = rewind_fluid_session(session_id, "n1", include_response=False)
 
-    # A NULL head is a legitimate, resumable omni session — the next turn
+    # A NULL head is a legitimate, resumable fluid session — the next turn
     # appends a fresh root node — so the session id is never invalidated.
     assert result.success is True
     assert _head(session_id) is None
-    assert load_omni_path(session_id) == []
+    assert load_fluid_path(session_id) == []
     assert result.remaining_user_turns == 0
 
 
 def test_rewind_leaves_dropped_nodes_in_the_tree_off_path(mock_db):
-    # omni's rewind semantics: nothing is deleted, so a later turn branches a
+    # fluid's rewind semantics: nothing is deleted, so a later turn branches a
     # sibling rather than losing history.
     session_id = _seed()
-    rewind_omni_session(session_id, "n6", include_response=False)
+    rewind_fluid_session(session_id, "n6", include_response=False)
 
     from app.db.base import get_cursor, get_db
 
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            "SELECT node_id FROM omni_session_nodes WHERE session_id = %s",
+            "SELECT node_id FROM fluid_session_nodes WHERE session_id = %s",
             (session_id,),
         )
         stored = {dict(r)["node_id"] for r in cursor.fetchall()}
@@ -238,7 +238,7 @@ def test_rewind_leaves_dropped_nodes_in_the_tree_off_path(mock_db):
 
 def test_rewind_unknown_target_fails_without_moving_head(mock_db):
     session_id = _seed()
-    result = rewind_omni_session(session_id, "node-that-does-not-exist")
+    result = rewind_fluid_session(session_id, "node-that-does-not-exist")
 
     assert result.success is False
     assert "not found" in (result.error or "")
@@ -246,7 +246,7 @@ def test_rewind_unknown_target_fails_without_moving_head(mock_db):
 
 
 def test_rewind_on_missing_session_fails(mock_db):
-    result = rewind_omni_session("ses_missing", "n1")
+    result = rewind_fluid_session("ses_missing", "n1")
     assert result.success is False
 
 
@@ -254,42 +254,42 @@ def test_rewind_on_missing_session_fails(mock_db):
 
 def test_fork_copies_ancestry_and_heads_at_the_fork_point(mock_db):
     session_id = _seed()
-    new_id, node_count = fork_omni_session(session_id, "n5")
+    new_id, node_count = fork_fluid_session(session_id, "n5")
 
     assert new_id.startswith("ses_") and new_id != session_id
     assert node_count == 5
     assert _head(new_id) == "n5"
     # Node ids are preserved verbatim, so the shared prefix stays
     # byte-identical (cache-preserving) and handles stay comparable.
-    assert [n["node_id"] for n in load_omni_path(new_id)] == [
+    assert [n["node_id"] for n in load_fluid_path(new_id)] == [
         "n1", "n2", "n3", "n4", "n5",
     ]
     # Nothing after the fork point came along...
-    assert get_omni_checkpoints(new_id)[-1].uuid == "n5"
+    assert get_fluid_checkpoints(new_id)[-1].uuid == "n5"
     # ...and the source session is untouched.
     assert _head(session_id) == "n7"
-    assert len(load_omni_path(session_id)) == 7
+    assert len(load_fluid_path(session_id)) == 7
 
 
 def test_fork_at_head_copies_the_whole_session(mock_db):
     session_id = _seed()
-    new_id, node_count = fork_omni_session(session_id, "n7")
+    new_id, node_count = fork_fluid_session(session_id, "n7")
     assert node_count == 7
-    assert omni_transcript_entries(new_id) == [
-        {**e, "sessionId": new_id} for e in omni_transcript_entries(session_id)
+    assert fluid_transcript_entries(new_id) == [
+        {**e, "sessionId": new_id} for e in fluid_transcript_entries(session_id)
     ]
 
 
 def test_fork_rejects_an_off_path_node(mock_db):
     session_id = _seed()
     with pytest.raises(ValueError):
-        fork_omni_session(session_id, "nope")
+        fork_fluid_session(session_id, "nope")
 
 
 def test_fork_accepts_an_explicit_new_id(mock_db):
     session_id = _seed()
-    wanted = new_omni_session_id()
-    new_id, _ = fork_omni_session(session_id, "n2", new_sdk_session_id=wanted)
+    wanted = new_fluid_session_id()
+    new_id, _ = fork_fluid_session(session_id, "n2", new_sdk_session_id=wanted)
     assert new_id == wanted
 
 
@@ -297,12 +297,12 @@ def test_fork_accepts_an_explicit_new_id(mock_db):
 
 def test_live_messages_render_through_the_shared_transform(mock_db):
     session_id = _seed()
-    messages, _usage = omni_live_messages(session_id, "/workspace")
+    messages, _usage = fluid_live_messages(session_id, "/workspace")
 
     rendered = [(m["role"], m["type"]) for m in messages]
     # ``type: None`` is the shared transform's own marker for a plain user
     # prompt (same for JSONL and store sources) — proof we render through it
-    # rather than through an omni-specific shape.
+    # rather than through a fluid-specific shape.
     assert ("user", None) in rendered
     assert ("assistant", "text") in rendered
     tool_rows = [m for m in messages if m["type"] == "tool_use"]
@@ -316,12 +316,12 @@ def test_live_messages_render_through_the_shared_transform(mock_db):
 
 
 def test_live_messages_empty_for_unknown_session(mock_db):
-    assert omni_live_messages("ses_missing") == ([], {})
+    assert fluid_live_messages("ses_missing") == ([], {})
 
 
 # ─── rewind content guard (commands.py) ──────────────────────────────────────
 
-def test_content_guard_resolves_an_omni_checkpoint(mock_db):
+def test_content_guard_resolves_an_fluid_checkpoint(mock_db):
     from app.api.commands import _resolve_checkpoint_uuid_from_content
 
     session_id = _seed()
@@ -352,13 +352,13 @@ def test_content_guard_still_fails_closed_on_no_match(mock_db):
 #
 # After a rewind the delegated engine's ``claude`` CLI still holds the
 # rewound-away turns (it reconnects to its OWN history via ``--resume``). The
-# re-seed materializes omni's post-rewind path as a CLI session file under a
+# re-seed materializes fluid's post-rewind path as a CLI session file under a
 # fresh uuid and stores that uuid as the session's resume handle, so the next
 # turn reconnects to a conversation that ends at the checkpoint.
 
 
 def _entry(uuid_, parent, role, content, model=None, timestamp=None):
-    """One omni-projected transcript entry (what ``_node_to_entry`` returns)."""
+    """One fluid-projected transcript entry (what ``_node_to_entry`` returns)."""
     message = {"role": role, "content": content}
     if model:
         message["model"] = model
@@ -396,7 +396,7 @@ def _set_cli(session_id, cli_session_id):
 
     with get_db() as conn:
         get_cursor(conn).execute(
-            "UPDATE omni_sessions SET cli_session_id = %s WHERE session_id = %s",
+            "UPDATE fluid_sessions SET cli_session_id = %s WHERE session_id = %s",
             (cli_session_id, session_id),
         )
 
@@ -410,7 +410,7 @@ def _read_jsonl(path):
 # ─ materialization: entry shape ─
 
 def test_cli_entries_carry_the_fields_the_cli_reads():
-    from app.core.provider.omni_transcript import build_cli_transcript_entries
+    from app.core.provider.fluid_transcript import build_cli_transcript_entries
 
     lines = build_cli_transcript_entries(
         _projected_conversation(), "cli-uuid", "/workspace"
@@ -448,7 +448,7 @@ def test_cli_entries_carry_the_fields_the_cli_reads():
 
 
 def test_user_text_turn_becomes_a_plain_string():
-    from app.core.provider.omni_transcript import build_cli_transcript_entries
+    from app.core.provider.fluid_transcript import build_cli_transcript_entries
 
     lines = build_cli_transcript_entries(
         _projected_conversation(), "cli-uuid", "/workspace"
@@ -465,14 +465,14 @@ def test_user_text_turn_becomes_a_plain_string():
 def test_uuid_chain_is_fresh_and_unbroken():
     import uuid as _uuidlib
 
-    from app.core.provider.omni_transcript import build_cli_transcript_entries
+    from app.core.provider.fluid_transcript import build_cli_transcript_entries
 
     entries = _projected_conversation()
     lines = build_cli_transcript_entries(entries, "cli-uuid", "/workspace")
 
     uuids = [line["uuid"] for line in lines]
     assert len(set(uuids)) == len(uuids)
-    # Real uuids, not omni node ids: two conversations must never share
+    # Real uuids, not fluid node ids: two conversations must never share
     # message identity, and the CLI expects uuid-shaped ids.
     node_ids = {e["uuid"] for e in entries}
     for value in uuids:
@@ -484,23 +484,23 @@ def test_uuid_chain_is_fresh_and_unbroken():
 
 
 def test_session_id_is_the_new_file_uuid_everywhere():
-    from app.core.provider.omni_transcript import build_cli_transcript_entries
+    from app.core.provider.fluid_transcript import build_cli_transcript_entries
 
     lines = build_cli_transcript_entries(
         _projected_conversation(), "cli-uuid", "/workspace"
     )
     # The CLI keys the resume on the filename and cross-checks this field; the
-    # omni session id must not leak into it.
+    # fluid session id must not leak into it.
     assert {line["sessionId"] for line in lines} == {"cli-uuid"}
 
 
 def test_unsigned_thinking_blocks_are_dropped():
-    from app.core.provider.omni_transcript import build_cli_transcript_entries
+    from app.core.provider.fluid_transcript import build_cli_transcript_entries
 
     entries = [
         _entry("nod_1", None, "user", _text("prompt")),
         _entry("nod_2", "nod_1", "assistant", [
-            {"type": "thinking", "thinking": "omni carries no signature"},
+            {"type": "thinking", "thinking": "fluid carries no signature"},
             {"type": "text", "text": "reply"},
         ]),
         # Thinking-only turn has nothing replayable left → the entry goes too.
@@ -515,7 +515,7 @@ def test_unsigned_thinking_blocks_are_dropped():
 
 
 def test_unpaired_tool_blocks_are_dropped():
-    from app.core.provider.omni_transcript import build_cli_transcript_entries
+    from app.core.provider.fluid_transcript import build_cli_transcript_entries
 
     entries = [
         _entry("nod_1", None, "user", _text("prompt")),
@@ -538,7 +538,7 @@ def test_unpaired_tool_blocks_are_dropped():
 
 
 def test_history_never_opens_on_an_assistant_turn():
-    from app.core.provider.omni_transcript import build_cli_transcript_entries
+    from app.core.provider.fluid_transcript import build_cli_transcript_entries
 
     entries = [
         _entry("nod_1", None, "assistant", _text("stray leading reply")),
@@ -552,7 +552,7 @@ def test_history_never_opens_on_an_assistant_turn():
 
 
 def test_empty_transcript_materializes_nothing():
-    from app.core.provider.omni_transcript import build_cli_transcript_entries
+    from app.core.provider.fluid_transcript import build_cli_transcript_entries
 
     assert build_cli_transcript_entries([], "cli-uuid", "/workspace") == []
 
@@ -561,7 +561,7 @@ def test_empty_transcript_materializes_nothing():
 
 def test_rewind_then_reseed_writes_the_post_rewind_transcript(mock_db, tmp_path):
     from app.core.jsonl_parser import get_project_dir_name
-    from app.core.provider.omni_transcript import (
+    from app.core.provider.fluid_transcript import (
         get_cli_session_id,
         reseed_delegated_cli_session,
     )
@@ -569,7 +569,7 @@ def test_rewind_then_reseed_writes_the_post_rewind_transcript(mock_db, tmp_path)
     session_id = _seed()
     _set_cli(session_id, "stale-cli-uuid")
 
-    rewind_omni_session(session_id, "n1", include_response=True)
+    rewind_fluid_session(session_id, "n1", include_response=True)
     result = reseed_delegated_cli_session(session_id, "/workspace", tmp_path)
 
     assert result.status == "reseeded"
@@ -594,7 +594,7 @@ def test_rewind_then_reseed_writes_the_post_rewind_transcript(mock_db, tmp_path)
 
 
 def test_reseed_is_skipped_without_a_delegated_cli_conversation(mock_db, tmp_path):
-    from app.core.provider.omni_transcript import reseed_delegated_cli_session
+    from app.core.provider.fluid_transcript import reseed_delegated_cli_session
 
     session_id = _seed()  # native engine: cli_session_id stays NULL
     result = reseed_delegated_cli_session(session_id, "/workspace", tmp_path)
@@ -606,7 +606,7 @@ def test_reseed_is_skipped_without_a_delegated_cli_conversation(mock_db, tmp_pat
 
 
 def test_reseed_is_skipped_for_a_legacy_session(tmp_path):
-    from app.core.provider.omni_transcript import reseed_delegated_cli_session
+    from app.core.provider.fluid_transcript import reseed_delegated_cli_session
 
     # Prefix-gated: a CLI uuid never reaches the database.
     result = reseed_delegated_cli_session(
@@ -618,7 +618,7 @@ def test_reseed_is_skipped_for_a_legacy_session(tmp_path):
 def test_reseed_drops_the_handle_when_the_rewind_emptied_the_session(
     mock_db, tmp_path
 ):
-    from app.core.provider.omni_transcript import (
+    from app.core.provider.fluid_transcript import (
         get_cli_session_id,
         reseed_delegated_cli_session,
     )
@@ -627,7 +627,7 @@ def test_reseed_drops_the_handle_when_the_rewind_emptied_the_session(
     _set_cli(session_id, "stale-cli-uuid")
 
     # Rewinding past the first prompt leaves a NULL head / empty path.
-    rewind_omni_session(session_id, "n1", include_response=False)
+    rewind_fluid_session(session_id, "n1", include_response=False)
     result = reseed_delegated_cli_session(session_id, "/workspace", tmp_path)
 
     # An empty context IS a fresh CLI conversation — clear the handle rather
@@ -639,17 +639,17 @@ def test_reseed_drops_the_handle_when_the_rewind_emptied_the_session(
 
 
 def test_reseed_failure_leaves_the_old_handle_in_place(mock_db, tmp_path, monkeypatch):
-    from app.core.provider import omni_transcript
+    from app.core.provider import fluid_transcript
 
     session_id = _seed()
     _set_cli(session_id, "stale-cli-uuid")
-    rewind_omni_session(session_id, "n1", include_response=True)
+    rewind_fluid_session(session_id, "n1", include_response=True)
 
     def boom(*args, **kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr(omni_transcript, "_write_cli_transcript", boom)
-    result = omni_transcript.reseed_delegated_cli_session(
+    monkeypatch.setattr(fluid_transcript, "_write_cli_transcript", boom)
+    result = fluid_transcript.reseed_delegated_cli_session(
         session_id, "/workspace", tmp_path
     )
 
@@ -658,4 +658,4 @@ def test_reseed_failure_leaves_the_old_handle_in_place(mock_db, tmp_path, monkey
     assert result.status == "failed"
     assert result.context_is_authoritative is False
     assert "disk full" in result.error
-    assert omni_transcript.get_cli_session_id(session_id) == "stale-cli-uuid"
+    assert fluid_transcript.get_cli_session_id(session_id) == "stale-cli-uuid"

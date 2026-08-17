@@ -1,7 +1,7 @@
 """
 Resolve the ``claude`` CLI binary this deployment actually runs.
 
-Caller: omni's ``DelegatedLoop`` (via ``app/core/provider/harness_adapter.py``),
+Caller: fluid's ``DelegatedLoop`` (via ``app/core/provider/harness_adapter.py``),
 which SPAWNS the CLI for the delegated Claude leg. It prefers a ``claude``
 on PATH (dev machines with a global install) and falls back to the bundled
 copy this module locates.

@@ -357,7 +357,7 @@ def validate_provider_model(
     :func:`~app.core.environment.is_provider_servable` gate. That predicate is
     the admission rule for *cross-provider WORKER* models, and it deliberately
     excludes ``openrouter`` — but a MAIN session may bind to any enabled
-    provider (the profile editor has always allowed it, and omni serves
+    provider (the profile editor has always allowed it, and fluid serves
     OpenRouter natively). The composer's model override (PA13) validates
     existence + enabled + curated-membership only, so it can offer exactly the
     grouped library the profile editor offers instead of a strict subset.
@@ -926,7 +926,7 @@ async def dispatch_worker(
         provider_id=provider_id,
         model_id=model_id,
         prompt=prompt,
-        # The model's Task tool_use_id (omni native leg) — display-only: lets
+        # The model's Task tool_use_id (fluid native leg) — display-only: lets
         # the card absorb the launch tool_use block. Join keys stay task_id.
         launch_tool_use_id=launch_tool_use_id,
     )

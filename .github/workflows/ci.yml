@@ -27,13 +27,13 @@ jobs:
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          # 3.12 matches production (the Docker image) and the vendored omni
+          # 3.12 matches production (the Docker image) and the vendored fluid
           # harness's requires-python floor.
           python-version: "3.12"
           cache: "pip"
 
       - name: Install dependencies
-        # The vendored omni harness must be importable or tests/core's omni
+        # The vendored fluid harness must be importable or tests/core's fluid
         # modules fail at COLLECTION, aborting the whole run before any test
         # executes (red on main since the vendor-snapshot commit f9681e4a).
         run: |

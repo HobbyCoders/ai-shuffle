@@ -1,23 +1,23 @@
-"""Bridge the app's encrypted ``model_providers`` credentials into omni's
+"""Bridge the app's encrypted ``model_providers`` credentials into fluid's
 native provider clients.
 
 Background
 ----------
-omni's native clients
-(``omni/providers/{openai_responses,openrouter,anthropic}/client.py``) know
+fluid's native clients
+(``fluid/providers/{openai_responses,openrouter,anthropic}/client.py``) know
 nothing about this app: each reads an env var (``OPENAI_API_KEY`` /
 ``OPENROUTER_API_KEY`` / ``ANTHROPIC_API_KEY``) or takes an ``api_key``
 argument, and ``OpenAIResponsesClient`` additionally accepts an ``auth`` object
-implementing omni's ``ResponsesAuth`` protocol (``async get_access_token()``,
+implementing fluid's ``ResponsesAuth`` protocol (``async get_access_token()``,
 ``async on_401()``, optional ``account_id``) for ChatGPT-subscription (Codex)
 OAuth. Without this module the flag-on native legs are built bare and every
 request fails with a missing-credential 401 — the app's encrypted provider rows
 were never consulted.
 
 This module is the adapter-side resolver: given the session's bound
-``model_providers`` row id and the omni provider kind, it returns a
+``model_providers`` row id and the fluid provider kind, it returns a
 :class:`ProviderCredentials` bundle that ``harness_adapter._build_provider_client``
-hands straight to the omni constructor. It reuses the existing crypto service
+hands straight to the fluid constructor. It reuses the existing crypto service
 (``app.core.encryption``) and the existing Codex refresh worker
 (``app.core.codex_token_refresh``) — no new credential storage, no new crypto.
 
@@ -71,7 +71,7 @@ class ProviderCredentialError(ProviderConfigError):
 
 @dataclass
 class ProviderCredentials:
-    """What an omni native client needs to authenticate.
+    """What a fluid native client needs to authenticate.
 
     ``api_key`` and ``auth`` are mutually exclusive: an API-key row yields the
     former, a ChatGPT-subscription row the latter. ``use_codex_backend`` tells
@@ -155,7 +155,7 @@ async def _load_codex_access_token(provider_id: str) -> Tuple[str, Optional[str]
 
 
 class CodexSubscriptionAuth:
-    """omni ``ResponsesAuth`` implementation backed by a ``model_providers`` row.
+    """fluid ``ResponsesAuth`` implementation backed by a ``model_providers`` row.
 
     Satisfies the protocol ``OpenAIResponsesClient`` expects: ``account_id``
     attribute, ``async get_access_token()``, ``async on_401()``. Token storage,
@@ -196,7 +196,7 @@ async def resolve_provider_credentials(
 ) -> ProviderCredentials:
     """Resolve credentials for the session's bound provider row.
 
-    ``kind`` is the omni provider kind (``openai_responses`` / ``openrouter`` /
+    ``kind`` is the fluid provider kind (``openai_responses`` / ``openrouter`` /
     ``anthropic``); ``provider_id`` is a ``model_providers`` row id. Raises
     :class:`ProviderCredentialError` when the row is missing, disabled, or has
     no usable credential — never returns a half-authenticated bundle.

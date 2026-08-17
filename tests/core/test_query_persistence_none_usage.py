@@ -1,7 +1,7 @@
 """``_persist_turn_results`` must never hand a None usage value to update_session.
 
 The turn metadata keys (``total_cost_usd``/``tokens_in``/``tokens_out``/
-``num_turns``) can be PRESENT with a None value — the omni harness path does
+``num_turns``) can be PRESENT with a None value — the fluid harness path does
 this whenever a provider reports no cost/usage — so ``metadata.get(key, 0)``'s
 default never fires. The None then reached ``update_session``, whose additive
 SQL turned into ``col = col + NULL`` and NULLed the session row's counters,

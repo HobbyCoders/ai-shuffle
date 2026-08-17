@@ -110,7 +110,7 @@ async def interrupt_session(session_id: str) -> bool:
     # underlying interrupt keeps running to completion in the background.
     # Interrupt via the ADAPTER interface: state.client resolves through the
     # legacy-only ``sdk_client`` attribute and raises AttributeError on the
-    # omni HarnessAdapter. ClaudeAgentAdapter.interrupt() delegates to the
+    # fluid HarnessAdapter. ClaudeAgentAdapter.interrupt() delegates to the
     # same sdk_client.interrupt(), so flag-off behavior is unchanged.
     interrupt_task = asyncio.create_task(state.adapter.interrupt())
     # Attach the swallow/log done-callback AT CREATION (F8): if the CALLER of
@@ -295,7 +295,7 @@ async def stop_session_task(session_id: str, task_id: str) -> dict:
 
     # 2) Background sub-agent — ask the SDK to stop it.
     state = get_session_pool().peek(session_id)
-    # Omni/harness adapters expose no SDK client at all, so the SDK stop_task
+    # Fluid/harness adapters expose no SDK client at all, so the SDK stop_task
     # path is simply unavailable there. Treat that exactly like a torn-down
     # client (reap the registry row / report honestly) instead of letting the
     # missing attribute blow up the stop request.

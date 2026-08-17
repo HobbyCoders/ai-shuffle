@@ -907,7 +907,7 @@ describe('SessionsBoard inline rename', () => {
 });
 
 /**
- * Row activity stats: subscription-auth sessions (e.g. omni Codex-native) never
+ * Row activity stats: subscription-auth sessions (e.g. fluid Codex-native) never
  * accrue a dollar cost, so gating the whole "$cost · N turns · duration" block on
  * total_cost_usd > 0 hid real activity behind "No activity yet" forever. The gate
  * keys on turn_count too; each part renders only when it has something to say.

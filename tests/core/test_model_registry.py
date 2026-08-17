@@ -385,7 +385,7 @@ class TestRegistryPayloadProviders:
     def test_subscription_detection_mirrors_the_gateway_mode_resolution(self):
         """``provider_type == 'chatgpt'`` OR ``auth_mode == 'chatgpt'`` — a
         ``custom`` row can carry the Codex auth mode (mirrors
-        ``omni_credentials._is_codex_subscription``)."""
+        ``fluid_credentials._is_codex_subscription``)."""
         assert m._is_subscription_row({"provider_type": "chatgpt"}) is True
         assert m._is_subscription_row({"provider_type": "custom", "auth_mode": "chatgpt"}) is True
         assert m._is_subscription_row({"provider_type": "openai"}) is False

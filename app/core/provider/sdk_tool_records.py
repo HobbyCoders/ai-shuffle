@@ -1,6 +1,6 @@
 """Side table: SDK MCP server instance → the @tool objects it was built from.
 
-The omni harness executes in-process tools through its own ToolRegistry, not
+The fluid harness executes in-process tools through its own ToolRegistry, not
 through the SDK's mcp.Server wrapper. But by the time an in-proc server
 reaches the adapter it is an opaque ``{"type": "sdk", "instance": mcp.Server}``
 config — the raw ``@tool`` objects (name/description/input_schema/handler) are
@@ -9,13 +9,13 @@ no longer reachable from it.
 Every in-proc server in this app flows through ``sdk_compat.patch_sdk_server``,
 which uniquely still holds BOTH the server config and the original tools list.
 It records the pair here; ``HarnessAdapter._build_registry`` looks the tools
-back up by instance and registers them with omni (see omni_tool_bridge).
+back up by instance and registers them with fluid (see fluid_tool_bridge).
 
 Keyed weakly by the ``mcp.Server`` instance — tools are closures over
 per-session state (session_id, project scope, admin flag), so recordings must
 be per-instance, never by server name, and must not outlive the server.
 
-This module is import-safe in every deployment: no omni imports, no SDK
+This module is import-safe in every deployment: no fluid imports, no SDK
 imports. Flag-off installs record and never read.
 """
 
@@ -32,7 +32,7 @@ def record_sdk_server_tools(server_cfg: Any, tools: List[Any]) -> None:
 
     ``server_cfg`` is the dict returned by ``create_sdk_mcp_server()`` (or the
     bare instance). Best-effort: an unhashable/weakref-less instance is skipped
-    rather than raised — recording is an optimization for the omni path, never
+    rather than raised — recording is an optimization for the fluid path, never
     a correctness requirement for the SDK path.
     """
     instance = server_cfg.get("instance") if isinstance(server_cfg, dict) else server_cfg

@@ -10,7 +10,7 @@ websockets>=12,<17
 bcrypt==4.2.1
 cryptography>=42.0.0
 claude-agent-sdk==0.2.126
-# omni agent harness — REQUIRED: it is the only provider backend
+# fluid agent harness — REQUIRED: it is the only provider backend
 # (app/core/provider/factory.py). Not listed here as a pinned dep because the
 # repo is private (Quickkill0/fluid): the Docker image vendors it via CI
 # (see Dockerfile vendor/ stage); dev installs use

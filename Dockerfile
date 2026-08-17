@@ -117,14 +117,14 @@ RUN groupadd -g 1000 appuser && \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# ── omni harness (REQUIRED — the only provider backend) ──
+# ── fluid harness (REQUIRED — the only provider backend) ──
 # CI vendors the harness source tree as
 # a checkout into vendor/fluid before the docker build (see
 # .github/workflows/docker-publish.yml). A build without the checkout produces
-# an image that cannot serve queries at all (make_adapter imports omni), so the
+# an image that cannot serve queries at all (make_adapter imports fluid), so the
 # skip branch below is a loud warning, not a supported configuration.
 COPY vendor/ /opt/vendor/
-RUN if [ -f /opt/vendor/fluid/pyproject.toml ]; then         pip install --no-cache-dir /opt/vendor/fluid &&         python -c "import fluid; print('fluid installed')";     else         echo "WARNING: vendor/fluid not present — omni backend NOT baked in; this image cannot serve queries";     fi
+RUN if [ -f /opt/vendor/fluid/pyproject.toml ]; then         pip install --no-cache-dir /opt/vendor/fluid &&         python -c "import fluid; print('fluid installed')";     else         echo "WARNING: vendor/fluid not present — fluid backend NOT baked in; this image cannot serve queries";     fi
 
 # ── Make the bundled Claude Code CLI writable by appuser ──
 # app/core/cli_interrupt_patch.py rewrites a byte in this binary at runtime

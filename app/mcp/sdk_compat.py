@@ -33,7 +33,7 @@ def patch_sdk_server(server_cfg: dict, tools: list) -> dict:
         The same dict, patched in-place.
     """
     # Every in-proc server passes through here with its raw @tool objects
-    # still in hand — record the pair so the omni harness can re-register the
+    # still in hand — record the pair so the fluid harness can re-register the
     # same tools on its own registry (see provider/sdk_tool_records.py).
     try:
         from app.core.provider.sdk_tool_records import record_sdk_server_tools

@@ -862,7 +862,7 @@ class WebhookTestResponse(BaseModel):
 class AgentExportData(BaseModel):
     """Agent configuration data for export.
 
-    Carries only config the omni harness honors (ruling A12): model,
+    Carries only config the fluid harness honors (ruling A12): model,
     permission_mode, effort, max_turns, custom system-prompt content, tool
     allow/deny lists, enabled_agents, ai_tools, memory,
     include_partial_messages, app_config_tools, env. SDK-era fields
@@ -891,7 +891,7 @@ class AgentExportData(BaseModel):
 class AgentImportData(AgentExportData):
     """Legacy-tolerant agent data for the import path.
 
-    Pre-A12 export files carry SDK-era fields the omni harness ignores. They
+    Pre-A12 export files carry SDK-era fields the fluid harness ignores. They
     are accepted here so old files still import: a preset-shaped prompt's
     append text is mapped onto the custom prompt content; everything else is
     silently dropped.

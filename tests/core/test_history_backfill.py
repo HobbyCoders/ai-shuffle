@@ -369,14 +369,14 @@ async def test_lost_race_is_silent(mock_db, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# omni (flag-on) sessions — the transcript no legacy loader can see
+# fluid (flag-on) sessions — the transcript no legacy loader can see
 # ---------------------------------------------------------------------------
 
-OMNI_SID = "sess-omni-backfill"
-OMNI_SDK_ID = "ses_backfill01"
+FLUID_SID = "sess-fluid-backfill"
+FLUID_SDK_ID = "ses_backfill01"
 
 
-def _omni_message(role, text):
+def _fluid_message(role, text):
     return {
         "role": role,
         "content": [{"kind": "text", "text": text}],
@@ -384,12 +384,12 @@ def _omni_message(role, text):
     }
 
 
-def _seed_omni_session(app_session_id=OMNI_SID, sdk_session_id=OMNI_SDK_ID):
-    """A session row bound to a two-node omni transcript (user + assistant).
+def _seed_fluid_session(app_session_id=FLUID_SID, sdk_session_id=FLUID_SDK_ID):
+    """A session row bound to a two-node fluid transcript (user + assistant).
 
-    Rows are written exactly as ``PgOmniStore`` writes them (see
-    tests/core/test_omni_transcript.py, which pins the fixture shape against
-    omni's real serializer).
+    Rows are written exactly as ``PgFluidStore`` writes them (see
+    tests/core/test_fluid_transcript.py, which pins the fixture shape against
+    fluid's real serializer).
     """
     from psycopg2.extras import Json
 
@@ -399,19 +399,19 @@ def _seed_omni_session(app_session_id=OMNI_SID, sdk_session_id=OMNI_SDK_ID):
     sessions_db.update_session(app_session_id, sdk_session_id=sdk_session_id)
 
     nodes = [
-        ("n1", None, _omni_message("user", "omni prompt")),
-        ("n2", "n1", _omni_message("assistant", "omni reply")),
+        ("n1", None, _fluid_message("user", "fluid prompt")),
+        ("n2", "n1", _fluid_message("assistant", "fluid reply")),
     ]
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            "INSERT INTO omni_sessions (session_id, head_node_id, created_at) "
+            "INSERT INTO fluid_sessions (session_id, head_node_id, created_at) "
             "VALUES (%s, %s, %s)",
             (sdk_session_id, nodes[-1][0], 1000.0),
         )
         for i, (node_id, parent_id, message) in enumerate(nodes):
             cursor.execute(
-                "INSERT INTO omni_session_nodes "
+                "INSERT INTO fluid_session_nodes "
                 "(session_id, node_id, parent_id, ts, message) "
                 "VALUES (%s, %s, %s, %s, %s)",
                 (sdk_session_id, node_id, parent_id, 1000.0 + i, Json(message)),
@@ -419,43 +419,43 @@ def _seed_omni_session(app_session_id=OMNI_SID, sdk_session_id=OMNI_SDK_ID):
     return app_session_id
 
 
-async def test_omni_session_seeds_the_event_feed_from_the_omni_store(mock_db):
-    """The V2 frontend renders from the event feed, so an omni session whose
+async def test_fluid_session_seeds_the_event_feed_from_the_fluid_store(mock_db):
+    """The V2 frontend renders from the event feed, so a fluid session whose
     backfill found nothing rendered as an EMPTY conversation (forked/reloaded
-    omni sessions in production). The loader must read omni's node tree."""
-    _seed_omni_session()
+    fluid sessions in production). The loader must read fluid's node tree."""
+    _seed_fluid_session()
 
-    await ensure_backfilled(OMNI_SID)
+    await ensure_backfilled(FLUID_SID)
 
-    rows = se.get_events(OMNI_SID)
+    rows = se.get_events(FLUID_SID)
     assert [r["event_type"] for r in rows] == [
         "message.user", "message.assistant",
     ]
     assert [r["payload"]["content"] for r in rows] == [
-        "omni prompt", "omni reply",
+        "fluid prompt", "fluid reply",
     ]
     assert all(r["turn_id"] == "backfill" for r in rows)
     assert all(r["run_id"] is None for r in rows)
 
 
-def test_omni_branch_short_circuits_the_db_loader_fast_path(mock_db, monkeypatch):
-    """The omni lookup is hoisted ABOVE the db_message_loader fast path: for an
-    omni session the legacy table only ever holds a partial (user-rows-only)
+def test_fluid_branch_short_circuits_the_db_loader_fast_path(mock_db, monkeypatch):
+    """The fluid lookup is hoisted ABOVE the db_message_loader fast path: for an
+    fluid session the legacy table only ever holds a partial (user-rows-only)
     view, and letting it win would shadow the real transcript."""
-    _seed_omni_session()
+    _seed_fluid_session()
     import app.core.db_message_loader as dml
     monkeypatch.setattr(
         dml, "load_messages_from_db",
         lambda sid: ([{"role": "user", "type": "text", "content": "LEGACY TRAP"}], True),
     )
 
-    messages = hb._load_legacy_history(OMNI_SID)
+    messages = hb._load_legacy_history(FLUID_SID)
 
-    assert [m["content"] for m in messages] == ["omni prompt", "omni reply"]
+    assert [m["content"] for m in messages] == ["fluid prompt", "fluid reply"]
 
 
 def test_legacy_session_still_uses_the_db_loader(mock_db, monkeypatch):
-    """Flag-off safety: a CLI-UUID session never enters the omni branch."""
+    """Flag-off safety: a CLI-UUID session never enters the fluid branch."""
     sessions_db.create_session("sess-legacy-bf", "default")
     sessions_db.update_session(
         "sess-legacy-bf", sdk_session_id="8f1c2a34-0000-4000-8000-000000000001"

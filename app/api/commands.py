@@ -415,17 +415,17 @@ class RewindResponseV2(BaseModel):
 def _get_checkpoints(sdk_session_id: str, working_dir: str):
     """Checkpoints for a session, from whichever transcript store owns it.
 
-    Store-aware read facade. An omni session keeps its transcript in omni's
-    node tree (``omni_session_nodes``) and its ``sdk_session_id`` is an omni
+    Store-aware read facade. A fluid session keeps its transcript in fluid's
+    node tree (``fluid_session_nodes``) and its ``sdk_session_id`` is a fluid
     ``ses_...`` id, so the JSONL service finds nothing for it — which made the
     rewind content guard fail closed ("transcript has 0 user prompt(s)
-    matching..."). ``is_omni_session`` is prefix-gated, so a pre-omni session
+    matching..."). ``is_fluid_session`` is prefix-gated, so a pre-fluid session
     never even queries: this is a no-op on the legacy path.
     """
-    from app.core.provider.omni_transcript import get_omni_checkpoints, is_omni_session
+    from app.core.provider.fluid_transcript import get_fluid_checkpoints, is_fluid_session
 
-    if is_omni_session(sdk_session_id):
-        return get_omni_checkpoints(sdk_session_id)
+    if is_fluid_session(sdk_session_id):
+        return get_fluid_checkpoints(sdk_session_id)
     return jsonl_rewind_service.get_checkpoints(sdk_session_id, working_dir)
 
 
@@ -782,12 +782,12 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     # Get working directory for project
     working_dir = get_working_dir_for_project(session.get("project_id"))
 
-    # Which transcript store owns this session? An omni (flag-on) session keeps
-    # its conversation in omni's node tree, so the JSONL/session-store
+    # Which transcript store owns this session? A fluid (flag-on) session keeps
+    # its conversation in fluid's node tree, so the JSONL/session-store
     # truncation path below simply has nothing to cut — it needs the node-tree
     # rewind instead. Prefix-gated probe: a legacy session never queries.
-    from app.core.provider.omni_transcript import is_omni_session
-    omni_session = await asyncio.to_thread(is_omni_session, sdk_session_id)
+    from app.core.provider.fluid_transcript import is_fluid_session
+    fluid_session = await asyncio.to_thread(is_fluid_session, sdk_session_id)
 
     logger.info(
         f"Rewind requested: session={session_id}, sdk_session={sdk_session_id}, "
@@ -856,8 +856,8 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     files_rewound = False
     messages_removed = 0
     errors = []
-    # Set by the omni branch below (ruling R5): the outcome of re-seeding the
-    # delegated CLI from omni's post-rewind context. None = never attempted.
+    # Set by the fluid branch below (ruling R5): the outcome of re-seeding the
+    # delegated CLI from fluid's post-rewind context. None = never attempted.
     reseed_result = None
 
     # CRITICAL: evict any live pooled CLI subprocess for this session BEFORE we
@@ -890,13 +890,13 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     # IMPORTANT: File rewind must happen BEFORE chat rewind.
     # Chat rewind truncates the JSONL file, which can remove the target message UUID.
     # The SDK needs that UUID present in the JSONL to find the file checkpoint.
-    if request.restore_files and omni_session:
+    if request.restore_files and fluid_session:
         # File checkpoints are an SDK feature keyed to a CLI transcript uuid;
-        # ``rewind_files_via_sdk`` would resume the SDK on an omni ``ses_...``
+        # ``rewind_files_via_sdk`` would resume the SDK on a fluid ``ses_...``
         # id it cannot find. Refuse explicitly instead of surfacing a confusing
         # SDK error — the chat rewind below still runs (partial success).
         errors.append(
-            "File restore is not available for omni-harness sessions "
+            "File restore is not available for fluid-harness sessions "
             "(no SDK file checkpoints)"
         )
     elif request.restore_files:
@@ -910,8 +910,8 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
         else:
             errors.append(file_error or "File rewind failed")
 
-    # Chat rewind, omni (flag-on) sessions. The transcript is omni's node tree,
-    # so the rewind is omni's NATIVE one: move ``omni_sessions.head_node_id``
+    # Chat rewind, fluid (flag-on) sessions. The transcript is fluid's node tree,
+    # so the rewind is fluid's NATIVE one: move ``fluid_sessions.head_node_id``
     # back up the parent chain. Nothing is deleted — the rewound-away nodes stay
     # in the tree but off-path, so ``load_path`` (and therefore the context the
     # next turn builds) stops at the checkpoint and that turn branches a sibling.
@@ -922,9 +922,9 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     # anchor logic as below) because they are what the UI actually renders for
     # these sessions today — omitting that is the "rewind succeeded but the
     # message is still in chat" bug.
-    if request.restore_chat and omni_session:
-        from app.core.provider.omni_transcript import (
-            rewind_omni_session,
+    if request.restore_chat and fluid_session:
+        from app.core.provider.fluid_transcript import (
+            rewind_fluid_session,
             reseed_delegated_cli_session,
         )
 
@@ -939,29 +939,29 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
             )
         except Exception as anchor_err:
             logger.error(
-                f"Omni rewind DB anchor resolution failed for session "
+                f"Fluid rewind DB anchor resolution failed for session "
                 f"{session_id}: {anchor_err}",
                 exc_info=True,
             )
 
-        omni_result = await asyncio.to_thread(
-            rewind_omni_session,
+        fluid_result = await asyncio.to_thread(
+            rewind_fluid_session,
             sdk_session_id,
             request.target_uuid,
             request.include_response,
             request.target_role,
         )
-        if omni_result.success:
+        if fluid_result.success:
             chat_rewound = True
-            messages_removed = omni_result.messages_removed or 0
-            if omni_result.remaining_user_turns is not None:
-                turn_diff = omni_result.remaining_user_turns - session.get("turn_count", 0)
+            messages_removed = fluid_result.messages_removed or 0
+            if fluid_result.remaining_user_turns is not None:
+                turn_diff = fluid_result.remaining_user_turns - session.get("turn_count", 0)
                 if turn_diff != 0:
                     await asyncio.to_thread(
                         database.update_session, session_id, turn_increment=turn_diff
                     )
         else:
-            errors.append(f"Chat rewind failed: {omni_result.error}")
+            errors.append(f"Chat rewind failed: {fluid_result.error}")
 
         if chat_rewound:
             if anchor_id is not None:
@@ -973,23 +973,23 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
                         include_response=request.include_response,
                     )
                     logger.info(
-                        f"Omni rewind DB sync: session={session_id}, "
+                        f"Fluid rewind DB sync: session={session_id}, "
                         f"target_node={request.target_uuid}, "
                         f"db_rows_removed={db_removed}, "
                         f"nodes_dropped={messages_removed}"
                     )
                 except Exception as db_err:
                     logger.error(
-                        f"Omni rewind DB sync failed for session {session_id}: {db_err}",
+                        f"Fluid rewind DB sync failed for session {session_id}: {db_err}",
                         exc_info=True,
                     )
                     errors.append(f"DB sync failed: {db_err}")
             else:
                 logger.warning(
-                    f"Omni rewind DB sync skipped: no anchor row resolved for "
+                    f"Fluid rewind DB sync skipped: no anchor row resolved for "
                     f"session={session_id} target={request.target_uuid}"
                 )
-            # Ruling R5: omni owns the context, so the DELEGATED (claude CLI)
+            # Ruling R5: fluid owns the context, so the DELEGATED (claude CLI)
             # engine must not be left resuming its own pre-rewind history.
             # Materialize the post-rewind path as a CLI session file under a
             # fresh uuid and store it as the session's --resume handle; the
@@ -1001,14 +1001,14 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
                 reseed_delegated_cli_session, sdk_session_id, working_dir
             )
             logger.info(
-                f"Omni rewind CLI re-seed: session={session_id}, "
+                f"Fluid rewind CLI re-seed: session={session_id}, "
                 f"status={reseed_result.status}, "
                 f"entries={reseed_result.entries_written}, "
                 f"error={reseed_result.error}"
             )
 
             # The sdk_session_id pointer is NOT cleared even when the rewind
-            # emptied the transcript: an omni session with a NULL head is a
+            # emptied the transcript: a fluid session with a NULL head is a
             # perfectly resumable session (the next turn appends a root node),
             # unlike a CLI session id whose transcript no longer exists.
             invalidate_parse_cache(sdk_session_id)
@@ -1219,10 +1219,10 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     if partial_success:
         warning = "Chat rewound successfully. File restore unavailable - no checkpoint exists for this point."
 
-    # Honesty guard for omni sessions running the DELEGATED (claude CLI) engine.
-    # The CLI keeps its OWN conversation history and omni cannot truncate it
+    # Honesty guard for fluid sessions running the DELEGATED (claude CLI) engine.
+    # The CLI keeps its OWN conversation history and fluid cannot truncate it
     # (``DelegatedLoop.caps`` declares rewind=False; ``--resume`` is its only
-    # history control), so before ruling R5 every omni rewind carried a warning
+    # history control), so before ruling R5 every fluid rewind carried a warning
     # that the model might still recall the removed turns.
     #
     # The re-seed above now removes that divergence at the source: the session's
@@ -1231,7 +1231,7 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     # conversation), and a native-engine session never had CLI history to begin
     # with. The warning is therefore reserved for the one case where the context
     # really can still diverge: the re-seed itself failed.
-    if omni_session and chat_rewound and reseed_result is not None:
+    if fluid_session and chat_rewound and reseed_result is not None:
         if not reseed_result.context_is_authoritative:
             divergence = (
                 "Transcript rewound, but the delegated claude-CLI history could "

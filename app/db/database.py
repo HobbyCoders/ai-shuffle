@@ -148,14 +148,15 @@ def _safe_json(value):
 #     wake here (fire_at as unix epoch), so an app restart rehydrates and re-arms
 #     them instead of dropping the bare in-process asyncio timer. Purely additive.
 # 69 (2026-08-12): add omni_sessions / omni_session_nodes / omni_session_events
-#     — PG-backed omni-harness SessionStore (branching node trees + durable
-#     event log; see app/core/provider/omni_pg_store.py). Purely additive; used
-#     whenever the app has a database (the omni pg store is derived, not flagged).
-# 70 (2026-08-12): add omni_sessions.cli_session_id TEXT — the delegated
-#     engine's ``claude --resume`` handle (a CLI-issued uuid, NOT the omni
-#     session id). It was previously in-process only, so after a restart the
-#     adapter resumed the CLI with the omni session id and every turn died
-#     instantly. Additive/nullable, no index.
+#     (renamed to fluid_* in v77) — PG-backed harness SessionStore (branching
+#     node trees + durable event log; see app/core/provider/fluid_pg_store.py).
+#     Purely additive; used whenever the app has a database (the fluid pg store
+#     is derived, not flagged).
+# 70 (2026-08-12): add omni_sessions.cli_session_id TEXT (table renamed in
+#     v77) — the delegated engine's ``claude --resume`` handle (a CLI-issued
+#     uuid, NOT the fluid session id). It was previously in-process only, so
+#     after a restart the adapter resumed the CLI with the fluid session id and
+#     every turn died instantly. Additive/nullable, no index.
 # v71: agents unification (ruling A4). ``profiles`` is RENAMED in place to
 #     ``agents`` (all seven FK consumers follow the rename automatically);
 #     ``subagents`` rows are FOLDED into ``agents`` (prompt -> custom
@@ -189,7 +190,39 @@ def _safe_json(value):
 #     created idempotently by the guarded blocks in _run_column_migrations, so
 #     an upgrade from any older version lands them without needing the bootstrap
 #     path to fire.
-SCHEMA_VERSION = 76
+# 77 (2026-08-16): harness rename omni -> fluid. omni_sessions /
+#     omni_session_nodes / omni_session_events are RENAMED in place to
+#     fluid_sessions / fluid_session_nodes / fluid_session_events (data and
+#     constraints carry across ALTER TABLE ... RENAME). Runs before the
+#     bootstrap DDL so the idempotent CREATE TABLE IF NOT EXISTS fluid_* can
+#     never create an empty table alongside the old one. See
+#     _migrate_omni_tables_to_fluid().
+SCHEMA_VERSION = 77
+
+
+def _migrate_omni_tables_to_fluid(cursor):
+    """v77 pre-schema migration: rename the harness store tables
+    ``omni_sessions`` / ``omni_session_nodes`` / ``omni_session_events`` ->
+    ``fluid_sessions`` / ``fluid_session_nodes`` / ``fluid_session_events``
+    (the harness itself was renamed omni -> fluid).
+
+    MUST run before ``create_postgres_schema`` — otherwise the idempotent
+    ``CREATE TABLE IF NOT EXISTS fluid_*`` would create a fresh empty table
+    alongside the still-named ``omni_*`` one and strand every session row
+    (same ordering rule as _migrate_profiles_to_agents).
+
+    Data, primary keys and indexes carry across ``ALTER TABLE ... RENAME``;
+    session ids themselves (``ses_<hex12>``) never contained the harness name,
+    so no row content changes.
+    """
+    for old, new in (
+        ("omni_sessions", "fluid_sessions"),
+        ("omni_session_nodes", "fluid_session_nodes"),
+        ("omni_session_events", "fluid_session_events"),
+    ):
+        if table_exists(cursor, old) and not table_exists(cursor, new):
+            cursor.execute(f"ALTER TABLE {old} RENAME TO {new}")
+            logger.info("v77: renamed %s -> %s", old, new)
 
 
 def _migrate_profiles_to_agents(cursor):
@@ -988,16 +1021,17 @@ def _run_column_migrations(cursor):
         "ON pending_wakeups(session_id)"
     )
 
-    # omni_sessions.cli_session_id (v70). The delegated engine's
+    # fluid_sessions.cli_session_id (v70). The delegated engine's
     # ``claude --resume`` handle, persisted so a restart reconnects to the same
-    # CLI conversation instead of resuming with the omni session id. Guarded on
-    # table_exists because omni_sessions is only created by the bootstrap path
-    # (v69); nothing here should create it on an older database.
-    if table_exists(cursor, "omni_sessions") and not column_exists(
-        cursor, "omni_sessions", "cli_session_id"
+    # CLI conversation instead of resuming with the fluid session id. Guarded on
+    # table_exists because fluid_sessions is only created by the bootstrap path
+    # (v69, as omni_sessions until the v77 rename); nothing here should create
+    # it on an older database.
+    if table_exists(cursor, "fluid_sessions") and not column_exists(
+        cursor, "fluid_sessions", "cli_session_id"
     ):
-        cursor.execute("ALTER TABLE omni_sessions ADD COLUMN cli_session_id TEXT")
-        migrations_applied.append("omni_sessions.cli_session_id")
+        cursor.execute("ALTER TABLE fluid_sessions ADD COLUMN cli_session_id TEXT")
+        migrations_applied.append("fluid_sessions.cli_session_id")
 
     # background_tasks (v55). Durable per-task lifecycle snapshots — WRITE-ONLY
     # in Phase 1 (no reader flips): task_registry mirrors its transitions here
@@ -1635,9 +1669,10 @@ def init_database():
 
         if current_version < SCHEMA_VERSION:
             logger.info(f"Migrating database from version {current_version} to {SCHEMA_VERSION}")
-            # v71 rename/fold MUST precede the idempotent CREATE TABLEs (see
-            # _migrate_profiles_to_agents docstring).
+            # v71 rename/fold and the v77 omni->fluid table rename MUST precede
+            # the idempotent CREATE TABLEs (see the two migration docstrings).
             _migrate_profiles_to_agents(cursor)
+            _migrate_omni_tables_to_fluid(cursor)
             from app.db.schema_postgres import create_postgres_schema
             create_postgres_schema(cursor)
             cursor.execute("DELETE FROM schema_version")

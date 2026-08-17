@@ -433,7 +433,7 @@ def _looks_like_subagent_launch_ack(output: Any) -> bool:
 def _task_launch_failure_error(output: Any, is_error: bool) -> Optional[str]:
     """Did this Task ToolResult report a launch that DIED before spawning a worker?
 
-    The omni Task dispatcher (``app/core/task_dispatch.py`` ``dispatch_task_tool``)
+    The fluid Task dispatcher (``app/core/task_dispatch.py`` ``dispatch_task_tool``)
     returns ``{"ok": false, "error": ...}`` when it rejects a launch before any
     worker exists (e.g. a model outside the provider's curated list). That — like
     an ``is_error`` ToolResult — is POSITIVE evidence the launch is dead: no
@@ -904,9 +904,9 @@ async def execute_query(
     await reconcile_memory(project_id, getattr(options, "cwd", None))
 
     # Backend selection goes through the provider seam (see
-    # app/core/provider/factory.py); the omni HarnessAdapter is the only
+    # app/core/provider/factory.py); the fluid HarnessAdapter is the only
     # backend. This headless path used to consume the SDK's one-shot query()
-    # directly, which bypassed the seam entirely: it was handed an omni session
+    # directly, which bypassed the seam entirely: it was handed a fluid session
     # id (ses_...) as ClaudeAgentOptions.resume, which the legacy SDK cannot
     # resume — every wake turn (idle watchdog, ScheduleWakeup, automations,
     # connectors, POST /api/v1/query) ran with no context. Routing through
@@ -1431,7 +1431,7 @@ async def stream_query(
         await reconcile_memory(project_id, getattr(options, "cwd", None))
 
         # Backend selection via the provider seam, same as the WS path below:
-        # make_adapter() always returns the omni HarnessAdapter.
+        # make_adapter() always returns the fluid HarnessAdapter.
         from app.core.provider.factory import make_adapter
         adapter = make_adapter()
 
@@ -2440,7 +2440,7 @@ async def _stream_to_websocket_impl(
         await reconcile_memory(project_id, options.cwd)
 
         # Backend selection via the provider seam: make_adapter() always
-        # returns the omni HarnessAdapter (see app/core/provider/factory.py).
+        # returns the fluid HarnessAdapter (see app/core/provider/factory.py).
         from app.core.provider.factory import make_adapter
         adapter = make_adapter()
         logger.debug("[WS] provider adapter created (%s), attempting connect...", type(adapter).__name__)
@@ -3916,7 +3916,7 @@ async def _stream_to_websocket_impl(
         }
     elif metadata.get("is_error") and not has_visible_content:
         # The turn ended on an is_error ResultMessage without rendering ANY
-        # content — the omni legs deliver provider failures this way (an
+        # content — the fluid legs deliver provider failures this way (an
         # ErrorEvent becomes a terminal ResultMessage, the generator ends
         # cleanly, `crashed` never flips). A bare `done` here made the
         # frontend chime "session complete" over a silently dead turn with no

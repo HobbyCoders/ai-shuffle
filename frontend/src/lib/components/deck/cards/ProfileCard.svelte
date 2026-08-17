@@ -174,9 +174,9 @@
 		if (embedded) onDetailChange?.(viewMode === 'form');
 	});
 
-	// Profile form state — omni harness options only (ruling R3). SDK-era
+	// Profile form state — fluid harness options only (ruling R3). SDK-era
 	// fields (thinking mode, setting sources, checkpointing, …) are gone: the
-	// omni harness ignores them. effort and max_turns are harness-honored.
+	// fluid harness ignores them. effort and max_turns are harness-honored.
 	let profileForm = $state({
 		id: '',
 		name: '',
@@ -658,7 +658,7 @@
 		config.computer_use = { enabled: profileForm.computer_use_enabled };
 
 		// The configured prompt IS the base (ruling A12) — always the custom
-		// shape. Env/instructions/security are compiled in at runtime by omni,
+		// shape. Env/instructions/security are compiled in at runtime by fluid,
 		// so there is no preset mode and no inject_env_details flag anymore.
 		config.system_prompt = {
 			type: 'custom',

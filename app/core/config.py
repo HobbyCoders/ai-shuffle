@@ -340,7 +340,7 @@ class Settings(BaseSettings):
     # leg (agents-program ruling A3). False (default): the CLI keeps its own
     # Claude Code preset and receives the agent's configured prompt + app
     # blocks via --append-system-prompt (byte-identical to pre-compiler
-    # behavior). True: the omni compiler's full output (base + instruction
+    # behavior). True: the fluid compiler's full output (base + instruction
     # files + skills + env + blocks) replaces the CLI preset via
     # --system-prompt. Native legs always run the compiled prompt; this flag
     # only affects the delegated leg. Set via PROMPT_FULL_REPLACE.
@@ -413,7 +413,7 @@ class Settings(BaseSettings):
     # cooldown. Motivation: the 2026-07-22 rate-limit storm (3,172 upstream POSTs
     # in ~11 minutes, 1,750 of them 429s, all after the parent turn had ended)
     # came from retry loops INSIDE the CLI processes. 429s are observed by the
-    # omni harness's usage-capture response hook (they were the translator
+    # fluid harness's usage-capture response hook (they were the translator
     # gateway's job until it was retired). The breaker only ever REFUSES — it
     # never reroutes or fails over (ruling P10). ON by default: this is a safety
     # feature. Set PROVIDER_CIRCUIT_BREAKER_ENABLED=false to restore the previous

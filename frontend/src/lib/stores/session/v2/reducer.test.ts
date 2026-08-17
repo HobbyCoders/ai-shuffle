@@ -898,7 +898,7 @@ describe('subagent cards', () => {
 	});
 
 	it('subagent.started absorbs the launch tool_use block via launch_tool_use_id', () => {
-		// Omni-leg Task workers key task_id on the WORKER session id, so the
+		// Fluid-leg Task workers key task_id on the WORKER session id, so the
 		// model's launch tool_use block ('toolu-9') never matches task_id. The
 		// event's launch_tool_use_id is what lets the card absorb it — without
 		// it the transcript rendered BOTH a Task tool call and the worker card.
@@ -922,7 +922,7 @@ describe('subagent cards', () => {
 	});
 
 	it('subagent.started absorbs a launch-keyed card already created for the dispatch', () => {
-		// One omni-leg Task dispatch emits TWO subagent.started events: the
+		// One fluid-leg Task dispatch emits TWO subagent.started events: the
 		// in-stream one keyed on the model's Task tool_use_id, then the WorkerFeed
 		// one keyed on the worker session id carrying launch_tool_use_id. The
 		// second must absorb the first (children and all) — not duplicate it.
@@ -994,7 +994,7 @@ describe('subagent cards', () => {
 	});
 
 	it('a dispatch-rejection tool.result settles the spinning card to error', () => {
-		// The omni Task dispatcher rejects the launch before spawning a worker, so
+		// The fluid Task dispatcher rejects the launch before spawning a worker, so
 		// no terminal subagent event ever arrives — the rejection result joined by
 		// toolId is the only settle signal the card will ever get.
 		const s = fold([

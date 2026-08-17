@@ -420,7 +420,7 @@ async def _persist_turn_results(
                 session_id=session_id,
                 sdk_session_id=sdk_session_id,
                 # `or 0` (not a .get default): these keys can be PRESENT with a
-                # None value on the omni path, so the default never fires and a
+                # None value on the fluid path, so the default never fires and a
                 # None would poison the additive SQL update.
                 cost_increment=metadata.get("total_cost_usd") or 0,
                 tokens_in_increment=metadata.get("tokens_in") or 0,
