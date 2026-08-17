@@ -756,6 +756,39 @@ def _no_terminal_event_error(worker_session_id: str, turn_id: Optional[str]) -> 
     )
 
 
+#: Registry statuses that mean the worker did not deliver (task_registry's
+#: ``_FAILURE_STATUSES``). Only these carry the failure text on the row.
+_REGISTRY_FAILURE_STATUSES = ("error", "killed")
+
+#: How much of a failure message rides the registry row's one-line summary.
+_FAILURE_SUMMARY_CHARS = 240
+
+
+def _failure_summary(
+    status: str, preview: Optional[str], frames_forwarded: int
+) -> Optional[str]:
+    """The registry ``summary`` for a terminal worker, or None to keep it as-is.
+
+    A BACKGROUND dispatch answers the caller the moment the worker registers, so
+    the registry row is the only place a later failure can still be told — and
+    until now it kept the "<provider> · <model>" summary it was started with,
+    leaving TaskList/TaskOutput showing a dead worker with no reason. A failure
+    status therefore replaces that summary with the failure text.
+
+    ``frames_forwarded == 0`` means the worker never streamed anything, i.e. it
+    died at or before provider connect (the ``ProviderCredentialError`` case) —
+    worth saying explicitly, because "failed to start" and "failed while working"
+    call for very different responses from the parent.
+    """
+    if status not in _REGISTRY_FAILURE_STATUSES:
+        return None
+    text = " ".join((preview or "").split()) or "no error detail was recorded"
+    if len(text) > _FAILURE_SUMMARY_CHARS:
+        text = text[: _FAILURE_SUMMARY_CHARS - 1].rstrip() + "…"
+    prefix = "worker failed to start" if not frames_forwarded else "worker failed"
+    return f"{prefix}: {text}"
+
+
 async def dispatch_worker(
     *,
     parent_session_id: str,
@@ -1132,7 +1165,12 @@ async def dispatch_worker(
                 summary=f"{provider_tag} · {model_tag}",
             ))
             try:
-                task_registry.complete_task(parent_session_id, worker_session_id, status)
+                task_registry.complete_task(
+                    parent_session_id,
+                    worker_session_id,
+                    status,
+                    summary=_failure_summary(status, preview, feed.frames_forwarded),
+                )
             except Exception:  # noqa: BLE001
                 logger.exception("ProviderAgent: registry completion failed")
             # Attribution: the authoritative per-provider numbers, recorded

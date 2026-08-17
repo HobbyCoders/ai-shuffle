@@ -483,3 +483,332 @@ def test_dispatcher_reads_the_agent_registry_off_the_ctx(agents):
 
     assert seen["profile_id"] == "root-agent"
     assert "careful researcher" in seen["system_prompt_append"]
+
+
+# ─── worker leg resolution (ruling 2026-08-17, as refined) ───────────────────
+#
+# Rule 1  default = the TARGET's own provider+model, cross-provider included.
+# Rule 2  the Claude-subscription leg is the ONLY leg that can't mix and match:
+#         a Claude-sub target on a non-Claude-sub caller is re-routed (exact
+#         slug -> same family -> delegated CLI anyway, with a note).
+# Rule 3  an explicit ``model`` override is the exception path: the SLUG picks
+#         the provider, and an unservable slug fails SYNCHRONOUSLY.
+# Rule 4  the resolved leg's credentials are pre-flighted before anything spawns.
+
+
+@pytest.fixture()
+def providers(agents):
+    """Three servable providers plus one that is not, all credentialed."""
+    from app.db import database
+
+    database.create_model_provider(
+        "openai-1", "OpenAI", "openai", "https://api.openai.com",
+        auth_token="enc:key", models=[{"id": "gpt-4o"}, {"id": "gpt-5.6-terra"}],
+    )
+    database.create_model_provider(
+        "anthropic-1", "Anthropic API", "anthropic", "https://api.anthropic.com",
+        auth_token="enc:key", models=[{"id": "claude-opus-4-6"}],
+    )
+    database.create_model_provider(
+        "xai-1", "xAI", "openai", "https://api.x.ai",
+        auth_token="enc:key", models=[{"id": "grok-9"}],
+    )
+    # OpenRouter is deliberately NOT servable for cross-provider workers
+    # (environment.is_provider_servable), so it must never be picked.
+    database.create_model_provider(
+        "openrouter-1", "OpenRouter", "openrouter", "https://openrouter.ai/api",
+        auth_token="enc:key", models=[{"id": "grok-9"}, {"id": "gpt-4o"}],
+    )
+
+    database.create_profile(
+        "openai-agent", "OpenAI Agent", None,
+        {"model": "gpt-4o", "provider": "openai-1"},
+    )
+    database.create_profile(
+        "xai-agent", "xAI Agent", None, {"model": "grok-9", "provider": "xai-1"},
+    )
+    # Claude-subscription (delegated) agents: no provider binding at all.
+    database.create_profile(
+        "claude-exact", "Claude Exact", None, {"model": "claude-opus-4-6"},
+    )
+    database.create_profile("claude-alias", "Claude Alias", None, {"model": "opus"})
+    database.create_profile("claude-haiku", "Claude Haiku", None, {"model": "haiku"})
+    return database
+
+
+def _spawn(providers_db, args, caller_session, caller_profile, **kw):
+    """Dispatch ``args`` from a session on ``caller_profile``; return kwargs seen."""
+    seen = {}
+
+    async def fake_worker(**kwargs):
+        seen.update(kwargs)
+        return WorkerOutcome(ok=True, session_id="w", report="r")
+
+    _mk_session(providers_db, caller_session, caller_profile)
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        payload = asyncio.run(_dispatch(args, caller_session, **kw))
+    return payload, seen
+
+
+# --- rule 1: the target's own binding, untouched -----------------------------
+
+
+def test_rule1_target_keeps_its_own_provider_across_providers(providers):
+    """A caller on one provider spawning an agent bound to ANOTHER provider gets
+    the target's binding verbatim - no reroute, no override needed."""
+    payload, seen = _spawn(
+        providers, {"agent": "xai-agent", "prompt": "go"}, "s-r1", "openai-agent",
+    )
+    assert payload["ok"] is True
+    assert seen["provider_id"] == "xai-1"
+    # model_id stays None = inherit the TARGET profile's own configured model.
+    assert seen["model_id"] is None
+    assert "note" not in payload
+
+
+def test_rule1_claude_sub_caller_to_claude_sub_target_is_untouched(providers):
+    payload, seen = _spawn(
+        providers, {"agent": "claude-alias", "prompt": "go"}, "s-r1b", "root-agent",
+    )
+    assert payload["ok"] is True
+    assert seen["provider_id"] is None and seen["model_id"] is None
+    assert "note" not in payload
+
+
+# --- rule 2: the Claude-subscription leg is the one special case -------------
+
+
+def test_rule2_exact_slug_reroutes_claude_sub_target_to_an_api_provider(providers):
+    """Non-Claude-sub caller + Claude-sub target: the target's model is served
+    verbatim by a configured Anthropic-API provider, so bind there."""
+    payload, seen = _spawn(
+        providers, {"agent": "claude-exact", "prompt": "go"}, "s-r2a", "openai-agent",
+    )
+    assert payload["ok"] is True
+    assert seen["provider_id"] == "anthropic-1"
+    assert seen["model_id"] == "claude-opus-4-6"
+    assert "Anthropic API" in payload["note"]
+
+
+def test_rule2_family_match_when_no_provider_curates_the_exact_slug(providers):
+    """'opus' is curated nowhere, but 'claude-opus-4-6' is the same FAMILY."""
+    payload, seen = _spawn(
+        providers, {"agent": "claude-alias", "prompt": "go"}, "s-r2b", "openai-agent",
+    )
+    assert payload["ok"] is True
+    assert seen["provider_id"] == "anthropic-1"
+    assert seen["model_id"] == "claude-opus-4-6"
+    assert "family level" in payload["note"]
+
+
+def test_rule2_falls_back_to_the_delegated_cli_with_a_note(providers):
+    """Nothing curates haiku or its family - the delegated worker still spawns
+    (it does function) and the result SAYS it ran on the subscription."""
+    payload, seen = _spawn(
+        providers, {"agent": "claude-haiku", "prompt": "go"}, "s-r2c", "openai-agent",
+    )
+    assert payload["ok"] is True
+    assert seen["provider_id"] is None
+    assert seen["model_id"] == "haiku"
+    assert "Claude subscription" in payload["note"]
+
+
+def test_rule2_never_picks_a_non_servable_provider(providers):
+    """OpenRouter curates 'gpt-4o' too, but is not servable for workers."""
+    binding = td.resolve_dispatch_binding(
+        target_provider_id=None, target_model=None,
+        model_override="gpt-4o", caller_provider_id=None,
+    )
+    assert binding.provider_id == "openai-1"
+
+
+# --- rule 3: an explicit model override --------------------------------------
+
+
+def test_rule3_override_binds_the_worker_to_the_callers_provider(providers):
+    """Provider-less target + a slug the CALLER's provider curates -> the worker
+    is BOUND to that provider (so the leg comes from the binding, not a sniff)."""
+    payload, seen = _spawn(
+        providers,
+        {"agent": "claude-alias", "prompt": "go", "model": "gpt-4o"},
+        "s-r3a", "openai-agent",
+    )
+    assert payload["ok"] is True
+    assert seen["provider_id"] == "openai-1"
+    assert seen["model_id"] == "gpt-4o"
+
+
+def test_rule3_override_binds_to_a_third_provider(providers):
+    """The slug belongs to neither the caller's nor the target's provider - it
+    still resolves, to the one provider that curates it."""
+    payload, seen = _spawn(
+        providers,
+        {"agent": "claude-alias", "prompt": "go", "model": "grok-9"},
+        "s-r3b", "openai-agent",
+    )
+    assert payload["ok"] is True
+    assert seen["provider_id"] == "xai-1"
+    assert seen["model_id"] == "grok-9"
+    assert "xAI" in payload["note"]
+
+
+def test_rule3_unknown_slug_fails_synchronously(providers):
+    """The live failure this whole change exists for: an unservable slug used to
+    reach the worker and 401 half a second after ok:true."""
+    seen = {}
+
+    async def fake_worker(**kwargs):  # pragma: no cover - must never run
+        seen.update(kwargs)
+        return WorkerOutcome(ok=True, session_id="w", report="r")
+
+    _mk_session(providers, "s-r3c", "openai-agent")
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        payload = asyncio.run(_dispatch(
+            {"agent": "claude-alias", "prompt": "go", "model": "gpt-5.6-nope"},
+            "s-r3c",
+        ))
+    assert payload["ok"] is False
+    assert payload["error"].startswith(
+        "Model 'gpt-5.6-nope' is not available on any configured provider. "
+        "The target agent's default is 'opus' — omit 'model' to use it."
+    )
+    assert "Valid model ids include:" in payload["error"]
+    assert seen == {}  # nothing was spawned
+
+
+def test_rule3_background_mode_also_fails_synchronously(providers):
+    """Background dispatch must not answer ok:true for a slug it cannot serve."""
+    _mk_session(providers, "s-r3c2", "openai-agent")
+    payload = asyncio.run(_dispatch(
+        {"agent": "claude-alias", "prompt": "go", "model": "nope-9",
+         "mode": "background"},
+        "s-r3c2",
+    ))
+    assert payload["ok"] is False and "not available" in payload["error"]
+
+
+def test_rule3_claude_slug_stays_delegated_for_a_claude_sub_caller(providers):
+    """Claude-sub caller + Claude-sub target: the CLI leg is preserved even
+    though an Anthropic-API provider curates the very same id."""
+    payload, seen = _spawn(
+        providers,
+        {"agent": "claude-alias", "prompt": "go", "model": "claude-opus-4-6"},
+        "s-r3d", "root-agent",
+    )
+    assert payload["ok"] is True
+    assert seen["provider_id"] is None
+    assert seen["model_id"] == "claude-opus-4-6"
+
+
+def test_rule3_claude_slug_off_claude_sub_prefers_an_api_provider(providers):
+    """An override only the subscription could serve, asked by a session that is
+    not on it, takes rule 2's preference chain instead."""
+    payload, seen = _spawn(
+        providers,
+        {"agent": "claude-alias", "prompt": "go", "model": "opus"},
+        "s-r3e", "openai-agent",
+    )
+    assert payload["ok"] is True
+    assert seen["provider_id"] == "anthropic-1"
+    assert seen["model_id"] == "claude-opus-4-6"
+
+
+def test_rule3_file_agent_takes_the_same_resolution(providers):
+    """The file-agent branch resolves cross-provider too, instead of silently
+    dropping a model its caller's provider does not curate."""
+    payload, seen = _spawn(
+        providers,
+        {"agent": "researcher", "prompt": "go"}, "s-r3f", "openai-agent",
+        agent_registry={"researcher": _definition(model="grok-9")},
+    )
+    assert payload["ok"] is True
+    assert seen["provider_id"] == "xai-1"
+    assert seen["model_id"] == "grok-9"
+
+
+def test_rule3_file_agent_still_spawns_when_nothing_serves_its_model(providers):
+    """Drop-with-note survives as the FINAL fallback: a file agent must spawn."""
+    payload, seen = _spawn(
+        providers,
+        {"agent": "researcher", "prompt": "go"}, "s-r3g", "openai-agent",
+        agent_registry={"researcher": _definition(model="totally-made-up")},
+    )
+    assert payload["ok"] is True
+    assert seen["provider_id"] == "openai-1"      # the caller's own binding
+    assert seen["model_id"] is None               # dropped, not fatal
+    assert "inherits the session's model" in payload["note"]
+
+
+# --- rule 4: credential pre-flight -------------------------------------------
+
+
+def test_rule4_missing_credentials_fail_synchronously(providers):
+    """A provider row with no key at all: the worker would die at connect, so it
+    is never spawned."""
+    from app.db import database
+
+    database.update_model_provider("xai-1", auth_token="")
+    seen = {}
+
+    async def fake_worker(**kwargs):  # pragma: no cover - must never run
+        seen.update(kwargs)
+        return WorkerOutcome(ok=True, session_id="w", report="r")
+
+    _mk_session(providers, "s-r4", "openai-agent")
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        payload = asyncio.run(_dispatch(
+            {"agent": "xai-agent", "prompt": "go"}, "s-r4",
+        ))
+    assert payload["ok"] is False
+    assert "no credentials configured" in payload["error"]
+    assert seen == {}
+
+
+def test_rule4_credential_check_is_skipped_for_the_delegated_leg(providers):
+    """A provider-less worker is the app's default path; its credentials live in
+    the CLI's own config, so the pre-flight must not refuse it."""
+    assert td._credential_gap(None) is None
+
+
+def test_rule4_needs_reauth_chatgpt_row_is_refused(providers):
+    from app.db import database
+
+    database.create_model_provider(
+        "chatgpt-1", "ChatGPT", "chatgpt", "https://chatgpt.com/backend-api",
+        models=[{"id": "gpt-5-codex"}],
+    )
+    database.update_model_provider(
+        "chatgpt-1", codex_access_token="enc:tok", needs_reauth=True,
+    )
+    assert "reconnected" in (td._credential_gap("chatgpt-1") or "")
+
+
+# --- helper units ------------------------------------------------------------
+
+
+def test_model_family_resolves_aliases_and_dated_ids():
+    assert td._model_family("opus") == "opus"
+    assert td._model_family("claude-opus-4-6") == "opus"
+    assert td._model_family("claude-sonnet-4-20250514") == "sonnet"
+    assert td._model_family("gpt-4o") is None
+
+
+def test_multiple_curating_providers_resolve_deterministically(providers):
+    """Two servable providers curate the same slug - the pick is stable, and the
+    CALLER's own provider wins when it is one of them."""
+    from app.db import database
+
+    database.create_model_provider(
+        "azure-1", "Azure OpenAI", "openai", "https://azure.example",
+        auth_token="enc:key", models=[{"id": "gpt-4o"}],
+    )
+    # No caller binding: stable (name, id) order -> "Azure OpenAI" before "OpenAI".
+    assert td.resolve_dispatch_binding(
+        target_provider_id=None, target_model=None,
+        model_override="gpt-4o", caller_provider_id=None,
+    ).provider_id == "azure-1"
+    # The caller's own provider wins the tie.
+    assert td.resolve_dispatch_binding(
+        target_provider_id=None, target_model=None,
+        model_override="gpt-4o", caller_provider_id="openai-1",
+    ).provider_id == "openai-1"

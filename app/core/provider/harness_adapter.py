@@ -2012,11 +2012,15 @@ def _amend_native_task_spec(registry: ToolRegistry, options: SessionOptions) -> 
 
         schema = copy.deepcopy(_TASK_SPEC.input_schema)
         schema["properties"]["model"]["description"] = (
-            f"Optional model override. For agents bound to this session's "
-            f"provider ('{provider_id}') it must be one of the curated ids: "
-            f"{ids_str}. Omit to use the target agent's configured model. "
-            f"Claude shorthand aliases (sonnet/opus/haiku) are NOT valid for "
-            f"non-Claude providers."
+            "Optional model override — normally OMIT it. A dispatched agent "
+            "runs its OWN configured provider and model, which may differ from "
+            "this session's; that is the intended behaviour and needs no "
+            "override. Set this only when you have a specific reason to run the "
+            "agent on a different model. Any model curated by one of the user's "
+            "configured providers is valid, whatever provider that is — the "
+            "platform resolves the provider from the model and routes the "
+            f"subagent there automatically. This session's provider "
+            f"('{provider_id}') curates: {ids_str}."
         )
         registry.register_builtin(
             dataclasses.replace(_TASK_SPEC, input_schema=schema), _task_handler

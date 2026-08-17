@@ -583,6 +583,56 @@ class TestDispatchWorker:
         assert outcome.error == "provider returned 429"
         assert outcome.session_id
 
+    def test_a_connect_failure_is_recorded_on_the_registry_entry(
+        self, dispatch_env, monkeypatch
+    ):
+        """A BACKGROUND dispatch already answered ok:true, so the registry row is
+        the only place a worker that died at provider connect can still be told.
+        It must carry the reason, not the "<provider> · <model>" summary it
+        started with — otherwise TaskList shows an idle-looking dead card."""
+        from app.core.task_registry import task_registry
+
+        monkeypatch.setattr(
+            pa, "final_turn_outcome",
+            lambda sid: {
+                "usage": {},
+                "error": (
+                    "Model provider 'xAI' has no credentials configured — add an "
+                    "API key for it before starting a session on it."
+                ),
+                "interrupted": False,
+                "terminal_found": True,
+            },
+        )
+
+        outcome = _dispatch(background=True)
+
+        assert not outcome.ok
+        record = task_registry.get_task("parent-1", outcome.session_id)
+        assert record["status"] == "error"
+        # No frames were ever forwarded, so this is a START failure, said so.
+        assert record["summary"].startswith("worker failed to start: ")
+        assert "no credentials configured" in record["summary"]
+        task_registry.clear_session("parent-1")
+
+    def test_a_clean_completion_keeps_its_provider_model_summary(self, dispatch_env):
+        from app.core.task_registry import task_registry
+
+        outcome = _dispatch()
+
+        record = task_registry.get_task("parent-1", outcome.session_id)
+        assert record["status"] == "completed"
+        assert record["summary"] == "prov-openai · gpt-5.5"
+        task_registry.clear_session("parent-1")
+
+    def test_failure_summary_distinguishes_start_from_mid_run(self):
+        assert pa._failure_summary("error", "boom", 0) == "worker failed to start: boom"
+        assert pa._failure_summary("error", "boom", 3) == "worker failed: boom"
+        assert pa._failure_summary("completed", "fine", 0) is None
+        # Bounded, and a missing message still says something.
+        assert pa._failure_summary("killed", "x" * 500, 1).endswith("…")
+        assert "no error detail" in pa._failure_summary("error", None, 0)
+
     def test_worker_interrupted_fails(self, dispatch_env, monkeypatch):
         monkeypatch.setattr(
             pa, "final_turn_outcome",

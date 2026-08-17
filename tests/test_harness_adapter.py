@@ -2872,7 +2872,13 @@ def test_effort_change_requires_reconnect():
 
 def test_amend_native_task_spec_names_the_curated_ids(monkeypatch):
     """A native leg bound to a provider row gets a Task ``model`` description
-    naming that row's curated ids, so the model stops guessing Claude aliases."""
+    naming that row's curated ids.
+
+    Since the 2026-08-17 refinement the wording also has to teach two things the
+    model kept getting wrong: a subagent NORMALLY runs its own configured model
+    (so the override is the exception, not the routine), and when an override IS
+    used it may name any configured provider's model because the platform
+    resolves the provider from the slug."""
     import app.core.provider.harness_adapter as ha
     import app.db.database as db
 
@@ -2896,7 +2902,9 @@ def test_amend_native_task_spec_names_the_curated_ids(monkeypatch):
     description = registry.get("Task").input_schema["properties"]["model"]["description"]
     assert "gpt-5.6-sol" in description
     assert "gpt-5.6-mini" in description
-    assert "NOT valid" in description
+    assert "normally OMIT it" in description
+    assert "runs its OWN configured provider and model" in description
+    assert "resolves the provider from the model" in description
 
 
 def test_amend_native_task_spec_leaves_unbound_sessions_untouched(monkeypatch):
