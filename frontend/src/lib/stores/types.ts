@@ -101,7 +101,8 @@ export interface ChatMessage {
 	profileId?: string; // Profile ID that was active when this message was created (for per-query tracking)
 	// Subagent-specific fields
 	agentId?: string; // The subagent's unique ID (e.g., '00ed8f4d')
-	agentType?: string; // The subagent type (e.g., 'Explore', 'Plan')
+	agentType?: string; // The subagent type (e.g., 'Explore', 'Plan'); for app-dispatched workers this is the MODEL slug
+	agentName?: string; // The dispatched agent's display name (e.g., 'Frontend Designer') — the card's identity
 	agentDescription?: string; // Task description from the Task tool
 	agentPrompt?: string; // The initial prompt sent to the subagent
 	agentStatus?: 'pending' | 'running' | 'completed' | 'error'; // Current status

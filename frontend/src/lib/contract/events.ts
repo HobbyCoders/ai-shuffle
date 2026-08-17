@@ -177,6 +177,7 @@ export type ToolUseId2 = string;
 export type TurnId13 = string | null;
 export type Type13 = 'tool.result';
 export type AgentId = string | null;
+export type AgentName = string | null;
 export type AgentType = string | null;
 export type CommandId14 = string | null;
 export type CreatedAt14 = string;
@@ -544,6 +545,7 @@ export interface ToolResult {
 }
 export interface SubagentStarted {
   agent_id?: AgentId;
+  agent_name?: AgentName;
   agent_type?: AgentType;
   command_id?: CommandId14;
   created_at: CreatedAt14;

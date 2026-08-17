@@ -118,6 +118,11 @@ def to_wire(record: Dict[str, Any]) -> Dict[str, Any]:
     # reap stamped one, so the pinned wire contract is unchanged otherwise.
     if record.get("reason"):
         wire["reason"] = record.get("reason")
+    # The dispatched agent's display NAME, for Task-tool workers. Additive for
+    # the same reason: only ``dispatch_worker`` sets it, so every other task
+    # kind keeps the exact shape it had.
+    if record.get("agent"):
+        wire["agent"] = record.get("agent")
     return wire
 
 
@@ -679,6 +684,7 @@ class TaskRegistry:
         *,
         summary: Optional[str] = None,
         tool_use_id: Optional[str] = None,
+        agent: Optional[str] = None,
     ) -> None:
         """Register a new task (idempotent — if it already exists, update it).
 
@@ -715,6 +721,8 @@ class TaskRegistry:
             # an id already recorded.
             if tool_use_id and not existing.get("tool_use_id"):
                 existing["tool_use_id"] = tool_use_id
+            if agent and not existing.get("agent"):
+                existing["agent"] = agent
             # Resume revival: a fresh start for a CLEANLY-COMPLETED task flips it
             # back to running (failures stay terminal — that's a stale leak).
             if existing.get("status") == "completed":
@@ -738,6 +746,8 @@ class TaskRegistry:
             "status": "running",
             "summary": summary,
             "tool_use_id": tool_use_id,
+            # Task-tool workers only: the agent's display name (see to_wire).
+            "agent": agent,
             "started_at": now,
             "updated_at": now,
         }

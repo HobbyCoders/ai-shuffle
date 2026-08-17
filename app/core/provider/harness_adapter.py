@@ -2019,44 +2019,23 @@ def _native_context_window(kind: str, options: SessionOptions) -> Optional[int]:
 
 
 def _amend_native_task_spec(registry: ToolRegistry, options: SessionOptions) -> None:
-    """Re-register fluid's bare Task builtin with a provider-aware ``model`` hint.
+    """Re-register fluid's bare Task builtin with a policy-aware ``model`` hint.
 
     The vendor spec's ``model`` property only says "Optional model override for
     this run" — on a native (non-Claude) leg the model calling Task has no idea
     what that means for ITS provider and reliably guesses a Claude shorthand
-    alias ("sonnet"/"opus"/"haiku"), which the dispatcher rejects, burning a
-    call for nothing. When the session is bound to a ``model_providers`` row we
-    know its curated model ids up front, so swap in a description that names
-    them explicitly. Unbound sessions (delegated/Claude default) are left alone
-    — the vendor description is already correct there.
+    alias ("sonnet"/"opus"/"haiku"), which the dispatcher then drops. Swap in
+    :data:`TASK_MODEL_OVERRIDE_DESCRIPTION`, which states the actual policy.
+    Unbound sessions (delegated/Claude default) are left alone — that leg gets
+    the same wording on its bridged ``mcp__builtins__Task`` copy instead (see
+    :mod:`app.mcp.builtin_tools`).
 
-    Best-effort only: any failure here (bad row, bad curated list) must never
-    break session connect, so the vendor spec simply stays registered as-is.
+    Best-effort only: any failure here must never break session connect, so the
+    vendor spec simply stays registered as-is.
     """
     try:
-        provider_id = (options.extra or {}).get("provider_id")
-        if not provider_id:
+        if not (options.extra or {}).get("provider_id"):
             return
-
-        from app.db import database
-
-        try:
-            row = database.get_model_provider(str(provider_id), include_token=False)
-        except Exception:
-            return
-        if not row:
-            return
-
-        from app.core.provider_agent import curated_model_ids
-
-        ids = curated_model_ids(row)
-        if not ids:
-            return
-
-        if len(ids) > 12:
-            ids_str = ", ".join(ids[:12]) + ", …"
-        else:
-            ids_str = ", ".join(ids)
 
         import copy
         import dataclasses
@@ -2064,17 +2043,11 @@ def _amend_native_task_spec(registry: ToolRegistry, options: SessionOptions) -> 
         from fluid.tools.builtins.task import SPEC as _TASK_SPEC
         from fluid.tools.builtins.task import handler as _task_handler
 
+        from app.core.task_dispatch import TASK_MODEL_OVERRIDE_DESCRIPTION
+
         schema = copy.deepcopy(_TASK_SPEC.input_schema)
         schema["properties"]["model"]["description"] = (
-            "Optional model override — normally OMIT it. A dispatched agent "
-            "runs its OWN configured provider and model, which may differ from "
-            "this session's; that is the intended behaviour and needs no "
-            "override. Set this only when you have a specific reason to run the "
-            "agent on a different model. Any model curated by one of the user's "
-            "configured providers is valid, whatever provider that is — the "
-            "platform resolves the provider from the model and routes the "
-            f"subagent there automatically. This session's provider "
-            f"('{provider_id}') curates: {ids_str}."
+            TASK_MODEL_OVERRIDE_DESCRIPTION
         )
         registry.register_builtin(
             dataclasses.replace(_TASK_SPEC, input_schema=schema), _task_handler

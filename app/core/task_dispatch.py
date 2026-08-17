@@ -26,7 +26,9 @@ What this module adds on top of raw ``dispatch_worker``:
   project/worktree/cwd inheritance still reads the direct caller;
 * modes (A8) — ``sync`` blocks and returns the worker's report;
   ``background`` returns the worker session id immediately (collect later via
-  TaskList/TaskOutput — background workers survive the caller's turn end);
+  ``mcp__builtins__TaskList`` / ``mcp__builtins__TaskOutput`` — those are the
+  names both legs actually advertise; background workers survive the caller's
+  turn end);
 * LEG RESOLUTION (2026-08-17) — which provider/model the worker actually runs
   on, including the cross-provider ``model`` override and the credential
   pre-flight that makes a doomed dispatch fail synchronously. The full rule
@@ -82,6 +84,26 @@ logger = logging.getLogger(__name__)
 
 #: Hard ceiling on parent-chain walks — above max depth anyway.
 _CHAIN_LIMIT = 12
+
+#: What the Task tool's ``model`` property tells the model, on BOTH legs (the
+#: native leg's bare builtin via ``harness_adapter._amend_native_task_spec``,
+#: the delegated leg's ``mcp__builtins__Task`` via ``app.mcp.builtin_tools``).
+#:
+#: It deliberately no longer enumerates the session provider's curated model ids
+#: (2026-08-17 ruling). Inlining that roster read as a MENU: the model took "here
+#: are ids you may pass" as an invitation to shop, and moved subscription-bound
+#: agents onto metered API rows. The policy is now "the agent runs at its own
+#: selected model unless YOUR provider curates the override", so the description
+#: says exactly that and nothing more.
+TASK_MODEL_OVERRIDE_DESCRIPTION = (
+    "Optional model override — normally OMIT it. Omitting it runs the agent "
+    "exactly as configured, on its own provider and model, which is the normal "
+    "and intended case even when that differs from this session's. An override "
+    "is honored ONLY if the model is available on YOUR OWN provider; anything "
+    "else is ignored and the agent runs as configured, with a note in the "
+    "result saying so. It is never an error, and it is never a way to move an "
+    "agent onto a provider you are not already using."
+)
 
 #: Background dispatch tasks, kept referenced so asyncio never GCs them.
 _BACKGROUND_TASKS: set = set()
@@ -374,13 +396,26 @@ def _validate_target(agent: Dict[str, Any]) -> Optional[str]:
 #    spawned anyway (it does function) and the result carries a note saying so.
 #    A Claude-sub caller dispatching a Claude-sub target is left alone.
 #
-# 3. AN EXPLICIT ``model`` OVERRIDE is the exception path, not the routine. It
-#    is intentionally cross-provider: the SLUG picks the leg, so no user ever
-#    needs duplicate per-provider agents. Resolution order is the target's own
-#    provider, then any configured servable provider curating the exact slug
-#    (caller's provider preferred), then — for a Claude-family slug — rule 2's
-#    preference chain, and finally a SYNCHRONOUS failure when nothing can serve
-#    it (nothing is spawned, so the caller learns immediately).
+# 3. AN EXPLICIT ``model`` OVERRIDE IS THE CALLER'S OWN PROVIDER ONLY
+#    (2026-08-17 ruling, superseding the earlier free cross-provider binding).
+#    Agents run at THEIR selected model; a caller does not get to shop for
+#    models it merely knows the name of. So an override is ADMITTED only when:
+#
+#      * the CALLER is bound to a provider row that curates the slug
+#        (``validate_provider_model`` on ``caller_provider_id``), or
+#      * the caller has NO row (it is on the Claude subscription) and the slug
+#        is a Claude-family one — then the existing claude-sub rules decide.
+#
+#    An override that fails that gate is DROPPED with a note and the dispatch
+#    proceeds on the TARGET's own configured provider+model (i.e. exactly the
+#    no-override resolution above). A bad override NEVER fails a dispatch.
+#
+#    Once admitted, the leg is picked as before: (a) the target's own provider
+#    when it curates the slug too, (b) a Claude slug asked of a Claude-sub
+#    target, (c) any configured servable provider curating the exact slug (the
+#    caller's own preferred), (d) rule 2's chain for a Claude-family slug.
+#    Rationale (live incident): a worker overrode a subscription-bound agent
+#    onto a metered API row it happened to be able to name.
 #
 # 4. Whatever leg is resolved, its credentials are pre-flighted (``_credential_gap``)
 #    before anything is spawned.
@@ -393,13 +428,46 @@ class ModelBinding:
     to — ``None`` means the delegated Claude-subscription leg (no row).
     ``model_id`` is the model to pin for the turn, or ``None`` for "inherit the
     target's configured model" (rule 1's untouched default). When ``error`` is
-    set the dispatch fails synchronously and nothing is spawned.
+    set the dispatch fails synchronously and nothing is spawned — no override
+    path sets it any more (rule 3 drops instead of failing), but the field
+    stays so a future hard refusal has somewhere to live.
+
+    ``rule`` names the branch that produced this binding ("1", "2-exact",
+    "2-family", "2-cli", "3a".."3d", "drop"). Display/diagnostics only — it is
+    what the per-dispatch INFO log reports.
     """
 
     provider_id: Optional[str] = None
     model_id: Optional[str] = None
     note: Optional[str] = None
     error: Optional[str] = None
+    rule: Optional[str] = None
+
+
+def _is_subscription_row(row: Dict[str, Any]) -> bool:
+    """Whether a ``model_providers`` row authenticates as a SUBSCRIPTION.
+
+    Third mirror of the same two-field test (``app.core.model_registry.
+    _is_subscription_row``, ``app.core.provider.fluid_credentials.
+    _is_codex_subscription``): ``provider_type == "chatgpt"`` OR
+    ``auth_mode == "chatgpt"`` — a ``custom`` row can carry the Codex auth mode.
+    Everything else is metered API-key auth.
+    """
+    return (
+        (row or {}).get("provider_type") == "chatgpt"
+        or (row or {}).get("auth_mode") == "chatgpt"
+    )
+
+
+def _subscription_first(rows: List[Dict[str, Any]]) -> None:
+    """Re-order ``rows`` IN PLACE so subscription-auth rows lead.
+
+    Applied AFTER the ``(name, id)`` sort and stable, so the tie-break order
+    inside each group is untouched: the pick stays deterministic, it just stops
+    reaching for a metered API row while the user's own subscription can serve
+    the same model. This is what every ``rows[0]`` fallback below inherits.
+    """
+    rows.sort(key=lambda row: 0 if _is_subscription_row(row) else 1)
 
 
 def _servable_providers_curating(model_id: str) -> List[Dict[str, Any]]:
@@ -409,7 +477,8 @@ def _servable_providers_curating(model_id: str) -> List[Dict[str, Any]]:
     :func:`app.core.environment.is_provider_servable` (the cross-provider WORKER
     admission rule) and :func:`app.core.provider_agent.curated_model_ids` (the
     one defensive parser for ``models_json``). Sorted by ``(name, id)`` so a
-    slug curated by several providers always resolves to the same one.
+    slug curated by several providers always resolves to the same one, then
+    subscription rows are floated to the front (see :func:`_subscription_first`).
     """
     from app.core.environment import is_provider_servable
     from app.core.provider_agent import curated_model_ids
@@ -425,6 +494,7 @@ def _servable_providers_curating(model_id: str) -> List[Dict[str, Any]]:
         if is_provider_servable(row) and model_id in curated_model_ids(row)
     ]
     matches.sort(key=lambda row: ((row.get("name") or ""), str(row.get("id") or "")))
+    _subscription_first(matches)
     return matches
 
 
@@ -456,9 +526,9 @@ def _model_family(model_id: Optional[str]) -> Optional[str]:
 def _servable_providers_curating_family(family: str) -> List[Tuple[Dict[str, Any], str]]:
     """``(provider row, curated model id)`` pairs serving ``family``.
 
-    Same admission rules and same ``(name, id)`` ordering as
-    :func:`_servable_providers_curating`; the model id is the FIRST curated id
-    on that row whose family matches, so the pick is stable per provider too.
+    Same admission rules and same ``(name, id)`` + subscription-first ordering
+    as :func:`_servable_providers_curating`; the model id is the FIRST curated
+    id on that row whose family matches, so the pick is stable per provider too.
     """
     from app.core.environment import is_provider_servable
     from app.core.provider_agent import curated_model_ids
@@ -470,6 +540,7 @@ def _servable_providers_curating_family(family: str) -> List[Tuple[Dict[str, Any
         logger.debug("task_dispatch: provider enumeration failed", exc_info=True)
         return []
     rows.sort(key=lambda row: ((row.get("name") or ""), str(row.get("id") or "")))
+    _subscription_first(rows)
     out: List[Tuple[Dict[str, Any], str]] = []
     for row in rows:
         if not is_provider_servable(row):
@@ -481,36 +552,16 @@ def _servable_providers_curating_family(family: str) -> List[Tuple[Dict[str, Any
     return out
 
 
-def _example_model_slugs(limit: int = 10) -> List[str]:
-    """A few real, dispatchable model ids to show alongside a rejection."""
-    from app.core.environment import is_provider_servable
-    from app.core.provider_agent import curated_model_ids
-    from app.db import database
-
-    out: List[str] = []
-    try:
-        rows = database.get_enabled_model_providers()
-    except Exception:  # noqa: BLE001 — examples are a nicety, never a failure
-        return out
-    rows.sort(key=lambda row: ((row.get("name") or ""), str(row.get("id") or "")))
-    for row in rows:
-        if not is_provider_servable(row):
-            continue
-        for model_id in curated_model_ids(row):
-            if model_id not in out:
-                out.append(model_id)
-            if len(out) >= limit:
-                return out
-    return out
-
-
 def _prefer_caller(
     rows: List[Dict[str, Any]], caller_provider_id: Optional[str]
 ) -> Dict[str, Any]:
     """The caller's own provider row when it is among ``rows``, else the first.
 
-    ``rows`` arrives sorted by ``(name, id)``, so the fallback is deterministic:
-    the same slug always resolves to the same provider.
+    ``rows`` arrives sorted by ``(name, id)`` with subscription-auth rows
+    floated to the front (:func:`_subscription_first`), so the fallback is both
+    deterministic AND cheapest-first: the same slug always resolves to the same
+    provider, and a user's own subscription is never passed over for a metered
+    API row that curates the same model.
     """
     return next(
         (row for row in rows if str(row.get("id")) == str(caller_provider_id or "")),
@@ -541,6 +592,7 @@ def _route_off_claude_sub(
                 f"is not on, so its model '{model_id}' was routed to provider "
                 f"'{label}', which curates it."
             ),
+            rule="2-exact",
         )
 
     family = _model_family(model_id)
@@ -564,6 +616,7 @@ def _route_off_claude_sub(
                     f"session is not on, so its model '{model_id}' was matched at "
                     f"family level to '{chosen_model}' on provider '{label}'."
                 ),
+                rule="2-family",
             )
 
     return ModelBinding(
@@ -574,6 +627,7 @@ def _route_off_claude_sub(
             f"no configured provider curates '{model_id}'"
             + (f" or anything in the {family} family." if family else ".")
         ),
+        rule="2-cli",
     )
 
 
@@ -583,6 +637,7 @@ def resolve_dispatch_binding(
     target_model: Optional[str],
     model_override: Optional[str],
     caller_provider_id: Optional[str],
+    target_name: Optional[str] = None,
 ) -> ModelBinding:
     """Decide the leg a worker runs on. Implements the rule table above.
 
@@ -590,7 +645,9 @@ def resolve_dispatch_binding(
     binding (for a file-defined agent that is the caller's profile, which the
     definition borrows). ``caller_provider_id`` is the calling session's binding
     — ``None`` means the caller is itself on the Claude-subscription leg, which
-    is the only thing rule 2 keys on.
+    is what rule 2 keys on AND what decides whether an override is admissible at
+    all (rule 3). ``target_name`` is display-only: it names the agent in the
+    dropped-override note.
     """
     from app.core.provider_agent import validate_provider_model
     from app.core.query_options import is_native_claude_model
@@ -598,28 +655,58 @@ def resolve_dispatch_binding(
     override = (model_override or "").strip() or None
     caller_on_claude_sub = not caller_provider_id
 
-    # ── Rule 1/2: no override — the target's own binding, mostly untouched ──
-    if not override:
+    def _target_binding() -> ModelBinding:
+        """Rules 1/2 — the target's own binding, mostly untouched."""
         if target_provider_id:
             # Rule 1: a native-leg target runs exactly as configured, whatever
             # the caller is bound to. model_id stays None = inherit the profile.
-            return ModelBinding(provider_id=target_provider_id)
+            return ModelBinding(provider_id=target_provider_id, rule="1")
         # Provider-less target = the Claude-subscription leg.
         if caller_on_claude_sub or not (target_model or "").strip():
             # Rule 2 no-op: same leg on both ends (or nothing to re-route).
-            return ModelBinding(provider_id=None)
+            return ModelBinding(provider_id=None, rule="1")
         return _route_off_claude_sub(str(target_model).strip(), caller_provider_id)
 
-    # ── Rule 3: an explicit override — the SLUG picks the leg ───────────────
-    # (a) the target's own provider already curates it.
+    if not override:
+        return _target_binding()
+
+    # ── Rule 3 admission: the override must be the CALLER's own to give ─────
+    # An agent runs at ITS selected model; the caller may only redirect it onto
+    # something its OWN provider curates. A Claude-sub caller has no row, so its
+    # only currency is the Claude family (the claude-sub rules below decide the
+    # rest). Anything else is dropped — never a refusal.
+    if caller_on_claude_sub:
+        admitted = is_native_claude_model(override)
+    else:
+        admitted = validate_provider_model(str(caller_provider_id), override).ok
+    if not admitted:
+        base = _target_binding()
+        agent_label = (target_name or "").strip() or "the agent"
+        model_label = (target_model or "").strip() or "model"
+        drop_note = (
+            f"Model override '{override}' isn't curated on your provider; "
+            f"ran {agent_label} on its configured {model_label}."
+        )
+        return ModelBinding(
+            provider_id=base.provider_id,
+            model_id=base.model_id,
+            note=" ".join(p for p in (drop_note, base.note) if p),
+            rule="drop",
+        )
+
+    # ── Rule 3, admitted: the slug picks the leg among what the caller may use ─
+    # (a) the target's own provider already curates it (and so does the caller's,
+    #     or the caller is the claude-sub case — the admission gate above).
     if target_provider_id and validate_provider_model(target_provider_id, override).ok:
-        return ModelBinding(provider_id=target_provider_id, model_id=override)
+        return ModelBinding(
+            provider_id=target_provider_id, model_id=override, rule="3a",
+        )
 
     # (b) a Claude slug asked of the Claude-sub target: rule 2 decides, so a
     #     non-Claude-sub caller prefers an API provider over the CLI leg.
     if not target_provider_id and is_native_claude_model(override):
         if caller_on_claude_sub:
-            return ModelBinding(provider_id=None, model_id=override)
+            return ModelBinding(provider_id=None, model_id=override, rule="3b")
         return _route_off_claude_sub(override, caller_provider_id)
 
     # (c) any configured, servable provider curating the exact slug.
@@ -628,18 +715,32 @@ def resolve_dispatch_binding(
         chosen = _prefer_caller(candidates, caller_provider_id)
         chosen_id = str(chosen.get("id"))
         label = chosen.get("name") or chosen_id
-        note = None
+        # The note used to compare the chosen row against the TARGET only, so
+        # "your own subscription was passed over" was unreportable — the very
+        # thing the live incident needed said. Compare against BOTH ends.
+        passed_over: List[str] = []
         if chosen_id != str(target_provider_id or ""):
+            passed_over.append("the target agent's own binding")
+        if chosen_id != str(caller_provider_id or ""):
+            passed_over.append(
+                "this session's own provider" if caller_provider_id
+                else "the Claude subscription this session runs on"
+            )
+        note = None
+        if passed_over:
             note = (
-                f"Model '{override}' is not served by the target agent's own "
-                f"binding, so the worker runs on provider '{label}'"
+                f"Model '{override}' is not served by "
+                + " or ".join(passed_over)
+                + f", so the worker runs on provider '{label}'"
                 + (
                     f" (one of {len(candidates)} providers curating it)."
                     if len(candidates) > 1
                     else "."
                 )
             )
-        return ModelBinding(provider_id=chosen_id, model_id=override, note=note)
+        return ModelBinding(
+            provider_id=chosen_id, model_id=override, note=note, rule="3c",
+        )
 
     # (d) a Claude-family slug nobody curates — rule 2's chain again. On a
     #     Claude-sub caller this is the delegated leg, which is what
@@ -647,19 +748,24 @@ def resolve_dispatch_binding(
     #     deciding it here makes it a binding rather than a guess.
     if is_native_claude_model(override):
         if caller_on_claude_sub:
-            return ModelBinding(provider_id=None, model_id=override)
+            return ModelBinding(provider_id=None, model_id=override, rule="3d")
         return _route_off_claude_sub(override, caller_provider_id)
 
-    # (e) nothing can serve it — synchronous failure, nothing spawned.
-    default_label = (target_model or "").strip() or "its configured default"
-    error = (
-        f"Model '{override}' is not available on any configured provider. "
-        f"The target agent's default is '{default_label}' — omit 'model' to use it."
+    # (e) admitted but unservable (the caller's own row curates it yet cannot be
+    #     served as a worker leg — e.g. a ``custom`` row). Still never fatal.
+    base = _target_binding()
+    agent_label = (target_name or "").strip() or "the agent"
+    model_label = (target_model or "").strip() or "model"
+    return ModelBinding(
+        provider_id=base.provider_id,
+        model_id=base.model_id,
+        note=" ".join(p for p in (
+            f"Model override '{override}' cannot be served by any provider that "
+            f"can run a worker; ran {agent_label} on its configured {model_label}.",
+            base.note,
+        ) if p),
+        rule="drop",
     )
-    examples = _example_model_slugs()
-    if examples:
-        error += " Valid model ids include: " + ", ".join(examples) + "."
-    return ModelBinding(error=error)
 
 
 def _credential_gap(provider_id: Optional[str]) -> Optional[str]:
@@ -819,6 +925,8 @@ async def dispatch_task_tool(
     label = (args.get("label") or "").strip() or f"Task · {target_name}"
     #: Non-fatal deviations reported back to the model with the result.
     notes: List[str] = []
+    #: Which branch of the rule table decided the leg — for the dispatch log.
+    binding_rule = "none"
 
     caller_provider_id = _caller_provider_id(caller_row, caller_pid)
 
@@ -832,26 +940,29 @@ async def dispatch_task_tool(
         # still wins, exactly as it does for an app agent.
         wanted = str(_def_field(definition, "model", "") or "").strip() or None
         if model_override or wanted:
+            wanted_model = model_override or wanted
             binding = resolve_dispatch_binding(
                 target_provider_id=provider_id,
                 target_model=wanted,
-                model_override=model_override or wanted,
+                model_override=wanted_model,
                 caller_provider_id=caller_provider_id,
+                target_name=target_name,
             )
-            if binding.error:
-                # A file agent must still spawn (ruling CE6): an unservable
+            binding_rule = binding.rule or "?"
+            provider_id = binding.provider_id
+            # NEVER fall back to the requested slug here: a DROPPED override
+            # resolves to model_id=None ("inherit"), and re-applying the slug
+            # would smuggle the very binding the drop rule refused.
+            model_override = binding.model_id
+            if binding.rule == "drop":
+                # A file agent must still spawn (ruling CE6): an inadmissible
                 # model degrades to the session's own, never to a refusal.
                 notes.append(
-                    f"The definition asks for model '{model_override or wanted}', "
-                    "which no configured provider can serve — the worker inherits "
-                    "the session's model instead."
+                    f"Model '{wanted_model}' is not curated on this session's "
+                    "provider — the worker inherits the session's model instead."
                 )
-                model_override = None
-            else:
-                provider_id = binding.provider_id
-                model_override = binding.model_id or model_override or wanted
-                if binding.note:
-                    notes.append(binding.note)
+            elif binding.note:
+                notes.append(binding.note)
         tool_allowlist = _definition_tool_allowlist(definition)
         if tool_allowlist:
             notes.append(
@@ -877,9 +988,11 @@ async def dispatch_task_tool(
             target_model=target_config.get("model") or None,
             model_override=model_override,
             caller_provider_id=caller_provider_id,
+            target_name=target_name,
         )
         if binding.error:
             return {"ok": False, "error": binding.error}
+        binding_rule = binding.rule or "?"
         provider_id = binding.provider_id
         model_override = binding.model_id
         if binding.note:
@@ -896,6 +1009,17 @@ async def dispatch_task_tool(
     if credential_error:
         return {"ok": False, "error": credential_error}
 
+    # ONE line per dispatch: what the caller was on, what the worker got, which
+    # branch of the rule table decided it, and whatever the caller is being told.
+    logger.info(
+        "task_dispatch: %s (session=%s provider=%s) -> agent %r on "
+        "provider=%s model=%s [rule=%s]%s",
+        mode, caller_session_id, caller_provider_id or "claude-sub",
+        target_name, provider_id or "claude-sub", model_override or "inherit",
+        binding_rule,
+        f" note={' '.join(notes)!r}" if notes else "",
+    )
+
     kwargs: Dict[str, Any] = dict(
         parent_session_id=root_session_id,
         context_session_id=caller_session_id,
@@ -904,6 +1028,9 @@ async def dispatch_task_tool(
         model_id=model_override,
         prompt=prompt,
         label=label,
+        # The agent's NAME — what the subagent card must show as the worker's
+        # identity (the model slug is a secondary detail, ruling 2026-08-17).
+        agent_name=target_name,
         # The model's Task tool_use_id (fluid native leg) — lets the worker
         # card absorb the launch tool_use block instead of rendering both.
         launch_tool_use_id=launch_tool_use_id,
@@ -928,8 +1055,14 @@ async def dispatch_task_tool(
             "agent": target["id"] if target is not None else target_name,
             "worker_session_id": worker_id,
             "note": " ".join([
-                "Worker dispatched in the background. Poll with TaskList/"
-                "TaskOutput (task id = worker session id).",
+                # The polling tools ride the ``builtins`` MCP server on BOTH
+                # legs — the native leg only swaps Task/ToolSearch for fluid's
+                # own builtins (harness_adapter's ``skip_tools``), so the bare
+                # names "TaskList"/"TaskOutput" this note used to advertise
+                # exist on neither leg's tool surface.
+                "Worker dispatched in the background. Poll with "
+                "mcp__builtins__TaskList / mcp__builtins__TaskOutput "
+                "(task id = worker session id).",
                 *notes,
             ]),
         }

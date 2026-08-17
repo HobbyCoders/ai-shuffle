@@ -154,6 +154,26 @@ function findSubagentByTask(messages: ChatMessage[], taskId: string): ChatMessag
 	return messages.find((m) => m.type === 'subagent' && m.toolId === taskId);
 }
 
+/**
+ * Append a thinking delta to the text already accumulated on the open block.
+ *
+ * Consecutive thinking BLOCKS (the CLI's per-step summaries, each of the form
+ * `**Title**\n...`) land as separate deltas on the same open message, and bare
+ * concatenation glued them into `**A****B**` — markdown renders the middle `**`
+ * literally, which is exactly the "Implementing X****Refactoring Y" the
+ * transcript showed. A boundary where the accumulated text ENDS with a bold
+ * close and the incoming chunk OPENS one can only ever be two adjacent spans, so
+ * it gets a paragraph break. Every other boundary (a coalescer splitting one
+ * block mid-sentence) is untouched.
+ */
+export function joinThinking(previous: string, chunk: string): string {
+	if (!previous) return chunk;
+	if (previous.trimEnd().endsWith('**') && chunk.trimStart().startsWith('**')) {
+		return `${previous.trimEnd()}\n\n${chunk.trimStart()}`;
+	}
+	return previous + chunk;
+}
+
 /** Close any open streaming text/thinking message (finalize it, clear pointers). */
 function closeOpenText(state: V2SessionState): V2SessionState {
 	if (!state.openTextId) return state;
@@ -898,7 +918,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				return {
 					...next,
 					messages: replaceById(next.messages, next.openThinkingId, {
-						content: (open?.content ?? '') + text,
+						content: joinThinking(open?.content ?? '', text),
 					}),
 				};
 			}
@@ -1107,6 +1127,12 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				toolId: taskId,
 				agentId: typeof event.agent_id === 'string' ? event.agent_id : undefined,
 				agentType: typeof event.agent_type === 'string' ? event.agent_type : undefined,
+				// The dispatched agent's display NAME — the card's identity, with
+				// agentType (the model slug) demoted to a secondary chip.
+				agentName:
+					typeof event.agent_name === 'string' && event.agent_name
+						? event.agent_name
+						: undefined,
 				agentDescription: typeof event.description === 'string' ? event.description : undefined,
 				agentPrompt: typeof event.prompt_preview === 'string' ? event.prompt_preview : undefined,
 				agentStatus: 'running',
@@ -1200,6 +1226,9 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			const speculativelySettledCardIds = state.speculativelySettledCardIds.includes(card.id)
 				? state.speculativelySettledCardIds.filter((c) => c !== card.id)
 				: state.speculativelySettledCardIds;
+			// The worker's authoritative token counts, when the feed forwarded
+			// them — ProviderAgent worker cards rendered no usage row at all.
+			const usage = obj(event.usage);
 			return {
 				...state,
 				speculativelySettledCardIds,
@@ -1207,6 +1236,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					agentStatus,
 					agentChildren: children,
 					content: str(event.result_preview),
+					...(usage ? { agentUsage: usage as ChatMessage['agentUsage'] } : {}),
 				}),
 			};
 		}

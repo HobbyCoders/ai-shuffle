@@ -644,6 +644,44 @@ class TestDispatchWorker:
         assert pa._failure_summary("killed", "x" * 500, 1).endswith("…")
         assert "no error detail" in pa._failure_summary("error", None, 0)
 
+    def test_failure_summary_puts_the_message_before_the_headers(self):
+        """The live rate-limit incident: the provider's stringified error leads
+        with a header dump, which ate the whole 240-char budget and left the
+        actual reason invisible. The message must survive the cap."""
+        raw = (
+            "Error code: 429 - {'headers': {"
+            + ", ".join(f"'x-ratelimit-{i}': 'value-{i}'" for i in range(40))
+            + "}, 'error': {'type': 'rate_limit_error', "
+            "'message': 'This request would exceed your organization rate limit.'}}"
+        )
+        summary = pa._failure_summary("error", raw, 2)
+        assert summary.startswith(
+            "worker failed: This request would exceed your organization rate limit."
+        )
+        assert len(summary) <= len("worker failed: ") + pa._FAILURE_SUMMARY_CHARS
+
+    def test_message_first_is_a_no_op_without_a_message_field(self):
+        """It may only ever re-order — never invent or drop information."""
+        assert pa._message_first("plain failure text") == "plain failure text"
+        assert pa._message_first("") == ""
+
+    def test_provider_display_name_resolves_the_row_name(self, monkeypatch):
+        """The registry summary showed a raw provider-row UUID."""
+        import app.db.database as db
+
+        monkeypatch.setattr(
+            db, "get_model_provider",
+            lambda pid, include_token=False: {"id": pid, "name": "My OpenRouter"},
+        )
+        assert pa._provider_display_name("abc-123") == "My OpenRouter"
+        # The delegated leg has no row, and a lookup failure falls back to the id.
+        assert pa._provider_display_name(None) == "agent"
+        monkeypatch.setattr(
+            db, "get_model_provider",
+            lambda pid, include_token=False: (_ for _ in ()).throw(RuntimeError("x")),
+        )
+        assert pa._provider_display_name("abc-123") == "abc-123"
+
     def test_worker_interrupted_fails(self, dispatch_env, monkeypatch):
         monkeypatch.setattr(
             pa, "final_turn_outcome",

@@ -700,6 +700,29 @@ describe('assistant deltas', () => {
 		// first text block finalized when thinking opened
 		expect(s.messages[0].streaming).toBe(false);
 	});
+
+	it('consecutive thinking summaries are separated, not glued into ****', () => {
+		// Two per-step summaries, each `**Title**…`, landed on the same open
+		// thinking message and were concatenated bare — producing `**A****B**`,
+		// which markdown renders with a literal `**` in the middle.
+		const s = fold([
+			ev('assistant.thinking_delta', { id: 'a', text: '**Implementing the filter**' }),
+			ev('assistant.thinking_delta', { id: 'b', text: '**Refactoring installs**' }),
+		]);
+		const thinking = s.messages.filter((m) => m.type === 'thinking');
+		expect(thinking).toHaveLength(1);
+		expect(thinking[0].content).toBe(
+			'**Implementing the filter**\n\n**Refactoring installs**'
+		);
+	});
+
+	it('a mid-block delta boundary is still glued verbatim', () => {
+		const s = fold([
+			ev('assistant.thinking_delta', { id: 'a', text: 'weighing the ' }),
+			ev('assistant.thinking_delta', { id: 'b', text: 'options' }),
+		]);
+		expect(s.messages[0].content).toBe('weighing the options');
+	});
 });
 
 // ─── Tool cards ─────────────────────────────────────────────────────────────
@@ -824,6 +847,28 @@ describe('tool cards', () => {
 // ─── Subagents (correlated by task_id) ──────────────────────────────────────
 
 describe('subagent cards', () => {
+	it('carries agent_name onto the card as its identity', () => {
+		const s = fold([
+			ev('subagent.started', {
+				task_id: 'task-n',
+				agent_name: 'Frontend Designer',
+				agent_type: 'gpt-5.5',
+				description: 'mock the page',
+			}),
+		]);
+		const card = s.messages.find((m) => m.type === 'subagent')!;
+		expect(card.agentName).toBe('Frontend Designer');
+		// The model slug is KEPT — it just stops being the identity.
+		expect(card.agentType).toBe('gpt-5.5');
+	});
+
+	it('leaves agentName undefined when the event carries none', () => {
+		const s = fold([ev('subagent.started', { task_id: 'task-n2', agent_type: 'gpt-5.5' })]);
+		const card = s.messages.find((m) => m.type === 'subagent')!;
+		expect(card.agentName).toBeUndefined();
+		expect(card.agentType).toBe('gpt-5.5');
+	});
+
 	it('started/progress/completed fold into one card keyed by task_id', () => {
 		const s = fold([
 			ev('subagent.started', { task_id: 'task-1', agent_id: 'a1', description: 'do work' }),

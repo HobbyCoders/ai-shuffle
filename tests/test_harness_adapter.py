@@ -2880,15 +2880,16 @@ def test_effort_change_requires_reconnect():
 # ─── _amend_native_task_spec ───────────────────────────────────────────────────
 
 
-def test_amend_native_task_spec_names_the_curated_ids(monkeypatch):
+def test_amend_native_task_spec_states_the_policy_without_a_model_menu(monkeypatch):
     """A native leg bound to a provider row gets a Task ``model`` description
-    naming that row's curated ids.
+    that states the OVERRIDE POLICY — and deliberately does NOT enumerate the
+    row's curated ids.
 
-    Since the 2026-08-17 refinement the wording also has to teach two things the
-    model kept getting wrong: a subagent NORMALLY runs its own configured model
-    (so the override is the exception, not the routine), and when an override IS
-    used it may name any configured provider's model because the platform
-    resolves the provider from the slug."""
+    2026-08-17 ruling: inlining the curated roster read as a menu and taught the
+    model to shop for models (the live incident moved a subscription-bound agent
+    onto a metered API row). The wording now says: omit it and the agent runs as
+    configured; an override is honored only if YOUR provider has the model, and
+    is otherwise ignored with a note."""
     import app.core.provider.harness_adapter as ha
     import app.db.database as db
 
@@ -2910,11 +2911,40 @@ def test_amend_native_task_spec_names_the_curated_ids(monkeypatch):
     ha._amend_native_task_spec(registry, options)
 
     description = registry.get("Task").input_schema["properties"]["model"]["description"]
-    assert "gpt-5.6-sol" in description
-    assert "gpt-5.6-mini" in description
+    # The curated roster is GONE — no menu, and no provider row id either.
+    assert "gpt-5.6-mini" not in description
+    assert "prov1" not in description
     assert "normally OMIT it" in description
-    assert "runs its OWN configured provider and model" in description
-    assert "resolves the provider from the model" in description
+    assert "runs the agent exactly as configured" in description
+    assert "available on YOUR OWN provider" in description
+
+
+def test_delegated_task_tool_shares_the_same_model_policy_wording():
+    """Leg parity: the delegated leg's ``mcp__builtins__Task`` carries the exact
+    same ``model`` description, so neither leg advertises a model menu."""
+    from unittest.mock import patch as _patch
+
+    import claude_agent_sdk as sdk
+
+    import app.mcp.builtin_tools as bt
+    from app.core.task_dispatch import TASK_MODEL_OVERRIDE_DESCRIPTION
+
+    captured = {}
+    real_create = sdk.create_sdk_mcp_server
+
+    def _spy(name, version, tools):
+        captured["tools"] = tools
+        return real_create(name=name, version=version, tools=tools)
+
+    with _patch.object(sdk, "create_sdk_mcp_server", side_effect=_spy):
+        bt.create_builtin_tools_server(session_id="s-policy", profile_id="p")
+
+    task = {t.name: t for t in captured["tools"]}["Task"]
+    assert (
+        task.input_schema["properties"]["model"]["description"]
+        == TASK_MODEL_OVERRIDE_DESCRIPTION
+    )
+    assert "curates:" not in TASK_MODEL_OVERRIDE_DESCRIPTION
 
 
 def test_amend_native_task_spec_leaves_unbound_sessions_untouched(monkeypatch):
@@ -2935,22 +2965,21 @@ def test_amend_native_task_spec_leaves_unbound_sessions_untouched(monkeypatch):
     assert description == _TASK_SPEC.input_schema["properties"]["model"]["description"]
 
 
-def test_amend_native_task_spec_swallows_provider_lookup_failure(monkeypatch):
-    """A DB error while resolving the bound provider row must never propagate
-    out of connect() — the vendor Task spec just stays registered as-is."""
+def test_amend_native_task_spec_swallows_a_registration_failure(monkeypatch):
+    """A failure anywhere in the amend path must never propagate out of
+    connect() — the vendor Task spec just stays registered as-is."""
     import app.core.provider.harness_adapter as ha
-    import app.db.database as db
-
-    def _boom(pid, include_token=False):
-        raise RuntimeError("db down")
-
-    monkeypatch.setattr(db, "get_model_provider", _boom)
 
     from fluid.tools.builtins import register_builtins
     from fluid.tools.builtins.task import SPEC as _TASK_SPEC
 
     registry = ha.ToolRegistry()
     register_builtins(registry)
+
+    def _boom(*a, **kw):
+        raise RuntimeError("registry down")
+
+    monkeypatch.setattr(registry, "register_builtin", _boom)
     options = SessionOptions(model="gpt-5.6-sol", extra={"provider_id": "prov1"})
 
     ha._amend_native_task_spec(registry, options)  # must not raise

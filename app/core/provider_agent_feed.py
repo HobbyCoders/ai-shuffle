@@ -164,6 +164,7 @@ class WorkerFeed:
         model_id: Optional[str] = None,
         prompt: Optional[str] = None,
         launch_tool_use_id: Optional[str] = None,
+        agent_name: Optional[str] = None,
     ) -> None:
         self.parent_session_id = parent_session_id
         self.worker_session_id = worker_session_id
@@ -171,6 +172,10 @@ class WorkerFeed:
         self.label = label
         self.provider_id = provider_id
         self.model_id = model_id
+        # The dispatched agent's DISPLAY NAME ("Frontend Designer"). Rides
+        # ``subagent.started`` as the card's identity; the model slug stays on
+        # ``agent_type`` as a secondary detail (2026-08-17 ruling).
+        self.agent_name = agent_name
         self.prompt = prompt
         # The model's Task tool_use_id (fluid native leg), when known. Rides the
         # subagent.started event so the reducer can absorb the launch tool_use
@@ -245,9 +250,14 @@ class WorkerFeed:
             "tool_id": self.task_id,
             "agent_id": self.task_id,
             "launch_tool_use_id": self.launch_tool_use_id,
-            # Unknown agent types render as their raw string badge on the card
-            # (SubagentMessage.getModelBadge), so the model id is the useful
-            # label here.
+            # The card's IDENTITY: the agent's own name. Absent (a bare
+            # ProviderAgent worker with no agent behind it) the card falls back
+            # to the model badge below, which is what it always showed.
+            "agent_name": self.agent_name or "",
+            # KEPT for compatibility: every existing consumer (and every card
+            # already in a durable log) reads the model id off ``agent_type``,
+            # which the card now renders as a secondary chip rather than as the
+            # worker's identity.
             "agent_type": self.model_id or "provider-agent",
             "description": description,
             "prompt": self.prompt or "",
@@ -259,6 +269,7 @@ class WorkerFeed:
         *,
         result_preview: Optional[str] = None,
         summary: Optional[str] = None,
+        usage: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Emit the terminal frames for this worker.
 
@@ -291,6 +302,9 @@ class WorkerFeed:
             "agent_id": self.task_id,
             "is_error": is_error,
             "result": _clip(result_preview, MAX_RESULT_PREVIEW_CHARS),
+            # The worker's authoritative token counts. Without them the card's
+            # usage row rendered nothing at all for ProviderAgent workers.
+            "usage": usage if isinstance(usage, dict) and usage else None,
         })
         try:
             from app.core.turn_recorder import record_task_settle_frame
