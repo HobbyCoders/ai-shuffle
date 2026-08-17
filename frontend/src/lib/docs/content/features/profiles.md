@@ -154,8 +154,8 @@ Controls which Claude Code configuration files are loaded. By default, all sourc
 
 | Field              | Type          | Description                                     |
 |--------------------|---------------|-------------------------------------------------|
-| `enabled_agents`   | list[string]  | Invoke allowlist for the Task tool — agent IDs this profile may dispatch (read with `agent_invoke_mode`) |
-| `agent_invoke_mode`| string        | `all` (no restriction), `custom` (`enabled_agents` is the exact allowlist; empty = may invoke no agents), or null (legacy: a non-empty `enabled_agents` restricts, otherwise open) |
+| `enabled_agents`   | list[string]  | Agent IDs declared into this profile's context (name + description in the prompt's agents index). Never a dispatch restriction — read with `agent_invoke_mode` |
+| `agent_invoke_mode`| string        | `all` (declare every agent), `custom` (declare exactly `enabled_agents`; empty = declare none), or null (legacy: a non-empty `enabled_agents` declares those ids, empty/absent declares all). The Task tool can dispatch any agent that resolves by id or name, declared or not |
 | `enabled_plugins`  | list[string]  | Plugin paths to load for this profile            |
 
 ### Advanced
