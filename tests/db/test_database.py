@@ -827,7 +827,8 @@ class TestSearchSessionsSql:
     def test_store_cte_structural_invariants(self):
         """Guard the store CTE's load-bearing predicates: it joins sessions on
         sdk_session_id, restricts to main transcripts (subpath IS NULL), matches
-        via sse_entry_text()'s tsvector, and excludes archived sessions."""
+        via sse_entry_text()'s tsvector, and excludes archived + failed
+        sessions."""
         sql = self._captured_search_sql()
         store = sql.split("store_matches AS (", 1)[1].split("all_matches AS (", 1)[0]
 
@@ -835,7 +836,20 @@ class TestSearchSessionsSql:
         assert "sse.subpath IS NULL" in store
         assert "sse_entry_text(sse.entry)" in store
         assert "to_tsvector('english', sse_entry_text(sse.entry)) @@ plainto_tsquery" in store
-        assert "s.status != 'archived'" in store
+        assert "s.status NOT IN ('archived','failed')" in store
+
+    def test_every_cte_excludes_archived_and_failed(self):
+        """All three CTEs (title / legacy content / store content) drop
+        ``status IN ('archived','failed')``. ``'failed'`` is ProviderAgent's
+        verdict on a worker session whose dispatch errored: the transcript stays
+        reachable from the session LISTS (visibility is deliberately unchanged),
+        but a dead worker must not compete with real conversations for search
+        hits. A new turn on such a session revives it to ``'active'`` and it
+        becomes searchable again."""
+        sql = self._captured_search_sql()
+
+        assert sql.count("s.status NOT IN ('archived','failed')") == 3
+        assert "s.status != 'archived'" not in sql
 
     def test_match_count_window_before_dedupe(self):
         """match_count is a COUNT(*) OVER (PARTITION BY id) computed in the pre-
@@ -898,6 +912,13 @@ class TestSearchSessionsPaginatedSql:
             assert "session_store_entries sse" in sql
             assert "s.sdk_session_id = sse.session_id" in sql
             assert "COUNT(*) OVER (PARTITION BY id) as match_count" in sql
+
+    def test_paginated_excludes_archived_and_failed_in_every_cte(self):
+        """Same exclusion as the non-paginated variant — a failed worker session
+        must not surface in either search surface."""
+        for sql in self._captured_paginated_sql():
+            assert sql.count("s.status NOT IN ('archived','failed')") == 3
+            assert "s.status != 'archived'" not in sql
 
 
 # =============================================================================

@@ -530,6 +530,36 @@ class SessionRuntime:
                     exc_info=True,
                 )
 
+            # 4c. Failed-worker revive. ``sessions.status == 'failed'`` is
+            #     stamped by ProviderAgent on a worker session whose dispatch
+            #     ended in the registry status "error" — a verdict about a run
+            #     that is OVER, not a property of the session. A turn STARTING
+            #     is proof the session is live again, so clear it here rather
+            #     than at enqueue time: this is the single choke point EVERY
+            #     turn passes through (a user message typed into the worker
+            #     session, a SendMessage-style resume, a scheduler wake), and a
+            #     turn that only ever sat queued should not un-fail anything.
+            #     ``session_row`` was read at the top of this method, moments
+            #     ago. Best-effort: a status write must never delay/kill a turn.
+            try:
+                from app.core.provider_agent import WORKER_FAILED_STATUS
+
+                if (session_row or {}).get("status") == WORKER_FAILED_STATUS:
+                    from app.db import database as _database
+
+                    await asyncio.to_thread(
+                        _database.update_session, sid, status="active"
+                    )
+                    logger.info(
+                        "SessionRuntime: revived failed session %s to active at "
+                        "turn %s start", sid, tid,
+                    )
+            except Exception:
+                logger.warning(
+                    "SessionRuntime: failed-session revive failed for %s", sid,
+                    exc_info=True,
+                )
+
             # 5. Recorder bound to the INJECTED lease/turn ids (no self-claim).
             recorder = await TurnRecorder.create_for_run(
                 sid,

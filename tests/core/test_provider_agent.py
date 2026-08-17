@@ -370,15 +370,32 @@ class _FakeTurnManager:
 def dispatch_env(monkeypatch):
     """Stub every out-of-process dependency of dispatch_worker.
 
-    Returns a namespace with the fake turn manager and the recorded
-    ``create_session`` kwargs.
+    Returns a namespace with the fake turn manager, the recorded
+    ``create_session`` kwargs, the recorded ``update_session`` calls (the
+    worker's own status verdict) and the terminal frames handed to
+    ``turn_scheduler.on_task_terminal`` (the caller wake).
     """
     from app.core import turn_manager as tm_mod
+    from app.core import turn_scheduler as ts_mod
     from app.core import project_resolver
     from app.db import database as db
 
     created = {}
+    updates = []
+    terminal_frames = []
     fake_tm = _FakeTurnManager()
+
+    def _update_session(session_id, **kwargs):
+        updates.append({"session_id": session_id, **kwargs})
+        return None
+
+    monkeypatch.setattr(db, "update_session", _update_session)
+
+    async def _on_task_terminal(session_id, frame):
+        terminal_frames.append((session_id, dict(frame)))
+        return None
+
+    monkeypatch.setattr(ts_mod, "on_task_terminal", _on_task_terminal)
 
     monkeypatch.setattr(tm_mod, "submit", fake_tm.submit)
     monkeypatch.setattr(tm_mod, "wait_session_idle", fake_tm.wait_session_idle)
@@ -413,6 +430,8 @@ def dispatch_env(monkeypatch):
     class _Env:
         tm = fake_tm
         create_kwargs = created
+        status_updates = updates
+        wakes = terminal_frames
 
     return _Env()
 
@@ -1187,3 +1206,202 @@ class TestDispatchWorkerParentFeed:
         assert outcome.ok
         assert outcome.report == "the worker's report"
         task_registry.clear_session("parent-1")
+
+
+# ---------------------------------------------------------------------------
+# Failed-status verdict + proactive caller wake
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def _clean_parent_registry():
+    from app.core.task_registry import task_registry
+    task_registry.clear_session("parent-1")
+    yield
+    task_registry.clear_session("parent-1")
+
+
+@pytest.mark.usefixtures("_clean_parent_registry")
+class TestWorkerFailedStatus:
+    """FEATURE 1a — a worker whose dispatch ends in the registry status
+    ``"error"`` stamps ``sessions.status = 'failed'`` on its OWN row."""
+
+    def test_errored_worker_marks_its_session_failed(
+        self, dispatch_env, monkeypatch
+    ):
+        monkeypatch.setattr(
+            pa, "final_turn_outcome",
+            lambda sid: {
+                "usage": {}, "error": "provider blew up", "interrupted": False,
+                "terminal_found": True,
+            },
+        )
+
+        outcome = _dispatch()
+
+        assert not outcome.ok
+        assert dispatch_env.status_updates == [
+            {"session_id": outcome.session_id, "status": "failed"}
+        ]
+
+    def test_completed_worker_never_touches_its_status(self, dispatch_env):
+        outcome = _dispatch()
+
+        assert outcome.ok
+        assert dispatch_env.status_updates == []
+
+    def test_timed_out_worker_marks_its_session_failed(self, dispatch_env):
+        """A worker that never went idle keeps the initial ``"error"`` status,
+        so its row is stamped too."""
+        dispatch_env.tm.idle = False
+
+        outcome = _dispatch()
+
+        assert not outcome.ok
+        assert dispatch_env.status_updates == [
+            {"session_id": outcome.session_id, "status": "failed"}
+        ]
+
+    def test_status_write_failure_never_breaks_the_dispatch(
+        self, dispatch_env, monkeypatch
+    ):
+        from app.db import database as db
+
+        def _boom(*a, **k):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(db, "update_session", _boom)
+        monkeypatch.setattr(
+            pa, "final_turn_outcome",
+            lambda sid: {
+                "usage": {}, "error": "provider blew up", "interrupted": False,
+                "terminal_found": True,
+            },
+        )
+
+        outcome = _dispatch()
+
+        assert not outcome.ok
+        assert outcome.error == "provider blew up"
+
+
+@pytest.mark.usefixtures("_clean_parent_registry")
+class TestWorkerWakesItsCaller:
+    """FEATURE 2 — an MCP-dispatched worker has no SDK task, so nothing in the
+    notification pipeline ever fires for it. Dispatch therefore (a) claims
+    OWNERSHIP of the worker's terminal for the parent's notification lanes and
+    (b) calls the scheduler seam itself on every terminal status."""
+
+    def test_dispatch_claims_ownership_of_the_worker_task(self, dispatch_env):
+        """``is_own_background_task`` is the gate on BOTH the terminal chip and
+        the scheduler wake. Before this feature it was False for every worker
+        (no SDK task, no recorded launch), so both lanes dropped it."""
+        from app.core.task_registry import task_registry
+
+        outcome = _dispatch()
+
+        assert task_registry.is_own_background_task("parent-1", outcome.session_id)
+
+    def test_launch_key_matches_the_registry_rows_tool_use_id(self, dispatch_env):
+        """Consistency check — ownership resolves via the registry record's
+        ``tool_use_id``, and the park gate resolves a launch via that SAME id.
+        A mismatch would either drop the wake or park the session forever."""
+        from app.core.task_registry import task_registry
+
+        outcome = _dispatch(tool_use_id="toolu-abc")
+
+        record = task_registry.get_task("parent-1", outcome.session_id)
+        assert record["toolUseId"] == "toolu-abc"
+        assert task_registry.was_background_launch("parent-1", "toolu-abc")
+        (_sid, frame), = dispatch_env.wakes
+        assert frame["tool_use_id"] == "toolu-abc"
+
+    def test_launch_key_defaults_to_the_worker_session_id(self, dispatch_env):
+        from app.core.task_registry import task_registry
+
+        outcome = _dispatch()
+
+        assert task_registry.was_background_launch("parent-1", outcome.session_id)
+        (_sid, frame), = dispatch_env.wakes
+        assert frame["tool_use_id"] == outcome.session_id
+
+    def test_park_gate_resolves_once_the_worker_is_terminal(self, dispatch_env):
+        """#803 ruling: ``complete_task`` must NOT prune the cumulative launch
+        set — the GATE instead stops counting a launch whose registry record is
+        terminal. Verify the two agree, or the caller parks forever."""
+        from app.core.task_registry import task_registry
+
+        _dispatch()
+
+        assert not task_registry.has_unresolved_background_launches("parent-1")
+        assert not task_registry.has_active_background_work("parent-1")
+
+    def test_completed_worker_wakes_the_caller(self, dispatch_env):
+        outcome = _dispatch()
+
+        (sid, frame), = dispatch_env.wakes
+        assert sid == "parent-1"
+        # task_id is MANDATORY — a frame without it is dropped by the
+        # contentless-frame choke before any lane sees it.
+        assert frame["task_id"] == outcome.session_id
+        assert frame["status"] == "completed"
+        assert frame["summary"] == "the worker's report"
+        assert frame["origin"] == "provider_agent"
+
+    def test_errored_worker_wakes_the_caller_with_the_failure_summary(
+        self, dispatch_env, monkeypatch
+    ):
+        monkeypatch.setattr(
+            pa, "final_turn_outcome",
+            lambda sid: {
+                "usage": {}, "error": "provider blew up", "interrupted": False,
+                "terminal_found": True,
+            },
+        )
+
+        outcome = _dispatch()
+
+        (sid, frame), = dispatch_env.wakes
+        assert sid == "parent-1"
+        assert frame["task_id"] == outcome.session_id
+        assert frame["status"] == "error"
+        # The registry row's failure summary, not the bare preview.
+        assert frame["summary"].startswith("worker failed")
+        assert "provider blew up" in frame["summary"]
+
+    def test_torn_down_worker_does_not_wake_the_caller(
+        self, dispatch_env, monkeypatch
+    ):
+        """Supervisor teardown coalesces its kills into ONE system note by
+        ruling P12 — the non-torn_down branch is the only one that wakes."""
+        from app.core import provider_agent_supervisor as sup
+
+        real_register = sup.register_worker
+
+        def _register_and_tear_down(record):
+            supervised = real_register(record)
+            supervised.torn_down = True
+            supervised.torn_down_reason = "turn_end"
+            return supervised
+
+        monkeypatch.setattr(sup, "register_worker", _register_and_tear_down)
+
+        outcome = _dispatch()
+
+        assert not outcome.ok
+        assert dispatch_env.wakes == []
+        assert dispatch_env.status_updates == []
+
+    def test_wake_failure_never_breaks_the_dispatch(
+        self, dispatch_env, monkeypatch
+    ):
+        from app.core import turn_scheduler as ts_mod
+
+        async def _boom(session_id, frame):
+            raise RuntimeError("scheduler down")
+
+        monkeypatch.setattr(ts_mod, "on_task_terminal", _boom)
+
+        outcome = _dispatch()
+
+        assert outcome.ok
+        assert outcome.report == "the worker's report"

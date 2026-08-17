@@ -62,7 +62,12 @@ logger = logging.getLogger(__name__)
 CLI_ENV_MARKER = "AI_SHUFFLE_MANAGED_BY"
 
 # sessions.status values that would read as in-flight. Current code never
-# writes these (only "active"/"archived"), so any hit is drift — reset it.
+# writes these — the whole written vocabulary is "active" / "archived" /
+# "failed" (the last one stamped by ProviderAgent on a worker session whose
+# dispatch errored, see ``app.core.provider_agent.WORKER_FAILED_STATUS``) — so
+# any hit here is drift and gets reset. "failed" is deliberately NOT in this
+# set: it is a settled verdict about a run that is over, not an in-flight
+# state, and a boot must not erase it. The session's next turn revives it.
 _LIVE_LOOKING_STATUSES = ("streaming", "parked", "running")
 
 
