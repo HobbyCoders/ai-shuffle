@@ -259,6 +259,32 @@ async def _spawn_background(
     return task
 
 
+def _discover_agent_registry(cwd: Optional[str]) -> Optional[Dict[str, Any]]:
+    """``{name: AgentDefinition}`` for the file/plugin agents visible from ``cwd``.
+
+    The shape ``app.core.task_dispatch.dispatch_task_tool`` expects for its
+    ``agent_registry`` seam — identical to the mapping ``NativeLoop`` publishes
+    on ``ctx.extra["agent_registry"]``, built from the same
+    ``fluid.context.agents.discover_agents`` walk (project ``.claude/agents``,
+    the global dir, and enabled plugins, ruling CE6).
+
+    This exists because the DELEGATED (claude CLI) leg runs no fluid engine:
+    its Task tool is this MCP one, so without a registry a ``.claude/agents``
+    definition is advertised in the prompt yet answers "Unknown agent" on
+    dispatch. Best effort in every direction — no cwd, no fluid, or a bad
+    definition returns None and dispatch falls back to DB agents only.
+    """
+    if not cwd:
+        return None
+    try:
+        from fluid.context.agents import discover_agents
+
+        return {d.name: d for d in discover_agents(cwd)}
+    except Exception:  # noqa: BLE001 — discovery must never fail a dispatch
+        logger.debug("agent discovery failed for cwd=%s", cwd, exc_info=True)
+        return None
+
+
 # ============================================================================
 # Tool factory
 # ============================================================================
@@ -269,6 +295,7 @@ def create_builtin_tools_server(
     project_id: Optional[str] = None,
     is_admin: bool = False,
     model: Optional[str] = None,
+    cwd: Optional[str] = None,
 ) -> Optional[Any]:
     """
     Build the ``mcp__builtins__*`` MCP server for a session.
@@ -282,6 +309,10 @@ def create_builtin_tools_server(
             destructive operations like CronDelete).
         model: The current turn's effective model, persisted by ScheduleWakeup
             so the wake replays it instead of running on the profile default.
+        cwd: The session's resolved working directory. Task uses it to discover
+            the file/plugin agent definitions this session can delegate to —
+            the delegated (CLI) leg has no fluid engine to publish them, so
+            without it those agents are advertised but not dispatchable.
 
     Returns:
         SDK MCP server config, or ``None`` if the SDK is unavailable.
@@ -450,7 +481,15 @@ def create_builtin_tools_server(
         from app.core.task_dispatch import dispatch_task_tool
 
         payload = await dispatch_task_tool(
-            args, caller_session_id=session_id, caller_profile_id=profile_id
+            args,
+            caller_session_id=session_id,
+            caller_profile_id=profile_id,
+            # Leg parity (ruling CE6): on a native leg fluid publishes the
+            # discovered definitions on ``ctx.extra["agent_registry"]``, but the
+            # delegated CLI leg has no fluid engine — so discover them here, at
+            # CALL time (a definition added mid-session is picked up) and only
+            # when a dispatch actually happens.
+            agent_registry=_discover_agent_registry(cwd),
         )
         return _ok(payload) if payload.get("ok") else _err(
             payload.get("error") or "Task dispatch failed.", **{

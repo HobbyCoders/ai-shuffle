@@ -137,9 +137,14 @@ SUPPLIED BY FLUID ITSELF, WITH NO WIRING HERE (Claude-ecosystem compat, CE1):
     same list: the profile's context-declared agents (2026-08-17 ruling —
     ``enabled_agents``/``agent_invoke_mode`` decide what is DECLARED, never what
     may be dispatched) are merged with the discovered ones, name+description
-    only. Dispatch stays ours: the Task dispatcher injected below resolves app
-    agents first and falls back to that registry (``app.core.task_dispatch``),
-    with no allowlist between it and any agent that resolves.
+    only. BOTH legs get the block: native legs through the compiled prompt, the
+    delegated leg through whichever prompt part the CLI reads (the compiled
+    prompt under PROMPT_FULL_REPLACE, the appended text otherwise — see
+    ``_with_agents_index``), so a Claude-subscription caller can name a
+    cross-provider agent too. Dispatch stays ours: the Task dispatcher injected
+    below resolves app agents first and falls back to that registry
+    (``app.core.task_dispatch``), with no allowlist between it and any agent
+    that resolves.
 """
 
 from __future__ import annotations
@@ -316,10 +321,22 @@ class HarnessAdapter(ProviderAdapter):
             from app.core.config import settings
 
             if settings.prompt_full_replace:
+                # The compiled prompt already carries the merged agents index
+                # (``_compile_prompt_sections`` slots it in), so nothing is
+                # added here — that is what keeps the block un-doubled.
                 delegated_system = self._compile_prompt(system, append_system, options)
                 delegated_append = None
             else:
-                delegated_system, delegated_append = system, append_system
+                # Append mode still owes the model the delegation catalog. The
+                # CLI builds its own prompt here, so without this a
+                # Claude-subscription caller would be the ONE leg that never
+                # learns which agents exist — it could not name a target for
+                # the Task tool at all. Same block as the native leg, attached
+                # to whichever part the CLI actually reads.
+                agents_index, _ = _agent_context(options)
+                delegated_system, delegated_append = _with_agents_index(
+                    system, append_system, agents_index
+                )
             self._engine = DelegatedLoop(
                 store=self._store,
                 model=options.model,
@@ -1867,6 +1884,47 @@ def _context_declared_agents(options: SessionOptions) -> List[Dict[str, str]]:
     return out
 
 
+def _agents_header() -> str:
+    """fluid's own "Available agent types" heading, with a literal fallback.
+
+    Shared by the index builder and the delegated-leg idempotence check so the
+    two can never drift apart (a header the check does not recognise would
+    double the block on the CLI's prompt).
+    """
+    try:
+        from fluid.context.compiler import AGENTS_HEADER
+
+        return AGENTS_HEADER
+    except Exception:  # noqa: BLE001
+        return "# Available agent types"
+
+
+def _with_agents_index(
+    system: Optional[str], append: Optional[str], index: Optional[str]
+) -> Tuple[Optional[str], Optional[str]]:
+    """Attach the agents index to the delegated leg's prompt parts.
+
+    ``DelegatedLoop`` spends exactly ONE of the two on argv —
+    ``--append-system-prompt`` when it has append text, else
+    ``--system-prompt`` — so the block must ride the part the CLI will actually
+    read: the append text when there is one (a preset profile, the common
+    shape), else a plain-string full replacement, else a bare append that
+    leaves the CLI's own preset intact.
+
+    Idempotent by header check: a part that already advertises agents is
+    returned untouched, so neither a reconnect nor a profile prompt that
+    already carries an index can produce two blocks.
+    """
+    if not index:
+        return system, append
+    header = _agents_header().split("\n", 1)[0]
+    if append:
+        return system, (append if header in append else f"{append}\n\n{index}")
+    if system:
+        return (system if header in system else f"{system}\n\n{index}"), append
+    return system, index
+
+
 def _agent_context(options: SessionOptions) -> Tuple[Optional[str], List[Dict[str, Any]]]:
     """``(agents index text, host-declared descriptors)`` for a fluid leg.
 
@@ -1906,12 +1964,8 @@ def _agent_context(options: SessionOptions) -> Tuple[Optional[str], List[Dict[st
 
     index: Optional[str] = None
     if lines:
-        try:
-            from fluid.context.compiler import AGENTS_HEADER
-        except Exception:  # noqa: BLE001
-            AGENTS_HEADER = "# Available agent types"
         body = "\n".join(f"- {name}: {lines[name]}" for name in sorted(lines))
-        index = f"{AGENTS_HEADER}\n{body}"
+        index = f"{_agents_header()}\n{body}"
 
     descriptors: List[Dict[str, Any]] = [
         {"agentType": entry["name"], "source": "app", "description": entry["description"]}

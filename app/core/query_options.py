@@ -1044,6 +1044,10 @@ def build_options_from_profile(
             project_id=project.get("id") if project else None,
             is_admin=not api_user_id,
             model=model_to_use,
+            # The resolved cwd, so the bridged Task tool can discover the same
+            # file/plugin agent definitions a native leg gets from fluid — the
+            # delegated (CLI) leg has no engine to publish them (ruling CE6).
+            cwd=working_dir,
         )
         if builtins_srv:
             mcp_servers_dict["builtins"] = builtins_srv
@@ -1316,9 +1320,11 @@ def build_options_from_profile(
     # ruling, superseding A10): name + description ONLY, resolved from
     # ``agent_invoke_mode``/``enabled_agents``. The fluid HarnessAdapter projects
     # it onto SessionOptions.extra["declared_agents"] and merges it into the
-    # compiled prompt's "Available agent types" index next to the file/plugin
-    # agents fluid discovers. It advertises, it does not restrict — Task
-    # dispatch runs any agent that resolves, declared or not.
+    # "Available agent types" index next to the file/plugin agents fluid
+    # discovers — the compiled prompt on a native leg, the appended
+    # system-prompt text on the delegated (Claude-subscription) one, so both
+    # caller directions can name a cross-provider target. It advertises, it does
+    # not restrict — Task dispatch runs any agent that resolves, declared or not.
     try:
         from app.core.agent_context import declared_agents as _declared_agents
 

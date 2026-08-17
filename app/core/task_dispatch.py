@@ -41,6 +41,13 @@ this module is what makes those names dispatchable, as a FALLBACK behind the
 app's own ``agents`` table (host wins a name collision, matching fluid's own
 doctrine and its registry-seam precedence).
 
+The DELEGATED (claude CLI) leg runs no fluid engine, so nothing publishes that
+registry there. Its bridged ``mcp__builtins__Task`` runs the same discovery
+itself from the session's cwd (``app.mcp.builtin_tools._discover_agent_registry``)
+and passes the result to ``agent_registry`` below — the two legs therefore
+resolve the same names, which is what the adapter's shared agents index
+promises the model on both.
+
 A file agent has no ``agents`` row, so it borrows the CALLER's profile (and with
 it the provider binding, tools and MCP surface) and its markdown body rides the
 worker's system prompt as an override block. Consequences, deliberate:

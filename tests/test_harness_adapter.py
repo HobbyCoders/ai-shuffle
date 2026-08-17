@@ -1512,8 +1512,14 @@ async def test_set_model_canonicalizes_on_the_anthropic_leg(monkeypatch, tmp_pat
 
 @pytest.mark.asyncio
 async def test_delegated_append_mode_bypasses_compiler(monkeypatch, tmp_path):
-    """Flag off (default): the delegated leg's system/append pass through
-    byte-identically — the CLI gathers its own env/instructions."""
+    """Flag off (default): the delegated leg's system/append are NOT compiled —
+    the CLI gathers its own env and instruction files.
+
+    The one thing the app does add here is the agents index (the CLI cannot
+    know about DB agents), so the assertion is "the app's text, then at most
+    that block" rather than byte-identity — see
+    test_delegated_append_mode_advertises_agents.
+    """
     import app.core.provider.harness_adapter as ha
     from fluid.tools.registry import ToolRegistry
 
@@ -1528,7 +1534,11 @@ async def test_delegated_append_mode_bypasses_compiler(monkeypatch, tmp_path):
         )
     )
     assert _CapturingLoop.captured["system"] is None
-    assert _CapturingLoop.captured["append_system_prompt"] == "APPEND TEXT"
+    append = _CapturingLoop.captured["append_system_prompt"]
+    assert append.startswith("APPEND TEXT")
+    # Compiler markers: none of fluid's gathering may appear on this leg.
+    assert "# Environment" not in append
+    assert "# Skills" not in append
 
 
 @pytest.mark.asyncio
@@ -3383,3 +3393,122 @@ async def test_plugin_agents_reach_the_dispatch_registry(monkeypatch, agent_work
     assert set(registry) == {"researcher", "myplug:reviewer"}
     resolved = td.resolve_registry_agent("myplug:reviewer", registry)
     assert resolved is not None and resolved.body.strip() == "PLUGIN AGENT PROMPT"
+
+
+# ─── the same index on the DELEGATED (Claude-subscription) leg ───────────────
+#
+# The Claude-sub caller direction: in append mode (the default) the CLI builds
+# its own prompt, so the app injects nothing and the one leg that never learned
+# which agents exist was the subscription one — it could not name a target for
+# the Task tool at all. The block now rides whichever prompt part the CLI reads.
+
+
+def _delegated_agents_options(cwd, declared=None):
+    from fluid.tools.registry import ToolRegistry
+
+    extra = {"fluid_registry": ToolRegistry()}
+    if declared is not None:
+        extra["declared_agents"] = declared
+    return SessionOptions(
+        model="fable",
+        system_prompt={"type": "preset", "append": "APPEND TEXT"},
+        cwd=str(cwd),
+        extra=extra,
+    )
+
+
+@pytest.mark.asyncio
+async def test_delegated_append_mode_advertises_agents(monkeypatch, agent_workspace):
+    """Default (append) mode: the merged index rides --append-system-prompt,
+    so a Claude-sub caller sees file, plugin AND DB agents."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+
+    await ha.HarnessAdapter().connect(
+        _delegated_agents_options(
+            agent_workspace, declared=[{"name": "Helper", "description": "Helps out"}]
+        )
+    )
+    append = _CapturingLoop.captured["append_system_prompt"]
+    # The CLI reads --append-system-prompt OR --system-prompt, never both.
+    assert _CapturingLoop.captured["system"] is None
+    assert append.startswith("APPEND TEXT")
+    assert append.count("# Available agent types") == 1
+    assert "- researcher: Reads the codebase" in append      # file agent
+    assert "- myplug:reviewer: Reviews diffs" in append       # plugin agent
+    assert "- Helper: Helps out" in append                    # DB agent
+    # Index-only, exactly like the native leg: no definition bodies.
+    assert "PLUGIN AGENT PROMPT" not in append
+    assert "BODY" not in append
+
+
+@pytest.mark.asyncio
+async def test_delegated_plain_prompt_carries_the_index(monkeypatch, agent_workspace):
+    """A full-replacement (plain string) profile prompt is the part the CLI
+    reads, so the index has to ride THAT one instead."""
+    import app.core.provider.harness_adapter as ha
+    from fluid.tools.registry import ToolRegistry
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+
+    await ha.HarnessAdapter().connect(
+        SessionOptions(
+            model="fable",
+            system_prompt="BASE PROMPT",
+            cwd=str(agent_workspace),
+            extra={
+                "fluid_registry": ToolRegistry(),
+                "declared_agents": [{"name": "Helper", "description": "Helps out"}],
+            },
+        )
+    )
+    system = _CapturingLoop.captured["system"]
+    assert _CapturingLoop.captured["append_system_prompt"] is None
+    assert system.startswith("BASE PROMPT")
+    assert system.count("# Available agent types") == 1
+    assert "- Helper: Helps out" in system
+
+
+@pytest.mark.asyncio
+async def test_delegated_full_replace_does_not_double_the_index(
+    monkeypatch, agent_workspace
+):
+    """PROMPT_FULL_REPLACE already slots the index into the compiled prompt —
+    the append-mode injection must not add a second copy."""
+    import app.core.provider.harness_adapter as ha
+    from app.core.config import settings
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+    monkeypatch.setattr(settings, "prompt_full_replace", True)
+
+    await ha.HarnessAdapter().connect(
+        _delegated_agents_options(
+            agent_workspace, declared=[{"name": "Helper", "description": "Helps out"}]
+        )
+    )
+    system = _CapturingLoop.captured["system"]
+    assert _CapturingLoop.captured["append_system_prompt"] is None
+    assert system.count("# Available agent types") == 1
+    assert "- Helper: Helps out" in system
+
+
+def test_with_agents_index_is_idempotent():
+    """A part that already advertises agents is returned untouched, so no
+    reconnect (or profile prompt that carries its own index) can double it."""
+    import app.core.provider.harness_adapter as ha
+
+    index = f"{ha._agents_header()}\n- Helper: Helps out"
+    # Append text wins (it is the flag the CLI actually spends).
+    assert ha._with_agents_index("BASE", "APP", index) == ("BASE", f"APP\n\n{index}")
+    # Already present -> unchanged, both ways round.
+    assert ha._with_agents_index(None, f"APP\n\n{index}", index) == (
+        None, f"APP\n\n{index}",
+    )
+    assert ha._with_agents_index(f"BASE\n\n{index}", None, index) == (
+        f"BASE\n\n{index}", None,
+    )
+    # No prompt at all -> a bare append, which keeps the CLI's own preset.
+    assert ha._with_agents_index(None, None, index) == (None, index)
+    # Nothing to advertise -> untouched.
+    assert ha._with_agents_index("BASE", None, None) == ("BASE", None)

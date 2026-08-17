@@ -485,6 +485,108 @@ def test_dispatcher_reads_the_agent_registry_off_the_ctx(agents):
     assert "careful researcher" in seen["system_prompt_append"]
 
 
+# ─── delegated-leg Task parity (the bridged mcp__builtins__Task) ─────────────
+#
+# The native leg's Task reads fluid's discovered definitions off
+# ctx.extra["agent_registry"]. The delegated (claude CLI) leg runs no fluid
+# engine, so its Task tool discovers them itself from the session's cwd —
+# without that a .claude/agents definition is advertised in the prompt (the
+# adapter injects the same index there) and then answers "Unknown agent".
+
+
+def _builtin_task_handler(session_id, profile_id, cwd):
+    """The real mcp__builtins__Task handler, invoked without an MCP transport."""
+    import claude_agent_sdk as sdk
+    import app.mcp.builtin_tools as bt
+
+    captured = {}
+    real_create = sdk.create_sdk_mcp_server
+
+    def _spy(name, version, tools):
+        captured["tools"] = tools
+        return real_create(name=name, version=version, tools=tools)
+
+    with patch.object(sdk, "create_sdk_mcp_server", side_effect=_spy):
+        bt.create_builtin_tools_server(
+            session_id=session_id, profile_id=profile_id, project_id=None, cwd=cwd,
+        )
+    tools = {t.name: t for t in captured["tools"]}
+    return tools["Task"].handler
+
+
+def _envelope(result):
+    import json
+
+    return json.loads(result["content"][0]["text"])
+
+
+@pytest.fixture()
+def file_agent_project(tmp_path, monkeypatch):
+    """A cwd holding one .claude/agents definition, with HOME redirected so the
+    developer's own global/plugin agents cannot leak into the assertion."""
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    project = tmp_path / "proj"
+    agent_dir = project / ".claude" / "agents"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "researcher.md").write_text(
+        "---\nname: researcher\ndescription: Reads the codebase\n---\n"
+        "You are a careful researcher. Read before you write.\n",
+        encoding="utf-8",
+    )
+    return project
+
+
+def test_delegated_task_tool_dispatches_a_file_agent(agents, file_agent_project):
+    _mk_session(agents, "s-cli", "root-agent")
+    handler = _builtin_task_handler("s-cli", "root-agent", str(file_agent_project))
+    seen = {}
+
+    async def fake_worker(**kwargs):
+        seen.update(kwargs)
+        return WorkerOutcome(ok=True, session_id="w-cli", report="found it")
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        payload = _envelope(asyncio.run(
+            handler({"agent": "researcher", "prompt": "go"})
+        ))
+
+    assert payload["success"] is True
+    assert payload["agent"] == "researcher"
+    assert seen["profile_id"] == "root-agent"        # borrowed, as on the native leg
+    assert "careful researcher" in seen["system_prompt_append"]
+
+
+def test_delegated_task_tool_without_a_cwd_still_serves_db_agents(agents):
+    """No cwd (a session built before the seam, or a DB-less spawn): discovery
+    is skipped, DB agents keep working, a file name is an honest miss."""
+    _mk_session(agents, "s-cli-2", "root-agent")
+    handler = _builtin_task_handler("s-cli-2", "root-agent", None)
+
+    async def fake_worker(**kwargs):
+        return WorkerOutcome(ok=True, session_id="w2", report="r")
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        ok = _envelope(asyncio.run(handler({"agent": "helper", "prompt": "go"})))
+        miss = _envelope(asyncio.run(handler({"agent": "researcher", "prompt": "go"})))
+
+    assert ok["success"] is True and ok["agent"] == "helper"
+    assert miss["success"] is False and "Unknown agent" in miss["error"]
+
+
+def test_discover_agent_registry_shape(file_agent_project):
+    """{name: definition}, the same mapping NativeLoop publishes."""
+    import app.mcp.builtin_tools as bt
+
+    registry = bt._discover_agent_registry(str(file_agent_project))
+    assert set(registry) == {"researcher"}
+    assert registry["researcher"].body.strip().startswith("You are a careful")
+    assert bt._discover_agent_registry(None) is None
+
+
 # ─── worker leg resolution (ruling 2026-08-17, as refined) ───────────────────
 #
 # Rule 1  default = the TARGET's own provider+model, cross-provider included.
@@ -573,6 +675,97 @@ def test_rule1_claude_sub_caller_to_claude_sub_target_is_untouched(providers):
     assert payload["ok"] is True
     assert seen["provider_id"] is None and seen["model_id"] is None
     assert "note" not in payload
+
+
+# --- rule 1, the CLAUDE-SUB CALLER direction ---------------------------------
+#
+# The mirror of the tests above: the caller sits on the Claude subscription
+# (delegated CLI leg — a profile with no ``provider`` binding at all) and
+# dispatches an agent bound to a real provider row. Rule 2 keys on the TARGET
+# being Claude-sub, so none of it applies here: the target's own provider+model
+# must survive verbatim, exactly as for a native-leg caller.
+
+
+def test_claude_sub_caller_to_provider_bound_target_keeps_the_targets_binding(
+    providers,
+):
+    payload, seen = _spawn(
+        providers, {"agent": "openai-agent", "prompt": "go"}, "s-cs1", "root-agent",
+    )
+    assert payload["ok"] is True
+    assert seen["provider_id"] == "openai-1"
+    # None = inherit the TARGET profile's own configured model (gpt-4o).
+    assert seen["model_id"] is None
+    assert "note" not in payload
+
+
+def test_claude_sub_caller_reaches_every_bound_provider(providers):
+    """Not just the first one: a Claude-sub caller mixes and matches freely."""
+    payload, seen = _spawn(
+        providers, {"agent": "xai-agent", "prompt": "go"}, "s-cs2", "root-agent",
+    )
+    assert payload["ok"] is True
+    assert seen["provider_id"] == "xai-1"
+    assert seen["model_id"] is None
+
+
+def test_claude_sub_caller_override_resolves_to_the_curating_provider(providers):
+    """Rule 3 from the subscription side: the SLUG picks the leg, so an override
+    no Claude leg could serve binds the worker to the provider that curates it."""
+    payload, seen = _spawn(
+        providers,
+        {"agent": "claude-alias", "prompt": "go", "model": "gpt-4o"},
+        "s-cs3", "root-agent",
+    )
+    assert payload["ok"] is True
+    assert seen["provider_id"] == "openai-1"
+    assert seen["model_id"] == "gpt-4o"
+
+
+def test_claude_sub_caller_override_can_leave_the_targets_provider(providers):
+    """A provider-BOUND target plus a slug its own provider does not curate:
+    the override still resolves, to the provider that does."""
+    payload, seen = _spawn(
+        providers,
+        {"agent": "openai-agent", "prompt": "go", "model": "grok-9"},
+        "s-cs4", "root-agent",
+    )
+    assert payload["ok"] is True
+    assert seen["provider_id"] == "xai-1"
+    assert seen["model_id"] == "grok-9"
+    assert "xAI" in payload["note"]
+
+
+def test_claude_sub_caller_override_stays_on_the_targets_provider(providers):
+    """...and when the target's own provider curates the slug, it stays put."""
+    payload, seen = _spawn(
+        providers,
+        {"agent": "openai-agent", "prompt": "go", "model": "gpt-5.6-terra"},
+        "s-cs5", "root-agent",
+    )
+    assert payload["ok"] is True
+    assert seen["provider_id"] == "openai-1"
+    assert seen["model_id"] == "gpt-5.6-terra"
+    assert "note" not in payload
+
+
+def test_claude_sub_caller_to_openrouter_bound_target_is_refused(providers):
+    """CURRENT admission rule, recorded rather than endorsed: an OpenRouter row
+    is not ``environment.is_provider_servable``, so an agent bound to one cannot
+    be a worker target — from ANY caller, Claude-sub included. Widening that set
+    is a product decision (see the is_provider_servable docstring)."""
+    from app.db import database
+
+    database.create_profile(
+        "openrouter-agent", "OpenRouter Agent", None,
+        {"model": "grok-9", "provider": "openrouter-1"},
+    )
+    payload, seen = _spawn(
+        providers, {"agent": "openrouter-agent", "prompt": "go"}, "s-cs6", "root-agent",
+    )
+    assert payload["ok"] is False
+    assert "cannot serve worker sessions" in payload["error"]
+    assert seen == {}
 
 
 # --- rule 2: the Claude-subscription leg is the one special case -------------
