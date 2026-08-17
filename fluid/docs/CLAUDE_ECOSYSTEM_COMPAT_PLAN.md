@@ -128,7 +128,7 @@ Context sources for this plan:
 
 ## ACCEPTANCE (per wave)
 
-- Full `pytest` green in omni-harness after each wave.
+- Full `pytest` green in fluid after each wave.
 - W1: imports expand (relative/`~`/absolute), depth-5 cut, cycle-safe, code
   fences and inline spans inert, unreadable literal kept, CLAUDE.local.md +
   AGENTS.override.md ordering tests.
