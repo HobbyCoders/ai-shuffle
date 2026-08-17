@@ -16,13 +16,15 @@ from fluid.tools.builtins._util import WalkState, glob_to_regex, truncate, walk_
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 MAX_RESULTS = 200
+MAX_LIMIT = 5000
 DEADLINE_S = 10.0
 
 SPEC = ToolSpec(
     name="Glob",
     description=(
         "Find files by glob pattern (e.g. **/*.py). Returns paths sorted by "
-        f"modification time, newest first, capped at {MAX_RESULTS}."
+        f"modification time, newest first (default cap {MAX_RESULTS}, raise "
+        f"with limit up to {MAX_LIMIT})."
     ),
     input_schema={
         "type": "object",
@@ -35,6 +37,13 @@ SPEC = ToolSpec(
                 ),
             },
             "path": {"type": "string", "description": "Directory to search (default cwd)."},
+            "limit": {
+                "type": "integer",
+                "description": (
+                    f"Maximum matches to return (default {MAX_RESULTS}). Raise it "
+                    "or narrow the pattern when you expect many results."
+                ),
+            },
         },
         "required": ["pattern"],
     },
@@ -42,23 +51,38 @@ SPEC = ToolSpec(
 )
 
 
+def _clamp_limit(raw: Any) -> int:
+    """Agent-settable result cap, clamped to [1, MAX_LIMIT]. Junk → default."""
+    if raw is None:
+        return MAX_RESULTS
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return MAX_RESULTS
+    return max(1, min(MAX_LIMIT, value))
+
+
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     root = Path(input.get("path") or ctx.cwd)
     if not root.is_absolute():
         root = (Path(ctx.cwd) / root).resolve()
-    return await asyncio.to_thread(_glob, input["pattern"], root)
+    limit = _clamp_limit(input.get("limit"))
+    return await asyncio.to_thread(_glob, input["pattern"], root, limit)
 
 
-def _glob(pattern: str, root: Path) -> ToolOutcome:
+def _glob(pattern: str, root: Path, limit: int = MAX_RESULTS) -> ToolOutcome:
     """Bounded glob walk. Runs on a thread — the walk can touch many paths."""
     head = f"globbed under {root}"
     if not root.exists():
         return ToolOutcome(text=f"path not found: {root}", is_error=True)
     rx = glob_to_regex(pattern)
 
+    # Collect everything the walk finds (up to a hard ceiling), THEN sort, THEN
+    # cap: truncating during the walk and sorting afterwards would return an
+    # arbitrary subset that merely *looks* like "the newest files".
     state = WalkState(deadline=time.monotonic() + DEADLINE_S)
     hits: list[tuple[float, Path]] = []
-    capped = False
+    ceiling_hit = False
     for path in walk_files(root, state):
         try:
             rel = path.relative_to(root).as_posix()
@@ -71,14 +95,21 @@ def _glob(pattern: str, root: Path) -> ToolOutcome:
         except OSError:
             mtime = 0.0
         hits.append((mtime, path))
-        if len(hits) >= MAX_RESULTS:
-            capped = True
+        if len(hits) >= MAX_LIMIT:
+            ceiling_hit = True
             break
 
     hits.sort(key=lambda pair: (-pair[0], str(pair[1])))
+    total = len(hits)
     notes: list[str] = []
-    if capped:
-        notes.append(f"[results truncated: cap {MAX_RESULTS} reached]")
+    if total > limit:
+        hits = hits[:limit]
+        notes.append(
+            f"[showing newest {limit} of {total} matched files — "
+            "pass a higher limit or narrow the pattern]"
+        )
+    if ceiling_hit:
+        notes.append(f"[walk stopped: hard ceiling {MAX_LIMIT} matched files reached]")
     if state.deadline_hit:
         notes.append(f"[search truncated: deadline reached after {state.files_seen} files]")
     body = truncate("\n".join(str(p) for _, p in hits)) or "(no matches)"

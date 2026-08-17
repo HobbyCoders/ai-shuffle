@@ -29,6 +29,7 @@ from fluid.tools.builtins._util import (
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 MAX_MATCHES = 200
+MAX_LIMIT = 5000
 RG_TIMEOUT_S = 30.0
 FALLBACK_DEADLINE_S = 10.0
 _MAX_FILESIZE = "2M"
@@ -37,7 +38,8 @@ SPEC = ToolSpec(
     name="Grep",
     description=(
         "Search file contents by regular expression. Returns matching lines "
-        f"(capped at {MAX_MATCHES}); respects ignore files unless no_ignore is set."
+        f"(default cap {MAX_MATCHES}, raise with limit up to {MAX_LIMIT}); "
+        "respects ignore files unless no_ignore is set."
     ),
     input_schema={
         "type": "object",
@@ -49,11 +51,29 @@ SPEC = ToolSpec(
                 "type": "boolean",
                 "description": "Also search ignored/hidden files (ripgrep -uu).",
             },
+            "limit": {
+                "type": "integer",
+                "description": (
+                    f"Maximum matches to return (default {MAX_MATCHES}). Raise it "
+                    "or narrow the pattern when you expect many results."
+                ),
+            },
         },
         "required": ["pattern"],
     },
     risk="safe",
 )
+
+
+def _clamp_limit(raw: Any) -> int:
+    """Agent-settable result cap, clamped to [1, MAX_LIMIT]. Junk → default."""
+    if raw is None:
+        return MAX_MATCHES
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return MAX_MATCHES
+    return max(1, min(MAX_LIMIT, value))
 
 
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
@@ -63,11 +83,12 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         root = (Path(ctx.cwd) / root).resolve()
     glob = input.get("glob")
     no_ignore = bool(input.get("no_ignore"))
+    limit = _clamp_limit(input.get("limit"))
 
     rg = shutil.which("rg")
     if rg:
-        return await _ripgrep(rg, pattern, root, glob, no_ignore)
-    return await asyncio.to_thread(_pure_python_grep, pattern, root, glob)
+        return await _ripgrep(rg, pattern, root, glob, no_ignore, limit)
+    return await asyncio.to_thread(_pure_python_grep, pattern, root, glob, limit)
 
 
 def _header(engine: str, root: Path) -> str:
@@ -75,12 +96,15 @@ def _header(engine: str, root: Path) -> str:
 
 
 async def _ripgrep(
-    rg: str, pattern: str, root: Path, glob: str | None, no_ignore: bool
+    rg: str, pattern: str, root: Path, glob: str | None, no_ignore: bool, limit: int
 ) -> ToolOutcome:
     head = _header("rg", root)
+    # ``--max-count`` is a PER-FILE bound, so it cannot enforce the global cap
+    # on its own — a thousand files each return up to ``limit`` lines. It stays
+    # as a cheap per-file bound; the global slice happens below.
     args = [
         rg, "-n", "--no-heading", "--color=never",
-        "--max-count", str(MAX_MATCHES),
+        "--max-count", str(limit),
         "--max-filesize", _MAX_FILESIZE,
     ]
     if no_ignore:
@@ -109,11 +133,24 @@ async def _ripgrep(
         detail = stderr.decode(errors="replace").strip() or f"rg exited {proc.returncode}"
         return ToolOutcome(text=f"{head}\nrg error: {truncate(detail, 4000)}", is_error=True)
 
-    text = truncate(stdout.decode(errors="replace")).rstrip("\n")
-    return ToolOutcome(text=f"{head}\n{text or '(no matches)'}")
+    lines = stdout.decode(errors="replace").split("\n")
+    while lines and not lines[-1]:
+        lines.pop()
+    total = len(lines)
+    notes: list[str] = []
+    if total > limit:
+        lines = lines[:limit]
+        notes.append(
+            f"[showing first {limit} of {total} matches — "
+            "pass a higher limit or narrow the pattern]"
+        )
+    text = truncate("\n".join(lines)).rstrip("\n")
+    return ToolOutcome(text="\n".join([head, text or "(no matches)", *notes]))
 
 
-def _pure_python_grep(pattern: str, root: Path, glob: str | None) -> ToolOutcome:
+def _pure_python_grep(
+    pattern: str, root: Path, glob: str | None, limit: int = MAX_MATCHES
+) -> ToolOutcome:
     """Bounded fallback used when ripgrep is not installed. Runs on a thread."""
     head = _header("python-fallback", root) + " (ripgrep not found)"
     try:
@@ -127,15 +164,18 @@ def _pure_python_grep(pattern: str, root: Path, glob: str | None) -> ToolOutcome
     for path in walk_files(root, state):
         if glob and not fnmatch.fnmatch(path.name, glob):
             continue
-        for hit in _search_file(path, rx, MAX_MATCHES - len(out)):
+        for hit in _search_file(path, rx, limit - len(out)):
             out.append(hit)
-        if len(out) >= MAX_MATCHES:
+        if len(out) >= limit:
             capped = True
             break
 
     notes: list[str] = []
     if capped:
-        notes.append(f"[search truncated: match cap {MAX_MATCHES} reached]")
+        notes.append(
+            f"[search truncated: match cap {limit} reached — "
+            "pass a higher limit or narrow the pattern]"
+        )
     if state.deadline_hit:
         notes.append(
             f"[search truncated: deadline reached after {state.files_seen} files]"

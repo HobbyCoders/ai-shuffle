@@ -566,3 +566,69 @@ async def test_deferred_catalog_injected_once_on_user_turn() -> None:
     # The schema itself stays deferred — not in the tools array.
     assert all(t["name"] != "mcp__srv__hello" for t in first.tools)
     await loop.aclose()
+
+
+def _reminder_texts(request: ProviderRequest) -> str:
+    return "\n".join(
+        b.text for m in request.messages for b in m.content if isinstance(b, Text)
+    )
+
+
+async def test_deferred_catalog_not_replayed_on_resume() -> None:
+    """A second engine over the same store must not re-announce the catalog."""
+    store = MemoryStore()
+    first = NativeLoop(
+        provider=ScriptedProvider([_text("one")]), store=store, model="m",
+        registry=_registry_with_deferred(),
+    )
+    await first.submit(UserTurn(content="first"))
+    await first.wait_turn()
+    sid = first.session_id
+    await first.aclose()
+
+    # Fresh process: new NativeLoop, same session, same deferred tool set.
+    resumed = NativeLoop(
+        provider=ScriptedProvider([_text("two")]), store=store, model="m",
+        registry=_registry_with_deferred(), session_id=sid,
+    )
+    await resumed.submit(UserTurn(content="second"))
+    await resumed.wait_turn()
+
+    sent = _reminder_texts(resumed.provider.requests[0])
+    # The history still carries the original announcement — exactly one of it.
+    assert sent.count("mcp__srv__hello") == 1
+    assert sent.count("<system-reminder>") == 1
+    await resumed.aclose()
+
+
+async def test_deferred_catalog_on_resume_announces_only_new_tools() -> None:
+    from fluid.tools.registry import _Entry
+
+    store = MemoryStore()
+    first = NativeLoop(
+        provider=ScriptedProvider([_text("one")]), store=store, model="m",
+        registry=_registry_with_deferred(),
+    )
+    await first.submit(UserTurn(content="first"))
+    await first.wait_turn()
+    sid = first.session_id
+    await first.aclose()
+
+    # The resumed session's registry gained one more deferred tool.
+    reg = _registry_with_deferred()
+    extra = ToolSpec(
+        name="mcp__srv__weather", description="forecast for a city",
+        input_schema={"type": "object"}, source="mcp",
+    )
+    reg._entries[extra.name] = _Entry(spec=extra, server="srv")
+    resumed = NativeLoop(
+        provider=ScriptedProvider([_text("two")]), store=store, model="m",
+        registry=reg, session_id=sid,
+    )
+    await resumed.submit(UserTurn(content="second"))
+    await resumed.wait_turn()
+
+    sent = _reminder_texts(resumed.provider.requests[0])
+    assert sent.count("mcp__srv__weather") == 1  # the new one is announced
+    assert sent.count("mcp__srv__hello") == 1  # the old one only from history
+    await resumed.aclose()

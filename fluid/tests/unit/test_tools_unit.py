@@ -1,5 +1,7 @@
 """M2 unit tests — registry/inproc, Edit discipline, permissions, hooks."""
 
+from pathlib import Path
+
 import pytest
 
 from fluid.hooks.bus import PRE_TOOL_USE, HookBus, HookDecision
@@ -216,8 +218,34 @@ async def test_grep_fallback_caps_matches_and_marks_truncation(tmp_path, monkeyp
 
     hits = [ln for ln in out.text.splitlines() if ln.endswith(":needle")]
     assert len(hits) == grep_mod.MAX_MATCHES
-    assert f"[search truncated: match cap {grep_mod.MAX_MATCHES} reached]" in out.text
+    assert (
+        f"[search truncated: match cap {grep_mod.MAX_MATCHES} reached — "
+        "pass a higher limit or narrow the pattern]"
+    ) in out.text
     assert "zzz_later.txt" not in out.text
+
+
+async def test_grep_fallback_honours_explicit_limit(tmp_path, monkeypatch) -> None:
+    from fluid.tools.builtins import grep as grep_mod
+
+    monkeypatch.setattr(grep_mod.shutil, "which", lambda _name: None)
+    (tmp_path / "many.txt").write_text("needle\n" * 500)
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    ctx = ToolCtx(cwd=str(tmp_path))
+
+    out = await registry.dispatch("Grep", {"pattern": "needle", "limit": 7}, ctx)
+    hits = [ln for ln in out.text.splitlines() if ln.endswith(":needle")]
+    assert len(hits) == 7
+    assert "[search truncated: match cap 7 reached — " in out.text
+
+    # A limit above the default lifts the cap, not just lowers it. (Line count
+    # is compared loosely: the 30KB byte-truncation may drop some middle lines.)
+    out = await registry.dispatch("Grep", {"pattern": "needle", "limit": 300}, ctx)
+    hits = [ln for ln in out.text.splitlines() if ln.endswith(":needle")]
+    assert len(hits) > grep_mod.MAX_MATCHES
+    assert "[search truncated: match cap 200" not in out.text
 
 
 async def test_grep_fallback_honours_glob_filter(tmp_path, monkeypatch) -> None:
@@ -308,6 +336,62 @@ async def test_grep_rg_error_is_surfaced_and_args_are_safe(tmp_path, monkeypatch
     assert "--max-count" in captured and "--max-filesize" in captured
 
 
+async def test_grep_rg_limit_is_global_across_files(tmp_path, monkeypatch) -> None:
+    """``--max-count`` is per-file; the cap the model asked for is global."""
+    import asyncio as _asyncio
+
+    from fluid.tools.builtins import grep as grep_mod
+
+    monkeypatch.setattr(grep_mod.shutil, "which", lambda _name: "/usr/bin/rg")
+    captured: list[str] = []
+    # Two files, two matches each: rg honoured --max-count per file, so four
+    # lines come back even though the caller asked for three in total.
+    stdout = b"".join(
+        f"/repo/{name}:{n}:needle\n".encode() for name in ("a.py", "b.py") for n in (1, 2)
+    )
+
+    async def fake_exec(*args, **kwargs):
+        captured.extend(args)
+        return _FakeProc(0, stdout, b"")
+
+    monkeypatch.setattr(_asyncio, "create_subprocess_exec", fake_exec)
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    out = await registry.dispatch(
+        "Grep", {"pattern": "needle", "limit": 3}, ToolCtx(cwd=str(tmp_path))
+    )
+
+    assert not out.is_error
+    hits = [ln for ln in out.text.splitlines() if ln.endswith(":needle")]
+    assert len(hits) == 3
+    assert (
+        "[showing first 3 of 4 matches — pass a higher limit or narrow the pattern]"
+        in out.text
+    )
+    # The per-file bound is still handed to rg, set from the same limit.
+    assert captured[captured.index("--max-count") + 1] == "3"
+
+
+async def test_grep_rg_under_limit_has_no_note(tmp_path, monkeypatch) -> None:
+    import asyncio as _asyncio
+
+    from fluid.tools.builtins import grep as grep_mod
+
+    monkeypatch.setattr(grep_mod.shutil, "which", lambda _name: "/usr/bin/rg")
+
+    async def fake_exec(*args, **kwargs):
+        return _FakeProc(0, b"/repo/a.py:1:needle\n", b"")
+
+    monkeypatch.setattr(_asyncio, "create_subprocess_exec", fake_exec)
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    out = await registry.dispatch("Grep", {"pattern": "needle"}, ToolCtx(cwd=str(tmp_path)))
+    assert out.text.endswith("/repo/a.py:1:needle")
+    assert "showing first" not in out.text
+
+
 async def test_grep_rg_no_matches_is_not_an_error(tmp_path, monkeypatch) -> None:
     import asyncio as _asyncio
 
@@ -346,7 +430,8 @@ async def test_glob_matches_and_prunes(tmp_path) -> None:
 async def test_glob_caps_results(tmp_path) -> None:
     from fluid.tools.builtins import glob as glob_mod
 
-    for i in range(glob_mod.MAX_RESULTS + 25):
+    total = glob_mod.MAX_RESULTS + 25
+    for i in range(total):
         (tmp_path / f"f{i:04d}.txt").write_text("x")
 
     registry = ToolRegistry()
@@ -355,4 +440,58 @@ async def test_glob_caps_results(tmp_path) -> None:
 
     paths = [ln for ln in out.text.splitlines() if ln.endswith(".txt")]
     assert len(paths) == glob_mod.MAX_RESULTS
-    assert f"[results truncated: cap {glob_mod.MAX_RESULTS} reached]" in out.text
+    assert (
+        f"[showing newest {glob_mod.MAX_RESULTS} of {total} matched files — "
+        "pass a higher limit or narrow the pattern]"
+    ) in out.text
+
+
+async def test_glob_sorts_newest_first_before_capping(tmp_path) -> None:
+    """The cap must keep the NEWEST files, not whichever the walk saw first."""
+    import os
+
+    names = [f"f{i:02d}.txt" for i in range(10)]
+    for i, name in enumerate(names):
+        path = tmp_path / name
+        path.write_text("x")
+        # f00 is oldest, f09 newest — the walk order (alphabetical) is the
+        # reverse of the wanted order, so a sort-after-cap keeps the wrong set.
+        os.utime(path, (1_700_000_000 + i * 60, 1_700_000_000 + i * 60))
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    out = await registry.dispatch(
+        "Glob", {"pattern": "*.txt", "limit": 3}, ToolCtx(cwd=str(tmp_path))
+    )
+
+    paths = [ln for ln in out.text.splitlines() if ln.endswith(".txt")]
+    assert [Path(p).name for p in paths] == ["f09.txt", "f08.txt", "f07.txt"]
+    assert (
+        "[showing newest 3 of 10 matched files — "
+        "pass a higher limit or narrow the pattern]"
+    ) in out.text
+
+
+async def test_grep_and_glob_limits_are_clamped(tmp_path) -> None:
+    from fluid.tools.builtins import glob as glob_mod
+    from fluid.tools.builtins import grep as grep_mod
+
+    for mod, default in ((grep_mod, grep_mod.MAX_MATCHES), (glob_mod, glob_mod.MAX_RESULTS)):
+        assert mod._clamp_limit(None) == default
+        assert mod._clamp_limit("junk") == default
+        assert mod._clamp_limit(0) == 1
+        assert mod._clamp_limit(-5) == 1
+        assert mod._clamp_limit(10**9) == mod.MAX_LIMIT
+        assert mod._clamp_limit(mod.MAX_LIMIT + 1) == 5000
+        assert mod._clamp_limit(42) == 42
+
+    # And the clamp is what the tool actually applies: 0 yields one result.
+    for name in ("a.txt", "b.txt"):
+        (tmp_path / name).write_text("x")
+    registry = ToolRegistry()
+    register_builtins(registry)
+    out = await registry.dispatch(
+        "Glob", {"pattern": "*.txt", "limit": 0}, ToolCtx(cwd=str(tmp_path))
+    )
+    assert len([ln for ln in out.text.splitlines() if ln.endswith(".txt")]) == 1
+    assert "[showing newest 1 of 2 matched files — " in out.text

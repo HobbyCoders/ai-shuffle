@@ -20,6 +20,7 @@ nor loadable.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Sequence
 
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
@@ -36,6 +37,12 @@ def _one_line(text: str) -> str:
     return ""
 
 
+# The literal first line of every catalog block. Rendering and parsing share it
+# so a resumed session can recognise its own past announcements.
+DEFERRED_CATALOG_HEADER = "The following deferred tools are available."
+_CATALOG_NAME_RE = re.compile(r"^- ([^\s:]+):", re.MULTILINE)
+
+
 def render_deferred_catalog(specs: Sequence[ToolSpec]) -> str | None:
     """System-reminder block announcing known-but-unloaded tools.
 
@@ -50,12 +57,33 @@ def render_deferred_catalog(specs: Sequence[ToolSpec]) -> str | None:
         f"- {s.name}: {_one_line(s.description)}" for s in sorted(specs, key=lambda s: s.name)
     )
     return (
-        "<system-reminder>\nThe following deferred tools are available. Their "
+        f"<system-reminder>\n{DEFERRED_CATALOG_HEADER} Their "
         "schemas are NOT loaded — calling them directly will fail. Load a "
         "schema first with the ToolSearch tool (query "
         '"select:<name>[,<name>...]" or keywords):\n'
         f"{lines}\n</system-reminder>"
     )
+
+
+def parse_deferred_catalog(text: str) -> set[str]:
+    """Tool names announced by catalog blocks inside ``text``.
+
+    The inverse of :func:`render_deferred_catalog`, used on session resume: a
+    fresh engine reads what a previous process already announced instead of
+    replaying the whole catalog into a session that already contains it.
+    """
+    names: set[str] = set()
+    if not text or DEFERRED_CATALOG_HEADER not in text:
+        return names
+    start = 0
+    while True:
+        found = text.find(DEFERRED_CATALOG_HEADER, start)
+        if found < 0:
+            return names
+        end = text.find("</system-reminder>", found)
+        block = text[found:] if end < 0 else text[found:end]
+        names.update(_CATALOG_NAME_RE.findall(block))
+        start = found + len(DEFERRED_CATALOG_HEADER) if end < 0 else end
 
 SPEC = ToolSpec(
     name="ToolSearch",

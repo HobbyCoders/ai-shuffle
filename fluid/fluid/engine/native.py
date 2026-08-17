@@ -76,7 +76,7 @@ from fluid.permissions.engine import PermissionEngine, plan_mode_tools
 from fluid.providers.base import ProviderClient, ProviderRequest
 from fluid.codemode.session import CodeModeSession, register_code_mode_tools
 from fluid.store.base import SessionMeta, SessionNode, SessionStore, new_id
-from fluid.tools.builtins.tool_search import render_deferred_catalog
+from fluid.tools.builtins.tool_search import parse_deferred_catalog, render_deferred_catalog
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
 
 log = logging.getLogger(__name__)
@@ -291,7 +291,10 @@ class NativeLoop:
         # Deferred-catalog injection: tool names already announced to the model
         # (each known-but-unloaded tool is listed once, on the user turn after
         # it becomes known — the static system prompt stays byte-stable).
+        # Seeded from the stored history on the first turn, so a *resumed*
+        # session does not replay a catalog it already contains.
         self._deferred_announced: set[str] = set()
+        self._deferred_rehydrated = False
         # Cache-safe tool-result trimming (view-level; the stored tree keeps
         # full fidelity). Sticky per engine lifetime — see context/trim.py.
         self._trimmer = ToolResultTrimmer(config=trim or TrimConfig())
@@ -623,6 +626,7 @@ class NativeLoop:
         # Connect config MCP servers before building the user node so newly
         # known deferred tools can be announced on this very turn.
         await self._connect_mcp_once(sid, turn_id)
+        await self._rehydrate_deferred_announced(sid, meta.head_node_id)
         content: list[Any] = (
             [Text(op.content)] if isinstance(op.content, str) else list(op.content)
         )
@@ -691,6 +695,32 @@ class NativeLoop:
 
             out["env"] = layered_env(settings_env, base=out.get("env"))
         return out
+
+    async def _rehydrate_deferred_announced(
+        self, sid: str, head_node_id: str | None
+    ) -> None:
+        """Seed the announced set from the stored history (once per engine).
+
+        ``_deferred_announced`` is process memory; the session outlives the
+        process. On resume a fresh loop would otherwise re-announce the whole
+        catalog into a session whose history already carries it — pure token
+        waste and a confusing duplicate for the model. So on the first turn we
+        read back the catalog blocks already in the history and treat those
+        names as announced; only genuinely new tools get injected.
+        """
+        if self._deferred_rehydrated:
+            return
+        self._deferred_rehydrated = True
+        if self.registry is None or self._codemode is not None:
+            return
+        try:
+            nodes = await self.store.load_path(sid, head_node_id)
+        except Exception:  # a store that cannot replay just loses the dedupe
+            return
+        for node in nodes:
+            text = node.message.text()
+            if text:
+                self._deferred_announced.update(parse_deferred_catalog(text))
 
     def _deferred_catalog_reminder(self) -> str | None:
         """Announce known-but-unloaded tools, once per tool (name + one-liner).
