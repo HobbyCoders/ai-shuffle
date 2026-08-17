@@ -80,9 +80,9 @@ def test_missing_prompt(agents):
     assert payload["ok"] is False and "prompt" in payload["error"]
 
 
-def test_allowlist_open_by_default(agents):
-    """No enabled_agents on the caller -> any target passes the grant check
-    (dispatch itself is stubbed)."""
+def test_dispatch_open_by_default(agents):
+    """No enabled_agents on the caller -> any target dispatches (dispatch
+    itself is stubbed)."""
     _mk_session(agents, "s-root", "root-agent")
 
     async def fake_worker(**kwargs):
@@ -95,53 +95,62 @@ def test_allowlist_open_by_default(agents):
     assert payload["agent"] == "helper"
 
 
-def test_allowlist_restricts(agents):
+def test_enabled_agents_never_restricts_dispatch(agents):
+    """(2026-08-17, superseding A10) enabled_agents declares context; an agent
+    left OFF the list still dispatches."""
     _mk_session(agents, "s-locked", "locked")
-    payload = asyncio.run(_dispatch({"agent": "root-agent", "prompt": "go"}, "s-locked"))
-    assert payload["ok"] is False
-    assert "allowlist" in payload["error"]
 
     async def fake_worker(**kwargs):
         return WorkerOutcome(ok=True, session_id="w1", report="ok")
 
     with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
-        allowed = asyncio.run(_dispatch({"agent": "helper", "prompt": "go"}, "s-locked"))
-    assert allowed["ok"] is True
+        undeclared = asyncio.run(
+            _dispatch({"agent": "root-agent", "prompt": "go"}, "s-locked")
+        )
+        declared = asyncio.run(_dispatch({"agent": "helper", "prompt": "go"}, "s-locked"))
+    assert undeclared["ok"] is True and undeclared["agent"] == "root-agent"
+    assert declared["ok"] is True
 
 
 @pytest.mark.parametrize("caller_pid", ["custom-empty", "custom-empty-list"])
-def test_invoke_mode_custom_empty_blocks_everything(agents, caller_pid):
-    """mode 'custom' with a missing/empty allowlist = may invoke NO agents."""
+def test_invoke_mode_custom_empty_still_dispatches(agents, caller_pid):
+    """mode 'custom' with a missing/empty list declares NOBODY — and blocks
+    nobody: a name the model already knows still runs."""
     session_id = f"s-{caller_pid}"
     _mk_session(agents, session_id, caller_pid)
-
-    for target in ("helper", "root-agent"):
-        payload = asyncio.run(_dispatch({"agent": target, "prompt": "go"}, session_id))
-        assert payload["ok"] is False
-        assert "may not invoke any agents" in payload["error"]
-
-
-def test_invoke_mode_custom_allows_listed_blocks_unlisted(agents):
-    _mk_session(agents, "s-custom-listed", "custom-listed")
-
-    blocked = asyncio.run(
-        _dispatch({"agent": "root-agent", "prompt": "go"}, "s-custom-listed")
-    )
-    assert blocked["ok"] is False
-    assert "may only invoke: helper" in blocked["error"]
 
     async def fake_worker(**kwargs):
         return WorkerOutcome(ok=True, session_id="w1", report="ok")
 
     with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
-        allowed = asyncio.run(
+        for target in ("helper", "root-agent"):
+            payload = asyncio.run(
+                _dispatch({"agent": target, "prompt": "go"}, session_id)
+            )
+            assert payload["ok"] is True
+            assert payload["agent"] == target
+
+
+def test_invoke_mode_custom_dispatches_unlisted_agents(agents):
+    _mk_session(agents, "s-custom-listed", "custom-listed")
+
+    async def fake_worker(**kwargs):
+        return WorkerOutcome(ok=True, session_id="w1", report="ok")
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        unlisted = asyncio.run(
+            _dispatch({"agent": "root-agent", "prompt": "go"}, "s-custom-listed")
+        )
+        listed = asyncio.run(
             _dispatch({"agent": "helper", "prompt": "go"}, "s-custom-listed")
         )
-    assert allowed["ok"] is True
+    assert unlisted["ok"] is True and unlisted["agent"] == "root-agent"
+    assert listed["ok"] is True
 
 
-def test_invoke_mode_all_ignores_allowlist(agents):
-    """mode 'all' places no restriction even with a non-empty enabled_agents."""
+def test_invoke_mode_all_dispatches_anything(agents):
+    """mode 'all' declares everything and, like every other mode, restricts
+    nothing."""
     _mk_session(agents, "s-mode-all", "mode-all")
 
     async def fake_worker(**kwargs):
@@ -438,14 +447,20 @@ def test_definition_tool_allowlist_normalizes():
     assert td._definition_tool_allowlist(_definition(tools=())) is None
 
 
-def test_file_agent_respects_the_invoke_allowlist(agents):
-    """enabled_agents is host policy — it gates file agents by name too."""
+def test_file_agent_dispatches_even_when_undeclared(agents):
+    """enabled_agents never gated file agents either — a resolvable definition
+    runs on name alone (2026-08-17, superseding A10)."""
     _mk_session(agents, "s-locked-file", "locked")
-    payload = asyncio.run(_dispatch(
-        {"agent": "researcher", "prompt": "go"}, "s-locked-file",
-        agent_registry={"researcher": _definition()},
-    ))
-    assert payload["ok"] is False and "allowlist" in payload["error"]
+
+    async def fake_worker(**kwargs):
+        return WorkerOutcome(ok=True, session_id="w-file", report="r")
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        payload = asyncio.run(_dispatch(
+            {"agent": "researcher", "prompt": "go"}, "s-locked-file",
+            agent_registry={"researcher": _definition()},
+        ))
+    assert payload["ok"] is True and payload["agent"] == "researcher"
 
 
 def test_dispatcher_reads_the_agent_registry_off_the_ctx(agents):

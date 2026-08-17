@@ -691,17 +691,18 @@ def build_options_from_profile(
         if override_append:
             final_system_prompt += "\n\n" + override_append
 
-    # Build agents dict from profile's enabled_agents
-    # P2c (rulings A6/A10): subagents no longer exist as SDK AgentDefinitions.
-    # ``enabled_agents`` is now the OPTIONAL invoke allowlist for the unified
-    # Task tool (empty/None = any agent may be invoked) — it is read by
-    # ``app.core.task_dispatch`` at dispatch time, not projected onto the
-    # engine. The CLI's native Task/Agent/Workflow tools are banned on the
-    # delegated leg (harness_adapter passes --disallowed-tools), so nothing
-    # consumes agent definitions any more.
-    enabled_agent_ids = config.get("enabled_agents", [])
+    # SDK AgentDefinitions stay retired (P2c, ruling A6): the CLI's native
+    # Task/Agent/Workflow tools are banned on the delegated leg (harness_adapter
+    # passes --disallowed-tools) and ``ClaudeAgentOptions.agents`` is read only
+    # by the retired ClaudeAgentAdapter, so ``agents_dict`` is permanently None.
+    #
+    # ``enabled_agents``/``agent_invoke_mode`` are now a CONTEXT-DECLARATION
+    # concern (2026-08-17 ruling, superseding A10) — see app.core.agent_context.
+    # The resolved name+description list is stamped onto the options object as
+    # ``aih_declared_agents`` further down and projected by the fluid
+    # HarnessAdapter onto the compiled prompt's agents index. Dispatch itself is
+    # never gated by it.
     agents_dict = None
-    enabled_subagents: Dict[str, Any] = {}
 
     # Per-agent memory (ruling A11): the profile's durable memory text rides
     # into the prompt on every leg — as append text on the preset shape (so the
@@ -1310,5 +1311,22 @@ def build_options_from_profile(
     # the engine would mean "no tools at all", which is never what a malformed
     # ``tools:`` line asked for.
     options.aih_tool_allowlist = _surface or None
+
+    # The DB agents this profile declares into its model's context (2026-08-17
+    # ruling, superseding A10): name + description ONLY, resolved from
+    # ``agent_invoke_mode``/``enabled_agents``. The fluid HarnessAdapter projects
+    # it onto SessionOptions.extra["declared_agents"] and merges it into the
+    # compiled prompt's "Available agent types" index next to the file/plugin
+    # agents fluid discovers. It advertises, it does not restrict — Task
+    # dispatch runs any agent that resolves, declared or not.
+    try:
+        from app.core.agent_context import declared_agents as _declared_agents
+
+        options.aih_declared_agents = (
+            _declared_agents(config, exclude_id=profile.get("id")) or None
+        )
+    except Exception:  # noqa: BLE001 — context declaration is best-effort
+        logger.warning("could not resolve declared agents for context", exc_info=True)
+        options.aih_declared_agents = None
 
     return options, agents_dict

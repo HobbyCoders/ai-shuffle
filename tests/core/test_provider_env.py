@@ -749,27 +749,95 @@ def _mk_subagent(db, agent_id, model):
     )
 
 
-class TestSubagentDefinitionsRetired:
-    """(P2c, rulings A6/R2) SDK AgentDefinitions are gone: enabled_agents is
-    now the Task tool's optional invoke allowlist, consumed at dispatch time
-    by app.core.task_dispatch — build_options_from_profile no longer builds
-    agents_dict no matter what the profile enables."""
+class TestAgentContextDeclaration:
+    """(2026-08-17 ruling, superseding A10) SDK AgentDefinitions stay retired —
+    ``agents_dict`` is always None — but ``enabled_agents``/``agent_invoke_mode``
+    now resolve to the name+description list stamped as ``aih_declared_agents``,
+    which the fluid adapter merges into the compiled prompt's agents index."""
 
-    def test_enabled_agents_produce_no_agent_definitions(self, mock_db):
+    @staticmethod
+    def _build(config, profile_id="t"):
         from unittest.mock import patch as _patch
         import app.core.query_options as qo
-        from app.db import database as db
 
-        db.create_profile("helper", "Helper", None, {"model": "sonnet"})
         with _patch.object(qo, "get_security_instructions", return_value=""):
-            opts, agents_dict = qo.build_options_from_profile(
-                profile={"id": "t", "config": {
-                    "model": "opus", "tools_preset": "claude_code",
-                    "enabled_agents": ["helper"],
+            return qo.build_options_from_profile(
+                profile={"id": profile_id, "config": {
+                    "model": "opus", "tools_preset": "claude_code", **config,
                 }},
             )
+
+    @staticmethod
+    def _seed(db):
+        db.create_profile("helper", "Helper", "Helps out", {"model": "sonnet"})
+        db.create_profile("scout", "Scout", "Explores", {"model": "sonnet"})
+
+    def test_sdk_agent_definitions_stay_retired(self, mock_db):
+        from app.db import database as db
+
+        self._seed(db)
+        opts, agents_dict = self._build({"enabled_agents": ["helper"]})
         assert agents_dict is None
         assert opts.agents is None
+
+    def test_mode_custom_declares_only_the_listed_ids(self, mock_db):
+        from app.db import database as db
+
+        self._seed(db)
+        opts, _ = self._build(
+            {"agent_invoke_mode": "custom", "enabled_agents": ["helper"]}
+        )
+        assert opts.aih_declared_agents == [
+            {"name": "Helper", "description": "Helps out"}
+        ]
+
+    def test_mode_custom_empty_declares_nothing(self, mock_db):
+        from app.db import database as db
+
+        self._seed(db)
+        opts, _ = self._build({"agent_invoke_mode": "custom", "enabled_agents": []})
+        assert opts.aih_declared_agents is None
+
+    def test_mode_all_declares_every_agent(self, mock_db):
+        from app.db import database as db
+
+        self._seed(db)
+        opts, _ = self._build(
+            {"agent_invoke_mode": "all", "enabled_agents": ["helper"]}
+        )
+        names = [a["name"] for a in opts.aih_declared_agents]
+        # Every agent row, not just the one on the list.
+        assert {"Helper", "Scout"} <= set(names) and len(names) > 2
+        assert names == sorted(names, key=str.lower)
+
+    def test_legacy_empty_list_declares_every_agent(self, mock_db):
+        from app.db import database as db
+
+        self._seed(db)
+        opts, _ = self._build({"enabled_agents": []})
+        assert {"Helper", "Scout"} <= {a["name"] for a in opts.aih_declared_agents}
+
+    def test_legacy_non_empty_list_declares_the_subset(self, mock_db):
+        from app.db import database as db
+
+        self._seed(db)
+        opts, _ = self._build({"enabled_agents": ["scout"]})
+        assert [a["name"] for a in opts.aih_declared_agents] == ["Scout"]
+
+    def test_the_calling_agent_is_never_declared_to_itself(self, mock_db):
+        from app.db import database as db
+
+        self._seed(db)
+        opts, _ = self._build({"agent_invoke_mode": "all"}, profile_id="helper")
+        names = {a["name"] for a in opts.aih_declared_agents}
+        assert "Scout" in names and "Helper" not in names
+
+    def test_a_missing_description_degrades_to_empty_string(self, mock_db):
+        from app.db import database as db
+
+        db.create_profile("bare", "Bare", None, {"model": "sonnet"})
+        opts, _ = self._build({"agent_invoke_mode": "custom", "enabled_agents": ["bare"]})
+        assert opts.aih_declared_agents == [{"name": "Bare", "description": ""}]
 
 
 class TestClaudeApiSkillGuardSurvivesLegRemoval:

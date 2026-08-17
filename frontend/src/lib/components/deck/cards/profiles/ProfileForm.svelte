@@ -211,9 +211,11 @@
 		newGroupName = '';
 	}
 
-	// Invoke allowlist: every agent EXCEPT the one being edited (an agent can't
-	// dispatch itself). The mode decides how the selection is read: 'all' ignores
-	// it entirely, 'custom' treats it as the exact allowlist (empty = none).
+	// Context declaration: every agent EXCEPT the one being edited (an agent
+	// doesn't list itself). The mode decides how the selection is read: 'all'
+	// declares every agent, 'custom' declares exactly the picked ones (empty =
+	// none). This never restricts dispatch — any agent can still be invoked by
+	// exact name; the list only decides what is loaded into the context.
 	const invocableAgents = $derived(
 		allSubagents.filter((a) => a.id !== editingProfile?.id)
 	);
@@ -418,12 +420,12 @@
 		/>
 
 	{:else if activeTab === 'agents'}
-		<!-- AGENTS TAB — invoke allowlist -->
+		<!-- AGENTS TAB — context declaration (never a dispatch restriction) -->
 		<div class="set-group">
 			<div class="set-grouphead grouphead-row">
 				<div>
-					<h3><Bot />Invocable agents</h3>
-					<p>Choose whether this agent may dispatch other agents via the Task tool.</p>
+					<h3><Bot />Agents in context</h3>
+					<p>Choose which agents are listed in this agent's context so it knows they exist. Any agent can still be dispatched by exact name, listed or not.</p>
 				</div>
 				{#if invocableAgents.length > 0 && !invokeAll}
 					<div class="head-acts">
@@ -433,7 +435,7 @@
 				{/if}
 			</div>
 			<div class="set-row">
-				<div class="lab"><h4>Access</h4><p>Allow every agent, or only the ones you pick below.</p></div>
+				<div class="lab"><h4>Loaded</h4><p>List every agent, or only the ones you pick below.</p></div>
 				<div class="ctl">
 					<div class="seg">
 						<button type="button" class:on={invokeAll} onclick={() => onFormChange('agent_invoke_mode', 'all')}>All agents</button>
@@ -442,13 +444,13 @@
 				</div>
 			</div>
 			{#if invocableAgents.length === 0}
-				<div class="set-row"><div class="lab"><p>No other agents to invoke.</p></div></div>
+				<div class="set-row"><div class="lab"><p>No other agents to list.</p></div></div>
 			{:else}
 				{#each invocableAgents as agent (agent.id)}
 					{@const isSelected = !invokeAll && profileForm.enabled_agents.includes(agent.id)}
 					<div class="set-row" class:disabled={invokeAll}>
 						<div class="lab">
-							<h4>{agent.name}{#if invokeAll}<span class="hint"> · Allowed (all)</span>{/if}</h4>
+							<h4>{agent.name}{#if invokeAll}<span class="hint"> · Loaded (all)</span>{/if}</h4>
 							<p>{getModelDisplay(agent.model)}</p>
 						</div>
 						<div class="ctl">
@@ -464,11 +466,11 @@
 				<Bot />
 				<span>
 					{#if invokeAll}
-						No restriction — this agent may invoke any of the {invocableAgents.length} agents.
+						All {invocableAgents.length} agents are listed in this agent's context.
 					{:else if profileForm.enabled_agents.length === 0}
-						This agent may not invoke any agents.
+						No agents listed — this agent can still dispatch any of them by exact name.
 					{:else}
-						{profileForm.enabled_agents.length} of {invocableAgents.length} agents invocable{allInvocableSelected ? ' (all)' : ''}.
+						{profileForm.enabled_agents.length} of {invocableAgents.length} agents in context{allInvocableSelected ? ' (all)' : ''}. Unlisted agents remain dispatchable by exact name.
 					{/if}
 				</span>
 			</div>

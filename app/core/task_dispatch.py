@@ -9,11 +9,12 @@ supervisor teardown, progress feed, bounded report).
 What this module adds on top of raw ``dispatch_worker``:
 
 * target resolution — agent id first, then unambiguous case-insensitive name;
-* invoke grants (A10) — driven by the caller agent's ``agent_invoke_mode``:
-  ``"all"`` places no restriction; ``"custom"`` makes ``enabled_agents`` the
-  exact allowlist (an empty/missing list means the agent may invoke nobody);
-  unset (None) keeps the legacy behavior — a non-empty ``enabled_agents``
-  list restricts, anything else is open;
+* NO invoke allowlist (2026-08-17 ruling, superseding A10) — dispatch is never
+  blocked by the caller's ``enabled_agents`` / ``agent_invoke_mode``. Those two
+  are a CONTEXT-LOADING concern only: they decide which agent definitions are
+  advertised in the caller's prompt (see :mod:`app.core.agent_context`), and
+  any agent that resolves here — DB row or file/plugin definition — can be
+  dispatched by name whether it was declared or not;
 * nesting depth (A9) — max ``settings.task_tool_max_depth`` (5) levels of
   agent-invokes-agent, counted by walking worker-created ancestor sessions;
 * cycle detection (A9) — an agent already active in the ancestor chain cannot
@@ -53,7 +54,7 @@ worker's system prompt as an override block. Consequences, deliberate:
   a note when it does not (a definition written for Claude should not fail a
   dispatch on an OpenAI-bound session);
 * the profile-id cycle check does not apply (the worker runs on the caller's own
-  profile by construction); depth, worker budget and invoke grants all do.
+  profile by construction); depth and worker budget both do.
 """
 
 from __future__ import annotations
@@ -395,43 +396,10 @@ async def dispatch_task_tool(
         assert target is not None
         target_name = str(target.get("name") or target["id"])
 
-    # Invoke grants (A10): mode-aware. "all" = open, "custom" = enabled_agents
-    # is the exact allowlist (empty means invoke nobody), unset = legacy
-    # (non-empty list restricts, otherwise open). A file agent is checked by
-    # NAME — the allowlist is the host's policy either way.
-    grant_key = target["id"] if target is not None else target_name
-    if caller_pid:
-        from app.db import database
-
-        caller_agent = database.get_profile(caller_pid)
-        caller_config = ((caller_agent or {}).get("config") or {})
-        invoke_mode = caller_config.get("agent_invoke_mode")
-        allowlist = caller_config.get("enabled_agents")
-        if invoke_mode == "custom":
-            allowed = allowlist if isinstance(allowlist, list) else []
-            if grant_key not in allowed:
-                if not allowed:
-                    error = (
-                        f"Agent '{caller_pid}' may not invoke any agents "
-                        "(invoke mode: custom, empty allowlist)."
-                    )
-                else:
-                    error = (
-                        f"Agent '{caller_pid}' may only invoke: "
-                        f"{', '.join(allowed)} (enabled_agents allowlist)."
-                    )
-                return {"ok": False, "error": error}
-        elif invoke_mode == "all":
-            pass  # No restriction.
-        elif isinstance(allowlist, list) and allowlist and grant_key not in allowlist:
-            # Legacy: a non-empty list restricts; empty/None stays open.
-            return {
-                "ok": False,
-                "error": (
-                    f"Agent '{caller_pid}' may only invoke: "
-                    f"{', '.join(allowlist)} (enabled_agents allowlist)."
-                ),
-            }
+    # NO invoke allowlist here, by design (2026-08-17 ruling, superseding A10):
+    # ``enabled_agents``/``agent_invoke_mode`` only decide what the caller's
+    # CONTEXT advertises (app.core.agent_context), never what it may run. An
+    # undeclared agent the model names anyway still dispatches.
 
     # Nesting depth + cycles (A9).
     max_depth = int(getattr(settings, "task_tool_max_depth", 5) or 5)

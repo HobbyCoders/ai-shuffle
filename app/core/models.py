@@ -152,14 +152,16 @@ class ProfileConfig(BaseModel):
     # User identification
     user: Optional[str] = None  # User identifier
 
-    # Invoke allowlist for the unified Task tool (ruling A10): agent IDs this
-    # agent is permitted to dispatch. Interpreted together with
-    # ``agent_invoke_mode`` below.
+    # Agent IDs DECLARED into this agent's context (2026-08-17 ruling,
+    # superseding A10): they ride the compiled prompt's agents index as
+    # name+description so the model knows they exist. Never an allowlist —
+    # Task dispatch runs any agent that resolves, declared or not. Interpreted
+    # together with ``agent_invoke_mode`` below (see app.core.agent_context).
     enabled_agents: Optional[List[str]] = None
 
-    # Invoke-grant mode for the Task tool — "all" = no restriction, "custom" =
-    # enabled_agents is the exact allowlist (empty = may invoke no agents),
-    # None = legacy (non-empty enabled_agents restricts, otherwise open).
+    # Context-declaration mode — "all" = declare every agent, "custom" =
+    # declare exactly enabled_agents (empty = declare none), None = legacy
+    # (a non-empty enabled_agents declares those ids, empty/absent = all).
     agent_invoke_mode: Optional[str] = None
 
     # Per-agent memory (agents-program ruling A11): durable text owned by THIS
@@ -190,10 +192,10 @@ class ProfileConfig(BaseModel):
     @field_validator("agent_invoke_mode")
     @classmethod
     def _check_agent_invoke_mode(cls, value):
-        """Only the three documented invoke-grant modes are storable.
+        """Only the three documented declaration modes are storable.
 
-        None keeps legacy behavior (a non-empty ``enabled_agents`` restricts,
-        otherwise the agent may invoke anything).
+        None keeps legacy behavior (a non-empty ``enabled_agents`` declares
+        exactly those ids, an empty/absent one declares every agent).
         """
         if value is not None and value not in ("all", "custom"):
             raise ValueError("agent_invoke_mode must be one of: all, custom (or null)")

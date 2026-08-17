@@ -102,16 +102,17 @@
 	}
 	function agentCount(p: Profile): number {
 		const enabled = p.config?.enabled_agents?.filter((id: string) => allSubagents.some((a) => a.id === id))?.length || 0;
-		// 'custom' = the pruned list IS the grant (0 really means none). Legacy rows
-		// (null mode) with a non-empty allowlist are likewise restricted to it.
-		// Everything else ('all' or legacy-empty) may invoke every agent but itself.
+		// 'custom' = the pruned list IS what gets declared (0 really means none).
+		// Legacy rows (null mode) with a non-empty list declare exactly it.
+		// Everything else ('all' or legacy-empty) declares every agent but itself.
+		// Counts what is LOADED INTO CONTEXT — dispatch is never restricted.
 		if (p.config?.agent_invoke_mode === 'custom') return enabled;
 		if (!p.config?.agent_invoke_mode && enabled > 0) return enabled;
 		return allSubagents.filter((a) => a.id !== p.id).length;
 	}
 	function agentLabel(p: Profile): string {
 		const n = agentCount(p);
-		return n === 0 && p.config?.agent_invoke_mode === 'custom' ? 'No agents invocable' : `${n} agents`;
+		return n === 0 && p.config?.agent_invoke_mode === 'custom' ? 'No agents in context' : `${n} agents`;
 	}
 	async function confirmDelete() {
 		if (!deletingId) return;

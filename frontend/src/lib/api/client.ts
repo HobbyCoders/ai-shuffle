@@ -301,8 +301,8 @@ export interface ProfileConfig {
 	enable_file_checkpointing?: boolean;  // LEGACY (SDK-era): still read by chat rewind gating for old rows; no longer written
 	ai_tools?: Record<string, boolean>;  // AI tool toggles (image_generation, video_generation, etc.)
 	computer_use?: { enabled?: boolean; target_display?: number | null; require_confirmation?: boolean };  // Host desktop control (native mode only)
-	enabled_agents?: string[];  // Optional invoke allowlist: agents this agent may dispatch via the Task tool; empty/unset = any
-	agent_invoke_mode?: 'all' | 'custom' | null;  // Invoke-grant mode: 'all' = unrestricted, 'custom' = enabled_agents is the exact allowlist (empty = none), null/unset = legacy (non-empty list restricts)
+	enabled_agents?: string[];  // Agents declared into this agent's context (name+description); empty/unset = all. NEVER a dispatch restriction
+	agent_invoke_mode?: 'all' | 'custom' | null;  // Context-declaration mode: 'all' = declare every agent, 'custom' = declare exactly enabled_agents (empty = none), null/unset = legacy (non-empty list declares those, empty declares all)
 	memory?: string;  // Per-agent memory (plain text); agent-editable at runtime via the Memory tool, injected into the system prompt
 	cwd?: string;  // Working directory override
 	add_dirs?: string[];  // Additional directories the agent may access

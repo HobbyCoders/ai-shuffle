@@ -3197,3 +3197,181 @@ async def test_generation_options_route_like_chat(monkeypatch):
     # A provider-less (native Claude) profile keeps the delegated leg via the
     # model sniff, exactly as before the fix.
     assert await kind(_GenOptions("opus")) == "delegated"
+
+
+# ─── Agents in context (2026-08-17 ruling, superseding A10) ──────────────────
+#
+# ``enabled_agents``/``agent_invoke_mode`` DECLARE agents into the caller's
+# context; they never gate dispatch. The declaration must be index-shaped —
+# name + description and nothing else — and must sit in the SAME
+# "Available agent types" block as the file and plugin agents fluid discovers.
+
+
+def _agent_md(name: str, description: str, body: str = "BODY") -> str:
+    return f"---\nname: {name}\ndescription: {description}\n---\n{body}"
+
+
+def _write_file(path, text: str):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+@pytest.fixture()
+def agent_workspace(tmp_path, monkeypatch):
+    """A project cwd with a file agent, plus an installed plugin agent.
+
+    HOME/USERPROFILE are redirected so the developer's real ~/.claude never
+    leaks into an assertion (fluid's own test convention).
+    """
+    import json
+
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+
+    project = tmp_path / "proj"
+    (project / ".git").mkdir(parents=True)
+    _write_file(
+        project / ".claude" / "agents" / "researcher.md",
+        _agent_md("researcher", "Reads the codebase"),
+    )
+
+    plugin_root = home / ".claude" / "plugins" / "cache" / "testmp" / "myplug" / "1.0.0"
+    _write_file(plugin_root / ".claude-plugin" / "plugin.json", json.dumps({"name": "myplug"}))
+    _write_file(
+        plugin_root / "agents" / "reviewer.md",
+        _agent_md("reviewer", "Reviews diffs", body="PLUGIN AGENT PROMPT"),
+    )
+    _write_file(
+        home / ".claude" / "settings.json",
+        json.dumps({"enabledPlugins": {"myplug@testmp": True}}),
+    )
+    return project
+
+
+def _agents_options(cwd, declared=None):
+    extra = {"fluid_provider": "openai_responses"}
+    if declared is not None:
+        extra["declared_agents"] = declared
+    return SessionOptions(
+        model="gpt-4o",
+        system_prompt="BASE PROMPT",
+        cwd=str(cwd),
+        extra=extra,
+    )
+
+
+@pytest.mark.asyncio
+async def test_agents_index_carries_file_plugin_and_db_agents(
+    monkeypatch, agent_workspace
+):
+    """One index, three sources, name+description only."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    await ha.HarnessAdapter().connect(
+        _agents_options(
+            agent_workspace,
+            declared=[{"name": "Helper", "description": "Helps out"}],
+        )
+    )
+    system = _CapturingLoop.captured["system"]
+    assert system.count("# Available agent types") == 1
+    assert "- researcher: Reads the codebase" in system      # (a) file agent
+    assert "- myplug:reviewer: Reviews diffs" in system      # (b) plugin agent
+    assert "- Helper: Helps out" in system                   # (c) DB agent
+    # Index-only: no definition body may reach the caller's context.
+    assert "PLUGIN AGENT PROMPT" not in system
+    assert "BODY" not in system
+
+
+@pytest.mark.asyncio
+async def test_declared_db_agents_reach_native_loop_as_descriptors(
+    monkeypatch, agent_workspace
+):
+    """A profile with a custom enabled_agents selection hands NativeLoop the
+    matching ``agents=`` descriptors (name + description, source 'app')."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    await ha.HarnessAdapter().connect(
+        _agents_options(
+            agent_workspace,
+            declared=[{"name": "Helper", "description": "Helps out"}],
+        )
+    )
+    agents = _CapturingLoop.captured["agents"]
+    app_agents = [a for a in agents if a["source"] == "app"]
+    assert app_agents == [
+        {"agentType": "Helper", "source": "app", "description": "Helps out"}
+    ]
+    # The discovered definitions ride along too — passing ``agents=`` at all
+    # suppresses fluid's own auto-fill, so the usage row must not lose them.
+    assert {a["agentType"] for a in agents} == {"Helper", "researcher", "myplug:reviewer"}
+
+
+@pytest.mark.asyncio
+async def test_no_declared_agents_leaves_the_discovered_index_alone(
+    monkeypatch, agent_workspace
+):
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    await ha.HarnessAdapter().connect(_agents_options(agent_workspace))
+    system = _CapturingLoop.captured["system"]
+    assert "- researcher: Reads the codebase" in system
+    assert "- myplug:reviewer: Reviews diffs" in system
+    assert sorted(a["agentType"] for a in _CapturingLoop.captured["agents"]) == [
+        "myplug:reviewer", "researcher",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_declared_db_agent_wins_a_name_collision_with_a_file_agent(
+    monkeypatch, agent_workspace
+):
+    """Host-first resolution (CE6): the index must describe the definition the
+    dispatcher would actually run."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    await ha.HarnessAdapter().connect(
+        _agents_options(
+            agent_workspace,
+            declared=[{"name": "researcher", "description": "the app's own"}],
+        )
+    )
+    system = _CapturingLoop.captured["system"]
+    assert "- researcher: the app's own" in system
+    assert "Reads the codebase" not in system
+
+
+@pytest.mark.asyncio
+async def test_plugin_agents_reach_the_dispatch_registry(monkeypatch, agent_workspace):
+    """A plugin agent is not just advertised, it is DISPATCHABLE.
+
+    Over a REAL NativeLoop (no fake), the namespaced definition lands in
+    ctx.extra["agent_registry"], which is what task_dispatch resolves against.
+    """
+    import app.core.provider.harness_adapter as ha
+    import app.core.task_dispatch as td
+
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(_agents_options(agent_workspace))
+    registry = adapter.engine.ctx.extra["agent_registry"]
+    assert set(registry) == {"researcher", "myplug:reviewer"}
+    resolved = td.resolve_registry_agent("myplug:reviewer", registry)
+    assert resolved is not None and resolved.body.strip() == "PLUGIN AGENT PROMPT"

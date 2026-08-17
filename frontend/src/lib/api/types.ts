@@ -31,7 +31,7 @@ export interface ProfileConfig {
 	include_partial_messages?: boolean;
 	enable_file_checkpointing?: boolean;  // LEGACY (SDK-era): still read by chat rewind gating for old rows; no longer written
 	ai_tools?: Record<string, boolean>;  // AI tool toggles (image_generation, video_generation, etc.)
-	enabled_agents?: string[];  // Optional invoke allowlist: agents this agent may dispatch via the Task tool; empty/unset = any
+	enabled_agents?: string[];  // Agents declared into this agent's context (name+description); empty/unset = all. NEVER a dispatch restriction
 	cwd?: string;  // Working directory override
 	add_dirs?: string[];  // Additional directories the agent may access
 	env?: Record<string, string>;  // Environment variables to set

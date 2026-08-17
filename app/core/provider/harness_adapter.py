@@ -131,10 +131,15 @@ SUPPLIED BY FLUID ITSELF, WITH NO WIRING HERE (Claude-ecosystem compat, CE1):
     (rulings CE2/CE3) — so the compiled prompt this adapter builds already
     contains them.
   * ``agents`` (subagents) — ``.claude/agents/**/*.md`` plus plugin agents are
-    read into ``ctx.extra["agent_registry"]`` by ``NativeLoop`` and advertised in
-    the prompt's agents index (ruling CE6). Dispatch stays ours: the Task
-    dispatcher injected below resolves app agents first and falls back to that
-    registry (``app.core.task_dispatch``).
+    read into ``ctx.extra["agent_registry"]`` by ``NativeLoop`` (ruling CE6).
+    The prompt's agents index is assembled by THIS module instead of fluid's
+    compiler (``_agent_context``), because the app's own DB agents belong in the
+    same list: the profile's context-declared agents (2026-08-17 ruling —
+    ``enabled_agents``/``agent_invoke_mode`` decide what is DECLARED, never what
+    may be dispatched) are merged with the discovered ones, name+description
+    only. Dispatch stays ours: the Task dispatcher injected below resolves app
+    agents first and falls back to that registry (``app.core.task_dispatch``),
+    with no allowlist between it and any agent that resolves.
 """
 
 from __future__ import annotations
@@ -142,7 +147,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -421,6 +426,10 @@ class HarnessAdapter(ProviderAdapter):
             native_model = (
                 resolve_api_model_id(options.model) if kind == "anthropic" else options.model
             )
+            # The delegation catalog (CE6 + the app's own DB agents) — one
+            # name+description index for the prompt, plus the matching
+            # descriptors for the "Custom agents" usage row.
+            _, declared_agent_descriptors = _agent_context(options)
             # Compiled ONCE, used twice below: the joined text is the prompt
             # the engine sends; the labeled sections feed get_context_usage().
             compiled_prompt = self._compile_prompt_sections(
@@ -457,6 +466,12 @@ class HarnessAdapter(ProviderAdapter):
                 # failure) degrades to the opaque-blob pricing, matching the
                 # string fallback above.
                 system_sections=compiled_prompt,
+                # Agent-definition descriptors behind get_context_usage()'s
+                # "Custom agents" row: the profile's context-declared DB agents
+                # (name+description, ruling of 2026-08-17) plus the file/plugin
+                # definitions fluid discovered — passing this list at all
+                # suppresses fluid's own auto-fill, so it has to carry both.
+                agents=declared_agent_descriptors or None,
                 registry=self._registry,
                 permissions=permissions,
                 ctx=native_ctx,
@@ -603,6 +618,13 @@ class HarnessAdapter(ProviderAdapter):
         app_session_id = getattr(sdk_options, "aih_session_id", None)
         if app_session_id:
             opts.extra["app_session_id"] = app_session_id
+        # The DB agents the profile declares into its model's context (2026-08-17
+        # ruling, superseding A10) — ``[{"name", "description"}]`` resolved by
+        # query_options from agent_invoke_mode/enabled_agents. Merged into the
+        # compiled prompt's agents index; never a dispatch restriction.
+        declared_agents = getattr(sdk_options, "aih_declared_agents", None)
+        if declared_agents:
+            opts.extra["declared_agents"] = list(declared_agents)
         # The app's permission prompt flow rides on this callback (see
         # _bridge_permission) — same wiring the SDK path uses.
         self._can_use_tool = getattr(sdk_options, "can_use_tool", None)
@@ -1339,26 +1361,51 @@ class HarnessAdapter(ProviderAdapter):
         """Run the fluid prompt compiler, keeping the labeled sections.
 
         Returns fluid's ``CompiledPrompt`` (joined text + one section per
-        input: base, instruction files, skills index, environment, extras) or
-        ``None`` on compiler failure. The sections are what let the native
-        leg's ``get_context_usage()`` price "Memory files"/"Skills" as their
-        own rows instead of one opaque "System prompt" blob — the same
-        source-by-source split Claude Code's ``/context`` shows.
+        input: base, instruction files, skills index, agents index,
+        environment, extras) or ``None`` on compiler failure. The sections are
+        what let the native leg's ``get_context_usage()`` price "Memory
+        files"/"Skills" as their own rows instead of one opaque "System prompt"
+        blob — the same source-by-source split Claude Code's ``/context`` shows.
+
+        The AGENTS section is the app's, not the compiler's: fluid's own
+        ``agents_index`` can only see disk (``.claude/agents`` + plugin agents),
+        and the profile's context-declared DB agents belong in the same index.
+        ``include_agents=False`` turns the compiler's version off and
+        :func:`_agent_context` supplies the merged one, slotted where the
+        compiler would have put it (after skills, before environment) so the
+        prompt prefix stays cache-stable.
         """
         try:
-            from fluid.context.compiler import PromptInputs, compile_prompt
+            from fluid.context.compiler import (
+                CompiledPrompt, PromptInputs, PromptSection, compile_prompt,
+            )
 
             # A profile with ``inject_env_details`` on already carries the
             # app's <env> block (which knows worktree/execution mode fluid
             # doesn't) — skip fluid's env section rather than injecting twice.
             has_app_env = bool(system) and "<env>" in system
-            return compile_prompt(
+            compiled = compile_prompt(
                 PromptInputs(
                     base=system,
                     extra_blocks=[append_system] if append_system else [],
                     cwd=options.cwd or ".",
                     include_env=not has_app_env,
+                    include_agents=False,
                 )
+            )
+            index, _ = _agent_context(options)
+            if not index:
+                return compiled
+            sections = list(compiled.sections)
+            insert_at = len(sections)
+            for position, section in enumerate(sections):
+                if section.kind in ("environment", "extra"):
+                    insert_at = position
+                    break
+            sections.insert(insert_at, PromptSection(kind="agents", text=index))
+            return CompiledPrompt(
+                sections=tuple(sections),
+                text="\n\n".join(s.text for s in sections) if sections else None,
             )
         except Exception:
             logger.exception("prompt compiler failed; falling back to raw parts")
@@ -1793,6 +1840,92 @@ def _lookup_provider_row_shape(provider_id: str) -> tuple:
     if not row:
         return None, None, None
     return row.get("provider_type"), row.get("auth_mode"), row.get("api_dialect")
+
+
+# fluid's discovery scope → the ``source`` label on a usage agent row (mirrors
+# NativeLoop._AGENT_SOURCES; kept here so the app's combined descriptor list
+# labels file/plugin agents exactly the way fluid's own auto-fill would).
+_AGENT_SOURCES = {"project": "project", "global": "user", "plugin": "plugin"}
+
+
+def _context_declared_agents(options: SessionOptions) -> List[Dict[str, str]]:
+    """The DB agents this session declares, off ``extra["declared_agents"]``.
+
+    ``[{"name", "description"}]`` — name and description and nothing else. The
+    agent's own system prompt, tools and model are resolved by
+    :mod:`app.core.task_dispatch` when the worker spawns; putting any of it in
+    the CALLER's context is exactly what the index shape exists to avoid.
+    """
+    out: List[Dict[str, str]] = []
+    for entry in (options.extra or {}).get("declared_agents") or ():
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or entry.get("agentType") or "").strip()
+        if not name:
+            continue
+        out.append({"name": name, "description": str(entry.get("description") or "").strip()})
+    return out
+
+
+def _agent_context(options: SessionOptions) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+    """``(agents index text, host-declared descriptors)`` for a fluid leg.
+
+    fluid's own ``compiler.agents_index`` only knows what it can find on disk
+    (``.claude/agents`` + plugin agents, ruling CE6), and its ``agents=`` engine
+    input feeds the context-usage breakdown, not the prompt. The app's DB agents
+    have to join that index for the model to know they exist, so the index is
+    assembled HERE from both sources and the compiler's own agents section is
+    turned off (see ``_compile_prompt_sections``) — one "Available agent types"
+    block, one line per agent, ``- name: description``, bodies left on disk.
+
+    A DB agent WINS a name collision with a file agent, matching the dispatcher's
+    host-first resolution (CE6) — the model must not read a description for a
+    definition that is not the one it would get.
+
+    The second element is the ``NativeLoop(agents=...)`` descriptor list: the
+    declared DB agents (priced by their description, which is all that entered
+    the context) plus the discovered file/plugin definitions with their bodies —
+    the same records fluid would have auto-filled, which passing ``agents=`` at
+    all would otherwise suppress.
+
+    Never raises: discovery is best-effort context (CE11).
+    """
+    declared = _context_declared_agents(options)
+    try:
+        from fluid.context.agents import discover_agents
+
+        discovered = list(discover_agents(options.cwd or "."))
+    except Exception:  # noqa: BLE001 — never break session connect
+        logger.warning("agent discovery failed; index falls back to DB agents", exc_info=True)
+        discovered = []
+
+    declared_names = {entry["name"] for entry in declared}
+    lines: Dict[str, str] = {entry["name"]: entry["description"] for entry in declared}
+    for definition in discovered:
+        lines.setdefault(definition.name, definition.description or "")
+
+    index: Optional[str] = None
+    if lines:
+        try:
+            from fluid.context.compiler import AGENTS_HEADER
+        except Exception:  # noqa: BLE001
+            AGENTS_HEADER = "# Available agent types"
+        body = "\n".join(f"- {name}: {lines[name]}" for name in sorted(lines))
+        index = f"{AGENTS_HEADER}\n{body}"
+
+    descriptors: List[Dict[str, Any]] = [
+        {"agentType": entry["name"], "source": "app", "description": entry["description"]}
+        for entry in declared
+    ]
+    for definition in discovered:
+        if definition.name in declared_names:
+            continue
+        descriptors.append({
+            "agentType": definition.name,
+            "source": _AGENT_SOURCES.get(definition.scope, definition.scope or "app"),
+            "text": definition.body,
+        })
+    return index, descriptors
 
 
 def _native_context_window(kind: str, options: SessionOptions) -> Optional[int]:
