@@ -5,11 +5,14 @@ import hmac
 import time
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.api import artifacts as artifacts_mod
 from app.api.artifacts import _require_auth_or_signed, router
+from app.api.projects import MAX_UPLOAD_SIZE
 from app.core import artifact_store, cluster
 from app.core.config import settings
 from app.db.artifacts import upsert_artifact
@@ -135,6 +138,7 @@ def test_serves_locally_even_when_runner_is_another_install(mock_db, client, mon
 
 def test_redirects_to_online_holder(mock_db, client, monkeypatch):
     monkeypatch.setattr(settings, "instance_id", "install-A")
+    monkeypatch.setattr(settings, "cluster_artifact_proxy", False)
     h = "b" * 64
     # Metadata row only — no local bytes on this install's disk.
     upsert_artifact(hash=h, size=42, mime="image/png", filename="s.png",
@@ -148,6 +152,7 @@ def test_redirects_to_online_holder(mock_db, client, monkeypatch):
 
 def test_redirect_strips_trailing_slash_on_base_url(mock_db, client, monkeypatch):
     monkeypatch.setattr(settings, "instance_id", "install-A")
+    monkeypatch.setattr(settings, "cluster_artifact_proxy", False)
     h = "c" * 64
     upsert_artifact(hash=h, size=42, mime="image/png", filename="s.png",
                     created_by_session="s", runner_id=HOLDER)
@@ -237,3 +242,229 @@ def test_tampered_signature_is_401(mock_db, unauth_client):
 
     resp = unauth_client.get(f"/api/v1/artifacts/{h}?exp={exp}&sig={flipped}")
     assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Serving-install proxy (cluster_artifact_proxy, default on).
+# Holder HTTP is mocked — no network. stream() only; never .get().
+# ---------------------------------------------------------------------------
+
+class _StreamClient:
+    """httpx stand-in whose stream() is the only legal fetch path."""
+
+    def __init__(self, cm):
+        self._cm = cm
+        self.calls = []
+
+    def stream(self, method, url, timeout=None, follow_redirects=None):
+        self.calls.append(
+            {
+                "method": method,
+                "url": url,
+                "timeout": timeout,
+                "follow_redirects": follow_redirects,
+            }
+        )
+        return self._cm
+
+    def get(self, *args, **kwargs):
+        raise AssertionError("download_artifact must use stream(), not get()")
+
+
+class _ChunkStream:
+    """Async stream context that yields ``chunks`` at status ``status_code``."""
+
+    def __init__(self, chunks, status_code=200):
+        self._chunks = chunks
+        self.status_code = status_code
+        self.closed = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        await self.aclose()
+
+    async def aclose(self):
+        self.closed = True
+
+    async def aiter_bytes(self):
+        for chunk in self._chunks:
+            if self.closed:
+                return
+            yield chunk
+
+
+def _install_stream(monkeypatch, cm):
+    fake = _StreamClient(cm)
+    monkeypatch.setattr(artifacts_mod, "get_http_client", lambda: fake)
+    return fake
+
+
+def _remote_row(h, mime="image/png", filename="s.png"):
+    upsert_artifact(
+        hash=h,
+        size=42,
+        mime=mime,
+        filename=filename,
+        created_by_session="s",
+        runner_id=HOLDER,
+    )
+
+
+def test_proxy_returns_200_and_does_not_307(mock_db, client, monkeypatch):
+    monkeypatch.setattr(settings, "instance_id", "install-A")
+    data = b"proxied-artifact-bytes"
+    h = hashlib.sha256(data).hexdigest()
+    _remote_row(h, mime="image/png", filename="s.png")
+    _make_online_holder(HOLDER_URL)
+    fake = _install_stream(monkeypatch, _ChunkStream([data]))
+
+    resp = client.get(f"/api/v1/artifacts/{h}", follow_redirects=False)
+    assert resp.status_code == 200
+    assert resp.content == data
+    assert "location" not in resp.headers
+    assert fake.calls[0]["method"] == "GET"
+    assert fake.calls[0]["timeout"] == 10.0
+    assert fake.calls[0]["follow_redirects"] is False
+    parsed = urlparse(fake.calls[0]["url"])
+    assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == (
+        f"{HOLDER_URL}/api/v1/artifacts/{h}"
+    )
+    q = parse_qs(parsed.query)
+    assert cluster.verify_artifact_token(h, q["exp"][0], q["sig"][0]) is True
+
+
+def test_proxy_does_not_follow_holder_307(mock_db, client, monkeypatch):
+    """A holder 307 whose follow-target would hash-match must still 404.
+
+    The shared client defaults to follow_redirects=True. If the call site
+    forgets the override (or uses .get()), httpx would land on the matching
+    body and this test would see 200.
+    """
+    monkeypatch.setattr(settings, "instance_id", "install-A")
+    data = b"matching-body-if-followed"
+    h = hashlib.sha256(data).hexdigest()
+    _remote_row(h)
+    _make_online_holder(HOLDER_URL)
+
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path.rstrip("/").endswith("redirect-target"):
+            return httpx.Response(200, content=data)
+        return httpx.Response(
+            307, headers={"location": f"{HOLDER_URL}/redirect-target"}
+        )
+
+    mock_http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        follow_redirects=True,
+    )
+    monkeypatch.setattr(artifacts_mod, "get_http_client", lambda: mock_http)
+
+    resp = client.get(f"/api/v1/artifacts/{h}", follow_redirects=False)
+    assert resp.status_code == 404
+    assert "location" not in resp.headers
+    assert "/redirect-target" not in seen
+
+
+def test_proxy_overflow_without_prebuilt_content_is_404(mock_db, client, monkeypatch):
+    """Cap is enforced while iterating chunks — not against a pre-built body."""
+    monkeypatch.setattr(settings, "instance_id", "install-A")
+    h = "1" * 64
+    _remote_row(h)
+    _make_online_holder(HOLDER_URL)
+
+    chunk = b"x" * (1024 * 1024)
+    stream = _ChunkStream([])
+    stream.iterated = False
+
+    async def _overflow_chunks():
+        stream.iterated = True
+        sent = 0
+        while sent <= MAX_UPLOAD_SIZE:
+            yield chunk
+            sent += len(chunk)
+
+    # Generator yields past the cap without assembling a `content=` body.
+    stream.aiter_bytes = _overflow_chunks
+    fake = _install_stream(monkeypatch, stream)
+
+    resp = client.get(f"/api/v1/artifacts/{h}", follow_redirects=False)
+    assert resp.status_code == 404
+    assert fake.calls, "must call stream(), not get()"
+    assert stream.iterated is True
+    assert stream.closed is True
+
+
+def test_proxy_hash_mismatch_is_404(mock_db, client, monkeypatch):
+    monkeypatch.setattr(settings, "instance_id", "install-A")
+    h = hashlib.sha256(b"expected-bytes").hexdigest()
+    _remote_row(h)
+    _make_online_holder(HOLDER_URL)
+    _install_stream(monkeypatch, _ChunkStream([b"not-the-right-bytes"]))
+
+    resp = client.get(f"/api/v1/artifacts/{h}", follow_redirects=False)
+    assert resp.status_code == 404
+
+
+def test_flag_off_still_307s(mock_db, client, monkeypatch):
+    monkeypatch.setattr(settings, "instance_id", "install-A")
+    monkeypatch.setattr(settings, "cluster_artifact_proxy", False)
+    h = "2" * 64
+    _remote_row(h)
+    _make_online_holder(HOLDER_URL)
+
+    def _must_not_fetch(*args, **kwargs):
+        raise AssertionError("flag off must 307, not proxy")
+
+    monkeypatch.setattr(artifacts_mod, "get_http_client", _must_not_fetch)
+
+    resp = client.get(f"/api/v1/artifacts/{h}", follow_redirects=False)
+    assert resp.status_code == 307
+    _assert_signed_redirect(resp.headers["location"], h)
+
+
+def test_proxy_headers_match_local_file_response(mock_db, client, monkeypatch):
+    monkeypatch.setattr(settings, "instance_id", "install-A")
+    data = b"header-compare-bytes"
+    local = artifact_store.store_bytes(
+        data, mime="image/png", filename="shot.png", runner_id=HOLDER
+    )
+    local_resp = client.get(f"/api/v1/artifacts/{local['hash']}")
+    assert local_resp.status_code == 200
+
+    # Drop the local bytes so the same hash takes the proxy path.
+    path = artifact_store.artifact_path(local["hash"])
+    assert path is not None
+    path.unlink()
+    _make_online_holder(HOLDER_URL)
+    _install_stream(monkeypatch, _ChunkStream([data]))
+
+    proxy_resp = client.get(
+        f"/api/v1/artifacts/{local['hash']}", follow_redirects=False
+    )
+    assert proxy_resp.status_code == 200
+    assert proxy_resp.content == data
+    assert proxy_resp.headers["content-type"] == local_resp.headers["content-type"]
+    assert (
+        proxy_resp.headers["content-disposition"]
+        == local_resp.headers["content-disposition"]
+    )
+
+
+def test_proxy_rejects_unsafe_base_url(mock_db, client, monkeypatch):
+    monkeypatch.setattr(settings, "instance_id", "install-A")
+    h = "3" * 64
+    _remote_row(h)
+    _make_online_holder("http://user:pass@10.0.0.99:8000")
+
+    def _must_not_fetch(*args, **kwargs):
+        raise AssertionError("must not fetch an unvalidated base_url")
+
+    monkeypatch.setattr(artifacts_mod, "get_http_client", _must_not_fetch)
+
+    resp = client.get(f"/api/v1/artifacts/{h}", follow_redirects=False)
+    assert resp.status_code == 404

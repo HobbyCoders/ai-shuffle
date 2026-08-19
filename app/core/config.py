@@ -155,6 +155,10 @@ class Settings(BaseSettings):
     #     cannot be controlled remotely.
     cluster_secret: Optional[str] = None
     cluster_advertise_url: Optional[str] = None
+    # Cross-install artifact GET is proxied through the authed origin by default
+    # (the browser cookie cannot follow a 307 to the holder). Kill switch:
+    # CLUSTER_ARTIFACT_PROXY=0 restores the 307 redirect.
+    cluster_artifact_proxy: bool = True
 
     # Session
     session_secret: Optional[str] = None
