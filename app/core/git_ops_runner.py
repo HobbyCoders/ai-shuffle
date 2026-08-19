@@ -99,7 +99,11 @@ def execute_ensure_worktree(op_row: Dict[str, Any]) -> Dict[str, Any]:
     routes produce identical side effects and identical ``result`` shapes.
     """
     from app.core import checkout_manager
+    from app.db import git_ops as git_ops_db
     from app.db import projects_v2
+
+    # Heartbeat before git so a live add past a few minutes is not stale.
+    git_ops_db.touch_op(op_row["id"])
 
     params = op_row.get("params") or {}
     branch = params.get("branch")

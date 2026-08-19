@@ -192,3 +192,27 @@ def test_orphan_session_uses_profile_config_cwd(tmp_path):
         )
 
     assert str(opts.cwd) == str(cfg_dir)
+
+
+def test_sync_builder_lost_claim_does_not_wait(tmp_path):
+    """Rescue + post-resolve stay no-wait; one async preflight owns the budget."""
+    session = {"id": "ses-1", "project_v2_id": "pv2-1", "branch": "feat/x"}
+    slept: list = []
+
+    with patch.object(qo, "get_security_instructions", return_value=""), patch.object(
+        qo.database, "get_session", return_value=session
+    ), patch(
+        "app.core.project_resolver.resolve_cwd", return_value=None
+    ), patch(
+        "app.core.project_resolver.resolve_project_v2",
+        return_value={"id": "pv2-1", "name": "MyRepo"},
+    ), patch.object(
+        qo, "_claim_and_run_pending_checkout", return_value=False
+    ) as claim, patch(
+        "time.sleep", side_effect=lambda s: slept.append(s)
+    ):
+        with pytest.raises(qo.WorktreeUnavailableError):
+            qo.build_options_from_profile(profile=_profile(), session_id="ses-1")
+
+    assert slept == []
+    assert claim.called

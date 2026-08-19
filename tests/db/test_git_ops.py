@@ -167,13 +167,84 @@ def test_find_queued_ignores_already_claimed_rows(mock_db):
     assert git_ops.find_queued(RUNNER, PV2, "ensure_worktree", branch="feat/x") is None
 
 
+# ═══ find_matching (pure read; skips stale running) ══════════════════════════
+
+
+def test_find_matching_returns_queued(mock_db):
+    target = _ensure_op(branch="feat/x")
+    found = git_ops.find_matching(RUNNER, PV2, "ensure_worktree", branch="feat/x")
+    assert found is not None and found["id"] == target["id"]
+    assert found["status"] == "queued"
+
+
+def test_find_matching_returns_fresh_running(mock_db):
+    op = _ensure_op(branch="feat/x")
+    git_ops.claim_op(op["id"], RUNNER)
+    found = git_ops.find_matching(RUNNER, PV2, "ensure_worktree", branch="feat/x")
+    assert found is not None and found["id"] == op["id"]
+    assert found["status"] == "running"
+
+
+def test_find_matching_skips_stale_running_and_returns_newer_queued(mock_db):
+    """A 3-hour zombie must not hide a claimable retry for the same branch."""
+    zombie = _ensure_op(branch="feat/x")
+    git_ops.claim_op(zombie["id"], RUNNER)
+    _backdate(zombie["id"], minutes=180)
+
+    queued = _ensure_op(branch="feat/x")
+    found = git_ops.find_matching(RUNNER, PV2, "ensure_worktree", branch="feat/x")
+    assert found is not None and found["id"] == queued["id"]
+    assert found["status"] == "queued"
+
+
+def test_find_matching_skips_stale_running_when_nothing_else_matches(mock_db):
+    zombie = _ensure_op(branch="feat/x")
+    git_ops.claim_op(zombie["id"], RUNNER)
+    _backdate(zombie["id"], minutes=20)
+    assert git_ops.find_matching(RUNNER, PV2, "ensure_worktree", branch="feat/x") is None
+
+
+def test_find_matching_never_calls_fail_op(mock_db):
+    from unittest.mock import patch
+
+    zombie = _ensure_op(branch="feat/x")
+    git_ops.claim_op(zombie["id"], RUNNER)
+    _backdate(zombie["id"], minutes=20)
+    with patch.object(git_ops, "fail_op") as fail:
+        git_ops.find_matching(RUNNER, PV2, "ensure_worktree", branch="feat/x")
+        fail.assert_not_called()
+
+
+def test_find_matching_keeps_running_younger_than_stale_bound(mock_db):
+    op = _ensure_op(branch="feat/x")
+    git_ops.claim_op(op["id"], RUNNER)
+    _backdate(op["id"], minutes=5)
+    found = git_ops.find_matching(RUNNER, PV2, "ensure_worktree", branch="feat/x")
+    assert found is not None and found["id"] == op["id"]
+    assert git_ops.list_stale_running(
+        RUNNER, PV2, "ensure_worktree", branch="feat/x"
+    ) == []
+
+
+def test_touch_op_refreshes_updated_at(mock_db):
+    op = _ensure_op()
+    git_ops.claim_op(op["id"], RUNNER)
+    _backdate(op["id"], minutes=20)
+    assert git_ops._is_stale_running(_got(op["id"]))
+    touched = git_ops.touch_op(op["id"])
+    assert touched is not None
+    assert not git_ops._is_stale_running(touched)
+
+
 # ═══ sweeper ═════════════════════════════════════════════════════════════════
 
 
-def _backdate(op_id: str, days: int):
+def _backdate(op_id: str, days: int = 0, minutes: int = 0):
     from app.db.base import get_db
 
-    old = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    old = (
+        datetime.now(timezone.utc) - timedelta(days=days, minutes=minutes)
+    ).isoformat()
     with get_db() as conn:
         conn.cursor().execute(
             "UPDATE git_ops SET updated_at = %s WHERE id = %s", (old, op_id)

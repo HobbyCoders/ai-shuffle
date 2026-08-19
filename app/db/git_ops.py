@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.db.base import get_db
@@ -36,6 +37,12 @@ logger = logging.getLogger(__name__)
 
 # Terminal statuses — a claim never touches these.
 TERMINAL_STATUSES = ("done", "error")
+
+# A ``running`` row older than this is treated as a crashed-loop zombie, not a
+# live ``git worktree add``. The executor heartbeats ``updated_at`` at start so
+# a long add is not skipped. Metadata GET must never fail these; cleanup lives
+# only in ``ensure_pending_checkout`` and only for this runner.
+STALE_RUNNING_SECONDS = 15 * 60
 
 
 def _parse_json(raw: Any) -> Any:
@@ -60,6 +67,67 @@ def _row(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 def _rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [d for r in rows if (d := _row(r)) is not None]
+
+
+def _as_aware_utc(value: Any) -> Optional[datetime]:
+    """Coerce a DB timestamp (datetime or ISO string, naive or aware) to UTC.
+
+    The SQLite test shim stores ``CURRENT_TIMESTAMP`` as a naive string;
+    Postgres returns aware datetimes. Missing/unparseable → None.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _is_stale_running(row: Dict[str, Any]) -> bool:
+    if row.get("status") != "running":
+        return False
+    updated = _as_aware_utc(row.get("updated_at"))
+    if updated is None:
+        return True
+    age = (datetime.now(timezone.utc) - updated).total_seconds()
+    return age > STALE_RUNNING_SECONDS
+
+
+def _matching_inflight(
+    runner_id: str,
+    project_v2_id: Optional[str],
+    op: str,
+    branch: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Queued + running rows for (runner, op[, project, branch]), oldest first."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM git_ops "
+            "WHERE runner_id = %s AND op = %s AND status IN ('queued', 'running') "
+            "ORDER BY created_at ASC, id ASC",
+            (runner_id, op),
+        )
+        candidates = _rows(cursor.fetchall())
+    matched: List[Dict[str, Any]] = []
+    for row in candidates:
+        if project_v2_id is not None and row.get("project_v2_id") != project_v2_id:
+            continue
+        if branch is not None and (row.get("params") or {}).get("branch") != branch:
+            continue
+        matched.append(row)
+    return matched
 
 
 def insert_op(
@@ -137,6 +205,17 @@ def fail_op(op_id: str, error: str) -> Optional[Dict[str, Any]]:
         return _row(cursor.fetchone())
 
 
+def touch_op(op_id: str) -> Optional[Dict[str, Any]]:
+    """Heartbeat ``updated_at`` so a live executor is not treated as stale."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE git_ops SET updated_at = NOW() WHERE id = %s RETURNING *",
+            (op_id,),
+        )
+        return _row(cursor.fetchone())
+
+
 def list_queued_for_runner(runner_id: str, limit: int = 50) -> List[Dict[str, Any]]:
     """Queued ops targeted at ``runner_id``, oldest first (the loop's read)."""
     with get_db() as conn:
@@ -178,6 +257,40 @@ def find_queued(
             continue
         return row
     return None
+
+
+def find_matching(
+    runner_id: str,
+    project_v2_id: Optional[str],
+    op: str,
+    branch: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Oldest queued or fresh-running match. Pure read — never writes.
+
+    Stale ``running`` (``updated_at`` older than ``STALE_RUNNING_SECONDS``) is
+    skipped so a crashed-loop zombie cannot hide a newer queued retry. Callers
+    that need to fail those zombies (spawn preflight on this runner) do so
+    themselves; metadata GET must not.
+    """
+    for row in _matching_inflight(runner_id, project_v2_id, op, branch):
+        if _is_stale_running(row):
+            continue
+        return row
+    return None
+
+
+def list_stale_running(
+    runner_id: str,
+    project_v2_id: Optional[str],
+    op: str,
+    branch: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Zombie ``running`` rows ``find_matching`` skipped. Pure read."""
+    return [
+        row
+        for row in _matching_inflight(runner_id, project_v2_id, op, branch)
+        if _is_stale_running(row)
+    ]
 
 
 def list_recent_for_project(

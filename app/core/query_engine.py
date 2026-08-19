@@ -880,6 +880,11 @@ async def execute_query(
     # through the shared sdk_options seam — previously only the WebSocket path
     # attached hooks here (issue #567).
     from app.core.sdk_options import build_session_options
+    from app.core.query_options import ensure_pending_checkout
+    # Async wait for an in-flight ensure_worktree. Must stay on the event
+    # loop: a sync poll would occupy a run_sync worker for 30s.
+    if session:
+        await ensure_pending_checkout(session)
     options, agents_dict = build_session_options(
         profile=profile,
         project=project,
@@ -1294,6 +1299,11 @@ async def stream_query(
     # Build options with user-scoped credential resolution.
     # WorktreeUnavailableError → refuse to run (never silently in main).
     from app.core.sdk_options import build_session_options
+    from app.core.query_options import ensure_pending_checkout
+    # Async wait for an in-flight ensure_worktree. Must stay on the event
+    # loop: a sync poll would occupy a run_sync worker for 30s.
+    if session:
+        await ensure_pending_checkout(session)
     try:
         options, agents_dict = build_session_options(
             profile=profile,
@@ -1953,6 +1963,11 @@ async def _stream_to_websocket_impl(
     # the shared seam yields byte-for-byte identical options; hooks are attached
     # separately below (after can_use_tool is set, with an stderr callback).
     from app.core.sdk_options import build_session_options
+    from app.core.query_options import ensure_pending_checkout
+    # Async wait for an in-flight ensure_worktree. Must stay on the event
+    # loop: a sync poll would occupy a run_sync worker for 30s.
+    if session:
+        await ensure_pending_checkout(session)
     _build_opts_start = time.monotonic()
     try:
         options, agents_dict = build_session_options(

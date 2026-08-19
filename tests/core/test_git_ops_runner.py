@@ -308,17 +308,24 @@ def test_inline_claim_is_a_no_op_without_a_matching_op(project):
 
 def test_inline_claim_loses_to_the_loop_and_reports_false(project):
     """When the loop already claimed the op, the spawn path must NOT re-run
-    ``git worktree add`` against the same path — it refuses honestly instead."""
+    ``git worktree add`` against the same path — it refuses honestly instead.
+
+    The sync helper must return False immediately (no wait). Waiting lives in
+    ``ensure_pending_checkout``.
+    """
     from app.core import checkout_manager, query_options
 
     op = _queue(project, branch="feat/x")
     git_ops_db.claim_op(op["id"], ME)  # the loop got there first
 
+    slept: list = []
     with patch.object(
         checkout_manager, "ensure_checkout",
         MagicMock(side_effect=AssertionError("must not double-run")),
-    ):
+    ), patch("time.sleep", side_effect=lambda s: slept.append(s)):
         assert query_options._claim_and_run_pending_checkout(project, "feat/x") is False
+    assert slept == []
+    assert _got(op["id"])["status"] == "running"
 
 
 def test_inline_claim_records_the_failure_and_reports_false(project):
@@ -352,6 +359,167 @@ def test_inline_claim_without_a_branch_is_a_no_op(project):
     from app.core import query_options
 
     assert query_options._claim_and_run_pending_checkout(project, None) is False
+
+
+# ═══ async spawn preflight (ensure_pending_checkout) ═════════════════════════
+
+
+def _session(project, branch="feat/x"):
+    return {"id": "ses-1", "project_v2_id": project["id"], "branch": branch}
+
+
+def _backdate(op_id: str, minutes: int):
+    from datetime import datetime, timedelta, timezone
+    from app.db.base import get_db
+
+    old = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    with get_db() as conn:
+        conn.cursor().execute(
+            "UPDATE git_ops SET updated_at = %s WHERE id = %s", (old, op_id)
+        )
+
+
+async def test_ensure_pending_checkout_done_op_returns_true_without_ensure_checkout(
+    project,
+):
+    """Wait path: a running op that settles ``done`` is True and must not
+    re-run ``git worktree add``."""
+    from app.core import checkout_manager, query_options
+
+    op = _queue(project, branch="feat/x")
+    git_ops_db.claim_op(op["id"], ME)
+    real_get = git_ops_db.get_op
+
+    def complete_then_get(op_id):
+        git_ops_db.complete_op(op_id, {"path": "/w/feat-x"})
+        return real_get(op_id)
+
+    with patch.object(
+        checkout_manager, "ensure_checkout",
+        MagicMock(side_effect=AssertionError("must not double-run")),
+    ), patch.object(git_ops_db, "get_op", side_effect=complete_then_get):
+        assert await query_options.ensure_pending_checkout(_session(project)) is True
+
+
+async def test_ensure_pending_checkout_timeout_returns_false_without_ensure_checkout(
+    project,
+):
+    from app.core import checkout_manager, query_options
+
+    op = _queue(project, branch="feat/x")
+    git_ops_db.claim_op(op["id"], ME)
+
+    with patch.object(
+        checkout_manager, "ensure_checkout",
+        MagicMock(side_effect=AssertionError("must not double-run")),
+    ):
+        assert await query_options.ensure_pending_checkout(
+            _session(project), timeout_s=0.0
+        ) is False
+    assert _got(op["id"])["status"] == "running"
+
+
+async def test_ensure_pending_checkout_error_returns_false_without_ensure_checkout(
+    project,
+):
+    from app.core import checkout_manager, query_options
+
+    op = _queue(project, branch="feat/x")
+    git_ops_db.claim_op(op["id"], ME)
+    real_get = git_ops_db.get_op
+
+    def fail_then_get(op_id):
+        git_ops_db.fail_op(op_id, "nope")
+        return real_get(op_id)
+
+    with patch.object(
+        checkout_manager, "ensure_checkout",
+        MagicMock(side_effect=AssertionError("must not double-run")),
+    ), patch.object(git_ops_db, "get_op", side_effect=fail_then_get):
+        assert await query_options.ensure_pending_checkout(_session(project)) is False
+
+
+async def test_ensure_pending_checkout_zombie_plus_queued_claims_queued_once(
+    project,
+):
+    """Stale running must not hide a newer queued retry: claim the queued
+    row and run ``ensure_checkout`` once."""
+    from app.core import checkout_manager, query_options
+
+    zombie = _queue(project, branch="feat/x")
+    git_ops_db.claim_op(zombie["id"], ME)
+    _backdate(zombie["id"], minutes=180)
+
+    queued = _queue(project, branch="feat/x")
+
+    with patch.object(
+        checkout_manager, "ensure_checkout", MagicMock(return_value="/w/feat-x")
+    ) as ensure:
+        assert await query_options.ensure_pending_checkout(_session(project)) is True
+
+    assert ensure.call_count == 1
+    assert _got(queued["id"])["status"] == "done"
+    assert _got(zombie["id"])["status"] == "error"
+    assert "stale running" in _got(zombie["id"])["result"]["error"]
+
+
+async def test_ensure_pending_checkout_does_not_fail_fresh_running(project):
+    """A running row younger than 15 minutes is the wait target, never failed."""
+    from app.core import checkout_manager, query_options
+
+    op = _queue(project, branch="feat/x")
+    git_ops_db.claim_op(op["id"], ME)
+    _backdate(op["id"], minutes=5)
+
+    with patch.object(
+        checkout_manager, "ensure_checkout",
+        MagicMock(side_effect=AssertionError("must not double-run")),
+    ):
+        assert await query_options.ensure_pending_checkout(
+            _session(project), timeout_s=0.0
+        ) is False
+    assert _got(op["id"])["status"] == "running"
+
+
+def test_find_matching_never_calls_fail_op(project):
+    zombie = _queue(project, branch="feat/x")
+    git_ops_db.claim_op(zombie["id"], ME)
+    _backdate(zombie["id"], minutes=20)
+    with patch.object(git_ops_db, "fail_op") as fail:
+        found = git_ops_db.find_matching(
+            ME, project["id"], "ensure_worktree", branch="feat/x"
+        )
+        fail.assert_not_called()
+    assert found is None
+
+
+async def test_ensure_pending_checkout_claims_queued_and_runs(project):
+    from app.core import checkout_manager, query_options
+
+    op = _queue(project, branch="feat/x")
+
+    with patch.object(
+        checkout_manager, "ensure_checkout", MagicMock(return_value="/w/feat-x")
+    ):
+        assert await query_options.ensure_pending_checkout(_session(project)) is True
+    assert _got(op["id"])["status"] == "done"
+
+
+def test_executor_heartbeats_updated_at_at_start(project):
+    """A live add past a few minutes must not look stale: touch before git."""
+    from app.core import checkout_manager
+
+    op = _queue(project)
+    claimed = _claimed(op["id"])
+    _backdate(op["id"], minutes=20)
+    assert git_ops_db._is_stale_running(_got(op["id"]))
+
+    with patch.object(
+        checkout_manager, "ensure_checkout", MagicMock(return_value="/w/feat-x")
+    ):
+        git_ops_runner.execute_ensure_worktree(claimed)
+
+    assert not git_ops_db._is_stale_running(_got(op["id"]))
 
 
 # ═══ sweeper ═════════════════════════════════════════════════════════════════

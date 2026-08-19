@@ -10,7 +10,9 @@ live here. MCP config, agent config, and environment setup are split into
 sibling modules and re-exported for backward compatibility.
 """
 
+import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -223,9 +225,9 @@ def _claim_and_run_pending_checkout(
             return False
         claimed = git_ops_db.claim_op(pending["id"], me)
         if claimed is None:
-            # The git-ops loop got there first; it is materializing the checkout
-            # right now. Refuse this turn honestly rather than double-running
-            # ``git worktree add`` against the same path.
+            # Lost the race. Must not wait here: this runs inside the sync
+            # option builder and would occupy a run_sync worker for 30s.
+            # The async preflight (ensure_pending_checkout) is the waiter.
             return False
         # This is the EXPECTED path for a session created from another device,
         # so it is announced as ordinary work (INFO) before it runs — not as the
@@ -287,6 +289,101 @@ def _rescue_pending_checkout(session_row: Dict[str, Any]) -> bool:
         return _claim_and_run_pending_checkout(project_v2, branch)
     except Exception:  # noqa: BLE001 — degrade to the post-resolve guard
         logger.warning("Pending-checkout pre-flight errored", exc_info=True)
+        return False
+
+
+async def ensure_pending_checkout(
+    session_row: Optional[Dict[str, Any]],
+    timeout_s: float = 30.0,
+) -> bool:
+    """Wait for (or claim-run) a matching ``ensure_worktree`` on the event loop.
+
+    One timeout budget for the whole preflight. Never calls ``ensure_checkout``
+    unless this task won ``claim_op`` — the wait path must not double-add.
+    Returns False on timeout/error/nothing-to-do; the caller still runs
+    ``build_session_options`` because cwd may already exist.
+    """
+    if not session_row:
+        return False
+    branch = session_row.get("branch") or session_row.get("worktree_branch")
+    if not branch:
+        return False
+    try:
+        from app.core import git_ops_runner
+        from app.core.config import settings as _settings
+        from app.db import git_ops as git_ops_db
+        from app.db.async_database import run_sync
+
+        me = _settings.effective_instance_id
+        pv2_id = session_row.get("project_v2_id")
+        deadline = time.monotonic() + timeout_s
+
+        def remaining() -> float:
+            return max(0.0, deadline - time.monotonic())
+
+        pending = await run_sync(
+            git_ops_db.find_matching, me, pv2_id, "ensure_worktree", branch
+        )
+        zombies = await run_sync(
+            git_ops_db.list_stale_running, me, pv2_id, "ensure_worktree", branch
+        )
+        pending_id = pending["id"] if pending else None
+        for zombie in zombies:
+            if zombie.get("runner_id") != me:
+                continue
+            if pending_id is not None and zombie["id"] == pending_id:
+                continue
+            logger.warning(
+                "git_ops: failing stale running op=%s", zombie["id"]
+            )
+            await run_sync(git_ops_db.fail_op, zombie["id"], "stale running")
+        if pending is None:
+            return False
+        if pending["status"] == "queued":
+            claimed = await run_sync(git_ops_db.claim_op, pending["id"], me)
+            if claimed is not None:
+                logger.info(
+                    "Materializing worktree via queued ensure_worktree op %s "
+                    "(branch %s)",
+                    claimed["id"], branch,
+                )
+                try:
+                    result = await run_sync(
+                        git_ops_runner.execute_ensure_worktree, claimed
+                    )
+                except Exception as exc:  # noqa: BLE001 — failure belongs on the row
+                    logger.warning(
+                        "Inline ensure_worktree claim failed for branch %s: %s",
+                        branch, exc,
+                    )
+                    await run_sync(git_ops_db.fail_op, claimed["id"], str(exc))
+                    return False
+                await run_sync(git_ops_db.complete_op, claimed["id"], result)
+                logger.info(
+                    "Queued ensure_worktree op %s materialized branch %s -> %s",
+                    claimed["id"], branch, result.get("path"),
+                )
+                return True
+            # Lost the race; wait on the same id rather than double-add.
+        wait_started = time.monotonic()
+        while remaining() > 0:
+            row = await run_sync(git_ops_db.get_op, pending["id"])
+            if row is None or row["status"] in ("done", "error"):
+                status = (row or {}).get("status")
+                logger.info(
+                    "git_ops: spawn wait finished op=%s status=%s duration=%.2fs",
+                    pending["id"], status, time.monotonic() - wait_started,
+                )
+                return bool(row) and row["status"] == "done"
+            await asyncio.sleep(min(0.2, remaining()))
+        logger.warning("git_ops: spawn wait timed out op=%s", pending["id"])
+        return False
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 — degrade to the normal refusal path
+        logger.warning(
+            "ensure_pending_checkout errored for branch %s", branch, exc_info=True
+        )
         return False
 
 

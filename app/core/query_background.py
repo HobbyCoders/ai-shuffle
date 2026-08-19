@@ -161,7 +161,12 @@ async def _run_background_query_impl(
     # through the shared sdk_options seam — previously only the WebSocket path
     # attached hooks here (issue #567).
     from app.core.sdk_options import build_session_options
-    from app.core.query_options import WorktreeUnavailableError
+    from app.core.query_options import WorktreeUnavailableError, ensure_pending_checkout
+    session_row = await run_sync(database.get_session, session_id)
+    # Async wait for an in-flight ensure_worktree. Must stay on the event
+    # loop: a sync poll would occupy a run_sync worker for 30s.
+    if session_row:
+        await ensure_pending_checkout(session_row)
     try:
         options, agents_dict = build_session_options(
             profile=profile,
