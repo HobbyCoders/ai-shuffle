@@ -123,6 +123,8 @@ class TestCreate:
     @pytest.mark.parametrize("provider_type,base_url", [
         ("openai", "https://api.openai.com/v1"),
         ("chatgpt", "https://chatgpt.com/backend-api/codex"),
+        ("xai", "https://api.x.ai/v1"),
+        ("grok", "https://api.x.ai/v1"),
     ])
     def test_create_accepts_new_provider_types(
         self, authenticated_client, mock_db, provider_type, base_url

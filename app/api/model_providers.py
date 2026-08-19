@@ -34,6 +34,7 @@ from app.core import (
     codex_token_refresh,
     encryption,
     model_catalog_presets,
+    xai_oauth,
 )
 from app.db import database as db
 
@@ -41,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/model-providers", tags=["Model Providers"])
 
-_VALID_PROVIDER_TYPES = ("openrouter", "custom", "openai", "chatgpt")
+_VALID_PROVIDER_TYPES = ("openrouter", "custom", "openai", "chatgpt", "xai", "grok")
 
 # Wire formats a CUSTOM row's endpoint may speak. 'anthropic' (the default when
 # unset — the historic custom-row contract: Anthropic Messages at
@@ -852,6 +853,10 @@ async def codex_consume_rate_limit_reset_credit(
 
 # provider_id -> (device_code, code_verifier, user_code, created_at_monotonic)
 _pending_enrollments: Dict[str, Tuple[str, str, str, float]] = {}
+# Grok/xAI enrollments are a separate map so a Codex and Grok flow on the same
+# (or different) provider cannot clobber each other.
+# provider_id -> (device_code, created_at_monotonic)
+_pending_xai_enrollments: Dict[str, Tuple[str, float]] = {}
 # Drop pending enrollments older than this (device codes expire upstream anyway).
 _PENDING_TTL_SECONDS = 900
 
@@ -984,6 +989,170 @@ async def codex_clear_reauth(provider_id: str, token: str = Depends(require_admi
         id_token_expires_at=stored.get("codex_id_token_expires_at"),
         last_refresh=stored.get("codex_last_refresh"),
         needs_reauth=False,
+    )
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Model provider not found")
+    full_row = _row_with_token_flags(provider_id)
+    return _public_provider(full_row)
+
+
+def _prune_pending_xai() -> None:
+    now = time.monotonic()
+    stale = [
+        pid for pid, (*_, ts) in _pending_xai_enrollments.items()
+        if now - ts > _PENDING_TTL_SECONDS
+    ]
+    for pid in stale:
+        _pending_xai_enrollments.pop(pid, None)
+
+
+def _seed_xai_preset_if_empty(provider_id: str) -> None:
+    """Persist the xAI preset roster when the enrolled row has no models yet.
+
+    A draft SuperGrok enrollment is created empty so the row exists for the
+    device flow; seeding here makes it immediately usable without a second UI
+    round-trip. A reconnect of a curated row is left untouched.
+    """
+    row = db.get_model_provider(provider_id)
+    if row is None:
+        return
+    models = row.get("models_json") or []
+    if models:
+        return
+    preset = model_catalog_presets.preset_models_for(
+        {"provider_type": "grok", "auth_mode": "grok"}
+    )
+    if not preset:
+        return
+    updates: Dict[str, Any] = {"models_json": preset}
+    if not row.get("default_model"):
+        updates["default_model"] = "grok-4.6"
+    if not row.get("small_fast_model"):
+        updates["small_fast_model"] = "grok-4.3"
+    db.update_model_provider(provider_id, **updates)
+
+
+# ============================================================================
+# xAI / SuperGrok device-code OAuth enrollment
+# ============================================================================
+
+@router.post("/{provider_id}/xai/device/start",
+             response_model=CodexDeviceStartResponse)
+async def xai_device_start(provider_id: str, token: str = Depends(require_admin)):
+    """Start the SuperGrok device-code enrollment for a provider.
+
+    Returns the ``user_code`` the admin enters at ``verification_uri``. When
+    upstream supplies ``verification_uri_complete`` (prefilled code), that is
+    returned as ``verification_uri`` so the UI "Open sign-in" link is ready.
+    """
+    if not encryption.is_encryption_ready():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Encryption is locked. Log in again as admin (or set "
+                   "ADMIN_PASSWORD) before enrolling a Grok login.",
+        )
+    if db.get_model_provider(provider_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Model provider not found")
+
+    try:
+        start = await xai_oauth.start_device_code()
+    except xai_oauth.XaiAuthError as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=f"Grok device-code start failed: {e.code}")
+
+    _prune_pending_xai()
+    _pending_xai_enrollments[provider_id] = (start.device_code, time.monotonic())
+    return CodexDeviceStartResponse(
+        user_code=start.user_code,
+        verification_uri=start.verification_uri_complete or start.verification_uri,
+    )
+
+
+@router.post("/{provider_id}/xai/device/poll",
+             response_model=CodexDevicePollResponse)
+async def xai_device_poll(provider_id: str, token: str = Depends(require_admin)):
+    """One poll step of the SuperGrok device-code enrollment.
+
+    ``pending`` / ``slow_down`` → keep polling. On authorization: encrypt the
+    access+refresh blobs, persist via ``set_codex_token_bundle`` with
+    ``auth_mode='grok'``, seed the xAI preset if the row has no models, and
+    return the fresh public row.
+    """
+    pending = _pending_xai_enrollments.get(provider_id)
+    if pending is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No pending Grok enrollment for this provider — start one first.",
+        )
+    device_code, _ = pending
+
+    try:
+        bundle = await xai_oauth.poll_device_code(device_code)
+    except xai_oauth.XaiAuthPending as pend:
+        return CodexDevicePollResponse(
+            status="slow_down" if pend.slow_down else "pending"
+        )
+    except xai_oauth.XaiAuthError as e:
+        _pending_xai_enrollments.pop(provider_id, None)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Grok enrollment failed: {e.code}")
+
+    enc_access = _encrypt_token_or_400(bundle.access_token)
+    enc_refresh = _encrypt_token_or_400(bundle.refresh_token)
+    exp_dt = _xai_id_token_exp(bundle)
+    id_token_exp = exp_dt.isoformat() if exp_dt is not None else None
+
+    from datetime import datetime, timezone
+    row = db.set_codex_token_bundle(
+        provider_id,
+        access_token=enc_access,
+        refresh_token=enc_refresh,
+        account_id=bundle.account_id,
+        id_token_expires_at=id_token_exp,
+        last_refresh=datetime.now(timezone.utc).isoformat(),
+        needs_reauth=False,
+        auth_mode="grok",
+    )
+    _pending_xai_enrollments.pop(provider_id, None)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Model provider not found")
+
+    _seed_xai_preset_if_empty(provider_id)
+
+    full_row = _row_with_token_flags(provider_id)
+    return CodexDevicePollResponse(status="complete", provider=_public_provider(full_row))
+
+
+def _xai_id_token_exp(bundle: "xai_oauth.TokenBundle"):
+    """Best-effort ``exp`` from the enrolled id_token (falls back to the access
+    token) so the stored ``codex_id_token_expires_at`` reflects real expiry."""
+    from app.core import xai_token_refresh
+    return xai_token_refresh._access_token_exp(bundle.id_token or bundle.access_token)
+
+
+@router.post("/{provider_id}/xai/clear-reauth",
+             response_model=ModelProviderResponse)
+async def xai_clear_reauth(provider_id: str, token: str = Depends(require_admin)):
+    """Clear ONLY the ``needs_reauth`` flag on a Grok provider.
+
+    Preserves the stored token bundle and ``auth_mode='grok'``.
+    """
+    stored = db.get_codex_tokens(provider_id)
+    if stored is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Model provider not found")
+    row = db.set_codex_token_bundle(
+        provider_id,
+        access_token=stored.get("codex_access_token"),
+        refresh_token=stored.get("codex_refresh_token"),
+        account_id=stored.get("codex_account_id"),
+        id_token_expires_at=stored.get("codex_id_token_expires_at"),
+        last_refresh=stored.get("codex_last_refresh"),
+        needs_reauth=False,
+        auth_mode=stored.get("auth_mode") or "grok",
     )
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,

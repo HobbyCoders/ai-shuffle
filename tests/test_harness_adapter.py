@@ -831,6 +831,10 @@ def test_provider_kind_prefers_the_bound_row_type_over_the_model_sniff():
     # A ChatGPT/Codex subscription row, in both of its shapes.
     assert _decide_provider_kind(_bound("gpt-5-codex", "chatgpt")) == "openai_responses"
     assert _decide_provider_kind(_bound("gpt-5-codex", "custom", "chatgpt")) == "openai_responses"
+    # First-class xAI API-key and SuperGrok subscription rows.
+    assert _decide_provider_kind(_bound("grok-4.6", "xai")) == "openai_responses"
+    assert _decide_provider_kind(_bound("grok-4.6", "grok")) == "openai_responses"
+    assert _decide_provider_kind(_bound("grok-4.6", "custom", "grok")) == "openai_responses"
 
 
 def test_provider_kind_anthropic_row_respects_the_subscription_constraint():
@@ -924,6 +928,15 @@ def test_chat_completions_url_composition():
         _chat_completions_url("https://openrouter.ai/api")
         == "https://openrouter.ai/api/v1/chat/completions"
     )
+
+
+def test_responses_url_composition():
+    from app.core.provider.harness_adapter import _responses_url
+
+    assert _responses_url("https://api.x.ai") == "https://api.x.ai/v1/responses"
+    assert _responses_url("https://api.x.ai/") == "https://api.x.ai/v1/responses"
+    assert _responses_url("https://api.x.ai/v1") == "https://api.x.ai/v1/responses"
+    assert _responses_url("https://api.openai.com/v1") == "https://api.openai.com/v1/responses"
 
 
 def test_provider_kind_unknown_row_type_falls_back_to_the_sniff():

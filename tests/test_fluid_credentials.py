@@ -222,6 +222,71 @@ async def test_codex_on_401_triggers_refresh(monkeypatch):
     assert seen == {"provider_id": PID, "stale": "access-1"}
 
 
+# ─── 2b. xAI API key + Grok subscription ─────────────────────────────────────
+
+
+XAI_ROW = {
+    "id": PID,
+    "name": "Grok",
+    "provider_type": "xai",
+    "enabled": True,
+    "auth_token": "enc:xai-secret",
+    "base_url": "https://api.x.ai/v1",
+}
+
+GROK_ROW = {
+    "id": PID,
+    "name": "Grok",
+    "provider_type": "grok",
+    "auth_mode": "grok",
+    "enabled": True,
+    "codex_account_id": "team_9",
+    "auth_token": None,
+    "base_url": "https://api.x.ai/v1",
+}
+GROK_TOKENS = {
+    "auth_mode": "grok",
+    "codex_access_token": "enc:grok-access-1",
+    "codex_refresh_token": "enc:grok-refresh-1",
+    "codex_account_id": "team_9",
+    "needs_reauth": False,
+}
+
+
+@pytest.mark.asyncio
+async def test_xai_api_key_uses_xai_responses_url(monkeypatch):
+    fake_provider_rows(monkeypatch, XAI_ROW)
+    client, http_client = await harness_adapter._build_provider_client(
+        "openai_responses", _opts()
+    )
+    if http_client is not None:
+        await http_client.aclose()
+    assert FakeOpenAI.last["api_key"] == "xai-secret"
+    assert FakeOpenAI.last["auth"] is None
+    assert FakeOpenAI.last["base_url"] == "https://api.x.ai/v1/responses"
+    assert FakeOpenAI.last["base_url"] != harness_adapter.CODEX_RESPONSES_URL
+
+
+@pytest.mark.asyncio
+async def test_grok_subscription_uses_auth_and_xai_url(monkeypatch):
+    fake_provider_rows(monkeypatch, GROK_ROW, codex=dict(GROK_TOKENS))
+    client, http_client = await harness_adapter._build_provider_client(
+        "openai_responses", _opts()
+    )
+    if http_client is not None:
+        await http_client.aclose()
+    assert FakeOpenAI.last["api_key"] is None
+    assert FakeOpenAI.last["base_url"] == "https://api.x.ai/v1/responses"
+    assert FakeOpenAI.last["base_url"] != harness_adapter.CODEX_RESPONSES_URL
+
+    auth = FakeOpenAI.last["auth"]
+    from fluid.providers.openai_responses.client import ResponsesAuth
+
+    assert isinstance(auth, ResponsesAuth)
+    assert auth.account_id is None
+    assert await auth.get_access_token() == "grok-access-1"
+
+
 @pytest.mark.asyncio
 async def test_codex_needs_reauth_is_a_clear_error(monkeypatch):
     tokens = dict(CODEX_TOKENS, needs_reauth=True)

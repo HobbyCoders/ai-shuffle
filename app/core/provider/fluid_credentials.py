@@ -92,7 +92,16 @@ class ProviderCredentials:
 # a future subscription mode can never silently fall through to the API-key
 # branch (and, for anthropic, into the banned subscription-token path).
 _SUBSCRIPTION_AUTH_MODES = frozenset(
-    {"chatgpt", "oauth", "subscription", "claude", "claude_subscription", "max", "pro"}
+    {
+        "chatgpt",
+        "grok",
+        "oauth",
+        "subscription",
+        "claude",
+        "claude_subscription",
+        "max",
+        "pro",
+    }
 )
 
 
@@ -103,6 +112,19 @@ def _is_codex_subscription(row: Dict[str, Any]) -> bool:
     ``auth_mode == "chatgpt"`` (a ``custom`` row can carry the Codex auth mode).
     """
     return row.get("provider_type") == "chatgpt" or row.get("auth_mode") == "chatgpt"
+
+
+def _is_grok_subscription(row: Dict[str, Any]) -> bool:
+    """Whether a provider row is a SuperGrok-subscription OAuth row.
+
+    ``provider_type == "grok"`` OR ``auth_mode == "grok"``.
+    """
+    return row.get("provider_type") == "grok" or row.get("auth_mode") == "grok"
+
+
+def _is_xai_api(row: Dict[str, Any]) -> bool:
+    """Whether a provider row is an xAI API-key (Grok) row."""
+    return row.get("provider_type") == "xai"
 
 
 def _decrypt_auth_token(row: Dict[str, Any]) -> Optional[str]:
@@ -152,6 +174,70 @@ async def _load_codex_access_token(provider_id: str) -> Tuple[str, Optional[str]
             "missing; reconnect the account."
         )
     return access, stored.get("codex_account_id")
+
+
+async def _load_grok_access_token(provider_id: str) -> str:
+    """Return the decrypted Grok access token, or raise.
+
+    Reads the encrypted bundle fresh on every call so a rotation performed by
+    the refresh worker (or by a peer's ``on_401``) is picked up without
+    rebuilding the client. Does NOT return account_id — Grok inference must
+    not send Codex's ``chatgpt-account-id`` header.
+    """
+    from app.db import database as db
+    from app.db.async_database import run_sync
+
+    stored = await run_sync(db.get_codex_tokens, provider_id)
+    if not stored:
+        raise ProviderCredentialError(
+            f"Model provider {provider_id!r} has no credentials configured: no "
+            "Grok account is connected."
+        )
+    if stored.get("needs_reauth"):
+        raise ProviderCredentialError(
+            f"The Grok account for model provider {provider_id!r} needs to be "
+            "reconnected before it can be used."
+        )
+    enc_access = stored.get("codex_access_token")
+    access = encryption.decrypt_value(enc_access) if enc_access else None
+    if not access:
+        raise ProviderCredentialError(
+            f"The Grok access token for model provider {provider_id!r} is "
+            "missing; reconnect the account."
+        )
+    return access
+
+
+class GrokSubscriptionAuth:
+    """fluid ``ResponsesAuth`` implementation for a SuperGrok provider row.
+
+    Same protocol as :class:`CodexSubscriptionAuth`, but ``account_id`` stays
+    ``None`` so the fluid client never attaches Codex-only headers, and
+    ``on_401`` drives ``xai_token_refresh.refresh_on_401_once``.
+    """
+
+    def __init__(self, provider_id: str) -> None:
+        self.provider_id = provider_id
+        self.account_id = None
+        self._last_access_token: Optional[str] = None
+
+    async def get_access_token(self) -> str:
+        access = await _load_grok_access_token(self.provider_id)
+        self._last_access_token = access
+        return access
+
+    async def on_401(self) -> None:
+        """Refresh once after an upstream 401 (serialized per provider)."""
+        from app.core import xai_token_refresh
+
+        refreshed = await xai_token_refresh.refresh_on_401_once(
+            self.provider_id, stale_access_token=self._last_access_token
+        )
+        if not refreshed:
+            logger.warning(
+                "grok auth: 401 refresh produced no fresh token for provider %s",
+                self.provider_id,
+            )
 
 
 class CodexSubscriptionAuth:
@@ -225,6 +311,14 @@ async def resolve_provider_credentials(
         await auth.get_access_token()
         return ProviderCredentials(auth=auth, use_codex_backend=True)
 
+    if kind == "openai_responses" and _is_grok_subscription(row):
+        auth = GrokSubscriptionAuth(provider_id)
+        await auth.get_access_token()
+        base_url = (row.get("base_url") or "").strip() or "https://api.x.ai/v1"
+        return ProviderCredentials(
+            auth=auth, base_url=base_url, use_codex_backend=False
+        )
+
     if kind == "anthropic":
         # HARD CONSTRAINT (see module docstring): a Claude Pro/Max subscription
         # OAuth token must NEVER reach AnthropicClient — that traffic stays on
@@ -244,8 +338,10 @@ async def resolve_provider_credentials(
     if not api_key:
         raise ProviderCredentialError(
             f"Model provider {label} has no credentials configured — add an API "
-            "key for it (or connect its ChatGPT account) before starting a "
-            "session on it."
+            "key for it (or connect its ChatGPT or Grok account) before starting "
+            "a session on it."
         )
     base_url = (row.get("base_url") or "").strip() or None
+    if kind == "openai_responses" and _is_xai_api(row) and not base_url:
+        base_url = "https://api.x.ai/v1"
     return ProviderCredentials(api_key=api_key, base_url=base_url)

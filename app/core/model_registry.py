@@ -248,13 +248,15 @@ def resolve_api_model_id(value: Optional[str]) -> Optional[str]:
 
 
 def _is_subscription_row(row: ModelProviderRow) -> bool:
-    """Whether a ``model_providers`` row authenticates as a ChatGPT subscription.
+    """Whether a ``model_providers`` row authenticates as a subscription.
 
-    Mirrors ``app.core.provider.fluid_credentials._is_codex_subscription``:
-    ``provider_type == "chatgpt"`` OR ``auth_mode == "chatgpt"`` (a ``custom``
-    row can carry the Codex auth mode). Everything else is API-key auth.
+    Mirrors ``fluid_credentials._is_codex_subscription`` /
+    ``_is_grok_subscription``: ChatGPT (``provider_type`` / ``auth_mode``
+    ``chatgpt``) or SuperGrok (``grok``). Everything else is API-key auth.
     """
-    return row.get("provider_type") == "chatgpt" or row.get("auth_mode") == "chatgpt"
+    ptype = row.get("provider_type")
+    mode = row.get("auth_mode")
+    return ptype in ("chatgpt", "grok") or mode in ("chatgpt", "grok")
 
 
 def _provider_plan_types() -> Dict[str, Optional[str]]:
