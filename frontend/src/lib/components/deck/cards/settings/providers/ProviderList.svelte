@@ -39,6 +39,7 @@
 	import ManageModelsDrawer from './ManageModelsDrawer.svelte';
 	import BankedResetsDialog from './BankedResetsDialog.svelte';
 	import ChatGptDeviceFlow from './flows/ChatGptDeviceFlow.svelte';
+	import GrokDeviceFlow from './flows/GrokDeviceFlow.svelte';
 	import ClaudeSubscriptionFlow from './flows/ClaudeSubscriptionFlow.svelte';
 
 	const s = $derived(providers.current);
@@ -73,7 +74,7 @@
 	let confirmDeleteId: string | null = $state(null);
 	// Which gateway row's Manage-models drawer is open (its id), or null.
 	let manageModelsId = $state<string | null>(null);
-	// Which ChatGPT row is mid-reconnect (its id, hosts the device-flow modal), or null.
+	// Which ChatGPT/Grok row is mid-reconnect (its id, hosts the device-flow modal), or null.
 	let reconnectId = $state<string | null>(null);
 	// True while the reconnect device flow has an operation in flight — guards close.
 	let reconnectBusy = $state(false);
@@ -142,14 +143,14 @@
 	// ----- model_providers classification & ordering (ruling PR1) -----
 	// Key on auth_mode FIRST (the Codex row is provider_type='custom' +
 	// auth_mode='chatgpt'), THEN provider_type.
-	type SubKind = 'chatgpt' | 'grok' | 'openrouter' | 'openai' | 'custom';
+	type SubKind = 'chatgpt' | 'grok' | 'openrouter' | 'openai' | 'xai' | 'custom';
 	function classifyProvider(p: ModelProvider): SubKind {
 		if (p.auth_mode === 'chatgpt') return 'chatgpt'; // auth_mode wins (PR1)
+		if (p.auth_mode === 'grok' || p.provider_type === 'grok') return 'grok';
 		if (p.provider_type === 'chatgpt') return 'chatgpt';
-		if (p.auth_mode === 'grok') return 'grok';
-		if (p.provider_type === 'grok') return 'grok';
 		if (p.provider_type === 'openrouter') return 'openrouter';
 		if (p.provider_type === 'openai') return 'openai';
+		if (p.provider_type === 'xai') return 'xai';
 		return 'custom';
 	}
 	const SUBKIND_ORDER: Record<SubKind, number> = {
@@ -157,12 +158,20 @@
 		grok: 1,
 		openrouter: 2,
 		openai: 3,
-		custom: 4
+		xai: 4,
+		custom: 5
 	};
+
+	let reconnectKind = $derived.by((): SubKind | null => {
+		if (reconnectId === null) return null;
+		const p = s.providers.find((x) => x.id === reconnectId);
+		return p ? classifyProvider(p) : null;
+	});
+	let reconnectTitle = $derived(reconnectKind === 'grok' ? 'Reconnect Grok' : 'Reconnect ChatGPT');
 
 	function badgeFor(kind: SubKind): string {
 		if (kind === 'chatgpt') return 'ChatGPT';
-		if (kind === 'grok') return 'Grok';
+		if (kind === 'grok' || kind === 'xai') return 'Grok';
 		if (kind === 'openrouter') return 'OpenRouter';
 		if (kind === 'openai') return 'OpenAI';
 		return 'Custom';
@@ -171,9 +180,10 @@
 	function providerMeta(p: ModelProvider, kind: SubKind): string {
 		const n = p.models.length;
 		const modelsTxt = `${n} ${n === 1 ? 'model' : 'models'}`;
-		// Subscription rows authenticate via OAuth tokens, not a gateway auth
-		// token — "no token" there would contradict the Connected pill.
-		const noToken = kind !== 'chatgpt' && kind !== 'grok' && !p.auth_token_set ? ' · no token' : '';
+		// ChatGPT/Grok subscription rows authenticate via OAuth blobs, not a
+		// gateway auth token — "no token" there would contradict the Connected pill.
+		const noToken =
+			kind !== 'chatgpt' && kind !== 'grok' && !p.auth_token_set ? ' · no token' : '';
 		return `${p.base_url} · ${modelsTxt}${noToken}`;
 	}
 
@@ -319,14 +329,14 @@
 	{#if s.providersLoading && s.providers.length === 0}
 		<li class="prov-item"><div class="prov-empty">Loading providers…</div></li>
 	{:else if !claudeRowVisible && !s.anthropicKeySet && s.providers.length === 0}
-		<li class="prov-item"><div class="prov-empty">No providers yet. Use “+ Add provider” to connect your Claude account, an Anthropic API key, or an OpenRouter / OpenAI / custom gateway.</div></li>
+		<li class="prov-item"><div class="prov-empty">No providers yet. Use “+ Add provider” to connect your Claude account, ChatGPT, Grok, an API key, or a custom gateway.</div></li>
 	{/if}
 
 	{#each sortedProviders as p (p.id)}
 		{@const kind = classifyProvider(p)}
 		<li class="prov-item">
 			{#if kind === 'chatgpt' || kind === 'grok'}
-				<!-- Subscription: native-auth, no toggle/edit, manage models + banked resets. -->
+				<!-- Subscription: native-auth, no toggle/edit, sign-in + manage models + banked resets. -->
 				<ProviderRow
 					title={p.name}
 					badge={badgeFor(kind)}
@@ -338,7 +348,7 @@
 					onBankedResets={p.codex_access_token_set && !p.needs_reauth
 						? (opener) => openBankedResets(p, opener)
 						: undefined}
-					onSignIn={kind === 'chatgpt' ? () => (reconnectId = p.id) : undefined}
+					onSignIn={() => (reconnectId = p.id)}
 					signInLabel={p.needs_reauth ? 'Reconnect' : 'Sign in'}
 					onRemove={() => armDelete(p.id)}
 					confirmingDelete={confirmDeleteId === p.id}
@@ -382,15 +392,14 @@
 {/if}
 
 {#if reconnectId !== null}
-	<!-- Reconnect ChatGPT: hosts ChatGptDeviceFlow in reconnect mode against the
-	     existing row. Modal chrome copies AddProviderModal (theme-token classes,
-	     backdrop/Esc close both guarded while busy, fullscreen at handheld width). -->
+	<!-- Reconnect ChatGPT/Grok: hosts the matching device flow in reconnect mode
+	     against the existing row. Modal chrome copies AddProviderModal. -->
 	<div
 		bind:this={reconnectDialogEl}
 		class="fixed inset-0 z-50 flex items-center justify-center {reconnectFullscreen ? 'p-0' : 'p-4'}"
 		role="dialog"
 		aria-modal="true"
-		aria-label="Reconnect ChatGPT"
+		aria-label={reconnectTitle}
 		onkeydown={handleReconnectKeydown}
 		tabindex="-1"
 	>
@@ -409,7 +418,7 @@
 		>
 			<!-- Header -->
 			<div class="flex items-center gap-2 px-6 py-4 border-b border-border">
-				<h2 class="flex-1 text-lg font-semibold text-foreground">Reconnect ChatGPT</h2>
+				<h2 class="flex-1 text-lg font-semibold text-foreground">{reconnectTitle}</h2>
 				<button
 					type="button"
 					onclick={closeReconnect}
@@ -423,12 +432,21 @@
 
 			<!-- Content -->
 			<div class="flex-1 overflow-y-auto p-6">
-				<ChatGptDeviceFlow
-					existingProviderId={reconnectId}
-					onDone={() => (reconnectId = null)}
-					onCancel={() => (reconnectId = null)}
-					onBusyChange={(b) => (reconnectBusy = b)}
-				/>
+				{#if reconnectKind === 'grok'}
+					<GrokDeviceFlow
+						existingProviderId={reconnectId}
+						onDone={() => (reconnectId = null)}
+						onCancel={() => (reconnectId = null)}
+						onBusyChange={(b) => (reconnectBusy = b)}
+					/>
+				{:else}
+					<ChatGptDeviceFlow
+						existingProviderId={reconnectId}
+						onDone={() => (reconnectId = null)}
+						onCancel={() => (reconnectId = null)}
+						onBusyChange={(b) => (reconnectBusy = b)}
+					/>
+				{/if}
 			</div>
 		</div>
 	</div>

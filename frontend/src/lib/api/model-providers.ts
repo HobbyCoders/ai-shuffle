@@ -197,6 +197,33 @@ export async function codexClearReauth(id: string): Promise<ModelProvider> {
 }
 
 // ============================================================================
+// xAI / SuperGrok device-code OAuth enrollment
+// ============================================================================
+//
+// Same wire shape as the Codex helpers above (`CodexDeviceStart` /
+// `CodexDevicePoll`). A separate in-memory pending map on the server keeps
+// Grok and Codex enrollments from colliding.
+
+/** Start SuperGrok device-code enrollment for a provider. Throws on 400/404/502. */
+export async function xaiDeviceStart(id: string): Promise<CodexDeviceStart> {
+	return api.post(`/model-providers/${id}/xai/device/start`);
+}
+
+/**
+ * One poll step of the Grok enrollment. Returns `pending`/`slow_down` to keep
+ * polling or `complete` with the enrolled `provider`. A terminal upstream error
+ * (or an absent pending enrollment) is thrown as an `ApiError` (HTTP 400).
+ */
+export async function xaiDevicePoll(id: string): Promise<CodexDevicePoll> {
+	return api.post(`/model-providers/${id}/xai/device/poll`);
+}
+
+/** Clear ONLY the `needs_reauth` flag on a Grok provider (token kept intact). */
+export async function xaiClearReauth(id: string): Promise<ModelProvider> {
+	return api.post(`/model-providers/${id}/xai/clear-reauth`);
+}
+
+// ============================================================================
 // Codex / ChatGPT-subscription banked rate-limit resets
 // ============================================================================
 

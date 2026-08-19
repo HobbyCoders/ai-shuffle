@@ -17,10 +17,12 @@
 	 * this chunk — Chunk 6 wires the real device flow.
 	 */
 	import { onMount } from 'svelte';
-	import { X, ArrowLeft, Sparkles, MessageSquare, KeyRound, Bot, Network } from 'lucide-svelte';
+	import { X, ArrowLeft, Sparkles, MessageSquare, KeyRound, Bot, Network, Zap } from 'lucide-svelte';
 	import { isPanelFullscreenWidth } from '$lib/utils/viewport';
 	import OpenAiKeyFlow from './flows/OpenAiKeyFlow.svelte';
 	import ChatGptDeviceFlow from './flows/ChatGptDeviceFlow.svelte';
+	import GrokKeyFlow from './flows/GrokKeyFlow.svelte';
+	import GrokDeviceFlow from './flows/GrokDeviceFlow.svelte';
 	import ClaudeApiKeyFlow from './flows/ClaudeApiKeyFlow.svelte';
 	import ClaudeSubscriptionFlow from './flows/ClaudeSubscriptionFlow.svelte';
 	import OpenRouterKeyFlow from './flows/OpenRouterKeyFlow.svelte';
@@ -31,7 +33,15 @@
 	}
 	let { onClose }: Props = $props();
 
-	type Step = 'choose' | 'openai-key' | 'openai-sub' | 'claude-key' | 'claude-sub' | 'openrouter-key';
+	type Step =
+		| 'choose'
+		| 'openai-key'
+		| 'openai-sub'
+		| 'grok-key'
+		| 'grok-sub'
+		| 'claude-key'
+		| 'claude-sub'
+		| 'openrouter-key';
 	let step = $state<Step>('choose');
 	// True while the active flow has an operation in flight — guards Esc/backdrop.
 	let busy = $state(false);
@@ -55,6 +65,8 @@
 		choose: 'Add a provider',
 		'openai-key': 'OpenAI API key',
 		'openai-sub': 'OpenAI subscription',
+		'grok-key': 'Grok API key',
+		'grok-sub': 'Grok subscription',
 		'claude-key': 'Anthropic API key',
 		'claude-sub': 'Claude Code subscription',
 		'openrouter-key': 'OpenRouter API key'
@@ -63,6 +75,8 @@
 	const CHOICES: { step: Step; icon: typeof KeyRound; name: string; subtitle: string }[] = [
 		{ step: 'openai-key', icon: Sparkles, name: 'OpenAI API key', subtitle: 'Paste a key. Models are set up for you.' },
 		{ step: 'openai-sub', icon: MessageSquare, name: 'OpenAI subscription', subtitle: 'Sign in with ChatGPT. No key needed.' },
+		{ step: 'grok-key', icon: Zap, name: 'Grok API key', subtitle: 'Paste a key. Models are set up for you.' },
+		{ step: 'grok-sub', icon: Sparkles, name: 'Grok subscription', subtitle: 'Sign in with SuperGrok. No key needed.' },
 		{ step: 'claude-key', icon: KeyRound, name: 'Anthropic API key', subtitle: 'Paste an Anthropic key for Claude Code.' },
 		{ step: 'claude-sub', icon: Bot, name: 'Claude Code subscription', subtitle: 'Sign in with your Claude account.' },
 		{ step: 'openrouter-key', icon: Network, name: 'OpenRouter API key', subtitle: 'One key, hundreds of models to choose from.' }
@@ -161,6 +175,10 @@
 				<OpenAiKeyFlow {onDone} {onCancel} {onBusyChange} />
 			{:else if step === 'openai-sub'}
 				<ChatGptDeviceFlow {onDone} {onCancel} {onBusyChange} />
+			{:else if step === 'grok-key'}
+				<GrokKeyFlow {onDone} {onCancel} {onBusyChange} />
+			{:else if step === 'grok-sub'}
+				<GrokDeviceFlow {onDone} {onCancel} {onBusyChange} />
 			{:else if step === 'claude-key'}
 				<ClaudeApiKeyFlow {onDone} {onCancel} {onBusyChange} />
 			{:else if step === 'claude-sub'}

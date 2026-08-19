@@ -554,7 +554,7 @@ function mapPayloadProvider(p: RegistryProviderPayload): ProviderEntry {
 		provider_type: p.provider_type,
 		models: p.models ?? [],
 		default_model: p.default_model ?? null,
-		auth_kind: p.auth_kind ?? (p.provider_type === 'chatgpt' ? 'subscription' : 'api'),
+		auth_kind: p.auth_kind ?? (p.provider_type === 'chatgpt' || p.provider_type === 'grok' ? 'subscription' : 'api'),
 		plan_type: p.plan_type ?? null
 	};
 }

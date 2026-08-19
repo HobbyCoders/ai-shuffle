@@ -31,6 +31,8 @@ const mocks = vi.hoisted(() => ({
 	consumeGrokRateLimitResetCredit: vi.fn(),
 	codexDeviceStart: vi.fn(),
 	codexDevicePoll: vi.fn(),
+	xaiDeviceStart: vi.fn(),
+	xaiDevicePoll: vi.fn(),
 	hydrateModelRegistry: vi.fn()
 }));
 
@@ -46,7 +48,9 @@ vi.mock('$lib/api/model-providers', async (importOriginal) => {
 		listGrokRateLimitResetCredits: mocks.listGrokRateLimitResetCredits,
 		consumeGrokRateLimitResetCredit: mocks.consumeGrokRateLimitResetCredit,
 		codexDeviceStart: mocks.codexDeviceStart,
-		codexDevicePoll: mocks.codexDevicePoll
+		codexDevicePoll: mocks.codexDevicePoll,
+		xaiDeviceStart: mocks.xaiDeviceStart,
+		xaiDevicePoll: mocks.xaiDevicePoll
 	};
 });
 vi.mock('$lib/constants/models.svelte', async (importOriginal) => {
@@ -91,6 +95,11 @@ beforeEach(() => {
 		verification_uri: 'https://example.test/verify'
 	});
 	mocks.codexDevicePoll.mockResolvedValue({ status: 'pending' });
+	mocks.xaiDeviceStart.mockResolvedValue({
+		user_code: 'WXYZ-5678',
+		verification_uri: 'https://auth.x.ai/activate'
+	});
+	mocks.xaiDevicePoll.mockResolvedValue({ status: 'pending' });
 	// Default integrations fetch: no Anthropic key set. Tests that need a key set
 	// override this before calling `providers.loadIntegrations()`.
 	vi.stubGlobal(
@@ -133,6 +142,50 @@ describe('ProviderList — ChatGPT row reconnect', () => {
 
 		const { getByRole } = render(ProviderList);
 		expect(getByRole('button', { name: 'Manage models' })).toBeTruthy();
+	});
+});
+
+function grokProvider(partial: Partial<ModelProvider> = {}): ModelProvider {
+	return {
+		id: 'grok-1',
+		name: 'Grok',
+		provider_type: 'grok',
+		base_url: 'https://api.x.ai/v1',
+		auth_token_set: false,
+		auth_token_masked: '',
+		models: [],
+		default_model: null,
+		small_fast_model: null,
+		extra_env: {},
+		context_window: null,
+		max_output_tokens: null,
+		enabled: true,
+		auth_mode: 'grok',
+		needs_reauth: true,
+		codex_access_token_set: true,
+		created_at: null,
+		updated_at: null,
+		...partial
+	};
+}
+
+describe('ProviderList — Grok row reconnect', () => {
+	it('clicking the Grok row Reconnect button opens the reconnect dialog', async () => {
+		mocks.listModelProviders.mockResolvedValue({ providers: [grokProvider()] });
+		await providers.loadProviders();
+
+		const { getByRole, queryByRole } = render(ProviderList);
+
+		expect(queryByRole('dialog', { name: 'Reconnect Grok' })).toBeNull();
+
+		const btn = getByRole('button', { name: 'Reconnect' });
+		await fireEvent.click(btn);
+
+		await waitFor(() =>
+			expect(getByRole('dialog', { name: 'Reconnect Grok' })).toBeTruthy()
+		);
+		expect(mocks.createModelProvider).not.toHaveBeenCalled();
+		await waitFor(() => expect(mocks.xaiDeviceStart).toHaveBeenCalledWith('grok-1'));
 	});
 });
 
@@ -194,28 +247,7 @@ describe('ProviderList — banked resets action', () => {
 
 	it('shows Banked resets on a connected Grok row and opens the same dialog', async () => {
 		mocks.listModelProviders.mockResolvedValue({
-			providers: [
-				{
-					id: 'grok-1',
-					name: 'SuperGrok',
-					provider_type: 'grok',
-					base_url: 'https://cli-chat-proxy.grok.com',
-					auth_token_set: false,
-					auth_token_masked: '',
-					models: [],
-					default_model: null,
-					small_fast_model: null,
-					extra_env: {},
-					context_window: null,
-					max_output_tokens: null,
-					enabled: true,
-					auth_mode: 'grok',
-					needs_reauth: false,
-					codex_access_token_set: true,
-					created_at: null,
-					updated_at: null
-				}
-			]
+			providers: [grokProvider({ needs_reauth: false })]
 		});
 		await providers.loadProviders();
 
@@ -228,6 +260,26 @@ describe('ProviderList — banked resets action', () => {
 		);
 		expect(getByRole('dialog', { name: 'Banked resets' })).toBeTruthy();
 		expect(mocks.listCodexRateLimitResetCredits).not.toHaveBeenCalled();
+	});
+
+	it('does not show Banked resets on an xAI API-key row', async () => {
+		mocks.listModelProviders.mockResolvedValue({
+			providers: [
+				chatgptProvider({
+					id: 'xai-key',
+					name: 'xAI API',
+					provider_type: 'xai',
+					auth_mode: null,
+					needs_reauth: false,
+					codex_access_token_set: false,
+					auth_token_set: true
+				})
+			]
+		});
+		await providers.loadProviders();
+
+		const { queryByRole } = render(ProviderList);
+		expect(queryByRole('button', { name: 'Banked resets' })).toBeNull();
 	});
 });
 
