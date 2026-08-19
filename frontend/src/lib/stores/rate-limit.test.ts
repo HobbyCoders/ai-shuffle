@@ -27,6 +27,7 @@ import {
 	selfBucketKey,
 	windowLabel,
 	displayWindows,
+	usedPct,
 	SELF_BUCKET_KEY,
 	type UsageWindow,
 } from './rate-limit';
@@ -623,6 +624,30 @@ describe('rateLimit.applySnapshot — provider buckets', () => {
 		});
 		expect(resolveBucket(rateLimit.current, 'primary')?.windows.five_hour.utilization).toBe(20);
 		expect(Object.keys(rateLimit.current.providerBuckets)).toEqual(['codex-1']);
+	});
+});
+
+describe('usedPct — Claude subscription remaining → used-of-100', () => {
+	function win(utilization: number, resetsAt: string | null): UsageWindow {
+		return {
+			type: 'five_hour',
+			utilization,
+			resets_at: resetsAt,
+			received_at: 0,
+			source: 'poll',
+		};
+	}
+
+	it('inverts remaining quota to used of 100', () => {
+		const now = Date.now();
+		expect(usedPct(win(12, new Date(now + 60_000).toISOString()), now)).toBe(88);
+		expect(usedPct(win(100, new Date(now + 60_000).toISOString()), now)).toBe(0);
+		expect(usedPct(win(0, new Date(now + 60_000).toISOString()), now)).toBe(100);
+	});
+
+	it('shows 0% used once the window has rolled over', () => {
+		const now = Date.now();
+		expect(usedPct(win(12, new Date(now - 60_000).toISOString()), now)).toBe(0);
 	});
 });
 

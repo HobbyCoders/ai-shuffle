@@ -415,7 +415,7 @@ describe('ContextUsageBar — context breakdown', () => {
 	it('colors the toolbar ring from chat context, not account plan usage', async () => {
 		rateLimit.applySnapshot({
 			available: true,
-			windows: [{ type: 'five_hour', utilization: 98, resets_at: future() }],
+			windows: [{ type: 'five_hour', utilization: 2, resets_at: future() }],
 		});
 		mocks.activeSession.set({
 			...mocks.DEFAULT,
@@ -435,7 +435,7 @@ describe('ContextUsageBar — context breakdown', () => {
 
 		await openPopover(container);
 		const planPct = container.querySelector('.popover-row .row-pct') as HTMLElement;
-		expect(planPct.textContent).toBe('98%');
+		expect(planPct.textContent).toBe('98%'); // remaining 2 → 98% used
 		expect(planPct.classList.contains('danger')).toBe(true);
 	});
 
@@ -522,7 +522,7 @@ describe('ContextUsageBar — plan usage limits', () => {
 		expect(withRows.querySelectorAll('.popover-row').length).toBe(1);
 	});
 
-	it('lists the resolved window percentage (snapshot is 0–100)', async () => {
+	it('lists the resolved window as used-of-100 (snapshot remaining inverted)', async () => {
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [{ type: 'five_hour', utilization: 42, resets_at: future() }],
@@ -531,19 +531,19 @@ describe('ContextUsageBar — plan usage limits', () => {
 		await openPopover(container);
 		const rows = container.querySelectorAll('.popover-row');
 		expect(rows.length).toBe(1);
-		expect(rows[0].querySelector('.row-pct')?.textContent).toBe('42%');
+		expect(rows[0].querySelector('.row-pct')?.textContent).toBe('58%');
 	});
 
-	it('normalises a live SDK fraction (0–1) to a percentage', async () => {
+	it('normalises a live SDK fraction then inverts remaining to used', async () => {
 		rateLimit.applyLiveEvent({
 			status: 'allowed',
 			rate_limit_type: 'five_hour',
-			utilization: 0.42, // SDK fraction → 42%
+			utilization: 0.42, // SDK fraction → 42 remaining → 58% used
 			resets_at: future(),
 		});
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('42%');
+		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('58%');
 	});
 
 	it('shows 0% once a window has rolled over', async () => {
@@ -614,7 +614,8 @@ describe('ContextUsageBar — plan usage limits', () => {
 		expect(container.textContent).not.toContain('a@example.com');
 		expect(container.textContent).not.toContain('Worker');
 		expect(container.textContent).not.toContain('b@example.com');
-		expect(container.textContent).not.toContain('88%');
+		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('88%');
+		expect(container.textContent).not.toContain('12%');
 	});
 
 	it('heads the Claude section with the resolved install device label (never the account name/email)', async () => {
@@ -672,7 +673,7 @@ describe('ContextUsageBar — plan usage limits', () => {
 		expect(container.querySelector('.section-account')).toBeNull();
 		expect(container.textContent).not.toContain('This device');
 		expect(container.textContent).not.toContain('Other device');
-		// Only the self window is shown (12%), not the worker's live 50%.
+		// Only the self window is shown (88% used), not the worker's live 50%.
 		expect(container.querySelectorAll('.popover-row').length).toBe(1);
 		expect(container.textContent).not.toContain('50%');
 	});
@@ -783,7 +784,7 @@ describe('ContextUsageBar — plan usage limits', () => {
 		expect(secHeader.getAttribute('aria-expanded')).toBe('false');
 		expect(localStorage.getItem('aihub.usageSectionOpen:plan')).toBe('0');
 		// Collapsed → the max plan pct rides on the header summary.
-		expect(container.querySelector('.sec-summary')?.textContent).toBe('42%');
+		expect(container.querySelector('.sec-summary')?.textContent).toBe('58%');
 
 		await fireEvent.click(secHeader); // expand again
 		expect(container.querySelectorAll('.popover-row').length).toBe(1);
@@ -830,9 +831,9 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		const rows = container.querySelectorAll('.popover-row');
 		expect(rows.length).toBe(2);
 		expect(rows[0].querySelector('.row-label')?.textContent).toBe('5-hour limit');
-		expect(rows[0].querySelector('.row-pct')?.textContent).toBe('30%');
+		expect(rows[0].querySelector('.row-pct')?.textContent).toBe('70%');
 		expect(rows[1].querySelector('.row-label')?.textContent).toBe('Weekly (all models)');
-		expect(rows[1].querySelector('.row-pct')?.textContent).toBe('12%');
+		expect(rows[1].querySelector('.row-pct')?.textContent).toBe('88%');
 		// Each window row draws a bar fill sized to its percent.
 		expect(rows[0].querySelector('.row-fill')).not.toBeNull();
 	});

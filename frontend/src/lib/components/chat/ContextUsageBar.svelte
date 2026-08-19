@@ -67,11 +67,13 @@
 		displayWindows,
 		windowLabel,
 		effectivePct,
+		usedPct,
 		formatCountdown,
 		resolveBucket,
 		resolveBucketKey,
 		selfBucketKey,
 		type UsageBucket,
+		type UsageWindow,
 	} from '$lib/stores/rate-limit';
 	import { usageTargetInstance } from '$lib/stores/usage-target';
 
@@ -278,6 +280,7 @@
 	}
 
 	// ── Plan usage limits (resolved install's rate-limit windows) ─────────
+	// Claude subscription bars show used-of-100 (usedPct), not remaining.
 	// Per-second tick — keeps countdowns fresh and flips windows to 0% on reset.
 	// Runs only while the popover is open; refreshed once otherwise.
 	let now: number = $state(Date.now());
@@ -301,7 +304,7 @@
 		return displayWindows(bucket.windows).map((w) => ({
 			type: w.type,
 			label: windowLabel(w.type),
-			pct: effectivePct(w, now),
+			pct: usedPct(w, now),
 			countdown: formatCountdown(w.resets_at, now),
 			hasReset: w.resets_at != null,
 		}));
@@ -411,6 +414,24 @@
 			auth_kind: entry?.auth_kind ?? null,
 			plan_type: entry?.plan_type ?? pb.planType
 		});
+	}
+
+	function isSubscriptionProvider(pb: {
+		providerId: string;
+		providerType: string | null;
+	}): boolean {
+		const entry = getProviders().find((p) => p.id === pb.providerId);
+		const type = entry?.provider_type ?? pb.providerType ?? '';
+		const kind = entry?.auth_kind ?? (type === 'chatgpt' ? 'subscription' : 'api');
+		return kind === 'subscription';
+	}
+
+	function providerWindowPct(
+		pb: { providerId: string; providerType: string | null },
+		w: UsageWindow,
+		nowMs: number
+	): number {
+		return isSubscriptionProvider(pb) ? usedPct(w, nowMs) : effectivePct(w, nowMs);
 	}
 
 	// Claude plan-usage collapse: the rows follow the 'plan' section toggle.
@@ -620,14 +641,15 @@
 			<!-- ═══ Provider usage (non-Claude) ═══ -->
 			<!-- Each bucket's head is its collapse toggle (name + planType stay);
 			     collapsed shows the bucket's max window pct and hides both the window
-			     rows and the credits line. -->
+			     rows and the credits line. ChatGPT/Codex subscription windows use
+			     usedPct (remaining → used); API-key / credit windows stay as-is. -->
 			{#each Object.values($rateLimit.providerBuckets ?? {}) as pb (pb.providerId)}
 				{@const sectionId = `provider:${pb.providerId}`}
 				{@const pbDisplay = providerDisplayFor(pb)}
 				{@const pbOpen = isSectionOpen(sectionId)}
 				{@const pbWindows = displayWindows(pb.windows)}
 				{@const pbMaxPct = pbWindows.length
-					? Math.max(...pbWindows.map((w) => effectivePct(w, now)))
+					? Math.max(...pbWindows.map((w) => providerWindowPct(pb, w, now)))
 					: null}
 				<div class="popover-section">
 					<button
@@ -669,7 +691,7 @@
 				</div>
 				{#if pbOpen}
 					{#each pbWindows as w (w.type)}
-						{@const pct = effectivePct(w, now)}
+						{@const pct = providerWindowPct(pb, w, now)}
 						{@const sev = usageSeverity(pct)}
 						{@const countdown = formatCountdown(w.resets_at, now)}
 						<div class="popover-row">
