@@ -260,6 +260,8 @@ export function getClaudeAuth(): ClaudeAuthInfo {
 //
 //   provider_type 'chatgpt'  → "OpenAI" · <plan>   (subscription, e.g. "prolite")
 //   provider_type 'openai'   → "OpenAI" · "API"    (API key)
+//   provider_type 'grok'     → "Grok"   · <plan>   (SuperGrok subscription)
+//   provider_type 'xai'      → "Grok"   · "API"    (xAI API key)
 //   any other row            → <row name> · "API"
 //   native Claude            → "Claude" · <plan> for a subscription account,
 //                              "Claude" · "API" for Anthropic API-key auth
@@ -281,7 +283,9 @@ export const SUBSCRIPTION_SUBTEXT = 'Subscription';
  *  brand we want to show (both OpenAI rows display as "OpenAI"). */
 const PROVIDER_BRANDS: Readonly<Record<string, string>> = {
 	chatgpt: 'OpenAI',
-	openai: 'OpenAI'
+	openai: 'OpenAI',
+	grok: 'Grok',
+	xai: 'Grok'
 };
 
 /** A provider's two-part display label. */
@@ -312,7 +316,7 @@ export function getProviderDisplay(entry: ProviderDisplayInput): ProviderDisplay
 	const type = entry.provider_type ?? '';
 	const name = PROVIDER_BRANDS[type] || entry.name || type || 'Provider';
 	const kind: ProviderAuthKind =
-		entry.auth_kind ?? (type === 'chatgpt' ? 'subscription' : 'api');
+		entry.auth_kind ?? (type === 'chatgpt' || type === 'grok' ? 'subscription' : 'api');
 	if (kind === 'subscription') {
 		return { name, subtext: entry.plan_type || SUBSCRIPTION_SUBTEXT };
 	}

@@ -1,7 +1,7 @@
 """Provider usage capture + polling (Chunks U2/U3 of the provider-usage program,
 plus the #757 follow-up: passive OpenAI/Anthropic API-key header capture).
 
-Four data paths land in this module, per ``docs/PROVIDER_USAGE_CONTEXT_PLAN.md``
+Five data paths land in this module, per ``docs/PROVIDER_USAGE_CONTEXT_PLAN.md``
 (Codex/OpenRouter) and GitHub issue #757 (OpenAI/Anthropic API-key providers):
 
 **Codex passive capture (U2).** The fluid harness's native Codex leg receives
@@ -31,6 +31,14 @@ non-null and positive, emit exactly ONE window —
 ``{type: "credit_limit", utilization: usage / limit * 100}``. Daily/weekly/
 monthly spend never drives a window's utilization; it is always carried as
 dollar figures in ``credits`` (populated in both branches).
+
+**Grok SuperGrok poller.** The same monitor also polls every enabled
+``provider_type='grok'`` / ``auth_mode='grok'`` subscription row against
+``GET https://cli-chat-proxy.grok.com/v1/billing?format=credits`` (OAuth
+access token from ``codex_access_token``, never the row's API-key
+``auth_token``). Settings (``subscription_tier_display``) is a separate
+short-timeout fetch whose failure must not drop an already-fetched billing
+snapshot. xAI API-key rows (``provider_type='xai'``) are never polled.
 
 Security (S4 hard invariant): the allowlists below are the ONLY thing that
 ever reaches ``raw`` (and, transitively, the DB and any future API response).
@@ -553,17 +561,294 @@ def _merge_openrouter_credits(
     return merged
 
 
+# ---------------------------------------------------------------------------
+# Grok SuperGrok subscription poller
+# ---------------------------------------------------------------------------
+
+# Official Grok CLI / SuperGrok OAuth usage (NOT grok.com cookies, NOT console
+# billing). Host is pinned; requests never follow redirects so the bearer token
+# cannot hop hosts.
+GROK_BILLING_HOST = "cli-chat-proxy.grok.com"
+GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+GROK_SETTINGS_URL = "https://cli-chat-proxy.grok.com/v1/settings"
+GROK_TOKEN_AUTH = "xai-grok-cli"
+_GROK_SETTINGS_TIMEOUT_SECONDS = 5.0
+_GROK_PLAN_FALLBACK = "SuperGrok"
+
+# productUsage.product → window type. Unknown products become grok_<slug>.
+_GROK_PRODUCT_WINDOW_TYPES: Dict[str, str] = {
+    "Api": "grok_api",
+    "GrokBuild": "grok_build",
+    "GrokChat": "grok_chat",
+}
+
+# credits keys that may leave this module. Never tokens.
+_GROK_CREDITS_FIELDS: Tuple[str, ...] = (
+    "credit_usage_percent",
+    "on_demand_used",
+    "on_demand_cap",
+    "period_type",
+    "period_end",
+)
+
+# raw keys we actually read from billing. Nested currentPeriod / productUsage
+# are themselves allowlisted below — never Authorization, never the access token.
+_GROK_RAW_FIELDS: Tuple[str, ...] = (
+    "creditUsagePercent",
+    "currentPeriod",
+    "billingPeriodEnd",
+    "productUsage",
+    "onDemandUsed",
+    "onDemandCap",
+)
+_GROK_PERIOD_FIELDS: Tuple[str, ...] = ("type", "start", "end")
+_GROK_PRODUCT_FIELDS: Tuple[str, ...] = ("product", "usagePercent")
+
+
+def _is_grok_subscription_row(row: Optional[Dict[str, Any]]) -> bool:
+    """True for SuperGrok OAuth rows. xAI API-key rows are ``provider_type='xai'``."""
+    r = row or {}
+    return r.get("provider_type") == "grok" or r.get("auth_mode") == "grok"
+
+
+def _unwrap_val(value: Any) -> Any:
+    """Accept a bare number or ``{"val": n}`` (Grok onDemand* shape)."""
+    if isinstance(value, dict) and "val" in value:
+        return value.get("val")
+    return value
+
+
+def _grok_resets_at(value: Any) -> Optional[str]:
+    """Coerce a period end (ISO, epoch, or ``{"val": ...}``) to a string."""
+    if isinstance(value, dict):
+        value = value.get("val", value.get("end"))
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return str(int(value))
+    text = str(value).strip()
+    return text or None
+
+
+def _grok_period_present(cfg: Mapping[str, Any]) -> bool:
+    """True when billing carries a parseable current/billing period."""
+    period = cfg.get("currentPeriod")
+    if isinstance(period, dict) and any(period.get(k) for k in _GROK_PERIOD_FIELDS):
+        return True
+    return cfg.get("billingPeriodEnd") is not None
+
+
+def _grok_product_window_type(product: str) -> str:
+    mapped = _GROK_PRODUCT_WINDOW_TYPES.get(product)
+    if mapped:
+        return mapped
+    slug = re.sub(r"[^a-z0-9]+", "_", product.lower()).strip("_")
+    return f"grok_{slug}" if slug else "grok_unknown"
+
+
+def _allowlisted_grok_raw(cfg: Mapping[str, Any]) -> Dict[str, Any]:
+    """Copy only the billing fields we actually read. Never credentials."""
+    raw: Dict[str, Any] = {}
+    if "creditUsagePercent" in cfg:
+        raw["creditUsagePercent"] = cfg.get("creditUsagePercent")
+    period = cfg.get("currentPeriod")
+    if isinstance(period, dict):
+        raw_period = {k: period[k] for k in _GROK_PERIOD_FIELDS if k in period}
+        if raw_period:
+            raw["currentPeriod"] = raw_period
+    if "billingPeriodEnd" in cfg:
+        raw["billingPeriodEnd"] = cfg.get("billingPeriodEnd")
+    products = cfg.get("productUsage")
+    if isinstance(products, list):
+        raw_products = []
+        for item in products:
+            if not isinstance(item, dict):
+                continue
+            entry = {k: item[k] for k in _GROK_PRODUCT_FIELDS if k in item}
+            if entry:
+                raw_products.append(entry)
+        if raw_products:
+            raw["productUsage"] = raw_products
+    if "onDemandUsed" in cfg:
+        raw["onDemandUsed"] = cfg.get("onDemandUsed")
+    if "onDemandCap" in cfg:
+        raw["onDemandCap"] = cfg.get("onDemandCap")
+    return raw
+
+
+def normalize_grok_billing(payload: Any) -> ProviderUsage:
+    """Normalize a SuperGrok ``/v1/billing?format=credits`` payload. Pure; never raises.
+
+    Accepts the official ``{config: {...}}`` wrapper and a flat top-level shape.
+    ``creditUsagePercent`` becomes the ``seven_day`` window; on-demand used/cap
+    is the fallback when that percent is missing and cap > 0. A parseable
+    current period with neither figure yields utilization 0 (not "no data").
+    ``productUsage`` entries with a numeric ``usagePercent`` become extra
+    windows; products without a percent are skipped.
+    """
+    try:
+        data = payload if isinstance(payload, dict) else {}
+        cfg_obj = data.get("config")
+        cfg: Mapping[str, Any] = cfg_obj if isinstance(cfg_obj, dict) else data
+
+        credit_pct = _as_float(cfg.get("creditUsagePercent"))
+        used = _as_float(_unwrap_val(cfg.get("onDemandUsed")))
+        cap = _as_float(_unwrap_val(cfg.get("onDemandCap")))
+
+        period = cfg.get("currentPeriod") if isinstance(cfg.get("currentPeriod"), dict) else None
+        period_type = period.get("type") if period else None
+        period_end = _grok_resets_at(period.get("end") if period else None)
+        if period_end is None:
+            period_end = _grok_resets_at(cfg.get("billingPeriodEnd"))
+
+        windows: List[Dict[str, Any]] = []
+        seven_day_util: Optional[float] = None
+        if credit_pct is not None:
+            seven_day_util = max(0.0, min(100.0, credit_pct))
+        elif cap is not None and cap > 0 and used is not None:
+            seven_day_util = max(0.0, min(100.0, used / cap * 100.0))
+        elif _grok_period_present(cfg):
+            seven_day_util = 0.0
+
+        if seven_day_util is not None:
+            windows.append(
+                {
+                    "type": "seven_day",
+                    "utilization": seven_day_util,
+                    "resets_at": period_end,
+                }
+            )
+
+        products = cfg.get("productUsage")
+        if isinstance(products, list):
+            for item in products:
+                if not isinstance(item, dict):
+                    continue
+                product = item.get("product")
+                pct = _as_float(item.get("usagePercent"))
+                if not product or pct is None:
+                    continue
+                windows.append(
+                    {
+                        "type": _grok_product_window_type(str(product)),
+                        "utilization": max(0.0, min(100.0, pct)),
+                        "resets_at": period_end,
+                    }
+                )
+
+        credits: Dict[str, Any] = {}
+        if credit_pct is not None:
+            credits["credit_usage_percent"] = credit_pct
+        if used is not None:
+            credits["on_demand_used"] = used
+        if cap is not None:
+            credits["on_demand_cap"] = cap
+        if period_type is not None:
+            credits["period_type"] = str(period_type)
+        if period_end is not None:
+            credits["period_end"] = period_end
+        # Drop anything that somehow isn't on the allowlist.
+        credits = {k: v for k, v in credits.items() if k in _GROK_CREDITS_FIELDS}
+
+        raw = {k: v for k, v in _allowlisted_grok_raw(cfg).items() if k in _GROK_RAW_FIELDS}
+        return ProviderUsage(
+            windows=windows,
+            credits=credits or None,
+            plan_type=None,
+            raw=raw,
+        )
+    except Exception:  # noqa: BLE001 — normalizer must never raise
+        return ProviderUsage(windows=[], credits=None, plan_type=None, raw={})
+
+
+def _decrypt_grok_access_token(blob: Any) -> Optional[str]:
+    """Decrypt a SuperGrok OAuth access token. Never log the return value."""
+    if not blob or not isinstance(blob, str):
+        return None
+    try:
+        if encryption.is_encrypted(blob):
+            return encryption.decrypt_value(blob)
+        return blob
+    except Exception:
+        return None
+
+
+def _grok_url_is_pinned(url: str) -> bool:
+    """HTTPS + host pin — the bearer token must never leave cli-chat-proxy.grok.com."""
+    parsed = urlsplit(url)
+    return parsed.scheme == "https" and parsed.hostname == GROK_BILLING_HOST
+
+
+async def _grok_get(
+    url: str,
+    headers: Mapping[str, str],
+    timeout: float,
+) -> Tuple[Optional[Any], int]:
+    """GET a pinned grok.com CLI-proxy URL. Never follows redirects."""
+    if not _grok_url_is_pinned(url):
+        raise ValueError("refusing non-pinned Grok billing host")
+    async with httpx.AsyncClient(
+        timeout=timeout, follow_redirects=False
+    ) as client:
+        resp = await client.get(url, headers=headers)
+    body: Optional[Any] = None
+    try:
+        body = resp.json()
+    except Exception:
+        body = None
+    return body, resp.status_code
+
+
+def _grok_request_headers(access_token: str) -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {access_token}",
+        "X-XAI-Token-Auth": GROK_TOKEN_AUTH,
+        "Accept": "application/json",
+    }
+
+
+async def _maybe_refresh_grok_on_401(
+    provider_id: str, stale_access: str
+) -> bool:
+    """Import-guarded SuperGrok token refresh after a billing 401.
+
+    ``xai_token_refresh`` lands with the sibling Grok-provider PR. Until then
+    this is a no-op (log + skip) so the monitor never crashes.
+    """
+    try:
+        from app.core import xai_token_refresh  # type: ignore[attr-defined]
+    except ImportError:
+        logger.warning(
+            "Grok billing 401 for provider %s; xai_token_refresh not available",
+            provider_id,
+        )
+        return False
+    try:
+        return bool(
+            await xai_token_refresh.refresh_on_401_once(
+                provider_id, stale_access_token=stale_access
+            )
+        )
+    except Exception as e:
+        logger.warning(
+            "Grok token refresh after 401 for provider %s failed: %s",
+            provider_id,
+            e,
+        )
+        return False
+
+
 class ProviderUsageMonitor:
-    """Polls every enabled OpenRouter provider's ``/api/v1/key`` endpoint.
+    """Polls OpenRouter ``/api/v1/key`` and SuperGrok billing endpoints.
 
     Best-effort, module-singleton, lifecycle mirrors
     ``app.core.usage_limits.UsageLimitsMonitor``: ``poll_once`` never raises,
     and one provider's failure (decrypt error, timeout, non-200) never blocks
-    another provider's poll or breaks the loop.
+    another provider's poll or breaks the loop. xAI API-key rows are skipped.
     """
 
     async def poll_once(self) -> None:
-        """Poll every enabled ``openrouter`` provider row. Never raises."""
+        """Poll enabled OpenRouter and Grok-subscription rows. Never raises."""
         from app.db import database as db
 
         try:
@@ -579,9 +864,11 @@ class ProviderUsageMonitor:
             return
 
         for row in rows or []:
-            if (row or {}).get("provider_type") != "openrouter":
-                continue
-            await self._poll_provider(row)
+            r = row or {}
+            if r.get("provider_type") == "openrouter":
+                await self._poll_provider(r)
+            elif _is_grok_subscription_row(r):
+                await self._poll_grok_provider(r)
 
     async def _poll_provider(self, row: Dict[str, Any]) -> None:
         from app.db import database as db
@@ -673,6 +960,87 @@ class ProviderUsageMonitor:
                 "OpenRouter /credits fetch for provider %s failed: %s", provider_id, e
             )
             return credits
+
+    async def _poll_grok_provider(self, row: Dict[str, Any]) -> None:
+        """Fetch SuperGrok billing + settings and upsert a snapshot. Never raises.
+
+        Uses the OAuth access token in ``codex_access_token`` only. The row's
+        ``auth_token`` / ``XAI_API_KEY`` is never sent to cli-chat-proxy.
+        """
+        from app.db import database as db
+
+        provider_id = row.get("id")
+        try:
+            if not provider_id or row.get("needs_reauth"):
+                return
+
+            stored = await run_sync(db.get_codex_tokens, provider_id)
+            if not stored or stored.get("needs_reauth"):
+                return
+            access = _decrypt_grok_access_token(stored.get("codex_access_token"))
+            if not access:
+                return
+
+            headers = _grok_request_headers(access)
+            body, status = await _grok_get(
+                GROK_BILLING_URL, headers, _REQUEST_TIMEOUT_SECONDS
+            )
+
+            if status == 401:
+                refreshed = await _maybe_refresh_grok_on_401(provider_id, access)
+                if not refreshed:
+                    return
+                stored = await run_sync(db.get_codex_tokens, provider_id)
+                access = _decrypt_grok_access_token(
+                    (stored or {}).get("codex_access_token")
+                )
+                if not access:
+                    return
+                headers = _grok_request_headers(access)
+                body, status = await _grok_get(
+                    GROK_BILLING_URL, headers, _REQUEST_TIMEOUT_SECONDS
+                )
+
+            if status != 200 or not isinstance(body, dict):
+                logger.warning(
+                    "Grok billing fetch for provider %s failed: HTTP %s",
+                    provider_id,
+                    status,
+                )
+                return
+
+            u = normalize_grok_billing(body)
+            plan_type = _GROK_PLAN_FALLBACK
+
+            try:
+                settings_body, settings_status = await _grok_get(
+                    GROK_SETTINGS_URL, headers, _GROK_SETTINGS_TIMEOUT_SECONDS
+                )
+                if settings_status == 200 and isinstance(settings_body, dict):
+                    display = settings_body.get("subscription_tier_display")
+                    if isinstance(display, str) and display.strip():
+                        plan_type = display.strip()
+            except Exception as e:
+                # Settings is additive; keep the billing snapshot.
+                logger.debug(
+                    "Grok settings fetch for provider %s failed: %s", provider_id, e
+                )
+
+            await run_sync(
+                db.upsert_provider_usage_snapshot,
+                provider_id,
+                "grok",
+                plan_type,
+                u.windows,
+                u.credits,
+                u.raw,
+                int(time.time() * 1000),
+            )
+        except Exception as e:
+            # Never include the bearer token here.
+            logger.warning(
+                "Grok usage poll for provider %s failed: %s", provider_id, e
+            )
 
 
 provider_usage_monitor = ProviderUsageMonitor()
