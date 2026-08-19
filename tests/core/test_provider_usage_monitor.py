@@ -9,8 +9,9 @@ Covers:
     ``/api/v1/credits`` (``total_credits``/``total_usage`` and the derived
     ``balance_remaining``) into the ``/key`` credits blob without clobbering
     ``usage``; any unusable payload leaves the blob untouched.
-  * ``ProviderUsageMonitor.poll_once`` — skips non-``openrouter`` provider
-    rows, and a read failure is swallowed (never raises).
+  * ``ProviderUsageMonitor.poll_once`` — polls ``openrouter`` and Grok
+    subscription rows, skips chatgpt/anthropic/openai/xai API-key rows, and
+    a read failure is swallowed (never raises).
   * ``ProviderUsageMonitor._poll_provider`` — upserts a normalised snapshot on
     a 200 response (raw whitelist enforced — the key never lands in ``raw``);
     a non-200 response, a decrypt failure, and a network exception are all
@@ -176,28 +177,36 @@ def monitor():
 
 class TestPollOnce:
     @pytest.mark.asyncio
-    async def test_skips_non_openrouter_rows(self, monitor):
+    async def test_skips_chatgpt_anthropic_openai_xai_rows(self, monitor):
         rows = [
             {"id": "p-chatgpt", "provider_type": "chatgpt", "base_url": "https://x"},
             {"id": "p-anthropic", "provider_type": "anthropic", "base_url": "https://x"},
+            {"id": "p-openai", "provider_type": "openai", "base_url": "https://api.openai.com"},
+            {"id": "p-xai", "provider_type": "xai", "base_url": "https://api.x.ai", "auth_token": "xai-key"},
         ]
         with patch("app.db.database.get_enabled_model_providers", return_value=rows), \
-             patch.object(monitor, "_poll_provider", new=AsyncMock()) as poll_provider:
+             patch.object(monitor, "_poll_provider", new=AsyncMock()) as poll_provider, \
+             patch.object(monitor, "_poll_grok_provider", new=AsyncMock()) as poll_grok:
             await monitor.poll_once()
 
         poll_provider.assert_not_called()
+        poll_grok.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_polls_only_openrouter_rows(self, monitor):
+    async def test_polls_openrouter_and_grok_subscription_rows(self, monitor):
         rows = [
             {"id": "p-chatgpt", "provider_type": "chatgpt", "base_url": "https://x"},
             {"id": "p-or", "provider_type": "openrouter", "base_url": "https://openrouter.ai/api/v1"},
+            {"id": "p-grok", "provider_type": "grok", "auth_mode": "grok"},
+            {"id": "p-xai", "provider_type": "xai", "auth_mode": "api"},
         ]
         with patch("app.db.database.get_enabled_model_providers", return_value=rows), \
-             patch.object(monitor, "_poll_provider", new=AsyncMock()) as poll_provider:
+             patch.object(monitor, "_poll_provider", new=AsyncMock()) as poll_provider, \
+             patch.object(monitor, "_poll_grok_provider", new=AsyncMock()) as poll_grok:
             await monitor.poll_once()
 
         poll_provider.assert_called_once_with(rows[1])
+        poll_grok.assert_called_once_with(rows[2])
 
     @pytest.mark.asyncio
     async def test_provider_read_failure_does_not_raise(self, monitor):

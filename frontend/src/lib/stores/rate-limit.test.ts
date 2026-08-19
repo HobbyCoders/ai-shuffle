@@ -632,6 +632,9 @@ describe('windowLabel — provider window types', () => {
 		expect(windowLabel('day')).toBe('Daily');
 		expect(windowLabel('month')).toBe('Monthly');
 		expect(windowLabel('credit_limit')).toBe('Credit limit');
+		expect(windowLabel('grok_api')).toBe('API');
+		expect(windowLabel('grok_build')).toBe('Grok Build');
+		expect(windowLabel('grok_chat')).toBe('Grok Chat');
 	});
 
 	it('humanizes a window_XXm rolling window before the generic fallback', () => {

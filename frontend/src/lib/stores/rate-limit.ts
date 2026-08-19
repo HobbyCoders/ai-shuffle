@@ -207,6 +207,10 @@ export const WINDOW_LABELS: Record<string, string> = {
 	day: 'Daily',
 	month: 'Monthly',
 	credit_limit: 'Credit limit',
+	// SuperGrok subscription product windows (weekly is seven_day above).
+	grok_api: 'API',
+	grok_build: 'Grok Build',
+	grok_chat: 'Grok Chat',
 	// OpenAI/Anthropic API-key passive header capture (#757) — utilization is
 	// "percent of window already used", same semantics as the Claude windows.
 	requests: 'API requests',
@@ -227,6 +231,9 @@ export const WINDOW_ORDER = [
 	'day',
 	'month',
 	'credit_limit',
+	'grok_build',
+	'grok_api',
+	'grok_chat',
 	'requests',
 	'tokens',
 	'input_tokens',

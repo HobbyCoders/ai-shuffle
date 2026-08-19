@@ -336,10 +336,11 @@ class TestUsageLimitsProviders:
         # The raw blob's contents must not appear anywhere in the response body.
         assert "should-not-leak" not in resp.text
 
-    def test_openai_snapshots_excluded_from_response(self):
-        """OpenAI API-key snapshots never surface: their windows are per-minute
-        rate-limit headroom (~always 0%), and OpenAI has no key-accessible
-        credits/usage endpoint to show instead. Other types are unaffected."""
+    def test_openai_and_xai_snapshots_excluded_from_response(self):
+        """OpenAI / xAI API-key snapshots never surface: their windows are
+        per-minute rate-limit headroom (~always 0%), and neither has a
+        key-accessible credits/usage endpoint to show instead. SuperGrok
+        subscription snapshots (provider_type='grok') are included."""
         from app.db import database as db
 
         db.upsert_provider_usage_snapshot(
@@ -348,8 +349,18 @@ class TestUsageLimitsProviders:
             credits=None, raw=None, fetched_at=5,
         )
         db.upsert_provider_usage_snapshot(
+            provider_id="prov-xai", provider_type="xai", plan_type=None,
+            windows=[{"type": "requests", "utilization": 1.0, "resets_at": None}],
+            credits=None, raw=None, fetched_at=5,
+        )
+        db.upsert_provider_usage_snapshot(
             provider_id="prov-or", provider_type="openrouter", plan_type=None,
             windows=[], credits={"balance_remaining": 18.11}, raw=None, fetched_at=6,
+        )
+        db.upsert_provider_usage_snapshot(
+            provider_id="prov-grok", provider_type="grok", plan_type="SuperGrok",
+            windows=[{"type": "seven_day", "utilization": 34.0, "resets_at": None}],
+            credits={"credit_usage_percent": 34.0}, raw=None, fetched_at=7,
         )
 
         with patch("app.api.usage.usage_limits_monitor") as mon:
@@ -358,7 +369,10 @@ class TestUsageLimitsProviders:
 
         assert resp.status_code == 200
         providers = resp.json()["providers"]
-        assert [p["provider_id"] for p in providers] == ["prov-or"]
+        assert [p["provider_id"] for p in providers] == ["prov-or", "prov-grok"]
+        grok = next(p for p in providers if p["provider_id"] == "prov-grok")
+        assert grok["provider_type"] == "grok"
+        assert grok["plan_type"] == "SuperGrok"
 
     def test_provider_load_exception_yields_empty_providers_with_200(self):
         """A DB hiccup inside _load_provider_usage degrades to providers: [] and

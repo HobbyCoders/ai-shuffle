@@ -304,6 +304,13 @@ describe('getProviderDisplay / getClaudeDisplay — brand + auth-kind subtext', 
 		expect(getProviderDisplay({ name: 'OpenRouter', provider_type: 'openrouter' }).subtext).toBe(
 			'API'
 		);
+		expect(
+			getProviderDisplay({ name: 'Grok', provider_type: 'grok', plan_type: 'SuperGrok' })
+		).toEqual({ name: 'Grok', subtext: 'SuperGrok' });
+		expect(getProviderDisplay({ name: 'xAI', provider_type: 'xai' })).toEqual({
+			name: 'Grok',
+			subtext: 'API'
+		});
 	});
 
 	it('falls back to the provider type, then a generic name, when the row has no name', () => {

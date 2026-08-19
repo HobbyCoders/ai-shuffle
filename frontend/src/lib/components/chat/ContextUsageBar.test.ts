@@ -866,6 +866,42 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		expect(container.textContent).toContain('Daily');
 	});
 
+	it('renders a Grok subscription section with weekly + Grok Build windows', async () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [
+				{
+					provider_id: 'grok-1',
+					provider_name: 'Grok',
+					provider_type: 'grok',
+					plan_type: 'SuperGrok',
+					windows: [
+						{ type: 'seven_day', utilization: 34, resets_at: future() },
+						{ type: 'grok_build', utilization: 12, resets_at: future() },
+					],
+					credits: null,
+				},
+			],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		expect(container.querySelectorAll('.popover-section').length).toBe(2);
+		const deviceLabels = Array.from(container.querySelectorAll('.section-device')).map(
+			(e) => e.textContent
+		);
+		expect(deviceLabels).toEqual(['Claude', 'Grok']);
+		expect(container.querySelector('.section-account')?.textContent).toBe('SuperGrok');
+
+		const rows = container.querySelectorAll('.popover-row');
+		expect(rows.length).toBe(2);
+		expect(rows[0].querySelector('.row-label')?.textContent).toBe('Weekly (all models)');
+		expect(rows[0].querySelector('.row-pct')?.textContent).toBe('34%');
+		expect(rows[1].querySelector('.row-label')?.textContent).toBe('Grok Build');
+		expect(rows[1].querySelector('.row-pct')?.textContent).toBe('12%');
+	});
+
 	it('subtexts an OpenAI API-key row as "OpenAI · API", separate from the ChatGPT row', async () => {
 		rateLimit.applySnapshot({
 			available: true,
