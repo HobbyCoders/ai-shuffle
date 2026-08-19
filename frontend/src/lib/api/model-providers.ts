@@ -200,7 +200,7 @@ export async function codexClearReauth(id: string): Promise<ModelProvider> {
 // Codex / ChatGPT-subscription banked rate-limit resets
 // ============================================================================
 
-export type CodexRateLimitResetType = 'codex_rate_limits' | 'unknown';
+export type CodexRateLimitResetType = 'codex_rate_limits' | 'grok_rate_limits' | 'unknown';
 export type CodexRateLimitResetStatus = 'available' | 'redeeming' | 'redeemed' | 'unknown';
 
 export interface CodexRateLimitResetCredit {
@@ -243,6 +243,32 @@ export async function consumeCodexRateLimitResetCredit(
 ): Promise<ConsumeCodexRateLimitResetCreditResponse> {
 	return api.post(
 		`/model-providers/${providerId}/codex/rate-limit-reset-credits/consume`,
+		body
+	);
+}
+
+// ============================================================================
+// Grok / SuperGrok-subscription banked usage-limit resets
+// Same public contract as Codex; only the routes and reset_type differ.
+// ============================================================================
+
+export type GrokRateLimitResetCredit = CodexRateLimitResetCredit;
+export type GrokRateLimitResetCreditsResponse = CodexRateLimitResetCreditsResponse;
+export type ConsumeGrokRateLimitResetCreditRequest = ConsumeCodexRateLimitResetCreditRequest;
+export type ConsumeGrokRateLimitResetCreditResponse = ConsumeCodexRateLimitResetCreditResponse;
+
+export async function listGrokRateLimitResetCredits(
+	providerId: string
+): Promise<GrokRateLimitResetCreditsResponse> {
+	return api.get(`/model-providers/${providerId}/grok/rate-limit-reset-credits`);
+}
+
+export async function consumeGrokRateLimitResetCredit(
+	providerId: string,
+	body: ConsumeGrokRateLimitResetCreditRequest
+): Promise<ConsumeGrokRateLimitResetCreditResponse> {
+	return api.post(
+		`/model-providers/${providerId}/grok/rate-limit-reset-credits/consume`,
 		body
 	);
 }

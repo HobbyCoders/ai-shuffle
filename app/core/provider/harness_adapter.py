@@ -1820,9 +1820,14 @@ def _provider_row_kind(
     mode = (auth_mode or "").strip().lower()
     dialect = (api_dialect or "").strip().lower()
 
-    # A ChatGPT/Codex subscription row can wear provider_type "chatgpt" OR
-    # "custom" + auth_mode "chatgpt" (mirrors _is_codex_subscription).
-    if ptype in ("openai", "chatgpt") or mode == "chatgpt":
+    # A ChatGPT/Codex or Grok/xAI row drives OpenAI Responses (api.openai.com,
+    # the Codex backend, or api.x.ai — _build_provider_client picks the URL).
+    # Subscription rows can wear provider_type "chatgpt"/"grok" OR
+    # "custom" + auth_mode "chatgpt"/"grok".
+    if (
+        ptype in ("openai", "chatgpt", "xai", "grok")
+        or mode in ("chatgpt", "grok")
+    ):
         return "openai_responses"
     if ptype == "openrouter":
         return "openrouter"
@@ -2154,6 +2159,19 @@ def _chat_completions_url(base: str) -> str:
     return trimmed + "/v1/chat/completions"
 
 
+def _responses_url(base: str) -> str:
+    """Endpoint-root → full Responses API URL.
+
+    Same composition as :func:`_chat_completions_url` but ending in
+    ``/v1/responses``. ``https://api.x.ai`` and ``https://api.x.ai/v1`` both
+    become ``https://api.x.ai/v1/responses``.
+    """
+    trimmed = base.rstrip("/")
+    if trimmed.endswith("/v1"):
+        trimmed = trimmed[: -len("/v1")]
+    return trimmed + "/v1/responses"
+
+
 def _require_env_credential(env_var: str, kind: str) -> None:
     """Dev-mode fallback guard: no provider row bound, so an env key is required.
 
@@ -2260,10 +2278,16 @@ async def _build_provider_client(
             http_client = _usage_capture_http_client(
                 str(provider_id), creds.use_codex_backend
             )
+            if creds.use_codex_backend:
+                base_url = CODEX_RESPONSES_URL
+            elif creds.base_url:
+                base_url = _responses_url(creds.base_url)
+            else:
+                base_url = OPENAI_RESPONSES_URL
             client = OpenAIResponsesClient(
                 api_key=creds.api_key,
                 auth=creds.auth,
-                base_url=CODEX_RESPONSES_URL if creds.use_codex_backend else OPENAI_RESPONSES_URL,
+                base_url=base_url,
                 http_client=http_client,
             )
             return client, http_client

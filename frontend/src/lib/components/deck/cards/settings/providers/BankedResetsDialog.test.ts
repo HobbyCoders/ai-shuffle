@@ -5,6 +5,8 @@ import type { ModelProvider } from '$lib/api/model-providers';
 const mocks = vi.hoisted(() => ({
 	list: vi.fn(),
 	consume: vi.fn(),
+	listGrok: vi.fn(),
+	consumeGrok: vi.fn(),
 	refreshProviders: vi.fn(),
 	randomUUID: vi.fn()
 }));
@@ -14,7 +16,9 @@ vi.mock('$lib/api/model-providers', async (importOriginal) => {
 	return {
 		...actual,
 		listCodexRateLimitResetCredits: mocks.list,
-		consumeCodexRateLimitResetCredit: mocks.consume
+		consumeCodexRateLimitResetCredit: mocks.consume,
+		listGrokRateLimitResetCredits: mocks.listGrok,
+		consumeGrokRateLimitResetCredit: mocks.consumeGrok
 	};
 });
 
@@ -45,10 +49,22 @@ const provider: ModelProvider = {
 	updated_at: null
 };
 
+function grokProvider(partial: Partial<ModelProvider> = {}): ModelProvider {
+	return {
+		...provider,
+		id: 'grok-1',
+		name: 'Work Grok',
+		provider_type: 'grok',
+		base_url: 'https://cli-chat-proxy.grok.com',
+		auth_mode: 'grok',
+		...partial
+	};
+}
+
 function credit(
 	partial: Partial<{
 		id: string;
-		reset_type: 'codex_rate_limits' | 'unknown';
+		reset_type: 'codex_rate_limits' | 'grok_rate_limits' | 'unknown';
 		status: 'available' | 'redeeming' | 'redeemed' | 'unknown';
 		granted_at: number;
 		expires_at: number | null;
@@ -338,5 +354,70 @@ describe('BankedResetsDialog modal behavior', () => {
 		await waitFor(() => expect(dialog.classList.contains('p-4')).toBe(true));
 		expect(card.classList.contains('max-w-lg')).toBe(true);
 		expect(card.classList.contains('rounded-xl')).toBe(true);
+	});
+});
+
+describe('BankedResetsDialog Grok provider', () => {
+	it('loads Grok inventory copy, default title, and grok APIs', async () => {
+		mocks.listGrok.mockResolvedValue({
+			available_count: 1,
+			credits: [
+				credit({
+					reset_type: 'grok_rate_limits',
+					title: null,
+					description: null
+				})
+			]
+		});
+		const { getByText, getByRole } = render(BankedResetsDialog, {
+			props: { provider: grokProvider(), onClose: vi.fn() }
+		});
+
+		await waitFor(() => expect(getByText('Usage limit reset')).toBeTruthy());
+		expect(getByText(/A reset clears your weekly usage once/)).toBeTruthy();
+		expect(mocks.listGrok).toHaveBeenCalledWith('grok-1');
+		expect(mocks.list).not.toHaveBeenCalled();
+
+		await fireEvent.click(getByRole('button', { name: 'Use' }));
+		expect(
+			getByText('Eligible Grok weekly usage may reset. This action cannot be undone.')
+		).toBeTruthy();
+	});
+
+	it('consumes via the Grok API and shows Grok outcome copy', async () => {
+		mocks.listGrok
+			.mockResolvedValueOnce({
+				available_count: 1,
+				credits: [credit({ reset_type: 'grok_rate_limits' })]
+			})
+			.mockResolvedValueOnce({ available_count: 0, credits: [] });
+		mocks.consumeGrok.mockResolvedValue({ outcome: 'reset', windows_reset: 1 });
+		const { getByRole, getByText } = render(BankedResetsDialog, {
+			props: { provider: grokProvider(), onClose: vi.fn() }
+		});
+		await waitFor(() => expect(getByRole('button', { name: 'Use' })).toBeTruthy());
+		await fireEvent.click(getByRole('button', { name: 'Use' }));
+		await fireEvent.click(getByRole('button', { name: 'Use reset' }));
+
+		await waitFor(() =>
+			expect(getByText('1 eligible Grok weekly usage window was reset.')).toBeTruthy()
+		);
+		expect(mocks.consumeGrok).toHaveBeenCalledWith('grok-1', {
+			credit_id: 'credit-1',
+			idempotency_key: 'uuid-1'
+		});
+		expect(mocks.consume).not.toHaveBeenCalled();
+	});
+
+	it('does not offer Use on a Codex-typed credit for a Grok account', async () => {
+		mocks.listGrok.mockResolvedValue({
+			available_count: 1,
+			credits: [credit({ reset_type: 'codex_rate_limits' })]
+		});
+		const { queryByRole, getByText } = render(BankedResetsDialog, {
+			props: { provider: grokProvider(), onClose: vi.fn() }
+		});
+		await waitFor(() => expect(getByText('Weekly reset')).toBeTruthy());
+		expect(queryByRole('button', { name: 'Use' })).toBeNull();
 	});
 });

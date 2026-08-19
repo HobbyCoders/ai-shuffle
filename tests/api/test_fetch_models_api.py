@@ -126,6 +126,35 @@ class TestPresetPath:
         # The OpenAI roster is distinct from the Codex roster.
         assert body["models"] != model_catalog_presets.CODEX_PRESET_MODELS
 
+    def test_xai_provider_type_returns_xai_preset(self, authenticated_client, mock_db):
+        _unlock(mock_db)
+        _make_provider(provider_type="xai", base_url="https://api.x.ai/v1")
+
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["source"] == "preset"
+        assert body["models"] == model_catalog_presets.XAI_PRESET_MODELS
+
+    def test_grok_provider_type_returns_xai_preset(self, authenticated_client, mock_db):
+        _unlock(mock_db)
+        _make_provider(provider_type="grok", base_url="https://api.x.ai/v1")
+
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["source"] == "preset"
+        assert body["models"] == model_catalog_presets.XAI_PRESET_MODELS
+
+    def test_grok_auth_mode_returns_xai_preset(self, authenticated_client, mock_db):
+        _unlock(mock_db)
+        _make_provider()
+        db.update_model_provider(PROVIDER_ID, auth_mode="grok")
+
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["models"] == model_catalog_presets.XAI_PRESET_MODELS
+
     def test_codex_roster_excludes_codex_auto_review(self):
         # codex-auto-review is special-purpose — must never appear in the picker.
         ids = {entry["id"] for entry in model_catalog_presets.CODEX_PRESET_MODELS}

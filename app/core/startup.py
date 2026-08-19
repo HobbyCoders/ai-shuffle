@@ -569,6 +569,39 @@ def start_background_tasks() -> List[asyncio.Task]:
             f"(every {codex_refresh_interval}s, first run in 20s)"
         )
 
+    xai_refresh_interval = settings.xai_token_refresh_interval_seconds
+    if xai_refresh_interval and xai_refresh_interval > 0:
+        async def _periodic_xai_token_refresh():
+            """Background task: refresh due Grok/SuperGrok provider OAuth tokens.
+
+            Scans every enabled Grok-subscription provider and refreshes any
+            whose access token is proactively due or nearing JWT ``exp``.
+            Permanent failures flip ``needs_reauth`` + surface a reconnect
+            prompt. See app.core.xai_token_refresh.
+            """
+            from app.core import xai_token_refresh
+
+            await asyncio.sleep(20)
+            while True:
+                try:
+                    n = await xai_token_refresh.refresh_due_providers()
+                    if n:
+                        logger.info(f"Grok token refresh: rotated {n} provider(s)")
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error(f"Periodic Grok token refresh failed: {e}")
+                try:
+                    await asyncio.sleep(xai_refresh_interval)
+                except asyncio.CancelledError:
+                    break
+
+        tasks.append(asyncio.create_task(_periodic_xai_token_refresh()))
+        logger.info(
+            f"Grok token-refresh task started "
+            f"(every {xai_refresh_interval}s, first run in 20s)"
+        )
+
     # Durable busy-status reconciler (v2 core): re-checks sessions last
     # broadcast as busy so a lease that expires with no terminal event (crashed
     # runner) still turns the board spinner off. Also registers the event

@@ -458,13 +458,14 @@ def _is_subscription_row(row: ModelProviderRow) -> bool:
 
     Third mirror of the same two-field test (``app.core.model_registry.
     _is_subscription_row``, ``app.core.provider.fluid_credentials.
-    _is_codex_subscription``): ``provider_type == "chatgpt"`` OR
-    ``auth_mode == "chatgpt"`` — a ``custom`` row can carry the Codex auth mode.
-    Everything else is metered API-key auth.
+    _is_codex_subscription`` / ``_is_grok_subscription``): ChatGPT
+    (``chatgpt``) or SuperGrok (``grok``) via ``provider_type`` or
+    ``auth_mode``. Everything else is metered API-key auth.
     """
+    row = row or {}
     return (
-        (row or {}).get("provider_type") == "chatgpt"
-        or (row or {}).get("auth_mode") == "chatgpt"
+        row.get("provider_type") in ("chatgpt", "grok")
+        or row.get("auth_mode") in ("chatgpt", "grok")
     )
 
 

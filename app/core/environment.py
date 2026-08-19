@@ -394,8 +394,9 @@ def inject_claude_code_auth(
 def is_provider_servable(provider: Optional[ModelProviderRow]) -> bool:
     """Whether the app can serve a provider row as a first-class model source.
 
-    True iff ``provider_type`` is one of ``openai`` / ``chatgpt`` / ``anthropic``
-    / ``openrouter`` (or ``auth_mode == "chatgpt"``).
+    True iff ``provider_type`` is one of ``openai`` / ``chatgpt`` / ``xai`` /
+    ``grok`` / ``anthropic`` / ``openrouter`` (or ``auth_mode`` in
+    ``chatgpt`` / ``grok``).
 
     Formerly ``is_gateway_servable``: the accepted set was defined by what the
     translator gateway could translate. The gateway is gone, but the predicate
@@ -408,9 +409,10 @@ def is_provider_servable(provider: Optional[ModelProviderRow]) -> bool:
     is now mechanical: a ``provider_type`` is admitted when it alone names a fluid
     client the native leg can drive — see
     ``provider.harness_adapter._provider_row_kind``, which maps
-    ``openai``/``chatgpt`` → ``OpenAIResponsesClient``, ``openrouter`` →
-    ``OpenRouterClient``, and ``anthropic`` → ``AnthropicClient`` (or the
-    delegated CLI leg for a subscription ``auth_mode``).
+    ``openai``/``chatgpt``/``xai``/``grok`` → ``OpenAIResponsesClient``,
+    ``openrouter`` → ``OpenRouterClient``, and ``anthropic`` →
+    ``AnthropicClient`` (or the delegated CLI leg for a subscription
+    ``auth_mode``).
 
     ``custom`` stays OUT on purpose: its leg is not implied by the type at all —
     it depends on the row's ``api_dialect`` plus a user-supplied ``base_url``
@@ -424,8 +426,8 @@ def is_provider_servable(provider: Optional[ModelProviderRow]) -> bool:
     ptype = provider.get("provider_type")
     auth_mode = provider.get("auth_mode")
     return (
-        ptype in ("openai", "chatgpt", "anthropic", "openrouter")
-        or auth_mode == "chatgpt"
+        ptype in ("openai", "chatgpt", "xai", "grok", "anthropic", "openrouter")
+        or auth_mode in ("chatgpt", "grok")
     )
 
 
@@ -484,7 +486,8 @@ def apply_provider_env(
       is known for the model, every window var is left unset (CLI defaults).
       All use ``setdefault`` so an explicit profile/user/extra_env value wins.
     - ``AIH_GATEWAY_TRANSLATED_MAIN=1`` — set IFF the MAIN provider is translated
-      (openai/chatgpt ``provider_type`` or ``chatgpt`` ``auth_mode``); consumed by
+      (openai/chatgpt/xai/grok ``provider_type`` or chatgpt/grok ``auth_mode``);
+      consumed by
       :func:`attach_hooks_to_options` to register the S8-R1 Agent-arg-strip
       PreToolUse hook
     - R4: ``ANTHROPIC_SMALL_FAST_MODEL`` set to ``small_fast_model or
@@ -500,8 +503,9 @@ def apply_provider_env(
     values LAST, so extra_env can never clobber the ``ANTHROPIC_API_KEY=""``
     guard (or any other overlay-controlled key).
 
-    Codex/OpenAI-subscription providers (``provider_type`` in
-    ``{"openai", "chatgpt"}`` or ``auth_mode == "chatgpt"``) do NOT speak the
+    Codex/OpenAI/Grok providers (``provider_type`` in
+    ``{"openai", "chatgpt", "xai", "grok"}`` or ``auth_mode`` in
+    ``{"chatgpt", "grok"}``) do NOT speak the
     Anthropic wire protocol. They used to be pointed at the loopback translator
     gateway with a per-session routing token; the gateway is retired and the fluid
     harness now serves them natively, resolving their REAL credentials itself
@@ -547,7 +551,10 @@ def apply_provider_env(
     # Anthropic-compatible endpoints).
     provider_type = provider.get("provider_type")
     auth_mode = provider.get("auth_mode")
-    is_translated = provider_type in ("openai", "chatgpt") or auth_mode == "chatgpt"
+    is_translated = (
+        provider_type in ("openai", "chatgpt", "xai", "grok")
+        or auth_mode in ("chatgpt", "grok")
+    )
 
     if is_translated:
         # NOTE: deliberately NOT subject to the "neither token nor base_url"

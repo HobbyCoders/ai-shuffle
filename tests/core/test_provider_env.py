@@ -416,6 +416,31 @@ class TestApplyProviderEnv:
         env = apply_provider_env({}, "gw", "gpt-5-codex", session_id="sess-cg")
         assert env[TRANSLATED_MAIN_KEY] == "1"
 
+    def test_translated_main_marker_set_for_xai_and_grok(self, mock_db):
+        """xAI API-key and SuperGrok rows do not speak Anthropic Messages."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        db.create_model_provider(
+            provider_id="xai", name="Grok", provider_type="xai",
+            base_url="https://api.x.ai/v1",
+            auth_token=encryption.encrypt_value("xai-key"),
+            models=[{"id": "grok-4.6", "label": "Grok 4.6"}],
+        )
+        env = apply_provider_env({}, "xai", "grok-4.6")
+        assert env[TRANSLATED_MAIN_KEY] == "1"
+        assert env[API_KEY] == ""
+        assert env[AUTH_TOKEN_KEY] == ""
+
+        db.create_model_provider(
+            provider_id="grok", name="Grok", provider_type="grok",
+            base_url="https://api.x.ai/v1", auth_token=None,
+            models=[{"id": "grok-4.6", "label": "Grok 4.6"}],
+        )
+        env = apply_provider_env({}, "grok", "grok-4.6")
+        assert env[TRANSLATED_MAIN_KEY] == "1"
+        assert env[API_KEY] == ""
+        assert env[AUTH_TOKEN_KEY] == ""
+
     def test_translated_main_marker_absent_for_openrouter(self, mock_db):
         """A non-translated (openrouter) main does NOT set the marker."""
         from app.db import database as db

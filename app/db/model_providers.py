@@ -343,17 +343,20 @@ def set_codex_token_bundle(
     id_token_expires_at: Optional[str] = None,
     last_refresh: Optional[str] = None,
     needs_reauth: bool = False,
+    auth_mode: str = "chatgpt",
 ) -> Optional[ModelProviderRow]:
-    """Atomically persist the Codex OAuth token bundle on a provider row.
+    """Atomically persist an OAuth token bundle on a provider row.
 
     Writes ``codex_access_token`` + ``codex_refresh_token`` +
     ``codex_account_id`` + ``codex_id_token_expires_at`` + ``codex_last_refresh``
-    in ONE UPDATE, and sets ``auth_mode='chatgpt'`` + ``needs_reauth`` (default
-    cleared) alongside. The Codex refresh token ROTATES on every refresh, so a
-    later refresh worker relies on this single-statement persist to avoid a
-    torn write between the new access and refresh tokens. ``access_token`` /
-    ``refresh_token`` are expected to already be ``enc:``-prefixed blobs
-    (encryption at the call site, same contract as ``auth_token``).
+    in ONE UPDATE, and sets ``auth_mode`` (default ``'chatgpt'`` so existing
+    Codex callers are unchanged; Grok enrollment passes ``'grok'``) +
+    ``needs_reauth`` (default cleared) alongside. The Codex refresh token
+    ROTATES on every refresh, so a later refresh worker relies on this
+    single-statement persist to avoid a torn write between the new access and
+    refresh tokens. ``access_token`` / ``refresh_token`` are expected to already
+    be ``enc:``-prefixed blobs (encryption at the call site, same contract as
+    ``auth_token``).
 
     Returns the fresh public row (no blobs), or ``None`` if the provider is gone.
     """
@@ -363,7 +366,7 @@ def set_codex_token_bundle(
         cursor.execute(
             """
             UPDATE model_providers
-               SET auth_mode = 'chatgpt',
+               SET auth_mode = %s,
                    codex_access_token = %s,
                    codex_refresh_token = %s,
                    codex_account_id = %s,
@@ -374,6 +377,7 @@ def set_codex_token_bundle(
              WHERE id = %s
             """,
             (
+                auth_mode,
                 access_token,
                 refresh_token,
                 account_id,

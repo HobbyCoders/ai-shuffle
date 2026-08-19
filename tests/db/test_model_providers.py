@@ -245,6 +245,17 @@ class TestCodexTokenBundle:
         assert bundle["codex_access_token"] == "enc:acc-2"
         assert bundle["codex_refresh_token"] == "enc:ref-2"
 
+    def test_set_bundle_auth_mode_grok(self, mock_db):
+        _create()
+        db.set_codex_token_bundle(
+            "prov-1", access_token="enc:a", refresh_token="enc:r",
+            account_id="team-1", auth_mode="grok",
+        )
+        bundle = db.get_codex_tokens("prov-1")
+        assert bundle["auth_mode"] == "grok"
+        row = db.get_model_provider("prov-1")
+        assert row["auth_mode"] == "grok"
+
     def test_set_bundle_can_flag_needs_reauth(self, mock_db):
         _create()
         db.set_codex_token_bundle(

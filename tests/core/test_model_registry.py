@@ -388,7 +388,10 @@ class TestRegistryPayloadProviders:
         ``fluid_credentials._is_codex_subscription``)."""
         assert m._is_subscription_row({"provider_type": "chatgpt"}) is True
         assert m._is_subscription_row({"provider_type": "custom", "auth_mode": "chatgpt"}) is True
+        assert m._is_subscription_row({"provider_type": "grok"}) is True
+        assert m._is_subscription_row({"provider_type": "custom", "auth_mode": "grok"}) is True
         assert m._is_subscription_row({"provider_type": "openai"}) is False
+        assert m._is_subscription_row({"provider_type": "xai"}) is False
         assert m._is_subscription_row({"provider_type": "custom", "auth_mode": None}) is False
 
     def test_no_auth_token_anywhere_in_payload(self, mock_db):

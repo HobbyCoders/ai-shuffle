@@ -27,6 +27,8 @@ const mocks = vi.hoisted(() => ({
 	deleteModelProvider: vi.fn(),
 	listCodexRateLimitResetCredits: vi.fn(),
 	consumeCodexRateLimitResetCredit: vi.fn(),
+	listGrokRateLimitResetCredits: vi.fn(),
+	consumeGrokRateLimitResetCredit: vi.fn(),
 	codexDeviceStart: vi.fn(),
 	codexDevicePoll: vi.fn(),
 	hydrateModelRegistry: vi.fn()
@@ -41,6 +43,8 @@ vi.mock('$lib/api/model-providers', async (importOriginal) => {
 		deleteModelProvider: mocks.deleteModelProvider,
 		listCodexRateLimitResetCredits: mocks.listCodexRateLimitResetCredits,
 		consumeCodexRateLimitResetCredit: mocks.consumeCodexRateLimitResetCredit,
+		listGrokRateLimitResetCredits: mocks.listGrokRateLimitResetCredits,
+		consumeGrokRateLimitResetCredit: mocks.consumeGrokRateLimitResetCredit,
 		codexDeviceStart: mocks.codexDeviceStart,
 		codexDevicePoll: mocks.codexDevicePoll
 	};
@@ -81,6 +85,7 @@ beforeEach(() => {
 	Object.values(mocks).forEach((m) => m.mockReset());
 	mocks.hydrateModelRegistry.mockResolvedValue(undefined);
 	mocks.listCodexRateLimitResetCredits.mockResolvedValue({ available_count: 0, credits: [] });
+	mocks.listGrokRateLimitResetCredits.mockResolvedValue({ available_count: 0, credits: [] });
 	mocks.codexDeviceStart.mockResolvedValue({
 		user_code: 'ABCD-1234',
 		verification_uri: 'https://example.test/verify'
@@ -185,6 +190,44 @@ describe('ProviderList — banked resets action', () => {
 
 		await fireEvent.click(getByRole('button', { name: 'Close' }));
 		await waitFor(() => expect(document.activeElement).toBe(openers[1]));
+	});
+
+	it('shows Banked resets on a connected Grok row and opens the same dialog', async () => {
+		mocks.listModelProviders.mockResolvedValue({
+			providers: [
+				{
+					id: 'grok-1',
+					name: 'SuperGrok',
+					provider_type: 'grok',
+					base_url: 'https://cli-chat-proxy.grok.com',
+					auth_token_set: false,
+					auth_token_masked: '',
+					models: [],
+					default_model: null,
+					small_fast_model: null,
+					extra_env: {},
+					context_window: null,
+					max_output_tokens: null,
+					enabled: true,
+					auth_mode: 'grok',
+					needs_reauth: false,
+					codex_access_token_set: true,
+					created_at: null,
+					updated_at: null
+				}
+			]
+		});
+		await providers.loadProviders();
+
+		const { getByRole } = render(ProviderList);
+		expect(getByRole('button', { name: 'Banked resets' })).toBeTruthy();
+
+		await fireEvent.click(getByRole('button', { name: 'Banked resets' }));
+		await waitFor(() =>
+			expect(mocks.listGrokRateLimitResetCredits).toHaveBeenCalledWith('grok-1')
+		);
+		expect(getByRole('dialog', { name: 'Banked resets' })).toBeTruthy();
+		expect(mocks.listCodexRateLimitResetCredits).not.toHaveBeenCalled();
 	});
 });
 

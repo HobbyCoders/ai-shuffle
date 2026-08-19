@@ -66,6 +66,19 @@ OPENAI_PRESET_MODELS: List[Dict[str, Any]] = [
     {"id": "gpt-5.4-nano", "label": "GPT-5.4 Nano"},
 ]
 
+# xAI / Grok TEXT+AGENT roster (verified 2026-08-19 against
+# docs.x.ai/developers/models). Imagine/Voice models are excluded — they are
+# not chat/agent endpoints. Same roster for API-key (``xai``) and SuperGrok
+# subscription (``grok``) rows: both hit ``https://api.x.ai/v1``.
+XAI_PRESET_MODELS: List[Dict[str, Any]] = [
+    {"id": "grok-4.6", "label": "Grok 4.6", "context_window": 500_000},
+    {"id": "grok-4.5", "label": "Grok 4.5", "context_window": 500_000},
+    {"id": "grok-4.3", "label": "Grok 4.3", "context_window": 1_000_000},
+    {"id": "grok-4.20-0309-reasoning", "label": "Grok 4.20 Reasoning", "context_window": 1_000_000},
+    {"id": "grok-4.20-0309-non-reasoning", "label": "Grok 4.20", "context_window": 1_000_000},
+    {"id": "grok-build-0.1", "label": "Grok Build", "context_window": 256_000},
+]
+
 # Preset kind → roster. The kind is the normalized provider classification
 # produced by :func:`preset_kind_for` (NOT the raw ``provider_type``: an
 # already-enrolled Codex row is ``provider_type='custom'`` +
@@ -73,6 +86,7 @@ OPENAI_PRESET_MODELS: List[Dict[str, Any]] = [
 _PRESET_ROSTERS: Dict[str, List[Dict[str, Any]]] = {
     "chatgpt": CODEX_PRESET_MODELS,
     "openai": OPENAI_PRESET_MODELS,
+    "xai": XAI_PRESET_MODELS,
 }
 
 
@@ -84,7 +98,9 @@ def preset_kind_for(provider_row: Optional[Mapping[str, Any]]) -> Optional[str]:
     ``auth_mode='chatgpt'`` and must still resolve to the Codex roster):
 
       * ``auth_mode == "chatgpt"``            → ``"chatgpt"`` (Codex roster)
+      * ``auth_mode == "grok"``               → ``"xai"`` (Grok roster)
       * ``provider_type == "chatgpt"``        → ``"chatgpt"`` (new enrollments)
+      * ``provider_type in ("xai", "grok")``  → ``"xai"`` (API key + SuperGrok)
       * ``provider_type == "openai"``         → ``"openai"``
 
     Everything else (``openrouter`` / ``custom``) is browsable upstream → ``None``.
@@ -93,6 +109,11 @@ def preset_kind_for(provider_row: Optional[Mapping[str, Any]]) -> Optional[str]:
         return None
     if provider_row.get("auth_mode") == "chatgpt":
         return "chatgpt"
+    if (
+        provider_row.get("auth_mode") == "grok"
+        or provider_row.get("provider_type") in ("xai", "grok")
+    ):
+        return "xai"
     provider_type = provider_row.get("provider_type")
     if provider_type in _PRESET_ROSTERS:
         return provider_type

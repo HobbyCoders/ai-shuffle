@@ -3,7 +3,9 @@
 	import { RefreshCw, RotateCcw, X } from 'lucide-svelte';
 	import {
 		consumeCodexRateLimitResetCredit,
+		consumeGrokRateLimitResetCredit,
 		listCodexRateLimitResetCredits,
+		listGrokRateLimitResetCredits,
 		type CodexRateLimitResetCredit,
 		type ConsumeCodexRateLimitResetCreditResponse,
 		type ModelProvider
@@ -18,6 +20,11 @@
 	}
 
 	let { provider, onClose }: Props = $props();
+
+	const GROK_DEFAULT_DESCRIPTION =
+		"A reset clears your weekly usage once. Resets don't stack and expire on their date.";
+
+	let isGrok = $derived(provider.provider_type === 'grok' || provider.auth_mode === 'grok');
 
 	let dialogEl = $state<HTMLDivElement | null>(null);
 	let cardEl = $state<HTMLDivElement | null>(null);
@@ -54,14 +61,19 @@
 	});
 
 	function formatUnixSeconds(value: number | null): string | null {
-		if (value === null || !Number.isFinite(value)) return null;
+		if (value === null || !Number.isFinite(value) || value <= 0) return null;
 		const date = new Date(value * 1000);
 		if (Number.isNaN(date.getTime())) return null;
 		return dateFormatter.format(date);
 	}
 
 	function creditTitle(credit: CodexRateLimitResetCredit): string {
-		return credit.title?.trim() || 'Codex rate-limit reset';
+		return credit.title?.trim() || (isGrok ? 'Usage limit reset' : 'Codex rate-limit reset');
+	}
+
+	function creditDescription(credit: CodexRateLimitResetCredit): string | null {
+		if (credit.description?.trim()) return credit.description;
+		return isGrok ? GROK_DEFAULT_DESCRIPTION : null;
 	}
 
 	function statusLabel(credit: CodexRateLimitResetCredit): string {
@@ -72,7 +84,23 @@
 	}
 
 	function canUse(credit: CodexRateLimitResetCredit): boolean {
-		return credit.reset_type === 'codex_rate_limits' && credit.status === 'available';
+		if (credit.status !== 'available') return false;
+		if (isGrok) return credit.reset_type === 'grok_rate_limits';
+		return credit.reset_type === 'codex_rate_limits';
+	}
+
+	async function listCredits() {
+		if (isGrok) return listGrokRateLimitResetCredits(provider.id);
+		return listCodexRateLimitResetCredits(provider.id);
+	}
+
+	async function consumeCreditRequest(
+		creditId: string,
+		idempotencyKey: string
+	): Promise<ConsumeCodexRateLimitResetCreditResponse> {
+		const body = { credit_id: creditId, idempotency_key: idempotencyKey };
+		if (isGrok) return consumeGrokRateLimitResetCredit(provider.id, body);
+		return consumeCodexRateLimitResetCredit(provider.id, body);
 	}
 
 	async function refreshInventory(): Promise<void> {
@@ -83,7 +111,7 @@
 		liveMessage = hasLoaded ? 'Refreshing banked resets…' : 'Loading banked resets…';
 
 		try {
-			const result = await listCodexRateLimitResetCredits(provider.id);
+			const result = await listCredits();
 			credits = result.credits;
 			availableCount = result.available_count;
 			hasLoaded = true;
@@ -113,10 +141,15 @@
 
 	function messageForOutcome(result: ConsumeCodexRateLimitResetCreditResponse): string {
 		if (result.outcome === 'reset') {
+			if (isGrok) {
+				return `${result.windows_reset} eligible Grok weekly usage ${result.windows_reset === 1 ? 'window was' : 'windows were'} reset.`;
+			}
 			return `${result.windows_reset} eligible Codex ${result.windows_reset === 1 ? 'window was' : 'windows were'} reset.`;
 		}
 		if (result.outcome === 'nothing_to_reset') {
-			return 'No eligible Codex windows needed a reset.';
+			return isGrok
+				? 'No eligible Grok weekly usage needed a reset.'
+				: 'No eligible Codex windows needed a reset.';
 		}
 		if (result.outcome === 'no_credit') {
 			return 'This banked reset is no longer available.';
@@ -138,10 +171,7 @@
 		liveMessage = 'Using banked reset…';
 
 		try {
-			const result = await consumeCodexRateLimitResetCredit(provider.id, {
-				credit_id: creditId,
-				idempotency_key: attempt.idempotencyKey
-			});
+			const result = await consumeCreditRequest(creditId, attempt.idempotencyKey);
 			outcomeMessage = messageForOutcome(result);
 			liveMessage = outcomeMessage;
 			armedCreditId = null;
@@ -251,7 +281,7 @@
 					{#if hasLoaded}
 						{availableCount} {availableCount === 1 ? 'reset' : 'resets'} available
 					{:else}
-						View and use reset credits saved to this ChatGPT account.
+						View and use reset credits saved to this {isGrok ? 'Grok' : 'ChatGPT'} account.
 					{/if}
 				</p>
 				<button
@@ -314,8 +344,8 @@
 								<div class="flex items-start justify-between gap-3">
 									<div class="min-w-0">
 										<h3 class="text-sm font-semibold text-foreground">{creditTitle(credit)}</h3>
-										{#if credit.description}
-											<p class="mt-1 text-sm text-muted-foreground">{credit.description}</p>
+										{#if creditDescription(credit)}
+											<p class="mt-1 text-sm text-muted-foreground">{creditDescription(credit)}</p>
 										{/if}
 									</div>
 									<span class="shrink-0 text-xs font-medium text-muted-foreground">{statusLabel(credit)}</span>
@@ -329,7 +359,7 @@
 								{#if canUse(credit)}
 									{#if armedCreditId === credit.id}
 										<div class="mt-3 rounded-lg border border-border bg-muted p-3">
-											<p class="text-sm text-foreground">Eligible Codex windows may reset. This action cannot be undone.</p>
+											<p class="text-sm text-foreground">{isGrok ? 'Eligible Grok weekly usage may reset. This action cannot be undone.' : 'Eligible Codex windows may reset. This action cannot be undone.'}</p>
 											{#if consumeError}
 												<p class="mt-2 text-sm text-destructive" role="alert">{consumeError}</p>
 											{/if}

@@ -207,6 +207,12 @@ class Settings(BaseSettings):
     # disables the periodic worker (the refresh-on-401 hook still works on demand).
     codex_token_refresh_interval_seconds: int = 3600
 
+    # SuperGrok / xAI OAuth token-refresh worker. Same cadence semantics as
+    # ``codex_token_refresh_interval_seconds`` (0 disables the periodic worker;
+    # the refresh-on-401 hook still works on demand). Defaults to the Codex
+    # interval so both sweeps wake together.
+    xai_token_refresh_interval_seconds: int = 3600
+
     # Timeouts (milliseconds)
     hook_timeout_ms: int = 30_000
     # Size limits
