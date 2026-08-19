@@ -142,18 +142,27 @@
 	// ----- model_providers classification & ordering (ruling PR1) -----
 	// Key on auth_mode FIRST (the Codex row is provider_type='custom' +
 	// auth_mode='chatgpt'), THEN provider_type.
-	type SubKind = 'chatgpt' | 'openrouter' | 'openai' | 'custom';
+	type SubKind = 'chatgpt' | 'grok' | 'openrouter' | 'openai' | 'custom';
 	function classifyProvider(p: ModelProvider): SubKind {
 		if (p.auth_mode === 'chatgpt') return 'chatgpt'; // auth_mode wins (PR1)
 		if (p.provider_type === 'chatgpt') return 'chatgpt';
+		if (p.auth_mode === 'grok') return 'grok';
+		if (p.provider_type === 'grok') return 'grok';
 		if (p.provider_type === 'openrouter') return 'openrouter';
 		if (p.provider_type === 'openai') return 'openai';
 		return 'custom';
 	}
-	const SUBKIND_ORDER: Record<SubKind, number> = { chatgpt: 0, openrouter: 1, openai: 2, custom: 3 };
+	const SUBKIND_ORDER: Record<SubKind, number> = {
+		chatgpt: 0,
+		grok: 1,
+		openrouter: 2,
+		openai: 3,
+		custom: 4
+	};
 
 	function badgeFor(kind: SubKind): string {
 		if (kind === 'chatgpt') return 'ChatGPT';
+		if (kind === 'grok') return 'Grok';
 		if (kind === 'openrouter') return 'OpenRouter';
 		if (kind === 'openai') return 'OpenAI';
 		return 'Custom';
@@ -162,9 +171,9 @@
 	function providerMeta(p: ModelProvider, kind: SubKind): string {
 		const n = p.models.length;
 		const modelsTxt = `${n} ${n === 1 ? 'model' : 'models'}`;
-		// ChatGPT rows authenticate via the Codex OAuth tokens, not a gateway auth
+		// Subscription rows authenticate via OAuth tokens, not a gateway auth
 		// token — "no token" there would contradict the Connected pill.
-		const noToken = kind !== 'chatgpt' && !p.auth_token_set ? ' · no token' : '';
+		const noToken = kind !== 'chatgpt' && kind !== 'grok' && !p.auth_token_set ? ' · no token' : '';
 		return `${p.base_url} · ${modelsTxt}${noToken}`;
 	}
 
@@ -316,8 +325,8 @@
 	{#each sortedProviders as p (p.id)}
 		{@const kind = classifyProvider(p)}
 		<li class="prov-item">
-			{#if kind === 'chatgpt'}
-				<!-- ChatGPT subscription: native-auth, no toggle/edit, sign-in + manage models. -->
+			{#if kind === 'chatgpt' || kind === 'grok'}
+				<!-- Subscription: native-auth, no toggle/edit, manage models + banked resets. -->
 				<ProviderRow
 					title={p.name}
 					badge={badgeFor(kind)}
@@ -329,7 +338,7 @@
 					onBankedResets={p.codex_access_token_set && !p.needs_reauth
 						? (opener) => openBankedResets(p, opener)
 						: undefined}
-					onSignIn={() => (reconnectId = p.id)}
+					onSignIn={kind === 'chatgpt' ? () => (reconnectId = p.id) : undefined}
 					signInLabel={p.needs_reauth ? 'Reconnect' : 'Sign in'}
 					onRemove={() => armDelete(p.id)}
 					confirmingDelete={confirmDeleteId === p.id}

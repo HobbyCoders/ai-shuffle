@@ -33,6 +33,7 @@ from app.core import (
     codex_rate_limit_resets,
     codex_token_refresh,
     encryption,
+    grok_rate_limit_resets,
     model_catalog_presets,
     xai_oauth,
 )
@@ -146,10 +147,10 @@ class CodexDevicePollResponse(BaseModel):
 
 
 class CodexResetCreditResponse(BaseModel):
-    """Public, normalized view of one ChatGPT/Codex reset credit."""
+    """Public, normalized view of one ChatGPT/Codex or Grok reset credit."""
 
     id: str
-    reset_type: Literal["codex_rate_limits", "unknown"]
+    reset_type: Literal["codex_rate_limits", "grok_rate_limits", "unknown"]
     status: Literal["available", "redeeming", "redeemed", "unknown"]
     granted_at: int
     expires_at: Optional[int] = None
@@ -831,6 +832,173 @@ async def codex_consume_rate_limit_reset_credit(
         )
 
     return await _codex_reset_request_with_refresh(provider_id, _request)
+
+
+# ============================================================================
+# Grok / SuperGrok-subscription rate-limit reset credits
+# ============================================================================
+
+_GROK_RESET_UPSTREAM_DETAIL = (
+    "The Grok reset-credit service is temporarily unavailable."
+)
+_GROK_RESET_RECONNECT_DETAIL = (
+    "Reconnect the Grok provider before using reset credits."
+)
+
+
+def _is_grok_reset_provider(provider: Dict[str, Any]) -> bool:
+    """SuperGrok OAuth rows. xAI API-key rows are ``provider_type='xai'``."""
+    return (
+        provider.get("provider_type") == "grok"
+        or provider.get("auth_mode") == "grok"
+    )
+
+
+def _grok_reset_credentials(provider_id: str) -> str:
+    """Load and decrypt one SuperGrok access token for an immediate request."""
+    provider = db.get_model_provider(provider_id)
+    if provider is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Model provider not found",
+        )
+    if not _is_grok_reset_provider(provider):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Rate-limit reset credits require a Grok provider.",
+        )
+    if not encryption.is_encryption_ready():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Encryption is locked. Log in again as admin before using "
+                   "reset credits.",
+        )
+
+    stored = db.get_codex_tokens(provider_id)
+    if (
+        not stored
+        or stored.get("needs_reauth")
+        or not stored.get("codex_access_token")
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_GROK_RESET_RECONNECT_DETAIL,
+        )
+    try:
+        access_token = encryption.decrypt_value(stored["codex_access_token"])
+    except Exception as exc:  # noqa: BLE001 - never expose credential failures
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_GROK_RESET_RECONNECT_DETAIL,
+        ) from exc
+    if not access_token:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_GROK_RESET_RECONNECT_DETAIL,
+        )
+    return access_token
+
+
+async def _try_grok_refresh_on_401(
+    provider_id: str, access_token: str, client
+) -> bool:
+    """Refresh once on 401. Import-guarded until the Grok OAuth sibling lands."""
+    try:
+        from app.core import xai_token_refresh
+    except ImportError:
+        return False
+    try:
+        return bool(
+            await xai_token_refresh.refresh_on_401_once(
+                provider_id,
+                stale_access_token=access_token,
+                client=client,
+            )
+        )
+    except Exception:  # noqa: BLE001 - refresh internals remain private
+        return False
+
+
+async def _grok_reset_request_with_refresh(provider_id: str, request_call):
+    """Run one reset-credit request, refreshing and retrying once on a first 401."""
+    from app.core.http_client import get_http_client
+
+    client = get_http_client()
+    access_token = _grok_reset_credentials(provider_id)
+    try:
+        return await request_call(access_token, client)
+    except grok_rate_limit_resets.GrokResetCreditsError as exc:
+        if not exc.is_unauthorized:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=_GROK_RESET_UPSTREAM_DETAIL,
+            ) from exc
+
+    refreshed = await _try_grok_refresh_on_401(provider_id, access_token, client)
+    if not refreshed:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_GROK_RESET_RECONNECT_DETAIL,
+        )
+
+    try:
+        access_token = _grok_reset_credentials(provider_id)
+    except HTTPException as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_GROK_RESET_RECONNECT_DETAIL,
+        ) from exc
+    try:
+        return await request_call(access_token, client)
+    except grok_rate_limit_resets.GrokResetCreditsError as exc:
+        if exc.is_unauthorized:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=_GROK_RESET_RECONNECT_DETAIL,
+            ) from exc
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=_GROK_RESET_UPSTREAM_DETAIL,
+        ) from exc
+
+
+@router.get(
+    "/{provider_id}/grok/rate-limit-reset-credits",
+    response_model=CodexResetCreditsResponse,
+)
+async def grok_rate_limit_reset_credits(
+    provider_id: str, token: str = Depends(require_admin)
+):
+    """Return the provider's normalized banked reset-credit inventory."""
+
+    async def _request(access_token, client):
+        return await grok_rate_limit_resets.get_reset_credits(
+            access_token, client=client
+        )
+
+    return await _grok_reset_request_with_refresh(provider_id, _request)
+
+
+@router.post(
+    "/{provider_id}/grok/rate-limit-reset-credits/consume",
+    response_model=CodexConsumeResetCreditResponse,
+)
+async def grok_consume_rate_limit_reset_credit(
+    provider_id: str,
+    body: CodexConsumeResetCreditRequest,
+    token: str = Depends(require_admin),
+):
+    """Consume a specific banked reset credit with an idempotency key."""
+
+    async def _request(access_token, client):
+        return await grok_rate_limit_resets.consume_reset_credit(
+            access_token,
+            credit_id=body.credit_id,
+            idempotency_key=body.idempotency_key,
+            client=client,
+        )
+
+    return await _grok_reset_request_with_refresh(provider_id, _request)
 
 
 # ============================================================================
