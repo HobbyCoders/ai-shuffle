@@ -2,9 +2,10 @@
  * Installs (cluster) API client.
  *
  * On a shared database every AI Shuffle install self-registers into the
- * `installs` registry. These endpoints power the Devices panel and the cloud
- * device picker — listing installs, renaming/removing a device, and inspecting
- * or rotating the shared cluster secret.
+ * `installs` registry. These endpoints power the Devices panel and the Cloud
+ * accordion's runner picker — listing installs, renaming/removing a device,
+ * and inspecting or rotating the shared cluster secret. Phones live in
+ * `mobile_devices` and are not returned here.
  */
 
 import { api } from './client';
@@ -79,9 +80,9 @@ export async function setAdvertiseUrl(base_url: string): Promise<AdvertiseStatus
 // ─── Cluster git state (W3 / ruling D6) ──────────────────────────────────────
 //
 // `GET /cluster/git-state?project_id=<legacy project id>` reports, per install,
-// whether that device can run this project (`eligible` — it holds an ACTIVE base
+// whether that runner can run this project (`eligible` — it holds an ACTIVE base
 // checkout) plus every checkout row it owns, and the project's recent `git_ops`.
-// Consumed by the composer device picker (eligibility badges) and the Devices
+// Consumed by the composer Cloud accordion (eligibility badges) and the Devices
 // panel's git-state surface.
 
 /** One `checkouts` row: the base checkout (`branch` null/'') or a worktree. */
@@ -94,7 +95,7 @@ export interface CheckoutRow {
 	updated_at: string | null;
 }
 
-/** An install row annotated with this project's git state on that device. */
+/** An install row annotated with this project's git state on that runner. */
 export interface GitStateInstall extends Install {
 	eligible: boolean; // has an ACTIVE base checkout of this project
 	checkouts: CheckoutRow[];

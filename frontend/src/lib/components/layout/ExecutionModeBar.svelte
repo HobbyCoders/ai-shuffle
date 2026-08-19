@@ -19,6 +19,13 @@
 	import type { ExecutionMode } from '$lib/stores/types';
 	import { syncWorktrees, type Worktree, type Branch } from '$lib/api/git';
 	import { listInstalls, getClusterGitState, type Install } from '$lib/api/installs';
+	import {
+		peerRunners,
+		isIneligible,
+		isBlocked,
+		runnerTitle,
+		emptyRunnersCopy
+	} from './execution-mode-eligibility';
 	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch, gitStatus } from '$lib/stores/git.svelte';
 	import { ChevronDown, ChevronRight, Cloud, GitBranch, Monitor, GitFork, Plus, Loader2, Check } from 'lucide-svelte';
 	import { untrack } from 'svelte';
@@ -162,7 +169,7 @@
 	}
 
 	function selectBaseMode() {
-		// Local is the base mode; picking it drops any device choice so the
+		// Local is the base mode; picking it drops any runner choice so the
 		// session is created on (and owned by) this install.
 		activeSession.setDeviceIntent(null);
 		cloudExpanded = false;
@@ -174,11 +181,12 @@
 		// Leave the menu open so the user sees the checkbox flip and can keep going.
 	}
 
-	// --- Cloud (other devices) section ---
+	// --- Cloud (other runners) section ---
 	//
 	// An inline accordion INSIDE the mode menu, not a flyout submenu: this
 	// codebase has no submenu primitive, and a nested floating panel would need
-	// its own outside-click/placement handling on mobile.
+	// its own outside-click/placement handling on mobile. The list is `installs`
+	// (full processes that can host a session), not `mobile_devices` (phones).
 	let cloudExpanded = $state(false);
 	let installs = $state<Install[]>([]);
 	let installsLoading = $state(false);
@@ -187,41 +195,18 @@
 	// keyed by install id. `null` = UNKNOWN — no project selected, the git-state
 	// call failed, or the project has no cluster git state. Ruling W3-3 is
 	// fail-open: unknown means no badges and no extra disabling, so a backend
-	// hiccup can never lock the user out of their own devices.
+	// hiccup can never lock the user out of their own runners.
 	let eligibility = $state<Record<string, boolean> | null>(null);
 
-	// Only online installs can accept a new cloud session. "This device" stays
-	// represented by the Local item above rather than appearing twice.
-	const onlineInstalls = $derived(installs.filter(i => !i.is_self && i.online));
+	// Every other install, including offline. Local already represents "this
+	// device"; greying (not hiding) offline peers is `isBlocked`.
+	const peers = $derived(peerRunners(installs));
 
 	const deviceIntent = $derived($activeSession.deviceIntent);
 
-	// Worktree and device compose freely (D7): picking a device sends the
+	// Worktree and runner compose freely (D7): picking a runner sends the
 	// worktree request to that install, which materializes the checkout on its
 	// own disk via the durable git-ops queue. Neither choice constrains the other.
-
-	// Only devices the backend explicitly reported as ineligible count — an
-	// install missing from the git-state payload stays unknown (fail-open).
-	function isIneligible(id: string): boolean {
-		return eligibility !== null && eligibility[id] === false;
-	}
-
-	// A worktree has to be materialized from a checkout of this project on the
-	// target device, so in worktree mode an ineligible device is unusable and
-	// reads as disabled. In plain mode the badge is purely informational.
-	function isBlocked(install: Install): boolean {
-		return !install.online || (worktreeOn && isIneligible(install.id));
-	}
-
-	function deviceTitle(install: Install): string {
-		if (!install.online) return `${install.device_name} is offline`;
-		if (isIneligible(install.id)) {
-			return worktreeOn
-				? `No checkout of this project on ${install.device_name} — a worktree can't be created there`
-				: `No checkout of this project on ${install.device_name}`;
-		}
-		return `Run this session on ${install.device_name}`;
-	}
 
 	async function loadInstalls() {
 		installsLoading = true;
@@ -238,7 +223,7 @@
 		try {
 			installs = (await listInstalls()).installs;
 		} catch (e) {
-			console.warn('[ExecutionModeBar] Failed to list devices:', e);
+			console.warn('[ExecutionModeBar] Failed to list runners:', e);
 			installs = [];
 		} finally {
 			installsLoading = false;
@@ -258,7 +243,7 @@
 	}
 
 	function selectDevice(install: Install) {
-		if (isBlocked(install)) return;
+		if (isBlocked(install, worktreeOn, eligibility)) return;
 		activeSession.setDeviceIntent({ id: install.id, name: install.device_name });
 		showModeDropdown = false;
 	}
@@ -386,13 +371,13 @@
 						<span class="branch-item-name">Local</span>
 					</button>
 
-					<!-- Cloud: inline accordion listing the other installs. Creating
-					     the session there stamps it with that device's ownership. -->
+					<!-- Cloud: inline accordion listing the other runners. Creating
+					     the session there stamps it with that runner's ownership. -->
 					<button
 						type="button"
 						class="branch-item cloud-item"
 						onclick={toggleCloud}
-						title="Run this session on another device"
+						title="Run this session on another runner"
 						aria-expanded={cloudExpanded}
 					>
 						<Cloud size={13} strokeWidth={1.5} />
@@ -407,24 +392,24 @@
 									<Loader2 size={14} class="animate-spin" />
 									<span>Loading...</span>
 								</div>
-							{:else if onlineInstalls.length === 0}
-								<p class="branch-empty">No online devices</p>
+							{:else if peers.length === 0}
+								<p class="branch-empty">{emptyRunnersCopy}</p>
 							{:else}
-								{#each onlineInstalls as install (install.id)}
+								{#each peers as install (install.id)}
 									<button
 										type="button"
 										class="branch-item device-item"
 										class:active={deviceIntent?.id === install.id}
-										class:disabled={isBlocked(install)}
+										class:disabled={isBlocked(install, worktreeOn, eligibility)}
 										onclick={() => selectDevice(install)}
-										title={deviceTitle(install)}
+										title={runnerTitle(install, worktreeOn, eligibility)}
 										role="menuitemradio"
 										aria-checked={deviceIntent?.id === install.id}
-										aria-disabled={isBlocked(install)}
+										aria-disabled={isBlocked(install, worktreeOn, eligibility)}
 									>
 										<Cloud size={13} strokeWidth={1.5} />
 										<span class="branch-item-name">{install.device_name}</span>
-										{#if isIneligible(install.id)}
+										{#if isIneligible(eligibility, install.id)}
 											<span class="device-nocheckout">no checkout</span>
 										{/if}
 									</button>
