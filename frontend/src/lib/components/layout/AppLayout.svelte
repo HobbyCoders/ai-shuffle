@@ -1,15 +1,23 @@
 <script lang="ts">
 	/**
-	 * AppLayout - Top bar + body layout
+	 * AppLayout - app shell (Studio Noir)
 	 *
-	 * - Global AppTopBar provides primary navigation (pages as siblings).
-	 * - The Sessions section is the navigator: a full-canvas board (overview)
-	 *   that drills into a focused chat. The old left sidebar is retired.
+	 * Desktop (>1080px): a 256px sidebar on the black `--sidebar` plane holds the
+	 * session navigator and the page rail; the main panel carries its own top bar
+	 * (StudioTopBar, rendered by MainPanel so it can host the existing git
+	 * actions). The sidebar collapses from that top bar and its collapsed state
+	 * persists via the layout store.
+	 *
+	 * Mobile (≤1080px): unchanged pattern — AppTopBar's compact bar plus the
+	 * slide-in drawer, which now hosts the very same Sidebar component.
 	 */
 	import { onMount, onDestroy } from 'svelte';
+	import { layout, sidebarCollapsed } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
+	import { isPanelFullscreenWidth } from '$lib/utils/viewport';
 	import MainPanel from './MainPanel.svelte';
 	import AppTopBar from './AppTopBar.svelte';
+	import Sidebar from './Sidebar.svelte';
 
 	interface Props {
 		isAdmin?: boolean;
@@ -40,12 +48,10 @@
 	// 1080px cutoff also covers unfolded foldables whose inner screens report
 	// ~1028px (Galaxy Z Fold 6) / ~1040px (Z Fold 7) CSS width in their wide
 	// orientation; a pointer:coarse gate at 1024 would have missed those.
-	// Keep this in sync with the `max-width: 1080px` media queries in the headers
-	// (AppTopBar / PageHeader / GitHeaderActions).
-	const MOBILE_MAX_WIDTH = 1080;
-
+	// Shared with the slide-out panels via isPanelFullscreenWidth, and mirrored
+	// by the `max-width: 1080px` media queries in the headers.
 	function checkMobile() {
-		isMobile = window.innerWidth <= MOBILE_MAX_WIDTH;
+		isMobile = isPanelFullscreenWidth(window.innerWidth);
 	}
 
 	onMount(() => {
@@ -58,25 +64,45 @@
 			window.removeEventListener('resize', checkMobile);
 		}
 	});
+
+	const showSidebar = $derived(!isMobile && !$sidebarCollapsed);
 </script>
 
-<div class="app-shell">
-	<AppTopBar
-		{isAdmin}
-		{isMobile}
-		{onNewSession}
-		{onOpenSessions}
-		{onOpenFeature}
-		{onOpenSpotlight}
-	/>
+<div class="app-shell" class:mobile={isMobile}>
+	{#if isMobile}
+		<AppTopBar
+			{isAdmin}
+			{onNewSession}
+			{onOpenSession}
+			{onOpenSessions}
+			{onOpenFeature}
+			{onOpenSpotlight}
+		/>
+	{/if}
 
 	<div class="app-body">
+		{#if showSidebar}
+			<div class="sidebar-slot">
+				<Sidebar
+					{isAdmin}
+					{onNewSession}
+					{onOpenSession}
+					{onOpenFeature}
+					{onOpenSessions}
+					{onOpenSpotlight}
+				/>
+			</div>
+		{/if}
+
 		<MainPanel
 			{onOpenSession}
 			{onOpenPlugins}
 			{onNewSession}
 			{onNewSessionForProject}
+			{onOpenSessions}
 			{isMobile}
+			sidebarCollapsed={$sidebarCollapsed}
+			onToggleSidebar={() => layout.toggleSidebar()}
 		/>
 	</div>
 </div>
@@ -98,5 +124,12 @@
 		min-width: 0;
 		display: flex;
 		overflow: hidden;
+	}
+
+	.sidebar-slot {
+		width: 256px;
+		flex: none;
+		min-height: 0;
+		border-right: 1px solid var(--sidebar-border);
 	}
 </style>

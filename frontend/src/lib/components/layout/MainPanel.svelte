@@ -46,6 +46,7 @@
 	import SessionsBoard from './SessionsBoard.svelte';
 	import BuildPage from './BuildPage.svelte';
 	import PageHeader from './PageHeader.svelte';
+	import StudioTopBar from './StudioTopBar.svelte';
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
 	import { shouldShowHeaderGitActions } from './git-header-visibility';
 	import { chatHeaderTitle } from './chat-empty-state';
@@ -69,7 +70,12 @@
 		onOpenPlugins?: () => void;
 		onNewSession?: () => void;
 		onNewSessionForProject?: (projectId: string) => void;
+		/** Return to the sessions board (the breadcrumb's project crumb). */
+		onOpenSessions?: () => void;
 		isMobile?: boolean;
+		/** Desktop shell: sidebar state + toggle, surfaced in the top bar. */
+		sidebarCollapsed?: boolean;
+		onToggleSidebar?: () => void;
 	}
 
 	let {
@@ -77,7 +83,10 @@
 		onOpenPlugins,
 		onNewSession,
 		onNewSessionForProject,
-		isMobile = false
+		onOpenSessions,
+		isMobile = false,
+		sidebarCollapsed = false,
+		onToggleSidebar
 	}: Props = $props();
 
 	// View type → page title mapping
@@ -144,6 +153,21 @@
 	const headerProjectName = $derived(
 		activeTab ? $projects.find(p => p.id === activeTab.project)?.name : undefined
 	);
+
+	// Breadcrumbs for the desktop top bar: `project › session title` in a chat,
+	// just the section name everywhere else. The project crumb returns to the
+	// sessions board.
+	const crumbProject = $derived(
+		$activeView?.type === 'chat' ? (headerProjectName || 'Sessions') : null
+	);
+	const crumbTitle = $derived.by(() => {
+		const type = $activeView?.type;
+		if (!type) return 'Sessions';
+		if (type === 'chat') return headerTitle;
+		if (type === 'board') return 'Sessions';
+		if (isBuildView) return 'Build';
+		return viewTitles[type] || '';
+	});
 
 	// Worktree branch for the GitHeaderActions context (passed through to its
 	// branch display). The read-only project/worktree context badge that used to
@@ -730,71 +754,101 @@
 	}
 </script>
 
+<!--
+	Header actions are declared once and rendered by whichever bar is on screen:
+	the desktop StudioTopBar or the mobile PageHeader. The git cluster is the
+	existing GitHeaderActions instance with its existing handlers.
+-->
+{#snippet downloadAction()}
+	{#if $activeView?.type === 'chat' && activeTab?.sessionId && activeTab.messages.length > 0}
+		<button
+			class="download-jsonl-btn"
+			onclick={handleDownloadJsonl}
+			disabled={downloadingJsonl}
+			title="Download chat history (.jsonl)"
+			aria-label="Download chat history as JSONL"
+		>
+			<Download size={16} strokeWidth={1.5} />
+		</button>
+	{/if}
+{/snippet}
+
+{#snippet headerActions()}
+	{#if $activeView?.type === 'chat' && activeTab?.sessionId}
+		<button
+			class="browser-toggle-btn"
+			class:active={$browserPanelOpen}
+			onclick={() => browserPanel.toggle(activeTab?.sessionId ?? null)}
+			title="Toggle live browser view"
+			aria-label="Toggle live browser view"
+			aria-pressed={$browserPanelOpen}
+		>
+			<PanelRight size={16} strokeWidth={1.5} />
+		</button>
+	{/if}
+	{#if activeTab && shouldShowHeaderGitActions({
+		viewType: $activeView?.type,
+		hasProject: !!activeTab.project,
+		githubAuthenticated: $githubAuthenticated,
+		worktreeDeleted: !!activeTab.worktreeDeleted,
+		isRemote: activeIsRemote
+	})}
+		<div class="git-actions-host">
+			<GitHeaderActions
+				projectId={activeTab.project}
+				isStreaming={$gitControlsStreaming}
+				operationInProgress={$gitOperationRunning}
+				isGitRepo={$gitStatus?.is_git_repo !== false}
+				showBranchSelector={false}
+				projectName={headerProjectName}
+				worktreeBranch={activeWorktreeBranch}
+				openPR={branchPR}
+				onClickCommit={handleCommit}
+				onClickCreatePR={handleCreatePR}
+				onClickFinish={handleFinish}
+				onClickNewBranch={() => showCreateBranchModal = true}
+				onClickPush={handlePush}
+				onClickPull={handlePull}
+				onClickInitRepo={() => showInitRepoModal = true}
+				onClickShipIt={handleShipIt}
+				onOpenDiffReview={() => { showChangedFilesPanel = true; reviewMode = true; git.refreshChangedFiles(); }}
+			/>
+			<GitProgressPopover />
+		</div>
+	{/if}
+{/snippet}
+
 <div class="main-panel">
+	{#if !isMobile}
+		<!-- Desktop: one bar for the whole main panel — sidebar toggle,
+		     breadcrumbs, and the action cluster. -->
+		<StudioTopBar
+			projectLabel={crumbProject}
+			title={crumbTitle}
+			{sidebarCollapsed}
+			{onToggleSidebar}
+			onOpenProject={onOpenSessions}
+		>
+			{#snippet actions()}
+				{@render downloadAction()}
+				{@render headerActions()}
+			{/snippet}
+		</StudioTopBar>
+	{/if}
+
 	{#if $activeView}
-		<!-- Only show PageHeader for chat views and non-embedded feature pages -->
-		{#if $activeView.type === 'chat' || !embeddedViews.has($activeView.type)}
+		<!-- Mobile keeps the PageHeader for chat views and non-embedded pages -->
+		{#if isMobile && ($activeView.type === 'chat' || !embeddedViews.has($activeView.type))}
 			<PageHeader
 				title={headerTitle}
 				{isMobile}
 				hideGlobalStt={$activeView?.type === 'chat'}
 			>
 				{#snippet leftActions()}
-					{#if $activeView?.type === 'chat' && activeTab?.sessionId && activeTab.messages.length > 0}
-						<button
-							class="download-jsonl-btn"
-							onclick={handleDownloadJsonl}
-							disabled={downloadingJsonl}
-							title="Download chat history (.jsonl)"
-							aria-label="Download chat history as JSONL"
-						>
-							<Download size={16} strokeWidth={1.5} />
-						</button>
-					{/if}
+					{@render downloadAction()}
 				{/snippet}
 				{#snippet actions()}
-					{#if $activeView?.type === 'chat' && activeTab?.sessionId}
-						<button
-							class="browser-toggle-btn"
-							class:active={$browserPanelOpen}
-							onclick={() => browserPanel.toggle(activeTab?.sessionId ?? null)}
-							title="Toggle live browser view"
-							aria-label="Toggle live browser view"
-							aria-pressed={$browserPanelOpen}
-						>
-							<PanelRight size={16} strokeWidth={1.5} />
-						</button>
-					{/if}
-					{#if activeTab && shouldShowHeaderGitActions({
-						viewType: $activeView?.type,
-						hasProject: !!activeTab.project,
-						githubAuthenticated: $githubAuthenticated,
-						worktreeDeleted: !!activeTab.worktreeDeleted,
-						isRemote: activeIsRemote
-					})}
-						<div class="git-actions-host">
-							<GitHeaderActions
-								projectId={activeTab.project}
-								isStreaming={$gitControlsStreaming}
-								operationInProgress={$gitOperationRunning}
-								isGitRepo={$gitStatus?.is_git_repo !== false}
-								showBranchSelector={false}
-								projectName={headerProjectName}
-								worktreeBranch={activeWorktreeBranch}
-								openPR={branchPR}
-								onClickCommit={handleCommit}
-								onClickCreatePR={handleCreatePR}
-								onClickFinish={handleFinish}
-								onClickNewBranch={() => showCreateBranchModal = true}
-								onClickPush={handlePush}
-								onClickPull={handlePull}
-								onClickInitRepo={() => showInitRepoModal = true}
-								onClickShipIt={handleShipIt}
-								onOpenDiffReview={() => { showChangedFilesPanel = true; reviewMode = true; git.refreshChangedFiles(); }}
-							/>
-							<GitProgressPopover />
-						</div>
-					{/if}
+					{@render headerActions()}
 				{/snippet}
 			</PageHeader>
 		{/if}
