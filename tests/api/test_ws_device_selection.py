@@ -294,6 +294,57 @@ async def test_new_session_with_branch_only_checkout_refuses_before_creating(
     assert mock_db.execute("SELECT COUNT(*) AS n FROM sessions").fetchone()["n"] == 0
 
 
+async def test_new_session_with_active_base_checkout_pins_and_dispatches(
+    mock_db, monkeypatch, tmp_path
+):
+    """Active BASE checkout on the target → WS pick creates the session.
+
+    Guards a regression that 409s every project-targeted pick: branch-only
+    refusal alone would still pass if the host gate refused everyone.
+    """
+    _stub_installs(monkeypatch, [ME, PEER])
+    monkeypatch.setattr(
+        database,
+        "get_install",
+        lambda _id: {"id": PEER, "device_name": "Studio", "online": True},
+    )
+    path = tmp_path / "repo"
+    path.mkdir()
+    database.create_project(
+        project_id="proj-1", name="P", description=None, path=str(path)
+    )
+    database.create_profile(
+        profile_id="claude-code", name="Claude Code", description=None, config={}
+    )
+    from app.core import project_resolver
+    from app.db import checkouts as checkouts_db
+
+    pv2 = project_resolver.resolve_project_v2({"project_id": "proj-1"})
+    checkouts_db.upsert_checkout(pv2["id"], PEER, str(path))
+
+    with _Patches() as p:
+        handler = _make_handler()
+        await handler.handle_query({
+            "prompt": "run this over there",
+            "session_id": None,
+            "profile": "claude-code",
+            "project": "proj-1",
+            "target_instance_id": PEER,
+        })
+
+    assert _sent(handler, "error") == []
+    created = _sent(handler, "session_created")
+    assert len(created) == 1
+    row = _row(created[0]["session_id"])
+    assert row["instance_id"] == PEER
+    assert placement_mod._normalize_placement(row["placement"]) == {
+        "where": f"runner:{PEER}"
+    }
+    assert p.submit.call_args.kwargs["no_kick"] is True
+    p.notify.assert_called_once()
+    assert _sent(handler, "query_queued")
+
+
 async def test_target_instance_id_ignored_for_existing_session(mock_db, monkeypatch):
     """The pick is a CREATION-time choice: on an existing (locally owned)
     session the key is dropped — no ownership rewrite, ordinary local turn."""
