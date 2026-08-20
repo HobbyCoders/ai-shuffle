@@ -277,7 +277,7 @@ export function getClaudeAuth(): ClaudeAuthInfo {
 export const CLAUDE_BRAND = 'Claude';
 
 /** Subtext used for any API-key-authenticated row. */
-export const API_SUBTEXT = 'api';
+export const API_SUBTEXT = 'API';
 
 /** Fallback subtext for a subscription row whose plan string isn't known yet. */
 export const SUBSCRIPTION_SUBTEXT = 'Subscription';
