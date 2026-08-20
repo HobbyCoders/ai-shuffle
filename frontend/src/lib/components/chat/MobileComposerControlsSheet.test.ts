@@ -81,7 +81,7 @@ describe('MobileComposerControlsSheet', () => {
 			target: { value: 'opus' }
 		});
 		expect(screen.queryByRole('button', { name: /sonnet/i })).toBeNull();
-		await fireEvent.click(screen.getByRole('button', { name: /opus.*deep reasoning/i }));
+		await fireEvent.click(screen.getByRole('option', { name: /opus/i }));
 		expect(onModelSelect).toHaveBeenCalledWith('opus');
 	});
 

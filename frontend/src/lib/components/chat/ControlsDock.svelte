@@ -14,19 +14,15 @@
 	import { profiles } from '$lib/stores/app-data.svelte';
 	import ContextUsageBar from './ContextUsageBar.svelte';
 	import OverrideDropdown from './OverrideDropdown.svelte';
+	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
+	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
 	import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
 	import { Monitor, SlidersHorizontal } from 'lucide-svelte';
 	import {
-		getModels,
-		getProviders,
 		getModelLabel,
 		getDefaultModel,
 		encodeProviderModel,
-		getProviderDisplay,
-		getClaudeDisplay,
-		getClaudeAuth,
-		isReroute,
-		type ModelFamily
+		isReroute
 	} from '$lib/constants/models';
 	import { computerUse } from '$lib/stores/computerUse.svelte';
 	import { getUsageLimits } from '$lib/api/client';
@@ -92,64 +88,15 @@
 	// ── Model override ──────────────────────────────────────────────
 	// Terse, family-level blurbs — the dropdown surfaces one line of "why pick
 	// this" without turning into a spec sheet.
-	const MODEL_FAMILY_BLURB: Record<ModelFamily, string> = {
-		haiku: 'Fastest, lightest',
-		sonnet: 'Balanced speed and depth',
-		opus: 'Deep reasoning',
-		fable: 'Most capable'
-	};
-	// Live model-switch options — the FULL provider-grouped library (PA13). The
-	// native/Claude group comes first, then one group per enabled provider, with
-	// provider entries encoded as `prov:<providerId>:<modelId>` so the backend can
-	// rebind the turn's provider from the pick alone. R7 (a provider session may
-	// only hot-swap within its own provider) is superseded: cross-provider
-	// switching is now a first-class mid-session action — the backend evicts and
-	// reconnects when the resolved provider changes.
-	// Group headings carry a BRAND NAME plus an auth-kind subtext ("OPENAI · API"
-	// vs "OPENAI · PROLITE") from the shared naming rules in `constants/models`,
-	// so all three model surfaces stay consistent. Groups are keyed by provider
-	// ID, never by the displayed brand — the two OpenAI rows share a brand and
-	// must stay separate groups.
-	const NATIVE_GROUP_KEY = '__claude__';
-	const modelOptions = $derived.by(() => {
-		const out: {
-			value: string;
-			label: string;
-			description: string;
-			group: string;
-			groupKey: string;
-			groupSubtext: string | null;
-		}[] = [];
-		const claudeAuth = getClaudeAuth();
-		const claude = getClaudeDisplay({
-			planType: claudeAuth.plan_type,
-			authKind: claudeAuth.auth_kind
-		});
-		for (const m of getModels()) {
-			out.push({
-				value: m.value,
-				label: m.label,
-				description: MODEL_FAMILY_BLURB[m.family] ?? '',
-				group: claude.name,
-				groupKey: NATIVE_GROUP_KEY,
-				groupSubtext: claude.subtext
-			});
-		}
-		for (const p of getProviders()) {
-			const display = getProviderDisplay(p);
-			for (const pm of p.models) {
-				out.push({
-					value: encodeProviderModel(p.id, pm.id),
-					label: pm.label,
-					description: pm.id,
-					group: display.name,
-					groupKey: p.id,
-					groupSubtext: display.subtext
-				});
-			}
-		}
-		return out;
-	});
+	// Live model-switch options — the FULL provider-grouped library (PA13), built
+	// by the shared catalog helper so the dock, the mobile sheet and the
+	// profile/agent editor can never disagree about naming or grouping. Provider
+	// entries are encoded as `prov:<providerId>:<modelId>` so the backend can
+	// rebind the turn's provider from the pick alone — cross-provider switching
+	// is a first-class mid-session action (the backend evicts and reconnects
+	// when the resolved provider changes).
+	const modelCatalog = $derived(buildModelPickerCatalog({ familyBlurbs: true }));
+	const modelOptions = $derived(modelCatalog.options);
 	// Effective selection: the per-session override if set, else the profile's
 	// model, else the registry default. Selecting the profile's own model clears
 	// the override (mirrors the effort/permission pattern) — for a provider-bound
@@ -307,6 +254,19 @@
 			warnTitle={modelWarnTitle}
 			notice={modelNotice}
 		>
+			{#snippet content()}
+				<ModelPickerPanel
+					groups={modelCatalog.groups}
+					options={modelCatalog.options}
+					value={modelValue}
+					notice={modelNotice}
+					onSelect={(v) => {
+						activeSession.setModelOverride(v === profileModel ? null : v);
+						openDropdown = null;
+					}}
+					onRequestClose={() => (openDropdown = null)}
+				/>
+			{/snippet}
 			{#snippet icon()}
 				<svg class="w-[16px] h-[16px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<rect x="4" y="4" width="16" height="16" rx="2" stroke-width="1.75" />
@@ -453,6 +413,7 @@
 	open={mobileSheetOpen}
 	onClose={() => setMobileSheetOpen(false)}
 	{modelOptions}
+	modelGroups={modelCatalog.groups}
 	{modelValue}
 	modelLabel={modelButtonLabel}
 	modelDefaultValue={profileModel}

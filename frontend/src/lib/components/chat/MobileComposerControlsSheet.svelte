@@ -10,9 +10,17 @@
 		Search,
 		ShieldCheck,
 		SlidersHorizontal,
+		Star,
 		X,
 		Zap
 	} from 'lucide-svelte';
+	import ProviderGlyph from '$lib/components/settings/ProviderGlyph.svelte';
+	import type { PickerGroup } from '$lib/constants/model-picker';
+	import {
+		getFavoriteModels,
+		isFavoriteModel,
+		toggleFavoriteModel
+	} from '$lib/stores/modelFavorites.svelte';
 
 	interface ControlOption {
 		value: string;
@@ -30,6 +38,9 @@
 		open: boolean;
 		onClose: () => void;
 		modelOptions: ModelOption[];
+		/** Provider groups backing the horizontal rail (T3-style picker). When
+		 *  omitted the rail is derived from the options without brand glyphs. */
+		modelGroups?: PickerGroup[];
 		modelValue: string;
 		modelLabel: string;
 		modelDefaultValue: string;
@@ -60,6 +71,7 @@
 		open,
 		onClose,
 		modelOptions,
+		modelGroups,
 		modelValue,
 		modelLabel,
 		modelDefaultValue,
@@ -92,34 +104,74 @@
 	let sheetRef = $state<HTMLElement | null>(null);
 	let searchRef = $state<HTMLInputElement | null>(null);
 
-	const filteredModels = $derived.by(() => {
-		const query = searchQuery.trim().toLowerCase();
-		if (!query) return modelOptions;
-		return modelOptions.filter((option) =>
-			[option.label, option.description, option.group, option.groupSubtext ?? '']
-				.join(' ')
-				.toLowerCase()
-				.includes(query)
-		);
-	});
+	const FAVORITES = '__favorites__';
 
-	const modelGroups = $derived.by(() => {
-		const groups = new Map<string, { key: string; label: string; subtext: string | null; options: ModelOption[] }>();
-		for (const option of filteredModels) {
-			let group = groups.get(option.groupKey);
-			if (!group) {
-				group = {
-					key: option.groupKey,
-					label: option.group,
-					subtext: option.groupSubtext,
-					options: []
-				};
-				groups.set(option.groupKey, group);
+	const isSearching = $derived(searchQuery.trim().length > 0);
+
+	// Rail entries: one per provider group (from `modelGroups` when the parent
+	// supplies them, else derived from the options), with brand glyphs.
+	const railGroups = $derived.by<PickerGroup[]>(() => {
+		if (modelGroups && modelGroups.length > 0) return modelGroups;
+		const seen = new Map<string, PickerGroup>();
+		for (const o of modelOptions) {
+			if (!seen.has(o.groupKey)) {
+				seen.set(o.groupKey, {
+					key: o.groupKey,
+					name: o.group,
+					subtext: o.groupSubtext,
+					glyph: 'custom'
+				});
 			}
-			group.options.push(option);
 		}
-		return [...groups.values()];
+		return [...seen.values()];
 	});
+	function groupFor(option: ModelOption): PickerGroup | undefined {
+		return railGroups.find((g) => g.key === option.groupKey);
+	}
+
+	const favoriteOptions = $derived(
+		getFavoriteModels()
+			.map((v) => modelOptions.find((o) => o.value === v))
+			.filter((o): o is ModelOption => o != null)
+	);
+	const hasFavorites = $derived(favoriteOptions.length > 0);
+
+	// Rail selection — favorites when any exist, else the current model's
+	// provider, else the first group. Re-validated against the live catalog.
+	let railKey = $state<string | null>(null);
+	const currentGroupKey = $derived(
+		modelOptions.find((o) => o.value === modelValue)?.groupKey ?? null
+	);
+	const effectiveRailKey = $derived.by(() => {
+		if (railKey === FAVORITES && hasFavorites) return FAVORITES;
+		if (railKey && railGroups.some((g) => g.key === railKey)) return railKey;
+		if (hasFavorites) return FAVORITES;
+		if (currentGroupKey) return currentGroupKey;
+		return railGroups[0]?.key ?? null;
+	});
+	const showRail = $derived(!isSearching && (railGroups.length > 1 || hasFavorites));
+
+	const visibleModels = $derived.by<ModelOption[]>(() => {
+		if (isSearching) {
+			const query = searchQuery.trim().toLowerCase();
+			return modelOptions.filter((option) =>
+				[option.label, option.description, option.group, option.groupSubtext ?? '']
+					.join(' ')
+					.toLowerCase()
+					.includes(query)
+			);
+		}
+		if (effectiveRailKey === FAVORITES) return favoriteOptions;
+		return modelOptions.filter((o) => o.groupKey === effectiveRailKey);
+	});
+	const showProviderLine = $derived(
+		isSearching || effectiveRailKey === FAVORITES || !showRail
+	);
+
+	function toggleFavorite(e: MouseEvent, value: string) {
+		e.stopPropagation();
+		toggleFavoriteModel(value);
+	}
 
 	function closeSheet() {
 		page = 'overview';
@@ -242,40 +294,99 @@
 					/>
 				</div>
 
+				{#if showRail}
+					<div class="provider-rail" role="tablist" aria-label="Providers">
+						{#if hasFavorites}
+							<button
+								type="button"
+								role="tab"
+								class="rail-chip"
+								class:selected={effectiveRailKey === FAVORITES}
+								aria-selected={effectiveRailKey === FAVORITES}
+								onclick={() => (railKey = FAVORITES)}
+							>
+								<Star size={14} strokeWidth={2} class="rail-star" />
+								<span>Favorites</span>
+							</button>
+						{/if}
+						{#each railGroups as g (g.key)}
+							<button
+								type="button"
+								role="tab"
+								class="rail-chip"
+								class:selected={effectiveRailKey === g.key}
+								aria-selected={effectiveRailKey === g.key}
+								title={g.subtext ? `${g.name} · ${g.subtext}` : g.name}
+								onclick={() => (railKey = g.key)}
+							>
+								<ProviderGlyph kind={g.glyph} size={14} />
+								<span>{g.name}</span>
+								{#if g.subtext}<small>{g.subtext}</small>{/if}
+							</button>
+						{/each}
+					</div>
+				{/if}
+
 				<div class="sheet-scroll model-scroll">
-					{#if modelGroups.length === 0}
+					{#if visibleModels.length === 0}
 						<div class="empty-results">
-							<Cpu size={22} strokeWidth={1.6} />
-							<p>No models match “{searchQuery}”.</p>
+							{#if isSearching}
+								<Cpu size={22} strokeWidth={1.6} />
+								<p>No models match “{searchQuery}”.</p>
+							{:else if effectiveRailKey === FAVORITES}
+								<Star size={22} strokeWidth={1.6} />
+								<p>No favorites yet — star a model to pin it here.</p>
+							{:else}
+								<Cpu size={22} strokeWidth={1.6} />
+								<p>No models available.</p>
+							{/if}
 						</div>
 					{:else}
-						{#each modelGroups as group (group.key)}
-							<section class="model-group" aria-label={group.label}>
-								<div class="group-label">
-									<span>{group.label}</span>
-									{#if group.subtext}<small>{group.subtext}</small>{/if}
-								</div>
-								<div class="option-card">
-									{#each group.options as option (option.value)}
-										<button
-											type="button"
-											class="choice-row"
-											class:selected={option.value === modelValue}
-											onclick={() => onModelSelect(option.value)}
-										>
-											<span class="choice-copy">
-												<span class="choice-title">
-													{option.label}
-													{#if option.value === modelDefaultValue}<em>Profile</em>{/if}
-												</span>
-												<span class="choice-description">{option.description}</span>
+						<div class="option-card">
+							{#each visibleModels as option (option.value)}
+								{@const g = groupFor(option)}
+								{@const fav = isFavoriteModel(option.value)}
+								<div
+									class="choice-row model-row"
+									class:selected={option.value === modelValue}
+									role="option"
+									aria-selected={option.value === modelValue}
+									tabindex="0"
+									onclick={() => onModelSelect(option.value)}
+									onkeydown={(e) => {
+										if (e.key === 'Enter' || e.key === ' ') {
+											e.preventDefault();
+											onModelSelect(option.value);
+										}
+									}}
+								>
+									<span class="choice-copy">
+										<span class="choice-title">
+											{option.label}
+											{#if option.value === modelDefaultValue}<em>Profile</em>{/if}
+										</span>
+										{#if showProviderLine && g}
+											<span class="choice-description model-provider">
+												<ProviderGlyph kind={g.glyph} size={12} />
+												<span>{g.name}{#if g.subtext} · {g.subtext}{/if}</span>
 											</span>
-											{#if option.value === modelValue}<Check size={18} strokeWidth={2.2} />{/if}
-										</button>
-									{/each}
+										{:else}
+											<span class="choice-description">{option.description}</span>
+										{/if}
+									</span>
+									<button
+										type="button"
+										class="fav-btn"
+										class:on={fav}
+										aria-label={fav ? `Remove ${option.label} from favorites` : `Add ${option.label} to favorites`}
+										onclick={(e) => toggleFavorite(e, option.value)}
+									>
+										<Star size={16} strokeWidth={2} />
+									</button>
+									{#if option.value === modelValue}<Check size={18} strokeWidth={2.2} />{/if}
 								</div>
-							</section>
-						{/each}
+							{/each}
+						</div>
 					{/if}
 				</div>
 			{:else}
@@ -490,25 +601,6 @@
 	}
 
 	.section-label,
-	.group-label {
-		display: flex;
-		align-items: center;
-		gap: 7px;
-		min-height: 24px;
-		padding: 0 5px 6px;
-		color: var(--muted-foreground);
-		font-size: 0.72rem;
-		font-weight: 650;
-		letter-spacing: 0.04em;
-		text-transform: uppercase;
-	}
-
-	.group-label small {
-		font-size: 0.65rem;
-		font-weight: 500;
-		letter-spacing: 0.03em;
-		opacity: 0.7;
-	}
 
 	.disclosure-row,
 	.option-card,
@@ -732,8 +824,76 @@
 		padding: 6px 14px calc(18px + env(safe-area-inset-bottom, 0px));
 	}
 
-	.model-group + .model-group {
-		margin-top: 16px;
+	/* Horizontal provider rail (the T3 icon rail, laid sideways for a phone). */
+	.provider-rail {
+		display: flex;
+		gap: 6px;
+		padding: 4px 14px 8px;
+		overflow-x: auto;
+		scrollbar-width: none;
+		flex-shrink: 0;
+	}
+	.provider-rail::-webkit-scrollbar {
+		display: none;
+	}
+	.rail-chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		height: 32px;
+		padding: 0 11px;
+		border: 1px solid var(--border-subtle);
+		border-radius: 999px;
+		background: var(--muted);
+		color: var(--muted-foreground);
+		font-size: 0.8rem;
+		font-weight: 550;
+		white-space: nowrap;
+		cursor: pointer;
+		flex-shrink: 0;
+	}
+	.rail-chip small {
+		font-size: 0.7rem;
+		font-weight: 450;
+		opacity: 0.7;
+	}
+	.rail-chip.selected {
+		background: var(--selection-bg);
+		border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
+		color: var(--foreground);
+	}
+	.rail-chip :global(.rail-star) {
+		fill: currentColor;
+	}
+
+	.model-row {
+		cursor: pointer;
+	}
+	.model-provider {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+	}
+	.fav-btn {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 32px;
+		height: 32px;
+		border: 0;
+		border-radius: 9px;
+		background: transparent;
+		color: var(--muted-foreground);
+		opacity: 0.6;
+		cursor: pointer;
+		flex-shrink: 0;
+	}
+	.fav-btn.on {
+		opacity: 1;
+		color: #eab308;
+	}
+	.fav-btn.on :global(svg) {
+		fill: currentColor;
 	}
 
 	.empty-results {

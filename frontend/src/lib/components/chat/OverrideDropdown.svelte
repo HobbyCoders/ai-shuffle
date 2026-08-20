@@ -54,6 +54,11 @@
 		/** One-line notice rendered at the top of the open dropdown (e.g. the
 		 *  reroute explanation). */
 		notice?: string;
+		/** Custom dropdown body. When provided the flat `modes` list is NOT
+		 *  rendered — the snippet owns the whole popover body (the model pill
+		 *  passes the T3-style `ModelPickerPanel` here). The popover then drops
+		 *  its padding/header so the panel can fill it edge to edge. */
+		content?: Snippet;
 	}
 
 	let {
@@ -69,7 +74,8 @@
 		buttonSubLabel = null,
 		warn = false,
 		warnTitle,
-		notice
+		notice,
+		content
 	}: Props = $props();
 
 	const isActive = $derived(isOverridden ?? currentValue !== null);
@@ -162,7 +168,11 @@
 		{/if}
 	</button>
 
-	{#if isOpen}
+	{#if isOpen && content}
+		<div class="override-dropdown override-dropdown--panel" aria-label={title}>
+			{@render content()}
+		</div>
+	{:else if isOpen}
 		<div class="override-dropdown" role="menu" aria-label={title}>
 			<div class="override-dropdown-header">{title}</div>
 			{#if notice}
@@ -343,6 +353,17 @@
 		max-height: min(420px, 60vh);
 		overflow-y: auto;
 		overscroll-behavior: contain;
+	}
+
+	/* Panel variant: the snippet (ModelPickerPanel) supplies its own search,
+	   rail and scrolling, so the popover becomes a bare rounded frame. */
+	.override-dropdown--panel {
+		padding: 0;
+		max-width: min(360px, calc(100vw - 24px));
+		max-height: none;
+		overflow: hidden;
+		--mpp-width: min(360px, calc(100vw - 24px));
+		--mpp-height: min(346px, 60vh);
 	}
 
 	/* Section heading for grouped lists (model override: Claude + one per
