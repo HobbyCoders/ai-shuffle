@@ -30,6 +30,14 @@ ImportStatus = Literal[
     "ready", "imported", "skipped", "duplicate", "conflict", "diagnostic"
 ]
 _SECRET_WORDS = ("secret", "auth", "token", "password", "credential", "api_key", "apikey")
+# Windows has neither dir_fd support nor O_NOFOLLOW/O_DIRECTORY, so the hardened
+# descriptor walk below is only available where the platform provides all four.
+_SUPPORTS_DIR_FD_WALK = (
+    os.open in os.supports_dir_fd
+    and os.mkdir in os.supports_dir_fd
+    and hasattr(os, "O_NOFOLLOW")
+    and hasattr(os, "O_DIRECTORY")
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -743,6 +751,23 @@ def _source_unchanged(item: SettingsImportItem) -> bool:
 
 def _write_exclusive(destination: Path, data: bytes) -> None:
     destination = destination.absolute()
+    if not _SUPPORTS_DIR_FD_WALK:
+        # Portable fallback: no descriptor walk and no O_NOFOLLOW, but O_EXCL
+        # still guarantees we never overwrite an existing file.  Callers gate on
+        # ``_path_has_symlink()`` before reaching here.
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        file_descriptor = os.open(destination, file_flags, 0o600)
+        try:
+            with os.fdopen(file_descriptor, "wb") as handle:
+                handle.write(data)
+        except BaseException:
+            try:
+                os.unlink(destination)
+            except OSError:
+                pass
+            raise
+        return
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(destination.anchor, directory_flags)
