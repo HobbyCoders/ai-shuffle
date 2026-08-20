@@ -255,17 +255,28 @@ def test_happy_path_moves_and_repins(client, mock_database):
 
 def test_live_run_409s_and_does_not_move(client, mock_database):
     """A streaming session is refused so turn-end persist cannot restore the
-    old disk's ``sdk_session_id`` after a successful move."""
-    session = _session()
+    old disk's ``sdk_session_id`` after a successful move. The 409 names the
+    CURRENT owner, not the move target."""
+    session = _session()  # instance_id = other-install-xyz
     mock_database.get_session.return_value = session
-    mock_database.get_install.return_value = {"device_name": "Studio Mac"}
+
+    def _install(iid):
+        if iid == TARGET:
+            return {"device_name": "Studio Mac"}
+        if iid == "other-install-xyz":
+            return {"device_name": "Laptop"}
+        return None
+
+    mock_database.get_install.side_effect = _install
 
     with patch("app.core.streaming_status.has_active_run", return_value=True), \
             patch("app.core.placement.capable_runners", return_value=[TARGET]):
         response = _move(client)
 
     assert response.status_code == 409
-    assert "currently running" in response.json()["detail"]
+    detail = response.json()["detail"]
+    assert "Laptop" in detail
+    assert "Studio Mac" not in detail
     mock_database.adopt_session.assert_not_called()
     mock_database.update_session.assert_not_called()
 

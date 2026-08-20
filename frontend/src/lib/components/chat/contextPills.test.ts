@@ -12,7 +12,9 @@
 import { describe, it, expect } from 'vitest';
 import {
 	computeContextBadge,
+	shouldShowBranchPill,
 	shouldShowEmptyStateBranchPill,
+	type ActiveBranchPillInput,
 	type ContextBadgeInput,
 	type EmptyStateBranchInput
 } from './contextPills';
@@ -192,6 +194,35 @@ function branchBase(overrides: Partial<EmptyStateBranchInput> = {}): EmptyStateB
 		...overrides
 	};
 }
+
+describe('shouldShowBranchPill', () => {
+	function branchPill(overrides: Partial<ActiveBranchPillInput> = {}) {
+		return shouldShowBranchPill({
+			messageCount: 1,
+			project: 'proj-1',
+			githubAuthenticated: true,
+			...overrides
+		});
+	}
+
+	it('shows for a local authenticated project chat', () => {
+		expect(branchPill()).toBe(true);
+	});
+
+	it('hides when the session is remote so the runner menu occupies the slot', () => {
+		expect(branchPill({ isRemote: true })).toBe(false);
+	});
+
+	it('hides when the session is degraded so the read-only badge occupies the slot', () => {
+		expect(branchPill({ degraded: true })).toBe(false);
+	});
+
+	it('hides without a project, without GitHub auth, or in the empty state', () => {
+		expect(branchPill({ project: null })).toBe(false);
+		expect(branchPill({ githubAuthenticated: false })).toBe(false);
+		expect(branchPill({ messageCount: 0 })).toBe(false);
+	});
+});
 
 describe('shouldShowEmptyStateBranchPill', () => {
 	it('shows on the new-session screen in local mode (authenticated + project)', () => {

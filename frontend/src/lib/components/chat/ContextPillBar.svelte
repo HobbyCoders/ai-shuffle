@@ -26,7 +26,7 @@
 	import BranchSelector from './BranchSelector.svelte';
 	import ExecutionModeBar from '$lib/components/layout/ExecutionModeBar.svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
-	import { computeContextBadge, shouldShowEmptyStateBranchPill } from './contextPills';
+	import { computeContextBadge, shouldShowBranchPill, shouldShowEmptyStateBranchPill } from './contextPills';
 	import { gitStateQuery, runnerBadgeMenuItems } from './runner-badge-menu';
 	import type { RunnerBadgeMenuItem } from './runner-badge-menu';
 	import { activeSession } from '$lib/stores/active-session';
@@ -60,15 +60,16 @@
 	// Worktree before sending. GitHub auth is required for worktree controls.
 	const isEmptyState = $derived($activeSession.messages.length === 0);
 
-	// Show the interactive branch pill in an active chat (messages present).
-	// Mirrors the header's previous gate: project + GitHub auth. Cleaned-up
-	// worktree sessions still show it — it's read-only in worktree mode (the
-	// BranchSelector locks the dropdown), so it just surfaces the worktree's
-	// branch; the worktree is recreated transparently on the next send.
+	// Interactive branch pill in an active chat. Remote / degraded occupy this
+	// slot with the runner menu (or the read-only degraded badge) instead.
 	const showBranch = $derived(
-		!!$activeSession.project &&
-			$githubAuthenticated &&
-			$activeSession.messages.length > 0
+		shouldShowBranchPill({
+			messageCount: $activeSession.messages.length,
+			project: $activeSession.project || null,
+			githubAuthenticated: $githubAuthenticated,
+			isRemote: sessionRow?.is_remote ?? false,
+			degraded
+		})
 	);
 
 	// New-session screen: show the branch pill in LOCAL mode, where the
@@ -120,7 +121,8 @@
 			isPinned: sessionRow?.is_pinned ?? false,
 			installs: runnerInstalls,
 			eligibility: runnerEligibility,
-			hasProject: !!(sessionRow?.project_id || sessionRow?.project_v2_id)
+			hasProject: !!(sessionRow?.project_id || sessionRow?.project_v2_id),
+			isWorktree: !!($activeSession.worktreeId || $activeSession.worktreeBranch)
 		})
 	);
 

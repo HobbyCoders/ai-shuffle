@@ -21,6 +21,8 @@ export interface RunnerBadgeMenuInput {
 	eligibility: EligibilityMap;
 	/** Session has a project — ineligible runners 409 on /move. */
 	hasProject: boolean;
+	/** Session is actually a worktree — only then does the tooltip mention one. */
+	isWorktree: boolean;
 }
 
 export type RunnerBadgeMenuAction =
@@ -63,7 +65,7 @@ export function runnerBadgeMenuItems(input: RunnerBadgeMenuInput): RunnerBadgeMe
 			label: install.device_name,
 			action: blocked ? null : { kind: 'move', targetInstanceId: install.id },
 			disabled: blocked,
-			title: runnerTitle(install, input.hasProject, input.eligibility)
+			title: runnerTitle(install, input.isWorktree, input.eligibility)
 		});
 	}
 	return items;

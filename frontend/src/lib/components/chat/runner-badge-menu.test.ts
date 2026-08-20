@@ -41,6 +41,7 @@ function input(overrides: Partial<RunnerBadgeMenuInput> = {}): RunnerBadgeMenuIn
 		installs: [self, owner, onlinePeer, offlinePeer],
 		eligibility: { 'inst-owner': true, 'inst-online': true, 'inst-offline': true },
 		hasProject: true,
+		isWorktree: false,
 		...overrides
 	};
 }
@@ -82,6 +83,20 @@ describe('runnerBadgeMenuItems', () => {
 		const desk = items.find((i) => i.id === 'move-inst-online')!;
 		expect(desk.disabled).toBe(true);
 		expect(desk.action).toBeNull();
+		expect(desk.title).toBe('No checkout of this project on Desk');
+		expect(desk.title.toLowerCase()).not.toContain('worktree');
+	});
+
+	it('mentions worktree in the tooltip only for a worktree session', () => {
+		const items = runnerBadgeMenuItems(
+			input({
+				isWorktree: true,
+				eligibility: { 'inst-online': false, 'inst-offline': true }
+			})
+		);
+		expect(items.find((i) => i.id === 'move-inst-online')!.title).toContain(
+			"a worktree can't be created there"
+		);
 	});
 
 	it('fails open when eligibility is null — only offline is blocked', () => {

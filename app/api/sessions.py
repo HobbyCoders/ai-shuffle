@@ -403,10 +403,14 @@ async def move_session_endpoint(
     from app.core import streaming_status
 
     if streaming_status.has_active_run(session_id):
+        owner_name = (
+            await run_sync(_adopt_device_name, session.get("instance_id"))
+            or "another device"
+        )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                f"This session is currently running on {device}. "
+                f"This session is currently running on {owner_name}. "
                 "Stop it there first."
             ),
         )

@@ -125,6 +125,33 @@ export function computeContextBadge(input: ContextBadgeInput): ContextBadge | nu
 	return { branch, title };
 }
 
+export interface ActiveBranchPillInput {
+	/** Number of messages in the active session (0 ⇒ empty/new-session state). */
+	messageCount: number;
+	/** The session's project id, or null when none is selected. */
+	project: string | null;
+	/** Whether GitHub CLI is authenticated (gates the branch controls). */
+	githubAuthenticated: boolean;
+	/** Owned by another install — the runner badge occupies this slot. */
+	isRemote?: boolean;
+	/** Queued work, no runner online — the degraded badge occupies this slot. */
+	degraded?: boolean;
+}
+
+/**
+ * Whether the interactive BranchSelector pill should appear in an active chat.
+ *
+ * Remote and degraded sessions keep this slot for the runner / read-only
+ * badge (Continue here, Unpin, Move). Local authenticated project chats
+ * still get the branch pill.
+ */
+export function shouldShowBranchPill(input: ActiveBranchPillInput): boolean {
+	if (input.messageCount === 0) return false;
+	if (!input.project || !input.githubAuthenticated) return false;
+	if (input.isRemote || input.degraded) return false;
+	return true;
+}
+
 export interface EmptyStateBranchInput {
 	/** Number of messages in the active session (0 ⇒ empty/new-session state). */
 	messageCount: number;

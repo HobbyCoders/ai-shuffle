@@ -402,9 +402,6 @@ async def _persist_turn_results(
     # (pre-fix metadata, non-streaming paths without AssistantMessages, etc.)
     # so the update is still safe.
     try:
-        # Written unconditionally at turn end. POST /move 409s while
-        # has_active_run so a mid-turn move cannot let this restore the old
-        # disk's resume id after a successful ownership change.
         if sdk_session_id:
             last_input_tokens = metadata.get(
                 "last_call_tokens_in",
