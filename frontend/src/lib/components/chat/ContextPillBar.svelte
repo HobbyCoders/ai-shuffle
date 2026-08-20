@@ -40,6 +40,13 @@
 	import { FolderClosed, GitBranch, Monitor, MonitorOff, ChevronDown, Loader2 } from 'lucide-svelte';
 	import type { EligibilityMap } from '$lib/components/layout/execution-mode-eligibility';
 
+	interface Props {
+		/** Render the selectors as stacked, full-width controls inside the mobile sheet. */
+		sheetMode?: boolean;
+	}
+
+	let { sheetMode = false }: Props = $props();
+
 	const projectName = $derived(
 		$projects.find((p) => p.id === $activeSession.project)?.name ??
 			$clusterProjects.find((p) => p.project_v2_id === $activeSession.projectV2Id)?.name ??
@@ -214,20 +221,22 @@
 
 <svelte:window onclick={handleRunnerClickOutside} onkeydown={handleRunnerKeydown} />
 
-<div class="context-pill-bar">
-	<ProfileSelector />
+<div class="context-pill-bar" class:sheet-mode={sheetMode}>
+	<ProfileSelector {sheetMode} />
 	{#if isEmptyState}
 		{#if $githubAuthenticated}
-			<ExecutionModeBar />
+			<ExecutionModeBar {sheetMode} />
 		{/if}
 		{#if showEmptyStateBranch}
 			<BranchSelector
+				{sheetMode}
 				{projectName}
 				onClickNewBranch={() => (showCreateBranchModal = true)}
 			/>
 		{/if}
 	{:else if showBranch}
 		<BranchSelector
+			{sheetMode}
 			{projectName}
 			onClickNewBranch={() => (showCreateBranchModal = true)}
 		/>
@@ -344,6 +353,15 @@
 		min-width: 0;
 	}
 
+	.context-pill-bar.sheet-mode {
+		z-index: auto;
+		width: 100%;
+		flex-direction: column;
+		align-items: stretch;
+		gap: 8px;
+		padding: 0;
+	}
+
 	.runner-badge-wrap {
 		position: relative;
 		min-width: 0;
@@ -366,6 +384,24 @@
 		font-size: 12px;
 		white-space: nowrap;
 		cursor: default;
+	}
+
+	.sheet-mode .context-badge,
+	.sheet-mode .runner-badge-wrap {
+		width: 100%;
+	}
+
+	.sheet-mode .context-badge {
+		height: 52px;
+		padding: 0 14px;
+		border-radius: 14px;
+	}
+
+	.sheet-mode .runner-dropdown {
+		position: static;
+		width: 100%;
+		max-width: none;
+		margin-top: 6px;
 	}
 
 	.context-badge :global(svg) {

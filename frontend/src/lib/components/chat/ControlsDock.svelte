@@ -322,27 +322,6 @@
 		<ContextUsageBar />
 		<button
 			type="button"
-			onclick={onAttachClick}
-			disabled={attachDisabled}
-			class="dock-action-btn mobile-attach"
-			aria-label="Attach file"
-			title={isUploading
-				? 'Uploading...'
-				: (attachmentBlockReason($activeSession.project, $activeSession.projectV2Id) ?? 'Attach file')}
-		>
-			{#if isUploading}
-				<svg class="w-[18px] h-[18px] animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-					<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-					<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-				</svg>
-			{:else}
-				<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-				</svg>
-			{/if}
-		</button>
-		<button
-			type="button"
 			class="mobile-settings-trigger"
 			class:warn={rerouted}
 			onclick={() => setMobileSheetOpen(true)}
@@ -351,7 +330,6 @@
 			aria-label={`Open chat controls. Current model: ${modelButtonLabel}`}
 		>
 			<SlidersHorizontal size={16} strokeWidth={1.8} aria-hidden="true" />
-			<span>{modelButtonLabel}</span>
 			{#if $activeSession.modelOverride !== null}<i aria-label="Model overridden"></i>{/if}
 		</button>
 	</div>
@@ -382,12 +360,13 @@
 			</button>
 		{/if}
 
-		<!-- Attach File Button -->
+		<!-- Attach stays in the primary action cluster on every viewport. -->
 		<button
 			type="button"
 			onclick={onAttachClick}
-			disabled={!$anyCredential || isUploading || isRemoteOnlyCompose($activeSession.project, $activeSession.projectV2Id)}
-			class="dock-action-btn desktop-controls"
+			disabled={attachDisabled}
+			class="dock-action-btn"
+			aria-label="Attach file"
 			title={isUploading
 				? 'Uploading...'
 				: (attachmentBlockReason($activeSession.project, $activeSession.projectV2Id) ?? 'Attach file')}
@@ -435,9 +414,6 @@
 	computerUseActive={computerUse.active}
 	computerUseBusy={cuBusy}
 	onToggleComputerUse={toggleComputerUse}
-	{attachDisabled}
-	{isUploading}
-	onAttach={onAttachClick}
 />
 
 <style>
@@ -484,32 +460,27 @@
 
 	.mobile-settings-trigger {
 		display: flex;
-		min-width: 0;
-		max-width: min(11rem, 42vw);
+		position: relative;
+		width: 36px;
 		height: 34px;
+		flex: 0 0 36px;
 		align-items: center;
+		justify-content: center;
 		gap: 6px;
-		padding: 0 10px;
+		padding: 0;
 		border: 1px solid var(--border);
 		border-radius: 999px;
 		background: var(--scrim);
 		color: var(--muted-foreground);
-		font-size: 11.5px;
-		font-weight: 600;
 		cursor: pointer;
-	}
-
-	.mobile-settings-trigger span {
-		min-width: 0;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
 	}
 
 	.mobile-settings-trigger i {
 		width: 5px;
 		height: 5px;
-		flex: none;
+		position: absolute;
+		top: 5px;
+		right: 5px;
 		border-radius: 50%;
 		background: var(--primary);
 		box-shadow: 0 0 7px var(--glow);

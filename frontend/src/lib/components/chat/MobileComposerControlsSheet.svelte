@@ -6,15 +6,14 @@
 		ChevronRight,
 		Cpu,
 		Monitor,
-		Paperclip,
 		Search,
 		ShieldCheck,
 		SlidersHorizontal,
 		Star,
-		X,
 		Zap
 	} from 'lucide-svelte';
 	import ProviderGlyph from '$lib/components/settings/ProviderGlyph.svelte';
+	import ContextPillBar from './ContextPillBar.svelte';
 	import type { PickerGroup } from '$lib/constants/model-picker';
 	import {
 		getFavoriteModels,
@@ -62,9 +61,6 @@
 		computerUseActive: boolean;
 		computerUseBusy: boolean;
 		onToggleComputerUse: () => void;
-		attachDisabled: boolean;
-		isUploading: boolean;
-		onAttach: () => void;
 	}
 
 	let {
@@ -92,10 +88,7 @@
 		computerUseStopped,
 		computerUseActive,
 		computerUseBusy,
-		onToggleComputerUse,
-		attachDisabled,
-		isUploading,
-		onAttach
+		onToggleComputerUse
 	}: Props = $props();
 
 	type SheetPage = 'overview' | 'models';
@@ -103,6 +96,10 @@
 	let searchQuery = $state('');
 	let sheetRef = $state<HTMLElement | null>(null);
 	let searchRef = $state<HTMLInputElement | null>(null);
+	let dragging = $state(false);
+	let dragOffset = $state(0);
+	let dragStartY = 0;
+	let dragStartedAt = 0;
 
 	const FAVORITES = '__favorites__';
 
@@ -167,6 +164,14 @@
 	const showProviderLine = $derived(
 		isSearching || effectiveRailKey === FAVORITES || !showRail
 	);
+	const effortIndex = $derived.by(() => {
+		const index = effortOptions.findIndex((option) => option.value === effortValue);
+		return index < 0 ? 0 : index;
+	});
+	const selectedEffort = $derived(effortOptions[effortIndex] ?? effortOptions[0]);
+	const effortProgress = $derived(
+		effortOptions.length > 1 ? (effortIndex / (effortOptions.length - 1)) * 100 : 0
+	);
 
 	function toggleFavorite(e: MouseEvent, value: string) {
 		e.stopPropagation();
@@ -176,6 +181,8 @@
 	function closeSheet() {
 		page = 'overview';
 		searchQuery = '';
+		dragging = false;
+		dragOffset = 0;
 		onClose();
 	}
 
@@ -215,10 +222,44 @@
 		}
 	}
 
-	function handleAttach() {
-		if (attachDisabled) return;
-		closeSheet();
-		requestAnimationFrame(onAttach);
+	function handleEffortInput(event: Event) {
+		const option = effortOptions[Number((event.currentTarget as HTMLInputElement).value)];
+		if (option && option.value !== effortValue) onEffortSelect(option.value);
+	}
+
+	function handleDragStart(event: PointerEvent) {
+		if (event.button !== 0) return;
+		dragging = true;
+		dragStartY = event.clientY;
+		dragStartedAt = performance.now();
+		dragOffset = 0;
+		(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+	}
+
+	function handleDragMove(event: PointerEvent) {
+		if (!dragging) return;
+		dragOffset = Math.max(0, event.clientY - dragStartY);
+	}
+
+	function handleDragEnd(event: PointerEvent) {
+		if (!dragging) return;
+		const elapsed = Math.max(performance.now() - dragStartedAt, 1);
+		const velocity = dragOffset / elapsed;
+		const closeThreshold = Math.min(96, (sheetRef?.offsetHeight ?? 480) * 0.18);
+		dragging = false;
+		if ((event.currentTarget as HTMLElement).hasPointerCapture(event.pointerId)) {
+			(event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
+		}
+		if (dragOffset >= closeThreshold || velocity > 0.75) {
+			closeSheet();
+		} else {
+			dragOffset = 0;
+		}
+	}
+
+	function handleDragCancel() {
+		dragging = false;
+		dragOffset = 0;
 	}
 
 	function portal(node: HTMLElement) {
@@ -252,12 +293,21 @@
 		<div
 			bind:this={sheetRef}
 			class="mobile-sheet"
+			class:dragging
+			style:transform={dragOffset > 0 ? `translateY(${dragOffset}px)` : undefined}
 			role="dialog"
 			aria-modal="true"
 			aria-labelledby="mobile-controls-title"
 			tabindex="-1"
 		>
-			<div class="sheet-grabber" aria-hidden="true"><span></span></div>
+			<div
+				class="sheet-grabber"
+				role="presentation"
+				onpointerdown={handleDragStart}
+				onpointermove={handleDragMove}
+				onpointerup={handleDragEnd}
+				onpointercancel={handleDragCancel}
+			><span></span></div>
 
 			<header class="sheet-header">
 				{#if page === 'models'}
@@ -277,9 +327,6 @@
 					<h2 id="mobile-controls-title">{page === 'models' ? 'Choose model' : 'Chat controls'}</h2>
 					<p>{page === 'models' ? 'Switch the model for this chat' : 'Settings for the next message'}</p>
 				</div>
-				<button type="button" class="header-button" aria-label="Close chat controls" onclick={closeSheet}>
-					<X size={20} strokeWidth={1.8} />
-				</button>
 			</header>
 
 			{#if page === 'models'}
@@ -392,6 +439,11 @@
 			{:else}
 				<div class="sheet-scroll overview-scroll">
 					<section class="control-section">
+						<div class="section-label"><SlidersHorizontal size={16} strokeWidth={1.8} /><span>Chat setup</span></div>
+						<ContextPillBar sheetMode />
+					</section>
+
+					<section class="control-section">
 						<div class="section-label"><Cpu size={15} strokeWidth={1.8} /><span>Model</span></div>
 						<button type="button" class="disclosure-row" onclick={openModels}>
 							<span class="disclosure-copy">
@@ -405,19 +457,34 @@
 
 					<section class="control-section">
 						<div class="section-label"><Zap size={15} strokeWidth={1.8} /><span>Reasoning effort</span></div>
-						<div class="segmented-grid effort-grid">
-							{#each effortOptions as option (option.value)}
-								<button
-									type="button"
-									class:selected={option.value === effortValue}
-									aria-pressed={option.value === effortValue}
-									title={option.description}
-									onclick={() => onEffortSelect(option.value)}
-								>
-									<span>{option.label}</span>
-									{#if option.value === effortDefaultValue}<small>Profile</small>{/if}
-								</button>
-							{/each}
+						<div class="effort-slider-card">
+							<div class="effort-current">
+								<span>
+									<strong>{selectedEffort?.label ?? 'Effort'}</strong>
+									<small>{selectedEffort?.description ?? 'Reasoning depth'}</small>
+								</span>
+								{#if selectedEffort?.value === effortDefaultValue}<em>Profile</em>{/if}
+							</div>
+							<input
+								type="range"
+								min="0"
+								max={Math.max(effortOptions.length - 1, 0)}
+								step="1"
+								value={effortIndex}
+								style={`--effort-progress: ${effortProgress}%`}
+								aria-label="Reasoning effort"
+								aria-valuetext={selectedEffort?.label ?? 'Effort'}
+								oninput={handleEffortInput}
+							/>
+							<div
+								class="effort-labels"
+								style:grid-template-columns={`repeat(${Math.max(effortOptions.length, 1)}, minmax(0, 1fr))`}
+								aria-hidden="true"
+							>
+								{#each effortOptions as option (option.value)}
+									<span class:selected={option.value === effortValue}>{option.label}</span>
+								{/each}
+							</div>
 						</div>
 						{#if effortOverridden}<p class="section-note">Overridden for this chat</p>{/if}
 					</section>
@@ -446,19 +513,10 @@
 						{#if permissionOverridden}<p class="section-note">Overridden for this chat</p>{/if}
 					</section>
 
-					<section class="control-section">
-						<div class="section-label"><SlidersHorizontal size={15} strokeWidth={1.8} /><span>Tools</span></div>
-						<div class="option-card">
-							<button type="button" class="tool-row" disabled={attachDisabled} onclick={handleAttach}>
-								<span class="tool-icon"><Paperclip size={18} strokeWidth={1.8} /></span>
-								<span class="tool-copy">
-									<strong>{isUploading ? 'Attaching…' : 'Attach a file'}</strong>
-									<small>Add project context to your message</small>
-								</span>
-								<ChevronRight size={18} strokeWidth={1.8} />
-							</button>
-
-							{#if computerUseEnabled}
+					{#if computerUseEnabled}
+						<section class="control-section">
+							<div class="section-label"><SlidersHorizontal size={15} strokeWidth={1.8} /><span>Tools</span></div>
+							<div class="option-card">
 								<button
 									type="button"
 									class="tool-row"
@@ -475,14 +533,10 @@
 									</span>
 									<span class="switch" class:on={!computerUseStopped}><span></span></span>
 								</button>
-							{/if}
-						</div>
-					</section>
+							</div>
+						</section>
+					{/if}
 				</div>
-
-				<footer class="sheet-footer">
-					<button type="button" onclick={closeSheet}>Done</button>
-				</footer>
 			{/if}
 		</div>
 	</div>
@@ -526,12 +580,23 @@
 		animation: sheet-in 240ms cubic-bezier(0.16, 1, 0.3, 1);
 	}
 
+	.mobile-sheet.dragging {
+		transition: none;
+		user-select: none;
+	}
+
 	.sheet-grabber {
-		height: 18px;
+		height: 24px;
 		display: flex;
-		align-items: flex-end;
+		align-items: center;
 		justify-content: center;
 		flex-shrink: 0;
+		cursor: grab;
+		touch-action: none;
+	}
+
+	.sheet-grabber:active {
+		cursor: grabbing;
 	}
 
 	.sheet-grabber span {
@@ -545,8 +610,8 @@
 		display: flex;
 		align-items: center;
 		gap: 10px;
-		min-height: 66px;
-		padding: 8px 14px 10px;
+		min-height: 62px;
+		padding: 4px 16px 12px;
 		border-bottom: 1px solid var(--border-subtle);
 		flex-shrink: 0;
 	}
@@ -562,12 +627,14 @@
 		font-weight: 650;
 		letter-spacing: -0.01em;
 		color: var(--foreground);
+		line-height: 1.25;
 	}
 
 	.header-copy p {
 		margin: 2px 0 0;
 		font-size: 0.75rem;
 		color: var(--muted-foreground);
+		line-height: 1.35;
 	}
 
 	.header-button {
@@ -593,22 +660,39 @@
 	}
 
 	.overview-scroll {
-		padding: 14px 14px 20px;
+		padding: 16px 14px calc(24px + env(safe-area-inset-bottom, 0px));
 	}
 
 	.control-section + .control-section {
 		margin-top: 20px;
 	}
 
-	.section-label,
-
 	.disclosure-row,
 	.option-card,
-	.segmented-grid {
+	.effort-slider-card {
 		background: color-mix(in oklch, var(--muted) 55%, var(--card));
 		border: 1px solid var(--border-subtle);
 		border-radius: 16px;
 		box-shadow: 0 1px 0 color-mix(in oklch, var(--foreground) 4%, transparent);
+	}
+
+	.section-label {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		min-height: 20px;
+		margin: 0 3px 8px;
+		color: var(--muted-foreground);
+		font-size: 0.76rem;
+		font-weight: 600;
+		line-height: 1;
+	}
+
+	.section-label :global(svg) {
+		width: 16px;
+		height: 16px;
+		flex: 0 0 16px;
+		color: var(--subtle-foreground);
 	}
 
 	.disclosure-row {
@@ -664,41 +748,129 @@
 		white-space: nowrap;
 	}
 
-	.segmented-grid {
-		display: grid;
-		grid-template-columns: repeat(5, minmax(0, 1fr));
-		gap: 4px;
-		padding: 4px;
+	.effort-slider-card {
+		padding: 12px 14px 10px;
 	}
 
-	.segmented-grid button {
+	.effort-current {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+		margin-bottom: 10px;
+	}
+
+	.effort-current > span {
 		min-width: 0;
-		min-height: 48px;
 		display: flex;
 		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		gap: 1px;
-		padding: 5px 3px;
-		border: 0;
-		border-radius: 12px;
-		background: transparent;
-		color: var(--muted-foreground);
+		gap: 2px;
+	}
+
+	.effort-current strong {
+		font-size: 0.9rem;
+		font-weight: 650;
+		color: var(--foreground);
+	}
+
+	.effort-current small {
 		font-size: 0.72rem;
-		font-weight: 600;
+		color: var(--muted-foreground);
+	}
+
+	.effort-current em {
+		padding: 3px 7px;
+		border-radius: 999px;
+		background: color-mix(in oklch, var(--primary) 12%, transparent);
+		color: var(--primary);
+		font-size: 0.62rem;
+		font-style: normal;
+		font-weight: 650;
+	}
+
+	.effort-slider-card input[type='range'] {
+		width: 100%;
+		height: 22px;
+		margin: 0;
+		appearance: none;
+		-webkit-appearance: none;
+		background: transparent;
 		cursor: pointer;
 	}
 
-	.segmented-grid button small {
-		font-size: 0.56rem;
-		font-weight: 550;
-		opacity: 0.72;
+	.effort-slider-card input[type='range']::-webkit-slider-runnable-track {
+		height: 5px;
+		border-radius: 999px;
+		background: linear-gradient(
+			to right,
+			var(--primary) 0 var(--effort-progress),
+			color-mix(in oklch, var(--muted-foreground) 25%, transparent) var(--effort-progress) 100%
+		);
 	}
 
-	.segmented-grid button.selected {
+	.effort-slider-card input[type='range']::-moz-range-track {
+		height: 5px;
+		border-radius: 999px;
+		background: color-mix(in oklch, var(--muted-foreground) 25%, transparent);
+	}
+
+	.effort-slider-card input[type='range']::-moz-range-progress {
+		height: 5px;
+		border-radius: 999px;
+		background: var(--primary);
+	}
+
+	.effort-slider-card input[type='range']::-webkit-slider-thumb {
+		width: 20px;
+		height: 20px;
+		margin-top: -7.5px;
+		appearance: none;
+		-webkit-appearance: none;
+		border: 3px solid var(--primary);
+		border-radius: 50%;
 		background: var(--card);
-		color: var(--foreground);
-		box-shadow: var(--shadow-s);
+		box-shadow: 0 1px 5px color-mix(in oklch, #000 24%, transparent);
+	}
+
+	.effort-slider-card input[type='range']::-moz-range-thumb {
+		width: 14px;
+		height: 14px;
+		border: 3px solid var(--primary);
+		border-radius: 50%;
+		background: var(--card);
+		box-shadow: 0 1px 5px color-mix(in oklch, #000 24%, transparent);
+	}
+
+	.effort-slider-card input[type='range']:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+		border-radius: 999px;
+	}
+
+	.effort-labels {
+		display: grid;
+		grid-template-columns: repeat(5, minmax(0, 1fr));
+		margin-top: 2px;
+		color: var(--subtle-foreground);
+		font-size: 0.62rem;
+		font-weight: 550;
+	}
+
+	.effort-labels span {
+		min-width: 0;
+		text-align: center;
+	}
+
+	.effort-labels span:first-child {
+		text-align: left;
+	}
+
+	.effort-labels span:last-child {
+		text-align: right;
+	}
+
+	.effort-labels span.selected {
+		color: var(--primary);
 	}
 
 	.section-note {
@@ -907,31 +1079,10 @@
 		font-size: 0.85rem;
 	}
 
-	.sheet-footer {
-		padding: 10px 14px calc(10px + env(safe-area-inset-bottom, 0px));
-		border-top: 1px solid var(--border-subtle);
-		background: color-mix(in oklch, var(--card) 94%, transparent);
-		flex-shrink: 0;
-	}
-
-	.sheet-footer button {
-		width: 100%;
-		height: 46px;
-		border: 0;
-		border-radius: 14px;
-		background: var(--button-primary-gradient);
-		color: var(--primary-foreground);
-		font-size: 0.9rem;
-		font-weight: 650;
-		cursor: pointer;
-	}
-
 	.choice-row:active,
 	.tool-row:active,
 	.disclosure-row:active,
-	.header-button:active,
-	.sheet-footer button:active,
-	.segmented-grid button:active {
+	.header-button:active {
 		transform: scale(0.985);
 	}
 
@@ -948,12 +1099,6 @@
 	@media (min-width: 640px) {
 		.sheet-layer {
 			display: none;
-		}
-	}
-
-	@media (max-width: 380px) {
-		.effort-grid {
-			grid-template-columns: repeat(3, minmax(0, 1fr));
 		}
 	}
 

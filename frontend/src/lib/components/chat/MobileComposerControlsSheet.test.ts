@@ -52,9 +52,6 @@ function props(overrides: Record<string, unknown> = {}) {
 		computerUseActive: false,
 		computerUseBusy: false,
 		onToggleComputerUse: vi.fn(),
-		attachDisabled: false,
-		isUploading: false,
-		onAttach: vi.fn(),
 		...overrides
 	};
 }
@@ -93,7 +90,9 @@ describe('MobileComposerControlsSheet', () => {
 			props: props({ onEffortSelect, onPermissionSelect, onToggleComputerUse })
 		});
 
-		await fireEvent.click(screen.getByRole('button', { name: /^high$/i }));
+		await fireEvent.input(screen.getByRole('slider', { name: /reasoning effort/i }), {
+			target: { value: '1' }
+		});
 		await fireEvent.click(screen.getByRole('button', { name: /auto.*model decides/i }));
 		await fireEvent.click(screen.getByRole('switch', { name: /computer control/i }));
 
@@ -101,6 +100,15 @@ describe('MobileComposerControlsSheet', () => {
 		expect(onPermissionSelect).toHaveBeenCalledWith('auto');
 		expect(onToggleComputerUse).toHaveBeenCalledTimes(1);
 		expect(screen.getByRole('dialog')).toBeTruthy();
+	});
+
+	it('uses a slider for reasoning and has no attach or explicit close action', () => {
+		render(MobileComposerControlsSheet, { props: props() });
+
+		expect(screen.getByRole('slider', { name: /reasoning effort/i })).toBeTruthy();
+		expect(screen.queryByRole('button', { name: /attach/i })).toBeNull();
+		expect(document.querySelector('.sheet-header [aria-label="Close chat controls"]')).toBeNull();
+		expect(screen.queryByRole('button', { name: /done/i })).toBeNull();
 	});
 
 	it('uses Escape to go back from models before dismissing the sheet', async () => {
