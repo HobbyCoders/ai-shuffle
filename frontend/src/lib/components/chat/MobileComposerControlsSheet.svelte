@@ -95,7 +95,6 @@
 	let page = $state<SheetPage>('overview');
 	let searchQuery = $state('');
 	let sheetRef = $state<HTMLElement | null>(null);
-	let searchRef = $state<HTMLInputElement | null>(null);
 	let dragging = $state(false);
 	let dragOffset = $state(0);
 	let dragStartY = 0;
@@ -189,7 +188,9 @@
 	async function openModels() {
 		page = 'models';
 		await tick();
-		searchRef?.focus();
+		// Keep focus on the dialog so opening the picker does not summon a
+		// software keyboard or immediately route typing into model search.
+		sheetRef?.focus();
 	}
 
 	function handleKeydown(event: KeyboardEvent) {
@@ -333,7 +334,6 @@
 				<div class="search-wrap">
 					<Search size={17} strokeWidth={1.8} aria-hidden="true" />
 					<input
-						bind:this={searchRef}
 						bind:value={searchQuery}
 						type="search"
 						placeholder="Search models"

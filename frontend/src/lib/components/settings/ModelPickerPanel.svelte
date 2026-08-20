@@ -51,8 +51,6 @@
 		/** One-line warning rendered above the list (e.g. a reroute explanation). */
 		notice?: string;
 		ariaLabel?: string;
-		/** Focus the search box on mount (default true). */
-		autofocus?: boolean;
 		/** Escape pressed inside the search box. */
 		onRequestClose?: () => void;
 	}
@@ -66,7 +64,6 @@
 		trailingRows = [],
 		notice,
 		ariaLabel = 'Model',
-		autofocus = true,
 		onRequestClose
 	}: Props = $props();
 
@@ -187,9 +184,6 @@
 		toggleFavoriteModel(optionValue);
 	}
 
-	$effect(() => {
-		if (autofocus) searchEl?.focus();
-	});
 </script>
 
 <div class="mpp" data-model-picker-panel>
