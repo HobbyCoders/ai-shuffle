@@ -66,55 +66,127 @@
 	);
 </script>
 
-<div class="w-full system-message-group">
-	<div class="min-w-0">
-		<details class="w-full border border-border rounded-lg overflow-hidden group" bind:open={detailsOpen}>
-			<summary class="system-group-summary w-full px-3 py-2 flex items-center gap-2 cursor-pointer list-none transition-colors">
-				<!-- Status indicator -->
-				{#if hasError}
-					<svg class="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-					</svg>
-				{:else}
-					<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-					</svg>
-				{/if}
-				{#if allTasks}
-					<!-- Task icon (bot) matches individual task rows -->
-					<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
-						<rect x="3" y="11" width="18" height="10" rx="2"/>
-						<circle cx="12" cy="5" r="2"/>
-						<path d="M12 7v4"/>
-						<line x1="8" y1="16" x2="8" y2="16"/>
-						<line x1="16" y1="16" x2="16" y2="16"/>
-					</svg>
-				{:else}
-					<!-- Hook icon (lightning bolt) matches individual SystemMessage rows -->
-					<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
-						<path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
-					</svg>
-				{/if}
-				<!-- Summary text -->
-				<span class="text-sm font-medium text-foreground flex-shrink-0">
-					{label}
-				</span>
-				<!-- Chevron -->
-				<svg class="w-4 h-4 text-muted-foreground transition-transform group-open:rotate-180 flex-shrink-0 ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+<div class="system-message-group">
+	<details class="sg-details" bind:open={detailsOpen}>
+		<summary class="sg-row">
+			{#if allTasks}
+				<!-- Task icon (bot) matches individual task rows -->
+				<svg class="sg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<rect x="3" y="11" width="18" height="10" rx="2" />
+					<circle cx="12" cy="5" r="2" />
+					<path d="M12 7v4" />
+					<line x1="8" y1="16" x2="8" y2="16" />
+					<line x1="16" y1="16" x2="16" y2="16" />
 				</svg>
-			</summary>
-			<div class="px-3 pt-2 pb-3 space-y-2">
-				{#each messages as m (m.id)}
-					<SystemMessage message={m} />
-				{/each}
-			</div>
-		</details>
-	</div>
+			{:else}
+				<!-- Hook icon (lightning bolt) matches individual SystemMessage rows -->
+				<svg class="sg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<path d="M13 10V3L4 14h7v7l9-11h-7z" />
+				</svg>
+			{/if}
+
+			<span class="sg-label">{label}</span>
+
+			<span class="sg-right">
+				<svg class="sg-chev" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<path d="m6 9 6 6 6-6" />
+				</svg>
+				{#if hasError}
+					<svg class="sg-glyph is-error" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+						<path d="M18 6 6 18M6 6l12 12" />
+					</svg>
+				{:else}
+					<svg class="sg-glyph is-ok" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+						<path d="M20 6 9 17l-5-5" />
+					</svg>
+				{/if}
+			</span>
+		</summary>
+		<div class="sg-body">
+			{#each messages as m (m.id)}
+				<SystemMessage message={m} />
+			{/each}
+		</div>
+	</details>
 </div>
 
 <style>
-	.system-group-summary:hover {
-		background: var(--hover-overlay);
+	.system-message-group {
+		width: 100%;
+		min-width: 0;
+		margin: 0 -8px;
+	}
+
+	.sg-details {
+		min-width: 0;
+	}
+
+	.sg-row {
+		display: flex;
+		align-items: center;
+		gap: 9px;
+		width: 100%;
+		padding: 6px 8px;
+		border-radius: 8px;
+		cursor: pointer;
+		list-style: none;
+		transition: background-color 0.13s ease;
+	}
+
+	.sg-row::-webkit-details-marker {
+		display: none;
+	}
+
+	.sg-row:hover {
+		background: var(--scrim);
+	}
+
+	.sg-row:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: -2px;
+	}
+
+	.sg-icon {
+		flex: none;
+		color: var(--subtle-foreground);
+	}
+
+	.sg-label {
+		font-size: 12.5px;
+		font-weight: 600;
+		color: var(--foreground);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		min-width: 0;
+	}
+
+	.sg-right {
+		margin-left: auto;
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		flex: none;
+		color: var(--subtle-foreground);
+	}
+
+	.sg-chev {
+		transition: transform 0.16s ease;
+	}
+
+	.sg-details[open] .sg-chev {
+		transform: rotate(180deg);
+	}
+
+	.sg-glyph.is-ok { color: var(--emerald); }
+	.sg-glyph.is-error { color: var(--rose); }
+
+	.sg-body {
+		margin: 2px 0 4px 14px;
+		padding-left: 12px;
+		border-left: 1px solid var(--border);
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
 	}
 </style>

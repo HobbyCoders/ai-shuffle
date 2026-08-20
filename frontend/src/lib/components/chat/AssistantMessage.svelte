@@ -2,20 +2,13 @@
 	/**
 	 * AssistantMessage - Assistant message with markdown rendering and hover-only action buttons
 	 */
-	import { marked } from 'marked';
 	import { onDestroy } from 'svelte';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { rewriteMediaMarkdown, clampRevealToMediaBoundary } from '$lib/utils/media';
+	import { renderChatMarkdown } from '$lib/utils/chat-markdown';
 	import { Typewriter } from '$lib/utils/typewriter';
-	import StreamingIndicator from './StreamingIndicator.svelte';
 	import MessageActions from './MessageActions.svelte';
 	import { formatMessageTime } from '$lib/utils/message-time';
-
-	// Configure marked for markdown rendering
-	marked.setOptions({
-		breaks: true,
-		gfm: true
-	});
 
 	interface Props {
 		content: string;
@@ -34,6 +27,8 @@
 		onRewindComplete?: () => void;
 		/** Profile name to display in header (defaults to "Assistant") */
 		profileName?: string;
+		/** Model display name for this specific message, when the turn reported one. */
+		modelLabel?: string | null;
 	}
 
 	let {
@@ -50,8 +45,13 @@
 		metadata,
 		onCopy,
 		onRewindComplete,
-		profileName = 'Assistant'
+		profileName = 'Assistant',
+		modelLabel = null
 	}: Props = $props();
+
+	/** The name line's text: the model that produced this message when we know
+	 *  it, otherwise the profile that was active. */
+	const speakerName = $derived(modelLabel || profileName);
 
 	// Determine if this is a final message with cost/duration metadata (query completion)
 	const hasFinalMetadata = $derived(Boolean(
@@ -200,7 +200,7 @@
 
 		if (lastBoundary <= 0) {
 			// No paragraph boundary yet — full parse (content is short)
-			const html = marked(rewriteMediaMarkdown(text), { breaks: true }) as string;
+			const html = renderChatMarkdown(rewriteMediaMarkdown(text), false);
 			return { prefix: '', tail: sanitizeHtml(injectStreamingCursor(html)) };
 		}
 
@@ -212,16 +212,20 @@
 		if (stableContent === _cache.stablePrefixContent) {
 			prefixHtml = _cache.stablePrefixHtml;
 		} else {
-			// Stable prefix grew — re-parse, sanitize, and cache it once.
-			prefixHtml = sanitizeHtml(marked(rewriteMediaMarkdown(stableContent), { breaks: true }) as string);
+			// Stable prefix grew — re-parse, sanitize, and cache it once. Only this
+			// side gets syntax highlighting: its fences are closed, and Shiki's
+			// memo makes the repeat renders cheap.
+			prefixHtml = sanitizeHtml(renderChatMarkdown(rewriteMediaMarkdown(stableContent), true));
 			_cache.stablePrefixContent = stableContent;
 			_cache.stablePrefixHtml = prefixHtml;
 		}
 
 		// Always re-parse the tail (last incomplete paragraph + new content).
 		// This is the only DOMPurify pass that runs every delta — bounded to the
-		// last paragraph rather than the whole message.
-		let tailHtml = marked(rewriteMediaMarkdown(tailContent), { breaks: true }) as string;
+		// last paragraph rather than the whole message. Highlighting is off here:
+		// the fence may not be closed yet, and tokenising per delta would be the
+		// most expensive thing in the stream loop.
+		let tailHtml = renderChatMarkdown(rewriteMediaMarkdown(tailContent), false);
 		tailHtml = sanitizeHtml(injectStreamingCursor(tailHtml));
 
 		return { prefix: prefixHtml, tail: tailHtml };
@@ -256,8 +260,32 @@
 	 * See $lib/utils/media for detection rules and produced markup.
 	 */
 	function renderMarkdownFull(text: string, isStreaming: boolean): string {
-		const html = marked(rewriteMediaMarkdown(text), { breaks: true }) as string;
+		const html = renderChatMarkdown(rewriteMediaMarkdown(text), !isStreaming);
 		return isStreaming ? sanitizeHtml(injectStreamingCursor(html)) : sanitizeHtml(html);
+	}
+
+	// ── Code-block copy ────────────────────────────────────────────────────
+	// Delegated rather than inline: the markup comes out of {@html}, so there is
+	// no component instance to bind to, and an inline onclick would have to
+	// survive DOMPurify. Reading the code back out of the rendered <pre> also
+	// means the button always copies exactly what is on screen.
+	const _copyTimers = new Set<ReturnType<typeof setTimeout>>();
+
+	function handleProseClick(e: MouseEvent) {
+		const target = e.target as HTMLElement | null;
+		const btn = target?.closest?.('.code-copy-btn') as HTMLElement | null;
+		if (!btn) return;
+		e.preventDefault();
+		e.stopPropagation();
+		const code = btn.closest('.codeblock')?.querySelector('pre code')?.textContent ?? '';
+		if (!code) return;
+		void navigator.clipboard?.writeText(code).catch(() => {});
+		btn.classList.add('is-copied');
+		const timer = setTimeout(() => {
+			btn.classList.remove('is-copied');
+			_copyTimers.delete(timer);
+		}, 1200);
+		_copyTimers.add(timer);
 	}
 
 	/**
@@ -388,6 +416,8 @@
 			currentAudio.pause();
 			currentAudio = null;
 		}
+		for (const timer of _copyTimers) clearTimeout(timer);
+		_copyTimers.clear();
 		_tw.destroy();
 	});
 </script>
@@ -401,12 +431,11 @@
 	role="article"
 >
 	<div class="min-w-0 max-w-full">
-		<div class="flex items-center gap-2 mb-1">
-			<span class="font-semibold text-sm" style="color: var(--primary)">{profileName}</span>
-			<span class="text-xs text-muted-foreground">{formatMessageTime(timestamp)}</span>
+		<div class="aname" title={formatMessageTime(timestamp)}>
 			{#if streaming}
-				<StreamingIndicator />
+				<span class="live" aria-label="Streaming"></span>
 			{/if}
+			<span class="aname-text">{speakerName}</span>
 			{#if showActions && content && !streaming && hasFinalMetadata}
 				<!-- Hover/touch action buttons - only shown on final messages with cost/duration -->
 				<div class="ml-auto">
@@ -426,7 +455,13 @@
 			{/if}
 		</div>
 		<div class="overflow-hidden max-w-full">
-			<div class="prose prose-sm max-w-none break-words pl-2" style="overflow-wrap: anywhere; word-break: break-word;">
+			<!-- svelte-ignore a11y_click_events_have_key_events -->
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div
+				class="prose prose-sm abody max-w-none break-words"
+				style="overflow-wrap: anywhere; word-break: break-word;"
+				onclick={handleProseClick}
+			>
 				{#if content}
 					<!-- Two blocks: stable prefix (settled media stays mounted) + streaming tail -->
 					{@html rendered.prefix}{@html rendered.tail}
@@ -441,7 +476,7 @@
 			</div>
 		</div>
 		{#if metadata && !streaming}
-			<div class="mt-2 text-xs text-muted-foreground flex items-center gap-3">
+			<div class="ameta">
 				{#if metadata.total_cost_usd}
 					<span>{formatCost(metadata.total_cost_usd as number)}</span>
 				{:else if metadata.cost_usd}
@@ -461,5 +496,164 @@
 <style>
 	.message-container {
 		position: relative;
+	}
+
+	/* ── Name line ─────────────────────────────────────────────────────── */
+	.aname {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		font-size: 11.5px;
+		font-weight: 500;
+		letter-spacing: 0.02em;
+		color: var(--subtle-foreground);
+		margin-bottom: 9px;
+		min-height: 16px;
+	}
+
+	.aname-text {
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.live {
+		width: 5px;
+		height: 5px;
+		flex: none;
+		border-radius: 50%;
+		background: var(--primary);
+		box-shadow: 0 0 8px 0 var(--glow);
+		animation: aname-pulse 1.4s ease-in-out infinite;
+	}
+
+	@keyframes aname-pulse {
+		0%, 100% { opacity: 1; }
+		50% { opacity: 0.35; }
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.live { animation: none; }
+	}
+
+	.ameta {
+		margin-top: 10px;
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		font-size: 11px;
+		font-family: var(--font-mono);
+		color: var(--subtle-foreground);
+	}
+
+	/* ── Code block chrome (markup produced by $lib/utils/chat-markdown) ── */
+	.abody :global(.codeblock) {
+		margin: 0 0 14px;
+		border-radius: 10px;
+		border: 1px solid var(--border);
+		background: var(--code-bg);
+		overflow: hidden;
+	}
+
+	.abody :global(.codehead) {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		padding: 6px 8px 6px 11px;
+		border-bottom: 1px solid var(--border);
+		background: color-mix(in oklch, var(--muted) 45%, transparent);
+	}
+
+	.abody :global(.codehead .cb-icon) {
+		color: var(--subtle-foreground);
+		flex: none;
+	}
+
+	.abody :global(.codehead .fname) {
+		font-family: var(--font-mono);
+		font-size: 11.5px;
+		color: var(--muted-foreground);
+		margin-right: auto;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.abody :global(.codehead .lang) {
+		font-size: 10px;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		color: var(--subtle-foreground);
+		padding: 2px 6px;
+		border-radius: 5px;
+		border: 1px solid var(--border);
+		flex: none;
+	}
+
+	.abody :global(.code-copy-btn) {
+		width: 24px;
+		height: 24px;
+		flex: none;
+		border: none;
+		background: transparent;
+		border-radius: 6px;
+		display: grid;
+		place-items: center;
+		cursor: pointer;
+		color: var(--subtle-foreground);
+		transition: background-color 0.13s ease, color 0.13s ease;
+	}
+
+	.abody :global(.code-copy-btn:hover) {
+		background: var(--accent);
+		color: var(--foreground);
+	}
+
+	.abody :global(.code-copy-btn .cb-check) {
+		display: none;
+	}
+
+	.abody :global(.code-copy-btn.is-copied) {
+		color: var(--emerald);
+	}
+
+	.abody :global(.code-copy-btn.is-copied .cb-copy) {
+		display: none;
+	}
+
+	.abody :global(.code-copy-btn.is-copied .cb-check) {
+		display: block;
+	}
+
+	.abody :global(.codeblock .cb-pre) {
+		margin: 0;
+		padding: 11px 13px 13px;
+		overflow-x: auto;
+		background: transparent;
+		border-radius: 0;
+		font-family: var(--font-mono);
+		font-size: 12.25px;
+		line-height: 1.72;
+		color: var(--muted-foreground);
+	}
+
+	.abody :global(.codeblock .cb-pre code) {
+		font-size: inherit;
+		line-height: inherit;
+		background: transparent;
+		padding: 0;
+		border: none;
+	}
+
+	/* Shiki emits both palettes as custom properties on every span, so one
+	   highlighted string serves both themes and a theme switch never
+	   invalidates the highlight cache. */
+	.abody :global(.codeblock .cb-pre span) {
+		color: var(--shiki-light, inherit);
+	}
+
+	:global(html.dark) .abody :global(.codeblock .cb-pre span) {
+		color: var(--shiki-dark, inherit);
 	}
 </style>

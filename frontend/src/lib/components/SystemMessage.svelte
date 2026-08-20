@@ -736,9 +736,9 @@
 		Whole row is the tap target (>=44px) so mobile users can expand
 		on touch.
 	-->
-	<div class="w-full hook-event-row border border-border/60 rounded-lg overflow-hidden bg-card/40">
+	<div class="w-full hook-event-row sys-flat">
 		<div
-			class="hook-event-summary w-full px-3 py-2 flex items-center gap-2 min-w-0 cursor-pointer select-none"
+			class="hook-event-summary sys-row w-full flex items-center gap-2 min-w-0 cursor-pointer select-none"
 			role="button"
 			tabindex="0"
 			aria-expanded={hookExpanded}
@@ -825,9 +825,9 @@
 {:else if !formatted.hidden}
 	{#if formatted.collapsible}
 		<!-- Collapsible rendering for hook responses — styled like tool messages -->
-		<div class="w-full border border-border rounded-lg overflow-hidden">
+		<div class="w-full sys-flat">
 			<details class="group/hook">
-				<summary class="hook-summary w-full px-3 py-2 flex items-center gap-2 min-w-0 cursor-pointer list-none">
+				<summary class="hook-summary sys-row w-full flex items-center gap-2 min-w-0 cursor-pointer list-none">
 					{#if isTaskSubtype}
 						<!-- Status icon — three-way, matching ToolUseMessage's convention -->
 						{#if formatted.taskStatus === 'running' || formatted.taskStatus === 'pending'}
@@ -888,7 +888,7 @@
 					</svg>
 				</summary>
 				{#if formatted.rawInput || formatted.rawOutput}
-					<div class="px-3 pb-3 pt-1 space-y-2">
+					<div class="sys-body space-y-2">
 						{#if formatted.rawInput}
 							<div class="p-2 bg-muted/50 rounded border border-zinc-500/20">
 								<div class="text-xs text-muted-foreground/70 mb-1 font-medium">Input</div>
@@ -907,8 +907,8 @@
 		</div>
 	{:else if formatted.compact}
 		<!-- Compact single-line rendering for hooks — styled like tool messages -->
-		<div class="w-full border border-border rounded-lg overflow-hidden">
-			<div class="compact-summary w-full px-3 py-2 flex items-center gap-2 min-w-0">
+		<div class="w-full sys-flat">
+			<div class="compact-summary sys-row w-full flex items-center gap-2 min-w-0">
 				<!-- Status icon matching tool message pattern -->
 				{#if formatted.badgeColor === 'green'}
 					<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -939,7 +939,7 @@
 		</div>
 	{:else}
 		<!-- Full card rendering for important system messages -->
-		<div class="w-full border border-border rounded-lg overflow-hidden shadow-s bg-card">
+		<div class="w-full sys-card">
 			<div class="px-4 py-2 bg-muted/30 flex items-center gap-2">
 				<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -965,39 +965,50 @@
 {/if}
 
 <style>
+	/* Flat-row idiom, shared with the work log: system events are steps in the
+	   log, not stacked panels. Only genuinely important messages (.sys-card)
+	   keep card chrome. */
+	.sys-flat {
+		min-width: 0;
+		margin: 0 -8px;
+	}
+
+	.sys-row {
+		padding: 6px 8px;
+		border-radius: 8px;
+		transition: background-color 130ms ease;
+	}
+
+	.sys-row:hover {
+		background: var(--scrim);
+	}
+
+	.sys-body {
+		margin: 2px 0 4px 14px;
+		padding-left: 12px;
+		border-left: 1px solid var(--border);
+	}
+
+	.sys-card {
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		overflow: hidden;
+		background: var(--card);
+		box-shadow: var(--shadow-s);
+	}
+
 	/* Hook event row — collapsed chrome, restrained styling, mobile tap target */
-	.hook-event-row {
-		transition: background-color 150ms ease, border-color 150ms ease;
-	}
-	.hook-event-row:hover {
-		border-color: hsl(var(--border));
-	}
 	.hook-event-summary {
 		min-height: 44px; /* CLAUDE.md mandate: touch targets >= 44px */
-		transition: background-color 120ms ease;
-	}
-	.hook-event-summary:hover {
-		background-color: hsl(var(--muted) / 0.35);
 	}
 	.hook-event-summary:focus-visible {
-		outline: 2px solid hsl(var(--ring));
+		outline: 2px solid var(--ring);
 		outline-offset: -2px;
 	}
 	.hook-matcher-chip {
 		letter-spacing: 0.02em;
 	}
 
-	/* Compact hook messages — match tool-summary hover behavior */
-	.compact-summary {
-		transition: background-color 150ms ease;
-	}
-	/* Collapsible hook summary — match tool message details pattern */
-	.hook-summary {
-		transition: background-color 150ms ease;
-	}
-	.hook-summary:hover {
-		background-color: hsl(var(--muted) / 0.5);
-	}
 	.hook-summary::-webkit-details-marker {
 		display: none;
 	}

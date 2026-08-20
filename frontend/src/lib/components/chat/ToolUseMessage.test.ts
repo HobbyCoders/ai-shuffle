@@ -9,7 +9,7 @@
  * any other denial keeps the error rendering.
  */
 import { describe, it, expect, afterEach } from 'vitest';
-import { render, cleanup, screen } from '@testing-library/svelte';
+import { render, cleanup, screen, fireEvent } from '@testing-library/svelte';
 import ToolUseMessage from './ToolUseMessage.svelte';
 import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 import {
@@ -43,16 +43,19 @@ describe('ToolUseMessage — dismissed AskUserQuestion', () => {
 		expect(screen.getByText('dismissed')).toBeTruthy();
 		// The neutral status mark replaces the red error X.
 		expect(container.querySelector('[data-testid="tool-dismissed-icon"]')).not.toBeNull();
-		expect(container.querySelector('.text-red-500')).toBeNull();
+		expect(container.querySelector('[data-testid="tool-status-error"]')).toBeNull();
 	});
 
-	it('shows the dismissal text in the result pane, muted', () => {
+	it('shows the dismissal text in the result pane, muted', async () => {
 		const { container } = renderTool();
+
+		// Rows start collapsed; the panes only exist once expanded.
+		await fireEvent.click(container.querySelector('.wlrow') as HTMLElement);
 
 		const pane = container.querySelector('[data-testid="tool-dismissed-result"]');
 		expect(pane).not.toBeNull();
 		expect(pane?.textContent).toContain(QUESTION_DISMISS_MESSAGE);
-		expect(pane?.className).toContain('text-muted-foreground');
+		expect(pane?.className).toContain('is-muted');
 	});
 
 	it('keeps error styling for an AskUserQuestion denied for another reason', () => {
@@ -60,14 +63,14 @@ describe('ToolUseMessage — dismissed AskUserQuestion', () => {
 			result: "Tool 'AskUserQuestion' is disabled in this profile"
 		});
 
-		expect(container.querySelector('.text-red-500')).not.toBeNull();
+		expect(container.querySelector('[data-testid="tool-status-error"]')).not.toBeNull();
 		expect(screen.queryByText(QUESTION_DISMISSED_LABEL)).toBeNull();
 	});
 
 	it('keeps error styling for a different tool carrying the same text', () => {
 		const { container } = renderTool({ name: 'Bash', input: { command: 'ls' } });
 
-		expect(container.querySelector('.text-red-500')).not.toBeNull();
+		expect(container.querySelector('[data-testid="tool-status-error"]')).not.toBeNull();
 		expect(screen.queryByText(QUESTION_DISMISSED_LABEL)).toBeNull();
 	});
 
@@ -78,7 +81,7 @@ describe('ToolUseMessage — dismissed AskUserQuestion', () => {
 		});
 
 		expect(screen.queryByText(QUESTION_DISMISSED_LABEL)).toBeNull();
-		expect(container.querySelector('.text-green-500')).not.toBeNull();
+		expect(container.querySelector('[data-testid="tool-status-ok"]')).not.toBeNull();
 	});
 });
 
