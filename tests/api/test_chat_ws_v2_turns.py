@@ -37,6 +37,12 @@ from app.db import turns as turns_db
 
 
 def _make_session(session_id="sess-1", *, title="t", profile_id="default"):
+    # The implicit-pin placement gate only considers approved, online runners,
+    # so the self install needs a registry row before any turn is submitted.
+    database.register_install(
+        settings.effective_instance_id, "test-runner", None, "local", "1", {},
+        approve_new=True,
+    )
     database.create_session(session_id=session_id, profile_id=profile_id, title=title)
     return session_id
 

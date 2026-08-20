@@ -59,7 +59,8 @@ async def _mobile_agen():
     """
     request = MagicMock()
     request.is_disconnected = AsyncMock(return_value=False)
-    with patch.object(mobile_mod, "get_device_from_api_key", return_value={"device_id": "d1"}):
+    device = {"device_id": "d1", "scopes": ["mobile:notifications"]}
+    with patch.object(mobile_mod, "get_device_from_api_key", return_value=device):
         response = await mobile_mod.notifications_stream(request)
     agen = response.body_iterator
     first = await agen.__anext__()  # ": connected\n\n" -> parked at that yield

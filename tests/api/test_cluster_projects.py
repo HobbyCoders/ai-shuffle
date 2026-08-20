@@ -60,8 +60,12 @@ def anon_client(mock_db):
 
 
 def _seed_installs():
-    database.register_install(ME, "This Mac", "http://me:8000", "darwin", "1", {})
-    database.register_install(PEER, "Studio", "http://peer:8000", "win32", "1", {})
+    database.register_install(
+        ME, "This Mac", "http://me:8000", "darwin", "1", {}, approve_new=True,
+    )
+    database.register_install(
+        PEER, "Studio", "http://peer:8000", "win32", "1", {}, approve_new=True,
+    )
 
 
 def test_auth_is_required(anon_client):
