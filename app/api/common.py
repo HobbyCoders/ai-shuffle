@@ -150,14 +150,21 @@ def require_origin_access(
 def assigned_origin(api_user: Optional[dict]) -> Optional[str]:
     """Origin of a scoped API user's project, or None if unscoped/admin.
 
-    Catalog (PR 8) filters ``GET /cluster/projects`` with this — it must not
-    go through :func:`require_origin_access` (both ids absent would 400).
+    ``None`` means no restriction (unscoped / admin). A scoped user whose
+    assigned ``projects`` row is gone is **not** unscoped — this raises 403,
+    same as :func:`require_origin_access`. Catalog (PR 8) filters
+    ``GET /cluster/projects`` with this and must not treat a deleted assigned
+    project as “list every origin”. Do not call
+    :func:`require_origin_access` there (both ids absent would 400).
     """
     if not api_user or not api_user.get("project_id"):
         return None
     assigned = database.get_project(api_user["project_id"])
     if not assigned:
-        return None
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied to this project",
+        )
     from app.core.project_resolver import origin_for_legacy_project
     return origin_for_legacy_project(assigned)
 

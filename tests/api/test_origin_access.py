@@ -154,5 +154,10 @@ def test_assigned_origin_scoped(linked_project):
     assert assigned_origin(_scoped()) == ORIGIN
 
 
-def test_assigned_origin_unresolvable_is_none(mock_db):
-    assert assigned_origin(_scoped("missing")) is None
+def test_assigned_origin_unresolvable_is_403(mock_db):
+    """Scoped user whose assigned project is gone is denied, not treated as
+    unscoped (``None`` would let a catalog list every origin)."""
+    with pytest.raises(HTTPException) as exc:
+        assigned_origin(_scoped("missing"))
+    assert exc.value.status_code == 403
+    assert "Access denied" in exc.value.detail

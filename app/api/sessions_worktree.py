@@ -348,6 +348,7 @@ async def _create_v2_branch_session(
     body: CreateWorktreeSessionRequest,
     project: Optional[dict],
     api_user_id: Optional[str],
+    pv2: Optional[dict] = None,
 ) -> WorktreeSessionResponse:
     """V2 branch-intake: create a branch session WITHOUT a legacy worktree row.
 
@@ -379,29 +380,31 @@ async def _create_v2_branch_session(
     if target_instance_id == settings.effective_instance_id:
         target_instance_id = None
 
-    # 1. Resolve the origin-keyed project_v2. ``project_v2_id`` is a direct
-    #    lookup (no local ``projects`` row required). ``project_id`` self-heals
-    #    / self-seeds a project created after the v60 collapse.
-    if body.project_v2_id:
-        from app.db import projects_v2 as projects_v2_db
+    # 1. Origin-keyed project_v2. The HTTP path passes the row already
+    #    resolved by ``require_origin_access``; direct callers still look it
+    #    up. ``project_v2_id`` is a direct get (no local ``projects`` row).
+    #    ``project_id`` self-heals / self-seeds a post-v60 project.
+    if pv2 is None:
+        if body.project_v2_id:
+            from app.db import projects_v2 as projects_v2_db
 
-        pv2 = await run_sync(projects_v2_db.get_project_v2, body.project_v2_id)
-        if not pv2:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Project not found: {body.project_v2_id}",
-            )
-    else:
-        session_stub = {"project_id": body.project_id}
-        pv2 = await run_sync(project_resolver.resolve_project_v2, session_stub)
-        if not pv2:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=(
-                    f"Could not resolve an origin-keyed project for '{body.project_id}'. "
-                    f"The project may not be fully initialized on this device."
-                ),
-            )
+            pv2 = await run_sync(projects_v2_db.get_project_v2, body.project_v2_id)
+            if not pv2:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Project not found: {body.project_v2_id}",
+                )
+        else:
+            session_stub = {"project_id": body.project_id}
+            pv2 = await run_sync(project_resolver.resolve_project_v2, session_stub)
+            if not pv2:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=(
+                        f"Could not resolve an origin-keyed project for '{body.project_id}'. "
+                        f"The project may not be fully initialized on this device."
+                    ),
+                )
 
     if target_instance_id:
         return await _create_remote_branch_session(
@@ -550,7 +553,8 @@ async def create_session_with_worktree(
     # ``project_v2_id`` is set (remote-only compose).
     api_user = get_api_user_from_request(request)
     api_user_id: Optional[str] = api_user["id"] if api_user else None
-    access = require_origin_access(
+    access = await run_sync(
+        require_origin_access,
         api_user=api_user,
         project_id=body.project_id,
         project_v2_id=body.project_v2_id,
@@ -567,4 +571,6 @@ async def create_session_with_worktree(
     # project_v2_id and materializes a deterministic checkout — no legacy
     # worktrees row / md5-hash dir. EXISTING legacy worktree sessions keep
     # resolving through the resolver's legacy ladder in ``query_options``.
-    return await _create_v2_branch_session(request, body, project, api_user_id)
+    return await _create_v2_branch_session(
+        request, body, project, api_user_id, access["project_v2"]
+    )

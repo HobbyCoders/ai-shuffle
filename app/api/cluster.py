@@ -88,8 +88,11 @@ async def git_state(
     from app.db import checkouts as checkouts_db
     from app.db import git_ops as git_ops_db
 
-    access = require_origin_access(
-        request=request, project_id=project_id, project_v2_id=project_v2_id
+    access = await run_sync(
+        require_origin_access,
+        request=request,
+        project_id=project_id,
+        project_v2_id=project_v2_id,
     )
     pv2 = access["project_v2"]
     pv2_id = pv2["id"] if pv2 else None

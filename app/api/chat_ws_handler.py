@@ -731,7 +731,8 @@ class ChatWebSocketHandler:
                 user = None
                 if self.api_user_id:
                     user = await run_sync(database.get_api_user, self.api_user_id)
-                access = require_origin_access(
+                access = await run_sync(
+                    require_origin_access,
                     api_user=user,
                     project_id=project_id,
                     project_v2_id=project_v2_id,
@@ -740,8 +741,6 @@ class ChatWebSocketHandler:
                 await self.send_json({"type": "error", "message": exc.detail})
                 return
             resolved_pv2_id = (access.get("project_v2") or {}).get("id")
-            if access.get("legacy") and not project_id:
-                project_id = access["legacy"].get("id")
 
         # Where does this session EXECUTE?
         #
