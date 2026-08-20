@@ -1,10 +1,13 @@
 /**
- * Project Memory (CLAUDE.md) Management API Client
+ * Project Memory (AGENTS.md) Management API Client
  *
- * Provides functions for managing CLAUDE.md memory files in project directories.
+ * Provides functions for managing AGENTS.md memory files in project directories.
  * Two locations per project:
- * - "project": <project>/CLAUDE.md (shared, version controlled)
- * - "local":   <project>/.claude/CLAUDE.md (private, gitignored)
+ * - "project": <project>/AGENTS.md (shared, version controlled)
+ * - "local":   <project>/.agents/AGENTS.md (private, gitignored)
+ *
+ * Legacy CLAUDE.md / .claude/CLAUDE.md files are read as a fallback when no
+ * AGENTS.md exists; saves always write the AGENTS.md path.
  */
 
 import { api } from './client';
