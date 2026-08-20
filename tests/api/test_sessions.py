@@ -65,7 +65,8 @@ def mock_database():
             patch("app.api.sessions_helpers.database", mock_db), \
             patch("app.api.sessions_export.database", mock_db), \
             patch("app.api.sessions_fork.database", mock_db), \
-            patch("app.api.sessions_worktree.database", mock_db):
+            patch("app.api.sessions_worktree.database", mock_db), \
+            patch("app.api.common.database", mock_db):
         # Set up default returns
         mock_db.get_session_tags.return_value = []
         mock_db.session_has_forks.return_value = False
@@ -94,7 +95,8 @@ def mock_api_user():
             patch("app.api.sessions_helpers.get_api_user_from_request", new=mock), \
             patch("app.api.sessions_fork.get_api_user_from_request", new=mock), \
             patch("app.api.sessions_worktree.get_api_user_from_request", new=mock), \
-            patch("app.api.sessions_export.get_api_user_from_request", new=mock):
+            patch("app.api.sessions_export.get_api_user_from_request", new=mock), \
+            patch("app.api.common.get_api_user_from_request", new=mock):
         mock.return_value = None  # Default to admin (no api user)
         yield mock
 
@@ -2273,12 +2275,20 @@ class TestCreateWorktreeSession:
         assert "Project not found" in response.json()["detail"]
 
     def test_create_worktree_session_api_user_denied(self, client, mock_database, mock_api_user, sample_project):
-        """Should deny API user access to other projects."""
+        """Should deny API user access to other origins."""
         mock_api_user.return_value = {
             "id": "api-user-1",
             "project_id": "other-project"
         }
-        mock_database.get_project.return_value = sample_project
+
+        def _get_project(pid):
+            if pid == "test-project":
+                return sample_project
+            if pid == "other-project":
+                return {"id": "other-project", "link_group_id": "git:other"}
+            return None
+
+        mock_database.get_project.side_effect = _get_project
 
         response = client.post(
             "/api/v1/sessions/with-worktree",

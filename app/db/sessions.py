@@ -449,6 +449,7 @@ def create_session(
     mode: Optional[str] = None,
     hidden: bool = False,
     target_instance_id: Optional[str] = None,
+    project_v2_id: Optional[str] = None,
     _conn=None
 ) -> SessionRow:
     """Create a new session
@@ -459,7 +460,8 @@ def create_session(
     Args:
         session_id: Unique session identifier
         profile_id: Agent profile to use
-        project_id: Optional project to work in
+        project_id: Optional legacy project to work in. NULL is a valid INSERT
+            when composing by ``project_v2_id`` alone (no local ``projects`` row).
         title: Optional session title
         api_user_id: Optional API user owner
         parent_session_id: For forked sessions
@@ -468,6 +470,8 @@ def create_session(
         worktree_branch: Optional branch name (persisted for display after worktree deletion)
         worktree_path: Optional worktree path (persisted for display after worktree deletion)
         automation_id: Automation that created this session (NULL = user/API session)
+        project_v2_id: Optional origin-keyed project. Stamped at create so a
+            remote-only compose is a DIRECT resolver hit on the first send.
         is_active: Whether the session starts in the Active group (user-initiated
             sessions are created active; imported/background ones are not)
         provider_id: Explicit model_providers binding for this session. When
@@ -498,6 +502,7 @@ def create_session(
     from app.core.config import settings
     now = datetime.now(timezone.utc).isoformat()
     target_instance_id = (target_instance_id or "").strip() or None
+    project_v2_id = (project_v2_id or "").strip() or None
     instance_id = target_instance_id or settings.effective_instance_id
     # Per-session provider binding (Chunk E / G2-r): resolve the profile's
     # configured provider ONCE, at creation, and stamp it into
@@ -523,8 +528,8 @@ def create_session(
             resolved_provider_id = None
     resolved_mode = (mode or "").strip() or None
     _ph = ph()
-    columns = ["id", "profile_id", "project_id", "title", "api_user_id", "parent_session_id", "fork_point_message_index", "worktree_id", "worktree_branch", "worktree_path", "automation_id", "instance_id", "is_active", "v2_stream", "created_at", "updated_at", "provider_id", "mode", "hidden"]
-    params = [session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, True, now, now, resolved_provider_id, resolved_mode, hidden]
+    columns = ["id", "profile_id", "project_id", "project_v2_id", "title", "api_user_id", "parent_session_id", "fork_point_message_index", "worktree_id", "worktree_branch", "worktree_path", "automation_id", "instance_id", "is_active", "v2_stream", "created_at", "updated_at", "provider_id", "mode", "hidden"]
+    params = [session_id, profile_id, project_id, project_v2_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, True, now, now, resolved_provider_id, resolved_mode, hidden]
     if target_instance_id:
         # Serialized to a JSON string (not a dict) so the SQLite test shim, which
         # stores JSONB columns as TEXT, round-trips identically to Postgres —

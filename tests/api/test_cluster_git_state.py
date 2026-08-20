@@ -89,8 +89,12 @@ def project(mock_db, tmp_path):
     return {"pv2": pv2, "path": path}
 
 
-def _get(client, project_id="proj-1"):
-    return client.get("/api/v1/cluster/git-state", params={"project_id": project_id})
+def _get(client, project_id="proj-1", **extra):
+    params = {}
+    if project_id is not None:
+        params["project_id"] = project_id
+    params.update(extra)
+    return client.get("/api/v1/cluster/git-state", params=params)
 
 
 def _install(body, install_id):
@@ -106,8 +110,16 @@ def test_auth_is_required(anon_client, project):
     assert _get(anon_client).status_code == 401
 
 
-def test_project_id_is_required(client, project):
-    assert client.get("/api/v1/cluster/git-state").status_code == 422
+def test_neither_id_is_400(client, project):
+    resp = client.get("/api/v1/cluster/git-state")
+    assert resp.status_code == 400
+    assert "exactly one" in resp.json()["detail"]
+
+
+def test_both_ids_are_400(client, project):
+    resp = _get(client, project_id="proj-1", project_v2_id=project["pv2"]["id"])
+    assert resp.status_code == 400
+    assert "exactly one" in resp.json()["detail"]
 
 
 def test_unknown_project_404s(client, project):
@@ -228,6 +240,34 @@ def test_recent_ops_are_returned(client, project):
     assert ops[0]["params"]["branch"] == "feat/x"
     assert ops[0]["result"]["path"] == "/w/feat-x"
     assert ops[0]["created_at"] and ops[0]["updated_at"]
+
+
+def test_git_state_by_project_v2_id_without_a_local_projects_row(client, mock_db, tmp_path):
+    """A remote-only project (projects_v2 + checkout, no local projects row)
+    is readable by ``project_v2_id`` — not a 404."""
+    from app.db import projects_v2
+
+    path = tmp_path / "remote-repo"
+    path.mkdir()
+    database.register_install(ME, "This Mac", "http://me:8000", "darwin", "1", {})
+    database.register_install(PEER, "Studio", "http://peer:8000", "win32", "1", {})
+    database.register_install(BARE, "Laptop", "http://bare:8000", "linux", "1", {})
+    pv2 = projects_v2.upsert_project("git:example/remote-only", name="Remote")
+    checkouts_db.upsert_checkout(pv2["id"], PEER, str(path))
+
+    resp = _get(client, project_id=None, project_v2_id=pv2["id"])
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["project_v2_id"] == pv2["id"]
+    assert _install(body, PEER)["eligible"] is True
+    assert _install(body, BARE)["eligible"] is False
+
+
+def test_unknown_project_v2_id_404s(client, project):
+    resp = _get(client, project_id=None, project_v2_id="pv2-does-not-exist")
+    assert resp.status_code == 404
+    assert "not found" in resp.json()["detail"].lower()
 
 
 def test_another_projects_ops_do_not_leak_in(client, project, mock_db):

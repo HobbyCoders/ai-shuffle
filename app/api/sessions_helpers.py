@@ -140,7 +140,9 @@ class MoveSessionResponse(BaseModel):
 
 class CreateWorktreeSessionRequest(BaseModel):
     """Request body for creating a session with a worktree"""
-    project_id: str
+    # XOR with project_v2_id — exactly one is required (400 if both/neither).
+    project_id: Optional[str] = None
+    project_v2_id: Optional[str] = None
     branch_name: str
     base_branch: str = "main"
     profile_id: Optional[str] = None

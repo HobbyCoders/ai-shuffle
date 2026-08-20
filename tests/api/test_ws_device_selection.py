@@ -160,6 +160,18 @@ def test_create_session_without_target_is_unchanged(mock_db):
     assert placement_mod._normalize_placement(row["placement"]) is None
 
 
+def test_create_session_stamps_project_v2_id_with_null_project_id(mock_db):
+    database.create_session(
+        session_id="sess-v2",
+        profile_id="default",
+        project_id=None,
+        project_v2_id="pv2-remote-only",
+    )
+    row = _row("sess-v2")
+    assert row["project_id"] is None
+    assert row["project_v2_id"] == "pv2-remote-only"
+
+
 # ═══ handle_query — NEW session with a device pick ═══════════════════════════
 
 
@@ -345,6 +357,196 @@ async def test_new_session_with_active_base_checkout_pins_and_dispatches(
     assert _sent(handler, "query_queued")
 
 
+async def test_new_session_with_project_v2_id_pins_and_stamps(
+    mock_db, monkeypatch, tmp_path
+):
+    """WS create with only ``project_v2_id`` (no local projects row) stamps
+    the session and honors a remote pick."""
+    from app.db import projects_v2
+    from app.db import checkouts as checkouts_db
+
+    _stub_installs(monkeypatch, [ME, PEER])
+    monkeypatch.setattr(
+        database,
+        "get_install",
+        lambda _id: {"id": PEER, "device_name": "Studio", "online": True},
+    )
+    database.create_profile(
+        profile_id="claude-code", name="Claude Code", description=None, config={}
+    )
+    path = tmp_path / "repo"
+    path.mkdir()
+    pv2 = projects_v2.upsert_project("git:example/remote-only", name="Remote")
+    checkouts_db.upsert_checkout(pv2["id"], PEER, str(path))
+
+    with _Patches() as p:
+        handler = _make_handler()
+        await handler.handle_query({
+            "prompt": "run this over there",
+            "session_id": None,
+            "profile": "claude-code",
+            "project": None,
+            "project_v2_id": pv2["id"],
+            "target_instance_id": PEER,
+        })
+
+    assert _sent(handler, "error") == []
+    created = _sent(handler, "session_created")
+    assert len(created) == 1
+    row = _row(created[0]["session_id"])
+    assert row["project_id"] is None
+    assert row["project_v2_id"] == pv2["id"]
+    assert row["instance_id"] == PEER
+    assert p.submit.call_args.kwargs["no_kick"] is True
+
+
+async def test_ws_scoped_user_projectless_create_is_not_400(mock_db, monkeypatch, tmp_path):
+    """A scoped API user sending neither id is still a projectless create,
+    not an XOR 400 from the origin helper."""
+    path = tmp_path / "repo"
+    path.mkdir()
+    database.create_project(
+        project_id="proj-assigned", name="Assigned", description=None, path=str(path)
+    )
+    database.create_api_user(
+        user_id="user-1",
+        name="Scoped",
+        api_key_hash="hash",
+        project_id="proj-assigned",
+    )
+    database.create_profile(
+        profile_id="claude-code", name="Claude Code", description=None, config={}
+    )
+
+    with _Patches():
+        handler = _make_handler()
+        handler.api_user_id = "user-1"
+        await handler.handle_query({
+            "prompt": "hello with no project",
+            "session_id": None,
+            "profile": "claude-code",
+            "project": None,
+        })
+
+    assert _sent(handler, "error") == []
+    assert _sent(handler, "session_created")
+
+
+async def test_ws_scoped_user_other_origin_is_denied(
+    mock_db, monkeypatch, tmp_path
+):
+    from app.db import projects as projects_db
+    from app.db import projects_v2
+
+    path = tmp_path / "repo"
+    path.mkdir()
+    database.create_project(
+        project_id="proj-assigned", name="Assigned", description=None, path=str(path)
+    )
+    projects_db.set_project_link_group("proj-assigned", "git:example/mine")
+    other = projects_v2.upsert_project("git:example/other", name="Other")
+    database.create_api_user(
+        user_id="user-1",
+        name="Scoped",
+        api_key_hash="hash",
+        project_id="proj-assigned",
+    )
+
+    with _Patches() as p:
+        handler = _make_handler()
+        handler.api_user_id = "user-1"
+        await handler.handle_query({
+            "prompt": "hello",
+            "session_id": None,
+            "profile": "claude-code",
+            "project_v2_id": other["id"],
+        })
+
+    assert "Access denied" in _sent(handler, "error")[0]["message"]
+    assert _sent(handler, "session_created") == []
+    p.submit.assert_not_called()
+
+
+async def test_ws_projectless_create_is_not_400(mock_db, monkeypatch):
+    """Neither project id is a projectless create — not an XOR 400."""
+    monkeypatch.setattr(
+        database,
+        "get_install",
+        lambda _id: {"id": PEER, "device_name": "Studio", "online": True},
+    )
+    database.create_profile(
+        profile_id="claude-code", name="Claude Code", description=None, config={}
+    )
+
+    with _Patches():
+        handler = _make_handler()
+        await handler.handle_query({
+            "prompt": "hello with no project",
+            "session_id": None,
+            "profile": "claude-code",
+            "project": None,
+            "target_instance_id": PEER,
+        })
+
+    assert _sent(handler, "error") == []
+    assert _sent(handler, "session_created")
+
+
+async def test_ws_both_project_ids_are_400(mock_db, monkeypatch, tmp_path):
+    path = tmp_path / "repo"
+    path.mkdir()
+    database.create_project(
+        project_id="proj-1", name="P", description=None, path=str(path)
+    )
+    from app.core import project_resolver
+
+    pv2 = project_resolver.resolve_project_v2({"project_id": "proj-1"})
+
+    with _Patches() as p:
+        handler = _make_handler()
+        await handler.handle_query({
+            "prompt": "hello",
+            "session_id": None,
+            "profile": "claude-code",
+            "project": "proj-1",
+            "project_v2_id": pv2["id"],
+        })
+
+    assert "exactly one" in _sent(handler, "error")[0]["message"]
+    assert _sent(handler, "session_created") == []
+    p.submit.assert_not_called()
+    assert mock_db.execute("SELECT COUNT(*) AS n FROM sessions").fetchone()["n"] == 0
+
+
+async def test_new_session_v2_only_refuses_attachments(
+    mock_db, monkeypatch, tmp_path
+):
+    from app.api.common import ATTACHMENTS_NEED_LOCAL_CHECKOUT
+    from app.db import projects_v2
+
+    monkeypatch.setattr(
+        database,
+        "get_install",
+        lambda _id: {"id": PEER, "device_name": "Studio", "online": True},
+    )
+    pv2 = projects_v2.upsert_project("git:example/remote-only", name="Remote")
+
+    with _Patches() as p:
+        handler = _make_handler()
+        await handler.handle_query({
+            "prompt": "read this",
+            "session_id": None,
+            "profile": "claude-code",
+            "project": None,
+            "project_v2_id": pv2["id"],
+            "upload_paths": ["/tmp/a.txt"],
+        })
+
+    assert _sent(handler, "error")[0]["message"] == ATTACHMENTS_NEED_LOCAL_CHECKOUT
+    assert _sent(handler, "session_created") == []
+    p.submit.assert_not_called()
+
+
 async def test_target_instance_id_ignored_for_existing_session(mock_db, monkeypatch):
     """The pick is a CREATION-time choice: on an existing (locally owned)
     session the key is dropped — no ownership rewrite, ordinary local turn."""
@@ -462,10 +664,17 @@ async def test_upload_paths_are_lifted_only_for_a_remote_turn(mock_db, monkeypat
     assert "upload_blob_ids" not in (p.submit.call_args.kwargs.get("payload") or {})
 
 
-async def test_remote_turn_attaches_lifted_blob_ids_to_the_turn(mock_db, monkeypatch):
+async def test_remote_turn_attaches_lifted_blob_ids_to_the_turn(
+    mock_db, monkeypatch, tmp_path
+):
     """Placed remote → the staged files become durable blobs and their ids ride
     the turn payload to the executing install."""
     _stub_installs(monkeypatch, [ME, PEER])
+    path = tmp_path / "repo"
+    path.mkdir()
+    database.create_project(
+        project_id="proj-1", name="P", description=None, path=str(path)
+    )
     _peer_owned_session("sess-1", placement={"where": f"runner:{PEER}"})
 
     with _Patches() as p:
@@ -475,7 +684,7 @@ async def test_remote_turn_attaches_lifted_blob_ids_to_the_turn(mock_db, monkeyp
             "prompt": "look at this",
             "session_id": "sess-1",
             "profile": "claude-code",
-            "project": None,
+            "project": "proj-1",
             "upload_paths": ["/tmp/a.txt", "/tmp/b.txt"],
         })
 
@@ -484,10 +693,15 @@ async def test_remote_turn_attaches_lifted_blob_ids_to_the_turn(mock_db, monkeyp
     assert p.submit.call_args.kwargs["no_kick"] is True
 
 
-async def test_a_failed_lift_refuses_the_send(mock_db, monkeypatch):
+async def test_a_failed_lift_refuses_the_send(mock_db, monkeypatch, tmp_path):
     """Never half-send: a turn whose prompt names files the executing install
     cannot see is exactly the silent loss D8 exists to prevent."""
     _stub_installs(monkeypatch, [ME, PEER])
+    path = tmp_path / "repo"
+    path.mkdir()
+    database.create_project(
+        project_id="proj-1", name="P", description=None, path=str(path)
+    )
     _peer_owned_session("sess-1", placement={"where": f"runner:{PEER}"})
 
     with _Patches() as p:
@@ -499,11 +713,36 @@ async def test_a_failed_lift_refuses_the_send(mock_db, monkeypatch):
             "prompt": "look at this",
             "session_id": "sess-1",
             "profile": "claude-code",
-            "project": None,
+            "project": "proj-1",
             "upload_paths": ["/etc/passwd"],
         })
 
     assert "outside the project directory" in _sent(handler, "error")[0]["message"]
+    p.submit.assert_not_called()
+
+
+async def test_remote_turn_without_local_project_refuses_attachments(
+    mock_db, monkeypatch
+):
+    from app.api.common import ATTACHMENTS_NEED_LOCAL_CHECKOUT
+
+    _stub_installs(monkeypatch, [ME, PEER])
+    _peer_owned_session("sess-1", placement={"where": f"runner:{PEER}"})
+
+    with _Patches() as p:
+        handler = _make_handler()
+        handler._lift_uploads = AsyncMock(
+            side_effect=AssertionError("must not lift without a local project")
+        )
+        await handler.handle_query({
+            "prompt": "look at this",
+            "session_id": "sess-1",
+            "profile": "claude-code",
+            "project": None,
+            "upload_paths": ["/tmp/a.txt"],
+        })
+
+    assert _sent(handler, "error")[0]["message"] == ATTACHMENTS_NEED_LOCAL_CHECKOUT
     p.submit.assert_not_called()
 
 

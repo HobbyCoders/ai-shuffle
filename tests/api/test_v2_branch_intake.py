@@ -293,12 +293,18 @@ async def test_missing_branch_non_new_raises_409_with_branch_message(monkeypatch
 
 async def test_endpoint_delegates_to_v2_branch_intake(monkeypatch):
     """``create_session_with_worktree`` unconditionally routes to
-    ``_create_v2_branch_session`` (after the project-exists / access checks)."""
+    ``_create_v2_branch_session`` (after XOR / origin-access checks)."""
     monkeypatch.setattr(worktree_api, "run_sync", _passthrough_run_sync)
-    monkeypatch.setattr(
-        worktree_api.database, "get_project", lambda pid: {"id": pid, "settings": {}}
-    )
     monkeypatch.setattr(worktree_api, "get_api_user_from_request", lambda req: None)
+    monkeypatch.setattr(
+        worktree_api,
+        "require_origin_access",
+        lambda **kw: {
+            "origin": "local:proj-A",
+            "project_v2": {"id": "pv2-abc123"},
+            "legacy": {"id": "proj-A", "settings": {}},
+        },
+    )
 
     v2_helper = AsyncMock(return_value="v2-response")
     monkeypatch.setattr(worktree_api, "_create_v2_branch_session", v2_helper)
@@ -311,3 +317,16 @@ async def test_endpoint_delegates_to_v2_branch_intake(monkeypatch):
 
     v2_helper.assert_awaited_once()
     assert resp == "v2-response"
+
+
+async def test_no_project_dict_falls_back_to_first_profile(monkeypatch):
+    """Remote-only compose (no legacy project dict) uses the first profile."""
+    m = _wire_v2(monkeypatch)
+
+    await worktree_api._create_v2_branch_session(
+        request=MagicMock(),
+        body=_body(profile_id=None),
+        project=None,
+        api_user_id=None,
+    )
+    assert m["create_session"].call_args.kwargs["profile_id"] == "default-ai"

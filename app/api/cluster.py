@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_auth
-from app.api.common import check_project_access
+from app.api.common import require_origin_access
 from app.core import cluster
 
 logger = logging.getLogger(__name__)
@@ -65,7 +65,8 @@ def _iso(value: Any) -> Optional[str]:
 @router.get("/git-state")
 async def git_state(
     request: Request,
-    project_id: str = Query(..., description="Legacy project id"),
+    project_id: Optional[str] = Query(None, description="Legacy project id"),
+    project_v2_id: Optional[str] = Query(None, description="Origin-keyed project_v2 id"),
     token: str = Depends(require_auth),
 ) -> Dict[str, Any]:
     """Per-device git state for one project — the read side of D6 (W3-1).
@@ -76,27 +77,21 @@ async def git_state(
     the with-worktree remote preflight enforces, so a device the composer shows
     as eligible is exactly a device whose send will not 409 (W3-2).
 
-    A project with no ``projects_v2`` row (a non-git project) is not an error:
-    it answers 200 with ``project_v2_id: null`` and every device ineligible.
+    Pass exactly one of ``project_id`` or ``project_v2_id`` (400 if both or
+    neither). ``project_v2_id`` does not 404 just because this install has no
+    legacy ``projects`` row — remote-only compose reads git-state by v2 id.
+
+    A legacy project with no ``projects_v2`` row (a non-git project) is not an
+    error: it answers 200 with ``project_v2_id: null`` and every device ineligible.
     """
-    from app.core import project_resolver
     from app.core.config import settings
     from app.db import checkouts as checkouts_db
     from app.db import git_ops as git_ops_db
 
-    check_project_access(request, project_id)
-
-    project = await run_sync(database.get_project, project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}",
-        )
-
-    # Resolve the origin-keyed project_v2 exactly as the with-worktree path does
-    # (self-heals / self-seeds), so this API and the preflight look at the same
-    # project. ``None`` = non-git project: no checkouts, no ops, nobody eligible.
-    pv2 = await run_sync(project_resolver.resolve_project_v2, {"project_id": project_id})
+    access = require_origin_access(
+        request=request, project_id=project_id, project_v2_id=project_v2_id
+    )
+    pv2 = access["project_v2"]
     pv2_id = pv2["id"] if pv2 else None
 
     installs = await run_sync(database.get_installs)

@@ -61,6 +61,12 @@ def format_file_size(size_bytes: int) -> str:
 # Project Access & Path Resolution
 # =============================================================================
 
+XOR_PROJECT_IDS_DETAIL = "pass exactly one of project_id or project_v2_id"
+ATTACHMENTS_NEED_LOCAL_CHECKOUT = (
+    "Attachments need a local checkout of this project. Clone it here, or send without files."
+)
+
+
 def check_project_access(request: Request, project_id: str) -> None:
     """
     Check if the requester has access to the project.
@@ -73,6 +79,87 @@ def check_project_access(request: Request, project_id: str) -> None:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this project"
             )
+
+
+def require_origin_access(
+    *,
+    request: Optional[Request] = None,
+    api_user: Optional[dict] = None,
+    project_id: Optional[str] = None,
+    project_v2_id: Optional[str] = None,
+) -> dict:
+    """XOR project identity + origin-based access for scoped API users.
+
+    Takes a FastAPI ``request`` **or** an ``api_user`` dict (the WS handler has
+    no Request). XOR 400 is opt-in to this helper — callers that allow
+    projectless create (WS ``handle_query``) must not call it when both ids
+    are absent.
+
+    Returns ``{"origin", "project_v2", "legacy"}``. ``legacy`` is the local
+    ``projects`` row when ``project_id`` was given, else None (remote-only
+    compose by ``project_v2_id``).
+    """
+    from app.core import project_resolver
+    from app.db import projects_v2 as projects_v2_db
+
+    project_id = (project_id or "").strip() or None
+    project_v2_id = (project_v2_id or "").strip() or None
+    if bool(project_id) == bool(project_v2_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=XOR_PROJECT_IDS_DETAIL,
+        )
+
+    legacy = None
+    pv2 = None
+    origin: Optional[str] = None
+
+    if project_id:
+        legacy = database.get_project(project_id)
+        if not legacy:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project not found: {project_id}",
+            )
+        origin = project_resolver.origin_for_legacy_project(legacy)
+        # Self-heal / self-seed the same way git-state and with-worktree did
+        # before this helper — a missing projects_v2 row is not a 404 here.
+        pv2 = project_resolver.resolve_project_v2({"project_id": project_id})
+    else:
+        pv2 = projects_v2_db.get_project_v2(project_v2_id)
+        if not pv2:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project not found: {project_v2_id}",
+            )
+        origin = pv2.get("origin")
+
+    user = api_user
+    if user is None and request is not None:
+        user = get_api_user_from_request(request)
+    if user and user.get("project_id"):
+        assigned = database.get_project(user["project_id"])
+        if not assigned or project_resolver.origin_for_legacy_project(assigned) != origin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this project",
+            )
+    return {"origin": origin, "project_v2": pv2, "legacy": legacy}
+
+
+def assigned_origin(api_user: Optional[dict]) -> Optional[str]:
+    """Origin of a scoped API user's project, or None if unscoped/admin.
+
+    Catalog (PR 8) filters ``GET /cluster/projects`` with this — it must not
+    go through :func:`require_origin_access` (both ids absent would 400).
+    """
+    if not api_user or not api_user.get("project_id"):
+        return None
+    assigned = database.get_project(api_user["project_id"])
+    if not assigned:
+        return None
+    from app.core.project_resolver import origin_for_legacy_project
+    return origin_for_legacy_project(assigned)
 
 
 def validate_project_access(request: Request, project_id: str) -> dict:

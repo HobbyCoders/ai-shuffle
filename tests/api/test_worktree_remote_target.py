@@ -382,6 +382,99 @@ async def test_a_bad_attachment_refuses_the_whole_create(project, tmp_path):
 # ═══ the local path is untouched ═════════════════════════════════════════════
 
 
+async def test_remote_create_by_project_v2_id_without_a_local_projects_row(
+    mock_db, tmp_path
+):
+    """Only ``project_v2_id`` + a remote target queues the op. No local
+    ``projects`` row, ``sessions.project_id`` is NULL."""
+    from app.db import projects_v2
+
+    path = tmp_path / "remote-repo"
+    path.mkdir()
+    pv2 = projects_v2.upsert_project("git:example/remote-only", name="Remote")
+    checkouts_db.upsert_checkout(pv2["id"], PEER, str(path))
+
+    body = _body(project_id=None, project_v2_id=pv2["id"])
+    with _Patches():
+        resp = await swt._create_v2_branch_session(
+            MagicMock(name="request"), body, None, None
+        )
+
+    row = _row(resp.session_id)
+    assert row["project_id"] is None
+    assert row["project_v2_id"] == pv2["id"]
+    assert row["instance_id"] == PEER
+    queued = git_ops_db.list_queued_for_runner(PEER)
+    assert len(queued) == 1
+    assert queued[0]["op"] == "ensure_worktree"
+    assert queued[0]["project_v2_id"] == pv2["id"]
+    assert resp.worktree_path is None
+
+
+async def test_remote_v2_only_refuses_attachments(mock_db, tmp_path):
+    """Attachments without a local legacy projects row are 400 — D8 is
+    project-dir-relative; no v2-keyed staging dir this wave."""
+    from fastapi import HTTPException
+    from app.api.common import ATTACHMENTS_NEED_LOCAL_CHECKOUT
+    from app.db import projects_v2
+
+    path = tmp_path / "remote-repo"
+    path.mkdir()
+    pv2 = projects_v2.upsert_project("git:example/remote-only", name="Remote")
+    checkouts_db.upsert_checkout(pv2["id"], PEER, str(path))
+    staged = tmp_path / "spec.md"
+    staged.write_bytes(b"# spec")
+
+    body = _body(
+        project_id=None,
+        project_v2_id=pv2["id"],
+        prompt="read this",
+        pending_upload_paths=[str(staged)],
+    )
+    with _Patches():
+        with pytest.raises(HTTPException) as exc:
+            await swt._create_v2_branch_session(
+                MagicMock(name="request"), body, None, None
+            )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == ATTACHMENTS_NEED_LOCAL_CHECKOUT
+    assert database.get_sessions() == []
+    assert git_ops_db.list_queued_for_runner(PEER) == []
+
+
+async def test_with_worktree_xor_neither_is_400(monkeypatch):
+    from fastapi import HTTPException
+    from app.api.common import XOR_PROJECT_IDS_DETAIL
+
+    monkeypatch.setattr(swt, "get_api_user_from_request", lambda req: None)
+
+    with pytest.raises(HTTPException) as exc:
+        await swt.create_session_with_worktree(
+            request=MagicMock(),
+            body=_body(project_id=None),
+            token="tok",
+        )
+    assert exc.value.status_code == 400
+    assert exc.value.detail == XOR_PROJECT_IDS_DETAIL
+
+
+async def test_with_worktree_xor_both_is_400(project, monkeypatch):
+    from fastapi import HTTPException
+    from app.api.common import XOR_PROJECT_IDS_DETAIL
+
+    monkeypatch.setattr(swt, "get_api_user_from_request", lambda req: None)
+
+    with pytest.raises(HTTPException) as exc:
+        await swt.create_session_with_worktree(
+            request=MagicMock(),
+            body=_body(project_v2_id=project["pv2"]["id"]),
+            token="tok",
+        )
+    assert exc.value.status_code == 400
+    assert exc.value.detail == XOR_PROJECT_IDS_DETAIL
+
+
 async def test_target_equal_to_self_takes_the_ordinary_local_path(project):
     """A pick of THIS install is not a remote target — today's behavior stands
     (local ensure_checkout runs, and a real path comes back)."""

@@ -14,6 +14,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from fastapi import HTTPException
 from fastapi.websockets import WebSocketState
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
@@ -588,7 +589,7 @@ class ChatWebSocketHandler:
         return True
 
     async def _validate_target_install(
-        self, target_instance_id: str, project_id: Optional[str]
+        self, target_instance_id: str, project_v2_id: Optional[str]
     ) -> bool:
         """Preflight the composer's device pick for a NEW session.
 
@@ -597,9 +598,11 @@ class ChatWebSocketHandler:
         project) must have an ACTIVE BASE checkout of that project
         (``has_active_base_checkout``, not ``capable_runners``: the latter
         also matches branch-only worktrees, and Phase 3 never clones). The
-        project half fails OPEN on resolver trouble, exactly like /move: a
-        preflight bug must not make a usable device unpickable. Sends the
-        refusal frame itself and returns False when the pick cannot be honored.
+        caller passes the already-resolved ``project_v2_id`` (legacy
+        ``project_id`` is resolved upstream). The checkout half fails OPEN on
+        lookup trouble, exactly like /move: a preflight bug must not make a
+        usable device unpickable. Sends the refusal frame itself and returns
+        False when the pick cannot be honored.
         """
         async def _refuse(message: str) -> bool:
             await self.send_json({"type": "error", "message": message})
@@ -614,16 +617,11 @@ class ChatWebSocketHandler:
                 f"{device} is offline. Bring it online or pick another device."
             )
 
-        if project_id:
-            from app.core import project_resolver
+        if project_v2_id:
             from app.db import checkouts as checkouts_db
 
             try:
-                resolved = await run_sync(
-                    project_resolver.resolve_project_v2, {"project_id": project_id}
-                )
-                project_v2_id = (resolved or {}).get("id")
-                if project_v2_id and not await run_sync(
+                if not await run_sync(
                     checkouts_db.has_active_base_checkout,
                     project_v2_id,
                     target_instance_id,
@@ -632,10 +630,10 @@ class ChatWebSocketHandler:
                         f"This project isn't checked out on {device} yet. Open "
                         "the project there once (or clone it), then try again."
                     )
-            except Exception:  # noqa: BLE001 — fail open on resolver trouble
+            except Exception:  # noqa: BLE001 — fail open on lookup trouble
                 logger.warning(
-                    "Device-pick preflight errored for project %s on %s; "
-                    "proceeding fail-open", project_id, target_instance_id,
+                    "Device-pick preflight errored for project_v2 %s on %s; "
+                    "proceeding fail-open", project_v2_id, target_instance_id,
                     exc_info=True,
                 )
         return True
@@ -691,7 +689,12 @@ class ChatWebSocketHandler:
         prompt = data.get("prompt", "").strip()
         session_id = data.get("session_id")
         profile_id = data.get("profile", "claude-code")
-        project_id = data.get("project")
+        project_id = data.get("project") or None
+        if isinstance(project_id, str):
+            project_id = project_id.strip() or None
+        project_v2_id = data.get("project_v2_id") or None
+        if isinstance(project_v2_id, str):
+            project_v2_id = project_v2_id.strip() or None
         overrides = data.get("overrides")  # Optional: {model, permission_mode}
         # Client-generated adoption token for a NEW-session query. Echoed back in
         # both the ``session_created`` and the first ``start`` frame so the
@@ -717,17 +720,28 @@ class ChatWebSocketHandler:
             await self.send_json({"type": "error", "message": "Empty prompt"})
             return
 
-        # Validate project-level authorization for API users
-        # API users are scoped to a specific project — prevent cross-project access
-        if self.api_user_id and project_id:
-            api_user = await run_sync(database.get_api_user, self.api_user_id)
-            if api_user and api_user.get("project_id") and api_user["project_id"] != project_id:
-                logger.warning(
-                    f"Authorization denied: API user {self.api_user_id} attempted to access "
-                    f"project {project_id} but is scoped to project {api_user['project_id']}"
+        # Origin access when composing against a project. Neither id →
+        # projectless create (today's behavior, not a 400). Both → 400.
+        # WS has no Request — pass the api_user dict.
+        resolved_pv2_id = None
+        if project_id or project_v2_id:
+            from app.api.common import require_origin_access
+
+            try:
+                user = None
+                if self.api_user_id:
+                    user = await run_sync(database.get_api_user, self.api_user_id)
+                access = require_origin_access(
+                    api_user=user,
+                    project_id=project_id,
+                    project_v2_id=project_v2_id,
                 )
-                await self.send_json({"type": "error", "message": "Not authorized for this project"})
+            except HTTPException as exc:
+                await self.send_json({"type": "error", "message": exc.detail})
                 return
+            resolved_pv2_id = (access.get("project_v2") or {}).get("id")
+            if access.get("legacy") and not project_id:
+                project_id = access["legacy"].get("id")
 
         # Where does this session EXECUTE?
         #
@@ -783,11 +797,19 @@ class ChatWebSocketHandler:
 
         # Create or get session
         if not session_id:
+            if upload_paths and not project_id:
+                from app.api.common import ATTACHMENTS_NEED_LOCAL_CHECKOUT
+
+                await self.send_json({
+                    "type": "error",
+                    "message": ATTACHMENTS_NEED_LOCAL_CHECKOUT,
+                })
+                return
             if target_instance_id:
                 # Refuse BEFORE creating anything — a session pinned to a device
                 # that cannot run it is stranded, not merely slow.
                 if not await self._validate_target_install(
-                    target_instance_id, project_id
+                    target_instance_id, resolved_pv2_id
                 ):
                     return
                 # The session is born owned by (and pinned to) the target, so
@@ -816,6 +838,7 @@ class ChatWebSocketHandler:
                         title=title,
                         is_active=True,
                         target_instance_id=target_instance_id,
+                        project_v2_id=resolved_pv2_id,
                         _conn=txn
                     )
                     _msg_role = "user"
@@ -839,13 +862,11 @@ class ChatWebSocketHandler:
             await run_sync(_create_session_atomic)
 
             # V2 projects: bind the new session to its origin-keyed project_v2 so
-            # the resolver is a DIRECT hit on the first send (rather than relying on
-            # the send-path self-heal). resolve_project_v2 self-seeds a fresh legacy
-            # project (F4) and persists sessions.project_v2_id when given the id and
-            # it is still NULL. Best-effort: a failure just defers to the send-path
-            # self-heal — it must never block session creation. project_id may be
-            # None (project-less session) → resolver returns None, a no-op.
-            if project_id:
+            # the resolver is a DIRECT hit on the first send. create_session
+            # already stamps project_v2_id when we resolved it above; this
+            # self-heal covers the project_id-only path if that stamp missed.
+            # Best-effort: a failure defers to the send-path self-heal.
+            if project_id and not resolved_pv2_id:
                 try:
                     from app.core import project_resolver
                     await run_sync(
@@ -995,6 +1016,14 @@ class ChatWebSocketHandler:
         # files the executing install cannot see is exactly the silent loss this
         # mechanism exists to prevent.
         if placed_remote and upload_paths:
+            if not project_id:
+                from app.api.common import ATTACHMENTS_NEED_LOCAL_CHECKOUT
+
+                await self.send_json({
+                    "type": "error",
+                    "message": ATTACHMENTS_NEED_LOCAL_CHECKOUT,
+                })
+                return
             try:
                 blob_ids = await self._lift_uploads(
                     upload_paths, project_id, session_id

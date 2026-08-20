@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Depends, status, Request
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_auth, get_api_user_from_request
+from app.api.common import ATTACHMENTS_NEED_LOCAL_CHECKOUT, require_origin_access
 from app.api.sessions_helpers import (
     CreateWorktreeSessionRequest,
     WorktreeSessionResponse,
@@ -85,14 +86,19 @@ def _detect_command_meta(prompt: str) -> Tuple[str, Optional[dict]]:
     return "user", None
 
 
-def _resolve_default_profile_id(project: dict, body_profile_id: Optional[str]) -> str:
-    """The profile a new session uses: explicit → project default → first profile."""
+def _resolve_default_profile_id(project: Optional[dict], body_profile_id: Optional[str]) -> str:
+    """The profile a new session uses: explicit → project default → first profile.
+
+    No legacy project dict (remote-only compose by ``project_v2_id``) skips
+    project settings and uses the first profile.
+    """
     if body_profile_id:
         return body_profile_id
-    project_settings = project.get("settings") or {}
-    profile_id = project_settings.get("default_profile_id")
-    if profile_id:
-        return profile_id
+    if project:
+        project_settings = project.get("settings") or {}
+        profile_id = project_settings.get("default_profile_id")
+        if profile_id:
+            return profile_id
     profiles = database.get_all_profiles()
     return profiles[0]["id"] if profiles else "claude-code"
 
@@ -208,7 +214,7 @@ async def _preflight_remote_target(
 
 async def _create_remote_branch_session(
     body: CreateWorktreeSessionRequest,
-    project: dict,
+    project: Optional[dict],
     api_user_id: Optional[str],
     pv2: dict,
     target_instance_id: str,
@@ -269,7 +275,8 @@ async def _create_remote_branch_session(
         database.create_session(
             session_id=session_id,
             profile_id=profile_id,
-            project_id=body.project_id,
+            project_id=body.project_id or None,
+            project_v2_id=pv2["id"],
             title="",
             api_user_id=api_user_id,
             is_active=True,
@@ -311,7 +318,7 @@ async def _create_remote_branch_session(
                 # The 'claude-code' no-profile sentinel is install-local and must
                 # never ride a turn another install executes.
                 profile_id=None if profile_id == "claude-code" else profile_id,
-                project_id=body.project_id,
+                project_id=body.project_id or None,
                 overrides=body.overrides,
                 payload=payload or None,
                 no_kick=True,
@@ -339,7 +346,7 @@ async def _create_remote_branch_session(
 async def _create_v2_branch_session(
     request: Request,
     body: CreateWorktreeSessionRequest,
-    project: dict,
+    project: Optional[dict],
     api_user_id: Optional[str],
 ) -> WorktreeSessionResponse:
     """V2 branch-intake: create a branch session WITHOUT a legacy worktree row.
@@ -358,6 +365,13 @@ async def _create_v2_branch_session(
 
     branch_name = body.branch_name
 
+    # Remote-only compose has no local project dir; D8 lift is project-dir-relative.
+    if body.pending_upload_paths and not (body.project_id and project):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ATTACHMENTS_NEED_LOCAL_CHECKOUT,
+        )
+
     # 0. Composer device pick (D4). A target that is not us takes the remote
     #    path: nothing is materialized here, a durable git op carries the
     #    checkout work to the target, and uploads travel as D8 blobs.
@@ -365,18 +379,29 @@ async def _create_v2_branch_session(
     if target_instance_id == settings.effective_instance_id:
         target_instance_id = None
 
-    # 1. Resolve the origin-keyed project_v2 for this legacy project (self-heals /
-    #    self-seeds a project created after the v60 collapse).
-    session_stub = {"project_id": body.project_id}
-    pv2 = await run_sync(project_resolver.resolve_project_v2, session_stub)
-    if not pv2:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=(
-                f"Could not resolve an origin-keyed project for '{body.project_id}'. "
-                f"The project may not be fully initialized on this device."
-            ),
-        )
+    # 1. Resolve the origin-keyed project_v2. ``project_v2_id`` is a direct
+    #    lookup (no local ``projects`` row required). ``project_id`` self-heals
+    #    / self-seeds a project created after the v60 collapse.
+    if body.project_v2_id:
+        from app.db import projects_v2 as projects_v2_db
+
+        pv2 = await run_sync(projects_v2_db.get_project_v2, body.project_v2_id)
+        if not pv2:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project not found: {body.project_v2_id}",
+            )
+    else:
+        session_stub = {"project_id": body.project_id}
+        pv2 = await run_sync(project_resolver.resolve_project_v2, session_stub)
+        if not pv2:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=(
+                    f"Could not resolve an origin-keyed project for '{body.project_id}'. "
+                    f"The project may not be fully initialized on this device."
+                ),
+            )
 
     if target_instance_id:
         return await _create_remote_branch_session(
@@ -422,7 +447,8 @@ async def _create_v2_branch_session(
         database.create_session(
             session_id=session_id,
             profile_id=profile_id,
-            project_id=body.project_id,
+            project_id=body.project_id or None,
+            project_v2_id=pv2["id"],
             title="",
             api_user_id=api_user_id,
             is_active=True,
@@ -471,7 +497,7 @@ async def _create_v2_branch_session(
                 "worktree",
                 prompt=prompt,
                 profile_id=profile_id,
-                project_id=body.project_id,
+                project_id=body.project_id or None,
                 overrides=body.overrides,
                 payload={"api_user_id": api_user_id} if api_user_id else None,
             )
@@ -520,23 +546,21 @@ async def create_session_with_worktree(
     ``worktrees`` row / md5-hash dir. EXISTING legacy worktree sessions keep
     resolving through the resolver's legacy ladder in ``query_options``.
     """
-    # Verify project exists and user has access
-    project = await run_sync(database.get_project, body.project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {body.project_id}"
-        )
-
-    # Check API user restrictions
+    # XOR + origin access. Does not 404 on get_project when only
+    # ``project_v2_id`` is set (remote-only compose).
     api_user = get_api_user_from_request(request)
     api_user_id: Optional[str] = api_user["id"] if api_user else None
-    if api_user and api_user.get("project_id"):
-        if api_user["project_id"] != body.project_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied to this project"
-            )
+    access = require_origin_access(
+        api_user=api_user,
+        project_id=body.project_id,
+        project_v2_id=body.project_v2_id,
+    )
+    project = access["legacy"]
+    if body.pending_upload_paths and not project:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ATTACHMENTS_NEED_LOCAL_CHECKOUT,
+        )
 
     # V2 branch-intake is the ONLY path (Phase-3 PR-B removed the ``v2_projects``
     # kill switch): a NEW branch session records only sessions.branch +
