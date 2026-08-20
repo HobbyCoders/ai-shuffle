@@ -204,13 +204,14 @@
 		position: fixed;
 		top: 0;
 		left: 0;
+		right: 0;
 		bottom: 0;
-		width: min(86vw, 300px);
+		width: 100%;
 		display: flex;
 		flex-direction: column;
 		background: var(--sidebar);
-		border-right: 1px solid var(--sidebar-border);
-		box-shadow: var(--shadow-l);
+		border-right: none;
+		box-shadow: none;
 		z-index: 100;
 		overflow: hidden;
 		animation: drawer-slide 200ms cubic-bezier(0.16, 1, 0.3, 1);
