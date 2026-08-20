@@ -1,4 +1,4 @@
-"""Task — dispatch work to another agent (agents-program rulings A6/A8/A13).
+"""Task — dispatch work to a subagent (agents-program rulings A6/A8/A13).
 
 Fluid owns the tool's SHAPE (bare name, schema, description travel with the
 harness, Claude Code-parity); the actual dispatch machinery — agent registry,
@@ -10,13 +10,16 @@ until it grows a dispatcher of its own).
 
 The dispatcher receives ``(input, ctx)`` and must return a ``ToolOutcome`` (or
 a plain string, which is wrapped). Contract for ``input``:
-  * agent   — target agent id or unambiguous name (required)
-  * prompt  — the task for the agent (required)
+  * agent   — target subagent id or unambiguous name (required)
+  * prompt  — the task for the subagent (required)
   * mode    — "sync" (default): block until the worker finishes and return its
               report; "background": return immediately with the worker's
               session id — collect later via the host's task tools.
-  * model   — optional model override honored when the target agent allows it
   * label   — optional short display label
+
+The host may replace this fallback spec per session with an eligible subagent
+roster. Provider and model selection remain host-owned and are not accepted as
+model-authored Task arguments.
 """
 
 from __future__ import annotations
@@ -28,32 +31,29 @@ from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 SPEC = ToolSpec(
     name="Task",
     description=(
-        "Dispatch work to another agent. The target agent runs in its own "
+        "Delegate a self-contained task to a configured subagent. The "
+        "subagent runs in its own "
         "session with its own configuration, memory, and tools, and reports "
         "back. mode='sync' (default) waits for the result; mode='background' "
-        "returns immediately with the worker session id (poll with the task "
-        "tools). Use background mode to fan out parallel work."
+        "returns immediately with the worker session id. Completion is "
+        "push-based; use task tools only for an on-demand status check."
     ),
     input_schema={
         "type": "object",
         "properties": {
             "agent": {
                 "type": "string",
-                "description": "Target agent id (or unambiguous name).",
+                "description": "Target subagent id (or unambiguous name).",
             },
             "prompt": {
                 "type": "string",
-                "description": "The task for the target agent. Self-contained — "
-                "the agent does not see this conversation.",
+                "description": "The task for the subagent. Self-contained — "
+                "the subagent does not see this conversation.",
             },
             "mode": {
                 "type": "string",
                 "enum": ["sync", "background"],
                 "description": "sync (default) waits; background returns at once.",
-            },
-            "model": {
-                "type": "string",
-                "description": "Optional model override for this run.",
             },
             "label": {
                 "type": "string",
