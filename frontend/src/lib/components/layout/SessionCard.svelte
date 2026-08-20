@@ -10,7 +10,7 @@
 	 * glyph; neither is derivable from the sessions store without new API work,
 	 * so those two segments are omitted rather than faked.
 	 */
-	import { onDestroy } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import {
 		Loader2,
 		AlertCircle,
@@ -29,7 +29,6 @@
 	import { appData } from '$lib/stores/app-data.svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { toast } from '$lib/stores/toast';
-	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 	import {
 		STATUS_LABELS,
 		isLiveStatus,
@@ -65,11 +64,23 @@
 
 	let cardRef = $state<HTMLElement | null>(null);
 	let actionsOpen = $state(false);
+	let swipeLayout = $state(false);
+	let dragOffset = $state<number | null>(null);
 	let deleteArmed = $state(false);
 	let deleteLoading = $state(false);
 	let deleteConfirmTimer: ReturnType<typeof setTimeout> | null = null;
+	let suppressClickTimer: ReturnType<typeof setTimeout> | null = null;
 	let renaming = $state(false);
 	let renameValue = $state('');
+
+	const ACTION_REVEAL_WIDTH = 176;
+	const SWIPE_COMMIT_DISTANCE = 44;
+	let pointerId: number | null = null;
+	let pointerStartX = 0;
+	let pointerStartY = 0;
+	let pointerStartOffset = 0;
+	let horizontalDrag = false;
+	let suppressNextClick = false;
 
 	function disarmDelete() {
 		if (deleteConfirmTimer !== null) {
@@ -81,6 +92,7 @@
 
 	function closeActions() {
 		actionsOpen = false;
+		dragOffset = null;
 		disarmDelete();
 	}
 
@@ -96,11 +108,6 @@
 			}
 			closeActions();
 		}
-	}
-
-	function toggleActions() {
-		if (actionsOpen) closeActions();
-		else actionsOpen = true;
 	}
 
 	async function toggleSettled(event: MouseEvent | KeyboardEvent) {
@@ -205,6 +212,14 @@
 	}
 
 	function openCard() {
+		if (suppressNextClick) {
+			suppressNextClick = false;
+			return;
+		}
+		if (swipeLayout && actionsOpen) {
+			closeActions();
+			return;
+		}
 		if (deleteArmed || deleteLoading || renaming) return;
 		onOpen(session.id);
 	}
@@ -217,142 +232,244 @@
 		}
 	}
 
-	onDestroy(disarmDelete);
+	function isActionTarget(target: EventTarget | null): boolean {
+		return target instanceof Element && !!target.closest('.card-actions, button, input, a');
+	}
+
+	function handlePointerDown(event: PointerEvent) {
+		if (!swipeLayout || event.isPrimary === false || event.button !== 0 || isActionTarget(event.target)) return;
+		pointerId = event.pointerId;
+		pointerStartX = event.clientX;
+		pointerStartY = event.clientY;
+		pointerStartOffset = actionsOpen ? -ACTION_REVEAL_WIDTH : 0;
+		horizontalDrag = false;
+		cardRef?.setPointerCapture?.(event.pointerId);
+	}
+
+	function handlePointerMove(event: PointerEvent) {
+		if (pointerId !== event.pointerId) return;
+		const dx = event.clientX - pointerStartX;
+		const dy = event.clientY - pointerStartY;
+
+		if (!horizontalDrag) {
+			if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
+			if (Math.abs(dy) >= Math.abs(dx)) {
+				pointerId = null;
+				dragOffset = null;
+				return;
+			}
+			horizontalDrag = true;
+		}
+
+		event.preventDefault();
+		dragOffset = Math.max(-ACTION_REVEAL_WIDTH, Math.min(0, pointerStartOffset + dx));
+	}
+
+	function finishPointer(event: PointerEvent) {
+		if (pointerId !== event.pointerId) return;
+		const dx = event.clientX - pointerStartX;
+		if (horizontalDrag) {
+			const nextOffset = dragOffset ?? pointerStartOffset;
+			actionsOpen = actionsOpen
+				? nextOffset < -(ACTION_REVEAL_WIDTH - SWIPE_COMMIT_DISTANCE)
+				: nextOffset <= -SWIPE_COMMIT_DISTANCE;
+			suppressNextClick = true;
+			if (suppressClickTimer !== null) clearTimeout(suppressClickTimer);
+			suppressClickTimer = setTimeout(() => {
+				suppressNextClick = false;
+				suppressClickTimer = null;
+			}, 0);
+		} else if (Math.abs(dx) > 6) {
+			suppressNextClick = true;
+		}
+		dragOffset = null;
+		pointerId = null;
+		horizontalDrag = false;
+	}
+
+	function cancelPointer(event: PointerEvent) {
+		if (pointerId !== event.pointerId) return;
+		dragOffset = null;
+		pointerId = null;
+		horizontalDrag = false;
+	}
+
+	onMount(() => {
+		if (typeof window.matchMedia !== 'function') {
+			const syncWidth = () => {
+				swipeLayout = window.innerWidth <= 1080;
+				if (!swipeLayout) closeActions();
+			};
+			syncWidth();
+			window.addEventListener('resize', syncWidth);
+			return () => window.removeEventListener('resize', syncWidth);
+		}
+
+		const query = window.matchMedia('(hover: none), (max-width: 1080px)');
+		const syncLayout = () => {
+			swipeLayout = query.matches;
+			if (!swipeLayout) closeActions();
+		};
+		syncLayout();
+		query.addEventListener('change', syncLayout);
+		return () => query.removeEventListener('change', syncLayout);
+	});
+
+	onDestroy(() => {
+		disarmDelete();
+		if (suppressClickTimer !== null) clearTimeout(suppressClickTimer);
+	});
 </script>
 
 <svelte:window onclick={handleWindowClick} onkeydown={handleWindowKeydown} />
 
 <div
 	bind:this={cardRef}
-	class="scard"
-	class:active
+	class="scard-frame"
 	class:actions-open={actionsOpen || deleteArmed}
-	role="button"
-	tabindex="0"
-	aria-current={active ? 'true' : undefined}
-	onclick={openCard}
-	onkeydown={handleCardKeydown}
-	title={title}
+	class:dragging={dragOffset !== null}
+	role="group"
+	aria-label={`${title} session`}
+	onpointerdown={handlePointerDown}
+	onpointermove={handlePointerMove}
+	onpointerup={finishPointer}
+	onpointercancel={cancelPointer}
 >
-	<span class="l1">
-		<span class="proj">{projectLabel}</span>
-		<span class="dot" aria-hidden="true"></span>
-		<span class="status {status}">
-			{#if status === 'working'}
-				<Loader2 size={11} strokeWidth={2.6} class="spin" />
-			{:else if status === 'await'}
-				<AlertCircle size={11} strokeWidth={2.2} />
-			{:else if status === 'done'}
-				<Check size={11} strokeWidth={2.6} />
-			{/if}
-			{statusLabel}
-		</span>
-		<span class="timer" class:live>{timer}</span>
-	</span>
-
-	{#if renaming}
-		<input
-			class="rename-input"
-			type="text"
-			bind:value={renameValue}
-			use:focusSelect
-			onclick={(event) => event.stopPropagation()}
-			onkeydown={handleRenameKeydown}
-			onblur={commitRename}
-			aria-label="Rename session"
-		/>
-	{:else}
-		<span class="l2">{title}</span>
-	{/if}
-
-	<span class="l3">
-		<span class="seg">
-			{#if session.is_remote}
-				<Cloud size={12} strokeWidth={1.9} />
-			{:else}
-				<Monitor size={12} strokeWidth={1.9} />
-			{/if}
-			<span class="dev">{device}</span>
-		</span>
-		{#if branch}
-			<span class="seg">
-				<GitBranch size={12} strokeWidth={1.9} />
-				<span class="branch">{branch}</span>
+	<div
+		class="scard"
+		class:active
+		role="button"
+		tabindex="0"
+		aria-current={active ? 'true' : undefined}
+		onclick={openCard}
+		onkeydown={handleCardKeydown}
+		title={title}
+		style:transform={dragOffset === null ? undefined : `translateX(${dragOffset}px)`}
+	>
+		<span class="l1">
+			<span class="proj">{projectLabel}</span>
+			<span class="dot" aria-hidden="true"></span>
+			<span class="status {status}">
+				{#if status === 'working'}
+					<Loader2 size={11} strokeWidth={2.6} class="spin" />
+				{:else if status === 'await'}
+					<AlertCircle size={11} strokeWidth={2.2} />
+				{:else if status === 'done'}
+					<Check size={11} strokeWidth={2.6} />
+				{/if}
+				{statusLabel}
 			</span>
-		{/if}
-	</span>
+			<span class="timer" class:live>{timer}</span>
+		</span>
 
-	<span class="card-actions">
-		{#snippet settleToggle()}
-			{#if session.is_active}
-				<button
-					class="row-action state-toggle"
-					title="Settle session"
-					aria-label="Settle session"
-					disabled={deleteArmed || deleteLoading}
-					onclick={toggleSettled}
-				>
-					<Check size={13} strokeWidth={1.8} />
-				</button>
-			{:else}
-				<button
-					class="row-action state-toggle"
-					title="Move to Active"
-					aria-label="Move session to Active"
-					disabled={deleteArmed || deleteLoading}
-					onclick={toggleSettled}
-				>
-					<Undo2 size={13} strokeWidth={1.8} />
-				</button>
-			{/if}
-		{/snippet}
-
-		<RowActionMenu
-			open={actionsOpen}
-			onToggle={toggleActions}
-			label="Session actions"
-			persistent={settleToggle}
-		>
-			{#if deleteArmed}
-				<button class="row-action cancel" title="Cancel" aria-label="Cancel delete" onclick={cancelDelete}>
-					<X size={13} strokeWidth={2} />
-				</button>
-			{/if}
-			<button
-				class="row-action"
-				title="Rename session"
+		{#if renaming}
+			<input
+				class="rename-input"
+				type="text"
+				bind:value={renameValue}
+				use:focusSelect
+				onclick={(event) => event.stopPropagation()}
+				onkeydown={handleRenameKeydown}
+				onblur={commitRename}
 				aria-label="Rename session"
-				disabled={deleteArmed || deleteLoading}
-				onclick={startRename}
-			>
-				<Pencil size={13} strokeWidth={1.7} />
+			/>
+		{:else}
+			<span class="l2">{title}</span>
+		{/if}
+
+		<span class="l3">
+			<span class="seg">
+				{#if session.is_remote}
+					<Cloud size={12} strokeWidth={1.9} />
+				{:else}
+					<Monitor size={12} strokeWidth={1.9} />
+				{/if}
+				<span class="dev">{device}</span>
+			</span>
+			{#if branch}
+				<span class="seg">
+					<GitBranch size={12} strokeWidth={1.9} />
+					<span class="branch">{branch}</span>
+				</span>
+			{/if}
+		</span>
+	</div>
+
+	<span
+		class="card-actions"
+		aria-label="Session actions"
+		aria-hidden={swipeLayout && !actionsOpen ? 'true' : undefined}
+		inert={swipeLayout && !actionsOpen}
+	>
+		{#if deleteArmed}
+			<button class="row-action cancel" title="Cancel" aria-label="Cancel delete" onclick={cancelDelete}>
+				<X size={16} strokeWidth={2} />
 			</button>
+		{:else if session.is_active}
 			<button
-				class="row-action"
-				title="Fork session"
-				aria-label="Fork session"
-				disabled={deleteArmed || deleteLoading}
-				onclick={handleFork}
-			>
-				<GitFork size={13} strokeWidth={1.7} />
-			</button>
-			<button
-				class="row-action"
-				class:danger={deleteArmed}
-				title={deleteArmed ? 'Confirm delete' : 'Delete session'}
-				aria-label={deleteArmed ? 'Confirm delete' : 'Delete session'}
+				class="row-action state-toggle"
+				title="Settle session"
+				aria-label="Settle session"
 				disabled={deleteLoading}
-				onclick={handleDelete}
+				onclick={toggleSettled}
 			>
-				<Trash2 size={13} strokeWidth={deleteArmed ? 2 : 1.7} />
+				<Check size={16} strokeWidth={1.8} />
 			</button>
-		</RowActionMenu>
+		{:else}
+			<button
+				class="row-action state-toggle"
+				title="Move to Active"
+				aria-label="Move session to Active"
+				disabled={deleteLoading}
+				onclick={toggleSettled}
+			>
+				<Undo2 size={16} strokeWidth={1.8} />
+			</button>
+		{/if}
+		<button
+			class="row-action"
+			title="Rename session"
+			aria-label="Rename session"
+			disabled={deleteArmed || deleteLoading}
+			onclick={startRename}
+		>
+			<Pencil size={13} strokeWidth={1.7} />
+		</button>
+		<button
+			class="row-action"
+			title="Fork session"
+			aria-label="Fork session"
+			disabled={deleteArmed || deleteLoading}
+			onclick={handleFork}
+		>
+			<GitFork size={13} strokeWidth={1.7} />
+		</button>
+		<button
+			class="row-action"
+			class:danger={deleteArmed}
+			title={deleteArmed ? 'Confirm delete' : 'Delete session'}
+			aria-label={deleteArmed ? 'Confirm delete' : 'Delete session'}
+			disabled={deleteLoading}
+			onclick={handleDelete}
+		>
+			<Trash2 size={13} strokeWidth={deleteArmed ? 2 : 1.7} />
+		</button>
 	</span>
 </div>
 
 <style>
-	.scard {
+	.scard-frame {
 		--ram-reveal: 0;
+		position: relative;
+		width: 100%;
+		border-radius: 9px;
+	}
+	.scard-frame:hover,
+	.scard-frame:focus-within,
+	.scard-frame.actions-open {
+		--ram-reveal: 1;
+	}
+	.scard {
 		display: block;
 		width: 100%;
 		text-align: left;
@@ -364,11 +481,11 @@
 		cursor: pointer;
 		transition: background-color 0.13s ease;
 		position: relative;
+		z-index: 2;
 	}
-	.scard:hover,
-	.scard:focus-within,
-	.scard.actions-open {
-		--ram-reveal: 1;
+	.scard-frame:hover .scard,
+	.scard-frame:focus-within .scard,
+	.scard-frame.actions-open .scard {
 		background: var(--sidebar-accent);
 	}
 	.scard.active { background: var(--sidebar-accent-active); }
@@ -446,7 +563,7 @@
 	.timer.live { color: var(--primary); }
 	.scard:hover .timer,
 	.scard:focus-within .timer,
-	.scard.actions-open .timer { opacity: 0; }
+	.scard-frame.actions-open .timer { opacity: 0; }
 
 	.l2 {
 		display: block;
@@ -520,9 +637,13 @@
 		bottom: 4px;
 		display: flex;
 		align-items: center;
+		gap: 2px;
 		z-index: 5;
 	}
-	.card-actions :global(.ram) { height: 100%; }
+	.card-actions > * {
+		opacity: var(--ram-reveal);
+		transition: opacity 120ms ease, color 120ms ease, background-color 120ms ease;
+	}
 	.row-action {
 		width: 25px;
 		height: 25px;
@@ -551,11 +672,57 @@
 	.row-action:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 
 	@media (hover: none), (max-width: 1080px) {
-		.scard .timer { opacity: 1; }
+		.scard-frame {
+			overflow: hidden;
+			touch-action: pan-y;
+			background: color-mix(in oklch, var(--sidebar-accent-active) 84%, var(--sidebar));
+		}
+		.scard {
+			background: var(--sidebar);
+			transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1), background-color 130ms ease;
+			will-change: transform;
+		}
+		.scard.active { background: var(--sidebar-accent-active); }
+		.scard-frame.actions-open .scard { transform: translateX(-176px); }
+		.scard-frame.dragging .scard { transition: none; }
+		.scard-frame:hover .scard { background: var(--sidebar); }
+		.scard-frame:hover .scard.active { background: var(--sidebar-accent-active); }
+		.scard .timer,
+		.scard-frame.actions-open .timer { opacity: 1; }
+		.l1,
+		.l2,
+		.l3 { padding-right: 0; }
+		.rename-input { width: 100%; }
+
+		.card-actions {
+			top: 0;
+			right: 0;
+			bottom: 0;
+			width: 176px;
+			justify-content: flex-end;
+			gap: 0;
+			z-index: 1;
+			pointer-events: none;
+		}
+		.scard-frame.actions-open .card-actions { pointer-events: auto; }
+		.card-actions > * {
+			width: 44px;
+			height: 100%;
+			min-height: 44px;
+			border-radius: 0;
+			opacity: 1;
+		}
+		.card-actions > *:hover {
+			background: color-mix(in oklch, var(--sidebar-accent-active) 88%, transparent);
+		}
+		.row-action.danger {
+			background: color-mix(in oklch, var(--destructive) 18%, transparent);
+		}
 	}
 
 	@media (prefers-reduced-motion: reduce) {
 		.status :global(svg),
 		.status :global(.spin) { animation: none; }
+		.scard { transition: none; }
 	}
 </style>

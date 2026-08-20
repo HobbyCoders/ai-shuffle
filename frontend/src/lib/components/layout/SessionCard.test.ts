@@ -102,6 +102,14 @@ function renderCard(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	Object.defineProperty(window, 'matchMedia', {
+		writable: true,
+		value: vi.fn().mockImplementation(() => ({
+			matches: false,
+			addEventListener: vi.fn(),
+			removeEventListener: vi.fn(),
+		})),
+	});
 	mocks.activeSession.set({ sessionId: null });
 	mocks.setSessionActive.mockResolvedValue(undefined);
 	mocks.deleteSession.mockResolvedValue(undefined);
@@ -161,5 +169,48 @@ describe('SessionCard actions', () => {
 		expect(mocks.forkSession).toHaveBeenCalledWith('session-a');
 		await vi.waitFor(() => expect(onOpen).toHaveBeenCalledWith('forked-session'));
 		expect(onOpen).not.toHaveBeenCalledWith('session-a');
+	});
+
+	it('keeps mobile actions hidden until a left swipe reveals them', async () => {
+		vi.mocked(window.matchMedia).mockImplementation(() => ({
+			matches: true,
+			addEventListener: vi.fn(),
+			removeEventListener: vi.fn(),
+		}) as unknown as MediaQueryList);
+		const { container, onOpen } = renderCard();
+		const frame = container.querySelector('.scard-frame') as HTMLElement;
+		const card = container.querySelector('.scard') as HTMLElement;
+		const actions = container.querySelector('.card-actions') as HTMLElement;
+
+		expect(actions.getAttribute('aria-hidden')).toBe('true');
+		expect(frame.classList.contains('actions-open')).toBe(false);
+
+		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, clientX: 260, clientY: 20 });
+		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 180, clientY: 22 });
+		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, clientX: 180, clientY: 22 });
+
+		expect(frame.classList.contains('actions-open')).toBe(true);
+		expect(actions.getAttribute('aria-hidden')).toBeNull();
+		expect(onOpen).not.toHaveBeenCalled();
+	});
+
+	it('closes revealed mobile actions when the card is tapped', async () => {
+		vi.mocked(window.matchMedia).mockImplementation(() => ({
+			matches: true,
+			addEventListener: vi.fn(),
+			removeEventListener: vi.fn(),
+		}) as unknown as MediaQueryList);
+		const { container, onOpen } = renderCard();
+		const frame = container.querySelector('.scard-frame') as HTMLElement;
+		const card = container.querySelector('.scard') as HTMLElement;
+
+		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, clientX: 260, clientY: 20 });
+		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 180, clientY: 20 });
+		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, clientX: 180, clientY: 20 });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		await fireEvent.click(card);
+
+		expect(frame.classList.contains('actions-open')).toBe(false);
+		expect(onOpen).not.toHaveBeenCalled();
 	});
 });
