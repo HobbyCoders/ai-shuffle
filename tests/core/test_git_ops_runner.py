@@ -313,6 +313,50 @@ def test_refresh_status_caps_at_three_checkouts(project, tmp_path):
         assert f"co-{ME}-" in call.args[1]
 
 
+def test_refresh_status_prefers_stalest_updated_at(project, tmp_path):
+    """A second click must cover worktrees the first cap skipped."""
+    from app.db.base import get_db
+
+    rows = _seed_checkouts(project, tmp_path, 5)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for i, row in enumerate(rows):
+            cursor.execute(
+                "UPDATE checkouts SET updated_at = %s WHERE id = %s",
+                (f"2026-01-0{i + 1}T00:00:00", row["id"]),
+            )
+
+    with patch.object(git_ops_runner, "_record_checkout_state") as rec:
+        git_ops_runner.execute_refresh_status(
+            {"project_v2_id": project["id"], "params": {}}
+        )
+
+    assert [call.args[1] for call in rec.call_args_list] == [
+        rows[0]["path"],
+        rows[1]["path"],
+        rows[2]["path"],
+    ]
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for i, row in enumerate(rows[:3]):
+            cursor.execute(
+                "UPDATE checkouts SET updated_at = %s WHERE id = %s",
+                (f"2026-02-0{i + 1}T00:00:00", row["id"]),
+            )
+
+    with patch.object(git_ops_runner, "_record_checkout_state") as rec:
+        git_ops_runner.execute_refresh_status(
+            {"project_v2_id": project["id"], "params": {}}
+        )
+
+    assert [call.args[1] for call in rec.call_args_list] == [
+        rows[3]["path"],
+        rows[4]["path"],
+        rows[0]["path"],
+    ]
+
+
 def test_refresh_status_caps_at_20s_wall_clock(project, tmp_path):
     _seed_checkouts(project, tmp_path, 4)
 

@@ -442,7 +442,7 @@
 							class="ic-btn gs-refresh"
 							title="Refresh git status on this device"
 							onclick={() => refreshInstallGitState(inst.id)}
-							disabled={gsRefreshingRunner === inst.id}
+							disabled={gsRefreshingRunner !== null}
 						><RefreshCw size={13} /></button>
 					</div>
 					{#if inst.checkouts.length === 0}

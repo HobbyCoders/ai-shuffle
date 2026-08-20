@@ -165,6 +165,9 @@ def execute_refresh_status(op_row: Dict[str, Any]) -> Dict[str, Any]:
             continue
         matching.append(row)
 
+    # Cap would otherwise always stamp the same oldest-created rows.
+    matching.sort(key=lambda r: str(r.get("updated_at") or ""))
+
     deadline = time.monotonic() + REFRESH_STATUS_DEADLINE_SECONDS
     n = 0
     skipped = 0
