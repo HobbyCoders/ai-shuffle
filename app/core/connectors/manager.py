@@ -328,8 +328,8 @@ class ConnectorManager:
         # Memory instructions
         parts.append(
             "MEMORY: Important context about this user, ongoing projects, preferences, "
-            "and key decisions should be persisted to CLAUDE.md in the working directory. "
-            "Read CLAUDE.md at the start of each conversation to recall prior context. "
+            "and key decisions should be persisted to AGENTS.md in the working directory. "
+            "Read AGENTS.md at the start of each conversation to recall prior context. "
             "Update it when you learn important new information worth remembering."
         )
 
