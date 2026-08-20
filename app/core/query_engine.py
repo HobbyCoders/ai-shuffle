@@ -47,6 +47,7 @@ _SERVER_TOOL_RESULT_TYPES: tuple = (ServerToolResultBlock,)
 from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
 from app.db import database
+from app.db import turns as turns_db
 from app.db.async_database import run_sync
 from pathlib import Path
 from app.core.config import settings
@@ -855,6 +856,8 @@ async def execute_query(
             source_device_id=None
         )
 
+    turn_started_at = datetime.now(timezone.utc)
+
     # Store user message with profile_id for per-query tracking. Skipped on a
     # failover retry (persist_user_message=False): the original entry already
     # persisted the user turn, so re-persisting would duplicate the message.
@@ -1102,6 +1105,28 @@ async def execute_query(
         working_dir=getattr(options, "cwd", None),
     )
 
+    # Terminal history row for a turn that ran outside the scheduler, so its
+    # provider spend is attributable. Written AFTER the fact and never live —
+    # see turns.record_adhoc_turn for why a queued/running row here would be
+    # double-run or reaped. The exception paths above raise before this point
+    # and deliberately record nothing (they write no usage_log row either).
+    try:
+        _is_error = bool(metadata.get("is_error"))
+        await run_sync(
+            turns_db.record_adhoc_turn,
+            session_id,
+            "automation_step" if automation_id else "api_query",
+            outcome="aborted" if _is_error else "completed",
+            prompt=prompt,
+            profile_id=profile_id,
+            project_id=project_id,
+            stop_reason=metadata.get("stop_reason"),
+            error=str(metadata["errors"]) if (_is_error and metadata.get("errors")) else None,
+            started_at=turn_started_at,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to record ad-hoc turn for {session_id}: {e}")
+
     # Push agent-memory the CLI wrote this turn up to the shared DB.
     await push_memory(project_id, getattr(options, "cwd", None))
 
@@ -1329,6 +1354,8 @@ async def stream_query(
 
     # Yield init event
     yield {"type": "init", "session_id": session_id}
+
+    turn_started_at = datetime.now(timezone.utc)
 
     # --- Session Pool: Acquire or create SDK client ---
     pool = get_session_pool()
@@ -1795,6 +1822,28 @@ async def stream_query(
         prompt=prompt,
         working_dir=getattr(options, "cwd", None),
     )
+
+    # Terminal history row for a turn that ran outside the scheduler — written
+    # after the fact, never live (see turns.record_adhoc_turn). The early
+    # returns above (busy-write guard, admission refusal, connect failure)
+    # record nothing: they spent no provider tokens.
+    try:
+        _is_error = bool(metadata.get("is_error"))
+        _aborted = interrupted or _is_error or not state.is_connected
+        await run_sync(
+            turns_db.record_adhoc_turn,
+            session_id,
+            "api_stream",
+            outcome="aborted" if _aborted else "completed",
+            prompt=prompt,
+            profile_id=profile_id,
+            project_id=project_id,
+            stop_reason="interrupted" if interrupted else metadata.get("stop_reason"),
+            error=str(metadata["errors"]) if (_is_error and metadata.get("errors")) else None,
+            started_at=turn_started_at,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to record ad-hoc turn for {session_id}: {e}")
 
     # Capture the SDK context-usage breakdown so the context-usage endpoint can
     # serve a persisted snapshot after the subprocess is evicted from the pool.

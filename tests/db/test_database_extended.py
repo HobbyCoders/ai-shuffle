@@ -150,6 +150,21 @@ class TestAnalyticsOperations:
 
         assert isinstance(result, list)
 
+    def test_session_less_usage_counts_in_stats_and_trends(self, mock_db, setup_profile):
+        """Internal generation spend has no session (usage_log.session_id NULL).
+        Both the totals and the trend query LEFT JOIN sessions, so it must still
+        be counted — an inner join silently dropped it from the trend chart."""
+        db.log_usage(None, setup_profile, "claude-3", 100, 200, 0.10, 1000)
+
+        stats = db.get_analytics_usage_stats()
+        assert stats["total_tokens_in"] == 100
+        assert stats["total_tokens_out"] == 200
+
+        trends = db.get_analytics_usage_trends(interval="day")
+        assert sum(t["query_count"] for t in trends) == 1
+        assert sum(t["tokens_in"] for t in trends) == 100
+        assert round(sum(t["cost_usd"] for t in trends), 6) == 0.10
+
     def test_get_analytics_top_sessions(self, mock_db, setup_profile, setup_project):
         """get_analytics_top_sessions should return top sessions by cost."""
         db.create_session("session-1", setup_profile, setup_project)

@@ -20,6 +20,7 @@ from app.core.provider.events import (
 )
 
 from app.db import database
+from app.db import turns as turns_db
 from app.db.async_database import run_sync
 from app.core.session_pool import (
     SessionState, get_session_pool, is_subprocess_alive,
@@ -125,6 +126,7 @@ async def _run_background_query_impl(
     """
     # Extract profile_id for per-query tracking
     profile_id = profile.get("id")
+    turn_started_at = datetime.now(timezone.utc)
 
     # Store user message and broadcast to other devices
     user_msg = await run_sync(
@@ -591,6 +593,28 @@ async def _run_background_query_impl(
         interrupted=interrupted,
         log_prefix="[Background] ",
     )
+
+    # Terminal history row for a turn that ran outside the scheduler — written
+    # after the fact, never live (see turns.record_adhoc_turn). The early
+    # returns above (busy-write guard, option-build failure, connect failure)
+    # record nothing: they spent no provider tokens.
+    try:
+        _is_error = bool(metadata.get("is_error"))
+        _aborted = interrupted or _is_error or not state.is_connected
+        await run_sync(
+            turns_db.record_adhoc_turn,
+            session_id,
+            "api_background",
+            outcome="aborted" if _aborted else "completed",
+            prompt=prompt,
+            profile_id=profile_id,
+            project_id=project.get("id") if project else None,
+            stop_reason="interrupted" if interrupted else metadata.get("stop_reason"),
+            error=str(metadata["errors"]) if (_is_error and metadata.get("errors")) else None,
+            started_at=turn_started_at,
+        )
+    except Exception as e:
+        logger.warning(f"[Background] Failed to record ad-hoc turn for {session_id}: {e}")
 
     # Capture the SDK context-usage breakdown so the endpoint can serve a
     # persisted snapshot post-eviction. Runs DETACHED (self-guards on the pool's

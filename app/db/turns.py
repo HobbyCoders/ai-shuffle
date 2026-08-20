@@ -187,6 +187,79 @@ def update_queued_turn_prompt(
     return _row(row)
 
 
+def record_adhoc_turn(
+    session_id: str,
+    source: str,
+    *,
+    outcome: str = "completed",
+    prompt: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    stop_reason: Optional[str] = None,
+    error: Optional[str] = None,
+    started_at=None,
+    payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Write a TERMINAL history row for a turn that already ran outside the
+    scheduler (ad-hoc REST calls, automation steps, headless background runs).
+
+    These paths spend provider tokens but never take a run lease, so they must
+    NOT be represented by a live or queued row. A ``running`` row with no lease
+    is aborted mid-flight by the 15s reap sweep
+    (``streaming_status._reap_and_kick_turns`` -> ``reap_expired``), and a
+    ``queued`` row can be picked up and executed a second time by the
+    cross-runner claim loop. Writing the row already terminal — after the turn
+    actually ran — makes it inert to both: the scheduler reads only ``queued``,
+    the reaper touches only live states, the partial unique index
+    ``idx_turns_one_live_per_session`` covers only live states (so this insert
+    succeeds even while a real turn is live for the same session), and
+    lifecycle computation ignores it. ``run_id``/``instance_id`` stay NULL
+    because there was never a lease to point at.
+
+    ``started_at`` is the caller's recorded turn start (defaults to now);
+    ``ended_at`` is stamped at insert. Returns the created turn row.
+    """
+    if outcome not in ("completed", "aborted"):
+        raise ValueError(
+            f"record_adhoc_turn outcome must be completed|aborted, got {outcome!r}"
+        )
+    turn_id = f"turn-{uuid.uuid4().hex}"
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COALESCE(MAX(position), 0) + 1 AS pos FROM turns WHERE session_id = %s",
+            (session_id,),
+        )
+        pos_row = cursor.fetchone()
+        position = pos_row["pos"] if pos_row and pos_row.get("pos") is not None else 1
+        cursor.execute(
+            "INSERT INTO turns "
+            "(id, session_id, state, source, prompt, profile_id, project_id, "
+            "payload, position, stop_reason, error, started_at, ended_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+            "COALESCE(%s, NOW()), NOW()) "
+            "RETURNING *",
+            (
+                turn_id,
+                session_id,
+                outcome,
+                source,
+                prompt,
+                profile_id,
+                project_id,
+                json.dumps(payload or {}),
+                position,
+                stop_reason,
+                error,
+                started_at,
+            ),
+        )
+        row = _row(cursor.fetchone())
+        if row is None:  # INSERT ... RETURNING always yields the new row
+            raise RuntimeError(f"record_adhoc_turn: INSERT returned no row for {turn_id}")
+        return row
+
+
 # ---------------------------------------------------------------------------
 # Live-state transitions (all DB-raced via the partial unique index)
 # ---------------------------------------------------------------------------

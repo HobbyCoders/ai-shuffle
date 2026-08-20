@@ -469,6 +469,8 @@ def get_analytics_usage_trends(
             return []
         date_expr = _interval_date_expressions()[interval]
 
+        # LEFT JOIN (like the stats/breakdown queries) so session-less rows —
+        # internal generation spend, which has no session — still show up.
         cursor.execute(f"""
             SELECT
                 {date_expr} as date,
@@ -477,7 +479,7 @@ def get_analytics_usage_trends(
                 COALESCE(SUM(u.cost_usd), 0) as cost_usd,
                 COUNT(*) as query_count
             FROM usage_log u
-            JOIN sessions s ON u.session_id = s.id
+            LEFT JOIN sessions s ON u.session_id = s.id
             WHERE 1=1 {date_filter} {user_filter}
             GROUP BY {date_expr}
             ORDER BY date ASC

@@ -39,6 +39,8 @@ from app.core.generation import (
     get_clarification_questions,
 )
 from app.core.generation.clarification import format_clarification_context
+from app.db import database
+from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -334,6 +336,13 @@ async def generate_with_claude(
     t0 = time.perf_counter()
     response_text: list[str] = []
 
+    # ResultMessage accounting, captured for the usage_log write below.
+    # ``result_usage is None`` means no ResultMessage was ever seen (timeout,
+    # crash) — nothing to bill.
+    result_usage: Optional[Dict] = None
+    result_cost: Optional[float] = None
+    result_duration_ms: Optional[int] = None
+
     # [gen-debug] Per-message timing. Capture time-to-first-event and
     # time-to-first-text so we can split "leg startup + init handshake" from
     # "model reasoning + token streaming."
@@ -361,6 +370,7 @@ async def generate_with_claude(
 
     async def _run_turn() -> None:
         nonlocal t_first_event, t_first_text, msg_count
+        nonlocal result_usage, result_cost, result_duration_ms
         await adapter.send_query(prompt)
         async for message in adapter.receive_events():
             now = time.perf_counter()
@@ -390,6 +400,9 @@ async def generate_with_claude(
                 detail = _result_message_error(message)
                 if detail:
                     raise RuntimeError(f"AI generation failed: {detail}")
+                result_usage = getattr(message, "usage", None) or {}
+                result_cost = getattr(message, "total_cost_usd", None)
+                result_duration_ms = getattr(message, "duration_ms", None)
                 break
 
     async with api_error_handler("run AI generation"):
@@ -429,6 +442,30 @@ async def generate_with_claude(
                 )
 
     t_total = time.perf_counter() - t0
+
+    # Generation calls (commit messages, PR text, branch names, profile /
+    # subagent generation) have no session, so session_id is NULL here:
+    # usage_log.session_id is nullable and the analytics totals LEFT JOIN
+    # sessions, so this spend lands in the totals without inventing a session
+    # row. log_usage's in-memory per-session cache append is gated on a truthy
+    # session_id, so None skips it — intended, there is nothing to cache.
+    if result_usage is not None:
+        try:
+            await run_sync(
+                database.log_usage,
+                session_id=None,
+                profile_id=(profile or {}).get("id"),
+                model=effective_model,
+                tokens_in=result_usage.get("input_tokens", 0),
+                tokens_out=result_usage.get("output_tokens", 0),
+                cost_usd=result_cost or 0,
+                duration_ms=result_duration_ms or int(t_total * 1000),
+            )
+        except Exception as usage_err:  # noqa: BLE001 - accounting is best-effort
+            logger.warning(
+                f"[generate_with_claude] failed to log generation usage: {usage_err}"
+            )
+
     logger.info(
         f"[generate_with_claude] adapter path model={effective_model} "
         f"took {t_total * 1000:.0f}ms"

@@ -17,6 +17,7 @@ import pytest
 from app.core.provider.events import SystemMessage
 
 import app.core.query_engine as qe
+from app.db import turns as turns_db
 
 AUTOMATION_ID = "auto-nightly-report"
 
@@ -115,3 +116,48 @@ async def test_interactive_session_has_no_automation_id(engine_mocks):
     assert engine_mocks.create_session.call_args.kwargs["automation_id"] is None
     # Interactive (non-automation) sessions ARE active.
     assert engine_mocks.create_session.call_args.kwargs["is_active"] is True
+
+
+# ---------------------------------------------------------------------------
+# Ad-hoc turn accounting
+# ---------------------------------------------------------------------------
+# execute_query's record_adhoc_turn call is deliberately wrapped in try/except
+# so a failed accounting write can never break a turn. That also means a
+# drifted kwarg or a broken import degrades into a log line nobody reads, with
+# every existing test still green. tests/db/test_turns.py covers the writer;
+# only a call-site test that reads the row back covers the wiring.
+
+
+@pytest.mark.asyncio
+async def test_execute_query_records_an_adhoc_turn(engine_mocks):
+    result = await qe.execute_query(
+        prompt="hello",
+        profile_id="principal-engineer",
+    )
+
+    row = turns_db.get_latest_turn(result["session_id"])
+    assert row is not None
+    assert row["state"] == "completed"
+    assert row["source"] == "api_query"
+    assert row["prompt"] == "hello"
+    assert row["profile_id"] == "principal-engineer"
+    # The turn ran outside the scheduler, so there was never a lease to point at.
+    assert row["run_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_adhoc_turn_from_an_automation_is_sourced_automation_step(engine_mocks):
+    """Automation steps go through the same call as ad-hoc REST queries, so
+    ``source`` is the only thing separating their spend in the turns history."""
+    result = await qe.execute_query(
+        prompt="nightly report",
+        profile_id="principal-engineer",
+        automation_id=AUTOMATION_ID,
+    )
+
+    row = turns_db.get_latest_turn(result["session_id"])
+    assert row is not None
+    assert row["source"] == "automation_step"
+    assert row["state"] == "completed"
+    assert row["prompt"] == "nightly report"
+    assert row["run_id"] is None

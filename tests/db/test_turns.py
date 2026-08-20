@@ -69,6 +69,82 @@ def test_enqueue_persists_optional_fields(mock_db):
 
 
 # ---------------------------------------------------------------------------
+# Ad-hoc terminal history rows
+# ---------------------------------------------------------------------------
+
+def test_record_adhoc_turn_writes_a_terminal_row(mock_db):
+    t = turns.record_adhoc_turn(
+        "s1",
+        "api_query",
+        prompt="ad-hoc",
+        profile_id="prof-1",
+        project_id="proj-1",
+        stop_reason="end_turn",
+    )
+    got = turns.get_turn(t["id"])
+    assert got["state"] == "completed"
+    assert got["source"] == "api_query"
+    assert got["prompt"] == "ad-hoc"
+    assert got["profile_id"] == "prof-1"
+    assert got["project_id"] == "proj-1"
+    assert got["stop_reason"] == "end_turn"
+    # Terminal on arrival: both timestamps set, no run lease to point at.
+    assert got["started_at"] is not None
+    assert got["ended_at"] is not None
+    assert got["run_id"] is None
+    assert got["instance_id"] is None
+    # Inert to the scheduler and the live-slot reads.
+    assert turns.get_queued_turns("s1") == []
+    assert turns.get_live_turn("s1") is None
+
+
+def test_record_adhoc_turn_aborted_carries_error(mock_db):
+    t = turns.record_adhoc_turn(
+        "s1", "api_stream", outcome="aborted",
+        stop_reason="interrupted", error="boom",
+    )
+    got = turns.get_turn(t["id"])
+    assert got["state"] == "aborted"
+    assert got["stop_reason"] == "interrupted"
+    assert got["error"] == "boom"
+
+
+def test_record_adhoc_turn_succeeds_while_a_turn_is_live(mock_db):
+    """Terminal rows sit outside the partial unique index, so recording one
+    never trips on the session's live turn (or aborts it)."""
+    live = turns.enqueue_turn("s1", "user")
+    turns.start_turn(live["id"], run_id="run-1")
+
+    adhoc = turns.record_adhoc_turn("s1", "api_background")
+
+    assert turns.get_turn(adhoc["id"])["state"] == "completed"
+    # The real live turn keeps the slot, untouched.
+    assert turns.get_live_turn("s1")["id"] == live["id"]
+
+
+def test_record_adhoc_turn_is_not_reaped(mock_db):
+    """A terminal row has no run lease, but the reap sweep only looks at live
+    states — so it must survive a sweep that aborts a genuinely dead turn."""
+    adhoc = turns.record_adhoc_turn("s1", "api_query")
+    dead = turns.enqueue_turn("s2", "auto_continue")
+    turns.start_turn(dead["id"], run_id=None)
+
+    reaped_ids = {r["id"] for r in turns.reap_expired()}
+
+    assert adhoc["id"] not in reaped_ids
+    assert dead["id"] in reaped_ids
+    row = turns.get_turn(adhoc["id"])
+    assert row["state"] == "completed"
+    assert row["stop_reason"] is None
+
+
+def test_record_adhoc_turn_rejects_non_terminal_outcome(mock_db):
+    for bad in ("running", "queued", "parked"):
+        with pytest.raises(ValueError):
+            turns.record_adhoc_turn("s1", "api_query", outcome=bad)
+
+
+# ---------------------------------------------------------------------------
 # Live-state transitions
 # ---------------------------------------------------------------------------
 
