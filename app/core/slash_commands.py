@@ -346,11 +346,11 @@ SDK_BUILTIN_COMMANDS = {
         "type": "sdk_builtin"
     },
     "init": {
-        "description": "Create a CLAUDE.md file for your project",
+        "description": "Create an AGENTS.md file for your project",
         "type": "sdk_builtin"
     },
     "memory": {
-        "description": "View and edit CLAUDE.md and memory files",
+        "description": "View and edit AGENTS.md and memory files",
         "type": "sdk_builtin"
     },
     "add-dir": {

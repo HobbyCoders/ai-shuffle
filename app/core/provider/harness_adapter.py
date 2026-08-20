@@ -126,10 +126,13 @@ SUPPLIED BY FLUID ITSELF, WITH NO WIRING HERE (Claude-ecosystem compat, CE1):
     and ``env`` becomes a child-process overlay for the Bash builtin and stdio
     MCP spawns — never an ``os.environ`` mutation (``fluid.context.
     claude_settings``, ruling CE4).
-  * ``CLAUDE.md`` ``@path`` imports, ``CLAUDE.local.md`` and codex
-    ``AGENTS.override.md`` are expanded/collected by the instruction gatherer
-    (rulings CE2/CE3) — so the compiled prompt this adapter builds already
-    contains them.
+  * instruction files — the ``AGENTS.md`` conventions (``AGENTS.md`` /
+    ``AGENT.md`` / ``.agents/AGENTS.md`` per scope, ``AGENTS.override.md``
+    replacing the root slot, ``~/.fluid/AGENTS.md`` globally) are collected
+    with ``@path`` imports expanded by the instruction gatherer (rulings
+    CE2/CE3) — so the compiled prompt this adapter builds already contains
+    them. ``CLAUDE.md``/``CLAUDE.local.md`` are no longer read directly; an
+    explicit settings import copies them over instead.
   * ``agents`` (subagents) — ``.claude/agents/**/*.md`` plus plugin agents are
     read into ``ctx.extra["agent_registry"]`` by ``NativeLoop`` (ruling CE6).
     The prompt's agents index is assembled by THIS module instead of fluid's
