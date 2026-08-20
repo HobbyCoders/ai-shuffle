@@ -163,11 +163,13 @@ export const layout = {
 		}));
 	},
 
-	/** Navigate to the Sessions board (mission-control overview) */
+	/** Navigate home. The Sessions board is retired — home is a fresh chat;
+	 *  sessions are navigated from the sidebar. ('board' stays in the ViewType
+	 *  union so persisted views from older builds still type-check.) */
 	openBoard() {
 		_update((s) => ({
 			...s,
-			activeView: { type: 'board', sessionId: null }
+			activeView: { type: 'chat', sessionId: null }
 		}));
 	},
 

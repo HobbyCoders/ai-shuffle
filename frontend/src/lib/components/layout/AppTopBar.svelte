@@ -22,7 +22,6 @@
 		isAdmin?: boolean;
 		onNewSession: () => void;
 		onOpenSession: (sessionId: string) => void;
-		onOpenSessions: () => void;
 		onOpenFeature: (type: ViewType) => void;
 		onOpenSpotlight?: () => void;
 	}
@@ -31,7 +30,6 @@
 		isAdmin = false,
 		onNewSession,
 		onOpenSession,
-		onOpenSessions,
 		onOpenFeature,
 		onOpenSpotlight
 	}: Props = $props();
@@ -113,7 +111,6 @@
 			onNewSession={drawerGo(onNewSession)}
 			onOpenSession={drawerGo(onOpenSession)}
 			onOpenFeature={drawerGo(onOpenFeature)}
-			onOpenSessions={drawerGo(onOpenSessions)}
 			onOpenSpotlight={onOpenSpotlight ? drawerGo(onOpenSpotlight) : undefined}
 		>
 			{#snippet headerAction()}

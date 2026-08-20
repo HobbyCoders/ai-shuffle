@@ -43,7 +43,6 @@
 	import { gitOperations, gitOperationRunning } from '$lib/stores/gitOperations.svelte';
 	import GitProgressPopover from '$lib/components/git/GitProgressPopover.svelte';
 	import ChatView from './ChatView.svelte';
-	import SessionsBoard from './SessionsBoard.svelte';
 	import BuildPage from './BuildPage.svelte';
 	import PageHeader from './PageHeader.svelte';
 	import StudioTopBar from './StudioTopBar.svelte';
@@ -70,8 +69,6 @@
 		onOpenPlugins?: () => void;
 		onNewSession?: () => void;
 		onNewSessionForProject?: (projectId: string) => void;
-		/** Return to the sessions board (the breadcrumb's project crumb). */
-		onOpenSessions?: () => void;
 		isMobile?: boolean;
 		/** Desktop shell: sidebar state + toggle, surfaced in the top bar. */
 		sidebarCollapsed?: boolean;
@@ -83,7 +80,6 @@
 		onOpenPlugins,
 		onNewSession,
 		onNewSessionForProject,
-		onOpenSessions,
 		isMobile = false,
 		sidebarCollapsed = false,
 		onToggleSidebar
@@ -827,7 +823,6 @@
 			title={crumbTitle}
 			{sidebarCollapsed}
 			{onToggleSidebar}
-			onOpenProject={onOpenSessions}
 		>
 			{#snippet actions()}
 				{@render downloadAction()}
@@ -860,12 +855,9 @@
 				{/if}
 			</div>
 		{:else if $activeView.type === 'board'}
-			<div class="feature-panel">
-				<SessionsBoard
-					onOpenSession={onOpenSession || (() => {})}
-					onNewSession={onNewSession || (() => {})}
-					onNewSessionForProject={onNewSessionForProject}
-				/>
+			<!-- Legacy persisted view from before the board was retired: show chat -->
+			<div class="chat-row">
+				<ChatView />
 			</div>
 		{:else if isBuildView}
 			<!-- Unified Build page (hosts Agents/MCP/Plugins/Hooks) -->
@@ -905,13 +897,9 @@
 			</div>
 		{/if}
 	{:else}
-		<!-- Default landing: the Sessions board -->
-		<div class="feature-panel">
-			<SessionsBoard
-				onOpenSession={onOpenSession || (() => {})}
-				onNewSession={onNewSession || (() => {})}
-				onNewSessionForProject={onNewSessionForProject}
-			/>
+		<!-- Default landing: a fresh chat (the Sessions board is retired) -->
+		<div class="chat-row">
+			<ChatView />
 		</div>
 	{/if}
 </div>

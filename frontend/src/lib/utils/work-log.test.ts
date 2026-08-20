@@ -41,20 +41,49 @@ const SETTLED = { isStreaming: false, groupingEnabled: true };
 const LIVE = { isStreaming: true, groupingEnabled: true };
 
 describe('buildDisplayItems — settled turns', () => {
-	it('folds intermediate tools and commentary, leaving the final answer visible', () => {
-		const messages = [user('do it'), tool(), text('looking'), tool(), text('done')];
+	it('folds each run of tools separately, keeping every assistant message visible', () => {
+		const messages = [
+			user('do it'),
+			tool(),
+			tool(),
+			text('progress so far'),
+			tool(),
+			tool(),
+			text('done')
+		];
 		const items = buildDisplayItems(messages, SETTLED);
 
-		expect(items.map((i) => i.kind)).toEqual(['message', 'work_log', 'message']);
-		const fold = items[1];
-		if (fold.kind !== 'work_log') throw new Error('expected a work_log');
-		expect(fold.mode).toBe('settled');
-		expect(fold.folded).toHaveLength(3);
-		expect(fold.tail).toHaveLength(0);
-		// The turn's last assistant text is the one still on screen.
-		const last = items[2];
-		if (last.kind !== 'message') throw new Error('expected a message');
-		expect(last.message.content).toBe('done');
+		expect(items.map((i) => i.kind)).toEqual([
+			'message', // user
+			'work_log', // first two tools
+			'message', // progress so far
+			'work_log', // second two tools
+			'message' // done
+		]);
+		for (const fold of items.filter((i) => i.kind === 'work_log')) {
+			if (fold.kind !== 'work_log') continue;
+			expect(fold.mode).toBe('settled');
+			expect(fold.folded).toHaveLength(2);
+			expect(fold.tail).toHaveLength(0);
+		}
+		const commentary = items[2];
+		if (commentary.kind !== 'message') throw new Error('expected a message');
+		expect(commentary.message.content).toBe('progress so far');
+	});
+
+	it('renders a lone tool between assistant messages flat, with no fold chrome', () => {
+		const messages = [user('do it'), tool(), text('looking'), tool(), text('done')];
+		const items = buildDisplayItems(messages, SETTLED);
+		expect(items.every((i) => i.kind === 'message')).toBe(true);
+		expect(items).toHaveLength(5);
+	});
+
+	it('folds thinking blocks into the run alongside tools', () => {
+		const messages = [user('go'), msg({ type: 'thinking', content: 'hmm' }), tool(), text('done')];
+		const items = buildDisplayItems(messages, SETTLED);
+		const fold = items.find((i) => i.kind === 'work_log');
+		if (fold?.kind !== 'work_log') throw new Error('expected a work_log');
+		expect(fold.folded).toHaveLength(2);
 	});
 
 	it('never folds a failed tool row', () => {
@@ -80,6 +109,7 @@ describe('buildDisplayItems — settled turns', () => {
 			tool(),
 			msg({ type: 'subagent', agentName: 'Explore' }),
 			tool({ toolName: 'TodoWrite' }),
+			tool({ toolName: 'Note' }),
 			tool({ toolName: 'AskUserQuestion' }),
 			text('done')
 		];
@@ -90,10 +120,11 @@ describe('buildDisplayItems — settled turns', () => {
 
 		expect(kinds).toContain('subagent');
 		expect(kinds).toContain('TodoWrite');
+		expect(kinds).toContain('Note');
 		expect(kinds).toContain('AskUserQuestion');
 	});
 
-	it('labels the fold with the turn duration', () => {
+	it('labels the fold with the run duration', () => {
 		const messages = [
 			user('go', '2026-08-19T10:00:00.000Z'),
 			tool({ timestamp: '2026-08-19T10:00:30.000Z' }),
@@ -103,27 +134,27 @@ describe('buildDisplayItems — settled turns', () => {
 		const items = buildDisplayItems(messages, SETTLED);
 		const fold = items.find((i) => i.kind === 'work_log');
 		if (fold?.kind !== 'work_log') throw new Error('expected a work_log');
-		expect(fold.durationLabel).toBe('Worked for 2m 14s');
+		expect(fold.durationLabel).toBe('Worked for 1m 44s');
 	});
 
-	it('says "Stopped after" when the turn was interrupted', () => {
+	it('says "Stopped after" on the final run of an interrupted turn', () => {
 		const messages = [
 			user('go', '2026-08-19T10:00:00.000Z'),
+			text('half an answer\n\n[Stopped]', '2026-08-19T10:00:02.000Z'),
 			tool({ timestamp: '2026-08-19T10:00:05.000Z' }),
-			tool({ timestamp: '2026-08-19T10:00:12.000Z' }),
-			text('half an answer\n\n[Stopped]', '2026-08-19T10:00:12.000Z')
+			tool({ timestamp: '2026-08-19T10:00:12.000Z' })
 		];
 		const items = buildDisplayItems(messages, SETTLED);
 		const fold = items.find((i) => i.kind === 'work_log');
 		if (fold?.kind !== 'work_log') throw new Error('expected a work_log');
-		expect(fold.durationLabel).toBe('Stopped after 12s');
+		expect(fold.durationLabel).toBe('Stopped after 7s');
 	});
 
-	it('leaves the label null when no timestamps are available', () => {
+	it('falls back to a tool count when no timestamps are available', () => {
 		const items = buildDisplayItems([user('go'), tool(), tool(), text('done')], SETTLED);
 		const fold = items.find((i) => i.kind === 'work_log');
 		if (fold?.kind !== 'work_log') throw new Error('expected a work_log');
-		expect(fold.durationLabel).toBeNull();
+		expect(fold.durationLabel).toBe('2 tool calls');
 	});
 });
 

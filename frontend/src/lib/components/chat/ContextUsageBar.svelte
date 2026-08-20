@@ -416,13 +416,18 @@
 		});
 	}
 
-	function isSubscriptionProvider(pb: {
-		providerId: string;
-		providerType: string | null;
-	}): boolean {
+	/**
+	 * True when this provider's window feed reports REMAINING quota, so its
+	 * display needs the remaining → used inversion. Only the ChatGPT/Codex
+	 * subscription feed behaves that way. Everything else already reports
+	 * used-of-100: Grok's billing payload (creditUsagePercent / usagePercent),
+	 * API-key header captures, and OpenRouter's credit_limit.
+	 */
+	function reportsRemaining(pb: { providerId: string; providerType: string | null }): boolean {
 		const entry = getProviders().find((p) => p.id === pb.providerId);
 		const type = entry?.provider_type ?? pb.providerType ?? '';
-		const kind = entry?.auth_kind ?? (type === 'chatgpt' ? 'subscription' : 'api');
+		if (type !== 'chatgpt') return false;
+		const kind = entry?.auth_kind ?? 'subscription';
 		return kind === 'subscription';
 	}
 
@@ -431,7 +436,7 @@
 		w: UsageWindow,
 		nowMs: number
 	): number {
-		return isSubscriptionProvider(pb) ? usedPct(w, nowMs) : effectivePct(w, nowMs);
+		return reportsRemaining(pb) ? usedPct(w, nowMs) : effectivePct(w, nowMs);
 	}
 
 	// Claude plan-usage collapse: the rows follow the 'plan' section toggle.
@@ -641,8 +646,9 @@
 			<!-- ═══ Provider usage (non-Claude) ═══ -->
 			<!-- Each bucket's head is its collapse toggle (name + planType stay);
 			     collapsed shows the bucket's max window pct and hides both the window
-			     rows and the credits line. ChatGPT/Codex subscription windows use
-			     usedPct (remaining → used); API-key / credit windows stay as-is. -->
+			     rows and the credits line. ChatGPT/Codex subscription windows invert
+			     remaining → used; Grok / API-key / credit windows already report
+			     used-of-100 and pass through unchanged. -->
 			{#each Object.values($rateLimit.providerBuckets ?? {}) as pb (pb.providerId)}
 				{@const sectionId = `provider:${pb.providerId}`}
 				{@const pbDisplay = providerDisplayFor(pb)}

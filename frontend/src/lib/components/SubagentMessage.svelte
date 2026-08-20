@@ -40,21 +40,6 @@
 		};
 	});
 
-	/**
-	 * One pill per tool call the subagent has made, in order: done, failed,
-	 * running, or not-yet-started. Same tick-bar idiom the todo row uses, so a
-	 * glance across the transcript reads progress the same way everywhere.
-	 */
-	const tickBar = $derived(
-		validChildren
-			.filter((c) => c.type === 'tool_use')
-			.map((c) => {
-				if (c.toolStatus === 'error') return 'e';
-				if (c.toolStatus === 'complete') return 'f';
-				return 'c';
-			})
-	);
-
 	// Get status display. `isRunning` also honors the registry truth of running
 	// background tasks (activeTasks), so a subagent card whose launch tool id is
 	// still running is forced to the spinner even if the server-supplied status
@@ -224,18 +209,15 @@
 
 <details class="w-full subagent-card group">
 	<summary class="subagent-summary">
-		<!-- Tick bar: one pill per tool call, or the agent glyph before any run. -->
-		{#if tickBar.length > 0}
-			<span class="wlbar" aria-hidden="true">
-				{#each tickBar as state, i (i)}
-					<i class:f={state === 'f'} class:c={state === 'c'} class:e={state === 'e'}></i>
-				{/each}
-			</span>
-		{:else}
-			<svg class="sa-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-				<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
-			</svg>
-		{/if}
+		<!-- Agent glyph — a subagent reads as one more tool row, just expandable
+		     into its nested tools and responses. -->
+		<svg class="sa-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+			<rect width="16" height="11" x="4" y="9" rx="2" />
+			<path d="M12 5v4" />
+			<circle cx="12" cy="4" r="1.4" />
+			<path d="M9 14h.01" />
+			<path d="M15 14h.01" />
+		</svg>
 
 		<!-- IDENTITY: the AGENT's name when the dispatcher supplied one
 		     (2026-08-17 ruling), otherwise the historical model/type badge. -->
@@ -292,8 +274,9 @@
 		</span>
 	</summary>
 
-	<!-- Expanded content -->
-	<div>
+	<!-- Expanded content: indented past the icon gutter like every other
+	     expanded tool row -->
+	<div class="sa-body">
 		<div class="max-h-[32rem] overflow-y-auto">
 			<!-- Initial prompt section -->
 			{#if message.agentPrompt}
@@ -468,10 +451,7 @@
 
 <style>
 	.subagent-card {
-		border: 1px solid var(--border);
-		border-radius: 10px;
-		overflow: hidden;
-		background: color-mix(in oklch, var(--card) 55%, transparent);
+		background: transparent;
 	}
 
 	.subagent-summary {
@@ -480,10 +460,17 @@
 		gap: 9px;
 		width: 100%;
 		min-width: 0;
-		padding: 7px 10px;
+		padding: 6px 8px;
+		border-radius: 8px;
 		cursor: pointer;
 		list-style: none;
 		transition: background-color 0.13s ease;
+	}
+
+	.sa-body {
+		margin: 2px 0 0 15px;
+		border-left: 1px solid var(--border);
+		padding-left: 10px;
 	}
 
 	.subagent-summary::-webkit-details-marker {
@@ -498,26 +485,6 @@
 		outline: 2px solid var(--ring);
 		outline-offset: -2px;
 	}
-
-	.wlbar {
-		display: inline-flex;
-		align-items: center;
-		gap: 2.5px;
-		flex: none;
-		flex-wrap: wrap;
-		max-width: 33%;
-	}
-
-	.wlbar i {
-		width: 7px;
-		height: 3px;
-		border-radius: 2px;
-		background: var(--border-strong);
-	}
-
-	.wlbar i.f { background: var(--emerald); }
-	.wlbar i.c { background: var(--blue); }
-	.wlbar i.e { background: var(--rose); }
 
 	.sa-icon {
 		flex: none;

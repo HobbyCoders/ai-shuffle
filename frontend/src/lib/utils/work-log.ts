@@ -2,17 +2,20 @@
  * Transcript grouping — turns the flat message array into the display list the
  * transcript renders.
  *
- * The shape follows the T3 work-log pattern:
- *  - While a turn is IN PROGRESS only the newest tool row is on screen; the
- *    earlier ones sit behind a "+N previous tool calls" toggle, so a long tool
- *    run doesn't push the live output off the top of the viewport.
- *  - Once a turn has SETTLED its intermediate tool rows and its non-final
- *    commentary collapse behind one "Worked for {duration}" row; the answer the
- *    user actually wants — the turn's final assistant message — stays visible.
+ * The shape follows the T3 work-log pattern, folded PER RUN:
+ *  - A fold spans one run of consecutive work entries (tool calls + thinking)
+ *    between assistant text messages. Assistant text is never folded and always
+ *    ends the current run, so the transcript reads text → fold → text → fold.
+ *  - While a turn is IN PROGRESS its current run keeps the newest row on
+ *    screen; the earlier ones sit behind a "+N previous tool calls" toggle, so
+ *    a long tool run doesn't push the live output off the top of the viewport.
+ *  - A SETTLED run collapses behind one "Worked for {duration}" row ("{N} tool
+ *    calls" when no timestamps are available). A single-row run renders flat —
+ *    fold chrome around one row hides nothing.
  *
  * Some things are never folded, because hiding them would hide a decision or a
- * failure: subagent cards, todo lists, questions, screenshots, and any tool row
- * that errored.
+ * failure: subagent cards, todo/notes lists, questions, screenshots, and any
+ * tool row that errored.
  */
 import type { ChatMessage } from '$lib/stores/types';
 
@@ -61,6 +64,7 @@ export function isGroupableSystem(msg: ChatMessage): boolean {
 function isSpecialTool(msg: ChatMessage): boolean {
 	return (
 		msg.toolName === 'TodoWrite' ||
+		msg.toolName === 'Note' ||
 		msg.toolName === 'Task' ||
 		msg.toolName === 'Agent' ||
 		msg.toolName === 'AskUserQuestion'
@@ -80,6 +84,12 @@ function isFoldableTool(msg: ChatMessage): boolean {
 
 function isAssistantText(msg: ChatMessage): boolean {
 	return msg.role === 'assistant' && (msg.type === 'text' || !msg.type) && !!msg.content?.trim();
+}
+
+/** A work entry a fold may swallow: a routine tool row or a thinking block. */
+function isFoldableWork(msg: ChatMessage): boolean {
+	if (msg.type === 'thinking') return true;
+	return isFoldableTool(msg);
 }
 
 /** Human duration: "45s", "2m 14s", "1h 03m". */
@@ -127,10 +137,20 @@ export function turnWasInterrupted(turn: ChatMessage[]): boolean {
 	return turn.some((m) => isAssistantText(m) && m.content.trimEnd().endsWith('[Stopped]'));
 }
 
-function durationLabel(turn: ChatMessage[]): string | null {
-	const ms = turnDurationMs(turn);
-	if (ms === null) return null;
-	return `${turnWasInterrupted(turn) ? 'Stopped after' : 'Worked for'} ${formatDuration(ms)}`;
+/**
+ * Label for one settled run. Timestamps give "Worked for 2m 14s" (or "Stopped
+ * after" on an interrupted turn's final run); without them the label degrades
+ * to a plain count.
+ */
+function runLabel(run: WorkLogEntry[], interrupted: boolean): string {
+	const msgs = run.map((r) => r.message);
+	const ms = turnDurationMs(msgs);
+	if (ms === null) {
+		const tools = msgs.filter((m) => m.type === 'tool_use').length;
+		const n = tools || run.length;
+		return `${n} tool ${n === 1 ? 'call' : 'calls'}`;
+	}
+	return `${interrupted ? 'Stopped after' : 'Worked for'} ${formatDuration(ms)}`;
 }
 
 interface Positioned {
@@ -192,10 +212,9 @@ export interface BuildOptions {
 /**
  * Build the transcript's display list.
  *
- * Ordering rule: the fold occupies the slot of the FIRST message it swallowed,
- * and everything it did not swallow keeps its original relative order. So a
- * subagent card that ran between two tool calls stays where it happened, and
- * both tool calls end up in the one fold above it.
+ * Ordering rule: everything is emitted in transcript order. A fold sits exactly
+ * where its run of work entries happened; assistant text, subagent cards, and
+ * every other non-work row stay in place and end the run they interrupt.
  */
 export function buildDisplayItems(messages: ChatMessage[], options: BuildOptions): DisplayItem[] {
 	const { isStreaming, groupingEnabled } = options;
@@ -217,75 +236,65 @@ export function buildDisplayItems(messages: ChatMessage[], options: BuildOptions
 
 	turns.forEach((turn, turnIdx) => {
 		const isLiveTurn = isStreaming && turnIdx === turns.length - 1;
-		const turnMessages = turn.map((t) => t.message);
+		const interrupted = !isLiveTurn && turnWasInterrupted(turn.map((t) => t.message));
 
-		// The turn's final assistant text is the answer — never folded.
-		let finalTextIndex = -1;
-		for (let i = turn.length - 1; i >= 0; i--) {
-			if (isAssistantText(turn[i].message)) {
-				finalTextIndex = i;
-				break;
+		// Plain rows waiting to be emitted, and the current run of work entries.
+		let plain: Positioned[] = [];
+		let run: WorkLogEntry[] = [];
+
+		const flushPlain = () => {
+			if (plain.length === 0) return;
+			emitWithSystemGroups(plain, items);
+			plain = [];
+		};
+
+		// `isTurnEnd` marks the flush at the end of the turn: on a live turn that
+		// run is the one still growing, and on an interrupted turn it is the run
+		// that was cut short.
+		const flushRun = (isTurnEnd: boolean) => {
+			if (run.length === 0) return;
+			const live = isLiveTurn && isTurnEnd;
+
+			// Fold chrome around a single row hides nothing — render it flat.
+			if (run.length === 1) {
+				plain.push({ message: run[0].message, index: run[0].index });
+				run = [];
+				return;
 			}
-		}
 
-		const foldable: WorkLogEntry[] = [];
-		const rest: Positioned[] = [];
-		let foldSlot = -1;
-
-		turn.forEach((entry, i) => {
-			let fold = false;
-			if (groupingEnabled) {
-				if (isFoldableTool(entry.message)) {
-					fold = true;
-				} else if (!isLiveTurn && isAssistantText(entry.message) && i !== finalTextIndex) {
-					// Settled turns also swallow the running commentary between tool
-					// calls; while the turn is live that commentary is the only thing
-					// telling the user what is happening, so it stays.
-					fold = true;
-				}
-			}
-			if (fold) {
-				if (foldSlot === -1) foldSlot = rest.length;
-				foldable.push({ message: entry.message, index: entry.index });
+			flushPlain();
+			if (live) {
+				items.push({
+					kind: 'work_log',
+					key: `wl-${run[0].message.id ?? run[0].index}`,
+					mode: 'live',
+					folded: run.slice(0, -1),
+					tail: run.slice(-1),
+					durationLabel: null
+				});
 			} else {
-				rest.push(entry);
+				items.push({
+					kind: 'work_log',
+					key: `wl-${run[0].message.id ?? run[0].index}`,
+					mode: 'settled',
+					folded: run,
+					tail: [],
+					durationLabel: runLabel(run, interrupted && isTurnEnd)
+				});
+			}
+			run = [];
+		};
+
+		turn.forEach((entry) => {
+			if (groupingEnabled && isFoldableWork(entry.message)) {
+				run.push({ message: entry.message, index: entry.index });
+			} else {
+				flushRun(false);
+				plain.push(entry);
 			}
 		});
-
-		// Live turns keep the newest tool row on screen.
-		let folded = foldable;
-		let tail: WorkLogEntry[] = [];
-		if (isLiveTurn && foldable.length > 0) {
-			folded = foldable.slice(0, -1);
-			tail = foldable.slice(-1);
-		}
-
-		if (foldable.length === 0) {
-			emitWithSystemGroups(rest, items);
-			return;
-		}
-
-		if (folded.length === 0) {
-			// Nothing to hide — render the visible rows in place, no fold chrome.
-			const merged = [...rest];
-			merged.splice(foldSlot === -1 ? merged.length : foldSlot, 0, ...tail);
-			emitWithSystemGroups(merged, items);
-			return;
-		}
-
-		const before = rest.slice(0, foldSlot === -1 ? rest.length : foldSlot);
-		const after = rest.slice(foldSlot === -1 ? rest.length : foldSlot);
-
-		emitWithSystemGroups(before, items);
-		items.push({
-			kind: 'work_log',
-			key: `wl-${folded[0].message.id ?? folded[0].index}`,
-			mode: isLiveTurn ? 'live' : 'settled',
-			folded,
-			tail,
-			durationLabel: isLiveTurn ? null : durationLabel(turnMessages)
-		});
-		emitWithSystemGroups(after, items);
+		flushRun(true);
+		flushPlain();
 	});
 
 	return items;
