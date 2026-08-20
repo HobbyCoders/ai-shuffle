@@ -185,8 +185,8 @@
 	}
 
 	// Handle project selection from WorkspaceSelector
-	function handleProjectSelect(projectId: string) {
-		activeSession.setProject(projectId);
+	function handleProjectSelect(projectId: string, projectV2Id?: string | null) {
+		activeSession.setProject(projectId, projectV2Id ?? null);
 	}
 
 	// Manually re-establish the WebSocket (the Reconnect button on the
@@ -250,6 +250,7 @@
 				{:else}
 					<WorkspaceSelector
 						selectedProject={$activeSession.project}
+						selectedProjectV2Id={$activeSession.projectV2Id}
 						onSelectProject={handleProjectSelect}
 					/>
 				{/if}

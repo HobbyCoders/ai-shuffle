@@ -36,6 +36,7 @@
 		BUCKET_STALE_MS
 	} from '$lib/stores/rate-limit';
 	import { usageTargetInstance } from '$lib/stores/usage-target';
+	import { attachmentBlockReason, isRemoteOnlyCompose } from './attach-disable';
 
 	interface Props {
 		isUploading: boolean;
@@ -373,9 +374,11 @@
 		<button
 			type="button"
 			onclick={onAttachClick}
-			disabled={!$anyCredential || isUploading}
+			disabled={!$anyCredential || isUploading || isRemoteOnlyCompose($activeSession.project, $activeSession.projectV2Id)}
 			class="dock-action-btn"
-			title={isUploading ? 'Uploading...' : $activeSession.project ? 'Attach file' : 'Select a project to attach files'}
+			title={isUploading
+				? 'Uploading...'
+				: (attachmentBlockReason($activeSession.project, $activeSession.projectV2Id) ?? 'Attach file')}
 		>
 			{#if isUploading}
 				<svg class="w-[18px] h-[18px] animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">

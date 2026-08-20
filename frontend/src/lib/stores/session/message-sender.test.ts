@@ -3,6 +3,8 @@ import { createMessageSender, type MessageSenderDeps } from './message-sender';
 import type { ActiveSessionState } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import { reopenWorktree } from '$lib/api/git';
+import { api } from '$lib/api/client';
+import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
 
 // message-sender pulls these from $lib/api/git at module load. Only reopenWorktree
 // is exercised here (the best-effort reopen for cleaned-up worktree sessions); the
@@ -11,6 +13,19 @@ vi.mock('$lib/api/git', () => ({
 	reopenWorktree: vi.fn(async () => {}),
 	generateBranchName: vi.fn(async () => ({ branch_name: 'auto/x' })),
 	generateBranchNameLocal: vi.fn(() => 'auto/x'),
+}));
+
+const apiMocks = vi.hoisted(() => ({
+	post: vi.fn(),
+}));
+
+vi.mock('$lib/api/client', () => ({
+	api: {
+		post: apiMocks.post,
+		get: vi.fn(),
+		put: vi.fn(),
+		delete: vi.fn(),
+	},
 }));
 
 /**
@@ -30,6 +45,7 @@ function baseState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		title: 'New Chat',
 		profile: 'claude-code',
 		project: 'proj-1',
+		projectV2Id: null,
 		messages: [],
 		isStreaming: false,
 		worktreeIntent: 'local',
@@ -452,3 +468,90 @@ describe('message-sender restored-session race guard', () => {
 		}
 	});
 });
+
+describe('createWorktree remote-only compose', () => {
+	beforeEach(() => {
+		apiMocks.post.mockReset();
+		apiMocks.post.mockResolvedValue({
+			session_id: 'ses-wt',
+			branch_name: 'feat/x',
+			base_branch: 'main',
+			worktree_path: '/remote/wt',
+			status: 'ok',
+		});
+	});
+
+	it('posts project_v2_id and omits pending_upload_paths', async () => {
+		const { deps } = makeDeps(baseState({
+			project: '',
+			projectV2Id: 'pv2-remote',
+			worktreeBranch: 'feat/x',
+			worktreeIntent: 'worktree',
+		}));
+		const sender = createMessageSender(deps);
+
+		await sender.createWorktree('hello');
+
+		expect(api.post).toHaveBeenCalledTimes(1);
+		const [path, body] = apiMocks.post.mock.calls[0];
+		expect(path).toBe('/sessions/with-worktree');
+		expect(body.project_v2_id).toBe('pv2-remote');
+		expect(body.project_id).toBeUndefined();
+		expect(body.pending_upload_paths).toBeUndefined();
+	});
+
+	it('refuses uploads before POSTing when there is no local project', async () => {
+		const { deps, getState } = makeDeps(baseState({
+			project: '',
+			projectV2Id: 'pv2-remote',
+			worktreeBranch: 'feat/x',
+			worktreeIntent: 'worktree',
+		}));
+		const sender = createMessageSender(deps);
+
+		await sender.createWorktree('hello', ['/tmp/upload.txt']);
+
+		expect(apiMocks.post).not.toHaveBeenCalled();
+		expect(getState().worktreeError).toBe(ATTACHMENTS_NEED_LOCAL_CHECKOUT);
+	});
+
+	it('still posts project_id for a local project and may include uploads', async () => {
+		const { deps } = makeDeps(baseState({
+			project: 'proj-1',
+			projectV2Id: 'pv2-local',
+			worktreeBranch: 'feat/x',
+			worktreeIntent: 'worktree',
+		}));
+		const sender = createMessageSender(deps);
+
+		await sender.createWorktree('hello', ['/tmp/upload.txt']);
+
+		const body = apiMocks.post.mock.calls[0][1];
+		expect(body.project_id).toBe('proj-1');
+		expect(body.project_v2_id).toBeUndefined();
+		expect(body.pending_upload_paths).toEqual(['/tmp/upload.txt']);
+	});
+});
+
+describe('sendMessage remote-only compose', () => {
+	it('sends project_v2_id and never upload_paths', async () => {
+		const { deps, wsConn } = makeDeps(baseState({
+			project: '',
+			projectV2Id: 'pv2-remote',
+			worktreeIntent: 'local',
+			sessionId: null,
+			messages: [],
+		}));
+		const sender = createMessageSender(deps);
+
+		await sender.sendMessage('hello remote', { pendingUploadPaths: ['/tmp/a.txt'] });
+
+		const querySends = wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'query');
+		expect(querySends).toHaveLength(1);
+		const frame = querySends[0][0] as any;
+		expect(frame.project_v2_id).toBe('pv2-remote');
+		expect(frame.project).toBeUndefined();
+		expect(frame.upload_paths).toBeUndefined();
+	});
+});
+

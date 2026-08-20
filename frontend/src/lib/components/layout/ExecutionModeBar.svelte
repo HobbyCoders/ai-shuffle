@@ -214,8 +214,9 @@
 		// badges match the picked project. Errors are swallowed at the source so a
 		// rejection can never surface while the installs call is still in flight.
 		const projectId = $activeSession.project;
-		const gitStateReq = projectId
-			? getClusterGitState(projectId).catch(e => {
+		const projectV2Id = $activeSession.projectV2Id;
+		const gitStateReq = (projectId || projectV2Id)
+			? getClusterGitState(projectId || null, projectId ? null : projectV2Id).catch(e => {
 				console.warn('[ExecutionModeBar] Failed to load git state:', e);
 				return null;
 			})

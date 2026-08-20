@@ -143,6 +143,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 						title: persisted.title || 'New Chat',
 						profile: persisted.profile || defaultProfile,
 						project: persisted.project || defaultProject,
+						projectV2Id: persisted.projectV2Id ?? null,
 						modelOverride: persisted.modelOverride ?? null,
 						permissionModeOverride: persisted.permissionModeOverride ?? null,
 						effortLevelOverride: persisted.effortLevelOverride ?? null,

@@ -117,6 +117,9 @@ export interface ActiveSessionState {
 	sessionProfileId: string | null;
 	currentQueryProfileId: string | null;
 	project: string;
+	/** Origin-keyed `projects_v2` id. Set alongside `project` for a local
+	 *  catalog row; set alone (with `project` empty) for remote-only compose. */
+	projectV2Id: string | null;
 	totalTokensIn: number;
 	totalTokensOut: number;
 	totalCacheCreationTokens: number;
@@ -198,6 +201,7 @@ export interface PersistedSession {
 	title: string;
 	profile: string;
 	project: string;
+	projectV2Id?: string | null;
 	modelOverride: string | null;
 	permissionModeOverride: string | null;
 	effortLevelOverride: string | null;
@@ -239,6 +243,7 @@ function defaultState(): ActiveSessionState {
 		sessionProfileId: null,
 		currentQueryProfileId: null,
 		project: getPersistedProject(),
+		projectV2Id: null,
 		totalTokensIn: 0,
 		totalTokensOut: 0,
 		totalCacheCreationTokens: 0,
@@ -704,18 +709,20 @@ export const activeSession = {
 		return true;
 	},
 
-	setProject(projectId: string) {
+	setProject(projectId: string, projectV2Id?: string | null) {
 		if (_state.worktreeIntent === 'local' && _state.messages.length > 0) {
 			console.warn('[ActiveSession] Cannot change project after session has started');
 			return;
 		}
-		if (_state.project === projectId) {
-			switcher.saveSelectionToBackend(_state.profile, projectId);
+		const nextV2 = projectV2Id === undefined ? _state.projectV2Id : projectV2Id;
+		if (_state.project === projectId && _state.projectV2Id === nextV2) {
+			if (projectId) switcher.saveSelectionToBackend(_state.profile, projectId);
 			return;
 		}
 		_update(s => ({
 			...s,
 			project: projectId,
+			projectV2Id: nextV2,
 			// Keep the user's preferred mode; only the project-specific worktree
 			// selection below is reset since it doesn't apply to the new project.
 			worktreeIntent: getPersistedWorktreeIntent(),
@@ -730,7 +737,8 @@ export const activeSession = {
 			isCreatingWorktree: false,
 			worktreeError: null,
 		}));
-		switcher.saveSelectionToBackend(_state.profile, projectId);
+		// Remote-only compose has no legacy id to persist as the default project.
+		if (projectId) switcher.saveSelectionToBackend(_state.profile, projectId);
 		persistSession();
 	},
 

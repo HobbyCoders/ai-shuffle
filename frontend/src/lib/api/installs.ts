@@ -119,15 +119,59 @@ export interface ClusterGitState {
 	recent_ops: GitOpRow[];
 }
 
-/** Per-install git state for a project (eligibility, checkouts, recent ops).
- *  Pass a legacy `project_id` (default) or `project_v2_id` via the second arg. */
+/**
+ * Query string for `GET /cluster/git-state`. Exactly one of `projectId` /
+ * `projectV2Id`. Returns null when neither is set (skip the fetch — fail-open).
+ */
+export function clusterGitStatePath(
+	projectId?: string | null,
+	projectV2Id?: string | null
+): string | null {
+	if (projectId) {
+		return `/cluster/git-state?project_id=${encodeURIComponent(projectId)}`;
+	}
+	if (projectV2Id) {
+		return `/cluster/git-state?project_v2_id=${encodeURIComponent(projectV2Id)}`;
+	}
+	return null;
+}
+
+/** Per-install git state for a project (eligibility, checkouts, recent ops). */
 export async function getClusterGitState(
-	id: string,
-	param: 'project_id' | 'project_v2_id' = 'project_id'
+	projectId?: string | null,
+	projectV2Id?: string | null
 ): Promise<ClusterGitState> {
-	return api.get<ClusterGitState>(
-		`/cluster/git-state?${param}=${encodeURIComponent(id)}`
-	);
+	const path = clusterGitStatePath(projectId, projectV2Id);
+	if (!path) {
+		throw { detail: 'pass exactly one of project_id or project_v2_id', status: 400 };
+	}
+	return api.get<ClusterGitState>(path);
+}
+
+/** One `projects_v2` the cluster knows, with an active base checkout on some runner. */
+export interface ClusterProjectEligible {
+	install_id: string;
+	device_name: string;
+	online: boolean;
+	is_self: boolean;
+}
+
+export interface ClusterProject {
+	project_v2_id: string;
+	origin: string;
+	name: string;
+	local_project_id: string | null;
+	remote_only: boolean;
+	eligible: ClusterProjectEligible[];
+}
+
+export interface ClusterProjectsResponse {
+	projects: ClusterProject[];
+}
+
+/** Origin-keyed catalog of projects with an active base checkout. */
+export async function listClusterProjects(): Promise<ClusterProjectsResponse> {
+	return api.get<ClusterProjectsResponse>('/cluster/projects');
 }
 
 export interface AdvertiseReachability {

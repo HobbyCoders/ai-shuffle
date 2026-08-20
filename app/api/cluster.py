@@ -21,8 +21,8 @@ from pydantic import BaseModel
 
 from app.db import database
 from app.db.async_database import run_sync
-from app.api.auth import require_auth
-from app.api.common import require_origin_access
+from app.api.auth import get_api_user_from_request, require_auth
+from app.api.common import assigned_origin, require_origin_access
 from app.core import cluster
 
 logger = logging.getLogger(__name__)
@@ -60,6 +60,139 @@ def _iso(value: Any) -> Optional[str]:
     if value is None or isinstance(value, str):
         return value
     return value.isoformat()
+
+
+def _catalog_scoped_origin(user: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Origin filter for the cluster catalog, or None if unscoped.
+
+    Do **not** call :func:`require_origin_access` here (both ids absent
+    would 400). A scoped user whose assigned project is gone is an empty
+    catalog, not unscoped — :func:`assigned_origin` 403s that case; we
+    turn it into ``""`` so the caller returns ``[]`` instead of listing
+    every origin.
+    """
+    try:
+        return assigned_origin(user)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_403_FORBIDDEN:
+            return ""
+        raise
+
+
+def _local_project_id_for_origin(
+    origin: str,
+    local_by_origin: Dict[str, Dict[str, Any]],
+) -> Optional[str]:
+    """Legacy ``projects`` id on THIS install for ``origin``, else None.
+
+    Foreign ``projects.path`` is another machine's path — never pick a
+    row whose ``instance_id`` is a peer. ``instance_id`` NULL is a
+    legacy local row (same filter as ``GET /projects``).
+    """
+    row = local_by_origin.get(origin)
+    return row["id"] if row else None
+
+
+def _build_cluster_catalog(
+    *,
+    bases: list,
+    pv2s: list,
+    installs: list,
+    local_projects: list,
+    me: str,
+) -> list:
+    """Join one checkout SELECT + pv2 + installs in Python. Drop pv2
+    rows with no active base checkout. Never expose foreign ``path``."""
+    from app.core.project_resolver import origin_for_legacy_project
+
+    by_pv2: Dict[str, list] = {}
+    for row in bases:
+        by_pv2.setdefault(row.get("project_id") or "", []).append(row)
+
+    # Prefer instance_id = me over a NULL-instance legacy row.
+    local_by_origin: Dict[str, Dict[str, Any]] = {}
+    for project in local_projects:
+        origin = origin_for_legacy_project(project)
+        existing = local_by_origin.get(origin)
+        if existing is None or project.get("instance_id") == me:
+            local_by_origin[origin] = project
+
+    install_map = {row.get("id"): row for row in installs if row.get("id")}
+
+    catalog = []
+    for pv2 in pv2s:
+        pv2_id = pv2.get("id")
+        rows = by_pv2.get(pv2_id, [])
+        if not rows:
+            continue
+        origin = pv2.get("origin") or ""
+        local_id = _local_project_id_for_origin(origin, local_by_origin)
+        seen: set[str] = set()
+        eligible = []
+        for ck in rows:
+            runner_id = ck.get("runner_id") or ""
+            if not runner_id or runner_id in seen:
+                continue
+            install = install_map.get(runner_id)
+            if not install:
+                continue
+            seen.add(runner_id)
+            eligible.append({
+                "install_id": runner_id,
+                "device_name": install.get("device_name"),
+                "online": bool(install.get("online")),
+                "is_self": runner_id == me,
+            })
+        catalog.append({
+            "project_v2_id": pv2_id,
+            "origin": origin,
+            "name": pv2.get("name") or origin,
+            "local_project_id": local_id,
+            "remote_only": local_id is None,
+            "eligible": eligible,
+        })
+    return catalog
+
+
+@router.get("/projects")
+async def list_cluster_projects(
+    request: Request,
+    token: str = Depends(require_auth),
+) -> Dict[str, Any]:
+    """Origin-keyed catalog of ``projects_v2`` with an active base checkout.
+
+    Compose accepts ``project_v2_id`` so a viewer can start a remote
+    session without a local clone. Scoped users are filtered by
+    :func:`assigned_origin` — this endpoint does **not** call
+    :func:`require_origin_access` (XOR 400 when both ids are absent).
+    A scoped user whose assigned project is gone gets an empty list,
+    not every origin.
+    """
+    from app.core.config import settings
+    from app.db import checkouts as checkouts_db
+    from app.db import projects_v2 as projects_v2_db
+
+    user = get_api_user_from_request(request)
+    scoped_origin = await run_sync(_catalog_scoped_origin, user)
+    if scoped_origin == "":
+        return {"projects": []}
+
+    bases = await run_sync(checkouts_db.list_active_base_checkouts)
+    pv2s = await run_sync(projects_v2_db.list_projects_v2)
+    installs = await run_sync(database.get_installs)
+    local_projects = await run_sync(database.get_all_projects)
+    me = settings.effective_instance_id
+
+    catalog = _build_cluster_catalog(
+        bases=bases,
+        pv2s=pv2s,
+        installs=installs,
+        local_projects=local_projects,
+        me=me,
+    )
+    if scoped_origin:
+        catalog = [row for row in catalog if row.get("origin") == scoped_origin]
+    return {"projects": catalog}
 
 
 @router.get("/git-state")

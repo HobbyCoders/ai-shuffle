@@ -15,6 +15,7 @@ export interface SessionEphemeral {
 	draft: string;
 	scrollTop: number;
 	project: string;
+	projectV2Id: string | null;
 	modelOverride: string | null;
 	permissionModeOverride: string | null;
 	effortLevelOverride: string | null;

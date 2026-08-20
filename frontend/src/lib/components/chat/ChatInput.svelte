@@ -24,6 +24,7 @@
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import { toast } from '$lib/stores/toast';
 	import { evaluateSubmitGuards } from './submit-guards';
+	import { attachmentBlockReason } from './attach-disable';
 	import Banner from '$lib/components/Banner.svelte';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
@@ -317,7 +318,7 @@
 			isUploading,
 			isCreatingWorktree: $activeSession.isCreatingWorktree,
 			hasProfile: !!$activeSession.profile,
-			hasProject: !!$activeSession.project
+			hasProject: !!$activeSession.project || !!$activeSession.projectV2Id
 		});
 		if (block) {
 			if (block.notice) toast.push(block.notice.message, { tone: block.notice.tone });
@@ -508,8 +509,9 @@
 
 	// File upload
 	function triggerFileUpload() {
-		if (!$activeSession.project) {
-			errorMessage = 'Please select a project first to upload files.';
+		const block = attachmentBlockReason($activeSession.project, $activeSession.projectV2Id);
+		if (block) {
+			errorMessage = block;
 			return;
 		}
 		fileInputRef?.click();
@@ -598,8 +600,9 @@
 
 		if (!e.dataTransfer?.files?.length) return;
 
-		if (!$activeSession.project) {
-			errorMessage = 'Please select a project first to upload files.';
+		const dropBlock = attachmentBlockReason($activeSession.project, $activeSession.projectV2Id);
+		if (dropBlock) {
+			errorMessage = dropBlock;
 			return;
 		}
 

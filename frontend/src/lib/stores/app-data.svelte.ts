@@ -10,6 +10,7 @@
 
 import type { Session, Profile, PaginatedSessions, CursorPaginatedSessions, SessionSearchResult, PaginatedSessionSearchResults } from '$lib/api/client';
 import { api, searchSessionsPaginated, renameSession as apiRenameSession, setSessionActive as apiSetSessionActive } from '$lib/api/client';
+import { listClusterProjects, type ClusterProject } from '$lib/api/installs';
 import type { Project } from './types';
 import { createSubscribers } from './store-utils';
 import { activeSession } from './active-session';
@@ -19,6 +20,8 @@ import { activeSession } from './active-session';
 interface AppDataState {
 	profiles: Profile[];
 	projects: Project[];
+	/** Origin-keyed cluster catalog (projects_v2 with an active base checkout). */
+	clusterProjects: ClusterProject[];
 	sessions: Session[];
 	// Selection state for batch operations
 	selectedSessionIds: Set<string>;
@@ -62,6 +65,7 @@ const SEARCH_PAGE_SIZE = 20;
 let _state = $state<AppDataState>({
 	profiles: [],
 	projects: [],
+	clusterProjects: [],
 	sessions: [],
 	selectedSessionIds: new Set<string>(),
 	selectionMode: false,
@@ -344,6 +348,15 @@ export const appData = {
 		}
 	},
 
+	async loadClusterProjects() {
+		try {
+			const result = await listClusterProjects();
+			_update(s => ({ ...s, clusterProjects: result.projects }));
+		} catch (e) {
+			console.error('Failed to load cluster projects:', e);
+		}
+	},
+
 	async createProject(data: { id: string; name: string; description?: string; path?: string }) {
 		// Return the server's created Project: the backend can rewrite the `id`
 		// (auto-suffix on a cross-install collision), so callers must key off the
@@ -550,6 +563,7 @@ export const appData = {
 
 export const profiles = createDerived(() => _state.profiles);
 export const projects = createDerived(() => _state.projects);
+export const clusterProjects = createDerived(() => _state.clusterProjects);
 export const sessions = createDerived(() => _state.sessions);
 export const sessionsTagFilter = createDerived(() => _state.sessionsTagFilter);
 export const apiUserSessions = createDerived(() => _state.apiUserSessions);

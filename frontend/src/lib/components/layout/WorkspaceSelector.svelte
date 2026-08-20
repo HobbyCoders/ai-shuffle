@@ -7,16 +7,23 @@
 	 * Uses GroupedSelector for group-aware project selection.
 	 */
 	import { ChevronDown, FolderClosed } from 'lucide-svelte';
-	import { projects } from '$lib/stores/app-data.svelte';
+	import { appData, clusterProjects, projects } from '$lib/stores/app-data.svelte';
 	import AddProjectModal from '$lib/components/AddProjectModal.svelte';
 	import GroupedSelector from '$lib/components/GroupedSelector.svelte';
+	import {
+		ON_OTHER_RUNNERS,
+		buildWorkspacePickerItems,
+		pickerItemName,
+		selectedPickerId
+	} from './workspace-catalog';
 
 	interface Props {
 		selectedProject: string | null;
-		onSelectProject: (projectId: string) => void;
+		selectedProjectV2Id?: string | null;
+		onSelectProject: (projectId: string, projectV2Id?: string | null) => void;
 	}
 
-	let { selectedProject, onSelectProject }: Props = $props();
+	let { selectedProject, selectedProjectV2Id = null, onSelectProject }: Props = $props();
 
 	let showDropdown = $state(false);
 	let dropdownRef = $state<HTMLDivElement | null>(null);
@@ -25,9 +32,12 @@
 	// Add project modal state
 	let showAddModal = $state(false);
 
-	// Get selected project name
+	const picker = $derived(buildWorkspacePickerItems($projects, $clusterProjects));
+	const selectedId = $derived(selectedPickerId(selectedProject, selectedProjectV2Id));
 	const selectedProjectName = $derived(
-		$projects.find((p) => p.id === selectedProject)?.name || 'your project'
+		pickerItemName(picker.items, picker.remoteItems, selectedId) ||
+			$projects.find((p) => p.id === selectedProject)?.name ||
+			'your project'
 	);
 
 	// Close dropdown on outside click
@@ -38,7 +48,14 @@
 	}
 
 	function handleSelect(id: string) {
-		onSelectProject(id);
+		const item =
+			picker.items.find((i) => i.id === id) ||
+			picker.remoteItems.find((i) => i.id === id);
+		if (item) {
+			onSelectProject(item.project, item.projectV2Id);
+		} else {
+			onSelectProject(id);
+		}
 		showDropdown = false;
 	}
 
@@ -52,6 +69,7 @@
 		if (showDropdown) {
 			// Reset grouped selector to main panel when opening
 			groupedSelector?.reset();
+			void appData.loadClusterProjects();
 		}
 	}
 </script>
@@ -89,15 +107,18 @@
 			<div class="picker-dropdown">
 				<GroupedSelector
 					bind:this={groupedSelector}
-					items={$projects}
+					items={picker.items}
 					entityType="projects"
-					selectedId={selectedProject}
+					selectedId={selectedId}
 					onSelect={handleSelect}
 					label="Select your workspace"
 					addLabel="Add Project"
 					onAdd={openAddModal}
 					emptyMessage="No workspaces available"
 					itemIcon={FolderClosed}
+					extraGroups={picker.remoteItems.length
+						? [{ name: ON_OTHER_RUNNERS, items: picker.remoteItems }]
+						: []}
 				/>
 			</div>
 		{/if}

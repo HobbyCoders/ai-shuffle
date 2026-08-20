@@ -30,7 +30,7 @@
 	import { gitStateQuery, runnerBadgeMenuItems } from './runner-badge-menu';
 	import type { RunnerBadgeMenuItem } from './runner-badge-menu';
 	import { activeSession } from '$lib/stores/active-session';
-	import { projects, sessions, appData } from '$lib/stores/app-data.svelte';
+	import { clusterProjects, projects, sessions, appData } from '$lib/stores/app-data.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
 	import { git, gitStatus } from '$lib/stores/git.svelte';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
@@ -41,7 +41,9 @@
 	import type { EligibilityMap } from '$lib/components/layout/execution-mode-eligibility';
 
 	const projectName = $derived(
-		$projects.find((p) => p.id === $activeSession.project)?.name ?? null
+		$projects.find((p) => p.id === $activeSession.project)?.name ??
+			$clusterProjects.find((p) => p.project_v2_id === $activeSession.projectV2Id)?.name ??
+			null
 	);
 
 	// The sessions-board summary row for the active session — source of the
@@ -135,7 +137,7 @@
 		const gitStateReq = q
 			? ('project_id' in q
 					? getClusterGitState(q.project_id)
-					: getClusterGitState(q.project_v2_id, 'project_v2_id')
+					: getClusterGitState(null, q.project_v2_id)
 				).catch((e) => {
 					console.warn('[ContextPillBar] Failed to load git state:', e);
 					return null;

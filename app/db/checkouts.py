@@ -262,6 +262,29 @@ def has_active_checkout(
     return bool(list_active_checkouts(project_id, runner_id, branch))
 
 
+def list_active_base_checkouts() -> List[Dict[str, Any]]:
+    """One SELECT of every ACTIVE base checkout across every project.
+
+    Catalog (``GET /cluster/projects``) joins this in Python to
+    ``list_projects_v2`` + ``get_installs``. Do not call
+    :func:`list_checkouts` per ``projects_v2`` — that is N queries.
+
+    "Base" is ``branch`` NULL or ''. A missing/NULL ``status`` counts as
+    ``'active'`` — same coercion as :func:`has_active_base_checkout`.
+    Branch-only and archived rows are omitted.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM checkouts "
+            "WHERE (branch IS NULL OR branch = '') "
+            "AND (status IS NULL OR status = '' OR status = 'active') "
+            "ORDER BY project_id ASC, runner_id ASC, created_at ASC, id ASC"
+        )
+        rows = cursor.fetchall()
+    return _rows(rows)
+
+
 def list_checkouts(project_id: str) -> List[Dict[str, Any]]:
     """Return every checkout for a project across all runners."""
     with get_db() as conn:

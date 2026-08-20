@@ -26,6 +26,8 @@
 		emptyMessage?: string;
 		/** Icon component for items (optional) */
 		itemIcon?: any;
+		/** Extra groups rendered after local items (e.g. "On other runners"). */
+		extraGroups?: { name: string; items: Item[] }[];
 	}
 
 	let {
@@ -37,7 +39,8 @@
 		addLabel = '',
 		onAdd,
 		emptyMessage = 'No items available',
-		itemIcon
+		itemIcon,
+		extraGroups = []
 	}: Props = $props();
 
 	// Current view state
@@ -66,10 +69,18 @@
 	// Has any groups at all
 	const hasGroups = $derived(populatedGroups.length > 0);
 
+	const extraPopulated = $derived(extraGroups.filter(g => g.items.length > 0));
+
+	const extraGroupMap = $derived.by(() => {
+		const map = new Map<string, Item[]>();
+		for (const group of extraGroups) map.set(group.name, group.items);
+		return map;
+	});
+
 	// Items in the active sub-panel
 	const activeGroupItems = $derived.by(() => {
 		if (!activeGroup) return [];
-		return organized.grouped.get(activeGroup) || [];
+		return extraGroupMap.get(activeGroup) || organized.grouped.get(activeGroup) || [];
 	});
 
 	// Panel height tracking for smooth resize
@@ -159,7 +170,9 @@
 						{/if}
 					</button>
 				{:else}
-					<p class="empty-message">{emptyMessage}</p>
+					{#if extraPopulated.length === 0}
+						<p class="empty-message">{emptyMessage}</p>
+					{/if}
 				{/each}
 			{:else}
 				<!-- Grouped: show group headers + ungrouped items -->
@@ -198,6 +211,24 @@
 						</button>
 					{/each}
 				{/if}
+			{/if}
+
+			{#if extraPopulated.length > 0}
+				{#if items.length > 0 || hasGroups}
+					<div class="menu-divider"></div>
+				{/if}
+				{#each extraPopulated as group (group.name)}
+					<button
+						type="button"
+						class="menu-item group-item"
+						onclick={() => openGroup(group.name)}
+					>
+						<FolderClosed size={16} strokeWidth={1.5} />
+						<span class="item-name">{group.name}</span>
+						<span class="group-count">{group.items.length}</span>
+						<ChevronRight size={16} strokeWidth={1.5} class="chevron-right" />
+					</button>
+				{/each}
 			{/if}
 		</div>
 

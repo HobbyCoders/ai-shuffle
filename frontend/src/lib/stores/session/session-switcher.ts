@@ -167,6 +167,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			draft: state.draft,
 			scrollTop: state.scrollTop,
 			project: state.project,
+			projectV2Id: state.projectV2Id,
 			modelOverride: state.modelOverride,
 			permissionModeOverride: state.permissionModeOverride,
 			effortLevelOverride: state.effortLevelOverride,
@@ -221,6 +222,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			title: state.title,
 			profile: state.profile,
 			project: state.project,
+			projectV2Id: state.projectV2Id,
 			modelOverride: state.modelOverride,
 			permissionModeOverride: state.permissionModeOverride,
 			effortLevelOverride: state.effortLevelOverride,
@@ -361,6 +363,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			sessionId,
 			title: resolvedTitle,
 			project: targetProject,
+			projectV2Id: ephemeral?.projectV2Id ?? null,
 			// Start empty; the authoritative messages load from the SSE feed
 			// (full replay from_seq=0) started below. No cache-first render —
 			// showing a stale snapshot first caused a visible flash before history.
@@ -567,6 +570,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			currentQueryProfileId: null,
 			profile: getPersistedProfile() || s.profile,
 			project: getPersistedProject() || s.project,
+			projectV2Id: newChatEphemeral?.projectV2Id ?? null,
 			messages: [],
 			isStreaming: false,
 			// #585: reset the live turn id on newChat (mirrors defaultState).

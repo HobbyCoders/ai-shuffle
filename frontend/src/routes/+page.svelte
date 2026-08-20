@@ -210,6 +210,7 @@
 			appData.loadProfiles(),
 			appData.loadSessions(),
 			appData.loadProjects(),
+			appData.loadClusterProjects(),
 			appData.loadApiUserSessions(),
 			loadAllTags()
 		]);

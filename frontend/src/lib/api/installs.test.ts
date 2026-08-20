@@ -8,7 +8,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { getClusterGitState, listInstalls, type ClusterGitState } from './installs';
+import {
+	clusterGitStatePath,
+	getClusterGitState,
+	listClusterProjects,
+	listInstalls,
+	type ClusterGitState
+} from './installs';
 
 function okJson(body: unknown) {
 	return { ok: true, status: 200, json: () => Promise.resolve(body) };
@@ -109,6 +115,31 @@ describe('Installs API', () => {
 				detail: 'Project not found',
 				status: 404
 			});
+		});
+
+		it('uses project_v2_id when the local project id is empty', async () => {
+			fetchMock.mockResolvedValueOnce(okJson(gitState));
+			await getClusterGitState(null, 'pv2-remote');
+			expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/cluster/git-state?project_v2_id=pv2-remote');
+		});
+
+		it('prefers project_id when both are present', () => {
+			expect(clusterGitStatePath('proj-1', 'pv2-1')).toBe(
+				'/cluster/git-state?project_id=proj-1'
+			);
+			expect(clusterGitStatePath('', 'pv2-1')).toBe(
+				'/cluster/git-state?project_v2_id=pv2-1'
+			);
+			expect(clusterGitStatePath(null, null)).toBeNull();
+		});
+	});
+
+	describe('listClusterProjects', () => {
+		it('GETs the catalog endpoint', async () => {
+			fetchMock.mockResolvedValueOnce(okJson({ projects: [] }));
+			const res = await listClusterProjects();
+			expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/cluster/projects');
+			expect(res.projects).toEqual([]);
 		});
 	});
 });

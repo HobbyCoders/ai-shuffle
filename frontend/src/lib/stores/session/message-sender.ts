@@ -11,6 +11,7 @@ import type { ExecutionMode } from '../types';
 import { api } from '$lib/api/client';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
 import { generateBranchName, generateBranchNameLocal } from '$lib/api/git';
+import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
 // V2 Phase 1: SSE-fed reducer — the transcript authority for a session.
 import { feedController } from './v2/feed-controller';
 
@@ -398,19 +399,21 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			}
 
 			wsConn.resetLastMessageTime();
+			const remoteOnly = !_state.project && !!_state.projectV2Id;
 			const querySent = wsConn.send({
 				type: 'query',
 				prompt,
 				session_id: _state.sessionId,
 				profile: _state.profile,
 				project: _state.project || undefined,
+				project_v2_id: remoteOnly ? _state.projectV2Id : undefined,
 				worktree_id: _state.worktreeId || undefined,
 				// Composer device pick. Creation-time only: the backend ignores it
 				// for an existing session.
 				target_instance_id: _state.deviceIntent?.id || undefined,
-				// Staged upload paths this prompt references (D8). The backend
-				// only acts on them when the turn is placed on another install.
-				upload_paths: options?.pendingUploadPaths?.length
+				// Staged upload paths this prompt references (D8). Remote-only
+				// compose has no local checkout — never send the list.
+				upload_paths: !remoteOnly && options?.pendingUploadPaths?.length
 					? options.pendingUploadPaths
 					: undefined,
 				// Adoption token — present only for a new-session query (see requestId).
@@ -485,13 +488,19 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		async createWorktree(prompt?: string, pendingUploadPaths?: string[]) {
 			const _state = getState();
 			if (!_state.profile) { update(s => ({ ...s, worktreeError: 'Please select a profile' })); return; }
-			if (!_state.project) { update(s => ({ ...s, worktreeError: 'Please select a project' })); return; }
+			if (!_state.project && !_state.projectV2Id) { update(s => ({ ...s, worktreeError: 'Please select a project' })); return; }
 			if (!_state.worktreeBranch) { update(s => ({ ...s, worktreeError: 'Please select a branch' })); return; }
+			if (!_state.project && pendingUploadPaths?.length) {
+				update(s => ({ ...s, worktreeError: ATTACHMENTS_NEED_LOCAL_CHECKOUT }));
+				return;
+			}
 
 			const creationGen = internal.worktreeCreationGeneration;
 			const projectId = _state.project;
+			const projectV2Id = _state.projectV2Id;
 			const queryProfileId = _state.profile;
 			const branchName = _state.worktreeBranch;
+			const remoteOnly = !projectId && !!projectV2Id;
 
 			update(s => ({ ...s, isCreatingWorktree: true, worktreeError: null }));
 
@@ -501,12 +510,16 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					base_branch: string; worktree_path: string; status: string;
 					upload_migration_errors?: string[] | null;
 				}>('/sessions/with-worktree', {
-					project_id: projectId,
+					...(remoteOnly
+						? { project_v2_id: projectV2Id }
+						: { project_id: projectId }),
 					branch_name: branchName,
 					base_branch: _state.worktreeBaseBranch || 'main',
 					profile_id: queryProfileId,
 					create_new_branch: _state.worktreeCreateNewBranch,
-					pending_upload_paths: pendingUploadPaths?.length ? pendingUploadPaths : undefined,
+					pending_upload_paths: !remoteOnly && pendingUploadPaths?.length
+						? pendingUploadPaths
+						: undefined,
 					// Composer device pick composes with the worktree checkbox: the
 					// target install materializes the checkout itself (durable git-ops
 					// queue) and the uploads travel as DB blobs.
@@ -598,10 +611,16 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			prompt = prompt.trim();
 			const _state = getState();
 			if (!_state.profile) { update(s => ({ ...s, worktreeError: 'Please select a profile' })); return; }
-			if (!_state.project) { update(s => ({ ...s, worktreeError: 'Please select a project' })); return; }
+			if (!_state.project && !_state.projectV2Id) { update(s => ({ ...s, worktreeError: 'Please select a project' })); return; }
+			if (!_state.project && pendingUploadPaths?.length) {
+				update(s => ({ ...s, worktreeError: ATTACHMENTS_NEED_LOCAL_CHECKOUT }));
+				return;
+			}
 
 			const queryProfileId = _state.profile;
 			const projectId = _state.project;
+			const projectV2Id = _state.projectV2Id;
+			const remoteOnly = !projectId && !!projectV2Id;
 			const baseBranch = _state.worktreeBaseBranch || 'main';
 			const modelOverrideSnap = _state.modelOverride;
 			const permissionModeOverrideSnap = _state.permissionModeOverride;
@@ -640,10 +659,14 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 			try {
 				let branchName: string;
-				try {
-					const result = await generateBranchName(projectId, prompt);
-					branchName = result.branch_name;
-				} catch {
+				if (projectId) {
+					try {
+						const result = await generateBranchName(projectId, prompt);
+						branchName = result.branch_name;
+					} catch {
+						branchName = generateBranchNameLocal(prompt);
+					}
+				} else {
 					branchName = generateBranchNameLocal(prompt);
 				}
 
@@ -665,14 +688,18 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					query_started?: boolean;
 					upload_migration_errors?: string[] | null;
 				}>('/sessions/with-worktree', {
-					project_id: projectId,
+					...(remoteOnly
+						? { project_v2_id: projectV2Id }
+						: { project_id: projectId }),
 					branch_name: branchName,
 					base_branch: baseBranch,
 					profile_id: queryProfileId,
 					create_new_branch: true,
 					prompt,
 					overrides: Object.keys(overridesPayload).length > 0 ? overridesPayload : undefined,
-					pending_upload_paths: pendingUploadPaths?.length ? pendingUploadPaths : undefined,
+					pending_upload_paths: !remoteOnly && pendingUploadPaths?.length
+						? pendingUploadPaths
+						: undefined,
 					// Composer device pick composes with the worktree checkbox (see
 					// createWorktree above).
 					target_instance_id: deviceIntentSnap?.id || undefined,

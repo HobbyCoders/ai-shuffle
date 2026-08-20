@@ -100,6 +100,7 @@ function mockState(): ActiveSessionState {
 		sessionProfileId: null,
 		currentQueryProfileId: null,
 		project: '',
+		projectV2Id: null,
 		totalTokensIn: 0,
 		totalTokensOut: 0,
 		totalCacheCreationTokens: 0,

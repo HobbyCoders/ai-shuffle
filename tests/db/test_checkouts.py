@@ -221,3 +221,37 @@ def test_archived_own_base_row_blocks_legacy_fallback(project):
 def test_a_base_checkout_on_another_runner_does_not_count(project):
     checkouts.upsert_checkout(project["id"], "runnerA", "/work/repo")
     assert checkouts.has_active_base_checkout(project["id"], "runnerB") is False
+
+
+# ---------------------------------------------------------------------------
+# list_active_base_checkouts — one SELECT for the cluster catalog (PR 8).
+# ---------------------------------------------------------------------------
+
+def test_list_active_base_checkouts_one_select_across_projects(mock_db):
+    a = projects_v2.upsert_project("git:a", name="A")
+    b = projects_v2.upsert_project("git:b", name="B")
+    checkouts.upsert_checkout(a["id"], "runnerA", "/a/repo")
+    checkouts.upsert_checkout(b["id"], "runnerB", "/b/repo")
+    checkouts.upsert_checkout(a["id"], "runnerA", "/a/feat", branch="feature-x")
+    rows = checkouts.list_active_base_checkouts()
+    paths = sorted(r["path"] for r in rows)
+    assert paths == ["/a/repo", "/b/repo"]
+    assert all(not r.get("branch") for r in rows)
+
+
+def test_list_active_base_checkouts_omits_archived_and_branch_only(project):
+    checkouts.upsert_checkout(project["id"], "runnerA", "/work/repo")
+    archived = checkouts.upsert_checkout(project["id"], "runnerB", "/work/old")
+    checkouts.set_checkout_status(archived["id"], "archived")
+    checkouts.upsert_checkout(
+        project["id"], "runnerA", "/work/feat", branch="feature-x"
+    )
+    rows = checkouts.list_active_base_checkouts()
+    assert [r["path"] for r in rows] == ["/work/repo"]
+
+
+def test_list_active_base_checkouts_empty_string_branch_is_base(project):
+    checkouts.upsert_checkout(project["id"], "runnerA", "/work/base", branch="")
+    rows = checkouts.list_active_base_checkouts()
+    assert len(rows) == 1
+    assert rows[0]["path"] == "/work/base"
