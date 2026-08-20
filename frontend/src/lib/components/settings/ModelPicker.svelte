@@ -28,7 +28,8 @@
 		getClaudeDisplay,
 		getClaudeAuth,
 		decodeProviderModel,
-		CUSTOM_VALUE
+		CUSTOM_VALUE,
+		NATIVE_PROVIDER_KEY
 	} from '$lib/constants/models';
 
 	interface Props {
@@ -43,9 +44,22 @@
 		 * Claude group and the `Custom…` entry. Additive, default false.
 		 */
 		providerModelsOnly?: boolean;
+		/** Limit choices to one provider. Use NATIVE_PROVIDER_KEY for native Claude. */
+		providerScope?: string;
+		/** Offer an empty assignment for provider-scoped subagent configuration. */
+		allowEmpty?: boolean;
+		emptyLabel?: string;
 	}
 
-	let { value, onSelect, id, providerModelsOnly = false }: Props = $props();
+	let {
+		value,
+		onSelect,
+		id,
+		providerModelsOnly = false,
+		providerScope,
+		allowEmpty = false,
+		emptyLabel = 'Unavailable as subagent'
+	}: Props = $props();
 
 	const PIN_STORAGE_KEY = 'aihub.pinnedModels';
 	// Groups are keyed by provider ID (the native catalog gets this sentinel) so
@@ -99,7 +113,7 @@
 	// ---- option set (native Claude first, then each provider) ----------------
 	const options = $derived.by<PickerOption[]>(() => {
 		const out: PickerOption[] = [];
-		if (!providerModelsOnly) {
+		if (!providerModelsOnly && (!providerScope || providerScope === NATIVE_PROVIDER_KEY)) {
 			const claudeAuth = getClaudeAuth();
 			const claude = getClaudeDisplay({
 				planType: claudeAuth.plan_type,
@@ -117,6 +131,7 @@
 			}
 		}
 		for (const p of getProviders()) {
+			if (providerScope && providerScope !== p.id) continue;
 			const display = getProviderDisplay(p);
 			for (const pm of p.models) {
 				out.push({
@@ -202,6 +217,7 @@
 
 	// Label shown on the collapsed trigger.
 	const currentLabel = $derived.by(() => {
+		if (allowEmpty && !value) return emptyLabel;
 		if (value === CUSTOM_VALUE) return 'Custom…';
 		const match = options.find((o) => o.value === value);
 		if (match) return match.label;
@@ -288,6 +304,21 @@
 			</div>
 
 			<div class="mpk-list">
+				{#if allowEmpty}
+					<div class="mpk-group mpk-customgroup">
+						<button
+							type="button"
+							class="mpk-row"
+							class:selected={!value}
+							role="option"
+							aria-selected={!value}
+							onclick={() => selectOption('')}
+						>
+							<span class="mpk-check">{#if !value}<Check size={14} />{/if}</span>
+							<span class="mpk-label">{emptyLabel}</span>
+						</button>
+					</div>
+				{/if}
 				{#if pinnedOptions.length > 0}
 					<div class="mpk-group">
 						<div class="mpk-grouphead">Pinned</div>
@@ -312,7 +343,7 @@
 					<div class="mpk-empty">No models match “{query}”.</div>
 				{/if}
 
-				{#if !providerModelsOnly}
+				{#if !providerModelsOnly && !providerScope}
 					<div class="mpk-group mpk-customgroup">
 						<button
 							type="button"

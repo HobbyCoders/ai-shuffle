@@ -8,9 +8,12 @@ supervisor teardown, progress feed, bounded report).
 
 What this module adds on top of raw ``dispatch_worker``:
 
-* target resolution — agent id first, then unambiguous case-insensitive name;
+* target resolution — subagent id first, then unambiguous name, inside the
+  current provider's eligible roster;
 * invoke grants (A10) — open by default; a caller agent with a non-empty
-  ``enabled_agents`` list may only invoke agents on that list;
+  ``enabled_agents`` list may only invoke subagents on that list;
+* provider binding — the caller provider and target's configured model on that
+  provider are authoritative; Task cannot switch providers or models;
 * nesting depth (A9) — max ``settings.task_tool_max_depth`` (5) levels of
   agent-invokes-agent, counted by walking worker-created ancestor sessions;
 * cycle detection (A9) — an agent already active in the ancestor chain cannot
@@ -21,8 +24,8 @@ What this module adds on top of raw ``dispatch_worker``:
   land on the ROOT session (the one with a human watching), while
   project/worktree/cwd inheritance still reads the direct caller;
 * modes (A8) — ``sync`` blocks and returns the worker's report;
-  ``background`` returns the worker session id immediately (collect later via
-  TaskList/TaskOutput — background workers survive the caller's turn end).
+  ``background`` returns the worker session id immediately and announces
+  completion to the parent — background workers survive the caller's turn end.
 """
 
 from __future__ import annotations
@@ -148,68 +151,6 @@ def _live_worker_count_for_root(root_session_id: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Target resolution
-# ---------------------------------------------------------------------------
-
-def resolve_target_agent(ref: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Resolve ``ref`` (agent id, else unambiguous name) to an agent row.
-
-    Returns ``(agent_row, error_message)`` — exactly one is non-None.
-    """
-    from app.db import database
-
-    ref = (ref or "").strip()
-    if not ref:
-        return None, "Task requires a target agent (id or name)."
-    row = database.get_profile(ref)
-    if row:
-        return row, None
-    matches = [
-        a for a in database.get_all_profiles()
-        if (a.get("name") or "").strip().lower() == ref.lower()
-    ]
-    if len(matches) == 1:
-        return matches[0], None
-    if len(matches) > 1:
-        ids = ", ".join(sorted(a["id"] for a in matches))
-        return None, f"Agent name '{ref}' is ambiguous — use an id: {ids}"
-    return None, f"Unknown agent: '{ref}'. List agents via the agents API/UI."
-
-
-def _validate_target(agent: Dict[str, Any], model_override: Optional[str]) -> Optional[str]:
-    """Provider/model admission for the target agent. None = OK."""
-    from app.core import provider_agent
-    from app.core.environment import is_provider_servable
-    from app.db import database
-
-    config = agent.get("config") or {}
-    provider_id = config.get("provider")
-    if not provider_id:
-        # Delegated Claude-subscription leg — always a valid worker target.
-        return None
-    try:
-        provider = database.get_model_provider(provider_id)
-    except Exception:  # noqa: BLE001
-        provider = None
-    if not provider:
-        return f"Agent '{agent['id']}' is bound to unknown provider '{provider_id}'."
-    if not provider.get("enabled"):
-        return f"Agent '{agent['id']}' is bound to disabled provider '{provider_id}'."
-    if not is_provider_servable(provider):
-        return (
-            f"Agent '{agent['id']}' is bound to provider '{provider_id}' "
-            "which cannot serve worker sessions."
-        )
-    if model_override:
-        validation = provider_agent.validate_provider_model(provider_id, model_override)
-        if not validation.ok:
-            return validation.reason or (
-                f"Model '{model_override}' is not curated for provider '{provider_id}'."
-            )
-    return None
-
-
-# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -218,6 +159,7 @@ async def dispatch_task_tool(
     *,
     caller_session_id: str,
     caller_profile_id: Optional[str] = None,
+    caller_provider_id: Optional[str] = None,
     launch_tool_use_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Handle one ``Task`` tool call. Never raises — returns a payload dict
@@ -231,28 +173,36 @@ async def dispatch_task_tool(
     mode = (args.get("mode") or "sync").strip().lower()
     if mode not in ("sync", "background"):
         return {"ok": False, "error": f"Unknown mode '{mode}' (sync|background)."}
+    if args.get("model") not in (None, ""):
+        return {
+            "ok": False,
+            "error": (
+                "Task does not accept a model override. The selected subagent's "
+                "model on the current provider is configured in the Agents UI."
+            ),
+        }
 
-    target, err = resolve_target_agent(args.get("agent") or "")
+    # Resolve only inside the provider-scoped roster. This applies invoke
+    # grants and provider/model admission before the model-authored target is
+    # accepted, so a forged call cannot cross providers even if the agent row
+    # exists in the database.
+    caller_row = _session_row(caller_session_id) or {}
+    caller_pid = caller_profile_id or caller_row.get("profile_id")
+    if not caller_pid:
+        return {
+            "ok": False,
+            "error": "Task could not resolve the calling agent profile.",
+        }
+    from app.core.agent_provider_models import (
+        available_subagents,
+        resolve_subagent,
+    )
+
+    roster = available_subagents(caller_pid, caller_provider_id)
+    target, err = resolve_subagent(args.get("agent") or "", roster)
     if err:
         return {"ok": False, "error": err}
     assert target is not None
-
-    # Invoke grants (A10): open by default, optional caller allowlist.
-    caller_row = _session_row(caller_session_id) or {}
-    caller_pid = caller_profile_id or caller_row.get("profile_id")
-    if caller_pid:
-        from app.db import database
-
-        caller_agent = database.get_profile(caller_pid)
-        allowlist = ((caller_agent or {}).get("config") or {}).get("enabled_agents")
-        if isinstance(allowlist, list) and allowlist and target["id"] not in allowlist:
-            return {
-                "ok": False,
-                "error": (
-                    f"Agent '{caller_pid}' may only invoke: "
-                    f"{', '.join(allowlist)} (enabled_agents allowlist)."
-                ),
-            }
 
     # Nesting depth + cycles (A9).
     max_depth = int(getattr(settings, "task_tool_max_depth", 5) or 5)
@@ -263,11 +213,11 @@ async def dispatch_task_tool(
             "error": f"Nesting limit reached ({max_depth} levels of agent-invokes-agent).",
         }
     active_agents = _chain_agent_ids(caller_session_id)
-    if target["id"] in active_agents:
+    if target.id in active_agents:
         return {
             "ok": False,
             "error": (
-                f"Cycle refused: agent '{target['id']}' is already active in "
+                f"Cycle refused: subagent '{target.id}' is already active in "
                 "this dispatch chain."
             ),
         }
@@ -283,21 +233,14 @@ async def dispatch_task_tool(
             ),
         }
 
-    model_override = (args.get("model") or "").strip() or None
-    admission_error = _validate_target(target, model_override)
-    if admission_error:
-        return {"ok": False, "error": admission_error}
-
-    target_config = target.get("config") or {}
-    provider_id = target_config.get("provider") or None
-    label = (args.get("label") or "").strip() or f"Task · {target.get('name') or target['id']}"
+    label = (args.get("label") or "").strip() or f"Task · {target.name}"
 
     kwargs: Dict[str, Any] = dict(
         parent_session_id=root_session_id,
         context_session_id=caller_session_id,
-        profile_id=target["id"],
-        provider_id=provider_id,
-        model_id=model_override,
+        profile_id=target.id,
+        provider_id=caller_provider_id,
+        model_id=target.model,
         prompt=prompt,
         label=label,
         # The model's Task tool_use_id (omni native leg) — lets the worker
@@ -312,16 +255,19 @@ async def dispatch_task_tool(
         _BACKGROUND_TASKS.add(task)
         task.add_done_callback(_BACKGROUND_TASKS.discard)
         # The worker session id is minted inside dispatch_worker; wait briefly
-        # for registration so the caller gets a pollable id.
+        # for registration so the caller gets an inspectable id.
         worker_id = await _await_worker_registration(root_session_id, label)
         return {
             "ok": True,
             "mode": "background",
-            "agent": target["id"],
+            "agent": target.id,
+            "model": target.model,
             "worker_session_id": worker_id,
             "note": (
-                "Worker dispatched in the background. Poll with TaskList/"
-                "TaskOutput (task id = worker session id)."
+                "Worker dispatched in the background. Completion will be "
+                "announced to the parent automatically; continue useful work. "
+                "Use TaskList/TaskOutput only for explicit inspection, not a "
+                "polling loop."
             ),
         }
 
@@ -329,7 +275,8 @@ async def dispatch_task_tool(
     payload: Dict[str, Any] = {
         "ok": outcome.ok,
         "mode": "sync",
-        "agent": target["id"],
+        "agent": target.id,
+        "model": target.model,
         "worker_session_id": outcome.session_id,
     }
     if outcome.ok:
@@ -364,6 +311,7 @@ async def _await_worker_registration(
 def make_omni_dispatcher(
     session_id: "str | Callable[[], Optional[str]]",
     profile_id: Optional[str] = None,
+    provider_id: Optional[str] = None,
 ):
     """The ``ctx.extra['task_dispatch']`` callable for omni's bare Task builtin
     (native legs).
@@ -384,7 +332,9 @@ def make_omni_dispatcher(
     session row that does not exist.
     """
 
-    async def _dispatch(input: Dict[str, Any], ctx: Any) -> str:
+    async def _dispatch(input: Dict[str, Any], ctx: Any) -> Any:
+        from omni.tools.registry import ToolOutcome
+
         caller_session_id: Any = session_id
         if callable(caller_session_id):
             try:
@@ -401,7 +351,7 @@ def make_omni_dispatcher(
                 "task_dispatch: no app session id resolved at dispatch time — "
                 "refusing to dispatch a parentless worker"
             )
-            return json.dumps({
+            payload = {
                 "ok": False,
                 "error": (
                     "Task dispatch could not resolve the calling session — the "
@@ -409,7 +359,10 @@ def make_omni_dispatcher(
                     "This is a host wiring problem, not a problem with the "
                     "request; retry once the session is fully registered."
                 ),
-            })
+            }
+            return ToolOutcome(
+                text=json.dumps(payload), ui=payload, is_error=True
+            )
         # Stamped by the engine for the duration of this dispatch (NativeLoop
         # sets ctx.extra["tool_use_id"] per tool call; dispatches are
         # sequential). Absent on the delegated leg's bridged mcp tool.
@@ -424,8 +377,43 @@ def make_omni_dispatcher(
             input,
             caller_session_id=str(caller_session_id),
             caller_profile_id=profile_id,
+            caller_provider_id=provider_id,
             launch_tool_use_id=launch_tool_use_id,
         )
-        return json.dumps(payload, default=str)
+        return ToolOutcome(
+            text=json.dumps(payload, default=str),
+            ui=payload,
+            is_error=not bool(payload.get("ok")),
+        )
 
     return _dispatch
+
+
+def subagent_system_prompt(session_id: Optional[str]) -> Optional[str]:
+    """Return the model-facing role block for a Task-created worker."""
+    if not session_id or not _is_worker_session(session_id):
+        return None
+    from app.core.config import settings
+
+    _, _, depth = caller_chain(session_id)
+    max_depth = int(getattr(settings, "task_tool_max_depth", 5) or 5)
+    if depth < max_depth:
+        nesting = (
+            f"You are at depth {depth} of {max_depth}. You may delegate only "
+            "through your own provider-scoped Task roster."
+        )
+    else:
+        nesting = (
+            f"You are at the maximum subagent depth ({max_depth}) and cannot "
+            "delegate further."
+        )
+    return (
+        "# Subagent context\n"
+        "You are a subagent, not the main agent. The first user message is your "
+        "complete assigned task. You do not have the parent's conversation.\n"
+        "Focus on the assigned scope, use the available tools, and verify the "
+        "result. Do not start a conversation with the user or take unrelated "
+        "side work. Your final response is returned to the parent, so report "
+        "concise accomplishments, findings, changed files, verification, and "
+        f"blockers. {nesting}"
+    )

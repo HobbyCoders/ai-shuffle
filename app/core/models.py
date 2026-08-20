@@ -97,6 +97,12 @@ class ProfileConfig(BaseModel):
     # with the provider's ANTHROPIC_BASE_URL / auth token and mitigation flags
     # (see ``environment.apply_provider_env``) instead of native Anthropic auth.
     provider: Optional[str] = None  # model_providers.id; None = native Anthropic
+    # Model used when this agent is invoked as a subagent on each provider.
+    # ``__native__`` is the native-Claude key; every other key is a
+    # ``model_providers.id``. Missing key = do not expose this agent as a
+    # subagent on that provider. The legacy provider/model pair above remains
+    # the default top-level chat binding.
+    provider_models: Optional[Dict[str, str]] = None
     permission_mode: Optional[str] = "default"  # default, auto, acceptEdits, plan, bypassPermissions
     thinking_mode: Optional[str] = "default"  # default, disabled, adaptive, think, think_harder, ultra_think
     # Opus 4.6+ uses effort-based reasoning instead of token budgets
@@ -835,6 +841,7 @@ class AgentExportData(BaseModel):
     name: str
     description: Optional[str] = None
     model: Optional[str] = DEFAULT_MODEL
+    provider_models: Optional[Dict[str, str]] = None
     permission_mode: Optional[str] = "default"  # default, acceptEdits, plan, bypassPermissions
     effort: Optional[str] = None  # low | medium | high | xhigh | max — harness-honored reasoning depth
     max_turns: Optional[int] = None  # per-turn model-call cap (native legs)

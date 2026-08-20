@@ -136,6 +136,19 @@ def is_native_claude_model(value: Any) -> bool:
     return get_model_family(value) is not None or value.lower().startswith("claude")
 
 
+def _append_system_block(prompt: Any, block: Optional[str]) -> Any:
+    """Append app-owned guidance to either supported system-prompt shape."""
+    if not block or not block.strip():
+        return prompt
+    if isinstance(prompt, dict):
+        updated = dict(prompt)
+        current = str(updated.get("append") or "").strip()
+        updated["append"] = f"{current}\n\n{block}" if current else block
+        return updated
+    current = str(prompt or "").strip()
+    return f"{current}\n\n{block}" if current else block
+
+
 # Back-compat aliases for tool names that were renamed. Applied at config-read
 # time only (never migrated in the DB) so saved profiles keep working. The
 # builtin ``PushNotification`` leaf tool was renamed to ``NotifyDevices`` to
@@ -725,6 +738,21 @@ def build_options_from_profile(
             (main_provider_row or {}).get("provider_type") != "anthropic"
         )
 
+    # Model-facing orchestration contract. The same provider-scoped resolver
+    # builds Task's schema and enforces dispatch, so prompt prose cannot promise
+    # a subagent that the tool will later reject (or omit one it will accept).
+    from app.core.agent_provider_models import parent_subagent_guidance
+    from app.core.task_dispatch import subagent_system_prompt
+
+    final_system_prompt = _append_system_block(
+        final_system_prompt,
+        parent_subagent_guidance(profile.get("id"), provider_id),
+    )
+    final_system_prompt = _append_system_block(
+        final_system_prompt,
+        subagent_system_prompt(session_id),
+    )
+
     betas_to_use = []
 
     # Build tool configuration (SDK 0.1.12+ supports new 'tools' parameter)
@@ -916,6 +944,7 @@ def build_options_from_profile(
             project_id=project.get("id") if project else None,
             is_admin=not api_user_id,
             model=model_to_use,
+            provider_id=provider_id,
         )
         if builtins_srv:
             mcp_servers_dict["builtins"] = builtins_srv
@@ -1167,5 +1196,9 @@ def build_options_from_profile(
     # only ever knows its own `ses_...` handle, and a brand-new session has no
     # omni id at connect time at all.
     options.aih_session_id = session_id
+    # The current agent profile is needed when the native harness builds its
+    # provider-scoped Task schema. The delegated MCP Task already receives the
+    # same id directly in create_builtin_tools_server above.
+    options.aih_profile_id = profile.get("id")
 
     return options, agents_dict

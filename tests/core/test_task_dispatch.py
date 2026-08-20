@@ -33,24 +33,6 @@ def _mk_session(database, session_id, profile_id, parent=None):
     )
 
 
-# ─── target resolution ───────────────────────────────────────────────────────
-
-
-def test_resolve_by_id(agents):
-    row, err = td.resolve_target_agent("helper")
-    assert err is None and row["id"] == "helper"
-
-
-def test_resolve_by_unambiguous_name(agents):
-    row, err = td.resolve_target_agent("Helper")
-    assert err is None and row["id"] == "helper"
-
-
-def test_resolve_unknown(agents):
-    row, err = td.resolve_target_agent("nope")
-    assert row is None and "Unknown agent" in err
-
-
 # ─── dispatch guards ─────────────────────────────────────────────────────────
 
 
@@ -82,7 +64,7 @@ def test_allowlist_restricts(agents):
     _mk_session(agents, "s-locked", "locked")
     payload = asyncio.run(_dispatch({"agent": "root-agent", "prompt": "go"}, "s-locked"))
     assert payload["ok"] is False
-    assert "allowlist" in payload["error"]
+    assert "not available" in payload["error"]
 
     async def fake_worker(**kwargs):
         return WorkerOutcome(ok=True, session_id="w1", report="ok")
@@ -97,14 +79,22 @@ def test_depth_limit(agents, monkeypatch):
 
     monkeypatch.setattr(settings, "task_tool_max_depth", 5)
     monkeypatch.setattr(td, "caller_chain", lambda sid: ([], "root", 5))
-    payload = asyncio.run(_dispatch({"agent": "helper", "prompt": "go"}, "deep"))
+    payload = asyncio.run(_dispatch(
+        {"agent": "helper", "prompt": "go"},
+        "deep",
+        caller_profile_id="root-agent",
+    ))
     assert payload["ok"] is False and "Nesting limit" in payload["error"]
 
 
 def test_cycle_refused(agents, monkeypatch):
     monkeypatch.setattr(td, "caller_chain", lambda sid: ([], "root", 1))
     monkeypatch.setattr(td, "_chain_agent_ids", lambda sid: ["helper", "root-agent"])
-    payload = asyncio.run(_dispatch({"agent": "helper", "prompt": "go"}, "s"))
+    payload = asyncio.run(_dispatch(
+        {"agent": "helper", "prompt": "go"},
+        "s",
+        caller_profile_id="root-agent",
+    ))
     assert payload["ok"] is False and "Cycle" in payload["error"]
 
 
@@ -114,7 +104,11 @@ def test_worker_budget(agents, monkeypatch):
     monkeypatch.setattr(settings, "task_tool_max_workers", 2)
     monkeypatch.setattr(td, "caller_chain", lambda sid: ([], "root", 0))
     monkeypatch.setattr(td, "_live_worker_count_for_root", lambda root: 2)
-    payload = asyncio.run(_dispatch({"agent": "helper", "prompt": "go"}, "s"))
+    payload = asyncio.run(_dispatch(
+        {"agent": "helper", "prompt": "go"},
+        "s",
+        caller_profile_id="root-agent",
+    ))
     assert payload["ok"] is False and "budget" in payload["error"].lower()
 
 
@@ -124,6 +118,59 @@ def test_provider_bound_target_admission(agents):
     payload = asyncio.run(_dispatch({"agent": "gpt-bound", "prompt": "go"}, "s-root2"))
     assert payload["ok"] is False
     assert "provider" in payload["error"]
+
+
+def test_model_override_is_refused(agents):
+    _mk_session(agents, "s-model-override", "root-agent")
+    payload = asyncio.run(_dispatch(
+        {"agent": "helper", "prompt": "go", "model": "opus"},
+        "s-model-override",
+    ))
+    assert payload["ok"] is False
+    assert "does not accept a model override" in payload["error"]
+
+
+def test_dispatch_stays_on_caller_provider_and_uses_target_assignment(
+    agents, monkeypatch
+):
+    from app.core import agent_provider_models as apm
+
+    _mk_session(agents, "s-provider-local", "root-agent")
+    seen = {}
+    monkeypatch.setattr(
+        apm,
+        "available_subagents",
+        lambda caller, provider: (
+            apm.SubagentTarget("helper", "Helper", "", "gpt-5"),
+        ),
+    )
+
+    async def fake_worker(**kwargs):
+        seen.update(kwargs)
+        return WorkerOutcome(ok=True, session_id="w-provider", report="done")
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        payload = asyncio.run(td.dispatch_task_tool(
+            {"agent": "helper", "prompt": "go"},
+            caller_session_id="s-provider-local",
+            caller_provider_id="openai-row",
+        ))
+
+    assert payload["ok"] is True
+    assert seen["provider_id"] == "openai-row"
+    assert seen["model_id"] == "gpt-5"
+
+
+def test_worker_system_prompt_uses_subagent_role_and_real_depth(monkeypatch):
+    monkeypatch.setattr(td, "_is_worker_session", lambda session_id: True)
+    monkeypatch.setattr(td, "caller_chain", lambda session_id: ([], "root", 2))
+
+    prompt = td.subagent_system_prompt("worker-2")
+
+    assert prompt.startswith("# Subagent context")
+    assert "You are a subagent, not the main agent" in prompt
+    assert "depth 2" in prompt
+    assert "returned to the parent" in prompt
 
 
 # ─── modes ───────────────────────────────────────────────────────────────────
@@ -200,7 +247,11 @@ def test_root_routing_passes_root_as_parent(agents, monkeypatch):
     monkeypatch.setattr(td, "caller_chain", lambda sid: ([], "the-root", 1))
     monkeypatch.setattr(td, "_chain_agent_ids", lambda sid: [])
     with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
-        asyncio.run(_dispatch({"agent": "helper", "prompt": "go"}, "nested-caller"))
+        asyncio.run(_dispatch(
+            {"agent": "helper", "prompt": "go"},
+            "nested-caller",
+            caller_profile_id="root-agent",
+        ))
     assert seen["parent_session_id"] == "the-root"
     assert seen["context_session_id"] == "nested-caller"
     assert seen["profile_id"] == "helper"

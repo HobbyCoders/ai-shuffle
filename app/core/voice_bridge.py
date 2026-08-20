@@ -557,6 +557,7 @@ class VoiceBridge:
         self._announced_approvals: set = set()
         # Voice session's profile id, read lazily and cached (dispatch grants).
         self._profile_id: Optional[str] = None
+        self._provider_id: Optional[str] = None
         self._profile_loaded = False
 
     # -- lifecycle ---------------------------------------------------------
@@ -1002,13 +1003,20 @@ class VoiceBridge:
         try:
             row = await run_sync(database.get_session, self.session_id)
             self._profile_id = (row or {}).get("profile_id")
+            self._provider_id = (row or {}).get("provider_id")
         except Exception:  # noqa: BLE001 — dispatch falls back to the row read
             logger.debug(
                 "Voice: could not read profile for %s", self.session_id, exc_info=True,
             )
             self._profile_id = None
+            self._provider_id = None
         self._profile_loaded = True
         return self._profile_id
+
+    async def _caller_provider_id(self) -> Optional[str]:
+        """The voice session's current provider; ``None`` means native Claude."""
+        await self._caller_profile_id()
+        return self._provider_id
 
     async def _tool_dispatch_agent(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Spin up a background worker and ACK immediately (ruling VM10).
@@ -1037,6 +1045,7 @@ class VoiceBridge:
             },
             caller_session_id=self.session_id,
             caller_profile_id=await self._caller_profile_id(),
+            caller_provider_id=await self._caller_provider_id(),
         )
         # dispatch_task_tool never raises; ok=False carries an actionable error
         # (unknown agent, depth/budget/cycle refusal) that the model reads out.
@@ -1082,7 +1091,8 @@ class VoiceBridge:
         fails with task_dispatch's own "needs a target" error.
         """
         caller = await self._caller_profile_id()
-        rows = await run_sync(_eligible_agent_rows, caller)
+        provider_id = await self._caller_provider_id()
+        rows = await run_sync(_eligible_agent_rows, caller, provider_id)
         return _pick_default_agent(rows)
 
     async def _agent_roster(self) -> str:
@@ -1092,7 +1102,8 @@ class VoiceBridge:
         name the model reads back is always a name dispatch accepts.
         """
         caller = await self._caller_profile_id()
-        rows = await run_sync(_eligible_agent_rows, caller)
+        provider_id = await self._caller_provider_id()
+        rows = await run_sync(_eligible_agent_rows, caller, provider_id)
         return _agent_roster_text(rows)
 
     async def _tool_check_agent(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1274,7 +1285,9 @@ def _parse_arguments(arguments: Any) -> Dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _eligible_agent_rows(caller_profile_id: Optional[str]) -> List[Dict[str, Any]]:
+def _eligible_agent_rows(
+    caller_profile_id: Optional[str], provider_id: Optional[str] = None
+) -> List[Dict[str, Any]]:
     """Agent definitions this voice session may dispatch to.
 
     The caller's own profile is excluded — ``task_dispatch`` refuses it as a
@@ -1282,13 +1295,20 @@ def _eligible_agent_rows(caller_profile_id: Optional[str]) -> List[Dict[str, Any
     explain out loud.
     """
     try:
-        rows = database.get_all_profiles() or []
+        from app.core.agent_provider_models import available_subagents
+
+        targets = available_subagents(caller_profile_id, provider_id)
     except Exception:  # noqa: BLE001
         logger.debug("Voice: agent listing failed", exc_info=True)
         return []
     return [
-        row for row in rows
-        if row.get("id") and row.get("id") != caller_profile_id
+        {
+            "id": target.id,
+            "name": target.name,
+            "description": target.description,
+            "model": target.model,
+        }
+        for target in targets
     ]
 
 
@@ -1477,11 +1497,17 @@ def _list_agents_payload(session_id: str) -> Dict[str, Any]:
 
     agents: List[Dict[str, Any]] = []
     try:
-        for row in (database.get_all_profiles() or [])[:MAX_LISTED_AGENTS]:
+        session = database.get_session(session_id) or {}
+        rows = _eligible_agent_rows(
+            session.get("profile_id"), session.get("provider_id")
+        )
+        for row in rows[:MAX_LISTED_AGENTS]:
             entry = {"id": row.get("id"), "name": row.get("name") or row.get("id")}
             description = (row.get("description") or "").strip()
             if description:
                 entry["description"] = description[:AGENT_DESCRIPTION_MAX_CHARS]
+            if row.get("model"):
+                entry["model"] = row["model"]
             agents.append(entry)
     except Exception:  # noqa: BLE001
         logger.debug("Voice: agent listing failed", exc_info=True)

@@ -759,15 +759,12 @@ async def dispatch_worker(
     worktree_branch = (parent_row or {}).get("worktree_branch")
     worktree_path = (parent_row or {}).get("worktree_path")
 
-    # Since P2c (Task tool, ruling A6) provider_id/model_id may be None: the
-    # worker then runs the TARGET agent's own binding — create_session resolves
-    # provider from the agent's config, and the turn inherits the agent's
-    # configured model. A None provider is the delegated Claude-subscription
-    # leg, which is a fully valid worker (the hard constraint is honored — it
-    # runs through the claude CLI like any other delegated session).
+    # Task supplies the caller's provider and the target's configured model on
+    # that provider. ``provider_id=None`` is an explicit native-Claude binding,
+    # not permission to fall back to the target profile's top-level provider.
     worker_session_id = str(uuid.uuid4())
     title = (label or "").strip() or f"Task worker · {model_id or profile_id}"
-    provider_tag = provider_id or "agent"
+    provider_tag = provider_id or "native"
     model_tag = model_id or "inherit"
 
     try:
@@ -781,6 +778,7 @@ async def dispatch_worker(
             worktree_branch=worktree_branch,
             worktree_path=worktree_path,
             provider_id=provider_id,
+            derive_provider_from_profile=False,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("ProviderAgent: worker session creation failed")

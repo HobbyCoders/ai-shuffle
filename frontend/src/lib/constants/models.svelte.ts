@@ -76,6 +76,9 @@ export const INHERIT_VALUE = '';
 /** Sentinel value meaning "custom free-text entry" (used by the `Custom…` dropdown option). */
 export const CUSTOM_VALUE = '__custom__';
 
+/** Reserved key used by agent `provider_models` maps for native Claude. */
+export const NATIVE_PROVIDER_KEY = '__native__';
+
 // ---------------------------------------------------------------------------
 // Provider-model composite codec (`prov:<providerId>:<modelId>`)
 // ---------------------------------------------------------------------------

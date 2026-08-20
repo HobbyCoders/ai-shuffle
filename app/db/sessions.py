@@ -411,6 +411,7 @@ def create_session(
     *,
     is_active: bool = False,
     provider_id: Optional[str] = None,
+    derive_provider_from_profile: bool = True,
     mode: Optional[str] = None,
     _conn=None
 ) -> SessionRow:
@@ -439,6 +440,10 @@ def create_session(
             about (ProviderAgent cross-provider workers, phase-3 chunk P3-A).
             ``None`` (or "") keeps the pre-existing profile-derived behaviour
             exactly.
+        derive_provider_from_profile: When false, preserve an explicit native
+            binding (``provider_id=None``) instead of falling back to the
+            profile's top-level provider. Task workers use this because their
+            provider comes from the caller, not the target profile.
         mode: Interaction mode for this session (ruling VM4) — ``'voice'`` for an
             OpenAI Realtime voice call. ``None`` (the default, and every
             pre-existing row) means chat; the API model coalesces NULL to
@@ -462,7 +467,7 @@ def create_session(
     # configure. With no argument the code below is byte-identical to the
     # pre-parameter behaviour.
     resolved_provider_id = (provider_id or "").strip() or None
-    if resolved_provider_id is None:
+    if resolved_provider_id is None and derive_provider_from_profile:
         try:
             from app.db.profiles import get_profile
             _profile = get_profile(profile_id)

@@ -1434,7 +1434,11 @@ class TestExportProfileEndpoint:
                     "inject_env_details": True
                 },
                 "allowed_tools": ["Bash", "Read"],
-                "enabled_agents": ["agent-1"]
+                "enabled_agents": ["agent-1"],
+                "provider_models": {
+                    "__native__": "opus",
+                    "provider-1": "gpt-5",
+                },
             },
             "is_builtin": False,
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -1452,6 +1456,10 @@ class TestExportProfileEndpoint:
                 body = json.loads(result.body)
                 assert body["agent"]["system_prompt_content"] == "You are a custom assistant"
                 assert body["agent"]["allowed_tools"] == ["Bash", "Read"]
+                assert body["agent"]["provider_models"] == {
+                    "__native__": "opus",
+                    "provider-1": "gpt-5",
+                }
                 # SDK-era fields are no longer part of the export wire shape
                 assert "system_prompt_type" not in body["agent"]
                 assert "thinking_mode" not in body["agent"]
@@ -1962,6 +1970,10 @@ class TestEdgeCases:
                     name="Full Agent",
                     description="Agent with all fields",
                     model="opus",
+                    provider_models={
+                        "__native__": "opus",
+                        "provider-1": "gpt-5",
+                    },
                     allowed_tools=["Bash", "Read", "Write"],
                     disallowed_tools=["WebFetch"],
                     enabled_agents=["subagent-1", "subagent-2"],
@@ -1985,6 +1997,10 @@ class TestEdgeCases:
             call_kwargs = mock_db.create_profile.call_args[1]
             config = call_kwargs["config"]
             assert config["allowed_tools"] == ["Bash", "Read", "Write"]
+            assert config["provider_models"] == {
+                "__native__": "opus",
+                "provider-1": "gpt-5",
+            }
             assert config["disallowed_tools"] == ["WebFetch"]
             assert config["enabled_agents"] == ["subagent-1", "subagent-2"]
             assert config["ai_tools"]["image_generation"] is True

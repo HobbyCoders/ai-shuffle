@@ -37,6 +37,7 @@ def test_err_serializes_datetime_extra():
     """_err takes **extra kwargs that may carry DB-sourced datetimes too."""
     dt = datetime(2026, 6, 7, 8, 9, 10, tzinfo=timezone.utc)
     result = _err("boom", last_run_at=dt)
+    assert result["isError"] is True
 
     body = _decode(result)
     assert body["success"] is False

@@ -550,6 +550,7 @@ def fake_dispatch(monkeypatch):
             "args": args,
             "caller_session_id": caller_session_id,
             "caller_profile_id": caller_profile_id,
+            "caller_provider_id": kw.get("caller_provider_id"),
         })
         return dict(result)
 
@@ -998,7 +999,12 @@ async def test_list_agents_returns_definitions_and_active_tasks(
     _mk_session()
     monkeypatch.setattr(
         database, "get_all_profiles",
-        lambda: [{"id": "coder", "name": "Coder", "description": "writes code"}],
+        lambda: [{
+            "id": "coder",
+            "name": "Coder",
+            "description": "writes code",
+            "config": {"model": "sonnet"},
+        }],
     )
     monkeypatch.setattr(
         task_registry, "get_all",
@@ -1015,7 +1021,7 @@ async def test_list_agents_returns_definitions_and_active_tasks(
     payload = json.loads(_items(sock, "function_call_output")[0]["output"])
     assert payload["ok"] is True
     assert payload["agents"] == [
-        {"id": "coder", "name": "Coder", "description": "writes code"},
+        {"id": "coder", "name": "Coder", "description": "writes code", "model": "sonnet"},
     ]
     assert payload["active_tasks"] == [
         {"task_id": "worker-1", "label": "dark mode", "status": "running"},
@@ -1031,7 +1037,10 @@ async def test_dispatch_without_an_agent_picks_a_default_definition(
     _mk_session()                                   # session profile = "default"
     monkeypatch.setattr(
         database, "get_all_profiles",
-        lambda: [{"id": "default", "name": "Default"}, {"id": "coder", "name": "Coder"}],
+        lambda: [
+            {"id": "default", "name": "Default", "config": {"model": "sonnet"}},
+            {"id": "coder", "name": "Coder", "config": {"model": "sonnet"}},
+        ],
     )
     bridge = await _bridge(fake_sockets)
     sock = fake_sockets[0]
@@ -1204,9 +1213,9 @@ async def test_the_default_pick_is_stable_across_row_order(
 
     _mk_session()                                   # session profile = "default"
     rows = [
-        {"id": "zeta", "name": "Zeta"},
-        {"id": "default", "name": "Default"},       # the caller — never eligible
-        {"id": "alpha", "name": "Alpha"},
+        {"id": "zeta", "name": "Zeta", "config": {"model": "sonnet"}},
+        {"id": "default", "name": "Default", "config": {"model": "sonnet"}},       # the caller — never eligible
+        {"id": "alpha", "name": "Alpha", "config": {"model": "sonnet"}},
     ]
     for ordering in (rows, list(reversed(rows))):
         monkeypatch.setattr(database, "get_all_profiles", lambda o=ordering: list(o))
@@ -1222,10 +1231,11 @@ async def test_instructions_carry_the_dispatchable_agent_roster(
 
     _mk_session()
     monkeypatch.setattr(database, "get_all_profiles", lambda: [
-        {"id": "default", "name": "Default"},       # the caller — excluded
+        {"id": "default", "name": "Default", "config": {"model": "sonnet"}},       # the caller — excluded
         {"id": "coder", "name": "Coder",
-         "description": "Writes code. Also reviews pull requests."},
-        {"id": "scout", "name": "Scout"},
+         "description": "Writes code. Also reviews pull requests.",
+         "config": {"model": "sonnet"}},
+        {"id": "scout", "name": "Scout", "config": {"model": "sonnet"}},
     ])
     bridge = await _bridge(fake_sockets)
     instructions = fake_sockets[0].session_update()["session"]["instructions"]

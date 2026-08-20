@@ -323,7 +323,9 @@ class HarnessAdapter(ProviderAdapter):
                 from app.core.task_dispatch import make_omni_dispatcher
 
                 native_ctx.extra["task_dispatch"] = make_omni_dispatcher(
-                    self._resolve_app_session_id
+                    self._resolve_app_session_id,
+                    profile_id=(options.extra or {}).get("profile_id"),
+                    provider_id=(options.extra or {}).get("provider_id"),
                 )
             except Exception:  # noqa: BLE001 — Task degrades to "unavailable"
                 logger.warning(
@@ -470,6 +472,9 @@ class HarnessAdapter(ProviderAdapter):
         app_session_id = getattr(sdk_options, "aih_session_id", None)
         if app_session_id:
             opts.extra["app_session_id"] = app_session_id
+        profile_id = getattr(sdk_options, "aih_profile_id", None)
+        if profile_id:
+            opts.extra["profile_id"] = profile_id
         # The app's permission prompt flow rides on this callback (see
         # _bridge_permission) — same wiring the SDK path uses.
         self._can_use_tool = getattr(sdk_options, "can_use_tool", None)
@@ -1559,66 +1564,36 @@ def _lookup_provider_row_shape(provider_id: str) -> tuple:
 
 
 def _amend_native_task_spec(registry: ToolRegistry, options: SessionOptions) -> None:
-    """Re-register omni's bare Task builtin with a provider-aware ``model`` hint.
+    """Replace omni's static Task spec with the provider-scoped app contract.
 
-    The vendor spec's ``model`` property only says "Optional model override for
-    this run" — on a native (non-Claude) leg the model calling Task has no idea
-    what that means for ITS provider and reliably guesses a Claude shorthand
-    alias ("sonnet"/"opus"/"haiku"), which the dispatcher rejects, burning a
-    call for nothing. When the session is bound to a ``model_providers`` row we
-    know its curated model ids up front, so swap in a description that names
-    them explicitly. Unbound sessions (delegated/Claude default) are left alone
-    — the vendor description is already correct there.
-
-    Best-effort only: any failure here (bad row, bad curated list) must never
-    break session connect, so the vendor spec simply stays registered as-is.
+    Omni owns the bare tool and handler; AI Shuffle owns its differentiated
+    agent registry and provider bindings. Building the description/schema here
+    gives native models the same eligible subagent roster as the delegated MCP
+    surface and removes model-authored provider/model selection.
     """
     try:
         provider_id = (options.extra or {}).get("provider_id")
-        if not provider_id:
-            return
+        profile_id = (options.extra or {}).get("profile_id")
+        from app.core.agent_provider_models import build_task_contract
 
-        from app.db import database
-
-        try:
-            row = database.get_model_provider(str(provider_id), include_token=False)
-        except Exception:
-            return
-        if not row:
-            return
-
-        from app.core.provider_agent import curated_model_ids
-
-        ids = curated_model_ids(row)
-        if not ids:
-            return
-
-        if len(ids) > 12:
-            ids_str = ", ".join(ids[:12]) + ", …"
-        else:
-            ids_str = ", ".join(ids)
-
-        import copy
+        contract = build_task_contract(profile_id, provider_id)
         import dataclasses
 
         from omni.tools.builtins.task import SPEC as _TASK_SPEC
         from omni.tools.builtins.task import handler as _task_handler
 
-        schema = copy.deepcopy(_TASK_SPEC.input_schema)
-        schema["properties"]["model"]["description"] = (
-            f"Optional model override. For agents bound to this session's "
-            f"provider ('{provider_id}') it must be one of the curated ids: "
-            f"{ids_str}. Omit to use the target agent's configured model. "
-            f"Claude shorthand aliases (sonnet/opus/haiku) are NOT valid for "
-            f"non-Claude providers."
-        )
         registry.register_builtin(
-            dataclasses.replace(_TASK_SPEC, input_schema=schema), _task_handler
+            dataclasses.replace(
+                _TASK_SPEC,
+                description=contract.description,
+                input_schema=contract.input_schema,
+            ),
+            _task_handler,
         )
     except Exception:  # noqa: BLE001 — must never break session connect
         logger.warning(
-            "[HarnessAdapter] failed to amend native Task spec's model "
-            "description; leaving the vendor spec as-is.",
+            "[HarnessAdapter] failed to install provider-scoped native Task "
+            "spec; leaving the vendor spec as-is.",
             exc_info=True,
         )
 

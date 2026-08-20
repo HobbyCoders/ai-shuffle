@@ -2106,6 +2106,12 @@ def _injected_dispatcher():
     return _CapturingLoop.captured["ctx"].extra.get("task_dispatch")
 
 
+def _task_payload(outcome):
+    import json
+
+    return json.loads(outcome.text)
+
+
 @pytest.mark.asyncio
 async def test_native_leg_injects_task_dispatch_without_a_session_id(
     monkeypatch, tmp_path
@@ -2124,7 +2130,10 @@ async def test_task_dispatch_uses_the_stamped_app_session_id(monkeypatch, tmp_pa
 
     seen: dict = {}
 
-    async def _fake_dispatch(args, *, caller_session_id, caller_profile_id=None, launch_tool_use_id=None):
+    async def _fake_dispatch(
+        args, *, caller_session_id, caller_profile_id=None,
+        caller_provider_id=None, launch_tool_use_id=None,
+    ):
         seen["caller"] = caller_session_id
         return {"ok": True}
 
@@ -2146,7 +2155,10 @@ async def test_task_dispatch_falls_back_to_the_sdk_id_lookup(monkeypatch, tmp_pa
 
     seen: dict = {}
 
-    async def _fake_dispatch(args, *, caller_session_id, caller_profile_id=None, launch_tool_use_id=None):
+    async def _fake_dispatch(
+        args, *, caller_session_id, caller_profile_id=None,
+        caller_provider_id=None, launch_tool_use_id=None,
+    ):
         seen["caller"] = caller_session_id
         return {"ok": True}
 
@@ -2167,8 +2179,6 @@ async def test_task_dispatch_reports_a_clear_error_when_unresolvable(
     monkeypatch, tmp_path
 ):
     """No stamp and no mapping → a named error, never a parentless worker."""
-    import json
-
     import app.core.task_dispatch as td
     from app.db import database
 
@@ -2180,7 +2190,8 @@ async def test_task_dispatch_reports_a_clear_error_when_unresolvable(
     await _connect_native_leg(monkeypatch, tmp_path)
 
     raw = await _injected_dispatcher()({"agent": "helper", "prompt": "go"}, object())
-    payload = json.loads(raw)
+    payload = _task_payload(raw)
+    assert raw.is_error is True
     assert payload["ok"] is False
     assert "could not resolve the calling session" in payload["error"]
 
@@ -2192,15 +2203,16 @@ async def test_pooled_engine_dispatcher_picks_up_a_late_session_id(
     """The ctx built in connect() outlives the connect. The SAME dispatcher
     must start working once the session id becomes resolvable — this is the
     pooled-client reuse path ("Reusing pooled client for session ...")."""
-    import json
-
     import app.core.task_dispatch as td
     from app.db import database
 
     seen: dict = {}
     mapped: dict = {}
 
-    async def _fake_dispatch(args, *, caller_session_id, caller_profile_id=None, launch_tool_use_id=None):
+    async def _fake_dispatch(
+        args, *, caller_session_id, caller_profile_id=None,
+        caller_provider_id=None, launch_tool_use_id=None,
+    ):
         seen["caller"] = caller_session_id
         return {"ok": True}
 
@@ -2211,7 +2223,9 @@ async def test_pooled_engine_dispatcher_picks_up_a_late_session_id(
     await _connect_native_leg(monkeypatch, tmp_path)
 
     dispatcher = _injected_dispatcher()
-    first = json.loads(await dispatcher({"agent": "helper", "prompt": "go"}, object()))
+    first = _task_payload(
+        await dispatcher({"agent": "helper", "prompt": "go"}, object())
+    )
     assert first["ok"] is False and "caller" not in seen
 
     mapped["ses_x"] = {"id": "app-sess-3"}
@@ -2220,7 +2234,7 @@ async def test_pooled_engine_dispatcher_picks_up_a_late_session_id(
 
 
 @pytest.mark.asyncio
-async def test_connect_with_sdk_options_projects_the_app_session_id(monkeypatch):
+async def test_connect_with_sdk_options_projects_app_session_and_profile_ids(monkeypatch):
     """``aih_session_id`` (stamped by query_options) lands on
     ``SessionOptions.extra['app_session_id']``."""
     import types
@@ -2238,9 +2252,11 @@ async def test_connect_with_sdk_options_projects_the_app_session_id(monkeypatch)
             model="claude-sonnet-4-5",
             aih_provider_id=None,
             aih_session_id="app-sess-4",
+            aih_profile_id="reviewer",
         )
     )
     assert adapter._options.extra["app_session_id"] == "app-sess-4"
+    assert adapter._options.extra["profile_id"] == "reviewer"
 
 
 @pytest.mark.asyncio
@@ -2310,63 +2326,77 @@ def test_effort_change_requires_reconnect():
 # ─── _amend_native_task_spec ───────────────────────────────────────────────────
 
 
-def test_amend_native_task_spec_names_the_curated_ids(monkeypatch):
-    """A native leg bound to a provider row gets a Task ``model`` description
-    naming that row's curated ids, so the model stops guessing Claude aliases."""
+def test_amend_native_task_spec_installs_provider_scoped_roster(monkeypatch):
+    """The native bare Task gets the same provider-scoped roster contract."""
     import app.core.provider.harness_adapter as ha
-    import app.db.database as db
+    from app.core import agent_provider_models as apm
 
     monkeypatch.setattr(
-        db,
-        "get_model_provider",
-        lambda pid, include_token=False: {
-            "id": pid,
-            "models_json": [{"id": "gpt-5.6-sol"}, {"id": "gpt-5.6-mini"}],
-        },
+        apm,
+        "available_subagents",
+        lambda profile_id, provider_id: (
+            apm.SubagentTarget(
+                id="reviewer",
+                name="Reviewer",
+                description="Reviews changes.",
+                model="gpt-5.6-sol",
+            ),
+        ),
     )
 
     registry = ha.ToolRegistry()
     from omni.tools.builtins import register_builtins
 
     register_builtins(registry)
-    options = SessionOptions(model="gpt-5.6-sol", extra={"provider_id": "prov1"})
+    options = SessionOptions(
+        model="gpt-5.6-sol",
+        extra={"provider_id": "prov1", "profile_id": "caller"},
+    )
 
     ha._amend_native_task_spec(registry, options)
 
-    description = registry.get("Task").input_schema["properties"]["model"]["description"]
-    assert "gpt-5.6-sol" in description
-    assert "gpt-5.6-mini" in description
-    assert "NOT valid" in description
+    spec = registry.get("Task")
+    assert spec.input_schema["properties"]["agent"]["enum"] == ["reviewer"]
+    assert "model" not in spec.input_schema["properties"]
+    assert "gpt-5.6-sol" in spec.description
+    assert "subagent" in spec.description.lower()
 
 
-def test_amend_native_task_spec_leaves_unbound_sessions_untouched(monkeypatch):
-    """No ``provider_id`` in ``extra`` means the session is delegated/Claude-
-    default — the vendor Task spec's own description must survive unmodified."""
+def test_amend_native_task_spec_scopes_native_claude_too(monkeypatch):
+    """No provider row means native Claude, which still gets a dynamic spec."""
     import app.core.provider.harness_adapter as ha
+    from app.core import agent_provider_models as apm
 
     from omni.tools.builtins import register_builtins
-    from omni.tools.builtins.task import SPEC as _TASK_SPEC
+
+    monkeypatch.setattr(
+        apm,
+        "available_subagents",
+        lambda profile_id, provider_id: (
+            apm.SubagentTarget("helper", "Helper", "", "sonnet"),
+        ),
+    )
 
     registry = ha.ToolRegistry()
     register_builtins(registry)
-    options = SessionOptions(model="gpt-5.6-sol", extra={})
+    options = SessionOptions(model="sonnet", extra={"profile_id": "caller"})
 
     ha._amend_native_task_spec(registry, options)
 
-    description = registry.get("Task").input_schema["properties"]["model"]["description"]
-    assert description == _TASK_SPEC.input_schema["properties"]["model"]["description"]
+    spec = registry.get("Task")
+    assert spec.input_schema["properties"]["agent"]["enum"] == ["helper"]
+    assert "model" not in spec.input_schema["properties"]
 
 
-def test_amend_native_task_spec_swallows_provider_lookup_failure(monkeypatch):
-    """A DB error while resolving the bound provider row must never propagate
-    out of connect() — the vendor Task spec just stays registered as-is."""
+def test_amend_native_task_spec_swallows_contract_failure(monkeypatch):
+    """A contract-build error never prevents session connection."""
     import app.core.provider.harness_adapter as ha
-    import app.db.database as db
+    from app.core import agent_provider_models as apm
 
-    def _boom(pid, include_token=False):
+    def _boom(*args, **kwargs):
         raise RuntimeError("db down")
 
-    monkeypatch.setattr(db, "get_model_provider", _boom)
+    monkeypatch.setattr(apm, "build_task_contract", _boom)
 
     from omni.tools.builtins import register_builtins
     from omni.tools.builtins.task import SPEC as _TASK_SPEC
@@ -2377,5 +2407,6 @@ def test_amend_native_task_spec_swallows_provider_lookup_failure(monkeypatch):
 
     ha._amend_native_task_spec(registry, options)  # must not raise
 
-    description = registry.get("Task").input_schema["properties"]["model"]["description"]
-    assert description == _TASK_SPEC.input_schema["properties"]["model"]["description"]
+    spec = registry.get("Task")
+    assert "model" not in spec.input_schema["properties"]
+    assert spec.description == _TASK_SPEC.description

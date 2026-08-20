@@ -291,6 +291,7 @@ export interface AuthStatus {
 export interface ProfileConfig {
 	model?: string;
 	provider?: string | null;  // model_providers.id this model runs through; unset/null = native Anthropic
+	provider_models?: Record<string, string>;  // subagent model by provider; __native__ = native Claude, missing key = unavailable
 	allowed_tools?: string[];
 	disallowed_tools?: string[];
 	tool_selection_mode?: 'all' | 'none' | 'allow' | 'disallow';  // UI-only: persists the editor dropdown so it round-trips even when the tool list is empty
@@ -465,6 +466,7 @@ export interface AgentExportData {
 	name: string;
 	description: string | null;
 	model: string | null;
+	provider_models?: Record<string, string> | null;
 	permission_mode: string | null;
 	effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null;  // harness-honored reasoning depth
 	max_turns?: number | null;  // per-turn model-call cap (native legs)
