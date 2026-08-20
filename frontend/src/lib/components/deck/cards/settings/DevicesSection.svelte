@@ -25,6 +25,7 @@
 		setAdvertiseUrl,
 		testAdvertiseReachability,
 		getClusterGitState,
+		refreshClusterGitState,
 		type Install,
 		type ClusterSecretStatus,
 		type AdvertiseStatus,
@@ -58,13 +59,13 @@
 	const onlineCount = $derived(installs.filter((i) => i.online).length);
 
 	// ── Git state (ruling D6) ──────────────────────────────────────────────
-	// Read-only view of which devices hold a checkout of a given project, plus
-	// the recent git-ops queue activity. The project choice is a transient
-	// viewing filter — nothing about it is persisted.
+	// Per-device checkouts + recent git-ops. Refresh is per-runner, never
+	// fan-out. The project choice is a transient viewing filter.
 	let gsProjectId = $state('');
 	let gsState = $state<ClusterGitState | null>(null);
 	let gsLoading = $state(false);
 	let gsError = $state('');
+	let gsRefreshingRunner = $state<string | null>(null);
 
 	onMount(() => {
 		load();
@@ -92,6 +93,20 @@
 
 	function shortSha(sha: string | null): string {
 		return sha ? sha.slice(0, 8) : '—';
+	}
+
+	async function refreshInstallGitState(runnerId: string) {
+		if (!gsProjectId || gsRefreshingRunner) return;
+		gsRefreshingRunner = runnerId;
+		gsError = '';
+		try {
+			await refreshClusterGitState({ projectId: gsProjectId, runnerId });
+			gsState = await getClusterGitState(gsProjectId);
+		} catch (e: unknown) {
+			gsError = getErrorMessage(e, 'Failed to refresh git state');
+		} finally {
+			gsRefreshingRunner = null;
+		}
 	}
 
 	async function load() {
@@ -371,8 +386,8 @@
 </div>
 
 <!-- Git state: per-install checkouts for one project + recent git-ops activity.
-     Read-only; the composer's device picker consumes the same endpoint to mark
-     which devices can actually run a project. -->
+     Per-row refresh queues a refresh_status op for that runner only (never
+     fan-out). The composer picker consumes the same GET for eligibility. -->
 <div class="set-group">
 	<div class="set-grouphead">
 		<h3><GitBranch />Git state</h3>
@@ -422,6 +437,13 @@
 						{:else}
 							<span class="b b-muted" title="No base checkout of this project on this device">No checkout</span>
 						{/if}
+						<button
+							type="button"
+							class="ic-btn gs-refresh"
+							title="Refresh git status on this device"
+							onclick={() => refreshInstallGitState(inst.id)}
+							disabled={gsRefreshingRunner === inst.id}
+						><RefreshCw size={13} /></button>
 					</div>
 					{#if inst.checkouts.length === 0}
 						<p class="gs-empty">No checkouts recorded.</p>
@@ -644,6 +666,9 @@
 		align-items: center;
 		gap: 7px;
 		flex-wrap: wrap;
+	}
+	.gs-refresh {
+		margin-left: auto;
 	}
 	.gs-co,
 	.gs-op {

@@ -284,6 +284,56 @@ async def git_state(
     }
 
 
+class GitStateRefreshRequest(BaseModel):
+    project_id: Optional[str] = None
+    project_v2_id: Optional[str] = None
+    runner_id: Optional[str] = None
+
+
+@router.post("/git-state/refresh", status_code=status.HTTP_202_ACCEPTED)
+async def refresh_git_state(
+    request: Request,
+    body: GitStateRefreshRequest,
+    token: str = Depends(require_auth),
+) -> Dict[str, Any]:
+    """Queue a ``refresh_status`` git op for ONE runner (never fan-out).
+
+    ``runner_id`` is required. XOR ``project_id`` / ``project_v2_id`` via
+    ``require_origin_access``. The executor caps at 3 checkouts / 20s so this
+    cannot starve ``ensure_worktree``. 202 ``{ops: [{id, runner_id}]}``.
+    """
+    from app.db import git_ops as git_ops_db
+
+    runner_id = (body.runner_id or "").strip()
+    if not runner_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="runner_id is required",
+        )
+
+    access = await run_sync(
+        require_origin_access,
+        request=request,
+        project_id=body.project_id,
+        project_v2_id=body.project_v2_id,
+    )
+    pv2 = access["project_v2"]
+    if not pv2:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="not a git project",
+        )
+
+    op = await run_sync(
+        git_ops_db.insert_op,
+        runner_id,
+        "refresh_status",
+        project_v2_id=pv2["id"],
+        params={},
+    )
+    return {"ops": [{"id": op["id"], "runner_id": op["runner_id"]}]}
+
+
 @router.patch("/installs/{install_id}")
 async def update_install(
     install_id: str,

@@ -12,12 +12,14 @@ id + runner_id + status), so concurrency is resolved by the database exactly
 like ``app.db.turns`` / ``app.db.runs``: two racers both try, one gets the row
 back, the other gets ``None`` and moves on. There are no in-memory locks.
 
-The first (and currently only) op is ``ensure_worktree``, whose ``params`` carry
-``{branch, base_branch, create_new_branch}``. That row is the DURABLE CARRIER of
-the caller's create-new-branch intent — which is why the spawn path
+Known ops: ``ensure_worktree`` (``params`` carry
+``{branch, base_branch, create_new_branch}`` — the DURABLE CARRIER of
+create-new-branch intent, which is why the spawn path
 (:mod:`app.core.query_options`) claims and runs a matching queued op INLINE
-before failing a branch session: a brand-new branch created from another device
-exists nowhere yet, so losing the intent would strand the session forever.
+before failing a branch session) and ``refresh_status`` (stamp ``head_sha``/
+``dirty`` on this runner's checkouts; omitted ``branch`` = every active
+checkout of the project on this runner). An unknown ``op`` is failed, never
+silently dropped.
 
 This module is a PURE DB layer: plain functions over ``get_db()``, PostgreSQL
 SQL that the test pg_shim translates to SQLite.

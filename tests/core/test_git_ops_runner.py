@@ -277,6 +277,80 @@ async def test_unknown_op_kind_is_failed_not_silently_dropped(mock_db):
     assert "unknown git op" in settled["result"]["error"]
 
 
+# ═══ execute_refresh_status ══════════════════════════════════════════════════
+
+
+def _seed_checkouts(project, tmp_path, n, *, runner=ME, start=0):
+    from app.db import checkouts as checkouts_db
+
+    rows = []
+    for i in range(start, start + n):
+        path = tmp_path / f"co-{runner}-{i}"
+        path.mkdir()
+        branch = None if i == 0 and runner == ME else f"b{i}"
+        rows.append(
+            checkouts_db.upsert_checkout(
+                project["id"], runner, str(path), branch=branch
+            )
+        )
+    return rows
+
+
+def test_refresh_status_caps_at_three_checkouts(project, tmp_path):
+    """Unbounded refresh would sit in front of ensure_worktree on claim_once."""
+    _seed_checkouts(project, tmp_path, 5)
+    _seed_checkouts(project, tmp_path, 2, runner=PEER, start=10)
+
+    with patch.object(git_ops_runner, "_record_checkout_state") as rec:
+        result = git_ops_runner.execute_refresh_status(
+            {"project_v2_id": project["id"], "params": {}}
+        )
+
+    assert result == {"refreshed": 3, "skipped": 2}
+    assert rec.call_count == 3
+    for call in rec.call_args_list:
+        assert call.args[0] == project["id"]
+        assert f"co-{ME}-" in call.args[1]
+
+
+def test_refresh_status_caps_at_20s_wall_clock(project, tmp_path):
+    _seed_checkouts(project, tmp_path, 4)
+
+    calls = {"n": 0}
+
+    def fake_monotonic():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return 1000.0  # deadline = 1020
+        if calls["n"] == 2:
+            return 1000.1  # first checkout still inside the window
+        return 1021.0  # remaining rows are past the wall clock
+
+    with patch.object(git_ops_runner.time, "monotonic", fake_monotonic), patch.object(
+        git_ops_runner, "_record_checkout_state"
+    ) as rec:
+        result = git_ops_runner.execute_refresh_status(
+            {"project_v2_id": project["id"], "params": {}}
+        )
+
+    assert result == {"refreshed": 1, "skipped": 3}
+    assert rec.call_count == 1
+
+
+async def test_loop_runs_refresh_status(project, tmp_path):
+    _seed_checkouts(project, tmp_path, 1)
+    op = git_ops_db.insert_op(
+        ME, "refresh_status", project_v2_id=project["id"], params={}
+    )
+
+    with patch.object(git_ops_runner, "_record_checkout_state"):
+        assert await git_ops_runner.claim_once() == 1
+
+    settled = _got(op["id"])
+    assert settled["status"] == "done"
+    assert settled["result"] == {"refreshed": 1, "skipped": 0}
+
+
 # ═══ spawn-path inline claim ═════════════════════════════════════════════════
 
 

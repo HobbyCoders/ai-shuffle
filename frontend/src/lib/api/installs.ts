@@ -174,6 +174,31 @@ export async function listClusterProjects(): Promise<ClusterProjectsResponse> {
 	return api.get<ClusterProjectsResponse>('/cluster/projects');
 }
 
+/** One queued ``refresh_status`` op — POST never fans out to every runner. */
+export interface GitStateRefreshOp {
+	id: string;
+	runner_id: string;
+}
+
+export interface GitStateRefreshResponse {
+	ops: GitStateRefreshOp[];
+}
+
+/**
+ * Queue a ``refresh_status`` git op for one runner of this project.
+ * Pass exactly one of ``projectId`` / ``projectV2Id``. ``runnerId`` is required.
+ */
+export async function refreshClusterGitState(opts: {
+	projectId?: string;
+	projectV2Id?: string;
+	runnerId: string;
+}): Promise<GitStateRefreshResponse> {
+	const body: Record<string, string> = { runner_id: opts.runnerId };
+	if (opts.projectId) body.project_id = opts.projectId;
+	if (opts.projectV2Id) body.project_v2_id = opts.projectV2Id;
+	return api.post<GitStateRefreshResponse>('/cluster/git-state/refresh', body);
+}
+
 export interface AdvertiseReachability {
 	ok: boolean;
 	url: string | null;

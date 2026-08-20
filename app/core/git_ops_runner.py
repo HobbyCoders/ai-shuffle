@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import time
 from typing import Any, Dict, Optional
 
 from app.core.config import settings
@@ -33,6 +35,11 @@ logger = logging.getLogger(__name__)
 
 # Correctness cadence — mirrors turn_claim's ≥5s slow poll (OD-1).
 CLAIM_POLL_SECONDS = 5.0
+
+# refresh_status is serial with ensure_worktree on claim_once. Cap so a
+# Devices refresh cannot starve first-turn checkout materialization.
+REFRESH_STATUS_MAX_CHECKOUTS = 3
+REFRESH_STATUS_DEADLINE_SECONDS = 20.0
 
 # Daily sweep of the durable carrier tables (D8's required cleanup). Kept on
 # this loop because it is the only always-on background loop this feature owns.
@@ -50,12 +57,11 @@ _sweep_task: Optional[asyncio.Task] = None
 def _record_checkout_state(
     project_v2_id: str, path: str, branch: Optional[str]
 ) -> None:
-    """Stamp ``head_sha``/``dirty`` onto the checkout row we just materialized.
+    """Stamp ``head_sha``/``dirty`` onto a checkout row.
 
-    W3-5: this is the ONLY place git subprocesses are added for git-state. The
-    hot spawn/refresh paths stay subprocess-free — an op has already paid for a
-    ``git worktree add``, so two more cheap reads here are free, whereas a
-    per-send ``git status`` would not be.
+    W3-5: the ONLY git subprocesses added for git-state live here, called from
+    ``ensure_worktree`` and ``refresh_status``. Spawn, heartbeat, and git-state
+    GET stay subprocess-free.
 
     Best-effort by construction: ANY failure (git missing, repo in a weird
     state, DB hiccup) is swallowed with a debug log. Populating a display field
@@ -131,7 +137,56 @@ def execute_ensure_worktree(op_row: Dict[str, Any]) -> Dict[str, Any]:
     return {"path": path, "branch": branch}
 
 
-_EXECUTORS = {"ensure_worktree": execute_ensure_worktree}
+def execute_refresh_status(op_row: Dict[str, Any]) -> Dict[str, Any]:
+    """Stamp head_sha/dirty on this runner's active checkouts (sync, partial ok).
+
+    Caps at ``REFRESH_STATUS_MAX_CHECKOUTS`` and
+    ``REFRESH_STATUS_DEADLINE_SECONDS`` wall clock, then returns ``done`` with
+    whatever finished. Missing directories are skipped without counting against
+    the cap. One op = one runner — never fan-out.
+    """
+    from app.db import checkouts as checkouts_db
+
+    params = op_row.get("params") or {}
+    project_v2_id = op_row.get("project_v2_id")
+    want_branch = params.get("branch") or None
+    me = settings.effective_instance_id
+
+    if not project_v2_id:
+        return {"refreshed": 0, "skipped": 0}
+
+    matching = []
+    for row in checkouts_db.list_checkouts(project_v2_id):
+        if row.get("runner_id") != me:
+            continue
+        if (row.get("status") or "active") != "active":
+            continue
+        if want_branch is not None and (row.get("branch") or None) != want_branch:
+            continue
+        matching.append(row)
+
+    deadline = time.monotonic() + REFRESH_STATUS_DEADLINE_SECONDS
+    n = 0
+    skipped = 0
+    for row in matching:
+        if n >= REFRESH_STATUS_MAX_CHECKOUTS:
+            skipped += 1
+            continue
+        if time.monotonic() > deadline:
+            skipped += 1
+            continue
+        path = row.get("path") or ""
+        if not os.path.isdir(path):
+            continue
+        _record_checkout_state(project_v2_id, path, row.get("branch"))
+        n += 1
+    return {"refreshed": n, "skipped": skipped}
+
+
+_EXECUTORS = {
+    "ensure_worktree": execute_ensure_worktree,
+    "refresh_status": execute_refresh_status,
+}
 
 
 async def run_op(op_row: Dict[str, Any]) -> None:

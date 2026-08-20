@@ -279,3 +279,58 @@ def test_another_projects_ops_do_not_leak_in(client, project, mock_db):
     )
 
     assert _get(client).json()["recent_ops"] == []
+
+
+# ═══ POST /git-state/refresh ═════════════════════════════════════════════════
+
+
+def _refresh(client, **json_body):
+    return client.post("/api/v1/cluster/git-state/refresh", json=json_body)
+
+
+def test_refresh_auth_is_required(anon_client, project):
+    assert _refresh(anon_client, project_id="proj-1", runner_id=PEER).status_code == 401
+
+
+def test_refresh_202_shape(client, project):
+    resp = _refresh(client, project_id="proj-1", runner_id=PEER)
+
+    assert resp.status_code == 202
+    body = resp.json()
+    assert list(body.keys()) == ["ops"]
+    assert len(body["ops"]) == 1
+    op = body["ops"][0]
+    assert op["runner_id"] == PEER
+    assert op["id"]
+    row = git_ops_db.get_op(op["id"])
+    assert row is not None
+    assert row["op"] == "refresh_status"
+    assert row["status"] == "queued"
+    assert row["runner_id"] == PEER
+    assert row["project_v2_id"] == project["pv2"]["id"]
+
+
+def test_refresh_400_without_runner_id(client, project):
+    resp = _refresh(client, project_id="proj-1")
+
+    assert resp.status_code == 400
+    assert "runner_id" in resp.json()["detail"]
+
+
+def test_refresh_400_both_ids(client, project):
+    resp = _refresh(
+        client,
+        project_id="proj-1",
+        project_v2_id=project["pv2"]["id"],
+        runner_id=PEER,
+    )
+
+    assert resp.status_code == 400
+    assert "exactly one" in resp.json()["detail"]
+
+
+def test_refresh_400_neither_id(client, project):
+    resp = _refresh(client, runner_id=PEER)
+
+    assert resp.status_code == 400
+    assert "exactly one" in resp.json()["detail"]
