@@ -8,7 +8,8 @@ The new keyword parameter closes that, under two rules this module pins down:
 
 * supplied → it WINS over the profile-derived value, and
 * omitted (or empty) → behaviour is byte-identical to before, i.e. the profile
-  still decides and an unresolvable/native profile still yields NULL.
+  still decides and an unresolvable/native profile still yields NULL; and
+* ``derive_provider_from_profile=False`` preserves an explicit native binding.
 
 NO ``SCHEMA_VERSION`` bump is involved — the column is pre-existing.
 """
@@ -117,6 +118,21 @@ def test_empty_provider_id_falls_back_to_profile(mock_db, empty):
     row = database.get_session(_new_session(pid, provider_id=empty))
 
     assert row["provider_id"] == "prov-from-profile"
+
+
+def test_explicit_native_binding_does_not_fall_back_to_profile(mock_db):
+    """Task workers on native Claude must not inherit the target's provider."""
+    _make_profile("p-bound-native-worker", {"provider": "prov-from-profile"})
+
+    row = database.get_session(
+        _new_session(
+            "p-bound-native-worker",
+            provider_id=None,
+            derive_provider_from_profile=False,
+        )
+    )
+
+    assert row["provider_id"] is None
 
 
 def test_provider_id_is_keyword_only(mock_db):

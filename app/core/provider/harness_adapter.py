@@ -427,7 +427,9 @@ class HarnessAdapter(ProviderAdapter):
                 from app.core.task_dispatch import make_fluid_dispatcher
 
                 native_ctx.extra["task_dispatch"] = make_fluid_dispatcher(
-                    self._resolve_app_session_id
+                    self._resolve_app_session_id,
+                    profile_id=(options.extra or {}).get("profile_id"),
+                    provider_id=(options.extra or {}).get("provider_id"),
                 )
             except Exception:  # noqa: BLE001 — Task degrades to "unavailable"
                 logger.warning(
@@ -661,6 +663,9 @@ class HarnessAdapter(ProviderAdapter):
         app_session_id = getattr(sdk_options, "aih_session_id", None)
         if app_session_id:
             opts.extra["app_session_id"] = app_session_id
+        profile_id = getattr(sdk_options, "aih_profile_id", None)
+        if profile_id:
+            opts.extra["profile_id"] = profile_id
         # The DB agents the profile declares into its model's context (2026-08-17
         # ruling, superseding A10) — ``[{"name", "description"}]`` resolved by
         # query_options from agent_invoke_mode/enabled_agents. Merged into the
@@ -2112,44 +2117,53 @@ def _native_context_window(kind: str, options: SessionOptions) -> Optional[int]:
 
 
 def _amend_native_task_spec(registry: ToolRegistry, options: SessionOptions) -> None:
-    """Re-register fluid's bare Task builtin with a policy-aware ``model`` hint.
+    """Replace Fluid's static Task spec with the provider-scoped app contract.
 
-    The vendor spec's ``model`` property only says "Optional model override for
-    this run" — on a native (non-Claude) leg the model calling Task has no idea
-    what that means for ITS provider and reliably guesses a Claude shorthand
-    alias ("sonnet"/"opus"/"haiku"), which the dispatcher then drops. Swap in
-    :data:`TASK_MODEL_OVERRIDE_DESCRIPTION`, which states the actual policy.
-    Unbound sessions (delegated/Claude default) are left alone — that leg gets
-    the same wording on its bridged ``mcp__builtins__Task`` copy instead (see
-    :mod:`app.mcp.builtin_tools`).
-
-    Best-effort only: any failure here must never break session connect, so the
-    vendor spec simply stays registered as-is.
+    Fluid owns the bare tool and handler; AI Shuffle owns its profile registry
+    and provider bindings. The native and delegated surfaces therefore receive
+    the same eligible subagent roster and neither accepts model-authored
+    provider or model selection.
     """
     try:
-        if not (options.extra or {}).get("provider_id"):
-            return
+        provider_id = (options.extra or {}).get("provider_id")
+        profile_id = (options.extra or {}).get("profile_id")
+        from app.core.agent_provider_models import (
+            build_task_contract,
+            file_subagent_targets,
+        )
 
-        import copy
+        try:
+            from fluid.context.agents import discover_agents
+
+            discovered_registry = {
+                definition.name: definition
+                for definition in discover_agents(options.cwd or ".")
+            }
+        except Exception:  # noqa: BLE001 — DB roster still remains usable
+            logger.debug("Could not discover file subagents for Task spec", exc_info=True)
+            discovered_registry = {}
+        contract = build_task_contract(
+            profile_id,
+            provider_id,
+            file_subagent_targets(discovered_registry, options.model),
+        )
         import dataclasses
 
         from fluid.tools.builtins.task import SPEC as _TASK_SPEC
         from fluid.tools.builtins.task import handler as _task_handler
 
-        from app.core.task_dispatch import task_model_property_schema
-
-        schema = copy.deepcopy(_TASK_SPEC.input_schema)
-        provider_id = (options.extra or {}).get("provider_id")
-        schema["properties"]["model"] = task_model_property_schema(
-            str(provider_id) if provider_id else None, options.model
-        )
         registry.register_builtin(
-            dataclasses.replace(_TASK_SPEC, input_schema=schema), _task_handler
+            dataclasses.replace(
+                _TASK_SPEC,
+                description=contract.description,
+                input_schema=contract.input_schema,
+            ),
+            _task_handler,
         )
     except Exception:  # noqa: BLE001 — must never break session connect
         logger.warning(
-            "[HarnessAdapter] failed to amend native Task spec's model "
-            "description; leaving the vendor spec as-is.",
+            "[HarnessAdapter] failed to install provider-scoped native Task "
+            "spec; leaving the vendor spec as-is.",
             exc_info=True,
         )
 

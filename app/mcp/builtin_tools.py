@@ -46,7 +46,16 @@ def _ok(payload: Dict[str, Any]) -> Dict[str, Any]:
 def _err(message: str, **extra: Any) -> Dict[str, Any]:
     """Format an error tool result for the SDK MCP envelope."""
     import json as _json
-    return {"content": [{"type": "text", "text": _json.dumps({"success": False, "error": message, **extra}, default=_json_default)}]}
+    return {
+        "content": [{
+            "type": "text",
+            "text": _json.dumps(
+                {"success": False, "error": message, **extra},
+                default=_json_default,
+            ),
+        }],
+        "isError": True,
+    }
 
 
 # ============================================================================
@@ -310,8 +319,9 @@ def create_builtin_tools_server(
             destructive operations like CronDelete).
         model: The current turn's effective model, persisted by ScheduleWakeup
             so the wake replays it instead of running on the profile default.
-        provider_id: Authoritative provider binding for the running chat.  Used
-            only to scope Task's optional model enum to this provider.
+        provider_id: The current turn's effective model-provider row. ``None``
+            means native Claude. Used to build and enforce Task's subagent
+            roster without exposing cross-provider targets.
         cwd: The session's resolved working directory. Task uses it to discover
             the file/plugin agent definitions this session can delegate to —
             the delegated (CLI) leg has no fluid engine to publish them, so
@@ -454,56 +464,51 @@ def create_builtin_tools_server(
     all_tools.append(agent_memory)
 
     # ------------------------------------------------------------------
-    # Task — dispatch work to another agent (P2c, rulings A6/A8/A9/A10).
+    # Task — dispatch work to a subagent (P2c, rulings A6/A8/A9/A10).
     # Delegated-leg surface (mcp__builtins__Task); native legs get fluid's
     # bare-named Task builtin instead (the bridge filters this copy out).
     # ------------------------------------------------------------------
-    from app.core.task_dispatch import task_model_property_schema
-
-    @tool(
-        "Task",
-        "Dispatch work to another agent. The target agent runs in its own "
-        "session with its own configuration, memory, and tools, and reports "
-        "back. mode='sync' (default) waits for the result; mode='background' "
-        "returns immediately with the worker session id (poll with "
-        "mcp__builtins__TaskList / mcp__builtins__TaskOutput). Use background "
-        "mode to fan out parallel work.",
-        {
-            "type": "object",
-            "properties": {
-                "agent": {"type": "string", "description": "Target agent id (or unambiguous name)."},
-                "prompt": {"type": "string", "description": "Self-contained task for the target agent."},
-                "mode": {"type": "string", "enum": ["sync", "background"],
-                         "description": "sync (default) waits; background returns at once."},
-                # Same wording the native leg's bare Task builtin gets — one
-                # policy statement, two legs (see harness_adapter).
-                "model": task_model_property_schema(provider_id, model),
-                "label": {"type": "string", "description": "Short display label."},
-            },
-            "required": ["agent", "prompt"],
-        },
+    from app.core.agent_provider_models import (
+        build_task_contract,
+        file_subagent_targets,
     )
+
+    agent_registry = _discover_agent_registry(cwd)
+    task_contract = build_task_contract(
+        profile_id,
+        provider_id,
+        file_subagent_targets(agent_registry, model),
+    )
+
+    @tool("Task", task_contract.description, task_contract.input_schema)
     async def task_tool(args: dict) -> dict:
         if not session_id:
-            return _err("Task requires an active session context.")
-        from app.core.task_dispatch import dispatch_task_tool
-
-        payload = await dispatch_task_tool(
-            args,
-            caller_session_id=session_id,
-            caller_profile_id=profile_id,
-            # Leg parity (ruling CE6): on a native leg fluid publishes the
-            # discovered definitions on ``ctx.extra["agent_registry"]``, but the
-            # delegated CLI leg has no fluid engine — so discover them here, at
-            # CALL time (a definition added mid-session is picked up) and only
-            # when a dispatch actually happens.
-            agent_registry=_discover_agent_registry(cwd),
-        )
-        return _ok(payload) if payload.get("ok") else _err(
-            payload.get("error") or "Task dispatch failed.", **{
-                k: v for k, v in payload.items() if k not in ("ok", "error")
+            payload = {
+                "ok": False,
+                "error": "Task requires an active session context.",
             }
-        )
+        else:
+            from app.core.task_dispatch import dispatch_task_tool
+
+            payload = await dispatch_task_tool(
+                args,
+                caller_session_id=session_id,
+                caller_profile_id=profile_id,
+                caller_provider_id=provider_id,
+                # Fluid file/plugin definitions have no DB provider map. They
+                # remain a fallback and borrow this exact caller binding.
+                agent_registry=agent_registry,
+            )
+        import json as _json
+
+        return {
+            "content": [{
+                "type": "text",
+                "text": _json.dumps(payload, default=_json_default),
+            }],
+            "isError": not bool(payload.get("ok")),
+            "structuredContent": payload,
+        }
 
     all_tools.append(task_tool)
 
@@ -872,8 +877,9 @@ def create_builtin_tools_server(
                                     payload["report"], payload["truncated"] = pa.bound_report(report)
                             else:
                                 payload["note"] = (
-                                    "Worker still running or no report yet — "
-                                    "poll again."
+                                    "Worker still running or no report yet. "
+                                    "Completion is announced automatically; "
+                                    "continue useful work instead of polling."
                                 )
                         except Exception:  # noqa: BLE001
                             payload["note"] = (

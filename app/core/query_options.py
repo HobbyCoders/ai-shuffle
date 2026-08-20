@@ -138,6 +138,19 @@ def is_native_claude_model(value: Any) -> bool:
     return get_model_family(value) is not None or value.lower().startswith("claude")
 
 
+def _append_system_block(prompt: Any, block: Optional[str]) -> Any:
+    """Append app-owned guidance to either supported system-prompt shape."""
+    if not block or not block.strip():
+        return prompt
+    if isinstance(prompt, dict):
+        updated = dict(prompt)
+        current = str(updated.get("append") or "").strip()
+        updated["append"] = f"{current}\n\n{block}" if current else block
+        return updated
+    current = str(prompt or "").strip()
+    return f"{current}\n\n{block}" if current else block
+
+
 # Back-compat aliases for tool names that were renamed. Applied at config-read
 # time only (never migrated in the DB) so saved profiles keep working. The
 # builtin ``PushNotification`` leaf tool was renamed to ``NotifyDevices`` to
@@ -958,6 +971,21 @@ def build_options_from_profile(
             (main_provider_row or {}).get("provider_type") != "anthropic"
         )
 
+    # Model-facing orchestration contract. The same provider-scoped resolver
+    # builds Task's schema and enforces dispatch, so prompt prose cannot promise
+    # a subagent that the tool will later reject.
+    from app.core.agent_provider_models import parent_subagent_guidance
+    from app.core.task_dispatch import subagent_system_prompt
+
+    final_system_prompt = _append_system_block(
+        final_system_prompt,
+        parent_subagent_guidance(profile.get("id"), provider_id),
+    )
+    final_system_prompt = _append_system_block(
+        final_system_prompt,
+        subagent_system_prompt(session_id),
+    )
+
     # Build tool configuration (SDK 0.1.12+ supports new 'tools' parameter)
     # Priority: tools > tools_preset > allowed_tools (legacy)
     tools_config = config.get("tools")  # Explicit list of tools
@@ -1394,6 +1422,7 @@ def build_options_from_profile(
     # only ever knows its own `ses_...` handle, and a brand-new session has no
     # fluid id at connect time at all.
     options.aih_session_id = session_id
+    options.aih_profile_id = profile.get("id")
 
     # Per-turn TOOL-SURFACE restriction (ruling CE12), set today by Task
     # dispatch when the target is a file/plugin agent whose definition carries a
@@ -1414,21 +1443,19 @@ def build_options_from_profile(
     # ``tools:`` line asked for.
     options.aih_tool_allowlist = _surface or None
 
-    # The DB agents this profile declares into its model's context (2026-08-17
-    # ruling, superseding A10): name + description ONLY, resolved from
-    # ``agent_invoke_mode``/``enabled_agents``. The fluid HarnessAdapter projects
-    # it onto SessionOptions.extra["declared_agents"] and merges it into the
-    # "Available agent types" index next to the file/plugin agents fluid
-    # discovers — the compiled prompt on a native leg, the appended
-    # system-prompt text on the delegated (Claude-subscription) one, so both
-    # caller directions can name a cross-provider target. It advertises, it does
-    # not restrict — Task dispatch runs any agent that resolves, declared or not.
+    # DB agents in the caller's context use the exact same provider-scoped
+    # roster as Task's schema and runtime admission. File/plugin definitions are
+    # added separately by Fluid and run on the caller's provider.
     try:
-        from app.core.agent_context import declared_agents as _declared_agents
+        from app.core.agent_provider_models import available_subagents
 
-        options.aih_declared_agents = (
-            _declared_agents(config, exclude_id=profile.get("id")) or None
-        )
+        options.aih_declared_agents = [
+            {
+                "name": target.name,
+                "description": target.description,
+            }
+            for target in available_subagents(profile.get("id"), provider_id)
+        ] or None
     except Exception:  # noqa: BLE001 — context declaration is best-effort
         logger.warning("could not resolve declared agents for context", exc_info=True)
         options.aih_declared_agents = None

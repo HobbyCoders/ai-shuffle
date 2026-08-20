@@ -635,14 +635,20 @@ class TestNestingGuardWiring:
         monkeypatch.setattr(
             td, "caller_chain", lambda sid: ([], "root-1", 5)
         )
+        from app.core import agent_provider_models as apm
+
         monkeypatch.setattr(
-            td, "resolve_target_agent",
-            lambda ref: ({"id": "helper", "name": "Helper", "config": {}}, None),
+            apm,
+            "available_subagents",
+            lambda caller, provider: (
+                apm.SubagentTarget("helper", "Helper", "", "sonnet"),
+            ),
         )
 
         payload = await td.dispatch_task_tool(
             {"agent": "helper", "prompt": "go"},
             caller_session_id="worker-deep",
+            caller_profile_id="caller",
         )
         assert payload["ok"] is False
         assert "Nesting limit" in payload["error"]

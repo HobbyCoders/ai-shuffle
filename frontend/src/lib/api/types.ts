@@ -23,6 +23,8 @@ export interface AuthStatus {
 // onto --effort / provider effort params and the per-turn model-call cap).
 export interface ProfileConfig {
 	model?: string;
+	provider?: string | null;
+	provider_models?: Record<string, string>;  // subagent model by provider; __native__ = native Claude, missing key = unavailable
 	allowed_tools?: string[];
 	disallowed_tools?: string[];
 	permission_mode?: string;

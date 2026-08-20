@@ -20,7 +20,8 @@
 		getModelBadgeClass as getModelBadgeClassShared,
 		getModelLabel,
 		isPresetModel,
-		normalizeModel
+		normalizeModel,
+		NATIVE_PROVIDER_KEY
 	} from '$lib/constants/models';
 	import './card-design-system.css';
 
@@ -70,7 +71,11 @@
 		id: string;
 		name: string;
 		description: string;
-		model?: string;
+		config?: {
+			model?: string;
+			provider?: string | null;
+			provider_models?: Record<string, string>;
+		};
 		is_builtin: boolean;
 	}
 
@@ -183,6 +188,7 @@
 		description: '',
 		model: getDefaultModel(),
 		provider: null as string | null,
+		provider_models: { [NATIVE_PROVIDER_KEY]: getDefaultModel() } as Record<string, string>,
 		permission_mode: 'default',
 		effort: null as 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null,
 		max_turns: null as number | null,
@@ -315,6 +321,7 @@
 			description: '',
 			model: getDefaultModel(),
 			provider: null,
+			provider_models: { [NATIVE_PROVIDER_KEY]: getDefaultModel() },
 			permission_mode: 'default',
 			effort: null,
 			max_turns: null,
@@ -384,12 +391,19 @@
 		// to custom-model mode when no provider is set.
 		customModelMode = !config.provider && !isPresetModel(config.model || getDefaultModel());
 
+		const providerModels = { ...((config as any).provider_models || {}) } as Record<string, string>;
+		const legacyProviderKey = config.provider || NATIVE_PROVIDER_KEY;
+		if (config.model && !providerModels[legacyProviderKey]) {
+			providerModels[legacyProviderKey] = normalizeModel(config.model) || config.model;
+		}
+
 		profileForm = {
 			id: profile.id,
 			name: profile.name,
 			description: profile.description || '',
 			model: normalizeModel(config.model) || getDefaultModel(),
 			provider: config.provider ?? null,
+			provider_models: providerModels,
 			permission_mode: config.permission_mode || 'default',
 			effort: (config as any).effort || null,
 			max_turns: config.max_turns || null,
@@ -601,6 +615,16 @@
 			include_partial_messages: profileForm.include_partial_messages,
 			app_config_tools: profileForm.app_config_tools
 		};
+		// Subagent runtime map. Blank values mean unavailable and are pruned;
+		// stale assignments for temporarily absent providers stay intact. The
+		// top-level binding is always callable on its own provider.
+		const providerModels = Object.fromEntries(
+			Object.entries(profileForm.provider_models)
+				.map(([key, value]) => [key.trim(), value.trim()])
+				.filter(([key, value]) => key && value)
+		);
+		providerModels[profileForm.provider || NATIVE_PROVIDER_KEY] = profileForm.model;
+		config.provider_models = providerModels;
 
 		// Reasoning depth — honored on every leg (delegated CLI --effort;
 		// native legs via the provider's effort/reasoning param).
@@ -787,6 +811,12 @@
 			// AI-generated/imported profiles are always native Anthropic today —
 			// the export format doesn't carry a provider id.
 			provider: null,
+			provider_models: {
+				...(agent.provider_models || {}),
+				[NATIVE_PROVIDER_KEY]: agent.provider_models?.[NATIVE_PROVIDER_KEY]
+					|| normalizeModel(agent.model)
+					|| getDefaultModel()
+			},
 			permission_mode: agent.permission_mode || 'default',
 			effort: (agent.effort as any) || null,
 			max_turns: agent.max_turns || null,
@@ -894,7 +924,6 @@
 				onDeleteGroup={deleteGroup}
 				{getCategorySelectionState}
 				{getAICategorySelectionState}
-				{getModelDisplay}
 			/>
 
 			{#snippet actions()}

@@ -885,6 +885,7 @@ async def export_profile(
         name=profile.get("name", profile_id),
         description=profile.get("description"),
         model=config.get("model", DEFAULT_MODEL),
+        provider_models=config.get("provider_models"),
         permission_mode=config.get("permission_mode", "default"),
         effort=config.get("effort"),
         max_turns=config.get("max_turns"),
@@ -993,6 +994,8 @@ async def import_profile(
         "permission_mode": agent_data.permission_mode or "default",
         "include_partial_messages": agent_data.include_partial_messages if agent_data.include_partial_messages is not None else True,
     }
+    if agent_data.provider_models:
+        config["provider_models"] = agent_data.provider_models
     # Harness-honored reasoning depth / per-turn cap (also present in pre-A12
     # legacy files, where they round-trip the same way).
     if agent_data.effort in ("low", "medium", "high", "xhigh", "max"):

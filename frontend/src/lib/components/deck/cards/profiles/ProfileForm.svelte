@@ -14,7 +14,10 @@
 		CUSTOM_VALUE,
 		normalizeModel,
 		encodeProviderModel,
-		decodeProviderModel
+		decodeProviderModel,
+		getProviders,
+		getProviderDisplay,
+		NATIVE_PROVIDER_KEY
 	} from '$lib/constants/models';
 	import { onMount } from 'svelte';
 	import { getComputerUseStatus } from '$lib/api/computerUse';
@@ -66,7 +69,11 @@
 		id: string;
 		name: string;
 		description: string;
-		model?: string;
+		config?: {
+			model?: string;
+			provider?: string | null;
+			provider_models?: Record<string, string>;
+		};
 		is_builtin: boolean;
 	}
 
@@ -92,6 +99,7 @@
 		model: string;
 		/** `model_providers.id` this profile's model belongs to, or `null` for native Anthropic. */
 		provider: string | null;
+		provider_models: Record<string, string>;
 		permission_mode: string;
 		effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null;
 		max_turns: number | null;
@@ -147,7 +155,6 @@
 		onDeleteGroup: (category: string, name: string) => void;
 		getCategorySelectionState: (category: { name: string; tools: { name: string }[] }) => 'all' | 'some' | 'none';
 		getAICategorySelectionState: (category: AIToolCategory) => 'all' | 'some' | 'none';
-		getModelDisplay: (model?: string) => string;
 	}
 
 	let {
@@ -183,8 +190,7 @@
 		onCreateGroup,
 		onDeleteGroup,
 		getCategorySelectionState,
-		getAICategorySelectionState,
-		getModelDisplay
+		getAICategorySelectionState
 	}: Props = $props();
 
 	// Group creation local state
@@ -211,11 +217,9 @@
 		newGroupName = '';
 	}
 
-	// Context declaration: every agent EXCEPT the one being edited (an agent
-	// doesn't list itself). The mode decides how the selection is read: 'all'
-	// declares every agent, 'custom' declares exactly the picked ones (empty =
-	// none). This never restricts dispatch — any agent can still be invoked by
-	// exact name; the list only decides what is loaded into the context.
+	// Every DB agent except the one being edited. The mode controls both the
+	// context index and Task's runtime roster; provider assignments narrow it
+	// again for each caller.
 	const invocableAgents = $derived(
 		allSubagents.filter((a) => a.id !== editingProfile?.id)
 	);
@@ -224,6 +228,25 @@
 		invocableAgents.length > 0 &&
 			invocableAgents.every((a) => profileForm.enabled_agents.includes(a.id))
 	);
+	const configuredProviders = $derived(getProviders());
+
+	function setProviderModel(key: string, model: string) {
+		onFormChange('provider_models', {
+			...profileForm.provider_models,
+			[key]: model
+		});
+	}
+
+	function providerAssignmentCount(agent: Subagent): number {
+		const config = agent.config || {};
+		const keys = new Set(
+			Object.entries(config.provider_models || {})
+				.filter(([key, value]) => key && typeof value === 'string' && value.trim())
+				.map(([key]) => key)
+		);
+		if (config.model) keys.add(config.provider || NATIVE_PROVIDER_KEY);
+		return keys.size;
+	}
 </script>
 
 <div class="card-system pf-body">
@@ -420,12 +443,52 @@
 		/>
 
 	{:else if activeTab === 'agents'}
-		<!-- AGENTS TAB — context declaration (never a dispatch restriction) -->
+		<div class="set-group">
+			<div class="set-grouphead">
+				<h3><Settings />Provider models</h3>
+				<p>Choose the model used when this agent runs as a subagent on each provider. An unavailable provider is never shown to a calling model.</p>
+			</div>
+			<div class="set-row">
+				<div class="lab"><h4>Claude</h4><p>Native Claude sessions.</p></div>
+				<div class="ctl">
+					<ModelPicker
+						value={profileForm.provider_models[NATIVE_PROVIDER_KEY] || ''}
+						providerScope={NATIVE_PROVIDER_KEY}
+						allowEmpty
+						onSelect={(value) => setProviderModel(NATIVE_PROVIDER_KEY, value)}
+					/>
+				</div>
+			</div>
+			{#each configuredProviders as provider (provider.id)}
+				{@const display = getProviderDisplay(provider)}
+				<div class="set-row">
+					<div class="lab">
+						<h4>{display.name}{#if display.subtext}<span class="hint"> · {display.subtext}</span>{/if}</h4>
+						<p>{provider.name}</p>
+					</div>
+					<div class="ctl">
+						<ModelPicker
+							value={profileForm.provider_models[provider.id]
+								? encodeProviderModel(provider.id, profileForm.provider_models[provider.id])
+								: ''}
+							providerScope={provider.id}
+							providerModelsOnly
+							allowEmpty
+							onSelect={(value) => {
+								const decoded = decodeProviderModel(value);
+								setProviderModel(provider.id, decoded?.modelId || '');
+							}}
+						/>
+					</div>
+				</div>
+			{/each}
+		</div>
+
 		<div class="set-group">
 			<div class="set-grouphead grouphead-row">
 				<div>
-					<h3><Bot />Agents in context</h3>
-					<p>Choose which agents are listed in this agent's context so it knows they exist. Any agent can still be dispatched by exact name, listed or not.</p>
+					<h3><Bot />Available subagents</h3>
+					<p>Choose which DB agents are listed and dispatchable. The current provider further limits this list to agents with a model assigned above.</p>
 				</div>
 				{#if invocableAgents.length > 0 && !invokeAll}
 					<div class="head-acts">
@@ -435,7 +498,7 @@
 				{/if}
 			</div>
 			<div class="set-row">
-				<div class="lab"><h4>Loaded</h4><p>List every agent, or only the ones you pick below.</p></div>
+				<div class="lab"><h4>Roster</h4><p>Offer every eligible agent, or only the ones selected below.</p></div>
 				<div class="ctl">
 					<div class="seg">
 						<button type="button" class:on={invokeAll} onclick={() => onFormChange('agent_invoke_mode', 'all')}>All agents</button>
@@ -444,14 +507,14 @@
 				</div>
 			</div>
 			{#if invocableAgents.length === 0}
-				<div class="set-row"><div class="lab"><p>No other agents to list.</p></div></div>
+				<div class="set-row"><div class="lab"><p>No other DB agents to list.</p></div></div>
 			{:else}
 				{#each invocableAgents as agent (agent.id)}
 					{@const isSelected = !invokeAll && profileForm.enabled_agents.includes(agent.id)}
 					<div class="set-row" class:disabled={invokeAll}>
 						<div class="lab">
-							<h4>{agent.name}{#if invokeAll}<span class="hint"> · Loaded (all)</span>{/if}</h4>
-							<p>{getModelDisplay(agent.model)}</p>
+							<h4>{agent.name}{#if invokeAll}<span class="hint"> · Available when provider-compatible</span>{/if}</h4>
+							<p>{agent.description || 'No description'} · {providerAssignmentCount(agent)} provider assignment{providerAssignmentCount(agent) === 1 ? '' : 's'}</p>
 						</div>
 						<div class="ctl">
 							<button type="button" class="switch" class:on={isSelected} aria-checked={isSelected} role="switch" aria-label={`Toggle ${agent.name}`} disabled={invokeAll} onclick={() => onToggleAgent(agent.id)}><i></i></button>
@@ -466,11 +529,11 @@
 				<Bot />
 				<span>
 					{#if invokeAll}
-						All {invocableAgents.length} agents are listed in this agent's context.
+						All {invocableAgents.length} DB agents may be offered when provider-compatible.
 					{:else if profileForm.enabled_agents.length === 0}
-						No agents listed — this agent can still dispatch any of them by exact name.
+						No DB subagents are configured for this caller.
 					{:else}
-						{profileForm.enabled_agents.length} of {invocableAgents.length} agents in context{allInvocableSelected ? ' (all)' : ''}. Unlisted agents remain dispatchable by exact name.
+						{profileForm.enabled_agents.length} of {invocableAgents.length} DB agents selected{allInvocableSelected ? ' (all)' : ''}; provider assignments still apply.
 					{/if}
 				</span>
 			</div>

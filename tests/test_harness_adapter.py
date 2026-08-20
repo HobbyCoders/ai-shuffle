@@ -2782,7 +2782,15 @@ async def test_task_dispatch_uses_the_stamped_app_session_id(monkeypatch, tmp_pa
 
     seen: dict = {}
 
-    async def _fake_dispatch(args, *, caller_session_id, caller_profile_id=None, launch_tool_use_id=None, agent_registry=None):
+    async def _fake_dispatch(
+        args,
+        *,
+        caller_session_id,
+        caller_profile_id=None,
+        caller_provider_id=None,
+        launch_tool_use_id=None,
+        agent_registry=None,
+    ):
         seen["caller"] = caller_session_id
         return {"ok": True}
 
@@ -2804,7 +2812,15 @@ async def test_task_dispatch_falls_back_to_the_sdk_id_lookup(monkeypatch, tmp_pa
 
     seen: dict = {}
 
-    async def _fake_dispatch(args, *, caller_session_id, caller_profile_id=None, launch_tool_use_id=None, agent_registry=None):
+    async def _fake_dispatch(
+        args,
+        *,
+        caller_session_id,
+        caller_profile_id=None,
+        caller_provider_id=None,
+        launch_tool_use_id=None,
+        agent_registry=None,
+    ):
         seen["caller"] = caller_session_id
         return {"ok": True}
 
@@ -2838,7 +2854,8 @@ async def test_task_dispatch_reports_a_clear_error_when_unresolvable(
     await _connect_native_leg(monkeypatch, tmp_path)
 
     raw = await _injected_dispatcher()({"agent": "helper", "prompt": "go"}, object())
-    payload = json.loads(raw)
+    payload = json.loads(raw.text)
+    assert raw.is_error is True
     assert payload["ok"] is False
     assert "could not resolve the calling session" in payload["error"]
 
@@ -2858,7 +2875,15 @@ async def test_pooled_engine_dispatcher_picks_up_a_late_session_id(
     seen: dict = {}
     mapped: dict = {}
 
-    async def _fake_dispatch(args, *, caller_session_id, caller_profile_id=None, launch_tool_use_id=None, agent_registry=None):
+    async def _fake_dispatch(
+        args,
+        *,
+        caller_session_id,
+        caller_profile_id=None,
+        caller_provider_id=None,
+        launch_tool_use_id=None,
+        agent_registry=None,
+    ):
         seen["caller"] = caller_session_id
         return {"ok": True}
 
@@ -2869,7 +2894,9 @@ async def test_pooled_engine_dispatcher_picks_up_a_late_session_id(
     await _connect_native_leg(monkeypatch, tmp_path)
 
     dispatcher = _injected_dispatcher()
-    first = json.loads(await dispatcher({"agent": "helper", "prompt": "go"}, object()))
+    first_outcome = await dispatcher({"agent": "helper", "prompt": "go"}, object())
+    first = json.loads(first_outcome.text)
+    assert first_outcome.is_error is True
     assert first["ok"] is False and "caller" not in seen
 
     mapped["ses_x"] = {"id": "app-sess-3"}
@@ -2896,9 +2923,11 @@ async def test_connect_with_sdk_options_projects_the_app_session_id(monkeypatch)
             model="claude-sonnet-4-5",
             aih_provider_id=None,
             aih_session_id="app-sess-4",
+            aih_profile_id="profile-4",
         )
     )
     assert adapter._options.extra["app_session_id"] == "app-sess-4"
+    assert adapter._options.extra["profile_id"] == "profile-4"
 
 
 @pytest.mark.asyncio
@@ -2968,58 +2997,104 @@ def test_effort_change_requires_reconnect():
 # ─── _amend_native_task_spec ───────────────────────────────────────────────────
 
 
-def test_amend_native_task_spec_exposes_only_provider_scoped_models(monkeypatch):
-    """Native Task gets selected-first, same-provider, deduplicated choices."""
-    import app.core.provider.harness_adapter as ha
-    import app.db.database as db
+def _stub_task_contract():
+    from app.core.agent_provider_models import SubagentTarget, TaskContract
 
-    monkeypatch.setattr(
-        db,
-        "get_model_provider",
-        lambda pid, include_token=False: {
-            "id": pid,
-            "models_json": [
-                {"id": "gpt-5.6-mini"}, {"id": "gpt-5.6-sol"},
-                {"id": "gpt-5.6-mini"},
-            ],
+    target = SubagentTarget(
+        id="reviewer",
+        name="Reviewer",
+        description="Checks correctness and risk.",
+        model="gpt-5.6-mini",
+    )
+    return TaskContract(
+        description=(
+            "Delegate to a configured subagent. Available subagents on this "
+            "provider: reviewer (model: gpt-5.6-mini)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "agent": {"type": "string", "enum": ["reviewer"]},
+                "prompt": {"type": "string"},
+            },
+            "required": ["agent", "prompt"],
+            "additionalProperties": False,
         },
+        targets=(target,),
+    )
+
+
+def test_amend_native_task_spec_installs_provider_scoped_roster(monkeypatch):
+    """Native Task exposes targets, while model/provider stay host-owned."""
+    from types import SimpleNamespace
+
+    import app.core.provider.harness_adapter as ha
+    import app.core.agent_provider_models as agent_models
+
+    seen = {}
+
+    def _contract(profile_id, provider_id, additional_targets=()):
+        seen.update(
+            profile_id=profile_id,
+            provider_id=provider_id,
+            additional_targets=additional_targets,
+        )
+        return _stub_task_contract()
+
+    monkeypatch.setattr(agent_models, "build_task_contract", _contract)
+    monkeypatch.setattr(
+        "fluid.context.agents.discover_agents",
+        lambda cwd: [
+            SimpleNamespace(
+                name="file-reviewer",
+                description="Reviews from a file.",
+            )
+        ],
     )
 
     registry = ha.ToolRegistry()
     from fluid.tools.builtins import register_builtins
 
     register_builtins(registry)
-    options = SessionOptions(model="gpt-5.6-sol", extra={"provider_id": "prov1"})
+    options = SessionOptions(
+        model="gpt-5.6-sol",
+        extra={"profile_id": "caller", "provider_id": "prov1"},
+    )
 
     ha._amend_native_task_spec(registry, options)
 
-    model_schema = registry.get("Task").input_schema["properties"]["model"]
-    description = model_schema["description"]
-    assert model_schema["enum"] == ["gpt-5.6-sol", "gpt-5.6-mini"]
-    assert "prov1" not in description
-    assert "normally OMIT it" in description
-    assert "uses the model selected when this chat started" in description
-    assert "unrelated provider model" in description
+    task = registry.get("Task")
+    assert seen["profile_id"] == "caller"
+    assert seen["provider_id"] == "prov1"
+    assert [(target.id, target.model) for target in seen["additional_targets"]] == [
+        ("file-reviewer", "gpt-5.6-sol")
+    ]
+    assert task.input_schema["properties"]["agent"]["enum"] == ["reviewer"]
+    assert "model" not in task.input_schema["properties"]
+    assert "subagent" in task.description
+    assert "gpt-5.6-mini" in task.description
 
 
-def test_delegated_task_tool_shares_provider_scoped_model_schema(monkeypatch):
-    """The delegated bridge uses the same selected-first scoped enum."""
+def test_delegated_task_tool_shares_provider_scoped_subagent_schema(monkeypatch):
+    """The delegated bridge receives the same host-scoped Task contract."""
     from unittest.mock import patch as _patch
 
     import claude_agent_sdk as sdk
 
     import app.mcp.builtin_tools as bt
-    from app.core.task_dispatch import TASK_MODEL_OVERRIDE_DESCRIPTION
-    import app.db.database as db
+    import app.core.agent_provider_models as agent_models
 
-    monkeypatch.setattr(
-        db,
-        "get_model_provider",
-        lambda pid, include_token=False: {
-            "id": pid,
-            "models_json": [{"id": "openai/gpt-5"}, {"id": "openai/gpt-5-mini"}],
-        },
-    )
+    seen = {}
+
+    def _contract(profile_id, provider_id, additional_targets=()):
+        seen.update(
+            profile_id=profile_id,
+            provider_id=provider_id,
+            additional_targets=additional_targets,
+        )
+        return _stub_task_contract()
+
+    monkeypatch.setattr(agent_models, "build_task_contract", _contract)
 
     captured = {}
     def _spy(name, version, tools):
@@ -3033,31 +3108,43 @@ def test_delegated_task_tool_shares_provider_scoped_model_schema(monkeypatch):
         )
 
     task = {t.name: t for t in captured["tools"]}["Task"]
-    assert (
-        task.input_schema["properties"]["model"]["description"]
-        == TASK_MODEL_OVERRIDE_DESCRIPTION
-    )
-    assert task.input_schema["properties"]["model"]["enum"] == [
-        "openai/gpt-5", "openai/gpt-5-mini",
-    ]
+    assert seen["profile_id"] == "p"
+    assert seen["provider_id"] == "or-1"
+    assert seen["additional_targets"] == ()
+    assert task.input_schema["properties"]["agent"]["enum"] == ["reviewer"]
+    assert "model" not in task.input_schema["properties"]
 
 
-def test_amend_native_task_spec_leaves_unbound_sessions_untouched(monkeypatch):
-    """No ``provider_id`` in ``extra`` means the session is delegated/Claude-
-    default — the vendor Task spec's own description must survive unmodified."""
+def test_amend_native_task_spec_scopes_native_claude_sessions(monkeypatch):
+    """A provider-less native Claude session still gets its profile roster."""
     import app.core.provider.harness_adapter as ha
+    import app.core.agent_provider_models as agent_models
 
     from fluid.tools.builtins import register_builtins
-    from fluid.tools.builtins.task import SPEC as _TASK_SPEC
+
+    seen = {}
+
+    def _contract(profile_id, provider_id, additional_targets=()):
+        seen.update(
+            profile_id=profile_id,
+            provider_id=provider_id,
+            additional_targets=additional_targets,
+        )
+        return _stub_task_contract()
+
+    monkeypatch.setattr(agent_models, "build_task_contract", _contract)
 
     registry = ha.ToolRegistry()
     register_builtins(registry)
-    options = SessionOptions(model="gpt-5.6-sol", extra={})
+    options = SessionOptions(model="opus", extra={"profile_id": "caller"})
 
     ha._amend_native_task_spec(registry, options)
 
-    description = registry.get("Task").input_schema["properties"]["model"]["description"]
-    assert description == _TASK_SPEC.input_schema["properties"]["model"]["description"]
+    task = registry.get("Task")
+    assert seen["profile_id"] == "caller"
+    assert seen["provider_id"] is None
+    assert task.input_schema["properties"]["agent"]["enum"] == ["reviewer"]
+    assert "model" not in task.input_schema["properties"]
 
 
 def test_amend_native_task_spec_swallows_a_registration_failure(monkeypatch):
@@ -3079,8 +3166,9 @@ def test_amend_native_task_spec_swallows_a_registration_failure(monkeypatch):
 
     ha._amend_native_task_spec(registry, options)  # must not raise
 
-    description = registry.get("Task").input_schema["properties"]["model"]["description"]
-    assert description == _TASK_SPEC.input_schema["properties"]["model"]["description"]
+    task = registry.get("Task")
+    assert task.description == _TASK_SPEC.description
+    assert task.input_schema == _TASK_SPEC.input_schema
 
 
 def test_native_mutation_tool_guidance_requires_write_or_edit_but_keeps_bash():
@@ -3103,6 +3191,10 @@ def test_native_mutation_tool_guidance_requires_write_or_edit_but_keeps_bash():
 def test_native_environment_declares_the_actual_windows_shell(tmp_path, monkeypatch):
     import fluid.context.environment as environment
 
+    # Keep path construction native to the Linux test host. Mutating the shared
+    # ``os.name`` module otherwise makes pathlib select WindowsPath, which cannot
+    # be instantiated here and prevents the shell assertion from running.
+    monkeypatch.setattr(environment, "Path", type(tmp_path))
     monkeypatch.setattr(environment.os, "name", "nt")
     monkeypatch.setattr(environment, "git_context", lambda cwd: None)
     block = environment.environment_block(tmp_path)

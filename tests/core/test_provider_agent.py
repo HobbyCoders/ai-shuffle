@@ -476,6 +476,7 @@ class TestDispatchWorker:
 
         created = dispatch_env.create_kwargs
         assert created["provider_id"] == "prov-openai"
+        assert created["derive_provider_from_profile"] is False
         assert created["parent_session_id"] == "parent-1"
         assert created["profile_id"] == "default"
         assert created["project_id"] == "proj-1"

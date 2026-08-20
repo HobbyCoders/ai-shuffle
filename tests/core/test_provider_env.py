@@ -784,12 +784,25 @@ class TestAgentContextDeclaration:
     def _build(config, profile_id="t"):
         from unittest.mock import patch as _patch
         import app.core.query_options as qo
+        from app.db import database as db
+
+        profile_config = {
+            "model": "opus",
+            "tools_preset": "claude_code",
+            **config,
+        }
+        if db.get_profile(profile_id):
+            db.update_profile(
+                profile_id,
+                config=profile_config,
+                allow_builtin=True,
+            )
+        else:
+            db.create_profile(profile_id, profile_id, None, profile_config)
 
         with _patch.object(qo, "get_security_instructions", return_value=""):
             return qo.build_options_from_profile(
-                profile={"id": profile_id, "config": {
-                    "model": "opus", "tools_preset": "claude_code", **config,
-                }},
+                profile={"id": profile_id, "config": profile_config},
             )
 
     @staticmethod
