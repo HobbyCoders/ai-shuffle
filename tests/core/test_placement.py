@@ -115,9 +115,30 @@ def test_capable_runners_os_equality_constraint(mock_db, monkeypatch):
 
 
 def test_capable_runners_projectless_returns_all_online(mock_db, monkeypatch):
-    _stub_installs(monkeypatch, ["runner-a", "runner-b"])
-    # No project_v2_id -> no checkout requirement (self included via _online_runners).
+    _stub_installs(monkeypatch, [RUNNER_ME, "runner-a", "runner-b"])
+    # No project_v2_id -> no checkout requirement. The approved local registry
+    # row is retained even if its heartbeat is racing startup.
     assert placement.capable_runners(None) == ["local-me", "runner-a", "runner-b"]
+
+
+def test_capable_runners_excludes_unapproved_local_runner(mock_db, monkeypatch):
+    rows = {
+        RUNNER_ME: {
+            "id": RUNNER_ME,
+            "online": True,
+            "approved": False,
+            "capabilities": {},
+        },
+        "runner-a": {
+            "id": "runner-a",
+            "online": True,
+            "approved": True,
+            "capabilities": {},
+        },
+    }
+    monkeypatch.setattr(database, "get_installs_map", lambda: rows)
+
+    assert placement.capable_runners(None) == ["runner-a"]
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +190,7 @@ def test_null_placement_foreign_owner_offline_yields_none(mock_db, monkeypatch):
 def test_null_placement_own_instance_id_resolves_runner_me(mock_db, monkeypatch):
     # Own-instance rows resolve ("runner", me) — the submit seam treats that as
     # NOT placed_remote and the execute gate passes, so behavior stays local.
-    _stub_installs(monkeypatch, [])
+    _stub_installs(monkeypatch, [RUNNER_ME])
     d = placement.resolve_placement(
         {"placement": None, "instance_id": RUNNER_ME, "project_v2_id": PROJECT}
     )

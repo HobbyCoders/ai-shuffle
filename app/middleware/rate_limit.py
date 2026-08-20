@@ -259,15 +259,34 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         # Check session cookie (admin auth)
         if session_token:
-            session = await run_sync(database.get_auth_session, session_token)
-            if session:
-                is_admin = True
-                user_id = "admin"
+            from app.core.pairing import PAIRED_SESSION_PREFIX, hash_controller_session
+            if session_token.startswith(PAIRED_SESSION_PREFIX):
+                client = await run_sync(
+                    database.get_paired_client_by_session_hash,
+                    hash_controller_session(session_token),
+                )
+                if client:
+                    api_key_id = client["id"]
+                    user_id = client.get("device_name") or "paired-device"
+            else:
+                session = await run_sync(database.get_auth_session, session_token)
+                if session:
+                    is_admin = True
+                    user_id = "admin"
 
         # Check API key header
         if header_token:
             token = header_token
-            if token.startswith("aih_"):
+            from app.core.pairing import PAIRED_SESSION_PREFIX, hash_controller_session
+            if token.startswith(PAIRED_SESSION_PREFIX):
+                client = await run_sync(
+                    database.get_paired_client_by_session_hash,
+                    hash_controller_session(token),
+                )
+                if client:
+                    api_key_id = client["id"]
+                    user_id = client.get("device_name") or "paired-device"
+            elif token.startswith("aih_"):
                 # API key authentication
                 key_hash = hashlib.sha256(token.encode()).hexdigest()
                 api_user = await run_sync(database.get_api_user_by_key_hash, key_hash)
@@ -286,19 +305,29 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         # Check query parameter for WebSocket connections
         if not user_id and query_token:
             token = query_token
-            # Check admin session
-            session = await run_sync(database.get_auth_session, token)
-            if session:
-                is_admin = True
-                user_id = "admin"
+            from app.core.pairing import PAIRED_SESSION_PREFIX, hash_controller_session
+            if token.startswith(PAIRED_SESSION_PREFIX):
+                client = await run_sync(
+                    database.get_paired_client_by_session_hash,
+                    hash_controller_session(token),
+                )
+                if client:
+                    api_key_id = client["id"]
+                    user_id = client.get("device_name") or "paired-device"
             else:
-                # Check API key session
-                api_session = await run_sync(database.get_api_key_session, token)
-                if api_session:
-                    api_user = await run_sync(database.get_api_user, api_session["api_user_id"])
-                    if api_user:
-                        api_key_id = api_user["id"]
-                        user_id = api_user.get("username") or api_user["name"]
+                # Check admin session
+                session = await run_sync(database.get_auth_session, token)
+                if session:
+                    is_admin = True
+                    user_id = "admin"
+                else:
+                    # Check API key session
+                    api_session = await run_sync(database.get_api_key_session, token)
+                    if api_session:
+                        api_user = await run_sync(database.get_api_user, api_session["api_user_id"])
+                        if api_user:
+                            api_key_id = api_user["id"]
+                            user_id = api_user.get("username") or api_user["name"]
 
         result = (user_id, api_key_id, is_admin)
         # Cache POSITIVE results only — never store anonymous/failed lookups so a

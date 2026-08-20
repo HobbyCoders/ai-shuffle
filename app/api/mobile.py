@@ -26,9 +26,10 @@ from app.core.models import (
     UnifiedPushEndpointRequest,
 )
 from app.api.auth import require_admin, get_api_key, hash_api_key
-from app.core.auth import auth_service
 from app.core.config import settings
+from app.core import pairing
 from app.db import database as db
+from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -70,9 +71,46 @@ def get_device_from_api_key(request: Request) -> dict:
             detail="Invalid mobile API key"
         )
 
+    if device.get("revoked_at"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Mobile device credential has been revoked",
+        )
+
+    expires_at = device.get("api_key_expires_at")
+    if expires_at is None:
+        # Legacy rows predate stored expiry. Honor their original documented
+        # one-year lifetime instead of silently granting permanent access.
+        expires_at = device.get("created_at")
+        if expires_at is not None:
+            if isinstance(expires_at, str):
+                expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            expires_at = expires_at + timedelta(days=MOBILE_API_KEY_EXPIRY_DAYS)
+    elif isinstance(expires_at, str):
+        expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    if expires_at is None or expires_at <= datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Mobile device credential has expired; pair this device again",
+        )
+
+    if not device.get("scopes"):
+        device["scopes"] = list(pairing.DEFAULT_MOBILE_SCOPES)
+
     # Update last seen
     db.update_mobile_device_last_seen(device["device_id"])
 
+    return device
+
+
+def get_device_with_scope(request: Request, required_scope: str) -> dict:
+    """Authenticate a mobile key and enforce one grant capability."""
+    device = get_device_from_api_key(request)
+    if required_scope not in (device.get("scopes") or []):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"This device is missing the {required_scope} capability",
+        )
     return device
 
 
@@ -85,6 +123,12 @@ async def register_device(request: MobileDeviceRegisterRequest):
     If the device_id already exists, returns an error.
     """
     device_info = request.device_info
+
+    if not request.pairing_code:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="A one-time pairing code is required. Create one from Settings → Devices.",
+        )
 
     # Check if device already exists
     existing = db.get_mobile_device(device_info.device_id)
@@ -101,22 +145,38 @@ async def register_device(request: MobileDeviceRegisterRequest):
     # Calculate expiry
     expires_at = datetime.now(timezone.utc) + timedelta(days=MOBILE_API_KEY_EXPIRY_DAYS)
 
-    # Create device record
+    # Consume the one-time grant and create both the generic controller row and
+    # mobile push row in a single transaction.
     capabilities_dict = device_info.capabilities.model_dump()
-    db.create_mobile_device(
+    token_hash = await run_sync(pairing.hash_pairing_code, request.pairing_code)
+    result = await run_sync(
+        db.exchange_grant_for_mobile,
+        token_hash=token_hash,
         device_id=device_info.device_id,
         device_name=device_info.device_name,
         platform=device_info.platform,
         api_key_hash=api_key_hash,
-        capabilities=capabilities_dict
+        capabilities=capabilities_dict,
+        api_key_expires_at=expires_at,
     )
+    if result and result.get("duplicate"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Device already registered. Revoke it from Settings → Devices before pairing again.",
+        )
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Pairing code is invalid, expired, already used, or revoked.",
+        )
 
     logger.debug(f"Registered mobile device: {device_info.device_name} ({device_info.platform})")
 
     return MobileDeviceRegisterResponse(
         api_key=api_key,
         device_id=device_info.device_id,
-        expires_at=expires_at
+        expires_at=expires_at,
+        scopes=result["client"].get("scopes") or pairing.DEFAULT_MOBILE_SCOPES,
     )
 
 
@@ -130,7 +190,7 @@ async def update_capabilities(
 
     Called when device capabilities change (e.g., biometric becomes available).
     """
-    device = get_device_from_api_key(request)
+    device = get_device_with_scope(request, "controller")
 
     # Verify device_id matches
     if device["device_id"] != caps_request.device_id:
@@ -158,7 +218,7 @@ async def get_pending_actions(request: Request):
 
     Returns a list of actions waiting for confirmation.
     """
-    device = get_device_from_api_key(request)
+    device = get_device_with_scope(request, "mobile:actions")
 
     # Clean up expired actions first
     db.cleanup_expired_actions()
@@ -191,7 +251,7 @@ async def confirm_action(
 
     The action must belong to the authenticated device.
     """
-    device = get_device_from_api_key(request)
+    device = get_device_with_scope(request, "mobile:actions")
 
     # Get the action
     action = db.get_pending_action(action_id)
@@ -258,7 +318,7 @@ async def register_push_token(
 
     Called when the app obtains a new FCM token.
     """
-    device = get_device_from_api_key(request)
+    device = get_device_with_scope(request, "mobile:notifications")
 
     # Verify device_id matches
     if device["device_id"] != token_request.device_id:
@@ -291,7 +351,7 @@ async def register_unifiedpush_endpoint(
     The Android app obtains this URL from its UnifiedPush distributor (e.g. ntfy)
     and registers it so this server can deliver notifications without Firebase.
     """
-    device = get_device_from_api_key(request)
+    device = get_device_with_scope(request, "mobile:notifications")
 
     if device["device_id"] != up_request.device_id:
         raise HTTPException(
@@ -329,7 +389,7 @@ async def notifications_stream(request: Request):
     connections survive proxy/timeout cutoffs.
     """
     # Validates the aim_ key (raises 401 otherwise) and bumps last_seen.
-    get_device_from_api_key(request)
+    get_device_with_scope(request, "mobile:notifications")
 
     async def event_generator():
         queue = mobile_push_hub.subscribe()
@@ -377,13 +437,23 @@ async def create_web_session(request: Request, response: Response):
     WebView. The returned `session_token` is also injected into the WebView's
     CookieManager by the app.
 
-    SECURITY: on a self-hosted instance, any holder of a valid device key is the
-    owner, so this grants a full web session (equivalent to admin login).
+    The resulting controller session can operate the app but does not satisfy
+    admin-only dependencies such as credential, connector, or pairing changes.
     """
-    # Validates the aim_ key (raises 401 otherwise) and bumps last_seen.
-    get_device_from_api_key(request)
+    # Validates expiry/revocation and bumps last_seen.
+    device = get_device_with_scope(request, "web:session")
 
-    token = auth_service.create_session()
+    client = await run_sync(db.ensure_paired_client_for_mobile, device)
+    token = pairing.generate_controller_session()
+    expires_at = datetime.now(timezone.utc) + timedelta(days=settings.session_expire_days)
+    stored = await run_sync(
+        db.set_paired_client_session,
+        client["id"],
+        pairing.hash_controller_session(token),
+        expires_at,
+    )
+    if stored is None:
+        raise HTTPException(status_code=401, detail="Paired device has been revoked")
 
     response.set_cookie(
         key="session",
@@ -393,8 +463,6 @@ async def create_web_session(request: Request, response: Response):
         samesite="lax",
         max_age=settings.session_expire_days * 24 * 60 * 60,
     )
-
-    expires_at = datetime.now(timezone.utc) + timedelta(days=settings.session_expire_days)
 
     return {
         "status": "ok",
@@ -422,6 +490,17 @@ async def list_devices(token: str = Depends(require_admin)):
             platform=d["platform"],
             capabilities=DeviceCapabilities(**d.get("capabilities", {})),
             fcm_token=d.get("fcm_token"),
+            api_key_expires_at=(
+                datetime.fromisoformat(d["api_key_expires_at"])
+                if isinstance(d.get("api_key_expires_at"), str)
+                else d.get("api_key_expires_at")
+            ),
+            scopes=d.get("scopes") or [],
+            revoked_at=(
+                datetime.fromisoformat(d["revoked_at"])
+                if isinstance(d.get("revoked_at"), str)
+                else d.get("revoked_at")
+            ),
             created_at=datetime.fromisoformat(d["created_at"]) if isinstance(d["created_at"], str) else d["created_at"],
             last_seen=datetime.fromisoformat(d["last_seen"]) if d.get("last_seen") and isinstance(d["last_seen"], str) else d.get("last_seen")
         )
@@ -437,10 +516,17 @@ async def delete_device(device_id: str, token: str = Depends(require_admin)):
     Admin only endpoint. This also removes all pending actions and trusted actions
     for the device (via CASCADE delete).
     """
-    if not db.delete_mobile_device(device_id):
+    device = db.get_mobile_device(device_id)
+    if not device:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Device not found"
         )
+
+    paired_client_id = device.get("paired_client_id")
+    if paired_client_id:
+        db.revoke_paired_client(paired_client_id)
+    if not db.delete_mobile_device(device_id):
+        raise HTTPException(status_code=404, detail="Device not found")
 
     logger.debug(f"Deleted mobile device: {device_id}")

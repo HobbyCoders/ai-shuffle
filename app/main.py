@@ -19,7 +19,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.core.config import settings
 
 # Import API routers
-from app.api import auth, claude_accounts, model_providers, agents, projects, sessions, query, system, websocket, commands, preferences, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, templates, webhooks, security, rate_limits, github, git, git_operations, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, browser, browser_panel, mobile, internal, workspace_files, connectors, automations, api_users, documentation, catalog, logs, teams, model_registry, computer_use, cluster, notifications, usage, voice
+from app.api import auth, claude_accounts, model_providers, agents, projects, sessions, query, system, websocket, commands, preferences, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, templates, webhooks, security, rate_limits, github, git, git_operations, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, browser, browser_panel, mobile, pairing, internal, workspace_files, connectors, automations, api_users, documentation, catalog, logs, teams, model_registry, computer_use, cluster, notifications, usage, voice
 from app.api import events as events_api
 from app.api import artifacts as artifacts_api
 
@@ -168,6 +168,18 @@ async def lifespan(app: FastAPI):
     from app.core.file_logging import emit_pending_fatal_warning
     emit_pending_fatal_warning()
 
+    # Register before starting any shared-DB workers. A brand-new instance id
+    # on a populated database is visible to the existing admin but remains
+    # quarantined until explicitly approved and restarted.
+    from app.core import cluster
+    from app.db.async_database import run_sync
+    try:
+        runner_approved = bool(await run_sync(cluster.register_self))
+    except Exception:
+        logger.exception("Cluster self-registration failed; keeping runner quarantined")
+        runner_approved = False
+    cluster_heartbeat_task = asyncio.create_task(_cluster_heartbeat_loop())
+
     # Install the v2 turn-scheduler seams (turn_scheduler.install +
     # turn_manager interrupt executor) BEFORE reconcile runs: reconcile's boot
     # sweep fires turn_scheduler.kick() for recovered sessions, which is a no-op
@@ -180,37 +192,39 @@ async def lifespan(app: FastAPI):
     # spinners/badges in the UI) and leak its CLI subprocesses — nothing in
     # memory survived, so clear both now. Guarded: reconcile failure must
     # never block boot.
-    try:
-        from app.core.startup_reconcile import reconcile_from_durable_truth
-        await reconcile_from_durable_truth()
-    except Exception:
-        logger.exception("Startup reconcile failed (non-fatal)")
+    if runner_approved:
+        try:
+            from app.core.startup_reconcile import reconcile_from_durable_truth
+            await reconcile_from_durable_truth()
+        except Exception:
+            logger.exception("Startup reconcile failed (non-fatal)")
 
     init_encryption_and_sessions()
     init_workspace()
     check_prerequisites()
-    await start_services()
-    bg_tasks = start_background_tasks()
-    monitor_task = await start_resource_monitor(interval_seconds=300)
-    plugin_task = start_plugin_auto_update()
+    bg_tasks = []
+    monitor_task = None
+    plugin_task = None
+    orphan_backfill_task = None
+    if runner_approved:
+        await start_services()
+        bg_tasks = start_background_tasks()
+        monitor_task = await start_resource_monitor(interval_seconds=300)
+        plugin_task = start_plugin_auto_update()
+    else:
+        logger.warning(
+            "Runner services are disabled while this install awaits approval. "
+            "The admin UI and heartbeat remain available."
+        )
 
     # One-time, unbounded backfill: heal any sessions orphaned by a past
     # mid-turn crash (NULL sdk_session_id but an intact transcript in the store →
     # blank history in postgres_only). Runs off the event loop and logs an ERROR
     # per heal so the operator is alerted. Periodic re-sweeps (bounded to recent
     # sessions) continue inside the resource monitor loop.
-    from app.core.resource_monitor import reconcile_orphans_once
-    orphan_backfill_task = asyncio.create_task(reconcile_orphans_once())
-
-    # Cross-install cluster: register this install in the shared registry and
-    # heartbeat its last_seen so peers can see it's online and relay control.
-    from app.core import cluster
-    from app.db.async_database import run_sync
-    try:
-        await run_sync(cluster.register_self)
-    except Exception:
-        logger.exception("Cluster self-registration failed (non-fatal)")
-    cluster_heartbeat_task = asyncio.create_task(_cluster_heartbeat_loop())
+    if runner_approved:
+        from app.core.resource_monitor import reconcile_orphans_once
+        orphan_backfill_task = asyncio.create_task(reconcile_orphans_once())
 
     logger.info(f"API docs: http://localhost:{settings.port}/docs")
     logger.info("=" * 60)
@@ -218,12 +232,13 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
-    if not orphan_backfill_task.done():
+    if orphan_backfill_task is not None and not orphan_backfill_task.done():
         orphan_backfill_task.cancel()
-    try:
-        await orphan_backfill_task
-    except asyncio.CancelledError:
-        pass
+    if orphan_backfill_task is not None:
+        try:
+            await orphan_backfill_task
+        except asyncio.CancelledError:
+            pass
     cluster_heartbeat_task.cancel()
     try:
         await cluster_heartbeat_task
@@ -235,8 +250,10 @@ async def lifespan(app: FastAPI):
             await task
         except asyncio.CancelledError:
             pass
-    await stop_plugin_auto_update(plugin_task)
-    await stop_resource_monitor(monitor_task)
+    if plugin_task is not None:
+        await stop_plugin_auto_update(plugin_task)
+    if monitor_task is not None:
+        await stop_resource_monitor(monitor_task)
     try:
         from app.core.team_transcript_watcher import team_transcript_watcher
         await team_transcript_watcher.stop_all()
@@ -249,7 +266,8 @@ async def lifespan(app: FastAPI):
         await voice_bridge.shutdown_all()
     except Exception:
         logger.exception("voice_bridge.shutdown_all failed")
-    await shutdown_services()
+    if runner_approved:
+        await shutdown_services()
     try:
         from app.core.error_log_handler import uninstall_error_log_handler
         uninstall_error_log_handler()
@@ -458,6 +476,7 @@ app.include_router(mcp.router)
 app.include_router(browser.router)
 app.include_router(browser_panel.router)
 app.include_router(mobile.router)
+app.include_router(pairing.router)
 app.include_router(internal.router)
 app.include_router(workspace_files.router)
 app.include_router(documentation.router)
@@ -501,6 +520,10 @@ if static_dir.exists():
 
     @app.get("/setup")
     async def serve_spa_setup():
+        return FileResponse(static_dir / "index.html")
+
+    @app.get("/pair")
+    async def serve_spa_pair():
         return FileResponse(static_dir / "index.html")
 
     @app.get("/chat")

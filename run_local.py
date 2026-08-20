@@ -12,12 +12,16 @@ This script handles:
 
 Usage:
     python run_local.py [--setup] [--no-browser] [--port PORT]
+    python run_local.py --pair [--pair-url URL]
 
 Options:
     --setup      Run first-time setup (install dependencies, build frontend)
     --no-browser Don't open browser after starting
     --port PORT  Use a specific port (default: 8000)
     --host HOST  Use a specific host (default: 127.0.0.1 for local mode)
+    --pair       Create a five-minute device pairing code and exit
+    --pair-url   Reachable URL to encode in the pairing QR
+    --join CODE  Approve this configured runner with a one-time enrollment code
 """
 
 import os
@@ -775,6 +779,24 @@ def start_server(host: str, port: int, open_browser: bool):
         print(f"\n{Colors.GREEN}Server stopped.{Colors.END}")
 
 
+def run_pairing_command(url: str | None, join_code: str | None, port: int) -> int:
+    """Run the pairing/enrollment CLI inside the project virtual environment."""
+    project_root = Path(__file__).parent
+    venv_python = get_venv_python()
+    if not venv_python.exists():
+        print_status("Virtual environment not found. Run with --setup first.", "error")
+        return 1
+    command = [str(venv_python), "-m", "app.cli_pair"]
+    if join_code:
+        command.extend(["--join", join_code])
+    elif url:
+        command.extend(["--url", url])
+    env = os.environ.copy()
+    env["LOCAL_MODE"] = "true"
+    env["PORT"] = str(port)
+    return subprocess.run(command, cwd=str(project_root), env=env).returncode
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="AI Hub Local Mode Launcher",
@@ -785,6 +807,8 @@ Examples:
   python run_local.py                 Start the server
   python run_local.py --port 3000     Start on a different port
   python run_local.py --no-browser    Start without opening browser
+  python run_local.py --pair          Create a one-time device pairing code
+  python run_local.py --join CODE     Enroll this configured runner
         """
     )
     parser.add_argument("--setup", action="store_true", help="Run first-time setup")
@@ -792,6 +816,9 @@ Examples:
     parser.add_argument("--port", type=int, default=8000, help="Port to run on (default: 8000)")
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
     parser.add_argument("--check", action="store_true", help="Check prerequisites only")
+    parser.add_argument("--pair", action="store_true", help="Create a one-time device pairing code and exit")
+    parser.add_argument("--pair-url", help="Reachable base URL to encode in the pairing QR")
+    parser.add_argument("--join", metavar="CODE", help="Enroll this configured runner with a one-time code")
 
     args = parser.parse_args()
 
@@ -810,6 +837,9 @@ Examples:
         print(f"\n{Colors.BOLD}Ready to start!{Colors.END}")
         print("Run: python run_local.py")
         sys.exit(0)
+
+    if args.pair or args.join:
+        sys.exit(run_pairing_command(args.pair_url, args.join, args.port))
 
     # Normal startup
     start_server(args.host, args.port, not args.no_browser)

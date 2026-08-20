@@ -1223,6 +1223,7 @@ class DeviceInfo(BaseModel):
 class MobileDeviceRegisterRequest(BaseModel):
     """Request to register a mobile device"""
     device_info: DeviceInfo
+    pairing_code: Optional[str] = Field(default=None, min_length=1, max_length=64)
 
 
 class MobileDeviceRegisterResponse(BaseModel):
@@ -1230,6 +1231,7 @@ class MobileDeviceRegisterResponse(BaseModel):
     api_key: str
     device_id: str
     expires_at: datetime
+    scopes: List[str] = Field(default_factory=list)
 
 
 class MobileDeviceCapabilitiesRequest(BaseModel):
@@ -1246,6 +1248,9 @@ class MobileDevice(BaseModel):
     platform: str
     capabilities: DeviceCapabilities
     fcm_token: Optional[str] = None
+    api_key_expires_at: Optional[datetime] = None
+    scopes: List[str] = Field(default_factory=list)
+    revoked_at: Optional[datetime] = None
     created_at: datetime
     last_seen: Optional[datetime] = None
 

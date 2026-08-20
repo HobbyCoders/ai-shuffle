@@ -21,7 +21,7 @@ from pydantic import BaseModel
 
 from app.db import database
 from app.db.async_database import run_sync
-from app.api.auth import get_api_user_from_request, require_auth
+from app.api.auth import get_api_user_from_request, require_admin, require_auth
 from app.api.common import assigned_origin, require_origin_access
 from app.core import cluster
 
@@ -40,6 +40,10 @@ class InstallRenameRequest(BaseModel):
 
 class InstallBaseUrlRequest(BaseModel):
     base_url: Optional[str] = None
+
+
+class InstallApprovalRequest(BaseModel):
+    approved: bool
 
 
 @router.get("/installs")
@@ -134,7 +138,7 @@ def _build_cluster_catalog(
             if not runner_id or runner_id in seen:
                 continue
             install = install_map.get(runner_id)
-            if not install:
+            if not install or not install.get("approved", True):
                 continue
             seen.add(runner_id)
             eligible.append({
@@ -338,7 +342,7 @@ async def refresh_git_state(
 async def update_install(
     install_id: str,
     rename: Optional[InstallRenameRequest] = None,
-    token: str = Depends(require_auth),
+    token: str = Depends(require_admin),
 ) -> Dict[str, Any]:
     """Rename a device (the user-friendly name shown on its sessions)."""
     if not rename or not (rename.device_name or "").strip():
@@ -349,8 +353,34 @@ async def update_install(
     return updated
 
 
+@router.put("/installs/{install_id}/approval")
+async def update_install_approval(
+    install_id: str,
+    body: InstallApprovalRequest,
+    token: str = Depends(require_admin),
+) -> Dict[str, Any]:
+    """Approve a quarantined runner or revoke an existing runner.
+
+    A newly approved runner must restart before its background workers start.
+    Revocation removes it from placement immediately; stopping an already
+    running process remains the operator's responsibility.
+    """
+    from app.core.config import settings
+
+    if install_id == settings.effective_instance_id and not body.approved:
+        raise HTTPException(
+            status_code=400,
+            detail="You cannot revoke the install serving this admin session",
+        )
+    updated = await run_sync(database.set_install_approval, install_id, body.approved)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Install not found")
+    updated["restart_required"] = bool(body.approved and updated.get("online"))
+    return updated
+
+
 @router.delete("/installs/{install_id}")
-async def delete_install(install_id: str, token: str = Depends(require_auth)) -> Dict[str, Any]:
+async def delete_install(install_id: str, token: str = Depends(require_admin)) -> Dict[str, Any]:
     """Remove a stale install from the registry.
 
     Deleting this install's own row is allowed but pointless — it re-registers
@@ -377,7 +407,7 @@ async def get_advertise_url(token: str = Depends(require_auth)) -> Dict[str, Any
 @router.put("/advertise")
 async def set_advertise_url(
     body: InstallBaseUrlRequest,
-    token: str = Depends(require_auth),
+    token: str = Depends(require_admin),
 ) -> Dict[str, Any]:
     """Override the URL this install advertises to peers (blank = auto-detect).
 
@@ -438,7 +468,7 @@ async def test_advertise_reachability(token: str = Depends(require_auth)) -> Dic
 
 
 @router.get("/secret/status")
-async def cluster_secret_status(token: str = Depends(require_auth)) -> Dict[str, Any]:
+async def cluster_secret_status(token: str = Depends(require_admin)) -> Dict[str, Any]:
     """Report how the cluster secret is sourced — never returns the secret itself."""
     from app.core.config import settings
 
@@ -449,7 +479,7 @@ async def cluster_secret_status(token: str = Depends(require_auth)) -> Dict[str,
 
 
 @router.post("/secret/regenerate")
-async def regenerate_cluster_secret(token: str = Depends(require_auth)) -> Dict[str, Any]:
+async def regenerate_cluster_secret(token: str = Depends(require_admin)) -> Dict[str, Any]:
     """Rotate the auto-generated cluster secret (no-op when env-pinned).
 
     Rotating invalidates the old secret cluster-wide: every other install must be

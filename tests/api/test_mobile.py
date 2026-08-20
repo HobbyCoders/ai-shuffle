@@ -28,6 +28,18 @@ from app.api.mobile import (
 )
 
 
+def valid_mobile(device_id: str, **overrides):
+    row = {
+        "device_id": device_id,
+        "device_name": "Test Phone",
+        "api_key_expires_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        "scopes": ["controller", "mobile:notifications", "mobile:actions", "web:session"],
+        "revoked_at": None,
+    }
+    row.update(overrides)
+    return row
+
+
 # =============================================================================
 # Fixtures
 # =============================================================================
@@ -58,7 +70,8 @@ def mock_auth():
     """Mock auth functions."""
     with patch("app.api.mobile.get_api_key") as mock_get_key, \
          patch("app.api.mobile.hash_api_key") as mock_hash, \
-         patch("app.api.mobile.require_admin") as mock_admin:
+         patch("app.api.mobile.require_admin") as mock_admin, \
+         patch("app.api.mobile.pairing.hash_pairing_code", return_value="pairing-hash"):
         mock_hash.return_value = "hashed_key"
         mock_admin.return_value = "admin_token"
         yield {
@@ -150,7 +163,7 @@ class TestGetDeviceFromApiKey:
     def test_valid_key_returns_device(self, mock_database, mock_auth):
         """Valid API key should return device."""
         mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_device = {"device_id": "test-device-123", "device_name": "Test Phone"}
+        mock_device = valid_mobile("test-device-123")
         mock_database.get_mobile_device_by_api_key_hash.return_value = mock_device
         mock_request = MagicMock()
 
@@ -158,6 +171,49 @@ class TestGetDeviceFromApiKey:
 
         assert device["device_id"] == "test-device-123"
         mock_database.update_mobile_device_last_seen.assert_called_once_with("test-device-123")
+
+    def test_revoked_key_raises_401(self, mock_database, mock_auth):
+        """Revoking the paired client must invalidate the linked mobile key."""
+        mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}revoked_key"
+        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile(
+            "revoked-device",
+            revoked_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        with pytest.raises(Exception) as exc_info:
+            get_device_from_api_key(MagicMock())
+
+        assert exc_info.value.status_code == 401
+        mock_database.update_mobile_device_last_seen.assert_not_called()
+
+    def test_expired_key_raises_401(self, mock_database, mock_auth):
+        """Stored mobile-key expiry is enforced on every authenticated call."""
+        mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}expired_key"
+        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile(
+            "expired-device",
+            api_key_expires_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+        )
+
+        with pytest.raises(Exception) as exc_info:
+            get_device_from_api_key(MagicMock())
+
+        assert exc_info.value.status_code == 401
+        mock_database.update_mobile_device_last_seen.assert_not_called()
+
+    def test_legacy_key_uses_created_at_for_expiry(self, mock_database, mock_auth):
+        """Pre-migration rows get the documented one-year limit, not forever access."""
+        mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}legacy_key"
+        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile(
+            "legacy-device",
+            api_key_expires_at=None,
+            created_at=(datetime.now(timezone.utc) - timedelta(days=366)).isoformat(),
+        )
+
+        with pytest.raises(Exception) as exc_info:
+            get_device_from_api_key(MagicMock())
+
+        assert exc_info.value.status_code == 401
+        mock_database.update_mobile_device_last_seen.assert_not_called()
 
 
 # =============================================================================
@@ -170,9 +226,12 @@ class TestRegisterDevice:
     def test_register_new_device_success(self, client, mock_database, mock_auth):
         """New device registration should succeed."""
         mock_database.get_mobile_device.return_value = None
-        mock_database.create_mobile_device.return_value = {"device_id": "new-device"}
+        mock_database.exchange_grant_for_mobile.return_value = {
+            "client": {"scopes": ["controller", "web:session"]}
+        }
 
         response = client.post("/api/v1/mobile/register", json={
+            "pairing_code": "ABCD-EFGH-IJKL",
             "device_info": {
                 "device_id": "new-device",
                 "device_name": "My iPhone",
@@ -192,11 +251,24 @@ class TestRegisterDevice:
         assert data["device_id"] == "new-device"
         assert "expires_at" in data
 
+    def test_register_without_pairing_code_is_forbidden(self, client, mock_database, mock_auth):
+        response = client.post("/api/v1/mobile/register", json={
+            "device_info": {
+                "device_id": "new-device",
+                "device_name": "My iPhone",
+                "platform": "ios",
+                "capabilities": {},
+            }
+        })
+        assert response.status_code == 403
+        mock_database.exchange_grant_for_mobile.assert_not_called()
+
     def test_register_duplicate_device_fails(self, client, mock_database, mock_auth):
         """Duplicate device registration should fail."""
         mock_database.get_mobile_device.return_value = {"device_id": "existing-device"}
 
         response = client.post("/api/v1/mobile/register", json={
+            "pairing_code": "ABCD-EFGH-IJKL",
             "device_info": {
                 "device_id": "existing-device",
                 "device_name": "My iPhone",
@@ -222,9 +294,7 @@ class TestUpdateCapabilities:
     def test_update_capabilities_success(self, client, mock_database, mock_auth):
         """Capabilities update should succeed for authenticated device."""
         mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_database.get_mobile_device_by_api_key_hash.return_value = {
-            "device_id": "test-device"
-        }
+        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("test-device")
         mock_database.update_mobile_device_capabilities.return_value = True
 
         response = client.post(
@@ -246,9 +316,7 @@ class TestUpdateCapabilities:
     def test_update_capabilities_device_mismatch(self, client, mock_database, mock_auth):
         """Capabilities update should fail for mismatched device ID."""
         mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_database.get_mobile_device_by_api_key_hash.return_value = {
-            "device_id": "device-a"
-        }
+        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("device-a")
 
         response = client.post(
             "/api/v1/mobile/capabilities",
@@ -275,9 +343,7 @@ class TestGetPendingActions:
     def test_get_pending_actions_success(self, client, mock_database, mock_auth):
         """Should return pending actions for authenticated device."""
         mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_database.get_mobile_device_by_api_key_hash.return_value = {
-            "device_id": "test-device"
-        }
+        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("test-device")
         now = datetime.now(timezone.utc)
         mock_database.get_pending_actions_for_device.return_value = [
             {
@@ -310,9 +376,7 @@ class TestConfirmAction:
     def test_confirm_action_approved(self, client, mock_database, mock_auth):
         """Approved action should update status."""
         mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_database.get_mobile_device_by_api_key_hash.return_value = {
-            "device_id": "test-device"
-        }
+        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("test-device")
         now = datetime.now(timezone.utc)
         mock_database.get_pending_action.return_value = {
             "id": "action-1",
@@ -336,9 +400,7 @@ class TestConfirmAction:
     def test_confirm_action_rejected(self, client, mock_database, mock_auth):
         """Rejected action should update status."""
         mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_database.get_mobile_device_by_api_key_hash.return_value = {
-            "device_id": "test-device"
-        }
+        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("test-device")
         now = datetime.now(timezone.utc)
         mock_database.get_pending_action.return_value = {
             "id": "action-2",
@@ -361,9 +423,7 @@ class TestConfirmAction:
     def test_confirm_action_not_found(self, client, mock_database, mock_auth):
         """Non-existent action should return 404."""
         mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_database.get_mobile_device_by_api_key_hash.return_value = {
-            "device_id": "test-device"
-        }
+        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("test-device")
         mock_database.get_pending_action.return_value = None
 
         response = client.post(
@@ -377,9 +437,7 @@ class TestConfirmAction:
     def test_confirm_action_wrong_device(self, client, mock_database, mock_auth):
         """Action for different device should return 403."""
         mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_database.get_mobile_device_by_api_key_hash.return_value = {
-            "device_id": "device-a"
-        }
+        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("device-a")
         mock_database.get_pending_action.return_value = {
             "id": "action-1",
             "device_id": "device-b",
@@ -397,9 +455,7 @@ class TestConfirmAction:
     def test_confirm_already_processed_action(self, client, mock_database, mock_auth):
         """Already processed action should return 400."""
         mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_database.get_mobile_device_by_api_key_hash.return_value = {
-            "device_id": "test-device"
-        }
+        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("test-device")
         mock_database.get_pending_action.return_value = {
             "id": "action-1",
             "device_id": "test-device",
@@ -417,9 +473,7 @@ class TestConfirmAction:
     def test_confirm_high_security_requires_biometric(self, client, mock_database, mock_auth):
         """High security action requires biometric verification."""
         mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_database.get_mobile_device_by_api_key_hash.return_value = {
-            "device_id": "test-device"
-        }
+        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("test-device")
         now = datetime.now(timezone.utc)
         mock_database.get_pending_action.return_value = {
             "id": "action-1",
@@ -449,9 +503,7 @@ class TestRegisterPushToken:
     def test_register_token_success(self, client, mock_database, mock_auth):
         """Push token registration should succeed."""
         mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_database.get_mobile_device_by_api_key_hash.return_value = {
-            "device_id": "test-device"
-        }
+        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("test-device")
         mock_database.update_mobile_device_fcm_token.return_value = True
 
         response = client.post(
@@ -469,9 +521,7 @@ class TestRegisterPushToken:
     def test_register_token_device_mismatch(self, client, mock_database, mock_auth):
         """Push token for mismatched device should fail."""
         mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_database.get_mobile_device_by_api_key_hash.return_value = {
-            "device_id": "device-a"
-        }
+        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("device-a")
 
         response = client.post(
             "/api/v1/mobile/push/token",
@@ -495,9 +545,7 @@ class TestRegisterUnifiedPushEndpoint:
     def test_register_endpoint_success(self, client, mock_database, mock_auth):
         """UnifiedPush endpoint registration should succeed."""
         mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_database.get_mobile_device_by_api_key_hash.return_value = {
-            "device_id": "test-device"
-        }
+        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("test-device")
         mock_database.update_mobile_device_unifiedpush_endpoint.return_value = {
             "device_id": "test-device"
         }
@@ -520,9 +568,7 @@ class TestRegisterUnifiedPushEndpoint:
     def test_register_endpoint_device_mismatch(self, client, mock_database, mock_auth):
         """UnifiedPush endpoint for mismatched device should fail with 403."""
         mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_database.get_mobile_device_by_api_key_hash.return_value = {
-            "device_id": "device-a"
-        }
+        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("device-a")
 
         response = client.post(
             "/api/v1/mobile/push/unifiedpush",
@@ -538,9 +584,7 @@ class TestRegisterUnifiedPushEndpoint:
     def test_register_endpoint_device_not_found(self, client, mock_database, mock_auth):
         """UnifiedPush endpoint update returning None should yield 404."""
         mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_database.get_mobile_device_by_api_key_hash.return_value = {
-            "device_id": "test-device"
-        }
+        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("test-device")
         mock_database.update_mobile_device_unifiedpush_endpoint.return_value = None
 
         response = client.post(
@@ -576,13 +620,11 @@ class TestCreateWebSession:
     def test_web_session_success(self, client, mock_database, mock_auth):
         """Valid device key should mint a web session and set the cookie."""
         mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_database.get_mobile_device_by_api_key_hash.return_value = {
-            "device_id": "test-device"
-        }
+        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("test-device")
 
-        with patch("app.api.mobile.auth_service") as mock_auth_service:
-            mock_auth_service.create_session.return_value = "web-session-token-xyz"
-
+        mock_database.ensure_paired_client_for_mobile.return_value = {"id": "client-1"}
+        mock_database.set_paired_client_session.return_value = {"id": "client-1"}
+        with patch("app.api.mobile.pairing.generate_controller_session", return_value="shc_web-session-token-xyz"):
             response = client.post(
                 "/api/v1/mobile/web-session",
                 headers={"Authorization": f"Bearer {MOBILE_API_KEY_PREFIX}valid_key"}
@@ -591,25 +633,39 @@ class TestCreateWebSession:
         assert response.status_code == 200
         body = response.json()
         assert body["status"] == "ok"
-        assert body["session_token"] == "web-session-token-xyz"
+        assert body["session_token"] == "shc_web-session-token-xyz"
         assert "expires_at" in body
         # Cookie should be set on the response for the WebView CookieManager.
         assert "session" in response.cookies
-        assert response.cookies["session"] == "web-session-token-xyz"
+        assert response.cookies["session"] == "shc_web-session-token-xyz"
 
     def test_web_session_requires_valid_key(self, client, mock_database, mock_auth):
         """Invalid mobile key should yield 401 and not mint a session."""
         mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}unknown"
         mock_database.get_mobile_device_by_api_key_hash.return_value = None
 
-        with patch("app.api.mobile.auth_service") as mock_auth_service:
-            response = client.post(
-                "/api/v1/mobile/web-session",
-                headers={"Authorization": f"Bearer {MOBILE_API_KEY_PREFIX}unknown"}
-            )
-            mock_auth_service.create_session.assert_not_called()
+        response = client.post(
+            "/api/v1/mobile/web-session",
+            headers={"Authorization": f"Bearer {MOBILE_API_KEY_PREFIX}unknown"}
+        )
 
         assert response.status_code == 401
+
+    def test_web_session_requires_scope(self, client, mock_database, mock_auth):
+        """A valid mobile key cannot mint capabilities it was not granted."""
+        mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}limited"
+        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile(
+            "limited-device",
+            scopes=["controller"],
+        )
+
+        response = client.post(
+            "/api/v1/mobile/web-session",
+            headers={"Authorization": f"Bearer {MOBILE_API_KEY_PREFIX}limited"},
+        )
+
+        assert response.status_code == 403
+        mock_database.ensure_paired_client_for_mobile.assert_not_called()
 
 
 # =============================================================================
@@ -633,9 +689,7 @@ class TestNotificationsStream:
         from app.services.mobile_push_hub import mobile_push_hub
 
         mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
-        mock_database.get_mobile_device_by_api_key_hash.return_value = {
-            "device_id": "test-device"
-        }
+        mock_database.get_mobile_device_by_api_key_hash.return_value = valid_mobile("test-device")
 
         request = MagicMock()
         request.is_disconnected = AsyncMock(return_value=False)

@@ -19,6 +19,9 @@ export interface Install {
 	capabilities: Record<string, unknown>;
 	last_seen: string | null;
 	online: boolean; // derived server-side from last_seen
+	approved?: boolean; // absent on an older server means approved (backward compatible)
+	approved_at?: string | null;
+	revoked_at?: string | null;
 	is_self?: boolean; // annotated by GET /cluster/installs
 	created_at?: string;
 	updated_at?: string;
@@ -55,6 +58,11 @@ export async function renameInstall(id: string, device_name: string): Promise<In
 /** Remove a stale install from the registry (it re-registers if it comes back). */
 export async function deleteInstall(id: string): Promise<void> {
 	await api.delete(`/cluster/installs/${id}`);
+}
+
+/** Approve a quarantined runner or revoke an existing one. */
+export async function setInstallApproval(id: string, approved: boolean): Promise<Install & { restart_required?: boolean }> {
+	return api.put<Install & { restart_required?: boolean }>(`/cluster/installs/${id}/approval`, { approved });
 }
 
 /** Report how the cluster secret is sourced — never returns the secret itself. */

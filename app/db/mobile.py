@@ -24,6 +24,11 @@ class MobileDeviceRow(TypedDict):
     fcm_token: Optional[str]
     unifiedpush_endpoint: Optional[str]
     capabilities: Dict[str, Any]
+    paired_client_id: Optional[str]
+    api_key_expires_at: Optional[str]
+    scopes: List[str]
+    paired_at: Optional[str]
+    revoked_at: Optional[str]
     created_at: str
     last_seen: Optional[str]
 
@@ -78,6 +83,27 @@ def _parse_params(raw: Any) -> Dict[str, Any]:
     return raw if raw else {}
 
 
+def _parse_scopes(raw: Any) -> List[str]:
+    """Parse a JSON/JSONB scope list without trusting malformed rows."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+    if not isinstance(raw, list):
+        return []
+    return [str(scope) for scope in raw if isinstance(scope, str)]
+
+
+def _parse_mobile_device(row: Any) -> Optional[MobileDeviceRow]:
+    if row is None:
+        return None
+    result = dict(row)
+    result["capabilities"] = _parse_capabilities(result.get("capabilities"))
+    result["scopes"] = _parse_scopes(result.get("scopes"))
+    return result  # type: ignore[return-value]
+
+
 # ============================================================================
 # Mobile Device Operations
 # ============================================================================
@@ -87,7 +113,11 @@ def create_mobile_device(
     device_name: str,
     platform: str,
     api_key_hash: str,
-    capabilities: Dict[str, Any]
+    capabilities: Dict[str, Any],
+    *,
+    paired_client_id: Optional[str] = None,
+    api_key_expires_at: Optional[datetime] = None,
+    scopes: Optional[List[str]] = None,
 ) -> Optional[MobileDeviceRow]:
     """Register a new mobile device"""
     import uuid
@@ -97,9 +127,25 @@ def create_mobile_device(
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO mobile_devices (id, device_id, device_name, platform, api_key_hash, capabilities, created_at, last_seen)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        """, (record_id, device_id, device_name, platform, api_key_hash, json.dumps(capabilities), now, now))
+            INSERT INTO mobile_devices
+                (id, device_id, device_name, platform, api_key_hash,
+                 capabilities, paired_client_id, api_key_expires_at, scopes,
+                 paired_at, created_at, last_seen)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            record_id,
+            device_id,
+            device_name,
+            platform,
+            api_key_hash,
+            json.dumps(capabilities),
+            paired_client_id,
+            api_key_expires_at.isoformat() if api_key_expires_at else None,
+            json.dumps(scopes or []),
+            now,
+            now,
+            now,
+        ))
 
     return get_mobile_device(device_id)
 
@@ -109,13 +155,7 @@ def get_mobile_device(device_id: str) -> Optional[MobileDeviceRow]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM mobile_devices WHERE device_id = %s", (device_id,))
-        row = cursor.fetchone()
-        if row:
-            result = dict(row)
-            if result.get("capabilities"):
-                result["capabilities"] = _parse_capabilities(result["capabilities"])
-            return result
-        return None
+        return _parse_mobile_device(cursor.fetchone())
 
 
 def get_mobile_device_by_api_key_hash(api_key_hash: str) -> Optional[MobileDeviceRow]:
@@ -123,13 +163,7 @@ def get_mobile_device_by_api_key_hash(api_key_hash: str) -> Optional[MobileDevic
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM mobile_devices WHERE api_key_hash = %s", (api_key_hash,))
-        row = cursor.fetchone()
-        if row:
-            result = dict(row)
-            if result.get("capabilities"):
-                result["capabilities"] = _parse_capabilities(result["capabilities"])
-            return result
-        return None
+        return _parse_mobile_device(cursor.fetchone())
 
 
 def get_all_mobile_devices() -> List[MobileDeviceRow]:
@@ -138,13 +172,10 @@ def get_all_mobile_devices() -> List[MobileDeviceRow]:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM mobile_devices ORDER BY created_at DESC")
         rows = cursor.fetchall()
-        results = []
-        for row in rows:
-            result = dict(row)
-            if result.get("capabilities"):
-                result["capabilities"] = _parse_capabilities(result["capabilities"])
-            results.append(result)
-        return results
+        return [
+            parsed for row in rows
+            if (parsed := _parse_mobile_device(row)) is not None
+        ]
 
 
 def update_mobile_device_capabilities(device_id: str, capabilities: Dict[str, Any]) -> Optional[MobileDeviceRow]:

@@ -190,6 +190,11 @@ async def _preflight_remote_target(
             detail="Unknown device — pick another device.",
         )
     device = install.get("device_name") or target_instance_id
+    if not install.get("approved", True):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"{device} is waiting for admin approval. Approve and restart it first.",
+        )
     if not install.get("online"):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

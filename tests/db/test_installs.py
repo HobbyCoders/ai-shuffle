@@ -52,12 +52,15 @@ def test_row_to_install_coerces_online_and_parses_capabilities():
         "platform": "docker",
         "version": "1.2.3",
         "capabilities": '{"advertise_url_source": "config"}',
+        "approved_at": "2026-06-25T00:00:00+00:00",
+        "revoked_at": None,
         "last_seen": "2026-06-25T00:00:00+00:00",
         "online": 1,  # SQLite/driver may hand back an int for the bool expr
     }
     out = _row_to_install(row)
     assert out["online"] is True  # coerced to a real bool
     assert out["capabilities"] == {"advertise_url_source": "config"}
+    assert out["approved"] is True
     assert out["id"] == "box-1"
     # The transient ``online`` expression alias is consumed, not left dangling
     # alongside a stale value — it's re-added as the coerced bool above.
@@ -68,6 +71,7 @@ def test_row_to_install_defaults_online_false_when_absent():
     out = _row_to_install(row)
     assert out["online"] is False
     assert out["capabilities"] == {}
+    assert out["approved"] is False
 
 
 def test_online_window_is_a_few_heartbeats():

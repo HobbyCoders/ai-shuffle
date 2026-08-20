@@ -20,7 +20,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 77
+SCHEMA_VERSION = 78
 
 
 def create_postgres_schema(cursor) -> None:
@@ -665,7 +665,47 @@ def create_postgres_schema(cursor) -> None:
     """)
 
     # ------------------------------------------------------------------
-    # 36. Mobile devices
+    # 36. Paired controller devices and one-time enrollment grants
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS paired_clients (
+            id TEXT PRIMARY KEY,
+            device_id TEXT NOT NULL UNIQUE,
+            device_name TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            client_type TEXT NOT NULL DEFAULT 'browser',
+            scopes JSONB NOT NULL DEFAULT '["controller"]',
+            session_token_hash TEXT UNIQUE,
+            session_expires_at TIMESTAMP WITH TIME ZONE,
+            paired_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            last_seen TIMESTAMP WITH TIME ZONE,
+            revoked_at TIMESTAMP WITH TIME ZONE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS pairing_grants (
+            id TEXT PRIMARY KEY,
+            token_hash TEXT NOT NULL UNIQUE,
+            purpose TEXT NOT NULL DEFAULT 'controller',
+            scopes JSONB NOT NULL DEFAULT '["controller"]',
+            target_install_id TEXT,
+            endpoint_url TEXT,
+            device_label TEXT,
+            created_by TEXT NOT NULL DEFAULT 'admin',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+            consumed_at TIMESTAMP WITH TIME ZONE,
+            revoked_at TIMESTAMP WITH TIME ZONE,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 10
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 36a. Mobile devices
     # ------------------------------------------------------------------
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS mobile_devices (
@@ -677,6 +717,11 @@ def create_postgres_schema(cursor) -> None:
             fcm_token TEXT,
             unifiedpush_endpoint TEXT,
             capabilities JSONB DEFAULT '{}',
+            paired_client_id TEXT,
+            api_key_expires_at TIMESTAMP WITH TIME ZONE,
+            scopes JSONB NOT NULL DEFAULT '["controller", "mobile:notifications", "mobile:actions", "web:session"]',
+            paired_at TIMESTAMP WITH TIME ZONE,
+            revoked_at TIMESTAMP WITH TIME ZONE,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             last_seen TIMESTAMP WITH TIME ZONE
         )
@@ -696,6 +741,8 @@ def create_postgres_schema(cursor) -> None:
             platform TEXT,
             version TEXT,
             capabilities JSONB DEFAULT '{}',
+            approved_at TIMESTAMP WITH TIME ZONE,
+            revoked_at TIMESTAMP WITH TIME ZONE,
             last_seen TIMESTAMP WITH TIME ZONE,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -1272,6 +1319,12 @@ def create_postgres_schema(cursor) -> None:
 
     # -- api_key_sessions
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_key_sessions_user ON api_key_sessions(api_user_id)")
+
+    # -- pairing grants / paired controller clients
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pairing_grants_token ON pairing_grants(token_hash)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_pairing_grants_active ON pairing_grants(expires_at) WHERE consumed_at IS NULL AND revoked_at IS NULL")
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_paired_clients_session ON paired_clients(session_token_hash) WHERE session_token_hash IS NOT NULL")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_paired_clients_active ON paired_clients(revoked_at, paired_at DESC)")
 
     # -- user_preferences
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_preferences_user ON user_preferences(user_type, user_id)")

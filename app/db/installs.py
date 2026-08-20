@@ -35,6 +35,9 @@ class InstallRow(TypedDict):
     platform: Optional[str]
     version: Optional[str]
     capabilities: Dict[str, Any]
+    approved_at: Optional[str]
+    revoked_at: Optional[str]
+    approved: bool
     last_seen: Optional[str]
     created_at: str
     updated_at: str
@@ -57,6 +60,7 @@ def _row_to_install(row: Any) -> Optional[InstallRow]:
     result = dict(row)
     result["capabilities"] = _parse_capabilities(result.get("capabilities"))
     result["online"] = bool(result.pop("online", False))
+    result["approved"] = bool(result.get("approved_at") and not result.get("revoked_at"))
     return result  # type: ignore[return-value]
 
 
@@ -72,6 +76,7 @@ def register_install(
     platform: Optional[str],
     version: Optional[str],
     capabilities: Optional[Dict[str, Any]] = None,
+    approve_new: bool = False,
 ) -> Optional[InstallRow]:
     """Register (or refresh) this install's registry row.
 
@@ -86,8 +91,8 @@ def register_install(
             """
             INSERT INTO installs
                 (id, device_name, base_url, platform, version, capabilities,
-                 last_seen, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 approved_at, last_seen, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(id) DO UPDATE SET
                 base_url = EXCLUDED.base_url,
                 platform = EXCLUDED.platform,
@@ -103,6 +108,7 @@ def register_install(
                 platform,
                 version,
                 json.dumps(capabilities or {}),
+                now if approve_new else None,
                 now,
                 now,
                 now,
@@ -165,6 +171,38 @@ def set_install_base_url(install_id: str, base_url: Optional[str]) -> None:
             "UPDATE installs SET base_url = %s, updated_at = %s WHERE id = %s",
             (base_url, now, install_id),
         )
+
+
+def set_install_approval(install_id: str, approved: bool) -> Optional[InstallRow]:
+    """Approve or revoke a runner without deleting its registry history."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if approved:
+            cursor.execute(
+                """
+                UPDATE installs
+                SET approved_at = NOW(), revoked_at = NULL, updated_at = NOW()
+                WHERE id = %s
+                """,
+                (install_id,),
+            )
+        else:
+            cursor.execute(
+                """
+                UPDATE installs
+                SET revoked_at = NOW(), updated_at = NOW()
+                WHERE id = %s
+                """,
+                (install_id,),
+            )
+        if cursor.rowcount == 0:
+            return None
+    return get_install(install_id)
+
+
+def is_install_approved(install_id: str) -> bool:
+    row = get_install(install_id)
+    return bool(row and row.get("approved"))
 
 
 def get_install(install_id: str) -> Optional[InstallRow]:

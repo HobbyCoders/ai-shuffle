@@ -129,11 +129,15 @@ def should_run_scheduled_here(automation: Dict[str, Any]) -> Tuple[bool, str]:
         logger.warning("Runner election: install registry unavailable (%s) — running locally", e)
         return True, "install registry unavailable"
 
-    online = {iid for iid, row in installs.items() if row.get("online")}
+    online = {
+        iid for iid, row in installs.items()
+        if row.get("online") and row.get("approved", True)
+    }
     # This code is running, so this install is alive no matter what its
     # heartbeat row says — counting ourselves closes the boundary race where
     # a stale row makes every install defer and nobody fires.
-    online.add(me)
+    if installs.get(me, {}).get("approved", True):
+        online.add(me)
 
     project_id = automation.get("project_id")
     if not project_id:

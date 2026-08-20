@@ -30,6 +30,10 @@ def client(monkeypatch):
     async def capabilities():  # a non-exempt, non-Bearer mobile POST
         return {"ok": True}
 
+    @api.post("/api/v1/pairing/exchange")
+    async def pairing_exchange():
+        return {"ok": True}
+
     return TestClient(api)
 
 
@@ -45,6 +49,11 @@ def test_non_exempt_mobile_post_without_origin_is_blocked(client):
     resp = client.post("/api/v1/mobile/capabilities", json={})
     assert resp.status_code == 403
     assert "CSRF" in resp.json()["detail"]
+
+
+def test_pairing_exchange_exempt_before_session_exists(client):
+    resp = client.post("/api/v1/pairing/exchange", json={"code": "example"})
+    assert resp.status_code == 200, resp.text
 
 
 def test_bearer_authenticated_request_is_exempt(client):

@@ -34,6 +34,9 @@ _EXEMPT_PATHS = frozenset({
     # CORS), so it carries no CSRF risk. Every other /api/v1/mobile/* endpoint
     # is a safe GET or already Bearer-authenticated (exempt below).
     "/api/v1/mobile/register",
+    # Pair exchange authenticates with a one-time, high-entropy grant in the
+    # request body and is called before the new device owns a session cookie.
+    "/api/v1/pairing/exchange",
 })
 
 # Prefixes that are exempt from CSRF checks.

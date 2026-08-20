@@ -30,7 +30,7 @@ export interface ApiError {
  * redirect loop off the very page that needs to render the 401. Everything else
  * that 401s means the session expired mid-use → send the user to /login.
  */
-const AUTH_PATH_PREFIXES = ['/auth/', '/workspace/'];
+const AUTH_PATH_PREFIXES = ['/auth/', '/workspace/', '/pairing/exchange'];
 
 function isAuthPath(path: string): boolean {
 	// `path` is the API-relative path (e.g. '/auth/status', '/sessions'). Strip a

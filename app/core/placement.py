@@ -14,8 +14,8 @@ first claim and honors the pin thereafter. A pinned ``{"where":"runner:<id>"}``
 that resolves here simply returns that runner when it is online+capable.
 
 Election reuses the shared-DB convention of
-``automation_service.should_run_scheduled_here``: the set of online installs
-(plus self, which is provably alive because this code is running), and a
+``automation_service.should_run_scheduled_here``: the set of online, approved
+installs (an approved self is retained through a heartbeat race), and a
 deterministic lowest-id winner.
 
 Pinned-vs-elected asymmetry (A10): a ``{"where":"runner:<id>"}`` pin is
@@ -100,19 +100,19 @@ def _normalize_placement(raw: Any) -> Optional[Dict[str, Any]]:
 
 
 def _online_runners() -> set:
-    """Online install ids from the shared registry, plus self.
-
-    Mirrors ``should_run_scheduled_here``: this code is running, so self is
-    alive no matter what its heartbeat row says — counting it closes the
-    boundary race where a stale row makes every install defer.
-    """
+    """Online approved installs, retaining an approved self during heartbeat races."""
     try:
         installs = database.get_installs_map()
     except Exception:  # noqa: BLE001 — registry trouble must not crash resolution
         logger.debug("Placement: install registry unavailable", exc_info=True)
         installs = {}
-    online = {iid for iid, row in installs.items() if row.get("online")}
-    online.add(settings.effective_instance_id)
+    online = {
+        iid for iid, row in installs.items()
+        if row.get("online") and row.get("approved", True)
+    }
+    me = installs.get(settings.effective_instance_id)
+    if me and me.get("approved", True):
+        online.add(settings.effective_instance_id)
     return online
 
 

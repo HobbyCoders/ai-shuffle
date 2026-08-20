@@ -132,6 +132,24 @@ class TestAuthenticateWebSocket:
             assert api_user is None  # Admin user
 
     @pytest.mark.asyncio
+    async def test_authenticate_with_paired_controller_token(self, mock_websocket):
+        """A live shc_ controller token authenticates without becoming an API user."""
+        from app.api.websocket import authenticate_websocket
+
+        with patch("app.api.ws_auth.database") as mock_db:
+            mock_db.get_paired_client_by_session_hash.return_value = {
+                "id": "paired-client-1",
+                "device_name": "Tablet",
+            }
+            is_auth, api_user = await authenticate_websocket(
+                mock_websocket, "shc_controller-token"
+            )
+
+        assert is_auth is True
+        assert api_user is None
+        mock_db.touch_paired_client.assert_called_once_with("paired-client-1")
+
+    @pytest.mark.asyncio
     async def test_authenticate_with_api_key_session(self, mock_websocket):
         """Should authenticate with API key session token."""
         from app.api.websocket import authenticate_websocket

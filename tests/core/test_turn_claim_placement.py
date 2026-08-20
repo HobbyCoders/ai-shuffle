@@ -96,6 +96,12 @@ def _stub_installs(monkeypatch, online_ids):
     rows = {
         iid: {"id": iid, "online": True, "capabilities": {}} for iid in online_ids
     }
+    # Production registers the current process before the claim loop starts.
+    # Keep its approved row in the fixture even when a test only names peers.
+    rows.setdefault(
+        RUNNER_ME,
+        {"id": RUNNER_ME, "online": True, "approved": True, "capabilities": {}},
+    )
     monkeypatch.setattr(database, "get_installs_map", lambda: rows)
 
 

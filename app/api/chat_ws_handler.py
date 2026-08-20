@@ -617,6 +617,10 @@ class ChatWebSocketHandler:
         if not install:
             return await _refuse("Unknown device — pick another device.")
         device = install.get("device_name") or target_instance_id
+        if not install.get("approved", True):
+            return await _refuse(
+                f"{device} is waiting for admin approval. Approve and restart it first."
+            )
         if not install.get("online"):
             return await _refuse(
                 f"{device} is offline. Bring it online or pick another device."
@@ -1790,4 +1794,3 @@ class ChatWebSocketHandler:
         await run_sync(_clear_v2_queue)
         await self._v2_broadcast_queue(session_id)
         return
-

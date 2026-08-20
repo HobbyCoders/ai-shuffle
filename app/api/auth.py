@@ -25,6 +25,7 @@ from app.core import encryption
 from app.core import audit_service
 from app.core import auth as _auth_module
 from app.db import database as db
+from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -212,11 +213,41 @@ def hash_api_key(api_key: str) -> str:
     return hashlib.sha256(api_key.encode()).hexdigest()
 
 
+def get_paired_client_from_token(token: Optional[str], *, touch: bool = True) -> Optional[dict]:
+    """Resolve a scoped controller session without treating it as admin auth."""
+    if not token:
+        return None
+    from app.core.pairing import PAIRED_SESSION_PREFIX, hash_controller_session
+
+    if not token.startswith(PAIRED_SESSION_PREFIX):
+        return None
+    client = db.get_paired_client_by_session_hash(hash_controller_session(token))
+    if client is not None and client.get("scopes") is not None:
+        if "controller" not in client.get("scopes", []):
+            return None
+    if client and touch:
+        db.touch_paired_client(client["id"])
+    return client
+
+
+def _set_paired_request_state(request: Request, token: str, client: dict) -> str:
+    request.state.is_admin = False
+    request.state.api_user = None
+    request.state.paired_client = client
+    request.state.auth_token = f"paired_client:{client['id']}"
+    request.state.user_info = (client.get("device_name") or "paired-device", client["id"], False)
+    return f"paired_client:{client['id']}"
+
+
 def require_auth(request: Request) -> str:
     """Dependency that requires authentication (cookie or API key)"""
     # First try cookie-based admin auth
     token = get_session_token(request)
     if token:
+        paired_client = get_paired_client_from_token(token)
+        if paired_client:
+            return _set_paired_request_state(request, token, paired_client)
+
         # Check admin session
         if auth_service.validate_session(token):
             request.state.is_admin = True
@@ -237,6 +268,10 @@ def require_auth(request: Request) -> str:
     # Then try API key auth (Bearer token)
     api_key = get_api_key(request)
     if api_key:
+        paired_client = get_paired_client_from_token(api_key)
+        if paired_client:
+            return _set_paired_request_state(request, api_key, paired_client)
+
         key_hash = hash_api_key(api_key)
         api_user = db.get_api_user_by_key_hash(key_hash)
         if api_user:
@@ -269,7 +304,7 @@ def require_auth(request: Request) -> str:
 def require_admin(request: Request) -> str:
     """Dependency that requires admin authentication only"""
     token = get_session_token(request)
-    if token and auth_service.validate_session(token):
+    if token and not get_paired_client_from_token(token, touch=False) and auth_service.validate_session(token):
         request.state.is_admin = True
         request.state.api_user = None
         return token
@@ -338,10 +373,15 @@ async def get_auth_status(request: Request):
     """Get complete authentication status"""
     token = get_session_token(request)
     is_admin_authenticated = False
+    is_paired_authenticated = False
     username = None
 
     if token:
-        if auth_service.validate_session(token):
+        paired_client = await run_sync(get_paired_client_from_token, token)
+        if paired_client:
+            is_paired_authenticated = True
+            username = paired_client.get("device_name") or "Paired device"
+        elif auth_service.validate_session(token):
             is_admin_authenticated = True
             username = auth_service.get_admin_username()
 
@@ -356,8 +396,9 @@ async def get_auth_status(request: Request):
     claude_authenticated = auth_service.is_claude_authenticated()
 
     return {
-        "authenticated": is_admin_authenticated,
+        "authenticated": is_admin_authenticated or is_paired_authenticated,
         "is_admin": is_admin_authenticated,
+        "paired_client": is_paired_authenticated,
         "setup_required": auth_service.is_setup_required(),
         "claude_authenticated": claude_authenticated,
         # PA10 (docs/PROVIDER_AGNOSTIC_PLAN.md): "does this install have ANY
@@ -484,7 +525,11 @@ async def logout(request: Request, response: Response):
     """Logout and invalidate session"""
     token = get_session_token(request)
     if token:
-        auth_service.logout(token)
+        paired_client = await run_sync(get_paired_client_from_token, token, touch=False)
+        if paired_client:
+            await run_sync(db.clear_paired_client_session, paired_client["id"])
+        else:
+            auth_service.logout(token)
         # Purge the rate-limit middleware's short-TTL auth cache so the revoked
         # session isn't classified against its old tier for up to the TTL.
         try:

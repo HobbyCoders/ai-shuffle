@@ -341,27 +341,45 @@ def _warn_if_stray_instance() -> None:
         logger.debug("Stray-instance check failed", exc_info=True)
 
 
-def register_self() -> None:
-    """Self-register this install's registry row (called once on startup)."""
+def register_self() -> bool:
+    """Self-register and return whether this runner is approved to execute.
+
+    The first install on a fresh database is trusted automatically. Any new
+    identity joining an existing registry stays quarantined until an admin
+    approves it from the Devices panel. Restarts preserve the existing state.
+    """
     url, source = advertise_url()
     _warn_if_stray_instance()
     try:
-        database.register_install(
+        existing = database.get_install(settings.effective_instance_id)
+        approve_new = existing is None and not database.get_installs()
+        row = database.register_install(
             install_id=settings.effective_instance_id,
             device_name=default_device_name(),
             base_url=url,
             platform=("docker" if not settings.is_local_mode() else "local"),
             version=settings.version,
             capabilities=_build_capabilities(source),
+            approve_new=approve_new,
         )
+        approved = bool(row and row.get("approved"))
         logger.info(
-            "Registered install %s in cluster registry (base_url=%s, source=%s)",
+            "Registered install %s in cluster registry (base_url=%s, source=%s, approved=%s)",
             settings.effective_instance_id,
             url or "<none/view-only>",
             source,
+            approved,
         )
+        if not approved:
+            logger.warning(
+                "Install %s is quarantined. Approve it from Settings > Devices "
+                "on an existing admin device, then restart this install.",
+                settings.effective_instance_id,
+            )
+        return approved
     except Exception:  # noqa: BLE001 — registration must never block startup
         logger.exception("Failed to register install in cluster registry")
+        return False
 
 
 def heartbeat_self() -> None:

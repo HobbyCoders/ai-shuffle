@@ -333,12 +333,14 @@ async def test_boot_reap_requeues_dead_lease_turns_and_kicks(
 # Schema: version parity + parked_task_kind column
 # =============================================================================
 
-def test_schema_version_parity_v51():
+def test_schema_version_parity_v78():
     from app.db.database import SCHEMA_VERSION as db_version
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 77 for the harness rename omni -> fluid: omni_sessions /
+    # Bumped to 78 for one-time pairing grants, scoped controller sessions,
+    # mobile credential lifetime/revocation, and runner approval. v77 was the
+    # harness rename omni -> fluid: omni_sessions /
     # omni_session_nodes / omni_session_events renamed in place to fluid_*
     # by _migrate_omni_tables_to_fluid(), which runs before the bootstrap DDL
     # so the idempotent CREATE TABLE IF NOT EXISTS fluid_* can never strand
@@ -400,8 +402,8 @@ def test_schema_version_parity_v51():
     # the Phase-2 turns table; v58 was the Phase-1 deletion (v2_stream forced
     # TRUE + default flipped); v57 added the opt-in flag; v56 added the Phase-0
     # primitives.
-    assert db_version == 77
-    assert pg_version == 77
+    assert db_version == 78
+    assert pg_version == 78
     assert db_version == pg_version
 
 

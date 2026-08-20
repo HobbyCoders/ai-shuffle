@@ -17,7 +17,7 @@ export type EligibilityMap = Record<string, boolean> | null;
 
 /** Other cluster installs, including offline. "This device" is Local, not a Cloud row. */
 export function peerRunners(installs: Install[]): Install[] {
-	return installs.filter(i => !i.is_self);
+	return installs.filter(i => !i.is_self && i.approved !== false);
 }
 
 /**
@@ -38,7 +38,7 @@ export function isBlocked(
 	worktreeOn: boolean,
 	eligibility: EligibilityMap
 ): boolean {
-	return !install.online || (worktreeOn && isIneligible(eligibility, install.id));
+	return install.approved === false || !install.online || (worktreeOn && isIneligible(eligibility, install.id));
 }
 
 /** Tooltip for a Cloud accordion row. Offline wins over the checkout message. */
@@ -47,6 +47,7 @@ export function runnerTitle(
 	worktreeOn: boolean,
 	eligibility: EligibilityMap
 ): string {
+	if (install.approved === false) return `${install.device_name} is waiting for admin approval`;
 	if (!install.online) return `${install.device_name} is offline`;
 	if (isIneligible(eligibility, install.id)) {
 		return worktreeOn

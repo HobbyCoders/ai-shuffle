@@ -12,13 +12,15 @@
 	 * links open on other devices.
 	 */
 	import { onMount } from 'svelte';
-	import { MonitorSmartphone, RefreshCw, Pencil, Trash2, Check, X, KeyRound, Globe, GitBranch } from 'lucide-svelte';
+	import { MonitorSmartphone, RefreshCw, Pencil, Trash2, Check, X, KeyRound, Globe, GitBranch, ShieldCheck, ShieldOff } from 'lucide-svelte';
 	import { getErrorMessage } from '$lib/api/client';
+	import PairingPanel from './PairingPanel.svelte';
 	import { appData, projects } from '$lib/stores/app-data.svelte';
 	import {
 		listInstalls,
 		renameInstall,
 		deleteInstall,
+		setInstallApproval,
 		getClusterSecretStatus,
 		regenerateClusterSecret,
 		getAdvertiseStatus,
@@ -52,11 +54,12 @@
 
 	// Delete confirmation (two-step, no native confirm dialog).
 	let confirmDeleteId = $state<string | null>(null);
+	let confirmRevokeId = $state<string | null>(null);
 
 	let regenerating = $state(false);
 	let confirmRegen = $state(false);
 
-	const onlineCount = $derived(installs.filter((i) => i.online).length);
+	const onlineCount = $derived(installs.filter((i) => i.online && i.approved !== false).length);
 
 	// ── Git state (ruling D6) ──────────────────────────────────────────────
 	// Per-device checkouts + recent git-ops. Refresh is per-runner, never
@@ -212,6 +215,23 @@
 		}
 	}
 
+	async function changeApproval(id: string, approved: boolean) {
+		savingId = id;
+		error = '';
+		try {
+			const updated = await setInstallApproval(id, approved);
+			installs = installs.map((install) => install.id === id ? { ...install, ...updated } : install);
+			confirmRevokeId = null;
+			flash(approved
+				? (updated.restart_required ? 'Runner approved — restart it to begin execution' : 'Runner approved')
+				: 'Runner revoked and removed from new execution placement');
+		} catch (e: unknown) {
+			error = getErrorMessage(e, approved ? 'Failed to approve runner' : 'Failed to revoke runner');
+		} finally {
+			savingId = null;
+		}
+	}
+
 	async function regenerate() {
 		regenerating = true;
 		error = '';
@@ -258,6 +278,8 @@
 	{#if loading}
 		<div class="sg-body"><p class="muted">Loading…</p></div>
 	{:else}
+		<PairingPanel />
+
 		<!-- Cluster secret -->
 		<div class="set-row">
 			<div class="lab">
@@ -336,7 +358,7 @@
 		{:else}
 			<div class="dev-list">
 				{#each installs as inst (inst.id)}
-					<div class="dev-row" class:self={inst.id === selfId}>
+					<div class="dev-row" class:self={inst.id === selfId} class:pending={inst.approved === false}>
 						<span class="dev-dot" class:online={inst.online} title={inst.online ? 'Online' : 'Offline'}></span>
 						<div class="dev-main">
 							<div class="dev-line1">
@@ -352,6 +374,7 @@
 								{:else}
 									<span class="dev-name">{inst.device_name}</span>
 									{#if inst.id === selfId}<span class="b b-on">This install</span>{/if}
+									{#if inst.approved === false}<span class="b b-warn">Approval needed</span>{/if}
 									{#if !inst.base_url}<span class="b b-muted" title="No address advertised — artifact links from this device may not open on your other devices">No address</span>{/if}
 								{/if}
 							</div>
@@ -364,8 +387,20 @@
 						</div>
 						{#if editingId !== inst.id}
 							<div class="dev-actions">
-								<button type="button" class="ic-btn" title="Rename" onclick={() => startEdit(inst)}><Pencil size={13} /></button>
+								{#if inst.approved === false}
+									<button type="button" class="ed-btn approve" title="Approve this runner" onclick={() => changeApproval(inst.id, true)} disabled={savingId === inst.id}><ShieldCheck size={13} /> Approve</button>
+								{:else}
+									<button type="button" class="ic-btn" title="Rename" onclick={() => startEdit(inst)}><Pencil size={13} /></button>
+								{/if}
 								{#if inst.id !== selfId}
+									{#if inst.approved !== false}
+										{#if confirmRevokeId === inst.id}
+											<button type="button" class="ic-btn danger" title="Confirm revoke" onclick={() => changeApproval(inst.id, false)} disabled={savingId === inst.id}><ShieldOff size={14} /></button>
+											<button type="button" class="ic-btn" title="Cancel" onclick={() => (confirmRevokeId = null)}><X size={14} /></button>
+										{:else}
+											<button type="button" class="ic-btn" title="Revoke runner access" onclick={() => { confirmRevokeId = inst.id; confirmDeleteId = null; }}><ShieldOff size={13} /></button>
+										{/if}
+									{/if}
 									{#if confirmDeleteId === inst.id}
 										<button type="button" class="ic-btn danger" title="Confirm remove" onclick={() => remove(inst.id)} disabled={savingId === inst.id}><Check size={14} /></button>
 										<button type="button" class="ic-btn" title="Cancel" onclick={() => (confirmDeleteId = null)}><X size={14} /></button>
@@ -547,6 +582,9 @@
 	.dev-row.self {
 		background: color-mix(in oklch, var(--primary) 6%, transparent);
 	}
+	.dev-row.pending {
+		background: color-mix(in oklch, var(--warning, #d97706) 8%, transparent);
+	}
 	.dev-dot {
 		width: 8px;
 		height: 8px;
@@ -627,6 +665,13 @@
 		color: var(--destructive);
 		border-color: color-mix(in oklch, var(--destructive) 40%, transparent);
 	}
+	.ed-btn.approve {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		color: var(--primary);
+		border-color: color-mix(in oklch, var(--primary) 35%, transparent);
+	}
 	.b {
 		font-family: var(--font-mono, monospace);
 		font-size: 10px;
@@ -643,6 +688,10 @@
 	.b-muted {
 		color: var(--muted-foreground);
 		background: var(--muted);
+	}
+	.b-warn {
+		color: var(--warning-foreground, #92400e);
+		background: color-mix(in oklch, var(--warning, #d97706) 18%, transparent);
 	}
 	/* ── Git state ── */
 	.gs-ctl {

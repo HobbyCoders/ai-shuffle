@@ -59,7 +59,7 @@
 		if ($setupRequired) return; // setup flow owns its own routing
 		if ($isAuthenticated) return;
 		const path = $page.url.pathname;
-		if (path === '/login' || path === '/setup') return;
+		if (path === '/login' || path === '/setup' || path === '/pair') return;
 		goto('/login');
 	}
 
@@ -127,12 +127,13 @@
 
 			// Handle redirects
 			const path = $page.url.pathname;
+			const isPairingPage = path === '/pair';
 
-			if ($setupRequired && path !== '/setup') {
+			if ($setupRequired && path !== '/setup' && !isPairingPage) {
 				goto('/setup');
-			} else if ($isAuthenticated && !$onboardingComplete && path !== '/setup') {
+			} else if ($isAuthenticated && !$onboardingComplete && path !== '/setup' && !isPairingPage) {
 				goto('/setup');
-			} else if (!$isAuthenticated && !$setupRequired && path !== '/login') {
+			} else if (!$isAuthenticated && !$setupRequired && path !== '/login' && !isPairingPage) {
 				goto('/login');
 			} else if ($isAuthenticated && path === '/login') {
 				goto('/');

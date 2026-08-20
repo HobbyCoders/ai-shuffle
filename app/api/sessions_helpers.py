@@ -612,7 +612,9 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
 
         if is_remote:
             install = installs_map.get(inst)
-            online = bool(install.get("online")) if install else False
+            online = bool(
+                install and install.get("online") and install.get("approved", True)
+            )
             session["device_name"] = install.get("device_name") if install else None
             session["device_online"] = online
             # Controllable whenever the owning install is online: send/interrupt

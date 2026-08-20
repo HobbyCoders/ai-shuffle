@@ -197,7 +197,10 @@ def _safe_json(value):
 #     bootstrap DDL so the idempotent CREATE TABLE IF NOT EXISTS fluid_* can
 #     never create an empty table alongside the old one. See
 #     _migrate_omni_tables_to_fluid().
-SCHEMA_VERSION = 77
+# 78 (2026-08-20): one-time device pairing grants, scoped paired-controller
+#     sessions, enforced mobile credential expiry/revocation, and runner
+#     approval state. Additive and idempotently guarded for rolling upgrades.
+SCHEMA_VERSION = 78
 
 
 def _migrate_omni_tables_to_fluid(cursor):
@@ -602,6 +605,84 @@ def _run_column_migrations(cursor):
         if not column_exists(cursor, "mobile_devices", "unifiedpush_endpoint"):
             cursor.execute("ALTER TABLE mobile_devices ADD COLUMN unifiedpush_endpoint TEXT")
             migrations_applied.append("mobile_devices.unifiedpush_endpoint")
+        for column, definition in (
+            ("paired_client_id", "TEXT"),
+            ("api_key_expires_at", "TIMESTAMP WITH TIME ZONE"),
+            (
+                "scopes",
+                "JSONB NOT NULL DEFAULT '[\"controller\", \"mobile:notifications\", "
+                "\"mobile:actions\", \"web:session\"]'",
+            ),
+            ("paired_at", "TIMESTAMP WITH TIME ZONE"),
+            ("revoked_at", "TIMESTAMP WITH TIME ZONE"),
+        ):
+            if not column_exists(cursor, "mobile_devices", column):
+                _validate_identifier(column, "column name")
+                cursor.execute(f"ALTER TABLE mobile_devices ADD COLUMN {column} {definition}")
+                migrations_applied.append(f"mobile_devices.{column}")
+
+    # v78 controller pairing. These blocks run on every boot so an interrupted
+    # rolling upgrade cannot leave the new version without its security tables.
+    if not table_exists(cursor, "paired_clients"):
+        cursor.execute("""
+            CREATE TABLE paired_clients (
+                id TEXT PRIMARY KEY,
+                device_id TEXT NOT NULL UNIQUE,
+                device_name TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                client_type TEXT NOT NULL DEFAULT 'browser',
+                scopes JSONB NOT NULL DEFAULT '["controller"]',
+                session_token_hash TEXT UNIQUE,
+                session_expires_at TIMESTAMP WITH TIME ZONE,
+                paired_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                last_seen TIMESTAMP WITH TIME ZONE,
+                revoked_at TIMESTAMP WITH TIME ZONE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        migrations_applied.append("paired_clients")
+    if not table_exists(cursor, "pairing_grants"):
+        cursor.execute("""
+            CREATE TABLE pairing_grants (
+                id TEXT PRIMARY KEY,
+                token_hash TEXT NOT NULL UNIQUE,
+                purpose TEXT NOT NULL DEFAULT 'controller',
+                scopes JSONB NOT NULL DEFAULT '["controller"]',
+                target_install_id TEXT,
+                endpoint_url TEXT,
+                device_label TEXT,
+                created_by TEXT NOT NULL DEFAULT 'admin',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                consumed_at TIMESTAMP WITH TIME ZONE,
+                revoked_at TIMESTAMP WITH TIME ZONE,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 10
+            )
+        """)
+        migrations_applied.append("pairing_grants")
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pairing_grants_token ON pairing_grants(token_hash)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_pairing_grants_active ON pairing_grants(expires_at) WHERE consumed_at IS NULL AND revoked_at IS NULL")
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_paired_clients_session ON paired_clients(session_token_hash) WHERE session_token_hash IS NOT NULL")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_paired_clients_active ON paired_clients(revoked_at, paired_at DESC)")
+
+    # Existing installs predate approval state and are trusted in place. New
+    # rows created after this migration choose their approval explicitly.
+    if table_exists(cursor, "installs"):
+        added_approval = False
+        if not column_exists(cursor, "installs", "approved_at"):
+            cursor.execute("ALTER TABLE installs ADD COLUMN approved_at TIMESTAMP WITH TIME ZONE")
+            migrations_applied.append("installs.approved_at")
+            added_approval = True
+        if not column_exists(cursor, "installs", "revoked_at"):
+            cursor.execute("ALTER TABLE installs ADD COLUMN revoked_at TIMESTAMP WITH TIME ZONE")
+            migrations_applied.append("installs.revoked_at")
+        if added_approval:
+            cursor.execute(
+                "UPDATE installs SET approved_at = COALESCE(created_at, NOW()) "
+                "WHERE approved_at IS NULL"
+            )
 
     # Ensure performance-critical indexes exist (idempotent, no version gate).
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC)")
@@ -2164,12 +2245,32 @@ from app.db.mobile import (  # noqa: F401
     save_mobile_device,
 )
 
+from app.db.pairing import (  # noqa: F401
+    create_pairing_grant,
+    list_pairing_grants,
+    revoke_pairing_grant,
+    exchange_grant_for_client,
+    exchange_grant_for_mobile,
+    get_paired_client_by_session_hash,
+    touch_paired_client,
+    list_paired_clients,
+    get_paired_client,
+    revoke_paired_client,
+    rename_paired_client,
+    ensure_paired_client_for_mobile,
+    set_paired_client_session,
+    clear_paired_client_session,
+    consume_grant_for_runner,
+)
+
 from app.db.installs import (  # noqa: F401
     register_install,
     touch_install_last_seen,
     touch_install_heartbeat,
     set_install_name,
     set_install_base_url,
+    set_install_approval,
+    is_install_approved,
     get_install,
     get_installs,
     get_installs_map,

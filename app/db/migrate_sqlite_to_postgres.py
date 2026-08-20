@@ -52,6 +52,8 @@ PHASE_2 = [
     "automations",
     "connectors",
     "git_repositories",
+    "paired_clients",
+    "pairing_grants",
     "mobile_devices",
     "webhooks",
     "project_hooks",

@@ -5,6 +5,7 @@ These are placeholder tests that verify the basic structure works.
 Full integration tests will require proper FastAPI testing setup.
 """
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -90,12 +91,12 @@ def _make_provider(provider_id: str, *, auth_token=None, enabled: bool = True):
     )
 
 
-async def _auth_status(claude_authenticated: bool = False):
+async def _auth_status(claude_authenticated: bool = False, session_token: str | None = None):
     """Call the status endpoint with the Claude/OAuth side stubbed out."""
     from app.api import auth as auth_api
 
     request = MagicMock()
-    request.cookies = {}
+    request.cookies = {"session": session_token} if session_token else {}
 
     oauth = MagicMock()
     oauth.ensure_fresh_credentials = AsyncMock(return_value=None)
@@ -154,6 +155,74 @@ class TestAuthStatusAnyCredential:
         ):
             status = await _auth_status(claude_authenticated=False)
         assert status["has_any_credential"] is False
+
+    @pytest.mark.asyncio
+    async def test_paired_controller_is_authenticated_but_not_admin(self, mock_db):
+        from app.core.pairing import hash_controller_session
+        from app.db import database
+
+        database.create_pairing_grant(
+            token_hash="grant-hash-auth-test",
+            purpose="controller",
+            scopes=["controller"],
+            target_install_id="runner",
+            endpoint_url=None,
+            device_label=None,
+            created_by="test",
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        )
+        raw_session = "shc_paired-auth-test"
+        database.exchange_grant_for_client(
+            token_hash="grant-hash-auth-test",
+            device_id="paired-auth-device",
+            device_name="Paired Tablet",
+            platform="web",
+            client_type="browser",
+            session_token_hash=hash_controller_session(raw_session),
+            session_expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+        )
+
+        status = await _auth_status(session_token=raw_session)
+        assert status["authenticated"] is True
+        assert status["is_admin"] is False
+        assert status["paired_client"] is True
+        assert status["username"] == "Paired Tablet"
+
+    @pytest.mark.asyncio
+    async def test_paired_logout_invalidates_controller_session(self, mock_db):
+        from fastapi import Response
+        from app.api import auth as auth_api
+        from app.core.pairing import hash_controller_session
+        from app.db import database
+
+        database.create_pairing_grant(
+            token_hash="grant-hash-logout-test",
+            purpose="controller",
+            scopes=["controller"],
+            target_install_id="runner",
+            endpoint_url=None,
+            device_label=None,
+            created_by="test",
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        )
+        raw_session = "shc_paired-logout-test"
+        database.exchange_grant_for_client(
+            token_hash="grant-hash-logout-test",
+            device_id="paired-logout-device",
+            device_name="Paired Phone",
+            platform="web",
+            client_type="browser",
+            session_token_hash=hash_controller_session(raw_session),
+            session_expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+        )
+        request = MagicMock()
+        request.cookies = {"session": raw_session}
+
+        await auth_api.logout(request, Response())
+
+        assert database.get_paired_client_by_session_hash(
+            hash_controller_session(raw_session)
+        ) is None
 
 
 class TestCountConfiguredModelProviders:
