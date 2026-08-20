@@ -14,6 +14,10 @@ import { writable } from 'svelte/store';
 type HeaderDropdownId =
 	| 'profile'
 	| 'branch'
+	// Mobile-sheet selectors have distinct ids because their CSS-hidden composer
+	// counterparts remain mounted and subscribe to this same coordinator.
+	| 'sheet-profile'
+	| 'sheet-branch'
 	| 'runner'
 	| 'notifications'
 	// Git-action option popovers (split-button chevrons). Listing them here means
