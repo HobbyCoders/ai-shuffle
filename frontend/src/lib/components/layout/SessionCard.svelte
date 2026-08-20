@@ -2,7 +2,7 @@
 	/**
 	 * SessionCard - three-line session row for the Studio Noir sidebar.
 	 *
-	 * L1: project · status (+ live timer)
+	 * L1: project · status · timer (row actions sit at the top-right)
 	 * L2: session title
 	 * L3: device · branch
 	 *
@@ -348,7 +348,7 @@
 	>
 		<span class="l1">
 			<span class="proj">{projectLabel}</span>
-			<span class="dot" aria-hidden="true"></span>
+			<span class="dot proj-sep" aria-hidden="true"></span>
 			<span class="status {status}">
 				{#if status === 'working'}
 					<Loader2 size={11} strokeWidth={2.6} class="spin" />
@@ -359,6 +359,7 @@
 				{/if}
 				{statusLabel}
 			</span>
+			<span class="dot" aria-hidden="true"></span>
 			<span class="timer" class:live>{timer}</span>
 		</span>
 
@@ -460,6 +461,7 @@
 <style>
 	.scard-frame {
 		--ram-reveal: 0;
+		--card-bg: transparent;
 		position: relative;
 		width: 100%;
 		border-radius: 9px;
@@ -468,7 +470,9 @@
 	.scard-frame:focus-within,
 	.scard-frame.actions-open {
 		--ram-reveal: 1;
+		--card-bg: var(--sidebar-accent);
 	}
+	.scard-frame:has(.scard.active) { --card-bg: var(--sidebar-accent-active); }
 	.scard {
 		display: block;
 		width: 100%;
@@ -507,7 +511,7 @@
 		align-items: center;
 		gap: 6px;
 		min-width: 0;
-		padding-right: 58px;
+		overflow: hidden;
 	}
 	.proj {
 		font-size: 12px;
@@ -517,6 +521,12 @@
 		text-overflow: ellipsis;
 		max-width: 96px;
 	}
+	.scard-frame:hover .proj,
+	.scard-frame:hover .proj-sep,
+	.scard-frame:focus-within .proj,
+	.scard-frame:focus-within .proj-sep,
+	.scard-frame.actions-open .proj,
+	.scard-frame.actions-open .proj-sep { display: none; }
 	.dot {
 		width: 2px;
 		height: 2px;
@@ -530,6 +540,7 @@
 		gap: 4px;
 		font-size: 12px;
 		white-space: nowrap;
+		flex: none;
 	}
 	.status.working { color: var(--primary); }
 	.status.await { color: var(--amber); }
@@ -552,23 +563,18 @@
 	}
 
 	.timer {
-		margin-left: auto;
+		flex: none;
 		font-family: var(--font-mono);
 		font-variant-numeric: tabular-nums;
 		font-size: 11.5px;
 		color: var(--sidebar-muted);
 		white-space: nowrap;
-		transition: opacity 0.12s ease;
 	}
 	.timer.live { color: var(--primary); }
-	.scard:hover .timer,
-	.scard:focus-within .timer,
-	.scard-frame.actions-open .timer { opacity: 0; }
 
 	.l2 {
 		display: block;
 		margin-top: 3px;
-		padding-right: 58px;
 		font-size: 13.5px;
 		font-weight: 500;
 		letter-spacing: -0.008em;
@@ -579,7 +585,7 @@
 	}
 	.rename-input {
 		display: block;
-		width: calc(100% - 58px);
+		width: 100%;
 		height: 24px;
 		margin-top: 1px;
 		padding: 2px 6px;
@@ -602,7 +608,6 @@
 		min-width: 0;
 		flex-wrap: nowrap;
 		overflow: hidden;
-		padding-right: 58px;
 	}
 	.l3 :global(svg) { color: var(--subtle-foreground); flex: none; }
 	.seg {
@@ -634,19 +639,26 @@
 		position: absolute;
 		top: 4px;
 		right: 4px;
-		bottom: 4px;
+		bottom: auto;
 		display: flex;
 		align-items: center;
-		gap: 2px;
+		gap: 1px;
+		padding-left: 14px;
+		/* Opaque stand-in for the card surface so the strip hides the tail of L1
+		   instead of overlapping it: sidebar base + the card's own tint. */
+		background:
+			linear-gradient(to right, transparent, var(--card-bg) 16px),
+			linear-gradient(to right, transparent, var(--sidebar) 16px);
+		opacity: var(--ram-reveal);
+		transition: opacity 120ms ease;
 		z-index: 5;
 	}
 	.card-actions > * {
-		opacity: var(--ram-reveal);
-		transition: opacity 120ms ease, color 120ms ease, background-color 120ms ease;
+		transition: color 120ms ease, background-color 120ms ease;
 	}
 	.row-action {
-		width: 25px;
-		height: 25px;
+		width: 22px;
+		height: 22px;
 		padding: 0;
 		border: none;
 		border-radius: 6px;
@@ -663,11 +675,9 @@
 	}
 	.row-action.state-toggle { color: var(--muted-foreground); }
 	.row-action.danger {
-		--ram-reveal: 1;
 		color: var(--destructive);
 		background: color-mix(in oklch, var(--destructive) 14%, transparent);
 	}
-	.row-action.cancel { --ram-reveal: 1; }
 	.row-action:disabled { opacity: 0.45; cursor: not-allowed; }
 	.row-action:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 
@@ -682,17 +692,24 @@
 			transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1), background-color 130ms ease;
 			will-change: transform;
 		}
-		.scard.active { background: var(--sidebar-accent-active); }
+		/* The swipe track sits behind the card, so the card surface has to be
+		   opaque or the revealed actions bleed through the accent tint. */
+		.scard.active {
+			background:
+				linear-gradient(var(--sidebar-accent-active), var(--sidebar-accent-active)),
+				var(--sidebar);
+		}
 		.scard-frame.actions-open .scard { transform: translateX(-176px); }
 		.scard-frame.dragging .scard { transition: none; }
 		.scard-frame:hover .scard { background: var(--sidebar); }
-		.scard-frame:hover .scard.active { background: var(--sidebar-accent-active); }
-		.scard .timer,
-		.scard-frame.actions-open .timer { opacity: 1; }
-		.l1,
-		.l2,
-		.l3 { padding-right: 0; }
-		.rename-input { width: 100%; }
+		.scard-frame:hover .scard.active {
+			background:
+				linear-gradient(var(--sidebar-accent-active), var(--sidebar-accent-active)),
+				var(--sidebar);
+		}
+
+		.scard-frame.actions-open .proj,
+		.scard-frame.actions-open .proj-sep { display: block; }
 
 		.card-actions {
 			top: 0;
@@ -701,6 +718,9 @@
 			width: 176px;
 			justify-content: flex-end;
 			gap: 0;
+			padding-left: 0;
+			background: none;
+			opacity: 1;
 			z-index: 1;
 			pointer-events: none;
 		}
@@ -710,7 +730,6 @@
 			height: 100%;
 			min-height: 44px;
 			border-radius: 0;
-			opacity: 1;
 		}
 		.card-actions > *:hover {
 			background: color-mix(in oklch, var(--sidebar-accent-active) 88%, transparent);
