@@ -1,10 +1,10 @@
 /**
  * Composer Cloud-accordion eligibility helpers.
  *
- * Extracted from ExecutionModeBar so the runner badge (PR 7) and project
- * picker (PR 8) share one list/block/title contract. The Cloud list is
- * `installs` (full processes that can host a session), not `mobile_devices`
- * (phones). Offline peers stay listed and are greyed via `isBlocked`.
+ * Shared list/block/title contract for the accordion, runner badge, and
+ * project picker. The Cloud list is `installs` (full processes that can
+ * host a session), not `mobile_devices` (phones). Offline peers stay
+ * listed and are greyed via `isBlocked`.
  *
  * W3-3 fail-open: a null eligibility map never adds extra disabling, so a
  * git-state hiccup cannot lock the user out of their runners.
