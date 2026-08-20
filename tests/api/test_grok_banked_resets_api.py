@@ -3,7 +3,6 @@
 All upstream calls use ``httpx.MockTransport``. No test reaches the network.
 """
 
-import json
 from datetime import datetime
 
 import httpx
@@ -11,13 +10,16 @@ import pytest
 
 from app.api import model_providers as model_providers_api
 from app.core import (
-    grok_rate_limit_resets,
     encryption,
+    grok_rate_limit_resets,
     http_client,
 )
-from app.core.grok_rate_limit_resets import GROK_TOKEN_AUTH
+from app.core.grok_rate_limit_resets import (
+    GRPC_WEB_CONTENT_TYPE,
+    encode_redeem_request,
+    frame_grpc_web,
+)
 from app.db import database as db
-
 
 ROOT = "/api/v1/model-providers"
 PROVIDER_ID = "prov-grok-banked-reset"
@@ -67,21 +69,51 @@ def _seed_provider(
         db.update_model_provider(PROVIDER_ID, auth_mode=auth_mode)
 
 
-def _inventory_payload():
-    return {
-        "available_count": 1,
-        "credits": [
-            {
-                "id": "credit-1",
-                "reset_type": "grok_rate_limits",
-                "status": "available",
-                "granted_at": "2026-06-17T00:00:00Z",
-                "expires_at": "2026-09-13T00:00:00Z",
-                "title": "Usage Limit Reset",
-                "description": "Ready",
-            }
-        ],
-    }
+GRANTED_AT = int(datetime.fromisoformat("2026-06-17T00:00:00+00:00").timestamp())
+EXPIRES_AT = int(datetime.fromisoformat("2126-09-13T00:00:00+00:00").timestamp())
+
+
+def _varint(value: int) -> bytes:
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            return bytes(out)
+
+
+def _ld(field: int, payload: bytes) -> bytes:
+    return _varint((field << 3) | 2) + _varint(len(payload)) + payload
+
+
+def _token(token_id: str) -> bytes:
+    ts = lambda s: _varint(8) + _varint(s)
+    return _ld(10, token_id.encode()) + _ld(20, ts(GRANTED_AT)) + _ld(30, ts(EXPIRES_AT))
+
+
+def _grpc_ok(message: bytes) -> httpx.Response:
+    trailer = b"grpc-status:0\r\n"
+    return httpx.Response(
+        200,
+        content=frame_grpc_web(message)
+        + b"\x80"
+        + len(trailer).to_bytes(4, "big")
+        + trailer,
+        headers={"content-type": GRPC_WEB_CONTENT_TYPE},
+    )
+
+
+def _inventory_response() -> httpx.Response:
+    """One available ``restok_*`` token, as GetRemainingResets returns it."""
+    return _grpc_ok(_ld(10, _token("credit-1")))
+
+
+def _consume_response() -> httpx.Response:
+    """RedeemReset OK with nothing left redeemable."""
+    return _grpc_ok(b"")
 
 
 def _install_transport(monkeypatch, handler):
@@ -91,7 +123,7 @@ def _install_transport(monkeypatch, handler):
 
 
 def _success_handler(request):
-    return httpx.Response(200, json=_inventory_payload())
+    return _inventory_response()
 
 
 class TestAdminAndProviderValidation:
@@ -193,7 +225,7 @@ class TestAdminAndProviderValidation:
 
 
 class TestRequestContract:
-    def test_get_uses_primary_url_headers_and_five_second_timeout(
+    def test_get_uses_grpc_web_url_headers_and_five_second_timeout(
         self, authenticated_client, mock_db, monkeypatch
     ):
         _unlock(mock_db)
@@ -202,18 +234,19 @@ class TestRequestContract:
 
         def handler(request):
             captured["request"] = request
-            return httpx.Response(200, json=_inventory_payload())
+            return _inventory_response()
 
         _install_transport(monkeypatch, handler)
         response = authenticated_client.get(GET_PATH)
 
         assert response.status_code == 200, response.text
         request = captured["request"]
-        assert request.method == "GET"
-        assert str(request.url) == grok_rate_limit_resets.RESET_CREDITS_URL
+        assert request.method == "POST"
+        assert str(request.url) == grok_rate_limit_resets.GET_REMAINING_RESETS_URL
         assert request.headers["authorization"] == f"Bearer {ACCESS_TOKEN}"
-        assert request.headers["x-xai-token-auth"] == GROK_TOKEN_AUTH
-        assert request.headers["accept"] == "application/json"
+        assert request.headers["content-type"] == GRPC_WEB_CONTENT_TYPE
+        assert request.headers["x-grpc-web"] == "1"
+        assert request.content == b"\x00\x00\x00\x00\x00"
         assert request.extensions["timeout"] == {
             "connect": 5.0,
             "read": 5.0,
@@ -221,7 +254,7 @@ class TestRequestContract:
             "pool": 5.0,
         }
 
-    def test_post_uses_primary_url_body_headers_and_ten_second_timeout(
+    def test_post_uses_redeem_url_body_headers_and_ten_second_timeout(
         self, authenticated_client, mock_db, monkeypatch
     ):
         _unlock(mock_db)
@@ -230,7 +263,7 @@ class TestRequestContract:
 
         def handler(request):
             captured["request"] = request
-            return httpx.Response(200, json={"code": "ok", "windows_reset": 2})
+            return _consume_response()
 
         _install_transport(monkeypatch, handler)
         response = authenticated_client.post(
@@ -239,15 +272,13 @@ class TestRequestContract:
         )
 
         assert response.status_code == 200, response.text
-        assert response.json() == {"outcome": "reset", "windows_reset": 2}
+        assert response.json() == {"outcome": "reset", "windows_reset": 1}
         request = captured["request"]
         assert request.method == "POST"
-        assert str(request.url) == grok_rate_limit_resets.CONSUME_RESET_CREDIT_URL
+        assert str(request.url) == grok_rate_limit_resets.REDEEM_RESET_URL
         assert request.headers["authorization"] == f"Bearer {ACCESS_TOKEN}"
-        assert request.headers["x-xai-token-auth"] == GROK_TOKEN_AUTH
-        body = json.loads(request.content)
-        assert body["credit_id"] == "credit-7"
-        assert body["idempotency_key"] == "idem-9"
+        assert request.headers["content-type"] == GRPC_WEB_CONTENT_TYPE
+        assert request.content == frame_grpc_web(encode_redeem_request("credit-7"))
         assert request.extensions["timeout"] == {
             "connect": 10.0,
             "read": 10.0,
@@ -260,12 +291,7 @@ class TestConsumeHappyPath:
     def test_consume_happy_path(self, authenticated_client, mock_db, monkeypatch):
         _unlock(mock_db)
         _seed_provider()
-        _install_transport(
-            monkeypatch,
-            lambda request: httpx.Response(
-                200, json={"code": "reset", "windows_reset": 1}
-            ),
-        )
+        _install_transport(monkeypatch, lambda request: _consume_response())
         response = authenticated_client.post(
             POST_PATH,
             json={"credit_id": "credit-1", "idempotency_key": "idem-1"},
@@ -303,18 +329,14 @@ class TestUpstreamFailureSanitization:
     ):
         _unlock(mock_db)
         _seed_provider()
-        _install_transport(
-            monkeypatch, lambda request: httpx.Response(200, json=_inventory_payload())
-        )
+        _install_transport(monkeypatch, lambda request: _inventory_response())
         response = authenticated_client.get(GET_PATH)
         assert response.status_code == 200, response.text
         credit = response.json()["credits"][0]
-        assert credit["granted_at"] == int(
-            datetime.fromisoformat("2026-06-17T00:00:00+00:00").timestamp()
-        )
-        assert credit["expires_at"] == int(
-            datetime.fromisoformat("2026-09-13T00:00:00+00:00").timestamp()
-        )
+        assert credit["id"] == "credit-1"
+        assert credit["status"] == "available"
+        assert credit["granted_at"] == GRANTED_AT
+        assert credit["expires_at"] == EXPIRES_AT
 
 
 class TestRefreshOnUnauthorized:
@@ -353,7 +375,7 @@ class TestRefreshOnUnauthorized:
             requests.append(request.headers["authorization"])
             if len(requests) == 1:
                 return httpx.Response(401, text="stale token body")
-            return httpx.Response(200, json=_inventory_payload())
+            return _inventory_response()
 
         mock_client = _install_transport(monkeypatch, handler)
 

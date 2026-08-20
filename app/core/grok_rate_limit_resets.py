@@ -2,41 +2,50 @@
 
 Isolated network/contract boundary: credentials are supplied per request,
 upstream bodies and tokens are never included in errors, and the bearer token
-never leaves ``cli-chat-proxy.grok.com`` (HTTPS + host pin, no redirects).
+never leaves ``grok.com`` (HTTPS + host pin, no redirects).
 
-Primary inventory URL (first 200 + valid wins):
-``GET https://cli-chat-proxy.grok.com/v1/billing/reset-credits``
-Fallbacks: ``/v1/billing/reset-tokens``, then nested fields on
-``GET /v1/billing?format=credits``.
+Live-verified 2026-08-20 against the grok.com web app: there is NO reset
+endpoint on ``cli-chat-proxy.grok.com`` (the guessed ``/v1/billing/reset-*``
+paths 404). The web UI's "Usage limit reset" card uses the gRPC-web service
+``prod_mc_billing.ConsumerUiSvc`` served from ``https://grok.com``, which
+accepts the same OAuth bearer the Grok CLI holds:
 
-Primary consume URL:
-``POST https://cli-chat-proxy.grok.com/v1/billing/reset-credits/consume``
-Fallback: ``POST /v1/billing/reset-tokens/{id}/redeem``.
+    POST /prod_mc_billing.ConsumerUiSvc/GetRemainingResets
+        ConsumerGetRemainingResetsReq {}
+        -> ConsumerGetRemainingResetsResp { repeated ConsumerResetToken tokens = 10 }
+    POST /prod_mc_billing.ConsumerUiSvc/RedeemReset
+        ConsumerRedeemResetReq { string token_id = 10 }
+        -> ConsumerRedeemResetResp { repeated ConsumerResetToken still_redeemable = 10 }
+
+    ConsumerResetToken {
+        string token_id = 10;
+        google.protobuf.Timestamp validity_start = 20;
+        google.protobuf.Timestamp validity_end = 30;
+    }
+
+Messages are tiny, so the protobuf + gRPC-web framing is hand-rolled here
+rather than pulling in ``protobuf``/``grpcio``.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
-from urllib.parse import quote, urlsplit
+import time
+from collections.abc import Iterator
+from typing import Any
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
 from app.core.http_client import get_http_client
 
-GROK_BILLING_HOST = "cli-chat-proxy.grok.com"
-GROK_TOKEN_AUTH = "xai-grok-cli"
-
-RESET_CREDITS_URL = "https://cli-chat-proxy.grok.com/v1/billing/reset-credits"
-RESET_TOKENS_URL = "https://cli-chat-proxy.grok.com/v1/billing/reset-tokens"
-BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
-CONSUME_RESET_CREDIT_URL = f"{RESET_CREDITS_URL}/consume"
-
-INVENTORY_URLS: Sequence[str] = (
-    RESET_CREDITS_URL,
-    RESET_TOKENS_URL,
-    BILLING_URL,
+GROK_RESET_HOST = "grok.com"
+GROK_RESET_SERVICE = "prod_mc_billing.ConsumerUiSvc"
+GET_REMAINING_RESETS_URL = (
+    f"https://{GROK_RESET_HOST}/{GROK_RESET_SERVICE}/GetRemainingResets"
 )
+REDEEM_RESET_URL = f"https://{GROK_RESET_HOST}/{GROK_RESET_SERVICE}/RedeemReset"
+
+GRPC_WEB_CONTENT_TYPE = "application/grpc-web+proto"
 
 INVENTORY_TIMEOUT = 5.0
 CONSUME_TIMEOUT = 10.0
@@ -47,56 +56,43 @@ DEFAULT_DESCRIPTION = (
     "Resets don't stack and expire on their date."
 )
 
-_RESET_TYPES = frozenset({"grok_rate_limits"})
-_CREDIT_STATUSES = frozenset({"available", "redeeming", "redeemed"})
-_CREDIT_LIST_KEYS = (
-    "credits",
-    "tokens",
-    "resetTokens",
-    "usageResetTokens",
-    "reset_credits",
-)
-_ID_KEYS = ("id", "tokenId", "token_id")
-_EXPIRES_KEYS = ("expires_at", "expiresAt", "expiry", "expires_on")
-_GRANTED_KEYS = ("granted_at", "grantedAt", "created_at")
-_AVAILABLE_COUNT_KEYS = ("available_count", "availableCount")
-_STATUS_ALIASES = {
-    "available": "available",
-    "active": "available",
-    "unused": "available",
-    "granted": "available",
-    "redeeming": "redeeming",
-    "consuming": "redeeming",
-    "in_progress": "redeeming",
-    "redeemed": "redeemed",
-    "used": "redeemed",
-    "consumed": "redeemed",
-}
-_OUTCOME_ALIASES = {
-    "reset": "reset",
-    "ok": "reset",
-    "success": "reset",
-    "redeemed": "reset",
-    "already_redeemed": "already_redeemed",
-    "already_used": "already_redeemed",
-    "no_credit": "no_credit",
-    "not_found": "no_credit",
-    "nothing_to_reset": "nothing_to_reset",
-    "no_usage": "nothing_to_reset",
-}
+# Proto field numbers (see module docstring).
+_F_TOKENS = 10
+_F_TOKEN_ID = 10
+_F_VALIDITY_START = 20
+_F_VALIDITY_END = 30
+_F_TS_SECONDS = 1
+
+# gRPC status codes we map to specific outcomes.
+_GRPC_OK = 0
+_GRPC_NOT_FOUND = 5
+_GRPC_ALREADY_EXISTS = 6
+_GRPC_PERMISSION_DENIED = 7
+_GRPC_FAILED_PRECONDITION = 9
+_GRPC_UNAUTHENTICATED = 16
+_UNAUTHORIZED_GRPC = frozenset({_GRPC_UNAUTHENTICATED})
 
 
 class GrokResetCreditsError(Exception):
     """Credential-free failure at the Grok reset-credit network boundary."""
 
-    def __init__(self, kind: str, *, status_code: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        kind: str,
+        *,
+        status_code: int | None = None,
+        grpc_status: int | None = None,
+    ) -> None:
         self.kind = kind
         self.status_code = status_code
+        self.grpc_status = grpc_status
         super().__init__(kind)
 
     @property
     def is_unauthorized(self) -> bool:
-        return self.status_code == 401
+        if self.status_code == 401:
+            return True
+        return self.grpc_status in _UNAUTHORIZED_GRPC
 
 
 def _contract_error() -> GrokResetCreditsError:
@@ -104,254 +100,272 @@ def _contract_error() -> GrokResetCreditsError:
 
 
 def _url_is_pinned(url: str) -> bool:
-    """HTTPS + host pin — the bearer token must never leave cli-chat-proxy.grok.com."""
+    """HTTPS + host pin — the bearer token must never leave grok.com."""
     parsed = urlsplit(url)
-    return parsed.scheme == "https" and parsed.hostname == GROK_BILLING_HOST
+    return parsed.scheme == "https" and parsed.hostname == GROK_RESET_HOST
 
 
-def _headers(access_token: str, *, content_type: bool = False) -> Dict[str, str]:
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "X-XAI-Token-Auth": GROK_TOKEN_AUTH,
-        "Accept": "application/json",
-    }
-    if content_type:
-        headers["Content-Type"] = "application/json"
-    return headers
-
-
-def _optional_text(value: Any) -> Optional[str]:
-    if value is None or not isinstance(value, str):
-        return None
-    return value
-
-
-def _rfc3339_to_unix(value: str) -> Optional[int]:
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    try:
-        return int(parsed.timestamp())
-    except (OverflowError, OSError, ValueError):
-        return None
-
-
-def _to_unix(value: Any, *, missing: Optional[int]) -> Optional[int]:
-    """Parse RFC3339 or unix seconds. ``missing`` is returned when absent/unparseable."""
-    if value is None or isinstance(value, bool):
-        return missing
-    if isinstance(value, (int, float)):
-        ts = int(value)
-        if ts > 10_000_000_000:
-            ts //= 1000
-        return ts
-    if isinstance(value, str) and value:
-        stripped = value.strip()
-        if stripped.isdigit() or (
-            stripped.startswith("-") and stripped[1:].isdigit()
-        ):
-            return _to_unix(int(stripped), missing=missing)
-        parsed = _rfc3339_to_unix(stripped)
-        return parsed if parsed is not None else missing
-    return missing
-
-
-def _first_present(payload: Dict[str, Any], keys: Sequence[str]) -> Any:
-    for key in keys:
-        if key in payload:
-            return payload[key]
-    return None
-
-
-def _credit_list_from(payload: Dict[str, Any]) -> Optional[List[Any]]:
-    for key in _CREDIT_LIST_KEYS:
-        value = payload.get(key)
-        if isinstance(value, list):
-            return value
-    return None
-
-
-def _looks_like_inventory(payload: Any) -> bool:
-    if not isinstance(payload, dict):
-        return False
-    if any(key in payload for key in _AVAILABLE_COUNT_KEYS):
-        return True
-    if _credit_list_from(payload) is not None:
-        return True
-    cfg = payload.get("config")
-    if isinstance(cfg, dict):
-        if any(key in cfg for key in _AVAILABLE_COUNT_KEYS):
-            return True
-        if _credit_list_from(cfg) is not None:
-            return True
-    return False
-
-
-def _unwrap_inventory(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Any]]:
-    lst = _credit_list_from(payload)
-    if lst is not None:
-        return payload, lst
-    cfg = payload.get("config")
-    if isinstance(cfg, dict):
-        lst = _credit_list_from(cfg)
-        if lst is not None:
-            return cfg, lst
-        return cfg, []
-    return payload, []
-
-
-def _read_available_count(
-    container: Dict[str, Any], payload: Dict[str, Any]
-) -> Optional[int]:
-    for source in (container, payload, payload.get("config")):
-        if not isinstance(source, dict):
-            continue
-        for key in _AVAILABLE_COUNT_KEYS:
-            if key not in source:
-                continue
-            value = source[key]
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise _contract_error()
-            return value
-    return None
-
-
-def _normalize_status(raw: Any) -> str:
-    if not isinstance(raw, str) or not raw:
-        return "available"
-    mapped = _STATUS_ALIASES.get(raw.lower())
-    if mapped:
-        return mapped
-    if raw in _CREDIT_STATUSES:
-        return raw
-    return "unknown"
-
-
-def _normalize_reset_type(raw: Any) -> str:
-    if not isinstance(raw, str) or not raw:
-        return "grok_rate_limits"
-    if raw in _RESET_TYPES:
-        return raw
-    return "unknown"
-
-
-def _normalize_credit(raw: Any) -> Optional[Dict[str, Any]]:
-    if not isinstance(raw, dict):
-        return None
-    credit_id = _first_present(raw, _ID_KEYS)
-    if isinstance(credit_id, (int, float)) and not isinstance(credit_id, bool):
-        credit_id = str(int(credit_id))
-    if not isinstance(credit_id, str) or not credit_id:
-        return None
-
-    title = _optional_text(_first_present(raw, ("title", "name")))
-    description = _optional_text(_first_present(raw, ("description",)))
-    granted_at = _to_unix(_first_present(raw, _GRANTED_KEYS), missing=0)
+def _headers(access_token: str) -> dict[str, str]:
     return {
-        "id": credit_id,
-        "reset_type": _normalize_reset_type(
-            _first_present(raw, ("reset_type", "resetType", "type"))
-        ),
-        "status": _normalize_status(_first_present(raw, ("status",))),
-        "granted_at": 0 if granted_at is None else granted_at,
-        "expires_at": _to_unix(_first_present(raw, _EXPIRES_KEYS), missing=None),
-        "title": title.strip() if title and title.strip() else DEFAULT_TITLE,
-        "description": (
-            description.strip()
-            if description and description.strip()
-            else DEFAULT_DESCRIPTION
-        ),
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": GRPC_WEB_CONTENT_TYPE,
+        "Accept": GRPC_WEB_CONTENT_TYPE,
+        "X-Grpc-Web": "1",
     }
 
 
-def normalize_inventory(payload: Any) -> Dict[str, Any]:
-    """Validate and normalize reset-credit inventory into the public contract."""
-    if not isinstance(payload, dict):
-        raise _contract_error()
-
-    container, raw_credits = _unwrap_inventory(payload)
-    credits: List[Dict[str, Any]] = []
-    for raw in raw_credits:
-        credit = _normalize_credit(raw)
-        if credit is not None:
-            credits.append(credit)
-
-    available_count = _read_available_count(container, payload)
-    if available_count is None:
-        available_count = sum(1 for c in credits if c["status"] == "available")
-
-    return {"available_count": available_count, "credits": credits}
+# ---------------------------------------------------------------------------
+# Minimal protobuf wire codec
+# ---------------------------------------------------------------------------
 
 
-def _map_outcome(payload: Dict[str, Any]) -> Optional[str]:
-    for key in ("code", "outcome", "status", "result"):
-        value = payload.get(key)
-        if isinstance(value, str) and value:
-            mapped = _OUTCOME_ALIASES.get(value.lower())
-            if mapped:
-                return mapped
-    if payload.get("success") is True:
-        return "reset"
-    error = payload.get("error")
-    if isinstance(error, str) and error:
-        return _OUTCOME_ALIASES.get(error.lower())
-    return None
+def _encode_varint(value: int) -> bytes:
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            return bytes(out)
 
 
-def _read_windows_reset(payload: Dict[str, Any]) -> int:
-    value = payload.get("windows_reset", payload.get("windowsReset", 0))
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        return 0
-    return value
+def _decode_varint(data: bytes, pos: int) -> tuple[int, int]:
+    result = 0
+    shift = 0
+    while True:
+        if pos >= len(data) or shift > 63:
+            raise _contract_error()
+        byte = data[pos]
+        pos += 1
+        result |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return result, pos
+        shift += 7
 
 
-def normalize_consume(payload: Any) -> Dict[str, Any]:
-    """Validate and normalize a reset-credit consume response."""
-    if not isinstance(payload, dict):
-        raise _contract_error()
-    outcome = _map_outcome(payload)
-    if outcome is None:
-        raise _contract_error()
-    return {"outcome": outcome, "windows_reset": _read_windows_reset(payload)}
+def _encode_bytes_field(field: int, payload: bytes) -> bytes:
+    return _encode_varint((field << 3) | 2) + _encode_varint(len(payload)) + payload
 
 
-def _decode_response(response: httpx.Response) -> Any:
+def _iter_fields(data: bytes) -> Iterator[tuple[int, int, Any]]:
+    """Yield ``(field_number, wire_type, value)`` for a serialized message."""
+    pos = 0
+    while pos < len(data):
+        key, pos = _decode_varint(data, pos)
+        field, wire = key >> 3, key & 7
+        if wire == 0:
+            value, pos = _decode_varint(data, pos)
+        elif wire == 1:
+            value, pos = data[pos:pos + 8], pos + 8
+        elif wire == 2:
+            length, pos = _decode_varint(data, pos)
+            value, pos = data[pos:pos + length], pos + length
+        elif wire == 5:
+            value, pos = data[pos:pos + 4], pos + 4
+        else:
+            raise _contract_error()
+        if pos > len(data):
+            raise _contract_error()
+        yield field, wire, value
+
+
+def _decode_timestamp(data: bytes) -> int | None:
+    seconds: int | None = None
+    for field, wire, value in _iter_fields(data):
+        if field == _F_TS_SECONDS and wire == 0:
+            seconds = value
+    return seconds
+
+
+def _decode_reset_token(data: bytes) -> dict[str, Any] | None:
+    token_id = ""
+    start: int | None = None
+    end: int | None = None
+    for field, wire, value in _iter_fields(data):
+        if wire != 2:
+            continue
+        if field == _F_TOKEN_ID:
+            try:
+                token_id = value.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise _contract_error() from exc
+        elif field == _F_VALIDITY_START:
+            start = _decode_timestamp(value)
+        elif field == _F_VALIDITY_END:
+            end = _decode_timestamp(value)
+    if not token_id:
+        return None
+    return {"token_id": token_id, "validity_start": start, "validity_end": end}
+
+
+def decode_reset_tokens(message: bytes) -> list[dict[str, Any]]:
+    """Decode the repeated ``tokens`` / ``still_redeemable`` field (= 10)."""
+    tokens: list[dict[str, Any]] = []
+    for field, wire, value in _iter_fields(message):
+        if field == _F_TOKENS and wire == 2:
+            token = _decode_reset_token(value)
+            if token is not None:
+                tokens.append(token)
+    return tokens
+
+
+def encode_redeem_request(token_id: str) -> bytes:
+    return _encode_bytes_field(_F_TOKEN_ID, token_id.encode("utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# gRPC-web framing
+# ---------------------------------------------------------------------------
+
+
+def frame_grpc_web(message: bytes) -> bytes:
+    """Wrap one protobuf message in a gRPC-web data frame."""
+    return b"\x00" + len(message).to_bytes(4, "big") + message
+
+
+def _parse_trailers(block: bytes) -> dict[str, str]:
+    trailers: dict[str, str] = {}
+    for line in block.split(b"\r\n"):
+        if not line or b":" not in line:
+            continue
+        name, _, value = line.partition(b":")
+        trailers[name.strip().lower().decode("latin-1")] = (
+            value.strip().decode("latin-1")
+        )
+    return trailers
+
+
+def parse_grpc_web_response(body: bytes) -> tuple[list[bytes], dict[str, str]]:
+    """Split a gRPC-web body into data messages and parsed trailers."""
+    messages: list[bytes] = []
+    trailers: dict[str, str] = {}
+    pos = 0
+    while pos < len(body):
+        if pos + 5 > len(body):
+            raise _contract_error()
+        flag = body[pos]
+        length = int.from_bytes(body[pos + 1:pos + 5], "big")
+        pos += 5
+        chunk = body[pos:pos + length]
+        if len(chunk) != length:
+            raise _contract_error()
+        pos += length
+        if flag & 0x80:
+            trailers.update(_parse_trailers(chunk))
+        elif flag == 0:
+            messages.append(chunk)
+        else:
+            raise _contract_error()
+    return messages, trailers
+
+
+def _grpc_status_from(
+    response: httpx.Response, trailers: dict[str, str]
+) -> int:
+    raw = trailers.get("grpc-status")
+    if raw is None:
+        raw = response.headers.get("grpc-status")
+    if raw is None:
+        return _GRPC_OK
+    try:
+        return int(unquote(raw).strip())
+    except ValueError as exc:
+        raise _contract_error() from exc
+
+
+def _decode_response(response: httpx.Response) -> bytes:
+    """Return the single response message, raising on HTTP/gRPC failure."""
     if not 200 <= response.status_code < 300:
         raise GrokResetCreditsError(
             "upstream_status", status_code=response.status_code
         )
-    if response.status_code == 204 or not response.content:
-        return {}
-    try:
-        return response.json()
-    except Exception as exc:  # noqa: BLE001 - sanitize malformed upstream bodies
-        raise _contract_error() from exc
+    messages, trailers = parse_grpc_web_response(response.content)
+    grpc_status = _grpc_status_from(response, trailers)
+    if grpc_status != _GRPC_OK:
+        raise GrokResetCreditsError("grpc_status", grpc_status=grpc_status)
+    if not messages:
+        # Trailers-only OK with no message: treat as an empty message.
+        return b""
+    return messages[0]
 
 
-async def _send(
+# ---------------------------------------------------------------------------
+# Normalization into the shared banked-reset contract
+# ---------------------------------------------------------------------------
+
+
+def normalize_tokens(
+    tokens: list[dict[str, Any]], *, now: int | None = None
+) -> dict[str, Any]:
+    """Map decoded reset tokens onto the public inventory contract.
+
+    Mirrors the grok.com web app: tokens whose ``validity_end`` has passed are
+    not shown at all, and every remaining token is redeemable.
+    """
+    current = int(time.time()) if now is None else now
+    credits: list[dict[str, Any]] = []
+    for token in tokens:
+        end = token.get("validity_end")
+        if isinstance(end, int) and end <= current:
+            continue
+        start = token.get("validity_start")
+        credits.append(
+            {
+                "id": token["token_id"],
+                "reset_type": "grok_rate_limits",
+                "status": "available",
+                "granted_at": start if isinstance(start, int) else 0,
+                "expires_at": end if isinstance(end, int) else None,
+                "title": DEFAULT_TITLE,
+                "description": DEFAULT_DESCRIPTION,
+            }
+        )
+    return {"available_count": len(credits), "credits": credits}
+
+
+def normalize_inventory(message: bytes) -> dict[str, Any]:
+    """Decode a ``ConsumerGetRemainingResetsResp`` into the public contract."""
+    return normalize_tokens(decode_reset_tokens(message))
+
+
+def normalize_consume(message: bytes, *, credit_id: str) -> dict[str, Any]:
+    """Decode a ``ConsumerRedeemResetResp`` into the public consume contract.
+
+    A gRPC OK means the reset was applied; upstream returns the tokens still
+    redeemable afterwards. If the redeemed id is still listed the upstream did
+    not consume it, which we surface as ``nothing_to_reset``.
+    """
+    still = decode_reset_tokens(message)
+    if any(t["token_id"] == credit_id for t in still):
+        return {"outcome": "nothing_to_reset", "windows_reset": 0}
+    return {"outcome": "reset", "windows_reset": 1}
+
+
+# ---------------------------------------------------------------------------
+# Network
+# ---------------------------------------------------------------------------
+
+
+async def _call(
     http_client: httpx.AsyncClient,
-    method: str,
     url: str,
     *,
     access_token: str,
+    message: bytes,
     timeout: float,
-    json_body: Optional[Dict[str, Any]] = None,
 ) -> httpx.Response:
     if not _url_is_pinned(url):
         raise GrokResetCreditsError("transport")
-    headers = _headers(access_token, content_type=json_body is not None)
     try:
-        kwargs: Dict[str, Any] = {
-            "headers": headers,
-            "timeout": timeout,
-            "follow_redirects": False,
-        }
-        if method == "GET":
-            return await http_client.get(url, **kwargs)
-        return await http_client.post(url, json=json_body, **kwargs)
+        return await http_client.post(
+            url,
+            content=frame_grpc_web(message),
+            headers=_headers(access_token),
+            timeout=timeout,
+            follow_redirects=False,
+        )
     except httpx.TimeoutException as exc:
         raise GrokResetCreditsError("timeout") from exc
     except httpx.RequestError as exc:
@@ -361,46 +375,18 @@ async def _send(
 async def get_reset_credits(
     access_token: str,
     *,
-    client: Optional[httpx.AsyncClient] = None,
-) -> Dict[str, Any]:
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
     """Fetch and normalize the current reset-credit inventory."""
     http_client = client or get_http_client()
-    last_error: Optional[GrokResetCreditsError] = None
-    last_index = len(INVENTORY_URLS) - 1
-    for index, url in enumerate(INVENTORY_URLS):
-        try:
-            response = await _send(
-                http_client,
-                "GET",
-                url,
-                access_token=access_token,
-                timeout=INVENTORY_TIMEOUT,
-            )
-            payload = _decode_response(response)
-        except GrokResetCreditsError as exc:
-            if exc.is_unauthorized:
-                raise
-            last_error = exc
-            continue
-        if not _looks_like_inventory(payload):
-            if index == last_index:
-                return {"available_count": 0, "credits": []}
-            last_error = _contract_error()
-            continue
-        try:
-            return normalize_inventory(payload)
-        except GrokResetCreditsError as exc:
-            last_error = exc
-            continue
-    raise last_error or _contract_error()
-
-
-def _consume_urls(credit_id: str) -> Sequence[str]:
-    encoded = quote(credit_id, safe="")
-    return (
-        CONSUME_RESET_CREDIT_URL,
-        f"{RESET_TOKENS_URL}/{encoded}/redeem",
+    response = await _call(
+        http_client,
+        GET_REMAINING_RESETS_URL,
+        access_token=access_token,
+        message=b"",
+        timeout=INVENTORY_TIMEOUT,
     )
+    return normalize_inventory(_decode_response(response))
 
 
 async def consume_reset_credit(
@@ -408,39 +394,30 @@ async def consume_reset_credit(
     *,
     credit_id: str,
     idempotency_key: str,
-    client: Optional[httpx.AsyncClient] = None,
-) -> Dict[str, Any]:
-    """Consume one specific reset credit and normalize the outcome."""
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    """Redeem one specific reset token and normalize the outcome.
+
+    ``idempotency_key`` is part of the shared API contract; the Grok RPC has
+    no idempotency field, so it is accepted and ignored here (redeeming an
+    already-used token id is reported by upstream as ``no_credit`` /
+    ``already_redeemed``).
+    """
+    del idempotency_key
     http_client = client or get_http_client()
-    body = {
-        "credit_id": credit_id,
-        "token_id": credit_id,
-        "id": credit_id,
-        "redeem_request_id": idempotency_key,
-        "idempotency_key": idempotency_key,
-    }
-    last_error: Optional[GrokResetCreditsError] = None
-    for url in _consume_urls(credit_id):
-        try:
-            response = await _send(
-                http_client,
-                "POST",
-                url,
-                access_token=access_token,
-                timeout=CONSUME_TIMEOUT,
-                json_body=body,
-            )
-            payload = _decode_response(response)
-        except GrokResetCreditsError as exc:
-            if exc.is_unauthorized:
-                raise
-            last_error = exc
-            continue
-        if payload == {}:
-            return {"outcome": "reset", "windows_reset": 0}
-        try:
-            return normalize_consume(payload)
-        except GrokResetCreditsError as exc:
-            last_error = exc
-            continue
-    raise last_error or _contract_error()
+    response = await _call(
+        http_client,
+        REDEEM_RESET_URL,
+        access_token=access_token,
+        message=encode_redeem_request(credit_id),
+        timeout=CONSUME_TIMEOUT,
+    )
+    try:
+        message = _decode_response(response)
+    except GrokResetCreditsError as exc:
+        if exc.grpc_status == _GRPC_NOT_FOUND:
+            return {"outcome": "no_credit", "windows_reset": 0}
+        if exc.grpc_status in (_GRPC_ALREADY_EXISTS, _GRPC_FAILED_PRECONDITION):
+            return {"outcome": "already_redeemed", "windows_reset": 0}
+        raise
+    return normalize_consume(message, credit_id=credit_id)
