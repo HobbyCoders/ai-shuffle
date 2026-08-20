@@ -324,7 +324,15 @@ async def test_turn_start_self_heal_spares_park_with_running_bg_work(mock_db):
 
 def _seed_session(sid, status):
     """A real sessions row with an explicit status."""
+    from app.core.config import settings
     from app.db import database
+
+    # The implicit-pin placement gate only considers approved, online runners,
+    # so the self install needs a registry row before any turn is submitted.
+    database.register_install(
+        settings.effective_instance_id, "test-runner", None, "local", "1", {},
+        approve_new=True,
+    )
 
     # profile_id stays NULL: this module's ``mock_db`` is a bare shim connection
     # (no seeded "default" profile), and sessions.profile_id is a FK.
