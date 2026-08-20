@@ -114,6 +114,7 @@ class TestParentTriple:
         rows = _parent_rows()
         assert _types(rows) == [
             "subagent.started",
+            "task.updated",        # running frame — the active-task chip
             "subagent.progress",   # coalesced text before the tool call
             "subagent.progress",   # tool_use
             "subagent.progress",   # tool_result
@@ -216,7 +217,8 @@ class TestParentTriple:
 
         asyncio.run(run())
 
-        chunk, tool_use, tool_result = _parent_rows()[1:4]
+        # [0] subagent.started, [1] the running task.updated.
+        chunk, tool_use, tool_result = _parent_rows()[2:5]
         assert chunk["payload"]["kind"] == "chunk"
         assert chunk["payload"]["payload"]["content"] == "thinking"
 
@@ -291,6 +293,83 @@ class TestParentTriple:
         types = _types(_parent_rows())
         assert types.count("subagent.started") == 1
         assert types.count("subagent.completed") == 1
+        # One running frame and one terminal settle — never a second of either.
+        assert types.count("task.updated") == 2
+
+
+# ---------------------------------------------------------------------------
+# The RUNNING task.updated — what puts the worker on the active-task strip
+# ---------------------------------------------------------------------------
+
+class TestRunningTaskFrame:
+    """``deriveActiveTasks`` is built only from ``task.updated`` summaries in
+    state ``running``, so without this frame a ProviderAgent worker never
+    reached the background-tasks strip, the spinner overlay or the StopButton —
+    only its terminal settle arrived, and a terminal summary adds no chip."""
+
+    def _running(self):
+        return [
+            r for r in _parent_rows()
+            if r["event_type"] == "task.updated"
+            and r["payload"]["state"] == "running"
+        ]
+
+    def test_started_emits_exactly_one_running_frame(self, db):
+        f = _feed()
+        asyncio.run(f.started())
+
+        running = self._running()
+        assert len(running) == 1
+        assert running[0]["payload"]["task_id"] == WORKER
+        assert running[0]["payload"]["tool_use_id"] == WORKER
+
+    def test_running_frame_describes_the_worker_by_its_label(self, db):
+        """``description`` is what the reducer stores as the Task's subject."""
+        f = _feed()
+        asyncio.run(f.started())
+
+        assert self._running()[0]["payload"]["description"] == "reviewer"
+
+    def test_running_frame_falls_back_to_provider_and_model_without_a_label(self, db):
+        f = _feed(label=None)
+        asyncio.run(f.started())
+
+        assert self._running()[0]["payload"]["description"] == "prov-openai · gpt-5.5"
+
+    def test_running_and_terminal_frames_share_both_join_keys(self, db):
+        """The terminal settle only clears the chip the running frame created if
+        both land on the same task_id AND the same tool_use_id."""
+        f = _feed()
+
+        async def run():
+            await f.started()
+            await f.completed("completed", result_preview="r")
+
+        asyncio.run(run())
+
+        settles = [r for r in _parent_rows() if r["event_type"] == "task.updated"]
+        assert [s["payload"]["state"] for s in settles] == ["running", "completed"]
+        assert {s["payload"]["task_id"] for s in settles} == {WORKER}
+        assert {s["payload"]["tool_use_id"] for s in settles} == {WORKER}
+
+    def test_running_frame_precedes_the_first_progress_frame(self, db):
+        """The chip must exist before any progress arrives, or the strip flickers
+        in only once the worker happens to say something."""
+        f = _feed()
+
+        async def run():
+            await f.started()
+            _seed_worker(_text("thinking"))
+            await f.drain()
+
+        asyncio.run(run())
+
+        rows = _parent_rows()
+        running_seq = self._running()[0]["seq"]
+        first_progress = [
+            r for r in rows if r["event_type"] == "subagent.progress"
+        ][0]
+        assert running_seq < first_progress["seq"]
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +461,9 @@ class TestWorkerLogIsUntouched:
 
         asyncio.run(run())
 
-        assert [r["seq"] for r in _parent_rows()] == [1, 2]
+        # started() writes two rows (subagent.started + the running task.updated),
+        # the drain a third; the worker's own counter is untouched by all of it.
+        assert [r["seq"] for r in _parent_rows()] == [1, 2, 3]
         assert [r["seq"] for r in se.get_events(WORKER)] == [1]
 
 
@@ -493,7 +574,7 @@ class TestProgressBounding:
 
         asyncio.run(run())
 
-        assert _types(_parent_rows()) == ["subagent.started"]
+        assert _types(_parent_rows()) == ["subagent.started", "task.updated"]
 
     def test_the_cursor_advances_so_rows_are_never_forwarded_twice(self, db):
         f = _feed()
@@ -588,10 +669,11 @@ class TestTurnBoundarySettling:
 
         types = _types(_parent_rows())
         assert types == [
-            "subagent.started", "turn.completed",
+            "subagent.started", "task.updated",
+            "turn.completed",
             "subagent.completed", "task.updated",
         ]
-        done = _parent_rows()[2]
+        done = _parent_rows()[3]
         assert done["payload"]["task_id"] == WORKER
         assert done["payload"]["result_preview"] == "late but landed"
 

@@ -250,6 +250,9 @@ async def stop_session_task(session_id: str, task_id: str) -> dict:
       ``stop_task()``. The CLI then emits a ``task_notification`` with status
       ``stopped`` which the streaming loop maps to ``killed`` in the registry —
       so the task drops off the next ``/live`` poll without us pre-marking it.
+      A PROVIDER-LANE worker is an agent task too, but it has no SDK task to
+      stop — it runs as its own session under the ProviderAgent supervisor, so
+      it is torn down there instead (checked before the SDK path).
 
     "Ghost" tasks — ones already terminated by outside forces (idle eviction,
     process death, session teardown) but still parked ``running`` in the
@@ -293,7 +296,28 @@ async def stop_session_task(session_id: str, task_id: str) -> dict:
             "detail": "reaped (shell gone)",
         }
 
-    # 2) Background sub-agent — ask the SDK to stop it.
+    # 2) ProviderAgent worker — a provider-lane subagent has no SDK task to
+    # stop: it is its OWN session, tracked by the supervisor and keyed by
+    # (parent session id, worker session id). Its task id IS the worker session
+    # id (``dispatch_worker`` sets both), so the registry key the strip's "x"
+    # sends is exactly the supervisor key. ``teardown_worker`` is the single
+    # per-worker kill path — it settles the card, kills the worker session,
+    # sweeps its parent-keyed approval prompts, completes the registry row and
+    # purges the park-gate residue.
+    from app.core import provider_agent_supervisor
+    from app.core.task_registry import USER_STOP_REASON, USER_STOP_SUMMARY
+
+    record = provider_agent_supervisor.get_worker(session_id, task_id)
+    if record is not None:
+        await provider_agent_supervisor.teardown_worker(
+            record,
+            reason=USER_STOP_REASON,
+            summary=USER_STOP_SUMMARY,
+            preview="Stopped by the user.",
+        )
+        return {"ok": True, "kind": "agent", "task_id": task_id}
+
+    # 3) Background sub-agent — ask the SDK to stop it.
     state = get_session_pool().peek(session_id)
     # Fluid/harness adapters expose no SDK client at all, so the SDK stop_task
     # path is simply unavailable there. Treat that exactly like a torn-down

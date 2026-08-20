@@ -992,7 +992,8 @@ class TestDispatchWorkerRateLimitFailFast:
 
         types = [e["event_type"] for e in _parent_events()]
         assert "subagent.completed" in types
-        settle = [e for e in _parent_events() if e["event_type"] == "task.updated"][0]
+        # [-1]: the first task.updated is the RUNNING frame from feed.started().
+        settle = [e for e in _parent_events() if e["event_type"] == "task.updated"][-1]
         assert settle["payload"]["state"] == "killed"
 
         task_registry.clear_session("parent-1")
@@ -1112,6 +1113,25 @@ class TestDispatchWorkerParentFeed:
             assert row["payload"]["task_id"] == worker
         task_registry.clear_session("parent-1")
 
+    def test_the_worker_is_running_before_it_is_terminal(self, dispatch_env, feed_db):
+        """A full dispatch writes a RUNNING ``task.updated`` and only later the
+        terminal one. The v2 background-tasks strip, the spinner overlay and the
+        StopButton all read ``activeTasks``, which is derived from ``running``
+        task summaries alone — with only the terminal frame a provider-lane
+        worker was invisible to every one of them.
+        """
+        from app.core.task_registry import task_registry
+
+        outcome = _dispatch(label="reviewer")
+        worker = outcome.session_id
+
+        settles = [
+            e for e in _parent_events() if e["event_type"] == "task.updated"
+        ]
+        assert [s["payload"]["state"] for s in settles] == ["running", "completed"]
+        assert {s["payload"]["task_id"] for s in settles} == {worker}
+        task_registry.clear_session("parent-1")
+
     def test_one_join_key_across_card_registry_and_settle(self, dispatch_env, feed_db):
         """card.toolId == registry.task_id == registry.tool_use_id.
 
@@ -1135,7 +1155,8 @@ class TestDispatchWorkerParentFeed:
         assert started["event_type"] == "subagent.started"
         assert started["payload"]["task_id"] == worker
 
-        settle = [e for e in _parent_events() if e["event_type"] == "task.updated"][0]
+        # [-1]: the first task.updated is the RUNNING frame from feed.started().
+        settle = [e for e in _parent_events() if e["event_type"] == "task.updated"][-1]
         assert settle["payload"]["tool_use_id"] == worker
         assert settle["payload"]["state"] == "completed"
         task_registry.clear_session("parent-1")
@@ -1222,7 +1243,8 @@ class TestDispatchWorkerParentFeed:
             e for e in _parent_events() if e["event_type"] == "subagent.completed"
         ][0]
         assert done["payload"]["status"] == "failed"
-        settle = [e for e in _parent_events() if e["event_type"] == "task.updated"][0]
+        # [-1]: the first task.updated is the RUNNING frame from feed.started().
+        settle = [e for e in _parent_events() if e["event_type"] == "task.updated"][-1]
         assert settle["payload"]["state"] == "killed"
         assert settle["payload"]["tool_use_id"] == done["payload"]["task_id"]
         task_registry.clear_session("parent-1")

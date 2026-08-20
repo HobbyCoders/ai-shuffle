@@ -1318,9 +1318,13 @@ async def dispatch_worker(
                 parent_session_id, worker_session_id
             )
         else:
-            # Terminal frames FIRST: the registry drop below is what clears the
-            # ``/live`` spinner overlay, and the card must already be settled by
-            # then. On the cancellation path the final drain is skipped (the loop
+            # Terminal frames FIRST. The terminal ``task.updated`` this emits is
+            # what clears the v2 spinner overlay / background-tasks chip (it
+            # settles the running frame ``feed.started()`` emitted); the registry
+            # drop below only feeds the legacy ``/live`` poll. Either way the
+            # card must already be settled by the time the row goes, so the
+            # ordering here stays as it is. On the cancellation path the final
+            # drain is skipped (the loop
             # is tearing down) and the completed frame is SHIELDED — the reducer
             # settles stale cards only on turn.completed, never on turn.aborted,
             # so a lost terminal frame would leave a permanently spinning card.

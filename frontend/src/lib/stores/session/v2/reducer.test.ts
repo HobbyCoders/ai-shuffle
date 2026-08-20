@@ -1189,6 +1189,72 @@ describe('task.updated summaries', () => {
 		expect(card?.agentStatus).toBe('running');
 	});
 
+	// ── ProviderAgent worker frames (provider_agent_feed.WorkerFeed) ──────────
+	// A provider-lane worker emits subagent.started + task.updated(running) at
+	// dispatch, then subagent.completed + task.updated(terminal) at the end. Both
+	// task frames carry task_id === tool_use_id === the worker session id.
+
+	it('a ProviderAgent worker running then terminal frame leaves one settled summary', () => {
+		const s = fold([
+			ev('task.updated', {
+				task_id: 'w1',
+				state: 'running',
+				description: 'reviewer',
+				summary: 'reviewer',
+				tool_use_id: 'w1',
+			}),
+			ev('task.updated', {
+				task_id: 'w1',
+				state: 'completed',
+				summary: 'prov-openai · gpt-5.5',
+				tool_use_id: 'w1',
+			}),
+		]);
+		expect(s.activeTaskSummaries).toHaveLength(1);
+		expect(s.activeTaskSummaries[0].status).toBe('completed');
+		expect(s.activeTaskSummaries.filter((t) => t.status === 'running')).toHaveLength(0);
+	});
+
+	it('a ProviderAgent worker still running at turn.parked is restored to running', () => {
+		// turn.completed prematurely self-heals both the summary and the card;
+		// the turn.parked that follows proves the worker is still live.
+		const s = fold([
+			ev('subagent.started', { task_id: 'w1', description: 'reviewer' }),
+			ev('task.updated', {
+				task_id: 'w1',
+				state: 'running',
+				description: 'reviewer',
+				tool_use_id: 'w1',
+			}),
+			ev('turn.completed', {}),
+			ev('turn.parked', {}),
+		]);
+		expect(s.activeTaskSummaries[0].status).toBe('running');
+		const card = s.messages.find((m) => m.type === 'subagent');
+		expect(card?.agentStatus).toBe('running');
+	});
+
+	it('a ProviderAgent worker that settles before turn.parked stays completed', () => {
+		const s = fold([
+			ev('subagent.started', { task_id: 'w1', description: 'reviewer' }),
+			ev('task.updated', {
+				task_id: 'w1',
+				state: 'running',
+				description: 'reviewer',
+				tool_use_id: 'w1',
+			}),
+			ev('turn.completed', {}),
+			ev('task.updated', {
+				task_id: 'w1',
+				state: 'completed',
+				summary: 'prov-openai · gpt-5.5',
+				tool_use_id: 'w1',
+			}),
+			ev('turn.parked', {}),
+		]);
+		expect(s.activeTaskSummaries[0].status).toBe('completed');
+	});
+
 	it('terminal task.updated never downgrades a settled card', () => {
 		// subagent.completed carries the richer result; a late terminal chip
 		// (drain-pump duplicate) must not overwrite it.

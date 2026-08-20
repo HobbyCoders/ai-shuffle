@@ -12,8 +12,13 @@ reducer is built from
 (``frontend/src/lib/stores/session/v2/reducer.ts:996/:1026/:1094``):
 
 * ``subagent.started``  — when the worker turn is dispatched;
+* ``task.updated`` (state ``running``) — emitted alongside ``subagent.started``,
+  this is what puts the worker on the v2 background-tasks strip / spinner
+  overlay / StopButton, all of which read ``activeTasks`` and therefore see only
+  ``task.updated`` rows (``reducer.ts`` ``deriveActiveTasks``);
 * ``subagent.progress`` — assistant text / tool calls / tool results, bounded;
-* ``subagent.completed`` — the terminal status plus a bounded result preview.
+* ``subagent.completed`` — the terminal status plus a bounded result preview,
+  paired with the terminal ``task.updated`` that clears the running chip.
 
 Four constraints shape the design; each is load-bearing:
 
@@ -231,7 +236,26 @@ class WorkerFeed:
             )
 
     async def started(self) -> None:
-        """Emit ``subagent.started`` — this is what CREATES the card.
+        """Emit ``subagent.started`` plus a RUNNING ``task.updated``.
+
+        Two frames, deliberately:
+
+        * ``subagent.started`` CREATES the card;
+        * a ``task.updated`` with state ``running`` puts the worker on the v2
+          active-task surfaces. ``deriveActiveTasks`` is built solely from
+          ``task.updated`` summaries, so before this frame the background-tasks
+          strip, the spinner overlay and the StopButton never saw a
+          ProviderAgent worker as running — only its TERMINAL settle arrived,
+          and a terminal summary adds no chip. The frame is the exact shape
+          ``query_engine`` yields for the SDK's ``TaskStartedMessage``, so
+          ``_translate_shared`` maps it with no new code and
+          ``record_drained_event`` admits it on the ``task_`` prefix. ``status``
+          is explicit ``running`` rather than the per-type ``started`` default,
+          because ``deriveActiveTasks`` keeps only ``running``.
+
+        Emitted for EVERY worker, background or synchronous: the pre-v2
+        ``/live`` strip surfaced every registry task, and strict parity with the
+        native leg (background-only chips) was rejected.
 
         Idempotent: a second call is a no-op (the reducer is idempotent too,
         but a duplicate row would still cost a write).
@@ -262,6 +286,14 @@ class WorkerFeed:
             "description": description,
             "prompt": self.prompt or "",
         })
+        await self._emit({
+            "type": "task_started",
+            "task_id": self.task_id,
+            "status": "running",
+            "description": description,
+            "summary": self.label,
+            "tool_use_id": self.task_id,
+        })
 
     async def completed(
         self,
@@ -280,8 +312,9 @@ class WorkerFeed:
         * a terminal ``task.updated`` settle frame (via
           :func:`app.core.turn_recorder.record_task_settle_frame`) is the belt.
           It joins the card through ``tool_use_id`` (``reducer.ts:1203``) and,
-          because ``deriveActiveTasks`` keeps only ``running`` summaries, a
-          TERMINAL-only summary adds no chip to the active-task strip.
+          because ``deriveActiveTasks`` keeps only ``running`` summaries, it is
+          also what CLEARS the active-task chip that :meth:`started`'s running
+          frame created.
 
         ``status`` uses the TASK REGISTRY's vocabulary —
         ``completed``/``error``/``killed`` — because it is forwarded verbatim as

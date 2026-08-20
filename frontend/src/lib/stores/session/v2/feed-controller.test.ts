@@ -157,6 +157,27 @@ function toolUse(id: string, name: string): Record<string, unknown> {
 	};
 }
 
+// A task.updated frame. The provider-lane subagent feed (WorkerFeed) emits one
+// with state 'running' at dispatch and one with a terminal state at the end,
+// both carrying task_id === tool_use_id === the worker session id.
+function taskUpdated(
+	taskId: string,
+	state: string,
+	fields: Record<string, unknown> = {},
+): Record<string, unknown> {
+	return {
+		type: 'task.updated',
+		id: `evt-task-${taskId}-${state}`,
+		seq: 0,
+		session_id: 's1',
+		created_at: '2026-07-12T00:00:00.000Z',
+		task_id: taskId,
+		state,
+		tool_use_id: taskId,
+		...fields,
+	};
+}
+
 // Durable interaction lifecycle events (#606 item 4). The FE consumes these only
 // to SETTLE a card the legacy relay seeded — top-level `request_id` correlates to
 // the pending permission / question's request_id.
@@ -517,6 +538,31 @@ describe('feedController revive (half-open feed healing)', () => {
 
 		feedController.revive();
 		expect(hoisted.revives).toBe(1);
+	});
+});
+
+// ─── activeTasks from task.updated ───────────────────────────────────────────
+// deriveActiveTasks keeps only summaries in state 'running', so the background
+// tasks strip, the spinner overlay and the StopButton all hang off the RUNNING
+// task.updated frame. A provider-lane worker that emitted only its terminal
+// frame never appeared in any of them.
+
+describe('feedController activeTasks', () => {
+	it('a running task.updated puts the task on the strip; the terminal frame clears it', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0)); // enter live mode
+
+		hoisted.onEvent!(taskUpdated('w1', 'running', { description: 'reviewer' }));
+		flushRaf();
+		const active = deps.state.activeTasks as Array<{ toolUseId: string }>;
+		expect(active).toHaveLength(1);
+		expect(active[0].toolUseId).toBe('w1');
+
+		hoisted.onEvent!(taskUpdated('w1', 'completed', { summary: 'prov-openai · gpt-5.5' }));
+		flushRaf();
+		expect(deps.state.activeTasks as unknown[]).toHaveLength(0);
 	});
 });
 

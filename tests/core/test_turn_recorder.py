@@ -220,26 +220,43 @@ async def test_subagent_done_maps_to_subagent_completed(mock_db, is_error, statu
     await rec.close()
 
 
-@pytest.mark.parametrize("pump_type,default_state", [
-    ("task_started", "started"),
-    ("task_progress", "running"),
-    ("task_notification", "notified"),
+@pytest.mark.parametrize("pump_type,explicit_status,state,via_drain", [
+    ("task_started", None, "started", False),
+    ("task_progress", None, "running", False),
+    ("task_notification", None, "notified", False),
+    # The ProviderAgent WorkerFeed's RUNNING frame (provider_agent_feed.started):
+    # a task_started carrying an EXPLICIT running status — which beats the
+    # per-type "started" default — appended through the unfenced drain tap. That
+    # tap admits it on the ``task_`` prefix alone, with no per-type allowlist.
+    ("task_started", "running", "running", True),
 ])
-async def test_task_events_map_to_task_updated(mock_db, pump_type, default_state):
+async def test_task_events_map_to_task_updated(
+    mock_db, pump_type, explicit_status, state, via_drain
+):
     _mk_session()
-    rec = await _recorder()
-    await rec.on_event({
+    event = {
         "type": pump_type, "task_id": "t1", "description": "bg work",
         "summary": "half done", "tool_use_id": "tu_9",
-    })
+    }
+    if explicit_status is not None:
+        event["status"] = explicit_status
+
+    rec = None
+    if via_drain:
+        await record_drained_event(SID, event)
+    else:
+        rec = await _recorder()
+        await rec.on_event(event)
+
     row = _rows()[-1]
     assert row["event_type"] == "task.updated"
     assert row["payload"]["task_id"] == "t1"
-    assert row["payload"]["state"] == default_state
+    assert row["payload"]["state"] == state
     assert row["payload"]["description"] == "bg work"
     assert row["payload"]["summary"] == "half done"
     assert row["payload"]["tool_use_id"] == "tu_9"
-    await rec.close()
+    if rec is not None:
+        await rec.close()
 
 
 async def test_task_notification_record_populates_task_id_and_tool_use_id(mock_db):

@@ -508,9 +508,11 @@ class TestCardsSettle:
                     if r["event_type"] == "subagent.completed")
         assert done["payload"]["status"] == "failed"
         assert done["payload"]["task_id"] == "w1"
-        # The task.updated settle frame joins the card through tool_use_id.
-        settle = next(r for r in se.get_events(PARENT)
-                      if r["event_type"] == "task.updated")
+        # The task.updated settle frame joins the card through tool_use_id. It
+        # is the LAST such frame: the first is the RUNNING one feed.started()
+        # emits to put the worker on the active-task strip.
+        settle = [r for r in se.get_events(PARENT)
+                  if r["event_type"] == "task.updated"][-1]
         assert settle["payload"]["tool_use_id"] == "w1"
         assert settle["payload"]["state"] == "killed"
 

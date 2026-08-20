@@ -1004,13 +1004,13 @@
 
 	/* Send Later — secondary/muted so it reads as the alternative to Send Now */
 	.send-btn.send-later-btn {
-		background: var(--scrim);
-		border: 1px solid var(--border);
+		background: color-mix(in oklch, var(--foreground) 8%, transparent);
+		border: 1px solid var(--border-strong);
 		box-shadow: none;
 	}
 
 	.send-btn.send-later-btn svg {
-		color: var(--muted-foreground);
+		color: var(--foreground);
 	}
 
 	.send-btn.send-later-btn:hover:not(:disabled) {
