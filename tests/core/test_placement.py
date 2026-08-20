@@ -141,6 +141,26 @@ def test_capable_runners_excludes_unapproved_local_runner(mock_db, monkeypatch):
     assert placement.capable_runners(None) == ["runner-a"]
 
 
+def test_capable_runners_counts_self_when_registry_read_fails(mock_db, monkeypatch):
+    def boom():
+        raise RuntimeError("registry down")
+    monkeypatch.setattr(database, "get_installs_map", boom)
+    assert placement.capable_runners(None) == [RUNNER_ME]
+
+
+def test_capable_runners_counts_self_before_own_row_registers(mock_db, monkeypatch):
+    rows = {
+        "runner-a": {
+            "id": "runner-a",
+            "online": True,
+            "approved": True,
+            "capabilities": {},
+        },
+    }
+    monkeypatch.setattr(database, "get_installs_map", lambda: rows)
+    assert placement.capable_runners(None) == [RUNNER_ME, "runner-a"]
+
+
 # ---------------------------------------------------------------------------
 # resolve_placement — the three canonical forms.
 # ---------------------------------------------------------------------------

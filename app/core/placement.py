@@ -100,7 +100,14 @@ def _normalize_placement(raw: Any) -> Optional[Dict[str, Any]]:
 
 
 def _online_runners() -> set:
-    """Online approved installs, retaining an approved self during heartbeat races."""
+    """Online approved installs, plus self unless its own row says unapproved.
+
+    Mirrors ``should_run_scheduled_here``: this code is running, so self is
+    alive no matter what its heartbeat row says. Only an explicit registry row
+    with ``approved=False`` (quarantine/revocation) drops self; an absent row —
+    a boot-time registration race or a failed registry read — must not make
+    every send refuse with "no capable device online".
+    """
     try:
         installs = database.get_installs_map()
     except Exception:  # noqa: BLE001 — registry trouble must not crash resolution
@@ -111,7 +118,7 @@ def _online_runners() -> set:
         if row.get("online") and row.get("approved", True)
     }
     me = installs.get(settings.effective_instance_id)
-    if me and me.get("approved", True):
+    if me is None or me.get("approved", True):
         online.add(settings.effective_instance_id)
     return online
 
