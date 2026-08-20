@@ -117,6 +117,12 @@ def _kick(session_id: str) -> None:
 # Commands
 # ---------------------------------------------------------------------------
 
+# Turn sources that count as "a person just spoke" and therefore cancel every
+# wakeup the session had armed. Server-originated sources (automation, unpark,
+# failover, auto_continue, wakeup itself) deliberately leave wakes alone.
+_WAKEUP_SUPERSEDING_SOURCES = ("user", "queue")
+
+
 def submit(
     session_id: str,
     source: str,
@@ -145,7 +151,22 @@ def submit(
     kick would only lose the placement-gate race in session_runtime.execute.
     The skip is an optimization, not a correctness gate — the execute-side
     placement check is the backstop either way.
+
+    A genuine user turn (``source`` in ``user``/``queue``) SUPERSEDES the
+    session's pending wakeups: whatever an agent armed for later, the person
+    who just typed is the newer instruction, and the agent can re-arm on its
+    next turn. Without this a parked session with an armed wake would take the
+    user's turn and then a second, stale one on top of it.
     """
+    if source in _WAKEUP_SUPERSEDING_SOURCES:
+        try:
+            from app.core import wakeup_service
+
+            wakeup_service.cancel_session_wakeups(session_id)
+        except Exception:  # noqa: BLE001 — never let this break an enqueue.
+            logger.exception(
+                "wakeup supersede failed for session %s", session_id
+            )
     turn = turns.enqueue_turn(
         session_id,
         source,

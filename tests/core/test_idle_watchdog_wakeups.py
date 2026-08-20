@@ -27,12 +27,31 @@ def _usage(total, max_tokens=200_000):
     }
 
 
+def _age_session(session_id, seconds):
+    """Backdate a session's ``updated_at`` by ``seconds`` (last-activity clock)."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.db.base import get_cursor, get_db
+    from app.db.compat import ph
+
+    stamp = (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+    _ph = ph()
+    with get_db() as conn:
+        get_cursor(conn).execute(
+            f"UPDATE sessions SET updated_at = {_ph} WHERE id = {_ph}",
+            (stamp, session_id),
+        )
+
+
 @pytest.fixture(autouse=True)
 def _reset_watchdog_state():
     from app.core import wakeup_service
     wakeup_service._watchdog_cooldown.clear()
     yield
     wakeup_service._watchdog_cooldown.clear()
+    for task in list(wakeup_service._timers.values()):
+        task.cancel()
+    wakeup_service._timers.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -108,18 +127,25 @@ async def test_rehydrate_rearms_pending(mock_db, monkeypatch):
     assert by["w2"] > 9_000
 
 
-async def test_fire_claims_row_and_skips_double_fire(mock_db, monkeypatch):
-    from app.core import wakeup_service
-    from app.db import wakeups as wdb
-    import app.core.account_failover as af
+def _capture_submit(monkeypatch):
+    """Spy on ``turn_manager.submit`` — the seam a wake now fires through."""
+    from app.core import turn_manager
 
     calls = []
 
-    async def _fake_exec(**kwargs):
-        calls.append(kwargs)
-        return {"session_id": kwargs.get("session_id"), "metadata": {}}
+    def _fake_submit(session_id, source, **kwargs):
+        calls.append({"session_id": session_id, "source": source, **kwargs})
+        return f"turn-{len(calls)}"
 
-    monkeypatch.setattr(af, "execute_query_with_failover", _fake_exec)
+    monkeypatch.setattr(turn_manager, "submit", _fake_submit)
+    return calls
+
+
+async def test_fire_claims_row_and_skips_double_fire(mock_db, monkeypatch):
+    from app.core import wakeup_service
+    from app.db import wakeups as wdb
+
+    calls = _capture_submit(monkeypatch)
 
     wdb.create_wakeup(id="w1", session_id="s1", prompt="p1", fire_at=time.time(),
                       instance_id=settings.effective_instance_id,
@@ -129,12 +155,174 @@ async def test_fire_claims_row_and_skips_double_fire(mock_db, monkeypatch):
 
     await wakeup_service._fire(row)
     assert len(calls) == 1
+    assert calls[0]["source"] == "wakeup"
     assert calls[0]["prompt"] == "p1"
     assert calls[0]["session_id"] == "s1"
+    assert calls[0]["profile_id"] == "pr"
+    assert calls[0]["project_id"] == "pj"
 
-    # row already claimed/deleted → no second query fires
+    # row already claimed/deleted → no second turn is enqueued
     await wakeup_service._fire(row)
     assert len(calls) == 1
+
+
+async def test_fire_falls_back_to_session_profile(mock_db, monkeypatch):
+    """A row with no profile borrows the session's rather than dropping."""
+    from app.core import wakeup_service
+    from app.db import database, wakeups as wdb
+
+    calls = _capture_submit(monkeypatch)
+    database.create_session(session_id="sess-prof", profile_id="default")
+    wdb.create_wakeup(id="wp", session_id="sess-prof", prompt="p",
+                      fire_at=time.time(),
+                      instance_id=settings.effective_instance_id)
+    row = {"id": "wp", "session_id": "sess-prof", "prompt": "p",
+           "profile_id": None, "project_id": None, "source": "schedule_wakeup"}
+
+    await wakeup_service._fire(row)
+
+    assert len(calls) == 1
+    assert calls[0]["profile_id"] == "default"
+
+
+async def test_fire_drops_wake_with_no_resolvable_profile(mock_db, monkeypatch, caplog):
+    from app.core import wakeup_service
+    from app.db import database, wakeups as wdb
+    from app.db import turns as turns_db
+
+    calls = _capture_submit(monkeypatch)
+    database.create_session(session_id="sess-noprof", profile_id=None)
+    wdb.create_wakeup(id="wn", session_id="sess-noprof", prompt="p",
+                      fire_at=time.time(),
+                      instance_id=settings.effective_instance_id)
+    row = {"id": "wn", "session_id": "sess-noprof", "prompt": "p",
+           "profile_id": None, "project_id": None, "source": "schedule_wakeup"}
+
+    with caplog.at_level("WARNING", logger="app.core.wakeup_service"):
+        await wakeup_service._fire(row)
+
+    assert calls == []
+    assert turns_db.get_queued_turns("sess-noprof") == []
+    assert any("dropping the wake" in r.message for r in caplog.records)
+
+
+async def test_fire_while_turn_live_queues_instead_of_racing(mock_db):
+    """The whole point of the fix: a wake that lands mid-turn QUEUES.
+
+    No spy here — the real ``turn_manager.submit`` runs, so the assertion is on
+    the durable ``turns`` table: a second row in ``queued`` behind the live one,
+    which the scheduler drains at settlement, rather than a concurrent agent
+    loop against the same session.
+    """
+    from app.core import wakeup_service
+    from app.db import database, wakeups as wdb
+    from app.db import turns as turns_db
+
+    sid = "sess-live"
+    database.create_session(session_id=sid, profile_id="default")
+    live = turns_db.enqueue_turn(sid, "user", prompt="do work")
+    turns_db.start_turn(live["id"])
+    assert turns_db.get_live_turn(sid)["state"] == "running"
+
+    wdb.create_wakeup(id="wl", session_id=sid, prompt="wake up",
+                      fire_at=time.time(), profile_id="pr",
+                      instance_id=settings.effective_instance_id)
+    await wakeup_service._fire(
+        {"id": "wl", "session_id": sid, "prompt": "wake up",
+         "profile_id": "pr", "project_id": None, "source": "schedule_wakeup"}
+    )
+
+    # the user turn is still the ONE live turn; the wake sits behind it
+    assert turns_db.get_live_turn(sid)["id"] == live["id"]
+    queued = turns_db.get_queued_turns(sid)
+    assert len(queued) == 1
+    assert queued[0]["source"] == "wakeup"
+    assert queued[0]["state"] == "queued"
+
+
+async def test_schedule_replaces_outstanding_wake_for_same_source(mock_db):
+    from app.core import wakeup_service
+    from app.db import wakeups as wdb
+
+    first = await wakeup_service.schedule(
+        session_id="s-dup", profile_id="pr", project_id=None,
+        prompt="one", delay_seconds=600, source="schedule_wakeup",
+    )
+    second = await wakeup_service.schedule(
+        session_id="s-dup", profile_id="pr", project_id=None,
+        prompt="two", delay_seconds=600, source="schedule_wakeup",
+    )
+
+    rows = [r for r in wdb.get_pending_wakeups(settings.effective_instance_id)
+            if r["session_id"] == "s-dup"]
+    assert len(rows) == 1
+    assert rows[0]["id"] == second["id"]
+    assert rows[0]["prompt"] == "two"
+
+    # exactly one armed timer, and it is the survivor's
+    live = {k: t for k, t in wakeup_service._timers.items() if not t.done()}
+    assert set(live) == {second["id"]}
+    assert first["id"] not in live
+
+    for task in list(wakeup_service._timers.values()):
+        task.cancel()
+
+
+async def test_schedule_keeps_a_different_source_armed(mock_db):
+    from app.core import wakeup_service
+    from app.db import wakeups as wdb
+
+    await wakeup_service.schedule(
+        session_id="s-mix", profile_id="pr", project_id=None,
+        prompt="agent", delay_seconds=600, source="schedule_wakeup",
+    )
+    await wakeup_service.schedule(
+        session_id="s-mix", profile_id="pr", project_id=None,
+        prompt="nudge", delay_seconds=600, source="idle_watchdog",
+    )
+
+    rows = [r for r in wdb.get_pending_wakeups(settings.effective_instance_id)
+            if r["session_id"] == "s-mix"]
+    assert {r["source"] for r in rows} == {"schedule_wakeup", "idle_watchdog"}
+
+    for task in list(wakeup_service._timers.values()):
+        task.cancel()
+
+
+async def test_user_turn_supersedes_pending_wakeups(mock_db):
+    from app.core import turn_manager, wakeup_service
+    from app.db import wakeups as wdb
+
+    sid = "s-supersede"
+    row = await wakeup_service.schedule(
+        session_id=sid, profile_id="pr", project_id=None,
+        prompt="later", delay_seconds=600, source="schedule_wakeup",
+    )
+    assert wdb.session_has_pending(sid)
+    timer = wakeup_service._timers[row["id"]]
+
+    turn_manager.submit(sid, "user", prompt="actually, do this", profile_id="pr")
+
+    assert not wdb.session_has_pending(sid)
+    assert row["id"] not in wakeup_service._timers
+    timer.cancel()
+
+
+async def test_server_turn_does_not_supersede_pending_wakeups(mock_db):
+    from app.core import turn_manager, wakeup_service
+    from app.db import wakeups as wdb
+
+    sid = "s-keep"
+    row = await wakeup_service.schedule(
+        session_id=sid, profile_id="pr", project_id=None,
+        prompt="later", delay_seconds=600, source="schedule_wakeup",
+    )
+
+    turn_manager.submit(sid, "automation", prompt="scheduled job", profile_id="pr")
+
+    assert wdb.session_has_pending(sid)
+    assert row["id"] in wakeup_service._timers
+    wakeup_service._timers[row["id"]].cancel()
 
 
 async def test_schedule_persists_then_arms(mock_db, monkeypatch):
@@ -439,6 +627,71 @@ async def test_watchdog_lifetime_cap_mutes_after_three(mock_db, monkeypatch, cap
     cap_logs = [r for r in caplog.records if "lifetime nudge cap" in r.message]
     assert len(cap_logs) == 1
     assert "muting" in cap_logs[0].message
+
+
+# ---------------------------------------------------------------------------
+# stale-candidate recency gate
+# ---------------------------------------------------------------------------
+
+def test_idle_edge_candidates_excludes_stale_sessions(mock_db):
+    from app.db import database
+    from app.db import wakeups as wdb
+
+    iid = settings.effective_instance_id
+    database.create_session(session_id="fresh", profile_id="default")
+    database.set_session_context_usage(session_id="fresh", data=_usage(190_000))
+    database.create_session(session_id="stale", profile_id="default")
+    database.set_session_context_usage(session_id="stale", data=_usage(190_000))
+    _age_session("stale", 60 * 60 * 24 * 30)  # a month untouched
+
+    gated = wdb.idle_edge_candidates(iid, max_idle_seconds=86_400)
+    assert {c["id"] for c in gated} == {"fresh"}
+
+    # gate off (None or 0) → the legacy "any active session, forever" behavior
+    assert {c["id"] for c in wdb.idle_edge_candidates(iid)} == {"fresh", "stale"}
+    assert {c["id"] for c in wdb.idle_edge_candidates(iid, max_idle_seconds=0)} == {
+        "fresh", "stale",
+    }
+
+
+async def test_watchdog_skips_stale_session(mock_db, monkeypatch):
+    from app.core import wakeup_service
+    from app.db import database
+
+    sid = "wd-stale"
+    database.create_session(session_id=sid, profile_id="default")
+    database.set_session_context_usage(session_id=sid, data=_usage(190_000))
+    _age_session(sid, settings.idle_watchdog_max_idle_seconds + 3_600)
+
+    scheduled = []
+    monkeypatch.setattr(wakeup_service, "schedule",
+                        lambda **kw: scheduled.append(kw))
+
+    assert await wakeup_service.scan_once() == []
+    assert scheduled == []
+
+
+# ---------------------------------------------------------------------------
+# session deletion tidies up
+# ---------------------------------------------------------------------------
+
+async def test_session_delete_drops_pending_wakeups(mock_db):
+    from app.core import wakeup_service
+    from app.db import database
+    from app.db import wakeups as wdb
+
+    sid = "s-doomed"
+    database.create_session(session_id=sid, profile_id="default")
+    row = await wakeup_service.schedule(
+        session_id=sid, profile_id="pr", project_id=None,
+        prompt="later", delay_seconds=600, source="schedule_wakeup",
+    )
+    assert wdb.session_has_pending(sid)
+
+    database.delete_session(sid)
+
+    assert not wdb.session_has_pending(sid)
+    assert row["id"] not in wakeup_service._timers
 
 
 # ---------------------------------------------------------------------------

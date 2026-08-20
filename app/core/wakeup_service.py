@@ -18,10 +18,20 @@ parks forever because no next turn arrives:
    belt-and-braces backstop that covers the cases the opt-in ScheduleWakeup and
    the #557 auto-continue latch miss.
 
-The actual wake re-fires the prompt through
-``account_failover.execute_query_with_failover`` — the single seam every
-non-streaming caller uses — so a wake is a genuine new turn (CLI-owned, per the
-"CLI owns wakes" invariant), not a new dispatch lane.
+A wake does NOT run a query of its own. :func:`_fire` enrolls the prompt in the
+v2 turn queue (``turn_manager.submit(..., source="wakeup")``), so the wake goes
+through the same run lease and one-live-turn-per-session index every other turn
+obeys. Firing straight at the query engine — as this module used to — created a
+second agent loop against a session that already had one running: a forked
+conversation DAG, no ``turns`` row, no lease, and untracked spend.
+
+Two cancellation rules keep armed wakes from stacking up:
+
+* :func:`schedule` replaces any outstanding wake for the same
+  ``(session_id, source)`` — one pending wake per producer, never a pile;
+* a user message supersedes every pending wake for the session
+  (:func:`cancel_session_wakeups`, called from ``turn_manager.submit`` on
+  ``user``/``queue`` turns). The agent can re-arm on its next turn.
 """
 
 from __future__ import annotations
@@ -56,8 +66,13 @@ WATCHDOG_NUDGE_PROMPT = (
 _REHYDRATE_STAGGER_SECONDS = 3.0
 _REHYDRATE_STAGGER_CAP_SECONDS = 60.0
 
-# Live references to in-flight wake timer tasks (asyncio keeps only weak refs).
-_timers: "set[asyncio.Task]" = set()
+# Live references to in-flight wake timer tasks, keyed by wakeup id (asyncio
+# keeps only weak refs, and the key is what lets a specific wake be disarmed
+# when its row is deleted out from under it).
+_timers: "dict[str, asyncio.Task]" = {}
+
+# Strong refs for the (unexpected) idless row — same GC guard, no key.
+_anon_timers: "set[asyncio.Task]" = set()
 
 @dataclass
 class _WatchdogLatch:
@@ -104,8 +119,41 @@ def _now_epoch() -> float:
 # Firing + arming
 # ---------------------------------------------------------------------------
 
+async def _resolve_profile_id(row: Dict[str, Any]) -> Optional[str]:
+    """The profile a wake should run under: the row's, else the session's.
+
+    A wakeup persisted without a profile (an older row, or a producer that had
+    none to hand) would enqueue a turn the runtime cannot resolve an agent for,
+    so the session's own profile is the fallback and "neither" is a drop.
+    """
+    profile_id = row.get("profile_id")
+    if profile_id:
+        return profile_id
+    session_id = row.get("session_id")
+    if not session_id:
+        return None
+    try:
+        from app.db import database
+
+        session = await asyncio.to_thread(database.get_session, session_id)
+    except Exception:  # noqa: BLE001 — a lookup failure is just "no fallback".
+        logger.exception(
+            "wakeup profile fallback lookup failed for session %s", session_id
+        )
+        return None
+    return (session or {}).get("profile_id") or None
+
+
 async def _fire(row: Dict[str, Any]) -> None:
-    """Claim and fire one wakeup: delete its row, then re-fire the prompt."""
+    """Claim one wakeup (delete its row) and enrol its prompt in the turn queue.
+
+    The claim stays first and stays atomic: it is what stops a rehydrated timer
+    and a peer install from both firing. What follows the claim changed — the
+    wake is now a ``source="wakeup"`` turn submitted through
+    :func:`app.core.turn_manager.submit` rather than a direct query-engine call.
+    If the session already has a live turn the new turn simply queues behind it
+    and drains at settlement, instead of racing it with a second agent loop.
+    """
     wakeup_id = row.get("id")
     session_id = row.get("session_id")
     claimed = await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)
@@ -115,29 +163,131 @@ async def _fire(row: Dict[str, Any]) -> None:
             wakeup_id, session_id,
         )
         return
-    from app.core import account_failover
 
-    logger.info(
-        "wakeup firing: id=%s session=%s source=%s",
-        wakeup_id, session_id, row.get("source"),
-    )
+    profile_id = await _resolve_profile_id(row)
+    if not profile_id:
+        logger.warning(
+            "wakeup %s (session %s, source %s) has no profile and its session "
+            "resolves to none — dropping the wake rather than queueing a turn "
+            "that cannot run",
+            wakeup_id, session_id, row.get("source"),
+        )
+        return
+
     # The wake must run on the scheduling turn's effective model, not the
     # profile default — otherwise it re-primes the prompt cache on the wrong
     # model. Rows without a model (e.g. idle_watchdog) keep the default path.
-    kwargs: Dict[str, Any] = {
-        "prompt": row.get("prompt"),
-        "profile_id": row.get("profile_id"),
-        "project_id": row.get("project_id"),
-        "session_id": session_id,
-    }
     model = row.get("model")
-    if model:
-        kwargs["overrides"] = {"model": model}
-    await account_failover.execute_query_with_failover(**kwargs)
+    overrides = {"model": model} if model else None
+
+    from app.core import turn_manager
+
+    turn_id = turn_manager.submit(
+        session_id,
+        "wakeup",
+        prompt=row.get("prompt"),
+        profile_id=profile_id,
+        project_id=row.get("project_id"),
+        overrides=overrides,
+    )
+    logger.info(
+        "wakeup fired: id=%s session=%s source=%s -> turn %s",
+        wakeup_id, session_id, row.get("source"), turn_id,
+    )
+
+
+def _cancel_timer_task(task: "asyncio.Task") -> None:
+    """Cancel a wake timer from whichever thread we happen to be on.
+
+    ``Task.cancel`` is only safe on the task's own loop; ``cancel_session_wakeups``
+    is a sync function callable from a worker thread (``turn_manager.submit``
+    runs wherever its caller does), so hop back via ``call_soon_threadsafe``
+    when the loops differ.
+    """
+    if task.done():
+        return
+    try:
+        loop = task.get_loop()
+    except Exception:  # noqa: BLE001
+        task.cancel()
+        return
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        running = None
+    if running is loop:
+        task.cancel()
+        return
+    try:
+        loop.call_soon_threadsafe(task.cancel)
+    except RuntimeError:  # loop already closed — nothing left to disarm
+        pass
+
+
+def _disarm(wakeup_ids: "list[str]") -> None:
+    """Cancel the in-process timers for ``wakeup_ids`` (missing ids are fine)."""
+    for wid in wakeup_ids:
+        task = _timers.pop(wid, None)
+        if task is not None:
+            _cancel_timer_task(task)
+
+
+def cancel_session_wakeups(
+    session_id: str, source: Optional[str] = None
+) -> int:
+    """Delete a session's pending wakeups and disarm their local timers.
+
+    Returns the number of rows removed. Synchronous on purpose: the callers are
+    sync (``turn_manager.submit``, the session-delete path). Use
+    :func:`cancel_session_wakeups_async` from async code so the DB hit lands on
+    a worker thread.
+
+    Wakes armed by a PEER install are not reachable from here and do not need to
+    be: their timer's :func:`app.db.wakeups.claim_wakeup` finds no row and
+    no-ops.
+    """
+    try:
+        ids = wakeups_db.pop_session_wakeups(session_id, source)
+    except Exception:  # noqa: BLE001 — cancelling must never break the caller.
+        logger.exception(
+            "wakeup cancel failed for session %s (source=%s)", session_id, source
+        )
+        return 0
+    _disarm(ids)
+    if ids:
+        logger.info(
+            "wakeup cancel: dropped %d pending wake(s) for session %s (source=%s)",
+            len(ids), session_id, source or "*",
+        )
+    return len(ids)
+
+
+async def cancel_session_wakeups_async(
+    session_id: str, source: Optional[str] = None
+) -> int:
+    """Async form of :func:`cancel_session_wakeups` (DB hit off the loop)."""
+    try:
+        ids = await asyncio.to_thread(
+            wakeups_db.pop_session_wakeups, session_id, source
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "wakeup cancel failed for session %s (source=%s)", session_id, source
+        )
+        return 0
+    _disarm(ids)
+    if ids:
+        logger.info(
+            "wakeup cancel: dropped %d pending wake(s) for session %s (source=%s)",
+            len(ids), session_id, source or "*",
+        )
+    return len(ids)
 
 
 def _arm(row: Dict[str, Any], delay_seconds: float) -> None:
     """Arm an in-process timer that fires ``row`` after ``delay_seconds``."""
+    wakeup_id = row.get("id")
+
     async def _run() -> None:
         try:
             if delay_seconds > 0:
@@ -152,8 +302,23 @@ def _arm(row: Dict[str, Any], delay_seconds: float) -> None:
             )
 
     task = asyncio.create_task(_run(), name=f"wakeup-{row.get('session_id')}")
-    _timers.add(task)
-    task.add_done_callback(_timers.discard)
+    if not wakeup_id:
+        # No id to key on (shouldn't happen for a persisted row) — keep a plain
+        # strong ref so asyncio's weak bookkeeping cannot collect the timer.
+        _anon_timers.add(task)
+        task.add_done_callback(_anon_timers.discard)
+        return
+
+    previous = _timers.get(wakeup_id)
+    if previous is not None and previous is not task:
+        _cancel_timer_task(previous)
+    _timers[wakeup_id] = task
+
+    def _forget(finished: "asyncio.Task", _id: str = wakeup_id) -> None:
+        if _timers.get(_id) is finished:
+            _timers.pop(_id, None)
+
+    task.add_done_callback(_forget)
 
 
 async def schedule(
@@ -176,7 +341,18 @@ async def schedule(
     ``model`` is the scheduling turn's effective model, persisted so the wake
     replays it as a query-level override instead of running on the profile
     default.
+
+    Scheduling REPLACES: any outstanding wake for the same
+    ``(session_id, source)`` is deleted and disarmed first, so a producer that
+    re-arms on every turn leaves one pending wake, not a growing pile that all
+    come due together.
     """
+    replaced = await cancel_session_wakeups_async(session_id, source)
+    if replaced:
+        logger.info(
+            "wakeup schedule: replaced %d outstanding %s wake(s) for session %s",
+            replaced, source, session_id,
+        )
     fire_at = _now_epoch() + max(0.0, float(delay_seconds))
     row = await asyncio.to_thread(
         wakeups_db.create_wakeup,
@@ -280,7 +456,10 @@ async def scan_once() -> List[str]:
     nudged: List[str] = []
     try:
         candidates = await asyncio.to_thread(
-            wakeups_db.idle_edge_candidates, settings.effective_instance_id
+            wakeups_db.idle_edge_candidates,
+            settings.effective_instance_id,
+            "active",
+            settings.idle_watchdog_max_idle_seconds,
         )
     except Exception:  # noqa: BLE001 — the loop must survive a bad scan.
         logger.exception("idle-watchdog: candidate scan failed")

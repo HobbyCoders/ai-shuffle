@@ -390,6 +390,12 @@ class Settings(BaseSettings):
     # Per-session cooldown after a watchdog nudge, so a session whose compaction
     # does not drop it back under the fraction is not re-nudged every tick.
     idle_watchdog_cooldown_seconds: int = 1800
+    # How recently a session must have been touched (``sessions.updated_at``)
+    # to still count as a watchdog candidate. ``status='active'`` is sticky, so
+    # without this gate a session abandoned months ago near the context edge
+    # stayed eligible forever and drew a fresh nudge turn after every restart.
+    # Default 24h. Set to 0 to disable the gate. Env: IDLE_WATCHDOG_MAX_IDLE_SECONDS.
+    idle_watchdog_max_idle_seconds: int = 86400
 
     # Durable background-task state (Phase 1, WRITE-ONLY). When on,
     # task_registry mirrors every task transition into the background_tasks

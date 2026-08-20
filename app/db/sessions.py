@@ -1005,10 +1005,29 @@ def delete_session(session_id: str) -> bool:
     # flag-gated and failure-swallowed — flag OFF (or no ref) issues ZERO git
     # commands, and any git failure never blocks the delete.
     _cleanup_working_set_ref(session_id)
+    _cleanup_pending_wakeups(session_id)
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(f"DELETE FROM sessions WHERE id = {ph()}", (session_id,))
         return cursor.rowcount > 0
+
+
+def _cleanup_pending_wakeups(session_id: str) -> None:
+    """Drop the session's pending wakeups (and disarm their local timers).
+
+    ``pending_wakeups`` carries no FK to ``sessions``, so without this a
+    deleted session's armed wake survives and later fires a turn against a row
+    that no longer exists. Best-effort: a failure here never blocks the delete.
+    """
+    try:
+        from app.core import wakeup_service
+
+        wakeup_service.cancel_session_wakeups(session_id)
+    except Exception:  # pragma: no cover - best-effort cleanup
+        logger.debug(
+            "pending-wakeup cleanup failed for session %s", session_id,
+            exc_info=True,
+        )
 
 
 def _cleanup_working_set_ref(session_id: str) -> None:

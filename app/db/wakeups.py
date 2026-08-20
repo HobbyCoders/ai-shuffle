@@ -21,6 +21,7 @@ double-firing.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from app.db.base import get_db, get_cursor, rows_to_list
@@ -89,15 +90,37 @@ def claim_wakeup(wakeup_id: str) -> bool:
     return bool(deleted and deleted > 0)
 
 
-def delete_session_wakeups(session_id: str, source: Optional[str] = None) -> int:
-    """Delete a session's pending wakeups (optionally only of one ``source``).
+def pop_session_wakeups(
+    session_id: str, source: Optional[str] = None
+) -> List[str]:
+    """Delete a session's pending wakeups and return the deleted row ids.
 
-    Returns the number of rows removed. Used to keep the watchdog idempotent
-    (clear a stale idle nudge) and to tidy up when a session is deleted.
+    The ids are what the caller needs to cancel the matching *in-process*
+    timers (:mod:`app.core.wakeup_service` keys its live timer tasks by wakeup
+    id), so the delete and the disarm stay in step. Read-then-delete inside one
+    connection rather than ``DELETE ... RETURNING`` so the SQLite conformance
+    shim runs the same statements as Postgres.
+
+    A peer install's armed timer is unaffected and safe: its
+    :func:`claim_wakeup` finds no row and no-ops.
     """
     _ph = ph()
     with get_db() as conn:
         cursor = get_cursor(conn)
+        if source is None:
+            cursor.execute(
+                f"SELECT id FROM pending_wakeups WHERE session_id = {_ph}",
+                (session_id,),
+            )
+        else:
+            cursor.execute(
+                f"SELECT id FROM pending_wakeups WHERE session_id = {_ph} "
+                f"AND source = {_ph}",
+                (session_id, source),
+            )
+        ids = [r["id"] for r in rows_to_list(list(cursor.fetchall() or []))]
+        if not ids:
+            return []
         if source is None:
             cursor.execute(
                 f"DELETE FROM pending_wakeups WHERE session_id = {_ph}",
@@ -109,7 +132,17 @@ def delete_session_wakeups(session_id: str, source: Optional[str] = None) -> int
                 f"AND source = {_ph}",
                 (session_id, source),
             )
-        return int(cursor.rowcount or 0)
+    return ids
+
+
+def delete_session_wakeups(session_id: str, source: Optional[str] = None) -> int:
+    """Delete a session's pending wakeups (optionally only of one ``source``).
+
+    Returns the number of rows removed. Used to keep the watchdog idempotent
+    (clear a stale idle nudge) and to tidy up when a session is deleted. Thin
+    count-returning wrapper over :func:`pop_session_wakeups`.
+    """
+    return len(pop_session_wakeups(session_id, source))
 
 
 def get_pending_wakeups(instance_id: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -154,7 +187,11 @@ def session_has_pending(session_id: str, source: Optional[str] = None) -> bool:
         return cursor.fetchone() is not None
 
 
-def idle_edge_candidates(instance_id: str, status: str = "active") -> List[Dict[str, Any]]:
+def idle_edge_candidates(
+    instance_id: str,
+    status: str = "active",
+    max_idle_seconds: Optional[float] = None,
+) -> List[Dict[str, Any]]:
     """Sessions eligible for an idle-at-edge watchdog check on this install.
 
     Structural filters only (the cheap, DB-expressible ones); the caller applies
@@ -163,14 +200,30 @@ def idle_edge_candidates(instance_id: str, status: str = "active") -> List[Dict[
 
     * belongs to this install (``instance_id``);
     * is ``status='active'`` (not streaming/parked/archived — i.e. no live turn);
+    * was last touched within ``max_idle_seconds`` (when given);
     * has a persisted context-usage snapshot (``context_usage_json`` present);
     * has NO in-flight turn (no ``turns`` row in a live state); and
     * has NO pending wakeup already armed (so the watchdog never piles a second
       nudge on top of one it — or ScheduleWakeup — already scheduled).
+
+    The recency gate matters: ``status='active'`` is sticky, so without it every
+    session ever left near the edge stayed a candidate forever and got nudged
+    again after each app restart — real turns, real money, on conversations
+    nobody had touched in weeks. ``sessions.updated_at`` is written as an
+    ISO-8601 UTC string by the session writers, so the bound cutoff is compared
+    as a same-shape value under both Postgres and the SQLite shim.
     """
     _ph = ph()
     live_states = ("queued", "running", "interrupting", "draining")
     placeholders = ", ".join([_ph] * len(live_states))
+    recency_sql = ""
+    recency_params: tuple = ()
+    if max_idle_seconds is not None and float(max_idle_seconds) > 0:
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            seconds=float(max_idle_seconds)
+        )
+        recency_sql = f"AND s.updated_at >= {_ph}"
+        recency_params = (cutoff.isoformat(),)
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
@@ -179,6 +232,7 @@ def idle_edge_candidates(instance_id: str, status: str = "active") -> List[Dict[
             FROM sessions s
             WHERE s.instance_id = {_ph}
               AND s.status = {_ph}
+              {recency_sql}
               AND s.context_usage_json IS NOT NULL
               AND NOT EXISTS (
                   SELECT 1 FROM turns t
@@ -190,7 +244,7 @@ def idle_edge_candidates(instance_id: str, status: str = "active") -> List[Dict[
                   WHERE w.session_id = s.id
               )
             """,
-            (instance_id, status, *live_states),
+            (instance_id, status, *recency_params, *live_states),
         )
         rows = cursor.fetchall() or []
     return rows_to_list(list(rows))

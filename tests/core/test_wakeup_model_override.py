@@ -1,10 +1,9 @@
 """Tests for the wakeup model override (pending_wakeups.model).
 
-A ScheduleWakeup wake used to fire through
-``account_failover.execute_query_with_failover`` on the profile's DEFAULT model
-even when the scheduling turn ran with a per-query model override — re-priming
-the prompt cache on the wrong model. The scheduling turn's effective model is now
-persisted on the wakeup row and replayed as the wake query's model override.
+A ScheduleWakeup wake used to fire on the profile's DEFAULT model even when the
+scheduling turn ran with a per-query model override — re-priming the prompt cache
+on the wrong model. The scheduling turn's effective model is now persisted on the
+wakeup row and replayed as the wake TURN's ``overrides={"model": ...}``.
 
 Idle-watchdog wakes (``source="idle_watchdog"``) stay model-less by design.
 """
@@ -24,6 +23,9 @@ def _reset_watchdog_state():
     wakeup_service._watchdog_cooldown.clear()
     yield
     wakeup_service._watchdog_cooldown.clear()
+    for task in list(wakeup_service._timers.values()):
+        task.cancel()
+    wakeup_service._timers.clear()
 
 
 def _usage(total, max_tokens=200_000):
@@ -88,16 +90,17 @@ async def test_schedule_persists_model(mock_db, monkeypatch):
 # firing: the override replay
 # ---------------------------------------------------------------------------
 
-def _capture_failover(monkeypatch):
-    import app.core.account_failover as af
+def _capture_submit(monkeypatch):
+    """Spy on ``turn_manager.submit`` — the seam a wake now fires through."""
+    from app.core import turn_manager
 
     calls = []
 
-    async def _fake_exec(**kwargs):
-        calls.append(kwargs)
-        return {"session_id": kwargs.get("session_id"), "metadata": {}}
+    def _fake_submit(session_id, source, **kwargs):
+        calls.append({"session_id": session_id, "source": source, **kwargs})
+        return f"turn-{len(calls)}"
 
-    monkeypatch.setattr(af, "execute_query_with_failover", _fake_exec)
+    monkeypatch.setattr(turn_manager, "submit", _fake_submit)
     return calls
 
 
@@ -105,7 +108,7 @@ async def test_fire_with_model_passes_override(mock_db, monkeypatch):
     from app.core import wakeup_service
     from app.db import wakeups as wdb
 
-    calls = _capture_failover(monkeypatch)
+    calls = _capture_submit(monkeypatch)
 
     wdb.create_wakeup(id="w1", session_id="s1", prompt="p1", fire_at=time.time(),
                       instance_id=settings.effective_instance_id,
@@ -116,16 +119,19 @@ async def test_fire_with_model_passes_override(mock_db, monkeypatch):
     await wakeup_service._fire(row)
 
     assert len(calls) == 1
+    assert calls[0]["source"] == "wakeup"
     assert calls[0]["overrides"] == {"model": "haiku"}
     assert calls[0]["prompt"] == "p1"
     assert calls[0]["session_id"] == "s1"
+    assert calls[0]["profile_id"] == "pr"
+    assert calls[0]["project_id"] == "pj"
 
 
 async def test_fire_without_model_passes_no_overrides(mock_db, monkeypatch):
     from app.core import wakeup_service
     from app.db import wakeups as wdb
 
-    calls = _capture_failover(monkeypatch)
+    calls = _capture_submit(monkeypatch)
 
     wdb.create_wakeup(id="w2", session_id="s2", prompt="p2", fire_at=time.time(),
                       instance_id=settings.effective_instance_id,
@@ -136,7 +142,8 @@ async def test_fire_without_model_passes_no_overrides(mock_db, monkeypatch):
     await wakeup_service._fire(row)
 
     assert len(calls) == 1
-    assert "overrides" not in calls[0]
+    assert calls[0]["source"] == "wakeup"
+    assert calls[0]["overrides"] is None
 
 
 # ---------------------------------------------------------------------------
