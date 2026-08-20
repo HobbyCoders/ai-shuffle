@@ -202,6 +202,66 @@ def has_active_base_checkout(project_id: str, runner_id: str) -> bool:
         return any(s == "active" for s in statuses)
 
 
+def _checkouts_for_branch(
+    cursor: Any, project_id: str, runner_id: str, branch: Optional[str]
+) -> List[Dict[str, Any]]:
+    """Every checkout of ``(project, runner, branch)``, any status.
+
+    Uniqueness is ``(project_id, runner_id, path)``, so a moved path leaves
+    several rows. Callers that care about existence must scan this full set —
+    :func:`get_checkout` is LIMIT 1 oldest and would hide a newer active row
+    behind an archived one. ``branch`` None/'' is the base (NULL or ''); a
+    non-empty branch matches that logical worktree exactly.
+    """
+    if branch:
+        cursor.execute(
+            "SELECT * FROM checkouts "
+            "WHERE project_id = %s AND runner_id = %s AND branch = %s "
+            "ORDER BY created_at ASC, id ASC",
+            (project_id, runner_id, branch),
+        )
+    else:
+        cursor.execute(
+            "SELECT * FROM checkouts "
+            "WHERE project_id = %s AND runner_id = %s "
+            "AND (branch IS NULL OR branch = '') "
+            "ORDER BY created_at ASC, id ASC",
+            (project_id, runner_id),
+        )
+    return _rows(cursor.fetchall())
+
+
+def list_active_checkouts(
+    project_id: str, runner_id: str, branch: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Every ACTIVE checkout of ``(project, runner, branch)``.
+
+    A missing/NULL ``status`` normalizes to ``'active'`` — same coercion as
+    :func:`has_active_base_checkout`. No legacy ``runner_id=''`` fallback: the
+    owner of a session is a real runner.
+    """
+    with get_db() as conn:
+        rows = _checkouts_for_branch(conn.cursor(), project_id, runner_id, branch)
+    return [r for r in rows if (r.get("status") or "active") == "active"]
+
+
+def has_active_checkout(
+    project_id: str, runner_id: str, branch: Optional[str] = None
+) -> bool:
+    """True iff ``runner_id`` has ANY ACTIVE checkout of this project at this branch.
+
+    Used by ``enrich_session_worktree_meta`` for remote ``worktree_deleted``
+    honesty. Scans every matching row — :func:`get_checkout` is LIMIT 1 oldest
+    and would treat an archived-at-old-path row as the whole story.
+
+    ``branch`` None/'' is the base (NULL or ''); a non-empty branch is exact.
+    Deliberately NOT the eligibility predicate — that stays
+    :func:`has_active_base_checkout` (base only, plus the legacy ``runner_id=''``
+    fallback).
+    """
+    return bool(list_active_checkouts(project_id, runner_id, branch))
+
+
 def list_checkouts(project_id: str) -> List[Dict[str, Any]]:
     """Return every checkout for a project across all runners."""
     with get_db() as conn:
