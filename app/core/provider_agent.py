@@ -345,8 +345,11 @@ def curated_model_ids(provider: Optional[Mapping[str, Any]]) -> Tuple[str, ...]:
 def default_model_for_provider(provider: Optional[Mapping[str, Any]]) -> Optional[str]:
     """The model to use when a ProviderAgent call omits ``model``.
 
-    The provider's ``default_model`` when it is curated, else the first curated
-    id, else ``None`` (the caller fails with "no curated models").
+    The provider's ``default_model`` when it is curated, else ``None`` — an
+    unconfigured (or uncurated) default has no answer here. Falling through to
+    the first curated id used to look harmless and was a cost trap: curation
+    order is arbitrary, so callers landed on whatever model happened to sit at
+    index 0 rather than on anything anyone chose.
     """
     ids = curated_model_ids(provider)
     if not ids:
@@ -354,7 +357,7 @@ def default_model_for_provider(provider: Optional[Mapping[str, Any]]) -> Optiona
     default = (provider or {}).get("default_model")
     if isinstance(default, str) and default in ids:
         return default
-    return ids[0]
+    return None
 
 
 def validate_provider_model(
@@ -969,6 +972,19 @@ async def dispatch_worker(
     card names the agent rather than the model slug it happens to run on
     (2026-08-17 ruling); purely presentational, never a join key.
     """
+    # Fail closed on the registry-index-0 cost trap: a provider turn with no
+    # model resolves downstream to an arbitrary curated entry, so an implicit
+    # provider default is never an acceptable binding for a worker.
+    if provider_id and not model_id:
+        return WorkerOutcome(
+            ok=False,
+            session_id="",
+            error=(
+                "Provider-bound worker dispatch requires an explicit model; "
+                "refusing to launch on an implicit provider default."
+            ),
+        )
+
     from app.core import provider_agent_supervisor, turn_manager
     from app.core.provider_agent_feed import WorkerFeed, emit_shielded
     from app.core.task_registry import task_registry

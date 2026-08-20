@@ -294,12 +294,29 @@ class TestHelpers:
         row = _provider(default_model="gpt-5.5-mini")
         assert pa.default_model_for_provider(row) == "gpt-5.5-mini"
 
-    def test_default_model_falls_back_to_first_curated(self):
-        row = _provider(default_model="not-curated")
-        assert pa.default_model_for_provider(row) == "gpt-5.5"
+    def test_default_model_none_when_default_is_uncurated(self):
+        """No first-curated fallback: index 0 is arbitrary, and picking it is
+        how callers silently landed on the roster's priciest model."""
+        assert pa.default_model_for_provider(_provider(default_model="not-curated")) is None
+        assert pa.default_model_for_provider(_provider(default_model=None)) is None
 
     def test_default_model_none_without_curated_models(self):
         assert pa.default_model_for_provider(_provider(model_ids=())) is None
+
+    def test_provider_bound_dispatch_without_a_model_is_refused(self):
+        """The guard sits ahead of every import and DB read, so this runs with
+        no fixtures at all."""
+        outcome = asyncio.run(pa.dispatch_worker(
+            parent_session_id="p",
+            profile_id="x",
+            provider_id="prov",
+            model_id=None,
+            prompt="go",
+        ))
+
+        assert outcome.ok is False
+        assert outcome.session_id == ""
+        assert "explicit model" in outcome.error
 
     def test_bound_report_keeps_the_tail(self):
         """Truncation keeps the END — the conclusion is the part the parent needs."""

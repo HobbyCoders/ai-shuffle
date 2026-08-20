@@ -528,6 +528,140 @@ def test_file_agent_dispatches_even_when_undeclared(agents):
     assert payload["ok"] is True and payload["agent"] == "researcher"
 
 
+# ─── file-agent model inheritance on a provider lane ─────────────────────────
+#
+# A file agent has no agents row, so it borrows a model. On a provider lane an
+# unresolved model used to mean "whatever sits at index 0 of models_json" — the
+# roster below deliberately puts the EXPENSIVE model there so any regression
+# shows up as that id.
+
+_GROK = "x-ai/grok-4.6"
+_CHEAP = "deepseek/deepseek-v4-flash"
+
+
+def _lane(agents, provider_id="prov-lane", default_model=None):
+    """A provider whose curated list leads with the expensive model."""
+    agents.create_model_provider(
+        provider_id=provider_id,
+        name="Lane",
+        provider_type="openai",
+        base_url="https://lane.test/v1",
+        models=[{"id": _GROK, "label": "Grok"}, {"id": _CHEAP, "label": "Flash"}],
+        default_model=default_model,
+        enabled=True,
+    )
+    return provider_id
+
+
+def _dispatch_file_agent(session_id, provider_id, monkeypatch):
+    """Dispatch the ``researcher`` file agent on ``provider_id``; return
+    ``(payload, seen_kwargs, calls)``."""
+    monkeypatch.setattr(td, "_credential_gap", lambda pid: None)
+    seen = {}
+    calls = []
+
+    async def fake_worker(**kwargs):
+        calls.append(kwargs)
+        seen.update(kwargs)
+        return WorkerOutcome(ok=True, session_id="w-lane", report="r")
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        payload = asyncio.run(_dispatch(
+            {"agent": "researcher", "prompt": "go"}, session_id,
+            caller_provider_id=provider_id,
+            agent_registry={"researcher": _definition()},
+        ))
+    return payload, seen, calls
+
+
+def test_file_agent_inherits_callers_launched_model(agents, monkeypatch):
+    provider_id = _lane(agents, default_model=_GROK)
+    _mk_session(agents, "s-lane-launched", "root-agent")
+    agents.update_session("s-lane-launched", launched_model=_CHEAP)
+
+    payload, seen, _ = _dispatch_file_agent(
+        "s-lane-launched", provider_id, monkeypatch
+    )
+
+    assert payload["ok"] is True
+    assert seen["model_id"] == _CHEAP
+
+
+def test_file_agent_without_launched_model_uses_provider_default_not_index_0(
+    agents, monkeypatch
+):
+    provider_id = _lane(agents, default_model=_CHEAP)
+    _mk_session(agents, "s-lane-default", "root-agent")
+
+    payload, seen, _ = _dispatch_file_agent(
+        "s-lane-default", provider_id, monkeypatch
+    )
+
+    assert payload["ok"] is True
+    assert seen["model_id"] == _CHEAP
+    assert seen["model_id"] != _GROK
+
+
+def test_file_agent_uncurated_launched_model_falls_through(agents, monkeypatch):
+    provider_id = _lane(agents, default_model=_CHEAP)
+    _mk_session(agents, "s-lane-uncurated", "root-agent")
+    agents.update_session("s-lane-uncurated", launched_model="opus")
+
+    payload, seen, _ = _dispatch_file_agent(
+        "s-lane-uncurated", provider_id, monkeypatch
+    )
+
+    assert payload["ok"] is True
+    assert seen["model_id"] == _CHEAP
+
+
+def test_file_agent_with_no_resolvable_model_refuses_dispatch(agents, monkeypatch):
+    provider_id = _lane(agents, default_model=None)
+    _mk_session(agents, "s-lane-none", "root-agent")
+
+    payload, _, calls = _dispatch_file_agent("s-lane-none", provider_id, monkeypatch)
+
+    assert payload["ok"] is False
+    assert "model" in payload["error"]
+    assert calls == []
+
+
+def test_file_agent_profile_mapping_beats_provider_default(agents, monkeypatch):
+    provider_id = _lane(agents, default_model=_GROK)
+    agents.create_profile(
+        "lane-caller", "Lane Caller", None,
+        {"model": "opus", "provider_models": {provider_id: _CHEAP}},
+    )
+    _mk_session(agents, "s-lane-mapped", "lane-caller")
+
+    payload, seen, _ = _dispatch_file_agent(
+        "s-lane-mapped", provider_id, monkeypatch
+    )
+
+    assert payload["ok"] is True
+    assert seen["model_id"] == _CHEAP
+
+
+def test_file_agent_native_caller_keeps_inherit_none(agents):
+    """Native leg: no provider row to curate against, so ``None`` (inherit the
+    caller's model) stays a legal answer."""
+    _mk_session(agents, "s-lane-native", "root-agent")
+    seen = {}
+
+    async def fake_worker(**kwargs):
+        seen.update(kwargs)
+        return WorkerOutcome(ok=True, session_id="w-native", report="r")
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        payload = asyncio.run(_dispatch(
+            {"agent": "researcher", "prompt": "go"}, "s-lane-native",
+            agent_registry={"researcher": _definition()},
+        ))
+
+    assert payload["ok"] is True
+    assert seen["model_id"] is None
+
+
 def test_dispatcher_reads_the_agent_registry_off_the_ctx(agents):
     """NativeLoop seeds ctx.extra['agent_registry'] AFTER this dispatcher is
     built into the same ctx, so the read must happen at call time."""

@@ -43,8 +43,12 @@ resolve the same names, which is what the adapter's shared agents index
 promises the model on both.
 
 A file agent has no ``agents`` row, so it borrows the caller's profile,
-effective provider, and selected model. Its markdown body rides the worker's
-system prompt as an override block. Consequences, deliberate:
+effective provider, and selected model. On a provider-bound dispatch the
+borrowed model is resolved as parent turn's model → caller profile's model for
+that provider → provider ``default_model``, and the dispatch is refused when
+none of those is curated (never the registry's first entry). Its markdown body
+rides the worker's system prompt as an override block. Consequences,
+deliberate:
 
 * ``tools:`` in the frontmatter is ENFORCED (ruling CE12), not advisory: the
   list rides the worker's turn as a ``tool_allowlist`` override and becomes
@@ -66,7 +70,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 if TYPE_CHECKING:  # pragma: no cover — annotation-only; every DB import here is
     # deliberately lazy (see the function bodies), so the row types ride the
@@ -380,6 +384,77 @@ def _credential_gap(provider_id: Optional[str]) -> Optional[str]:
     return None
 
 
+def _file_agent_model_id(
+    caller_row: Mapping[str, Any],
+    caller_profile_id: str,
+    provider_id: Optional[str],
+) -> Tuple[Optional[str], Optional[str]]:
+    """The model a file/plugin agent inherits — ``(model_id, error)``.
+
+    A file agent has no ``agents`` row to carry a per-provider model, so it
+    borrows one. On the native Claude leg ``None`` is a legal answer: the worker
+    turn simply inherits the caller's model. On a PROVIDER-bound leg it is not —
+    a model-less provider turn resolves downstream to an arbitrary curated entry
+    (the registry's FIRST id, which is how every subagent of a cheap parent
+    silently ran on the roster's most expensive model, 2026-08-20 incident). The
+    provider branch therefore returns only a CURATED id and refuses otherwise;
+    list position is never a model choice.
+    """
+    launched = str(caller_row.get("launched_model") or "").strip() or None
+    if not provider_id:
+        return launched, None
+
+    from app.db import database
+
+    try:
+        row = database.get_model_provider(provider_id, include_token=False)
+    except Exception:  # noqa: BLE001 — a lookup failure reads as "missing"
+        logger.debug(
+            "task_dispatch: provider lookup failed for %s", provider_id, exc_info=True
+        )
+        row = None
+    if not row:
+        return None, (
+            f"Model provider '{provider_id}' no longer exists, so the worker's "
+            "model cannot be resolved."
+        )
+
+    from app.core.provider_agent import curated_model_ids
+
+    curated = curated_model_ids(row)
+
+    # The parent turn's model first: ``launched_model`` tracks composer
+    # hot-swaps, so it is the binding the human actually chose to pay for.
+    if launched and launched in curated:
+        return launched, None
+
+    try:
+        from app.core.agent_provider_models import model_for_provider
+
+        profile = database.get_profile(caller_profile_id) or {}
+        mapped = model_for_provider(profile.get("config") or {}, provider_id)
+    except Exception:  # noqa: BLE001 — no mapping is a legal outcome
+        logger.debug(
+            "task_dispatch: profile model lookup failed for %s",
+            caller_profile_id, exc_info=True,
+        )
+        mapped = None
+    if mapped and mapped in curated:
+        return mapped, None
+
+    default = row.get("default_model")
+    if isinstance(default, str) and default in curated:
+        return default, None
+
+    label = row.get("name") or provider_id
+    return None, (
+        f"Task cannot resolve a model for this file agent on provider "
+        f"'{label}': the calling session's model is not usable here and the "
+        "provider has no curated default model. Set the provider's default "
+        "model or pick a provider model for this session."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
@@ -453,7 +528,11 @@ async def dispatch_task_tool(
     if definition is not None:
         target_name = str(_def_field(definition, "name", ref) or ref)
         profile_id = str(caller_pid)
-        model_id = str(caller_row.get("launched_model") or "").strip() or None
+        model_id, model_error = _file_agent_model_id(
+            caller_row, str(caller_pid), effective_provider_id
+        )
+        if model_error:
+            return {"ok": False, "error": model_error}
         system_prompt_append = _file_agent_prompt(definition)
         tool_allowlist = _definition_tool_allowlist(definition)
         result_agent = target_name
