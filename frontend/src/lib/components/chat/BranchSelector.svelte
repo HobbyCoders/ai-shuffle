@@ -23,9 +23,11 @@
 		projectName?: string | null;
 		/** Open the "create branch" modal (owned by the parent pill bar). */
 		onClickNewBranch?: () => void;
+		/** Use a stacked, full-width row and inline menu inside the mobile sheet. */
+		sheetMode?: boolean;
 	}
 
-	let { projectName = null, onClickNewBranch }: Props = $props();
+	let { projectName = null, onClickNewBranch, sheetMode = false }: Props = $props();
 
 	// Worktree mode locks the branch to the session's worktree branch.
 	const isWorktreeMode = $derived(!!($activeSession.worktreeId || $activeSession.worktreeBranch) || $gitMode === 'worktree');
@@ -134,7 +136,7 @@
 
 <svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} />
 
-<div class="branch-selector" bind:this={dropdownRef}>
+<div class="branch-selector" class:sheet-mode={sheetMode} bind:this={dropdownRef}>
 	<button
 		type="button"
 		class="pill branch-btn"
@@ -249,6 +251,39 @@
 		position: relative;
 		min-width: 0;
 		flex-shrink: 1;
+	}
+
+	.branch-selector.sheet-mode {
+		position: relative;
+		width: 100%;
+		flex-shrink: 1;
+	}
+
+	.sheet-mode .pill {
+		width: 100%;
+		height: 52px;
+		padding: 0 14px;
+		border-color: var(--border-subtle);
+		border-radius: 14px;
+		background: color-mix(in oklch, var(--muted) 55%, var(--card));
+	}
+
+	.sheet-mode .project-name,
+	.sheet-mode .branch-name {
+		max-width: none;
+	}
+
+	.sheet-mode .branch-name {
+		flex: 1;
+	}
+
+	.sheet-mode .branch-dropdown {
+		position: static;
+		width: 100%;
+		min-width: 0;
+		max-width: none;
+		max-height: 45dvh;
+		margin-top: 6px;
 	}
 
 	/* Pill button — the composer island's `.pill` metrics (mockup): 26px tall,

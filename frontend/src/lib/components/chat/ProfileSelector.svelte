@@ -9,6 +9,12 @@
 	import GroupedSelector from '$lib/components/GroupedSelector.svelte';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 
+	interface Props {
+		sheetMode?: boolean;
+	}
+
+	let { sheetMode = false }: Props = $props();
+
 	let profileDropdownRef = $state<HTMLDivElement | null>(null);
 	let groupedSelector = $state<ReturnType<typeof GroupedSelector> | null>(null);
 
@@ -55,7 +61,7 @@
 	});
 </script>
 
-<div class="selector-wrapper" bind:this={profileDropdownRef}>
+<div class="selector-wrapper" class:sheet-mode={sheetMode} bind:this={profileDropdownRef}>
 	<button
 		type="button"
 		class="context-selector-btn {$activeSession.profile ? '' : 'unset'}"
@@ -94,6 +100,38 @@
 	.selector-wrapper {
 		position: relative;
 		flex-shrink: 0;
+	}
+
+	.selector-wrapper.sheet-mode {
+		position: relative;
+		width: 100%;
+		flex-shrink: 1;
+	}
+
+	.sheet-mode .context-selector-btn {
+		width: 100%;
+		height: 52px;
+		padding: 0 14px;
+		border-color: var(--border-subtle);
+		border-radius: 14px;
+		background: color-mix(in oklch, var(--muted) 55%, var(--card));
+	}
+
+	.sheet-mode .selector-text {
+		flex: 1;
+		max-width: none;
+		text-align: left;
+		font-size: 0.86rem;
+		font-weight: 600;
+	}
+
+	.sheet-mode .selector-dropdown {
+		position: static;
+		width: 100%;
+		min-width: 0;
+		max-width: none;
+		max-height: 45dvh;
+		margin-top: 6px;
 	}
 
 	/* The mockup's `.pill.agent`: standard pill metrics with a primary-tinted

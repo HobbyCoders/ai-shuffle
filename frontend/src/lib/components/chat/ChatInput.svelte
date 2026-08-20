@@ -1078,6 +1078,11 @@
 				box-shadow 180ms ease;
 		}
 
+		/* Profile, branch and worktree setup now live in the mobile controls sheet. */
+		.context-pill-row {
+			display: none;
+		}
+
 		.input-area {
 			min-height: 56px;
 			padding: 10px 12px 4px;
@@ -1096,8 +1101,14 @@
 			border-radius: 999px;
 		}
 
-		.mobile-collapsed .context-pill-row,
-		.mobile-collapsed :global(.mobile-controls) {
+		.mobile-collapsed .context-pill-row {
+			display: none;
+		}
+
+		/* Keep the sheet trigger reachable in an existing chat's collapsed composer.
+		   The context meter is secondary here and would unnecessarily squeeze the
+		   message field, so only the icon-only sheet trigger remains on the left. */
+		.mobile-collapsed :global(.mobile-controls .usage-context-wrapper) {
 			display: none;
 		}
 

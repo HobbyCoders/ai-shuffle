@@ -32,6 +32,13 @@
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
 	import Banner from '$lib/components/Banner.svelte';
 
+	interface Props {
+		/** Stack the mode and worktree selectors as full-width mobile-sheet rows. */
+		sheetMode?: boolean;
+	}
+
+	let { sheetMode = false }: Props = $props();
+
 	// --- UI state ---
 	let showBranchDropdown = $state(false);
 	let dropdownRef = $state<HTMLDivElement | null>(null);
@@ -328,7 +335,7 @@
 
 <svelte:window onclick={handleClickOutside} />
 
-<div class="execution-mode-bar">
+<div class="execution-mode-bar" class:sheet-mode={sheetMode}>
 	<div class="mode-bar-row">
 		<!-- Mode dropdown pill: shows the base mode (Local) plus a worktree marker,
 		     and on click opens an upward menu with Local as a radio and a Worktree
@@ -615,6 +622,53 @@
 		min-width: 0;
 		max-width: 100%;
 		overflow: visible;
+	}
+
+	.execution-mode-bar.sheet-mode {
+		z-index: auto;
+		width: 100%;
+		align-items: stretch;
+		align-self: stretch;
+	}
+
+	.sheet-mode .mode-bar-row {
+		width: 100%;
+		flex-direction: column;
+		align-items: stretch;
+		gap: 8px;
+	}
+
+	.sheet-mode .mode-selector,
+	.sheet-mode .branch-selector {
+		position: relative;
+		width: 100%;
+	}
+
+	.sheet-mode .mode-trigger,
+	.sheet-mode .branch-trigger {
+		width: 100%;
+		height: 52px;
+		padding: 0 14px;
+		border-color: var(--border-subtle);
+		border-radius: 14px;
+		background: color-mix(in oklch, var(--muted) 55%, var(--card));
+	}
+
+	.sheet-mode .mode-trigger-label,
+	.sheet-mode .branch-name {
+		flex: 1;
+		max-width: none;
+		text-align: left;
+	}
+
+	.sheet-mode .branch-dropdown,
+	.sheet-mode .mode-dropdown {
+		position: static;
+		width: 100%;
+		min-width: 0;
+		max-width: none;
+		max-height: 45dvh;
+		margin-top: 6px;
 	}
 
 	.mode-bar-row {
