@@ -36,9 +36,11 @@
 	);
 	const isStreaming = $derived($activeSession.isStreaming);
 
-	// Dropdown state — driven by the shared store so opening this closes the
-	// profile selector (and vice versa).
-	const showDropdown = $derived($openHeaderDropdown === 'branch');
+	// The sheet uses a distinct shared id: its CSS-hidden composer counterpart
+	// remains mounted on phones, so a plain `branch` id would render two menus.
+	// Distinct ids still preserve single-open coordination with the profile row.
+	const dropdownId = $derived(sheetMode ? 'sheet-branch' as const : 'branch' as const);
+	const showDropdown = $derived($openHeaderDropdown === dropdownId);
 	let dropdownRef = $state<HTMLDivElement | null>(null);
 	let checkingOut = $state(false);
 	let branchSearch = $state('');
@@ -90,12 +92,17 @@
 	);
 	const showSearch = $derived(localBranches.length + remoteBranches.length > 5);
 
-	function toggleDropdown() {
+	function closeBranchDropdown() {
+		closeDropdown(dropdownId);
+	}
+
+	function toggleDropdown(event: MouseEvent) {
+		event.stopPropagation();
 		if (branchLocked) return;
 		if (showDropdown) {
-			closeDropdown('branch');
+			closeBranchDropdown();
 		} else {
-			openDropdown('branch');
+			openDropdown(dropdownId);
 			branchSearch = '';
 			git.loadBranches();
 			requestAnimationFrame(() => searchInputRef?.focus());
@@ -104,11 +111,11 @@
 
 	async function checkoutBranch(branchName: string) {
 		if (branchName === currentBranch) {
-			closeDropdown('branch');
+			closeBranchDropdown();
 			return;
 		}
 		checkingOut = true;
-		closeDropdown('branch');
+		closeBranchDropdown();
 		try {
 			await checkoutBranchWithToast(branchName, () => git.refreshDiffStats());
 		} finally {
@@ -117,21 +124,21 @@
 	}
 
 	function handleNewBranch() {
-		closeDropdown('branch');
+		closeBranchDropdown();
 		onClickNewBranch?.();
 	}
 
 	function handleClickOutside(e: MouseEvent) {
 		if (showDropdown && dropdownRef && !dropdownRef.contains(e.target as Node)) {
-			closeDropdown('branch');
+			closeBranchDropdown();
 		}
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
-		if (e.key === 'Escape' && showDropdown) closeDropdown('branch');
+		if (e.key === 'Escape' && showDropdown) closeBranchDropdown();
 	}
 
-	onDestroy(() => closeDropdown('branch'));
+	onDestroy(closeBranchDropdown);
 </script>
 
 <svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} />

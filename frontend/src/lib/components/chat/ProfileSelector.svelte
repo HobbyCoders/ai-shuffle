@@ -18,35 +18,42 @@
 	let profileDropdownRef = $state<HTMLDivElement | null>(null);
 	let groupedSelector = $state<ReturnType<typeof GroupedSelector> | null>(null);
 
-	// Driven by the shared store so opening this closes the branch/status dropdowns.
-	const showProfileDropdown = $derived($openHeaderDropdown === 'profile');
+	// The sheet uses a distinct shared id: its CSS-hidden composer counterpart
+	// remains mounted on phones, so a plain `profile` id would render two menus.
+	// Distinct ids still preserve single-open coordination with the branch row.
+	const dropdownId = $derived(sheetMode ? 'sheet-profile' as const : 'profile' as const);
+	const showProfileDropdown = $derived($openHeaderDropdown === dropdownId);
 
 	const selectedProfileName = $derived($profiles.find(p => p.id === $activeSession.profile)?.name || 'Agent');
 
 	function handleProfileClick(e: MouseEvent) {
 		e.stopPropagation();
 		if (showProfileDropdown) {
-			closeDropdown('profile');
+			closeProfileDropdown();
 		} else {
-			openDropdown('profile');
+			openDropdown(dropdownId);
 			groupedSelector?.reset();
 		}
 	}
 
+	function closeProfileDropdown() {
+		closeDropdown(dropdownId);
+	}
+
 	function selectProfile(profileId: string) {
 		activeSession.setProfile(profileId);
-		closeDropdown('profile');
+		closeProfileDropdown();
 	}
 
 	function handleClickOutside(e: MouseEvent) {
 		if (showProfileDropdown && profileDropdownRef && !profileDropdownRef.contains(e.target as Node)) {
-			closeDropdown('profile');
+			closeProfileDropdown();
 		}
 	}
 
 	function handleEscape(e: KeyboardEvent) {
 		if (e.key === 'Escape') {
-			closeDropdown('profile');
+			closeProfileDropdown();
 		}
 	}
 
@@ -56,7 +63,7 @@
 		return () => {
 			document.removeEventListener('click', handleClickOutside);
 			document.removeEventListener('keydown', handleEscape);
-			closeDropdown('profile');
+			closeProfileDropdown();
 		};
 	});
 </script>
