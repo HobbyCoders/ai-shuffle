@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
 
 afterEach(() => cleanup());
@@ -83,6 +83,17 @@ describe('MobileComposerControlsSheet', () => {
 		expect(screen.queryByRole('button', { name: /sonnet/i })).toBeNull();
 		await fireEvent.click(screen.getByRole('option', { name: /opus/i }));
 		expect(onModelSelect).toHaveBeenCalledWith('opus');
+	});
+
+	it('does not focus model search when the model subpage opens', async () => {
+		render(MobileComposerControlsSheet, { props: props() });
+
+		await fireEvent.click(screen.getByRole('button', { name: /sonnet.*model used/i }));
+		const dialog = screen.getByRole('dialog', { name: /choose model/i });
+		await waitFor(() => expect(document.activeElement).toBe(dialog));
+		expect(screen.getByRole('searchbox', { name: /search models/i })).not.toBe(
+			document.activeElement
+		);
 	});
 
 	it('applies effort, access, and computer-control changes without closing the sheet', async () => {

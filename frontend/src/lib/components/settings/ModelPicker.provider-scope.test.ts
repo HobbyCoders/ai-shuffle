@@ -50,6 +50,22 @@ afterEach(() => {
 });
 
 describe('ModelPicker provider scope', () => {
+	it('keeps focus on the trigger when the picker opens', async () => {
+		const { getByRole } = render(ModelPicker, {
+			props: {
+				value: 'sonnet',
+				onSelect: vi.fn()
+			}
+		});
+
+		const trigger = getByRole('button', { name: 'Sonnet' });
+		trigger.focus();
+		await fireEvent.click(trigger);
+
+		expect(getByRole('textbox', { name: 'Search models' })).not.toBe(document.activeElement);
+		expect(document.activeElement).toBe(trigger);
+	});
+
 	it('shows only the selected provider and emits its composite model value', async () => {
 		const onSelect = vi.fn();
 		const { getByRole, queryByText } = render(ModelPicker, {
