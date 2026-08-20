@@ -1,5 +1,6 @@
 name: Build and Push Docker Image
 
+# Publish images for explicit dispatches and releases rather than rebuilding on every merge.
 on:
   # Manual trigger (with the no-cache escape hatch).
   workflow_dispatch:
@@ -9,13 +10,7 @@ on:
         required: false
         type: boolean
         default: false
-  # Auto-build on pushes to the default branch and on version tags.
-  # Tagging semantics are unchanged (see the metadata step in the merge job):
-  #   - main push  -> 'latest' (is_default_branch) + branch tag + sha-<sha>
-  #   - v* tag      -> semver tags (1.2.3, 1.2, 1) + sha-<sha>
   push:
-    branches:
-      - main
     tags:
       - 'v*'
 
@@ -32,15 +27,7 @@ env:
 jobs:
   build:
     timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: blacksmith-8vcpu-ubuntu-2404
-          - platform: linux/arm64
-            runner: blacksmith-8vcpu-ubuntu-2404-arm
-    runs-on: ${{ matrix.runner }}
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     permissions:
       contents: read
       packages: write
@@ -68,74 +55,6 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
-
-      - name: Build and push by digest
-        id: build
-        uses: useblacksmith/build-push-action@v2
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: ${{ matrix.platform }}
-          labels: ${{ steps.meta.outputs.labels }}
-          # inputs.no_cache is '' on push triggers; coerce to a strict boolean
-          # (the action rejects anything but YAML true/false literals).
-          no-cache: ${{ inputs.no_cache == true }}
-          build-args: |
-            ${{ inputs.no_cache && format('CACHEBUST={0}', github.run_id) || '' }}
-            GIT_SHA=${{ github.sha }}
-          # Layer caching is automatic via Blacksmith's sticky disk:
-          # useblacksmith/setup-docker-builder persists /var/lib/buildkit across
-          # runs, so no cache-from/cache-to registry round-trip is needed.
-          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
-
-      - name: Export digest
-        run: |
-          mkdir -p ${{ runner.temp }}/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "${{ runner.temp }}/digests/${digest#sha256:}"
-
-      - name: Upload digest
-        uses: actions/upload-artifact@v4
-        with:
-          name: digests-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
-          path: ${{ runner.temp }}/digests/*
-          if-no-files-found: error
-          retention-days: 1
-
-  merge:
-    timeout-minutes: 10
-    runs-on: blacksmith-8vcpu-ubuntu-2404
-    needs: build
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - name: Download digests
-        uses: actions/download-artifact@v4
-        with:
-          path: ${{ runner.temp }}/digests
-          pattern: digests-*
-          merge-multiple: true
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Lowercase image name
-        run: echo "IMAGE=${REGISTRY}/${IMAGE_NAME,,}" >> "$GITHUB_ENV"
-
-      - name: Extract metadata (tags, labels)
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE }}
           tags: |
             # Tag with 'latest' on main/master branch
             type=raw,value=latest,enable={{is_default_branch}}
@@ -150,11 +69,24 @@ jobs:
             # Tag with git short SHA (simple prefix, works for all events)
             type=sha,prefix=sha-
 
-      - name: Create manifest list and push
-        working-directory: ${{ runner.temp }}/digests
-        run: |
-          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.IMAGE }}@sha256:%s ' *)
+      - name: Build and push
+        uses: useblacksmith/build-push-action@v2
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          push: true
+          # inputs.no_cache is '' on tag pushes; coerce to a strict boolean
+          # (the action rejects anything but YAML true/false literals).
+          no-cache: ${{ inputs.no_cache == true }}
+          build-args: |
+            ${{ inputs.no_cache && format('CACHEBUST={0}', github.run_id) || '' }}
+            GIT_SHA=${{ github.sha }}
+          # Layer caching is automatic via Blacksmith's sticky disk:
+          # useblacksmith/setup-docker-builder persists /var/lib/buildkit across
+          # runs, so no cache-from/cache-to registry round-trip is needed.
 
       - name: Inspect image
         run: |

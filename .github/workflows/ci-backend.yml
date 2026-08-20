@@ -1,0 +1,69 @@
+name: CI Backend
+
+# Backend half of the split CI. Paths-filtered: a PR that touches no backend
+# file runs this workflow not at all, so docs-only PRs run no CI whatsoever —
+# intended, that is the point of the split.
+#
+# Blacksmith runners are PAID per minute; every trigger below is deliberate.
+on:
+  pull_request:
+    paths:
+      - 'app/**'
+      - 'tests/**'
+      - 'vendor/**'
+      - 'requirements.txt'
+      - 'requirements-dev.txt'
+      - 'pytest.ini'
+      - '.github/workflows/ci-backend.yml'
+  # Main-branch canary. Merges to main no longer run CI directly — the PR
+  # already ran it, and re-running on the merge commit doubled the bill for a
+  # result that is green ~always. What that loses is semantic conflicts between
+  # two branches that were each green alone; the canary catches those within
+  # ~6h instead of at the next PR.
+  schedule:
+    - cron: '7 */6 * * *'
+  # Manual canary (`gh workflow run ci-backend.yml`).
+  workflow_dispatch:
+
+# Cancel superseded runs (force-pushes / rapid successive commits) instead of
+# letting stale runs finish and fail/email after a newer commit already ran.
+concurrency:
+  group: ci-backend-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend tests
+    # Keep a hard job timeout to bound silent backend wedges and surface a useful failure rather than waiting
+    # for the platform default.
+    timeout-minutes: 20
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+
+      # Upstream actions/setup-* on purpose: Blacksmith archived its
+      # useblacksmith/setup-* forks and now routes the official cache actions
+      # through its colocated cache transparently.
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          # 3.12 matches production (the Docker image) and the vendored fluid
+          # harness's requires-python floor.
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        # The vendored fluid harness must be importable or tests/core's fluid
+        # modules fail at COLLECTION, aborting the whole run before any test
+        # executes (red on main since the vendor-snapshot commit f9681e4a).
+        run: |
+          pip install -r requirements.txt -r requirements-dev.txt
+          pip install -e ./vendor/fluid
+
+      - name: Run fast test subset
+        # The suite uses an in-memory SQLite shim — no Postgres service needed.
+        # addopts="" overrides any pytest.ini addopts so this never fails on coverage.
+        # --timeout=120 bounds the rare hard-wedge per test: a wedged run fails
+        # in ~2 minutes with the hung test named, instead of billing the full
+        # 20-minute job timeout with no diagnosis.
+        run: python -m pytest tests/api tests/core tests/db tests/middleware -o addopts="" -q -p no:cacheprovider --timeout=120
