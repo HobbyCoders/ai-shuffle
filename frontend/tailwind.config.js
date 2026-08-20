@@ -55,7 +55,20 @@ export default {
 					ring: 'var(--selection-ring)',
 					glow: 'var(--selection-glow)',
 					text: 'var(--selection-text)'
-				}
+				},
+				/* Studio Noir token pass-through */
+				'subtle-foreground': 'var(--subtle-foreground)',
+				'border-strong': 'var(--border-strong)',
+				sidebar: {
+					DEFAULT: 'var(--sidebar)',
+					foreground: 'var(--sidebar-foreground)',
+					border: 'var(--sidebar-border)',
+					accent: 'var(--sidebar-accent)',
+					'accent-active': 'var(--sidebar-accent-active)',
+					muted: 'var(--sidebar-muted)'
+				},
+				scrim: 'var(--scrim)',
+				'code-bg': 'var(--code-bg)'
 			},
 			borderRadius: {
 				lg: 'var(--radius)',
