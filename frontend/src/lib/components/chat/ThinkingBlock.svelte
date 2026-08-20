@@ -46,12 +46,14 @@
 	let userToggled = $state(false);
 	let userExpandedChoice = $state(false);
 
-	// Compute expanded state: prop override > user toggle > preference
+	// Compute expanded state: user toggle > prop override > preference. The
+	// user's click must always win — with the prop first, a supplied
+	// initialExpanded made the header a dead control.
 	const isExpanded = $derived(
-		initialExpanded !== undefined
-			? initialExpanded
-			: userToggled
-				? userExpandedChoice
+		userToggled
+			? userExpandedChoice
+			: initialExpanded !== undefined
+				? initialExpanded
 				: prefs.thinkingStartExpanded
 	);
 
@@ -60,27 +62,34 @@
 		userExpandedChoice = !isExpanded;
 	}
 
-	// Generate a summary of the thinking content (first ~100 chars of meaningful text)
-	function getSummary(text: string): string {
+	// Collapsed preview: the actual thinking text, markdown-stripped. The CSS
+	// line clamp decides how much fits; this only bounds the string so a huge
+	// block doesn't land in the DOM. While streaming the TAIL is the useful
+	// part — it shows what is being thought right now.
+	function getPreview(text: string, live: boolean): string {
 		if (!text) return '';
 
-		// Strip markdown formatting for cleaner summary
-		let cleaned = text
-			.replace(/```[\s\S]*?```/g, '') // Remove code blocks
-			.replace(/`[^`]+`/g, '')        // Remove inline code
-			.replace(/#+\s*/g, '')          // Remove headers
+		const cleaned = text
+			.replace(/```[\s\S]*?```/g, ' ')   // Remove code blocks
+			.replace(/`[^`]+`/g, ' ')          // Remove inline code
+			.replace(/#+\s*/g, '')             // Remove headers
 			.replace(/\*\*([^*]+)\*\*/g, '$1') // Bold to plain
-			.replace(/\*([^*]+)\*/g, '$1')    // Italic to plain
+			.replace(/\*([^*]+)\*/g, '$1')     // Italic to plain
 			.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // Links to text
-			.replace(/\n+/g, ' ')            // Newlines to spaces
+			.replace(/\s+/g, ' ')              // Whitespace runs to spaces
 			.trim();
 
-		// Get first ~120 chars, break at word boundary
-		if (cleaned.length <= 120) return cleaned;
+		const MAX = 400;
+		if (cleaned.length <= MAX) return cleaned;
 
-		const truncated = cleaned.substring(0, 120);
-		const lastSpace = truncated.lastIndexOf(' ');
-		return (lastSpace > 80 ? truncated.substring(0, lastSpace) : truncated) + '…';
+		if (live) {
+			const tail = cleaned.slice(-MAX);
+			const firstSpace = tail.indexOf(' ');
+			return '…' + (firstSpace > 0 && firstSpace < 40 ? tail.slice(firstSpace + 1) : tail);
+		}
+		const head = cleaned.slice(0, MAX);
+		const lastSpace = head.lastIndexOf(' ');
+		return (lastSpace > MAX - 40 ? head.slice(0, lastSpace) : head) + '…';
 	}
 
 	// ── Typewriter animation ───────────────────────────────────────────────
@@ -198,10 +207,10 @@
 		</span>
 	</button>
 
-	<!-- Summary when collapsed -->
+	<!-- Preview when collapsed: real thinking text, clamped to three lines -->
 	{#if showSummary}
 		<div class="thinking-summary">
-			{getSummary(content)}
+			{getPreview(displayContent, streaming)}
 		</div>
 	{/if}
 
@@ -312,6 +321,12 @@
 		color: var(--subtle-foreground);
 		font-style: italic;
 		border-left: 1px solid var(--border);
+		display: -webkit-box;
+		-webkit-line-clamp: 3;
+		line-clamp: 3;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
+		overflow-wrap: anywhere;
 	}
 
 	.thinking-content {

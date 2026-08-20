@@ -39,7 +39,6 @@
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
 	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
-	import { username } from '$lib/stores/auth.svelte';
 	import SessionCard from './SessionCard.svelte';
 	import {
 		deriveStatus,
@@ -56,7 +55,6 @@
 		onNewSession: () => void;
 		onOpenSession: (sessionId: string) => void;
 		onOpenFeature: (type: ViewType) => void;
-		onOpenSessions: () => void;
 		onOpenSpotlight?: () => void;
 		/** Extra control for the header row (the drawer's close button). */
 		headerAction?: Snippet;
@@ -67,14 +65,37 @@
 		onNewSession,
 		onOpenSession,
 		onOpenFeature,
-		onOpenSessions,
 		onOpenSpotlight,
 		headerAction
 	}: Props = $props();
 
-	// How many settled sessions the list shows before deferring to the board.
+	// The list starts capped; "All sessions" grows it in place (the board is gone).
 	const RECENT_LIMIT = 30;
+	const SHOW_MORE_STEP = 50;
 	const ARCHIVED_LIMIT = 30;
+
+	// --- collapsible groups (persisted) -------------------------------------
+	const GROUPS_KEY = 'sidebar-collapsed-groups';
+
+	function loadCollapsedGroups(): Record<string, boolean> {
+		if (typeof localStorage === 'undefined') return {};
+		try {
+			return JSON.parse(localStorage.getItem(GROUPS_KEY) || '{}');
+		} catch {
+			return {};
+		}
+	}
+
+	let collapsedGroups = $state<Record<string, boolean>>(loadCollapsedGroups());
+
+	function toggleGroup(name: string) {
+		collapsedGroups = { ...collapsedGroups, [name]: !collapsedGroups[name] };
+		try {
+			localStorage.setItem(GROUPS_KEY, JSON.stringify(collapsedGroups));
+		} catch {
+			// Storage full or blocked — the toggle still works for this session.
+		}
+	}
 
 	// ---------------------------------------------------------------- clock
 	// One shared ticker drives every card's timer: 1s while something is live,
@@ -186,8 +207,10 @@
 
 	const workingRows = $derived(rows.filter((r) => r.status === 'working' || r.status === 'await'));
 	const restRows = $derived(rows.filter((r) => r.status !== 'working' && r.status !== 'await'));
-	const recentRows = $derived(restRows.slice(0, RECENT_LIMIT));
+	let recentLimit = $state(RECENT_LIMIT);
+	const recentRows = $derived(restRows.slice(0, recentLimit));
 	const hiddenRecent = $derived(Math.max(0, restRows.length - recentRows.length));
+	const fullyExpanded = $derived(hiddenRecent === 0 && recentLimit > RECENT_LIMIT);
 
 	const archivedRows = $derived.by((): CardRow[] =>
 		visibleSessions
@@ -217,40 +240,22 @@
 			: []),
 		{ label: 'Projects', icon: FolderKanban, type: 'project' as ViewType, on: currentType === 'project' },
 		{ label: 'Stats', icon: BarChart3, type: 'stats' as ViewType, on: currentType === 'stats' },
+		{ label: 'Docs', icon: BookOpen, type: 'docs' as ViewType, on: currentType === 'docs' },
 		...(isAdmin
 			? [{ label: 'Settings', icon: Settings, type: 'settings' as ViewType, on: currentType === 'settings' }]
 			: [])
 	]);
 
-	// The account menu keeps Docs (and Settings for non-rail widths) reachable.
-	let accountMenuOpen = $state(false);
-	let accountMenuRef = $state<HTMLDivElement | null>(null);
-
-	const accountItems = $derived([
-		{ label: 'Docs', icon: BookOpen, type: 'docs' as ViewType },
-		...(isAdmin ? [{ label: 'Settings', icon: Settings, type: 'settings' as ViewType }] : [])
-	]);
-
-	const initials = $derived.by(() => {
-		const name = ($username ?? '').trim();
-		if (!name) return '·';
-		const parts = name.split(/[\s._-]+/).filter(Boolean);
-		const letters = parts.length > 1 ? parts[0][0] + parts[1][0] : name.slice(0, 2);
-		return letters.toUpperCase();
-	});
-
 	// --- menu plumbing -----------------------------------------------------
 	function closeMenus() {
 		projectMenuOpen = false;
 		deviceMenuOpen = false;
-		accountMenuOpen = false;
 	}
 
 	function handleWindowClick(e: MouseEvent) {
 		const t = e.target as Node;
 		if (projectMenuOpen && projectMenuRef && !projectMenuRef.contains(t)) projectMenuOpen = false;
 		if (deviceMenuOpen && deviceMenuRef && !deviceMenuRef.contains(t)) deviceMenuOpen = false;
-		if (accountMenuOpen && accountMenuRef && !accountMenuRef.contains(t)) accountMenuOpen = false;
 	}
 
 	function handleWindowKeydown(e: KeyboardEvent) {
@@ -357,48 +362,69 @@
 
 	<div class="sb-scroll">
 		{#if workingRows.length > 0}
-			<h2 class="grouplabel">Working <span class="count">{workingRows.length}</span></h2>
-			<div class="cards">
-				{#each workingRows as row (row.session.id)}
-					<SessionCard
-						session={row.session}
-						status={row.status}
-						projectLabel={projectLabel(row.session)}
-						active={row.session.id === activeId}
-						{now}
-						onOpen={onOpenSession}
-					/>
-				{/each}
-			</div>
+			<button class="grouplabel" onclick={() => toggleGroup('working')} aria-expanded={!collapsedGroups.working}>
+				Working <span class="count">{workingRows.length}</span>
+				<span class="group-chev" class:is-collapsed={collapsedGroups.working}>
+					<ChevronDown size={13} strokeWidth={2} />
+				</span>
+			</button>
+			{#if !collapsedGroups.working}
+				<div class="cards">
+					{#each workingRows as row (row.session.id)}
+						<SessionCard
+							session={row.session}
+							status={row.status}
+							projectLabel={projectLabel(row.session)}
+							active={row.session.id === activeId}
+							{now}
+							onOpen={onOpenSession}
+						/>
+					{/each}
+				</div>
+			{/if}
 			<div class="divider" role="separator"></div>
 		{/if}
 
-		<h2 class="grouplabel">Recent <span class="count">{recentRows.length}</span></h2>
-		{#if recentRows.length === 0}
-			<p class="empty">No sessions yet</p>
-		{:else}
-			<div class="cards">
-				{#each recentRows as row (row.session.id)}
-					<SessionCard
-						session={row.session}
-						status={row.status}
-						projectLabel={projectLabel(row.session)}
-						active={row.session.id === activeId}
-						{now}
-						onOpen={onOpenSession}
-					/>
-				{/each}
-			</div>
-		{/if}
-
-		<!-- The board stays the full navigator; the sidebar list is capped, so this
-		     row is always available (and is the only way back to it from a feature
-		     page, where there is no breadcrumb to click). -->
-		<button class="shelf" onclick={onOpenSessions} title={hiddenRecent > 0 ? `${hiddenRecent} more not listed` : undefined}>
-			<span class="txt">All sessions ({rows.length})</span>
-			<span class="rule" aria-hidden="true"></span>
-			<ChevronRight size={14} strokeWidth={2} />
+		<button class="grouplabel" onclick={() => toggleGroup('recent')} aria-expanded={!collapsedGroups.recent}>
+			Recent <span class="count">{recentRows.length}</span>
+			<span class="group-chev" class:is-collapsed={collapsedGroups.recent}>
+				<ChevronDown size={13} strokeWidth={2} />
+			</span>
 		</button>
+		{#if !collapsedGroups.recent}
+			{#if recentRows.length === 0}
+				<p class="empty">No sessions yet</p>
+			{:else}
+				<div class="cards">
+					{#each recentRows as row (row.session.id)}
+						<SessionCard
+							session={row.session}
+							status={row.status}
+							projectLabel={projectLabel(row.session)}
+							active={row.session.id === activeId}
+							{now}
+							onOpen={onOpenSession}
+						/>
+					{/each}
+				</div>
+			{/if}
+
+			<!-- The board is retired: this shelf grows the list in place instead. -->
+			{#if hiddenRecent > 0}
+				<button class="shelf" onclick={() => (recentLimit += SHOW_MORE_STEP)}>
+					<span class="txt">All sessions ({rows.length})</span>
+					<span class="rule" aria-hidden="true"></span>
+					<span class="txt">{hiddenRecent} more</span>
+					<ChevronDown size={14} strokeWidth={2} />
+				</button>
+			{:else if fullyExpanded}
+				<button class="shelf" onclick={() => (recentLimit = RECENT_LIMIT)}>
+					<span class="txt">Show fewer</span>
+					<span class="rule" aria-hidden="true"></span>
+					<ChevronRight size={14} strokeWidth={2} />
+				</button>
+			{/if}
+		{/if}
 
 		{#if archivedCount > 0}
 			<button class="shelf" onclick={() => (archivedOpen = !archivedOpen)} aria-expanded={archivedOpen}>
@@ -434,30 +460,6 @@
 				<item.icon size={16} strokeWidth={1.85} />
 			</button>
 		{/each}
-
-		<div class="accountmenu" bind:this={accountMenuRef}>
-			<button
-				class="avatar"
-				aria-haspopup="menu"
-				aria-expanded={accountMenuOpen}
-				title={$username || 'Account'}
-				aria-label="Account"
-				onclick={() => { const next = !accountMenuOpen; closeMenus(); accountMenuOpen = next; }}
-			>{initials}</button>
-			{#if accountMenuOpen}
-				<div class="menu menu-up" role="menu">
-					{#if $username}
-						<div class="menu-user">{$username}</div>
-					{/if}
-					{#each accountItems as item (item.label)}
-						<button class="menu-item" role="menuitem" onclick={() => pickFeature(item.type)}>
-							<item.icon size={14} strokeWidth={1.7} />
-							<span class="menu-label">{item.label}</span>
-						</button>
-					{/each}
-				</div>
-			{/if}
-		</div>
 	</footer>
 </aside>
 
@@ -578,13 +580,6 @@
 		box-shadow: var(--shadow-l);
 		z-index: 60;
 	}
-	.menu-up {
-		top: auto;
-		bottom: calc(100% + 6px);
-		left: auto;
-		right: 0;
-		min-width: 168px;
-	}
 	.menu-item {
 		display: flex;
 		align-items: center;
@@ -610,17 +605,6 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
-	.menu-user {
-		padding: 6px 8px;
-		font-size: 11.5px;
-		color: var(--subtle-foreground);
-		border-bottom: 1px solid var(--border);
-		margin-bottom: 4px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
 	/* Session list */
 	.sb-scroll {
 		flex: 1 1 auto;
@@ -643,14 +627,27 @@
 		display: flex;
 		align-items: center;
 		gap: 7px;
+		width: 100%;
 		margin: 0;
 		padding: 12px 8px 6px;
+		border: none;
+		background: transparent;
 		font-size: 10.5px;
 		font-weight: 600;
 		letter-spacing: 0.075em;
 		text-transform: uppercase;
 		color: var(--subtle-foreground);
+		cursor: pointer;
+		text-align: left;
+		transition: color 0.13s ease;
 	}
+	.grouplabel:hover { color: var(--muted-foreground); }
+	.group-chev {
+		margin-left: auto;
+		display: inline-flex;
+		transition: transform 0.16s ease;
+	}
+	.group-chev.is-collapsed { transform: rotate(-90deg); }
 	.grouplabel .count {
 		font-family: var(--font-mono);
 		font-variant-numeric: tabular-nums;
@@ -736,23 +733,6 @@
 		z-index: 30;
 	}
 	.railbtn:hover .tip { opacity: 1; }
-
-	.accountmenu { position: relative; margin-left: auto; }
-	.avatar {
-		width: 24px;
-		height: 24px;
-		border: none;
-		border-radius: 50%;
-		display: grid;
-		place-items: center;
-		font-size: 10.5px;
-		font-weight: 600;
-		letter-spacing: 0.01em;
-		color: var(--foreground);
-		background: linear-gradient(155deg, oklch(0.42 0.05 200), oklch(0.28 0.03 250));
-		box-shadow: 0 0 0 1px var(--border);
-		cursor: pointer;
-	}
 
 	:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 

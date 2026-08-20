@@ -154,17 +154,6 @@
 		}
 	}
 
-	/**
-	 * Return to the Sessions section — show the current chat, or start a new one.
-	 */
-	function handleOpenSessions() {
-		layout.openBoard();
-		// Pull fresh sessions so cross-install mutations (active-state changes on
-		// another install) show up the moment the board opens, not just on next
-		// focus. Debounced via _refreshBoard so a rapid open/close/open doesn't
-		// stampede the API.
-		_refreshBoard();
-	}
 
 	// ============================================
 	// Lifecycle
@@ -191,10 +180,8 @@
 		void appData.loadSessions($sessionsTagFilter);
 	}
 	function refreshBoardIfVisible() {
-		// Only when the sessions board is the active view — no point refetching the
-		// list while the user is deep in a chat. (handleOpenSessions calls
-		// _refreshBoard directly since it navigates TO the board this same tick.)
-		if ($activeView?.type !== 'board') return;
+		// The sidebar session list is always on screen on desktop, so refresh on
+		// every visibility/focus return (still debounced by _refreshBoard).
 		_refreshBoard();
 	}
 
@@ -468,7 +455,6 @@
 		onNewSessionForProject={handleNewSessionForProject}
 		onOpenSession={handleOpenSession}
 		onOpenFeature={handleOpenFeature}
-		onOpenSessions={handleOpenSessions}
 		onOpenSpotlight={() => showSpotlight = true}
 		onOpenPlugins={() => handleOpenFeature('plugins')}
 	/>
