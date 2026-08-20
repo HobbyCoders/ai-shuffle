@@ -67,7 +67,8 @@
 		displayWindows,
 		windowLabel,
 		effectivePct,
-		usedPct,
+		reportedRemainingPct,
+		remainingFromUsedPct,
 		formatCountdown,
 		resolveBucket,
 		resolveBucketKey,
@@ -280,8 +281,8 @@
 	}
 
 	// ── Plan usage limits (resolved install's rate-limit windows) ─────────
-	// Claude subscription bars show used-of-100 (usedPct), not remaining.
-	// Per-second tick — keeps countdowns fresh and flips windows to 0% on reset.
+	// Claude subscription bars show the remaining quota reported by its usage feed.
+	// Per-second tick keeps countdowns and rolled-over windows fresh.
 	// Runs only while the popover is open; refreshed once otherwise.
 	let now: number = $state(Date.now());
 	$effect(() => {
@@ -293,21 +294,49 @@
 		return () => clearInterval(interval);
 	});
 
-	interface WindowItem {
+	interface PercentDisplay {
+		pct: number;
+		severity: UsageSeverity;
+	}
+
+	interface WindowItem extends PercentDisplay {
 		type: string;
 		label: string;
-		pct: number;
 		countdown: string;
 		hasReset: boolean;
 	}
+
+	/** Mirror the used-quota thresholds against a remaining-quota value. */
+	function remainingSeverity(percentRemaining: number): UsageSeverity {
+		return usageSeverity(100 - percentRemaining);
+	}
+
+	function providerWindowPercent(
+		usageWindow: UsageWindow,
+		nowMs: number,
+		showsRemaining: boolean
+	): PercentDisplay {
+		const pct = showsRemaining
+			? remainingFromUsedPct(usageWindow, nowMs)
+			: effectivePct(usageWindow, nowMs);
+		return {
+			pct,
+			severity: showsRemaining ? remainingSeverity(pct) : usageSeverity(pct),
+		};
+	}
+
 	function itemsFor(bucket: UsageBucket): WindowItem[] {
-		return displayWindows(bucket.windows).map((w) => ({
-			type: w.type,
-			label: windowLabel(w.type),
-			pct: usedPct(w, now),
-			countdown: formatCountdown(w.resets_at, now),
-			hasReset: w.resets_at != null,
-		}));
+		return displayWindows(bucket.windows).map((usageWindow) => {
+			const pct = reportedRemainingPct(usageWindow, now);
+			return {
+				pct,
+				severity: remainingSeverity(pct),
+				type: usageWindow.type,
+				label: windowLabel(usageWindow.type),
+				countdown: formatCountdown(usageWindow.resets_at, now),
+				hasReset: usageWindow.resets_at != null,
+			};
+		});
 	}
 
 	// Provider credits (non-Claude): render a single muted line from the opaque
@@ -417,13 +446,14 @@
 	}
 
 	/**
-	 * True when this provider's window feed reports REMAINING quota, so its
-	 * display needs the remaining → used inversion. Only the ChatGPT/Codex
-	 * subscription feed behaves that way. Everything else already reports
-	 * used-of-100: Grok's billing payload (creditUsagePercent / usagePercent),
-	 * API-key header captures, and OpenRouter's credit_limit.
+	 * Claude and ChatGPT subscription sections present quota remaining. Other
+	 * provider feeds keep their existing used-quota convention: Grok billing,
+	 * API-key headers, and OpenRouter credit limits all expose utilization.
 	 */
-	function reportsRemaining(pb: { providerId: string; providerType: string | null }): boolean {
+	function providerShowsRemaining(pb: {
+		providerId: string;
+		providerType: string | null;
+	}): boolean {
 		const entry = getProviders().find((p) => p.id === pb.providerId);
 		const type = entry?.provider_type ?? pb.providerType ?? '';
 		if (type !== 'chatgpt') return false;
@@ -431,20 +461,31 @@
 		return kind === 'subscription';
 	}
 
-	function providerWindowPct(
-		pb: { providerId: string; providerType: string | null },
-		w: UsageWindow,
-		nowMs: number
-	): number {
-		return reportsRemaining(pb) ? usedPct(w, nowMs) : effectivePct(w, nowMs);
+	function providerWindowSummary(
+		windows: UsageWindow[],
+		nowMs: number,
+		showsRemaining: boolean
+	): PercentDisplay | null {
+		const values = windows.map((usageWindow) =>
+			providerWindowPercent(usageWindow, nowMs, showsRemaining)
+		);
+		if (values.length === 0) return null;
+		// The constrained subscription window is the one with the LEAST quota
+		// remaining. Used-quota providers retain the previous highest-usage summary.
+		return values.reduce((summary, value) => {
+			const isMoreConstrained = showsRemaining
+				? value.pct < summary.pct
+				: value.pct > summary.pct;
+			return isMoreConstrained ? value : summary;
+		});
 	}
 
 	// Claude plan-usage collapse: the rows follow the 'plan' section toggle.
 	const planRowsVisible = $derived(isSectionOpen('plan'));
-	// Compact summary shown on the collapsed header: the MAX pct across the plan
-	// windows (null → omit, e.g. an empty bucket).
-	const planMaxPct = $derived<number | null>(
-		items.length ? Math.max(...items.map((it) => it.pct)) : null
+	// The collapsed Claude summary surfaces the most constrained window: the
+	// smallest remaining percentage (null → omit for an empty bucket).
+	const planMinRemaining = $derived<number | null>(
+		items.length ? Math.min(...items.map((it) => it.pct)) : null
 	);
 
 	// ── Document-level click/tap-away + Escape ────────────────────────────
@@ -583,7 +624,7 @@
 			<!-- The header always renders (provider parity): the "Claude" brand +
 			     its auth-kind subtext (plan / "API"), falling back to the resolved
 			     device name or "Other device". It is the collapse toggle for the window rows;
-			     collapsed shows the max plan pct on the right and hides the rows +
+			     collapsed shows the least quota remaining and hides the rows +
 			     "No usage data" line. No account naming, no "as of" staleness line. -->
 			<div class="popover-section">
 				<button
@@ -599,8 +640,10 @@
 							<span class="section-account">{claudeSubtext}</span>
 						{/if}
 					</span>
-					{#if !planRowsVisible && planMaxPct != null}
-						<span class="row-pct {usageSeverity(planMaxPct)} sec-summary">{planMaxPct}%</span>
+					{#if !planRowsVisible && planMinRemaining != null}
+						<span class="row-pct {remainingSeverity(planMinRemaining)} sec-summary"
+							>{planMinRemaining}% left</span
+						>
 					{/if}
 					<svg
 						class="ctx-chevron {planRowsVisible ? '' : 'collapsed'}"
@@ -616,7 +659,6 @@
 			{#if planRowsVisible}
 				{#if items.length > 0}
 					{#each items as item (item.type)}
-						{@const rowSeverity = usageSeverity(item.pct)}
 						<div class="popover-row">
 							<div class="row-line">
 								<span class="row-label">{item.label}</span>
@@ -630,11 +672,11 @@
 											no reset window
 										{/if}
 									</span>
-									<span class="row-pct {rowSeverity}">{item.pct}%</span>
+									<span class="row-pct {item.severity}">{item.pct}% left</span>
 								</span>
 							</div>
 							<div class="row-bar">
-								<div class="row-fill {rowSeverity}" style="width: {item.pct}%"></div>
+								<div class="row-fill {item.severity}" style="width: {item.pct}%"></div>
 							</div>
 						</div>
 					{/each}
@@ -644,19 +686,17 @@
 			{/if}
 
 			<!-- ═══ Provider usage (non-Claude) ═══ -->
-			<!-- Each bucket's head is its collapse toggle (name + planType stay);
-			     collapsed shows the bucket's max window pct and hides both the window
-			     rows and the credits line. ChatGPT/Codex subscription windows invert
-			     remaining → used; Grok / API-key / credit windows already report
-			     used-of-100 and pass through unchanged. -->
+			<!-- Each bucket's head is its collapse toggle (name + planType stay).
+			     ChatGPT/Codex subscription windows show quota remaining; their collapsed
+			     summary uses the least remaining window. Grok / API-key / credit windows
+			     keep used-of-100 and summarize the highest-utilization window. -->
 			{#each Object.values($rateLimit.providerBuckets ?? {}) as pb (pb.providerId)}
 				{@const sectionId = `provider:${pb.providerId}`}
 				{@const pbDisplay = providerDisplayFor(pb)}
 				{@const pbOpen = isSectionOpen(sectionId)}
 				{@const pbWindows = displayWindows(pb.windows)}
-				{@const pbMaxPct = pbWindows.length
-					? Math.max(...pbWindows.map((w) => providerWindowPct(pb, w, now)))
-					: null}
+				{@const pbShowsRemaining = providerShowsRemaining(pb)}
+				{@const pbSummary = providerWindowSummary(pbWindows, now, pbShowsRemaining)}
 				<div class="popover-section">
 					<button
 						type="button"
@@ -678,8 +718,10 @@
 							     key-spend limit would otherwise produce). -->
 							{#if creditsNum(pb.credits, 'balance_remaining') != null && pbCreditsShort}
 								<span class="sec-summary sec-credits">{pbCreditsShort}</span>
-							{:else if pbMaxPct != null}
-								<span class="row-pct {usageSeverity(pbMaxPct)} sec-summary">{pbMaxPct}%</span>
+							{:else if pbSummary}
+								<span class="row-pct {pbSummary.severity} sec-summary"
+									>{pbSummary.pct}%{pbShowsRemaining ? ' left' : ''}</span
+								>
 							{:else if pbCreditsShort}
 								<span class="sec-summary sec-credits">{pbCreditsShort}</span>
 							{/if}
@@ -697,8 +739,7 @@
 				</div>
 				{#if pbOpen}
 					{#each pbWindows as w (w.type)}
-						{@const pct = providerWindowPct(pb, w, now)}
-						{@const sev = usageSeverity(pct)}
+						{@const display = providerWindowPercent(w, now, pbShowsRemaining)}
 						{@const countdown = formatCountdown(w.resets_at, now)}
 						<div class="popover-row">
 							<div class="row-line">
@@ -713,11 +754,13 @@
 											no reset window
 										{/if}
 									</span>
-									<span class="row-pct {sev}">{pct}%</span>
+									<span class="row-pct {display.severity}"
+										>{display.pct}%{pbShowsRemaining ? ' left' : ''}</span
+									>
 								</span>
 							</div>
 							<div class="row-bar">
-								<div class="row-fill {sev}" style="width: {pct}%"></div>
+								<div class="row-fill {display.severity}" style="width: {display.pct}%"></div>
 							</div>
 						</div>
 					{/each}

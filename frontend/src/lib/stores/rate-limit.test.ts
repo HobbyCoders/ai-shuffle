@@ -27,7 +27,8 @@ import {
 	selfBucketKey,
 	windowLabel,
 	displayWindows,
-	usedPct,
+	reportedRemainingPct,
+	remainingFromUsedPct,
 	SELF_BUCKET_KEY,
 	type UsageWindow,
 } from './rate-limit';
@@ -627,7 +628,7 @@ describe('rateLimit.applySnapshot — provider buckets', () => {
 	});
 });
 
-describe('usedPct — Claude subscription remaining → used-of-100', () => {
+describe('remaining quota helpers', () => {
 	function win(utilization: number, resetsAt: string | null): UsageWindow {
 		return {
 			type: 'five_hour',
@@ -638,16 +639,25 @@ describe('usedPct — Claude subscription remaining → used-of-100', () => {
 		};
 	}
 
-	it('inverts remaining quota to used of 100', () => {
+	it('preserves a reported remaining percentage', () => {
 		const now = Date.now();
-		expect(usedPct(win(12, new Date(now + 60_000).toISOString()), now)).toBe(88);
-		expect(usedPct(win(100, new Date(now + 60_000).toISOString()), now)).toBe(0);
-		expect(usedPct(win(0, new Date(now + 60_000).toISOString()), now)).toBe(100);
+		expect(reportedRemainingPct(win(12, new Date(now + 60_000).toISOString()), now)).toBe(12);
+		expect(reportedRemainingPct(win(100, new Date(now + 60_000).toISOString()), now)).toBe(100);
+		expect(reportedRemainingPct(win(0, new Date(now + 60_000).toISOString()), now)).toBe(0);
 	});
 
-	it('shows 0% used once the window has rolled over', () => {
+	it('inverts a reported used percentage', () => {
 		const now = Date.now();
-		expect(usedPct(win(12, new Date(now - 60_000).toISOString()), now)).toBe(0);
+		expect(remainingFromUsedPct(win(12, new Date(now + 60_000).toISOString()), now)).toBe(88);
+		expect(remainingFromUsedPct(win(100, new Date(now + 60_000).toISOString()), now)).toBe(0);
+		expect(remainingFromUsedPct(win(0, new Date(now + 60_000).toISOString()), now)).toBe(100);
+	});
+
+	it('returns 100% remaining after either kind of window rolls over', () => {
+		const now = Date.now();
+		const expired = win(12, new Date(now - 60_000).toISOString());
+		expect(reportedRemainingPct(expired, now)).toBe(100);
+		expect(remainingFromUsedPct(expired, now)).toBe(100);
 	});
 });
 

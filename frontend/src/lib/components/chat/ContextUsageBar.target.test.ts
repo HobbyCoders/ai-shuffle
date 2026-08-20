@@ -79,13 +79,13 @@ describe('ContextUsageBar — resolved target', () => {
 		setTarget('worker');
 		const remote = render(ContextUsageBar);
 		await openPopover(remote.container);
-		expect(remote.container.querySelector('.popover-row .row-pct')?.textContent).toBe('12%');
+		expect(remote.container.querySelector('.popover-row .row-pct')?.textContent).toBe('88% left');
 		cleanup();
 
 		setTarget(null); // self → primary
 		const local = render(ContextUsageBar);
 		await openPopover(local.container);
-		expect(local.container.querySelector('.popover-row .row-pct')?.textContent).toBe('88%');
+		expect(local.container.querySelector('.popover-row .row-pct')?.textContent).toBe('12% left');
 	});
 
 	it('popover shows ONLY the remote install for a remote target', async () => {
@@ -101,11 +101,11 @@ describe('ContextUsageBar — resolved target', () => {
 		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
 		expect(container.querySelector('.section-account')?.textContent).toBe('Worker');
 		expect(container.textContent).not.toContain('b@example.com');
-		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('12%');
-		// The self install (Studio / a@example.com / 88% used) must NOT appear.
+		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('88% left');
+		// The self install (Studio / a@example.com / 12% left) must NOT appear.
 		expect(container.textContent).not.toContain('Studio');
 		expect(container.textContent).not.toContain('a@example.com');
-		expect(container.textContent).not.toContain('88%');
+		expect(container.textContent).not.toContain('12%');
 	});
 
 	it('popover shows ONLY the self install for a local target', async () => {
@@ -118,10 +118,10 @@ describe('ContextUsageBar — resolved target', () => {
 		// Header is the fixed "Claude" label + the resolved self install's device name.
 		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
 		expect(container.querySelector('.section-account')?.textContent).toBe('Studio');
-		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('88%');
+		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('12% left');
 		// The worker install must NOT appear.
 		expect(container.textContent).not.toContain('Worker');
-		expect(container.textContent).not.toContain('12%');
+		expect(container.textContent).not.toContain('88%');
 	});
 
 	it('shows "No usage data yet" for a remote target with no snapshot yet', async () => {
