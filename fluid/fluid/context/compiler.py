@@ -15,11 +15,11 @@ Everything else the compiler gathers itself:
 
 * environment block — cwd, platform, OS, date, git state
                       (``fluid.context.environment``);
-* instruction stack — CLAUDE.md / AGENTS.md discovery
+* instruction stack — Fluid-native AGENTS.md discovery
                       (``fluid.context.instructions.build_instruction_stack``);
 * skills index      — name+description only; bodies load on demand via the
                       ``Skill`` builtin (progressive disclosure);
-* agents index      — the discovered ``.claude/agents`` catalog (CE6), again
+* agents index      — the native ``.agents/agents`` catalog, again
                       name+description only; the definitions themselves reach a
                       host dispatcher via ``ctx.extra["agent_registry"]``.
 
@@ -78,12 +78,10 @@ class PromptInputs:
     include_global_instructions: bool = True
     include_project_instructions: bool = True
     include_skills: bool = True
-    # Agent-definition index (CE6): the ``.claude/agents`` catalog advertised
-    # for Task delegation.
+    # Native ``.agents/agents`` catalog advertised for Task delegation.
     include_agents: bool = True
-    # Whether enabled Claude Code plugins contribute their skills and agents to
-    # those indexes (CE5) — the discovery functions' own ``include_plugins``.
-    include_plugins: bool = True
+    # Retained as a no-op compatibility argument. Provider homes are import-only.
+    include_plugins: bool = False
 
 
 # Section kinds a compiled prompt can carry. ``memory`` sections additionally
@@ -116,16 +114,14 @@ def skills_index(
     cwd: str | os.PathLike[str],
     *,
     include_global: bool = True,
-    include_plugins: bool = True,
+    include_plugins: bool = False,
 ) -> str | None:
     """Progressive-disclosure skills listing (name + description only).
 
-    Sorted by name (ruling CE7): the index feeds the cached prompt prefix, so
-    its order must not depend on filesystem walk order — plugin skills, which
-    arrive last from discovery, would otherwise shuffle the listing whenever a
-    plugin is installed or removed.
+    Sorted by name: the index feeds the cached prompt prefix, so its order must
+    not depend on filesystem walk order.
     """
-    skills = discover_skills(cwd, include_global=include_global, include_plugins=include_plugins)
+    skills = discover_skills(cwd, include_global=include_global)
     if not skills:
         return None
     lines = "\n".join(
@@ -138,7 +134,7 @@ def agents_index(
     cwd: str | os.PathLike[str],
     *,
     include_global: bool = True,
-    include_plugins: bool = True,
+    include_plugins: bool = False,
 ) -> str | None:
     """Delegation catalog: the discovered agent types (name + description).
 
@@ -148,9 +144,7 @@ def agents_index(
     definitions themselves reach a host dispatcher through
     ``ctx.extra["agent_registry"]``, not through this text.
     """
-    agents = discover_agents(
-        cwd, include_global=include_global, include_plugins=include_plugins
-    )
+    agents = discover_agents(cwd, include_global=include_global)
     if not agents:
         return None
     lines = "\n".join(
@@ -186,7 +180,6 @@ def compile_prompt(inputs: PromptInputs) -> CompiledPrompt:
         index = skills_index(
             inputs.cwd,
             include_global=inputs.include_global_instructions,
-            include_plugins=inputs.include_plugins,
         )
         if index:
             sections.append(PromptSection(kind="skills", text=index))
@@ -194,7 +187,6 @@ def compile_prompt(inputs: PromptInputs) -> CompiledPrompt:
         index = agents_index(
             inputs.cwd,
             include_global=inputs.include_global_instructions,
-            include_plugins=inputs.include_plugins,
         )
         if index:
             sections.append(PromptSection(kind="agents", text=index))

@@ -4,10 +4,13 @@ Precedence (lowest → highest, later layers deep-merge over earlier ones):
 
   1. built-in defaults (:data:`BUILTIN_DEFAULTS`)
   2. system   ``/etc/fluid/config.toml``            (skipped if absent)
-  3. user     ``~/.config/fluid/config.toml``       (skipped if absent)
-  4. project  ``./.fluid/config.toml`` or ``./fluid.toml``
+  3. user     ``~/.fluid/mcp.json`` then ``~/.fluid/config.toml``
+  4. project  ``./.fluid/mcp.json`` then ``./.fluid/config.toml`` or ``./fluid.toml``
   5. env      ``FLUID_*`` overrides
   6. explicit CLI/`overrides` argument
+
+The TOML layer follows the MCP JSON layer at each scope, so a native ``[mcp]``
+entry wins a same-named imported server definition.
 
 Parsing uses the stdlib :mod:`tomllib` (3.11+), so the core stays dependency-free.
 ``build_engine`` turns a resolved :class:`HarnessConfig` into a ready
@@ -18,6 +21,7 @@ builtins registry, a permission engine, and an optional code-mode session.
 
 from __future__ import annotations
 
+import json
 import os
 import tomllib
 from pathlib import Path
@@ -46,11 +50,6 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
         "skills": True,
         "commands": True,
         "nested": True,
-    },
-    "claude_ecosystem": {
-        "settings": True,
-        "plugins": True,
-        "agents": True,
     },
     # Session tool restriction (ruling CE12). ``allowed = None`` → every
     # registered tool; a list makes the surface exactly that set, and
@@ -94,9 +93,11 @@ SYSTEM_CONFIG = Path("/etc/fluid/config.toml")
 
 
 def _user_config_path() -> Path:
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(xdg) if xdg else Path.home() / ".config"
-    return base / "fluid" / "config.toml"
+    return Path.home() / ".fluid" / "config.toml"
+
+
+def _user_mcp_path() -> Path:
+    return Path.home() / ".fluid" / "mcp.json"
 
 
 def _project_config_path(cwd: Path) -> Path | None:
@@ -104,6 +105,10 @@ def _project_config_path(cwd: Path) -> Path | None:
         if candidate.is_file():
             return candidate
     return None
+
+
+def _project_mcp_path(cwd: Path) -> Path:
+    return cwd / ".fluid" / "mcp.json"
 
 
 # ─── merge + parse ───────────────────────────────────────────────────────────
@@ -124,6 +129,35 @@ def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
 def _load_toml(path: Path) -> dict[str, Any]:
     with path.open("rb") as fh:
         return tomllib.load(fh)
+
+
+def _load_mcp_json(path: Path) -> dict[str, Any]:
+    """Load Fluid's canonical MCP file as a config overlay.
+
+    The file accepts the common ``{"mcpServers": {...}}`` envelope or a plain
+    name-to-config mapping. Transport defaults are inferred only when unambiguous.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    servers = raw.get("mcpServers", raw)
+    if not isinstance(servers, dict):
+        return {}
+    normalized: dict[str, dict[str, Any]] = {}
+    for name, value in servers.items():
+        if not isinstance(name, str) or not isinstance(value, dict):
+            continue
+        config = dict(value)
+        if "transport" not in config:
+            if isinstance(config.get("command"), str):
+                config["transport"] = "stdio"
+            elif isinstance(config.get("url"), str):
+                config["transport"] = "http"
+        normalized[name] = config
+    return {"mcp": normalized}
 
 
 def _coerce_bool(raw: str) -> bool:
@@ -160,17 +194,6 @@ def env_overrides(env: dict[str, str] | None = None) -> dict[str, Any]:
             pass
     if "FLUID_APPROVAL_POLICY" in env:
         out["permission"] = {"approval_policy": env["FLUID_APPROVAL_POLICY"]}
-    ecosystem = {
-        key: _coerce_bool(env[var])
-        for key, var in (
-            ("settings", "FLUID_CLAUDE_SETTINGS"),
-            ("plugins", "FLUID_CLAUDE_PLUGINS"),
-            ("agents", "FLUID_CLAUDE_AGENTS"),
-        )
-        if var in env
-    }
-    if ecosystem:
-        out["claude_ecosystem"] = ecosystem
     return out
 
 
@@ -194,9 +217,15 @@ def load_config(
     if include_system and SYSTEM_CONFIG.is_file():
         merged = deep_merge(merged, _load_toml(SYSTEM_CONFIG))
     if include_user:
+        user_mcp_path = _user_mcp_path()
+        if user_mcp_path.is_file():
+            merged = deep_merge(merged, _load_mcp_json(user_mcp_path))
         user_path = _user_config_path()
         if user_path.is_file():
             merged = deep_merge(merged, _load_toml(user_path))
+    project_mcp_path = _project_mcp_path(cwd_path)
+    if project_mcp_path.is_file():
+        merged = deep_merge(merged, _load_mcp_json(project_mcp_path))
     project_path = _project_config_path(cwd_path)
     if project_path is not None:
         merged = deep_merge(merged, _load_toml(project_path))
@@ -380,7 +409,4 @@ def build_engine(
         mcp_servers=config.mcp,
         allowed_tools=config.tools.allowed,
         disallowed_tools=config.tools.disallowed,
-        claude_settings=config.claude_ecosystem.settings,
-        claude_plugins=config.claude_ecosystem.plugins,
-        claude_agents=config.claude_ecosystem.agents,
     )

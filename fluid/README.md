@@ -9,18 +9,21 @@ aggressive prompt caching, sessions you can branch like git, an agent that write
 code instead of clicking through tool calls one at a time, and a memory that turns
 repeated work into reusable skills.
 
-Point it at your existing Claude Code setup and it just works — your CLAUDE.md,
-settings, plugins, skills, agents, and slash commands come along with zero
-conversion.
+Fluid uses native, explicit paths: `~/.fluid/AGENTS.md`,
+`~/.fluid/skills/<name>/SKILL.md`, `~/.fluid/agents/**/*.md`, and project
+`.agents/` directories. Existing Claude and Codex content can be reviewed and
+copied with `fluid import-settings`; it is never silently loaded or executed.
 
 ## Why fluid
 
 - **Bring your own provider.** Anthropic, OpenAI, OpenRouter, or your Claude
   Pro/Max subscription — one harness, same experience.
-- **Bring your existing setup.** Reads Claude Code's on-disk world natively:
-  `CLAUDE.md` (with `@`-imports), `settings.json` permissions and env, plugins,
-  skills, agents, and slash commands with `$1` positionals, inline `` !`bash` ``,
-  and `@file` references. Codex-style `AGENTS.md` too. Switching costs nothing.
+- **Native paths, explicit migration.** Global instructions, skills, and agents
+  live under `~/.fluid`; project content lives under `.agents/`. Root
+  `AGENTS.md`, `AGENT.md`, and `AGENTS.override.md` retain their familiar
+  precedence. `fluid import-settings` previews Claude and Codex sources, never
+  overwrites a destination, redacts credential-bearing MCP values, and leaves
+  unsupported provider settings inert.
 - **Built to be embedded.** The core is headless and event-driven — the bundled
   TUI is just one subscriber. Wire the same engine into a server, a bot, or your
   own app.
@@ -96,7 +99,6 @@ for free.
 Early development, moving fast. Working today: both engine legs (native API loop
 and delegated Claude CLI), all five provider backends, the code-as-actions
 kernel with continual skills, MCP 2.0 (spec 2026-07-28), permissions, hooks, and
-the TUI/REPL. Claude Code ecosystem compatibility is landing in waves —
-instruction files, settings, plugins, skills, agents, and slash commands are in;
-remaining waves are tracked in
-[docs/CLAUDE_ECOSYSTEM_COMPAT_PLAN.md](docs/CLAUDE_ECOSYSTEM_COMPAT_PLAN.md).
+the TUI/REPL. Fluid-native instruction, skill, and agent discovery is available;
+the explicit provider-settings importer inventories and copies portable Claude
+and Codex content without enabling provider-owned runtime discovery.

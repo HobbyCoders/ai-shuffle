@@ -1,36 +1,15 @@
-"""Agent definitions — ``.claude/agents`` + plugin agents (ruling CE6).
+"""Fluid-native agent definition discovery.
 
-A user who already wrote subagent definitions for Claude Code keeps them when
-they run fluid: the same markdown files are read off disk, from the same three
-scopes, with the same ``<plugin>:<name>`` namespacing.
+Definitions live in ``~/.fluid/agents/**/*.md`` globally and
+``<directory>/.agents/agents/**/*.md`` at every project scope from git root to
+cwd. The nearest project definition wins a name collision; every project
+definition wins over the global one. Files use the existing
+:class:`AgentDefinition` parser and precedence semantics.
 
-Scopes, in precedence order:
-
-  1. project  ``<dir>/.claude/agents/**/*.md`` for every dir from the git root
-              down to the cwd — the directory NEAREST the cwd wins a name
-              collision (the most specific definition is the one in effect);
-  2. global   ``~/.claude/agents/**/*.md`` — loses to any project definition of
-              the same name;
-  3. plugin   an enabled plugin's ``agents/**/*.md`` (``fluid.context.plugins``),
-              named ``<plugin>:<agent>`` and therefore collision-free.
-
-Unlike skills, definitions are loaded EAGERLY: an agent file is a
-description plus a system prompt (a few hundred tokens), so there is nothing to
-gain from progressive disclosure and a dispatcher needs the body the moment it
-spawns the agent.
-
-What fluid does with them (CE6, and no more than this):
-
-  * :func:`fluid.context.compiler.agents_index` advertises name+description in
-    the system prompt, so the model knows what it can delegate to;
-  * :class:`~fluid.engine.native.NativeLoop` publishes the full definitions on
-    ``ctx.extra["agent_registry"]`` for the host's Task dispatcher.
-
-Dispatch itself stays host-app territory (rulings A6/A8 — ``tools/builtins/
-task.py``): fluid discovers, surfaces and exposes; it never spawns.
-
-Nothing here raises: an unreadable or malformed file is skipped with a
-``logging`` warning (CE11).
+Unlike skills, definitions are loaded eagerly because a Task host needs the
+worker's complete system prompt when it dispatches. Claude and plugin agent
+files are never read by normal Fluid discovery; use the explicit Claude import
+API to copy definitions into these native locations.
 """
 
 from __future__ import annotations
@@ -147,43 +126,25 @@ def discover_agents(
     cwd: str | os.PathLike[str],
     *,
     include_global: bool = True,
-    include_plugins: bool = True,
+    include_plugins: bool = False,
     plugins: Sequence[Any] | None = None,
 ) -> list[AgentDefinition]:
     """Every agent definition visible from ``cwd``, sorted by name.
 
-    Precedence (CE6): a project definition beats a global one of the same name,
-    and among project directories the one NEAREST the cwd wins — the walk runs
-    outermost → cwd, so a later (inner) directory overwrites an outer one's
-    entry. Plugin agents are namespaced and can collide with nothing.
-
-    ``plugins`` passes an already-loaded plugin list (the engine reads it once
-    per session); leave it None to let discovery load them itself.
+    A project definition beats a global one of the same name, and among project
+    directories the one NEAREST the cwd wins — the walk runs outermost → cwd, so
+    a later (inner) directory overwrites an outer one's entry. ``include_plugins``
+    and ``plugins`` are accepted for API compatibility but intentionally ignored.
     """
     by_name: dict[str, AgentDefinition] = {}
     for directory in _walk_up_dirs(Path(cwd)):
         # Nearest-wins: the walk is outermost → cwd, so the inner directory's
         # entry replaces the outer one's under the same key.
-        by_name.update(_agents_in(directory / ".claude" / "agents", "project"))
+        by_name.update(_agents_in(directory / ".agents" / "agents", "project"))
     if include_global:
         for name, definition in _agents_in(
-            Path.home() / ".claude" / "agents", "global"
+            Path.home() / ".fluid" / "agents", "global"
         ).items():
             by_name.setdefault(name, definition)
 
-    records = plugins if plugins is not None else (_plugins(cwd) if include_plugins else [])
-    for plugin in records:
-        for agent in getattr(plugin, "agents", ()):
-            # Bodies are unread on the PluginAgent record (progressive
-            # disclosure suits skills, not agents) — load it here.
-            definition = load_agent_definition(agent.path, scope="plugin", name=agent.name)
-            if definition is not None:
-                by_name.setdefault(definition.name, definition)
     return sorted(by_name.values(), key=lambda d: d.name)
-
-
-def _plugins(cwd: str | os.PathLike[str]) -> list[Any]:
-    """Enabled plugins, imported lazily (plugins imports instructions)."""
-    from fluid.context.plugins import discover_plugins
-
-    return discover_plugins(cwd)

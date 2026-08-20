@@ -115,32 +115,6 @@ class InstructionFilesConfig:
 
 
 @dataclass(frozen=True, kw_only=True)
-class ClaudeEcosystemConfig:
-    """Opt-out switches for Claude Code ecosystem pickup (ruling CE9).
-
-    Discovery is filesystem-native and on by default (CE1) — a host app can
-    only *disable* a piece, never has to wire one up. ``settings`` reads the
-    settings.json stack (CE4), ``plugins`` loads enabled plugins' components
-    (CE5), ``agents`` discovers ``.claude/agents`` definitions (CE6).
-    """
-
-    settings: bool = True
-    plugins: bool = True
-    agents: bool = True
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "ClaudeEcosystemConfig":
-        def pick(key: str, *, default: bool) -> bool:
-            return bool(d[key]) if key in d else default
-
-        return cls(
-            settings=pick("settings", default=True),
-            plugins=pick("plugins", default=True),
-            agents=pick("agents", default=True),
-        )
-
-
-@dataclass(frozen=True, kw_only=True)
 class ToolsConfig:
     """Session tool restriction (ruling CE12), from ``[tools]``.
 
@@ -177,7 +151,6 @@ class HarnessConfig:
     continual: bool = False
     continual_model: str | None = None
     instruction_files: InstructionFilesConfig = field(default_factory=InstructionFilesConfig)
-    claude_ecosystem: ClaudeEcosystemConfig = field(default_factory=ClaudeEcosystemConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     cwd: str = "."
     max_tokens: int = 8192
@@ -209,7 +182,6 @@ class HarnessConfig:
             continual=bool(d.get("continual", False)),
             continual_model=d.get("continual_model"),
             instruction_files=InstructionFilesConfig.from_dict(d.get("instruction_files", {})),
-            claude_ecosystem=ClaudeEcosystemConfig.from_dict(d.get("claude_ecosystem", {})),
             tools=ToolsConfig.from_dict(d.get("tools", {})),
             cwd=d.get("cwd", "."),
             max_tokens=int(d.get("max_tokens", 8192)),
@@ -261,11 +233,6 @@ class HarnessConfig:
                 "skills": self.instruction_files.discover_skills,
                 "commands": self.instruction_files.discover_commands,
                 "nested": self.instruction_files.discover_nested,
-            },
-            "claude_ecosystem": {
-                "settings": self.claude_ecosystem.settings,
-                "plugins": self.claude_ecosystem.plugins,
-                "agents": self.claude_ecosystem.agents,
             },
             "tools": {
                 "allowed": list(self.tools.allowed) if self.tools.allowed is not None else None,

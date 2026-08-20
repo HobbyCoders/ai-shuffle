@@ -15,7 +15,7 @@ Categories — the same labels Claude Code's ``/context`` uses
 ``System prompt``   base prompt + environment block + app "extra" blocks + the
                     agent-types index (CE7 — the index is prompt text; the
                     definitions behind it price under "Custom agents").
-``Memory files``    the instruction stack (CLAUDE.md / AGENTS.md), summed.
+``Memory files``    the native AGENTS.md instruction stack, summed.
                     The category row carries only the total, exactly like the
                     CLI's; per-file detail rides alongside in the top-level
                     ``memoryFiles`` key (see :class:`MemoryFileUsage`).
@@ -29,8 +29,8 @@ Categories — the same labels Claude Code's ``/context`` uses
                     servers — the naming convention IS the classifier, same as
                     Claude Code's). Per-tool detail: ``mcpTools``.
 ``Custom agents``   agent definitions the session carries — host-declared
-                    descriptors, or (CE6) the ``.claude/agents`` definitions the
-                    native loop discovered when the host declared none.
+                    descriptors, or native ``~/.fluid/agents`` / project
+                    ``.agents/agents`` definitions discovered by the loop.
                     Dispatch stays host-app territory (rulings A6/A8); this row
                     only prices the definitions. Per-agent detail: ``agents``.
 ``Messages``        the TRIMMED history view (what a request would actually
@@ -127,7 +127,7 @@ _SYSTEM_KINDS = ("base", "environment", "extra", "agents")
 # Discovery scope → the CLI's ``memoryFiles[].type`` vocabulary. Claude Code
 # labels an instruction file by where it came from: "User" (the user's home
 # config), "Project" (the working tree), "Managed" (enterprise policy — fluid
-# discovers no such scope, so it is never emitted). A nested CLAUDE.md is still
+# discovers no such scope, so it is never emitted). A nested AGENTS.md is still
 # a file in the tree, so it labels "Project" too.
 _MEMORY_TYPES = {"global": "User", "project": "Project", "nested": "Project"}
 _DEFAULT_MEMORY_TYPE = "Project"

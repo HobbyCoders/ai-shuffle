@@ -128,16 +128,15 @@ def test_skills_index_is_sorted_by_name(git_repo: Path, tmp_path: Path, monkeypa
     monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
     monkeypatch.setenv("USERPROFILE", str(tmp_path / "empty-home"))
     for name in ("zulu", "alpha", "mike"):
-        _skill(git_repo / ".claude" / "skills" / name / "SKILL.md", name, f"the {name} skill")
+        _skill(git_repo / ".agents" / "skills" / name / "SKILL.md", name, f"the {name} skill")
     idx = skills_index(git_repo, include_global=False)
     assert idx is not None
     listed = [line[2:].split(":")[0] for line in idx.splitlines() if line.startswith("- ")]
     assert listed == ["alpha", "mike", "zulu"]
 
 
-def test_plugin_skills_appear_in_the_index(git_repo: Path, tmp_path: Path, monkeypatch):
-    """A skill from an enabled Claude Code plugin is advertised like any other,
-    under its ``<plugin>:<skill>`` name (CE5)."""
+def test_plugin_skills_are_inert_in_the_index(git_repo: Path, tmp_path: Path, monkeypatch):
+    """Legacy plugin content is not a native discovery source."""
     import json
 
     home = tmp_path / "home"
@@ -153,13 +152,12 @@ def test_plugin_skills_appear_in_the_index(git_repo: Path, tmp_path: Path, monke
     )
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
-    _skill(git_repo / ".claude" / "skills" / "local" / "SKILL.md", "local", "the project's own")
+    _skill(git_repo / ".agents" / "skills" / "local" / "SKILL.md", "local", "the project's own")
 
-    idx = skills_index(git_repo, include_global=False)
+    idx = skills_index(git_repo, include_global=False, include_plugins=True)
     assert idx is not None
-    assert "demoplug:packaged: from a plugin" in idx
-    # Sorted by name, so the plugin entry sits where its name belongs.
-    assert idx.index("demoplug:packaged") < idx.index("local:")
+    assert "demoplug" not in idx
+    assert "- local: the project's own" in idx
 
 
 def _agent(path: Path, name: str, description: str, body: str = "AGENT PROMPT") -> None:
@@ -185,7 +183,7 @@ def test_agents_index_is_sorted_and_body_free(git_repo: Path, tmp_path: Path, mo
     system prompts, not the caller's business."""
     _empty_home(tmp_path, monkeypatch)
     for name in ("zulu", "alpha", "mike"):
-        _agent(git_repo / ".claude" / "agents" / f"{name}.md", name, f"the {name} agent")
+        _agent(git_repo / ".agents" / "agents" / f"{name}.md", name, f"the {name} agent")
 
     idx = agents_index(git_repo)
     assert idx is not None
@@ -204,8 +202,8 @@ def test_agents_section_sits_after_skills_before_environment(
     git_repo: Path, tmp_path: Path, monkeypatch
 ):
     _empty_home(tmp_path, monkeypatch)
-    _skill(git_repo / ".claude" / "skills" / "deploy" / "SKILL.md", "deploy", "Ship it")
-    _agent(git_repo / ".claude" / "agents" / "reviewer.md", "reviewer", "Reviews code")
+    _skill(git_repo / ".agents" / "skills" / "deploy" / "SKILL.md", "deploy", "Ship it")
+    _agent(git_repo / ".agents" / "agents" / "reviewer.md", "reviewer", "Reviews code")
 
     compiled = compile_prompt(PromptInputs(base="B", cwd=git_repo))
     kinds = [s.kind for s in compiled.sections]
@@ -215,17 +213,16 @@ def test_agents_section_sits_after_skills_before_environment(
 
 def test_include_agents_false_omits_the_index(git_repo: Path, tmp_path: Path, monkeypatch):
     _empty_home(tmp_path, monkeypatch)
-    _agent(git_repo / ".claude" / "agents" / "reviewer.md", "reviewer", "Reviews code")
+    _agent(git_repo / ".agents" / "agents" / "reviewer.md", "reviewer", "Reviews code")
 
     compiled = compile_prompt(PromptInputs(base="B", cwd=git_repo, include_agents=False))
     assert compiled.of_kind("agents") == ()
     assert "reviewer" not in (compiled.text or "")
 
 
-def test_include_plugins_false_omits_plugin_skills_and_agents(
+def test_legacy_plugin_flag_cannot_enable_provider_discovery(
     git_repo: Path, tmp_path: Path, monkeypatch
 ):
-    """The CE9 plugins toggle reaches the compiled indexes, not just the engine."""
     import json
 
     home = _empty_home(tmp_path, monkeypatch)
@@ -240,21 +237,21 @@ def test_include_plugins_false_omits_plugin_skills_and_agents(
     (home / ".claude" / "settings.json").write_text(
         json.dumps({"enabledPlugins": {"demoplug@mp": True}}), encoding="utf-8"
     )
-    _skill(git_repo / ".claude" / "skills" / "local" / "SKILL.md", "local", "the project's own")
+    _skill(git_repo / ".agents" / "skills" / "local" / "SKILL.md", "local", "the project's own")
 
-    with_plugins = compile_system_prompt(PromptInputs(base="B", cwd=git_repo)) or ""
-    assert "demoplug:packaged" in with_plugins
-    assert "demoplug:packaged-agent" in with_plugins
+    native = compile_system_prompt(PromptInputs(base="B", cwd=git_repo)) or ""
+    assert "demoplug" not in native
+    assert "- local: the project's own" in native
 
-    without = compile_system_prompt(
-        PromptInputs(base="B", cwd=git_repo, include_plugins=False)
+    explicit_compat = compile_system_prompt(
+        PromptInputs(base="B", cwd=git_repo, include_plugins=True)
     ) or ""
-    assert "demoplug" not in without
-    assert "- local: the project's own" in without
+    assert "demoplug" not in explicit_compat
+    assert "- local: the project's own" in explicit_compat
 
 
 def test_skills_index_progressive_disclosure(git_repo: Path):
-    skill = git_repo / ".claude" / "skills" / "demo" / "SKILL.md"
+    skill = git_repo / ".agents" / "skills" / "demo" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("---\nname: demo\ndescription: does demo things\n---\nBODY NEVER LOADED")
     idx = skills_index(git_repo, include_global=False)

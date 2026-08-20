@@ -382,35 +382,27 @@ def test_plugin_mcp_servers_first_plugin_wins(tmp_path, monkeypatch) -> None:
 def test_plugin_skills_and_commands_join_discovery(tmp_path, monkeypatch) -> None:
     proj = _setup(tmp_path, monkeypatch)
     _write(
-        proj / ".claude" / "skills" / "hello" / "SKILL.md",
+        proj / ".agents" / "skills" / "hello" / "SKILL.md",
         "---\nname: hello\ndescription: the project's own\n---\nBODY",
     )
-    _write(proj / ".claude" / "commands" / "deploy.md", "project deploy")
+    _write(proj / ".agents" / "commands" / "deploy.md", "project deploy")
 
-    skills = discover_skills(proj)
-    # The project's own skill keeps its bare name and comes first; the plugin's
-    # namespaced twin is appended, so neither shadows the other.
-    assert [(s.name, s.scope) for s in skills] == [
-        ("hello", "project"), ("myplug:hello", "plugin")
-    ]
-    assert [(c.name, c.scope) for c in discover_commands(proj)] == [
-        ("deploy", "project"), ("myplug:deploy", "plugin")
-    ]
-
-    # The toggle switches the plugin contribution off entirely.
-    assert [s.name for s in discover_skills(proj, include_plugins=False)] == ["hello"]
-    assert [c.name for c in discover_commands(proj, include_plugins=False)] == ["deploy"]
+    assert [skill.name for skill in discover_skills(proj)] == ["hello"]
+    assert [command.name for command in discover_commands(proj)] == ["deploy"]
+    # The deprecated compatibility argument cannot add provider plugin content.
+    assert [skill.name for skill in discover_skills(proj, include_plugins=True)] == ["hello"]
+    assert [command.name for command in discover_commands(proj, include_plugins=True)] == ["deploy"]
 
 
-async def test_skill_builtin_loads_a_plugin_skill(tmp_path, monkeypatch) -> None:
-    """The Skill tool resolves plugin skills through discover_skills for free."""
+async def test_skill_builtin_does_not_load_a_provider_plugin_skill(tmp_path, monkeypatch) -> None:
+    """Provider plugin content is inert until explicitly imported."""
     from fluid.tools.builtins.skill import handler
     from fluid.tools.registry import ToolCtx
 
     proj = _setup(tmp_path, monkeypatch)
     outcome = await handler({"name": "myplug:hello"}, ToolCtx(cwd=str(proj)))
-    assert not outcome.is_error
-    assert "SKILL BODY NEVER LOADED" in outcome.text
+    assert outcome.is_error
+    assert "unknown skill" in outcome.text
 
 
 # ─── NativeLoop seam ─────────────────────────────────────────────────────────
@@ -440,13 +432,12 @@ def _loop(cwd, *, mcp_servers=None, claude_plugins=True):
     )
 
 
-def test_native_loop_merges_plugin_mcp_servers(tmp_path, monkeypatch) -> None:
+def test_native_loop_does_not_merge_provider_plugin_mcp_servers(tmp_path, monkeypatch) -> None:
     proj = _setup(tmp_path, monkeypatch)
     loop = _loop(proj)
-    assert [p.name for p in loop.claude_plugins] == ["myplug"]
-    # Merged before the lazy connect runs, so no host wiring is needed.
+    assert loop.claude_plugins == []
     assert loop._mcp_connected is False
-    assert set(loop._mcp_servers) == {"myplug-local", "myplug-http"}
+    assert loop._mcp_servers == {}
 
 
 def test_host_supplied_server_wins_a_name_collision(tmp_path, monkeypatch, caplog) -> None:
@@ -454,8 +445,8 @@ def test_host_supplied_server_wins_a_name_collision(tmp_path, monkeypatch, caplo
     host = {"command": "host-binary"}
     with caplog.at_level(logging.WARNING):
         loop = _loop(proj, mcp_servers={"myplug-local": host})
-    assert loop._mcp_servers["myplug-local"] == host
-    assert any("host already configured" in r.getMessage() for r in caplog.records)
+    assert loop._mcp_servers == {"myplug-local": host}
+    assert not caplog.records
 
 
 def test_native_loop_plugins_toggle_off(tmp_path, monkeypatch) -> None:
@@ -465,9 +456,8 @@ def test_native_loop_plugins_toggle_off(tmp_path, monkeypatch) -> None:
     assert loop._mcp_servers == {}
 
 
-def test_plugins_load_even_with_the_settings_toggle_off(tmp_path, monkeypatch) -> None:
-    """The two CE9 toggles are independent: enablement lives in settings.json,
-    but that is not the same as *applying* its permissions and env."""
+def test_legacy_settings_keyword_cannot_enable_provider_plugins(tmp_path, monkeypatch) -> None:
+    """Deprecated constructor keywords are inert compatibility inputs."""
     from fluid.engine.native import NativeLoop
     from fluid.providers.base import ProviderCaps
     from fluid.store.base import MemoryStore
@@ -492,10 +482,10 @@ def test_plugins_load_even_with_the_settings_toggle_off(tmp_path, monkeypatch) -
     )
     assert loop.claude_settings == {}
     assert "settings_env" not in loop.ctx.extra
-    assert [p.name for p in loop.claude_plugins] == ["myplug"]
+    assert loop.claude_plugins == []
 
 
-def test_build_engine_threads_the_plugins_toggle(tmp_path, monkeypatch) -> None:
+def test_build_engine_ignores_removed_plugin_settings(tmp_path, monkeypatch) -> None:
     from fluid.config.loader import BUILTIN_DEFAULTS, build_engine, deep_merge
     from fluid.config.model import HarnessConfig
     from fluid.providers.base import ProviderCaps
@@ -511,15 +501,15 @@ def test_build_engine_threads_the_plugins_toggle(tmp_path, monkeypatch) -> None:
             if False:
                 yield None
 
-    on = HarnessConfig.from_dict(deep_merge(BUILTIN_DEFAULTS, {"cwd": str(proj)}))
-    engine = build_engine(on, MemoryStore(), provider=_Provider())
-    assert [p.name for p in engine.claude_plugins] == ["myplug"]
-    assert "myplug-local" in engine._mcp_servers
+    native = HarnessConfig.from_dict(deep_merge(BUILTIN_DEFAULTS, {"cwd": str(proj)}))
+    engine = build_engine(native, MemoryStore(), provider=_Provider())
+    assert engine.claude_plugins == []
+    assert engine._mcp_servers == {}
 
-    off = HarnessConfig.from_dict(
-        deep_merge(BUILTIN_DEFAULTS, {"cwd": str(proj), "claude_ecosystem": {"plugins": False}})
+    stale = HarnessConfig.from_dict(
+        deep_merge(BUILTIN_DEFAULTS, {"cwd": str(proj), "claude_ecosystem": {"plugins": True}})
     )
-    engine = build_engine(off, MemoryStore(), provider=_Provider())
+    engine = build_engine(stale, MemoryStore(), provider=_Provider())
     assert engine.claude_plugins == []
     assert engine._mcp_servers == {}
 

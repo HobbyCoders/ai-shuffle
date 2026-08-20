@@ -233,13 +233,12 @@ def test_default_permission_mode_refuses_unknown_values(caplog) -> None:
 
 
 def test_default_permission_mode_is_not_applied_to_a_session(tmp_path, monkeypatch) -> None:
-    """Carry-over from W2: the value is mapped, not yet enforced — the engine
-    has no way to tell a deliberate host policy from the default one, and
-    overriding a host's configured policy would be the worse failure."""
     proj = _scoped(tmp_path, monkeypatch, project={"permissions": {"defaultMode": "plan"}})
+    assert default_permission_mode(load_claude_settings(proj)) == "plan"
+
     loop = _loop(proj)
-    assert default_permission_mode(loop.claude_settings) == "plan"
-    assert loop.permissions.approval_policy == "never_ask"  # as the host built it
+    assert loop.claude_settings == {}
+    assert loop.permissions.approval_policy == "never_ask"
     assert loop.plan_mode is False
 
 
@@ -283,7 +282,7 @@ def _loop(cwd, *, rules=None, claude_settings=True):
     )
 
 
-def test_native_loop_seeds_settings_env_and_rules(tmp_path, monkeypatch) -> None:
+def test_native_loop_keeps_claude_settings_inert(tmp_path, monkeypatch) -> None:
     proj = _scoped(
         tmp_path, monkeypatch,
         project={
@@ -292,8 +291,9 @@ def test_native_loop_seeds_settings_env_and_rules(tmp_path, monkeypatch) -> None
         },
     )
     loop = _loop(proj)
-    assert loop.ctx.extra["settings_env"] == {"FLUID_ENV_PROBE": "from-settings"}
-    assert loop.permissions.evaluate(_spec("Bash"), {"command": "rm -rf /"}) == "deny"
+    assert loop.claude_settings == {}
+    assert "settings_env" not in loop.ctx.extra
+    assert loop.permissions.rules == []
 
 
 def test_native_loop_toggle_off_reads_nothing(tmp_path, monkeypatch) -> None:
@@ -326,7 +326,7 @@ def _spec(name: str):
     return ToolSpec(name=name, description="", input_schema={}, risk="write")
 
 
-async def test_bash_builtin_runs_with_the_settings_env(tmp_path, monkeypatch) -> None:
+async def test_bash_builtin_does_not_inherit_claude_settings_env(tmp_path, monkeypatch) -> None:
     import sys
 
     from fluid.tools.builtins.bash import handler
@@ -339,37 +339,17 @@ async def test_bash_builtin_runs_with_the_settings_env(tmp_path, monkeypatch) ->
     command = f'"{sys.executable}" "{probe}"'
 
     loop = _loop(proj)
-    outcome = await handler({"command": command}, loop.ctx)
-    assert "from-settings" in outcome.text
-    assert "FLUID_ENV_PROBE" not in __import__("os").environ  # os.environ untouched
-
-    # Without the overlay the child simply inherits, and the var is absent.
-    bare = _loop(proj, claude_settings=False)
-    assert "MISSING" in (await handler({"command": command}, bare.ctx)).text
+    assert "MISSING" in (await handler({"command": command}, loop.ctx)).text
+    assert "FLUID_ENV_PROBE" not in __import__("os").environ
 
 
-def test_mcp_stdio_config_layers_settings_env(tmp_path, monkeypatch) -> None:
-    import os
-
+def test_native_loop_has_no_implicit_provider_mcp_rewrite(tmp_path, monkeypatch) -> None:
     from fluid.engine.native import NativeLoop
 
-    merged = NativeLoop._mcp_config({"command": "srv"}, {"FLUID_ENV_PROBE": "1"})
-    assert merged["env"]["FLUID_ENV_PROBE"] == "1"
-    # Layered over the inherited environment, not a bare replacement — a stdio
-    # server handed a partial env would lose PATH.
-    assert set(os.environ) <= set(merged["env"])
-    assert merged["command"] == "srv"
-
-    # An explicit server env is the base; settings win the overlap.
-    explicit = NativeLoop._mcp_config(
-        {"command": "srv", "env": {"A": "1", "FLUID_ENV_PROBE": "old"}},
-        {"FLUID_ENV_PROBE": "new"},
-    )
-    assert explicit["env"] == {"A": "1", "FLUID_ENV_PROBE": "new"}
-
-    # http servers spawn nothing, and no overlay means no rewrite at all.
-    assert "env" not in NativeLoop._mcp_config({"transport": "http", "url": "u"}, {"X": "1"})
-    assert NativeLoop._mcp_config({"command": "srv"}, None) == {"command": "srv"}
+    proj = _scoped(tmp_path, monkeypatch, project={"env": {"FLUID_ENV_PROBE": "1"}})
+    loop = _loop(proj)
+    assert loop._mcp_servers == {}
+    assert not hasattr(NativeLoop, "_mcp_config")
 
 
 def test_layered_env_never_mutates_os_environ() -> None:

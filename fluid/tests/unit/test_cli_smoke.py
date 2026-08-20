@@ -7,9 +7,10 @@ function (unit-level) rather than a pty.
 
 import asyncio
 import io
+import json
 from typing import AsyncIterator
 
-from fluid.cli.__main__ import run_once
+from fluid.cli.__main__ import build_parser, main, run_once
 from fluid.cli.config import list_sessions, make_engine, make_store
 from fluid.cli.repl import Repl, stream_turn
 from fluid.config.loader import BUILTIN_DEFAULTS, deep_merge
@@ -171,3 +172,41 @@ def test_stream_turn_reports_stop_reason() -> None:
         return stop
 
     assert asyncio.run(scenario()) == "end_turn"
+
+
+def test_import_settings_cli_previews_then_applies_selected_item(tmp_path, capsys) -> None:
+    source = tmp_path / "source home"
+    destination = tmp_path / "destination home"
+    instruction = source / ".claude" / "CLAUDE.md"
+    instruction.parent.mkdir(parents=True)
+    instruction.write_text("imported guidance", encoding="utf-8")
+
+    assert main([
+        "import-settings",
+        "--source", "claude",
+        "--source-home", str(source),
+        "--destination-home", str(destination),
+    ]) == 0
+    preview = json.loads(capsys.readouterr().out)
+    item = next(entry for entry in preview["items"] if entry["kind"] == "global_instruction")
+    assert item["status"] == "ready"
+    assert not (destination / ".fluid" / "AGENTS.md").exists()
+
+    assert main([
+        "import-settings",
+        "--source", "claude",
+        "--source-home", str(source),
+        "--destination-home", str(destination),
+        "--select", item["id"],
+        "--apply",
+    ]) == 0
+    result = json.loads(capsys.readouterr().out)
+    outcome = next(entry for entry in result["items"] if entry["id"] == item["id"])
+    assert outcome["status"] == "imported"
+    assert (destination / ".fluid" / "AGENTS.md").read_text() == "imported guidance"
+
+
+def test_import_settings_cli_aliases_choose_one_provider() -> None:
+    parser = build_parser()
+    assert parser.parse_args(["import-claude"]).command == "import-claude"
+    assert parser.parse_args(["import-codex"]).command == "import-codex"

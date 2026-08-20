@@ -101,7 +101,7 @@ async def test_nested_instructions_ride_tool_result_once(tmp_path) -> None:
     nested = project / "sub"
     nested.mkdir(parents=True)
     (project / ".git").mkdir()  # git root = project boundary
-    (nested / "CLAUDE.md").write_text("Nested rule: use tabs.")
+    (nested / "AGENTS.md").write_text("Nested rule: use tabs.")
     (nested / "f.txt").write_text("data")
 
     registry = ToolRegistry()
@@ -121,7 +121,7 @@ async def test_nested_instructions_ride_tool_result_once(tmp_path) -> None:
     await loop.submit(UserTurn(content="read it twice"))
     await loop.wait_turn()
 
-    # The nested CLAUDE.md rides the FIRST tool result only (once per session).
+    # The nested AGENTS.md rides the FIRST tool result only (once per session).
     path = await store.load_path(sid)
     joined = "\n".join(_all_text(n.message) for n in path)
     assert joined.count("Nested rule: use tabs.") == 1
@@ -132,7 +132,7 @@ async def test_project_root_instructions_not_reinjected(tmp_path) -> None:
     project = tmp_path / "proj"
     project.mkdir()
     (project / ".git").mkdir()
-    (project / "CLAUDE.md").write_text("Root rule.")  # in the project stack
+    (project / "AGENTS.md").write_text("Root rule.")  # in the project stack
     (project / "f.txt").write_text("data")
 
     registry = ToolRegistry()
@@ -160,7 +160,7 @@ async def test_project_root_instructions_not_reinjected(tmp_path) -> None:
 
 
 async def test_skill_tool_loads_body_on_demand(tmp_path) -> None:
-    skill_dir = tmp_path / ".claude" / "skills" / "deploy"
+    skill_dir = tmp_path / ".agents" / "skills" / "deploy"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
         "---\nname: deploy\ndescription: Ship it\n---\nStep 1: build. Step 2: ship."
@@ -179,7 +179,7 @@ def test_skill_index_advertised_in_system_prompt(tmp_path, monkeypatch) -> None:
     from fluid.cli.config import resolved_system
     from fluid.config.model import HarnessConfig
 
-    skill_dir = tmp_path / ".claude" / "skills" / "deploy"
+    skill_dir = tmp_path / ".agents" / "skills" / "deploy"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
         "---\nname: deploy\ndescription: Ship it\n---\nBODY NOT IN PREFIX"
@@ -195,7 +195,7 @@ def test_skill_index_advertised_in_system_prompt(tmp_path, monkeypatch) -> None:
 
 
 async def test_user_slash_command_runs_as_turn(tmp_path) -> None:
-    cmds = tmp_path / ".claude" / "commands"
+    cmds = tmp_path / ".agents" / "commands"
     cmds.mkdir(parents=True)
     (cmds / "greet.md").write_text("---\ndescription: greet\n---\nSay hello to $ARGUMENTS!")
 

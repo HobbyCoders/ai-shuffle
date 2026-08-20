@@ -158,7 +158,7 @@ class Repl:
         if cmd == "/help":
             self.out.write(
                 "commands: /model <name>, /fork <node_id>, /rewind <node_id>, /exit,\n"
-                "plus any .claude/commands|.agents/commands *.md file as /<name> [args]\n"
+                "plus any ~/.fluid/commands or .agents/commands *.md file as /<name> [args]\n"
             )
         elif cmd == "/model":
             if arg:
@@ -171,9 +171,9 @@ class Repl:
         elif cmd == "/rewind":
             await self._submit_or_report(Rewind(to_node_id=arg), "rewind")
         else:
-            # User-defined slash commands: .claude/commands/*.md and
-            # .agents/commands/*.md files run as a turn, rendered per the
-            # Claude Code conventions ($ARGUMENTS/$1/$2, !`bash`, @file).
+            # User-defined slash commands: ~/.fluid/commands/*.md and
+            # .agents/commands/*.md files run as a turn. Rendering uses the
+            # documented Fluid command syntax ($ARGUMENTS/$1/$2, !`bash`, @file).
             # Off-thread because rendering may run inline bash.
             rendered = await asyncio.to_thread(
                 self._render_user_command, cmd.lstrip("/"), arg

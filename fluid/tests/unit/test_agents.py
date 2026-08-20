@@ -1,8 +1,8 @@
 """CE6/CE7 — agent definitions: discovery, precedence, prompt index, seams.
 
 HOME (and USERPROFILE, which is what ``Path.expanduser`` reads on Windows) is
-redirected to a tmp dir so the developer's real ~/.claude never leaks into an
-assertion — same convention as test_claude_settings.py / test_plugins.py.
+redirected to a temporary directory so the developer's real Fluid or legacy
+provider files never leak into an assertion.
 """
 
 import json
@@ -91,7 +91,7 @@ def test_tools_comma_split_from_either_shape() -> None:
 
 
 def test_project_agent_is_fully_loaded(project: Path) -> None:
-    path = _write(project / ".claude" / "agents" / "reviewer.md", REVIEWER_MD)
+    path = _write(project / ".agents" / "agents" / "reviewer.md", REVIEWER_MD)
 
     agent = _by_name(discover_agents(project))["reviewer"]
     assert agent.description == "Reviews code for correctness"
@@ -109,19 +109,19 @@ def test_project_agent_is_fully_loaded(project: Path) -> None:
 
 def test_tools_bare_string_also_splits(project: Path) -> None:
     _write(
-        project / ".claude" / "agents" / "t.md",
+        project / ".agents" / "agents" / "t.md",
         _agent_md("t", "d", extra="tools: Read, Grep, Bash\n"),
     )
     assert _by_name(discover_agents(project))["t"].tools == ("Read", "Grep", "Bash")
 
 
 def test_no_tools_means_inherit_everything(project: Path) -> None:
-    _write(project / ".claude" / "agents" / "t.md", _agent_md("t", "d"))
+    _write(project / ".agents" / "agents" / "t.md", _agent_md("t", "d"))
     assert _by_name(discover_agents(project))["t"].tools == ()
 
 
 def test_name_falls_back_to_the_file_stem(project: Path) -> None:
-    _write(project / ".claude" / "agents" / "nested" / "helper.md", "no frontmatter here")
+    _write(project / ".agents" / "agents" / "nested" / "helper.md", "no frontmatter here")
     agent = _by_name(discover_agents(project))["helper"]
     assert agent.body == "no frontmatter here"
     assert agent.description == ""
@@ -130,8 +130,8 @@ def test_name_falls_back_to_the_file_stem(project: Path) -> None:
 def test_nested_project_dirs_nearest_to_cwd_wins(project: Path) -> None:
     inner = project / "pkg" / "sub"
     inner.mkdir(parents=True)
-    _write(project / ".claude" / "agents" / "dup.md", _agent_md("dup", "outer"))
-    _write(inner / ".claude" / "agents" / "dup.md", _agent_md("dup", "inner"))
+    _write(project / ".agents" / "agents" / "dup.md", _agent_md("dup", "outer"))
+    _write(inner / ".agents" / "agents" / "dup.md", _agent_md("dup", "inner"))
 
     agents = _by_name(discover_agents(inner))
     assert agents["dup"].description == "inner"
@@ -140,9 +140,9 @@ def test_nested_project_dirs_nearest_to_cwd_wins(project: Path) -> None:
 
 def test_global_agent_discovered_and_loses_to_project(project: Path) -> None:
     home = _home(project)
-    _write(home / ".claude" / "agents" / "dup.md", _agent_md("dup", "from home"))
-    _write(home / ".claude" / "agents" / "only-global.md", _agent_md("solo", "home only"))
-    _write(project / ".claude" / "agents" / "dup.md", _agent_md("dup", "from project"))
+    _write(home / ".fluid" / "agents" / "dup.md", _agent_md("dup", "from home"))
+    _write(home / ".fluid" / "agents" / "only-global.md", _agent_md("solo", "home only"))
+    _write(project / ".agents" / "agents" / "dup.md", _agent_md("dup", "from project"))
 
     agents = _by_name(discover_agents(project))
     assert agents["dup"].description == "from project" and agents["dup"].scope == "project"
@@ -154,15 +154,15 @@ def test_global_agent_discovered_and_loses_to_project(project: Path) -> None:
 
 def test_results_are_sorted_by_name(project: Path) -> None:
     for name in ("zulu", "alpha", "mike"):
-        _write(project / ".claude" / "agents" / f"{name}.md", _agent_md(name, name))
+        _write(project / ".agents" / "agents" / f"{name}.md", _agent_md(name, name))
     assert [a.name for a in discover_agents(project)] == ["alpha", "mike", "zulu"]
 
 
 def test_unreadable_file_is_skipped_with_a_warning(project: Path, caplog) -> None:
-    good = project / ".claude" / "agents" / "good.md"
+    good = project / ".agents" / "agents" / "good.md"
     _write(good, _agent_md("good", "fine"))
     # A directory named like an agent file: rglob finds it, reading it fails.
-    (project / ".claude" / "agents" / "broken.md").mkdir()
+    (project / ".agents" / "agents" / "broken.md").mkdir()
 
     with caplog.at_level(logging.WARNING):
         agents = _by_name(discover_agents(project))
@@ -170,7 +170,7 @@ def test_unreadable_file_is_skipped_with_a_warning(project: Path, caplog) -> Non
     assert any("unreadable agent definition" in r.getMessage() for r in caplog.records)
 
 
-def test_no_claude_setup_yields_nothing(project: Path) -> None:
+def test_no_native_agent_setup_yields_nothing(project: Path) -> None:
     assert discover_agents(project) == []
 
 
@@ -191,16 +191,13 @@ def _install_plugin(home: Path, *, agent_name: str = "reviewer") -> Path:
     return root
 
 
-def test_plugin_agents_are_namespaced_and_loaded(project: Path) -> None:
+def test_plugin_agents_are_inert_even_with_legacy_flag(project: Path) -> None:
     _install_plugin(_home(project))
-    _write(project / ".claude" / "agents" / "reviewer.md", _agent_md("reviewer", "the project's"))
+    _write(project / ".agents" / "agents" / "reviewer.md", _agent_md("reviewer", "the project's"))
 
-    agents = _by_name(discover_agents(project))
-    # Namespacing keeps the plugin's agent from shadowing the project's.
+    agents = _by_name(discover_agents(project, include_plugins=True))
+    assert set(agents) == {"reviewer"}
     assert agents["reviewer"].description == "the project's"
-    plugin_agent = agents["myplug:reviewer"]
-    assert plugin_agent.scope == "plugin"
-    assert plugin_agent.body.strip() == "PLUGIN AGENT PROMPT"
 
 
 def test_include_plugins_false_drops_plugin_agents(project: Path) -> None:
@@ -215,7 +212,7 @@ def test_include_plugins_false_drops_plugin_agents(project: Path) -> None:
 # ─── engine seams (registry + usage) ─────────────────────────────────────────
 
 
-def _loop(cwd, *, agents=None, ctx_extra=None, claude_agents=True):
+def _loop(cwd, *, agents=None, ctx_extra=None, native_agents=True):
     from fluid.engine.native import NativeLoop
     from fluid.providers.base import ProviderCaps
     from fluid.store.base import MemoryStore
@@ -238,22 +235,22 @@ def _loop(cwd, *, agents=None, ctx_extra=None, claude_agents=True):
         model="m",
         ctx=ctx,
         agents=agents,
-        claude_agents=claude_agents,
+        native_agents=native_agents,
     )
 
 
 def test_native_loop_publishes_the_agent_registry(project: Path) -> None:
-    _write(project / ".claude" / "agents" / "reviewer.md", REVIEWER_MD)
+    _write(project / ".agents" / "agents" / "reviewer.md", REVIEWER_MD)
     loop = _loop(project)
 
     registry = loop.ctx.extra["agent_registry"]
     assert set(registry) == {"reviewer"}
     assert registry["reviewer"].body.startswith("You are a meticulous")
-    assert [d.name for d in loop.claude_agents] == ["reviewer"]
+    assert [d.name for d in loop.native_agents] == ["reviewer"]
 
 
 def test_host_declared_agent_wins_a_name_collision(project: Path, caplog) -> None:
-    _write(project / ".claude" / "agents" / "reviewer.md", REVIEWER_MD)
+    _write(project / ".agents" / "agents" / "reviewer.md", REVIEWER_MD)
     host_entry = object()
 
     with caplog.at_level(logging.WARNING):
@@ -264,15 +261,15 @@ def test_host_declared_agent_wins_a_name_collision(project: Path, caplog) -> Non
 
 
 def test_toggle_off_discovers_nothing(project: Path) -> None:
-    _write(project / ".claude" / "agents" / "reviewer.md", REVIEWER_MD)
-    loop = _loop(project, claude_agents=False)
-    assert loop.claude_agents == []
+    _write(project / ".agents" / "agents" / "reviewer.md", REVIEWER_MD)
+    loop = _loop(project, native_agents=False)
+    assert loop.native_agents == []
     assert "agent_registry" not in loop.ctx.extra
     assert loop.agents == []
 
 
 async def test_discovered_agents_show_in_the_usage_breakdown(project: Path) -> None:
-    _write(project / ".claude" / "agents" / "reviewer.md", REVIEWER_MD)
+    _write(project / ".agents" / "agents" / "reviewer.md", REVIEWER_MD)
     loop = _loop(project)
 
     usage = await loop.get_context_usage()
@@ -285,7 +282,7 @@ async def test_discovered_agents_show_in_the_usage_breakdown(project: Path) -> N
 
 async def test_host_declared_agents_are_not_replaced(project: Path) -> None:
     """A host that priced its own catalog keeps it — no double counting."""
-    _write(project / ".claude" / "agents" / "reviewer.md", REVIEWER_MD)
+    _write(project / ".agents" / "agents" / "reviewer.md", REVIEWER_MD)
     loop = _loop(project, agents=[{"agentType": "app-agent", "text": "host text"}])
 
     usage = await loop.get_context_usage()

@@ -1,8 +1,7 @@
-"""M6 — CLAUDE.md / AGENTS.md discovery, merge rule, skills, commands.
+"""Fluid-native AGENTS discovery, imports, skills, and commands.
 
-Discovery walks up to the git root, so tests drop a ``.git`` marker at the
-project root to bound the walk. Global discovery reads ``~`` / XDG, so tests
-that exercise it isolate HOME + XDG_CONFIG_HOME to tmp dirs.
+Discovery walks up to the git root, so tests add a ``.git`` marker at the
+project root. Global tests isolate HOME from the developer's real settings.
 """
 
 from pathlib import Path
@@ -37,27 +36,26 @@ def _set_home(monkeypatch, home) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(Path(home) / ".config"))
 
 
-def test_both_claude_and_agents_in_same_scope_are_concatenated(tmp_path) -> None:
+def test_claude_instructions_are_inert_until_imported(tmp_path) -> None:
     proj = _mk_project(tmp_path)
-    (proj / "CLAUDE.md").write_text("claude rules here", encoding="utf-8")
-    (proj / "AGENTS.md").write_text("agents rules here", encoding="utf-8")
+    (proj / ".claude").mkdir()
+    (proj / ".claude" / "CLAUDE.md").write_text("legacy rules", encoding="utf-8")
+    (proj / "AGENTS.md").write_text("native rules", encoding="utf-8")
 
     files = discover_instruction_files(proj, include_global=False)
-    kinds = {f.kind for f in files}
-    assert kinds == {"claude", "agents"}  # neither dropped
+    assert {f.kind for f in files} == {"agents"}
 
     stack = build_instruction_stack(proj, include_global=False)
-    assert "claude rules here" in stack
-    assert "agents rules here" in stack
-    assert f"# From: {proj / 'CLAUDE.md'}" in stack
+    assert "legacy rules" not in stack
+    assert "native rules" in stack
     assert f"# From: {proj / 'AGENTS.md'}" in stack
 
 
 def test_byte_identical_sibling_gets_dedup_note(tmp_path) -> None:
     proj = _mk_project(tmp_path)
     body = "identical guidance"
-    (proj / "CLAUDE.md").write_text(body, encoding="utf-8")
     (proj / "AGENTS.md").write_text(body, encoding="utf-8")
+    (proj / "AGENT.md").write_text(body, encoding="utf-8")
 
     stack = build_instruction_stack(proj, include_global=False)
     # Present once, and the sibling is noted rather than silently dropped.
@@ -68,7 +66,7 @@ def test_byte_identical_sibling_gets_dedup_note(tmp_path) -> None:
 
 def test_walk_up_orders_outermost_then_cwd(tmp_path) -> None:
     proj = _mk_project(tmp_path)
-    (proj / "CLAUDE.md").write_text("root guidance", encoding="utf-8")
+    (proj / "AGENTS.md").write_text("root guidance", encoding="utf-8")
     sub = proj / "pkg" / "mod"
     sub.mkdir(parents=True)
     (sub / "AGENTS.md").write_text("sub guidance", encoding="utf-8")
@@ -86,7 +84,7 @@ def test_dir_config_variants_discovered(tmp_path) -> None:
     (proj / "AGENT.md").write_text("singular agent", encoding="utf-8")
 
     paths = {f.path for f in discover_instruction_files(proj, include_global=False)}
-    assert str(proj / ".claude" / "CLAUDE.md") in paths
+    assert str(proj / ".claude" / "CLAUDE.md") not in paths
     assert str(proj / ".agents" / "AGENTS.md") in paths
     assert str(proj / "AGENT.md") in paths
 
@@ -95,7 +93,7 @@ def test_nested_instructions_for_subdir_file(tmp_path) -> None:
     proj = _mk_project(tmp_path)
     sub = proj / "service"
     sub.mkdir()
-    (sub / "CLAUDE.md").write_text("service-local rules", encoding="utf-8")
+    (sub / "AGENTS.md").write_text("service-local rules", encoding="utf-8")
     (sub / "handler.py").write_text("# code", encoding="utf-8")
 
     nested = nested_instructions(sub / "handler.py")
@@ -106,12 +104,12 @@ def test_nested_instructions_for_subdir_file(tmp_path) -> None:
 
 def test_global_before_project(tmp_path, monkeypatch) -> None:
     home = tmp_path / "home"
-    (home / ".claude").mkdir(parents=True)
-    (home / ".claude" / "CLAUDE.md").write_text("global user rules", encoding="utf-8")
+    (home / ".fluid").mkdir(parents=True)
+    (home / ".fluid" / "AGENTS.md").write_text("global user rules", encoding="utf-8")
     _set_home(monkeypatch, home)
 
     proj = _mk_project(tmp_path / "proj")
-    (proj / "CLAUDE.md").write_text("project rules", encoding="utf-8")
+    (proj / "AGENTS.md").write_text("project rules", encoding="utf-8")
 
     stack = build_instruction_stack(proj)
     assert "global user rules" in stack
@@ -125,7 +123,7 @@ def test_global_before_project(tmp_path, monkeypatch) -> None:
 def test_import_relative_to_containing_file(tmp_path) -> None:
     proj = _mk_project(tmp_path)
     (proj / "style.md").write_text("be terse", encoding="utf-8")
-    (proj / "CLAUDE.md").write_text("Rules:\n@style.md\n", encoding="utf-8")
+    (proj / "AGENTS.md").write_text("Rules:\n@style.md\n", encoding="utf-8")
 
     stack = build_instruction_stack(proj, include_global=False)
     assert "be terse" in stack
@@ -137,7 +135,7 @@ def test_import_resolves_relative_to_the_file_not_the_cwd(tmp_path) -> None:
     sub = proj / "pkg"
     sub.mkdir()
     (sub / "style.md").write_text("sub-local style", encoding="utf-8")
-    (sub / "CLAUDE.md").write_text("@style.md", encoding="utf-8")
+    (sub / "AGENTS.md").write_text("@style.md", encoding="utf-8")
 
     # cwd is the project root; the import still resolves next to pkg/CLAUDE.md.
     stack = build_instruction_stack(sub, include_global=False)
@@ -146,12 +144,12 @@ def test_import_resolves_relative_to_the_file_not_the_cwd(tmp_path) -> None:
 
 def test_import_tilde_path(tmp_path, monkeypatch) -> None:
     home = tmp_path / "home"
-    (home / ".claude").mkdir(parents=True)
-    (home / ".claude" / "communication-style.md").write_text("short answers", encoding="utf-8")
+    (home / ".fluid").mkdir(parents=True)
+    (home / ".fluid" / "communication-style.md").write_text("short answers", encoding="utf-8")
     _set_home(monkeypatch, home)
 
     proj = _mk_project(tmp_path / "proj")
-    (proj / "CLAUDE.md").write_text("@~/.claude/communication-style.md", encoding="utf-8")
+    (proj / "AGENTS.md").write_text("@~/.fluid/communication-style.md", encoding="utf-8")
 
     stack = build_instruction_stack(proj, include_global=False)
     assert "short answers" in stack
@@ -161,7 +159,7 @@ def test_import_absolute_path(tmp_path) -> None:
     proj = _mk_project(tmp_path)
     external = tmp_path / "external.md"
     external.write_text("external guidance", encoding="utf-8")
-    (proj / "CLAUDE.md").write_text(f"@{external}", encoding="utf-8")
+    (proj / "AGENTS.md").write_text(f"@{external}", encoding="utf-8")
 
     stack = build_instruction_stack(proj, include_global=False)
     assert "external guidance" in stack
@@ -171,7 +169,7 @@ def test_imports_nest(tmp_path) -> None:
     proj = _mk_project(tmp_path)
     (proj / "inner.md").write_text("innermost text", encoding="utf-8")
     (proj / "outer.md").write_text("outer text\n@inner.md", encoding="utf-8")
-    (proj / "CLAUDE.md").write_text("@outer.md", encoding="utf-8")
+    (proj / "AGENTS.md").write_text("@outer.md", encoding="utf-8")
 
     stack = build_instruction_stack(proj, include_global=False)
     assert "outer text" in stack
@@ -186,7 +184,7 @@ def test_import_depth_capped_at_five_hops(tmp_path) -> None:
         if i < 7:
             body += f"\n@f{i + 1}.md"
         (proj / f"f{i}.md").write_text(body, encoding="utf-8")
-    (proj / "CLAUDE.md").write_text("@f1.md", encoding="utf-8")
+    (proj / "AGENTS.md").write_text("@f1.md", encoding="utf-8")
 
     stack = build_instruction_stack(proj, include_global=False)
     for i in range(1, 6):  # hops 1..5 expand
@@ -199,7 +197,7 @@ def test_import_cycle_is_cut(tmp_path) -> None:
     proj = _mk_project(tmp_path)
     (proj / "a.md").write_text("a body\n@b.md", encoding="utf-8")
     (proj / "b.md").write_text("b body\n@a.md", encoding="utf-8")
-    (proj / "CLAUDE.md").write_text("@a.md", encoding="utf-8")
+    (proj / "AGENTS.md").write_text("@a.md", encoding="utf-8")
 
     stack = build_instruction_stack(proj, include_global=False)
     assert stack.count("a body") == 1
@@ -209,17 +207,17 @@ def test_import_cycle_is_cut(tmp_path) -> None:
 
 def test_self_import_is_cut(tmp_path) -> None:
     proj = _mk_project(tmp_path)
-    (proj / "CLAUDE.md").write_text("rules\n@CLAUDE.md", encoding="utf-8")
+    (proj / "AGENTS.md").write_text("rules\n@AGENTS.md", encoding="utf-8")
 
     stack = build_instruction_stack(proj, include_global=False)
     assert stack.count("rules") == 1
-    assert "@CLAUDE.md" in stack
+    assert "@AGENTS.md" in stack
 
 
 def test_import_inside_fenced_block_is_inert(tmp_path) -> None:
     proj = _mk_project(tmp_path)
     (proj / "style.md").write_text("SHOULD NOT APPEAR", encoding="utf-8")
-    (proj / "CLAUDE.md").write_text(
+    (proj / "AGENTS.md").write_text(
         "How imports work:\n\n```md\n@style.md\n```\n\n~~~\n@style.md\n~~~\n",
         encoding="utf-8",
     )
@@ -232,7 +230,7 @@ def test_import_inside_fenced_block_is_inert(tmp_path) -> None:
 def test_import_inside_inline_code_span_is_inert(tmp_path) -> None:
     proj = _mk_project(tmp_path)
     (proj / "style.md").write_text("SHOULD NOT APPEAR", encoding="utf-8")
-    (proj / "CLAUDE.md").write_text(
+    (proj / "AGENTS.md").write_text(
         "Write `@style.md` to import it.\nThen @style.md expands.\n", encoding="utf-8"
     )
 
@@ -243,7 +241,7 @@ def test_import_inside_inline_code_span_is_inert(tmp_path) -> None:
 
 def test_missing_import_keeps_the_literal_token(tmp_path) -> None:
     proj = _mk_project(tmp_path)
-    (proj / "CLAUDE.md").write_text("see @nope.md for details", encoding="utf-8")
+    (proj / "AGENTS.md").write_text("see @nope.md for details", encoding="utf-8")
 
     stack = build_instruction_stack(proj, include_global=False)
     assert "@nope.md" in stack
@@ -252,7 +250,7 @@ def test_missing_import_keeps_the_literal_token(tmp_path) -> None:
 def test_import_keeps_surrounding_line_text(tmp_path) -> None:
     proj = _mk_project(tmp_path)
     (proj / "style.md").write_text("TERSE", encoding="utf-8")
-    (proj / "CLAUDE.md").write_text("before @style.md after", encoding="utf-8")
+    (proj / "AGENTS.md").write_text("before @style.md after", encoding="utf-8")
 
     assert "before TERSE after" in build_instruction_stack(proj, include_global=False)
 
@@ -267,18 +265,16 @@ def test_expand_imports_ignores_mid_word_at_signs(tmp_path) -> None:
 # ─── CLAUDE.local.md / AGENTS.override.md (CE3) ──────────────────────────────
 
 
-def test_claude_local_loads_after_claude_md(tmp_path) -> None:
+def test_claude_local_is_inert_until_imported(tmp_path) -> None:
     proj = _mk_project(tmp_path)
-    (proj / "CLAUDE.md").write_text("shared rules", encoding="utf-8")
+    (proj / "AGENTS.md").write_text("shared rules", encoding="utf-8")
     (proj / "CLAUDE.local.md").write_text("my personal rules", encoding="utf-8")
 
-    files = discover_instruction_files(proj, include_global=False)
-    by_path = {f.path: f for f in files}
-    local = by_path[str(proj / "CLAUDE.local.md")]
-    assert local.kind == "claude"
-
+    paths = {f.path for f in discover_instruction_files(proj, include_global=False)}
+    assert str(proj / "CLAUDE.local.md") not in paths
     stack = build_instruction_stack(proj, include_global=False)
-    assert stack.index("shared rules") < stack.index("my personal rules")
+    assert "shared rules" in stack
+    assert "my personal rules" not in stack
 
 
 def test_agents_override_replaces_agents_md(tmp_path) -> None:
@@ -310,7 +306,7 @@ def test_agents_override_keeps_agent_md_and_dot_agents(tmp_path) -> None:
     assert "replaced" not in stack
 
 
-def test_global_codex_override_preferred(tmp_path, monkeypatch) -> None:
+def test_global_codex_files_are_inert_until_imported(tmp_path, monkeypatch) -> None:
     home = tmp_path / "home"
     (home / ".codex").mkdir(parents=True)
     (home / ".codex" / "AGENTS.md").write_text("codex base rules", encoding="utf-8")
@@ -319,7 +315,7 @@ def test_global_codex_override_preferred(tmp_path, monkeypatch) -> None:
 
     proj = _mk_project(tmp_path / "proj")
     stack = build_instruction_stack(proj)
-    assert "codex override rules" in stack
+    assert "codex override rules" not in stack
     assert "codex base rules" not in stack
 
 
@@ -335,7 +331,7 @@ def test_parse_frontmatter() -> None:
 
 def test_discover_skills_parses_name_and_description(tmp_path) -> None:
     proj = _mk_project(tmp_path)
-    skill_dir = proj / ".claude" / "skills" / "pdf"
+    skill_dir = proj / ".agents" / "skills" / "pdf"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
         "---\nname: pdf\ndescription: Work with PDF files\n---\nlong body not loaded yet",
@@ -364,7 +360,7 @@ def test_discover_commands(tmp_path) -> None:
     (a_dir / "deploy.md").write_text("deploy prompt", encoding="utf-8")
 
     names = {c.name for c in discover_commands(proj, include_global=False)}
-    assert names == {"review", "deploy"}
+    assert names == {"deploy"}
 
 
 # ─── render_command ──────────────────────────────────────────────────────────

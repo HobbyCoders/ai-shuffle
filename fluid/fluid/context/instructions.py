@@ -1,49 +1,25 @@
-"""Instruction-file / skill / command discovery — ecosystem compatibility.
+"""Fluid-native instruction, skill, and command discovery.
 
-This is locked decision #5: setups authored for Claude Code, Codex, or any
-AGENTS.md-speaking harness must port over unchanged. The discovery layer accepts
-BOTH naming conventions and merges them into one "instruction stack" the
-ContextManager treats as a single system-prompt input.
+Fluid reads only its own ``AGENTS.md`` conventions during normal operation.
+Provider-specific files are intentionally not discovered here: users can make
+an explicit, non-destructive copy with :mod:`fluid.context.settings_import`.
 
 What is discovered
 ------------------
 Global (per user):
-  ~/.claude/CLAUDE.md
-  ~/.config/fluid/AGENTS.md      (XDG_CONFIG_HOME honored)
-  ~/.codex/AGENTS.md            (only if present)
+  ~/.fluid/AGENTS.md
 
 Project (walk up from cwd to the git root, else the filesystem root):
-  CLAUDE.md, CLAUDE.local.md, AGENTS.md, AGENT.md
-  .claude/CLAUDE.md, .agents/AGENTS.md
-  AGENTS.override.md — replaces AGENTS.md in the same directory (codex)
+  AGENTS.md, AGENT.md, AGENTS.override.md, .agents/AGENTS.md
+  AGENTS.override.md replaces root-level AGENTS.md in the same directory.
 
-@-imports:
-  ``@path`` tokens inside a discovered instruction file inline that file's
-  content (see :func:`expand_imports`) — so a CLAUDE.md that says
-  ``@communication-style.md`` ports over unchanged.
+Skills use ``~/.fluid/skills/<name>/SKILL.md`` globally and
+``<directory>/.agents/skills/<name>/SKILL.md`` at each project scope. They are
+separate from code-mode's Python ``SkillStore`` files, even though both use the
+same default global root.
 
-Merge rule (per the plan):
-  Global entries come first, then project entries ordered outermost → cwd (so
-  the most specific scope is appended last). When BOTH a CLAUDE.md and an
-  AGENTS.md exist in the SAME directory scope, both are concatenated — neither
-  is silently dropped — with a dedup note emitted instead of a second copy when
-  their bytes are identical. Every block carries a ``# From: <path>`` provenance
-  header.
-
-Wiring (M6 seams, now closed):
-  * ``nested_instructions(path)`` — injected by ``NativeLoop._dispatch_tool``:
-    a tool call touching a path whose directory carries its own instruction
-    file rides those instructions into that tool result, once per session.
-  * ``discover_skills``/``discover_commands`` also surface the components of
-    enabled Claude Code plugins (``fluid.context.plugins``, ruling CE5), named
-    ``<plugin>:<component>`` and appended after the user's own.
-  * ``discover_skills`` returns ``Skill`` records with ``body_loaded=False``;
-    the CLI advertises name+description in the system prompt and the ``Skill``
-    builtin loads a body on demand (progressive disclosure).
-  * ``discover_commands`` — the REPL runs ``/name args`` from a discovered
-    command file through :func:`render_command`: ``$ARGUMENTS``/``$1``/``$2``…
-    substitution, inline ``!`cmd``` bash execution (when frontmatter
-    ``allowed-tools`` grants Bash), and ``@path`` file references.
+Every instruction block carries a ``# From: <path>`` provenance header. Global
+entries come first, followed by project entries from git root to cwd.
 """
 
 from __future__ import annotations
@@ -55,36 +31,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-# Ordered per-directory candidates. Order is significant: it fixes the order
-# blocks appear within a single scope and which file "wins" the byte-identical
-# dedup (the earlier one is kept, the later one noted).
-#
-# ``CLAUDE.local.md`` is Claude Code's gitignored per-developer sibling of
-# CLAUDE.md; it loads *after* the CLAUDE.md variants in the same directory.
-_CLAUDE_NAMES = ("CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md")
+# Ordered per-directory candidates. Order fixes the order blocks appear within
+# a scope. ``AGENTS.override.md`` replaces only the root AGENTS.md slot.
 _AGENTS_NAMES = ("AGENTS.md", "AGENT.md", ".agents/AGENTS.md")
-
-# Codex convention: an ``AGENTS.override.md`` REPLACES the ``AGENTS.md`` in the
-# same directory (it does not stack on top of it).
 _AGENTS_OVERRIDE = "AGENTS.override.md"
-
-_CLAUDE_BASENAMES = ("CLAUDE.md", "CLAUDE.local.md")
 
 
 def _kind_for(rel_name: str) -> str:
-    base = os.path.basename(rel_name)
-    if base in _CLAUDE_BASENAMES:
-        return "claude"
-    if base == "AGENT.md":
-        return "agent"
-    return "agents"
+    return "agent" if os.path.basename(rel_name) == "AGENT.md" else "agents"
 
 
 @dataclass(frozen=True, kw_only=True)
 class InstructionFile:
     path: str
     scope: str  # "global" | "project" | "nested"
-    kind: str  # "claude" | "agents" | "agent"
+    kind: str  # "agents" | "agent"
     content: str = ""
 
 
@@ -252,9 +213,9 @@ def _agents_names_for(directory: Path) -> tuple[str, ...]:
 
 
 def _files_in_dir(directory: Path, scope: str) -> list[InstructionFile]:
-    """Discover instruction files directly under ``directory`` in canonical order."""
+    """Discover Fluid-native instruction files under ``directory``."""
     found: list[InstructionFile] = []
-    for rel in (*_CLAUDE_NAMES, *_agents_names_for(directory)):
+    for rel in _agents_names_for(directory):
         p = directory / rel
         if p.is_file():
             found.append(
@@ -295,32 +256,22 @@ def _walk_up_dirs(cwd: Path) -> list[Path]:
 
 
 def discover_global_instruction_files() -> list[InstructionFile]:
-    home = Path.home()
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    config_base = Path(xdg) if xdg else home / ".config"
-    codex = home / ".codex"
-    # Same override rule as the project walk: ~/.codex/AGENTS.override.md
-    # replaces ~/.codex/AGENTS.md rather than stacking with it.
-    codex_agents = codex / _AGENTS_OVERRIDE
-    if not codex_agents.is_file():
-        codex_agents = codex / "AGENTS.md"
-    candidates = [
-        (home / ".claude" / "CLAUDE.md", "claude"),
-        (config_base / "fluid" / "AGENTS.md", "agents"),
-        (codex_agents, "agents"),
+    """The single Fluid global instruction file: ``~/.fluid/AGENTS.md``.
+
+    XDG is reserved for TOML configuration. Legacy Claude/Codex instruction
+    files remain inert until explicitly imported.
+    """
+    path = Path.home() / ".fluid" / "AGENTS.md"
+    if not path.is_file():
+        return []
+    return [
+        InstructionFile(
+            path=str(path),
+            scope="global",
+            kind="agents",
+            content=expand_imports(_read(path), path),
+        )
     ]
-    out: list[InstructionFile] = []
-    for path, kind in candidates:
-        if path.is_file():
-            out.append(
-                InstructionFile(
-                    path=str(path),
-                    scope="global",
-                    kind=kind,
-                    content=expand_imports(_read(path), path),
-                )
-            )
-    return out
 
 
 def discover_project_instruction_files(cwd: str | os.PathLike[str]) -> list[InstructionFile]:
@@ -348,8 +299,8 @@ def discover_instruction_files(
 def nested_instructions(path: str | os.PathLike[str]) -> list[InstructionFile]:
     """Instruction files that apply to a file/dir the agent is reading.
 
-    When the agent touches ``<subdir>/foo.py``, ``<subdir>``'s own CLAUDE.md /
-    AGENTS.md apply on top of the project stack. This returns those files;
+    When the agent touches ``<subdir>/foo.py``, ``<subdir>``'s own native
+    AGENTS files apply on top of the project stack. This returns those files;
     ``NativeLoop._dispatch_tool`` appends them to that call's tool result.
     """
     p = Path(path)
@@ -371,14 +322,14 @@ def build_instruction_blocks(
     Same discovery, ordering and dedup rules as :func:`build_instruction_stack`
     — which is this function joined with blank lines — but keeps per-file
     attribution, so a caller (the context-usage breakdown) can price each
-    CLAUDE.md/AGENTS.md separately instead of only the merged stack.
+    AGENTS-family file separately instead of only the merged stack.
     """
     files = discover_instruction_files(
         cwd, include_global=include_global, include_project=include_project
     )
     blocks: list[tuple[InstructionFile, str]] = []
-    # Track content already emitted per directory so an identical sibling
-    # (CLAUDE.md vs AGENTS.md) is noted, not repeated.
+    # Track content already emitted per directory so identical native siblings
+    # are noted rather than repeated.
     seen: dict[tuple[str, str], str] = {}  # (dir, content) -> emitting path
     for f in files:
         directory = str(Path(f.path).parent)
@@ -403,8 +354,8 @@ def build_instruction_stack(
     """Concatenate discovered instruction files into one prompt string.
 
     Global → project ordering, ``# From: <path>`` provenance headers, and a
-    byte-identical dedup note (rather than a duplicated body) when a CLAUDE.md and
-    an AGENTS.md in the same directory carry identical content.
+    byte-identical dedup note when two native instruction files in the same
+    directory carry identical content.
     """
     return "\n\n".join(
         block
@@ -463,36 +414,31 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
 
 
 def _skill_dirs(cwd: str | os.PathLike[str], include_global: bool) -> list[tuple[Path, str]]:
+    """Native markdown skill roots, deliberately distinct from ``SkillStore``.
+
+    ``SkillStore`` may place Python modules directly in ``~/.fluid/skills``;
+    this scan matches only ``<name>/SKILL.md`` and will never treat those modules
+    as prompt skills.
+    """
     dirs: list[tuple[Path, str]] = []
     if include_global:
-        dirs.append((Path.home() / ".claude" / "skills", "global"))
+        dirs.append((Path.home() / ".fluid" / "skills", "global"))
     for directory in _walk_up_dirs(Path(cwd)):
-        dirs.append((directory / ".claude" / "skills", "project"))
         dirs.append((directory / ".agents" / "skills", "project"))
     return dirs
-
-
-def _plugin_components(cwd: str | os.PathLike[str], attr: str) -> list:
-    """Plugin-provided skills/commands (ruling CE5), or ``[]`` when plugins are
-    absent. Imported lazily: ``fluid.context.plugins`` imports this module."""
-    from fluid.context.plugins import discover_plugins
-
-    return [item for plugin in discover_plugins(cwd) for item in getattr(plugin, attr)]
 
 
 def discover_skills(
     cwd: str | os.PathLike[str],
     *,
     include_global: bool = True,
-    include_plugins: bool = True,
+    include_plugins: bool = False,
 ) -> list[Skill]:
     """Discover ``<skills-dir>/*/SKILL.md`` and parse name+description only.
 
     Bodies are left unread (``body_loaded=False``) — progressive disclosure:
-    the ``Skill`` builtin loads a body on demand.
-
-    Enabled Claude Code plugins contribute their own skills last, named
-    ``<plugin>:<skill>`` so they can never shadow a user's own (CE5).
+    the ``Skill`` builtin loads a body on demand. ``include_plugins`` is retained
+    as an ignored compatibility argument; provider plugin homes are never read.
     """
     out: list[Skill] = []
     seen: set[str] = set()
@@ -515,13 +461,6 @@ def discover_skills(
                     body_loaded=False,
                 )
             )
-    if include_plugins:
-        for skill in _plugin_components(cwd, "skills"):
-            resolved = str(Path(skill.path).resolve())
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            out.append(skill)
     return out
 
 
@@ -529,19 +468,19 @@ def discover_commands(
     cwd: str | os.PathLike[str],
     *,
     include_global: bool = True,
-    include_plugins: bool = True,
+    include_plugins: bool = False,
 ) -> list[Command]:
-    """Discover slash-command files: ``.claude/commands/*.md`` and
-    ``.agents/commands/*.md``. The REPL executes these via :func:`render_command`.
+    """Discover native slash-command files from ``.fluid`` / ``.agents``.
 
-    Enabled plugins contribute ``<plugin>:<command>`` entries last (CE5)."""
+    The REPL executes these via :func:`render_command`. ``include_plugins`` is
+    retained as an ignored compatibility argument.
+    """
     out: list[Command] = []
     seen: set[str] = set()
     bases: list[tuple[Path, str]] = []
     if include_global:
-        bases.append((Path.home() / ".claude" / "commands", "global"))
+        bases.append((Path.home() / ".fluid" / "commands", "global"))
     for directory in _walk_up_dirs(Path(cwd)):
-        bases.append((directory / ".claude" / "commands", "project"))
         bases.append((directory / ".agents" / "commands", "project"))
     for base, scope in bases:
         if not base.is_dir():
@@ -552,13 +491,6 @@ def discover_commands(
                 continue
             seen.add(resolved)
             out.append(Command(name=cmd.stem, path=str(cmd), scope=scope))
-    if include_plugins:
-        for command in _plugin_components(cwd, "commands"):
-            resolved = str(Path(command.path).resolve())
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            out.append(command)
     return out
 
 

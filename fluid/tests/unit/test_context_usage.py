@@ -66,11 +66,11 @@ def test_caps_advertise_context_usage() -> None:
 
 def _project(tmp_path: Path) -> Path:
     proj = tmp_path / "proj"
-    (proj / ".claude" / "skills" / "deploy").mkdir(parents=True)
+    (proj / ".agents" / "skills" / "deploy").mkdir(parents=True)
     (proj / ".git").mkdir()
-    (proj / "CLAUDE.md").write_text("Project rule: be terse.", encoding="utf-8")
+    (proj / "AGENT.md").write_text("Project rule: be terse.", encoding="utf-8")
     (proj / "AGENTS.md").write_text("Agents rule: run tests.", encoding="utf-8")
-    (proj / ".claude" / "skills" / "deploy" / "SKILL.md").write_text(
+    (proj / ".agents" / "skills" / "deploy" / "SKILL.md").write_text(
         "---\nname: deploy\ndescription: Ship it\n---\nbody", encoding="utf-8"
     )
     return proj
@@ -98,7 +98,7 @@ def test_compiled_sections_carry_per_file_attribution(tmp_path) -> None:
     assert kinds[0] == "base" and kinds[-1] == "extra"
     memory = compiled.of_kind("memory")
     # One section per instruction file, each naming its own path.
-    assert {Path(s.path or "").name for s in memory} == {"CLAUDE.md", "AGENTS.md"}
+    assert {Path(s.path or "").name for s in memory} == {"AGENT.md", "AGENTS.md"}
     assert all(s.text.startswith("# From: ") for s in memory)
     assert len(compiled.of_kind("skills")) == 1
     assert len(compiled.of_kind("environment")) == 1
@@ -249,7 +249,7 @@ def test_memory_files_carry_the_sdk_per_file_shape(tmp_path) -> None:
         assert isinstance(entry["path"], str) and entry["path"]
         assert isinstance(entry["type"], str)
         assert isinstance(entry["tokens"], int) and entry["tokens"] > 0
-    assert {Path(e["path"]).name for e in files} == {"CLAUDE.md", "AGENTS.md"}
+    assert {Path(e["path"]).name for e in files} == {"AGENT.md", "AGENTS.md"}
     # The category row is exactly the sum of the per-file detail.
     assert sum(e["tokens"] for e in files) == _by_name(usage)[MEMORY_FILES]["tokens"]
 
@@ -349,7 +349,7 @@ async def test_native_breakdown_matches_the_compiled_prompt(tmp_path) -> None:
         m.tokens for m in loop.memory_file_usage()
     )
     assert {Path(m.path).name for m in loop.memory_file_usage()} == {
-        "CLAUDE.md", "AGENTS.md",
+        "AGENT.md", "AGENTS.md",
     }
     # Full SDK parity: the per-file detail ships in the response, not just in
     # the helper — same list, same order, in the CLI's entry shape.

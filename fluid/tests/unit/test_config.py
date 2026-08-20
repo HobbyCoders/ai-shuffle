@@ -46,15 +46,16 @@ def test_defaults_when_no_files(tmp_path) -> None:
 
 
 def test_project_overrides_user_overrides_default(tmp_path, monkeypatch) -> None:
-    # User layer via XDG_CONFIG_HOME.
-    user_home = tmp_path / "xdg"
-    (user_home / "fluid").mkdir(parents=True)
+    # User layer is owned by Fluid under the platform home.
+    user_home = tmp_path / "home"
+    (user_home / ".fluid").mkdir(parents=True)
     _write_toml(
-        user_home / "fluid" / "config.toml",
+        user_home / ".fluid" / "config.toml",
         'default_model = "user-model"\ncode_mode = true\n'
         '[permission]\napproval_policy = "always_ask"\n',
     )
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(user_home))
+    monkeypatch.setenv("HOME", str(user_home))
+    monkeypatch.setenv("USERPROFILE", str(user_home))
 
     # Project layer (./.fluid/config.toml) wins over user for default_model.
     proj = tmp_path / "proj"
@@ -110,47 +111,35 @@ def test_toml_rules_parse(tmp_path) -> None:
     assert rule.input_globs == {"command": "rm *"}
 
 
-def test_claude_ecosystem_toggles_default_on() -> None:
-    config = HarnessConfig.from_dict(BUILTIN_DEFAULTS)
-    assert config.claude_ecosystem.settings is True
-    assert config.claude_ecosystem.plugins is True
-    assert config.claude_ecosystem.agents is True
-    assert config.to_dict()["claude_ecosystem"] == {
-        "settings": True, "plugins": True, "agents": True,
-    }
-
-
-def test_claude_ecosystem_toggles_from_toml(tmp_path) -> None:
-    proj = tmp_path / "proj"
-    (proj / ".fluid").mkdir(parents=True)
-    _write_toml(
-        proj / ".fluid" / "config.toml",
-        "[claude_ecosystem]\nsettings = false\nplugins = false\n",
+def test_provider_ecosystem_switches_are_not_runtime_config() -> None:
+    config = HarnessConfig.from_dict(
+        deep_merge(BUILTIN_DEFAULTS, {"claude_ecosystem": {"settings": True}})
     )
-    config = load_config(cwd=proj, include_system=False, include_user=False, env={})
-    assert config.claude_ecosystem.settings is False
-    assert config.claude_ecosystem.plugins is False
-    assert config.claude_ecosystem.agents is True  # untouched key keeps its default
+    assert "claude_ecosystem" not in config.to_dict()
+    assert "claude_ecosystem" not in env_overrides({"FLUID_CLAUDE_SETTINGS": "true"})
 
 
-def test_claude_ecosystem_env_overrides() -> None:
-    env = {
-        "FLUID_CLAUDE_SETTINGS": "false",
-        "FLUID_CLAUDE_PLUGINS": "0",
-        "FLUID_CLAUDE_AGENTS": "true",
-    }
-    assert env_overrides(env)["claude_ecosystem"] == {
-        "settings": False, "plugins": False, "agents": True,
-    }
-    config = load_config(cwd=".", include_system=False, include_user=False, env=env)
-    assert config.claude_ecosystem.settings is False
-    assert config.claude_ecosystem.agents is True
-    # No FLUID_CLAUDE_* set → the key is absent from the overlay entirely.
-    assert "claude_ecosystem" not in env_overrides({})
+def test_native_mcp_json_loads_and_toml_wins_same_name(tmp_path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    fluid_home = home / ".fluid"
+    fluid_home.mkdir(parents=True)
+    (fluid_home / "mcp.json").write_text(
+        '{"mcpServers":{"shared":{"command":"imported"},"json-only":{"command":"json"}}}',
+        encoding="utf-8",
+    )
+    _write_toml(
+        fluid_home / "config.toml",
+        '[mcp.shared]\ncommand = "native"\n',
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    config = load_config(cwd=tmp_path, include_system=False, env={})
+    assert config.mcp["shared"]["command"] == "native"
+    assert config.mcp["json-only"]["command"] == "json"
 
 
-def test_build_engine_threads_the_settings_toggle(tmp_path, monkeypatch) -> None:
-    # A settings.json that would contribute a rule if the toggle were on.
+def test_provider_settings_are_inert_until_explicit_import(tmp_path, monkeypatch) -> None:
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
     (home / ".claude" / "settings.json").write_text(
@@ -160,18 +149,11 @@ def test_build_engine_threads_the_settings_toggle(tmp_path, monkeypatch) -> None
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
 
-    off = HarnessConfig.from_dict(
-        deep_merge(BUILTIN_DEFAULTS, {"cwd": str(tmp_path), "claude_ecosystem": {"settings": False}})
-    )
-    engine = build_engine(off, MemoryStore(), provider=FakeProvider())
+    config = HarnessConfig.from_dict(deep_merge(BUILTIN_DEFAULTS, {"cwd": str(tmp_path)}))
+    engine = build_engine(config, MemoryStore(), provider=FakeProvider())
     assert engine.claude_settings == {}
     assert "settings_env" not in engine.ctx.extra
     assert all(r.tool != "Bash" for r in engine.permissions.rules)
-
-    on = HarnessConfig.from_dict(deep_merge(BUILTIN_DEFAULTS, {"cwd": str(tmp_path)}))
-    engine = build_engine(on, MemoryStore(), provider=FakeProvider())
-    assert engine.ctx.extra["settings_env"] == {"FLUID_TOGGLE_TEST": "1"}
-    assert any(r.tool == "Bash" and r.decision == "deny" for r in engine.permissions.rules)
 
 
 def test_build_engine_native_for_anthropic(tmp_path) -> None:

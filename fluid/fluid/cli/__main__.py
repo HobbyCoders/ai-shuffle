@@ -1,9 +1,10 @@
-"""``fluid`` console entry — subcommands: chat, run, sessions, config.
+"""``fluid`` console entry — chat, run, sessions, config, and migration.
 
   fluid chat [--tui]        interactive REPL (or Textual TUI)
   fluid run "<prompt>"      one-shot: stream the reply, then exit
   fluid sessions            list persisted sessions from the JSONL store
   fluid config              print the resolved layered config
+  fluid import-settings     preview an explicit provider-to-Fluid migration
 
 The heavy lifting lives in ``fluid.cli.config`` (engine construction with the
 instruction stack injected) and ``fluid.cli.repl`` (rendering/permissions). The
@@ -133,6 +134,36 @@ def build_parser() -> argparse.ArgumentParser:
     p_config = sub.add_parser("config", help="print the resolved config")
     _add_common(p_config)
 
+    p_import = sub.add_parser(
+        "import-settings",
+        aliases=["import-claude", "import-codex"],
+        help="preview or apply a non-destructive Claude/Codex-to-Fluid import",
+    )
+    p_import.add_argument(
+        "--source",
+        action="append",
+        choices=["claude", "codex"],
+        dest="sources",
+        help="provider source to inspect; repeat to select both (default: both)",
+    )
+    p_import.add_argument(
+        "--source-home",
+        default=None,
+        help="home containing provider settings (default: current home)",
+    )
+    p_import.add_argument(
+        "--destination-home",
+        default=None,
+        help="home receiving .fluid content (default: current home)",
+    )
+    p_import.add_argument(
+        "--select",
+        action="append",
+        dest="selected_ids",
+        help="apply only this preview item ID; repeat to select multiple items",
+    )
+    p_import.add_argument("--apply", action="store_true", help="copy selected ready items; never overwrite")
+
     return parser
 
 
@@ -152,12 +183,36 @@ def _cmd_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_import_settings(args: argparse.Namespace) -> int:
+    from fluid.context.settings_import import apply_settings_import, preview_settings_import
+
+    command_defaults = {
+        "import-claude": ("claude",),
+        "import-codex": ("codex",),
+    }
+    sources = tuple(args.sources or command_defaults.get(args.command, ("codex", "claude")))
+    preview = preview_settings_import(
+        sources=sources,
+        source_home=args.source_home,
+        destination_home=args.destination_home,
+    )
+    result = (
+        apply_settings_import(preview, selected_ids=args.selected_ids)
+        if args.apply
+        else preview
+    )
+    print(json.dumps(result.to_dict(), indent=2, default=str))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "sessions":
         return _cmd_sessions(args)
     if args.command == "config":
         return _cmd_config(args)
+    if args.command in {"import-settings", "import-claude", "import-codex"}:
+        return _cmd_import_settings(args)
 
     config = _resolve_config(args)
     store = make_store(getattr(args, "store", None))
