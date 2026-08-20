@@ -15,10 +15,10 @@ from app.core import browser_panel_registry as registry
 @pytest.fixture(autouse=True)
 def _clean():
     # Registry is process-global; isolate each test.
-    for sid in ("s-tok", "s-verify", "s-target", "s-wake"):
+    for sid in ("s-tok", "s-verify", "s-target", "s-wake", "s-idempotent"):
         registry.clear(sid)
     yield
-    for sid in ("s-tok", "s-verify", "s-target", "s-wake"):
+    for sid in ("s-tok", "s-verify", "s-target", "s-wake", "s-idempotent"):
         registry.clear(sid)
 
 
@@ -64,6 +64,20 @@ async def test_change_event_wakes_waiter():
     registry.register("s-wake", "t", None, "http://x/")
     await asyncio.wait_for(waiter, timeout=1.0)
     assert registry.get_target("s-wake").target_id == "t"
+
+
+async def test_identical_registration_does_not_signal_a_lifecycle_change():
+    registry.register("s-idempotent", "t", "tab", "http://x/")
+    waiter = asyncio.create_task(registry.wait_for_change("s-idempotent"))
+    await asyncio.sleep(0)
+
+    registry.register("s-idempotent", "t", "tab", "http://x/")
+    await asyncio.sleep(0.02)
+    assert not waiter.done()
+
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
 
 
 async def test_clear_removes_state():

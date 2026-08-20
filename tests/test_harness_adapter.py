@@ -20,6 +20,7 @@ Run:  cd /home/owner/Documents/AI-Shuffle && \
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 
 import pytest
@@ -156,17 +157,21 @@ async def test_translation_table():
     assert isinstance(got[7], UserMessage)
     tr = got[7].content[0]
     assert isinstance(tr, ToolResultBlock) and tr.tool_use_id == "tu1" and tr.content == "ok"
-    assert isinstance(got[8], RateLimitEvent)
-    assert got[8].rate_limit_info.rate_limit_type == "requests"
-    assert got[8].rate_limit_info.utilization == 0.5
-    assert isinstance(got[9], TaskStartedMessage) and got[9].task_id == "t1"
-    assert isinstance(got[9], SystemMessage)  # subclass, like the SDK hierarchy
-    assert isinstance(got[10], TaskProgressMessage)
-    assert isinstance(got[11], TaskNotificationMessage) and got[11].status == "completed"
-    assert isinstance(got[12], ResultMessage) and got[12].stop_reason == "end_turn"
-    assert got[12].total_cost_usd == 0.01
-    assert got[12].usage == {"input_tokens": 10}
-    assert len(got) == 13  # nothing after the terminal event
+    # Usage is a durable, per-model-call record now; it is no longer held and
+    # attached to an unrelated later assistant block.
+    assert isinstance(got[8], AssistantMessage) and got[8].content == []
+    assert got[8].usage["input_tokens"] == 10
+    assert isinstance(got[9], RateLimitEvent)
+    assert got[9].rate_limit_info.rate_limit_type == "requests"
+    assert got[9].rate_limit_info.utilization == 0.5
+    assert isinstance(got[10], TaskStartedMessage) and got[10].task_id == "t1"
+    assert isinstance(got[10], SystemMessage)  # subclass, like the SDK hierarchy
+    assert isinstance(got[11], TaskProgressMessage)
+    assert isinstance(got[12], TaskNotificationMessage) and got[12].status == "completed"
+    assert isinstance(got[13], ResultMessage) and got[13].stop_reason == "end_turn"
+    assert got[13].total_cost_usd == 0.01
+    assert got[13].usage == {"input_tokens": 10}
+    assert len(got) == 14  # nothing after the terminal event
 
 
 @pytest.mark.asyncio
@@ -188,9 +193,10 @@ async def test_translation_non_partial_buffers_deltas():
 
 
 @pytest.mark.asyncio
-async def test_usage_attaches_to_next_assistant_message():
-    # A fluid Usage reading rides on the next synthesized AssistantMessage in
-    # the SDK's field names, where the loops read per-call token counts.
+async def test_usage_emits_immediately_as_its_own_assistant_record():
+    # A fluid Usage reading surfaces immediately as an empty-content
+    # AssistantMessage.  Waiting for the next block lost the last call's usage
+    # and made interrupted turns undercount provider spend.
     events = [
         lm.TurnStarted(session_id=SID, model="m", provider="fake"),
         lm.Usage(session_id=SID, input_tokens=10, output_tokens=3,
@@ -202,7 +208,8 @@ async def test_usage_attaches_to_next_assistant_message():
     ]
     got = await _collect(_adapter_with(FakeEngine(events)))
     asst = [e for e in got if isinstance(e, AssistantMessage)]
-    assert asst and asst[0].usage == {
+    usage_messages = [e for e in asst if e.usage]
+    assert len(usage_messages) == 1 and usage_messages[0].usage == {
         "input_tokens": 10,
         "output_tokens": 3,
         "cache_read_input_tokens": 7,
@@ -2104,6 +2111,63 @@ async def test_build_provider_client_env_fallback_has_no_capture_client(monkeypa
     assert client._http is None
 
 
+def test_openrouter_pricing_is_sanitized_from_bound_provider_only(monkeypatch):
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(
+        ha, "_lookup_provider_row",
+        lambda provider_id: {
+            "id": provider_id,
+            "models_json": [
+                {
+                    "id": "x-ai/grok-4.6",
+                    "pricing": {
+                        "prompt": "0.000001",
+                        "completion": 0.000002,
+                        "input_cache_read": "0.0000002",
+                        "input_cache_write": "nan",
+                    },
+                },
+                {"id": "broken", "pricing": {"prompt": "not-a-number"}},
+            ],
+        },
+    )
+    assert ha._openrouter_pricing(SessionOptions(
+        model="x-ai/grok-4.6", extra={"provider_id": "or-1"}
+    )) == {
+        "x-ai/grok-4.6": {
+            "prompt": 0.000001,
+            "completion": 0.000002,
+            "input_cache_read": 0.0000002,
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_safety_warning_and_hard_stop_are_visible_and_terminal():
+    events = [
+        lm.SafetyWarning(
+            session_id=SID, code="spend_budget", message="Spend warning",
+            hard=False, counters={"model_calls": 7},
+        ),
+        lm.SafetyWarning(
+            session_id=SID, code="spend_budget", message="Spend halted",
+            hard=True, counters={"model_calls": 8},
+        ),
+        lm.TurnComplete(
+            session_id=SID, stop_reason="safety_limit:spend_budget",
+            num_model_calls=8,
+        ),
+    ]
+    got = await _collect(_adapter_with(FakeEngine(events)))
+    assert [message.subtype for message in got[:2]] == [
+        "safety_warning", "safety_limit",
+    ]
+    assert got[0].data["counters"]["model_calls"] == 7
+    assert isinstance(got[-1], ResultMessage)
+    assert got[-1].terminal_reason == "safety_limit"
+
+
 @pytest.mark.asyncio
 async def test_disconnect_closes_capture_http_client():
     """Teardown owns the injected client — the fluid client never closes one it
@@ -2164,12 +2228,16 @@ async def _seeded_store(sid: str, seqs: list[int]) -> MemoryStore:
 async def _connect_native(monkeypatch, store, tmp_path, **option_kwargs) -> HarnessAdapter:
     """connect() a REAL NativeLoop (real EventBus) over a fake provider."""
     import app.core.provider.harness_adapter as ha
+    import fluid.context.plugins as fluid_plugins
 
     async def fake_client(kind, options):
         return FakeProvider(list(_SEED_CHUNKS)), None
 
     monkeypatch.setattr(ha, "_build_provider_client", fake_client)
     monkeypatch.setattr(HarnessAdapter, "_build_store", staticmethod(lambda _o: store))
+    # Unit isolation: installed Claude/Chrome plugins must not start real MCP
+    # processes while this test is proving only durable bus sequence behavior.
+    monkeypatch.setattr(fluid_plugins, "discover_plugins", lambda *a, **kw: [])
 
     adapter = ha.HarnessAdapter()
     await adapter.connect(
@@ -2201,7 +2269,7 @@ async def test_resume_seeds_bus_log_and_continues_seq(monkeypatch, tmp_path):
         ]
 
         await adapter.send_query("hi")
-        got = await _collect(adapter)
+        got = await asyncio.wait_for(_collect(adapter), timeout=5)
 
         # (i) no historical event leaks into this turn's stream
         delta_texts = [
@@ -2210,7 +2278,11 @@ async def test_resume_seeds_bus_log_and_continues_seq(monkeypatch, tmp_path):
             if isinstance(e, StreamEvent) and e.event.get("delta", {}).get("type")
             == "text_delta"
         ]
-        assert delta_texts == ["fresh reply"]
+        assert delta_texts == ["fresh reply"], [
+            (type(event).__name__, getattr(event, "subtype", None),
+             getattr(event, "result", None))
+            for event in got
+        ]
         assert not any("old-" in t for t in delta_texts)
 
         # (ii) the turn's events landed durably, numbered strictly after the
@@ -2588,13 +2660,16 @@ async def test_max_turns_becomes_model_call_budget(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_no_max_turns_keeps_fluid_default(monkeypatch, tmp_path):
-    """Unset / non-positive values must not be passed — fluid's default (50) wins."""
+async def test_no_max_turns_uses_install_safety_ceiling(monkeypatch, tmp_path):
+    """An unset profile cannot bypass the conservative install ceiling."""
     captured = await _connect_capturing_native(monkeypatch, tmp_path)
-    assert "max_model_calls_per_turn" not in captured
+    assert captured["max_model_calls_per_turn"] == 12
+    assert captured["safety_limits"].hard_model_calls == 12
+    assert captured["trim"].trigger_tokens == 64_000
+    assert captured["trim"].keep_recent_tool_results == 5
 
     captured = await _connect_capturing_native(monkeypatch, tmp_path, max_turns=0)
-    assert "max_model_calls_per_turn" not in captured
+    assert captured["max_model_calls_per_turn"] == 12
 
 
 @pytest.mark.asyncio
@@ -2893,16 +2968,8 @@ def test_effort_change_requires_reconnect():
 # ─── _amend_native_task_spec ───────────────────────────────────────────────────
 
 
-def test_amend_native_task_spec_states_the_policy_without_a_model_menu(monkeypatch):
-    """A native leg bound to a provider row gets a Task ``model`` description
-    that states the OVERRIDE POLICY — and deliberately does NOT enumerate the
-    row's curated ids.
-
-    2026-08-17 ruling: inlining the curated roster read as a menu and taught the
-    model to shop for models (the live incident moved a subscription-bound agent
-    onto a metered API row). The wording now says: omit it and the agent runs as
-    configured; an override is honored only if YOUR provider has the model, and
-    is otherwise ignored with a note."""
+def test_amend_native_task_spec_exposes_only_provider_scoped_models(monkeypatch):
+    """Native Task gets selected-first, same-provider, deduplicated choices."""
     import app.core.provider.harness_adapter as ha
     import app.db.database as db
 
@@ -2911,7 +2978,10 @@ def test_amend_native_task_spec_states_the_policy_without_a_model_menu(monkeypat
         "get_model_provider",
         lambda pid, include_token=False: {
             "id": pid,
-            "models_json": [{"id": "gpt-5.6-sol"}, {"id": "gpt-5.6-mini"}],
+            "models_json": [
+                {"id": "gpt-5.6-mini"}, {"id": "gpt-5.6-sol"},
+                {"id": "gpt-5.6-mini"},
+            ],
         },
     )
 
@@ -2923,41 +2993,53 @@ def test_amend_native_task_spec_states_the_policy_without_a_model_menu(monkeypat
 
     ha._amend_native_task_spec(registry, options)
 
-    description = registry.get("Task").input_schema["properties"]["model"]["description"]
-    # The curated roster is GONE — no menu, and no provider row id either.
-    assert "gpt-5.6-mini" not in description
+    model_schema = registry.get("Task").input_schema["properties"]["model"]
+    description = model_schema["description"]
+    assert model_schema["enum"] == ["gpt-5.6-sol", "gpt-5.6-mini"]
     assert "prov1" not in description
     assert "normally OMIT it" in description
-    assert "runs the agent exactly as configured" in description
-    assert "available on YOUR OWN provider" in description
+    assert "uses the model selected when this chat started" in description
+    assert "unrelated provider model" in description
 
 
-def test_delegated_task_tool_shares_the_same_model_policy_wording():
-    """Leg parity: the delegated leg's ``mcp__builtins__Task`` carries the exact
-    same ``model`` description, so neither leg advertises a model menu."""
+def test_delegated_task_tool_shares_provider_scoped_model_schema(monkeypatch):
+    """The delegated bridge uses the same selected-first scoped enum."""
     from unittest.mock import patch as _patch
 
     import claude_agent_sdk as sdk
 
     import app.mcp.builtin_tools as bt
     from app.core.task_dispatch import TASK_MODEL_OVERRIDE_DESCRIPTION
+    import app.db.database as db
+
+    monkeypatch.setattr(
+        db,
+        "get_model_provider",
+        lambda pid, include_token=False: {
+            "id": pid,
+            "models_json": [{"id": "openai/gpt-5"}, {"id": "openai/gpt-5-mini"}],
+        },
+    )
 
     captured = {}
-    real_create = sdk.create_sdk_mcp_server
-
     def _spy(name, version, tools):
         captured["tools"] = tools
-        return real_create(name=name, version=version, tools=tools)
+        return {"name": name, "version": version, "tools": tools}
 
     with _patch.object(sdk, "create_sdk_mcp_server", side_effect=_spy):
-        bt.create_builtin_tools_server(session_id="s-policy", profile_id="p")
+        bt.create_builtin_tools_server(
+            session_id="s-policy", profile_id="p", provider_id="or-1",
+            model="openai/gpt-5",
+        )
 
     task = {t.name: t for t in captured["tools"]}["Task"]
     assert (
         task.input_schema["properties"]["model"]["description"]
         == TASK_MODEL_OVERRIDE_DESCRIPTION
     )
-    assert "curates:" not in TASK_MODEL_OVERRIDE_DESCRIPTION
+    assert task.input_schema["properties"]["model"]["enum"] == [
+        "openai/gpt-5", "openai/gpt-5-mini",
+    ]
 
 
 def test_amend_native_task_spec_leaves_unbound_sessions_untouched(monkeypatch):
@@ -2999,6 +3081,33 @@ def test_amend_native_task_spec_swallows_a_registration_failure(monkeypatch):
 
     description = registry.get("Task").input_schema["properties"]["model"]["description"]
     assert description == _TASK_SPEC.input_schema["properties"]["model"]["description"]
+
+
+def test_native_mutation_tool_guidance_requires_write_or_edit_but_keeps_bash():
+    import app.core.provider.harness_adapter as ha
+    from fluid.tools.builtins import register_builtins
+
+    registry = ha.ToolRegistry()
+    register_builtins(registry)
+    ha._amend_native_mutation_specs(registry)
+
+    write = registry.get("Write").description
+    edit = registry.get("Edit").description
+    bash = registry.get("Bash").description
+    assert "invoke Write immediately" in write
+    assert "invoke Edit immediately" in edit
+    assert "git, builds" in bash
+    assert "use Write or Edit for direct file-content mutations" in bash
+
+
+def test_native_environment_declares_the_actual_windows_shell(tmp_path, monkeypatch):
+    import fluid.context.environment as environment
+
+    monkeypatch.setattr(environment.os, "name", "nt")
+    monkeypatch.setattr(environment, "git_context", lambda cwd: None)
+    block = environment.environment_block(tmp_path)
+    assert "Shell: cmd.exe" in block
+    assert "not PowerShell or POSIX" in block
 
 
 # ─── 7. CE12 — enforced tool restriction projected onto the engines ──────────

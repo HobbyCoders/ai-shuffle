@@ -59,7 +59,13 @@
 	let fetchError = $state('');
 	let fetchSource = $state<'preset' | 'upstream' | ''>('');
 	let results = $state<
-		{ id: string; label: string; checked: boolean; context_window?: number | null }[]
+		{
+			id: string;
+			label: string;
+			checked: boolean;
+			context_window?: number | null;
+			pricing?: import('$lib/api/model-providers').ProviderModelEntry['pricing'];
+		}[]
 	>([]);
 	let filter = $state('');
 
@@ -96,7 +102,8 @@
 					id: m.id,
 					label: m.label,
 					checked: true,
-					context_window: m.context_window
+					context_window: m.context_window,
+					pricing: m.pricing
 				}));
 
 			// Pre-check: if the row already has curated models, check exactly those ids.
@@ -106,11 +113,13 @@
 			// A stored per-model window wins over the freshly-fetched one (an admin
 			// curation is deliberate); otherwise take whatever the catalog advertises.
 			const storedWindows = new Map(stored.map((m) => [m.id, m.context_window]));
+			const storedPricing = new Map(stored.map((m) => [m.id, m.pricing]));
 			const catalogRows = catalog.map((m) => ({
 				id: m.id,
 				label: m.label,
 				checked: hasCurated ? curatedIds.has(m.id) : fetchSource === 'preset',
-				context_window: storedWindows.get(m.id) ?? m.context_window
+				context_window: storedWindows.get(m.id) ?? m.context_window,
+				pricing: storedPricing.get(m.id) ?? m.pricing
 			}));
 
 			results = [...extras, ...catalogRows];
@@ -122,7 +131,8 @@
 				id: m.id,
 				label: m.label,
 				checked: true,
-				context_window: m.context_window
+				context_window: m.context_window,
+				pricing: m.pricing
 			}));
 		} finally {
 			fetching = false;
@@ -165,7 +175,8 @@
 			.map((r) => ({
 				id: r.id.trim(),
 				label: (r.label || r.id).trim(),
-				...(r.context_window != null ? { context_window: r.context_window } : {})
+				...(r.context_window != null ? { context_window: r.context_window } : {}),
+				...(r.pricing ? { pricing: r.pricing } : {})
 			}))
 			.filter((m) => m.id && m.label);
 		saving = true;

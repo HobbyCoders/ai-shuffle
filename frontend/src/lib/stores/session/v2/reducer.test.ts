@@ -102,6 +102,21 @@ describe('turn lifecycle', () => {
 		expect(s.messages.some((m) => m.role === 'system')).toBe(false);
 	});
 
+	it('turn.completed(terminal_reason=safety_limit) shows a visible halt card once', () => {
+		const completed = ev('turn.completed', {
+			id: 'tc-safety',
+			terminal_reason: 'safety_limit',
+		});
+		const s1 = reduce(reduce(initialState(), ev('turn.started')), completed);
+		const s2 = reduce(s1, completed);
+		const cards = s2.messages.filter(
+			(m) => m.role === 'system' && m.systemSubtype === 'warning'
+		);
+		expect(cards).toHaveLength(1);
+		expect(cards[0].content).toContain('halted before further model or tool spend');
+		expect(cards[0].content).toContain('send a new message to continue');
+	});
+
 	it('replaying a max_turns turn.completed does not duplicate the info card', () => {
 		const evt = ev('turn.completed', { id: 'tc-mt', terminal_reason: 'max_turns' });
 		const s1 = reduce(reduce(initialState(), ev('turn.started')), evt);

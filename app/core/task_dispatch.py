@@ -29,10 +29,11 @@ What this module adds on top of raw ``dispatch_worker``:
   ``mcp__builtins__TaskList`` / ``mcp__builtins__TaskOutput`` — those are the
   names both legs actually advertise; background workers survive the caller's
   turn end);
-* LEG RESOLUTION (2026-08-17) — which provider/model the worker actually runs
-  on, including the cross-provider ``model`` override and the credential
-  pre-flight that makes a doomed dispatch fail synchronously. The full rule
-  table lives above :class:`ModelBinding`; read it before changing any of it.
+* LEG RESOLUTION — current chats stay on the provider/model scope selected at
+  chat start; target agents contribute persona and tools only. Imported legacy
+  sessions without ``launched_model`` retain the 2026-08-17 compatibility
+  table above :class:`ModelBinding`. Every resolved leg is credential-checked
+  before dispatch so a doomed worker fails synchronously.
 
 File-defined agents (Claude-ecosystem compat, ruling CE6)
 ---------------------------------------------------------
@@ -96,24 +97,71 @@ _CHAIN_LIMIT = 12
 #: native leg's bare builtin via ``harness_adapter._amend_native_task_spec``,
 #: the delegated leg's ``mcp__builtins__Task`` via ``app.mcp.builtin_tools``).
 #:
-#: It deliberately no longer enumerates the session provider's curated model ids
-#: (2026-08-17 ruling). Inlining that roster read as a MENU: the model took "here
-#: are ids you may pass" as an invitation to shop, and moved subscription-bound
-#: agents onto metered API rows. The policy is now "the agent runs at its own
-#: selected model unless YOUR provider curates the override", so the description
-#: says exactly that and nothing more.
+#: The schema now carries a provider-scoped enum assembled by
+#: :func:`provider_scoped_task_models`.  The selected chat model is always first;
+#: every additional value comes from that exact provider row.  This keeps an
+#: override mechanically constrained without letting an agent-builder profile
+#: inject a model from another provider.
 TASK_MODEL_OVERRIDE_DESCRIPTION = (
-    "Optional model override — normally OMIT it. Omitting it runs the agent "
-    "exactly as configured, on its own provider and model, which is the normal "
-    "and intended case even when that differs from this session's. An override "
-    "is honored ONLY if the model is available on YOUR OWN provider; anything "
-    "else is ignored and the agent runs as configured, with a note in the "
-    "result saying so. It is never an error, and it is never a way to move an "
-    "agent onto a provider you are not already using."
+    "Optional model override — normally OMIT it; omission uses the model selected "
+    "when this chat started. If supplied, choose only from this schema's enum: it "
+    "contains the selected chat model plus configured models from this chat's "
+    "provider, never the target agent's builder model or an unrelated provider model."
 )
 
 #: Background dispatch tasks, kept referenced so asyncio never GCs them.
 _BACKGROUND_TASKS: set = set()
+
+
+def provider_scoped_task_models(
+    provider_id: Optional[str], selected_model: Optional[str]
+) -> Tuple[str, ...]:
+    """Return the Task override roster for one running chat.
+
+    The running session's provider binding is authoritative.  The chat's
+    selected model is included even when an older provider row has not curated
+    it yet; all other entries come solely from that same row's ``models_json``.
+    Ordering is stable and duplicates are removed without consulting the target
+    agent/profile, which is the boundary that prevents cross-provider leakage.
+    """
+    ordered: List[str] = []
+
+    def add(value: Any) -> None:
+        if isinstance(value, str):
+            value = value.strip()
+            if value and value not in ordered:
+                ordered.append(value)
+
+    add(selected_model)
+    if not provider_id:
+        return tuple(ordered)
+    try:
+        from app.db import database
+        from app.core.provider_agent import curated_model_ids
+
+        row = database.get_model_provider(str(provider_id), include_token=False)
+        for model_id in curated_model_ids(row):
+            add(model_id)
+    except Exception:  # noqa: BLE001 — schema construction must never block chat
+        logger.warning(
+            "Task model roster lookup failed for provider %s", provider_id,
+            exc_info=True,
+        )
+    return tuple(ordered)
+
+
+def task_model_property_schema(
+    provider_id: Optional[str], selected_model: Optional[str]
+) -> Dict[str, Any]:
+    """JSON-schema property shared by native and delegated Task tools."""
+    schema: Dict[str, Any] = {
+        "type": "string",
+        "description": TASK_MODEL_OVERRIDE_DESCRIPTION,
+    }
+    models = provider_scoped_task_models(provider_id, selected_model)
+    if models:
+        schema["enum"] = list(models)
+    return schema
 
 
 # ---------------------------------------------------------------------------
@@ -383,8 +431,14 @@ def _validate_target(agent: ProfileRow) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Worker leg resolution (ruling 2026-08-17, as refined)
+# Legacy worker-leg resolution (ruling 2026-08-17, as refined)
 # ---------------------------------------------------------------------------
+#
+# Current chats persist ``sessions.launched_model`` and bypass this table in
+# ``dispatch_task_tool``: their workers stay on the chat's provider and either
+# its selected model or another model curated by that provider. The table below
+# remains only for imported/legacy sessions that have no durable launched-model
+# binding, so those sessions keep their historical behavior instead of failing.
 #
 # THE RULE TABLE. Read this before touching anything below.
 #
@@ -939,6 +993,25 @@ async def dispatch_task_tool(
     binding_rule = "none"
 
     caller_provider_id = _caller_provider_id(caller_row, caller_pid)
+    caller_model = str((caller_row or {}).get("launched_model") or "").strip() or None
+    session_bound = caller_model is not None
+
+    if session_bound:
+        # A concrete chat's provider/model binding is authoritative. Target
+        # profiles contribute persona and tools, not a hidden provider/model
+        # switch from the agent builder. Recheck the provider roster here
+        # because malformed/direct tool calls can bypass JSON Schema.
+        roster = provider_scoped_task_models(caller_provider_id, caller_model)
+        requested_model = model_override or caller_model
+        if requested_model not in roster:
+            notes.append(
+                f"Model '{requested_model}' is not available on this chat's "
+                f"provider; the worker uses the chat-selected model '{caller_model}'."
+            )
+            requested_model = caller_model
+        provider_id = caller_provider_id
+        model_override = requested_model
+        binding_rule = "session"
 
     if definition is not None:
         # The worker rides the CALLER's profile and provider binding; only the
@@ -949,7 +1022,10 @@ async def dispatch_task_tool(
         # (the borrowed profile has no opinion about it); an explicit override
         # still wins, exactly as it does for an app agent.
         wanted = str(_def_field(definition, "model", "") or "").strip() or None
-        if model_override or wanted:
+        if session_bound:
+            # File-agent model metadata cannot override a live chat binding.
+            pass
+        elif model_override or wanted:
             wanted_model = model_override or wanted
             binding = resolve_dispatch_binding(
                 target_provider_id=provider_id,
@@ -988,25 +1064,27 @@ async def dispatch_task_tool(
         )
     else:
         assert target is not None
-        admission_error = _validate_target(target)
-        if admission_error:
-            return {"ok": False, "error": admission_error}
         profile_id = target["id"]
         target_config = target.get("config") or {}
-        binding = resolve_dispatch_binding(
-            target_provider_id=target_config.get("provider") or None,
-            target_model=target_config.get("model") or None,
-            model_override=model_override,
-            caller_provider_id=caller_provider_id,
-            target_name=target_name,
-        )
-        if binding.error:
-            return {"ok": False, "error": binding.error}
-        binding_rule = binding.rule or "?"
-        provider_id = binding.provider_id
-        model_override = binding.model_id
-        if binding.note:
-            notes.append(binding.note)
+        if not session_bound:
+            # Compatibility for imported sessions that predate launched_model.
+            admission_error = _validate_target(target)
+            if admission_error:
+                return {"ok": False, "error": admission_error}
+            binding = resolve_dispatch_binding(
+                target_provider_id=target_config.get("provider") or None,
+                target_model=target_config.get("model") or None,
+                model_override=model_override,
+                caller_provider_id=caller_provider_id,
+                target_name=target_name,
+            )
+            if binding.error:
+                return {"ok": False, "error": binding.error}
+            binding_rule = binding.rule or "?"
+            provider_id = binding.provider_id
+            model_override = binding.model_id
+            if binding.note:
+                notes.append(binding.note)
         system_prompt_append = None
         # An app agent carries its own profile (and with it its own
         # allowed/disallowed tool config) — nothing to override per-dispatch.

@@ -380,6 +380,20 @@ class BrowserStreamHub:
                             await self._broadcast_status("live", target.url)
                 if change_task in done:
                     change_task.result()
+                    current = registry.get_target(self.session_id)
+                    # A URL/tab metadata update on the SAME CDP target does not
+                    # require an upstream teardown.  Keep the canvas-producing
+                    # screencast alive, publish the fresh URL, and arm the next
+                    # change waiter.  Only attachment identity changes reattach.
+                    if current is not None and current.target_id == target.target_id:
+                        target = current
+                        await self._broadcast_status(
+                            "live" if live else "connecting", current.url
+                        )
+                        change_task = asyncio.create_task(
+                            registry.wait_for_change(self.session_id)
+                        )
+                        continue
                     raise _RegistryChanged()
         finally:
             if change_task is not None:

@@ -299,6 +299,27 @@ class TestHelperParsing:
         ]})
         assert out == [{"id": "a", "label": "A", "context_window": 64000}]
 
+    def test_parse_preserves_only_pricing_needed_for_cost_projection(self):
+        out = mp_api._parse_models_response({"data": [{
+            "id": "x-ai/grok-4.6",
+            "name": "Grok 4.6",
+            "pricing": {
+                "prompt": "0.000001",
+                "completion": "0.000002",
+                "input_cache_read": "0.0000002",
+                "irrelevant": "must-not-persist",
+            },
+        }]})
+        assert out == [{
+            "id": "x-ai/grok-4.6",
+            "label": "Grok 4.6",
+            "pricing": {
+                "prompt": "0.000001",
+                "completion": "0.000002",
+                "input_cache_read": "0.0000002",
+            },
+        }]
+
     def test_parse_ignores_unusable_context_length(self):
         out = mp_api._parse_models_response({"data": [
             {"id": "a", "label": "A", "context_length": "huge"},

@@ -194,7 +194,7 @@ async def _wait_for(cond, timeout=2.0):
 
 @pytest.fixture(autouse=True)
 def _reset_hubs():
-    for sid in ("hub-start", "hub-ack", "hub-reattach", "hub-death"):
+    for sid in ("hub-start", "hub-ack", "hub-stable", "hub-reattach", "hub-death"):
         registry.clear(sid)
     browser_stream._hubs.clear()
     yield
@@ -308,6 +308,39 @@ async def test_reattaches_on_registry_change(monkeypatch):
     assert "target-2" in fakes[1].uri
     await _wait_for(lambda: fakes[0].closed)
     assert "Page.stopScreencast" in fakes[0].methods()
+
+    await browser_stream.detach_viewer(sid, viewer)
+
+
+async def test_same_target_updates_do_not_restart_live_screencast(monkeypatch):
+    """Incoming browser events may refresh URL metadata many times; the live
+    canvas must keep the same upstream connection throughout."""
+    sid = "hub-stable"
+    registry.register(sid, "target-1", "tab-1", "http://a/")
+    fakes = []
+
+    async def opener(uri):
+        fake = FakeUpstream(uri)
+        fakes.append(fake)
+        return fake
+
+    monkeypatch.setattr(browser_stream, "_open_upstream", opener)
+    ws = FakeViewerWS()
+    hub, viewer = await browser_stream.attach_viewer(sid, ws)
+    await _wait_for(lambda: fakes and "Page.startScreencast" in fakes[0].methods())
+    fakes[0].feed_frame("A", {"deviceWidth": 10, "deviceHeight": 10})
+    await _wait_for(lambda: any(m.get("state") == "live" for m in ws.sent))
+
+    # Exact repeats are ignored; URL/tab metadata changes are broadcast without
+    # replacing the CDP attachment.
+    registry.register(sid, "target-1", "tab-1", "http://a/")
+    registry.register(sid, "target-1", "tab-1", "http://b/")
+    await _wait_for(
+        lambda: any(m.get("state") == "live" and m.get("url") == "http://b/" for m in ws.sent)
+    )
+    await asyncio.sleep(0.02)
+    assert len(fakes) == 1
+    assert not fakes[0].closed
 
     await browser_stream.detach_viewer(sid, viewer)
 

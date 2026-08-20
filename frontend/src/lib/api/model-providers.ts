@@ -19,6 +19,10 @@ import { api } from './client';
 export interface ProviderModelEntry {
 	id: string;
 	label: string;
+	/** OpenRouter per-token prices retained for server-side spend projection. */
+	pricing?: Partial<
+		Record<'prompt' | 'completion' | 'input_cache_read' | 'input_cache_write', string | number>
+	>;
 	/**
 	 * Per-model context window (tokens), when known: carried through from the
 	 * upstream catalog (`context_length` / `top_provider.context_length`) or a

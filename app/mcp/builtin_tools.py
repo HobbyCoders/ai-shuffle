@@ -295,6 +295,7 @@ def create_builtin_tools_server(
     project_id: Optional[str] = None,
     is_admin: bool = False,
     model: Optional[str] = None,
+    provider_id: Optional[str] = None,
     cwd: Optional[str] = None,
 ) -> Optional[Any]:
     """
@@ -309,6 +310,8 @@ def create_builtin_tools_server(
             destructive operations like CronDelete).
         model: The current turn's effective model, persisted by ScheduleWakeup
             so the wake replays it instead of running on the profile default.
+        provider_id: Authoritative provider binding for the running chat.  Used
+            only to scope Task's optional model enum to this provider.
         cwd: The session's resolved working directory. Task uses it to discover
             the file/plugin agent definitions this session can delegate to —
             the delegated (CLI) leg has no fluid engine to publish them, so
@@ -455,7 +458,7 @@ def create_builtin_tools_server(
     # Delegated-leg surface (mcp__builtins__Task); native legs get fluid's
     # bare-named Task builtin instead (the bridge filters this copy out).
     # ------------------------------------------------------------------
-    from app.core.task_dispatch import TASK_MODEL_OVERRIDE_DESCRIPTION
+    from app.core.task_dispatch import task_model_property_schema
 
     @tool(
         "Task",
@@ -474,8 +477,7 @@ def create_builtin_tools_server(
                          "description": "sync (default) waits; background returns at once."},
                 # Same wording the native leg's bare Task builtin gets — one
                 # policy statement, two legs (see harness_adapter).
-                "model": {"type": "string",
-                          "description": TASK_MODEL_OVERRIDE_DESCRIPTION},
+                "model": task_model_property_schema(provider_id, model),
                 "label": {"type": "string", "description": "Short display label."},
             },
             "required": ["agent", "prompt"],

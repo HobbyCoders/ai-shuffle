@@ -64,7 +64,12 @@
 	// editing a provider never flattens its models back onto the row's single
 	// shared window. There is no editor for it — it is preserved, not authored.
 	let formModels: ProviderModelEntry[] = $state(
-		(seed?.models ?? []).map((m) => ({ id: m.id, label: m.label, context_window: m.context_window }))
+		(seed?.models ?? []).map((m) => ({
+			id: m.id,
+			label: m.label,
+			context_window: m.context_window,
+			pricing: m.pricing
+		}))
 	);
 	let formDefaultModel = $state(seed?.default_model ?? '');
 	let formSmallFastModel = $state(seed?.small_fast_model ?? '');
@@ -79,7 +84,13 @@
 	let fetchError = $state('');
 	let fetchSource = $state<'preset' | 'upstream' | ''>('');
 	let fetchResults = $state<
-		{ id: string; label: string; checked: boolean; context_window?: number | null }[]
+		{
+			id: string;
+			label: string;
+			checked: boolean;
+			context_window?: number | null;
+			pricing?: ProviderModelEntry['pricing'];
+		}[]
 	>([]);
 	let fetchSaving = $state(false);
 
@@ -94,12 +105,14 @@
 			fetchSource = res.source;
 			// A curated per-model window wins over the freshly-fetched one.
 			const curatedWindows = new Map(formModels.map((m) => [m.id.trim(), m.context_window]));
+			const curatedPricing = new Map(formModels.map((m) => [m.id.trim(), m.pricing]));
 			fetchResults = (res.models ?? []).map((m) => ({
 				id: m.id,
 				label: m.label,
 				// Preselect ids already in the curated set.
 				checked: curated.has(m.id),
-				context_window: curatedWindows.get(m.id) ?? m.context_window
+				context_window: curatedWindows.get(m.id) ?? m.context_window,
+				pricing: curatedPricing.get(m.id) ?? m.pricing
 			}));
 			showFetchPicker = true;
 		} catch (e) {
@@ -131,7 +144,8 @@
 			.map((r) => ({
 				id: r.id.trim(),
 				label: (r.label || r.id).trim(),
-				...(r.context_window != null ? { context_window: r.context_window } : {})
+				...(r.context_window != null ? { context_window: r.context_window } : {}),
+				...(r.pricing ? { pricing: r.pricing } : {})
 			}))
 			.filter((m) => m.id && m.label);
 		fetchSaving = true;
@@ -203,7 +217,8 @@
 			.map((m) => ({
 				id: m.id.trim(),
 				label: m.label.trim(),
-				...(m.context_window != null ? { context_window: m.context_window } : {})
+				...(m.context_window != null ? { context_window: m.context_window } : {}),
+				...(m.pricing ? { pricing: m.pricing } : {})
 			}))
 			.filter((m) => m.id && m.label);
 		const token = formToken.trim();

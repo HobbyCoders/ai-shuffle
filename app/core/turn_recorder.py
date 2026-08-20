@@ -874,6 +874,13 @@ class TurnRecorder:
     # ------------------------------------------------------------------
 
     def _coalesce_usage(self, usage: Dict[str, Any]) -> List[Dict[str, Any]]:
+        # Native fluid emits one terminal snapshot per logical model call with
+        # a stable call index. Those records are accounting/audit evidence, not
+        # a rapidly-changing gauge, so never coalesce one call over another.
+        if usage.get("model_call_index") is not None:
+            self._pending_usage = None
+            self._last_usage_at = time.monotonic()
+            return [self._event(contract.TurnUsage, usage=usage)]
         now = time.monotonic()
         if now - self._last_usage_at >= USAGE_COALESCE_SECONDS:
             self._last_usage_at = now

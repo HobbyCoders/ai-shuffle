@@ -454,6 +454,29 @@ async def test_turn_usage_maps_to_turn_usage(mock_db):
     await rec.close()
 
 
+async def test_indexed_model_call_usage_is_never_coalesced_and_keeps_request_ids(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    for index in (1, 2):
+        await rec.on_event({
+            "type": "turn_usage",
+            "usage": {
+                "model_call_index": index,
+                "cost_usd": 0.25 * index,
+                "provider_requests": {
+                    "logical_call_id": f"call-{index}",
+                    "attempts": [{"attempt": 1, "generation_id": f"gen-{index}"}],
+                },
+            },
+        })
+    usage_rows = [row for row in _rows() if row["event_type"] == "turn.usage"]
+    assert [row["payload"]["usage"]["model_call_index"] for row in usage_rows] == [1, 2]
+    assert usage_rows[1]["payload"]["usage"]["provider_requests"]["attempts"] == [
+        {"attempt": 1, "generation_id": "gen-2"}
+    ]
+    await rec.close()
+
+
 async def test_done_maps_to_turn_completed_with_usage_summary(mock_db):
     _mk_session()
     rec = await _recorder()

@@ -151,6 +151,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional, Tuple, cast
 
@@ -198,7 +199,9 @@ from app.core.provider.events import (
 # fluid imports (the library we wrap). Its top-level __init__ is intentionally
 # empty, so we import from submodules directly.
 from fluid.engine.native import NativeLoop
+from fluid.engine.safety import TurnSafetyLimits
 from fluid.engine.delegated import DelegatedLoop
+from fluid.context.trim import TrimConfig
 from fluid.events.ops import (
     Interrupt,
     RespondPermission,
@@ -274,9 +277,6 @@ class HarnessAdapter(ProviderAdapter):
         # Open streaming blocks: index -> block_type, and accumulated delta text.
         self._block_types: Dict[int, str] = {}
         self._block_buffers: Dict[int, list] = {}
-        # Last fluid Usage reading, attached to the next synthesized
-        # AssistantMessage (the loops read per-call usage off that message).
-        self._pending_usage: Optional[Dict[str, Any]] = None
         # App-side permission callback (ClaudeAgentOptions.can_use_tool). When
         # present, fluid PermissionRequests are bridged to it out-of-band (SDK
         # parity — the loops never see a permission event); when absent they
@@ -440,9 +440,21 @@ class HarnessAdapter(ProviderAdapter):
             # omitted unless configured so fluid keeps its own defaults
             # (max_model_calls_per_turn=50, max_tokens=8192).
             native_caps: Dict[str, Any] = {}
-            max_calls = _positive_int(getattr(options, "max_turns", None))
-            if max_calls is not None:
-                native_caps["max_model_calls_per_turn"] = max_calls
+            safety_limits = _turn_safety_limits()
+            requested_calls = _positive_int(getattr(options, "max_turns", None))
+            max_calls = min(
+                requested_calls or safety_limits.hard_model_calls,
+                safety_limits.hard_model_calls,
+            )
+            native_caps["max_model_calls_per_turn"] = max_calls
+            native_caps["safety_limits"] = safety_limits
+            from app.core.config import settings as app_settings
+            native_caps["trim"] = TrimConfig(
+                trigger_tokens=max(1, app_settings.turn_safety_trim_trigger_tokens),
+                keep_recent_tool_results=max(
+                    0, app_settings.turn_safety_trim_keep_recent_results
+                ),
+            )
             max_tokens = _native_max_output_tokens(options)
             if max_tokens is not None:
                 native_caps["max_tokens"] = max_tokens
@@ -1091,14 +1103,12 @@ class HarnessAdapter(ProviderAdapter):
         )
 
     def _assistant(self, event: Any, blocks: list) -> AssistantMessage:
-        """Synthesized AssistantMessage; attaches the last Usage reading so the
-        loops' per-call token accounting sees it (SDK parity)."""
-        usage, self._pending_usage = self._pending_usage, None
+        """Synthesized content message; per-call usage has its own message."""
         return AssistantMessage(
             content=blocks,
             model=self._current_model
             or (self._options.model if self._options else ""),
-            usage=usage,
+            usage=None,
             session_id=getattr(event, "session_id", None),
             uuid=self._uuid(event),
         )
@@ -1259,8 +1269,10 @@ class HarnessAdapter(ProviderAdapter):
             ]
 
         if cls == "Usage":
-            # Held and attached to the next synthesized AssistantMessage — the
-            # loops read per-call usage off AssistantMessage.usage (SDK names).
+            # Emit a contentless AssistantMessage NOW. Holding usage for the
+            # next content block created a one-call lag and dropped the final
+            # call's telemetry entirely. QueryEngine already treats an empty
+            # AssistantMessage as non-visible while recording ``turn_usage``.
             usage: Dict[str, Any] = {
                 "input_tokens": event.input_tokens,
                 "output_tokens": event.output_tokens,
@@ -1269,8 +1281,25 @@ class HarnessAdapter(ProviderAdapter):
             }
             if event.raw:
                 usage.update(event.raw)
-            self._pending_usage = usage
-            return []
+            return [AssistantMessage(
+                content=[],
+                model=self._current_model
+                or (self._options.model if self._options else ""),
+                usage=usage,
+                session_id=getattr(event, "session_id", None),
+                uuid=self._uuid(event),
+            )]
+
+        if cls == "SafetyWarning":
+            return [SystemMessage(
+                subtype="safety_limit" if event.hard else "safety_warning",
+                data={
+                    "content": event.message,
+                    "code": event.code,
+                    "hard": event.hard,
+                    "counters": dict(event.counters),
+                },
+            )]
 
         if cls == "RateLimit":
             return [
@@ -1325,6 +1354,12 @@ class HarnessAdapter(ProviderAdapter):
             ]
 
         if cls == "TurnComplete":
+            if event.stop_reason.startswith("safety_limit:"):
+                terminal_reason = "safety_limit"
+            elif event.stop_reason == "max_calls":
+                terminal_reason = "max_turns"
+            else:
+                terminal_reason = "completed"
             return [
                 ResultMessage(
                     subtype="success",
@@ -1338,7 +1373,7 @@ class HarnessAdapter(ProviderAdapter):
                     total_cost_usd=event.cost_usd if event.cost_usd is not None else 0.0,
                     usage=dict(event.usage),
                     uuid=self._uuid(event),
-                    terminal_reason="completed",
+                    terminal_reason=terminal_reason,
                 )
             ]
 
@@ -1516,6 +1551,7 @@ class HarnessAdapter(ProviderAdapter):
             builtins_registered = True
             logger.info("[HarnessAdapter] registered fluid builtin tools for native leg")
             _amend_native_task_spec(registry, options)
+            _amend_native_mutation_specs(registry)
 
         # The app's own in-proc SDK servers (builtins, app-config, ai-tools,
         # computer-use, provider-agent): their @tool objects were recorded per
@@ -1573,6 +1609,38 @@ class HarnessAdapter(ProviderAdapter):
 
 
 # ─── Module-level helpers ─────────────────────────────────────────────────────
+
+
+def _turn_safety_limits() -> TurnSafetyLimits:
+    """Build one immutable limit set from the install's persisted settings."""
+    from app.core.config import settings
+
+    hard_models = max(1, settings.turn_safety_max_model_calls)
+    hard_tools = max(1, settings.turn_safety_max_tool_calls)
+    hard_prompt = max(1, settings.turn_safety_max_prompt_tokens)
+    hard_cost = max(0.0, settings.turn_safety_max_cost_usd)
+    hard_repeat = max(1, settings.turn_safety_repeated_action_hard)
+    hard_new_page = max(1, settings.turn_safety_browser_new_page_hard)
+    return TurnSafetyLimits(
+        soft_model_calls=min(max(1, settings.turn_safety_soft_model_calls), hard_models),
+        hard_model_calls=hard_models,
+        soft_tool_calls=min(max(1, settings.turn_safety_soft_tool_calls), hard_tools),
+        hard_tool_calls=hard_tools,
+        soft_prompt_tokens=min(
+            max(1, settings.turn_safety_soft_prompt_tokens), hard_prompt
+        ),
+        hard_prompt_tokens=hard_prompt,
+        soft_cost_usd=min(max(0.0, settings.turn_safety_soft_cost_usd), hard_cost),
+        hard_cost_usd=hard_cost,
+        repeated_action_warn=min(
+            max(1, settings.turn_safety_repeated_action_warn), hard_repeat
+        ),
+        repeated_action_hard=hard_repeat,
+        browser_new_page_warn=min(
+            max(1, settings.turn_safety_browser_new_page_warn), hard_new_page
+        ),
+        browser_new_page_hard=hard_new_page,
+    )
 
 
 def _resolve_claude_cmd() -> Optional[list]:
@@ -2068,11 +2136,12 @@ def _amend_native_task_spec(registry: ToolRegistry, options: SessionOptions) -> 
         from fluid.tools.builtins.task import SPEC as _TASK_SPEC
         from fluid.tools.builtins.task import handler as _task_handler
 
-        from app.core.task_dispatch import TASK_MODEL_OVERRIDE_DESCRIPTION
+        from app.core.task_dispatch import task_model_property_schema
 
         schema = copy.deepcopy(_TASK_SPEC.input_schema)
-        schema["properties"]["model"]["description"] = (
-            TASK_MODEL_OVERRIDE_DESCRIPTION
+        provider_id = (options.extra or {}).get("provider_id")
+        schema["properties"]["model"] = task_model_property_schema(
+            str(provider_id) if provider_id else None, options.model
         )
         registry.register_builtin(
             dataclasses.replace(_TASK_SPEC, input_schema=schema), _task_handler
@@ -2081,6 +2150,52 @@ def _amend_native_task_spec(registry: ToolRegistry, options: SessionOptions) -> 
         logger.warning(
             "[HarnessAdapter] failed to amend native Task spec's model "
             "description; leaving the vendor spec as-is.",
+            exc_info=True,
+        )
+
+
+def _amend_native_mutation_specs(registry: ToolRegistry) -> None:
+    """Make the native mutation/shell contract explicit in tool schemas.
+
+    This is guidance, not a shell ban: Bash remains the right tool for commands,
+    builds, git, and generators.  Direct file-content changes should use the
+    purpose-built Write/Edit tools so intent is followed by an auditable
+    mutation call instead of prose or shell redirection.
+    """
+    try:
+        import dataclasses
+
+        from fluid.tools.builtins.bash import SPEC as bash_spec, handler as bash_handler
+        from fluid.tools.builtins.edit import SPEC as edit_spec, handler as edit_handler
+        from fluid.tools.builtins.write import SPEC as write_spec, handler as write_handler
+
+        registry.register_builtin(dataclasses.replace(
+            write_spec,
+            description=(
+                "Create or overwrite a file. When you say you will create or write "
+                "file content, invoke Write immediately; do not draft the content "
+                "only in reasoning or route it through Bash/Python redirection."
+            ),
+        ), write_handler)
+        registry.register_builtin(dataclasses.replace(
+            edit_spec,
+            description=(
+                "Modify an existing file by exact replacement after Read. When you "
+                "say you will edit or update file content, invoke Edit immediately."
+            ),
+        ), edit_handler)
+        registry.register_builtin(dataclasses.replace(
+            bash_spec,
+            description=(
+                "Run a command in the host platform shell. Use for git, builds, "
+                "tests, package managers, and command-driven generators; use Write "
+                "or Edit for direct file-content mutations. Follow the Shell line "
+                "in the environment block exactly."
+            ),
+        ), bash_handler)
+    except Exception:  # noqa: BLE001 — schemas are guidance, never a connect gate
+        logger.warning(
+            "[HarnessAdapter] failed to amend native mutation tool descriptions",
             exc_info=True,
         )
 
@@ -2299,18 +2414,20 @@ async def _build_provider_client(
         # api_dialect='openai': xAI-direct / Groq / vLLM). For openrouter-type
         # rows the stored base ("https://openrouter.ai/api") composes to the
         # client's own default URL, so honoring it is behavior-preserving.
+        pricing = _openrouter_pricing(options)
         if creds is not None:
             if creds.base_url:
                 return (
                     OpenRouterClient(
                         api_key=creds.api_key,
                         base_url=_chat_completions_url(creds.base_url),
+                        pricing=pricing,
                     ),
                     None,
                 )
-            return OpenRouterClient(api_key=creds.api_key), None
+            return OpenRouterClient(api_key=creds.api_key, pricing=pricing), None
         _require_env_credential("OPENROUTER_API_KEY", kind)
-        return OpenRouterClient(), None
+        return OpenRouterClient(pricing=pricing), None
     # anthropic — API-key rows only. A Claude Pro/Max SUBSCRIPTION OAuth token is
     # never routed here (that path stays delegated-CLI only); resolve_provider_
     # credentials refuses such a row outright. A row-level ``base_url`` (every
@@ -2339,3 +2456,27 @@ async def _build_provider_client(
         return AnthropicClient(api_key=creds.api_key), None
     _require_env_credential("ANTHROPIC_API_KEY", kind)
     return AnthropicClient(), None
+
+
+def _openrouter_pricing(options: SessionOptions) -> Dict[str, Dict[str, float]]:
+    """Sanitized per-token pricing retained from the bound provider catalog."""
+    provider_id = (options.extra or {}).get("provider_id")
+    row = _lookup_provider_row(str(provider_id)) if provider_id else None
+    out: Dict[str, Dict[str, float]] = {}
+    for entry in (row or {}).get("models_json") or []:
+        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+            continue
+        raw = entry.get("pricing")
+        if not isinstance(raw, dict):
+            continue
+        parsed: Dict[str, float] = {}
+        for key in ("prompt", "completion", "input_cache_read", "input_cache_write"):
+            try:
+                value = float(raw[key])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if value >= 0 and math.isfinite(value):
+                parsed[key] = value
+        if parsed:
+            out[entry["id"]] = parsed
+    return out

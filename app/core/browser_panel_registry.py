@@ -87,10 +87,18 @@ def register(
     tab_id: Optional[str],
     url: Optional[str],
 ) -> None:
-    """Store/overwrite the session's current target and wake all waiters."""
+    """Store the session target and wake waiters only when it changed.
+
+    Browser tools commonly publish the same target after every operation.  An
+    identical registration is not a lifecycle transition and must not force the
+    screencast hub to detach/reconnect (that was the live-preview flicker).
+    """
+    new_target = PanelTarget(target_id=target_id, tab_id=tab_id, url=url)
     with _lock:
         rec = _get_or_create(session_id)
-        rec.target = PanelTarget(target_id=target_id, tab_id=tab_id, url=url)
+        if rec.target == new_target:
+            return
+        rec.target = new_target
         event = rec.change_event
         rec.change_event = asyncio.Event()
     # Fire outside the lock; safe when called from the event-loop thread.

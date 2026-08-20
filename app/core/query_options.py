@@ -1141,6 +1141,7 @@ def build_options_from_profile(
             project_id=project.get("id") if project else None,
             is_admin=not api_user_id,
             model=model_to_use,
+            provider_id=provider_id,
             # The resolved cwd, so the bridged Task tool can discover the same
             # file/plugin agent definitions a native leg gets from fluid — the
             # delegated (CLI) leg has no engine to publish them (ruling CE6).

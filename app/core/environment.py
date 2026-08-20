@@ -932,5 +932,6 @@ Working directory: {working_dir}
 Is directory a git repo: {"Yes" if is_git else "No"}
 Platform: {sys.platform}
 OS Version: {os_version}
+Shell: {"cmd.exe (use Windows cmd syntax)" if os.name == "nt" else "/bin/sh-compatible (use POSIX shell syntax)"}
 Today's date: {today}{execution_lines}
 </env>"""

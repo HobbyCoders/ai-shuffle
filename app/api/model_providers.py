@@ -399,6 +399,18 @@ def _parse_models_response(payload: Any) -> List[Dict[str, Any]]:
         model: Dict[str, Any] = {"id": model_id, "label": label}
         if context_window is not None:
             model["context_window"] = context_window
+        # OpenRouter publishes per-token prices here. Preserve the numeric
+        # strings for pre-call spend projection; never copy arbitrary catalog
+        # metadata into the persisted provider row.
+        if isinstance(entry, dict) and isinstance(entry.get("pricing"), dict):
+            pricing = entry["pricing"]
+            kept = {
+                key: pricing[key]
+                for key in ("prompt", "completion", "input_cache_read", "input_cache_write")
+                if isinstance(pricing.get(key), (str, int, float))
+            }
+            if kept:
+                model["pricing"] = kept
         models.append(model)
         if len(models) >= _FETCH_MODELS_CAP:
             break

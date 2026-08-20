@@ -634,6 +634,23 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					}, seq);
 				}
 			}
+			if (str(event.terminal_reason) === 'safety_limit') {
+				const text =
+					'Safety limit reached — this turn was halted before further model or tool ' +
+					'spend. Review the warning above, then send a new message to continue.';
+				const last = completed.messages[completed.messages.length - 1];
+				if (!(last?.role === 'system' && last.content === text)) {
+					return appendMessage(completed, {
+						id: event.id,
+						role: 'system',
+						type: 'system',
+						content: text,
+						systemSubtype: 'warning',
+						systemData: { content: text },
+						timestamp: createdAt || undefined,
+					}, seq);
+				}
+			}
 			return completed;
 		}
 

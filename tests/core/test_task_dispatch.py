@@ -9,6 +9,55 @@ import app.core.task_dispatch as td
 from app.core.provider_agent import WorkerOutcome
 
 
+def test_provider_scoped_task_models_include_selected_dedupe_and_exclude_other_provider(
+    monkeypatch,
+):
+    from app.db import database
+
+    rows = {
+        "openrouter-1": {
+            "id": "openrouter-1",
+            "models_json": [
+                {"id": "x-ai/grok-4.6"},
+                {"id": "openai/gpt-5-mini"},
+                {"id": "x-ai/grok-4.6"},
+            ],
+        },
+        "anthropic-1": {
+            "id": "anthropic-1",
+            "models_json": [{"id": "claude-opus-4-6"}],
+        },
+    }
+    monkeypatch.setattr(
+        database, "get_model_provider",
+        lambda provider_id, include_token=False: rows.get(provider_id),
+    )
+
+    assert td.provider_scoped_task_models("openrouter-1", "x-ai/grok-4.6") == (
+        "x-ai/grok-4.6", "openai/gpt-5-mini",
+    )
+    assert "claude-opus-4-6" not in td.provider_scoped_task_models(
+        "openrouter-1", "x-ai/grok-4.6"
+    )
+
+
+def test_provider_scoped_task_models_other_provider_still_includes_selected(monkeypatch):
+    from app.db import database
+
+    monkeypatch.setattr(
+        database, "get_model_provider",
+        lambda provider_id, include_token=False: {
+            "id": provider_id,
+            "models_json": [
+                {"id": "claude-sonnet-4-6"}, {"id": "claude-haiku-4-5"},
+            ],
+        },
+    )
+    assert td.provider_scoped_task_models("anthropic-1", "claude-opus-4-6") == (
+        "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5",
+    )
+
+
 @pytest.fixture()
 def agents(mock_db):
     from app.db import database
@@ -500,11 +549,10 @@ def _builtin_task_handler(session_id, profile_id, cwd):
     import app.mcp.builtin_tools as bt
 
     captured = {}
-    real_create = sdk.create_sdk_mcp_server
 
     def _spy(name, version, tools):
         captured["tools"] = tools
-        return real_create(name=name, version=version, tools=tools)
+        return {"name": name, "version": version, "tools": tools}
 
     with patch.object(sdk, "create_sdk_mcp_server", side_effect=_spy):
         bt.create_builtin_tools_server(
@@ -658,6 +706,52 @@ def _spawn(providers_db, args, caller_session, caller_profile, **kw):
     with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
         payload = asyncio.run(_dispatch(args, caller_session, **kw))
     return payload, seen
+
+
+def test_live_chat_binding_ignores_target_builder_provider_and_model(providers):
+    """Issue 1: a live chat binds Task to its selected provider/model."""
+    from app.db import database
+
+    _mk_session(providers, "s-live-binding", "openai-agent")
+    database.update_session("s-live-binding", launched_model="gpt-5.6-terra")
+    seen = {}
+
+    async def fake_worker(**kwargs):
+        seen.update(kwargs)
+        return WorkerOutcome(ok=True, session_id="w", report="r")
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        payload = asyncio.run(_dispatch(
+            {"agent": "xai-agent", "prompt": "go"}, "s-live-binding"
+        ))
+
+    assert payload["ok"] is True
+    assert seen["profile_id"] == "xai-agent"  # target still supplies persona/tools
+    assert seen["provider_id"] == "openai-1"
+    assert seen["model_id"] == "gpt-5.6-terra"
+
+
+def test_live_chat_rejects_out_of_provider_task_model_at_runtime(providers):
+    from app.db import database
+
+    _mk_session(providers, "s-live-roster", "openai-agent")
+    database.update_session("s-live-roster", launched_model="gpt-5.6-terra")
+    seen = {}
+
+    async def fake_worker(**kwargs):
+        seen.update(kwargs)
+        return WorkerOutcome(ok=True, session_id="w", report="r")
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        payload = asyncio.run(_dispatch(
+            {"agent": "xai-agent", "prompt": "go", "model": "grok-9"},
+            "s-live-roster",
+        ))
+
+    assert payload["ok"] is True
+    assert seen["provider_id"] == "openai-1"
+    assert seen["model_id"] == "gpt-5.6-terra"
+    assert "not available on this chat's provider" in payload["note"]
 
 
 # --- rule 1: the target's own binding, untouched -----------------------------
