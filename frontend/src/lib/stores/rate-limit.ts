@@ -282,16 +282,17 @@ export function effectivePct(w: UsageWindow, nowMs: number): number {
 	return Math.round(w.utilization);
 }
 
-/**
- * Used-of-100 for subscription windows (Claude OAuth and ChatGPT/Codex).
- *
- * Those feeds report remaining quota (100 = unused, 0 = exhausted) even when
- * the Codex header is named used-percent. The popover shows consumed instead.
- * A rolled-over window is a fresh 0% used, not 100 − remaining.
- */
-export function usedPct(w: UsageWindow, nowMs: number): number {
+/** Reported remaining quota, returning a fresh window after rollover. */
+export function reportedRemainingPct(w: UsageWindow, nowMs: number): number {
 	const resetMs = parseResetMs(w.resets_at);
-	if (resetMs != null && resetMs <= nowMs) return 0;
+	if (resetMs != null && resetMs <= nowMs) return 100;
+	return Math.round(w.utilization);
+}
+
+/** Convert reported used quota to remaining, returning a fresh window after rollover. */
+export function remainingFromUsedPct(w: UsageWindow, nowMs: number): number {
+	const resetMs = parseResetMs(w.resets_at);
+	if (resetMs != null && resetMs <= nowMs) return 100;
 	return Math.round(100 - w.utilization);
 }
 

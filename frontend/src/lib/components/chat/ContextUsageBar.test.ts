@@ -435,7 +435,7 @@ describe('ContextUsageBar — context breakdown', () => {
 
 		await openPopover(container);
 		const planPct = container.querySelector('.popover-row .row-pct') as HTMLElement;
-		expect(planPct.textContent).toBe('98%'); // remaining 2 → 98% used
+		expect(planPct.textContent).toBe('2% left');
 		expect(planPct.classList.contains('danger')).toBe(true);
 	});
 
@@ -522,38 +522,52 @@ describe('ContextUsageBar — plan usage limits', () => {
 		expect(withRows.querySelectorAll('.popover-row').length).toBe(1);
 	});
 
-	it('lists the resolved window as used-of-100 (snapshot remaining inverted)', async () => {
+	it('preserves the Claude feed as quota remaining', async () => {
 		rateLimit.applySnapshot({
 			available: true,
-			windows: [{ type: 'five_hour', utilization: 42, resets_at: future() }],
+			windows: [{ type: 'five_hour', utilization: 14, resets_at: future() }],
 		});
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		const rows = container.querySelectorAll('.popover-row');
-		expect(rows.length).toBe(1);
-		expect(rows[0].querySelector('.row-pct')?.textContent).toBe('58%');
+		const pct = container.querySelector('.popover-row .row-pct') as HTMLElement;
+		expect(pct.textContent).toBe('14% left');
+		expect(pct.classList.contains('warning')).toBe(true);
+		expect(pct.classList.contains('danger')).toBe(false);
 	});
 
-	it('normalises a live SDK fraction then inverts remaining to used', async () => {
+	it('warns from low remaining Claude quota, not high remaining quota', async () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [{ type: 'five_hour', utilization: 9, resets_at: future() }],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		const pct = container.querySelector('.popover-row .row-pct') as HTMLElement;
+		expect(pct.textContent).toBe('9% left');
+		expect(pct.classList.contains('danger')).toBe(true);
+	});
+
+	it('normalises a live SDK remaining fraction to a percentage', async () => {
 		rateLimit.applyLiveEvent({
 			status: 'allowed',
 			rate_limit_type: 'five_hour',
-			utilization: 0.42, // SDK fraction → 42 remaining → 58% used
+			utilization: 0.42,
 			resets_at: future(),
 		});
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('58%');
+		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('42% left');
 	});
 
-	it('shows 0% once a window has rolled over', async () => {
+	it('shows 100% left once a subscription window has rolled over', async () => {
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [{ type: 'five_hour', utilization: 42, resets_at: past() }],
 		});
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('0%');
+		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('100% left');
 	});
 
 	it('lists all windows with humanised labels on open', async () => {
@@ -614,8 +628,8 @@ describe('ContextUsageBar — plan usage limits', () => {
 		expect(container.textContent).not.toContain('a@example.com');
 		expect(container.textContent).not.toContain('Worker');
 		expect(container.textContent).not.toContain('b@example.com');
-		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('88%');
-		expect(container.textContent).not.toContain('12%');
+		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('12% left');
+		expect(container.textContent).not.toContain('88%');
 	});
 
 	it('heads the Claude section with the resolved install device label (never the account name/email)', async () => {
@@ -673,7 +687,7 @@ describe('ContextUsageBar — plan usage limits', () => {
 		expect(container.querySelector('.section-account')).toBeNull();
 		expect(container.textContent).not.toContain('This device');
 		expect(container.textContent).not.toContain('Other device');
-		// Only the self window is shown (88% used), not the worker's live 50%.
+		// Only the self window is shown (12% left), not the worker's live 50%.
 		expect(container.querySelectorAll('.popover-row').length).toBe(1);
 		expect(container.textContent).not.toContain('50%');
 	});
@@ -783,8 +797,8 @@ describe('ContextUsageBar — plan usage limits', () => {
 		expect(container.querySelectorAll('.popover-row').length).toBe(0);
 		expect(secHeader.getAttribute('aria-expanded')).toBe('false');
 		expect(localStorage.getItem('aihub.usageSectionOpen:plan')).toBe('0');
-		// Collapsed → the max plan pct rides on the header summary.
-		expect(container.querySelector('.sec-summary')?.textContent).toBe('58%');
+		// Collapsed → the least remaining plan pct rides on the header summary.
+		expect(container.querySelector('.sec-summary')?.textContent).toBe('42% left');
 
 		await fireEvent.click(secHeader); // expand again
 		expect(container.querySelectorAll('.popover-row').length).toBe(1);
@@ -831,11 +845,39 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		const rows = container.querySelectorAll('.popover-row');
 		expect(rows.length).toBe(2);
 		expect(rows[0].querySelector('.row-label')?.textContent).toBe('5-hour limit');
-		expect(rows[0].querySelector('.row-pct')?.textContent).toBe('70%');
+		expect(rows[0].querySelector('.row-pct')?.textContent).toBe('70% left');
 		expect(rows[1].querySelector('.row-label')?.textContent).toBe('Weekly (all models)');
-		expect(rows[1].querySelector('.row-pct')?.textContent).toBe('88%');
+		expect(rows[1].querySelector('.row-pct')?.textContent).toBe('88% left');
 		// Each window row draws a bar fill sized to its percent.
 		expect(rows[0].querySelector('.row-fill')).not.toBeNull();
+	});
+
+	it('shows high OpenAI subscription quota remaining without warning or danger color', async () => {
+		localStorage.setItem('aihub.usageSectionOpen:provider:codex-91', '0');
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [
+				{
+					provider_id: 'codex-91',
+					provider_name: 'ChatGPT',
+					provider_type: 'chatgpt',
+					plan_type: 'prolite',
+					windows: [
+						{ type: 'five_hour', utilization: 9, resets_at: future() },
+						{ type: 'seven_day', utilization: 2, resets_at: future() },
+					],
+					credits: null,
+				},
+			],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		const summary = container.querySelector('.row-pct.sec-summary') as HTMLElement;
+		expect(summary.textContent).toBe('91% left');
+		expect(summary.classList.contains('warning')).toBe(false);
+		expect(summary.classList.contains('danger')).toBe(false);
 	});
 
 	it('falls back to the provider type, then "Provider", for the section header', async () => {
