@@ -217,7 +217,7 @@
 	.thinking-block {
 		font-style: italic;
 		color: var(--muted-foreground);
-		margin: 0 -8px;
+		margin: 0;
 		min-width: 0;
 	}
 

@@ -114,7 +114,7 @@
 	.system-message-group {
 		width: 100%;
 		min-width: 0;
-		margin: 0 -8px;
+		margin: 0;
 	}
 
 	.sg-details {

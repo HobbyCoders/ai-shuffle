@@ -77,7 +77,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 1px;
-		margin: 0 -8px;
+		margin: 0;
 		min-width: 0;
 	}
 
