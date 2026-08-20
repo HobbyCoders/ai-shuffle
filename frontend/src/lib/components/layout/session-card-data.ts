@@ -98,6 +98,11 @@ export function projectKey(s: Session): string {
 	return s.origin || s.link_group_id || s.project_id || UNGROUPED_PROJECT;
 }
 
+/** Internal worker/command sessions never belong in the sidebar navigator. */
+export function isSidebarSession(s: Session): boolean {
+	return !s.hidden;
+}
+
 /** Sessions the archive shelf owns (backend sets status='archived'). */
 export function isArchived(s: Session): boolean {
 	return s.status === 'archived';

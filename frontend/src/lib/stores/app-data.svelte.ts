@@ -374,6 +374,30 @@ export const appData = {
 
 	async deleteProject(projectId: string) {
 		await api.delete(`/projects/${projectId}`);
+
+		// The backend deletes every session attached to the project. Mirror that
+		// cascade locally as soon as the request succeeds so stale chats cannot
+		// remain in the sidebar or keep the deleted project in its filter menu.
+		const removedSessionIds = new Set(
+			_state.sessions.filter(session => session.project_id === projectId).map(session => session.id)
+		);
+		_update(s => ({
+			...s,
+			projects: s.projects.filter(project => project.id !== projectId),
+			sessions: s.sessions.filter(session => session.project_id !== projectId),
+			sessionsTotal: Math.max(0, s.sessionsTotal - removedSessionIds.size),
+			...(s.sessions.length === removedSessionIds.size
+				? {
+					sessionsCursor: null,
+					sessionsCursorId: null,
+					sessionsHasMore: false,
+				}
+				: {}),
+		}));
+
+		if (activeSession.current.sessionId && removedSessionIds.has(activeSession.current.sessionId)) {
+			activeSession.newChat();
+		}
 		await appData.loadProjects();
 	},
 

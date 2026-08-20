@@ -3,7 +3,9 @@
 v75 adds ONE nullable ``sessions.hidden BOOLEAN`` column: TRUE keeps a session
 out of the sessions-list queries (wake-word "command" voice sessions are born
 hidden), NULL/FALSE — every pre-existing row — stays visible. Hidden rows are
-list-hidden ONLY: still fetchable by id, still fully functional.
+list-hidden ONLY: still fetchable by id, still fully functional. Delegated
+workers use the same contract; a persisted ``provider_agent`` turn also hides
+workers created before the flag was set at creation time.
 
 Mirrors tests/db/test_sessions_mode_migration.py (the v74 sessions.mode
 precedent this column follows exactly).
@@ -120,6 +122,29 @@ def test_cursor_excludes_hidden(mock_db):
 
     rows, *_ = database.get_sessions_cursor(include_hidden=True)
     assert {visible_id, hidden_id} <= {s["id"] for s in rows}
+
+
+def test_legacy_provider_worker_is_list_hidden_by_turn_source(mock_db):
+    """Workers created before hidden=True was stamped are still excluded from
+    every sidebar-list query, while include_hidden keeps diagnostics possible."""
+    from app.db.turns import enqueue_turn
+
+    visible_id = _mk()
+    worker_id = _mk()
+    enqueue_turn(worker_id, "provider_agent", prompt="delegated work")
+
+    assert {s["id"] for s in database.get_sessions()} == {visible_id}
+
+    rows, total = database.get_sessions_paginated()
+    assert {s["id"] for s in rows} == {visible_id}
+    assert total == 1
+
+    rows, *_ = database.get_sessions_cursor()
+    assert {s["id"] for s in rows} == {visible_id}
+
+    assert worker_id in {
+        s["id"] for s in database.get_sessions(include_hidden=True)
+    }
 
 
 def test_set_session_hidden_toggles(mock_db):

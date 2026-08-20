@@ -4,7 +4,7 @@
 	 *
 	 * A 256px black plane: brand header + new session, ghost rows (search and the
 	 * project / device filters), a scrollable list of three-line session cards
-	 * grouped Working / Recent, the archived shelf, and a footer icon rail that
+	 * grouped Active / Settled, the archived shelf, and a footer icon rail that
 	 * switches the MainPanel deck views.
 	 *
 	 * Desktop hosts it beside the main panel; at ≤1080px the same component is
@@ -12,9 +12,8 @@
 	 * identical on both.
 	 *
 	 * Data comes exclusively from the stores the app already loads ($sessions,
-	 * streamingSessions, backgroundPermissions). The mockup's Pinned group and
-	 * the per-card diffstat / provider glyph have no backing data, so they are
-	 * omitted rather than invented.
+	 * streamingSessions, backgroundPermissions). Internal worker sessions are
+	 * list-hidden and never enter the filters or either visible group.
 	 */
 	import { onDestroy, type Snippet } from 'svelte';
 	import {
@@ -45,6 +44,7 @@
 		sessionTimestamp,
 		sessionDeviceId,
 		projectKey,
+		isSidebarSession,
 		isArchived,
 		UNGROUPED_PROJECT,
 		type SessionCardStatus
@@ -70,7 +70,7 @@
 	}: Props = $props();
 
 	// The list starts capped; "All sessions" grows it in place (the board is gone).
-	const RECENT_LIMIT = 30;
+	const SETTLED_LIMIT = 30;
 	const SHOW_MORE_STEP = 50;
 	const ARCHIVED_LIMIT = 30;
 
@@ -118,6 +118,7 @@
 	// ---------------------------------------------------------------- data
 	const activeId = $derived($activeSession.sessionId);
 	const projectsById = $derived(new Map($projects.map((p) => [p.id, p])));
+	const sidebarSessions = $derived($sessions.filter(isSidebarSession));
 
 	function isStreaming(id: string): boolean {
 		if ($activeSession.sessionId === id) return $activeSession.isStreaming;
@@ -142,7 +143,7 @@
 
 	const projectOptions = $derived.by((): FilterOption[] => {
 		const map = new Map<string, string>();
-		for (const s of $sessions) {
+		for (const s of sidebarSessions) {
 			const key = projectKey(s);
 			if (!map.has(key)) map.set(key, key === UNGROUPED_PROJECT ? 'Ungrouped' : projectLabel(s));
 		}
@@ -153,7 +154,7 @@
 
 	const deviceOptions = $derived.by((): FilterOption[] => {
 		const map = new Map<string, string>();
-		for (const s of $sessions) {
+		for (const s of sidebarSessions) {
 			const id = sessionDeviceId(s);
 			if (!map.has(id)) {
 				map.set(id, id === '__local__' ? 'This device' : s.device_name || 'Unknown device');
@@ -181,7 +182,7 @@
 	});
 
 	const visibleSessions = $derived(
-		$sessions.filter(
+		sidebarSessions.filter(
 			(s) =>
 				(!projectFilter || projectKey(s) === projectFilter) &&
 				(!deviceFilter || sessionDeviceId(s) === deviceFilter)
@@ -205,12 +206,12 @@
 			.sort((a, b) => sessionTimestamp(b.session) - sessionTimestamp(a.session))
 	);
 
-	const workingRows = $derived(rows.filter((r) => r.status === 'working' || r.status === 'await'));
-	const restRows = $derived(rows.filter((r) => r.status !== 'working' && r.status !== 'await'));
-	let recentLimit = $state(RECENT_LIMIT);
-	const recentRows = $derived(restRows.slice(0, recentLimit));
-	const hiddenRecent = $derived(Math.max(0, restRows.length - recentRows.length));
-	const fullyExpanded = $derived(hiddenRecent === 0 && recentLimit > RECENT_LIMIT);
+	const activeRows = $derived(rows.filter((r) => r.session.is_active));
+	const settledRows = $derived(rows.filter((r) => !r.session.is_active));
+	let settledLimit = $state(SETTLED_LIMIT);
+	const visibleSettledRows = $derived(settledRows.slice(0, settledLimit));
+	const hiddenSettled = $derived(Math.max(0, settledRows.length - visibleSettledRows.length));
+	const fullyExpanded = $derived(hiddenSettled === 0 && settledLimit > SETTLED_LIMIT);
 
 	const archivedRows = $derived.by((): CardRow[] =>
 		visibleSessions
@@ -224,7 +225,7 @@
 
 	// Keep the ticker in step with what's actually on screen.
 	$effect(() => {
-		retick(workingRows.length > 0);
+		retick(activeRows.some((row) => row.status === 'working' || row.status === 'await'));
 	});
 
 	// --- footer rail -------------------------------------------------------
@@ -361,16 +362,16 @@
 	</div>
 
 	<div class="sb-scroll">
-		{#if workingRows.length > 0}
-			<button class="grouplabel" onclick={() => toggleGroup('working')} aria-expanded={!collapsedGroups.working}>
-				Working <span class="count">{workingRows.length}</span>
-				<span class="group-chev" class:is-collapsed={collapsedGroups.working}>
+		{#if activeRows.length > 0}
+			<button class="grouplabel" onclick={() => toggleGroup('active')} aria-expanded={!collapsedGroups.active}>
+				Active <span class="count">{activeRows.length}</span>
+				<span class="group-chev" class:is-collapsed={collapsedGroups.active}>
 					<ChevronDown size={13} strokeWidth={2} />
 				</span>
 			</button>
-			{#if !collapsedGroups.working}
+			{#if !collapsedGroups.active}
 				<div class="cards">
-					{#each workingRows as row (row.session.id)}
+					{#each activeRows as row (row.session.id)}
 						<SessionCard
 							session={row.session}
 							status={row.status}
@@ -385,18 +386,18 @@
 			<div class="divider" role="separator"></div>
 		{/if}
 
-		<button class="grouplabel" onclick={() => toggleGroup('recent')} aria-expanded={!collapsedGroups.recent}>
-			Recent <span class="count">{recentRows.length}</span>
-			<span class="group-chev" class:is-collapsed={collapsedGroups.recent}>
+		<button class="grouplabel" onclick={() => toggleGroup('settled')} aria-expanded={!collapsedGroups.settled}>
+			Settled <span class="count">{settledRows.length}</span>
+			<span class="group-chev" class:is-collapsed={collapsedGroups.settled}>
 				<ChevronDown size={13} strokeWidth={2} />
 			</span>
 		</button>
-		{#if !collapsedGroups.recent}
-			{#if recentRows.length === 0}
+		{#if !collapsedGroups.settled}
+			{#if visibleSettledRows.length === 0}
 				<p class="empty">No sessions yet</p>
 			{:else}
 				<div class="cards">
-					{#each recentRows as row (row.session.id)}
+					{#each visibleSettledRows as row (row.session.id)}
 						<SessionCard
 							session={row.session}
 							status={row.status}
@@ -410,15 +411,15 @@
 			{/if}
 
 			<!-- The board is retired: this shelf grows the list in place instead. -->
-			{#if hiddenRecent > 0}
-				<button class="shelf" onclick={() => (recentLimit += SHOW_MORE_STEP)}>
+			{#if hiddenSettled > 0}
+				<button class="shelf" onclick={() => (settledLimit += SHOW_MORE_STEP)}>
 					<span class="txt">All sessions ({rows.length})</span>
 					<span class="rule" aria-hidden="true"></span>
-					<span class="txt">{hiddenRecent} more</span>
+					<span class="txt">{hiddenSettled} more</span>
 					<ChevronDown size={14} strokeWidth={2} />
 				</button>
 			{:else if fullyExpanded}
-				<button class="shelf" onclick={() => (recentLimit = RECENT_LIMIT)}>
+				<button class="shelf" onclick={() => (settledLimit = SETTLED_LIMIT)}>
 					<span class="txt">Show fewer</span>
 					<span class="rule" aria-hidden="true"></span>
 					<ChevronRight size={14} strokeWidth={2} />

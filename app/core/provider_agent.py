@@ -91,10 +91,11 @@ WORKER_TURN_SOURCE = "provider_agent"
 #: this status, and a new turn on the session flips it back to ``"active"``
 #: (``app/core/session_runtime.py``, the turn-start revive).
 #:
-#: The status is EXCLUDED from session SEARCH (``app/db/sessions.py``) but NOT
-#: from the session lists: a failed worker stays visible so its transcript can
-#: be read. It also drops out of the worktree active-session election and the
-#: idle-edge wakeup candidates for free — both test for ``"active"``.
+#: The status is EXCLUDED from session SEARCH (``app/db/sessions.py``). Worker
+#: sessions are also born list-hidden; their transcript remains fetchable by id
+#: for Task output and diagnostics. The status drops them out of the worktree
+#: active-session election and idle-edge wakeup candidates too — both test for
+#: ``"active"``.
 WORKER_FAILED_STATUS = "failed"
 
 #: Cap on the report handed back to the PARENT's context (plan §2 C.5). The
@@ -1012,6 +1013,7 @@ async def dispatch_worker(
             worktree_path=worktree_path,
             provider_id=provider_id,
             derive_provider_from_profile=False,
+            hidden=True,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("ProviderAgent: worker session creation failed")

@@ -244,7 +244,15 @@ def get_sessions(
             query += " AND s.api_user_id IS NULL" if tag_id else " AND api_user_id IS NULL"
     if not include_hidden:
         # NULL = visible (every pre-v75 row), so coalesce rather than = FALSE.
+        # The turn-source guard also hides worker rows created before workers
+        # began setting sessions.hidden at creation time.
+        outer_id = "s.id" if tag_id else "sessions.id"
         query += " AND COALESCE(s.hidden, FALSE) = FALSE" if tag_id else " AND COALESCE(hidden, FALSE) = FALSE"
+        query += (
+            " AND NOT EXISTS (SELECT 1 FROM turns worker_turn "
+            f"WHERE worker_turn.session_id = {outer_id} "
+            "AND worker_turn.source = 'provider_agent')"
+        )
 
     query += f" ORDER BY s.updated_at DESC LIMIT {_ph} OFFSET {_ph}" if tag_id else f" ORDER BY updated_at DESC LIMIT {_ph} OFFSET {_ph}"
     params.extend([limit, offset])
@@ -312,8 +320,15 @@ def get_sessions_paginated(
             base_query += f" AND {col_prefix}api_user_id IS NULL"
     if not include_hidden:
         # NULL = visible (every pre-v75 row). Shared by the COUNT query below,
-        # so hidden rows never inflate the total.
+        # so hidden rows never inflate the total. The turn-source guard catches
+        # worker sessions created before the hidden-at-creation rule.
         base_query += f" AND COALESCE({col_prefix}hidden, FALSE) = FALSE"
+        outer_id = f"{col_prefix}id" if col_prefix else "sessions.id"
+        base_query += (
+            " AND NOT EXISTS (SELECT 1 FROM turns worker_turn "
+            f"WHERE worker_turn.session_id = {outer_id} "
+            "AND worker_turn.source = 'provider_agent')"
+        )
 
     with get_db() as conn:
         cursor = get_cursor(conn)
@@ -396,8 +411,15 @@ def get_sessions_cursor(
         else:
             base_query += f" AND {col_prefix}api_user_id IS NULL"
     if not include_hidden:
-        # NULL = visible (every pre-v75 row).
+        # NULL = visible (every pre-v75 row). The turn-source guard catches
+        # worker sessions created before the hidden-at-creation rule.
         base_query += f" AND COALESCE({col_prefix}hidden, FALSE) = FALSE"
+        outer_id = f"{col_prefix}id" if col_prefix else "sessions.id"
+        base_query += (
+            " AND NOT EXISTS (SELECT 1 FROM turns worker_turn "
+            f"WHERE worker_turn.session_id = {outer_id} "
+            "AND worker_turn.source = 'provider_agent')"
+        )
 
     # Cursor condition: seek past the last seen (updated_at, id)
     if cursor and cursor_id:

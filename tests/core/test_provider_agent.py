@@ -482,6 +482,7 @@ class TestDispatchWorker:
         assert created["project_id"] == "proj-1"
         assert created["worktree_id"] == "wt-1"
         assert created["session_id"] == outcome.session_id
+        assert created["hidden"] is True
 
     def test_turn_carries_provider_and_model_overrides(self, dispatch_env):
         _dispatch()

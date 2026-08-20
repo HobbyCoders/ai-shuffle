@@ -68,6 +68,7 @@ export interface Session {
 	provider_id?: string | null;  // Bound model provider (null = native Claude)
 	mode?: string;  // Interaction mode: 'chat' (default) or 'voice' (Realtime call)
 	v2_stream?: boolean;  // Per-session opt-in to the V2 streaming path (V2 Phase 1)
+	hidden?: boolean;  // List-hidden internal sessions (for example delegated workers)
 }
 
 export interface SessionMessage {
@@ -341,4 +342,3 @@ export async function stopSessionTask(sessionId: string, taskId: string): Promis
 		`/sessions/${sessionId}/tasks/${encodeURIComponent(taskId)}/stop`
 	);
 }
-
