@@ -7,7 +7,8 @@ Covers:
     malformed/missing fields.
   * UsageLimitsMonitor.fetch — happy path, missing credential (graceful empty),
     HTTP error and network error (keep last snapshot, warn once).
-  * apply_live_event — update an existing window vs append a new one.
+  * apply_live_event — update an existing window vs append a new one, and the
+    used → remaining flip that keeps live events on the snapshot's convention.
   * get_snapshot — on-demand fetch when stale.
 """
 
@@ -333,22 +334,24 @@ class TestLiveEvents:
         snap = monitor.apply_live_event("five_hour", 55.0, "b")
         assert snap is not None
         w = next(w for w in snap["windows"] if w["type"] == "five_hour")
-        assert w["utilization"] == 55.0 and w["resets_at"] == "b"
+        # 55% used → 45% remaining, the convention every snapshot window carries.
+        assert w["utilization"] == 45.0 and w["resets_at"] == "b"
         assert len(snap["windows"]) == 1  # replaced, not appended
 
     def test_appends_new_window(self, monitor):
         snap = monitor.apply_live_event("seven_day_opus", 30.0, "c")
         assert [w["type"] for w in snap["windows"]] == ["seven_day_opus"]
+        assert snap["windows"][0]["utilization"] == 70.0
         assert snap["available"] is True
 
-    def test_normalizes_fraction_utilization_to_percent(self, monitor):
-        # SDK sends 0.0-1.0; snapshot must be 0-100.
-        snap = monitor.apply_live_event("five_hour", 0.42, "a")
-        assert snap["windows"][0]["utilization"] == 42.0
-        # A value already in percent (>1) is left alone.
+    def test_normalizes_fraction_utilization_to_remaining_percent(self, monitor):
+        # SDK sends a 0.0-1.0 USED fraction; the snapshot stores 0-100 REMAINING.
+        snap = monitor.apply_live_event("five_hour", 0.25, "a")
+        assert snap["windows"][0]["utilization"] == 75.0
+        # A value already in percent (>1) skips the fraction scaling but still flips.
         snap2 = monitor.apply_live_event("seven_day", 17.0, "b")
         w = next(w for w in snap2["windows"] if w["type"] == "seven_day")
-        assert w["utilization"] == 17.0
+        assert w["utilization"] == 83.0
 
     def test_ignores_incomplete_event(self, monitor):
         assert monitor.apply_live_event(None, 5.0, "x") is None
@@ -434,14 +437,14 @@ class TestPersistence:
         # what persists (through run_sync) and fans out.
         from app.db import database as db
         monitor._broadcast = AsyncMock()
-        await monitor.apply_live_event_and_broadcast("five_hour", 0.42, "a")
+        await monitor.apply_live_event_and_broadcast("five_hour", 0.25, "a")
 
         rows = db.get_all_usage_snapshots()
         assert len(rows) == 1
         assert rows[0]["instance_id"] == settings.effective_instance_id
         assert rows[0]["available"] is True
-        # SDK fraction normalized to percent, then persisted.
-        assert rows[0]["windows"][0]["utilization"] == 42.0
+        # SDK used-fraction normalized to a remaining percent, then persisted.
+        assert rows[0]["windows"][0]["utilization"] == 75.0
         monitor._broadcast.assert_awaited_once()
 
     def test_apply_live_event_is_in_memory_only(self, monitor, mock_db):

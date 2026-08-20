@@ -446,9 +446,12 @@
 	}
 
 	/**
-	 * Claude and ChatGPT subscription sections present quota remaining. Other
-	 * provider feeds keep their existing used-quota convention: Grok billing,
-	 * API-key headers, and OpenRouter credit limits all expose utilization.
+	 * Claude, ChatGPT and SuperGrok subscription sections present quota remaining.
+	 * SuperGrok billing reports used-%, which `remainingFromUsedPct` converts — so
+	 * grok rows and their collapsed summary render "% left" too. The remaining
+	 * provider feeds keep their used-quota convention: xAI API-key rows
+	 * (`provider_type === 'xai'`), other API-key headers, and OpenRouter credit
+	 * limits all expose utilization directly.
 	 */
 	function providerShowsRemaining(pb: {
 		providerId: string;
@@ -456,6 +459,7 @@
 	}): boolean {
 		const entry = getProviders().find((p) => p.id === pb.providerId);
 		const type = entry?.provider_type ?? pb.providerType ?? '';
+		if (type === 'grok') return true;
 		if (type !== 'chatgpt') return false;
 		const kind = entry?.auth_kind ?? 'subscription';
 		return kind === 'subscription';
@@ -490,7 +494,12 @@
 
 	// ── Document-level click/tap-away + Escape ────────────────────────────
 	function handleClickOutside(e: MouseEvent) {
-		if (open && wrapperRef && !wrapperRef.contains(e.target as Node)) {
+		// Membership via composedPath(), NOT wrapperRef.contains(e.target): Svelte 5
+		// flushes DOM updates synchronously after a click handler, so a section
+		// toggle can detach the clicked node (e.g. the collapsed summary chip inside
+		// `{#if !pbOpen}`) before this document-level listener runs — `contains` then
+		// reads the click as outside. `composedPath()` is frozen at dispatch time.
+		if (open && wrapperRef && !e.composedPath().includes(wrapperRef)) {
 			open = false;
 		}
 	}
@@ -687,9 +696,10 @@
 
 			<!-- ═══ Provider usage (non-Claude) ═══ -->
 			<!-- Each bucket's head is its collapse toggle (name + planType stay).
-			     ChatGPT/Codex subscription windows show quota remaining; their collapsed
-			     summary uses the least remaining window. Grok / API-key / credit windows
-			     keep used-of-100 and summarize the highest-utilization window. -->
+			     ChatGPT/Codex and SuperGrok subscription windows show quota remaining;
+			     their collapsed summary uses the least remaining window. xAI API-key,
+			     other API-key and credit windows keep used-of-100 and summarize the
+			     highest-utilization window. -->
 			{#each Object.values($rateLimit.providerBuckets ?? {}) as pb (pb.providerId)}
 				{@const sectionId = `provider:${pb.providerId}`}
 				{@const pbDisplay = providerDisplayFor(pb)}

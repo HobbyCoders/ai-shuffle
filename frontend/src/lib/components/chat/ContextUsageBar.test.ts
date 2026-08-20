@@ -548,16 +548,16 @@ describe('ContextUsageBar — plan usage limits', () => {
 		expect(pct.classList.contains('danger')).toBe(true);
 	});
 
-	it('normalises a live SDK remaining fraction to a percentage', async () => {
+	it('converts a live SDK used fraction into the remaining percentage', async () => {
 		rateLimit.applyLiveEvent({
 			status: 'allowed',
 			rate_limit_type: 'five_hour',
-			utilization: 0.42,
+			utilization: 0.25, // 25% of the window used → 75% left
 			resets_at: future(),
 		});
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('42% left');
+		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('75% left');
 	});
 
 	it('shows 100% left once a subscription window has rolled over', async () => {
@@ -909,7 +909,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		expect(container.textContent).toContain('Daily');
 	});
 
-	it('renders a Grok subscription section with weekly + Grok Build windows', async () => {
+	it('renders a Grok subscription section as quota remaining, without Grok Build', async () => {
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [],
@@ -921,6 +921,8 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 					plan_type: 'SuperGrok',
 					windows: [
 						{ type: 'seven_day', utilization: 34, resets_at: future() },
+						{ type: 'grok_api', utilization: 20, resets_at: future() },
+						// A stale persisted bucket may still carry this — never rendered.
 						{ type: 'grok_build', utilization: 12, resets_at: future() },
 					],
 					credits: null,
@@ -937,12 +939,40 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		expect(deviceLabels).toEqual(['Claude', 'Grok']);
 		expect(container.querySelector('.section-account')?.textContent).toBe('SuperGrok');
 
+		// SuperGrok billing reports used-%, converted to "% left" for display.
 		const rows = container.querySelectorAll('.popover-row');
 		expect(rows.length).toBe(2);
 		expect(rows[0].querySelector('.row-label')?.textContent).toBe('Weekly (all models)');
-		expect(rows[0].querySelector('.row-pct')?.textContent).toBe('34%');
-		expect(rows[1].querySelector('.row-label')?.textContent).toBe('Grok Build');
-		expect(rows[1].querySelector('.row-pct')?.textContent).toBe('12%');
+		expect(rows[0].querySelector('.row-pct')?.textContent).toBe('66% left');
+		expect(rows[1].querySelector('.row-label')?.textContent).toBe('API');
+		expect(rows[1].querySelector('.row-pct')?.textContent).toBe('80% left');
+		expect(container.textContent).not.toContain('Grok Build');
+	});
+
+	it('summarizes a collapsed Grok section with the least quota remaining', async () => {
+		localStorage.setItem('aihub.usageSectionOpen:provider:grok-2', '0');
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [
+				{
+					provider_id: 'grok-2',
+					provider_name: 'Grok',
+					provider_type: 'grok',
+					plan_type: 'SuperGrok',
+					windows: [
+						{ type: 'seven_day', utilization: 34, resets_at: future() },
+						{ type: 'grok_api', utilization: 70, resets_at: future() },
+					],
+					credits: null,
+				},
+			],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		const summary = container.querySelector('.row-pct.sec-summary') as HTMLElement;
+		expect(summary.textContent).toBe('30% left');
 	});
 
 	it('subtexts an OpenAI API-key row as "OpenAI · API", separate from the ChatGPT row', async () => {

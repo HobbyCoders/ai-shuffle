@@ -488,6 +488,9 @@ class UsageLimitsMonitor:
         # so every window in the snapshot is on the same 0-100 scale.
         if util <= 1:
             util *= 100
+        # Polled snapshot windows carry quota REMAINING; SDK events carry quota
+        # USED — flip so the persisted/broadcast snapshot stays consistent.
+        util = 100.0 - util
 
         updated = {"type": rate_limit_type, "utilization": util, "resets_at": resets_at}
         replaced = False

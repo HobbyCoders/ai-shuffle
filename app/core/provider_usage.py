@@ -576,9 +576,10 @@ _GROK_SETTINGS_TIMEOUT_SECONDS = 5.0
 _GROK_PLAN_FALLBACK = "SuperGrok"
 
 # productUsage.product → window type. Unknown products become grok_<slug>.
+# "GrokBuild" is deliberately absent: that product is skipped before a window is
+# built, so it is never surfaced in the usage popover.
 _GROK_PRODUCT_WINDOW_TYPES: Dict[str, str] = {
     "Api": "grok_api",
-    "GrokBuild": "grok_build",
     "GrokChat": "grok_chat",
 }
 
@@ -684,7 +685,8 @@ def normalize_grok_billing(payload: Any) -> ProviderUsage:
     is the fallback when that percent is missing and cap > 0. A parseable
     current period with neither figure yields utilization 0 (not "no data").
     ``productUsage`` entries with a numeric ``usagePercent`` become extra
-    windows; products without a percent are skipped.
+    windows; products without a percent, and the ``GrokBuild`` product (never
+    surfaced), are skipped.
     """
     try:
         data = payload if isinstance(payload, dict) else {}
@@ -727,6 +729,9 @@ def normalize_grok_billing(payload: Any) -> ProviderUsage:
                 product = item.get("product")
                 pct = _as_float(item.get("usagePercent"))
                 if not product or pct is None:
+                    continue
+                # GrokBuild is deliberately not surfaced in the usage popover.
+                if str(product) == "GrokBuild":
                     continue
                 windows.append(
                     {

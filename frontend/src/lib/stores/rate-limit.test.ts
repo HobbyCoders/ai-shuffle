@@ -393,7 +393,7 @@ describe('rateLimit.applyLiveEvent — routing by instance_id', () => {
 		});
 		rateLimit.applyLiveEvent({
 			rate_limit_type: 'five_hour',
-			utilization: 0.5, // fraction → 50%
+			utilization: 0.5, // used fraction → 50% used → 50 remaining
 			resets_at: future(),
 			instance_id: 'worker',
 		});
@@ -406,8 +406,21 @@ describe('rateLimit.applyLiveEvent — routing by instance_id', () => {
 			available: true,
 			windows: [{ type: 'five_hour', utilization: 10, resets_at: future() }],
 		});
-		rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', utilization: 0.33, resets_at: future() });
-		expect(selfBucket()!.windows.five_hour.utilization).toBe(33);
+		rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', utilization: 0.25, resets_at: future() });
+		expect(selfBucket()!.windows.five_hour.utilization).toBe(75);
+	});
+
+	it('stores REMAINING quota — the SDK reports the USED fraction', () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [{ type: 'five_hour', utilization: 100, resets_at: future() }],
+		});
+		// 0.25 used → 75 left, matching the polled Claude feed's convention.
+		rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', utilization: 0.25, resets_at: future() });
+		expect(selfBucket()!.windows.five_hour.utilization).toBe(75);
+		// A value already in percent (>1) skips the fraction scaling but still flips.
+		rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', utilization: 40, resets_at: future() });
+		expect(selfBucket()!.windows.five_hour.utilization).toBe(60);
 	});
 });
 
@@ -668,7 +681,6 @@ describe('windowLabel — provider window types', () => {
 		expect(windowLabel('month')).toBe('Monthly');
 		expect(windowLabel('credit_limit')).toBe('Credit limit');
 		expect(windowLabel('grok_api')).toBe('API');
-		expect(windowLabel('grok_build')).toBe('Grok Build');
 		expect(windowLabel('grok_chat')).toBe('Grok Chat');
 	});
 
@@ -682,7 +694,7 @@ describe('windowLabel — provider window types', () => {
 	});
 });
 
-describe('displayWindows — drops degenerate zero-length rolling windows', () => {
+describe('displayWindows — drops degenerate and never-surfaced windows', () => {
 	function win(type: string): UsageWindow {
 		return {
 			type,
@@ -710,5 +722,15 @@ describe('displayWindows — drops degenerate zero-length rolling windows', () =
 		};
 		const result = displayWindows(windows);
 		expect(result.map((w) => w.type)).toEqual(['window_60m']);
+	});
+
+	it('drops a persisted grok_build window (no longer surfaced by the poller)', () => {
+		const windows: Record<string, UsageWindow> = {
+			seven_day: win('seven_day'),
+			grok_build: win('grok_build'),
+			grok_api: win('grok_api'),
+		};
+		const result = displayWindows(windows);
+		expect(result.map((w) => w.type)).toEqual(['seven_day', 'grok_api']);
 	});
 });

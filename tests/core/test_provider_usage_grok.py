@@ -1,7 +1,8 @@
 """Tests for SuperGrok subscription usage (app/core/provider_usage.py).
 
 Covers ``normalize_grok_billing`` (config wrapper vs flat payload, on-demand
-fallback, period-present → 0%, productUsage skip/map, raw/credits allowlist)
+fallback, period-present → 0%, productUsage skip/map incl. the never-surfaced
+GrokBuild product, raw/credits allowlist)
 and ``ProviderUsageMonitor._poll_grok_provider`` / ``poll_once`` (OAuth token
 from ``codex_access_token``, settings failure does not drop billing, 401 is
 swallowed, API-key xai rows are never polled). No real network.
@@ -133,7 +134,8 @@ class TestNormalizeGrokBilling:
         assert by_type["seven_day"]["utilization"] == 34.0
         assert by_type["seven_day"]["resets_at"] == _PERIOD_END
         assert by_type["grok_api"]["utilization"] == 34.0
-        assert by_type["grok_build"]["utilization"] == 12.0
+        # GrokBuild is deliberately never surfaced as a window.
+        assert "grok_build" not in by_type
         assert "grok_chat" not in by_type
         assert u.credits["credit_usage_percent"] == 34.0
         assert u.credits["on_demand_used"] == 0.0
@@ -200,7 +202,25 @@ class TestNormalizeGrokBilling:
                 ],
             }
         )
-        assert set(_windows_by_type(u.windows)) == {"seven_day", "grok_build"}
+        # GrokChat/Api carry no usable percent; GrokBuild is dropped by policy.
+        assert set(_windows_by_type(u.windows)) == {"seven_day"}
+
+    def test_grok_build_product_never_becomes_a_window(self):
+        u = normalize_grok_billing(
+            {
+                "creditUsagePercent": 1.0,
+                "currentPeriod": dict(_PERIOD),
+                "productUsage": [
+                    {"product": "GrokBuild", "usagePercent": 12.0},
+                    {"product": "Api", "usagePercent": 34.0},
+                    {"product": "GrokChat", "usagePercent": 7.0},
+                ],
+            }
+        )
+        by_type = _windows_by_type(u.windows)
+        assert "grok_build" not in by_type
+        assert by_type["grok_api"]["utilization"] == 34.0
+        assert by_type["grok_chat"]["utilization"] == 7.0
 
     def test_unknown_product_becomes_grok_slug(self):
         u = normalize_grok_billing(
@@ -344,7 +364,8 @@ class TestPollGrokProvider:
         assert plan_type == "SuperGrok Heavy"
         by_type = _windows_by_type(windows)
         assert by_type["seven_day"]["utilization"] == 34.0
-        assert by_type["grok_build"]["utilization"] == 12.0
+        assert by_type["grok_api"]["utilization"] == 34.0
+        assert "grok_build" not in by_type
         assert credits["credit_usage_percent"] == 34.0
         _assert_no_token_keys(raw)
         _assert_no_token_keys(credits)

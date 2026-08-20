@@ -19,8 +19,9 @@
  *      the LOCAL install, which we fold into a self bucket.
  *   2. Live SDK `rate_limit` events (WS `case 'rate_limit'`) — refine a SINGLE
  *      window of the emitting install's bucket, routed by the event's
- *      `instance_id`. SDK utilization is a 0.0–1.0 fraction, normalised to
- *      0–100 on ingest.
+ *      `instance_id`. SDK utilization is a 0.0–1.0 fraction of quota USED, while
+ *      the polled Claude feed reports quota REMAINING; ingest normalises the
+ *      fraction to 0–100 and flips it to remaining so both feeds agree.
  *
  * Windows key on the window-type string (`five_hour`, `seven_day`,
  * `seven_day_opus`, `seven_day_sonnet`, `seven_day_overage_included`,
@@ -208,8 +209,8 @@ export const WINDOW_LABELS: Record<string, string> = {
 	month: 'Monthly',
 	credit_limit: 'Credit limit',
 	// SuperGrok subscription product windows (weekly is seven_day above).
+	// GrokBuild is deliberately not surfaced — see `normalize_grok_billing`.
 	grok_api: 'API',
-	grok_build: 'Grok Build',
 	grok_chat: 'Grok Chat',
 	// OpenAI/Anthropic API-key passive header capture (#757) — utilization is
 	// "percent of window already used", same semantics as the Claude windows.
@@ -231,7 +232,6 @@ export const WINDOW_ORDER = [
 	'day',
 	'month',
 	'credit_limit',
-	'grok_build',
 	'grok_api',
 	'grok_chat',
 	'requests',
@@ -341,9 +341,11 @@ export function orderedWindows(windows: Record<string, UsageWindow>): UsageWindo
 }
 
 /** Windows for display: ordered, minus degenerate zero-length rolling windows
- *  (`window_0m`) that older backends captured from ChatGPT plus-plan headers. */
+ *  (`window_0m`) that older backends captured from ChatGPT plus-plan headers,
+ *  and minus the Grok Build window — dropped at the source now, but persisted
+ *  localStorage buckets may still carry it until the next poll. */
 export function displayWindows(windows: Record<string, UsageWindow>): UsageWindow[] {
-	return orderedWindows(windows).filter((w) => w.type !== 'window_0m');
+	return orderedWindows(windows).filter((w) => w.type !== 'window_0m' && w.type !== 'grok_build');
 }
 
 /** The key of the self (local install's) bucket for the given state. */
@@ -513,7 +515,10 @@ export const rateLimit = {
 		if (!rate_limit_type || utilization == null || typeof utilization !== 'number') return;
 		const win: UsageWindow = {
 			type: rate_limit_type,
-			utilization: _fractionToPct(utilization),
+			// SDK events report the USED fraction; the polled Claude feed — and every
+			// consumer, e.g. `reportedRemainingPct` — treats a window's utilization as
+			// quota REMAINING, so convert at ingest.
+			utilization: 100 - _fractionToPct(utilization),
 			resets_at: event.resets_at ?? null,
 			received_at: Date.now(),
 			source: 'live',
