@@ -278,14 +278,15 @@
 	}
 
 	/* ProseMirror editor styles */
+	/* Composer body type (mockup `.inputarea`): 14.5px / 1.55. */
 	.tiptap-editor :global(.ProseMirror) {
 		outline: none;
 		width: 100%;
 		min-height: 24px;
 		font-family: var(--font-sans);
-		font-size: 15px;
+		font-size: 14.5px;
 		font-weight: 400;
-		line-height: 1.5;
+		line-height: 1.55;
 		color: var(--foreground);
 	}
 
@@ -296,8 +297,8 @@
 	/* Placeholder styling */
 	.tiptap-editor :global(.ProseMirror p.is-editor-empty:first-child::before) {
 		content: attr(data-placeholder);
-		color: var(--input-placeholder);
-		font-weight: 300;
+		color: var(--subtle-foreground);
+		font-weight: 400;
 		pointer-events: none;
 		float: left;
 		height: 0;

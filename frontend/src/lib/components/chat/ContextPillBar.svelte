@@ -167,33 +167,46 @@
 {/if}
 
 <style>
+	/* The composer island's top pill row (mockup `.pillrow`). It sits INSIDE the
+	   glass island now, so it carries no surface of its own — just the row
+	   metrics. Its dropdowns (agent, execution mode, branch) open upward and out
+	   of the island; the explicit stacking level keeps them below the input area's
+	   @/slash autocomplete panels, which is the order the old markup had.
+	   `flex-wrap` lets the execution-mode bar's worktree error banner drop to its
+	   own line instead of squeezing the pills. */
 	.context-pill-bar {
+		position: relative;
+		z-index: 10;
 		display: flex;
 		flex-wrap: wrap;
 		align-items: center;
-		gap: 8px;
-		padding: 0 2px 8px;
+		gap: 6px;
+		padding: 9px 10px 0;
 		min-width: 0;
 	}
 
 	/* Read-only project/worktree context badge — same pill metrics as the
-	   BranchSelector, but non-interactive (no hover affordance, default cursor). */
+	   interactive pills, but non-interactive (no hover affordance, default
+	   cursor). */
 	.context-badge {
 		display: flex;
 		align-items: center;
-		gap: 5px;
-		height: 28px;
+		gap: 6px;
+		height: 26px;
 		max-width: 100%;
 		min-width: 0;
-		padding: 0 10px;
-		background: color-mix(in oklch, var(--foreground) 6%, var(--background));
+		padding: 0 9px;
+		background: var(--scrim);
 		border: 1px solid var(--border);
-		border-radius: var(--radius, 0.75rem);
+		border-radius: 999px;
 		color: var(--muted-foreground);
-		font-size: 0.75rem;
-		font-weight: 500;
+		font-size: 12px;
 		white-space: nowrap;
 		cursor: default;
+	}
+
+	.context-badge :global(svg) {
+		color: var(--subtle-foreground);
 	}
 
 	/* Remote-placed session: subtle accent so the runner indicator is
@@ -201,7 +214,11 @@
 	.context-badge.runner {
 		color: var(--primary);
 		border-color: color-mix(in oklch, var(--primary) 35%, var(--border));
-		background: color-mix(in oklch, var(--primary) 8%, var(--background));
+		background: color-mix(in oklch, var(--primary) 8%, transparent);
+	}
+
+	.context-badge.runner :global(svg) {
+		color: var(--primary);
 	}
 
 	/* V2 Q7 degraded session: read-only, no runner online. Warning accent so it
@@ -209,8 +226,13 @@
 	.context-badge.degraded {
 		color: var(--warning);
 		border-color: color-mix(in oklch, var(--warning) 40%, var(--border));
-		background: color-mix(in oklch, var(--warning) 10%, var(--background));
+		background: color-mix(in oklch, var(--warning) 10%, transparent);
 	}
+
+	.context-badge.degraded :global(svg) {
+		color: var(--warning);
+	}
+
 
 	.context-badge :global(svg) {
 		flex-shrink: 0;
@@ -228,8 +250,12 @@
 		max-width: 120px;
 	}
 
+	/* The branch segment reads as a ref, so it gets the mono treatment the
+	   mockup's `.branchtxt` uses. */
 	.branch-name {
 		max-width: min(180px, 38vw);
+		font-family: var(--font-mono);
+		font-size: 11px;
 	}
 
 	.separator {

@@ -43,6 +43,9 @@
 		 *  (icon + label + chevron). When omitted the control stays icon-only at
 		 *  every width. */
 		buttonLabel?: string;
+		/** Muted qualifier rendered after `buttonLabel` on the same pill (mockup:
+		 *  "Fable 5 · Claude"). Ignored when there is no `buttonLabel`. */
+		buttonSubLabel?: string | null;
 		/** Elevates the control to a warning state (amber border/text + warning
 		 *  indicator dot). Used to flag a model reroute (actual != requested). */
 		warn?: boolean;
@@ -63,6 +66,7 @@
 		isOpen,
 		onOpenChange,
 		buttonLabel,
+		buttonSubLabel = null,
 		warn = false,
 		warnTitle,
 		notice
@@ -146,6 +150,9 @@
 		{@render icon()}
 		{#if buttonLabel != null}
 			<span class="override-label">{buttonLabel}</span>
+			{#if buttonSubLabel}
+				<span class="override-sublabel">· {buttonSubLabel}</span>
+			{/if}
 			<svg class="override-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 9l6 6 6-6" />
 			</svg>
@@ -216,15 +223,20 @@
 		height: 28px;
 		background: transparent;
 		border: none;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
+		border-radius: 9px;
 		cursor: pointer;
-		color: var(--muted-foreground);
-		transition: all 0.15s ease;
+		color: var(--subtle-foreground);
+		transition: background-color 0.13s ease, color 0.13s ease, border-color 0.13s ease;
 	}
 
 	.override-btn:hover {
-		background: var(--hover-overlay);
+		background: var(--scrim);
 		color: var(--foreground);
+	}
+
+	.override-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
 	}
 
 	.override-btn.active {
@@ -255,6 +267,20 @@
 		white-space: nowrap;
 		line-height: 1;
 		letter-spacing: 0.01em;
+		color: var(--foreground);
+		font-weight: 500;
+	}
+
+	/* Provider qualifier beside the label ("· Claude") — dimmer so the model name
+	   still reads first. Desktop pill only, same as the label. */
+	.override-sublabel {
+		display: none;
+		max-width: 88px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		line-height: 1;
+		color: var(--subtle-foreground);
 	}
 
 	.override-chevron {
@@ -294,13 +320,16 @@
 		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 	}
 
-	/* Override dropdown */
+	/* Override dropdown. Anchored to the trigger's LEFT edge: these pills live at
+	   the left of the composer's foot row, so a right-anchored panel would grow
+	   leftward off the island (and off-screen on a narrow viewport). */
 	.override-dropdown {
 		position: absolute;
 		bottom: calc(100% + 6px);
-		right: 0;
+		left: 0;
+		right: auto;
 		min-width: 140px;
-		max-width: min(320px, 82vw);
+		max-width: min(320px, calc(100vw - 24px));
 		background: var(--popover);
 		border: 1px solid var(--border);
 		border-radius: var(--radius, 0.75rem);
@@ -410,45 +439,51 @@
 		}
 	}
 
-	/* Desktop: labeled controls expand into full pills that match the composer's
-	   top context pills (`.context-selector-btn` metrics: 28px tall, 0 10px pad,
-	   same surface/border/radius/typography). Icon-only controls (no buttonLabel)
-	   are untouched and stay compact. */
+	/* Desktop: labeled controls expand into the mockup's `.pill` — 26px tall,
+	   fully rounded, `--scrim` fill on a hairline border. Icon-only controls (no
+	   buttonLabel) are untouched and stay compact. */
 	@media (min-width: 640px) {
 		.override-btn.has-label {
 			width: auto;
-			height: 28px;
-			gap: 5px;
-			padding: 0 10px;
-			background: color-mix(in oklch, var(--foreground) 6%, var(--background));
+			height: 26px;
+			gap: 6px;
+			padding: 0 9px;
+			background: var(--scrim);
 			border: 1px solid var(--border);
-			border-radius: var(--radius, 0.75rem);
+			border-radius: 999px;
 			color: var(--muted-foreground);
-			font-size: 0.75rem;
-			font-weight: 500;
+			font-size: 12px;
+			font-weight: 400;
 			white-space: nowrap;
 		}
 
 		.override-btn.has-label .override-label,
+		.override-btn.has-label .override-sublabel,
 		.override-btn.has-label .override-chevron {
 			display: block;
 		}
 
+		/* The pill leads with its text; the glyph would double up on a row that
+		   already names the setting in the dropdown header. */
+		.override-btn.has-label :global(svg:first-child) {
+			display: none;
+		}
+
 		.override-btn.has-label:hover {
-			background: color-mix(in oklch, var(--foreground) 6%, var(--background));
-			border-color: var(--primary);
+			background: var(--scrim);
+			border-color: var(--border-strong);
 			color: var(--foreground);
 		}
 
 		/* Override set: primary-tinted chip instead of a corner dot. */
 		.override-btn.has-label.active {
-			background: color-mix(in oklch, var(--primary) 10%, var(--background));
-			border-color: var(--primary);
+			background: color-mix(in oklch, var(--primary) 10%, transparent);
+			border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
 			color: var(--foreground);
 		}
 
 		.override-btn.has-label.active:hover {
-			background: color-mix(in oklch, var(--primary) 14%, var(--background));
+			background: color-mix(in oklch, var(--primary) 14%, transparent);
 		}
 
 		/* Reroute: amber chip. The component never sets both `.active` and
@@ -456,9 +491,18 @@
 		   relative to `.active`. */
 		.override-btn.has-label.warn,
 		.override-btn.has-label.warn:hover {
-			background: color-mix(in oklch, var(--warning) 10%, var(--background));
-			border-color: var(--warning);
+			background: color-mix(in oklch, var(--warning) 10%, transparent);
+			border-color: color-mix(in oklch, var(--warning) 50%, var(--border));
 			color: var(--warning);
+		}
+
+		.override-btn.has-label.warn .override-label {
+			color: var(--warning);
+		}
+
+		/* The pill carries its own border, so the corner dot is redundant. */
+		.override-btn.has-label .override-indicator {
+			display: none;
 		}
 
 		/* The corner dot is redundant once the pill carries a label + fill. */

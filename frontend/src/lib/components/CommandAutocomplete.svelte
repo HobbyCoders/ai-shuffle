@@ -300,7 +300,7 @@
   /* Mobile: break out of textarea-wrapper to span full chat island width */
   @media (max-width: 640px) {
     .command-autocomplete-panel {
-      left: -21px; /* -(input-inner padding 16px + input-wrapper padding 4px + border 1px) */
+      left: -15px; /* -(island .input-area padding 14px + island border 1px) */
       right: auto;
       width: calc(100vw - 1.5rem); /* viewport minus chat-input-wrapper horizontal padding */
     }
