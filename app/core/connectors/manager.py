@@ -367,8 +367,15 @@ class ConnectorManager:
         """
         Process a message arriving from a platform connector.
 
-        Resolves (or creates) a connector session, executes the query via the
-        query engine, and sends the response back through the connector.
+        Resolves (or creates) a connector session and its linked AI session,
+        enrols the message as a durable ``source=connector`` turn on the v2 turn
+        queue, waits for the session to drain, and sends the assistant's reply
+        back through the connector.
+
+        Going through the queue is what keeps a chatty channel safe: two
+        messages seconds apart used to start two concurrent agent loops against
+        the same session (a forked conversation and spend nobody accounted for).
+        Now the second one queues behind the live turn and runs when it settles.
         """
         try:
             # Get the connector instance early for ack/typing/read
@@ -427,19 +434,19 @@ class ConnectorManager:
                     logger.error("No profiles available for connector query")
                     return
 
-            # Pre-mint + link the AI session BEFORE the query runs.
+            # Pre-mint + link the AI session BEFORE the turn is submitted.
             #
-            # Per-session builtin tools (notably the Discord-native tools) are
-            # registered at query build time by resolving session_id -> linked
-            # connector session. Historically the linkage was written only AFTER
-            # the first turn, so those tools were missing on the very first
-            # message of a channel. execute_query resolves an existing session by
-            # id (it RAISES on an unknown id — it does not create one from a fresh
-            # id), so we create the AI-session row here via the same helper
-            # execute_query uses and link it first, then hand the query that id to
-            # resume. On subsequent turns the connector session already carries
-            # the link, so this is a no-op.
+            # Two reasons this has to happen first. Per-session builtin tools
+            # (notably the Discord-native ones) are registered at query build
+            # time by resolving session_id -> linked connector session, so a
+            # link written only after the first turn left those tools missing on
+            # the very first message of a channel. And ``turn_manager.submit``
+            # enqueues against an EXISTING session row — it never creates one —
+            # so without the row there is nothing to enrol the turn on. On
+            # subsequent turns the connector session already carries the link,
+            # so this is a no-op.
             ai_session_id = session.get("session_id") if session else None
+            link_written = False
             if not ai_session_id and session and session.get("id"):
                 minted_id = str(uuid.uuid4())
                 title = (message.text or "")[:50].strip()
@@ -458,6 +465,7 @@ class ConnectorManager:
                         session.get("id"), minted_id
                     )
                     ai_session_id = minted_id
+                    link_written = True
                     # Mirror execute_query's sidebar broadcast for new sessions so
                     # connector-started conversations appear without a refresh.
                     try:
@@ -470,14 +478,23 @@ class ConnectorManager:
                     except Exception:
                         logger.debug("session-created broadcast failed", exc_info=True)
                 except Exception:
-                    # Fall back to letting execute_query create the session (tools
-                    # then register from the 2nd message, as before the fix).
                     logger.exception(
                         "Failed to pre-create AI session for connector message"
                     )
                     ai_session_id = None
 
-            # Send typing indicator and keep it alive while the query runs
+            # No session row means there is nothing to enrol a turn on, so bail
+            # rather than falling back to a session-less query (that fallback is
+            # exactly the concurrent-loop path this method no longer takes).
+            # Nothing to clean up: the typing indicator starts below.
+            if not ai_session_id:
+                logger.error(
+                    f"No AI session for connector {message.connector_id} "
+                    f"chat_id={message.platform_chat_id} — dropping the message"
+                )
+                return
+
+            # Send typing indicator and keep it alive while the turn runs
             typing_task: Optional[asyncio.Task] = None
             if instance:
                 # Fire one immediate typing indicator so the user sees it
@@ -501,8 +518,9 @@ class ConnectorManager:
 
                 typing_task = asyncio.create_task(_keep_typing())
 
-            # Execute the query — import lazily to avoid circular imports
-            from app.core import account_failover
+            # Run the message as a queued turn — import lazily to avoid circular
+            # imports.
+            from app.core import turn_manager, turn_outcome
 
             # Build connector context for the system prompt (memory + capabilities)
             overrides: Dict[str, Any] = {}
@@ -513,30 +531,57 @@ class ConnectorManager:
                 overrides["system_prompt_append"] = context_append
 
             try:
-                result = await account_failover.execute_query_with_failover(
+                # Enqueue, then block until the session drains. If a turn is
+                # already live this one waits its place in the queue instead of
+                # starting a second loop against the same session.
+                turn_manager.submit(
+                    ai_session_id,
+                    "connector",
                     prompt=message.text,
                     profile_id=profile_id,
                     project_id=project_id,
-                    session_id=ai_session_id,
-                    api_user_id=api_user_id,
                     overrides=overrides or None,
+                )
+                idle = await turn_manager.wait_session_idle(
+                    ai_session_id, timeout=3600
                 )
             finally:
                 if typing_task:
                     typing_task.cancel()
 
-            response_text = result.get("response", "I couldn't generate a response.")
-
-            # Link the AI session to the connector session for conversation memory.
-            # execute_query creates an AI session and returns its ID — store it
-            # so the next message in this channel resumes the same conversation.
-            ai_session_id = result.get("session_id")
-            if ai_session_id and session:
-                connector_session_id = session.get("id")
-                if connector_session_id and session.get("session_id") != ai_session_id:
-                    database.update_connector_session_ai_session(
-                        connector_session_id, ai_session_id
+            if not idle:
+                # The turn is durable and keeps running; only our wait gave up,
+                # so never interrupt here — just tell the channel.
+                logger.error(
+                    f"Connector turn did not settle within the wait window for "
+                    f"session {ai_session_id}"
+                )
+                response_text = "I couldn't generate a response."
+            else:
+                outcome = turn_outcome.final_turn_outcome(ai_session_id)
+                response_text = (
+                    turn_outcome.extract_final_assistant_text(ai_session_id)
+                    or "I couldn't generate a response."
+                )
+                if outcome["error"]:
+                    # Still send whatever text the turn produced before it died.
+                    logger.error(
+                        f"Connector turn failed for session {ai_session_id}: "
+                        f"{outcome['error']}"
                     )
+
+            # The AI session id is known up front now, so the link is already
+            # written for sessions minted above. This only repairs legacy rows
+            # whose link points somewhere else (or nowhere).
+            if (
+                not link_written
+                and session
+                and session.get("id")
+                and session.get("session_id") != ai_session_id
+            ):
+                database.update_connector_session_ai_session(
+                    session.get("id"), ai_session_id
+                )
 
             # Send response back through the connector
             sent = False

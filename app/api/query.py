@@ -5,6 +5,8 @@ Query API routes - main AI interface
 import asyncio
 import json
 import logging
+import time
+import uuid
 
 from fastapi import APIRouter, HTTPException, Depends, status
 from fastapi.responses import StreamingResponse
@@ -236,8 +238,18 @@ async def conversation(
 ):
     """
     Multi-turn conversation - maintains context across messages.
-    If session_id is provided, continues that session.
-    Otherwise creates a new session.
+
+    If session_id is provided, continues that session (unknown ids are refused);
+    otherwise a session row is created here, up front, before any turn runs.
+
+    The prompt is enrolled as a durable ``source=api`` turn on the v2 turn queue
+    rather than executed straight against the query engine. That is what makes a
+    message into a BUSY session safe: the one-live-turn-per-session index means
+    the new turn queues behind the live one and drains at settlement, instead of
+    forking a second agent loop against the same session (a split conversation
+    and untracked spend). We then block until the session drains and read the
+    outcome and the assistant text back out of the durable event log.
+
     Requires API key authentication. Uses the API user's configured project and profile.
     """
     # Use API user's configured profile/project, fall back to request values
@@ -255,21 +267,101 @@ async def conversation(
         if request.overrides:
             overrides = request.overrides.model_dump(exclude_none=True)
 
-        result = await _execute_query_with_failover(
+        from app.core import turn_manager, turn_outcome
+        from app.db import database
+
+        # ``submit`` requires an existing session row: resolve the caller's id or
+        # mint one here (the old engine created it as a side effect of running).
+        session_id = request.session_id
+        if session_id:
+            if database.get_session(session_id) is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Unknown session_id",
+                )
+        else:
+            session_id = str(uuid.uuid4())
+            title = request.prompt[:50].strip()
+            if len(request.prompt) > 50:
+                title += "..."
+            database.create_session(
+                session_id=session_id,
+                profile_id=profile_id,
+                project_id=project_id,
+                title=title,
+                api_user_id=api_user.get("id"),
+                is_active=True,
+            )
+            # Best-effort: surface the new session on connected devices right
+            # away rather than on the next sidebar poll.
+            try:
+                from app.core.sync_engine import sync_engine
+
+                await sync_engine.broadcast_user_session_created(
+                    user_id="admin",
+                    session_id=session_id,
+                    source_device_id=None,
+                )
+            except Exception:
+                logger.debug("session-created broadcast failed", exc_info=True)
+
+        started = time.monotonic()
+        turn_manager.submit(
+            session_id,
+            "api",
             prompt=request.prompt,
             profile_id=profile_id,
             project_id=project_id,
             overrides=overrides,
-            session_id=request.session_id,
-            api_user_id=api_user.get("id")
+        )
+
+        # Block until the whole queue drains — a hand-off (failover retry,
+        # compact auto-continue) is a NEW turn, so waiting for idle covers the
+        # successor too. On timeout the turn is left running: it is durable and
+        # will settle on its own; only this HTTP call gives up.
+        idle = await turn_manager.wait_session_idle(session_id, timeout=600)
+        if not idle:
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="Conversation timed out; the turn may still be running.",
+            )
+
+        outcome = turn_outcome.final_turn_outcome(session_id)
+        if outcome["error"]:
+            logger.error(
+                "Conversation turn failed for session %s: %s",
+                session_id,
+                outcome["error"],
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Conversation failed"
+            )
+
+        response_text = turn_outcome.extract_final_assistant_text(session_id)
+
+        usage = outcome["usage"] or {}
+        cost = usage.get("total_cost_usd")
+        tokens_in = usage.get("tokens_in")
+        tokens_out = usage.get("tokens_out")
+        metadata = QueryMetadata(
+            model=usage.get("model"),
+            duration_ms=int((time.monotonic() - started) * 1000),
+            total_cost_usd=float(cost) if cost is not None else None,
+            tokens_in=int(tokens_in) if tokens_in is not None else None,
+            tokens_out=int(tokens_out) if tokens_out is not None else None,
+            num_turns=usage.get("num_turns"),
+            terminal_reason="interrupted" if outcome["interrupted"] else None,
         )
 
         return {
-            "response": result["response"],
-            "session_id": result["session_id"],
-            "metadata": QueryMetadata(**result["metadata"])
+            "response": response_text,
+            "session_id": session_id,
+            "metadata": metadata,
         }
 
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

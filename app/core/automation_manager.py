@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from app.core import turn_outcome
 from app.db import database
 
 logger = logging.getLogger(__name__)
@@ -909,114 +910,25 @@ class AutomationManager:
             "tokens_out": int(usage.get("tokens_out") or 0),
         }
 
+    # The three readers below moved to :mod:`app.core.turn_outcome` — the REST
+    # conversation endpoint and the connector intake path derive their outcome
+    # from the same event log. They stay here as thin delegates because they are
+    # part of this class's tested surface (tests patch them on the class).
+
     @staticmethod
     def _load_session_events(session_id: str) -> List[Dict[str, Any]]:
-        """Read the whole V2 ``session_events`` log for a session in seq order.
-        Never raises — a reader error yields ``[]`` (the callers treat an empty
-        log as "no derivable outcome")."""
-        from app.db import session_events as session_events_db
-
-        events: List[Dict[str, Any]] = []
-        try:
-            from_seq = 0
-            while True:
-                batch = session_events_db.get_events(
-                    session_id, from_seq=from_seq, limit=500
-                )
-                if not batch:
-                    break
-                events.extend(batch)
-                if len(batch) < 500:
-                    break
-                from_seq = batch[-1].get("seq") or from_seq
-        except Exception:  # noqa: BLE001
-            return []
-        return events
+        """Delegate to :func:`app.core.turn_outcome.load_session_events`."""
+        return turn_outcome.load_session_events(session_id)
 
     @classmethod
     def _final_turn_outcome(cls, session_id: str) -> Dict[str, Any]:
-        """Derive the automation run's outcome from the session's LAST terminal
-        turn event (``turn.completed`` / ``turn.aborted`` / ``turn.parked``).
-
-        Replaces the headless handler's WS-frame sniffing — the durable log is
-        now the record. Returns ``{"usage", "error", "interrupted"}``:
-
-        * ``turn.completed`` → ``usage`` = its usage summary, no error;
-        * ``turn.aborted`` with ``reason == 'interrupt'`` → ``interrupted`` True
-          (a genuine stop that settled before the timeout);
-        * any other ``turn.aborted`` (error / crash / escalation / lease) →
-          ``error`` = the aborted ``message`` or a reason-derived string;
-        * ``turn.parked`` / no terminal event → treated as a clean, empty run.
-        """
-        events = cls._load_session_events(session_id)
-        terminal = None
-        for ev in reversed(events):
-            if ev.get("event_type") in ("turn.completed", "turn.aborted", "turn.parked"):
-                terminal = ev
-                break
-        result: Dict[str, Any] = {"usage": {}, "error": None, "interrupted": False}
-        if terminal is None:
-            return result
-        etype = terminal.get("event_type")
-        payload = terminal.get("payload") or {}
-        if etype == "turn.completed":
-            usage = payload.get("usage")
-            result["usage"] = usage if isinstance(usage, dict) else {}
-        elif etype == "turn.aborted":
-            reason = payload.get("reason")
-            if reason == "interrupt":
-                result["interrupted"] = True
-            else:
-                result["error"] = (
-                    payload.get("message")
-                    or (f"Turn aborted: {reason}" if reason else "Turn aborted")
-                )
-        return result
+        """Delegate to :func:`app.core.turn_outcome.final_turn_outcome`."""
+        return turn_outcome.final_turn_outcome(session_id)
 
     @staticmethod
     def _extract_final_assistant_text(session_id: str) -> str:
-        """Final assistant text of the turn — feeds output delivery and the
-        runs-list preview. Derived from the V2 session event log: the turn
-        recorder streams assistant text as ``assistant.text_delta`` events and
-        the v2 path no longer dual-writes ``session_messages``, so this
-        concatenates the LAST completed turn's text-delta payloads in seq order
-        exactly as replay would render them. Never raises (returns "")."""
-        events = AutomationManager._load_session_events(session_id)
-
-        # Target the LAST completed turn; if none completed (an aborted or
-        # interrupted run), fall back to the turn of the last assistant text
-        # event so a partial turn still surfaces its text.
-        target_turn_id = None
-        for ev in reversed(events):
-            if ev.get("event_type") == "turn.completed":
-                target_turn_id = ev.get("turn_id")
-                break
-        if target_turn_id is None:
-            for ev in reversed(events):
-                if ev.get("event_type") in ("assistant.text_delta", "message.assistant"):
-                    target_turn_id = ev.get("turn_id")
-                    break
-        if target_turn_id is None:
-            return ""
-
-        parts: List[str] = []
-        for ev in events:
-            if ev.get("turn_id") != target_turn_id:
-                continue
-            etype = ev.get("event_type")
-            payload = ev.get("payload") or {}
-            if etype == "assistant.text_delta":
-                text = payload.get("text")
-            elif etype == "message.assistant":
-                # Consolidated assistant event (history backfill) — text kind only.
-                if payload.get("kind") not in (None, "text"):
-                    continue
-                text = payload.get("content")
-            else:
-                continue
-            if isinstance(text, str):
-                parts.append(text)
-        return "".join(parts).strip()
+        """Delegate to :func:`app.core.turn_outcome.extract_final_assistant_text`."""
+        return turn_outcome.extract_final_assistant_text(session_id)
 
     # ------------------------------------------------------------------
     # Action step execution

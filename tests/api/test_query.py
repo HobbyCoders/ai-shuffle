@@ -13,7 +13,7 @@ This module tests the query API routes in app/api/query.py including:
 
 import json
 import pytest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 # =============================================================================
@@ -327,81 +327,98 @@ class TestConversation:
     """Tests for POST /api/v1/conversation endpoint."""
 
     @pytest.fixture
-    def mock_conv_dependencies(self):
-        """Set up mocks for conversation tests."""
+    def mock_conv_dependencies(self, mock_db):
+        """Mocks for conversation tests.
+
+        The endpoint no longer calls the query engine: it submits a
+        ``source=api`` turn and reads the settled outcome out of the durable
+        event log, so the seams to stub are ``turn_manager`` and
+        ``turn_outcome``.
+        """
         with patch("app.api.query.require_api_key") as mock_api_key, \
              patch("app.api.query.require_claude_auth") as mock_claude, \
-             patch("app.core.query_engine.execute_query") as mock_execute:
+             patch("app.core.turn_manager.submit") as mock_submit, \
+             patch("app.core.turn_manager.wait_session_idle",
+                   new=AsyncMock(return_value=True)) as mock_wait, \
+             patch("app.core.turn_outcome.final_turn_outcome",
+                   return_value={"usage": {"model": "sonnet"}, "error": None,
+                                 "interrupted": False}), \
+             patch("app.core.turn_outcome.extract_final_assistant_text",
+                   return_value="Continued response"):
             mock_api_key.return_value = {
-                "id": "test-api-user-id",
-                "profile_id": "test-profile"
+                "id": None,
+                "profile_id": "default"
             }
             mock_claude.return_value = None
-            mock_execute.return_value = {
-                "response": "Continued response",
-                "session_id": "existing-session-123",
-                "metadata": {"model": "sonnet", "duration_ms": 500}
-            }
+            mock_submit.return_value = "turn-1"
             yield {
                 "api_key": mock_api_key,
                 "claude": mock_claude,
-                "execute": mock_execute
+                "submit": mock_submit,
+                "wait": mock_wait,
             }
 
     @pytest.mark.asyncio
     async def test_conversation_new_session(self, mock_conv_dependencies):
-        """Should create new conversation session."""
+        """Should create the session up front, then submit an ``api`` turn."""
         from app.api.query import conversation
         from app.core.models import ConversationRequest
+        from app.db import database
 
         request = ConversationRequest(
             prompt="Start a conversation",
-            profile="test-profile"
+            profile="default"
         )
         api_user = mock_conv_dependencies["api_key"].return_value
 
         result = await conversation(request, api_user)
 
         assert result["response"] == "Continued response"
-        call_kwargs = mock_conv_dependencies["execute"].call_args.kwargs
-        assert call_kwargs["session_id"] is None
+        submit = mock_conv_dependencies["submit"]
+        submit.assert_called_once()
+        assert submit.call_args.args[1] == "api"
+        assert submit.call_args.args[0] == result["session_id"]
+        assert database.get_session(result["session_id"]) is not None
 
     @pytest.mark.asyncio
     async def test_conversation_continue_session(self, mock_conv_dependencies):
         """Should continue existing session when session_id provided."""
         from app.api.query import conversation
         from app.core.models import ConversationRequest
+        from app.db import database
 
+        database.create_session(session_id="existing-session-123",
+                                profile_id="default")
         request = ConversationRequest(
             prompt="Continue conversation",
             session_id="existing-session-123"
         )
-        api_user = {"id": "user1", "profile_id": "test-profile"}
+        api_user = {"id": None, "profile_id": "default"}
 
         await conversation(request, api_user)
 
-        call_kwargs = mock_conv_dependencies["execute"].call_args.kwargs
-        assert call_kwargs["session_id"] == "existing-session-123"
+        submit = mock_conv_dependencies["submit"]
+        assert submit.call_args.args[0] == "existing-session-123"
 
     @pytest.mark.asyncio
-    async def test_conversation_value_error(self, mock_conv_dependencies):
-        """Should return 400 for ValueError."""
+    async def test_conversation_unknown_session(self, mock_conv_dependencies):
+        """Should return 400 for a session id with no row (was a ValueError
+        out of the engine; the endpoint now refuses it before submitting)."""
         from fastapi import HTTPException
         from app.api.query import conversation
         from app.core.models import ConversationRequest
-
-        mock_conv_dependencies["execute"].side_effect = ValueError("Session not found")
 
         request = ConversationRequest(
             prompt="Hello!",
             session_id="invalid-session"
         )
-        api_user = {"id": "user1", "profile_id": "test-profile"}
+        api_user = {"id": None, "profile_id": "default"}
 
         with pytest.raises(HTTPException) as exc_info:
             await conversation(request, api_user)
 
         assert exc_info.value.status_code == 400
+        mock_conv_dependencies["submit"].assert_not_called()
 
     @pytest.mark.asyncio
     async def test_conversation_general_error(self, mock_conv_dependencies):
@@ -410,10 +427,10 @@ class TestConversation:
         from app.api.query import conversation
         from app.core.models import ConversationRequest
 
-        mock_conv_dependencies["execute"].side_effect = RuntimeError("Connection failed")
+        mock_conv_dependencies["submit"].side_effect = RuntimeError("Connection failed")
 
         request = ConversationRequest(prompt="Hello!")
-        api_user = {"id": "user1", "profile_id": "test-profile"}
+        api_user = {"id": None, "profile_id": "default"}
 
         with pytest.raises(HTTPException) as exc_info:
             await conversation(request, api_user)
