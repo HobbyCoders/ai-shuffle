@@ -616,9 +616,9 @@ export const activeSession = {
 
 	// ── Session Navigation (delegated to session-switcher) ─────────
 
-	switchSession: (sessionId: string, projectId?: string | null, worktreeInfo?: import('./session/session-switcher').SessionWorktreeInfo | null, title?: string | null) => {
+	switchSession: (sessionId: string, projectId?: string | null, worktreeInfo?: import('./session/session-switcher').SessionWorktreeInfo | null, title?: string | null, projectV2Id?: string | null) => {
 		setSkipRestore(false);
-		switcher.switchSession(sessionId, projectId, worktreeInfo, title);
+		switcher.switchSession(sessionId, projectId, worktreeInfo, title, projectV2Id);
 	},
 
 	newChat: () => {

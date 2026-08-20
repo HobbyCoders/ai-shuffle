@@ -290,7 +290,7 @@
 			worktreeDeleted: session.worktree_deleted ?? false,
 			worktreeIntent: 'worktree' as const,
 		} : null;
-		activeSession.switchSession(session.id, session.project_id ?? null, worktreeInfo, session.title || null);
+		activeSession.switchSession(session.id, session.project_id ?? null, worktreeInfo, session.title || null, session.project_v2_id ?? null);
 		layout.openChat(session.id);
 	}
 

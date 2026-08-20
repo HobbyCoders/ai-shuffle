@@ -276,3 +276,63 @@ describe('session-switcher · isRestoringSession clears on navigation', () => {
 		expect(getState().isRestoringSession).toBe(false);
 	});
 });
+
+describe('session-switcher · remote-only project survives switch', () => {
+	it('does not inherit the leaving local project when the target is v2-only', async () => {
+		const { switcher, getState } = makeSwitcher(fullState({
+			project: 'proj-A',
+			projectV2Id: 'pv2-A',
+		}));
+
+		await switcher.switchSession('session-B', null, null, null, 'pv2-remote');
+		switcher.destroy();
+
+		expect(getState().project).toBe('');
+		expect(getState().projectV2Id).toBe('pv2-remote');
+	});
+
+	it('restores a remote-only compose from ephemeral (empty project is set, not unset)', async () => {
+		const { switcher, getState, ephemeralStore } = makeSwitcher(fullState({
+			project: 'proj-A',
+			projectV2Id: 'pv2-A',
+		}));
+		ephemeralStore.set('session-B', {
+			title: 'Remote',
+			draft: '',
+			scrollTop: 0,
+			project: '',
+			projectV2Id: 'pv2-remote',
+			modelOverride: null,
+			permissionModeOverride: null,
+			effortLevelOverride: null,
+			worktreeIntent: 'local',
+			deviceIntent: null,
+			worktreeId: null,
+			worktreeBranch: '',
+			worktreeBaseBranch: 'main',
+			selectedWorktreeBranch: null,
+			worktreeMode: 'new',
+			worktreeDeleted: false,
+		});
+
+		await switcher.switchSession('session-B');
+		switcher.destroy();
+
+		expect(getState().project).toBe('');
+		expect(getState().projectV2Id).toBe('pv2-remote');
+	});
+
+	it('newChat keeps a v2-only compose instead of the last local default', () => {
+		const { switcher, getState } = makeSwitcher(fullState({
+			sessionId: null,
+			project: '',
+			projectV2Id: 'pv2-remote',
+		}));
+
+		switcher.newChat();
+		switcher.destroy();
+
+		expect(getState().project).toBe('');
+		expect(getState().projectV2Id).toBe('pv2-remote');
+	});
+});

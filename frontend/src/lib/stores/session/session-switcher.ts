@@ -19,6 +19,7 @@ import { getOrCreateDeviceId, TAB_ACTIVE_SESSION_KEY } from '../device-id';
 import { appData } from '../app-data.svelte';
 // V2 Phase 1: SSE-fed reducer store — the transcript authority for a session.
 import { feedController } from './v2/feed-controller';
+import { resolveNewChatProject, resolveSessionProject } from './session-project';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -74,7 +75,7 @@ export interface SessionWorktreeInfo {
 }
 
 interface SessionSwitcher {
-	switchSession: (sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null) => Promise<void>;
+	switchSession: (sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null, projectV2Id?: string | null) => Promise<void>;
 	newChat: () => void;
 	persistSession: () => void;
 	loadPersistedSession: () => Promise<PersistedSession | null>;
@@ -310,7 +311,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 	// ── Session Navigation ──────────────────────────────────────────────
 
-	async function switchSession(sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null) {
+	async function switchSession(sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null, projectV2Id?: string | null) {
 		const generation = ++_switchGeneration;
 		const state = getState();
 		// eslint-disable-next-line no-console
@@ -343,7 +344,13 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		sessionEphemeralCache.save(leavingKey, buildEphemeral(state));
 
 		const ephemeral = sessionEphemeralCache.restore(sessionId);
-		const targetProject = projectId || ephemeral?.project || state.project;
+		const row = appData.current.sessions.find((s) => s.id === sessionId);
+		const { project: targetProject, projectV2Id: targetV2 } = resolveSessionProject({
+			projectId: projectId !== undefined ? projectId : row?.project_id,
+			projectV2Id: projectV2Id !== undefined ? projectV2Id : (row?.project_v2_id ?? undefined),
+			ephemeralProject: ephemeral?.project,
+			ephemeralProjectV2Id: ephemeral?.projectV2Id,
+		});
 
 		// Single update: set sessionId, reset + restore ephemeral state.
 		// This is one _update call instead of the previous two, preventing
@@ -363,7 +370,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			sessionId,
 			title: resolvedTitle,
 			project: targetProject,
-			projectV2Id: ephemeral?.projectV2Id ?? null,
+			projectV2Id: targetV2,
 			// Start empty; the authoritative messages load from the SSE feed
 			// (full replay from_seq=0) started below. No cache-first render —
 			// showing a stale snapshot first caused a visible flash before history.
@@ -569,8 +576,10 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			sessionProfileId: null,
 			currentQueryProfileId: null,
 			profile: getPersistedProfile() || s.profile,
-			project: getPersistedProject() || s.project,
-			projectV2Id: newChatEphemeral?.projectV2Id ?? null,
+			...resolveNewChatProject(
+				newChatEphemeral,
+				getPersistedProject() || s.project,
+			),
 			messages: [],
 			isStreaming: false,
 			// #585: reset the live turn id on newChat (mirrors defaultState).

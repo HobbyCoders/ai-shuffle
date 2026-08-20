@@ -67,7 +67,8 @@
 				created.session_id,
 				$activeSession.project || null,
 				null,
-				'Voice session'
+				'Voice session',
+				$activeSession.projectV2Id
 			);
 			layout.openChat(created.session_id);
 			// Auto-start — the affordance IS the call (the channel is always open

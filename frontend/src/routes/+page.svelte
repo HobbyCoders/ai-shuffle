@@ -91,6 +91,7 @@
 		// set them immediately, avoiding state bleed from the leaving session.
 		const session = $sessions.find(s => s.id === sessionId);
 		const sessionProjectId = session?.project_id;
+		const sessionProjectV2Id = session?.project_v2_id ?? null;
 
 		// Build worktree info from the session list data so the switcher can
 		// use server-authoritative values instead of stale in-memory state.
@@ -106,7 +107,7 @@
 		const sessionTitle = session?.title || null;
 
 		const openChat = () => {
-			activeSession.switchSession(sessionId, sessionProjectId, worktreeInfo, sessionTitle);
+			activeSession.switchSession(sessionId, sessionProjectId, worktreeInfo, sessionTitle, sessionProjectV2Id);
 			layout.openChat(sessionId);
 		};
 

@@ -12,6 +12,7 @@ import type { ActiveSessionState } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 // V2 Phase 1: the SSE-fed reducer owns the transcript; destroy() tears its feed down.
 import { feedController } from './v2/feed-controller';
+import { resolvePersistedProject } from './session-project';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -117,7 +118,10 @@ export function createSessionInit(deps: SessionInitDeps) {
 				update(s => ({
 					...s,
 					profile: s.profile || defaultProfile,
-					project: s.project || defaultProject,
+					...resolvePersistedProject(
+						{ project: s.project, projectV2Id: s.projectV2Id },
+						defaultProject,
+					),
 				}));
 			} else {
 				const persisted = await switcher.loadPersistedSession();
@@ -142,8 +146,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 						isRestoringSession: !!persisted.sessionId,
 						title: persisted.title || 'New Chat',
 						profile: persisted.profile || defaultProfile,
-						project: persisted.project || defaultProject,
-						projectV2Id: persisted.projectV2Id ?? null,
+						...resolvePersistedProject(persisted, defaultProject),
 						modelOverride: persisted.modelOverride ?? null,
 						permissionModeOverride: persisted.permissionModeOverride ?? null,
 						effortLevelOverride: persisted.effortLevelOverride ?? null,

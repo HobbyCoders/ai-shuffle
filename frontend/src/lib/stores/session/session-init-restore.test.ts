@@ -134,4 +134,24 @@ describe('session-init · isRestoringSession on persisted restore', () => {
 		expect(getState().sessionId).toBeNull();
 		expect(getState().isRestoringSession).toBe(false);
 	});
+
+	it('does not replace a v2-only persisted session with the last local default', async () => {
+		const { init, getState } = makeInit({
+			sessionId: 'persisted-v2',
+			title: 'Remote chat',
+			profile: 'profile-1',
+			project: '',
+			projectV2Id: 'pv2-remote',
+			modelOverride: null,
+			permissionModeOverride: null,
+			effortLevelOverride: null,
+		});
+
+		await init();
+
+		const s = getState();
+		expect(s.sessionId).toBe('persisted-v2');
+		expect(s.project).toBe('');
+		expect(s.projectV2Id).toBe('pv2-remote');
+	});
 });

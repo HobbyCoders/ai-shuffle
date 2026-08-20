@@ -15,10 +15,13 @@ from fastapi.testclient import TestClient
 from app.api.auth import require_auth
 from app.api.cluster import router
 from app.core.config import settings
+from datetime import datetime, timezone
+
 from app.db import checkouts as checkouts_db
 from app.db import database
 from app.db import projects as projects_db
 from app.db import projects_v2
+from app.db.base import get_db
 
 
 ME = "local-me"
@@ -96,6 +99,36 @@ def test_includes_remote_only_and_does_not_expose_path(client, mock_db, tmp_path
             "is_self": False,
         }
     ]
+
+
+def test_peer_projects_row_same_origin_is_not_local(client, mock_db, tmp_path):
+    """A peer ``projects`` row for the same origin must not become
+    ``local_project_id`` and must not leak that machine's ``path``."""
+    _seed_installs()
+    peer_path = tmp_path / "peer-clone"
+    peer_path.mkdir()
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO projects "
+            "(id, name, path, settings, instance_id, created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            ("peer-proj", "Peer clone", str(peer_path), "{}", PEER, now, now),
+        )
+    projects_db.set_project_link_group("peer-proj", ORIGIN)
+    pv2 = projects_v2.upsert_project(ORIGIN, name="Shared")
+    checkouts_db.upsert_checkout(pv2["id"], PEER, str(peer_path))
+
+    resp = client.get("/api/v1/cluster/projects")
+    assert resp.status_code == 200
+    rows = resp.json()["projects"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["local_project_id"] is None
+    assert row["remote_only"] is True
+    assert "path" not in row
+    assert str(peer_path) not in str(row)
 
 
 def test_local_project_id_when_this_install_has_a_row(client, mock_db, tmp_path):
