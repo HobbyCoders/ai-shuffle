@@ -77,7 +77,7 @@ RUN mkdir -p /etc/apt/keyrings \
     && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Node.js runtime (needed by Claude Agent SDK subprocess) ──
+# ── Node.js runtime (delegated CLI providers and bundled MCP tools) ──
 RUN mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
        | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
@@ -109,7 +109,7 @@ RUN set -eux; \
 # ── Create non-root user ──
 RUN groupadd -g 1000 appuser && \
     useradd -m -u 1000 -g 1000 appuser && \
-    mkdir -p /home/appuser/.config/claude /home/appuser/.claude && \
+    mkdir -p /home/appuser/.fluid /home/appuser/.config/claude /home/appuser/.claude && \
     mkdir -p /data /workspace && \
     chown -R appuser:appuser /home/appuser /data /workspace
 
@@ -126,24 +126,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY vendor/ /opt/vendor/
 RUN if [ -f /opt/vendor/fluid/pyproject.toml ]; then         pip install --no-cache-dir /opt/vendor/fluid &&         python -c "import fluid; print('fluid installed')";     else         echo "WARNING: vendor/fluid not present — fluid backend NOT baked in; this image cannot serve queries";     fi
 
-# ── Make the bundled Claude Code CLI writable by appuser ──
-# app/core/cli_interrupt_patch.py rewrites a byte in this binary at runtime
-# (as appuser) to keep background subagents alive across Stop/interrupt
-# (PRESERVE_BACKGROUND_ON_INTERRUPT). pip installs claude_agent_sdk as root,
-# leaving the binary root:root -rwxr-xr-x, so the runtime patch fails with
-# "Cannot write ... (read-only): Permission denied" and the feature is inert
-# even with the env var set. The patch also writes a marker JSON file next to
-# the binary to avoid re-scanning it on every boot, so the whole `_bundled/`
-# directory (not just the `claude` file) must be appuser-owned or those
-# marker writes fail too. We only chown here — the actual byte patch stays
-# a runtime concern (it relocates its anchor per CLI build; see
-# resolve_bundled_cli_path()/apply_patch() in cli_interrupt_patch.py) rather
-# than being baked into the image. NOTE: entrypoint.sh remaps appuser to
-# $PUID/$PGID at container start, which orphans this build-time chown — it
-# must re-apply this same chown after that remap (see entrypoint.sh).
-RUN find /usr/local/lib/python3*/site-packages/claude_agent_sdk \
-    -type d -name _bundled -exec chown -R appuser:appuser {} +
-
 # ── Backend code ──
 COPY --chown=appuser:appuser app/ ./app/
 
@@ -158,7 +140,7 @@ COPY --from=frontend-builder --chown=appuser:appuser /build/build/ /app/app/stat
 COPY --from=tools-builder --chown=appuser:appuser /tools/ /opt/ai-tools/
 
 # ── Copy the built browser-automation MCP server from its builder stage ──
-# The SDK spawns `node /opt/browser-mcp/dist/index.js` per session (see
+# Fluid launches `node /opt/browser-mcp/dist/index.js` when the tool is used (see
 # app/core/builtin_mcp_servers.py DEFAULT_BROWSER_MCP_ENTRY). node_modules here
 # is the pruned prod-only set; package.json ships so its `"type": "module"`
 # resolves at runtime.
@@ -197,7 +179,9 @@ RUN printf '%s\n' "$GIT_SHA" > /app/GIT_SHA
 ENV START_CHROME=1 \
     CHROME_CDP=1 \
     CHROME_CDP_PORT=9221 \
-    CHROME_EXECUTABLE=/usr/bin/google-chrome-stable
+    CHROME_EXECUTABLE=/usr/bin/google-chrome-stable \
+    SETTINGS_IMPORT_SOURCE_HOME=/home/appuser \
+    SETTINGS_IMPORT_ALLOWED_HOMES=/imports/provider-settings
 
 EXPOSE 8000
 
@@ -208,7 +192,7 @@ HEALTHCHECK --interval=120s --timeout=10s --start-period=40s --retries=3 \
 # grandchildren of a crash-looping headless Chromium) are reaped by a real init.
 # Without this, the app process (PID 1) inherits every orphan but never wait()s
 # on them, so defunct chromium/chrome_crashpad corpses accumulate until the
-# container's pids cgroup fills and ALL forks fail (SDK spawns, git worktree,
+# container's pids cgroup fills and ALL forks fail (provider/MCP spawns, git worktree,
 # even `docker exec`). `-g` forwards signals to the whole process group so a
 # `docker stop` shuts the app down cleanly.
 ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/entrypoint.sh"]

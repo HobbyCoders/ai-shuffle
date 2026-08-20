@@ -7,7 +7,8 @@
 #
 # What it produces (in $BACKUP_DIR):
 #   ai-shuffle-db-<timestamp>.dump      pg_dump -Fc (custom format, restore with pg_restore)
-#   ai-shuffle-media-<timestamp>.tar.gz tar of generated media dirs (see MEDIA_DIRS)
+#   ai-shuffle-media-<timestamp>.tar.gz    tar of generated media dirs (see MEDIA_DIRS)
+#   ai-shuffle-settings-<timestamp>.tar.gz tar of active Fluid settings (never legacy Claude data)
 #
 # Retention: files older than BACKUP_RETENTION_DAYS (default 7) matching the
 # backup name patterns are pruned after a successful run.
@@ -18,6 +19,7 @@
 #   BACKUP_RETENTION_DAYS  days to keep (default: 7)
 #   WORKSPACE_DIR          generated media root (default: /workspace)
 #   DATA_DIR              app data root, included in media tar if present (default: /data)
+#   FLUID_HOME            active Fluid settings root (default: /fluid)
 #
 # Flags:
 #   --dry-run   print the commands that WOULD run; touch nothing.
@@ -45,10 +47,12 @@ BACKUP_DIR="${BACKUP_DIR:-/data/backups}"
 BACKUP_RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-7}"
 WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace}"
 DATA_DIR="${DATA_DIR:-/data}"
+FLUID_HOME="${FLUID_HOME:-/fluid}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 
 DB_DUMP="${BACKUP_DIR}/ai-shuffle-db-${TIMESTAMP}.dump"
 MEDIA_TAR="${BACKUP_DIR}/ai-shuffle-media-${TIMESTAMP}.tar.gz"
+SETTINGS_TAR="${BACKUP_DIR}/ai-shuffle-settings-${TIMESTAMP}.tar.gz"
 
 # Generated-media directories to include in the tar, relative to WORKSPACE_DIR.
 # These are where the app writes generated assets (see app/api/generated_*.py).
@@ -99,17 +103,30 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3) Retention prune
+# 3) Active Fluid settings
+# ---------------------------------------------------------------------------
+# Archive only the active destination. The legacy Claude auth/import volume is
+# intentionally not mounted into the backup sidecar and cannot be changed here.
+if [ -d "$FLUID_HOME" ]; then
+  log "Archiving active Fluid settings"
+  run tar -czf "$SETTINGS_TAR" -C "$FLUID_HOME" .
+  log "Settings tar -> ${SETTINGS_TAR}"
+else
+  log "No Fluid settings directory found at ${FLUID_HOME}; skipping settings tar"
+fi
+
+# ---------------------------------------------------------------------------
+# 4) Retention prune
 # ---------------------------------------------------------------------------
 # Delete backup artifacts older than the retention window. Scoped strictly to
 # our own name patterns so nothing else in BACKUP_DIR is ever touched.
 log "Pruning backups older than ${BACKUP_RETENTION_DAYS} day(s)"
 if [ "$DRY_RUN" -eq 1 ]; then
-  printf '[dry-run] find %s -maxdepth 1 -type f \\( -name "ai-shuffle-db-*.dump" -o -name "ai-shuffle-media-*.tar.gz" \\) -mtime +%s -print\n' \
+  printf '[dry-run] find %s -maxdepth 1 -type f \\( -name "ai-shuffle-db-*.dump" -o -name "ai-shuffle-media-*.tar.gz" -o -name "ai-shuffle-settings-*.tar.gz" \\) -mtime +%s -print\n' \
     "$BACKUP_DIR" "$BACKUP_RETENTION_DAYS"
 else
   find "$BACKUP_DIR" -maxdepth 1 -type f \
-    \( -name 'ai-shuffle-db-*.dump' -o -name 'ai-shuffle-media-*.tar.gz' \) \
+    \( -name 'ai-shuffle-db-*.dump' -o -name 'ai-shuffle-media-*.tar.gz' -o -name 'ai-shuffle-settings-*.tar.gz' \) \
     -mtime "+${BACKUP_RETENTION_DAYS}" -print -delete
 fi
 

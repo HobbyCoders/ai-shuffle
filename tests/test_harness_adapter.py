@@ -1347,7 +1347,7 @@ async def test_native_leg_passes_compiled_sections_for_context_usage(
     monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
     monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
 
-    (tmp_path / "CLAUDE.md").write_text("Project rule: be terse.", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("Project rule: be terse.", encoding="utf-8")
     await ha.HarnessAdapter().connect(
         SessionOptions(
             model="gpt-4o",
@@ -1364,7 +1364,7 @@ async def test_native_leg_passes_compiled_sections_for_context_usage(
     kinds = [s.kind for s in compiled.sections]
     assert "base" in kinds and "environment" in kinds
     assert any(
-        s.kind == "memory" and s.path and s.path.endswith("CLAUDE.md")
+        s.kind == "memory" and s.path and s.path.endswith("AGENTS.md")
         for s in compiled.sections
     )
 
@@ -2572,23 +2572,14 @@ async def test_connect_drops_plugin_mcp_servers_the_app_already_connected(
 
 
 @pytest.mark.asyncio
-async def test_connect_native_leg_folds_the_hosts_claude_settings(monkeypatch, tmp_path):
-    """Ruling CE4: a native leg adopts the user's settings.json stack.
-
-    Asserted over a REAL NativeLoop (the pin lifted in this change is a
-    constructor kwarg, so a capturing fake could only prove the kwarg's
-    absence): ``env`` lands on ``ctx.extra["settings_env"]`` as the
-    child-process overlay, and the settings permission rules are PREPENDED to
-    the app's own — evaluation is last-match-wins, so the app keeps the final
-    say over its session.
-    """
+async def test_connect_native_leg_keeps_provider_settings_inert(monkeypatch, tmp_path):
+    """Native sessions never activate provider-home env or permission rules."""
     import json
 
     import app.core.provider.harness_adapter as ha
     from fluid.permissions.engine import PermissionEngine
     from fluid.permissions.rules import Rule
 
-    # HOME redirected so the developer's real ~/.claude never leaks in.
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
@@ -2607,8 +2598,6 @@ async def test_connect_native_leg_folds_the_hosts_claude_settings(monkeypatch, t
         encoding="utf-8",
     )
 
-    # One host rule that contradicts the settings rule, so the ordering is
-    # observable rather than incidental.
     host_rule = Rule(tool="Bash", decision="deny", input_globs={"command": "npm run *"})
     monkeypatch.setattr(
         ha.HarnessAdapter,
@@ -2630,10 +2619,8 @@ async def test_connect_native_leg_folds_the_hosts_claude_settings(monkeypatch, t
     )
 
     engine = adapter._engine
-    assert engine.ctx.extra["settings_env"] == {"AIH_SETTINGS_PROBE": "from-settings"}
-    # Settings rule first, host rule last — the host's deny is what evaluates.
-    assert [r.decision for r in engine.permissions.rules] == ["allow", "deny"]
-    assert engine.permissions.rules[-1] is host_rule
+    assert "settings_env" not in engine.ctx.extra
+    assert engine.permissions.rules == [host_rule]
 
 
 async def _connect_capturing_native(monkeypatch, tmp_path, **option_kwargs):
@@ -3466,7 +3453,7 @@ async def test_generation_options_route_like_chat(monkeypatch):
 # ``enabled_agents``/``agent_invoke_mode`` DECLARE agents into the caller's
 # context; they never gate dispatch. The declaration must be index-shaped —
 # name + description and nothing else — and must sit in the SAME
-# "Available agent types" block as the file and plugin agents fluid discovers.
+# "Available agent types" block as the native file agents Fluid discovers.
 
 
 def _agent_md(name: str, description: str, body: str = "BODY") -> str:
@@ -3481,10 +3468,10 @@ def _write_file(path, text: str):
 
 @pytest.fixture()
 def agent_workspace(tmp_path, monkeypatch):
-    """A project cwd with a file agent, plus an installed plugin agent.
+    """A project cwd with a native file agent and an inert legacy plugin.
 
-    HOME/USERPROFILE are redirected so the developer's real ~/.claude never
-    leaks into an assertion (fluid's own test convention).
+    HOME/USERPROFILE are redirected so the developer's own settings cannot
+    leak into an assertion.
     """
     import json
 
@@ -3497,7 +3484,7 @@ def agent_workspace(tmp_path, monkeypatch):
     project = tmp_path / "proj"
     (project / ".git").mkdir(parents=True)
     _write_file(
-        project / ".claude" / "agents" / "researcher.md",
+        project / ".agents" / "agents" / "researcher.md",
         _agent_md("researcher", "Reads the codebase"),
     )
 
@@ -3545,7 +3532,7 @@ async def test_agents_index_carries_file_plugin_and_db_agents(
     system = _CapturingLoop.captured["system"]
     assert system.count("# Available agent types") == 1
     assert "- researcher: Reads the codebase" in system      # (a) file agent
-    assert "- myplug:reviewer: Reviews diffs" in system      # (b) plugin agent
+    assert "myplug:reviewer" not in system                   # legacy plugin is inert
     assert "- Helper: Helps out" in system                   # (c) DB agent
     # Index-only: no definition body may reach the caller's context.
     assert "PLUGIN AGENT PROMPT" not in system
@@ -3576,7 +3563,7 @@ async def test_declared_db_agents_reach_native_loop_as_descriptors(
     ]
     # The discovered definitions ride along too — passing ``agents=`` at all
     # suppresses fluid's own auto-fill, so the usage row must not lose them.
-    assert {a["agentType"] for a in agents} == {"Helper", "researcher", "myplug:reviewer"}
+    assert {a["agentType"] for a in agents} == {"Helper", "researcher"}
 
 
 @pytest.mark.asyncio
@@ -3591,10 +3578,8 @@ async def test_no_declared_agents_leaves_the_discovered_index_alone(
     await ha.HarnessAdapter().connect(_agents_options(agent_workspace))
     system = _CapturingLoop.captured["system"]
     assert "- researcher: Reads the codebase" in system
-    assert "- myplug:reviewer: Reviews diffs" in system
-    assert sorted(a["agentType"] for a in _CapturingLoop.captured["agents"]) == [
-        "myplug:reviewer", "researcher",
-    ]
+    assert "myplug:reviewer" not in system
+    assert [a["agentType"] for a in _CapturingLoop.captured["agents"]] == ["researcher"]
 
 
 @pytest.mark.asyncio
@@ -3620,12 +3605,7 @@ async def test_declared_db_agent_wins_a_name_collision_with_a_file_agent(
 
 
 @pytest.mark.asyncio
-async def test_plugin_agents_reach_the_dispatch_registry(monkeypatch, agent_workspace):
-    """A plugin agent is not just advertised, it is DISPATCHABLE.
-
-    Over a REAL NativeLoop (no fake), the namespaced definition lands in
-    ctx.extra["agent_registry"], which is what task_dispatch resolves against.
-    """
+async def test_native_file_agents_reach_dispatch_but_plugins_stay_inert(monkeypatch, agent_workspace):
     import app.core.provider.harness_adapter as ha
     import app.core.task_dispatch as td
 
@@ -3634,9 +3614,9 @@ async def test_plugin_agents_reach_the_dispatch_registry(monkeypatch, agent_work
     adapter = ha.HarnessAdapter()
     await adapter.connect(_agents_options(agent_workspace))
     registry = adapter.engine.ctx.extra["agent_registry"]
-    assert set(registry) == {"researcher", "myplug:reviewer"}
-    resolved = td.resolve_registry_agent("myplug:reviewer", registry)
-    assert resolved is not None and resolved.body.strip() == "PLUGIN AGENT PROMPT"
+    assert set(registry) == {"researcher"}
+    resolved = td.resolve_registry_agent("researcher", registry)
+    assert resolved is not None and resolved.description == "Reads the codebase"
 
 
 # ─── the same index on the DELEGATED (Claude-subscription) leg ───────────────
@@ -3663,8 +3643,7 @@ def _delegated_agents_options(cwd, declared=None):
 
 @pytest.mark.asyncio
 async def test_delegated_append_mode_advertises_agents(monkeypatch, agent_workspace):
-    """Default (append) mode: the merged index rides --append-system-prompt,
-    so a Claude-sub caller sees file, plugin AND DB agents."""
+    """Default append mode advertises native file and database agents."""
     import app.core.provider.harness_adapter as ha
 
     monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
@@ -3680,7 +3659,7 @@ async def test_delegated_append_mode_advertises_agents(monkeypatch, agent_worksp
     assert append.startswith("APPEND TEXT")
     assert append.count("# Available agent types") == 1
     assert "- researcher: Reads the codebase" in append      # file agent
-    assert "- myplug:reviewer: Reviews diffs" in append       # plugin agent
+    assert "myplug:reviewer" not in append                    # legacy plugin is inert
     assert "- Helper: Helps out" in append                    # DB agent
     # Index-only, exactly like the native leg: no definition bodies.
     assert "PLUGIN AGENT PROMPT" not in append

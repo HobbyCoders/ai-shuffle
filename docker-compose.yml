@@ -55,10 +55,16 @@ services:
       - COMMAND_TIMEOUT=${COMMAND_TIMEOUT:-300}
       - PUID=${PUID:-99}
       - PGID=${PGID:-100}
-      # Auto-update Claude Code and GitHub CLI on container start (default: true)
+      # Auto-update the GitHub CLI package on container start (default: true).
+      # Delegated provider CLIs are image-managed and are not updated here.
       - AUTO_UPDATE=${AUTO_UPDATE:-true}
-      # SDK initialize timeout in ms (default: 60000, increase if CLI startup is slow)
+      # Delegated Claude CLI stream-close timeout in ms.
       - CLAUDE_CODE_STREAM_CLOSE_TIMEOUT=${CLAUDE_CODE_STREAM_CLOSE_TIMEOUT:-120000}
+      # Import defaults are container paths, never hardcoded host homes. The first
+      # path preserves existing installs; /imports/provider-settings is an optional read-only
+      # bind mount configured below (or entered explicitly in the preview dialog).
+      - SETTINGS_IMPORT_SOURCE_HOME=${SETTINGS_IMPORT_SOURCE_HOME:-/home/appuser}
+      - SETTINGS_IMPORT_ALLOWED_HOMES=${SETTINGS_IMPORT_ALLOWED_HOMES:-/imports/provider-settings}
 
     depends_on:
       postgres:
@@ -70,8 +76,17 @@ services:
 
     # Volume mounts for persistent data
     volumes:
-      # Persist Claude Code authentication tokens
+      # Active Fluid settings. Kept separate from every provider import source so
+      # preview/apply can remain copy-only and destination conflicts stay visible.
+      - fluid-settings:/home/appuser/.fluid
+      # Preserve the historical named volume. Delegated Claude providers may still
+      # use its auth tokens; all other Claude settings here are legacy import input.
       - claude-auth:/home/appuser/.claude
+      # Optional external Claude/Codex home (Linux/macOS): mount it read-only with a
+      # small override file, then enter /imports/provider-settings in the import dialog:
+      #   volumes:
+      #     - ${PROVIDER_IMPORT_HOME:?set PROVIDER_IMPORT_HOME}:/imports/provider-settings:ro
+      # Never mount an external provider home over /home/appuser/.fluid.
       # Persist GitHub CLI authentication
       - gh-auth:/home/appuser/.config/gh
       # Persist the browser-automation Chrome profile (logged-in sessions the
@@ -157,7 +172,11 @@ services:
     stdin_open: true
 
 volumes:
-  # Named volume for Claude authentication persistence
+  # Named volume for active Fluid settings and imported copies.
+  fluid-settings:
+    driver: local
+  # Historical volume retained for delegated Claude auth and legacy import data.
+  # Do not rename: existing Docker/Unraid installs depend on this volume identity.
   claude-auth:
     driver: local
   # Named volume for GitHub CLI authentication persistence

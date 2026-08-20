@@ -343,7 +343,7 @@ def test_root_routing_passes_root_as_parent(agents, monkeypatch):
     assert seen["profile_id"] == "helper"
 
 
-# ─── file/plugin agent definitions (CE6 registry seam) ───────────────────────
+# ─── native file-agent definitions (registry seam) ───────────────────────
 
 
 def _definition(name="researcher", **kw):
@@ -353,7 +353,7 @@ def _definition(name="researcher", **kw):
     fields = dict(
         name=name,
         description="Researches things",
-        path=f"/proj/.claude/agents/{name}.md",
+        path=f"/proj/.agents/agents/{name}.md",
         scope="project",
         model=None,
         tools=(),
@@ -555,7 +555,7 @@ def test_dispatcher_reads_the_agent_registry_off_the_ctx(agents):
 # The native leg's Task reads fluid's discovered definitions off
 # ctx.extra["agent_registry"]. The delegated (claude CLI) leg runs no fluid
 # engine, so its Task tool discovers them itself from the session's cwd —
-# without that a .claude/agents definition is advertised in the prompt (the
+# without that a .agents/agents definition is advertised in the prompt (the
 # adapter injects the same index there) and then answers "Unknown agent".
 
 
@@ -590,7 +590,7 @@ def _envelope(result):
 
 @pytest.fixture()
 def file_agent_project(tmp_path, monkeypatch):
-    """A cwd holding one .claude/agents definition, with HOME redirected so the
+    """A cwd holding one .agents/agents definition, with HOME redirected so the
     developer's own global/plugin agents cannot leak into the assertion."""
     home = tmp_path / "home"
     home.mkdir(parents=True, exist_ok=True)
@@ -598,7 +598,7 @@ def file_agent_project(tmp_path, monkeypatch):
     monkeypatch.setenv("USERPROFILE", str(home))
 
     project = tmp_path / "proj"
-    agent_dir = project / ".claude" / "agents"
+    agent_dir = project / ".agents" / "agents"
     agent_dir.mkdir(parents=True)
     (agent_dir / "researcher.md").write_text(
         "---\nname: researcher\ndescription: Reads the codebase\n---\n"

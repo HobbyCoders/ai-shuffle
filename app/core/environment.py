@@ -7,6 +7,7 @@ generating environment details blocks, and configuring security instructions.
 
 import json
 import logging
+import os
 import platform
 import subprocess
 import sys
@@ -42,7 +43,7 @@ def _inject_model_params(env: Dict[str, str], env_var: str, setting_key: str) ->
 # Can be customized via admin settings API
 DEFAULT_SECURITY_INSTRUCTIONS = """
 ## App-Identity
-You are Claude Code running inside AI Shuffle — a self-hosted web chat application (SvelteKit + FastAPI + Claude Agent SDK). When the user mentions "this app", "the app", or discusses bugs/features without specifying another project, they mean the current project that is in your workspace. Never forget this context.
+You are an AI agent running inside AI Shuffle — a self-hosted web chat application built with SvelteKit, FastAPI, and the Fluid multi-provider harness. When the user mentions "this app", "the app", or discusses bugs or features without naming another project, they mean the current project in your workspace.
 
 ## Showing Files & Media in Chat
 The chat renders Markdown and turns media links into inline players. Make everything you produce visible and clickable — never leave the user with a raw filesystem path they cannot open.

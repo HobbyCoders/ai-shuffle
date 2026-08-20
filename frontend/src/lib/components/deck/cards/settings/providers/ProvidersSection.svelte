@@ -23,11 +23,12 @@
 	 * `ensureLoaded()`; that path is untouched.)
 	 */
 	import { onMount } from 'svelte';
-	import { Info, Server, Plus } from 'lucide-svelte';
+	import { Info, Server, Plus, FileInput } from 'lucide-svelte';
 	import { providers } from '$lib/stores/providers.svelte';
 	import MediaToolsSection from './MediaToolsSection.svelte';
 	import ProviderList from './ProviderList.svelte';
 	import AddProviderModal from './AddProviderModal.svelte';
+	import SettingsImportDialog from './SettingsImportDialog.svelte';
 
 	interface Props {
 		// ----- GitHub (forwarded to MediaToolsSection) -----
@@ -52,8 +53,21 @@
 	// Add-provider modal open flag. The modal owns its own step machine + flows;
 	// on completion or dismissal it calls back to close.
 	let addProviderOpen = $state(false);
+	let importDialogOpen = $state(false);
+	let importOpener = $state<HTMLButtonElement | null>(null);
+
 	function onAddProvider() {
 		addProviderOpen = true;
+	}
+
+	function onImportSettings(event: MouseEvent) {
+		importOpener = event.currentTarget as HTMLButtonElement;
+		importDialogOpen = true;
+	}
+
+	function closeImportDialog() {
+		importDialogOpen = false;
+		queueMicrotask(() => importOpener?.focus());
 	}
 
 	onMount(() => {
@@ -81,9 +95,14 @@
 	<div class="prov-groupbody">
 		<div class="prov-toolbar">
 			<h4>Configured providers</h4>
-			<button type="button" class="ed-btn prov-add-btn" onclick={onAddProvider}>
-				<Plus />Add provider
-			</button>
+			<div class="prov-actions">
+				<button type="button" class="ed-btn prov-import-btn" onclick={onImportSettings}>
+					<FileInput />Import settings
+				</button>
+				<button type="button" class="ed-btn prov-add-btn" onclick={onAddProvider}>
+					<Plus />Add provider
+				</button>
+			</div>
 		</div>
 
 		{#if s.claudeAuthError}
@@ -108,6 +127,10 @@
 	<AddProviderModal onClose={() => (addProviderOpen = false)} />
 {/if}
 
+{#if importDialogOpen}
+	<SettingsImportDialog onClose={closeImportDialog} />
+{/if}
+
 <style>
 	.prov-groupbody {
 		padding: 4px 18px 14px;
@@ -127,18 +150,49 @@
 		text-transform: uppercase;
 		color: var(--muted-foreground);
 	}
-	.prov-add-btn {
+	.prov-actions {
+		display: flex;
+		align-items: center;
+		justify-content: flex-end;
+		gap: 8px;
+	}
+	.prov-add-btn,
+	.prov-import-btn {
 		display: inline-flex;
+		min-height: 36px;
 		align-items: center;
 		gap: 6px;
 	}
-	.prov-add-btn :global(svg) {
+	.prov-add-btn :global(svg),
+	.prov-import-btn :global(svg) {
 		width: 14px;
 		height: 14px;
+	}
+	.prov-import-btn {
+		color: var(--foreground);
+		border-color: color-mix(in oklch, var(--primary) 28%, var(--border));
+		background: color-mix(in oklch, var(--primary) 6%, transparent);
+	}
+	.prov-import-btn:hover {
+		background: color-mix(in oklch, var(--primary) 11%, transparent);
 	}
 	.prov-err {
 		font-size: 12.5px;
 		color: var(--destructive);
 		padding: 4px 2px 8px;
+	}
+	@media (max-width: 640px) {
+		.prov-toolbar {
+			align-items: flex-start;
+			flex-direction: column;
+		}
+		.prov-actions {
+			width: 100%;
+			justify-content: stretch;
+		}
+		.prov-actions :global(button) {
+			flex: 1;
+			justify-content: center;
+		}
 	}
 </style>

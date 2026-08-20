@@ -19,7 +19,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.core.config import settings
 
 # Import API routers
-from app.api import auth, claude_accounts, model_providers, agents, projects, sessions, query, system, websocket, commands, preferences, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, templates, webhooks, security, rate_limits, github, git, git_operations, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, browser, browser_panel, mobile, pairing, internal, workspace_files, connectors, automations, api_users, documentation, catalog, logs, teams, model_registry, computer_use, cluster, notifications, usage, voice
+from app.api import auth, claude_accounts, model_providers, agents, projects, sessions, query, system, websocket, commands, preferences, permission_rules, import_export, settings as settings_api, settings_import, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, templates, webhooks, security, rate_limits, github, git, git_operations, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, browser, browser_panel, mobile, pairing, internal, workspace_files, connectors, automations, api_users, documentation, catalog, logs, teams, model_registry, computer_use, cluster, notifications, usage, voice
 from app.api import events as events_api
 from app.api import artifacts as artifacts_api
 
@@ -449,6 +449,7 @@ app.include_router(teams.router)
 app.include_router(permission_rules.router)
 app.include_router(import_export.router)
 app.include_router(settings_api.router)
+app.include_router(settings_import.router)
 app.include_router(generated_images.router)
 app.include_router(generated_videos.router)
 app.include_router(generated_audio.router)

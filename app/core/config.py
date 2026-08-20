@@ -96,7 +96,7 @@ class Settings(BaseSettings):
     # Paths - these will be set dynamically if not provided
     data_dir: Optional[Path] = None
     workspace_dir: Optional[Path] = None
-    claude_projects_dir: Optional[Path] = None  # Override for Claude SDK projects dir (defaults to ~/.claude/projects)
+    claude_projects_dir: Optional[Path] = None  # Legacy Claude CLI transcript root (defaults to ~/.claude/projects)
     tools_dir: Optional[Path] = None  # Path to AI tools directory (defaults to /workspace/ai-shuffle/tools in Docker)
 
     # Database (PostgreSQL). Set the individual connection pieces — the app

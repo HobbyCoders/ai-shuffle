@@ -10,8 +10,8 @@ AUTO_UPDATE=${AUTO_UPDATE:-true}
 
 echo "Starting with PUID=${PUID} and PGID=${PGID}"
 
-# Update GitHub CLI if enabled
-# Note: Claude Code CLI is bundled with claude-agent-sdk, updated via pip
+# Update GitHub CLI if enabled. Provider runtimes remain pinned to the image
+# and are never rewritten by startup scripts.
 if [ "$AUTO_UPDATE" = "true" ]; then
     echo "Checking for updates..."
 
@@ -47,131 +47,37 @@ if [ "$PUID" != "$CURRENT_UID" ] || [ "$PGID" != "$CURRENT_GID" ]; then
     chown -R appuser:appuser /app/app /data /workspace
     chown appuser:appuser /app /app/.env.example 2>/dev/null || true
     find /opt/ai-tools -not -path "*/node_modules/*" -exec chown appuser:appuser {} + 2>/dev/null || true
-
-    # Re-own the bundled Claude Code CLI dir after the UID remap — the
-    # Dockerfile chowns it to build-time appuser (1000) so the
-    # interrupt-preserve byte patch (app/core/cli_interrupt_patch.py) can
-    # write the binary and its marker file, but remapping appuser to PUID
-    # (e.g. 99 on Unraid) orphans that ownership and the patch fails EPERM.
-    find /usr/local/lib/python3*/site-packages/claude_agent_sdk -type d -name _bundled \
-        -exec chown -R appuser:appuser {} + 2>/dev/null || true
 else
     echo "UID/GID already correct, skipping user modification"
 fi
 
 # Ensure config directories exist with correct permissions
-mkdir -p /home/appuser/.config/claude /home/appuser/.claude /home/appuser/.config/gh
-chown -R appuser:appuser /home/appuser/.config /home/appuser/.claude
+mkdir -p /home/appuser/.fluid /home/appuser/.config/claude /home/appuser/.claude /home/appuser/.config/gh
+chown -R appuser:appuser /home/appuser/.fluid /home/appuser/.config /home/appuser/.claude
 
 # =============================================================================
-# Claude Code Config Persistence
+# Provider configuration compatibility
 # =============================================================================
-# Claude CLI expects ~/.claude.json at the home directory root, but only
-# ~/.claude/ is volume-mounted. Without a symlink, the config is lost on
-# every container restart. Fix: store the real file inside the volume and
-# symlink to it.
+# Existing provider files are import sources and delegated-CLI auth state. Never
+# move, restore, create, or rewrite them at startup. Older AI Shuffle releases
+# stored .claude.json inside the mounted ~/.claude volume. Route the CLI's root
+# path into that volume; a missing target remains missing until the CLI writes it.
 CLAUDE_JSON_REAL="/home/appuser/.claude/.claude.json"
 CLAUDE_JSON_LINK="/home/appuser/.claude.json"
-
-if [ ! -L "$CLAUDE_JSON_LINK" ]; then
-    # Not a symlink — migrate or restore the file into the volume
-    if [ -f "$CLAUDE_JSON_LINK" ]; then
-        # Plain file exists outside the volume — move it in
-        mv "$CLAUDE_JSON_LINK" "$CLAUDE_JSON_REAL"
-        echo "Migrated .claude.json into persistent volume"
-    elif [ ! -f "$CLAUDE_JSON_REAL" ]; then
-        # No file anywhere — try to restore from the most recent backup
-        LATEST_BACKUP=$(ls -t /home/appuser/.claude/backups/.claude.json.backup.* 2>/dev/null | head -1)
-        if [ -n "$LATEST_BACKUP" ]; then
-            cp "$LATEST_BACKUP" "$CLAUDE_JSON_REAL"
-            echo "Restored .claude.json from backup: $LATEST_BACKUP"
-        fi
-    fi
-    # Ensure the target file exists (a dangling symlink causes the CLI
-    # subprocess to hang in --input-format stream-json mode because it
-    # can't read hasCompletedOnboarding and enters an interactive flow)
-    if [ ! -f "$CLAUDE_JSON_REAL" ]; then
-        echo '{"hasCompletedOnboarding":true}' > "$CLAUDE_JSON_REAL"
-        chown appuser:appuser "$CLAUDE_JSON_REAL"
-        echo "Created default .claude.json in persistent volume"
-    fi
-    ln -sf "$CLAUDE_JSON_REAL" "$CLAUDE_JSON_LINK"
+if [ ! -e "$CLAUDE_JSON_LINK" ] && [ ! -L "$CLAUDE_JSON_LINK" ]; then
+    ln -s "$CLAUDE_JSON_REAL" "$CLAUDE_JSON_LINK"
     chown -h appuser:appuser "$CLAUDE_JSON_LINK"
-    echo "Symlinked $CLAUDE_JSON_LINK -> $CLAUDE_JSON_REAL"
+    echo "Routed .claude.json into the retained provider volume without creating or rewriting provider data"
 fi
 
-# Also ensure hasCompletedOnboarding is set in the existing .claude.json
-# (covers case where file exists from a previous version without this flag)
-if [ -f "$CLAUDE_JSON_REAL" ]; then
-    if ! grep -q '"hasCompletedOnboarding"' "$CLAUDE_JSON_REAL" 2>/dev/null; then
-        python3 -c "
-import json
-with open('$CLAUDE_JSON_REAL', 'r') as f:
-    data = json.load(f)
-data['hasCompletedOnboarding'] = True
-with open('$CLAUDE_JSON_REAL', 'w') as f:
-    json.dump(data, f, indent=2)
-print('Added hasCompletedOnboarding to .claude.json')
-" 2>/dev/null || echo "Could not update .claude.json"
-    fi
-fi
-
-# =============================================================================
-# Claude Code Credentials Management
-# =============================================================================
-# The volume mount for Claude auth is at /home/appuser/.claude
-# Credentials are stored after in-app login - no need to copy from root anymore
-
-# Check for existing Claude credentials in the volume
 if [ -f /home/appuser/.claude/.credentials.json ]; then
-    CREDS_SIZE=$(stat -c%s /home/appuser/.claude/.credentials.json 2>/dev/null || echo "0")
-    if [ "$CREDS_SIZE" -gt "10" ]; then
-        echo "Claude Code credentials found in volume (${CREDS_SIZE} bytes)"
-
-        # Ensure settings.json has hasCompletedOnboarding to skip CLI onboarding wizard
-        SETTINGS_FILE="/home/appuser/.claude/settings.json"
-        if [ -f "$SETTINGS_FILE" ]; then
-            # Check if hasCompletedOnboarding is already set
-            if ! grep -q '"hasCompletedOnboarding"' "$SETTINGS_FILE" 2>/dev/null; then
-                echo "Adding hasCompletedOnboarding to settings.json..."
-                # Use Python to safely update JSON
-                python3 -c "
-import json
-with open('$SETTINGS_FILE', 'r') as f:
-    data = json.load(f)
-data['hasCompletedOnboarding'] = True
-if 'theme' not in data:
-    data['theme'] = 'dark'
-with open('$SETTINGS_FILE', 'w') as f:
-    json.dump(data, f, indent=2)
-print('Settings updated with hasCompletedOnboarding=true')
-" 2>/dev/null || echo "Could not update settings.json"
-            fi
-        else
-            # Create settings.json with required fields
-            echo "Creating settings.json with hasCompletedOnboarding..."
-            echo '{"theme": "dark", "hasCompletedOnboarding": true}' > "$SETTINGS_FILE"
-        fi
-        chown appuser:appuser "$SETTINGS_FILE" 2>/dev/null || true
-    fi
+    echo "Claude CLI credentials found in the retained provider volume"
 else
-    echo "Claude Code: No credentials found - login via web UI required"
+    echo "Claude CLI credentials not found - connect Claude from the web UI if needed"
 fi
 
-# Legacy: Copy Claude credentials from root if they exist (for backwards compatibility)
-if [ -f /root/.claude/.credentials.json ] && [ ! -f /home/appuser/.claude/.credentials.json ]; then
-    echo "Copying Claude credentials from root to appuser (legacy migration)..."
-    cp /root/.claude/.credentials.json /home/appuser/.claude/ 2>/dev/null || true
-    cp -r /root/.claude/* /home/appuser/.claude/ 2>/dev/null || true
-    chown -R appuser:appuser /home/appuser/.claude
-fi
-
-# Also check .config/claude location (newer Claude versions)
-if [ -f /root/.config/claude/credentials.json ] && [ ! -f /home/appuser/.config/claude/credentials.json ]; then
-    echo "Copying Claude config from root to appuser..."
-    mkdir -p /home/appuser/.config/claude
-    cp -r /root/.config/claude/* /home/appuser/.config/claude/ 2>/dev/null || true
-    chown -R appuser:appuser /home/appuser/.config
+if [ -n "$(find /home/appuser/.claude -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+    echo "Legacy Claude data detected and preserved; preview an explicit import from Settings > Providers"
 fi
 
 # =============================================================================
@@ -220,8 +126,8 @@ fi
 # Ensure data and workspace directories are writable
 chown -R appuser:appuser /data /workspace
 
-# Final ownership fix for config directories
-chown -R appuser:appuser /home/appuser/.config /home/appuser/.claude 2>/dev/null || true
+# Final ownership fix for active Fluid settings and provider compatibility data.
+chown -R appuser:appuser /home/appuser/.fluid /home/appuser/.config /home/appuser/.claude 2>/dev/null || true
 
 # =============================================================================
 # Browser-automation browser
