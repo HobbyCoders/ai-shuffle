@@ -89,11 +89,15 @@ from app.api.sessions_helpers import (  # noqa: F401 — re-exports
     ImportJSONLResponse,
     ForkSessionRequest,
     ForkSessionResponse,
+    AdoptRequest,
     AdoptSessionResponse,
     MoveSessionRequest,
     MoveSessionResponse,
     CreateWorktreeSessionRequest,
     WorktreeSessionResponse,
+    is_pinned,
+    retain_sdk_session_id,
+    apply_sdk_session_keep,
 )
 
 from app.api.sessions_export import (  # noqa: F401 — re-exports
@@ -141,6 +145,68 @@ def _adopt_device_name(instance_id: Optional[str]) -> Optional[str]:
     return (install or {}).get("device_name")
 
 
+async def _parse_adopt_request(request: Request) -> AdoptRequest:
+    """Read the adopt body first. Empty / omitted JSON → pin-to-here."""
+    import json as json_lib
+
+    raw_body = await request.body()
+    if not raw_body:
+        return AdoptRequest()
+    try:
+        data = json_lib.loads(raw_body)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid JSON body",
+        )
+    if data is None:
+        return AdoptRequest()
+    if not isinstance(data, dict):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="JSON body must be an object",
+        )
+    try:
+        return AdoptRequest.model_validate(data)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        )
+
+
+async def _require_local_base_checkout(session: dict, session_id: str, me: str) -> None:
+    """409 when this disk has no base checkout of the session's project.
+
+    Fails open on any non-409 resolver error. Project-less sessions skip.
+    """
+    if not (session.get("project_v2_id") or session.get("project_id")):
+        return
+    from app.core import project_resolver
+
+    try:
+        has_base = await run_sync(
+            project_resolver.has_local_base_checkout, session, me
+        )
+        if not has_base:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "This session's project isn't checked out on this device "
+                    "yet. Create a checkout of the repository here (clone it and "
+                    "open the project), then try again."
+                ),
+            )
+    except HTTPException:
+        raise
+    except Exception:  # noqa: BLE001 — fail open on any non-409 resolver error
+        logger.warning(
+            "Adopt preflight errored for session %s; proceeding fail-open",
+            session_id,
+            exc_info=True,
+        )
+
+
 @router.post("/{session_id}/adopt", response_model=AdoptSessionResponse)
 async def adopt_session_endpoint(
     request: Request,
@@ -149,50 +215,22 @@ async def adopt_session_endpoint(
 ):
     """Take over a session created by another install so it can resume locally.
 
-    On a shared database every install's sessions are visible, but a session is
-    "owned" by the install whose ``instance_id`` is on the row — the send /
-    interrupt path resolves the working dir and worktree against the local
-    machine, so a foreign session can't actually be driven from here until it is
-    adopted. This re-points ``instance_id`` to this install.
+    Body is parsed first. Empty JSON / omitted fields is pin-to-here (today's
+    Resume here). ``{"follow": true}`` is unpin: this install becomes the owner
+    and ``placement`` is NULLed so the next send from another runner auto-adopts.
 
-    Semantics:
-      * Already local (this install, or a legacy NULL owner) → no-op, returns
-        ``adopted=False`` so the caller just opens it.
-      * Owned elsewhere and **actively streaming** → refuse with 409: two
-        installs driving one live SDK session at once corrupts the transcript.
-        The user should stop it on that device first. Busy truth is the durable
-        ``runs`` table in the SHARED database (a lease-valid active run), so it
-        is authoritative even for a remote-owned session — and, unlike the
-        install-level "online" heartbeat, it does not block adoption of an idle
-        session just because the owning install happens to run 24/7.
-      * Owned elsewhere but idle (not streaming) → adopt it.
-
-    Worktree sessions keep working after adoption: only the owner column changes,
-    so the existing ``recreate_worktree`` adopt-on-disk path rebinds the worktree
-    on the next resume (``sdk_session_id`` is preserved, so history survives).
+    A live run 409s in every case (including already-local unpin) so two
+    installs never drive one SDK turn. ``sdk_session_id`` is kept only when
+    Fluid (shared PG) or a CLI JSONL file exists on this disk.
     """
     from app.core.config import settings
+    from app.core import streaming_status
 
+    body = await _parse_adopt_request(request)
     session = await require_session(request, session_id)
 
     me = settings.effective_instance_id
     owner = session.get("instance_id")
-
-    # Already ours (or legacy NULL) — nothing to adopt.
-    if not owner or owner == me:
-        return AdoptSessionResponse(
-            session_id=session_id,
-            instance_id=me,
-            adopted=False,
-            status="already_local",
-        )
-
-    # Owned by another install: refuse only while the session is actually live
-    # (a lease-valid active run in the shared runs table) so we never wrestle an
-    # in-flight SDK turn away mid-stream. The install-level "online" heartbeat
-    # is the wrong granularity — a 24/7 install would make all of its idle
-    # sessions permanently unadoptable.
-    from app.core import streaming_status
 
     if streaming_status.has_active_run(session_id):
         device = await run_sync(_adopt_device_name, owner) or "another device"
@@ -204,45 +242,37 @@ async def adopt_session_endpoint(
             ),
         )
 
-    # Cross-runner adopt preflight — the origin resolver is the single authority.
-    # A session's project_v2 identity is origin-keyed and install-independent, so
-    # it is already correct on every runner; adopt only confirms the project's
-    # BASE checkout is present on THIS install (has_local_base_checkout self-heals
-    # project_v2_id off the legacy project_id first, so pre-cutover sessions work
-    # too). The gate is base-availability, NOT the branch checkout — a branch
-    # session materializes its branch lazily at spawn (checkout_manager), so
-    # gating on the branch row would spuriously 409 a branch session whenever only
-    # the base is present. If the base isn't checked out here, refuse with 409 —
-    # the ONE deliberate blocker — rather than let the first send crash on git
-    # against a path that doesn't exist locally. sessions.project_id is NEVER rewritten: the resolver
-    # owns cwd via project_v2, so there is no cross-install project rebind to
-    # persist. Fails open on any non-409 error — a preflight bug must never make an
-    # adoptable session impossible to adopt. Project-less sessions skip this
-    # entirely (nothing to check out).
-    if session.get("project_v2_id") or session.get("project_id"):
-        from app.core import project_resolver
+    if body.follow:
+        if (session.get("project_v2_id") or session.get("project_id")) and owner != me:
+            await _require_local_base_checkout(session, session_id, me)
+        updated = await run_sync(database.unpin_session, session_id, me)
+        if not updated:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Session not found: {session_id}",
+            )
+        await run_sync(apply_sdk_session_keep, updated, me)
+        logger.info(
+            "Unpinned session %s (owner %s -> %s, placement NULL)",
+            session_id, owner, me,
+        )
+        return AdoptSessionResponse(
+            session_id=session_id,
+            instance_id=me,
+            adopted=True,
+            status="unpinned",
+        )
 
-        try:
-            has_base = await run_sync(
-                project_resolver.has_local_base_checkout, session, me
-            )
-            if not has_base:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=(
-                        "This session's project isn't checked out on this device "
-                        "yet. Create a checkout of the repository here (clone it and "
-                        "open the project), then try again."
-                    ),
-                )
-        except HTTPException:
-            raise
-        except Exception:  # noqa: BLE001 — fail open on any non-409 resolver error
-            logger.warning(
-                "Adopt preflight errored for session %s; proceeding fail-open",
-                session_id,
-                exc_info=True,
-            )
+    # pin-to-here (today)
+    if not owner or owner == me:
+        return AdoptSessionResponse(
+            session_id=session_id,
+            instance_id=me,
+            adopted=False,
+            status="already_local",
+        )
+
+    await _require_local_base_checkout(session, session_id, me)
 
     updated = await run_sync(database.adopt_session, session_id, me)
     if not updated:
@@ -251,6 +281,7 @@ async def adopt_session_endpoint(
             detail=f"Session not found: {session_id}",
         )
 
+    await run_sync(apply_sdk_session_keep, updated, me)
     logger.info("Adopted session %s from install %s -> %s", session_id, owner, me)
     return AdoptSessionResponse(
         session_id=session_id,
@@ -289,12 +320,10 @@ async def move_session_endpoint(
       * Session carries a project whose checkout is not materialized on the
         target → 409, mirroring adopt's base-checkout gate: an unchecked-out
         target would fail on the first send.
-      * **Actively streaming → NOT refused** (unlike adopt). The placement gate
-        runs only at TURN START, so flipping the pin mid-run is safe: the live
-        turn keeps its lease and finishes on the current owner, and only turns
-        queued after it are claimed by the new one. This deliberate
-        "queue the move" semantic is reported back as ``pending_live_run=True``
-        so the UI can say "after the current turn finishes".
+      * Actively streaming → 409 (same gate as /adopt). Turn-end persist
+        would otherwise restore the old disk's ``sdk_session_id`` after a
+        successful move. ``pending_live_run`` stays on the response as
+        ``false``.
     """
     session = await require_session(request, session_id)
 
@@ -371,12 +400,16 @@ async def move_session_endpoint(
                 exc_info=True,
             )
 
-    # NOT a refusal — an advisory. Placement is consulted only at turn start, so
-    # a live turn finishes on the CURRENT owner under its existing lease and the
-    # new pin takes effect from the next queued turn ("queue the move").
     from app.core import streaming_status
 
-    pending = streaming_status.has_active_run(session_id)
+    if streaming_status.has_active_run(session_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"This session is currently running on {device}. "
+                "Stop it there first."
+            ),
+        )
 
     owner = session.get("instance_id")
     updated = await run_sync(database.adopt_session, session_id, target)
@@ -385,6 +418,8 @@ async def move_session_endpoint(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session not found: {session_id}",
         )
+
+    await run_sync(apply_sdk_session_keep, updated, target)
 
     # Wake the target's claim loop now instead of on its next 5s poll. Purely a
     # latency optimization — the poll is the correctness backstop, so a NOTIFY
@@ -401,18 +436,17 @@ async def move_session_endpoint(
         )
 
     logger.info(
-        "Moved session %s from install %s -> %s (pending_live_run=%s)",
+        "Moved session %s from install %s -> %s",
         session_id,
         owner,
         target,
-        pending,
     )
     return MoveSessionResponse(
         session_id=session_id,
         instance_id=target,
         moved=True,
         status="moved",
-        pending_live_run=pending,
+        pending_live_run=False,
     )
 
 

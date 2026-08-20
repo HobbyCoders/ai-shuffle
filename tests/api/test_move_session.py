@@ -10,9 +10,9 @@ install. Same single write (``database.adopt_session`` — owner column +
     (``capable_runners(None, {})`` — online + capability only);
   - project session whose target has no ACTIVE BASE checkout → 409
     (``has_active_base_checkout``; a branch-only worktree is not a base);
-  - **actively streaming → NOT refused**. Placement is consulted only at turn
-    start, so the live turn finishes on the old owner and later turns follow the
-    new pin; the response reports ``pending_live_run=True``.
+  - actively streaming → 409 (same gate as /adopt), so turn-end persist
+    cannot restore the old disk's ``sdk_session_id``. ``pending_live_run``
+    stays ``false``. CLI resume ids are cleared on move; Fluid ids are kept.
 
 Fixtures mirror tests/api/test_adopt_preflight_v2.py. Checkout-gate tests seed
 real ``checkouts`` rows (mirror tests/api/test_worktree_remote_target.py) and
@@ -253,24 +253,56 @@ def test_happy_path_moves_and_repins(client, mock_database):
     assert updated["placement"] == {"where": f"runner:{TARGET}"}
 
 
-def test_live_run_still_moves_and_flags_pending(client, mock_database):
-    """A streaming session is NOT refused — the move is queued behind the live
-    turn and reported with ``pending_live_run=True``."""
+def test_live_run_409s_and_does_not_move(client, mock_database):
+    """A streaming session is refused so turn-end persist cannot restore the
+    old disk's ``sdk_session_id`` after a successful move."""
     session = _session()
+    mock_database.get_session.return_value = session
+    mock_database.get_install.return_value = {"device_name": "Studio Mac"}
+
+    with patch("app.core.streaming_status.has_active_run", return_value=True), \
+            patch("app.core.placement.capable_runners", return_value=[TARGET]):
+        response = _move(client)
+
+    assert response.status_code == 409
+    assert "currently running" in response.json()["detail"]
+    mock_database.adopt_session.assert_not_called()
+    mock_database.update_session.assert_not_called()
+
+
+def test_cli_move_clears_sdk_session_id(client, mock_database):
+    """A CLI resume id lives on the source disk — /move cannot stat the
+    destination, so the id is cleared. DB transcript remains."""
+    session = _session(sdk_session_id="cli-uuid-1")
     mock_database.get_session.return_value = session
     mock_database.get_install.return_value = {"device_name": "Studio Mac"}
     mock_database.adopt_session.return_value = {**session, "instance_id": TARGET}
 
-    with patch("app.core.streaming_status.has_active_run", return_value=True), \
+    with patch("app.core.provider.fluid_transcript.is_fluid_session", return_value=False), \
             patch("app.core.placement.capable_runners", return_value=[TARGET]), \
             patch("app.core.turn_claim.notify_turns_changed"):
         response = _move(client)
 
     assert response.status_code == 200
-    data = response.json()
-    assert data["moved"] is True
-    assert data["pending_live_run"] is True
-    mock_database.adopt_session.assert_called_once_with("test-session-id", TARGET)
+    mock_database.update_session.assert_called_once_with(
+        "test-session-id", sdk_session_id=""
+    )
+
+
+def test_fluid_move_keeps_sdk_session_id(client, mock_database):
+    """Fluid ids live in shared Postgres — resume works on any install."""
+    session = _session(sdk_session_id="ses_deadbeefcafe")
+    mock_database.get_session.return_value = session
+    mock_database.get_install.return_value = {"device_name": "Studio Mac"}
+    mock_database.adopt_session.return_value = {**session, "instance_id": TARGET}
+
+    with patch("app.core.provider.fluid_transcript.is_fluid_session", return_value=True), \
+            patch("app.core.placement.capable_runners", return_value=[TARGET]), \
+            patch("app.core.turn_claim.notify_turns_changed"):
+        response = _move(client)
+
+    assert response.status_code == 200
+    mock_database.update_session.assert_not_called()
 
 
 def test_blank_target_is_rejected(client, mock_database):

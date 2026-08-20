@@ -1,0 +1,110 @@
+/**
+ * Tests for the context-bar runner badge menu.
+ *
+ * Continue here and (when pinned) Unpin are always offered. Other runners
+ * are listed, offline greyed, ineligible blocked when the session has a
+ * project. git-state is fetched by project_id, else project_v2_id.
+ */
+
+import { describe, it, expect } from 'vitest';
+import type { Install } from '$lib/api/installs';
+import {
+	runnerBadgeMenuItems,
+	gitStateQuery,
+	type RunnerBadgeMenuInput
+} from './runner-badge-menu';
+
+function install(overrides: Partial<Install> = {}): Install {
+	return {
+		id: 'inst-peer',
+		device_name: 'Studio',
+		base_url: 'http://10.0.0.2:8000',
+		platform: 'linux',
+		version: '1.2.1',
+		capabilities: {},
+		last_seen: '2026-08-19T10:00:00Z',
+		online: true,
+		is_self: false,
+		...overrides
+	};
+}
+
+const self = install({ id: 'inst-self', device_name: 'This box', is_self: true });
+const owner = install({ id: 'inst-owner', device_name: 'Laptop' });
+const onlinePeer = install({ id: 'inst-online', device_name: 'Desk' });
+const offlinePeer = install({ id: 'inst-offline', device_name: 'Garage', online: false });
+
+function input(overrides: Partial<RunnerBadgeMenuInput> = {}): RunnerBadgeMenuInput {
+	return {
+		ownerId: owner.id,
+		isPinned: true,
+		installs: [self, owner, onlinePeer, offlinePeer],
+		eligibility: { 'inst-owner': true, 'inst-online': true, 'inst-offline': true },
+		hasProject: true,
+		...overrides
+	};
+}
+
+describe('runnerBadgeMenuItems', () => {
+	it('offers Continue here, and Unpin only when pinned', () => {
+		const pinned = runnerBadgeMenuItems(input());
+		expect(pinned.map((i) => i.id)).toContain('continue-here');
+		expect(pinned.map((i) => i.id)).toContain('unpin');
+		expect(pinned.find((i) => i.id === 'continue-here')!.action).toEqual({ kind: 'adopt' });
+		expect(pinned.find((i) => i.id === 'unpin')!.action).toEqual({ kind: 'unpin' });
+
+		const unpinned = runnerBadgeMenuItems(input({ isPinned: false }));
+		expect(unpinned.map((i) => i.id)).not.toContain('unpin');
+	});
+
+	it('lists other runners for /move and skips self and the current owner', () => {
+		const items = runnerBadgeMenuItems(input());
+		const moveIds = items.filter((i) => i.id.startsWith('move-')).map((i) => i.id);
+		expect(moveIds).toEqual(['move-inst-online', 'move-inst-offline']);
+		expect(items.find((i) => i.id === 'move-inst-online')!.action).toEqual({
+			kind: 'move',
+			targetInstanceId: 'inst-online'
+		});
+	});
+
+	it('greys an offline runner even when eligible', () => {
+		const items = runnerBadgeMenuItems(input());
+		const offline = items.find((i) => i.id === 'move-inst-offline')!;
+		expect(offline.disabled).toBe(true);
+		expect(offline.action).toBeNull();
+		expect(offline.title).toBe('Garage is offline');
+	});
+
+	it('disables an ineligible online runner when the session has a project', () => {
+		const items = runnerBadgeMenuItems(
+			input({ eligibility: { 'inst-online': false, 'inst-offline': true } })
+		);
+		const desk = items.find((i) => i.id === 'move-inst-online')!;
+		expect(desk.disabled).toBe(true);
+		expect(desk.action).toBeNull();
+	});
+
+	it('fails open when eligibility is null — only offline is blocked', () => {
+		const items = runnerBadgeMenuItems(input({ eligibility: null }));
+		expect(items.find((i) => i.id === 'move-inst-online')!.disabled).toBe(false);
+		expect(items.find((i) => i.id === 'move-inst-offline')!.disabled).toBe(true);
+	});
+});
+
+describe('gitStateQuery', () => {
+	it('uses project_id when the session has a legacy id', () => {
+		expect(gitStateQuery({ project_id: 'proj-1', project_v2_id: 'pv2-1' })).toEqual({
+			project_id: 'proj-1'
+		});
+	});
+
+	it('uses project_v2_id for a v2-only session', () => {
+		expect(gitStateQuery({ project_id: null, project_v2_id: 'pv2-1' })).toEqual({
+			project_v2_id: 'pv2-1'
+		});
+	});
+
+	it('skips git-state for a projectless session', () => {
+		expect(gitStateQuery({ project_id: null, project_v2_id: null })).toBeNull();
+	});
+});

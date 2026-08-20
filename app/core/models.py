@@ -415,6 +415,9 @@ class Session(SessionBase):
     # enrichment layer via ``placement.resolve_placement`` (the single oracle);
     # the model default is False.
     degraded: bool = False
+    # Explicit ``{"where":"runner:<id>"}`` pin. Computed at read from
+    # ``sessions.placement``; NULL / anywhere placements are not pins.
+    is_pinned: bool = False
     project_name: Optional[str] = None  # Resolved server-side (frontend $projects is instance-filtered)
     # Folds same-repo project clones across installs into ONE sessions-board card.
     # Derived from the git remote so every install agrees; without it on the

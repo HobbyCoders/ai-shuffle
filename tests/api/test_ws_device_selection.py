@@ -746,6 +746,58 @@ async def test_remote_turn_without_local_project_refuses_attachments(
     p.submit.assert_not_called()
 
 
+async def test_auto_adopt_clears_cli_sdk_without_jsonl(mock_db, monkeypatch):
+    """Auto-adopt uses the same keep-predicate: a CLI id with no local JSONL
+    is cleared so the next turn does not resume a missing conversation file."""
+    _stub_installs(monkeypatch, [ME, PEER])
+    _peer_owned_session("sess-1")
+    with database.get_db() as conn:
+        conn.cursor().execute(
+            "UPDATE sessions SET sdk_session_id = %s WHERE id = %s",
+            ("cli-uuid-1", "sess-1"),
+        )
+
+    with patch(
+        "app.core.provider.fluid_transcript.is_fluid_session", return_value=False
+    ), patch(
+        "app.core.jsonl_parser.get_session_jsonl_path", return_value=None
+    ), _Patches():
+        handler = _make_handler()
+        await handler.handle_query({
+            "prompt": "continue here",
+            "session_id": "sess-1",
+            "profile": "claude-code",
+            "project": None,
+        })
+
+    assert _row("sess-1")["sdk_session_id"] in (None, "")
+
+
+async def test_auto_adopt_keeps_fluid_sdk(mock_db, monkeypatch):
+    """Fluid resume ids survive auto-adopt — they live in shared Postgres."""
+    _stub_installs(monkeypatch, [ME, PEER])
+    _peer_owned_session("sess-1")
+    fluid_id = "ses_deadbeefcafe"
+    with database.get_db() as conn:
+        conn.cursor().execute(
+            "UPDATE sessions SET sdk_session_id = %s WHERE id = %s",
+            (fluid_id, "sess-1"),
+        )
+
+    with patch(
+        "app.core.provider.fluid_transcript.is_fluid_session", return_value=True
+    ), _Patches():
+        handler = _make_handler()
+        await handler.handle_query({
+            "prompt": "continue here",
+            "session_id": "sess-1",
+            "profile": "claude-code",
+            "project": None,
+        })
+
+    assert _row("sess-1")["sdk_session_id"] == fluid_id
+
+
 async def test_missing_local_checkout_blocks_auto_adopt(mock_db, monkeypatch):
     """A project session whose base checkout is not materialized here keeps
     running on its owner (adopting would spawn against a missing path)."""

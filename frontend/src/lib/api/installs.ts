@@ -119,10 +119,14 @@ export interface ClusterGitState {
 	recent_ops: GitOpRow[];
 }
 
-/** Per-install git state for a project (eligibility, checkouts, recent ops). */
-export async function getClusterGitState(projectId: string): Promise<ClusterGitState> {
+/** Per-install git state for a project (eligibility, checkouts, recent ops).
+ *  Pass a legacy `project_id` (default) or `project_v2_id` via the second arg. */
+export async function getClusterGitState(
+	id: string,
+	param: 'project_id' | 'project_v2_id' = 'project_id'
+): Promise<ClusterGitState> {
 	return api.get<ClusterGitState>(
-		`/cluster/git-state?project_id=${encodeURIComponent(projectId)}`
+		`/cluster/git-state?${param}=${encodeURIComponent(id)}`
 	);
 }
 

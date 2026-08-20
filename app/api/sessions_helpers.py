@@ -96,11 +96,21 @@ class ForkSessionResponse(BaseModel):
     status: str
 
 
+class AdoptRequest(BaseModel):
+    """Request body for POST /sessions/{id}/adopt.
+
+    Empty / omitted body is pin-to-here (today's Resume here). ``follow=true``
+    is unpin: take ownership here and drop the sticky placement pin.
+    """
+    follow: bool = False
+
+
 class AdoptSessionResponse(BaseModel):
     """Response for the cross-device 'Resume here' adopt action.
 
     ``adopted`` is True when ownership was re-pointed to this install; False
     when the session was already local (a no-op — the caller just opens it).
+    ``status`` is ``adopted``, ``already_local``, or ``unpinned``.
     """
     session_id: str
     instance_id: str
@@ -127,9 +137,9 @@ class MoveSessionResponse(BaseModel):
 
     ``moved`` is True when ownership was re-pointed to the target; False when the
     session already belonged to it (a no-op). ``instance_id`` is the owner AFTER
-    the call. ``pending_live_run`` is True when a turn was still streaming on the
-    OLD owner at move time — that turn finishes there and only later turns follow
-    the new pin (placement is consulted at turn start only).
+    the call. ``pending_live_run`` stays on the wire as ``false``: a live run
+    409s instead of queueing the move (turn-end persist would otherwise restore
+    the old disk's ``sdk_session_id``).
     """
     session_id: str
     instance_id: str
@@ -403,6 +413,81 @@ async def require_session(request: Request, session_id: str) -> dict:
 # Enrichment helpers
 # ---------------------------------------------------------------------------
 
+def is_pinned(session_row: dict) -> bool:
+    """True when ``placement.where`` is an explicit ``runner:<id>`` pin.
+
+    Computed at read (never persisted). NULL / anywhere / capability
+    placements are not pins — those still auto-adopt.
+    """
+    from app.core.placement import _normalize_placement
+
+    placement = _normalize_placement(session_row.get("placement"))
+    where = (placement or {}).get("where") or ""
+    return isinstance(where, str) and where.startswith("runner:")
+
+
+def retain_sdk_session_id(
+    session_row: dict, destination_instance_id: str
+) -> Optional[str]:
+    """Keep ``sdk_session_id`` iff it is still usable on the destination.
+
+    Fluid ids live in shared ``fluid_sessions`` (resume works on any install).
+    CLI JSONL lives on one disk: keep only when the destination is this
+    install and the file exists. Otherwise return None (caller clears).
+    """
+    sdk = session_row.get("sdk_session_id") or None
+    if not sdk:
+        return None
+
+    from app.core.provider.fluid_transcript import is_fluid_session
+
+    if is_fluid_session(sdk):
+        return sdk
+
+    from app.core.config import settings
+
+    if destination_instance_id != settings.effective_instance_id:
+        return None
+
+    from app.core.jsonl_parser import get_session_jsonl_path
+    from app.core.message_resolver import resolve_working_dir
+
+    try:
+        cwd = resolve_working_dir(session_row)
+    except Exception:  # noqa: BLE001 — missing cwd must not block the clear
+        cwd = "/workspace"
+    if get_session_jsonl_path(sdk, cwd):
+        return sdk
+    return None
+
+
+def apply_sdk_session_keep(session_row: dict, destination_instance_id: str) -> None:
+    """Clear ``sdk_session_id`` when :func:`retain_sdk_session_id` returns None.
+
+    Logs the reason (``no_local_jsonl`` / ``cross_install_move`` / ``not_fluid``).
+    DB transcript is the history that always survives.
+    """
+    sdk = session_row.get("sdk_session_id")
+    if not sdk:
+        return
+    if retain_sdk_session_id(session_row, destination_instance_id):
+        return
+
+    from app.core.config import settings
+
+    if destination_instance_id != settings.effective_instance_id:
+        reason = "cross_install_move"
+    else:
+        reason = "no_local_jsonl"
+    database.update_session(session_row["id"], sdk_session_id="")
+    session_row["sdk_session_id"] = None
+    logger.info(
+        "Cleared sdk_session_id for session %s (reason=%s, not_fluid)",
+        session_row.get("id"),
+        reason,
+    )
+
+
 def is_session_degraded(session_row: dict, claimable_ids: set) -> bool:
     """Derive the transient V2 Q7 ``degraded`` state for one session.
 
@@ -521,6 +606,7 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
         inst = session.get("instance_id")
         is_remote = bool(inst) and inst != me
         session["is_remote"] = is_remote
+        session["is_pinned"] = is_pinned(session)
 
         session["degraded"] = is_session_degraded(session, claimable_ids)
 

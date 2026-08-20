@@ -1884,6 +1884,7 @@ from app.db.sessions import (  # noqa: F401
     set_session_parked_task_kind,
     adopt_session,
     adopt_session_follow,
+    unpin_session,
     set_session_project,
     set_session_branch,
     session_has_forks,

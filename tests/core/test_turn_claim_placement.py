@@ -435,6 +435,23 @@ def test_adopt_dual_writes_placement_and_resolver_routes_to_adopter(
     assert decision.kind == "runner" and decision.runner_id == RUNNER_ME
 
 
+def test_unpin_nulls_placement_and_takes_ownership(mock_db, monkeypatch):
+    """follow-me write: instance_id = me, placement NULL."""
+    _stub_installs(monkeypatch, [OTHER])
+    _seed_session(
+        "s-unpin", placement_val={"where": f"runner:{OTHER}"}, instance_id=OTHER
+    )
+
+    from app.db import sessions as sessions_db
+
+    row = sessions_db.unpin_session("s-unpin", RUNNER_ME)
+
+    assert row is not None
+    pin, instance_id = _placement_of("s-unpin")
+    assert pin is None
+    assert instance_id == RUNNER_ME
+
+
 # ---------------------------------------------------------------------------
 # 5. Interrupt observed — foreign flip drives the live runtime exactly once.
 # ---------------------------------------------------------------------------

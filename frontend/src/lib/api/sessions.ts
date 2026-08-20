@@ -63,6 +63,7 @@ export interface Session {
 	// grouping key (1:1 with link_group_id for grouped projects → identical fold).
 	project_v2_id?: string | null;  // Origin-keyed project (install-independent)
 	origin?: string | null;  // Grouping token (git:… / manual:… / local:<id>)
+	is_pinned?: boolean;  // Explicit runner:<id> placement pin (computed at read)
 	automation_id?: string | null;  // Set when an automation run created this session
 	provider_id?: string | null;  // Bound model provider (null = native Claude)
 	mode?: string;  // Interaction mode: 'chat' (default) or 'voice' (Realtime call)
@@ -218,6 +219,43 @@ export async function forkSession(sessionId: string, messageIndex?: number): Pro
 	// action). Passing an index forks up to and including that display message.
 	return api.post<ForkSessionResponse>(`/sessions/${sessionId}/fork`, {
 		message_index: messageIndex ?? null
+	});
+}
+
+export interface AdoptSessionResponse {
+	session_id: string;
+	instance_id: string;
+	adopted: boolean;
+	status: 'adopted' | 'already_local' | 'unpinned' | (string & {});
+	warning?: string | null;
+	local_project_id?: string | null;
+}
+
+export interface MoveSessionResponse {
+	session_id: string;
+	instance_id: string;
+	moved: boolean;
+	status: string;
+	pending_live_run: boolean;
+}
+
+/** Pin this session to the viewing install (Resume here). */
+export async function adoptSession(sessionId: string): Promise<AdoptSessionResponse> {
+	return api.post<AdoptSessionResponse>(`/sessions/${sessionId}/adopt`, {});
+}
+
+/** Take ownership here and drop the sticky pin (follow-me). */
+export async function unpinSession(sessionId: string): Promise<AdoptSessionResponse> {
+	return api.post<AdoptSessionResponse>(`/sessions/${sessionId}/adopt`, { follow: true });
+}
+
+/** Re-pin this session to another runner. */
+export async function moveSession(
+	sessionId: string,
+	targetInstanceId: string
+): Promise<MoveSessionResponse> {
+	return api.post<MoveSessionResponse>(`/sessions/${sessionId}/move`, {
+		target_instance_id: targetInstanceId
 	});
 }
 

@@ -370,6 +370,18 @@ class TestControllableAnnotation:
         assert sessions[0]["is_remote"] is False
         assert sessions[0]["controllable"] is True
 
+    def test_is_pinned_from_runner_placement(self):
+        """``is_pinned`` is true only for an explicit runner:<id> placement."""
+        installs = {"me-install": {"online": True, "device_name": "Primary"}}
+        pinned = [{"id": "s1", "instance_id": "me-install",
+                   "placement": {"where": "runner:me-install"}}]
+        self._annotate(pinned, installs)
+        assert pinned[0]["is_pinned"] is True
+
+        follow = [{"id": "s2", "instance_id": "me-install", "placement": None}]
+        self._annotate(follow, installs)
+        assert follow[0]["is_pinned"] is False
+
 
 # =============================================================================
 # Test List Sessions Endpoint

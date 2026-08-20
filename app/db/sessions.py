@@ -812,6 +812,29 @@ def adopt_session_follow(session_id: str, instance_id: str) -> Optional[SessionR
     return get_session(session_id)
 
 
+def unpin_session(session_id: str, instance_id: str) -> Optional[SessionRow]:
+    """Take ownership and drop the sticky pin (follow-me / unpin).
+
+    Writes ``instance_id`` AND ``placement = NULL`` so the session follows
+    whoever sends next (D2 auto-adopt). Used by ``POST /adopt {follow: true}``.
+    ``sdk_session_id`` is left for the caller to apply the keep-predicate.
+    ``updated_at`` is bumped, mirroring adopt. Returns the updated row, or
+    ``None`` if no such session exists.
+    """
+    _ph = ph()
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"UPDATE sessions SET instance_id = {_ph}, placement = {_ph}, "
+            f"updated_at = {_ph} WHERE id = {_ph}",
+            (instance_id, None, now, session_id),
+        )
+        if cursor.rowcount == 0:
+            return None
+    return get_session(session_id)
+
+
 def pin_session_placement(session_id: str, runner_id: str) -> bool:
     """Sticky-pin a session to ``runner_id`` (V2 Phase 4, OD-6 + OD-9).
 

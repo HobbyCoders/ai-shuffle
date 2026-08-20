@@ -95,6 +95,14 @@ describe('Installs API', () => {
 			expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/cluster/git-state?project_id=a%20b%26c%2Fd');
 		});
 
+		it('GETs git-state by project_v2_id for a v2-only session', async () => {
+			fetchMock.mockResolvedValueOnce(okJson(gitState));
+			await getClusterGitState('pv2-abc', 'project_v2_id');
+			expect(fetchMock.mock.calls[0][0]).toBe(
+				'/api/v1/cluster/git-state?project_v2_id=pv2-abc'
+			);
+		});
+
 		it('throws { detail, status } so callers can fail open on errors', async () => {
 			fetchMock.mockResolvedValueOnce(errJson(404, { detail: 'Project not found' }));
 			await expect(getClusterGitState('missing')).rejects.toMatchObject({

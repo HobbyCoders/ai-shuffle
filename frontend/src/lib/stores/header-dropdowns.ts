@@ -14,6 +14,7 @@ import { writable } from 'svelte/store';
 type HeaderDropdownId =
 	| 'profile'
 	| 'branch'
+	| 'runner'
 	| 'notifications'
 	// Git-action option popovers (split-button chevrons). Listing them here means
 	// opening any one closes every other header dropdown — including the branch

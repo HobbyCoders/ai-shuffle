@@ -572,6 +572,11 @@ class ChatWebSocketHandler:
             )
             if not updated:
                 return False
+            from app.api.sessions_helpers import apply_sdk_session_keep
+
+            await run_sync(apply_sdk_session_keep, updated, me)
+            # Keep-predicate may have NULLed sdk_session_id on the stored row.
+            session_row["sdk_session_id"] = updated.get("sdk_session_id")
         except Exception:  # noqa: BLE001 — auto-adopt is an optimization only
             logger.debug(
                 "Auto-adopt skipped for session %s — dispatching remotely",
