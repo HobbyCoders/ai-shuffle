@@ -258,6 +258,12 @@
 		outline-offset: -2px;
 	}
 
+	@media (max-width: 639px) {
+		.thinking-header {
+			min-height: 44px;
+		}
+	}
+
 	.thinking-label {
 		flex: none;
 		font-weight: 600;

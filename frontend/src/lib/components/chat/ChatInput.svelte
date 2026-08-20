@@ -201,12 +201,21 @@
 	// Autocomplete state
 	let showCommandAutocomplete = $state(false);
 	let showFileAutocomplete = $state(false);
+	let composerFocused = $state(false);
+	let mobileControlsOpen = $state(false);
 	let commandJustSelected = false;
 	let commandAutocompleteRef = $state<CommandAutocomplete | null>(null);
 	let fileAutocompleteRef = $state<FileAutocomplete | null>(null);
 
 	// Island ref
 	let islandRef = $state<HTMLDivElement | null>(null);
+	const mobileCollapsed = $derived(
+		compact &&
+			!composerFocused &&
+			!mobileControlsOpen &&
+			!showCommandAutocomplete &&
+			!showFileAutocomplete
+	);
 
 	// Get selected profile name for display in placeholder
 	const selectedProfileName = $derived($profiles.find(p => p.id === $activeSession.profile)?.name || 'Profile');
@@ -402,12 +411,20 @@
 			}
 		};
 
+		const collapseMobileComposer = () => {
+			if (typeof window === 'undefined' || !window.matchMedia('(max-width: 639px)').matches) return;
+			editorRef?.blur();
+		};
+
 		try {
 			if (sendLater && $activeSession.isStreaming) {
 				// Queue for when current stream completes naturally
 				const queued = await activeSession.queueMessage(finalPrompt);
 				if (queued === false) restoreOnFailure();
-				else dropEditedOriginal();
+				else {
+					dropEditedOriginal();
+					collapseMobileComposer();
+				}
 			} else {
 				// Send immediately (interrupt → confirm → query if streaming, normal query if not)
 				const sent = await activeSession.sendMessage(
@@ -415,7 +432,10 @@
 					pendingPaths?.length ? { pendingUploadPaths: pendingPaths } : undefined,
 				);
 				if (sent === false) restoreOnFailure();
-				else dropEditedOriginal();
+				else {
+					dropEditedOriginal();
+					collapseMobileComposer();
+				}
 			}
 		} catch (err) {
 			console.error('[ChatInput] sendMessage threw', err);
@@ -636,6 +656,7 @@
 
 <div
 	class="chat-input-wrapper"
+	class:mobile-collapsed={mobileCollapsed}
 	role="region"
 	aria-label="Chat input with file drop"
 >
@@ -680,7 +701,7 @@
 			<!-- Main Island: one glass container, three rows -->
 			<div class="chat-island" bind:this={islandRef}>
 				<!-- Row 1: context pills (agent + execution mode / branch) -->
-				<ContextPillBar />
+				<div class="context-pill-row"><ContextPillBar /></div>
 
 				<!-- Row 2: the editor -->
 				<div class="input-area">
@@ -719,6 +740,7 @@
 								handleInputChange();
 							}}
 							onKeyDown={handleKeyDown}
+							onFocusChange={(focused) => (composerFocused = focused)}
 						/>
 					</div>
 				</div>
@@ -732,6 +754,7 @@
 				<ControlsDock
 					{isUploading}
 					onAttachClick={triggerFileUpload}
+					onSheetOpenChange={(open) => (mobileControlsOpen = open)}
 				>
 					{#snippet actions()}
 						<!-- Voice Input (delegated to VoiceRecorder component) -->
@@ -834,6 +857,10 @@
 		position: relative;
 		max-width: 48rem;
 		margin: 0 auto;
+	}
+
+	.context-pill-row {
+		min-width: 0;
 	}
 
 	/* Drag overlay */
@@ -1034,5 +1061,62 @@
 		from { opacity: 0; }
 		to { opacity: 1; }
 	}
-</style>
 
+	/* T3-style mobile composer: an idle chat shrinks to a single pill. Focusing
+	   restores the context and controls rows; a successful send blurs it again. */
+	@media (max-width: 639px) {
+		.chat-input-wrapper {
+			padding: 12px 0.5rem calc(0.5rem + env(safe-area-inset-bottom, 0px));
+			background: linear-gradient(to top, var(--background) 68%, transparent);
+		}
+
+		.chat-island {
+			border-radius: 18px;
+			transition:
+				border-radius 180ms ease,
+				border-color 180ms ease,
+				box-shadow 180ms ease;
+		}
+
+		.input-area {
+			min-height: 56px;
+			padding: 10px 12px 4px;
+		}
+
+		.send-btn {
+			width: 38px;
+			height: 38px;
+			border-radius: 12px;
+		}
+
+		.mobile-collapsed .chat-island {
+			min-height: 50px;
+			flex-direction: row;
+			align-items: center;
+			border-radius: 999px;
+		}
+
+		.mobile-collapsed .context-pill-row,
+		.mobile-collapsed :global(.mobile-controls) {
+			display: none;
+		}
+
+		.mobile-collapsed .input-area {
+			min-width: 0;
+			min-height: 48px;
+			flex: 1;
+			padding: 12px 4px 10px 16px;
+		}
+
+		.mobile-collapsed :global(.controls-dock) {
+			width: auto;
+			padding: 5px 6px 5px 0;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.chat-island {
+			transition: none;
+		}
+	}
+</style>

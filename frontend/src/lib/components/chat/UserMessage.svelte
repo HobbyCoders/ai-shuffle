@@ -4,8 +4,8 @@
 	 *
 	 * No avatar and no name label: the alignment already says who wrote it, and
 	 * dropping the header lets a short prompt read as one compact object. The
-	 * timestamp moves to the bubble's tooltip; the hover/tap action row (copy,
-	 * rewind) sits above the bubble so it never reflows the text.
+	 * timestamp stays in the tooltip on desktop and becomes a quiet footer on
+	 * mobile, alongside copy/rewind actions.
 	 */
 	import MessageActions from './MessageActions.svelte';
 	import { formatMessageTime } from '$lib/utils/message-time';
@@ -24,36 +24,19 @@
 	let { content, timestamp, sessionId = null, messageUuid = null, userPromptOccurrence = null, streaming = false, onRewindComplete, fileCheckpointingEnabled = false }: Props = $props();
 
 	let isHovered = $state(false);
-	let isTouchDevice = $state(false);
-	let showActionsOnMobile = $state(false);
-
-	function handleTouchStart() {
-		isTouchDevice = true;
-	}
-
-	function handleClick() {
-		// Only toggle on touch devices - desktop uses hover
-		if (isTouchDevice) {
-			showActionsOnMobile = !showActionsOnMobile;
-		}
-	}
-
-	// Show actions if hovered (desktop) or tapped (mobile)
-	const showActions = $derived(isHovered || showActionsOnMobile);
+	const showActions = $derived(isHovered && !streaming);
 </script>
 
 <div
 	class="userrow"
 	onmouseenter={() => isHovered = true}
-	onmouseleave={() => { isHovered = false; showActionsOnMobile = false; }}
-	ontouchstart={handleTouchStart}
-	onclick={handleClick}
-	onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); showActionsOnMobile = !showActionsOnMobile; } }}
-	role="button"
-	tabindex="0"
+	onmouseleave={() => (isHovered = false)}
+	role="article"
 >
 	<div class="usercol">
-		<div class="useractions" class:is-visible={showActions && !streaming}>
+		<div class="bubble" title={formatMessageTime(timestamp)}>{content}</div>
+		<div class="useractions" class:is-visible={showActions}>
+			{#if timestamp}<span class="user-time">{formatMessageTime(timestamp)}</span>{/if}
 			<MessageActions
 				{sessionId}
 				messageContent={content}
@@ -62,10 +45,9 @@
 				{userPromptOccurrence}
 				{onRewindComplete}
 				{fileCheckpointingEnabled}
-				visible={showActions && !streaming}
+				visible={!streaming}
 			/>
 		</div>
-		<div class="bubble" title={formatMessageTime(timestamp)}>{content}</div>
 	</div>
 </div>
 
@@ -97,7 +79,13 @@
 		height: auto;
 		opacity: 1;
 		pointer-events: auto;
-		margin-bottom: 4px;
+		margin-top: 4px;
+	}
+
+	.user-time {
+		font-family: var(--font-mono);
+		font-size: 10.5px;
+		color: var(--subtle-foreground);
 	}
 
 	.bubble {
@@ -116,5 +104,21 @@
 
 	:global(html.light) .bubble {
 		background: var(--muted);
+	}
+
+	@media (max-width: 639px) {
+		.usercol {
+			max-width: 85%;
+		}
+
+		.useractions {
+			height: auto;
+			display: flex;
+			align-items: center;
+			gap: 5px;
+			opacity: 1;
+			pointer-events: auto;
+			margin-top: 4px;
+		}
 	}
 </style>
