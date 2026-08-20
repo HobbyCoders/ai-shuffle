@@ -288,7 +288,7 @@ class _ChunkStream:
     async def aclose(self):
         self.closed = True
 
-    async def aiter_bytes(self):
+    async def aiter_bytes(self, chunk_size=None):
         for chunk in self._chunks:
             if self.closed:
                 return
@@ -381,7 +381,7 @@ def test_proxy_overflow_without_prebuilt_content_is_404(mock_db, client, monkeyp
     stream = _ChunkStream([])
     stream.iterated = False
 
-    async def _overflow_chunks():
+    async def _overflow_chunks(chunk_size=None):
         stream.iterated = True
         sent = 0
         while sent <= MAX_UPLOAD_SIZE:
@@ -427,11 +427,12 @@ def test_flag_off_still_307s(mock_db, client, monkeypatch):
     _assert_signed_redirect(resp.headers["location"], h)
 
 
-def test_proxy_headers_match_local_file_response(mock_db, client, monkeypatch):
+@pytest.mark.parametrize("filename", ["shot.png", 'café "x".png'])
+def test_proxy_headers_match_local_file_response(mock_db, client, monkeypatch, filename):
     monkeypatch.setattr(settings, "instance_id", "install-A")
-    data = b"header-compare-bytes"
+    data = b"header-compare-bytes:" + filename.encode()
     local = artifact_store.store_bytes(
-        data, mime="image/png", filename="shot.png", runner_id=HOLDER
+        data, mime="image/png", filename=filename, runner_id=HOLDER
     )
     local_resp = client.get(f"/api/v1/artifacts/{local['hash']}")
     assert local_resp.status_code == 200
@@ -460,6 +461,21 @@ def test_proxy_rejects_unsafe_base_url(mock_db, client, monkeypatch):
     h = "3" * 64
     _remote_row(h)
     _make_online_holder("http://user:pass@10.0.0.99:8000")
+
+    def _must_not_fetch(*args, **kwargs):
+        raise AssertionError("must not fetch an unvalidated base_url")
+
+    monkeypatch.setattr(artifacts_mod, "get_http_client", _must_not_fetch)
+
+    resp = client.get(f"/api/v1/artifacts/{h}", follow_redirects=False)
+    assert resp.status_code == 404
+
+
+def test_proxy_malformed_ipv6_base_url_is_404(mock_db, client, monkeypatch):
+    monkeypatch.setattr(settings, "instance_id", "install-A")
+    h = "4" * 64
+    _remote_row(h)
+    _make_online_holder("http://[")
 
     def _must_not_fetch(*args, **kwargs):
         raise AssertionError("must not fetch an unvalidated base_url")

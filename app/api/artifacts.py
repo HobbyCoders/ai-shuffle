@@ -21,7 +21,7 @@ import hashlib
 import logging
 import re
 from typing import Optional
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import FileResponse, RedirectResponse, Response
@@ -68,17 +68,28 @@ def _holder_artifact_url(base_url: str, hash: str) -> Optional[str]:
     """
     if not _HASH_RE.match(hash):
         return None
-    parts = urlsplit(str(base_url).strip())
-    if parts.scheme.lower() not in ("http", "https"):
-        return None
-    if parts.username is not None or parts.password is not None:
-        return None
-    if not parts.hostname:
-        return None
-    for segment in parts.path.split("/"):
-        if segment in (".", ".."):
+    try:
+        parts = urlsplit(str(base_url).strip())
+        if parts.scheme.lower() not in ("http", "https"):
             return None
-    return f"{parts.scheme}://{parts.netloc}/api/v1/artifacts/{hash}"
+        if parts.username is not None or parts.password is not None:
+            return None
+        if not parts.hostname:
+            return None
+        for segment in parts.path.split("/"):
+            if segment in (".", ".."):
+                return None
+        return f"{parts.scheme}://{parts.netloc}/api/v1/artifacts/{hash}"
+    except ValueError:
+        return None
+
+
+def _content_disposition(filename: str) -> str:
+    """Match Starlette FileResponse quoting for an in-memory body."""
+    quoted = quote(filename)
+    if quoted != filename:
+        return f"attachment; filename*=utf-8''{quoted}"
+    return f'attachment; filename="{filename}"'
 
 
 def _not_found() -> HTTPException:
@@ -99,7 +110,7 @@ async def _proxy_holder_bytes(target: str, hash: str, runner_id: str) -> bytes:
                 )
                 raise _not_found()
             buf = bytearray()
-            async for chunk in resp.aiter_bytes():
+            async for chunk in resp.aiter_bytes(chunk_size=64 * 1024):
                 buf.extend(chunk)
                 if len(buf) > MAX_UPLOAD_SIZE:
                     await resp.aclose()
@@ -164,7 +175,7 @@ async def download_artifact(hash: str, token: str = Depends(_require_auth_or_sig
             return Response(
                 bytes(body),
                 media_type=media_type,
-                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+                headers={"Content-Disposition": _content_disposition(filename)},
             )
 
     raise _not_found()
