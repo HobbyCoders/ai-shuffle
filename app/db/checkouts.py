@@ -168,12 +168,15 @@ def _base_checkout_statuses(cursor: Any, project_id: str, runner_id: str) -> Lis
 def has_active_base_checkout(project_id: str, runner_id: str) -> bool:
     """True iff ``runner_id`` has ANY ACTIVE **BASE** checkout of this project.
 
-    THE eligibility predicate, shared by the with-worktree remote preflight
-    (``app.api.sessions_worktree._preflight_remote_target``) and the cluster
-    git-state API (``GET /api/v1/cluster/git-state``) — D6/W3-2. They must never
-    diverge: the composer badge that says a device is eligible and the preflight
-    that decides whether the send 409s are the same question, so they ask it
-    with the same function.
+    THE eligibility predicate. Callers: cluster git-state
+    (``GET /api/v1/cluster/git-state``, which feeds composer badges), the
+    with-worktree remote preflight
+    (``app.api.sessions_worktree._preflight_remote_target``), WS create-pick
+    (``ChatWebSocketHandler._validate_target_install``), and the
+    ``POST /sessions/{id}/move`` checkout gate. They must never diverge: the
+    composer badge that says a device is eligible and the preflight that
+    decides whether the send 409s are the same question, so they ask it with
+    the same function.
 
     "Base" is ``branch`` NULL or ''. **ANY** matters: uniqueness is
     ``(project_id, runner_id, path)``, so one runner can hold SEVERAL base rows

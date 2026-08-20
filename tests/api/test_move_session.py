@@ -6,15 +6,17 @@ Move is adopt's mirror image: instead of "resume THIS session HERE" it says
 install. Same single write (``database.adopt_session`` — owner column +
 ``placement`` pin dual-write), different gates:
   - target already owns it → 200 no-op (``moved=False``);
-  - unknown install → 404; offline/incapable install → 409;
-  - project session whose project isn't checked out on the target → 409
-    (``capable_runners(project_v2_id, {})`` returns only runners with an active
-    checkout row);
+  - unknown install → 404; offline/incapable install → 409
+    (``capable_runners(None, {})`` — online + capability only);
+  - project session whose target has no ACTIVE BASE checkout → 409
+    (``has_active_base_checkout``; a branch-only worktree is not a base);
   - **actively streaming → NOT refused**. Placement is consulted only at turn
     start, so the live turn finishes on the old owner and later turns follow the
     new pin; the response reports ``pending_live_run=True``.
 
-Fixtures mirror tests/api/test_adopt_preflight_v2.py.
+Fixtures mirror tests/api/test_adopt_preflight_v2.py. Checkout-gate tests seed
+real ``checkouts`` rows (mirror tests/api/test_worktree_remote_target.py) and
+do not patch ``capable_runners`` for the host predicate.
 """
 
 from unittest.mock import patch
@@ -25,6 +27,8 @@ from fastapi.testclient import TestClient
 
 from app.api.auth import require_auth
 from app.api.sessions import router
+from app.db import checkouts as checkouts_db
+from app.db import projects_v2 as projects_v2_db
 
 
 @pytest.fixture
@@ -68,6 +72,22 @@ def _not_streaming():
 
 
 TARGET = "target-install-abc"
+
+
+def _seed_pv2():
+    """A real projects_v2 row so checkout inserts satisfy the FK."""
+    return projects_v2_db.upsert_project("git:move-test-repo", name="Move Test")
+
+
+def _give_target_a_checkout(tmp_path, project_v2_id, *, branch=None, runner=TARGET):
+    """Seed a checkout row on the move target (real DB, not a mock)."""
+    checkouts_db.upsert_checkout(
+        project_v2_id,
+        runner,
+        str(tmp_path / "repo") if branch is None else str(tmp_path / branch),
+        branch=branch,
+        status="active",
+    )
 
 
 def _session(**overrides):
@@ -137,25 +157,69 @@ def test_offline_target_409s(client, mock_database):
 
 
 def test_project_session_without_checkout_on_target_409s(client, mock_database):
-    """Project session + target has no active checkout row → 409, no write.
+    """Project session + target has no checkout row at all → 409, no write.
 
-    The online check (``capable_runners(None, {})``) passes; only the
-    project-scoped call excludes the target.
+    The online check (``capable_runners(None, {})``) passes; the host
+    predicate is the real ``has_active_base_checkout``, not a mock of
+    ``capable_runners(project_v2_id)``.
     """
+    pv2 = _seed_pv2()
     mock_database.get_session.return_value = _session(
-        project_id="proj-1", project_v2_id="pv2-abc"
+        project_id="proj-1", project_v2_id=pv2["id"]
     )
     mock_database.get_install.return_value = {"device_name": "Studio Mac"}
 
-    def _capable(project_v2_id, constraints=None):
-        return [] if project_v2_id else [TARGET]
-
-    with patch("app.core.placement.capable_runners", side_effect=_capable):
+    with patch("app.core.placement.capable_runners", return_value=[TARGET]):
         response = _move(client)
 
     assert response.status_code == 409
     assert "isn't checked out on Studio Mac" in response.json()["detail"]
     mock_database.adopt_session.assert_not_called()
+
+
+def test_branch_only_checkout_on_target_409s(client, mock_database, tmp_path):
+    """``capable_runners`` would accept this row; the base-checkout gate must
+    not — Phase 3 never clones, so there is nothing to fork from on the target.
+    """
+    pv2 = _seed_pv2()
+    mock_database.get_session.return_value = _session(
+        project_id="proj-1", project_v2_id=pv2["id"]
+    )
+    mock_database.get_install.return_value = {"device_name": "Studio Mac"}
+    _give_target_a_checkout(tmp_path, pv2["id"], branch="some/other-branch")
+
+    with patch("app.core.placement.capable_runners", return_value=[TARGET]):
+        response = _move(client)
+
+    assert response.status_code == 409
+    assert "isn't checked out on Studio Mac" in response.json()["detail"]
+    mock_database.adopt_session.assert_not_called()
+
+
+def test_active_base_checkout_on_target_moves(client, mock_database, tmp_path):
+    """Idle project session + active BASE checkout on the target → 200."""
+    pv2 = _seed_pv2()
+    session = _session(project_id="proj-1", project_v2_id=pv2["id"])
+    mock_database.get_session.return_value = session
+    mock_database.get_install.return_value = {"device_name": "Studio Mac"}
+    mock_database.adopt_session.return_value = {
+        **session,
+        "instance_id": TARGET,
+        "placement": {"where": f"runner:{TARGET}"},
+    }
+    _give_target_a_checkout(tmp_path, pv2["id"])
+
+    with patch("app.core.placement.capable_runners", return_value=[TARGET]), \
+            patch("app.core.turn_claim.notify_turns_changed") as notify:
+        response = _move(client)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["moved"] is True
+    assert data["status"] == "moved"
+    assert data["instance_id"] == TARGET
+    mock_database.adopt_session.assert_called_once_with("test-session-id", TARGET)
+    notify.assert_called_once_with("test-session-id")
 
 
 def test_happy_path_moves_and_repins(client, mock_database):

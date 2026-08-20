@@ -594,11 +594,12 @@ class ChatWebSocketHandler:
 
         Mirrors the ``POST /sessions/{id}/move`` preflight — the target must be
         a registered install that is online, and (when the session carries a
-        project) must have that project checked out, or the very first send
-        would die on a path that does not exist there. The project half fails
-        OPEN on resolver trouble, exactly like /move: a preflight bug must not
-        make a usable device unpickable. Sends the refusal frame itself and
-        returns False when the pick cannot be honored.
+        project) must have an ACTIVE BASE checkout of that project
+        (``has_active_base_checkout``, not ``capable_runners``: the latter
+        also matches branch-only worktrees, and Phase 3 never clones). The
+        project half fails OPEN on resolver trouble, exactly like /move: a
+        preflight bug must not make a usable device unpickable. Sends the
+        refusal frame itself and returns False when the pick cannot be honored.
         """
         async def _refuse(message: str) -> bool:
             await self.send_json({"type": "error", "message": message})
@@ -615,15 +616,17 @@ class ChatWebSocketHandler:
 
         if project_id:
             from app.core import project_resolver
-            from app.core.placement import capable_runners
+            from app.db import checkouts as checkouts_db
 
             try:
                 resolved = await run_sync(
                     project_resolver.resolve_project_v2, {"project_id": project_id}
                 )
                 project_v2_id = (resolved or {}).get("id")
-                if project_v2_id and target_instance_id not in await run_sync(
-                    capable_runners, project_v2_id, {}
+                if project_v2_id and not await run_sync(
+                    checkouts_db.has_active_base_checkout,
+                    project_v2_id,
+                    target_instance_id,
                 ):
                     return await _refuse(
                         f"This project isn't checked out on {device} yet. Open "

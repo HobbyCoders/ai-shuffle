@@ -335,16 +335,14 @@ async def move_session_endpoint(
             ),
         )
 
-    # Project checkout gate — the destination must actually have the project
-    # materialized, or the first send there dies on a path that doesn't exist.
-    # The project_v2 identity is origin-keyed and install-independent, so the
-    # same resolver adopt uses (`resolve_project_v2`, which self-heals a NULL
-    # `project_v2_id` off the legacy `project_id`) gives the id to filter on.
-    # Projectless sessions impose no checkout requirement and skip this.
-    # Fails OPEN on any non-409 error — a preflight bug must never make a
-    # movable session impossible to move.
+    # Project host gate — has_active_base_checkout, not capable_runners.
+    # capable_runners(project_v2_id) also matches branch-only worktrees, and
+    # Phase 3 never clones; a new branch needs a base to fork from.
+    # Projectless sessions skip this. Fails OPEN on any non-409 error — a
+    # preflight bug must never make a movable session impossible to move.
     if session.get("project_v2_id") or session.get("project_id"):
         from app.core import project_resolver
+        from app.db import checkouts as checkouts_db
 
         try:
             project_v2_id = session.get("project_v2_id")
@@ -353,8 +351,8 @@ async def move_session_endpoint(
                     project_resolver.resolve_project_v2, session
                 )
                 project_v2_id = (resolved or {}).get("id")
-            if project_v2_id and target not in await run_sync(
-                capable_runners, project_v2_id, {}
+            if project_v2_id and not await run_sync(
+                checkouts_db.has_active_base_checkout, project_v2_id, target
             ):
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,

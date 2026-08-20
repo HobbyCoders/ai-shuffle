@@ -250,6 +250,50 @@ async def test_new_session_with_online_target_pins_and_dispatches(
     assert _sent(handler, "query_queued")
 
 
+async def test_new_session_with_branch_only_checkout_refuses_before_creating(
+    mock_db, monkeypatch, tmp_path
+):
+    """``capable_runners`` would accept this row; the base-checkout gate must
+    not — Phase 3 never clones, so a WS pick of a branch-only target 409s
+    before anything is created.
+    """
+    # PEER is online so capable_runners(project_v2_id) WOULD accept the
+    # branch-only row; the test only passes if we asked has_active_base_checkout.
+    _stub_installs(monkeypatch, [ME, PEER])
+    monkeypatch.setattr(
+        database,
+        "get_install",
+        lambda _id: {"id": PEER, "device_name": "Studio", "online": True},
+    )
+    path = tmp_path / "repo"
+    path.mkdir()
+    database.create_project(
+        project_id="proj-1", name="P", description=None, path=str(path)
+    )
+    from app.core import project_resolver
+    from app.db import checkouts as checkouts_db
+
+    pv2 = project_resolver.resolve_project_v2({"project_id": "proj-1"})
+    checkouts_db.upsert_checkout(
+        pv2["id"], PEER, str(path / "feat"), branch="some/other-branch"
+    )
+
+    with _Patches() as p:
+        handler = _make_handler()
+        await handler.handle_query({
+            "prompt": "run this over there",
+            "session_id": None,
+            "profile": "claude-code",
+            "project": "proj-1",
+            "target_instance_id": PEER,
+        })
+
+    assert "isn't checked out on Studio" in _sent(handler, "error")[0]["message"]
+    assert _sent(handler, "session_created") == []
+    p.submit.assert_not_called()
+    assert mock_db.execute("SELECT COUNT(*) AS n FROM sessions").fetchone()["n"] == 0
+
+
 async def test_target_instance_id_ignored_for_existing_session(mock_db, monkeypatch):
     """The pick is a CREATION-time choice: on an existing (locally owned)
     session the key is dropped — no ownership rewrite, ordinary local turn."""
