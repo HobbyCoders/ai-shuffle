@@ -1,9 +1,12 @@
 """
-Project memory API routes - manages CLAUDE.md files in project directories.
+Project memory API routes - manages AGENTS.md files in project directories.
 
 Memory files are plain markdown files at two locations:
-- <project>/CLAUDE.md         (project-level, shared)
-- <project>/.claude/CLAUDE.md (local, private)
+- <project>/AGENTS.md         (project-level, shared)
+- <project>/.agents/AGENTS.md (local, private)
+
+Legacy CLAUDE.md / .claude/CLAUDE.md files are still read as a fallback when
+no AGENTS.md exists at that location, but saves always write AGENTS.md.
 """
 
 from typing import List, Optional
@@ -38,7 +41,7 @@ class MemoryFileResponse(BaseModel):
 
 class MemoryFileSave(BaseModel):
     """Request body for creating/updating a memory file"""
-    content: str = Field(..., description="Markdown content for the CLAUDE.md file")
+    content: str = Field(..., description="Markdown content for the memory file (AGENTS.md)")
 
 
 # ============================================================================
@@ -57,7 +60,7 @@ async def list_memory_files(
     """
     List all memory file locations with their current state.
 
-    Returns info for both project and local CLAUDE.md files,
+    Returns info for both project and local AGENTS.md files,
     including those that don't exist yet.
     """
     project = validate_project_access(request, project_id)
@@ -92,7 +95,7 @@ async def get_memory_file(
     """
     Get a specific memory file by location.
 
-    Location must be "project" (CLAUDE.md) or "local" (.claude/CLAUDE.md).
+    Location must be "project" (AGENTS.md) or "local" (.agents/AGENTS.md).
     """
     if location not in MEMORY_LOCATIONS:
         raise HTTPException(
@@ -130,7 +133,7 @@ async def save_memory_file(
     """
     Create or update a memory file.
 
-    Location must be "project" (CLAUDE.md) or "local" (.claude/CLAUDE.md).
+    Location must be "project" (AGENTS.md) or "local" (.agents/AGENTS.md).
     """
     if location not in MEMORY_LOCATIONS:
         raise HTTPException(
@@ -167,7 +170,7 @@ async def delete_memory_file(
     """
     Delete a memory file.
 
-    Location must be "project" (CLAUDE.md) or "local" (.claude/CLAUDE.md).
+    Location must be "project" (AGENTS.md) or "local" (.agents/AGENTS.md).
     """
     if location not in MEMORY_LOCATIONS:
         raise HTTPException(

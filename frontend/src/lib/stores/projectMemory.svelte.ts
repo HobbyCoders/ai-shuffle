@@ -1,9 +1,12 @@
 /**
- * Project Memory (CLAUDE.md) Store
+ * Project Memory (AGENTS.md) Store
  *
- * Manages state for CLAUDE.md memory files in project directories:
- * - "project": <project>/CLAUDE.md (shared)
- * - "local":   <project>/.claude/CLAUDE.md (private)
+ * Manages state for AGENTS.md memory files in project directories:
+ * - "project": <project>/AGENTS.md (shared)
+ * - "local":   <project>/.agents/AGENTS.md (private)
+ *
+ * Legacy CLAUDE.md / .claude/CLAUDE.md files are read as a fallback when no
+ * AGENTS.md exists; saves always write the AGENTS.md path.
  *
  * Svelte 5 runes store following the projectAgents pattern.
  */

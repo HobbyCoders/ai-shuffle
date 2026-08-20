@@ -1,12 +1,13 @@
 <script lang="ts">
 	/**
-	 * ProjectMemoryTab - CLAUDE.md memory file management tab
+	 * ProjectMemoryTab - AGENTS.md memory file management tab
 	 *
 	 * Studio-v2 grouped-field design (.set-group), mirroring the Profile
 	 * editor. Card shell primitives come from project-tabs.css (.ptab);
 	 * the preview/editor bodies are styled locally with theme tokens.
 	 *
-	 * - View/edit CLAUDE.md at project root and .claude/CLAUDE.md
+	 * - View/edit AGENTS.md at project root and .agents/AGENTS.md
+	 *   (legacy CLAUDE.md / .claude/CLAUDE.md are still read as a fallback)
 	 * - Create new memory files
 	 * - Delete memory files with confirmation
 	 * - Inline markdown editor with save/cancel
@@ -56,12 +57,12 @@
 	const LOCATION_META: Record<MemoryLocation, { label: string; description: string; icon: typeof FileText }> = {
 		project: {
 			label: 'Project Memory',
-			description: 'CLAUDE.md — Shared project instructions, checked into version control',
+			description: 'AGENTS.md — Shared project instructions, checked into version control',
 			icon: FolderOpen
 		},
 		local: {
 			label: 'Local Memory',
-			description: '.claude/CLAUDE.md — Private local overrides, typically gitignored',
+			description: '.agents/AGENTS.md — Private local instructions, typically gitignored',
 			icon: Lock
 		}
 	};
@@ -197,7 +198,7 @@
 							class="mem-textarea"
 							value={editContent}
 							oninput={handleInput}
-							placeholder="Enter markdown instructions for Claude…"
+							placeholder="Enter markdown instructions for the agent…"
 							rows={12}
 							spellcheck={false}
 						></textarea>
@@ -236,7 +237,7 @@
 			<div class="empty-state">
 				<FileText />
 				<p class="es-title">No memory files</p>
-				<p class="es-desc">CLAUDE.md files provide persistent instructions and context for Claude Code sessions.</p>
+				<p class="es-desc">AGENTS.md files provide persistent instructions and context for agent sessions. Existing CLAUDE.md files are still read.</p>
 			</div>
 		{/if}
 	{/if}
