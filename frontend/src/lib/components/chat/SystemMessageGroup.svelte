@@ -189,4 +189,10 @@
 		flex-direction: column;
 		gap: 8px;
 	}
+
+	@media (max-width: 639px) {
+		.sg-row {
+			min-height: 44px;
+		}
+	}
 </style>

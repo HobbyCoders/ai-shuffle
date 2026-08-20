@@ -147,6 +147,12 @@
 		outline-offset: -2px;
 	}
 
+	@media (max-width: 639px) {
+		.todo-row {
+			min-height: 44px;
+		}
+	}
+
 	.wlbar {
 		display: inline-flex;
 		align-items: center;

@@ -283,6 +283,12 @@
 		}
 	}
 
+	@media (max-width: 639px) {
+		.wlrow {
+			min-height: 44px;
+		}
+	}
+
 	.wl-body {
 		margin: 2px 0 6px 14px;
 		padding-left: 12px;

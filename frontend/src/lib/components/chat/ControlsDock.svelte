@@ -14,7 +14,8 @@
 	import { profiles } from '$lib/stores/app-data.svelte';
 	import ContextUsageBar from './ContextUsageBar.svelte';
 	import OverrideDropdown from './OverrideDropdown.svelte';
-	import { Monitor } from 'lucide-svelte';
+	import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
+	import { Monitor, SlidersHorizontal } from 'lucide-svelte';
 	import {
 		getModels,
 		getProviders,
@@ -43,9 +44,17 @@
 		onAttachClick: () => void;
 		/** Trailing buttons for the right cluster (dictate / voice call / send). */
 		actions?: Snippet;
+		/** Lets ChatInput keep its compact mobile surface expanded while the sheet is open. */
+		onSheetOpenChange?: (open: boolean) => void;
 	}
 
-	let { isUploading, onAttachClick, actions }: Props = $props();
+	let { isUploading, onAttachClick, actions, onSheetOpenChange }: Props = $props();
+
+	let mobileSheetOpen = $state(false);
+	function setMobileSheetOpen(open: boolean) {
+		mobileSheetOpen = open;
+		onSheetOpenChange?.(open);
+	}
 
 	// Computer-use toolbar toggle. A single monitor icon: lit when the agent is
 	// allowed to control the screen, dimmed when paused (the process-global
@@ -76,6 +85,9 @@
 	const effortValue = $derived($activeSession.effortLevelOverride ?? profileEffort);
 	const permissionValue = $derived($activeSession.permissionModeOverride ?? profilePermissionMode);
 	const computerUseEnabled = $derived(!!activeProfile?.config?.computer_use?.enabled);
+	const attachDisabled = $derived(
+		!$anyCredential || isUploading || isRemoteOnlyCompose($activeSession.project, $activeSession.projectV2Id)
+	);
 
 	// ── Model override ──────────────────────────────────────────────
 	// Terse, family-level blurbs — the dropdown surfaces one line of "why pick
@@ -279,7 +291,7 @@
 
 <div class="controls-dock">
 	<!-- Left: model / effort / permission pills, then the context ring -->
-	<div class="controls-left">
+	<div class="controls-left desktop-controls">
 		<!-- Model Override -->
 		<OverrideDropdown
 			modes={modelOptions}
@@ -344,6 +356,46 @@
 		<ContextUsageBar />
 	</div>
 
+	<!-- Mobile keeps the primary actions visible and moves the configuration
+	     matrix into one native-style bottom sheet, matching T3's composer. -->
+	<div class="mobile-controls">
+		<ContextUsageBar />
+		<button
+			type="button"
+			onclick={onAttachClick}
+			disabled={attachDisabled}
+			class="dock-action-btn mobile-attach"
+			aria-label="Attach file"
+			title={isUploading
+				? 'Uploading...'
+				: (attachmentBlockReason($activeSession.project, $activeSession.projectV2Id) ?? 'Attach file')}
+		>
+			{#if isUploading}
+				<svg class="w-[18px] h-[18px] animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+					<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+					<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+				</svg>
+			{:else}
+				<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+				</svg>
+			{/if}
+		</button>
+		<button
+			type="button"
+			class="mobile-settings-trigger"
+			class:warn={rerouted}
+			onclick={() => setMobileSheetOpen(true)}
+			aria-haspopup="dialog"
+			aria-expanded={mobileSheetOpen}
+			aria-label={`Open chat controls. Current model: ${modelButtonLabel}`}
+		>
+			<SlidersHorizontal size={16} strokeWidth={1.8} aria-hidden="true" />
+			<span>{modelButtonLabel}</span>
+			{#if $activeSession.modelOverride !== null}<i aria-label="Model overridden"></i>{/if}
+		</button>
+	</div>
+
 	<!-- Right: computer-use, attach, then the parent's action cluster -->
 	<div class="controls-right">
 		<!-- Computer Use toggle (only when the profile enables it). A single
@@ -354,7 +406,7 @@
 				type="button"
 				onclick={toggleComputerUse}
 				disabled={cuBusy}
-				class="dock-action-btn dock-action-btn--cu"
+				class="dock-action-btn dock-action-btn--cu desktop-controls"
 				class:cu-on={!computerUse.stopped}
 				class:cu-active={computerUse.active && !computerUse.stopped}
 				role="switch"
@@ -375,7 +427,7 @@
 			type="button"
 			onclick={onAttachClick}
 			disabled={!$anyCredential || isUploading || isRemoteOnlyCompose($activeSession.project, $activeSession.projectV2Id)}
-			class="dock-action-btn"
+			class="dock-action-btn desktop-controls"
 			title={isUploading
 				? 'Uploading...'
 				: (attachmentBlockReason($activeSession.project, $activeSession.projectV2Id) ?? 'Attach file')}
@@ -396,6 +448,36 @@
 		{@render actions?.()}
 	</div>
 </div>
+
+<MobileComposerControlsSheet
+	open={mobileSheetOpen}
+	onClose={() => setMobileSheetOpen(false)}
+	{modelOptions}
+	{modelValue}
+	modelLabel={modelButtonLabel}
+	modelDefaultValue={profileModel}
+	modelOverridden={$activeSession.modelOverride !== null}
+	modelNotice={modelNotice}
+	onModelSelect={(value) => activeSession.setModelOverride(value === profileModel ? null : value)}
+	effortOptions={effortLevels}
+	{effortValue}
+	effortDefaultValue={profileEffort}
+	effortOverridden={$activeSession.effortLevelOverride !== null}
+	onEffortSelect={(value) => activeSession.setEffortLevelOverride(value === profileEffort ? null : value)}
+	permissionOptions={permissionModes}
+	permissionValue={permissionValue}
+	permissionDefaultValue={profilePermissionMode}
+	permissionOverridden={$activeSession.permissionModeOverride !== null}
+	onPermissionSelect={(value) => activeSession.setPermissionModeOverride(value === profilePermissionMode ? null : value)}
+	{computerUseEnabled}
+	computerUseStopped={computerUse.stopped}
+	computerUseActive={computerUse.active}
+	computerUseBusy={cuBusy}
+	onToggleComputerUse={toggleComputerUse}
+	{attachDisabled}
+	{isUploading}
+	onAttach={onAttachClick}
+/>
 
 <style>
 	/* ===== FOOT ROW (mockup `.footrow`) =====
@@ -430,6 +512,56 @@
 		align-items: center;
 		gap: 2px;
 		margin-left: auto;
+	}
+
+	.mobile-controls {
+		display: none;
+		align-items: center;
+		gap: 3px;
+		min-width: 0;
+	}
+
+	.mobile-settings-trigger {
+		display: flex;
+		min-width: 0;
+		max-width: min(11rem, 42vw);
+		height: 34px;
+		align-items: center;
+		gap: 6px;
+		padding: 0 10px;
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		background: var(--scrim);
+		color: var(--muted-foreground);
+		font-size: 11.5px;
+		font-weight: 600;
+		cursor: pointer;
+	}
+
+	.mobile-settings-trigger span {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.mobile-settings-trigger i {
+		width: 5px;
+		height: 5px;
+		flex: none;
+		border-radius: 50%;
+		background: var(--primary);
+		box-shadow: 0 0 7px var(--glow);
+	}
+
+	.mobile-settings-trigger.warn {
+		color: var(--warning, var(--primary));
+		border-color: color-mix(in oklch, var(--warning, var(--primary)) 36%, var(--border));
+	}
+
+	.mobile-settings-trigger:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
 	}
 
 	/* ===== ICON BUTTONS (mockup `.fbtn`) ===== */
@@ -486,5 +618,37 @@
 	@keyframes cu-pulse {
 		0%, 100% { opacity: 1; }
 		50% { opacity: 0.45; }
+	}
+
+	@media (max-width: 639px) {
+		.controls-dock {
+			gap: 3px;
+			padding: 5px 6px 7px;
+		}
+
+		.desktop-controls {
+			display: none;
+		}
+
+		.mobile-controls {
+			display: flex;
+		}
+
+		.controls-right {
+			gap: 0;
+		}
+
+		.controls-right :global(.voice-btn),
+		.controls-right :global(.voice-call-btn),
+		.controls-right :global(.stop-btn) {
+			width: 36px;
+			height: 36px;
+		}
+
+		.dock-action-btn {
+			width: 36px;
+			height: 36px;
+			border-radius: 11px;
+		}
 	}
 </style>

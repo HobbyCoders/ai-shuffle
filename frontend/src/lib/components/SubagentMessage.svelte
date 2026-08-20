@@ -454,6 +454,12 @@
 		background: transparent;
 	}
 
+	@media (max-width: 639px) {
+		.subagent-summary {
+			min-height: 44px;
+		}
+	}
+
 	.subagent-summary {
 		display: flex;
 		align-items: center;

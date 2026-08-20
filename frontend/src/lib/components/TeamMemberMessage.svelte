@@ -182,7 +182,7 @@
 	}
 </script>
 
-<details class="w-full border border-border rounded-lg overflow-hidden shadow-s group">
+<details class="w-full team-card group">
 	<summary class="team-summary w-full min-w-0 px-4 py-2 flex items-center gap-2 cursor-pointer list-none transition-colors">
 		<!-- Status icon -->
 		{#if status === 'running'}
@@ -255,7 +255,7 @@
 	</summary>
 
 	<!-- Expanded content -->
-	<div class="bg-card border-t border-border">
+	<div class="team-body">
 		<!-- Session id row -->
 		{#if message.teammateSessionId}
 			<div class="px-4 py-2 border-b border-border/50 flex items-center gap-2 text-xs">
@@ -413,11 +413,18 @@
 </details>
 
 <style>
+	.team-card {
+		min-width: 0;
+		background: transparent;
+	}
+
 	.team-summary {
-		background: color-mix(in oklch, var(--muted) 30%, transparent);
+		padding: 6px 8px;
+		border-radius: 8px;
+		background: transparent;
 	}
 	.team-summary:hover {
-		background: color-mix(in oklch, var(--muted) 50%, transparent);
+		background: var(--scrim);
 	}
 	.team-summary:focus-visible {
 		outline: 2px solid var(--ring);
@@ -429,5 +436,22 @@
 	.team-tool-summary:focus-visible {
 		outline: 2px solid var(--ring);
 		outline-offset: -2px;
+	}
+
+	.team-body {
+		margin: 2px 0 6px 14px;
+		padding-left: 10px;
+		border-left: 1px solid var(--border);
+		overflow: hidden;
+	}
+
+	@media (max-width: 639px) {
+		.team-summary {
+			min-height: 44px;
+		}
+
+		.team-summary button {
+			min-height: 36px;
+		}
 	}
 </style>

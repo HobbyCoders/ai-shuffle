@@ -18,6 +18,7 @@
 		disabled?: boolean;
 		onTextChange?: (text: string) => void;
 		onKeyDown?: (event: KeyboardEvent) => boolean | void;
+		onFocusChange?: (focused: boolean) => void;
 	}
 
 	let {
@@ -25,7 +26,8 @@
 		initialContent = '',
 		disabled = false,
 		onTextChange,
-		onKeyDown
+		onKeyDown,
+		onFocusChange
 	}: Props = $props();
 
 	let editorElement = $state<HTMLDivElement | null>(null);
@@ -51,6 +53,7 @@
 				},
 				onFocus: () => {
 					isFocused = true;
+					onFocusChange?.(true);
 				},
 				onBlur: () => {
 					// Defer state mutation to avoid Svelte 5 state_unsafe_mutation error
@@ -58,6 +61,7 @@
 					// ensure the mutation happens after the current render completes
 					tick().then(() => {
 						isFocused = false;
+						onFocusChange?.(false);
 					});
 				}
 			});
@@ -122,6 +126,11 @@
 	 */
 	export function focus() {
 		editor?.commands.focus();
+	}
+
+	/** Blur the editor, allowing the mobile composer to return to its compact state. */
+	export function blur() {
+		editor?.commands.blur();
 	}
 
 	/**

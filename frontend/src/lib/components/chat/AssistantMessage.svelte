@@ -436,23 +436,6 @@
 				<span class="live" aria-label="Streaming"></span>
 			{/if}
 			<span class="aname-text">{speakerName}</span>
-			{#if showActions && content && !streaming && hasFinalMetadata}
-				<!-- Hover/touch action buttons - only shown on final messages with cost/duration -->
-				<div class="ml-auto">
-					<MessageActions
-						{sessionId}
-						messageContent={content}
-						messageRole="assistant"
-						{messageUuid}
-						{canRead}
-						isStreaming={streaming}
-						onRead={handleRead}
-						{isReading}
-						{onRewindComplete}
-						{fileCheckpointingEnabled}
-					/>
-				</div>
-			{/if}
 		</div>
 		<div class="overflow-hidden max-w-full">
 			<!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -477,6 +460,7 @@
 		</div>
 		{#if metadata && !streaming}
 			<div class="ameta">
+				{#if timestamp}<span>{formatMessageTime(timestamp)}</span>{/if}
 				{#if metadata.total_cost_usd}
 					<span>{formatCost(metadata.total_cost_usd as number)}</span>
 				{:else if metadata.cost_usd}
@@ -487,6 +471,22 @@
 				{/if}
 				{#if metadata.tokens_out && metadata.duration_ms && (metadata.duration_ms as number) > 0}
 					<span>{((metadata.tokens_out as number) / ((metadata.duration_ms as number) / 1000)).toFixed(1)} t/s</span>
+				{/if}
+				{#if content && hasFinalMetadata}
+					<div class="assistant-actions" class:is-visible={showActions}>
+						<MessageActions
+							{sessionId}
+							messageContent={content}
+							messageRole="assistant"
+							{messageUuid}
+							{canRead}
+							isStreaming={streaming}
+							onRead={handleRead}
+							{isReading}
+							{onRewindComplete}
+							{fileCheckpointingEnabled}
+						/>
+					</div>
 				{/if}
 			</div>
 		{/if}
@@ -544,6 +544,30 @@
 		font-size: 11px;
 		font-family: var(--font-mono);
 		color: var(--subtle-foreground);
+	}
+
+	.assistant-actions {
+		margin-left: auto;
+		opacity: 0;
+		pointer-events: none;
+		transition: opacity 0.12s ease;
+	}
+
+	.assistant-actions.is-visible {
+		opacity: 1;
+		pointer-events: auto;
+	}
+
+	@media (max-width: 639px) {
+		.ameta {
+			min-height: 36px;
+			gap: 9px;
+		}
+
+		.assistant-actions {
+			opacity: 1;
+			pointer-events: auto;
+		}
 	}
 
 	/* ── Code block chrome (markup produced by $lib/utils/chat-markdown) ── */

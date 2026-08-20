@@ -120,4 +120,10 @@
 		border-bottom: 1px solid var(--border);
 		border-radius: 8px 8px 0 0;
 	}
+
+	@media (max-width: 639px) {
+		.wlrow.fold {
+			min-height: 44px;
+		}
+	}
 </style>

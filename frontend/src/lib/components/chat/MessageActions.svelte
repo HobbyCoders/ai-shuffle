@@ -340,4 +340,12 @@
 		outline: 2px solid var(--ring);
 		outline-offset: 2px;
 	}
+
+	@media (max-width: 639px) {
+		.action-btn {
+			width: 32px;
+			height: 32px;
+			padding: 0;
+		}
+	}
 </style>
