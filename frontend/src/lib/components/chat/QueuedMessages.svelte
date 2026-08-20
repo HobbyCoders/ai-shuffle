@@ -1,10 +1,13 @@
 <script lang="ts">
 	/**
-	 * QueuedMessages — tray listing user messages queued to send after the
-	 * current turn. Sits above the composer, mirroring the Background/ActiveTasks
-	 * tray: the header row is a collapse toggle (chevron at the right edge) that
-	 * shrinks the tray to just its header. The "Queued (N)" count stays visible
-	 * when collapsed.
+	 * QueuedMessages — the queue chips that sit directly above the composer
+	 * island, listing user messages queued to send after the current turn. Each
+	 * chip is the mockup's blue-tinted `.queued` pill (clock glyph + preview +
+	 * remove X); clicking one expands it to the full text with Edit / Remove.
+	 *
+	 * A thin header line above the chips carries the "Queued (N)" count, the
+	 * "Clear all" action and the collapse toggle (chevron at the right edge) that
+	 * shrinks the stack to just that line.
 	 *
 	 * The collapsed state is a chat preference (localStorage + cross-device server
 	 * sync — the same store the background-tasks tray uses) so it persists across
@@ -94,6 +97,9 @@
 					{#each $activeSession.queuedMessages as msg (msg.id)}
 						<div class="queued-chip" class:is-expanded={expandedId === msg.id}>
 							<div class="chip-head">
+								<svg class="chip-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+									<circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" />
+								</svg>
 								<button
 									type="button"
 									class="chip-main"
@@ -101,7 +107,7 @@
 									title="Show message"
 									onclick={() => (expandedId = expandedId === msg.id ? null : msg.id)}
 								>
-									<span class="chip-text">{truncate(msg.content)}</span>
+									<span class="chip-text">{truncate(msg.content, 90)}</span>
 									{#if $queuedMessageEdit?.id === msg.id}
 										<span
 											class="chip-editing-badge"
@@ -137,6 +143,7 @@
 {/if}
 
 <style>
+	/* Aligned to the composer dock below it: same gutters, same 768px measure. */
 	.queued-bar {
 		padding: 0 0.75rem;
 		flex-shrink: 0;
@@ -144,28 +151,27 @@
 
 	@media (min-width: 640px) {
 		.queued-bar {
-			padding: 0 1rem;
+			padding: 0 1.5rem;
 		}
 	}
 
+	/* No card of its own — the chips carry the surface, as in the mockup. */
 	.queued-bar-inner {
-		max-width: 56rem;
+		max-width: 48rem;
 		margin: 0 auto;
-		background: color-mix(in oklch, var(--card) 80%, transparent);
-		border: 1px solid var(--border-subtle);
-		border-radius: calc(var(--radius, 0.75rem) * 0.67);
-		overflow: hidden;
 		display: flex;
 		flex-direction: column;
+		gap: 6px;
+		padding-bottom: 8px;
 	}
 
 	.queued-header {
 		display: flex;
 		align-items: center;
 		gap: 0.375rem;
-		padding: 0.375rem 0.625rem;
-		font-size: 0.6875rem;
-		color: var(--muted-foreground);
+		padding: 0 2px;
+		font-size: 11px;
+		color: var(--subtle-foreground);
 	}
 
 	/* The label area (and the chevron) are collapse toggles — click either to
@@ -202,7 +208,7 @@
 
 	.queue-icon {
 		flex-shrink: 0;
-		color: var(--muted-foreground);
+		color: var(--blue);
 	}
 
 	.queued-label {
@@ -226,7 +232,7 @@
 	}
 
 	.clear-all-btn {
-		font-size: 0.625rem;
+		font-size: 11px;
 		color: var(--muted-foreground);
 		background: none;
 		border: none;
@@ -241,43 +247,50 @@
 		background: color-mix(in srgb, var(--destructive) 10%, transparent);
 	}
 
+	/* One chip per row, full width — the mockup stacks them above the island. */
 	.queued-chips {
 		display: flex;
-		flex-wrap: wrap;
-		gap: 0.25rem;
-		padding: 0 0.625rem 0.375rem;
+		flex-direction: column;
+		gap: 6px;
 	}
 
+	/* The mockup's `.queued` pill: blue-tinted, fully rounded. It squares off a
+	   little when expanded so the message body has proper corners to sit in. */
 	.queued-chip {
 		display: flex;
 		flex-direction: column;
-		gap: 0.25rem;
-		padding: 0.25rem 0.5rem;
-		background: var(--muted);
-		border: 1px solid var(--border-subtle);
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		font-size: 0.6875rem;
+		gap: 0.375rem;
+		width: 100%;
+		padding: 5px 6px 5px 10px;
+		background: color-mix(in oklch, var(--blue) 12%, transparent);
+		border: 1px solid color-mix(in oklch, var(--blue) 28%, transparent);
+		border-radius: 999px;
+		font-size: 12px;
 		font-family: inherit;
-		color: var(--foreground);
+		color: var(--muted-foreground);
 		max-width: 100%;
-		transition: border-color 0.15s, background 0.15s;
+		transition: border-color 0.15s, background 0.15s, border-radius 0.15s;
 	}
 
 	.queued-chip:hover {
-		border-color: var(--border);
-		background: color-mix(in srgb, var(--muted) 80%, var(--foreground) 5%);
+		border-color: color-mix(in oklch, var(--blue) 45%, transparent);
 	}
 
-	/* Expanded chips take the full tray width so the message body is readable. */
 	.queued-chip.is-expanded {
-		flex: 1 1 100%;
+		border-radius: 14px;
+		padding: 7px 8px 8px 12px;
 	}
 
 	.chip-head {
 		display: flex;
 		align-items: center;
-		gap: 0.375rem;
+		gap: 8px;
 		min-width: 0;
+	}
+
+	.chip-icon {
+		flex-shrink: 0;
+		color: var(--blue);
 	}
 
 	.chip-main {
@@ -304,21 +317,23 @@
 	}
 
 	.chip-text {
+		flex: 1 1 auto;
+		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-		max-width: 24rem;
+		color: var(--foreground);
 	}
 
 	.chip-editing-badge {
 		flex-shrink: 0;
-		font-size: 0.625rem;
+		font-size: 10px;
 		line-height: 1;
-		padding: 0.125rem 0.25rem;
-		border-radius: 0.25rem;
-		border: 1px solid var(--border-subtle);
-		color: var(--muted-foreground);
-		background: color-mix(in srgb, var(--foreground) 6%, transparent);
+		padding: 0.1875rem 0.3125rem;
+		border-radius: 999px;
+		border: 1px solid var(--border);
+		color: var(--subtle-foreground);
+		background: var(--scrim);
 	}
 
 	.chip-remove {
@@ -326,20 +341,20 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 1rem;
-		height: 1rem;
+		width: 18px;
+		height: 18px;
 		padding: 0;
 		border: none;
 		background: transparent;
 		border-radius: 50%;
 		color: var(--muted-foreground);
 		cursor: pointer;
-		transition: color 0.15s, background 0.15s;
+		transition: color 0.13s, background 0.13s;
 	}
 
-	.queued-chip:hover .chip-remove {
-		color: var(--destructive);
-		background: color-mix(in srgb, var(--destructive) 15%, transparent);
+	.chip-remove:hover {
+		color: var(--foreground);
+		background: var(--scrim);
 	}
 
 	.chip-full {
@@ -348,11 +363,11 @@
 		max-height: 10rem;
 		overflow-y: auto;
 		text-align: left;
-		font-size: 0.6875rem;
-		line-height: 1.4;
+		font-size: 11.5px;
+		line-height: 1.5;
 		color: var(--muted-foreground);
-		border-top: 1px solid var(--border-subtle);
-		padding-top: 0.25rem;
+		border-top: 1px solid color-mix(in oklch, var(--blue) 22%, transparent);
+		padding-top: 0.375rem;
 	}
 
 	.chip-actions {
@@ -361,7 +376,7 @@
 	}
 
 	.chip-action {
-		font-size: 0.625rem;
+		font-size: 11px;
 		font-family: inherit;
 		color: var(--muted-foreground);
 		background: none;

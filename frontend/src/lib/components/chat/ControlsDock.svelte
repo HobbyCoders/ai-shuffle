@@ -1,9 +1,14 @@
 <script lang="ts">
 	/**
-	 * ControlsDock - Bottom bar of the chat input island containing
-	 * context usage, profile selector, override dropdowns,
-	 * and file attach button.
+	 * ControlsDock — the composer island's foot row (mockup `.footrow`).
+	 *
+	 * Left: the model / effort / permission override pills followed by the
+	 * context-usage ring. Right: the computer-use toggle (when enabled) and the
+	 * attach button, then whatever the parent passes in the `actions` snippet —
+	 * ChatInput uses it for the dictate / voice-call / send cluster so the whole
+	 * right-hand group shares one flex row.
 	 */
+	import type { Snippet } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { anyCredential } from '$lib/stores/auth.svelte';
 	import { profiles } from '$lib/stores/app-data.svelte';
@@ -35,9 +40,11 @@
 	interface Props {
 		isUploading: boolean;
 		onAttachClick: () => void;
+		/** Trailing buttons for the right cluster (dictate / voice call / send). */
+		actions?: Snippet;
 	}
 
-	let { isUploading, onAttachClick }: Props = $props();
+	let { isUploading, onAttachClick, actions }: Props = $props();
 
 	// Computer-use toolbar toggle. A single monitor icon: lit when the agent is
 	// allowed to control the screen, dimmed when paused (the process-global
@@ -174,6 +181,14 @@
 	const modelNotice = $derived(
 		rerouted ? `Running ${actualModelLabel} instead of ${requestedModelLabel}` : undefined
 	);
+	// Provider sub-label on the model pill (mockup: "Fable 5 · Claude"). It is the
+	// brand group the SELECTED model belongs to, reused verbatim from the dropdown
+	// options so the pill and the menu can't name the same account differently.
+	// Suppressed while rerouted — the pill then shows the ACTUAL model, whose
+	// group we haven't resolved, and a stale brand would be worse than none.
+	const modelSubLabel = $derived(
+		rerouted ? null : modelOptions.find((o) => o.value === modelValue)?.group ?? null
+	);
 
 	// Single owner of usage-limit fetching. A shared in-flight promise dedupes
 	// concurrent triggers (e.g. mount + a rapid target change) into ONE GET.
@@ -262,13 +277,8 @@
 </script>
 
 <div class="controls-dock">
-	<!-- Left: Usage Indicator -->
+	<!-- Left: model / effort / permission pills, then the context ring -->
 	<div class="controls-left">
-		<ContextUsageBar />
-	</div>
-
-	<!-- Right: Override buttons, Attach & Mic buttons -->
-	<div class="controls-right">
 		<!-- Model Override -->
 		<OverrideDropdown
 			modes={modelOptions}
@@ -279,6 +289,7 @@
 			onSelect={(v) => activeSession.setModelOverride(v === profileModel ? null : v)}
 			title="Model"
 			buttonLabel={modelButtonLabel}
+			buttonSubLabel={modelSubLabel}
 			warn={rerouted}
 			warnTitle={modelWarnTitle}
 			notice={modelNotice}
@@ -328,6 +339,12 @@
 			{/snippet}
 		</OverrideDropdown>
 
+		<!-- Context-usage ring (16px SVG arc + its popover) -->
+		<ContextUsageBar />
+	</div>
+
+	<!-- Right: computer-use, attach, then the parent's action cluster -->
+	<div class="controls-right">
 		<!-- Computer Use toggle (only when the profile enables it). A single
 		     monitor icon: lit = the agent may control the screen; dimmed =
 		     paused. Clicking toggles control on/off. -->
@@ -371,72 +388,71 @@
 				</svg>
 			{/if}
 		</button>
+
+		<!-- Dictate / voice call / send, supplied by ChatInput -->
+		{@render actions?.()}
 	</div>
 </div>
 
 <style>
-	/* ===== CONTROLS DOCK ===== */
+	/* ===== FOOT ROW (mockup `.footrow`) =====
+	   No surface of its own — the island above provides the glass. */
 	.controls-dock {
-		/* The Effort/Permission dropdowns inside this dock open UPWARD, so they
-		   overlap the `.input-wrapper` (the message box) that sits directly above
-		   the dock in ChatInput. That wrapper sets `z-index: 20` and establishes a
-		   stacking context (backdrop-filter), so without an explicit z-index here
-		   the whole dock — and its z-50 dropdowns — stacks below the wrapper and the
-		   popups render BEHIND the message box. Lifting the dock above the wrapper
-		   keeps the override popups fully visible on top. */
+		/* The override dropdowns and the context-usage popover inside this row open
+		   UPWARD, so they overlap the input area directly above them. That area sets
+		   `z-index: 20` inside the island's stacking context (established by its
+		   backdrop-filter), so without an explicit z-index here the whole row — and
+		   its z-50 popups — would stack below the message box and render behind it.
+		   Lifting the row above the input area keeps them fully visible on top. */
 		position: relative;
 		z-index: 30;
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
-		background: color-mix(in oklch, var(--card) 60%, transparent);
-		backdrop-filter: blur(20px);
-		-webkit-backdrop-filter: blur(20px);
-		border: 1px solid var(--border-subtle);
-		border-top: none;
-		border-radius: 0 0 calc(var(--radius, 0.75rem) * 1.33) calc(var(--radius, 0.75rem) * 1.33);
-		padding: 8px 12px;
+		gap: 6px;
+		padding: 6px 8px 8px 10px;
 		overflow: visible;
 	}
 
 	.controls-left {
 		display: flex;
 		align-items: center;
-		gap: 8px;
-		flex: 1;
+		gap: 6px;
+		min-width: 0;
 	}
 
+	/* `margin-left: auto` (not a second flex:1 half) so the pills on the left keep
+	   their natural width and the action cluster hugs the right edge. */
 	.controls-right {
 		display: flex;
 		align-items: center;
-		gap: 4px;
-		justify-content: flex-end;
-		flex: 1;
+		gap: 2px;
+		margin-left: auto;
 	}
 
-	/* ===== ACTION BUTTONS ===== */
+	/* ===== ICON BUTTONS (mockup `.fbtn`) ===== */
 	.dock-action-btn {
 		position: relative;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 32px;
-		height: 32px;
+		width: 30px;
+		height: 30px;
 		background: transparent;
 		border: none;
-		border-radius: calc(var(--radius, 0.75rem) * 0.67);
+		border-radius: 9px;
 		cursor: pointer;
-		color: var(--muted-foreground);
-		transition: all 0.15s ease;
+		color: var(--subtle-foreground);
+		transition: background-color 0.13s ease, color 0.13s ease;
 	}
 
 	.dock-action-btn:hover:not(:disabled) {
-		background: var(--hover-overlay);
+		background: var(--scrim);
 		color: var(--foreground);
 	}
 
-	.dock-action-btn:active:not(:disabled) {
-		transform: scale(0.94);
+	.dock-action-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
 	}
 
 	.dock-action-btn:disabled {
@@ -455,7 +471,7 @@
 	}
 
 	.dock-action-btn--cu:hover:not(:disabled) {
-		background: var(--hover-overlay);
+		background: var(--scrim);
 		color: var(--primary);
 	}
 

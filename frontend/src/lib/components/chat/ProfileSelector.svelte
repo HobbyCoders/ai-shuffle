@@ -96,26 +96,32 @@
 		flex-shrink: 0;
 	}
 
+	/* The mockup's `.pill.agent`: standard pill metrics with a primary-tinted
+	   border and a teal glyph, so the agent reads as the composer's subject. */
 	.context-selector-btn {
 		display: flex;
 		align-items: center;
-		gap: 5px;
-		height: 28px;
-		padding: 0 10px;
-		background: color-mix(in oklch, var(--foreground) 6%, var(--background));
-		border: 1px solid var(--border);
-		border-radius: var(--radius, 0.75rem);
+		gap: 6px;
+		height: 26px;
+		padding: 0 9px;
+		background: var(--scrim);
+		border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
+		border-radius: 999px;
 		color: var(--muted-foreground);
-		font-size: 0.75rem;
-		font-weight: 500;
+		font-size: 12px;
 		cursor: pointer;
-		transition: all 150ms ease;
+		transition: border-color 0.13s ease, color 0.13s ease, background-color 0.13s ease;
 		white-space: nowrap;
 	}
 
 	.context-selector-btn:hover {
-		border-color: var(--primary);
+		border-color: color-mix(in oklch, var(--primary) 55%, transparent);
 		color: var(--foreground);
+	}
+
+	.context-selector-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
 	}
 
 	.context-selector-btn.unset {
@@ -136,13 +142,18 @@
 	}
 
 	.selector-icon svg {
-		color: currentColor;
+		color: var(--primary);
+	}
+
+	/* The unset state repaints the whole pill amber, glyph included. */
+	.context-selector-btn.unset .selector-icon svg {
+		color: var(--warning);
 	}
 
 	.selector-text {
-		font-size: 0.75rem;
+		font-size: 12px;
 		font-weight: 500;
-		color: inherit;
+		color: var(--foreground);
 		line-height: 1;
 		letter-spacing: 0.01em;
 		max-width: 80px;
@@ -151,10 +162,14 @@
 		white-space: nowrap;
 	}
 
+	.context-selector-btn.unset .selector-text {
+		color: inherit;
+	}
+
 	/* Desktop: allow wider name */
 	@media (min-width: 640px) {
 		.selector-text {
-			max-width: 120px;
+			max-width: 140px;
 		}
 	}
 
@@ -224,7 +239,7 @@
 		   Bound to the viewport (minus the bar's padding) so a pathologically long
 		   name can't overflow horizontally; normal names show in full. */
 		.selector-text {
-			font-size: 0.75rem;
+			font-size: 12px;
 			max-width: calc(100vw - 4rem);
 			overflow: hidden;
 			text-overflow: ellipsis;
@@ -244,11 +259,11 @@
 		}
 
 		/* Keep the same pill metrics as the branch selector / worktree badge
-		   (28px) so all context pills line up at the same height on mobile. */
+		   (26px) so all context pills line up at the same height on mobile. */
 		.context-selector-btn {
-			height: 28px;
-			padding: 0 10px;
-			font-size: 0.75rem;
+			height: 26px;
+			padding: 0 9px;
+			font-size: 12px;
 		}
 	}
 </style>

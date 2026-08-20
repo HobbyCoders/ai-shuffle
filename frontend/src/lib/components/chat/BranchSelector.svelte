@@ -251,29 +251,38 @@
 		flex-shrink: 1;
 	}
 
-	/* Pill button — matches the profile selector pill metrics. */
+	/* Pill button — the composer island's `.pill` metrics (mockup): 26px tall,
+	   fully rounded, `--scrim` fill on a hairline border. */
 	.pill {
 		display: flex;
 		align-items: center;
-		gap: 5px;
-		height: 28px;
+		gap: 6px;
+		height: 26px;
 		max-width: 100%;
 		min-width: 0;
-		padding: 0 10px;
-		background: color-mix(in oklch, var(--foreground) 6%, var(--background));
+		padding: 0 9px;
+		background: var(--scrim);
 		border: 1px solid var(--border);
-		border-radius: var(--radius, 0.75rem);
+		border-radius: 999px;
 		color: var(--muted-foreground);
-		font-size: 0.75rem;
-		font-weight: 500;
+		font-size: 12px;
 		cursor: pointer;
-		transition: all 150ms ease;
+		transition: border-color 0.13s ease, color 0.13s ease, background-color 0.13s ease;
 		white-space: nowrap;
 	}
 
 	.pill:hover:not(:disabled) {
-		border-color: var(--primary);
+		border-color: var(--border-strong);
 		color: var(--foreground);
+	}
+
+	.pill:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
+	}
+
+	.pill :global(svg:first-child) {
+		color: var(--subtle-foreground);
 	}
 
 	.pill:disabled {
@@ -300,8 +309,11 @@
 		max-width: 120px;
 	}
 
+	/* A git ref reads as code, so it takes the mockup's `.branchtxt` treatment. */
 	.branch-name {
 		max-width: min(180px, 38vw);
+		font-family: var(--font-mono);
+		font-size: 11px;
 	}
 
 	.separator {

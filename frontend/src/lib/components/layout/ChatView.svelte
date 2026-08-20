@@ -483,12 +483,14 @@
 		position: relative;
 	}
 
+	/* Same 768px measure as the transcript column and the composer dock, so the
+	   hero and the island below it share one edge. */
 	.empty-hero-content {
 		display: flex;
 		flex-direction: column;
 		align-items: center;
 		width: 100%;
-		max-width: 640px;
+		max-width: 768px;
 	}
 
 	.empty-bottom-spacer {
@@ -504,21 +506,15 @@
 		z-index: 5;
 	}
 
-	/* Empty-state layout for the persistent input slot: centered, capped at the
-	   same content width as the hero, with a 1rem horizontal gutter. Tailwind
-	   preflight makes box-sizing:border-box global, so the cap is 640px + 2rem of
-	   padding — this keeps the input's rendered content width pixel-identical to
-	   the old markup, where the 640px cap sat on .empty-state-content and the 1rem
-	   padding lived on the .empty-state parent (outside the cap). The 0.5rem
-	   margin-top reproduces the old .empty-state-content gap between hero and
-	   input. */
+	/* Empty-state layout for the persistent input slot: centered and capped at the
+	   same 768px content width as the hero above it. Tailwind preflight makes
+	   box-sizing:border-box global, so the cap includes the gutters — ChatInput
+	   supplies its own dock padding inside, so none is added here. */
 	.input-slot.empty-input-layout {
 		align-self: center;
 		width: 100%;
-		max-width: calc(640px + 2rem);
-		padding-left: 1rem;
-		padding-right: 1rem;
-		margin-top: 0.5rem;
+		max-width: calc(768px + 3rem);
+		margin-top: 0.75rem;
 	}
 
 	/* Cleared/empty existing-session hero. Reuses WorkspaceSelector's tokens
@@ -528,8 +524,8 @@
 		display: flex;
 		flex-direction: column;
 		align-items: center;
-		gap: 6px;
-		padding: 2rem 2rem 1rem;
+		gap: 8px;
+		padding: 2rem 2rem 1.25rem;
 		text-align: center;
 		user-select: none;
 	}
@@ -540,10 +536,10 @@
 		justify-content: center;
 		width: 44px;
 		height: 44px;
-		margin-bottom: 8px;
+		margin-bottom: 10px;
 		border-radius: 50%;
-		color: var(--muted-foreground);
-		background: var(--muted);
+		color: var(--subtle-foreground);
+		background: var(--scrim);
 		border: 1px solid var(--border);
 	}
 

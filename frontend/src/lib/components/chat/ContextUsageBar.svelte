@@ -476,14 +476,14 @@
 		onclick={toggle}
 	>
 		<svg class="usage-ring {ringSeverity}" viewBox="0 0 16 16" aria-hidden="true">
-			<circle class="ring-track" cx="8" cy="8" r={RING_RADIUS} fill="none" stroke-width="2" />
+			<circle class="ring-track" cx="8" cy="8" r={RING_RADIUS} fill="none" stroke-width="2.4" />
 			<circle
 				class="ring-progress"
 				cx="8"
 				cy="8"
 				r={RING_RADIUS}
 				fill="none"
-				stroke-width="2"
+				stroke-width="2.4"
 				stroke-linecap="round"
 				stroke-dasharray={RING_CIRCUMFERENCE}
 				stroke-dashoffset={ringDashoffset}
@@ -731,40 +731,43 @@
 		display: inline-flex;
 	}
 
-	/* ===== USAGE INDICATOR - Glass styling to match desktop =====
-	   Rendered as a button here (clickable), so reset the button chrome. */
+	/* ===== USAGE INDICATOR — the mockup's bare `.ctxring` =====
+	   It sits inside the composer island's glass foot row, so it carries no
+	   surface of its own: just the ring, on a hit target big enough to click.
+	   Rendered as a button (clickable), so reset the button chrome. */
 	.usage-indicator {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		min-width: 32px;
-		min-height: 32px;
-		padding: 5px;
-		background: var(--glass-bg);
-		backdrop-filter: blur(var(--glass-blur, 12px));
-		-webkit-backdrop-filter: blur(var(--glass-blur, 12px));
-		border: 1px solid var(--glass-border);
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
+		width: 26px;
+		height: 26px;
+		margin-left: 2px;
+		padding: 0;
+		background: transparent;
+		border: none;
+		border-radius: 50%;
 		font: inherit;
 		cursor: pointer;
-		transition: border-color 0.2s ease, background 0.2s ease;
+		transition: background-color 0.13s ease;
 	}
 	.usage-indicator:hover {
-		background: color-mix(in oklch, var(--glass-bg) 80%, var(--foreground) 6%);
+		background: var(--scrim);
+	}
+	.usage-indicator:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
 	}
 
 	/* ===== Circular progress ring (context-window fraction) ===== */
 	.usage-ring {
-		width: 15px;
-		height: 15px;
+		width: 16px;
+		height: 16px;
 		flex-shrink: 0;
 		transform: rotate(-90deg);
 		transform-origin: center;
 	}
 	.ring-track {
-		/* Foreground-mix reads slightly lighter than the toolbar in dark mode and
-		   slightly darker in light mode, so the unfilled ring stays visible in both. */
-		stroke: color-mix(in oklch, var(--foreground) 12%, var(--background));
+		stroke: var(--border-strong);
 	}
 	.ring-progress {
 		stroke: var(--primary);

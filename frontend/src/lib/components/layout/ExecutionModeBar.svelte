@@ -612,10 +612,12 @@
 />
 
 <style>
-	/* Hosted inline in the ContextPillBar (above the chat input) on the new-session
-	   screen, so it flows as a pill group next to the profile selector rather than
-	   as a standalone centered bar. align-self keeps the toggle row vertically
-	   centered against the profile pill; the optional error wraps underneath. */
+	/* There is no standalone bar any more: this component renders inline in the
+	   ContextPillBar, which is now the composer island's top pill row. It flows as
+	   a pill group next to the agent pill — the mode/device pill plus, in worktree
+	   mode, the branch and base-branch pills. align-self keeps the row vertically
+	   centered against the agent pill; the optional error wraps underneath (the
+	   pill row wraps, so a full-width banner drops to its own line). */
 	.execution-mode-bar {
 		position: relative;
 		z-index: 10;
@@ -632,11 +634,11 @@
 	.mode-bar-row {
 		display: flex;
 		align-items: center;
-		gap: 8px;
+		gap: 6px;
 		max-width: 100%;
 	}
 
-	/* Mode dropdown pill — styled to match the .branch-trigger pill */
+	/* Mode dropdown pill — the composer island's `.pill` metrics (mockup) */
 	.mode-selector {
 		position: relative;
 		flex-shrink: 0;
@@ -646,29 +648,36 @@
 	.mode-trigger {
 		display: flex;
 		align-items: center;
-		gap: 5px;
-		padding: 4px 10px;
-		background: color-mix(in oklch, var(--foreground) 8%, var(--background));
+		gap: 6px;
+		height: 26px;
+		padding: 0 9px;
+		background: var(--scrim);
 		border: 1px solid var(--border);
-		border-radius: var(--radius);
+		border-radius: 999px;
 		color: var(--muted-foreground);
-		font-size: 0.75rem;
-		font-weight: 500;
+		font-size: 12px;
 		cursor: pointer;
-		transition: all 150ms ease;
+		transition: border-color 0.13s ease, color 0.13s ease, background-color 0.13s ease;
 		white-space: nowrap;
 		max-width: 100%;
 	}
 
 	.mode-trigger:hover,
 	.mode-trigger.open {
-		border-color: var(--primary);
+		border-color: var(--border-strong);
 		color: var(--foreground);
+	}
+
+	.mode-trigger:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
 	}
 
 	.mode-trigger :global(svg) {
 		flex-shrink: 0;
+		color: var(--subtle-foreground);
 	}
+
 
 	/* Small worktree marker on the trigger pill when the checkbox is on. */
 	.mode-trigger :global(svg.wt-marker) {
@@ -737,10 +746,14 @@
 		opacity: 0.75;
 	}
 
+	/* The mode name is the pill's subject, so it takes the foreground weight the
+	   mockup's `.pill .k` uses. */
 	.mode-trigger-label {
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+		color: var(--foreground);
+		font-weight: 500;
 	}
 
 	/* Mode dropdown — reuses .branch-dropdown visuals; anchored to the pill's left
@@ -760,22 +773,32 @@
 	.branch-trigger {
 		display: flex;
 		align-items: center;
-		gap: 4px;
-		padding: 4px 10px;
-		background: color-mix(in oklch, var(--foreground) 8%, var(--background));
+		gap: 5px;
+		height: 26px;
+		padding: 0 9px;
+		background: var(--scrim);
 		border: 1px solid var(--border);
-		border-radius: var(--radius);
+		border-radius: 999px;
 		color: var(--muted-foreground);
-		font-size: 0.75rem;
+		font-size: 12px;
 		cursor: pointer;
-		transition: all 150ms ease;
+		transition: border-color 0.13s ease, color 0.13s ease, background-color 0.13s ease;
 		max-width: 100%;
 		min-width: 0;
 	}
 
 	.branch-trigger:hover {
-		border-color: var(--primary);
+		border-color: var(--border-strong);
 		color: var(--foreground);
+	}
+
+	.branch-trigger:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
+	}
+
+	.branch-trigger :global(svg) {
+		color: var(--subtle-foreground);
 	}
 
 	.branch-trigger.auto-mode {
@@ -788,11 +811,14 @@
 		opacity: 1;
 	}
 
+	/* A git ref reads as code — the mockup's `.branchtxt` treatment. */
 	.branch-name {
 		max-width: min(180px, 40vw);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+		font-family: var(--font-mono);
+		font-size: 11px;
 	}
 
 	/* Branch dropdown */

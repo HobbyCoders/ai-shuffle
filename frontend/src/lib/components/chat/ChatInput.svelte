@@ -1,9 +1,14 @@
 <script lang="ts">
 	/**
-	 * ChatInput - Modern chat input island with progressive disclosure
+	 * ChatInput - the Studio Noir glass composer island.
 	 *
-	 * Layer 1: Minimal - textarea + essential buttons
-	 * Layer 2: Context Bar - inline profile/project dropdown selectors
+	 * One rounded glass container holds three rows:
+	 *   1. pill row   — ContextPillBar (agent pill + execution-mode/branch pills)
+	 *   2. input area — Tiptap editor + the @/slash autocomplete panels
+	 *   3. foot row   — ControlsDock (model / effort / permission pills, context
+	 *      ring, computer-use + attach buttons) with the dictate / voice-call /
+	 *      send cluster passed in as its `actions` snippet.
+	 * A keyboard-hint line sits below the island.
 	 *
 	 * Delegates voice recording to VoiceRecorder, controls dock to ControlsDock,
 	 * and drag-and-drop to DragDropOverlay.
@@ -204,6 +209,11 @@
 
 	// Get selected profile name for display in placeholder
 	const selectedProfileName = $derived($profiles.find(p => p.id === $activeSession.profile)?.name || 'Profile');
+
+	// Modifier label for the queue shortcut in the hint line. Mirrors the
+	// send-later button's own title so the two can't disagree.
+	const metaLabel =
+		typeof navigator !== 'undefined' && navigator.platform?.includes('Mac') ? '⌘' : 'Ctrl';
 
 	// Handle queued message edit events from QueuedMessages component.
 	// The queued row is NOT removed up front — we only mark which queued message
@@ -664,144 +674,162 @@
 		{/if}
 
 		<form onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}>
-			<!-- Main Island -->
+			<!-- Main Island: one glass container, three rows -->
 			<div class="chat-island" bind:this={islandRef}>
-				<!-- Context pills (profile + branch) sit directly above the input -->
+				<!-- Row 1: context pills (agent + execution mode / branch) -->
 				<ContextPillBar />
 
-				<!-- Input Wrapper - The Hero (outer container with border) -->
-				<div class="input-wrapper">
-					<!-- Input Inner - Dark background container -->
-					<div class="input-inner">
-						<!-- Textarea with autocomplete -->
-						<div class="textarea-wrapper">
-							<CommandAutocomplete
-								bind:this={commandAutocompleteRef}
-								inputValue={inputValue}
-								projectId={$activeSession.project}
-								worktreeId={$activeSession.worktreeIntent === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined}
-								visible={showCommandAutocomplete}
-								onSelect={handleCommandSelect}
-								onClose={() => showCommandAutocomplete = false}
-							/>
+				<!-- Row 2: the editor -->
+				<div class="input-area">
+					<!-- Textarea with autocomplete -->
+					<div class="textarea-wrapper">
+						<CommandAutocomplete
+							bind:this={commandAutocompleteRef}
+							inputValue={inputValue}
+							projectId={$activeSession.project}
+							worktreeId={$activeSession.worktreeIntent === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined}
+							visible={showCommandAutocomplete}
+							onSelect={handleCommandSelect}
+							onClose={() => showCommandAutocomplete = false}
+						/>
 
-							<FileAutocomplete
-								bind:this={fileAutocompleteRef}
-								inputValue={plainTextValue}
-								projectId={$activeSession.project}
-								profileId={$activeSession.profile}
-								worktreeId={$activeSession.worktreeIntent === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined}
-								visible={showFileAutocomplete}
-								onSelect={handleFileSelect}
-								onClose={() => showFileAutocomplete = false}
-							/>
+						<FileAutocomplete
+							bind:this={fileAutocompleteRef}
+							inputValue={plainTextValue}
+							projectId={$activeSession.project}
+							profileId={$activeSession.profile}
+							worktreeId={$activeSession.worktreeIntent === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined}
+							visible={showFileAutocomplete}
+							onSelect={handleFileSelect}
+							onClose={() => showFileAutocomplete = false}
+						/>
 
-							<TiptapEditor
-								bind:this={editorRef}
-								placeholder="Message {selectedProfileName}..."
-								initialContent={initialComposerDraft}
-								disabled={!$anyCredential}
-								onTextChange={(text) => {
-									inputValue = text;
-									// Also update plain text for autocomplete (without chip @path serialization)
-									plainTextValue = editorRef?.getText() ?? '';
-									handleInputChange();
-								}}
-								onKeyDown={handleKeyDown}
-							/>
-						</div>
-
-						<!-- Voice + Send buttons -->
-						<div class="send-button-wrapper">
-							<!-- Voice call (VM19): starts/resumes a voice call. Renders
-							     nothing when voice mode is off or the surface doesn't
-							     qualify (active non-voice chat). -->
-							<VoiceCallButton disabled={isUploading || isRecording || isTranscribing} />
-
-							<!-- Voice Input (delegated to VoiceRecorder component) -->
-							<VoiceRecorder
-								onTranscription={handleTranscription}
-								disabled={!$anyCredential || isUploading}
-								bind:isRecording
-								bind:isTranscribing
-							/>
-
-							{#if $activeSession.isCreatingWorktree}
-								<!-- Creating worktree - show spinner -->
-								<button type="button" class="send-btn creating-worktree" disabled title="Creating worktree...">
-									<svg class="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
-									</svg>
-								</button>
-							{:else if $activeSession.isStreaming}
-								{#if plainTextValue.trim()}
-									<!-- Send Now: stops current response then sends -->
-									<button type="submit" class="send-btn" title="Send now (interrupts) — Enter">
-										<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
-										</svg>
-									</button>
-									<!-- Send Later: queues for after completion -->
-									<button type="button" class="send-btn send-later-btn"
-										onclick={() => handleSubmit(true)}
-										title="Send later (after response) — {navigator.platform?.includes('Mac') ? '⌘' : 'Ctrl'}+Enter"
-									>
-										<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-										</svg>
-									</button>
-								{:else}
-									<!-- Stop is an informed choice when background agents are live:
-									     the SDK interrupt cancels the agents too, so StopButton
-									     confirms first. -->
-									<StopButton
-										activeTasks={$activeSession.activeTasks}
-										onStop={() => activeSession.stopGeneration()}
-									/>
-								{/if}
-							{:else}
-								<button
-									type="submit"
-									class="send-btn"
-									disabled={!inputValue.trim() || !$anyCredential || isUploading || isRecording || isTranscribing}
-									title={isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : ($activeSession.worktreeIntent === "worktree" && !$activeSession.worktreeId) ? "Branch will be auto-created from your message" : "Send message"}
-								>
-									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
-									</svg>
-								</button>
-							{/if}
-						</div>
+						<TiptapEditor
+							bind:this={editorRef}
+							placeholder="Message {selectedProfileName} — @ files, / commands"
+							initialContent={initialComposerDraft}
+							disabled={!$anyCredential}
+							onTextChange={(text) => {
+								inputValue = text;
+								// Also update plain text for autocomplete (without chip @path serialization)
+								plainTextValue = editorRef?.getText() ?? '';
+								handleInputChange();
+							}}
+							onKeyDown={handleKeyDown}
+						/>
 					</div>
 				</div>
 
-				<!-- Controls Dock (delegated to ControlsDock component) -->
+				<!-- Row 3: foot row. ControlsDock owns the model / effort / permission
+				     pills, the context ring and the attach + computer-use buttons; the
+				     dictate / voice-call / send cluster is handed to it as a snippet so
+				     the whole right-hand cluster of the mockup's footrow lines up in one
+				     flex row. The snippet renders inside the form, so the submit
+				     buttons below still submit it. -->
 				<ControlsDock
 					{isUploading}
 					onAttachClick={triggerFileUpload}
-				/>
+				>
+					{#snippet actions()}
+						<!-- Voice Input (delegated to VoiceRecorder component) -->
+						<VoiceRecorder
+							onTranscription={handleTranscription}
+							disabled={!$anyCredential || isUploading}
+							bind:isRecording
+							bind:isTranscribing
+						/>
+
+						<!-- Voice call (VM19): starts/resumes a voice call. Renders
+						     nothing when voice mode is off or the surface doesn't
+						     qualify (active non-voice chat). -->
+						<VoiceCallButton disabled={isUploading || isRecording || isTranscribing} />
+
+						{#if $activeSession.isCreatingWorktree}
+							<!-- Creating worktree - show spinner -->
+							<button type="button" class="send-btn creating-worktree" disabled title="Creating worktree...">
+								<svg class="w-3.5 h-3.5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
+								</svg>
+							</button>
+						{:else if $activeSession.isStreaming}
+							{#if plainTextValue.trim()}
+								<!-- Send Now: stops current response then sends -->
+								<button type="submit" class="send-btn" title="Send now (interrupts) — Enter">
+									<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.3" d="m5 12 7-7 7 7M12 19V5" />
+									</svg>
+								</button>
+								<!-- Send Later: queues for after completion -->
+								<button type="button" class="send-btn send-later-btn"
+									onclick={() => handleSubmit(true)}
+									title="Send later (after response) — {metaLabel}+Enter"
+								>
+									<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+									</svg>
+								</button>
+							{:else}
+								<!-- Stop is an informed choice when background agents are live:
+								     the SDK interrupt cancels the agents too, so StopButton
+								     confirms first. -->
+								<StopButton
+									activeTasks={$activeSession.activeTasks}
+									onStop={() => activeSession.stopGeneration()}
+								/>
+							{/if}
+						{:else}
+							<button
+								type="submit"
+								class="send-btn"
+								disabled={!inputValue.trim() || !$anyCredential || isUploading || isRecording || isTranscribing}
+								title={isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : ($activeSession.worktreeIntent === "worktree" && !$activeSession.worktreeId) ? "Branch will be auto-created from your message" : "Send message"}
+							>
+								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.3" d="m5 12 7-7 7 7M12 19V5" />
+								</svg>
+							</button>
+						{/if}
+					{/snippet}
+				</ControlsDock>
+			</div>
+
+			<!-- Keyboard hints. Desktop only: on touch devices Enter inserts a
+			     newline (see handleKeyDown), so the send/newline pair would be wrong.
+			     The queue shortcut is only bound while a turn is streaming, so it
+			     only appears then. -->
+			<div class="composer-hint">
+				<span class="kbd">↵</span> send
+				<span class="hint-sep">·</span>
+				<span class="kbd">⇧↵</span> newline
+				{#if $activeSession.isStreaming}
+					<span class="hint-sep">·</span>
+					<span class="kbd">{metaLabel}↵</span> queue for later
+				{/if}
 			</div>
 		</form>
 	</div>
 </div>
 
 <style>
-	/* Wrapper - provides safe spacing */
+	/* ===== DOCK =====
+	   Mirrors the mockup's `.dock`: the composer floats over the transcript with
+	   generous bottom padding and no surface of its own. */
 	.chat-input-wrapper {
-		padding: 0.5rem 0.75rem 0.75rem;
+		padding: 0 0.75rem 0.75rem;
 		flex-shrink: 0;
 	}
 
 	@media (min-width: 640px) {
 		.chat-input-wrapper {
-			padding: 0.75rem 1rem 1rem;
+			padding: 0 1.5rem 1.25rem;
 		}
 	}
 
-	/* Container with max-width - positioning context for drag overlay */
+	/* `.dockinner` — the composer shares the transcript column's 768px measure.
+	   Also the positioning context for the drag overlay. */
 	.chat-input-container {
 		position: relative;
-		max-width: 56rem;
+		max-width: 48rem;
 		margin: 0 auto;
 	}
 
@@ -815,7 +843,7 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		border-radius: 0.75rem;
+		border-radius: 20px;
 		animation: fadeIn 0.2s ease;
 	}
 
@@ -838,52 +866,49 @@
 		flex-shrink: 0;
 	}
 
-	/* Main Island - Two tier structure */
+	/* ===== THE GLASS ISLAND =====
+	   One container for all three rows. `overflow` stays VISIBLE (unlike the
+	   mockup, which has no live dropdowns): every popover in the composer — the
+	   @/slash autocomplete panels, the agent/branch/mode menus, the override
+	   dropdowns and the context-usage popover — opens upward and out of these
+	   bounds, and clipping them would make them unreachable. */
 	.chat-island {
+		position: relative;
 		display: flex;
 		flex-direction: column;
-		overflow: visible;
+		border-radius: 20px;
+		border: 1px solid var(--border);
+		background: var(--glass);
+		backdrop-filter: blur(22px) saturate(160%);
+		-webkit-backdrop-filter: blur(22px) saturate(160%);
+		box-shadow: inset 0 1px 0 0 var(--glass-highlight);
+		transition: border-color 0.2s ease, box-shadow 0.2s ease;
 	}
 
-	/* ===== INPUT WRAPPER - THE HERO (glass outer frame) ===== */
-	.input-wrapper {
-		position: relative;
-		/* The `backdrop-filter` below establishes a stacking context, which traps
-		   the @/slash autocomplete panels (z-index: 50) inside this subtree. Without
-		   an explicit z-index here, the whole wrapper stacks at the auto level (0)
-		   and the ContextPillBar's ExecutionModeBar (z-index: 10) — plus its upward
-		   dropdown — would render ABOVE the autocomplete menus. Lifting the wrapper
-		   above the exec-mode bar keeps the @ and / menus on top where they belong. */
-		z-index: 20;
-		background: var(--glass-bg);
-		backdrop-filter: blur(20px);
-		-webkit-backdrop-filter: blur(20px);
-		border: 1px solid var(--glass-border);
-		border-radius: calc(var(--radius, 0.75rem) * 1.33) calc(var(--radius, 0.75rem) * 1.33) 0 0;
-		padding: 4px;
-		transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-	}
-
-	/* Focus glow effect */
-	.input-wrapper:focus-within {
-		border-color: var(--ring);
+	.chat-island:focus-within {
+		border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
 		box-shadow:
-			0 0 0 1px var(--ring),
-			0 0 40px -10px var(--glow-color-soft),
-			inset 0 1px 0 var(--hover-overlay);
+			inset 0 1px 0 0 var(--glass-highlight),
+			0 0 32px -12px var(--glow);
 	}
 
-	/* ===== INPUT INNER - Glass rounded bubble inside ===== */
-	.input-inner {
+	/* ===== ROW 2 — the editor =====
+	   The island's `backdrop-filter` establishes a stacking context, so the rows
+	   are ordered explicitly inside it. Same relative order the old markup had:
+	   the pill row (z-index 10, set in ContextPillBar) sits below the input area,
+	   whose @/slash panels must stay on top of it, and the foot row (z-index 30,
+	   set in ControlsDock) is above both so its upward override dropdowns and the
+	   context-usage popover paint over the message box. */
+	.input-area {
+		position: relative;
+		z-index: 20;
+		padding: 10px 14px 6px;
+		min-height: 62px;
 		display: flex;
-		align-items: center;
-		gap: 8px;
-		background: var(--input-bg);
-		border-radius: var(--radius, 0.75rem);
-		padding: 12px 16px;
+		align-items: flex-start;
 	}
 
-	/* Textarea wrapper */
+	/* Textarea wrapper — the autocomplete panels anchor to this. */
 	.textarea-wrapper {
 		flex: 1;
 		min-width: 0;
@@ -891,75 +916,55 @@
 		background: transparent;
 	}
 
-	/* Send button wrapper - stays vertically centered regardless of text height */
-	.send-button-wrapper {
-		display: flex;
-		align-items: center;
-		align-self: center;
-		flex-shrink: 0;
-		gap: 4px;
-	}
-
-	/* ===== SEND BUTTON - COMPACT ===== */
+	/* ===== SEND BUTTON — teal, with the mockup's glow ===== */
 	.send-btn {
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		min-width: 32px;
-		min-height: 32px;
-		width: 32px;
-		height: 32px;
-		padding: 6px;
-		background: var(--button-primary-gradient);
+		width: 30px;
+		height: 30px;
+		margin-left: 3px;
+		padding: 0;
+		background: var(--primary);
 		border: none;
-		border-radius: calc(var(--radius, 0.75rem) * 0.67);
+		border-radius: 10px;
 		cursor: pointer;
-		transition: all 0.2s ease;
+		box-shadow: 0 0 18px -4px var(--glow);
+		transition: filter 0.13s ease, box-shadow 0.13s ease, background-color 0.13s ease;
 		flex-shrink: 0;
-		position: relative;
-		overflow: hidden;
-	}
-
-	.send-btn::before {
-		content: '';
-		position: absolute;
-		inset: 0;
-		background: linear-gradient(135deg, var(--hover-overlay), transparent);
-		opacity: 0;
-		transition: opacity 0.2s ease;
 	}
 
 	.send-btn:hover:not(:disabled) {
-		transform: translateY(-1px);
-		box-shadow: 0 4px 20px var(--glow-color-soft);
-	}
-
-	.send-btn:hover:not(:disabled)::before {
-		opacity: 1;
+		filter: brightness(1.08);
+		box-shadow: 0 0 22px -2px var(--glow);
 	}
 
 	.send-btn:active:not(:disabled) {
-		transform: translateY(0) scale(0.96);
+		filter: brightness(0.96);
+	}
+
+	.send-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
 	}
 
 	.send-btn svg {
 		color: var(--primary-foreground);
-		position: relative;
-		z-index: 1;
 	}
 
 	.send-btn:disabled {
-		background: var(--muted);
+		background: var(--scrim);
+		box-shadow: none;
 		cursor: not-allowed;
 	}
 
 	.send-btn:disabled svg {
-		color: var(--muted-foreground);
+		color: var(--subtle-foreground);
 	}
 
-	/* Creating worktree state - show primary color with spinner */
+	/* Creating worktree state - keep the primary fill with the spinner */
 	.send-btn.creating-worktree {
-		background: var(--button-primary-gradient);
+		background: var(--primary);
 		cursor: wait;
 	}
 
@@ -967,14 +972,11 @@
 		color: var(--primary-foreground);
 	}
 
-	/* Send Later button - secondary/muted style to distinguish from Send Now */
+	/* Send Later — secondary/muted so it reads as the alternative to Send Now */
 	.send-btn.send-later-btn {
-		background: var(--muted);
-		border: 1px solid var(--border-subtle);
-	}
-
-	.send-btn.send-later-btn::before {
-		display: none;
+		background: var(--scrim);
+		border: 1px solid var(--border);
+		box-shadow: none;
 	}
 
 	.send-btn.send-later-btn svg {
@@ -982,8 +984,8 @@
 	}
 
 	.send-btn.send-later-btn:hover:not(:disabled) {
-		background: color-mix(in oklch, var(--muted) 80%, var(--foreground) 10%);
-		transform: translateY(-1px);
+		filter: none;
+		background: color-mix(in oklch, var(--foreground) 10%, transparent);
 		box-shadow: none;
 	}
 
@@ -991,8 +993,43 @@
 		color: var(--foreground);
 	}
 
+	/* ===== KEYBOARD HINT LINE ===== */
+	.composer-hint {
+		display: none;
+		align-items: center;
+		gap: 6px;
+		margin: 8px 2px 0;
+		font-size: 11px;
+		color: var(--subtle-foreground);
+		user-select: none;
+	}
+
+	/* On touch devices Enter inserts a newline instead of sending (see
+	   handleKeyDown), so the hint only shows where the shortcuts actually apply. */
+	@media (min-width: 640px) and (pointer: fine) {
+		.composer-hint {
+			display: flex;
+		}
+	}
+
+	.composer-hint .kbd {
+		font-family: var(--font-mono);
+		font-size: 10.5px;
+		line-height: 1;
+		padding: 3.5px 5px;
+		border-radius: 5px;
+		color: var(--subtle-foreground);
+		background: var(--scrim);
+		border: 1px solid var(--border);
+	}
+
+	.hint-sep {
+		opacity: 0.55;
+	}
+
 	@keyframes fadeIn {
 		from { opacity: 0; }
 		to { opacity: 1; }
 	}
 </style>
+
