@@ -1,10 +1,38 @@
 from __future__ import annotations
 
+import json
+import os
+import tempfile
 from pathlib import Path
 
 import pytest
 
 from app.core import settings_import_service as service
+
+
+def _symlinks_supported() -> bool:
+    """Probe whether this process can create symlinks.
+
+    On Windows, os.symlink raises OSError (WinError 1314) unless Developer Mode
+    is on or the process is elevated. Detect the capability by actually trying to
+    create one in a throwaway temp dir so the symlink-dependent tests skip with a
+    clear reason on unprivileged runners instead of failing (issue #620).
+    """
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            link = os.path.join(d, "probe_link")
+            os.symlink(os.path.join(d, "probe_target"), link)
+            os.remove(link)
+        return True
+    except (OSError, NotImplementedError, AttributeError):
+        return False
+
+
+_SYMLINKS_SUPPORTED = _symlinks_supported()
+_requires_symlinks = pytest.mark.skipif(
+    not _SYMLINKS_SUPPORTED,
+    reason="symlink creation requires Developer Mode or admin privileges on this platform",
+)
 
 
 def _write(path: Path, text: str = "content") -> Path:
@@ -74,6 +102,7 @@ def test_apply_rejects_stale_preview(import_homes) -> None:
         )
 
 
+@_requires_symlinks
 def test_symlinked_skill_is_visible_but_blocked(import_homes, tmp_path) -> None:
     source, _ = import_homes
     outside = _write(tmp_path / "outside" / "secret.txt", "do not copy")
@@ -105,9 +134,9 @@ def test_codex_and_claude_project_registries_deduplicate(import_homes, monkeypat
     project.mkdir()
     _write(
         source / ".codex" / "config.toml",
-        f'[projects."{project}"]\ntrust_level = "trusted"\n',
+        f'[projects.{json.dumps(str(project))}]\ntrust_level = "trusted"\n',
     )
-    _write(source / ".claude.json", '{"projects": {"' + str(project) + '": {}}}')
+    _write(source / ".claude.json", json.dumps({"projects": {str(project): {}}}))
     created = []
 
     def create_project(**kwargs):

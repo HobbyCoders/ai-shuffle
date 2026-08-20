@@ -101,6 +101,9 @@ def _drive_listen_loop(monkeypatch, gateway, connect_effects, max_sleeps=10):
             gateway._stop = True
 
     record = MagicMock()
+    # A real DATABASE_URL from the developer's .env would win over the
+    # postgres_* fields these tests patch, so neutralize it for every driven loop.
+    monkeypatch.setattr(eg.settings, "database_url", "")
     if not getattr(eg.settings, "postgres_password", None):
         monkeypatch.setattr(eg.settings, "postgres_password", "p")
     monkeypatch.setattr(eg.psycopg2, "connect", fake_connect)
