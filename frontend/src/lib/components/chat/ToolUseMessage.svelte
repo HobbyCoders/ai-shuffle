@@ -1,11 +1,21 @@
 <script lang="ts">
 	/**
-	 * ToolUseMessage - Collapsible tool execution display
+	 * ToolUseMessage — one flat work-log row for a single tool call.
+	 *
+	 * Row anatomy (Studio Noir `.wlrow`): subtle tool icon, bold short name, a
+	 * truncated mono preview of the call's identifying argument, then a right
+	 * cluster with the expand chevron and the status glyph. No card border — the
+	 * transcript reads as a log, not a stack of panels.
+	 *
+	 * Expanding reveals the Input / Result panels indented past the icon gutter.
+	 * Screenshots stay OUTSIDE the collapsible body: a screenshot the user can't
+	 * see is useless.
 	 */
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import ToolScreenshot from './ToolScreenshot.svelte';
 	import ToolIcon from './ToolIcon.svelte';
 	import { displayToolName } from '$lib/utils/tool-icons';
+	import { toolPreview } from '$lib/utils/tool-preview';
 	import { isDismissedQuestion, QUESTION_DISMISSED_LABEL } from './question-outcome';
 
 	interface Props {
@@ -16,148 +26,49 @@
 		status: 'running' | 'complete' | 'error';
 		streaming?: boolean;
 		serverSide?: boolean;
-		/** Data URI of a screenshot from MCP image results (e.g. browser automation), shown inline below the tool call. */
+		/** Data URI of a screenshot from MCP image results (e.g. browser automation). */
 		screenshot?: string;
 	}
 
 	let { name, input, partialInput, result, status, streaming = false, serverSide = false, screenshot }: Props = $props();
 
-	// Chat preferences (reactive via .current getter)
 	const prefs = $derived(chatPreferences.current);
 
-	// Track if user has manually toggled this details element
-	// Once toggled, user's choice takes precedence over preference
+	// Once the user has toggled this row, their choice outranks the preference.
 	let userToggled = $state(false);
-	let detailsOpen = $state(false);
+	let expanded = $state(false);
 
-	// Sync from preferences when user hasn't manually toggled
 	$effect(() => {
-		if (!userToggled) {
-			detailsOpen = prefs.toolsStartExpanded;
-		}
+		if (!userToggled) expanded = prefs.toolsStartExpanded;
 	});
 
-	function handleToggle() {
+	function toggle() {
 		userToggled = true;
+		expanded = !expanded;
 	}
 
-	// Extract field from partial JSON string using regex (for streaming)
-	// Handles multiline content with escaped characters
-	function extractFieldFromPartial(partial: string, fieldName: string): string {
-		// Find the start of the field
-		const fieldPattern = new RegExp(`"${fieldName}"\\s*:\\s*"`);
-		const fieldMatch = partial.match(fieldPattern);
-		if (!fieldMatch || fieldMatch.index === undefined) {
-			return '';
-		}
+	const preview = $derived(
+		toolPreview({ name, input, partialInput, result, streaming })
+	);
 
-		// Find the start of the string value (after the opening quote)
-		const valueStart = fieldMatch.index + fieldMatch[0].length;
-
-		// Manually parse the JSON string, handling escapes
-		let result = '';
-		let i = valueStart;
-		while (i < partial.length) {
-			const char = partial[i];
-			if (char === '\\' && i + 1 < partial.length) {
-				// Handle escape sequences
-				const nextChar = partial[i + 1];
-				switch (nextChar) {
-					case 'n': result += '\n'; break;
-					case 'r': result += '\r'; break;
-					case 't': result += '\t'; break;
-					case '"': result += '"'; break;
-					case '\\': result += '\\'; break;
-					default: result += nextChar; break;
-				}
-				i += 2;
-			} else if (char === '"') {
-				// End of string
-				break;
-			} else {
-				result += char;
-				i++;
-			}
-		}
-
-		return result;
-	}
-
-	function getToolSummary(toolInput?: Record<string, unknown>): string {
-		if (!toolInput) return '';
-		// Use the description field that tools provide, fallback to path/pattern fields
-		return String(
-			toolInput.description ||
-			toolInput.url ||  // Browser tools - show URL
-			toolInput.skill ||  // Skill tool - show skill name
-			toolInput.file_path ||
-			toolInput.path ||
-			toolInput.notebook_path ||
-			toolInput.pattern ||
-			toolInput.glob ||
-			toolInput.query ||
-			toolInput.command ||
-			toolInput.prompt ||
-			toolInput.text ||  // Browser type tool
-			toolInput.selector ||
-			toolInput.label ||  // Browser fill tool
-			toolInput.script ||  // Browser evaluate tool
-			''
-		);
-	}
-
-	// Extract summary from partial JSON during streaming
-	function getPartialSummary(partial: string): string {
-		// Try to parse as complete JSON first
-		try {
-			const parsed = JSON.parse(partial);
-			return getToolSummary(parsed);
-		} catch {
-			// Fallback: extract fields via regex from incomplete JSON (in priority order)
-			const fields = ['description', 'skill', 'file_path', 'path', 'notebook_path', 'pattern', 'glob', 'query', 'command', 'prompt'];
-			for (const field of fields) {
-				const value = extractFieldFromPartial(partial, field);
-				if (value) return value;
-			}
-			return '';
-		}
-	}
-
-	// Compute summary - use input if available, try parsing partialInput during streaming
-	const summary = $derived.by(() => {
-		if (input && Object.keys(input).length > 0) {
-			return getToolSummary(input);
-		}
-		if (streaming && partialInput) {
-			return getPartialSummary(partialInput);
-		}
-		return '';
-	});
-
-	// Closing the AskUserQuestion modal resolves the tool call as a DENY (the
-	// tool has no "unanswered" value). That is correct mechanically but it is
-	// not a failure, so the card drops the red error chrome for neutral,
-	// muted "dismissed" styling. See ./question-outcome.ts.
+	// Closing the AskUserQuestion modal resolves the call as a DENY (the tool has
+	// no "unanswered" value). Mechanically correct, but not a failure — so the
+	// row drops the error chrome for neutral, muted "dismissed" styling.
 	const dismissedQuestion = $derived(isDismissedQuestion(name, status, result));
 
-	// Check if tool result contains media (image, video, or file)
 	function toolResultHasMedia(content: string): boolean {
 		try {
 			const data = JSON.parse(content);
 			return data.success && (
-				data.image_url ||
-				data.image_base64 ||
-				data.video_url ||
-				data.audio_url ||
-				data.audio_base64 ||
-				data.file_url
+				data.image_url || data.image_base64 || data.video_url ||
+				data.audio_url || data.audio_base64 || data.file_url
 			);
 		} catch {
 			return false;
 		}
 	}
 
-	// Short label for the generated-media kind ("Image" | "Video" | "Audio").
+	/** Short label for the generated-media kind ("Image" | "Video" | "Audio"). */
 	function toolResultMediaLabel(content: string): string {
 		try {
 			const data = JSON.parse(content);
@@ -168,153 +79,279 @@
 			return 'Image';
 		}
 	}
-
-	// Extract media URL from tool result JSON for rendering
-	function getMediaFromResult(content: string): { type: 'image' | 'video' | 'audio'; src: string; filename?: string } | null {
-		try {
-			const data = JSON.parse(content);
-			if (!data.success) return null;
-			if (data.video_url) return { type: 'video', src: data.video_url, filename: data.filename };
-			if (data.audio_url) return { type: 'audio', src: data.audio_url, filename: data.filename };
-			if (data.image_url) return { type: 'image', src: data.image_url, filename: data.filename };
-			if (data.image_base64) {
-				const mime = data.mime_type || 'image/png';
-				return { type: 'image', src: `data:${mime};base64,${data.image_base64}`, filename: data.filename };
-			}
-			if (data.audio_base64) {
-				const mime = data.mime_type || 'audio/mpeg';
-				return { type: 'audio', src: `data:${mime};base64,${data.audio_base64}`, filename: data.filename };
-			}
-			return null;
-		} catch {
-			return null;
-		}
-	}
 </script>
 
-<div class="w-full tool-use-message">
-	<div class="min-w-0">
-		<details class="w-full border border-border rounded-lg overflow-hidden group" bind:open={detailsOpen} ontoggle={handleToggle}>
-			<summary class="tool-summary w-full px-3 py-2 flex items-center gap-2 cursor-pointer list-none transition-colors">
-				<!-- Status indicator - use toolStatus as primary, not streaming -->
-				{#if dismissedQuestion}
-					<!-- Neutral "closed" mark: not an error, not a success. -->
-					<svg class="w-4 h-4 text-muted-foreground flex-shrink-0" data-testid="tool-dismissed-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<circle cx="12" cy="12" r="9" stroke-width="2" />
-						<path stroke-linecap="round" stroke-width="2" d="M8.5 12h7" />
-					</svg>
-				{:else if status === 'running'}
-					<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-					</svg>
-				{:else if status === 'error'}
-					<svg class="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-					</svg>
-				{:else}
-					<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-					</svg>
-				{/if}
-				<!-- Tool icon (shared mapping with the subagent card) -->
-				<ToolIcon {name} />
-				<!-- Tool name -->
-				<span class="text-sm font-medium text-foreground flex-shrink-0" title={name}>{displayToolName(name)}</span>
-				<!-- Server-side badge -->
-				{#if serverSide}
-					<span
-						class="text-[10px] font-medium px-1.5 py-0.5 rounded border border-primary/30 bg-primary/10 text-primary flex-shrink-0 uppercase tracking-wide"
-						title="Executed server-side by Anthropic API"
-					>server</span>
-				{/if}
-				<!-- Dismissed question: say what actually happened, in muted chrome. -->
-				{#if dismissedQuestion}
-					<span
-						class="text-[10px] font-medium px-1.5 py-0.5 rounded border border-border bg-muted text-muted-foreground flex-shrink-0 uppercase tracking-wide"
-					>dismissed</span>
-					<span class="text-muted-foreground flex-shrink-0">&bull;</span>
-					<span
-						class="text-sm text-muted-foreground truncate min-w-0"
-						title={QUESTION_DISMISSED_LABEL}
-					>{QUESTION_DISMISSED_LABEL}</span>
-				<!-- Summary (if available) -->
-				{:else if summary}
-					<span class="text-muted-foreground flex-shrink-0">&bull;</span>
-					<span
-						class="text-sm text-muted-foreground truncate min-w-0"
-						title={summary}
-					>{summary}</span>
-				{/if}
-				<!-- Chevron -->
-				<svg class="w-4 h-4 text-muted-foreground transition-transform group-open:rotate-180 flex-shrink-0 ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-				</svg>
-			</summary>
-			<div>
-				{#if partialInput || input}
-					<div class="px-3 py-2">
-						<div class="grid grid-cols-1 gap-2">
-							<!-- Input -->
-							<div class="min-w-0">
-								<div class="text-[10px] text-muted-foreground mb-1 font-medium">Input</div>
-								<div class="rounded border border-zinc-500/20 bg-zinc-500/5 p-2">
-									<div class="max-h-60 overflow-auto">
-										{#if streaming && partialInput}
-											<pre class="text-[10px] font-mono text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{partialInput}<span class="inline-block w-1.5 h-3 ml-0.5 bg-primary animate-pulse"></span></pre>
-										{:else if input && Object.keys(input).length > 0}
-											<pre class="text-[10px] font-mono text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{JSON.stringify(input, null, 2)}</pre>
-										{:else if partialInput}
-											<pre class="text-[10px] font-mono text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{partialInput}</pre>
-										{/if}
-									</div>
-								</div>
-							</div>
-							<!-- Result -->
-							<div class="min-w-0">
-								<div class="text-[10px] text-muted-foreground mb-1 font-medium">Result</div>
-								<div class="rounded border border-zinc-500/20 bg-zinc-500/5 p-2">
-									<div class="max-h-60 overflow-auto">
-										{#if dismissedQuestion}
-											<pre class="text-[10px] font-mono text-muted-foreground m-0 w-max !bg-transparent !p-0 !rounded-none" data-testid="tool-dismissed-result">{result}</pre>
-										{:else if result}
-											{#if toolResultHasMedia(result)}
-												<span class="text-[10px] text-green-500">&#10003; {toolResultMediaLabel(result)} generated</span>
-											{:else}
-												<pre class="text-[10px] font-mono text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{result}</pre>
-											{/if}
-										{:else if status === 'error'}
-											<pre class="text-[10px] font-mono text-red-400 m-0 w-max !bg-transparent !p-0 !rounded-none">[Interrupted]</pre>
-										{:else if status === 'running'}
-											<pre class="text-[10px] font-mono text-muted-foreground m-0 w-max !bg-transparent !p-0 !rounded-none">Running...</pre>
-										{:else}
-											<pre class="text-[10px] font-mono text-muted-foreground m-0 w-max !bg-transparent !p-0 !rounded-none"> </pre>
-										{/if}
-									</div>
-								</div>
-							</div>
-						</div>
-					</div>
-				{/if}
-			</div>
-		</details>
-		<!-- Screenshot (e.g. browser automation) rendered directly below the tool
-		     call, OUTSIDE the <details> so it shows regardless of expand/collapse
-		     state. When this tool is grouped, ToolUseGroup omits the screenshot
-		     here and hoists it below the whole group instead (so it isn't trapped
-		     inside the collapsed group). -->
-		{#if screenshot}
-			<ToolScreenshot {screenshot} {name} />
+<div class="wl-item">
+	<button
+		type="button"
+		class="wlrow"
+		class:is-open={expanded}
+		onclick={toggle}
+		aria-expanded={expanded}
+	>
+		<ToolIcon {name} class="wig" />
+		<span class="wname" title={name}>{displayToolName(name)}</span>
+
+		{#if serverSide}
+			<span class="wl-badge" title="Executed server-side by Anthropic API">server</span>
 		{/if}
-	</div>
+
+		{#if dismissedQuestion}
+			<span class="wl-badge">dismissed</span>
+			<span class="wtxt" title={QUESTION_DISMISSED_LABEL}>{QUESTION_DISMISSED_LABEL}</span>
+		{:else if preview}
+			<span class="wtxt" title={preview}>{preview}</span>
+		{/if}
+
+		<span class="wright">
+			<svg class="wl-chev" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<path d="m6 9 6 6 6-6" />
+			</svg>
+			{#if dismissedQuestion}
+				<svg class="wl-glyph is-muted" data-testid="tool-dismissed-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+					<circle cx="12" cy="12" r="9" />
+					<path stroke-linecap="round" d="M8.5 12h7" />
+				</svg>
+			{:else if status === 'running'}
+				<svg class="wl-glyph is-running" data-testid="tool-status-running" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+					<path d="M12 3a9 9 0 1 0 9 9" />
+				</svg>
+			{:else if status === 'error'}
+				<svg class="wl-glyph is-error" data-testid="tool-status-error" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+					<path d="M18 6 6 18M6 6l12 12" />
+				</svg>
+			{:else}
+				<svg class="wl-glyph is-ok" data-testid="tool-status-ok" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<path d="M20 6 9 17l-5-5" />
+				</svg>
+			{/if}
+		</span>
+	</button>
+
+	{#if expanded && (partialInput || input)}
+		<div class="wl-body">
+			<div class="wl-panel">
+				<div class="wl-panel-label">Input</div>
+				<div class="wl-pane">
+					{#if streaming && partialInput}
+						<pre>{partialInput}<span class="wl-caret"></span></pre>
+					{:else if input && Object.keys(input).length > 0}
+						<pre>{JSON.stringify(input, null, 2)}</pre>
+					{:else if partialInput}
+						<pre>{partialInput}</pre>
+					{/if}
+				</div>
+			</div>
+			<div class="wl-panel">
+				<div class="wl-panel-label">Result</div>
+				<div class="wl-pane">
+					{#if dismissedQuestion}
+						<pre class="is-muted" data-testid="tool-dismissed-result">{result}</pre>
+					{:else if result}
+						{#if toolResultHasMedia(result)}
+							<span class="wl-media-note">{toolResultMediaLabel(result)} generated</span>
+						{:else}
+							<pre>{result}</pre>
+						{/if}
+					{:else if status === 'error'}
+						<pre class="is-error">[Interrupted]</pre>
+					{:else if status === 'running'}
+						<pre class="is-muted">Running…</pre>
+					{:else}
+						<pre class="is-muted"> </pre>
+					{/if}
+				</div>
+			</div>
+		</div>
+	{/if}
+
+	<!-- Outside the collapsible body on purpose: the screenshot is the result. -->
+	{#if screenshot}
+		<ToolScreenshot {screenshot} {name} />
+	{/if}
 </div>
 
 <style>
-	.tool-summary:hover {
-		background: var(--hover-overlay);
+	.wl-item {
+		width: 100%;
+		min-width: 0;
 	}
 
-	.tool-summary:focus-visible {
+	.wlrow {
+		display: flex;
+		align-items: center;
+		gap: 9px;
+		width: 100%;
+		padding: 6px 8px;
+		border-radius: 8px;
+		text-align: left;
+		background: transparent;
+		border: none;
+		cursor: pointer;
+		transition: background-color 0.13s ease;
+	}
+
+	.wlrow:hover {
+		background: var(--scrim);
+	}
+
+	.wlrow:focus-visible {
 		outline: 2px solid var(--ring);
 		outline-offset: -2px;
+	}
+
+	.wlrow :global(.wig) {
+		color: var(--subtle-foreground);
+		flex: none;
+		width: 14px;
+		height: 14px;
+	}
+
+	.wname {
+		font-size: 12.5px;
+		font-weight: 600;
+		color: var(--foreground);
+		white-space: nowrap;
+		flex: none;
+	}
+
+	.wtxt {
+		font-family: var(--font-mono);
+		font-size: 11.5px;
+		color: var(--muted-foreground);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		min-width: 0;
+	}
+
+	.wl-badge {
+		flex: none;
+		font-size: 9.5px;
+		font-weight: 600;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		padding: 1px 5px;
+		border-radius: 5px;
+		border: 1px solid var(--border);
+		color: var(--subtle-foreground);
+	}
+
+	.wright {
+		margin-left: auto;
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		color: var(--subtle-foreground);
+		flex: none;
+	}
+
+	.wl-chev {
+		transition: transform 0.16s ease;
+	}
+
+	.wlrow.is-open .wl-chev {
+		transform: rotate(180deg);
+	}
+
+	.wl-glyph.is-ok {
+		color: var(--emerald);
+	}
+
+	.wl-glyph.is-error {
+		color: var(--rose);
+	}
+
+	.wl-glyph.is-muted {
+		color: var(--subtle-foreground);
+	}
+
+	.wl-glyph.is-running {
+		color: var(--primary);
+		animation: wl-spin 0.9s linear infinite;
+	}
+
+	@keyframes wl-spin {
+		to {
+			transform: rotate(360deg);
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.wl-glyph.is-running {
+			animation-duration: 2.4s;
+		}
+	}
+
+	.wl-body {
+		margin: 2px 0 6px 14px;
+		padding-left: 12px;
+		border-left: 1px solid var(--border);
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.wl-panel {
+		min-width: 0;
+	}
+
+	.wl-panel-label {
+		font-size: 10px;
+		font-weight: 600;
+		letter-spacing: 0.075em;
+		text-transform: uppercase;
+		color: var(--subtle-foreground);
+		margin-bottom: 4px;
+	}
+
+	.wl-pane {
+		max-height: 15rem;
+		overflow: auto;
+		border-radius: 7px;
+		border: 1px solid var(--border);
+		background: var(--code-bg);
+		padding: 7px 9px;
+	}
+
+	.wl-pane pre {
+		margin: 0;
+		padding: 0;
+		background: transparent;
+		border-radius: 0;
+		width: max-content;
+		font-family: var(--font-mono);
+		font-size: 11.5px;
+		line-height: 1.6;
+		color: var(--muted-foreground);
+	}
+
+	.wl-pane pre.is-muted {
+		color: var(--subtle-foreground);
+	}
+
+	.wl-pane pre.is-error {
+		color: var(--rose);
+	}
+
+	.wl-caret {
+		display: inline-block;
+		width: 5px;
+		height: 11px;
+		margin-left: 2px;
+		vertical-align: middle;
+		background: var(--primary);
+		animation: wl-blink 1s steps(2, start) infinite;
+	}
+
+	@keyframes wl-blink {
+		50% {
+			opacity: 0;
+		}
+	}
+
+	.wl-media-note {
+		font-size: 11.5px;
+		color: var(--emerald);
 	}
 </style>

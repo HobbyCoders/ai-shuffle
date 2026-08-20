@@ -1,6 +1,11 @@
 <script lang="ts">
 	/**
-	 * UserMessage - User message bubble with label, timestamp, and hover/touch actions
+	 * UserMessage — right-aligned prompt bubble.
+	 *
+	 * No avatar and no name label: the alignment already says who wrote it, and
+	 * dropping the header lets a short prompt read as one compact object. The
+	 * timestamp moves to the bubble's tooltip; the hover/tap action row (copy,
+	 * rewind) sits above the bubble so it never reflows the text.
 	 */
 	import MessageActions from './MessageActions.svelte';
 	import { formatMessageTime } from '$lib/utils/message-time';
@@ -26,7 +31,7 @@
 		isTouchDevice = true;
 	}
 
-	function handleClick(e: MouseEvent) {
+	function handleClick() {
 		// Only toggle on touch devices - desktop uses hover
 		if (isTouchDevice) {
 			showActionsOnMobile = !showActionsOnMobile;
@@ -38,7 +43,7 @@
 </script>
 
 <div
-	class="w-full user-message overflow-hidden message-container"
+	class="userrow"
 	onmouseenter={() => isHovered = true}
 	onmouseleave={() => { isHovered = false; showActionsOnMobile = false; }}
 	ontouchstart={handleTouchStart}
@@ -47,31 +52,69 @@
 	role="button"
 	tabindex="0"
 >
-	<div class="min-w-0 max-w-full">
-		<div class="flex items-center gap-2 mb-1">
-			<span class="font-semibold text-sm text-blue-400">You</span>
-			<span class="text-xs text-muted-foreground">{formatMessageTime(timestamp)}</span>
-			<div class="ml-auto">
-				<MessageActions
-					{sessionId}
-					messageContent={content}
-					messageRole="user"
-					{messageUuid}
-					{userPromptOccurrence}
-					{onRewindComplete}
-					{fileCheckpointingEnabled}
-					visible={showActions && !streaming}
-				/>
-			</div>
+	<div class="usercol">
+		<div class="useractions" class:is-visible={showActions && !streaming}>
+			<MessageActions
+				{sessionId}
+				messageContent={content}
+				messageRole="user"
+				{messageUuid}
+				{userPromptOccurrence}
+				{onRewindComplete}
+				{fileCheckpointingEnabled}
+				visible={showActions && !streaming}
+			/>
 		</div>
-		<div class="overflow-hidden max-w-full">
-			<p class="whitespace-pre-wrap break-words text-foreground" style="overflow-wrap: anywhere; word-break: break-word;">{content}</p>
-		</div>
+		<div class="bubble" title={formatMessageTime(timestamp)}>{content}</div>
 	</div>
 </div>
 
 <style>
-	.message-container {
-		position: relative;
+	.userrow {
+		display: flex;
+		justify-content: flex-end;
+		width: 100%;
+		min-width: 0;
+	}
+
+	.usercol {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-end;
+		max-width: 80%;
+		min-width: 0;
+	}
+
+	.useractions {
+		height: 0;
+		overflow: visible;
+		opacity: 0;
+		pointer-events: none;
+		transition: opacity 0.12s ease;
+	}
+
+	.useractions.is-visible {
+		height: auto;
+		opacity: 1;
+		pointer-events: auto;
+		margin-bottom: 4px;
+	}
+
+	.bubble {
+		padding: 10px 14px;
+		border-radius: 16px;
+		background: var(--card);
+		border: 1px solid var(--border);
+		color: var(--card-foreground);
+		font-size: 14px;
+		line-height: 1.58;
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+		word-break: break-word;
+		min-width: 0;
+	}
+
+	:global(html.light) .bubble {
+		background: var(--muted);
 	}
 </style>

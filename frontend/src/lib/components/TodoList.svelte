@@ -1,6 +1,10 @@
 <script lang="ts">
 	/**
-	 * TodoList - Cursor-style minimal task progress display
+	 * TodoList — the plan, as one segmented progress row.
+	 *
+	 * Collapsed it is a tick bar (one pill per task: done / current / pending),
+	 * the current step's label, and an n/total counter — enough to read progress
+	 * without opening anything. Expanding gives the full checklist.
 	 */
 	import type { TodoItem } from '$lib/stores/types';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
@@ -13,15 +17,12 @@
 
 	let { todos, initialExpanded }: Props = $props();
 
-	// Chat preferences (reactive via .current getter)
 	const prefs = $derived(chatPreferences.current);
 
-	// Track if user has manually toggled this list
-	// Once toggled, user's choice takes precedence over preference
+	// Once the user has toggled this list, their choice outranks the preference.
 	let userToggled = $state(false);
 	let userExpandedChoice = $state(false);
 
-	// Compute expanded state: prop override > user toggle > preference
 	const isExpanded = $derived(
 		initialExpanded !== undefined
 			? initialExpanded
@@ -35,140 +36,220 @@
 		userExpandedChoice = !isExpanded;
 	}
 
-	// Compute statistics
-	const stats = $derived.by(() => {
-		const total = todos.length;
-		const completed = todos.filter(t => t.status === 'completed').length;
-		return { total, completed };
-	});
+	const stats = $derived.by(() => ({
+		total: todos.length,
+		completed: todos.filter((t) => t.status === 'completed').length
+	}));
 
-	// Get the currently active task (first in_progress, or first pending)
-	const activeTask = $derived.by(() => {
-		const inProgressTask = todos.find(t => t.status === 'in_progress');
-		if (inProgressTask) return inProgressTask;
-		return todos.find(t => t.status === 'pending');
-	});
-
-	// Check if all tasks are completed
-	const allCompleted = $derived(
-		todos.length > 0 && todos.every(t => t.status === 'completed')
+	// The step worth naming: what's running, or what's up next.
+	const activeTask = $derived.by(
+		() => todos.find((t) => t.status === 'in_progress') ?? todos.find((t) => t.status === 'pending')
 	);
 
-	// Progress percentage for circular progress bar
-	const progress = $derived.by(() => {
-		if (todos.length === 0) return 0;
-		return (todos.filter(t => t.status === 'completed').length / todos.length) * 100;
-	});
-
-	// SVG circle properties for progress ring
-	const circleRadius = 6;
-	const circumference = 2 * Math.PI * circleRadius;
+	const allCompleted = $derived(todos.length > 0 && todos.every((t) => t.status === 'completed'));
 </script>
 
 {#if todos.length > 0}
-	<div class="w-full">
-		<!-- Collapsed Header -->
-		<button
-			onclick={toggleExpanded}
-			class="todo-toggle-btn w-full flex items-center gap-2 py-1.5 text-left rounded px-2 -mx-2 transition-colors"
-		>
-			<!-- Circular Progress or Checkmark -->
-			{#if allCompleted}
-				<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-				</svg>
-			{:else}
-				<!-- Circular progress bar -->
-				<svg class="w-4 h-4 flex-shrink-0 -rotate-90" viewBox="0 0 16 16">
-					<!-- Background circle -->
-					<circle
-						cx="8"
-						cy="8"
-						r={circleRadius}
-						fill="none"
-						stroke="currentColor"
-						stroke-width="2"
-						class="text-muted-foreground/30"
-					/>
-					<!-- Progress circle -->
-					<circle
-						cx="8"
-						cy="8"
-						r={circleRadius}
-						fill="none"
-						stroke="currentColor"
-						stroke-width="2"
-						stroke-linecap="round"
-						class="text-green-500 transition-all duration-300"
-						stroke-dasharray={circumference}
-						stroke-dashoffset={circumference - (progress / 100) * circumference}
-					/>
-				</svg>
-			{/if}
+	<div class="todo">
+		<button type="button" class="todo-row" onclick={toggleExpanded} aria-expanded={isExpanded}>
+			<span class="wlbar" aria-hidden="true">
+				{#each todos as todo, i (i)}
+					<i
+						class:f={todo.status === 'completed'}
+						class:c={todo.status === 'in_progress'}
+					></i>
+				{/each}
+			</span>
 
-			<!-- Task text -->
-			<span class="flex-1 text-sm text-muted-foreground truncate">
+			<span class="todo-label">
 				{#if allCompleted}
 					All tasks completed
 				{:else if activeTask}
-					{activeTask?.status === 'in_progress' ? activeTask?.activeForm : activeTask?.content}
+					{activeTask.status === 'in_progress' ? activeTask.activeForm : activeTask.content}
 				{:else}
 					{stats.total} pending tasks
 				{/if}
 			</span>
 
-			<!-- Progress count -->
-			<span class="text-sm text-muted-foreground tabular-nums flex-shrink-0">
-				{stats.completed}/{stats.total}
-			</span>
+			<span class="todo-count mono">{stats.completed}/{stats.total}</span>
 
-			<!-- Chevron -->
 			<svg
-				class="w-4 h-4 text-muted-foreground transition-transform duration-200 flex-shrink-0 {isExpanded ? 'rotate-180' : ''}"
+				class="todo-chev"
+				class:is-open={isExpanded}
+				width="13"
+				height="13"
+				viewBox="0 0 24 24"
 				fill="none"
 				stroke="currentColor"
-				viewBox="0 0 24 24"
+				stroke-width="2"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+				aria-hidden="true"
 			>
-				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+				<path d="m6 9 6 6 6-6" />
 			</svg>
 		</button>
 
-		<!-- Expanded Task List -->
 		{#if isExpanded}
-			<div class="mt-1 space-y-0.5">
+			<ul class="todo-items">
 				{#each todos as todo, index (index)}
-					<div
-						class="flex items-center gap-2 py-1 px-2 -mx-2 rounded {todo.status === 'in_progress' ? 'bg-muted/40' : ''}"
-					>
-						<!-- Checkbox style icon -->
+					<li class="todo-item" class:is-current={todo.status === 'in_progress'}>
 						{#if todo.status === 'completed'}
-							<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+							<svg class="glyph is-done" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+								<path d="M20 6 9 17l-5-5" />
+							</svg>
+						{:else if todo.status === 'in_progress'}
+							<svg class="glyph is-current" width="13" height="13" viewBox="0 0 24 24" aria-hidden="true">
+								<circle cx="12" cy="12" r="4.5" fill="currentColor" />
 							</svg>
 						{:else}
-							<div class="w-4 h-4 rounded border border-muted-foreground/40 flex-shrink-0"></div>
+							<svg class="glyph is-pending" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+								<circle cx="12" cy="12" r="5" />
+							</svg>
 						{/if}
-
-						<!-- Task text -->
-						<span
-							class="flex-1 text-sm truncate {todo.status === 'completed' ? 'text-muted-foreground line-through' : 'text-foreground'}"
-						>
+						<span class="todo-text" class:is-done={todo.status === 'completed'}>
 							{todo.status === 'in_progress' ? todo.activeForm : todo.content}
 						</span>
-					</div>
+					</li>
 				{/each}
-			</div>
+			</ul>
 		{/if}
 	</div>
 {/if}
 
 <style>
-	.todo-toggle-btn:hover {
-		background: var(--hover-overlay);
+	.todo {
+		width: 100%;
+		min-width: 0;
+		margin: 0 -8px;
 	}
 
-	.todo-toggle-btn:focus-visible {
+	.todo-row {
+		display: flex;
+		align-items: center;
+		gap: 9px;
+		width: 100%;
+		padding: 6px 8px;
+		border: none;
+		background: transparent;
+		border-radius: 8px;
+		text-align: left;
+		cursor: pointer;
+		transition: background-color 0.13s ease;
+	}
+
+	.todo-row:hover {
+		background: var(--scrim);
+	}
+
+	.todo-row:focus-visible {
 		outline: 2px solid var(--ring);
-		outline-offset: 2px;
+		outline-offset: -2px;
+	}
+
+	.wlbar {
+		display: inline-flex;
+		align-items: center;
+		gap: 2.5px;
+		flex: none;
+		flex-wrap: wrap;
+		max-width: 45%;
+	}
+
+	.wlbar i {
+		width: 7px;
+		height: 3px;
+		border-radius: 2px;
+		background: var(--border-strong);
+		transition: background-color 0.2s ease;
+	}
+
+	.wlbar i.f {
+		background: var(--emerald);
+	}
+
+	.wlbar i.c {
+		background: var(--blue);
+	}
+
+	.todo-label {
+		flex: 1;
+		min-width: 0;
+		font-size: 12.5px;
+		color: var(--muted-foreground);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.todo-count {
+		flex: none;
+		font-family: var(--font-mono);
+		font-size: 11px;
+		color: var(--subtle-foreground);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.todo-chev {
+		flex: none;
+		color: var(--subtle-foreground);
+		transition: transform 0.16s ease;
+	}
+
+	.todo-chev.is-open {
+		transform: rotate(180deg);
+	}
+
+	.todo-items {
+		list-style: none;
+		margin: 2px 0 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+	}
+
+	.todo-item {
+		display: flex;
+		align-items: center;
+		gap: 9px;
+		padding: 4px 8px;
+		border-radius: 8px;
+		min-width: 0;
+	}
+
+	.todo-item.is-current {
+		background: var(--scrim);
+	}
+
+	.glyph {
+		flex: none;
+	}
+
+	.glyph.is-done {
+		color: var(--emerald);
+	}
+
+	.glyph.is-current {
+		color: var(--blue);
+	}
+
+	.glyph.is-pending {
+		color: var(--border-strong);
+	}
+
+	.todo-text {
+		flex: 1;
+		min-width: 0;
+		font-size: 12.5px;
+		color: var(--foreground);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.todo-text.is-done {
+		color: var(--subtle-foreground);
+		text-decoration: line-through;
 	}
 </style>

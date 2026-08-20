@@ -40,6 +40,21 @@
 		};
 	});
 
+	/**
+	 * One pill per tool call the subagent has made, in order: done, failed,
+	 * running, or not-yet-started. Same tick-bar idiom the todo row uses, so a
+	 * glance across the transcript reads progress the same way everywhere.
+	 */
+	const tickBar = $derived(
+		validChildren
+			.filter((c) => c.type === 'tool_use')
+			.map((c) => {
+				if (c.toolStatus === 'error') return 'e';
+				if (c.toolStatus === 'complete') return 'f';
+				return 'c';
+			})
+	);
+
 	// Get status display. `isRunning` also honors the registry truth of running
 	// background tasks (activeTasks), so a subagent card whose launch tool id is
 	// still running is forced to the spinner even if the server-supplied status
@@ -207,80 +222,74 @@
 	}
 </script>
 
-<details class="w-full border border-border rounded-lg overflow-hidden group">
-	<summary class="subagent-summary w-full min-w-0 px-3 py-2 flex items-center gap-2 cursor-pointer list-none transition-colors">
-		<!-- Status icon -->
-		{#if statusInfo.isRunning}
-			<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-			</svg>
-		{:else if statusInfo.isError}
-			<svg class="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-			</svg>
+<details class="w-full subagent-card group">
+	<summary class="subagent-summary">
+		<!-- Tick bar: one pill per tool call, or the agent glyph before any run. -->
+		{#if tickBar.length > 0}
+			<span class="wlbar" aria-hidden="true">
+				{#each tickBar as state, i (i)}
+					<i class:f={state === 'f'} class:c={state === 'c'} class:e={state === 'e'}></i>
+				{/each}
+			</span>
 		{:else}
-			<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+			<svg class="sa-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
 			</svg>
 		{/if}
 
-		<!-- Subagent icon -->
-		<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-		</svg>
-
-		<!-- IDENTITY badge: the AGENT's name when the dispatcher supplied one
+		<!-- IDENTITY: the AGENT's name when the dispatcher supplied one
 		     (2026-08-17 ruling), otherwise the historical model/type badge. -->
 		{#if message.agentName}
-			<span class="px-1.5 py-0.5 text-xs font-medium bg-primary/20 text-primary rounded-full flex-shrink-0">
-				{message.agentName}
-			</span>
+			<span class="sa-name">{message.agentName}</span>
 			<!-- The model slug stays visible, demoted to a secondary chip. -->
 			{#if message.agentType}
-				<span
-					class="px-1.5 py-0.5 text-[10px] font-medium bg-muted text-muted-foreground rounded-full flex-shrink-0 hidden sm:inline"
-					title="Model: {message.agentType}"
-				>{getModelBadge(message.agentType).label}</span>
+				<span class="sa-chip" title="Model: {message.agentType}">
+					{getModelBadge(message.agentType).label}
+				</span>
 			{/if}
 		{:else if message.agentType}
-			{@const badge = getModelBadge(message.agentType)}
-			<span class="px-1.5 py-0.5 text-xs font-medium {badge.color} rounded-full flex-shrink-0">
-				{badge.label}
-			</span>
+			<span class="sa-name">{getModelBadge(message.agentType).label}</span>
 		{/if}
 
 		<!-- Description or default label -->
-		<span class="text-sm font-medium text-foreground truncate min-w-0">
-			{message.agentDescription || 'Subagent'}
+		<span class="sa-desc">{message.agentDescription || 'Subagent'}</span>
+
+		<span class="sa-right">
+			<!-- Usage stats from task_progress (tokens, duration) -->
+			{#if message.agentUsage}
+				{@const usageText = formatUsage(message.agentUsage)}
+				{#if usageText}
+					<span class="sa-usage mono">{usageText}</span>
+				{/if}
+			{/if}
+
+			<!-- Tool count, with failures called out — a collapsed failed card
+			     showed no count at all. -->
+			{#if childCounts.toolUse > 0}
+				<span class="sa-count mono">{childCounts.completedTools}/{childCounts.toolUse}</span>
+				{#if childCounts.errorTools > 0}
+					<span class="sa-failed mono">({childCounts.errorTools} failed)</span>
+				{/if}
+			{/if}
+
+			<svg class="sa-chev" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<path d="m6 9 6 6 6-6" />
+			</svg>
+
+			{#if statusInfo.isRunning}
+				<svg class="sa-glyph is-running" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+					<path d="M12 3a9 9 0 1 0 9 9" />
+				</svg>
+			{:else if statusInfo.isError}
+				<svg class="sa-glyph is-error" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+					<path d="M18 6 6 18M6 6l12 12" />
+				</svg>
+			{:else}
+				<svg class="sa-glyph is-ok" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<path d="M20 6 9 17l-5-5" />
+				</svg>
+			{/if}
 		</span>
-
-		<!-- Tool count (if any), with failures called out like the main feed's
-		     tool group chip — a collapsed failed card showed no count at all. -->
-		{#if childCounts.toolUse > 0}
-			<span class="text-muted-foreground flex-shrink-0">•</span>
-			<span class="text-xs text-muted-foreground flex-shrink-0">
-				{childCounts.completedTools}/{childCounts.toolUse} tools
-			</span>
-			{#if childCounts.errorTools > 0}
-				<span class="text-xs text-red-500 flex-shrink-0">({childCounts.errorTools} failed)</span>
-			{/if}
-		{/if}
-
-		<!-- Usage stats from task_progress (tokens, duration) -->
-		{#if message.agentUsage}
-			{@const usageText = formatUsage(message.agentUsage)}
-			{#if usageText}
-				<span class="text-muted-foreground flex-shrink-0">•</span>
-				<span class="text-xs text-muted-foreground flex-shrink-0">
-					{usageText}
-				</span>
-			{/if}
-		{/if}
-
-		<!-- Chevron -->
-		<svg class="w-4 h-4 text-muted-foreground ml-auto transition-transform group-open:rotate-180 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-		</svg>
 	</summary>
 
 	<!-- Expanded content -->
@@ -458,13 +467,142 @@
 </details>
 
 <style>
+	.subagent-card {
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		overflow: hidden;
+		background: color-mix(in oklch, var(--card) 55%, transparent);
+	}
+
+	.subagent-summary {
+		display: flex;
+		align-items: center;
+		gap: 9px;
+		width: 100%;
+		min-width: 0;
+		padding: 7px 10px;
+		cursor: pointer;
+		list-style: none;
+		transition: background-color 0.13s ease;
+	}
+
+	.subagent-summary::-webkit-details-marker {
+		display: none;
+	}
+
 	.subagent-summary:hover {
-		background: var(--hover-overlay);
+		background: var(--scrim);
 	}
 
 	.subagent-summary:focus-visible {
 		outline: 2px solid var(--ring);
 		outline-offset: -2px;
+	}
+
+	.wlbar {
+		display: inline-flex;
+		align-items: center;
+		gap: 2.5px;
+		flex: none;
+		flex-wrap: wrap;
+		max-width: 33%;
+	}
+
+	.wlbar i {
+		width: 7px;
+		height: 3px;
+		border-radius: 2px;
+		background: var(--border-strong);
+	}
+
+	.wlbar i.f { background: var(--emerald); }
+	.wlbar i.c { background: var(--blue); }
+	.wlbar i.e { background: var(--rose); }
+
+	.sa-icon {
+		flex: none;
+		color: var(--subtle-foreground);
+	}
+
+	.sa-name {
+		flex: none;
+		font-size: 12.5px;
+		font-weight: 600;
+		color: var(--foreground);
+		white-space: nowrap;
+	}
+
+	.sa-chip {
+		flex: none;
+		font-size: 10px;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
+		color: var(--subtle-foreground);
+		border: 1px solid var(--border);
+		border-radius: 5px;
+		padding: 1px 5px;
+	}
+
+	.sa-desc {
+		min-width: 0;
+		font-size: 12px;
+		color: var(--muted-foreground);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.sa-right {
+		margin-left: auto;
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		flex: none;
+		color: var(--subtle-foreground);
+	}
+
+	.sa-usage,
+	.sa-count,
+	.sa-failed {
+		font-family: var(--font-mono);
+		font-size: 11px;
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+	}
+
+	.sa-usage {
+		display: none;
+	}
+
+	@media (min-width: 640px) {
+		.sa-usage { display: inline; }
+	}
+
+	.sa-failed {
+		color: var(--rose);
+	}
+
+	.sa-chev {
+		transition: transform 0.16s ease;
+	}
+
+	.subagent-card[open] .sa-chev {
+		transform: rotate(180deg);
+	}
+
+	.sa-glyph.is-ok { color: var(--emerald); }
+	.sa-glyph.is-error { color: var(--rose); }
+	.sa-glyph.is-running {
+		color: var(--primary);
+		animation: sa-spin 0.9s linear infinite;
+	}
+
+	@keyframes sa-spin {
+		to { transform: rotate(360deg); }
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.sa-glyph.is-running { animation-duration: 2.4s; }
 	}
 
 	.subagent-tool-summary:hover {

@@ -31,7 +31,9 @@
 		type ScrollMetrics
 	} from '$lib/stores/session/auto-scroll';
 	import ToolUseMessage from './ToolUseMessage.svelte';
-	import ToolUseGroup from './ToolUseGroup.svelte';
+	import WorkLogGroup from './WorkLogGroup.svelte';
+	import { buildDisplayItems, type DisplayItem } from '$lib/utils/work-log';
+	import { getModelLabel } from '$lib/constants/models.svelte';
 	import SystemMessageGroup from './SystemMessageGroup.svelte';
 	import ThinkingBlock from './ThinkingBlock.svelte';
 	import CommandMessage from './CommandMessage.svelte';
@@ -183,6 +185,20 @@
 		return sessionProfile?.name ?? 'Assistant';
 	}
 
+	/**
+	 * Display name for the model that produced a message.
+	 *
+	 * The reducer stamps `metadata.model` on a closed assistant message when the
+	 * turn's event carried one; that is the only per-message model attribution
+	 * that exists, so messages without it fall back to the profile name (which
+	 * IS per-message, via profileId).
+	 */
+	function getModelDisplayName(message: ChatMessage): string | null {
+		const model = (message.metadata as Record<string, unknown> | undefined)?.model;
+		if (typeof model !== 'string' || !model) return null;
+		return getModelLabel(model);
+	}
+
 	// Chat preferences (reactive via .current getter)
 	const chatPrefs = $derived(chatPreferences.current);
 
@@ -225,13 +241,10 @@
 		)
 	);
 
-	// --- Tool call grouping ---
-	// Groups 2+ consecutive "regular" tool_use messages into a single display item.
-	// TodoWrite, Task, and Agent tools are excluded from grouping.
-	type DisplayItem =
-		| { kind: 'message'; message: ChatMessage; index: number }
-		| { kind: 'tool_group'; tools: ChatMessage[]; indices: number[] }
-		| { kind: 'system_group'; messages: ChatMessage[]; indices: number[] };
+	// --- Transcript grouping ---
+	// The turn-aware work-log builder lives in $lib/utils/work-log so it can be
+	// reasoned about (and tested) without a DOM. This component only decides
+	// which component each surviving message becomes.
 
 	// Rewind fallback occurrence: 0-based index of a user PROMPT among the
 	// PRIOR user prompts with IDENTICAL (trimmed) content — usually 0. The
@@ -252,34 +265,6 @@
 			}
 		}
 		return occurrence;
-	}
-
-	function isGroupableTool(msg: ChatMessage): boolean {
-		return msg.type === 'tool_use'
-			&& msg.toolName !== 'TodoWrite'
-			&& msg.toolName !== 'Task'
-			&& msg.toolName !== 'Agent';
-	}
-
-	// Subtypes considered low-signal / hook-related — group into a collapsible
-	// summary when they arrive consecutively. Important system messages
-	// (errors, compact boundaries, mode changes, /context, local commands,
-	// agent launches, rewind notices) are intentionally excluded so they stay
-	// visible as full cards.
-	const GROUPABLE_SYSTEM_SUBTYPES = new Set([
-		'hook_started',
-		'hook_response',
-		'stop_hook_summary',
-		'turn_duration',
-		'task_started',
-		'task_progress',
-		'task_updated',
-		'task_notification'
-	]);
-
-	function isGroupableSystem(msg: ChatMessage): boolean {
-		return msg.type === 'system'
-			&& GROUPABLE_SYSTEM_SUBTYPES.has(msg.systemSubtype || '');
 	}
 
 	// Memoize the grouped display list by (messages, isStreaming) identity.
@@ -309,70 +294,17 @@
 			// cached array reference so downstream {#each} skips re-diffing.
 			return _displayCache.items;
 		}
-		const items: DisplayItem[] = [];
 		// Diagnostic: log when displayItems re-evaluates after streaming ends
 		if (STREAM_DEBUG && !isStreamingNow && messages.length > 0) {
 			const aTexts = messages.filter((m: ChatMessage) => m.role === 'assistant' && m.type === 'text');
 			const hasStrmMsg = messages.some((m: ChatMessage) => m.streaming);
 			console.debug(`[displayItems] re-eval: ${messages.length} msgs, streaming=${isStreamingNow}, hasStreamingMsg=${hasStrmMsg}, aTexts=${aTexts.length} [${aTexts.map((m: ChatMessage) => `len=${(m.content||'').length}`).join(',')}]`);
 		}
-		// Deduplicate by message ID to prevent Svelte 5 each_key_duplicate crashes.
-		// Duplicates can originate from delta merge edge cases or corrupted caches.
-		const seenIds = new Set<string>();
-		let i = 0;
 
-		while (i < messages.length) {
-			const msg = messages[i];
-			if (msg.id && seenIds.has(msg.id)) { i++; continue; }
-
-			if (msg.id) seenIds.add(msg.id);
-
-			if (groupingEnabled && isGroupableTool(msg)) {
-				// Only group strictly consecutive groupable tools.
-				// Any assistant text/thinking between tools breaks the group.
-				const tools: ChatMessage[] = [msg];
-				const indices: number[] = [i];
-				let j = i + 1;
-				while (j < messages.length && isGroupableTool(messages[j])) {
-					const toolMsg = messages[j];
-					if (toolMsg.id && seenIds.has(toolMsg.id)) { j++; continue; }
-					if (toolMsg.id) seenIds.add(toolMsg.id);
-					tools.push(toolMsg);
-					indices.push(j);
-					j++;
-				}
-
-				if (tools.length >= 2) {
-					items.push({ kind: 'tool_group', tools, indices });
-				} else {
-					items.push({ kind: 'message', message: msg, index: i });
-				}
-				i = j;
-			} else if (isGroupableSystem(msg)) {
-				// Group consecutive low-signal system/hook messages.
-				const sysMsgs: ChatMessage[] = [msg];
-				const indices: number[] = [i];
-				let j = i + 1;
-				while (j < messages.length && isGroupableSystem(messages[j])) {
-					const sysMsg = messages[j];
-					if (sysMsg.id && seenIds.has(sysMsg.id)) { j++; continue; }
-					if (sysMsg.id) seenIds.add(sysMsg.id);
-					sysMsgs.push(sysMsg);
-					indices.push(j);
-					j++;
-				}
-
-				if (sysMsgs.length >= 2) {
-					items.push({ kind: 'system_group', messages: sysMsgs, indices });
-				} else {
-					items.push({ kind: 'message', message: msg, index: i });
-				}
-				i = j;
-			} else {
-				items.push({ kind: 'message', message: msg, index: i });
-				i++;
-			}
-		}
+		const items = buildDisplayItems(messages, {
+			isStreaming: isStreamingNow,
+			groupingEnabled
+		});
 
 		_displayCache.messages = messages;
 		_displayCache.isStreaming = isStreamingNow;
@@ -1030,127 +962,26 @@
 		</div>
 	{:else}
 		<!-- Messages -->
-		<div class="max-w-5xl mx-auto px-4 sm:px-8 py-4 space-y-4">
-			{#each displayItems as item, i (item.kind === 'tool_group' ? 'tg-' + item.tools[0].id : item.kind === 'system_group' ? 'sg-' + item.messages[0].id : item.message.id)}
+		<div class="chat-column">
+			{#each displayItems as item, i (item.kind === 'work_log' ? item.key : item.kind === 'system_group' ? 'sg-' + item.messages[0].id : item.message.id)}
 				<!-- content-visibility: auto lets the browser skip paint/layout for off-screen
 				     messages. The last LIVE_TAIL items opt OUT (.msg-live) so the growing
 				     streaming region near the viewport bottom is never re-estimated. -->
 				<div class="msg-virtualized" class:msg-live={i >= displayItems.length - LIVE_TAIL}>
-				{#if item.kind === 'tool_group'}
-					<!-- Grouped tool calls (2+ consecutive regular tools from the same turn) -->
-					<ToolUseGroup tools={item.tools} />
+				{#if item.kind === 'work_log'}
+					<!-- Routine steps of one turn, folded (see $lib/utils/work-log) -->
+					<WorkLogGroup
+						mode={item.mode}
+						folded={item.folded}
+						tail={item.tail}
+						durationLabel={item.durationLabel}
+						row={messageBody}
+					/>
 				{:else if item.kind === 'system_group'}
 					<!-- Grouped system/hook messages (2+ consecutive low-signal events) -->
 					<SystemMessageGroup messages={item.messages} />
 				{:else}
-					{@const message = item.message}
-					{@const messageIndex = item.index}
-					{#if message.type === 'command'}
-						<!-- Slash command invocation (e.g., /commit, /ralph-loop) -->
-						<CommandMessage
-							commandName={message.commandName || message.content}
-							commandArgs={message.commandArgs}
-						/>
-					{:else if message.role === 'user'}
-						<UserMessage
-							content={message.content}
-							timestamp={message.timestamp}
-							sessionId={$activeSession.sessionId}
-							messageUuid={message.jsonlUuid}
-							userPromptOccurrence={userPromptOccurrence($activeSession.messages, messageIndex)}
-							{fileCheckpointingEnabled}
-							onRewindComplete={handleRewindComplete}
-						/>
-					{:else if message.type === 'thinking' && chatPrefs?.showThinkingBlocks !== false}
-						<!-- Thinking block - shown based on user preference -->
-						<ThinkingBlock
-							content={message.content}
-							streaming={message.streaming}
-							thinkingTokens={message.thinkingTokens}
-							profileName={getProfileName(message)}
-						/>
-					{:else if message.type === 'text' || !message.type}
-						{@const isStreamAnchor = !!(message.streaming && messageIndex === lastStreamingMessageIndex)}
-						<!-- Suppress empty phantom assistant-text bubbles. The turn-start
-						     synthetic (empty streaming text) is re-appended to the tail during
-						     post-tool think-gaps and while parked on a subagent; when it is not
-						     the streaming anchor it renders only a bare "Name • time" header —
-						     no body, no indicator — the confusing empty "Principal Engineer …"
-						     bubble. The single activity signal is the bottom gap dots or the
-						     real streaming message's own inline cursor. -->
-						{#if shouldRenderAssistantText(message.content, isStreamAnchor)}
-							<AssistantMessage
-								content={message.content}
-								timestamp={message.timestamp}
-								messageIndex={messageIndex}
-								messageId={message.id}
-								messageUuid={message.jsonlUuid}
-								sessionId={$activeSession.sessionId}
-								streaming={isStreamAnchor}
-								{hasPartialMessages}
-								{fileCheckpointingEnabled}
-								metadata={message.metadata}
-								onRewindComplete={handleRewindComplete}
-								profileName={getProfileName(message)}
-							/>
-						{/if}
-					{:else if message.type === 'tool_use' && message.toolName === 'TodoWrite'}
-						<!-- TodoWrite - Render as TodoList component (also handles streaming partial input) -->
-						{@const todos = extractTodosFromMessage(message)}
-						{#if todos && todos.length > 0}
-							<div class="w-full">
-								<div class="min-w-0">
-									<TodoList {todos} />
-								</div>
-							</div>
-						{/if}
-					{:else if message.type === 'tool_use' && (message.toolName === 'Task' || message.toolName === 'Agent')}
-						<!-- Subagent tool_use (SDK "Task" or "Agent") - Skip if a linked SubagentMessage exists -->
-						<!-- The SubagentMessage component handles displaying the agent's work -->
-						{@const hasLinkedSubagent = $activeSession.messages.some(m => m.type === 'subagent' && m.toolId === message.toolId)}
-						{#if !hasLinkedSubagent}
-							<ToolUseMessage
-								name={message.toolName || 'Tool'}
-								input={message.toolInput}
-								partialInput={message.partialToolInput}
-								result={message.toolResult}
-								status={message.toolStatus || 'running'}
-								streaming={message.streaming}
-							/>
-						{/if}
-					{:else if message.type === 'tool_use'}
-						<ToolUseMessage
-							name={message.toolName || 'Tool'}
-							input={message.toolInput}
-							partialInput={message.partialToolInput}
-							result={message.toolResult}
-							status={message.toolStatus || 'running'}
-							streaming={message.streaming}
-							serverSide={message.serverSide ?? message.server_side ?? false}
-							screenshot={message.toolScreenshot}
-						/>
-					{:else if message.type === 'tool_result'}
-						<!-- Skip standalone tool_result messages - they should be merged into tool_use -->
-						<!-- This prevents flickering where result briefly appears separately -->
-					{:else if message.type === 'system'}
-						<div class="w-full">
-							<div class="min-w-0">
-								<SystemMessage {message} />
-							</div>
-						</div>
-					{:else if message.type === 'subagent'}
-						<div class="w-full">
-							<div class="min-w-0">
-								<SubagentMessage {message} {runningToolIds} />
-							</div>
-						</div>
-					{:else if message.type === 'team_member'}
-						<div class="w-full">
-							<div class="min-w-0">
-								<TeamMemberMessage {message} parentSessionId={$activeSession.sessionId ?? ''} />
-							</div>
-						</div>
-					{/if}
+					{@render messageBody(item.message, item.index)}
 				{/if}
 			</div>
 			{/each}
@@ -1175,6 +1006,118 @@
 	{/if}
 </div>
 
+<!-- The one dispatch table: message → component. Shared with WorkLogGroup so a
+     folded row renders exactly as it would inline. -->
+{#snippet messageBody(message: ChatMessage, messageIndex: number)}
+	{#if message.type === 'command'}
+		<!-- Slash command invocation (e.g., /commit, /ralph-loop) -->
+		<CommandMessage
+			commandName={message.commandName || message.content}
+			commandArgs={message.commandArgs}
+		/>
+	{:else if message.role === 'user'}
+		<UserMessage
+			content={message.content}
+			timestamp={message.timestamp}
+			sessionId={$activeSession.sessionId}
+			messageUuid={message.jsonlUuid}
+			userPromptOccurrence={userPromptOccurrence($activeSession.messages, messageIndex)}
+			{fileCheckpointingEnabled}
+			onRewindComplete={handleRewindComplete}
+		/>
+	{:else if message.type === 'thinking' && chatPrefs?.showThinkingBlocks !== false}
+		<!-- Thinking block - shown based on user preference -->
+		<ThinkingBlock
+			content={message.content}
+			streaming={message.streaming}
+			thinkingTokens={message.thinkingTokens}
+			profileName={getProfileName(message)}
+		/>
+	{:else if message.type === 'text' || !message.type}
+		{@const isStreamAnchor = !!(message.streaming && messageIndex === lastStreamingMessageIndex)}
+		<!-- Suppress empty phantom assistant-text bubbles. The turn-start
+		     synthetic (empty streaming text) is re-appended to the tail during
+		     post-tool think-gaps and while parked on a subagent; when it is not
+		     the streaming anchor it renders only a bare "Name • time" header —
+		     no body, no indicator — the confusing empty "Principal Engineer …"
+		     bubble. The single activity signal is the bottom gap dots or the
+		     real streaming message's own inline cursor. -->
+		{#if shouldRenderAssistantText(message.content, isStreamAnchor)}
+			<AssistantMessage
+				content={message.content}
+				timestamp={message.timestamp}
+				messageIndex={messageIndex}
+				messageId={message.id}
+				messageUuid={message.jsonlUuid}
+				sessionId={$activeSession.sessionId}
+				streaming={isStreamAnchor}
+				{hasPartialMessages}
+				{fileCheckpointingEnabled}
+				metadata={message.metadata}
+				onRewindComplete={handleRewindComplete}
+				profileName={getProfileName(message)}
+				modelLabel={getModelDisplayName(message)}
+			/>
+		{/if}
+	{:else if message.type === 'tool_use' && message.toolName === 'TodoWrite'}
+		<!-- TodoWrite - Render as TodoList component (also handles streaming partial input) -->
+		{@const todos = extractTodosFromMessage(message)}
+		{#if todos && todos.length > 0}
+			<div class="w-full">
+				<div class="min-w-0">
+					<TodoList {todos} />
+				</div>
+			</div>
+		{/if}
+	{:else if message.type === 'tool_use' && (message.toolName === 'Task' || message.toolName === 'Agent')}
+		<!-- Subagent tool_use (SDK "Task" or "Agent") - Skip if a linked SubagentMessage exists -->
+		<!-- The SubagentMessage component handles displaying the agent's work -->
+		{@const hasLinkedSubagent = $activeSession.messages.some(m => m.type === 'subagent' && m.toolId === message.toolId)}
+		{#if !hasLinkedSubagent}
+			<ToolUseMessage
+				name={message.toolName || 'Tool'}
+				input={message.toolInput}
+				partialInput={message.partialToolInput}
+				result={message.toolResult}
+				status={message.toolStatus || 'running'}
+				streaming={message.streaming}
+			/>
+		{/if}
+	{:else if message.type === 'tool_use'}
+		<ToolUseMessage
+			name={message.toolName || 'Tool'}
+			input={message.toolInput}
+			partialInput={message.partialToolInput}
+			result={message.toolResult}
+			status={message.toolStatus || 'running'}
+			streaming={message.streaming}
+			serverSide={message.serverSide ?? message.server_side ?? false}
+			screenshot={message.toolScreenshot}
+		/>
+	{:else if message.type === 'tool_result'}
+		<!-- Skip standalone tool_result messages - they should be merged into tool_use -->
+		<!-- This prevents flickering where result briefly appears separately -->
+	{:else if message.type === 'system'}
+		<div class="w-full">
+			<div class="min-w-0">
+				<SystemMessage {message} />
+			</div>
+		</div>
+	{:else if message.type === 'subagent'}
+		<div class="w-full">
+			<div class="min-w-0">
+				<SubagentMessage {message} {runningToolIds} />
+			</div>
+		</div>
+	{:else if message.type === 'team_member'}
+		<div class="w-full">
+			<div class="min-w-0">
+				<TeamMemberMessage {message} parentSessionId={$activeSession.sessionId ?? ''} />
+			</div>
+		</div>
+	{/if}
+{/snippet}
+
 <!-- Fullscreen media preview overlay (driven by the lightbox store) -->
 <MediaLightbox />
 
@@ -1186,6 +1129,25 @@
 	   the default, but we assert it so nothing downstream defeats it. */
 	.msg-scroll {
 		overflow-anchor: auto;
+	}
+
+	/* The reading column. A fixed 768px measure keeps prose at a comfortable
+	   line length no matter how wide the window gets, and every transcript
+	   element (bubbles, work-log rows, subagent cards) aligns to it. */
+	.chat-column {
+		max-width: 768px;
+		margin: 0 auto;
+		padding: 26px 24px 24px;
+		display: flex;
+		flex-direction: column;
+		gap: 22px;
+	}
+
+	@media (max-width: 640px) {
+		.chat-column {
+			padding: 18px 14px 16px;
+			gap: 18px;
+		}
 	}
 
 	/* Browser-native virtualization: skip paint/layout for off-screen messages.

@@ -150,12 +150,13 @@
 <div class="thinking-block" class:streaming>
 	<!-- Collapsible Header -->
 	<button
+		type="button"
 		onclick={toggleExpanded}
 		class="thinking-header"
+		aria-expanded={isExpanded}
 	>
-		<span class="thinking-label">{profileName}</span>
 		<!-- Brain/thinking icon -->
-		<svg class="thinking-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+		<svg class="thinking-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 			<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
 			<path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
 			<path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/>
@@ -167,25 +168,34 @@
 			<path d="M19.967 17.484A4 4 0 0 1 18 18"/>
 		</svg>
 
-		{#if streaming}
-			<StreamingIndicator />
-		{/if}
+		<span class="thinking-label">Thinking</span>
+		<span class="thinking-who" title={profileName}>{profileName}</span>
 
-		{#if thinkingTokens != null}
-			<span class="thinking-tokens" title="Estimated thinking tokens">
-				{thinkingTokens.toLocaleString()} tokens
-			</span>
-		{/if}
+		<span class="thinking-right">
+			{#if thinkingTokens != null}
+				<span class="thinking-tokens" title="Estimated thinking tokens">
+					{thinkingTokens.toLocaleString()} tokens
+				</span>
+			{/if}
 
-		<!-- Chevron -->
-		<svg
-			class="thinking-chevron {isExpanded ? 'expanded' : ''}"
-			fill="none"
-			stroke="currentColor"
-			viewBox="0 0 24 24"
-		>
-			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-		</svg>
+			<!-- Chevron -->
+			<svg
+				class="thinking-chevron {isExpanded ? 'expanded' : ''}"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+				viewBox="0 0 24 24"
+				aria-hidden="true"
+			>
+				<path d="m6 9 6 6 6-6" />
+			</svg>
+
+			{#if streaming}
+				<StreamingIndicator />
+			{/if}
+		</span>
 	</button>
 
 	<!-- Summary when collapsed -->
@@ -206,68 +216,88 @@
 <style>
 	.thinking-block {
 		font-style: italic;
-		color: var(--text-muted, hsl(var(--muted-foreground)));
-		opacity: 0.85;
-		margin: 0.5rem 0;
+		color: var(--muted-foreground);
+		margin: 0 -8px;
+		min-width: 0;
 	}
 
 	/* .thinking-block.streaming — reserved for future pulse effect */
 
+	/* Same flat-row idiom as the work log: subtle icon, bold short name, muted
+	   detail, right cluster. Thinking is a step, not a card. */
 	.thinking-header {
 		display: flex;
 		align-items: center;
-		gap: 0.5rem;
+		gap: 9px;
 		font-style: normal;
 		width: 100%;
 		text-align: left;
-		padding: 0.375rem 0.5rem;
-		margin: 0 -0.5rem;
+		padding: 6px 8px;
 		border: none;
 		background: transparent;
-		border-radius: 0.375rem;
+		border-radius: 8px;
 		cursor: pointer;
-		transition: background-color 150ms ease;
+		transition: background-color 130ms ease;
 	}
 
 	.thinking-header:hover {
-		background: var(--hover-overlay);
+		background: var(--scrim);
 	}
 
 	.thinking-header:focus-visible {
 		outline: 2px solid var(--ring);
-		outline-offset: 2px;
+		outline-offset: -2px;
 	}
 
 	.thinking-label {
+		flex: none;
 		font-weight: 600;
-		font-size: 0.875rem;
-		color: color-mix(in oklch, var(--primary) 80%, var(--foreground));
+		font-size: 12.5px;
+		color: var(--foreground);
+		white-space: nowrap;
+	}
+
+	.thinking-who {
+		min-width: 0;
+		font-size: 11.5px;
+		font-family: var(--font-mono);
+		color: var(--muted-foreground);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.thinking-icon {
-		width: 1rem;
-		height: 1rem;
+		width: 14px;
+		height: 14px;
 		flex-shrink: 0;
-		color: color-mix(in oklch, var(--primary) 70%, var(--muted-foreground));
+		color: var(--subtle-foreground);
+	}
+
+	.thinking-right {
+		margin-left: auto;
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		flex: none;
+		color: var(--subtle-foreground);
 	}
 
 	.thinking-tokens {
 		font-style: normal;
-		font-size: 0.6875rem;
-		font-weight: 500;
-		color: var(--muted-foreground);
+		font-family: var(--font-mono);
+		font-size: 11px;
+		color: var(--subtle-foreground);
 		font-variant-numeric: tabular-nums;
-		opacity: 0.85;
 		white-space: nowrap;
 	}
 
 	.thinking-chevron {
-		width: 1rem;
-		height: 1rem;
+		width: 13px;
+		height: 13px;
 		flex-shrink: 0;
-		margin-left: auto;
-		color: var(--muted-foreground);
-		transition: transform 200ms ease;
+		color: var(--subtle-foreground);
+		transition: transform 160ms ease;
 	}
 
 	.thinking-chevron.expanded {
@@ -275,23 +305,21 @@
 	}
 
 	.thinking-summary {
-		font-size: 0.8125rem;
-		line-height: 1.5;
-		padding: 0.25rem 0.5rem;
-		margin: 0 -0.5rem;
-		color: var(--muted-foreground);
-		opacity: 0.7;
+		font-size: 12.5px;
+		line-height: 1.55;
+		margin: 2px 0 0 14px;
+		padding: 2px 0 2px 12px;
+		color: var(--subtle-foreground);
 		font-style: italic;
-		border-left: 2px solid var(--border);
-		margin-left: 0;
-		padding-left: 0.75rem;
+		border-left: 1px solid var(--border);
 	}
 
 	.thinking-content {
-		font-size: var(--text-sm, 0.875rem);
+		font-size: 13px;
 		line-height: 1.6;
-		padding: 0.5rem 0;
-		padding-left: 0.5rem;
+		margin: 4px 0 0 14px;
+		padding: 2px 0 2px 12px;
+		border-left: 1px solid var(--border);
 	}
 
 	/* Override prose styles to maintain italic + muted appearance */
