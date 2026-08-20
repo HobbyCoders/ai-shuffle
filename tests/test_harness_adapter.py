@@ -2144,7 +2144,7 @@ def test_openrouter_pricing_is_sanitized_from_bound_provider_only(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_safety_warning_and_hard_stop_are_visible_and_terminal():
+async def test_legacy_safety_events_remain_replayable():
     events = [
         lm.SafetyWarning(
             session_id=SID, code="spend_budget", message="Spend warning",
@@ -2660,16 +2660,17 @@ async def test_max_turns_becomes_model_call_budget(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_no_max_turns_uses_install_safety_ceiling(monkeypatch, tmp_path):
-    """An unset profile cannot bypass the conservative install ceiling."""
+async def test_no_max_turns_adds_no_automatic_limits(monkeypatch, tmp_path):
+    """Only an explicitly configured profile may cap a native turn."""
     captured = await _connect_capturing_native(monkeypatch, tmp_path)
-    assert captured["max_model_calls_per_turn"] == 12
-    assert captured["safety_limits"].hard_model_calls == 12
-    assert captured["trim"].trigger_tokens == 64_000
-    assert captured["trim"].keep_recent_tool_results == 5
+    assert "max_model_calls_per_turn" not in captured
+    assert "safety_limits" not in captured
+    assert "trim" not in captured
 
     captured = await _connect_capturing_native(monkeypatch, tmp_path, max_turns=0)
-    assert captured["max_model_calls_per_turn"] == 12
+    assert "max_model_calls_per_turn" not in captured
+    assert "safety_limits" not in captured
+    assert "trim" not in captured
 
 
 @pytest.mark.asyncio

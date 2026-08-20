@@ -40,8 +40,8 @@ HONORED:
     (max_tokens=...)``, the interim escape hatch from fluid's 8192 default
     until the reasoning/output config wave lands (plan wave W0a).
   * ``max_turns``            → native ``NativeLoop(max_model_calls_per_turn=...)``
-    when positive; fluid's default (50) otherwise. The delegated leg's CLI
-    enforces its own turn budget, so nothing is passed there.
+    when positive; unlimited otherwise. The delegated leg's CLI enforces its
+    own turn budget, so nothing is passed there.
   * ``mcp_servers``          → fluid ``registry.connect_mcp`` (external stdio/http).
     App configs are SDK-shaped (``{"type": "http"|"sse", "url", "headers"}``)
     while fluid's client dispatches on ``transport``, so configs are normalized
@@ -199,9 +199,7 @@ from app.core.provider.events import (
 # fluid imports (the library we wrap). Its top-level __init__ is intentionally
 # empty, so we import from submodules directly.
 from fluid.engine.native import NativeLoop
-from fluid.engine.safety import TurnSafetyLimits
 from fluid.engine.delegated import DelegatedLoop
-from fluid.context.trim import TrimConfig
 from fluid.events.ops import (
     Interrupt,
     RespondPermission,
@@ -438,25 +436,14 @@ class HarnessAdapter(ProviderAdapter):
                     "unavailable on this native leg",
                     fluid_session_id, options.cwd, exc_info=True,
                 )
-            # Engine caps the app can express today (plan wave W0a). Both are
-            # omitted unless configured so fluid keeps its own defaults
-            # (max_model_calls_per_turn=50, max_tokens=8192).
+            # Only explicit user configuration may limit a native turn. There
+            # is deliberately no install-wide model/token/cost/loop ceiling and
+            # no automatic context trimming: provider usage remains telemetry,
+            # never a reason for AI Shuffle to stop or rewrite a turn.
             native_caps: Dict[str, Any] = {}
-            safety_limits = _turn_safety_limits()
             requested_calls = _positive_int(getattr(options, "max_turns", None))
-            max_calls = min(
-                requested_calls or safety_limits.hard_model_calls,
-                safety_limits.hard_model_calls,
-            )
-            native_caps["max_model_calls_per_turn"] = max_calls
-            native_caps["safety_limits"] = safety_limits
-            from app.core.config import settings as app_settings
-            native_caps["trim"] = TrimConfig(
-                trigger_tokens=max(1, app_settings.turn_safety_trim_trigger_tokens),
-                keep_recent_tool_results=max(
-                    0, app_settings.turn_safety_trim_keep_recent_results
-                ),
-            )
+            if requested_calls is not None:
+                native_caps["max_model_calls_per_turn"] = requested_calls
             max_tokens = _native_max_output_tokens(options)
             if max_tokens is not None:
                 native_caps["max_tokens"] = max_tokens
@@ -1296,6 +1283,8 @@ class HarnessAdapter(ProviderAdapter):
             )]
 
         if cls == "SafetyWarning":
+            # Legacy replay compatibility only; NativeLoop no longer emits
+            # inferred safety warnings or stops.
             return [SystemMessage(
                 subtype="safety_limit" if event.hard else "safety_warning",
                 data={
@@ -1614,38 +1603,6 @@ class HarnessAdapter(ProviderAdapter):
 
 
 # ─── Module-level helpers ─────────────────────────────────────────────────────
-
-
-def _turn_safety_limits() -> TurnSafetyLimits:
-    """Build one immutable limit set from the install's persisted settings."""
-    from app.core.config import settings
-
-    hard_models = max(1, settings.turn_safety_max_model_calls)
-    hard_tools = max(1, settings.turn_safety_max_tool_calls)
-    hard_prompt = max(1, settings.turn_safety_max_prompt_tokens)
-    hard_cost = max(0.0, settings.turn_safety_max_cost_usd)
-    hard_repeat = max(1, settings.turn_safety_repeated_action_hard)
-    hard_new_page = max(1, settings.turn_safety_browser_new_page_hard)
-    return TurnSafetyLimits(
-        soft_model_calls=min(max(1, settings.turn_safety_soft_model_calls), hard_models),
-        hard_model_calls=hard_models,
-        soft_tool_calls=min(max(1, settings.turn_safety_soft_tool_calls), hard_tools),
-        hard_tool_calls=hard_tools,
-        soft_prompt_tokens=min(
-            max(1, settings.turn_safety_soft_prompt_tokens), hard_prompt
-        ),
-        hard_prompt_tokens=hard_prompt,
-        soft_cost_usd=min(max(0.0, settings.turn_safety_soft_cost_usd), hard_cost),
-        hard_cost_usd=hard_cost,
-        repeated_action_warn=min(
-            max(1, settings.turn_safety_repeated_action_warn), hard_repeat
-        ),
-        repeated_action_hard=hard_repeat,
-        browser_new_page_warn=min(
-            max(1, settings.turn_safety_browser_new_page_warn), hard_new_page
-        ),
-        browser_new_page_hard=hard_new_page,
-    )
 
 
 def _resolve_claude_cmd() -> Optional[list]:

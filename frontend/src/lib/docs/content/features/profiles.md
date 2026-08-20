@@ -32,7 +32,7 @@ A profile contains a `config` object with the following settings:
 | `permission_mode`  | string | `"default"`| How Claude handles permissions                  |
 | `thinking_mode`    | string | `"default"`| Extended thinking behavior (Sonnet/Haiku)       |
 | `effort`           | string | null       | Reasoning effort level (Opus 4.6+)              |
-| `max_turns`        | int    | null       | Maximum conversation turns per session          |
+| `max_turns`        | int    | null       | Optional model-call cap; null means unlimited    |
 
 #### Models
 

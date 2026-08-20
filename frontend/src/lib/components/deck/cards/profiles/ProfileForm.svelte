@@ -381,9 +381,9 @@
 				</div>
 			</div>
 			<div class="set-row">
-				<div class="lab"><h4>Max model calls per turn</h4><p>Caps how many model calls one turn may make. Empty = default.</p></div>
+				<div class="lab"><h4>Max model calls per turn</h4><p>Optional user-set cap. Empty = unlimited.</p></div>
 				<div class="ctl">
-					<input class="inp" type="number" value={profileForm.max_turns} oninput={(e) => { const v = (e.target as HTMLInputElement).value; onFormChange('max_turns', v ? Number(v) : null); }} placeholder="Default (50)" />
+					<input class="inp" type="number" value={profileForm.max_turns} oninput={(e) => { const v = (e.target as HTMLInputElement).value; onFormChange('max_turns', v ? Number(v) : null); }} placeholder="Unlimited" />
 				</div>
 			</div>
 		</div>

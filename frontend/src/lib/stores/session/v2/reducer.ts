@@ -635,6 +635,8 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				}
 			}
 			if (str(event.terminal_reason) === 'safety_limit') {
+				// Legacy replay compatibility for turns stored before automatic
+				// safety termination was removed. New turns never emit this reason.
 				const text =
 					'Safety limit reached — this turn was halted before further model or tool ' +
 					'spend. Review the warning above, then send a new message to continue.';

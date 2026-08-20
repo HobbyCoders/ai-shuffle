@@ -102,7 +102,7 @@ describe('turn lifecycle', () => {
 		expect(s.messages.some((m) => m.role === 'system')).toBe(false);
 	});
 
-	it('turn.completed(terminal_reason=safety_limit) shows a visible halt card once', () => {
+	it('legacy safety_limit turn completion remains replayable', () => {
 		const completed = ev('turn.completed', {
 			id: 'tc-safety',
 			terminal_reason: 'safety_limit',

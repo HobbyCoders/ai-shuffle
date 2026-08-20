@@ -346,27 +346,6 @@ class Settings(BaseSettings):
     task_tool_max_depth: int = 5
     task_tool_max_workers: int = 8
 
-    # Native agent-loop safety budgets. These are deliberately independent of
-    # profile ``max_turns``: a profile may request a lower cap, but cannot
-    # silently raise the install-wide spend guard. Environment-backed settings
-    # are persisted by the normal .env/deployment configuration path.
-    turn_safety_soft_model_calls: int = 8
-    turn_safety_max_model_calls: int = 12
-    turn_safety_soft_tool_calls: int = 20
-    turn_safety_max_tool_calls: int = 30
-    # These are cumulative prompt-resend tokens, not context-window sizes. A
-    # 60k-token context sent three times therefore crosses the hard default.
-    turn_safety_soft_prompt_tokens: int = 80_000
-    turn_safety_max_prompt_tokens: int = 160_000
-    turn_safety_soft_cost_usd: float = 1.0
-    turn_safety_max_cost_usd: float = 2.0
-    turn_safety_repeated_action_warn: int = 3
-    turn_safety_repeated_action_hard: int = 5
-    turn_safety_browser_new_page_warn: int = 3
-    turn_safety_browser_new_page_hard: int = 6
-    turn_safety_trim_trigger_tokens: int = 64_000
-    turn_safety_trim_keep_recent_results: int = 5
-
     # Staged flip for the compiled system prompt on the delegated (claude CLI)
     # leg (agents-program ruling A3). False (default): the CLI keeps its own
     # Claude Code preset and receives the agent's configured prompt + app
