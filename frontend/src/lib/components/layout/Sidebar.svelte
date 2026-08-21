@@ -312,6 +312,7 @@
 		<div class="rowmenu" bind:this={projectMenuRef}>
 			<button
 				class="ghostrow"
+				class:active={!!projectFilter}
 				aria-haspopup="menu"
 				aria-expanded={projectMenuOpen}
 				onclick={() => { const next = !projectMenuOpen; closeMenus(); projectMenuOpen = next; }}
@@ -339,6 +340,7 @@
 		<div class="rowmenu" bind:this={deviceMenuRef}>
 			<button
 				class="ghostrow"
+				class:active={!!deviceFilter}
 				aria-haspopup="menu"
 				aria-expanded={deviceMenuOpen}
 				onclick={() => { const next = !deviceMenuOpen; closeMenus(); deviceMenuOpen = next; }}
@@ -550,6 +552,12 @@
 	.ghostrow:hover { background: var(--sidebar-accent); color: var(--foreground); }
 	.ghostrow:hover :global(svg) { color: var(--foreground); }
 	.ghostrow :global(svg) { color: var(--subtle-foreground); transition: color 0.13s ease; flex: none; }
+	/* An applied filter marks its row so the active scope is legible at a glance
+	   (mirrors t3-code's filled filter glyph). Uses the stronger accent-active
+	   tier so it reads a notch above a plain hover, and holds it on hover. */
+	.ghostrow.active,
+	.ghostrow.active:hover { background: var(--sidebar-accent-active); color: var(--foreground); }
+	.ghostrow.active :global(svg) { color: var(--primary); }
 	.ghostrow .label {
 		font-size: 13px;
 		margin-right: auto;
@@ -739,6 +747,15 @@
 	.railbtn:hover .tip { opacity: 1; }
 
 	:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+
+	/* The same rail serves the desktop sidebar and the mobile drawer; on
+	   handheld widths enlarge its controls to clear the 44px touch minimum. */
+	@media (hover: none), (max-width: 1080px) {
+		.iconbtn { width: 40px; height: 40px; }
+		.ghostrow { height: 44px; }
+		.sb-foot { gap: 2px; flex-wrap: wrap; justify-content: space-between; }
+		.railbtn { width: 44px; height: 44px; }
+	}
 
 	@media (prefers-reduced-motion: reduce) {
 		.iconbtn, .ghostrow, .shelf, .railbtn, .tip { transition: none; }

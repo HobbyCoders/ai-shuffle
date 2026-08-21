@@ -84,7 +84,7 @@ function session(overrides: Record<string, unknown> = {}) {
 	};
 }
 
-function renderCard(overrides: Record<string, unknown> = {}) {
+function renderCard(overrides: Record<string, unknown> = {}, propOverrides: Record<string, unknown> = {}) {
 	const onOpen = vi.fn();
 	const row = session(overrides);
 	const result = render(SessionCard, {
@@ -95,6 +95,7 @@ function renderCard(overrides: Record<string, unknown> = {}) {
 			active: false,
 			now: Date.parse('2026-08-20T12:06:00Z'),
 			onOpen,
+			...propOverrides,
 		},
 	});
 	return { onOpen, ...result };
@@ -128,6 +129,18 @@ describe('SessionCard actions', () => {
 		expect(screen.queryByTitle('Rename session')).toBeNull();
 		expect(screen.queryByTitle('Fork session')).toBeNull();
 		expect(screen.queryByTitle('Delete session')).toBeNull();
+	});
+
+	it('recedes a working row that is not the open session', () => {
+		const { container } = renderCard({ is_active: true }, { status: 'working' });
+
+		expect(container.querySelector('.scard.receded')).toBeTruthy();
+	});
+
+	it('keeps an awaiting row bright (not receded)', () => {
+		const { container } = renderCard({ is_active: true }, { status: 'await' });
+
+		expect(container.querySelector('.scard.receded')).toBeNull();
 	});
 
 	it('settles an active session without opening it', async () => {

@@ -58,6 +58,9 @@
 	const device = $derived(deviceLabel(session));
 	const branch = $derived(branchLabel(session));
 	const statusLabel = $derived(STATUS_LABELS[status]);
+	// In-flight (working) rows that aren't the open session recede so the list
+	// triages at a glance; awaiting/done rows stay prominent because they need you.
+	const receded = $derived(status === 'working' && !active);
 
 	let cardRef = $state<HTMLElement | null>(null);
 	let actionsOpen = $state(false);
@@ -222,6 +225,7 @@
 	<div
 		class="scard"
 		class:active
+		class:receded
 		role="button"
 		tabindex="0"
 		aria-current={active ? 'true' : undefined}
@@ -298,7 +302,6 @@
 <style>
 	.scard-frame {
 		--ram-reveal: 0;
-		--card-bg: transparent;
 		position: relative;
 		width: 100%;
 		border-radius: 9px;
@@ -307,14 +310,12 @@
 	.scard-frame:focus-within,
 	.scard-frame.actions-open {
 		--ram-reveal: 1;
-		--card-bg: var(--sidebar-accent);
 	}
-	.scard-frame:has(.scard.active) { --card-bg: var(--sidebar-accent-active); }
 	.scard {
 		display: block;
 		width: 100%;
 		text-align: left;
-		padding: 8px 7px 9px;
+		padding: 7px 8px 8px;
 		border: none;
 		border-radius: 9px;
 		background: transparent;
@@ -334,8 +335,8 @@
 		content: '';
 		position: absolute;
 		left: 0;
-		top: 9px;
-		bottom: 9px;
+		top: 8px;
+		bottom: 8px;
 		width: 2px;
 		border-radius: 2px;
 		background: var(--primary);
@@ -400,8 +401,27 @@
 		font-size: 11.5px;
 		color: var(--sidebar-muted);
 		white-space: nowrap;
+		transition: opacity 120ms ease;
 	}
 	.timer.live { color: var(--primary); }
+
+	/* Desktop swap: the timer yields its slot to the settle/move action on
+	   hover, so the quick action appears in place instead of over line 1. */
+	.scard-frame:hover .timer,
+	.scard-frame:focus-within .timer,
+	.scard-frame.actions-open .timer { opacity: 0; }
+
+	/* Receded rows dim their project + title + meta but keep the colored status
+	   and timer lit; hover (desktop) restores the whole row. */
+	.scard.receded .proj,
+	.scard.receded .l2,
+	.scard.receded .l3 { opacity: 0.62; transition: opacity 0.13s ease; }
+	.scard-frame:hover .scard.receded .proj,
+	.scard-frame:hover .scard.receded .l2,
+	.scard-frame:hover .scard.receded .l3,
+	.scard-frame:focus-within .scard.receded .proj,
+	.scard-frame:focus-within .scard.receded .l2,
+	.scard-frame:focus-within .scard.receded .l3 { opacity: 1; }
 
 	.l2 {
 		display: block;
@@ -455,17 +475,11 @@
 	.card-actions {
 		position: absolute;
 		top: 4px;
-		right: 4px;
+		right: 6px;
 		bottom: auto;
 		display: flex;
 		align-items: center;
 		gap: 1px;
-		padding-left: 14px;
-		/* Opaque stand-in for the card surface so the strip hides the tail of L1
-		   instead of overlapping it: sidebar base + the card's own tint. */
-		background:
-			linear-gradient(to right, transparent, var(--card-bg) 16px),
-			linear-gradient(to right, transparent, var(--sidebar) 16px);
 		opacity: var(--ram-reveal);
 		transition: opacity 120ms ease;
 		z-index: 5;
@@ -500,6 +514,11 @@
 			touch-action: pan-y;
 			background: color-mix(in oklch, var(--sidebar-accent-active) 84%, var(--sidebar));
 		}
+		/* No hover on touch: keep the timer lit (the swipe strip is the action
+		   affordance here, not the in-slot desktop swap). */
+		.scard-frame:hover .timer,
+		.scard-frame:focus-within .timer,
+		.scard-frame.actions-open .timer { opacity: 1; }
 		.scard {
 			background: var(--sidebar);
 			transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1), background-color 130ms ease;

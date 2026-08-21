@@ -230,4 +230,17 @@ describe('Sidebar session groups', () => {
 		expect(screen.getByRole('menuitem', { name: /Laptop/ })).toBeTruthy();
 		expect(screen.queryByRole('menuitem', { name: /Unknown device/ })).toBeNull();
 	});
+
+	it('marks the project ghost row active once a project filter is applied', async () => {
+		render(Sidebar, { props: sidebarProps });
+
+		expect(document.querySelector('.ghostrow.active')).toBeNull();
+
+		await fireEvent.click(screen.getByRole('button', { name: /All projects/ }));
+		await fireEvent.click(screen.getByRole('menuitem', { name: /Visible Project/ }));
+
+		const active = document.querySelector('.ghostrow.active');
+		expect(active).toBeTruthy();
+		expect(active?.textContent).toContain('Visible Project');
+	});
 });
