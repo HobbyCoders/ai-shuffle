@@ -26,7 +26,7 @@
 		emptyMessage?: string;
 		/** Icon component for items (optional) */
 		itemIcon?: any;
-		/** Extra groups rendered after local items (e.g. "On other runners"). */
+		/** Optional groups rendered after the primary items. */
 		extraGroups?: { name: string; items: Item[] }[];
 	}
 
