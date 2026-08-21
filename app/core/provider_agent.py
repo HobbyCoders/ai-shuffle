@@ -23,8 +23,8 @@ SDK — so it is unit-testable on its own and reusable by the API layer:
 * :func:`dispatch_worker` — the worker lifecycle, mirroring the proven
   in-process pattern in ``app/core/automation_manager.py``: mint a session,
   ``create_session`` bound to the target provider, ``turn_manager.submit``,
-  ``wait_session_idle`` under a bounded timeout, then read the outcome from the
-  durable V2 event log.
+  ``wait_session_idle`` with NO wall-clock ceiling (a subagent may run for
+  hours), then read the outcome from the durable V2 event log.
 
 Scope notes (deliberate — later chunks own these):
 
@@ -105,8 +105,9 @@ MAX_REPORT_CHARS = 2000
 
 #: How often :func:`dispatch_worker` re-checks the provider's circuit breaker
 #: while waiting for a worker to go idle. Short enough that a rate-limited
-#: worker dies in seconds rather than at the (minutes-long) worker timeout,
-#: long enough that the check itself — one lock-guarded dict lookup — is free.
+#: worker dies in seconds rather than blocking indefinitely (there is no
+#: wall-clock worker timeout), long enough that the check itself — one
+#: lock-guarded dict lookup — is free.
 WAIT_SLICE_SECONDS = 2.0
 
 # Validation result codes — stable identifiers the API layer maps onto its own
@@ -204,17 +205,6 @@ def is_provider_agent_worker(session_id: Optional[str]) -> bool:
     row goes live.
     """
     return is_worker_session(session_id) or is_worker_turn(session_id)
-
-
-def worker_timeout_seconds() -> float:
-    """The configured per-worker ceiling, clamped to something sane."""
-    from app.core.config import settings
-
-    try:
-        value = float(getattr(settings, "provider_agent_timeout_seconds", 900) or 900)
-    except (TypeError, ValueError):
-        value = 900.0
-    return max(30.0, value)
 
 
 # ---------------------------------------------------------------------------
@@ -691,25 +681,28 @@ def _caller_permission_mode(caller_row: Optional[Mapping[str, Any]]) -> Optional
 
 
 async def _await_worker_idle(
-    worker_session_id: str, provider_id: Optional[str], timeout: float
-) -> Tuple[bool, bool]:
-    """Wait for a worker to go idle, bailing out early if its provider trips.
+    worker_session_id: str, provider_id: Optional[str]
+) -> bool:
+    """Wait — with NO wall-clock ceiling — for a worker to go idle, bailing out
+    early only if its provider's circuit breaker trips.
 
-    Returns ``(idle, rate_limited)``.
+    Returns ``True`` when the breaker tripped (the caller must fail the worker
+    fast) and ``False`` when the worker went idle on its own.
 
-    The wait is the SAME single ``wait_session_idle(timeout=timeout)`` call as
-    before — identical timeout semantics — but it is now observed in
+    A subagent may legitimately run for hours, so there is no timeout here
+    (2026-08-21 ruling): a worker that never finishes blocks until it goes idle,
+    the breaker trips, or the supervisor tears it down — a worker wedged on a
+    silently-hung provider is stopped from the UI. The wait is still observed in
     :data:`WAIT_SLICE_SECONDS` slices so the provider's circuit breaker can be
-    re-read between them. Without this a worker whose provider is already
-    refusing every request sits there burning the full (default 10-minute)
-    worker timeout while the CLI inside it retries into a closed door: exactly
-    the 2026-07-22 storm's shape, one level down.
+    re-read between them — a worker whose provider is already refusing every
+    request still fails fast instead of retrying forever into a closed door
+    (the 2026-07-22 storm's shape, one level down).
 
     SCOPE LIMITATION (accepted until P3-B): the breaker is in-process state, and
     a worker turn claimed by ANOTHER runner trips THAT runner's breaker, which
-    is invisible here — such a worker still fails only at the timeout. This is
-    purely about how fast the parent hears about it. A shared/persisted breaker
-    (P3-G) closes the gap.
+    is invisible here — such a worker only settles when it goes idle. This is
+    purely about how fast the parent hears about a refusing provider. A
+    shared/persisted breaker (P3-G) closes the gap.
 
     NOTE (2026-08-12): this ``is_tripped()`` read is currently the breaker's only
     consumer. The translator gateway's pre-dispatch refusal — which actually
@@ -719,17 +712,22 @@ async def _await_worker_idle(
     from app.core import turn_manager
 
     waiter = asyncio.ensure_future(
-        turn_manager.wait_session_idle(worker_session_id, timeout=timeout)
+        turn_manager.wait_session_idle(worker_session_id, timeout=float("inf"))
     )
     try:
         while True:
             done, _pending = await asyncio.wait({waiter}, timeout=WAIT_SLICE_SECONDS)
             if done:
-                return bool(waiter.result()), False
+                # Surface any exception the wait raised — notably the
+                # CancelledError when the parent turn is cancelled, which MUST
+                # propagate so the worker is stopped rather than stranded. The
+                # idle bool itself no longer carries a verdict (no timeout).
+                waiter.result()
+                return False
             # No provider binding (delegated Claude-leg worker) -> no breaker
             # to consult; the CLI's own backoff handles subscription limits.
             if provider_id and rate_limit_breaker.is_tripped(provider_id):
-                return False, True
+                return True
     finally:
         if not waiter.done():
             waiter.cancel()
@@ -940,7 +938,6 @@ async def dispatch_worker(
     model_id: Optional[str] = None,
     prompt: str,
     label: Optional[str] = None,
-    timeout_seconds: Optional[float] = None,
     tool_use_id: Optional[str] = None,
     background: bool = False,
     context_session_id: Optional[str] = None,
@@ -965,9 +962,11 @@ async def dispatch_worker(
     — without it the parent's client can be evicted mid-flight and the worker is
     stranded.
 
-    NEVER hangs the caller: the wait is bounded by ``timeout_seconds`` (default
-    ``settings.provider_agent_timeout_seconds``) and every failure path returns
-    a :class:`WorkerOutcome` with ``ok=False``.
+    Has NO wall-clock ceiling (2026-08-21 ruling): a subagent may legitimately
+    run for hours, so the wait blocks until the worker goes idle, its provider's
+    circuit breaker trips, or the supervisor tears it down. A worker wedged on a
+    silently-hung provider is stopped from the UI (Task card / stop control).
+    Every failure path still returns a :class:`WorkerOutcome` with ``ok=False``.
 
     Progress is forwarded to the PARENT's event feed by
     :class:`app.core.provider_agent_feed.WorkerFeed` so the existing subagent
@@ -1099,8 +1098,6 @@ async def dispatch_worker(
     if tool_allowlist:
         overrides["tool_allowlist"] = list(tool_allowlist)
 
-    timeout = float(timeout_seconds) if timeout_seconds else worker_timeout_seconds()
-
     # ONE join key for the whole surface: the worker's session id is the
     # registry task id, the registry's ``tool_use_id`` AND the ``task_id`` on
     # every forwarded subagent.* event. The frontend joins the ``/live`` spinner
@@ -1208,9 +1205,7 @@ async def dispatch_worker(
         # existing once the turn is submitted.
         feed.start_following()
 
-        idle, rate_limited = await _await_worker_idle(
-            worker_session_id, provider_id, timeout
-        )
+        rate_limited = await _await_worker_idle(worker_session_id, provider_id)
 
         # torn_down FIRST, on every branch: the supervisor may have killed this
         # worker while we waited (turn end, stop-all), and a killed worker's
@@ -1227,7 +1222,7 @@ async def dispatch_worker(
             )
 
         if rate_limited:
-            # Fail fast rather than at the timeout: the provider is refusing
+            # Fail fast rather than block indefinitely: the provider is refusing
             # everything install-wide, so the worker cannot make progress. Kill
             # it through the supervisor's own per-worker teardown so the card,
             # the registry row and the park-gate residue settle exactly as they
@@ -1253,24 +1248,6 @@ async def dispatch_worker(
                 )
             return WorkerOutcome(
                 ok=False, session_id=worker_session_id, error=error,
-            )
-
-        if not idle:
-            try:
-                turn_manager.interrupt(worker_session_id, "stop")
-            except Exception:  # noqa: BLE001 — the timeout result stands regardless
-                logger.exception("ProviderAgent: interrupt of timed-out worker failed")
-            preview = (
-                f"The worker did not finish within {int(timeout)}s and was stopped."
-            )
-            return WorkerOutcome(
-                ok=False,
-                session_id=worker_session_id,
-                error=(
-                    f"The worker did not finish within {int(timeout)}s and was "
-                    f"stopped. Its partial transcript is in session "
-                    f"{worker_session_id}."
-                ),
             )
 
         outcome = final_turn_outcome(worker_session_id)

@@ -356,12 +356,6 @@ class Settings(BaseSettings):
     # only affects the delegated leg. Set via PROMPT_FULL_REPLACE.
     prompt_full_replace: bool = False
 
-    # Hard ceiling, in seconds, on a single ProviderAgent worker. When the
-    # worker session has not gone idle by then the tool interrupts it and
-    # returns a FAILED result — the parent turn must never hang on a worker
-    # (phase-3 plan §2 C.6). Set via PROVIDER_AGENT_TIMEOUT_SECONDS.
-    provider_agent_timeout_seconds: int = 900
-
     # Auto-continue an autonomous turn cut at the autocompact boundary. The
     # bundled CLI ends the agentic loop when the NEXT turn would cross the
     # autocompact threshold and DEFERS compaction to the start of the next
