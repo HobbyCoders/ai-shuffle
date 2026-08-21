@@ -65,9 +65,12 @@ row without the numbers disagreeing.
 is a display artifact of the CLI's own renderer; the delegated leg proxies it
 when the CLI sends it.
 
-There is no "Autocompact buffer" category: fluid has cache-safe trimming, not
-autocompaction, and ``isAutoCompactEnabled`` is reported False rather than
-fabricating a buffer the engine would never apply.
+There is no "Autocompact buffer" category: fluid has a mechanical, recoverable
+eviction ladder (:mod:`fluid.context.compaction`), not lossy model-summary
+autocompaction, so ``isAutoCompactEnabled`` is reported False. What the ladder
+has done is reported separately in the ``compaction`` field (digested spans,
+epoch stubs, trimmed results, reclaimed tokens) — native leg only; the
+delegated leg proxies the CLI's dict verbatim, which lacks it.
 
 Palette — fixed hex per category, stable across calls so a UI can colour rows
 without a legend lookup, and distinct enough to stay readable side by side:
@@ -217,6 +220,7 @@ def build_context_usage(
     agents: Sequence[dict[str, Any]] = (),
     model: str,
     context_window: int | None = None,
+    compaction: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Assemble the breakdown dict (see the module docstring for the rules).
 
@@ -320,9 +324,15 @@ def build_context_usage(
         "rawMaxTokens": context_window,
         "percentage": percentage,
         "model": model,
-        # fluid trims tool results; it never autocompacts. Reported False rather
-        # than inventing an "Autocompact buffer" the engine would never apply.
+        # fluid never autocompacts in the CLI's sense (a model-written summary
+        # replacing history). Its eviction ladder is mechanical and recoverable
+        # — reported via ``compaction`` below, not by fabricating an
+        # "Autocompact buffer" the engine would never apply.
         "isAutoCompactEnabled": False,
+        # Eviction-ladder stats (native leg only; None when the engine has no
+        # compactor or no session yet): digestedSpans/epochStubs/
+        # trimmedToolResults/reclaimedTokens.
+        "compaction": compaction,
         # Per-item detail behind the category rows. Always present — the CLI's
         # schema makes memoryFiles/mcpTools/agents required lists, so an empty
         # source is [], never a missing key, and a host widget needs no key

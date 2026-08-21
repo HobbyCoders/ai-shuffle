@@ -757,7 +757,8 @@ class DelegatedLoop:
         answer straight through; it is already the documented shape (categories
         / totalTokens / maxTokens / rawMaxTokens / percentage / model /
         isAutoCompactEnabled). None when the CLI is not running, errored, or did
-        not answer within ``CONTROL_TIMEOUT``.
+        not answer within ``CONTROL_TIMEOUT``. The native leg's ``compaction``
+        stats field is absent here — the CLI compacts its own way.
         """
         return await self._request_control({"subtype": "get_context_usage"})
 

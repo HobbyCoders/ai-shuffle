@@ -416,6 +416,21 @@ def test_render_command_file_references(tmp_path) -> None:
     assert "Contents of missing.md" not in out
 
 
+def test_render_command_blocks_separates_file_dumps(tmp_path) -> None:
+    """Each @file dump is its own block, so an oversize one can be intake-
+    stubbed by the compaction view without hiding the instruction text."""
+    from fluid.context.instructions import render_command_blocks
+
+    (tmp_path / "a.md").write_text("alpha body", encoding="utf-8")
+    (tmp_path / "b.md").write_text("beta body", encoding="utf-8")
+    blocks = render_command_blocks("Review @a.md and @b.md", "", cwd=tmp_path)
+    assert blocks[0] == "Review @a.md and @b.md"
+    assert blocks[1] == "Contents of a.md:\nalpha body"
+    assert blocks[2] == "Contents of b.md:\nbeta body"
+    # The joined form is exactly what render_command returns.
+    assert render_command("Review @a.md and @b.md", "", cwd=tmp_path) == "\n\n".join(blocks)
+
+
 def test_render_command_file_reference_in_code_span_inert(tmp_path) -> None:
     (tmp_path / "notes.md").write_text("body", encoding="utf-8")
     out = render_command("Docs about `@notes.md` syntax", "", cwd=tmp_path)

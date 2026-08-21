@@ -22,14 +22,17 @@ from fnmatch import fnmatchcase
 from typing import Any, AsyncIterator, Sequence
 
 from fluid.context.cache_plan import plan_cache
+from fluid.context.compaction import CompactionConfig, Compactor, Promotion
 from fluid.context.compiler import CompiledPrompt
-from fluid.context.trim import ToolResultTrimmer, TrimConfig
+from fluid.context.recall import HistoryRecall
+from fluid.context.trim import TrimConfig, estimate_tokens_of_text
 from fluid.context.usage import MemoryFileUsage, build_context_usage, memory_file_usage
 from fluid.engine.base import EngineCaps
 from fluid.events.bus import EventBus
 from fluid.events.model import (
     BlockStart,
     BlockStop,
+    ContextCompaction,
     ErrorEvent,
     Event,
     Interrupted,
@@ -218,6 +221,7 @@ class NativeLoop:
         codemode: "CodeModeSession | None" = None,
         max_model_calls_per_turn: int = 50,
         trim: TrimConfig | None = None,
+        compaction: CompactionConfig | None = None,
         mcp_servers: dict[str, dict[str, Any]] | None = None,
         agents: Sequence[dict[str, Any]] | None = None,
         allowed_tools: Sequence[str] | None = None,
@@ -295,9 +299,17 @@ class NativeLoop:
         # session does not replay a catalog it already contains.
         self._deferred_announced: set[str] = set()
         self._deferred_rehydrated = False
-        # Cache-safe tool-result trimming (view-level; the stored tree keeps
-        # full fidelity). Sticky per engine lifetime — see context/trim.py.
-        self._trimmer = ToolResultTrimmer(config=trim or TrimConfig())
+        # The mechanical eviction ladder (view-level; the stored tree keeps
+        # full fidelity). Sticky per engine lifetime; promotions are persisted
+        # as ContextCompaction events and rehydrated on resume — see
+        # context/compaction.py. A legacy ``trim=`` arg (tier-1 knobs only)
+        # folds into a default compaction config.
+        if compaction is None:
+            compaction = CompactionConfig(trim=trim or TrimConfig())
+        self._compactor = Compactor(config=compaction)
+        # Compatibility seam: existing callers/tests reach the tier-1 trimmer.
+        self._trimmer = self._compactor.trimmer
+        self._compaction_rehydrated = False
         # MCP servers from config, connected lazily on the first turn (the
         # constructor is sync; connecting needs the event loop).
         self._mcp_servers = dict(mcp_servers or {})
@@ -362,6 +374,12 @@ class NativeLoop:
                 self._session = await self.store.get_session(self._session_id)
             if self._session is None:
                 self._session = await self.store.create_session(self._session_id)
+            # The HistoryExpand/HistorySearch builtins reach the store through
+            # the ctx (same seam as tool_registry) — recall re-reads originals
+            # that compaction evicted from the rendered view.
+            self.ctx.extra["history_recall"] = HistoryRecall(
+                store=self.store, session_id=self._session.session_id
+            )
         return self._session
 
     @property
@@ -520,6 +538,7 @@ class NativeLoop:
         See :mod:`fluid.context.usage` for the category rules and the palette.
         """
         history: list[Message] = []
+        compaction_stats: dict[str, int] | None = None
         # Resolve the session READ-ONLY: _ensure_session would create one, and
         # asking what the context looks like must not bring a session into being.
         sid = self._session.session_id if self._session is not None else None
@@ -527,7 +546,8 @@ class NativeLoop:
             sid = self._session_id if await self.store.get_session(self._session_id) else None
         if sid is not None:
             nodes = await self.store.load_path(sid)
-            history = repair_dangling_tool_calls(self._trimmer.view(nodes))
+            history = repair_dangling_tool_calls(self._compactor.view(nodes))
+            compaction_stats = self._compactor.stats(nodes)
         deferred = (
             [
                 s.to_api() for s in self.registry.deferred_tools()
@@ -545,6 +565,7 @@ class NativeLoop:
             agents=self.agents,
             model=self.model,
             context_window=self.context_window,
+            compaction=compaction_stats,
         )
 
     # ─── Turn lifecycle ──────────────────────────────────────────────────
@@ -558,12 +579,16 @@ class NativeLoop:
         # known deferred tools can be announced on this very turn.
         await self._connect_mcp_once(sid, turn_id)
         await self._rehydrate_deferred_announced(sid, meta.head_node_id)
+        await self._rehydrate_compaction(sid)
         content: list[Any] = (
             [Text(op.content)] if isinstance(op.content, str) else list(op.content)
         )
         reminder = self._deferred_catalog_reminder()
         if reminder is not None:
             content.append(Text(reminder))
+        ledger = self._ledger_reminder()
+        if ledger is not None:
+            content.append(Text(ledger))
         user_node = SessionNode(
             node_id=new_id("node"),
             parent_id=op.parent_node_id or meta.head_node_id,
@@ -656,6 +681,72 @@ class NativeLoop:
         self._deferred_announced.update(s.name for s in specs)
         return render_deferred_catalog(specs)
 
+    # ─── Compaction plumbing ─────────────────────────────────────────────
+
+    async def _rehydrate_compaction(self, sid: str) -> None:
+        """Replay persisted ContextCompaction events into the compactor.
+
+        Promotion state is process memory; the session outlives the process.
+        Digest rendering is deterministic, so re-applying the persisted
+        decisions makes the resumed view byte-identical to the pre-restart one
+        — the cache survives the restart too.
+        """
+        if self._compaction_rehydrated:
+            return
+        self._compaction_rehydrated = True
+        try:
+            events = await self.store.events_since(sid, 0)
+        except Exception:  # a store that cannot replay just re-compacts later
+            return
+        self._compactor.rehydrate(
+            Promotion(
+                tier=e.tier,
+                reason=e.reason,
+                trimmed=tuple((n, t) for n, t in e.trimmed),
+                spans=tuple((s, en, k) for s, en, k in e.spans),
+            )
+            for e in events
+            if isinstance(e, ContextCompaction)
+        )
+
+    async def _emit_compaction(
+        self, sid: str, turn_id: str, promo: Promotion
+    ) -> None:
+        await self._emit(ContextCompaction(
+            session_id=sid, turn_id=turn_id,
+            tier=promo.tier, reason=promo.reason,
+            trimmed=[list(p) for p in promo.trimmed],
+            spans=[list(s) for s in promo.spans],
+            reclaimed_chars=promo.reclaimed_chars,
+        ))
+
+    def _context_overhead_tokens(self) -> int:
+        """Estimated tokens of everything the next request carries besides
+        history: system prompt + tool schemas. Priced with the same estimator
+        the usage breakdown uses, so the trigger and the report agree."""
+        total = estimate_tokens_of_text(self.system)
+        for api in self._tools_api():
+            try:
+                total += estimate_tokens_of_text(json.dumps(api))
+            except (TypeError, ValueError):
+                pass
+        return total
+
+    def _ledger_reminder(self) -> str | None:
+        """Recite the session ledger (model-curated, never-lossy state) onto
+        the new user turn. The newest copy always rides the recent window —
+        which compaction never digests — while older copies are stripped when
+        their turns digest, so the ledger survives every tier without pinning
+        anything in the cached prefix."""
+        try:
+            from fluid.tools.builtins.ledger import read_ledger, render_ledger_reminder
+        except ImportError:
+            return None
+        text = read_ledger(self.ctx, self._session.session_id if self._session else None)
+        if not text:
+            return None
+        return render_ledger_reminder(text)
+
     # ─── Agent loop (model call → tool dispatch → repeat) ────────────────
 
     async def _agent_loop(self, sid: str, turn_id: str, user_node: SessionNode) -> None:
@@ -663,24 +754,38 @@ class NativeLoop:
         num_calls = 0
         total_usage: dict[str, Any] = {}
         final_stop = "end_turn"
-        overflow_retried = False
+        overflow_retries = 0
 
         while True:
             nodes = await self.store.load_path(sid, parent.node_id)
-            history = repair_dangling_tool_calls(self._trimmer.apply(nodes))
+            rendered, promotions = self._compactor.apply(
+                nodes,
+                overhead_tokens=self._context_overhead_tokens(),
+                context_window=self.context_window,
+                output_reserve_tokens=self.max_tokens,
+            )
+            history = repair_dangling_tool_calls(rendered)
+            for promo in promotions:
+                await self._emit_compaction(sid, turn_id, promo)
             result = await self._stream_once(sid, turn_id, history)
             num_calls += 1
             if result.stop_reason == "error":
                 if (
-                    not overflow_retried
+                    overflow_retries < 3
                     and result.error_message
                     and _is_context_overflow(result.error_message)
-                    and self._trimmer.force_trim(nodes)
                 ):
-                    # The prompt outgrew the window: batch-trim everything
-                    # eligible and retry the call once on the smaller view.
-                    overflow_retried = True
-                    continue
+                    # The prompt outgrew the window: force the next rung of
+                    # the eviction ladder and retry on the smaller view. Each
+                    # rung is a batch (tier 1 trim → tier 2 digests → tier 3
+                    # epoch folds); when no rung can reclaim anything, fall
+                    # through to the normal error path.
+                    escalations = self._compactor.escalate(nodes)
+                    if escalations:
+                        overflow_retries += 1
+                        for promo in escalations:
+                            await self._emit_compaction(sid, turn_id, promo)
+                        continue
                 # The failed call still streamed (and billed) partial tokens —
                 # fold them in so the turn's spend is not lost with the error.
                 self._fold_call_usage(total_usage, result.usage)

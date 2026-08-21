@@ -118,7 +118,11 @@ that deserve friction.
   compaction (kernel namespace), kernel death (checkpoint + restore),
   sessions (verified skills).
 
-Everything on this list is now implemented in fluid. What remains genuinely
-open: a hard sandbox (container/gVisor kernel behind the same protocol) and
-retroactive context eviction at the harness level — the kernel remains the
-working substitute for both.
+Everything on this list is now implemented in fluid, including retroactive
+context eviction at the harness level: a mechanical ladder (tool-result trim →
+turn digests → epoch stubs) that evicts by view transform only — the stored
+tree keeps full fidelity, every digest carries node refs, and the
+HistoryExpand/HistorySearch tools re-read originals on demand. Compaction
+became an index, not a summary. What remains genuinely open: a hard sandbox
+(container/gVisor kernel behind the same protocol) — the kernel remains the
+working substitute.

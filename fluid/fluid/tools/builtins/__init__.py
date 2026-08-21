@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from fluid.tools.builtins import (
-    bash, edit, glob, grep, note, read, skill, task, tool_search, write,
+    bash, edit, glob, grep, history_expand, history_search, ledger, note,
+    read, skill, task, tool_search, write,
 )
 from fluid.tools.registry import ToolRegistry
 
-_MODULES = (read, grep, glob, write, edit, bash, skill, note, task, tool_search)
+_MODULES = (
+    read, grep, glob, write, edit, bash, skill, note, task, tool_search,
+    history_expand, history_search, ledger,
+)
 
 
 def register_builtins(registry: ToolRegistry) -> None:

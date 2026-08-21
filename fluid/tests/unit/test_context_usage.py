@@ -405,10 +405,15 @@ async def test_native_messages_use_the_trimmed_history_view(tmp_path) -> None:
         # Arm the trimmer the way a real turn would, then re-read the snapshot.
         nodes = await store.load_path(sid)
         assert loop._trimmer.force_trim(nodes)
-        trimmed = _by_name(await loop.get_context_usage())[MESSAGES]["tokens"]
+        after = await loop.get_context_usage()
+        trimmed = _by_name(after)[MESSAGES]["tokens"]
     finally:
         await loop.aclose()
     assert trimmed < untrimmed_messages
+    # The eviction-ladder stats field reports what was reclaimed.
+    stats = after["compaction"]
+    assert stats["trimmedToolResults"] == 3 and stats["reclaimedTokens"] > 0
+    assert stats["digestedSpans"] == 0 and stats["epochStubs"] == 0
 
 
 async def test_native_snapshot_has_no_side_effects(tmp_path) -> None:
@@ -431,8 +436,10 @@ async def test_native_snapshot_has_no_side_effects(tmp_path) -> None:
         await loop.aclose()
     assert first == second
     assert [n.node_id for n in before] == [n.node_id for n in after]
-    # A trigger this low would arm a batch under apply(); view() must not.
+    # A trigger this low would arm a batch under apply(); view() must not —
+    # neither tier 1 trims nor tier 2/3 span promotions.
     assert loop._trimmer._trimmed == set()
+    assert loop._compactor._digested == {}
 
 
 async def test_native_without_a_session_prices_an_empty_history(tmp_path) -> None:

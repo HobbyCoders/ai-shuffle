@@ -67,11 +67,17 @@ metric.
 things, back up, try again. fluid stores sessions as branching trees: fork at
 any message, explore, and come back, with the cache preserved along the way.
 
-**Prevention over compaction.** When context fills up, most tools summarize the
-conversation and hope nothing important gets lost. fluid works to never reach
-that point: old tool output is trimmed in cache-safe ways, big results are kept
-out of the conversation entirely, and handoffs are structured — not a lossy
-"previously, on this session…" paragraph.
+**Prevention over compaction — and recoverable when it happens.** When context
+fills up, most tools summarize the conversation and hope nothing important gets
+lost. fluid works to never reach that point: old tool output is trimmed in
+cache-safe ways, big results are kept out of the conversation entirely, and
+handoffs are structured — not a lossy "previously, on this session…" paragraph.
+When a session outgrows even that, a mechanical eviction ladder takes over —
+old turns collapse into deterministic, extractive digests, then into one-line
+epoch stubs — and every evicted thing keeps a ref: `HistoryExpand` and
+`HistorySearch` re-read the originals from the session store on demand, so
+nothing is ever permanently lost. The window becomes a working set, not a
+lifetime cap; sessions age instead of dying.
 
 **Code-as-actions.** Instead of the model requesting tools one JSON call at a
 time, fluid projects tools as typed Python functions into a persistent,

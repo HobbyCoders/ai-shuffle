@@ -16,13 +16,17 @@ estimated context size crosses a trigger. Design rules (plan §7):
 * **The tree is never mutated.** Trimming is a view transformation applied when
   history is rendered for a request; the stored SessionNodes keep full fidelity
   (rewind/fork/audit see everything).
+
+This module is tier 1 of the eviction ladder; tiers 2 and 3 (span digests and
+epoch stubs) live in :mod:`fluid.context.compaction`, which owns a trimmer and
+drives it through :meth:`ToolResultTrimmer.trim_batch`.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterable
 
 from fluid.messages import Message, Text, ToolResultBlock
 from fluid.store.base import SessionNode
@@ -39,7 +43,7 @@ class TrimConfig:
     min_result_chars: int = 2_000
 
 
-def _block_chars(block: Any) -> int:
+def block_chars(block: Any) -> int:
     total = 0
     text = getattr(block, "text", None)
     if isinstance(text, str):
@@ -66,10 +70,14 @@ def _block_chars(block: Any) -> int:
     return total
 
 
+# Back-compat alias (tests and older callers import the underscored name).
+_block_chars = block_chars
+
+
 def estimate_tokens(nodes: list[SessionNode]) -> int:
     """Cheap chars/4 estimate over every text carried by the path."""
     chars = sum(
-        _block_chars(b) for n in nodes for b in n.message.content
+        block_chars(b) for n in nodes for b in n.message.content
     )
     return chars // 4
 
@@ -81,10 +89,10 @@ def estimate_tokens_of_text(text: str | None) -> int:
     return len(text) // 4 if text else 0
 
 
-def _placeholder(chars: int) -> Text:
+def _placeholder(node_id: str, chars: int) -> Text:
     return Text(
         f"[old tool result trimmed to save context — {chars} chars removed; "
-        "re-run the tool if this output is needed again]"
+        f'recover verbatim with HistoryExpand("{node_id}") if needed]'
     )
 
 
@@ -116,7 +124,7 @@ class ToolResultTrimmer:
                     blocks.append(
                         ToolResultBlock(
                             tool_use_id=block.tool_use_id,
-                            content=[_placeholder(_block_chars(block))],
+                            content=[_placeholder(node.node_id, block_chars(block))],
                             is_error=block.is_error,
                         )
                     )
@@ -139,7 +147,7 @@ class ToolResultTrimmer:
                 if not isinstance(block, ToolResultBlock):
                     continue
                 found.append(
-                    (node.node_id, block.tool_use_id, _block_chars(block),
+                    (node.node_id, block.tool_use_id, block_chars(block),
                      bool(block.is_error))
                 )
         keep = self.config.keep_recent_tool_results
@@ -152,17 +160,25 @@ class ToolResultTrimmer:
             and (nid, tuid) not in self._trimmed
         ]
 
+    def trim_batch(self, nodes: list[SessionNode]) -> list[tuple[str, str]]:
+        """Trim every eligible result NOW, ignoring the trigger. Returns the
+        newly trimmed ``(node_id, tool_use_id)`` pairs (empty when nothing was
+        eligible) so the caller can persist the decision."""
+        if not self.config.enabled:
+            return []
+        newly = self._eligible(nodes)
+        self._trimmed.update(newly)
+        return newly
+
+    def mark_trimmed(self, pairs: Iterable[tuple[str, str]]) -> None:
+        """Re-apply previously persisted trim decisions (resume rehydration)."""
+        self._trimmed.update(tuple(p) for p in pairs)
+
     def force_trim(self, nodes: list[SessionNode]) -> bool:
         """Trim every eligible result NOW, ignoring the trigger (context-
         overflow recovery). Returns True when at least one new block was
         trimmed — i.e. a retry has a smaller prompt to work with."""
-        if not self.config.enabled:
-            return False
-        newly = self._eligible(nodes)
-        if not newly:
-            return False
-        self._trimmed.update(newly)
-        return True
+        return bool(self.trim_batch(nodes))
 
     def view(self, nodes: list[SessionNode]) -> list[Message]:
         """The CURRENT trimmed view, read-only.
@@ -190,5 +206,5 @@ class ToolResultTrimmer:
 
 
 def estimate_tokens_of_messages(messages: list[Message]) -> int:
-    chars = sum(_block_chars(b) for m in messages for b in m.content)
+    chars = sum(block_chars(b) for m in messages for b in m.content)
     return chars // 4

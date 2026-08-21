@@ -137,6 +137,44 @@ class ToolsConfig:
 
 
 @dataclass(frozen=True, kw_only=True)
+class ContextConfig:
+    """The mechanical eviction ladder + recall, from ``[context]``.
+
+    Scalar mirror of :class:`fluid.context.compaction.CompactionConfig` (plus
+    the tier-1 trim knobs) so the trigger and headroom are finally
+    configurable — before this section, ``build_engine`` never passed a trim
+    config and the 120k trigger was effectively hardcoded.
+    """
+
+    enabled: bool = True
+    trigger_tokens: int = 120_000
+    headroom_tokens: int = 16_000
+    target_ratio: float = 0.7
+    keep_recent_turns: int = 3
+    max_resident_span_digests: int = 20
+    epoch_fold_spans: int = 10
+    intake_stub_chars: int = 25_000
+    # Tier-1 (tool-result trim) knobs.
+    keep_recent_tool_results: int = 5
+    min_result_chars: int = 2_000
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "ContextConfig":
+        return cls(
+            enabled=bool(d.get("enabled", True)),
+            trigger_tokens=int(d.get("trigger_tokens", 120_000)),
+            headroom_tokens=int(d.get("headroom_tokens", 16_000)),
+            target_ratio=float(d.get("target_ratio", 0.7)),
+            keep_recent_turns=int(d.get("keep_recent_turns", 3)),
+            max_resident_span_digests=int(d.get("max_resident_span_digests", 20)),
+            epoch_fold_spans=int(d.get("epoch_fold_spans", 10)),
+            intake_stub_chars=int(d.get("intake_stub_chars", 25_000)),
+            keep_recent_tool_results=int(d.get("keep_recent_tool_results", 5)),
+            min_result_chars=int(d.get("min_result_chars", 2_000)),
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
 class HarnessConfig:
     default_provider: str = "anthropic"
     default_model: str = "claude-sonnet-5"
@@ -152,6 +190,7 @@ class HarnessConfig:
     continual_model: str | None = None
     instruction_files: InstructionFilesConfig = field(default_factory=InstructionFilesConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
+    context: ContextConfig = field(default_factory=ContextConfig)
     cwd: str = "."
     max_tokens: int = 8192
     # Model context window, when the host app knows it (model ids come and go
@@ -183,6 +222,7 @@ class HarnessConfig:
             continual_model=d.get("continual_model"),
             instruction_files=InstructionFilesConfig.from_dict(d.get("instruction_files", {})),
             tools=ToolsConfig.from_dict(d.get("tools", {})),
+            context=ContextConfig.from_dict(d.get("context", {})),
             cwd=d.get("cwd", "."),
             max_tokens=int(d.get("max_tokens", 8192)),
             context_window=(
@@ -237,6 +277,18 @@ class HarnessConfig:
             "tools": {
                 "allowed": list(self.tools.allowed) if self.tools.allowed is not None else None,
                 "disallowed": list(self.tools.disallowed),
+            },
+            "context": {
+                "enabled": self.context.enabled,
+                "trigger_tokens": self.context.trigger_tokens,
+                "headroom_tokens": self.context.headroom_tokens,
+                "target_ratio": self.context.target_ratio,
+                "keep_recent_turns": self.context.keep_recent_turns,
+                "max_resident_span_digests": self.context.max_resident_span_digests,
+                "epoch_fold_spans": self.context.epoch_fold_spans,
+                "intake_stub_chars": self.context.intake_stub_chars,
+                "keep_recent_tool_results": self.context.keep_recent_tool_results,
+                "min_result_chars": self.context.min_result_chars,
             },
             "providers": {
                 name: {

@@ -559,15 +559,15 @@ def _file_references(body: str) -> list[str]:
     return refs
 
 
-def render_command(
+def render_command_blocks(
     text: str,
     arg: str,
     *,
     cwd: str | os.PathLike[str],
     timeout: float = INLINE_BASH_TIMEOUT_S,
-) -> str:
-    """Render a slash-command file into the prompt for one turn (Claude Code
-    conventions). Never raises — anything unresolvable stays literal.
+) -> list[str]:
+    """Render a slash-command file into prompt blocks for one turn (Claude
+    Code conventions). Never raises — anything unresolvable stays literal.
 
     * ``$ARGUMENTS`` → the full argument string; ``$1``/``$2``… → positional
       arguments (quoted grouping honored, missing → empty string).
@@ -575,8 +575,13 @@ def render_command(
       shell in ``cwd`` — only when frontmatter ``allowed-tools`` grants Bash,
       and never inside fenced code blocks.
     * ``@path`` (cwd-relative, ``~``/absolute ok, outside code) → the file's
-      contents are appended after the body under a provenance header; the
-      token itself stays in place so the prose still reads.
+      contents follow the body as their own block under a provenance header;
+      the token itself stays in place so the prose still reads.
+
+    The body is ``blocks[0]``; each ``@file`` dump is its own block. Keeping
+    them separate lets the compaction view stub an oversize dump without ever
+    hiding the instruction text (each block becomes one Text content block —
+    intake stubbing is per-block).
     """
     fields, body = parse_frontmatter(text)
     args = split_command_args(arg)
@@ -609,4 +614,16 @@ def render_command(
             content = None
         if content is not None:
             blocks.append(f"Contents of {ref}:\n{content.rstrip()}")
-    return "\n\n".join(blocks)
+    return blocks
+
+
+def render_command(
+    text: str,
+    arg: str,
+    *,
+    cwd: str | os.PathLike[str],
+    timeout: float = INLINE_BASH_TIMEOUT_S,
+) -> str:
+    """:func:`render_command_blocks` joined to one string, for callers that
+    want the flat prompt (tests, plain-text hosts)."""
+    return "\n\n".join(render_command_blocks(text, arg, cwd=cwd, timeout=timeout))

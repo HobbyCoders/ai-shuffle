@@ -43,6 +43,11 @@ class ExecutionEngine(Protocol):
              "percentage": float | None,   # None when maxTokens is unknown
              "model": str,
              "isAutoCompactEnabled": bool,
+             # Native leg only — eviction-ladder stats (the delegated leg
+             # proxies the CLI's dict, which lacks the key):
+             "compaction"?: {"digestedSpans": int, "epochStubs": int,
+                             "trimmedToolResults": int,
+                             "reclaimedTokens": int} | None,
              # Per-item detail behind the category rows (each row equals the
              # sum of its list; empty source → [], never a missing key):
              "memoryFiles": [{"path": str, "type": str, "tokens": int}, ...],

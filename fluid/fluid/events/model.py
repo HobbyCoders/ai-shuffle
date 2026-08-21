@@ -163,6 +163,20 @@ class HandoffCreated(Event):
     goal: str | None = None
 
 
+@dataclass(frozen=True, kw_only=True)
+class ContextCompaction(Event):
+    """A batch promotion in the mechanical eviction ladder (view-level; the
+    stored tree keeps full fidelity). Carries the DECISIONS, not the digest
+    text — rendering is deterministic, so replaying these events rehydrates a
+    byte-identical view after a restart."""
+
+    tier: int  # highest rung this batch reached: 1 trim | 2 digest | 3 epoch
+    reason: str  # "trigger" | "overflow"
+    trimmed: list[list[str]] = field(default_factory=list)  # [node_id, tool_use_id]
+    spans: list[list[str]] = field(default_factory=list)  # [start, end, kind]
+    reclaimed_chars: int = 0
+
+
 # ─── Accounting / signals ────────────────────────────────────────────────────
 
 
@@ -210,7 +224,7 @@ _EVENT_TYPES: dict[str, type[Event]] = {
         TurnStarted, TurnComplete, Interrupted, ErrorEvent,
         BlockStart, BlockStop, TextDelta, ThinkingDelta,
         ToolUse, ToolResult, PermissionRequest, QuestionRequest, HandoffCreated,
-        Usage, RateLimit, SubagentEvent,
+        ContextCompaction, Usage, RateLimit, SubagentEvent,
     )
 }
 

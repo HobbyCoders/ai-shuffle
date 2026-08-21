@@ -6,8 +6,10 @@ append-only-prefix rule by construction: the prompt is always
 ``[system, tools, history-in-node-order]`` and nothing upstream of the newest
 node is ever rewritten mid-session.
 
-Later milestones extend this into breakpoint scheduling across tool defs and
-pinned notes, plus cache-safe trimming (`trim.py`).
+The same discipline governs the eviction ladder: cache-safe trimming
+(`trim.py`) and the digest/epoch tiers (`compaction.py`) mutate the rendered
+prefix only in rare, sticky batches, so between batches every render is
+byte-identical and the breakpoints keep hitting.
 """
 
 from __future__ import annotations

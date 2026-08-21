@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
-from typing import Awaitable, Callable, TextIO
+from typing import Any, Awaitable, Callable, TextIO
 
 from fluid.events.model import (
     ErrorEvent,
@@ -76,7 +76,7 @@ async def auto_deny(event: PermissionRequest) -> str:
 async def stream_turn(
     engine,
     session_id: str,
-    text: str,
+    text: "str | list[Any]",
     *,
     out: TextIO,
     on_permission: PermissionResponder = auto_deny,
@@ -142,7 +142,7 @@ class Repl:
         answer = await self._read_line(f"  allow {event.name}? [y/N] ")
         return "allow" if answer.strip().lower() in ("y", "yes") else "deny"
 
-    async def run_turn(self, text: str) -> str:
+    async def run_turn(self, text: "str | list[Any]") -> str:
         return await stream_turn(
             self.engine, self.session_id, text,
             out=self.out, on_permission=self.handle_permission,
@@ -185,9 +185,16 @@ class Repl:
         self.out.flush()
         return True
 
-    def _render_user_command(self, name: str, arg: str) -> str | None:
-        """Resolve a discovered command file to its rendered prompt, or None."""
-        from fluid.context.instructions import discover_commands, render_command
+    def _render_user_command(self, name: str, arg: str):
+        """Resolve a discovered command file to its rendered prompt, or None.
+
+        Returns a plain string for a bodiless render, or a list of Text
+        blocks when the command pulled in ``@file`` contents — each dump rides
+        as its own content block so the compaction view can stub an oversize
+        one without hiding the instruction text.
+        """
+        from fluid.context.instructions import discover_commands, render_command_blocks
+        from fluid.messages import Text
 
         cwd = getattr(getattr(self.engine, "ctx", None), "cwd", None) or "."
         match = next((c for c in discover_commands(cwd) if c.name == name), None)
@@ -197,7 +204,10 @@ class Repl:
             raw = Path(match.path).read_text(encoding="utf-8")
         except OSError:
             return None
-        return render_command(raw, arg, cwd=cwd)
+        blocks = render_command_blocks(raw, arg, cwd=cwd)
+        if len(blocks) <= 1:
+            return blocks[0] if blocks else ""
+        return [Text(b) for b in blocks]
 
     async def _submit_or_report(self, op, label: str) -> None:
         try:

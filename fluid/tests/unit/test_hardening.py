@@ -379,6 +379,60 @@ async def test_context_overflow_force_trims_and_retries_once() -> None:
     assert any("trimmed to save context" in t for t in retry_texts)
 
 
+async def test_context_overflow_escalates_the_ladder() -> None:
+    """Repeated overflows climb the rungs — tier 1 trim, tier 2 digests,
+    tier 3 epoch fold — each persisted as ContextCompaction(reason="overflow");
+    when no rung can reclaim anything (cap 3 retries), the error surfaces."""
+    from fluid.context.compaction import CompactionConfig
+    from fluid.events import ContextCompaction
+
+    registry = ToolRegistry()
+    big = {"content": [{"type": "text", "text": "B" * 5000}]}
+
+    @tool("blob", "Blob", {"type": "object", "properties": {}})
+    async def blob(args: dict) -> dict:
+        return big
+
+    registry.register_inproc(create_inproc_server("b", [blob]))
+    provider = ScriptedProvider([
+        _tool("t1", "mcp__b__blob", "{}"),   # turn 1: tool call
+        _text("turn one done " + "pad " * 200),
+        _text("turn two done " + "pad " * 200),
+        _text("turn three done " + "pad " * 200),
+        _error("prompt is too long: 210000 tokens > 200000 maximum"),
+        # last script repeats: every retry overflows again
+    ])
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="m",
+        registry=registry, permissions=PermissionEngine("never_ask"),
+        compaction=CompactionConfig(
+            trigger_tokens=10_000_000,        # normal trigger never fires
+            keep_recent_turns=1, epoch_fold_spans=10,
+            trim=TrimConfig(trigger_tokens=10_000_000,
+                            keep_recent_tool_results=0, min_result_chars=100),
+        ),
+    )
+    for i in range(3):
+        await loop.submit(UserTurn(content=f"turn {i} " + "words " * 100))
+        await asyncio.wait_for(loop.wait_turn(), timeout=5)
+    await loop.submit(UserTurn(content="doomed turn"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+
+    events = loop.bus.log(loop.session_id)
+    overflow = [e for e in events if isinstance(e, ContextCompaction)
+                and e.reason == "overflow"]
+    assert [e.tier for e in overflow] == [1, 2, 3]  # the full ladder, in order
+    assert any(isinstance(e, ErrorEvent) for e in events)  # 4th overflow surfaces
+    # Retry 2 saw digests; retry 3 saw the epoch stub.
+    def _flat(request) -> str:
+        return "\n".join(
+            getattr(b, "text", "") for m in request.messages for b in m.content
+            if isinstance(getattr(b, "text", None), str)
+        )
+    assert "compacted turn" in _flat(provider.requests[-2])
+    assert "[epoch " in _flat(provider.requests[-1])
+
+
 async def test_non_overflow_error_still_surfaces() -> None:
     provider = ScriptedProvider([_error("upstream exploded")])
     loop = NativeLoop(provider=provider, store=MemoryStore(), model="m")

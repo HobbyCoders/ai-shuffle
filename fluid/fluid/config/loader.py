@@ -58,6 +58,20 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
         "allowed": None,
         "disallowed": [],
     },
+    # The mechanical eviction ladder (context/compaction.py): trigger,
+    # headroom reserve, digest/epoch shape, intake stub size, tier-1 knobs.
+    "context": {
+        "enabled": True,
+        "trigger_tokens": 120_000,
+        "headroom_tokens": 16_000,
+        "target_ratio": 0.7,
+        "keep_recent_turns": 3,
+        "max_resident_span_digests": 20,
+        "epoch_fold_spans": 10,
+        "intake_stub_chars": 25_000,
+        "keep_recent_tool_results": 5,
+        "min_result_chars": 2_000,
+    },
     "providers": {
         "anthropic": {
             "kind": "anthropic",
@@ -194,6 +208,20 @@ def env_overrides(env: dict[str, str] | None = None) -> dict[str, Any]:
             pass
     if "FLUID_APPROVAL_POLICY" in env:
         out["permission"] = {"approval_policy": env["FLUID_APPROVAL_POLICY"]}
+    context: dict[str, Any] = {}
+    if "FLUID_CONTEXT_ENABLED" in env:
+        context["enabled"] = _coerce_bool(env["FLUID_CONTEXT_ENABLED"])
+    for var, key in (
+        ("FLUID_CONTEXT_TRIGGER_TOKENS", "trigger_tokens"),
+        ("FLUID_CONTEXT_HEADROOM_TOKENS", "headroom_tokens"),
+    ):
+        if var in env:
+            try:
+                context[key] = int(env[var])
+            except ValueError:
+                pass
+    if context:
+        out["context"] = context
     return out
 
 
@@ -390,6 +418,27 @@ def build_engine(
             synthesizer = Synthesizer(client, config.continual_model or model, skills)
         codemode = CodeModeSession(registry, skills=skills, synthesizer=synthesizer)
 
+    from fluid.context.compaction import CompactionConfig
+    from fluid.context.trim import TrimConfig
+
+    cc = config.context
+    compaction = CompactionConfig(
+        enabled=cc.enabled,
+        trim=TrimConfig(
+            enabled=cc.enabled,
+            trigger_tokens=cc.trigger_tokens,
+            keep_recent_tool_results=cc.keep_recent_tool_results,
+            min_result_chars=cc.min_result_chars,
+        ),
+        trigger_tokens=cc.trigger_tokens,
+        headroom_tokens=cc.headroom_tokens,
+        target_ratio=cc.target_ratio,
+        keep_recent_turns=cc.keep_recent_turns,
+        max_resident_span_digests=cc.max_resident_span_digests,
+        epoch_fold_spans=cc.epoch_fold_spans,
+        intake_stub_chars=cc.intake_stub_chars,
+    )
+
     return NativeLoop(
         provider=client,
         store=store,
@@ -409,4 +458,5 @@ def build_engine(
         mcp_servers=config.mcp,
         allowed_tools=config.tools.allowed,
         disallowed_tools=config.tools.disallowed,
+        compaction=compaction,
     )

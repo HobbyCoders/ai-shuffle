@@ -2,6 +2,7 @@ from fluid.events.bus import EventBus
 from fluid.events.model import (
     BlockStart,
     BlockStop,
+    ContextCompaction,
     ErrorEvent,
     Event,
     HandoffCreated,
@@ -34,6 +35,7 @@ from fluid.events.ops import (
 __all__ = [
     "BlockStart",
     "BlockStop",
+    "ContextCompaction",
     "ErrorEvent",
     "Event",
     "EventBus",
