@@ -1,10 +1,13 @@
 """Provider-scoped model assignments and model-facing subagent discovery.
 
-An agent keeps its existing ``config.provider`` / ``config.model`` pair as its
-default top-level chat binding. ``config.provider_models`` is a separate map
-used when that agent is selected as a Task subagent. The current caller
-provider chooses the map entry; a model-authored Task call never chooses or
-changes providers.
+``config.provider_models`` is the ONE model binding an agent still carries: the
+model it runs on when another agent dispatches it as a Task subagent. Top-level
+chat sessions stopped reading an agent's model in v79 — they carry their own,
+picked at creation — so the legacy ``config.provider`` / ``config.model`` pair
+survives here only as a fallback for agents configured before that move.
+
+The current caller provider chooses the map entry; a model-authored Task call
+never chooses or changes providers.
 """
 
 from __future__ import annotations
@@ -33,7 +36,8 @@ def normalized_provider_models(config: Mapping[str, Any]) -> dict[str, str]:
     The legacy fallback is intentionally provider-local. An old native-Claude
     agent becomes available on native Claude, and an old provider-bound agent
     becomes available on that provider. Neither is inferred onto other
-    providers.
+    providers. Agents saved since v79 have no top-level model at all, so for
+    them the stored map is the whole answer.
     """
     result: dict[str, str] = {}
     raw = config.get("provider_models")

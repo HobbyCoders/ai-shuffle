@@ -21,7 +21,6 @@ from app.core.plugin_service import get_plugin_service
 from app.core.project_utils import get_project_working_dir_as_path, get_worktree_working_dir_as_path
 from app.core.project_agent_service import get_project_agent_service, get_user_agent_service
 from app.core.config import settings
-from app.core.model_registry import DEFAULT_MODEL
 from app.core.profiles import get_builtin_profile_defaults
 
 logger = logging.getLogger(__name__)
@@ -884,9 +883,12 @@ async def export_profile(
     agent_data = AgentExportData(
         name=profile.get("name", profile_id),
         description=profile.get("description"),
-        model=config.get("model", DEFAULT_MODEL),
+        # Only present on agents that still carry a legacy binding, or on the
+        # built-in Default AI agent (whose model drives internal generation) —
+        # an ordinary agent no longer pins a model (v79).
+        model=config.get("model"),
         provider_models=config.get("provider_models"),
-        permission_mode=config.get("permission_mode", "default"),
+        permission_mode=config.get("permission_mode"),
         effort=config.get("effort"),
         max_turns=config.get("max_turns"),
         system_prompt_content=prompt_content or None,
@@ -990,10 +992,16 @@ async def import_profile(
     # setting_sources, enable_file_checkpointing, continue_conversation,
     # fork_session) are accepted but ignored.
     config = {
-        "model": agent_data.model or DEFAULT_MODEL,
-        "permission_mode": agent_data.permission_mode or "default",
         "include_partial_messages": agent_data.include_partial_messages if agent_data.include_partial_messages is not None else True,
     }
+    # A model / permission mode is written only when the file actually carries
+    # one. Agents stopped pinning either in v79, so importing an older export
+    # must not resurrect a binding the user can no longer see or edit; sessions
+    # created from this agent pick their own.
+    if agent_data.model:
+        config["model"] = agent_data.model
+    if agent_data.permission_mode:
+        config["permission_mode"] = agent_data.permission_mode
     if agent_data.provider_models:
         config["provider_models"] = agent_data.provider_models
     # Harness-honored reasoning depth / per-turn cap (also present in pre-A12

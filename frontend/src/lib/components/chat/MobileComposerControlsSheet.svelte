@@ -42,19 +42,13 @@
 		modelGroups?: PickerGroup[];
 		modelValue: string;
 		modelLabel: string;
-		modelDefaultValue: string;
-		modelOverridden: boolean;
 		modelNotice?: string;
 		onModelSelect: (value: string) => void;
 		effortOptions: ControlOption[];
 		effortValue: string | null;
-		effortDefaultValue: string | null;
-		effortOverridden: boolean;
 		onEffortSelect: (value: string) => void;
 		permissionOptions: ControlOption[];
 		permissionValue: string | null;
-		permissionDefaultValue: string | null;
-		permissionOverridden: boolean;
 		onPermissionSelect: (value: string) => void;
 		computerUseEnabled: boolean;
 		computerUseStopped: boolean;
@@ -70,19 +64,13 @@
 		modelGroups,
 		modelValue,
 		modelLabel,
-		modelDefaultValue,
-		modelOverridden,
 		modelNotice,
 		onModelSelect,
 		effortOptions,
 		effortValue,
-		effortDefaultValue,
-		effortOverridden,
 		onEffortSelect,
 		permissionOptions,
 		permissionValue,
-		permissionDefaultValue,
-		permissionOverridden,
 		onPermissionSelect,
 		computerUseEnabled,
 		computerUseStopped,
@@ -115,7 +103,12 @@
 					key: o.groupKey,
 					name: o.group,
 					subtext: o.groupSubtext,
-					glyph: 'custom'
+					glyph: 'custom',
+					// The options carry no auth kind, so this fallback cannot know
+					// it — no API badge, same neutral stance as the 'custom' glyph
+					// beside it. A parent that supplies `modelGroups` (every real
+					// caller) carries the real value.
+					isApi: false
 				});
 			}
 		}
@@ -410,7 +403,6 @@
 									<span class="choice-copy">
 										<span class="choice-title">
 											{option.label}
-											{#if option.value === modelDefaultValue}<em>Profile</em>{/if}
 										</span>
 										{#if showProviderLine && g}
 											<span class="choice-description model-provider">
@@ -450,7 +442,6 @@
 								<strong>{modelLabel}</strong>
 								<small>{modelNotice ?? 'Model used for the next turn'}</small>
 							</span>
-							{#if modelOverridden}<span class="override-badge">Override</span>{/if}
 							<ChevronRight size={18} strokeWidth={1.8} />
 						</button>
 					</section>
@@ -463,7 +454,6 @@
 									<strong>{selectedEffort?.label ?? 'Effort'}</strong>
 									<small>{selectedEffort?.description ?? 'Reasoning depth'}</small>
 								</span>
-								{#if selectedEffort?.value === effortDefaultValue}<em>Profile</em>{/if}
 							</div>
 							<input
 								type="range"
@@ -486,7 +476,6 @@
 								{/each}
 							</div>
 						</div>
-						{#if effortOverridden}<p class="section-note">Overridden for this chat</p>{/if}
 					</section>
 
 					<section class="control-section">
@@ -502,7 +491,6 @@
 									<span class="choice-copy">
 										<span class="choice-title">
 											{option.label}
-											{#if option.value === permissionDefaultValue}<em>Profile</em>{/if}
 										</span>
 										<span class="choice-description">{option.description}</span>
 									</span>
@@ -510,7 +498,6 @@
 								</button>
 							{/each}
 						</div>
-						{#if permissionOverridden}<p class="section-note">Overridden for this chat</p>{/if}
 					</section>
 
 					{#if computerUseEnabled}
@@ -736,18 +723,6 @@
 		color: var(--muted-foreground);
 	}
 
-	.override-badge,
-	.choice-title em {
-		padding: 3px 6px;
-		border-radius: 999px;
-		background: color-mix(in oklch, var(--primary) 12%, transparent);
-		color: var(--primary);
-		font-size: 0.62rem;
-		font-style: normal;
-		font-weight: 650;
-		white-space: nowrap;
-	}
-
 	.effort-slider-card {
 		padding: 12px 14px 10px;
 	}
@@ -776,16 +751,6 @@
 	.effort-current small {
 		font-size: 0.72rem;
 		color: var(--muted-foreground);
-	}
-
-	.effort-current em {
-		padding: 3px 7px;
-		border-radius: 999px;
-		background: color-mix(in oklch, var(--primary) 12%, transparent);
-		color: var(--primary);
-		font-size: 0.62rem;
-		font-style: normal;
-		font-weight: 650;
 	}
 
 	.effort-slider-card input[type='range'] {
@@ -870,12 +835,6 @@
 	}
 
 	.effort-labels span.selected {
-		color: var(--primary);
-	}
-
-	.section-note {
-		margin: 6px 5px 0;
-		font-size: 0.68rem;
 		color: var(--primary);
 	}
 

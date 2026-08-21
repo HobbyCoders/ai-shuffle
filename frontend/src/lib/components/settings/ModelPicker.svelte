@@ -39,6 +39,12 @@
 		/** Offer an empty assignment for provider-scoped subagent configuration. */
 		allowEmpty?: boolean;
 		emptyLabel?: string;
+		/**
+		 * Offer the free-text `Custom…` entry. Off for callers that must end up
+		 * with a real, routable model id — a typo'd custom string would only
+		 * surface as a failed call much later.
+		 */
+		allowCustom?: boolean;
 	}
 
 	let {
@@ -48,14 +54,17 @@
 		providerModelsOnly = false,
 		providerScope,
 		allowEmpty = false,
-		emptyLabel = 'Unavailable as subagent'
+		emptyLabel = 'Unavailable as subagent',
+		allowCustom = true
 	}: Props = $props();
 
 	const catalog = $derived(buildModelPickerCatalog({ providerModelsOnly, providerScope }));
 
 	const leadingRows = $derived(allowEmpty ? [{ value: '', label: emptyLabel }] : []);
 	const trailingRows = $derived(
-		!providerModelsOnly && !providerScope ? [{ value: CUSTOM_VALUE, label: 'Custom…' }] : []
+		allowCustom && !providerModelsOnly && !providerScope
+			? [{ value: CUSTOM_VALUE, label: 'Custom…' }]
+			: []
 	);
 
 	// ---- open/close state ------------------------------------------------------

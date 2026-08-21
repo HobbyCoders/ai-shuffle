@@ -17,9 +17,6 @@
 	import { layout } from '$lib/stores/layout.svelte';
 	import {
 		getDefaultModel,
-		getModelBadgeClass as getModelBadgeClassShared,
-		getModelLabel,
-		isPresetModel,
 		normalizeModel,
 		NATIVE_PROVIDER_KEY
 	} from '$lib/constants/models';
@@ -186,11 +183,7 @@
 		id: '',
 		name: '',
 		description: '',
-		model: getDefaultModel(),
-		provider: null as string | null,
 		provider_models: { [NATIVE_PROVIDER_KEY]: getDefaultModel() } as Record<string, string>,
-		permission_mode: 'default',
-		effort: null as 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null,
 		max_turns: null as number | null,
 		allowed_tools: [] as string[],
 		disallowed_tools: [] as string[],
@@ -211,7 +204,6 @@
 	// Tool selection mode. The single visible dropdown drives both built-in and
 	// AI tool behavior — there is no separate AI-tool mode (see ./profiles/toolAccess).
 	let toolSelectionMode = $state<'all' | 'none' | 'allow' | 'disallow'>('all');
-	let customModelMode = $state(false);
 
 	// Collapsible tool source sections
 	let expandedSections = $state<Record<string, boolean>>({
@@ -319,11 +311,7 @@
 			id: '',
 			name: '',
 			description: '',
-			model: getDefaultModel(),
-			provider: null,
 			provider_models: { [NATIVE_PROVIDER_KEY]: getDefaultModel() },
-			permission_mode: 'default',
-			effort: null,
 			max_turns: null,
 			allowed_tools: [],
 			disallowed_tools: [],
@@ -340,7 +328,6 @@
 			computer_use_enabled: false
 		};
 		toolSelectionMode = 'all';
-		customModelMode = false;
 		activeTab = 'general';
 	}
 
@@ -386,11 +373,6 @@
 			toolSelectionMode = 'all';
 		}
 
-		// A provider model (e.g. "openai/gpt-5.6") isn't a Claude preset, but it's
-		// also not free-text custom — it lives in its own optgroup. Only fall back
-		// to custom-model mode when no provider is set.
-		customModelMode = !config.provider && !isPresetModel(config.model || getDefaultModel());
-
 		const providerModels = { ...((config as any).provider_models || {}) } as Record<string, string>;
 		const legacyProviderKey = config.provider || NATIVE_PROVIDER_KEY;
 		if (config.model && !providerModels[legacyProviderKey]) {
@@ -401,11 +383,7 @@
 			id: profile.id,
 			name: profile.name,
 			description: profile.description || '',
-			model: normalizeModel(config.model) || getDefaultModel(),
-			provider: config.provider ?? null,
 			provider_models: providerModels,
-			permission_mode: config.permission_mode || 'default',
-			effort: (config as any).effort || null,
 			max_turns: config.max_turns || null,
 			allowed_tools: allowedTools,
 			disallowed_tools: disallowedTools,
@@ -554,11 +532,6 @@
 		}
 	}
 
-	// Model display delegates to the shared registry so dropdowns, badges
-	// and labels stay in sync everywhere.
-	const getModelDisplay = getModelLabel;
-	const getModelBadgeClass = getModelBadgeClassShared;
-
 	// Handle form field changes from sub-component
 	function handleFormChange(field: string, value: any) {
 		(profileForm as any)[field] = value;
@@ -580,15 +553,6 @@
 		}
 	}
 
-	// Handle custom model mode change
-	function handleCustomModelModeChange(custom: boolean, model: string) {
-		customModelMode = custom;
-		profileForm.model = model;
-		// Free-text custom models are always native Anthropic — a provider
-		// selection only comes from the dedicated provider optgroup.
-		if (custom) profileForm.provider = null;
-	}
-
 	// Apply a built-in template to the (new) agent's prompt. Explicit user action
 	// only — never auto-applied. Fills the custom-prompt content and, when the
 	// template carries a tool list, the allow-list; the user can edit freely after.
@@ -608,27 +572,24 @@
 		if (!profileForm.name) return;
 
 		const config: any = {
-			model: profileForm.model,
-			permission_mode: profileForm.permission_mode,
-			// model_providers.id, or omitted (→ native Anthropic) when unset.
-			...(profileForm.provider ? { provider: profileForm.provider } : {}),
 			include_partial_messages: profileForm.include_partial_messages,
 			app_config_tools: profileForm.app_config_tools
 		};
-		// Subagent runtime map. Blank values mean unavailable and are pruned;
-		// stale assignments for temporarily absent providers stay intact. The
-		// top-level binding is always callable on its own provider.
+		// An agent carries no model, provider, permission mode or effort: a chat
+		// picks those when it starts, and internal one-shot generation reads the
+		// text-generation setting under Settings → Providers.
+		//
+		// Subagent runtime map — the ONE model binding an agent still owns, used
+		// when another agent dispatches it as a Task subagent. Blank values mean
+		// unavailable and are pruned; stale assignments for temporarily absent
+		// providers stay intact. Nothing is injected from a top-level binding any
+		// more: the map is exactly what the Agents tab shows.
 		const providerModels = Object.fromEntries(
 			Object.entries(profileForm.provider_models)
 				.map(([key, value]) => [key.trim(), value.trim()])
 				.filter(([key, value]) => key && value)
 		);
-		providerModels[profileForm.provider || NATIVE_PROVIDER_KEY] = profileForm.model;
 		config.provider_models = providerModels;
-
-		// Reasoning depth — honored on every leg (delegated CLI --effort;
-		// native legs via the provider's effort/reasoning param).
-		if (profileForm.effort) config.effort = profileForm.effort;
 		// Per-turn model-call cap (native legs).
 		if (profileForm.max_turns) config.max_turns = profileForm.max_turns;
 
@@ -801,24 +762,18 @@
 				? agent.system_prompt_content || ''
 				: agent.system_prompt_append || '';
 
-		customModelMode = !isPresetModel(agent.model || getDefaultModel());
-
 		profileForm = {
 			id: '',
 			name: agent.name,
 			description: agent.description || '',
-			model: normalizeModel(agent.model) || getDefaultModel(),
-			// AI-generated/imported profiles are always native Anthropic today —
-			// the export format doesn't carry a provider id.
-			provider: null,
+			// A legacy export's top-level model becomes the native SUBAGENT
+			// binding — the only model an agent still carries.
 			provider_models: {
 				...(agent.provider_models || {}),
 				[NATIVE_PROVIDER_KEY]: agent.provider_models?.[NATIVE_PROVIDER_KEY]
 					|| normalizeModel(agent.model)
 					|| getDefaultModel()
 			},
-			permission_mode: agent.permission_mode || 'default',
-			effort: (agent.effort as any) || null,
 			max_turns: agent.max_turns || null,
 			allowed_tools: allowedTools,
 			disallowed_tools: disallowedTools,
@@ -881,7 +836,7 @@
 {#if viewMode === 'form'}
 		<StudioEditorShell
 			title={editingProfile ? editingProfile.name : 'New Agent'}
-			subtitle={editingProfile ? `Agent · ${getModelDisplay(profileForm.model)}` : 'Create a new agent'}
+			subtitle={editingProfile ? 'Agent configuration' : 'Create a new agent'}
 			backLabel="Agents"
 			onBack={backToList}
 			sections={tabs.map((t) => ({ id: t.id, label: t.label, icon: tabIcons[t.id as keyof typeof tabIcons] }))}
@@ -895,7 +850,6 @@
 				{editingProfile}
 				{profileForm}
 				{toolSelectionMode}
-				{customModelMode}
 				{groups}
 				{allSubagents}
 				{builtinAgentIds}
@@ -910,7 +864,6 @@
 				{expandedSections}
 				onFormChange={handleFormChange}
 				onToolSelectionModeChange={handleToolSelectionModeChange}
-				onCustomModelModeChange={handleCustomModelModeChange}
 				onToggleTool={toggleTool}
 				onToggleCategory={toggleCategory}
 				onToggleAITool={toggleAITool}
@@ -947,7 +900,6 @@
 			onExportProfile={handleExportProfile}
 			onDeleteProfile={handleDeleteProfile}
 			onRevertProfile={handleRevertProfile}
-			{getModelDisplay}
 			{getProfileToolCount}
 		/>
 	{/if}

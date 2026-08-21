@@ -1979,13 +1979,19 @@ async def _stream_to_websocket_impl(
     session = await run_sync(database.get_session, session_id)
     resume_id = session.get("sdk_session_id") if session else None
 
-    # Determine permission mode
+    # Determine permission mode. Same chain build_options_from_profile uses
+    # (v79): this turn's override, then the session's own binding, then the
+    # agent's legacy config for pre-v79 sessions.
     config = profile.get("config", {})
     permission_mode = overrides.get("permission_mode") if overrides else None
     if not permission_mode:
-        permission_mode = config.get("permission_mode", "default")
+        permission_mode = (
+            (session or {}).get("permission_mode")
+            or config.get("permission_mode")
+            or "default"
+        )
 
-    logger.debug(f"[WS] Permission mode for session {session_id}: {permission_mode} (profile config: {config.get('permission_mode')}, override: {overrides.get('permission_mode') if overrides else None})")
+    logger.debug(f"[WS] Permission mode for session {session_id}: {permission_mode} (session binding: {(session or {}).get('permission_mode')}, agent config: {config.get('permission_mode')}, override: {overrides.get('permission_mode') if overrides else None})")
     logger.debug(f"[WS] broadcast_func provided: {broadcast_func is not None}")
 
     # Get tool restrictions for use in callback

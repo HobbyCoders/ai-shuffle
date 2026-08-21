@@ -6,7 +6,9 @@ order: 6
 
 # Profiles
 
-Profiles are configuration containers that control how Claude behaves during a session. Each profile defines the model, permissions, system prompt, available tools, enabled subagents, plugins, and other settings. Switch between profiles to get different behaviors from the same AI Shuffle instance.
+Profiles are configuration containers that control how Claude behaves during a session. Each profile defines the system prompt, available tools, enabled subagents, plugins, memory, and other settings. Switch between profiles to get different behaviors from the same AI Shuffle instance.
+
+A profile does **not** pin a model. The model, reasoning effort, and permission mode belong to the session: you pick them in the composer when you start a chat, and they stay with that chat (changeable mid-conversation) no matter which profile it runs. That way the same profile can run cheap on one conversation and expensive on the next.
 
 ## Overview
 
@@ -14,8 +16,9 @@ Every session uses a profile. Profiles let you create specialized configurations
 
 Key concepts:
 
-- **Default profile** included out of the box
-- **All profiles are editable**, including built-in ones
+- **A starter profile** is created when an install has none, so there is always
+  something to chat with. It is an ordinary profile — rename, edit or delete it
+- **Every profile is yours**: nothing ships as a protected built-in
 - **AI-powered generation** to create profiles from a description
 - **Export/import** profiles as JSON for sharing across instances
 - **Per-profile subagents and plugins** for fine-grained control
@@ -28,11 +31,18 @@ A profile contains a `config` object with the following settings:
 
 | Field              | Type   | Default    | Description                                    |
 |--------------------|--------|------------|------------------------------------------------|
-| `model`            | string | `"sonnet"` | Claude model to use                             |
-| `permission_mode`  | string | `"default"`| How Claude handles permissions                  |
 | `thinking_mode`    | string | `"default"`| Extended thinking behavior (Sonnet/Haiku)       |
-| `effort`           | string | null       | Reasoning effort level (Opus 4.6+)              |
 | `max_turns`        | int    | null       | Optional model-call cap; null means unlimited    |
+
+`model`, `permission_mode` and `effort` are session settings, not profile
+settings. Profiles saved by older versions may still carry them; they are used
+only as a fallback for sessions created before the move.
+
+Text the app generates for you outside a chat — session titles, commit
+messages, PR descriptions, branch names, generated agents — runs on its own
+model and effort, set once under **Settings → Providers → Generated text**.
+
+The vocabularies below describe what you can pick per session.
 
 #### Models
 
@@ -74,7 +84,8 @@ Controls Claude's extended thinking behavior. More thinking produces better resu
 
 #### Effort (Opus 4.6+)
 
-For Opus 4.6 and later models, use effort-based reasoning instead of thinking modes:
+For Opus 4.6 and later models, effort-based reasoning replaces thinking modes.
+Pick it per session from the composer:
 
 | Level    | Description                                   |
 |----------|-----------------------------------------------|

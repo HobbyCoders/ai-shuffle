@@ -8,7 +8,6 @@ permission mode, system prompt, etc.).
 import logging
 from typing import Any, Dict, cast
 
-from app.core.model_registry import DEFAULT_MODEL, model_values
 from app.mcp.config_helpers import _tool_result, _error
 
 logger = logging.getLogger(__name__)
@@ -38,9 +37,7 @@ def _create_profile_tools(is_admin: bool) -> list:
                     "name": p.get("name"),
                     "description": p.get("description"),
                     "is_builtin": p.get("is_builtin", False),
-                    "model": p.get("config", {}).get("model"),
                     "tools_preset": p.get("config", {}).get("tools_preset"),
-                    "permission_mode": p.get("config", {}).get("permission_mode"),
                     "app_config_tools": p.get("config", {}).get("app_config_tools", False),
                 }
                 for p in profiles
@@ -81,20 +78,10 @@ def _create_profile_tools(is_admin: bool) -> list:
             "properties": {
                 "name": {"type": "string", "description": "Profile name (1-100 chars)."},
                 "description": {"type": "string"},
-                "model": {
-                    "type": "string",
-                    "enum": model_values(),
-                    "description": "AI model to use.",
-                },
                 "tools_preset": {
                     "type": "string",
                     "enum": ["claude_code"],
                     "description": "Tools preset. 'claude_code' gives access to all standard tools.",
-                },
-                "permission_mode": {
-                    "type": "string",
-                    "enum": ["default", "auto", "acceptEdits", "plan", "bypassPermissions"],
-                    "description": "Tool permission mode.",
                 },
                 "thinking_mode": {
                     "type": "string",
@@ -144,10 +131,10 @@ def _create_profile_tools(is_admin: bool) -> list:
                 "Choose a different name."
             )
 
-        # Build config
+        # Build config. No model or permission mode: an agent is configuration,
+        # and the person starting a chat picks the model, effort and permission
+        # mode for that session.
         config: Dict[str, Any] = {
-            "model": args.get("model", DEFAULT_MODEL),
-            "permission_mode": args.get("permission_mode", "default"),
             "tools_preset": args.get("tools_preset", "claude_code"),
         }
 
@@ -194,10 +181,10 @@ def _create_profile_tools(is_admin: bool) -> list:
             "success": True,
             "profile_id": profile_id,
             "name": args["name"],
-            "model": config["model"],
             "message": (
                 f"Profile '{args['name']}' created (ID: {profile_id}). "
-                "Select it from the profile dropdown to use it."
+                "Select it from the profile dropdown to use it. Its model, "
+                "effort and permission mode are chosen per chat, not here."
             ),
         })
 
@@ -214,8 +201,6 @@ def _create_profile_tools(is_admin: bool) -> list:
                 "profile_id": {"type": "string"},
                 "name": {"type": "string"},
                 "description": {"type": "string"},
-                "model": {"type": "string", "enum": model_values()},
-                "permission_mode": {"type": "string", "enum": ["default", "auto", "acceptEdits", "plan", "bypassPermissions"]},
                 "thinking_mode": {"type": "string", "enum": ["default", "disabled", "adaptive", "think", "think_harder", "ultra_think"]},
                 "tools_preset": {"type": "string", "enum": ["claude_code"]},
                 "max_turns": {"type": "integer"},
@@ -224,7 +209,6 @@ def _create_profile_tools(is_admin: bool) -> list:
                 "system_prompt_append": {"type": "string", "description": "Text to append to the preset system prompt. Pass non-empty string to switch profile to preset+append; omit to leave unchanged."},
                 "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Explicit tool whitelist. Pass [] to clear; omit to leave unchanged."},
                 "disallowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Tool blacklist. Pass [] to clear; omit to leave unchanged."},
-                "effort": {"type": "string", "enum": ["low", "medium", "high", "max", "xhigh"], "description": "Effort-based reasoning level for Opus 4.6+ models. Ignored on other models."},
             },
             "required": ["profile_id"],
         },
@@ -241,8 +225,8 @@ def _create_profile_tools(is_admin: bool) -> list:
         config = dict(profile.get("config", {}))
         updated_fields = []
 
-        for field in ("model", "permission_mode", "thinking_mode",
-                      "tools_preset", "max_turns", "app_config_tools", "effort"):
+        for field in ("thinking_mode", "tools_preset", "max_turns",
+                      "app_config_tools"):
             if field in args and args[field] is not None:
                 config[field] = args[field]
                 updated_fields.append(field)

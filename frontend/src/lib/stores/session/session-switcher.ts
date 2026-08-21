@@ -127,6 +127,47 @@ export function setPersistedWorktreeIntent(mode: ExecutionMode): void {
 	}
 }
 
+/**
+ * Last-used run binding — the model, effort and permission mode the user last
+ * picked in the composer.
+ *
+ * Agents no longer pin any of these: a session's binding is chosen when the
+ * session is created and then lives on its row. A brand-new chat has no row
+ * yet, so it opens on whatever the user picked last, and falls back to the
+ * registry default only on a first-ever run. Like the worktree intent above,
+ * this is a UI *preference*: an existing session always restores its OWN
+ * binding and never consults these.
+ */
+export function getPersistedModel(): string | null {
+	if (typeof window === 'undefined') return null;
+	return localStorage.getItem('aihub_lastModel') || null;
+}
+
+export function getPersistedEffort(): string | null {
+	if (typeof window === 'undefined') return null;
+	return localStorage.getItem('aihub_lastEffort') || null;
+}
+
+export function getPersistedPermissionMode(): string | null {
+	if (typeof window === 'undefined') return null;
+	return localStorage.getItem('aihub_lastPermissionMode') || null;
+}
+
+/** Remember one leg of the run binding. `null` clears it. */
+export function setPersistedRunBinding(
+	key: 'model' | 'effort' | 'permissionMode',
+	value: string | null
+): void {
+	if (typeof window === 'undefined') return;
+	const storageKey = {
+		model: 'aihub_lastModel',
+		effort: 'aihub_lastEffort',
+		permissionMode: 'aihub_lastPermissionMode'
+	}[key];
+	if (value) localStorage.setItem(storageKey, value);
+	else localStorage.removeItem(storageKey);
+}
+
 async function loadSelectionFromBackend(): Promise<{ selectedProfile: string; selectedProject: string } | null> {
 	if (typeof window === 'undefined') return null;
 	try {
@@ -431,13 +472,15 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// Merge ephemeral state in the same update
 			draft: ephemeral?.draft || '',
 			scrollTop: ephemeral?.scrollTop || 0,
-			// Overrides are per-session ephemeral state — default to null on cache
-			// miss, NEVER fall back to s.X (the leaving session's state). Using
-			// s.X caused the leaving session's effort / permission / model
-			// overrides to cascade into the target session on switch.
-			modelOverride: ephemeral?.modelOverride ?? null,
-			permissionModeOverride: ephemeral?.permissionModeOverride ?? null,
-			effortLevelOverride: ephemeral?.effortLevelOverride ?? null,
+			// The target session's run binding: this tab's unsent pick first (the
+			// user may have changed the model without sending yet), then the
+			// session's own row — the server-side binding, so a session opened on
+			// a second device shows the model it actually runs on. NEVER fall
+			// back to s.X (the leaving session's state): that is what used to
+			// cascade one session's model/effort/permission into the next.
+			modelOverride: ephemeral?.modelOverride ?? row?.model ?? null,
+			permissionModeOverride: ephemeral?.permissionModeOverride ?? row?.permission_mode ?? null,
+			effortLevelOverride: ephemeral?.effortLevelOverride ?? row?.effort ?? null,
 			// Worktree fields: ephemeral > worktreeInfo from session list > safe defaults
 			worktreeIntent: ephemeral?.worktreeIntent ?? worktreeInfo?.worktreeIntent ?? 'local',
 			// Compose-time only: an existing session's device is already settled

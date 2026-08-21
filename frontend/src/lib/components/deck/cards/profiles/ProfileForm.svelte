@@ -11,8 +11,6 @@
 	import ProfileSystemPrompt from './ProfileSystemPrompt.svelte';
 	import ModelPicker from '$lib/components/settings/ModelPicker.svelte';
 	import {
-		CUSTOM_VALUE,
-		normalizeModel,
 		encodeProviderModel,
 		decodeProviderModel,
 		getProviders,
@@ -96,12 +94,8 @@
 		id: string;
 		name: string;
 		description: string;
-		model: string;
-		/** `model_providers.id` this profile's model belongs to, or `null` for native Anthropic. */
-		provider: string | null;
+		/** Per-provider model used when this agent is dispatched as a subagent. */
 		provider_models: Record<string, string>;
-		permission_mode: string;
-		effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null;
 		max_turns: number | null;
 		allowed_tools: string[];
 		disallowed_tools: string[];
@@ -124,7 +118,6 @@
 		editingProfile: Profile | null;
 		profileForm: ProfileFormData;
 		toolSelectionMode: 'all' | 'none' | 'allow' | 'disallow';
-		customModelMode: boolean;
 		groups: GroupState;
 		allSubagents: Subagent[];
 		builtinAgentIds: string[];
@@ -140,7 +133,6 @@
 		expandedSections: Record<string, boolean>;
 		onFormChange: (field: string, value: any) => void;
 		onToolSelectionModeChange: (mode: 'all' | 'none' | 'allow' | 'disallow') => void;
-		onCustomModelModeChange: (custom: boolean, model: string) => void;
 		onToggleTool: (toolName: string) => void;
 		onToggleCategory: (category: { name: string; tools: { name: string }[] }) => void;
 		onToggleAITool: (toolId: string) => void;
@@ -162,7 +154,6 @@
 		editingProfile,
 		profileForm,
 		toolSelectionMode,
-		customModelMode,
 		groups,
 		allSubagents,
 		builtinAgentIds,
@@ -177,7 +168,6 @@
 		expandedSections,
 		onFormChange,
 		onToolSelectionModeChange,
-		onCustomModelModeChange,
 		onToggleTool,
 		onToggleCategory,
 		onToggleAITool,
@@ -319,73 +309,6 @@
 					</div>
 				</div>
 			{/if}
-		</div>
-
-		<div class="set-group">
-			<div class="set-grouphead"><h3><Settings />Model &amp; permissions</h3></div>
-			<div class="set-row">
-				<div class="lab"><h4>Model</h4><p>The model this agent runs on. Any signed-in provider's models are available.</p></div>
-				<div class="ctl ctl-col">
-					<div class="grp-row">
-						<ModelPicker
-							value={customModelMode
-								? CUSTOM_VALUE
-								: profileForm.provider
-									? encodeProviderModel(profileForm.provider, profileForm.model)
-									: normalizeModel(profileForm.model)}
-							onSelect={(v) => {
-								const composite = decodeProviderModel(v);
-								if (v === CUSTOM_VALUE) {
-									onCustomModelModeChange(true, '');
-									onFormChange('provider', null);
-								} else if (composite) {
-									// `prov:<providerId>:<modelId>` — the shared codec splits on the
-									// first colon only, so provider model ids that contain colons
-									// themselves (e.g. "meta-llama/llama-3.1:free") survive intact.
-									onCustomModelModeChange(false, composite.modelId);
-									onFormChange('provider', composite.providerId);
-								} else {
-									onCustomModelModeChange(false, v);
-									onFormChange('provider', null);
-								}
-							}}
-						/>
-					</div>
-					{#if customModelMode}
-						<input type="text" value={profileForm.model} oninput={(e) => onFormChange('model', (e.target as HTMLInputElement).value)} class="inp mono" placeholder="e.g. claude-sonnet-4-5" />
-					{/if}
-				</div>
-			</div>
-			<div class="set-row">
-				<div class="lab"><h4>Permission mode</h4><p>How the agent asks before taking actions.</p></div>
-				<div class="ctl">
-					<select class="sel" value={profileForm.permission_mode} onchange={(e) => onFormChange('permission_mode', (e.target as HTMLSelectElement).value)}>
-						<option value="default">Default</option>
-						<option value="acceptEdits">Accept Edits</option>
-						<option value="plan">Plan</option>
-						<option value="bypassPermissions">Bypass Permissions</option>
-					</select>
-				</div>
-			</div>
-			<div class="set-row">
-				<div class="lab"><h4>Effort</h4><p>Reasoning depth vs. speed and cost. Applies to any provider that supports it; can be overridden per-chat.</p></div>
-				<div class="ctl">
-					<select class="sel" value={profileForm.effort || ''} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; onFormChange('effort', v ? v : null); }}>
-						<option value="">Provider default</option>
-						<option value="low">Low</option>
-						<option value="medium">Medium</option>
-						<option value="high">High</option>
-						<option value="xhigh">XHigh</option>
-						<option value="max">Max</option>
-					</select>
-				</div>
-			</div>
-			<div class="set-row">
-				<div class="lab"><h4>Max model calls per turn</h4><p>Optional user-set cap. Empty = unlimited.</p></div>
-				<div class="ctl">
-					<input class="inp" type="number" value={profileForm.max_turns} oninput={(e) => { const v = (e.target as HTMLInputElement).value; onFormChange('max_turns', v ? Number(v) : null); }} placeholder="Unlimited" />
-				</div>
-			</div>
 		</div>
 
 		<div class="set-group">
@@ -590,6 +513,16 @@
 
 	{:else if activeTab === 'advanced'}
 		<!-- ADVANCED TAB -->
+		<div class="set-group">
+			<div class="set-grouphead"><h3>Limits</h3><p>Guardrails applied to every session this agent runs.</p></div>
+			<div class="set-row">
+				<div class="lab"><h4>Max model calls per turn</h4><p>Optional user-set cap. Empty = unlimited.</p></div>
+				<div class="ctl">
+					<input class="inp" type="number" value={profileForm.max_turns} oninput={(e) => { const v = (e.target as HTMLInputElement).value; onFormChange('max_turns', v ? Number(v) : null); }} placeholder="Unlimited" />
+				</div>
+			</div>
+		</div>
+
 		<div class="set-group">
 			<div class="set-grouphead"><h3>Environment</h3><p>Configure the working environment for this agent.</p></div>
 			<div class="set-row stack">

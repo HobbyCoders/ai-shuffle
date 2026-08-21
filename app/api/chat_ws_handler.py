@@ -847,6 +847,13 @@ class ChatWebSocketHandler:
                         is_active=True,
                         target_instance_id=target_instance_id,
                         project_v2_id=resolved_pv2_id,
+                        # The composer's pick IS the session's binding (v79) —
+                        # agents no longer pin a model, so stamp it at birth.
+                        # A ``prov:`` composite also settles provider_id here,
+                        # before anything reads the row.
+                        model=(overrides or {}).get("model"),
+                        effort=(overrides or {}).get("effort"),
+                        permission_mode=(overrides or {}).get("permission_mode"),
                         _conn=txn
                     )
                     _msg_role = "user"

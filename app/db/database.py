@@ -200,7 +200,17 @@ def _safe_json(value):
 # 78 (2026-08-20): one-time device pairing grants, scoped paired-controller
 #     sessions, enforced mobile credential expiry/revocation, and runner
 #     approval state. Additive and idempotently guarded for rolling upgrades.
-SCHEMA_VERSION = 78
+# 79 (2026-08-20): add sessions.model / sessions.effort / sessions.permission_mode
+#     — the run binding the user picks when the session is created, instead of
+#     the one an agent used to pin. ``model`` holds the raw composer selection
+#     (a bare id/alias, or a ``prov:<providerId>:<modelId>`` composite whose
+#     provider wins over the row's provider_id, exactly like a query-level
+#     model override). NULL on every pre-existing row, where resolution falls
+#     back to launched_model and then the agent's legacy config — so sessions
+#     created before this migration keep running on exactly what they ran on.
+#     Additive/nullable with no index; lands via the always-run guarded ADD
+#     COLUMN in _run_column_migrations.
+SCHEMA_VERSION = 79
 
 
 def _migrate_omni_tables_to_fluid(cursor):
@@ -1655,6 +1665,19 @@ def _run_column_migrations(cursor):
         cursor.execute("ALTER TABLE sessions ADD COLUMN hidden BOOLEAN")
         migrations_applied.append("sessions.hidden")
 
+    # Per-session run binding (v79): the model / effort / permission mode the
+    # user picked for THIS session. Agents no longer pin a model, so these are
+    # the authoritative selection every turn resolves from — a query-level
+    # override still wins for that one turn and is written back here, so the
+    # composer's mid-session switch sticks server-side (and therefore on every
+    # device, and for server-initiated turns like wakeups and automations).
+    # NULL on pre-existing rows: resolution falls back to launched_model, then
+    # the agent's legacy config, so nothing reroutes on upgrade.
+    for _col in ("model", "effort", "permission_mode"):
+        if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", _col):
+            cursor.execute(f"ALTER TABLE sessions ADD COLUMN {_col} TEXT")
+            migrations_applied.append(f"sessions.{_col}")
+
     # Rename sessions.is_favorite -> is_active (v63). Favorites were reworked
     # into an "Active group": the flag now marks the session the user is
     # currently working in. Guarded so the rename runs exactly once (only when
@@ -1958,6 +1981,7 @@ from app.db.sessions import (  # noqa: F401
     create_session_with_stats,
     update_session,
     set_session_context_usage,
+    set_session_run_binding,
     get_session_context_usage_snapshot,
     delete_session,
     set_session_active,

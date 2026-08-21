@@ -291,6 +291,11 @@ async def conversation(
                 title=title,
                 api_user_id=api_user.get("id"),
                 is_active=True,
+                # The caller's requested model/effort/permission bind the new
+                # session (v79) — agents no longer carry one.
+                model=(overrides or {}).get("model"),
+                effort=(overrides or {}).get("effort"),
+                permission_mode=(overrides or {}).get("permission_mode"),
             )
             # Best-effort: surface the new session on connected devices right
             # away rather than on the next sidebar poll.

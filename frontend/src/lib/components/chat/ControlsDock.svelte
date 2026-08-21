@@ -21,7 +21,6 @@
 	import {
 		getModelLabel,
 		getDefaultModel,
-		encodeProviderModel,
 		isReroute
 	} from '$lib/constants/models';
 	import { computerUse } from '$lib/stores/computerUse.svelte';
@@ -71,15 +70,14 @@
 	// Only one override dropdown may be open at a time — opening one closes the others.
 	let openDropdown = $state<'model' | 'effort' | 'permission' | null>(null);
 
-	// The effort/permission dropdowns reflect the *effective* value: the per-session
-	// override if one is set, otherwise the active profile's setting. They list only
-	// real SDK values (no synthetic "Default") — selecting the profile's own value
-	// clears the override so the session keeps inheriting from the profile.
+	// Model / effort / permission are the SESSION's run binding, not an override
+	// of the agent's: an agent is the configuration (prompt, tools, memory) and
+	// carries no model. The user picks the binding when the chat is created —
+	// seeded from whatever they picked last — and may change it mid-session;
+	// every send carries it, and the backend stores it on the session row.
 	const activeProfile = $derived($profiles.find((p) => p.id === $activeSession.profile));
-	const profileEffort = $derived(activeProfile?.config?.effort ?? null);
-	const profilePermissionMode = $derived(activeProfile?.config?.permission_mode ?? null);
-	const effortValue = $derived($activeSession.effortLevelOverride ?? profileEffort);
-	const permissionValue = $derived($activeSession.permissionModeOverride ?? profilePermissionMode);
+	const effortValue = $derived($activeSession.effortLevelOverride);
+	const permissionValue = $derived($activeSession.permissionModeOverride ?? 'default');
 	const computerUseEnabled = $derived(!!activeProfile?.config?.computer_use?.enabled);
 	const attachDisabled = $derived(
 		!$anyCredential || isUploading || isRemoteOnlyCompose($activeSession.project, $activeSession.projectV2Id)
@@ -97,17 +95,11 @@
 	// when the resolved provider changes).
 	const modelCatalog = $derived(buildModelPickerCatalog({ familyBlurbs: true }));
 	const modelOptions = $derived(modelCatalog.options);
-	// Effective selection: the per-session override if set, else the profile's
-	// model, else the registry default. Selecting the profile's own model clears
-	// the override (mirrors the effort/permission pattern) — for a provider-bound
-	// profile that means the profile's COMPOSITE, so the checkmark lands on the
-	// right row and re-picking it still clears the override.
-	const profileModel = $derived.by(() => {
-		const model = activeProfile?.config?.model ?? getDefaultModel();
-		const provider = activeProfile?.config?.provider ?? null;
-		return provider ? encodeProviderModel(provider, model) : model;
-	});
-	const modelValue = $derived($activeSession.modelOverride ?? profileModel);
+	// The session's model. A chat always has one: the pick is seeded from the
+	// last-used model on a new chat and restored from the session's own row
+	// when an existing one is opened, so the registry default is only ever the
+	// first-run floor.
+	const modelValue = $derived($activeSession.modelOverride ?? getDefaultModel());
 
 	// Live reroute detection: the backend `model_info` note tells us which model
 	// the SDK's MAIN lane is ACTUALLY running. Compare at FAMILY level — exact-ID
@@ -226,8 +218,8 @@
 		{ value: 'max', label: 'Max', description: 'Maximum reasoning depth' }
 	];
 
-	// Desktop pill labels — the effective value's human label, with a neutral
-	// fallback when nothing is set yet (no profile value + no override).
+	// Desktop pill labels — the selected value's human label, with a neutral
+	// fallback when nothing is picked (effort defaults to the provider's own).
 	const effortButtonLabel = $derived(
 		effortLevels.find((m) => m.value === effortValue)?.label ?? 'Effort'
 	);
@@ -243,10 +235,10 @@
 		<OverrideDropdown
 			modes={modelOptions}
 			currentValue={modelValue}
-			isOverridden={$activeSession.modelOverride !== null}
+			isOverridden={false}
 			isOpen={openDropdown === 'model'}
 			onOpenChange={(open) => (openDropdown = open ? 'model' : null)}
-			onSelect={(v) => activeSession.setModelOverride(v === profileModel ? null : v)}
+			onSelect={(v) => activeSession.setModelOverride(v)}
 			title="Model"
 			buttonLabel={modelButtonLabel}
 			buttonSubLabel={modelSubLabel}
@@ -261,7 +253,7 @@
 					value={modelValue}
 					notice={modelNotice}
 					onSelect={(v) => {
-						activeSession.setModelOverride(v === profileModel ? null : v);
+						activeSession.setModelOverride(v);
 						openDropdown = null;
 					}}
 					onRequestClose={() => (openDropdown = null)}
@@ -283,7 +275,7 @@
 			isOverridden={$activeSession.effortLevelOverride !== null}
 			isOpen={openDropdown === 'effort'}
 			onOpenChange={(open) => (openDropdown = open ? 'effort' : null)}
-			onSelect={(v) => activeSession.setEffortLevelOverride(v === profileEffort ? null : v)}
+			onSelect={(v) => activeSession.setEffortLevelOverride(v)}
 			title="Effort Level"
 			buttonLabel={effortButtonLabel}
 		>
@@ -301,7 +293,7 @@
 			isOverridden={$activeSession.permissionModeOverride !== null}
 			isOpen={openDropdown === 'permission'}
 			onOpenChange={(open) => (openDropdown = open ? 'permission' : null)}
-			onSelect={(v) => activeSession.setPermissionModeOverride(v === profilePermissionMode ? null : v)}
+			onSelect={(v) => activeSession.setPermissionModeOverride(v)}
 			title="Permission Mode"
 			buttonLabel={permissionButtonLabel}
 		>
@@ -330,7 +322,6 @@
 			aria-label={`Open chat controls. Current model: ${modelButtonLabel}`}
 		>
 			<SlidersHorizontal size={16} strokeWidth={1.8} aria-hidden="true" />
-			{#if $activeSession.modelOverride !== null}<i aria-label="Model overridden"></i>{/if}
 		</button>
 	</div>
 
@@ -395,20 +386,14 @@
 	modelGroups={modelCatalog.groups}
 	{modelValue}
 	modelLabel={modelButtonLabel}
-	modelDefaultValue={profileModel}
-	modelOverridden={$activeSession.modelOverride !== null}
 	modelNotice={modelNotice}
-	onModelSelect={(value) => activeSession.setModelOverride(value === profileModel ? null : value)}
+	onModelSelect={(value) => activeSession.setModelOverride(value)}
 	effortOptions={effortLevels}
 	{effortValue}
-	effortDefaultValue={profileEffort}
-	effortOverridden={$activeSession.effortLevelOverride !== null}
-	onEffortSelect={(value) => activeSession.setEffortLevelOverride(value === profileEffort ? null : value)}
+	onEffortSelect={(value) => activeSession.setEffortLevelOverride(value)}
 	permissionOptions={permissionModes}
 	permissionValue={permissionValue}
-	permissionDefaultValue={profilePermissionMode}
-	permissionOverridden={$activeSession.permissionModeOverride !== null}
-	onPermissionSelect={(value) => activeSession.setPermissionModeOverride(value === profilePermissionMode ? null : value)}
+	onPermissionSelect={(value) => activeSession.setPermissionModeOverride(value)}
 	{computerUseEnabled}
 	computerUseStopped={computerUse.stopped}
 	computerUseActive={computerUse.active}
@@ -473,17 +458,6 @@
 		background: var(--scrim);
 		color: var(--muted-foreground);
 		cursor: pointer;
-	}
-
-	.mobile-settings-trigger i {
-		width: 5px;
-		height: 5px;
-		position: absolute;
-		top: 5px;
-		right: 5px;
-		border-radius: 50%;
-		background: var(--primary);
-		box-shadow: 0 0 7px var(--glow);
 	}
 
 	.mobile-settings-trigger.warn {

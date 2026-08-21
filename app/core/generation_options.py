@@ -2,8 +2,9 @@
 Generation call option builder.
 
 Builds a `ClaudeAgentOptions` for one-shot AI generation calls (commit
-messages, PR descriptions, branch names, profile / subagent generation,
-etc.) from the Default AI profile.
+messages, PR descriptions, branch names, profile / subagent generation, etc.)
+from the **text-generation setting** — one model + effort pair configured under
+Settings → Providers, shared by every internal generation call.
 
 All generation calls run through the provider adapter seam
 (`app.core.provider.factory.make_adapter`), exactly like chat: a
@@ -11,10 +12,12 @@ Claude-subscription binding takes the delegated `claude.exe` leg, anything else
 takes the fluid native leg. One throwaway adapter per call — no warm pool, no
 cross-call context bleed.
 
-Profile honoring:
-- Honored from the Default AI profile config: model, permission_mode,
-  setting_sources, thinking_mode, effort, max_thinking_tokens, system_prompt,
-  env, extra_args.
+Config honoring:
+- ``text_generation_config()`` supplies model / provider / effort from the
+  system setting. Callers may still pass a config dict of their own (the
+  profile-shaped path, kept for tests and for a caller with a bespoke binding),
+  in which case its model, permission_mode, setting_sources, thinking_mode,
+  effort, max_thinking_tokens, system_prompt, env and extra_args are honored.
 - Always force-disabled for one-shot generation: tools, agents, MCP servers,
   hooks, file checkpointing, partial messages, fork_session,
   continue_conversation. These would add cold-start overhead without benefit.
@@ -97,7 +100,7 @@ def _resolve_setting_sources(
     profile_config: Optional[Dict[str, Any]],
 ) -> List[str]:
     """
-    Resolve `setting_sources` for generation calls from the Default AI profile.
+    Resolve `setting_sources` for generation calls from the caller's config.
 
     Generation calls (commit messages, PR descriptions, branch names, etc.) are
     short one-shot prompts that have nothing to do with user-global Claude Code
@@ -235,6 +238,57 @@ def _resolve_env(
     return env
 
 
+# ---------------------------------------------------------------------------
+# The text-generation setting
+# ---------------------------------------------------------------------------
+#
+# One model + effort pair, stored in ``system_settings`` and edited under
+# Settings → Providers. Every internal generation call runs on it: session and
+# thread titles, commit messages, PR descriptions, branch names, agent and
+# subagent generation. It replaced the old "Default AI" agent, which pinned
+# these on an agent row even though generation never runs in a session.
+
+TEXT_GENERATION_MODEL_KEY = "text_generation_model"
+TEXT_GENERATION_EFFORT_KEY = "text_generation_effort"
+
+VALID_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
+def text_generation_config() -> Dict[str, Any]:
+    """Return the configured text-generation binding as a config dict.
+
+    Shaped like the profile config ``build_generation_options`` already
+    consumes: ``model`` (a bare id — a ``prov:<providerId>:<modelId>`` setting
+    is split here), ``provider`` (``model_providers.id``, or None for native
+    Anthropic) and ``effort``. Falls back to the registry default model with no
+    provider when the setting is unset or unreadable, so generation always has
+    somewhere to run.
+    """
+    model: Optional[str] = None
+    effort: Optional[str] = None
+    try:
+        from app.db import database
+
+        model = (database.get_system_setting(TEXT_GENERATION_MODEL_KEY) or "").strip() or None
+        effort = (database.get_system_setting(TEXT_GENERATION_EFFORT_KEY) or "").strip() or None
+    except Exception:  # noqa: BLE001 — an unreadable setting is not a failure
+        logger.debug("Could not read the text-generation setting", exc_info=True)
+
+    provider_id: Optional[str] = None
+    if model:
+        from app.core.query_options import decode_provider_model
+
+        decoded = decode_provider_model(model)
+        if decoded:
+            provider_id, model = decoded
+
+    return {
+        "model": model or DEFAULT_MODEL,
+        "provider": provider_id,
+        "effort": effort if effort in VALID_EFFORTS else None,
+    }
+
+
 def build_generation_options(
     profile_config: Optional[Dict[str, Any]],
     model_override: Optional[str] = None,
@@ -244,7 +298,7 @@ def build_generation_options(
     """
     Build a `ClaudeAgentOptions` for a one-shot generation call.
 
-    Honored from the Default AI profile config:
+    Honored from ``profile_config`` (callers pass ``text_generation_config()``):
     - `model` (unless `model_override` is supplied)
     - `permission_mode` (default `bypassPermissions`)
     - `setting_sources` (via `_resolve_setting_sources` workaround)

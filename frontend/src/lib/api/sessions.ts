@@ -66,6 +66,13 @@ export interface Session {
 	is_pinned?: boolean;  // Explicit runner:<id> placement pin (computed at read)
 	automation_id?: string | null;  // Set when an automation run created this session
 	provider_id?: string | null;  // Bound model provider (null = native Claude)
+	// The run binding chosen when this session was created (agents no longer
+	// pin one). `model` is the raw pick: a bare id/alias, or a
+	// `prov:<providerId>:<modelId>` composite. Null on sessions created before
+	// the binding moved onto the row.
+	model?: string | null;
+	effort?: string | null;
+	permission_mode?: string | null;
 	mode?: string;  // Interaction mode: 'chat' (default) or 'voice' (Realtime call)
 	v2_stream?: boolean;  // Per-session opt-in to the V2 streaming path (V2 Phase 1)
 	hidden?: boolean;  // List-hidden internal sessions (for example delegated workers)

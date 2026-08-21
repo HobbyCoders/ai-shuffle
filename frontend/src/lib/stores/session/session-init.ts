@@ -147,9 +147,18 @@ export function createSessionInit(deps: SessionInitDeps) {
 						title: persisted.title || 'New Chat',
 						profile: persisted.profile || defaultProfile,
 						...resolvePersistedProject(persisted, defaultProject),
-						modelOverride: persisted.modelOverride ?? null,
-						permissionModeOverride: persisted.permissionModeOverride ?? null,
-						effortLevelOverride: persisted.effortLevelOverride ?? null,
+						// Run binding. A restored EXISTING session keeps whatever the
+						// record holds — null included, which lets the backend fall
+						// back to what that session actually last ran on. Only an
+						// unbound compose (no sessionId) inherits the seeded
+						// last-used pick, so reopening an old chat never reroutes it
+						// onto the model the user happened to choose elsewhere.
+						modelOverride:
+							persisted.modelOverride ?? (persisted.sessionId ? null : s.modelOverride),
+						permissionModeOverride:
+							persisted.permissionModeOverride ?? (persisted.sessionId ? null : s.permissionModeOverride),
+						effortLevelOverride:
+							persisted.effortLevelOverride ?? (persisted.sessionId ? null : s.effortLevelOverride),
 						worktreeIntent: persisted.worktreeIntent || 'local',
 						worktreeBranch: persisted.worktreeBranch || '',
 						worktreeBaseBranch: persisted.worktreeBaseBranch || 'main',

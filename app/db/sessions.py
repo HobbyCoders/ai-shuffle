@@ -86,6 +86,17 @@ class SessionRow(TypedDict):
     working_set_ref: Optional[str]
     context_usage_json: Optional[Dict[str, Any]]
     provider_id: Optional[str]
+    # Effective model the SDK/CLI session was last launched (or switched) with.
+    # A record of what RAN — distinct from ``model`` below, which is what the
+    # user picked.
+    launched_model: Optional[str]
+    # The run binding chosen when this session was created (v79). ``model`` is
+    # the raw pick: a bare id/alias, or a ``prov:<providerId>:<modelId>``
+    # composite that also settles ``provider_id``. NULL on pre-v79 rows, which
+    # fall back to ``launched_model`` and then the agent's legacy config.
+    model: Optional[str]
+    effort: Optional[str]
+    permission_mode: Optional[str]
     # Interaction mode (v74, ruling VM4): 'voice' for an OpenAI Realtime call,
     # NULL/'chat' for a normal chat session.
     mode: Optional[str]
@@ -469,6 +480,9 @@ def create_session(
     is_active: bool = False,
     provider_id: Optional[str] = None,
     derive_provider_from_profile: bool = True,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
+    permission_mode: Optional[str] = None,
     mode: Optional[str] = None,
     hidden: bool = False,
     target_instance_id: Optional[str] = None,
@@ -507,6 +521,15 @@ def create_session(
             binding (``provider_id=None``) instead of falling back to the
             profile's top-level provider. Task workers use this because their
             provider comes from the caller, not the target profile.
+        model: The model chosen for THIS session (v79). Agents no longer pin
+            one, so this is the session's binding: a bare id/alias, or a
+            ``prov:<providerId>:<modelId>`` composite. A composite also
+            supplies the session's provider when no explicit ``provider_id``
+            was passed, so the pick binds model and provider together.
+            ``None`` leaves the row unbound and resolution falls back (see
+            ``query_options.build_options_from_profile``).
+        effort: Reasoning effort chosen for this session, or ``None``.
+        permission_mode: Permission mode chosen for this session, or ``None``.
         mode: Interaction mode for this session (ruling VM4) — ``'voice'`` for an
             OpenAI Realtime voice call. ``None`` (the default, and every
             pre-existing row) means chat; the API model coalesces NULL to
@@ -545,6 +568,20 @@ def create_session(
     # configure. With no argument the code below is byte-identical to the
     # pre-parameter behaviour.
     resolved_provider_id = (provider_id or "").strip() or None
+    # The session's own run binding (v79). A ``prov:`` composite carries the
+    # provider with the model, so an explicit provider_id aside, the user's
+    # model pick is what binds the session to a provider — the agent's legacy
+    # config.provider is only consulted when neither says anything.
+    selected_model = (model or "").strip() or None
+    selected_effort = (effort or "").strip() or None
+    selected_permission_mode = (permission_mode or "").strip() or None
+    if resolved_provider_id is None and selected_model:
+        from app.core.query_options import decode_provider_model
+
+        decoded = decode_provider_model(selected_model)
+        if decoded:
+            resolved_provider_id = decoded[0]
+            derive_provider_from_profile = False
     if resolved_provider_id is None and derive_provider_from_profile:
         try:
             from app.db.profiles import get_profile
@@ -555,8 +592,8 @@ def create_session(
             resolved_provider_id = None
     resolved_mode = (mode or "").strip() or None
     _ph = ph()
-    columns = ["id", "profile_id", "project_id", "project_v2_id", "title", "api_user_id", "parent_session_id", "fork_point_message_index", "worktree_id", "worktree_branch", "worktree_path", "automation_id", "instance_id", "is_active", "v2_stream", "created_at", "updated_at", "provider_id", "mode", "hidden"]
-    params = [session_id, profile_id, project_id, project_v2_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, True, now, now, resolved_provider_id, resolved_mode, hidden]
+    columns = ["id", "profile_id", "project_id", "project_v2_id", "title", "api_user_id", "parent_session_id", "fork_point_message_index", "worktree_id", "worktree_branch", "worktree_path", "automation_id", "instance_id", "is_active", "v2_stream", "created_at", "updated_at", "provider_id", "model", "effort", "permission_mode", "mode", "hidden"]
+    params = [session_id, profile_id, project_id, project_v2_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, True, now, now, resolved_provider_id, selected_model, selected_effort, selected_permission_mode, resolved_mode, hidden]
     if target_instance_id:
         # Serialized to a JSON string (not a dict) so the SQLite test shim, which
         # stores JSONB columns as TEXT, round-trips identically to Postgres —
@@ -718,6 +755,104 @@ def update_session(
         )
 
     return get_session(session_id)
+
+
+def _provider_for_model_pick(
+    session_id: str, pick: str
+) -> tuple[Optional[str], bool]:
+    """Resolve what a model pick means for a session's ``provider_id``.
+
+    Returns ``(provider_id, should_write)``. Mirrors the two rebind shapes the
+    turn itself applies: a ``prov:<providerId>:<modelId>`` composite names its
+    provider outright, and a plain native-Claude pick that the currently bound
+    provider does not curate drops the session back to the native leg. Anything
+    else (a bare model belonging to the bound provider, a custom id) leaves the
+    binding untouched — as does any lookup failure, since a stale binding is far
+    better than one wrongly cleared.
+    """
+    from app.core.query_options import decode_provider_model, is_native_claude_model
+
+    decoded = decode_provider_model(pick)
+    if decoded:
+        return decoded[0], True
+    if not is_native_claude_model(pick):
+        return None, False
+
+    row = get_session(session_id)
+    bound = (row or {}).get("provider_id")
+    if not bound:
+        return None, False
+    try:
+        from app.db.model_providers import get_model_provider
+        from app.core.provider_agent import curated_model_ids
+
+        provider_row = get_model_provider(bound, include_token=False)
+        if pick in curated_model_ids(provider_row):
+            return None, False
+    except Exception:  # noqa: BLE001 — never clear a binding on a lookup failure
+        logger.debug(
+            "run-binding: could not check provider %s for model %s", bound, pick,
+            exc_info=True,
+        )
+        return None, False
+    return None, True
+
+
+def set_session_run_binding(
+    session_id: str,
+    *,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
+    permission_mode: Optional[str] = None,
+) -> None:
+    """Persist the run binding a turn actually used onto its session (v79).
+
+    Agents no longer pin a model, so the session row carries the choice. The
+    composer sends its current selection with every send; writing it back here
+    makes a mid-session switch stick server-side, which is what lets another
+    device — and a server-initiated turn such as a wakeup, automation, or
+    connector message — run on the model the user last chose rather than on a
+    default.
+
+    The model also settles ``provider_id``, mirroring the rebind the turn itself
+    performs (see ``query_options.build_options_from_profile``) so the row never
+    disagrees with the leg the turn ran on: a ``prov:<providerId>:<modelId>``
+    composite binds that provider, and a plain native-Claude pick the bound
+    provider does not curate clears the binding back to native.
+
+    ``None`` leaves a field alone; only non-empty values are written (a turn
+    that sent no override must not erase the binding).
+    """
+    _ph = ph()
+    updates: List[str] = []
+    values: List[Any] = []
+
+    clean_model = (model or "").strip()
+    if clean_model:
+        updates.append(f"model = {_ph}")
+        values.append(clean_model)
+        rebound_provider, rebind = _provider_for_model_pick(session_id, clean_model)
+        if rebind:
+            updates.append(f"provider_id = {_ph}")
+            values.append(rebound_provider)
+    clean_effort = (effort or "").strip()
+    if clean_effort:
+        updates.append(f"effort = {_ph}")
+        values.append(clean_effort)
+    clean_permission = (permission_mode or "").strip()
+    if clean_permission:
+        updates.append(f"permission_mode = {_ph}")
+        values.append(clean_permission)
+
+    if not updates:
+        return
+    values.append(session_id)
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"UPDATE sessions SET {', '.join(updates)} WHERE id = {_ph}",
+            values,
+        )
 
 
 def set_session_context_usage(session_id: str, data: Dict[str, Any]) -> None:

@@ -238,7 +238,10 @@ class TestGenerateWithClaude:
         from app.api.generation import generate_with_claude
 
         adapter = FakeAdapter(text_turn('{"name": "Generated"}'))
-        with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
+        with patch(
+                    "app.core.generation_options.text_generation_config",
+                    return_value={"model": "sonnet", "provider": None, "effort": None},
+                ), \
                 patch("app.core.generation_options.build_generation_options", return_value=MagicMock()), \
                 patch_adapter(adapter):
             result = await generate_with_claude("Test prompt")
@@ -269,7 +272,10 @@ class TestGenerateWithClaude:
         from app.api.generation import generate_with_claude
 
         adapter = FakeAdapter(text_turn('{"result": "ok"}'))
-        with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
+        with patch(
+                    "app.core.generation_options.text_generation_config",
+                    return_value={"model": "sonnet", "provider": None, "effort": None},
+                ), \
                 patch("app.core.generation_options.build_generation_options", return_value=MagicMock()) as mock_build, \
                 patch_adapter(adapter):
             result = await generate_with_claude("Test prompt", model="opus")
@@ -288,7 +294,10 @@ class TestGenerateWithClaude:
             success_result(),
             assistant_text("after-the-end"),
         ])
-        with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
+        with patch(
+                    "app.core.generation_options.text_generation_config",
+                    return_value={"model": "sonnet", "provider": None, "effort": None},
+                ), \
                 patch("app.core.generation_options.build_generation_options", return_value=MagicMock()), \
                 patch_adapter(adapter):
             result = await generate_with_claude("Test prompt")
@@ -302,7 +311,10 @@ class TestGenerateWithClaude:
         from fastapi import HTTPException
 
         adapter = FakeAdapter(send_error=RuntimeError("harness connection failed"))
-        with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
+        with patch(
+                    "app.core.generation_options.text_generation_config",
+                    return_value={"model": "sonnet", "provider": None, "effort": None},
+                ), \
                 patch("app.core.generation_options.build_generation_options", return_value=MagicMock()), \
                 patch_adapter(adapter):
             with pytest.raises(HTTPException) as exc_info:
@@ -321,7 +333,10 @@ class TestGenerateWithClaude:
         from fastapi import HTTPException
 
         adapter = FakeAdapter([error_result("provider rejected the request")])
-        with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
+        with patch(
+                    "app.core.generation_options.text_generation_config",
+                    return_value={"model": "sonnet", "provider": None, "effort": None},
+                ), \
                 patch("app.core.generation_options.build_generation_options", return_value=MagicMock()), \
                 patch_adapter(adapter):
             with pytest.raises(HTTPException) as exc_info:
@@ -337,7 +352,10 @@ class TestGenerateWithClaude:
         from fastapi import HTTPException
 
         adapter = FakeAdapter(hang=True)
-        with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
+        with patch(
+                    "app.core.generation_options.text_generation_config",
+                    return_value={"model": "sonnet", "provider": None, "effort": None},
+                ), \
                 patch("app.core.generation_options.build_generation_options", return_value=MagicMock()), \
                 patch_adapter(adapter):
             with pytest.raises(HTTPException) as exc_info:
@@ -367,7 +385,10 @@ class TestGenerateWithClaude:
         assert not hasattr(generation_mod, "query")
 
         adapter = FakeAdapter(text_turn('{"ok": true}'))
-        with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
+        with patch(
+                    "app.core.generation_options.text_generation_config",
+                    return_value={"model": "sonnet", "provider": None, "effort": None},
+                ), \
                 patch("app.core.generation_options.build_generation_options", return_value=MagicMock()), \
                 patch_adapter(adapter), \
                 patch("httpx.AsyncClient.post", side_effect=AssertionError("HTTP path must not be used")):
@@ -386,7 +407,10 @@ class TestGenerateWithClaude:
         from app.core.environment import ProviderConfigError
         from fastapi import HTTPException
 
-        with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
+        with patch(
+                    "app.core.generation_options.text_generation_config",
+                    return_value={"model": "sonnet", "provider": None, "effort": None},
+                ), \
                 patch(
                     "app.core.generation_options.build_generation_options",
                     side_effect=ProviderConfigError(
@@ -415,7 +439,10 @@ class TestGenerateWithClaude:
                 "Model provider 'gpt-row' has no credentials configured."
             )
         )
-        with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
+        with patch(
+                    "app.core.generation_options.text_generation_config",
+                    return_value={"model": "sonnet", "provider": None, "effort": None},
+                ), \
                 patch("app.core.generation_options.build_generation_options", return_value=MagicMock()), \
                 patch_adapter(adapter):
             with pytest.raises(HTTPException) as exc_info:
@@ -436,7 +463,10 @@ class TestGenerateWithClaude:
         from app.api.generation import generate_with_claude
 
         adapter = FakeAdapter(text_turn('{"name": "X"}'))
-        with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
+        with patch(
+                    "app.core.generation_options.text_generation_config",
+                    return_value={"model": "sonnet", "provider": None, "effort": None},
+                ), \
                 patch("app.core.generation_options.build_generation_options", return_value=MagicMock()), \
                 patch("app.api.settings_crypto.get_decrypted_api_key", return_value="sk-ant-stored"), \
                 patch_adapter(adapter):
@@ -516,8 +546,12 @@ class TestGenerateProfileEndpoint:
         # Check agent data
         agent = result["agent"]
         assert agent["name"] == "Python Developer"
-        assert agent["model"] == "sonnet"
         assert agent["system_prompt_content"] == "You are a Python development assistant."
+        # A model / permission mode the generator still emits must NOT survive
+        # into the generated agent: an agent carries no run binding, and a chat
+        # picks both when it starts.
+        assert agent["model"] is None
+        assert agent["permission_mode"] is None
         # Dead SDK-era fields emitted by the model must not survive into the
         # generated config — the fluid harness ignores them (ruling A12)
         assert "thinking_mode" not in agent

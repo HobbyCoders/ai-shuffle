@@ -218,17 +218,11 @@ class TestCreateProfile:
 class TestUpdateProfile:
     @pytest.mark.asyncio
     async def test_update_profile_basic_fields(self, admin_tools):
-        original = _make_profile(
-            id="update-basic",
-            name="Update Basic",
-            config={"model": "claude-sonnet-4-20250514"},
-        )
+        original = _make_profile(id="update-basic", name="Update Basic", config={})
         updated = _make_profile(
             id="update-basic",
             name="Update Basic",
             config={
-                "model": "claude-haiku-4-20250514",
-                "permission_mode": "auto",
                 "thinking_mode": "think",
                 "tools_preset": "claude_code",
                 "max_turns": 5,
@@ -236,12 +230,9 @@ class TestUpdateProfile:
             },
         )
         tool = _get_tool(admin_tools, "updateProfile")
-        with patch("app.db.database.get_profile", return_value=original), \
-             patch("app.db.database.update_profile", return_value=updated) as mock_update:
+        with patch("app.db.database.get_profile", return_value=original),              patch("app.db.database.update_profile", return_value=updated) as mock_update:
             result = await tool.handler({
                 "profile_id": "update-basic",
-                "model": "claude-haiku-4-20250514",
-                "permission_mode": "auto",
                 "thinking_mode": "think",
                 "tools_preset": "claude_code",
                 "max_turns": 5,
@@ -251,8 +242,6 @@ class TestUpdateProfile:
         assert body["success"] is True
         _, kwargs = mock_update.call_args
         cfg = kwargs["config"]
-        assert cfg["model"] == "claude-haiku-4-20250514"
-        assert cfg["permission_mode"] == "auto"
         assert cfg["thinking_mode"] == "think"
         assert cfg["tools_preset"] == "claude_code"
         assert cfg["max_turns"] == 5
@@ -318,24 +307,32 @@ class TestUpdateProfile:
         assert kwargs["config"]["disallowed_tools"] == ["Bash"]
 
     @pytest.mark.asyncio
-    async def test_update_profile_effort(self, admin_tools):
-        original = _make_profile(id="update-effort", name="Update Effort", config={})
+    async def test_update_profile_ignores_run_binding_fields(self, admin_tools):
+        """Model, effort and permission mode belong to a session, not an agent
+        (v79) — the tool must not write them into an agent's config even if a
+        model names them."""
+        original = _make_profile(id="update-binding", name="Update Binding", config={})
         tool = _get_tool(admin_tools, "updateProfile")
-        with patch("app.db.database.get_profile", return_value=original), \
-             patch("app.db.database.update_profile") as mock_update:
+        with patch("app.db.database.get_profile", return_value=original),              patch("app.db.database.update_profile") as mock_update:
             mock_update.return_value = _make_profile(
-                id="update-effort",
-                name="Update Effort",
-                config={"effort": "high"},
+                id="update-binding",
+                name="Update Binding",
+                config={"max_turns": 3},
             )
             result = await tool.handler({
-                "profile_id": "update-effort",
+                "profile_id": "update-binding",
+                "max_turns": 3,
+                "model": "claude-haiku-4-20250514",
+                "permission_mode": "auto",
                 "effort": "high",
             })
         body = _decode(result)
         assert body["success"] is True
-        _, kwargs = mock_update.call_args
-        assert kwargs["config"]["effort"] == "high"
+        cfg = mock_update.call_args[1]["config"]
+        assert cfg["max_turns"] == 3
+        assert "model" not in cfg
+        assert "permission_mode" not in cfg
+        assert "effort" not in cfg
 
     @pytest.mark.asyncio
     async def test_update_profile_system_prompt_content_switches_to_custom(self, admin_tools):
@@ -410,7 +407,7 @@ class TestUpdateProfile:
             )
             result = await tool.handler({
                 "profile_id": "sp-preserve",
-                "model": "claude-haiku-4-20250514",
+                "max_turns": 4,
             })
         body = _decode(result)
         assert body["success"] is True
@@ -460,24 +457,24 @@ class TestUpdateProfile:
             id="claude-code",
             name="Claude Code",
             is_builtin=True,
-            config={"model": "claude-sonnet-4-20250514"},
+            config={"max_turns": 2},
         )
         updated_row = _make_profile(
             id="claude-code",
             name="Claude Code",
             is_builtin=True,
-            config={"model": "claude-opus-4-20250514"},
+            config={"max_turns": 9},
         )
         tool = _get_tool(admin_tools, "updateProfile")
         with patch("app.db.database.get_profile", return_value=builtin), \
              patch("app.db.database.update_profile", return_value=updated_row) as mock_update:
             result = await tool.handler({
                 "profile_id": "claude-code",
-                "model": "claude-opus-4-20250514",
+                "max_turns": 9,
             })
         body = _decode(result)
         assert body["success"] is True
-        assert "model" in body["updated_fields"]
+        assert "max_turns" in body["updated_fields"]
         # Confirm allow_builtin=True was passed through to the DB layer
         _, kwargs = mock_update.call_args
         assert kwargs.get("allow_builtin") is True

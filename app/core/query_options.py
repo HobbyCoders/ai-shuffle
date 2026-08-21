@@ -458,7 +458,12 @@ THINKING_TOKEN_BUDGETS = {
 }
 
 
-def _build_thinking_config(config: Dict[str, Any], model: Optional[str], overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _build_thinking_config(
+    config: Dict[str, Any],
+    model: Optional[str],
+    overrides: Optional[Dict[str, Any]] = None,
+    session_effort: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Build thinking/effort configuration for ClaudeAgentOptions.
 
@@ -476,6 +481,9 @@ def _build_thinking_config(config: Dict[str, Any], model: Optional[str], overrid
         config: Profile configuration dict
         model: Model name (e.g., 'opus', 'sonnet', 'haiku')
         overrides: Optional query-level overrides dict (may contain 'thinking_mode' and/or 'effort')
+        session_effort: The effort the session itself is bound to (v79 —
+            picked at session creation, not pinned by the agent). Beaten by a
+            query-level override, beats the agent's legacy config.effort.
 
     Returns:
         Dict with thinking/effort configuration to spread into ClaudeAgentOptions
@@ -500,7 +508,7 @@ def _build_thinking_config(config: Dict[str, Any], model: Optional[str], overrid
 
     # Resolve effort: override takes priority over profile config (independent of thinking)
     # 'xhigh' is only valid for Opus 4.7+ models
-    effort = overrides.get('effort') or config.get('effort')
+    effort = overrides.get('effort') or session_effort or config.get('effort')
     if effort and effort in ('low', 'medium', 'high', 'max', 'xhigh'):
         result['effort'] = effort
         logger.debug(f"Using effort={effort}")
@@ -846,8 +854,32 @@ def build_options_from_profile(
         else:
             final_system_prompt += "\n\n" + APP_CONFIG_SYSTEM_PROMPT
 
-    # Determine permission mode
-    permission_mode = overrides.get("permission_mode") or config.get("permission_mode", "default")
+    # ── The session's own run binding (v79) ─────────────────────────────────
+    #
+    # Agents used to pin a model, an effort level and a permission mode; now
+    # the user picks them when the session is created and they live on the
+    # session row. Read the row ONCE here — the model/provider resolution
+    # further down uses the same snapshot. A session-LESS build (tests,
+    # project-only spawns) has no row and falls through to the agent's config,
+    # exactly as before.
+    _binding_row = session_row
+    if _binding_row is None and session_id:
+        try:
+            _binding_row = database.get_session(session_id)
+        except Exception:  # noqa: BLE001 — a lookup failure falls back to config
+            _binding_row = None
+    _session_effort = (_binding_row or {}).get("effort")
+    _session_permission_mode = (_binding_row or {}).get("permission_mode")
+
+    # Determine permission mode. Like the model and effort, this is the
+    # session's own binding (v79) with the agent's legacy config as the
+    # pre-v79 fallback; a query-level override still wins for this turn.
+    permission_mode = (
+        overrides.get("permission_mode")
+        or _session_permission_mode
+        or config.get("permission_mode")
+        or "default"
+    )
 
     # Create stderr callback to log CLI output
     # Note: We only log stderr, don't forward to frontend. The SDK sends proper
@@ -860,36 +892,41 @@ def build_options_from_profile(
     # Process model selection.
     # The preset model values (haiku, sonnet, opus, fable) are native Agent SDK /
     # CLI shorthand aliases; custom model IDs pass through as-is too.
-    raw_model = overrides.get("model") or config.get("model")
-    model_to_use = raw_model
     # Model provider (multi-provider phase-2 Chunk E, ruling G2-r). Resolution:
     # a query-level override wins; otherwise the SESSION's bound provider
-    # (sessions.provider_id, stamped at creation from the profile) is
-    # authoritative for a real session spawn — editing the profile later never
-    # reroutes a live session, and a NULL binding stays native even if the
-    # profile now carries a provider. Only session-LESS builds (e.g. tests /
-    # project-only spawns) fall back to the profile's config.provider (which is
-    # also what seeds the binding at creation). None = native Anthropic; when
-    # set, the env is overlaid with the gateway vars (apply_provider_env).
-    _binding_row = session_row
-    if _binding_row is None and session_id:
-        try:
-            _binding_row = database.get_session(session_id)
-        except Exception:  # noqa: BLE001 — a lookup failure falls back to config
-            _binding_row = None
+    # (sessions.provider_id, stamped at creation from the model the user
+    # picked) is authoritative for a real session spawn — editing the agent
+    # later never reroutes a live session, and a NULL binding stays native even
+    # if the agent now carries a provider. Only session-LESS builds (e.g. tests
+    # / project-only spawns) fall back to the agent's config.provider. None =
+    # native Anthropic; when set, the env is overlaid with the gateway vars
+    # (apply_provider_env).
     if _binding_row is not None:
         provider_id = overrides.get("provider") or _binding_row.get("provider_id")
     else:
         provider_id = overrides.get("provider") or config.get("provider")
 
+    # The session's model (v79). Agents no longer pin one: the user picks a
+    # model when the session is created and it lands on the row, so the
+    # SELECTION is this turn's override or the row's own binding. The legacy
+    # chain below only carries pre-v79 sessions, whose column is NULL —
+    # ``launched_model`` (what that session actually last ran on) first, then
+    # the agent's old config.model — so upgrading never reroutes an existing
+    # conversation.
+    _selected_model = overrides.get("model") or (_binding_row or {}).get("model")
+    _legacy_model = (_binding_row or {}).get("launched_model") or config.get("model")
+    raw_model = _selected_model or _legacy_model
+    model_to_use = raw_model
+
     # ── PA13: the composer's model override may REBIND the provider ─────────
     #
     # Until W-R4 the ``or``-chain above could only ever SET a provider, never
     # clear one, and ``model_to_use`` was taken verbatim — so the composer had to
-    # be locked to the session's own provider (R7). Two override shapes now
-    # re-resolve the binding for THIS turn (stickiness stays client-side, via the
-    # per-session ``modelOverride`` the composer already persists — there is no
-    # ``sessions.provider_id`` rebind):
+    # be locked to the session's own provider (R7). Two selection shapes now
+    # re-resolve the binding for THIS turn. Since v79 the selection is durable:
+    # the turn intake writes it back to ``sessions.model`` /
+    # ``sessions.provider_id`` (``set_session_run_binding``), so the rebind
+    # below and the stored row always describe the same leg.
     #
     #   1. a ``prov:<pid>:<mid>`` composite → provider_id = pid (beats the
     #      session binding), model = mid. Validated against the provider row so
@@ -908,7 +945,11 @@ def build_options_from_profile(
     # An explicit ``overrides["provider"]`` (internal callers: ProviderAgent
     # workers, generation) still pins the provider and is never cleared by a
     # model pick.
-    _override_model = overrides.get("model")
+    # Only an EXPLICIT selection (this turn's override or the session's own
+    # binding) may rebind the provider. The legacy fallbacks above must not:
+    # a pre-v79 provider session whose launched_model happens to read as a
+    # native Claude id would otherwise silently drop back to the native leg.
+    _override_model = _selected_model
     _decoded_model = decode_provider_model(_override_model)
     _bound_provider_row = None
     if _decoded_model is not None:
@@ -943,6 +984,16 @@ def build_options_from_profile(
                 )
                 provider_id = None
                 _bound_provider_row = None
+
+    # Last-resort floor: a native session with nothing bound anywhere (a fresh
+    # row whose first turn carried no selection, an agent with no legacy model)
+    # still needs a model. A PROVIDER-bound session deliberately gets no floor —
+    # a native alias would be meaningless on a gateway leg, and resolving to an
+    # arbitrary curated id is the exact failure #919 fixed.
+    if not model_to_use and not provider_id:
+        from app.core.model_registry import DEFAULT_MODEL
+
+        model_to_use = DEFAULT_MODEL
 
     # (P2c) The D4-era subagent frontmatter-model resolution died with SDK
     # AgentDefinitions — the Task tool resolves the target agent's own binding
@@ -1308,7 +1359,9 @@ def build_options_from_profile(
         # Extended thinking configuration (SDK 0.1.36+)
         # For Opus 4.6+: use effort-based adaptive thinking
         # For Sonnet/Haiku: use token budget-based thinking
-        **_build_thinking_config(config, model_to_use, overrides),
+        **_build_thinking_config(
+            config, model_to_use, overrides, session_effort=_session_effort
+        ),
     )
 
     deployment_mode = detect_deployment_mode()

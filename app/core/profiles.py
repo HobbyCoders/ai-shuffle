@@ -1,15 +1,14 @@
 """
 Profile and subagent utilities
 
-Seeds a built-in "Default AI" profile on first run. This profile is used
-for all internal AI generation tasks (branch-name generation,
-profile/subagent generation, etc.) when no user profile is selected.
-Built-in profiles can be edited but not deleted.
+Seeds one ordinary starter agent when an install has none, so the composer
+always has something to chat with. No agent is built-in or protected any more:
+the old "Default AI" agent existed to configure internal AI generation, and
+that binding is now a setting (Settings -> Providers -> Generated text).
 """
 
 import logging
 from typing import Dict, Any, Optional
-from app.core.model_registry import DEFAULT_MODEL
 from app.db import database
 
 logger = logging.getLogger(__name__)
@@ -24,11 +23,11 @@ logger = logging.getLogger(__name__)
 # agents start empty and the fluid compiler wraps whatever is configured with
 # environment, instruction files, and security context at runtime. SDK-era
 # keys (thinking_mode, setting_sources, enable_file_checkpointing, …) are
-# gone — the fluid harness ignores them.
+# gone — the fluid harness ignores them. No model / permission_mode either
+# (v79): an agent is the configuration, and the run binding belongs to the
+# session the user creates from it.
 DEFAULT_PROFILE_CONFIG: Dict[str, Any] = {
-    "model": DEFAULT_MODEL,
     "allowed_tools": [],
-    "permission_mode": "default",
     "system_prompt": {
         "type": "custom",
         "content": ""
@@ -38,37 +37,37 @@ DEFAULT_PROFILE_CONFIG: Dict[str, Any] = {
 
 
 # ============================================================================
-# Built-in Default AI Profile
+# Starter agent
 # ============================================================================
-# This profile controls the model and settings used for all internal AI
-# generation tasks: branch-name generation, profile/subagent generation,
-# and any other AI-powered feature that doesn't use a user profile.
-# Users can edit these settings but cannot delete the profile.
+# A fresh install seeds ONE ordinary agent so the composer has something to
+# chat with — sending is blocked without a selected agent. It is not built-in:
+# rename it, edit it, or delete it once you have made your own.
+#
+# It replaces the old built-in "Default AI" agent, which existed to configure
+# internal AI generation. That binding is now a setting (Settings -> Providers
+# -> Generated text, ``generation_options.text_generation_config``), because
+# generation runs one-shot outside any session and so has no agent whose
+# configuration would sensibly apply.
 
-DEFAULT_AI_PROFILE_ID = "default-ai"
+STARTER_AGENT_ID = "default"
 
-DEFAULT_AI_PROFILE: Dict[str, Any] = {
-    "id": DEFAULT_AI_PROFILE_ID,
-    "name": "Default AI",
-    "description": "Built-in profile used for AI-powered features like branch-name generation, "
-                   "profile/subagent generation, and other internal AI tasks. "
-                   "Edit this profile to change the model and settings used by these features.",
+STARTER_AGENT: Dict[str, Any] = {
+    "id": STARTER_AGENT_ID,
+    "name": "Default",
+    "description": "Starter agent. Edit its prompt, tools, memory and subagents; "
+                   "pick the model when you start a chat.",
     "config": {
-        "model": DEFAULT_MODEL,
-        "permission_mode": "bypassPermissions",
         "system_prompt": {
             "type": "custom",
             "content": "",
         },
         "allowed_tools": [],
-        # Live streaming deltas ON: the seeded profile is the default chat
-        # profile on a fresh install, and the app's streaming UX (typewriter,
-        # gap indicators, stream_delta handling) requires partial messages.
-        # With this False a fresh install saw dead air for the whole turn and
-        # then one chunk at turn end. Internal generation forces this off
-        # regardless via build_generation_options, so True here only affects
-        # interactive chat — where it should stream. Matches the True default
-        # every other code path uses (query_options, profiles API, new-profile UI).
+        # Live streaming deltas ON: this is the agent a fresh install chats
+        # with, and the app's streaming UX (typewriter, gap indicators,
+        # stream_delta handling) requires partial messages. With this False a
+        # fresh install saw dead air for the whole turn and then one chunk at
+        # turn end. Matches the True default every other code path uses
+        # (query_options, profiles API, new-profile UI).
         "include_partial_messages": True,
         "continue_conversation": False,
         "fork_session": False,
@@ -94,13 +93,10 @@ DEFAULT_AI_PROFILE: Dict[str, Any] = {
     },
 }
 
-
-def get_default_ai_profile() -> Optional[Dict[str, Any]]:
-    """Get the default AI profile from the database.
-
-    Returns the profile dict or None if it hasn't been seeded yet.
-    """
-    return database.get_profile(DEFAULT_AI_PROFILE_ID)
+# The retired built-in. Nothing creates or protects it any more; the migration
+# below only unlocks the row an existing install still has, so its owner can
+# delete it like any other agent.
+RETIRED_DEFAULT_AI_ID = "default-ai"
 
 
 def run_migrations():
@@ -110,11 +106,77 @@ def run_migrations():
     """
     _migrate_instance_id()
 
-    # Seed the built-in default AI profile
-    _seed_default_ai_profile()
+    # Retire the old built-in before seeding, so an install that still has it
+    # is not handed a second agent it never asked for.
+    _retire_default_ai_agent()
+
+    # Make sure there is at least one agent to chat with
+    _seed_starter_agent()
 
     # Seed default templates if none exist
     _seed_default_templates()
+
+
+def _retire_default_ai_agent():
+    """Retire the built-in "Default AI" agent on an install that still has one.
+
+    Two one-time steps, both safe to repeat:
+
+    1. Carry its model / effort onto the text-generation setting when that
+       setting is still unset. The agent used to BE the internal-generation
+       control, so without this an upgrading install would silently start
+       writing its commit messages on a model nobody chose.
+    2. Clear ``is_builtin``, which is what made the row undeletable. The agent
+       is now ordinary — the app neither creates nor depends on it — so its
+       owner can keep it as a chat agent or delete it.
+
+    The row itself is deliberately NOT deleted: sessions reference it (deleting
+    would blank their agent), and it may have been edited into something the
+    user actually chats with. Its ``config.model`` is left alone too — it still
+    backs the agent's legacy native subagent binding
+    (``normalized_provider_models``).
+    """
+    from app.core.generation_options import (
+        TEXT_GENERATION_EFFORT_KEY,
+        TEXT_GENERATION_MODEL_KEY,
+        VALID_EFFORTS,
+    )
+
+    try:
+        profile = database.get_profile(RETIRED_DEFAULT_AI_ID)
+        if not profile:
+            return
+
+        config = profile.get("config") or {}
+        model = str(config.get("model") or "").strip()
+        setting_unset = not (
+            database.get_system_setting(TEXT_GENERATION_MODEL_KEY) or ""
+        ).strip()
+        if model and setting_unset:
+            provider = str(config.get("provider") or "").strip()
+            # Stored in the picker's own shape, so a provider-bound generation
+            # model round-trips through the codec the composer uses.
+            value = f"prov:{provider}:{model}" if provider else model
+            database.set_system_setting(TEXT_GENERATION_MODEL_KEY, value)
+
+            effort = str(config.get("effort") or "").strip()
+            if effort in VALID_EFFORTS:
+                database.set_system_setting(TEXT_GENERATION_EFFORT_KEY, effort)
+
+            logger.info(
+                "Carried the retired Default AI agent's model (%s) onto the "
+                "text-generation setting",
+                value,
+            )
+
+        if profile.get("is_builtin"):
+            database.set_profile_builtin(RETIRED_DEFAULT_AI_ID, False)
+            logger.info(
+                "Retired the built-in Default AI agent - it is now an ordinary, "
+                "deletable agent"
+            )
+    except Exception:  # noqa: BLE001 - a startup nicety, never a boot blocker
+        logger.warning("Could not retire the Default AI agent", exc_info=True)
 
 
 def _migrate_instance_id():
@@ -127,29 +189,28 @@ def _migrate_instance_id():
             logger.info("Added instance_id column to projects table")
 
 
-def _seed_default_ai_profile():
-    """Ensure the built-in Default AI profile exists.
+def _seed_starter_agent():
+    """Create the starter agent when the install has no agents at all.
 
-    Creates it on first run. If it already exists, ensures it's marked as built-in.
-    Does NOT overwrite user edits to the profile config.
+    Gated on the table being EMPTY, not on a particular id: an install that
+    already has agents (including one upgrading from the old built-in) is left
+    exactly as it is, and deleting the starter sticks as long as another agent
+    remains. Reaching zero agents makes chat impossible, so seeding one back is
+    the useful behaviour rather than a resurrection.
     """
-    existing = database.get_profile(DEFAULT_AI_PROFILE_ID)
-    if existing:
-        # Ensure it's marked as built-in (in case of upgrade from older version)
-        if not existing.get("is_builtin"):
-            database.set_profile_builtin(DEFAULT_AI_PROFILE_ID, True)
-            logger.info("Marked existing default-ai profile as built-in")
-        return
-
-    # Create the default AI profile
-    database.create_profile(
-        profile_id=DEFAULT_AI_PROFILE["id"],
-        name=DEFAULT_AI_PROFILE["name"],
-        description=DEFAULT_AI_PROFILE["description"],
-        config=DEFAULT_AI_PROFILE["config"],
-        is_builtin=True,
-    )
-    logger.info("Seeded built-in Default AI profile")
+    try:
+        if database.get_all_profiles():
+            return
+        database.create_profile(
+            profile_id=STARTER_AGENT["id"],
+            name=STARTER_AGENT["name"],
+            description=STARTER_AGENT["description"],
+            config=STARTER_AGENT["config"],
+            is_builtin=False,
+        )
+        logger.info("Seeded the starter agent (no agents existed)")
+    except Exception:  # noqa: BLE001 - never block boot on the convenience seed
+        logger.warning("Could not seed the starter agent", exc_info=True)
 
 
 # Default templates to seed on first run
@@ -225,17 +286,13 @@ def _seed_default_templates():
 
 
 def get_builtin_profile_defaults(profile_id: str) -> Optional[Dict[str, Any]]:
-    """Get the original seed defaults for a built-in profile.
+    """Get the original seed defaults for a built-in agent.
 
-    Returns the default name, description, and config for a built-in profile,
-    or None if the profile_id doesn't correspond to a known built-in profile.
+    Always ``None`` today: no agent ships as built-in any more. The starter
+    agent is an ordinary row the user owns from the moment it is created, so
+    there is nothing to restore it to. Kept as the seam the restore endpoint
+    calls, for whenever a genuinely built-in agent exists again.
     """
-    if profile_id == DEFAULT_AI_PROFILE_ID:
-        return {
-            "name": DEFAULT_AI_PROFILE["name"],
-            "description": DEFAULT_AI_PROFILE["description"],
-            "config": DEFAULT_AI_PROFILE["config"],
-        }
     return None
 
 

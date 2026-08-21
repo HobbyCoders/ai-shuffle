@@ -90,8 +90,16 @@ class ComputerUseConfig(BaseModel):
 
 class ProfileConfig(BaseModel):
     """Claude Agent configuration stored in profile - maps to ClaudeAgentOptions"""
-    # Core settings
-    model: Optional[str] = DEFAULT_MODEL
+    # Core settings.
+    #
+    # An agent does NOT pin a model any more (v79): the model, effort and
+    # permission mode are picked when a session is created and live on the
+    # session row. These fields stay for two consumers only — the built-in
+    # "Default AI" agent, whose model still drives internal generation (commit
+    # messages, branch names, agent generation), and sessions created before
+    # the move, which fall back to them. They default to None so an agent saved
+    # without them stores nothing rather than a phantom binding.
+    model: Optional[str] = None
     # Model provider (multi-provider support). References ``model_providers.id``;
     # None = native Anthropic. When set, the spawned session's env is overlaid
     # with the provider's ANTHROPIC_BASE_URL / auth token and mitigation flags
@@ -103,7 +111,7 @@ class ProfileConfig(BaseModel):
     # subagent on that provider. The legacy provider/model pair above remains
     # the default top-level chat binding.
     provider_models: Optional[Dict[str, str]] = None
-    permission_mode: Optional[str] = "default"  # default, auto, acceptEdits, plan, bypassPermissions
+    permission_mode: Optional[str] = None  # default, auto, acceptEdits, plan, bypassPermissions
     thinking_mode: Optional[str] = "default"  # default, disabled, adaptive, think, think_harder, ultra_think
     # Opus 4.6+ uses effort-based reasoning instead of token budgets
     # effort: low, medium, high, max, xhigh (xhigh only for Opus 4.7+)
@@ -395,6 +403,15 @@ class Session(SessionBase):
     # model so clients can tell a ProviderAgent-bound session from a native one
     # without a second round-trip.
     provider_id: Optional[str] = None
+    # The run binding this session was created with (v79): the model, effort
+    # and permission mode the user picked in the composer. Agents no longer
+    # pin any of these, so the client hydrates its controls from here — that is
+    # what makes the pick survive a reload and show up the same on every
+    # device. NULL on pre-v79 rows, where resolution falls back to
+    # launched_model and then the agent's legacy config.
+    model: Optional[str] = None
+    effort: Optional[str] = None
+    permission_mode: Optional[str] = None
     # Interaction mode (v74, ruling VM4 of docs/VOICE_MODE_PLAN.md): 'chat' (the
     # default) or 'voice' (an OpenAI Realtime voice call). The column is
     # nullable and NULL means chat, so the validator below coalesces — that
@@ -873,18 +890,23 @@ class WebhookTestResponse(BaseModel):
 class AgentExportData(BaseModel):
     """Agent configuration data for export.
 
-    Carries only config the fluid harness honors (ruling A12): model,
-    permission_mode, effort, max_turns, custom system-prompt content, tool
-    allow/deny lists, enabled_agents, ai_tools, memory,
-    include_partial_messages, app_config_tools, env. SDK-era fields
-    (thinking_mode, preset prompts, setting_sources, …) are no longer
-    exported; legacy files are still importable via AgentImportData.
+    Carries only config the fluid harness honors (ruling A12): provider
+    models, max_turns, custom system-prompt content, tool allow/deny lists,
+    enabled_agents, ai_tools, memory, include_partial_messages,
+    app_config_tools, env. SDK-era fields (thinking_mode, preset prompts,
+    setting_sources, …) are no longer exported; legacy files are still
+    importable via AgentImportData.
+
+    ``model`` / ``permission_mode`` / ``effort`` are no longer part of an
+    agent's identity (v79 — a session carries its own). They round-trip only
+    so an export written by an older build imports without loss, and so the
+    built-in "Default AI" agent keeps its internal-generation model.
     """
     name: str
     description: Optional[str] = None
-    model: Optional[str] = DEFAULT_MODEL
+    model: Optional[str] = None
     provider_models: Optional[Dict[str, str]] = None
-    permission_mode: Optional[str] = "default"  # default, acceptEdits, plan, bypassPermissions
+    permission_mode: Optional[str] = None  # default, acceptEdits, plan, bypassPermissions
     effort: Optional[str] = None  # low | medium | high | xhigh | max — harness-honored reasoning depth
     max_turns: Optional[int] = None  # per-turn model-call cap (native legs)
     system_prompt_content: Optional[str] = None

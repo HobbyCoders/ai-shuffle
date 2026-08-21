@@ -274,33 +274,18 @@ If this contains an existing system prompt, use it as the basis for system_promp
 ## What Are Profiles?
 
 Profiles are pre-configured settings for Claude sessions. They control:
-- Which model to use
-- Permission levels
 - Available tools
 - System prompt customization
+- Memory and delegated subagents
+
+They do NOT choose a model or a permission level: the person starting a chat
+picks those for that chat.
 
 ## Configuration Fields (All Fields)
 
 ### Identity
 - **name**: Display name for the profile (1-100 chars)
 - **description**: Brief description of the profile's purpose
-
-### Model
-- **model**: Claude model to use
-  - "haiku": Fast, cheap - quick tasks, exploration
-  - "sonnet": Balanced - general coding, analysis (default)
-  - "opus": Powerful - complex reasoning, architecture, deep reasoning
-  - "fable": Most capable - hardest reasoning, long-running tasks
-  (sonnet/opus/fable all run a 1M context window natively - there is no suffix
-  or flag to opt into it)
-  - Any other string is treated as a custom model ID and passed through unchanged
-
-### Permissions
-- **permission_mode**: How permissions are handled
-  - "default": Ask for permission on sensitive actions
-  - "acceptEdits": Auto-accept file edits (still asks for other actions)
-  - "plan": Plan-only mode - no code execution
-  - "bypassPermissions": Skip all permission prompts (for automation)
 
 ### Tool Configuration
 - **allowed_tools**: If set, ONLY these tools are available (whitelist)
@@ -368,8 +353,6 @@ Output ONLY a valid JSON object (no markdown code blocks, no explanation):
 {{
   "name": "Profile Name",
   "description": "What this profile is for",
-  "model": "sonnet",
-  "permission_mode": "default",
   "system_prompt_content": null,
   "allowed_tools": null,
   "disallowed_tools": null,

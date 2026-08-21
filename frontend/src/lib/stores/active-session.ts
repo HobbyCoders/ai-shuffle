@@ -26,6 +26,8 @@ import {
 	createSessionSwitcher,
 	getPersistedProfile, getPersistedProject,
 	getPersistedWorktreeIntent, setPersistedWorktreeIntent,
+	getPersistedModel, getPersistedEffort, getPersistedPermissionMode,
+	setPersistedRunBinding,
 } from './session/session-switcher';
 
 // Extracted sub-modules
@@ -250,9 +252,12 @@ function defaultState(): ActiveSessionState {
 		totalCacheReadTokens: 0,
 		contextUsed: null,
 		contextMax: 200_000,
-		modelOverride: null,
-		permissionModeOverride: null,
-		effortLevelOverride: null,
+		// A new chat opens on the last binding the user picked (agents no
+		// longer supply one); an existing session overwrites these from its
+		// own row when it loads.
+		modelOverride: getPersistedModel(),
+		permissionModeOverride: getPersistedPermissionMode(),
+		effortLevelOverride: getPersistedEffort(),
 		pendingPermissions: [],
 		deferredPermissions: [],
 		pendingQuestions: [],
@@ -754,11 +759,17 @@ export const activeSession = {
 		persistSession();
 	},
 
-	// ── Session Overrides ───────────────────────────────────────────
+	// ── Session Run Binding ─────────────────────────────────────────
+	//
+	// The model / effort / permission mode this session runs on. Picked when
+	// the session is created and changeable mid-session; the backend stores it
+	// on the session row from the overrides every send carries, so the choice
+	// outlives this tab. Each pick is also remembered as the default for the
+	// NEXT new chat.
 
-	setModelOverride(model: string | null) { _update(s => ({ ...s, modelOverride: model })); persistSession(); },
-	setPermissionModeOverride(mode: string | null) { _update(s => ({ ...s, permissionModeOverride: mode })); persistSession(); },
-	setEffortLevelOverride(level: string | null) { _update(s => ({ ...s, effortLevelOverride: level })); persistSession(); },
+	setModelOverride(model: string | null) { _update(s => ({ ...s, modelOverride: model })); setPersistedRunBinding('model', model); persistSession(); },
+	setPermissionModeOverride(mode: string | null) { _update(s => ({ ...s, permissionModeOverride: mode })); setPersistedRunBinding('permissionMode', mode); persistSession(); },
+	setEffortLevelOverride(level: string | null) { _update(s => ({ ...s, effortLevelOverride: level })); setPersistedRunBinding('effort', level); persistSession(); },
 
 	// ── Ephemeral UI State (delegated to draft-manager) ─────────────
 

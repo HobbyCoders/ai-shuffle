@@ -33,7 +33,6 @@
 		onExportProfile: (profileId: string) => void;
 		onDeleteProfile: (profileId: string) => void;
 		onRevertProfile: (profileId: string) => void;
-		getModelDisplay: (model?: string) => string;
 		getProfileToolCount: (profile: Profile) => number;
 	}
 
@@ -49,16 +48,8 @@
 		onExportProfile,
 		onDeleteProfile,
 		onRevertProfile,
-		getModelDisplay,
 		getProfileToolCount
 	}: Props = $props();
-
-	const PERM_LABELS: Record<string, string> = {
-		default: 'Default',
-		acceptEdits: 'Accept Edits',
-		plan: 'Plan',
-		bypassPermissions: 'Bypass'
-	};
 
 	let searchQuery = $state('');
 	let deletingId = $state<string | null>(null);
@@ -97,9 +88,6 @@
 			: profiles
 	);
 
-	function permLabel(mode?: string): string {
-		return PERM_LABELS[mode || 'default'] || 'Default';
-	}
 	function agentCount(p: Profile): number {
 		const enabled = p.config?.enabled_agents?.filter((id: string) => allSubagents.some((a) => a.id === id))?.length || 0;
 		// 'custom' = the pruned list IS what gets declared (0 really means none).
@@ -169,13 +157,13 @@
 						<h3 class="bpg-name">{profile.name}</h3>
 					</div>
 
-					<div class="bpg-tags">
-						<span class="bpg-pill bpg-pill--accent">{getModelDisplay(profile.config?.model)}</span>
-						<span class="bpg-pill">{permLabel(profile.config?.permission_mode)}</span>
-						{#if groups?.profiles?.assignments?.[profile.id]}
+					<!-- No model or permission pill: an agent is configuration, and
+					     both are chosen per chat rather than pinned here. -->
+					{#if groups?.profiles?.assignments?.[profile.id]}
+						<div class="bpg-tags">
 							<span class="bpg-pill">{groups.profiles.assignments[profile.id]}</span>
-						{/if}
-					</div>
+						</div>
+					{/if}
 
 					{#if profile.description}<p class="bpg-desc">{profile.description}</p>{/if}
 
@@ -302,7 +290,6 @@
 		background: color-mix(in oklch, var(--muted) 45%, transparent);
 		padding: 2px 8px; border-radius: 6px;
 	}
-	.bpg-pill--accent { color: var(--primary); background: color-mix(in oklch, var(--primary) 14%, transparent); font-weight: 600; }
 
 	.bpg-desc {
 		margin: 0 0 12px; font-size: 0.78rem; line-height: 1.45; color: var(--muted-foreground);

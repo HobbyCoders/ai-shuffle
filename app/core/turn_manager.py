@@ -122,6 +122,14 @@ def _kick(session_id: str) -> None:
 # failover, auto_continue, wakeup itself) deliberately leave wakes alone.
 _WAKEUP_SUPERSEDING_SOURCES = ("user", "queue")
 
+# Sources whose ``overrides`` carry a PERSON's current pick of model / effort /
+# permission mode, so the session's stored binding (v79) follows them. An
+# automation, a wakeup replay, and a Task worker all run with overrides that
+# were decided elsewhere — writing those back would silently re-bind a session
+# the user never touched (a wakeup replays the model the SCHEDULING turn used,
+# which may be older than what the user has since chosen).
+_BINDING_SOURCES = ("user", "queue", "api", "worktree", "connector")
+
 
 def submit(
     session_id: str,
@@ -152,12 +160,32 @@ def submit(
     The skip is an optimization, not a correctness gate — the execute-side
     placement check is the backstop either way.
 
+    A turn from a human-facing source also PERSISTS its model / effort /
+    permission overrides onto the session row (v79). Agents no longer pin a
+    model, so the composer's current pick is the session's binding, and writing
+    it here is what makes a mid-session switch survive a reload, reach another
+    device, and govern the next server-initiated turn.
+
     A genuine user turn (``source`` in ``user``/``queue``) SUPERSEDES the
     session's pending wakeups: whatever an agent armed for later, the person
     who just typed is the newer instruction, and the agent can re-arm on its
     next turn. Without this a parked session with an armed wake would take the
     user's turn and then a second, stale one on top of it.
     """
+    if source in _BINDING_SOURCES and overrides:
+        try:
+            from app.db import database
+
+            database.set_session_run_binding(
+                session_id,
+                model=overrides.get("model"),
+                effort=overrides.get("effort"),
+                permission_mode=overrides.get("permission_mode"),
+            )
+        except Exception:  # noqa: BLE001 — never let this break an enqueue.
+            logger.exception(
+                "run-binding persist failed for session %s", session_id
+            )
     if source in _WAKEUP_SUPERSEDING_SOURCES:
         try:
             from app.core import wakeup_service

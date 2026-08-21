@@ -336,3 +336,66 @@ describe('session-switcher · remote-only project survives switch', () => {
 		expect(getState().projectV2Id).toBe('pv2-remote');
 	});
 });
+
+describe('session run binding on switch', () => {
+	beforeEach(() => {
+		_mockSessions.current = [];
+	});
+
+	it('hydrates the target session own binding from its row', async () => {
+		// Agents carry no model, so the row is the only source for a session
+		// opened without a local ephemeral entry — e.g. from another device.
+		_mockSessions.current = [
+			{ id: 'session-B', model: 'prov:op:openai/gpt-5.6', effort: 'high', permission_mode: 'plan' },
+		];
+		const { switcher, getState } = makeSwitcher(fullState());
+
+		await switcher.switchSession('session-B');
+		switcher.destroy();
+
+		const s = getState();
+		expect(s.modelOverride).toBe('prov:op:openai/gpt-5.6');
+		expect(s.effortLevelOverride).toBe('high');
+		expect(s.permissionModeOverride).toBe('plan');
+	});
+
+	it('prefers an unsent local pick over the stored binding', async () => {
+		_mockSessions.current = [{ id: 'session-B', model: 'sonnet' }];
+		const { switcher, getState, ephemeralStore } = makeSwitcher(fullState());
+		ephemeralStore.set('session-B', {
+			title: 'Session B',
+			draft: '',
+			scrollTop: 0,
+			project: 'proj-B',
+			projectV2Id: null,
+			modelOverride: 'opus',
+			permissionModeOverride: null,
+			effortLevelOverride: null,
+			worktreeIntent: 'local',
+			deviceIntent: null,
+			worktreeId: null,
+			worktreeBranch: '',
+			worktreeBaseBranch: 'main',
+			selectedWorktreeBranch: null,
+			worktreeMode: 'new',
+			worktreeDeleted: false,
+		});
+
+		await switcher.switchSession('session-B');
+		switcher.destroy();
+
+		expect(getState().modelOverride).toBe('opus');
+	});
+
+	it('leaves the binding null for a session created before it existed', async () => {
+		// The backend then falls back to launched_model / the agent legacy
+		// config, so an old conversation keeps running on what it always did.
+		_mockSessions.current = [{ id: 'session-B' }];
+		const { switcher, getState } = makeSwitcher(fullState());
+
+		await switcher.switchSession('session-B');
+		switcher.destroy();
+
+		expect(getState().modelOverride).toBeNull();
+	});
+});

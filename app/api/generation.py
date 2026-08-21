@@ -275,13 +275,15 @@ async def generate_with_claude(
     timeout_seconds: float = 120.0,
 ) -> str:
     """
-    Generate a response using AI, honoring the Default AI profile.
+    Generate a response using AI, honoring the text-generation setting.
 
-    The Default AI profile is the user-facing control for all internal AI
-    generation (commit messages, PR descriptions, branch names, profile /
-    subagent generation, etc.). This function pulls the profile's model,
-    provider binding and system prompt, then runs a throwaway turn through the
-    provider adapter seam (`app.core.provider.factory.make_adapter`).
+    Settings → Providers carries one model + effort pair — the user-facing
+    control for all internal AI generation (commit messages, PR descriptions,
+    branch names, profile / subagent generation, etc.). This function reads that
+    binding, then runs a throwaway turn through the provider adapter seam
+    (`app.core.provider.factory.make_adapter`). No agent is involved: generation
+    never runs in a session, so there is no agent whose configuration would
+    sensibly apply.
 
     ROUTING — identical to chat. The adapter's `_decide_provider_kind` reads the
     provider binding stamped onto the options by `build_generation_options`
@@ -302,8 +304,8 @@ async def generate_with_claude(
 
     Args:
         prompt: The prompt to send.
-        model: Optional model override. If None, uses the model from the
-               Default AI profile.
+        model: Optional model override. If None, uses the configured
+               text-generation model.
         timeout_seconds: Wall-clock budget for the send+receive phase. On expiry
                the adapter is torn down and an HTTP 504 is raised. Latency-
                sensitive callers (branch names) pass a shorter budget so their
@@ -312,18 +314,19 @@ async def generate_with_claude(
     Returns:
         Text response from the model.
     """
-    from app.core.profiles import get_default_ai_profile
-    from app.core.generation_options import build_generation_options
+    from app.core.generation_options import (
+        build_generation_options,
+        text_generation_config,
+    )
     from app.core.environment import ProviderConfigError
 
-    profile = get_default_ai_profile()
-    profile_config = (profile or {}).get("config") if profile else None
-    effective_model = model or (profile_config or {}).get("model") or DEFAULT_MODEL
+    generation_config = text_generation_config()
+    effective_model = model or generation_config.get("model") or DEFAULT_MODEL
 
     # Single-shot turn: max_turns=1 since we only send one prompt.
     try:
         options = build_generation_options(
-            profile_config,
+            generation_config,
             model_override=model,
             max_turns=1,
         )
@@ -564,8 +567,8 @@ async def _generate_profile_internal(
     agent_data = AgentExportData(
         name=generated.get("name", "Generated Profile"),
         description=generated.get("description"),
-        model=generated.get("model", DEFAULT_MODEL),
-        permission_mode=generated.get("permission_mode", "default"),
+        # No model / permission_mode: an agent does not carry a run binding,
+        # and a session picks both when it starts.
         system_prompt_content=prompt_content,
         allowed_tools=generated.get("allowed_tools"),
         disallowed_tools=generated.get("disallowed_tools"),

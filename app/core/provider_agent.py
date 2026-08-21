@@ -635,9 +635,12 @@ def _caller_permission_mode(caller_row: Optional[Mapping[str, Any]]) -> Optional
     Resolution mirrors what actually governed the caller:
 
     1. the caller's most recent turn's ``overrides.permission_mode`` — the
-       composer's per-session override, which the FE sends with every query;
-    2. else the caller PROFILE's configured ``permission_mode`` — the only
-       source for a voice session, which never runs turns (VM9).
+       composer's per-session selection, which the FE sends with every query;
+    2. else the caller SESSION's own binding (v79) — the mode chosen when that
+       session was created, which is also what a voice session (never runs
+       turns, VM9) and a server-initiated turn resolve from;
+    3. else the caller AGENT's legacy ``config.permission_mode``, for sessions
+       created before the binding moved onto the row.
 
     ``plan`` is deliberately NOT inherited: it is a UI conversation mode, and a
     worker dispatched to do work while forced into plan mode could only ever
@@ -661,6 +664,11 @@ def _caller_permission_mode(caller_row: Optional[Mapping[str, Any]]) -> Optional
             logger.debug(
                 "ProviderAgent: caller turn-override read failed", exc_info=True,
             )
+
+    if not mode:
+        candidate = caller_row.get("permission_mode")
+        if isinstance(candidate, str) and candidate.strip():
+            mode = candidate.strip()
 
     if not mode:
         profile_id = caller_row.get("profile_id")
@@ -1029,6 +1037,7 @@ async def dispatch_worker(
             worktree_path=worktree_path,
             provider_id=provider_id,
             derive_provider_from_profile=False,
+            model=model_id,
             hidden=True,
         )
     except Exception as exc:  # noqa: BLE001

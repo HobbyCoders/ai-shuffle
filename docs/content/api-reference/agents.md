@@ -8,7 +8,9 @@ order: 5
 
 > **Renamed from `/profiles`.** As of schema v71 ("agents unification"), this router moved from `/api/v1/profiles` to `/api/v1/agents`. Handlers and response shapes are unchanged — only the mount path moved. There is no alias or redirect: `/api/v1/profiles` paths return `404` as of this release. The standalone `/api/v1/subagents` router was removed in the same release; see [Former `/subagents` API](#former-subagents-api) below.
 
-Endpoints for managing agents — configuration containers that control Claude's behavior, tool access, and model selection. Every session runs under an agent.
+Endpoints for managing agents — configuration containers that control Claude's behavior, prompt, and tool access. Every session runs under an agent.
+
+An agent does not pin a model: the model, reasoning effort, and permission mode are chosen when a session is created and stored on the session, not on the agent.
 
 ## Agent CRUD
 
@@ -113,7 +115,7 @@ Delete an agent. Built-in agents cannot be deleted.
 
 ### POST /api/v1/agents/{agent_id}/restore
 
-Restore a built-in agent to its original seed defaults (name, description, and config). Only works for built-in agents with known defaults; custom agents have no defaults to restore to.
+Restore a built-in agent to its original seed defaults (name, description, and config). Only works for built-in agents with known defaults; custom agents have no defaults to restore to. No agent ships as built-in today, so this currently applies to nothing.
 
 **Auth:** Admin only
 
@@ -123,11 +125,9 @@ The top-level object has `id`, `name`, `description`, `is_builtin`, `is_modified
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `model` | string | Model preset shorthand (e.g., `sonnet`) or a custom model id |
 | `system_prompt` | object | `{type: "preset"\|"custom", preset, content, append, inject_env_details}` |
-| `permission_mode` | string | `default`, `acceptEdits`, `plan`, `bypassPermissions` |
 | `thinking_mode` | string | `default`, `think`, `think_harder`, `ultra_think` |
-| `effort` | string | Reasoning effort for Opus 4.6+: `low`, `medium`, `high`, `max`, `xhigh` |
+| `provider_models` | object | Model to run this agent on when another agent dispatches it as a subagent, keyed by provider (`__native__` for Claude). The one model binding an agent still owns |
 | `allowed_tools` | string[] | Tool whitelist (empty/null = all tools allowed) |
 | `disallowed_tools` | string[] | Tool blacklist |
 | `enabled_plugins` | string[] | Plugin paths to enable |
@@ -137,6 +137,14 @@ The top-level object has `id`, `name`, `description`, `is_builtin`, `is_modified
 | `setting_sources` | string[] | Config sources: `user`, `project`, `local` |
 | `cwd` | string | Override working directory |
 | `add_dirs` | string[] | Additional accessible directories |
+
+`model`, `permission_mode` and `effort` are no longer agent fields. They are
+accepted on write and returned on read for backward compatibility, and an agent
+that still carries them uses them only as a fallback for sessions created before
+those settings moved onto the session row (a top-level `model` also still seeds
+the agent's native subagent binding). The model behind internal one-shot
+generation is a separate setting — see `GET/PUT /api/v1/settings/text-generation`.
+
 
 ## Nested Agents (formerly "subagents")
 

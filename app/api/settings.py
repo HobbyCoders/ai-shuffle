@@ -718,3 +718,105 @@ async def update_voice_settings(
             database.set_system_setting(VOICE_PROVIDER_ID_KEY, provider_id)
 
     return VoiceSettingsResponse(**get_voice_settings())
+
+
+# ============================================================================
+# Text generation (internal one-shot AI calls)
+# ============================================================================
+
+class TextGenerationSettingsResponse(BaseModel):
+    """The model + effort every internal generation call runs on.
+
+    ``model`` is the raw picker value — a bare id/alias, or a
+    ``prov:<providerId>:<modelId>`` composite. Empty means "not configured",
+    which resolves to the registry default at call time. ``effort`` is empty
+    for the provider's own default.
+    """
+    text_generation_model: str = ""
+    text_generation_effort: str = ""
+
+
+class TextGenerationSettingsUpdateRequest(BaseModel):
+    """Partial update — only the keys present in the body are written."""
+    text_generation_model: Optional[str] = None
+    text_generation_effort: Optional[str] = None
+
+
+def get_text_generation_settings() -> Dict[str, str]:
+    """Read the stored text-generation binding (empty strings when unset)."""
+    from app.core.generation_options import (
+        TEXT_GENERATION_EFFORT_KEY,
+        TEXT_GENERATION_MODEL_KEY,
+    )
+
+    return {
+        "text_generation_model":
+            (database.get_system_setting(TEXT_GENERATION_MODEL_KEY) or "").strip(),
+        "text_generation_effort":
+            (database.get_system_setting(TEXT_GENERATION_EFFORT_KEY) or "").strip(),
+    }
+
+
+@router.get("/text-generation", response_model=TextGenerationSettingsResponse)
+async def get_text_generation_settings_endpoint(token: str = Depends(require_auth)):
+    """Get the model and effort used for internal text generation."""
+    return TextGenerationSettingsResponse(**get_text_generation_settings())
+
+
+@router.put("/text-generation", response_model=TextGenerationSettingsResponse)
+async def update_text_generation_settings(
+    request: TextGenerationSettingsUpdateRequest,
+    token: str = Depends(require_admin)
+):
+    """Update the text-generation model / effort. Admin only.
+
+    A ``prov:<providerId>:<modelId>`` model is validated against the provider
+    row so a gateway model that the provider does not serve is refused here
+    rather than failing every commit-message generation afterwards. An empty
+    string on either key clears it back to the default.
+    """
+    from app.core.generation_options import (
+        TEXT_GENERATION_EFFORT_KEY,
+        TEXT_GENERATION_MODEL_KEY,
+        VALID_EFFORTS,
+    )
+
+    provided = request.model_fields_set
+
+    if "text_generation_model" in provided:
+        model = (request.text_generation_model or "").strip()
+        if not model:
+            database.delete_system_setting(TEXT_GENERATION_MODEL_KEY)
+        else:
+            from app.core.query_options import decode_provider_model
+
+            decoded = decode_provider_model(model)
+            if decoded:
+                from app.core.provider_agent import validate_provider_model
+
+                validation = validate_provider_model(
+                    decoded[0], decoded[1], require_servable=False
+                )
+                if not validation.ok:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            validation.reason
+                            or f"Model {decoded[1]!r} is not available on that provider."
+                        ),
+                    )
+            database.set_system_setting(TEXT_GENERATION_MODEL_KEY, model)
+
+    if "text_generation_effort" in provided:
+        effort = (request.text_generation_effort or "").strip()
+        if not effort:
+            database.delete_system_setting(TEXT_GENERATION_EFFORT_KEY)
+        elif effort not in VALID_EFFORTS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"text_generation_effort must be one of {list(VALID_EFFORTS)}",
+            )
+        else:
+            database.set_system_setting(TEXT_GENERATION_EFFORT_KEY, effort)
+
+    return TextGenerationSettingsResponse(**get_text_generation_settings())

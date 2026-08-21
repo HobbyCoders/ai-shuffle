@@ -38,7 +38,6 @@
 	 */
 	import { onMount } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
-	import { profiles } from '$lib/stores/app-data.svelte';
 	import { getContextMaxForModel } from '$lib/constants/chat';
 	import {
 		getDefaultModel,
@@ -79,15 +78,14 @@
 	import { usageTargetInstance } from '$lib/stores/usage-target';
 
 	// ── Effective model → context window (200k / 1M) ──────────────────────
-	// A composer override may be a `prov:<providerId>:<modelId>` composite
+	// The session's model pick may be a `prov:<providerId>:<modelId>` composite
 	// (PA13's cross-provider switch) — decode it once and let BOTH the model id
 	// and the provider id come from the pick, mirroring the backend's resolution.
 	const overrideComposite = $derived(decodeProviderModel($activeSession.modelOverride));
 	const effectiveModel = $derived.by(() => {
 		if (overrideComposite) return overrideComposite.modelId;
 		if ($activeSession.modelOverride) return $activeSession.modelOverride;
-		const profile = $profiles.find((p) => p.id === $activeSession.profile);
-		return profile?.config?.model || getDefaultModel();
+		return getDefaultModel();
 	});
 	// The label reads the RAW selection so a composite round-trips to its
 	// provider-scoped label rather than a bare id.
@@ -95,15 +93,13 @@
 		getModelLabel($activeSession.modelOverride ?? effectiveModel)
 	);
 	// Provider id for the context-window lookup (null = native Claude), resolved
-	// with the same precedence the backend uses: an explicit composite override
-	// wins; a plain native-preset override CLEARS the binding for the turn; else
-	// the session's live provider, else the profile's configured provider.
+	// with the same precedence the backend uses: an explicit composite pick
+	// wins; a plain native-preset pick CLEARS the binding for the turn; else
+	// the session's live provider (an agent carries none to fall back to).
 	const effectiveProviderId = $derived.by(() => {
 		if (overrideComposite) return overrideComposite.providerId;
 		if ($activeSession.modelOverride && isPresetModel($activeSession.modelOverride)) return null;
-		if ($activeSession.liveProvider) return $activeSession.liveProvider;
-		const profile = $profiles.find((p) => p.id === $activeSession.profile);
-		return profile?.config?.provider ?? null;
+		return $activeSession.liveProvider ?? null;
 	});
 	const contextMax = $derived(getContextMaxForModel(effectiveModel, effectiveProviderId));
 

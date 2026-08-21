@@ -2148,20 +2148,27 @@ class TestProfileConfigStrictMcpConfig:
         assert cfg.strict_mcp_config is False
 
 
-class TestSeededDefaultAIProfileStreams:
-    """The built-in "Default AI" profile is the default chat profile on a fresh
-    install. Live streaming (typewriter, gap indicators, stream_delta handling)
-    requires ``include_partial_messages`` to be enabled — otherwise a fresh
-    install shows dead air for the whole turn and one chunk at turn end.
+class TestSeededStarterAgentStreams:
+    """The starter agent is what a fresh install chats with. Live streaming
+    (typewriter, gap indicators, stream_delta handling) requires
+    ``include_partial_messages`` to be enabled — otherwise a fresh install shows
+    dead air for the whole turn and one chunk at turn end.
     """
 
-    def test_seed_default_ai_profile_streams_partial_messages(self):
+    def test_starter_agent_streams_partial_messages(self):
         """Seed template must enable partial-message streaming for live chat."""
-        from app.core.profiles import DEFAULT_AI_PROFILE
+        from app.core.profiles import STARTER_AGENT
 
         assert (
-            DEFAULT_AI_PROFILE["config"]["include_partial_messages"] is True
-        ), "seeded Default AI profile must stream partial messages for live chat UX"
+            STARTER_AGENT["config"]["include_partial_messages"] is True
+        ), "seeded starter agent must stream partial messages for live chat UX"
+
+    def test_starter_agent_is_not_builtin(self):
+        """Nothing ships as a protected built-in any more: the starter agent is
+        the user's from the moment it is created, so it can be deleted."""
+        from app.core.profiles import STARTER_AGENT
+
+        assert "model" not in STARTER_AGENT["config"]
 
 
 # =============================================================================
