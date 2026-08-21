@@ -1,5 +1,6 @@
 from fluid.tools.inproc import InprocServer, InprocTool, create_inproc_server, tool
 from fluid.tools.registry import (
+    BackgroundTaskReceipt,
     InputRequired,
     ToolCtx,
     ToolOutcome,
@@ -8,6 +9,7 @@ from fluid.tools.registry import (
 )
 
 __all__ = [
+    "BackgroundTaskReceipt",
     "InprocServer",
     "InprocTool",
     "InputRequired",

@@ -13,8 +13,10 @@ a plain string, which is wrapped). Contract for ``input``:
   * agent   — target subagent id or unambiguous name (required)
   * prompt  — the task for the subagent (required)
   * mode    — "sync" (default): block until the worker finishes and return its
-              report; "background": return immediately with the worker's
-              session id — collect later via the host's task tools.
+              report; "background": atomically detach and return a
+              ``BackgroundTaskReceipt`` (or ``ToolOutcome.background_task``).
+              The host later submits ``BackgroundTaskFinished`` to the parent
+              engine; Fluid persists the result and wakes the parked session.
   * label   — optional short display label
 
 The host may replace this fallback spec per session with an eligible subagent
@@ -24,9 +26,16 @@ model-authored Task arguments.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 from typing import Any
 
-from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
+from fluid.tools.registry import (
+    BackgroundTaskReceipt,
+    ToolCtx,
+    ToolOutcome,
+    ToolSpec,
+)
 
 SPEC = ToolSpec(
     name="Task",
@@ -75,6 +84,50 @@ SPEC = ToolSpec(
 )
 
 
+def _background_outcome(result: Any, input: dict[str, Any]) -> ToolOutcome:
+    if isinstance(result, ToolOutcome):
+        return result
+    if isinstance(result, BackgroundTaskReceipt):
+        return ToolOutcome(
+            text=f"Background task {result.task_id} started.",
+            background_task=result,
+        )
+    if isinstance(result, dict) and result.get("task_id"):
+        receipt = BackgroundTaskReceipt(
+            task_id=str(result["task_id"]),
+            worker_session_id=(
+                str(result["worker_session_id"])
+                if result.get("worker_session_id") is not None
+                else None
+            ),
+            description=result.get("description") or input.get("label"),
+        )
+        return ToolOutcome(
+            text=str(
+                result.get("text")
+                or result.get("message")
+                or f"Background task {receipt.task_id} started."
+            ),
+            ui=result.get("ui", result),
+            is_error=bool(result.get("is_error", False)),
+            background_task=receipt,
+        )
+    return ToolOutcome(text=str(result))
+
+
+async def _dispatch_background(dispatch: Any, input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
+    outcome = _background_outcome(await dispatch(input, ctx), input)
+    receipt = outcome.background_task
+    if receipt is None or outcome.is_error:
+        return outcome
+    started = (ctx.extra or {}).get("background_task_started")
+    if started is not None:
+        notified = started(receipt)
+        if inspect.isawaitable(notified):
+            await notified
+    return outcome
+
+
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     dispatch = (ctx.extra or {}).get("task_dispatch")
     if dispatch is None:
@@ -85,6 +138,16 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             ),
             is_error=True,
         )
+    if input.get("mode", "sync") == "background":
+        # The spawn acknowledgement is an atomic detach boundary. Interrupting
+        # the parent turn may stop consuming this tool result, but must not cancel
+        # a worker the host has already started or lose its durable task id.
+        spawn = asyncio.create_task(_dispatch_background(dispatch, input, ctx))
+        tracked = (ctx.extra or {}).get("background_spawn_tasks")
+        if isinstance(tracked, set):
+            tracked.add(spawn)
+            spawn.add_done_callback(tracked.discard)
+        return await asyncio.shield(spawn)
     result = await dispatch(input, ctx)
     if isinstance(result, ToolOutcome):
         return result

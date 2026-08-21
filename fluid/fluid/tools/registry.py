@@ -89,6 +89,15 @@ class ToolImage:
 
 
 @dataclass(frozen=True, kw_only=True)
+class BackgroundTaskReceipt:
+    """Durable identity returned after a host detached a background worker."""
+
+    task_id: str
+    worker_session_id: str | None = None
+    description: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
 class ToolOutcome:
     """Dual-output tool result: ``text`` for the model, ``ui`` for clients."""
 
@@ -97,6 +106,7 @@ class ToolOutcome:
     is_error: bool = False
     input_required: InputRequired | None = None
     images: tuple[ToolImage, ...] = ()
+    background_task: BackgroundTaskReceipt | None = None
 
 
 @dataclass

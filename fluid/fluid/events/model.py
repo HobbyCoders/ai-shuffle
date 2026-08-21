@@ -59,6 +59,18 @@ class TurnComplete(Event):
 
 
 @dataclass(frozen=True, kw_only=True)
+class SessionParked(Event):
+    pending_task_ids: tuple[str, ...] = ()
+    reason: str = "background_tasks"
+
+
+@dataclass(frozen=True, kw_only=True)
+class SessionWoken(Event):
+    task_ids: tuple[str, ...] = ()
+    reason: str = "background_task_completion"
+
+
+@dataclass(frozen=True, kw_only=True)
 class Interrupted(Event):
     message: str = "interrupted"
     # A turn-ending Interrupted carries the turn's accumulated partial
@@ -206,9 +218,12 @@ class RateLimit(Event):
 @dataclass(frozen=True, kw_only=True)
 class SubagentEvent(Event):
     task_id: str
-    kind: str  # "started" | "progress" | "finished"
+    kind: str  # started | progress | completion_pending | finished | failed | cancelled
     description: str | None = None
     summary: str | None = None
+    worker_session_id: str | None = None
+    wake: bool = True
+    status: str | None = None
 
 
 # ─── Durable event codec ─────────────────────────────────────────────────────
@@ -221,7 +236,8 @@ class SubagentEvent(Event):
 _EVENT_TYPES: dict[str, type[Event]] = {
     cls.__name__: cls
     for cls in (
-        TurnStarted, TurnComplete, Interrupted, ErrorEvent,
+        TurnStarted, TurnComplete, SessionParked, SessionWoken,
+        Interrupted, ErrorEvent,
         BlockStart, BlockStop, TextDelta, ThinkingDelta,
         ToolUse, ToolResult, PermissionRequest, QuestionRequest, HandoffCreated,
         ContextCompaction, Usage, RateLimit, SubagentEvent,
@@ -239,4 +255,8 @@ def event_to_dict(event: Event) -> dict[str, Any]:
 def event_from_dict(d: dict[str, Any]) -> Event:
     d = dict(d)
     cls = _EVENT_TYPES[d.pop("_cls")]
+    if cls is SessionParked and isinstance(d.get("pending_task_ids"), list):
+        d["pending_task_ids"] = tuple(d["pending_task_ids"])
+    elif cls is SessionWoken and isinstance(d.get("task_ids"), list):
+        d["task_ids"] = tuple(d["task_ids"])
     return cls(**d)

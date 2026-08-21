@@ -27,6 +27,7 @@ from fluid.context.compiler import CompiledPrompt
 from fluid.context.recall import HistoryRecall
 from fluid.context.trim import TrimConfig, estimate_tokens_of_text
 from fluid.context.usage import MemoryFileUsage, build_context_usage, memory_file_usage
+from fluid.engine.background import BackgroundLifecycleMixin
 from fluid.engine.base import EngineCaps
 from fluid.events.bus import EventBus
 from fluid.events.model import (
@@ -48,6 +49,7 @@ from fluid.events.model import (
     Usage,
 )
 from fluid.events.ops import (
+    BackgroundTaskFinished,
     Fork,
     Handoff,
     Interrupt,
@@ -83,6 +85,8 @@ from fluid.tools.builtins.tool_search import parse_deferred_catalog, render_defe
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
 
 log = logging.getLogger(__name__)
+
+_BACKGROUND_SPAWN_INTERRUPT_GRACE = 1.0
 
 
 @dataclass
@@ -194,7 +198,7 @@ def repair_dangling_tool_calls(history: list[Message]) -> list[Message]:
     return out if repaired else history
 
 
-class NativeLoop:
+class NativeLoop(BackgroundLifecycleMixin):
     caps = EngineCaps(
         inproc_tools=True, schema_plan_mode=True,
         fork=True, rewind=True, cache_metrics=True, context_usage=True,
@@ -322,6 +326,7 @@ class NativeLoop:
         if native_agents:
             self._apply_native_agents()
         self.claude_agents = self.native_agents
+        self._init_background_lifecycle()
 
     # Discovery scope → the ``source`` label carried on a usage agent row.
     _AGENT_SOURCES = {"project": "project", "global": "user"}
@@ -390,7 +395,9 @@ class NativeLoop:
     # ─── ExecutionEngine interface ───────────────────────────────────────
 
     async def submit(self, op: Op) -> None:
-        if isinstance(op, UserTurn):
+        if isinstance(op, BackgroundTaskFinished):
+            await self._finish_background_task(op)
+        elif isinstance(op, UserTurn):
             if self._turn_task and not self._turn_task.done():
                 raise RuntimeError("a turn is already running; Interrupt it first")
             self._interrupted.clear()
@@ -500,10 +507,10 @@ class NativeLoop:
         return self.bus.subscribe(self.session_id, since_seq=since_seq)
 
     async def wait_turn(self) -> None:
-        if self._turn_task:
-            await self._turn_task
+        await self._wait_background_turns()
 
     async def aclose(self) -> None:
+        await self._close_background_lifecycle()
         self._interrupted.set()
         if self._turn_task and not self._turn_task.done():
             self._turn_task.cancel()
@@ -574,6 +581,8 @@ class NativeLoop:
         meta = await self._ensure_session()
         sid = meta.session_id
         turn_id = new_id("turn")
+        self._background_turn_terminal = False
+        self._active_turn_id = turn_id
 
         # Connect config MCP servers before building the user node so newly
         # known deferred tools can be announced on this very turn.
@@ -595,6 +604,7 @@ class NativeLoop:
             message=Message(role="user", content=content),
         )
         await self.store.append(sid, user_node)
+        await self._mark_background_woken(op, sid, user_node.node_id, turn_id)
         if self._codemode is not None:
             # Episodic half of the continual journal: the intent behind the turn.
             self._codemode.record_event("user", _plain_text(content))
@@ -611,9 +621,11 @@ class NativeLoop:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # surface, never swallow
-            await self._emit(
+            await self._emit_terminal_with_park(
                 ErrorEvent(session_id=sid, turn_id=turn_id, message=repr(exc))
             )
+        finally:
+            self._active_turn_id = None
 
     async def _connect_mcp_once(self, sid: str, turn_id: str) -> None:
         """Connect configured MCP servers on the first turn (idempotent).
@@ -790,7 +802,7 @@ class NativeLoop:
                 # fold them in so the turn's spend is not lost with the error.
                 self._fold_call_usage(total_usage, result.usage)
                 partial, partial_cost = self._partial_usage(total_usage)
-                await self._emit(ErrorEvent(
+                await self._emit_terminal_with_park(ErrorEvent(
                     session_id=sid, turn_id=turn_id,
                     message=result.error_message or "provider error",
                     retriable=result.error_retriable,
@@ -816,7 +828,7 @@ class NativeLoop:
             if result.interrupted:
                 # This call's usage is already folded in above — snapshot, don't re-fold.
                 partial, partial_cost = self._partial_usage(total_usage)
-                await self._emit(Interrupted(
+                await self._emit_terminal_with_park(Interrupted(
                     session_id=sid, node_id=node.node_id, turn_id=turn_id,
                     usage=partial, cost_usd=partial_cost,
                 ))
@@ -849,7 +861,7 @@ class NativeLoop:
                 # Interrupt landed during tool dispatch (e.g. while parked on a
                 # permission prompt) — stop before issuing another model call.
                 partial, partial_cost = self._partial_usage(total_usage)
-                await self._emit(Interrupted(
+                await self._emit_terminal_with_park(Interrupted(
                     session_id=sid, node_id=parent.node_id, turn_id=turn_id,
                     usage=partial, cost_usd=partial_cost,
                 ))
@@ -862,7 +874,7 @@ class NativeLoop:
             await self.hooks.emit(TURN_END, {"session_id": sid, "turn_id": turn_id})
         # Cost rides its own TurnComplete field; keep the usage dict token-shaped.
         cost_total = total_usage.pop("cost_usd", None)
-        await self._emit(TurnComplete(
+        await self._emit_terminal_with_park(TurnComplete(
             session_id=sid, node_id=parent.node_id, turn_id=turn_id,
             stop_reason=final_stop or "end_turn", num_model_calls=num_calls,
             usage=dict(total_usage), cost_usd=cost_total,
@@ -1077,11 +1089,35 @@ class NativeLoop:
             # same tick — a real result beats a synthesized cancellation.
             if dispatch in done:
                 return dispatch.result()
-            dispatch.cancel()
-            try:
-                await dispatch
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
+            detached_spawn = (
+                tu.get("name") == "Task"
+                and isinstance(tu.get("input"), dict)
+                and tu["input"].get("mode", "sync") == "background"
+            )
+            if detached_spawn:
+                # Give the short spawn handshake a bounded chance to cross its
+                # atomic detach boundary. The handler's inner spawn task is
+                # shielded and lifecycle-tracked, so timing out this tool call
+                # does not cancel a worker the host may already have created.
+                try:
+                    return await asyncio.wait_for(
+                        asyncio.shield(dispatch),
+                        timeout=_BACKGROUND_SPAWN_INTERRUPT_GRACE,
+                    )
+                except asyncio.TimeoutError:
+                    dispatch.cancel()
+                    try:
+                        await dispatch
+                    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                        pass
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                dispatch.cancel()
+                try:
+                    await dispatch
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
         text = "Tool execution cancelled: the turn was interrupted."
         await self._emit(ToolResult(
             session_id=sid, turn_id=turn_id, tool_use_id=tu["tool_use_id"],

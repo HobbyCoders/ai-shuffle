@@ -10,6 +10,8 @@ from fluid.events.model import (
     PermissionRequest,
     QuestionRequest,
     RateLimit,
+    SessionParked,
+    SessionWoken,
     SubagentEvent,
     TextDelta,
     ThinkingDelta,
@@ -20,6 +22,7 @@ from fluid.events.model import (
     Usage,
 )
 from fluid.events.ops import (
+    BackgroundTaskFinished,
     Fork,
     Handoff,
     Interrupt,
@@ -33,6 +36,7 @@ from fluid.events.ops import (
 )
 
 __all__ = [
+    "BackgroundTaskFinished",
     "BlockStart",
     "BlockStop",
     "ContextCompaction",
@@ -51,6 +55,8 @@ __all__ = [
     "RespondPermission",
     "RespondQuestion",
     "Rewind",
+    "SessionParked",
+    "SessionWoken",
     "SetModel",
     "SetPermissionMode",
     "SubagentEvent",

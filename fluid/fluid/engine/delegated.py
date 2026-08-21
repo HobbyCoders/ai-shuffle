@@ -44,6 +44,7 @@ import socket
 import tempfile
 from typing import Any, AsyncIterator
 
+from fluid.engine.background import BackgroundLifecycleMixin
 from fluid.engine.base import EngineCaps
 from fluid.engine.delegated_proto import (
     ControlReply,
@@ -52,8 +53,9 @@ from fluid.engine.delegated_proto import (
     parse_control_response,
 )
 from fluid.events.bus import EventBus
-from fluid.events.model import ErrorEvent, Event, TurnStarted
+from fluid.events.model import ErrorEvent, Event, Interrupted, TurnComplete, TurnStarted
 from fluid.events.ops import (
+    BackgroundTaskFinished,
     Interrupt,
     Op,
     RespondPermission,
@@ -93,7 +95,7 @@ class _PumpOutcome(enum.Enum):
     YIELDED = "yielded"  # a turn started; stdout handed back to its reader
 
 
-class DelegatedLoop:
+class DelegatedLoop(BackgroundLifecycleMixin):
     caps = EngineCaps(
         code_mode=False,
         inproc_tools=True,
@@ -175,6 +177,7 @@ class DelegatedLoop:
         self._mcp_config_path: str | None = None
         self._socket_path: str | None = None
         self._socket_server: Any | None = None
+        self._init_background_lifecycle()
 
     # ─── session plumbing (mirrors NativeLoop) ───────────────────────────
 
@@ -201,13 +204,14 @@ class DelegatedLoop:
         return self.bus.subscribe(self.session_id, since_seq=since_seq)
 
     async def wait_turn(self) -> None:
-        if self._turn_task:
-            await self._turn_task
+        await self._wait_background_turns()
 
     # ─── ExecutionEngine interface ───────────────────────────────────────
 
     async def submit(self, op: Op) -> None:
-        if isinstance(op, UserTurn):
+        if isinstance(op, BackgroundTaskFinished):
+            await self._finish_background_task(op)
+        elif isinstance(op, UserTurn):
             if self._turn_task and not self._turn_task.done():
                 raise RuntimeError("a turn is already running; Interrupt it first")
             self._interrupted.clear()
@@ -229,6 +233,7 @@ class DelegatedLoop:
             raise NotImplementedError(f"op not supported by DelegatedLoop: {type(op).__name__}")
 
     async def aclose(self) -> None:
+        await self._close_background_lifecycle()
         self._interrupted.set()
         # Settle anyone parked on a control reply: the CLI is going away, so
         # they get "unavailable" now instead of waiting out the timeout.
@@ -391,11 +396,16 @@ class DelegatedLoop:
         meta = await self._ensure_session()
         sid = meta.session_id
         turn_id = new_id("turn")
+        self._background_turn_terminal = False
+        self._active_turn_id = turn_id
         reused = self._proc is not None and self._proc.returncode is None
         try:
             proc = await self._ensure_process()
         except Exception as exc:
-            await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id, message=f"spawn failed: {exc!r}"))
+            await self._emit_terminal_with_park(ErrorEvent(
+                session_id=sid, turn_id=turn_id, message=f"spawn failed: {exc!r}"
+            ))
+            self._active_turn_id = None
             return
         if reused:
             async with self._stdout_lock:
@@ -408,6 +418,7 @@ class DelegatedLoop:
             message=Message(role="user", content=content),
         )
         await self.store.append(sid, user_node)
+        await self._mark_background_woken(op, sid, user_node.node_id, turn_id)
         # TurnStarted is emitted here (not from the init frame): a persistent CLI
         # process emits `init` only once, so per-turn parity with NativeLoop
         # requires the loop to own this event.
@@ -429,8 +440,11 @@ class DelegatedLoop:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id, message=repr(exc)))
+            await self._emit_terminal_with_park(
+                ErrorEvent(session_id=sid, turn_id=turn_id, message=repr(exc))
+            )
         finally:
+            self._active_turn_id = None
             if mapper.cli_session_id and mapper.cli_session_id != self.cli_session_id:
                 self.cli_session_id = mapper.cli_session_id
                 self._persist_cli_session_id(sid, mapper.cli_session_id)
@@ -504,7 +518,7 @@ class DelegatedLoop:
         while True:
             line = await self._proc.stdout.readline()
             if not line:
-                await self._emit(ErrorEvent(
+                await self._emit_terminal_with_park(ErrorEvent(
                     session_id=sid, turn_id=turn_id, message="claude stream closed before result",
                 ))
                 return
@@ -518,7 +532,10 @@ class DelegatedLoop:
 
             mapped = mapper.feed(frame)
             for event in mapped.events:
-                await self._emit(event)
+                if isinstance(event, (TurnComplete, Interrupted, ErrorEvent)):
+                    await self._emit_terminal_with_park(event)
+                else:
+                    await self._emit(event)
             if mapped.message is not None and mapped.node_id is not None:
                 node = SessionNode(
                     node_id=mapped.node_id, parent_id=parent.node_id, message=mapped.message,

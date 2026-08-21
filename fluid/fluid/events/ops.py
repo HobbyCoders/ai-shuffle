@@ -27,11 +27,25 @@ class UserTurn(Op):
 
     content: list[Any]  # list[ContentBlock] | str convenience handled by the engine
     parent_node_id: str | None = None
+    # Internal durable-delivery marker for an automatic background wake. Hosts
+    # normally leave this empty and submit BackgroundTaskFinished instead.
+    wake_task_ids: tuple[str, ...] = ()
 
 
 @dataclass(kw_only=True)
 class Interrupt(Op):
     pass
+
+
+@dataclass(kw_only=True)
+class BackgroundTaskFinished(Op):
+    """Record a detached worker's terminal result and optionally wake its parent."""
+
+    task_id: str
+    status: str = "finished"  # "finished" | "failed" | "cancelled"
+    summary: str | None = None
+    worker_session_id: str | None = None
+    wake: bool = True
 
 
 @dataclass(kw_only=True)
