@@ -87,6 +87,7 @@ def register_sdk_tools(
     version: str = "1.0.0",
     risk_map: Optional[Mapping[str, str]] = None,
     default_risk: str = "safe",
+    defer: bool = False,
 ) -> InprocServer:
     """Convert + register in one call. Each tool surfaces as
     ``mcp__<server_name>__<tool>`` (fluid's naming, matching Claude Code).
@@ -94,6 +95,10 @@ def register_sdk_tools(
     ``default_risk`` applies to tools absent from ``risk_map`` — used by
     servers whose tool set is dynamic (connector gateway tools on ``builtins``,
     the ProviderAgent tool) so unknown tools default to gated, not open.
+
+    ``defer=True`` registers the server's tools in fluid's deferred tier
+    (announced by name + one-line description, schema loaded on demand via
+    ToolSearch) instead of pushing every schema into the prompt prefix.
     """
     risk_map = risk_map or {}
     tools: List[InprocTool] = [
@@ -101,7 +106,11 @@ def register_sdk_tools(
         for t in sdk_tools
     ]
     server = create_inproc_server(server_name, tools, version=version)
-    registry.register_inproc(server)
+    try:
+        registry.register_inproc(server, defer=defer)
+    except TypeError:
+        # Older vendored fluid without the defer parameter: eager fallback.
+        registry.register_inproc(server)
     return server
 
 
@@ -223,12 +232,26 @@ SERVER_DEFAULT_RISK: Mapping[str, str] = {
     "provider-agent": "write",
 }
 
+# Servers whose schemas stay OUT of the prompt prefix on the native leg
+# (deferred tier: announced by name, loaded on demand via ToolSearch). The
+# app-config CRUD surface alone is ~35 schemas; pushing all of them into every
+# coding session buried the core tools. ``builtins`` stays eager — its tools
+# (Memory, Monitor, task tools, scheduling) are the session's operating
+# surface. Claude Code applies the same tiering to its MCP servers.
+DEFERRED_SDK_SERVERS: frozenset[str] = frozenset({
+    "app-config",
+    "ai-tools",
+    "computer-use",
+    "provider-agent",
+})
+
 
 def register_recorded_sdk_servers(
     registry: ToolRegistry,
     mcp_servers: Optional[Mapping[str, Any]],
     *,
     skip_tools: Optional[Mapping[str, Any]] = None,
+    defer_servers: Optional[frozenset[str]] = None,
 ) -> List[str]:
     """Register every recorded in-proc SDK server from an ``mcp_servers``
     mapping onto ``registry``. Returns the server names registered.
@@ -267,6 +290,7 @@ def register_recorded_sdk_servers(
             tools,
             risk_map=SERVER_RISK_MAPS.get(name),
             default_risk=SERVER_DEFAULT_RISK.get(name, "write"),
+            defer=name in (defer_servers or ()),
         )
         registered.append(name)
     return registered
