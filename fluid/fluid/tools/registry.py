@@ -150,11 +150,14 @@ class ToolRegistry:
         self._entries[spec.name] = _Entry(spec=spec, handler=handler)
         self._loaded.add(spec.name)
 
-    def register_inproc(self, server: "Any") -> None:
+    def register_inproc(self, server: "Any", *, defer: bool = False) -> None:
         """Register an in-process MCP server (from ``create_inproc_server``).
 
-        Each tool surfaces as ``mcp__<server>__<tool>`` and is loaded eagerly —
-        in-proc schemas are cheap and belong in the prefix like builtins.
+        Each tool surfaces as ``mcp__<server>__<tool>``. By default schemas
+        load eagerly into the prompt prefix like builtins; pass ``defer=True``
+        to register them in the deferred tier instead (known + searchable via
+        ToolSearch, schema out of context until loaded) — the right choice for
+        large in-proc servers whose tools are rarely used in a typical turn.
         """
         for tool in server.tools:
             name = f"mcp__{server.name}__{tool.name}"
@@ -163,7 +166,8 @@ class ToolRegistry:
                 risk=tool.risk, source="inproc",
             )
             self._entries[name] = _Entry(spec=spec, handler=tool.as_handler(), server=server.name)
-            self._loaded.add(name)
+            if not defer:
+                self._loaded.add(name)
 
     async def connect_mcp(self, name: str, config: dict[str, Any]) -> list[ToolSpec]:
         """Connect an MCP server and register its catalog (schemas deferred).
