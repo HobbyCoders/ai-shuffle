@@ -1548,23 +1548,30 @@ class HarnessAdapter(ProviderAdapter):
             builtins_registered = True
             logger.info("[HarnessAdapter] registered fluid builtin tools for native leg")
             _amend_native_task_spec(registry, options)
-            _amend_native_mutation_specs(registry)
 
         # The app's own in-proc SDK servers (builtins, app-config, ai-tools,
         # computer-use, provider-agent): their @tool objects were recorded per
         # instance when patch_sdk_server assembled them; re-register the same
         # tools on fluid's registry with the bridge's risk maps.
-        from app.core.provider.fluid_tool_bridge import register_recorded_sdk_servers
+        from app.core.provider.fluid_tool_bridge import (
+            DEFERRED_SDK_SERVERS,
+            register_recorded_sdk_servers,
+        )
         # Native legs run fluid's bare-named Task builtin (ruling A13) and its
         # ToolSearch (the functional deferred-schema loader for THIS registry)
         # — the bridged mcp__builtins__ copies are excluded so the model sees
         # ONE of each. The delegated leg keeps the MCP copies (the CLI can
         # only receive external tools via --mcp-config, and its own native
         # ToolSearch serves the CLI-side registry).
+        #
+        # Deferral is native-only too: fluid's ToolSearch is what makes a
+        # deferred schema reachable, and the delegated leg's bundled socket
+        # server must keep serving every spec to the CLI.
         recorded = register_recorded_sdk_servers(
             registry,
             options.mcp_servers,
             skip_tools={"builtins": {"Task", "ToolSearch"}} if native else None,
+            defer_servers=DEFERRED_SDK_SERVERS if native else None,
         )
         if recorded:
             logger.info(
@@ -2128,50 +2135,11 @@ def _amend_native_task_spec(registry: ToolRegistry, options: SessionOptions) -> 
         )
 
 
-def _amend_native_mutation_specs(registry: ToolRegistry) -> None:
-    """Make the native mutation/shell contract explicit in tool schemas.
-
-    This is guidance, not a shell ban: Bash remains the right tool for commands,
-    builds, git, and generators.  Direct file-content changes should use the
-    purpose-built Write/Edit tools so intent is followed by an auditable
-    mutation call instead of prose or shell redirection.
-    """
-    try:
-        import dataclasses
-
-        from fluid.tools.builtins.bash import SPEC as bash_spec, handler as bash_handler
-        from fluid.tools.builtins.edit import SPEC as edit_spec, handler as edit_handler
-        from fluid.tools.builtins.write import SPEC as write_spec, handler as write_handler
-
-        registry.register_builtin(dataclasses.replace(
-            write_spec,
-            description=(
-                "Create or overwrite a file. When you say you will create or write "
-                "file content, invoke Write immediately; do not draft the content "
-                "only in reasoning or route it through Bash/Python redirection."
-            ),
-        ), write_handler)
-        registry.register_builtin(dataclasses.replace(
-            edit_spec,
-            description=(
-                "Modify an existing file by exact replacement after Read. When you "
-                "say you will edit or update file content, invoke Edit immediately."
-            ),
-        ), edit_handler)
-        registry.register_builtin(dataclasses.replace(
-            bash_spec,
-            description=(
-                "Run a command in the host platform shell. Use for git, builds, "
-                "tests, package managers, and command-driven generators; use Write "
-                "or Edit for direct file-content mutations. Follow the Shell line "
-                "in the environment block exactly."
-            ),
-        ), bash_handler)
-    except Exception:  # noqa: BLE001 — schemas are guidance, never a connect gate
-        logger.warning(
-            "[HarnessAdapter] failed to amend native mutation tool descriptions",
-            exc_info=True,
-        )
+# NOTE: the former ``_amend_native_mutation_specs`` (which overwrote fluid's
+# Bash/Write/Edit descriptions with one-line summaries) is gone: fluid's own
+# tool contracts now carry richer guidance than the amendments did, including
+# the invoke-immediately mutation rule and the environment-block Shell pointer,
+# so amending here would only downgrade them.
 
 
 def _decide_provider_kind(options: SessionOptions) -> str:

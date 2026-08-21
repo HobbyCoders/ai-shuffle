@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.core.provider.fluid_tool_bridge import (
+    DEFERRED_SDK_SERVERS,
     SERVER_RISK_MAPS,
     register_recorded_sdk_servers,
 )
@@ -89,6 +90,33 @@ def test_register_recorded_sdk_servers_applies_risk_maps():
     assert monitor.risk == "safe"
     assert cron_delete.risk == "destructive"  # from BUILTINS_RISK_MAP
     assert gateway.risk == "write"  # dynamic gateway tool → server default
+
+
+def test_deferred_servers_land_in_the_deferred_tier_and_stay_loadable():
+    """Native-leg tiering: app-config/ai-tools schemas stay out of the prompt
+    prefix (deferred, ToolSearch-loadable) while builtins remain eager."""
+    config_cfg = {"type": "sdk", "name": "app-config", "instance": _Instance()}
+    builtins_cfg = {"type": "sdk", "name": "builtins", "instance": _Instance()}
+    record_sdk_server_tools(config_cfg, [_tool("listHooks")])
+    record_sdk_server_tools(builtins_cfg, [_tool("Memory")])
+
+    registry = ToolRegistry()
+    register_recorded_sdk_servers(
+        registry,
+        {"app-config": config_cfg, "builtins": builtins_cfg},
+        defer_servers=DEFERRED_SDK_SERVERS,
+    )
+
+    deferred = {spec.name for spec in registry.deferred_tools()}
+    loaded = {spec.name for spec in registry.list_tools(loaded_only=True)}
+    assert "mcp__app-config__listHooks" in deferred
+    assert "mcp__app-config__listHooks" not in loaded
+    assert "mcp__builtins__Memory" in loaded
+
+    # ToolSearch's load path promotes a deferred tool into the loaded tier.
+    registry.load_schema("mcp__app-config__listHooks")
+    loaded_after = {spec.name for spec in registry.list_tools(loaded_only=True)}
+    assert "mcp__app-config__listHooks" in loaded_after
 
 
 def test_unrecorded_sdk_server_is_skipped():
