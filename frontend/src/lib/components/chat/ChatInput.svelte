@@ -25,6 +25,7 @@
 	import { toast } from '$lib/stores/toast';
 	import { evaluateSubmitGuards } from './submit-guards';
 	import { attachmentBlockReason } from './attach-disable';
+	import { shouldCollapseMobileComposer } from './mobile-composer-collapse';
 	import Banner from '$lib/components/Banner.svelte';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
@@ -209,13 +210,41 @@
 
 	// Island ref
 	let islandRef = $state<HTMLDivElement | null>(null);
+	let mobileComposerExpanded = $state(false);
 	const mobileCollapsed = $derived(
-		compact &&
-			!composerFocused &&
-			!mobileControlsOpen &&
-			!showCommandAutocomplete &&
-			!showFileAutocomplete
+		shouldCollapseMobileComposer({
+			compact,
+			hasDraft: inputValue.trim().length > 0,
+			expanded: mobileComposerExpanded,
+			composerFocused,
+			controlsOpen: mobileControlsOpen,
+			commandAutocompleteOpen: showCommandAutocomplete,
+			fileAutocompleteOpen: showFileAutocomplete
+		})
 	);
+
+	function isMobileComposerViewport(): boolean {
+		return typeof window !== 'undefined' && window.matchMedia('(max-width: 639px)').matches;
+	}
+
+	function keepMobileComposerExpanded() {
+		if (isMobileComposerViewport()) mobileComposerExpanded = true;
+	}
+
+	function handleDocumentPointerDown(event: PointerEvent) {
+		if (!compact || !isMobileComposerViewport()) return;
+		const target = event.target;
+		if (!(target instanceof Node)) return;
+		if (islandRef?.contains(target)) {
+			mobileComposerExpanded = true;
+			return;
+		}
+		if (target instanceof Element && target.closest('.mobile-sheet')) {
+			mobileComposerExpanded = true;
+			return;
+		}
+		mobileComposerExpanded = false;
+	}
 
 	// Get selected profile name for display in placeholder
 	const selectedProfileName = $derived($profiles.find(p => p.id === $activeSession.profile)?.name || 'Profile');
@@ -267,8 +296,10 @@
 
 	onMount(() => {
 		window.addEventListener('queued-message-edit', handleQueuedMessageEdit);
+		document.addEventListener('pointerdown', handleDocumentPointerDown);
 		return () => {
 			window.removeEventListener('queued-message-edit', handleQueuedMessageEdit);
+			document.removeEventListener('pointerdown', handleDocumentPointerDown);
 		};
 	});
 
@@ -412,7 +443,8 @@
 		};
 
 		const collapseMobileComposer = () => {
-			if (typeof window === 'undefined' || !window.matchMedia('(max-width: 639px)').matches) return;
+			if (!isMobileComposerViewport()) return;
+			mobileComposerExpanded = false;
 			editorRef?.blur();
 		};
 
@@ -697,7 +729,10 @@
 			<Banner severity="warning" message={$activeSession.worktreeError} dismissible onDismiss={() => activeSession.clearWorktreeError()} />
 		{/if}
 
-		<form onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}>
+		<form
+			onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}
+			onpointerdown={keepMobileComposerExpanded}
+		>
 			<!-- Main Island: one glass container, three rows -->
 			<div class="chat-island" bind:this={islandRef}>
 				<!-- Row 1: context pills (agent + execution mode / branch) -->
@@ -740,7 +775,10 @@
 								handleInputChange();
 							}}
 							onKeyDown={handleKeyDown}
-							onFocusChange={(focused) => (composerFocused = focused)}
+							onFocusChange={(focused) => {
+								composerFocused = focused;
+								if (focused) keepMobileComposerExpanded();
+							}}
 						/>
 					</div>
 				</div>
@@ -1098,17 +1136,17 @@
 			min-height: 50px;
 			flex-direction: row;
 			align-items: center;
-			border-radius: 999px;
+			border-radius: 14px;
 		}
 
 		.mobile-collapsed .context-pill-row {
 			display: none;
 		}
 
-		/* Keep the sheet trigger reachable in an existing chat's collapsed composer.
-		   The context meter is secondary here and would unnecessarily squeeze the
-		   message field, so only the icon-only sheet trigger remains on the left. */
-		.mobile-collapsed :global(.mobile-controls .usage-context-wrapper) {
+		.mobile-collapsed :global(.mobile-controls),
+		.mobile-collapsed :global(.controls-right > button:not(.send-btn):not(.stop-btn)),
+		.mobile-collapsed :global(.controls-right > .voice-btn-wrapper),
+		.mobile-collapsed :global(.controls-right > .send-later-btn) {
 			display: none;
 		}
 

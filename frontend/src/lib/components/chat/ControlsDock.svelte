@@ -311,7 +311,6 @@
 	<!-- Mobile keeps the primary actions visible and moves the configuration
 	     matrix into one native-style bottom sheet, matching T3's composer. -->
 	<div class="mobile-controls">
-		<ContextUsageBar />
 		<button
 			type="button"
 			class="mobile-settings-trigger"
@@ -323,6 +322,7 @@
 		>
 			<SlidersHorizontal size={16} strokeWidth={1.8} aria-hidden="true" />
 		</button>
+		<ContextUsageBar />
 	</div>
 
 	<!-- Right: computer-use, attach, then the parent's action cluster -->
