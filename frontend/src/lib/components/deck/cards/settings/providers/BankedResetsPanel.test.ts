@@ -1,3 +1,10 @@
+/**
+ * Behaviour tests for BankedResetsPanel — the inline banked-reset inventory that
+ * replaced the old modal dialog. Every mechanic the dialog had is still under
+ * test (listing, arming, consuming, idempotency-key reuse on retry, the 409
+ * provider refresh, outcome copy, Grok vs Codex wording); only the dialog chrome
+ * assertions are gone, because there is no dialog any more.
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import type { ModelProvider } from '$lib/api/model-providers';
@@ -26,7 +33,7 @@ vi.mock('$lib/stores/providers.svelte', () => ({
 	providers: { refreshProviders: mocks.refreshProviders }
 }));
 
-import BankedResetsDialog from './BankedResetsDialog.svelte';
+import BankedResetsPanel from './BankedResetsPanel.svelte';
 
 const provider: ModelProvider = {
 	id: 'chatgpt-1',
@@ -99,7 +106,6 @@ beforeEach(() => {
 	mocks.refreshProviders.mockResolvedValue(undefined);
 	mocks.randomUUID.mockReturnValue('uuid-1');
 	vi.stubGlobal('crypto', { randomUUID: mocks.randomUUID });
-	Object.defineProperty(window, 'innerWidth', { value: 1280, writable: true, configurable: true });
 });
 
 afterEach(() => {
@@ -107,19 +113,18 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 });
 
-describe('BankedResetsDialog inventory', () => {
+describe('BankedResetsPanel inventory', () => {
 	it('shows loading, then every credit in order with metadata, statuses, fallback, and dates', async () => {
 		const request = deferred<{
 			available_count: number;
 			credits: ReturnType<typeof credit>[];
 		}>();
 		mocks.list.mockReturnValue(request.promise);
-		const { getByLabelText, getByText, getAllByText, getAllByRole, queryByText } = render(
-			BankedResetsDialog,
-			{ props: { provider, onClose: vi.fn() } }
-		);
+		const { getByText, getAllByText, getAllByRole, queryByText } = render(BankedResetsPanel, {
+			props: { provider }
+		});
 
-		expect(getByLabelText('Loading banked resets')).toBeTruthy();
+		expect(getByText('Loading…')).toBeTruthy();
 		request.resolve({
 			available_count: 1,
 			credits: [
@@ -144,29 +149,25 @@ describe('BankedResetsDialog inventory', () => {
 		expect(getByText('Status unavailable')).toBeTruthy();
 		expect(getByText('No expiration shown')).toBeTruthy();
 		expect(
-			getAllByText(`Granted ${new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(1_750_000_000 * 1000))}`)
+			getAllByText(
+				`Granted ${new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(1_750_000_000 * 1000))}`
+			)
 		).toHaveLength(4);
 		expect(getAllByRole('button', { name: 'Use' })).toHaveLength(1);
-		expect(queryByText('Loading banked resets')).toBeNull();
+		expect(queryByText('Loading…')).toBeNull();
 	});
 
-	it('shows the empty inventory state', async () => {
+	it('shows the header count and the empty inventory state', async () => {
 		mocks.list.mockResolvedValue({ available_count: 0, credits: [] });
-		const { getByText } = render(BankedResetsDialog, {
-			props: { provider, onClose: vi.fn() }
-		});
-		await waitFor(() => expect(getByText('No banked resets')).toBeTruthy());
-		expect(getByText('New reset credits will appear here when they are granted.')).toBeTruthy();
+		const { getByText } = render(BankedResetsPanel, { props: { provider } });
+		await waitFor(() => expect(getByText('No banked resets.')).toBeTruthy());
+		expect(getByText(/Banked resets · 0 available/)).toBeTruthy();
 	});
 
 	it('states when the available inventory details are capped without inventing rows', async () => {
 		mocks.list.mockResolvedValue({ available_count: 4, credits: [credit()] });
-		const { getByText, getAllByRole } = render(BankedResetsDialog, {
-			props: { provider, onClose: vi.fn() }
-		});
-		await waitFor(() =>
-			expect(getByText('1 of 4 available reset details are shown.')).toBeTruthy()
-		);
+		const { getByText, getAllByRole } = render(BankedResetsPanel, { props: { provider } });
+		await waitFor(() => expect(getByText('1 of 4 available reset details are shown.')).toBeTruthy());
 		expect(getAllByRole('listitem')).toHaveLength(1);
 	});
 
@@ -174,13 +175,11 @@ describe('BankedResetsDialog inventory', () => {
 		mocks.list
 			.mockRejectedValueOnce(new Error('Inventory unavailable'))
 			.mockResolvedValueOnce({ available_count: 0, credits: [] });
-		const { getByRole, getByText } = render(BankedResetsDialog, {
-			props: { provider, onClose: vi.fn() }
-		});
+		const { getByRole, getByText } = render(BankedResetsPanel, { props: { provider } });
 
 		await waitFor(() => expect(getByRole('alert').textContent).toContain('Inventory unavailable'));
 		await fireEvent.click(getByRole('button', { name: 'Try again' }));
-		await waitFor(() => expect(getByText('No banked resets')).toBeTruthy());
+		await waitFor(() => expect(getByText('No banked resets.')).toBeTruthy());
 		expect(mocks.list).toHaveBeenCalledTimes(2);
 	});
 
@@ -188,9 +187,7 @@ describe('BankedResetsDialog inventory', () => {
 		mocks.list
 			.mockResolvedValueOnce({ available_count: 1, credits: [credit()] })
 			.mockRejectedValueOnce(new Error('Refresh failed'));
-		const { getByRole, getByText } = render(BankedResetsDialog, {
-			props: { provider, onClose: vi.fn() }
-		});
+		const { getByRole, getByText } = render(BankedResetsPanel, { props: { provider } });
 
 		await waitFor(() => expect(getByText('Weekly reset')).toBeTruthy());
 		await fireEvent.click(getByRole('button', { name: 'Refresh' }));
@@ -199,24 +196,21 @@ describe('BankedResetsDialog inventory', () => {
 	});
 });
 
-describe('BankedResetsDialog consume flow', () => {
+describe('BankedResetsPanel consume flow', () => {
 	it('expands inline confirmation and Cancel disarms it', async () => {
 		mocks.list.mockResolvedValue({ available_count: 1, credits: [credit()] });
-		const { getByRole, getByText, queryByText } = render(BankedResetsDialog, {
-			props: { provider, onClose: vi.fn() }
-		});
+		const { getByRole, getByText, queryByText } = render(BankedResetsPanel, { props: { provider } });
 		await waitFor(() => expect(getByRole('button', { name: 'Use' })).toBeTruthy());
 
 		await fireEvent.click(getByRole('button', { name: 'Use' }));
-		expect(
-			getByText('Eligible Codex windows may reset. This action cannot be undone.')
-		).toBeTruthy();
+		expect(getByText('Use this reset?')).toBeTruthy();
+		expect(getByText('Eligible Codex windows may reset. This action cannot be undone.')).toBeTruthy();
 		await fireEvent.click(getByRole('button', { name: 'Cancel' }));
-		expect(queryByText('Eligible Codex windows may reset. This action cannot be undone.')).toBeNull();
+		expect(queryByText('Use this reset?')).toBeNull();
 		expect(mocks.consume).not.toHaveBeenCalled();
 	});
 
-	it('sends the selected credit and UUID, disables actions while busy, and blocks dismissal', async () => {
+	it('sends the selected credit and UUID and disables actions while busy', async () => {
 		mocks.list
 			.mockResolvedValueOnce({
 				available_count: 2,
@@ -228,14 +222,11 @@ describe('BankedResetsDialog consume flow', () => {
 			windows_reset: number;
 		}>();
 		mocks.consume.mockReturnValue(consume.promise);
-		const onClose = vi.fn();
-		const { getAllByRole, getByRole } = render(BankedResetsDialog, {
-			props: { provider, onClose }
-		});
+		const { getAllByRole, getByRole } = render(BankedResetsPanel, { props: { provider } });
 		await waitFor(() => expect(getAllByRole('button', { name: 'Use' })).toHaveLength(2));
 
 		await fireEvent.click(getAllByRole('button', { name: 'Use' })[1]);
-		await fireEvent.click(getByRole('button', { name: 'Use reset' }));
+		await fireEvent.click(getByRole('button', { name: 'Confirm' }));
 
 		expect(mocks.consume).toHaveBeenCalledWith('chatgpt-1', {
 			credit_id: 'second',
@@ -244,8 +235,6 @@ describe('BankedResetsDialog consume flow', () => {
 		expect((getByRole('button', { name: 'Using…' }) as HTMLButtonElement).disabled).toBe(true);
 		expect((getByRole('button', { name: 'Refresh' }) as HTMLButtonElement).disabled).toBe(true);
 		expect((getByRole('button', { name: 'Use' }) as HTMLButtonElement).disabled).toBe(true);
-		await fireEvent.keyDown(getByRole('dialog'), { key: 'Escape' });
-		expect(onClose).not.toHaveBeenCalled();
 
 		consume.resolve({ outcome: 'reset', windows_reset: 2 });
 		await waitFor(() => expect(mocks.list).toHaveBeenCalledTimes(2));
@@ -258,12 +247,10 @@ describe('BankedResetsDialog consume flow', () => {
 		mocks.consume
 			.mockRejectedValueOnce(new Error('Connection lost'))
 			.mockResolvedValueOnce({ outcome: 'reset', windows_reset: 1 });
-		const { getByRole } = render(BankedResetsDialog, {
-			props: { provider, onClose: vi.fn() }
-		});
+		const { getByRole } = render(BankedResetsPanel, { props: { provider } });
 		await waitFor(() => expect(getByRole('button', { name: 'Use' })).toBeTruthy());
 		await fireEvent.click(getByRole('button', { name: 'Use' }));
-		await fireEvent.click(getByRole('button', { name: 'Use reset' }));
+		await fireEvent.click(getByRole('button', { name: 'Confirm' }));
 		await waitFor(() => expect(getByRole('alert').textContent).toContain('Connection lost'));
 		await fireEvent.click(getByRole('button', { name: 'Try again' }));
 
@@ -278,86 +265,39 @@ describe('BankedResetsDialog consume flow', () => {
 		['nothing_to_reset', 0, 'No eligible Codex windows needed a reset.'],
 		['no_credit', 0, 'This banked reset is no longer available.'],
 		['already_redeemed', 0, 'This banked reset was already used.']
-	] as const)('handles %s and refreshes inventory while preserving the outcome', async (outcome, windowsReset, message) => {
-		mocks.list
-			.mockResolvedValueOnce({ available_count: 1, credits: [credit()] })
-			.mockRejectedValueOnce(new Error('Post-use refresh failed'));
-		mocks.consume.mockResolvedValue({ outcome, windows_reset: windowsReset });
-		const { getByRole, getByText } = render(BankedResetsDialog, {
-			props: { provider, onClose: vi.fn() }
-		});
-		await waitFor(() => expect(getByRole('button', { name: 'Use' })).toBeTruthy());
-		await fireEvent.click(getByRole('button', { name: 'Use' }));
-		await fireEvent.click(getByRole('button', { name: 'Use reset' }));
+	] as const)(
+		'handles %s and refreshes inventory while preserving the outcome',
+		async (outcome, windowsReset, message) => {
+			mocks.list
+				.mockResolvedValueOnce({ available_count: 1, credits: [credit()] })
+				.mockRejectedValueOnce(new Error('Post-use refresh failed'));
+			mocks.consume.mockResolvedValue({ outcome, windows_reset: windowsReset });
+			const { getByRole, getByText } = render(BankedResetsPanel, { props: { provider } });
+			await waitFor(() => expect(getByRole('button', { name: 'Use' })).toBeTruthy());
+			await fireEvent.click(getByRole('button', { name: 'Use' }));
+			await fireEvent.click(getByRole('button', { name: 'Confirm' }));
 
-		await waitFor(() => expect(getByText(message)).toBeTruthy());
-		expect(mocks.list).toHaveBeenCalledTimes(2);
-		expect(getByRole('alert').textContent).toContain('Post-use refresh failed');
-		expect(getByText(message)).toBeTruthy();
-	});
+			await waitFor(() => expect(getByText(message)).toBeTruthy());
+			expect(mocks.list).toHaveBeenCalledTimes(2);
+			expect(getByRole('alert').textContent).toContain('Post-use refresh failed');
+			expect(getByText(message)).toBeTruthy();
+		}
+	);
 
 	it('keeps a 409 error visible and refreshes providers', async () => {
 		mocks.list.mockResolvedValue({ available_count: 1, credits: [credit()] });
 		mocks.consume.mockRejectedValue({ status: 409, detail: 'Provider credentials changed' });
-		const { getByRole } = render(BankedResetsDialog, {
-			props: { provider, onClose: vi.fn() }
-		});
+		const { getByRole } = render(BankedResetsPanel, { props: { provider } });
 		await waitFor(() => expect(getByRole('button', { name: 'Use' })).toBeTruthy());
 		await fireEvent.click(getByRole('button', { name: 'Use' }));
-		await fireEvent.click(getByRole('button', { name: 'Use reset' }));
+		await fireEvent.click(getByRole('button', { name: 'Confirm' }));
 
 		await waitFor(() => expect(mocks.refreshProviders).toHaveBeenCalledOnce());
 		expect(getByRole('alert').textContent).toContain('Provider credentials changed');
 	});
 });
 
-describe('BankedResetsDialog modal behavior', () => {
-	it('focuses the dialog, contains Tab and Shift+Tab, and closes with Escape', async () => {
-		mocks.list.mockResolvedValue({ available_count: 1, credits: [credit()] });
-		const onClose = vi.fn();
-		const { getByRole } = render(BankedResetsDialog, { props: { provider, onClose } });
-		const dialog = getByRole('dialog');
-		await waitFor(() => expect(document.activeElement).toBe(dialog));
-		await waitFor(() => expect(getByRole('button', { name: 'Use' })).toBeTruthy());
-
-		await fireEvent.keyDown(dialog, { key: 'Tab' });
-		expect(document.activeElement).toBe(getByRole('button', { name: 'Close' }));
-		await fireEvent.keyDown(document.activeElement as Element, { key: 'Tab', shiftKey: true });
-		expect(document.activeElement).toBe(getByRole('button', { name: 'Use' }));
-
-		await fireEvent.keyDown(dialog, { key: 'Escape' });
-		expect(onClose).toHaveBeenCalledOnce();
-	});
-
-	it('closes from the backdrop', async () => {
-		mocks.list.mockResolvedValue({ available_count: 0, credits: [] });
-		const onClose = vi.fn();
-		const { getByRole } = render(BankedResetsDialog, { props: { provider, onClose } });
-		await fireEvent.click(getByRole('button', { name: 'Close banked resets' }));
-		expect(onClose).toHaveBeenCalledOnce();
-	});
-
-	it('uses the full viewport at the inclusive 1080px cutoff', async () => {
-		mocks.list.mockResolvedValue({ available_count: 0, credits: [] });
-		Object.defineProperty(window, 'innerWidth', { value: 1080, writable: true });
-		const { getByRole } = render(BankedResetsDialog, {
-			props: { provider, onClose: vi.fn() }
-		});
-		const dialog = getByRole('dialog');
-		const card = dialog.querySelector(':scope > div') as HTMLDivElement;
-		expect(dialog.classList.contains('p-0')).toBe(true);
-		expect(card.classList.contains('h-full')).toBe(true);
-		expect(card.classList.contains('rounded-none')).toBe(true);
-
-		window.innerWidth = 1081;
-		window.dispatchEvent(new Event('resize'));
-		await waitFor(() => expect(dialog.classList.contains('p-4')).toBe(true));
-		expect(card.classList.contains('max-w-lg')).toBe(true);
-		expect(card.classList.contains('rounded-xl')).toBe(true);
-	});
-});
-
-describe('BankedResetsDialog Grok provider', () => {
+describe('BankedResetsPanel Grok provider', () => {
 	it('loads Grok inventory copy, default title, and grok APIs', async () => {
 		mocks.listGrok.mockResolvedValue({
 			available_count: 1,
@@ -369,8 +309,8 @@ describe('BankedResetsDialog Grok provider', () => {
 				})
 			]
 		});
-		const { getByText, getByRole } = render(BankedResetsDialog, {
-			props: { provider: grokProvider(), onClose: vi.fn() }
+		const { getByText, getByRole } = render(BankedResetsPanel, {
+			props: { provider: grokProvider() }
 		});
 
 		await waitFor(() => expect(getByText('Usage limit reset')).toBeTruthy());
@@ -392,12 +332,12 @@ describe('BankedResetsDialog Grok provider', () => {
 			})
 			.mockResolvedValueOnce({ available_count: 0, credits: [] });
 		mocks.consumeGrok.mockResolvedValue({ outcome: 'reset', windows_reset: 1 });
-		const { getByRole, getByText } = render(BankedResetsDialog, {
-			props: { provider: grokProvider(), onClose: vi.fn() }
+		const { getByRole, getByText } = render(BankedResetsPanel, {
+			props: { provider: grokProvider() }
 		});
 		await waitFor(() => expect(getByRole('button', { name: 'Use' })).toBeTruthy());
 		await fireEvent.click(getByRole('button', { name: 'Use' }));
-		await fireEvent.click(getByRole('button', { name: 'Use reset' }));
+		await fireEvent.click(getByRole('button', { name: 'Confirm' }));
 
 		await waitFor(() =>
 			expect(getByText('1 eligible Grok weekly usage window was reset.')).toBeTruthy()
@@ -414,8 +354,8 @@ describe('BankedResetsDialog Grok provider', () => {
 			available_count: 1,
 			credits: [credit({ reset_type: 'codex_rate_limits' })]
 		});
-		const { queryByRole, getByText } = render(BankedResetsDialog, {
-			props: { provider: grokProvider(), onClose: vi.fn() }
+		const { queryByRole, getByText } = render(BankedResetsPanel, {
+			props: { provider: grokProvider() }
 		});
 		await waitFor(() => expect(getByText('Weekly reset')).toBeTruthy());
 		expect(queryByRole('button', { name: 'Use' })).toBeNull();

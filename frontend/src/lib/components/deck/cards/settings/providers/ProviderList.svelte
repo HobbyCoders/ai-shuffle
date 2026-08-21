@@ -23,25 +23,22 @@
 	 * the same glyph — a row is never dropped.
 	 *
 	 * Clicking a row header expands its panel; only one panel is open at a time.
-	 * The panel holds the ai-shuffle controls for that provider (reconnect, remove,
-	 * banked resets, manage models, default model, replace key). All mutations
-	 * funnel through the `providers` store so the model registry re-hydrates
-	 * (landmine L4); this component owns only the transient view state.
+	 * EVERY panel is a `ProviderPanel`, so the structure (two actions, settings,
+	 * models, banked resets) is identical on every row and cannot drift. This
+	 * component keeps the parts that reach outside one row: the modals, the delete
+	 * confirms, and the `providers` store calls (which re-hydrate the model
+	 * registry — landmine L4).
 	 */
-	import { onMount, tick } from 'svelte';
+	import { onMount } from 'svelte';
 	import { X } from 'lucide-svelte';
 	import { isPanelFullscreenWidth } from '$lib/utils/viewport';
 	import { claudeAuthenticated, claudeTokenValid } from '$lib/stores/auth.svelte';
-	import { updateModelProvider, type ModelProvider } from '$lib/api/model-providers';
-	import { getErrorMessage } from '$lib/api/client';
+	import { type ModelProvider } from '$lib/api/model-providers';
 	import { providers } from '$lib/stores/providers.svelte';
-	import { toast } from '$lib/stores/toast';
 	import type { ProviderGlyphKind } from '$lib/components/settings/ProviderGlyph.svelte';
 	import ProviderRow from './ProviderRow.svelte';
+	import ProviderPanel from './ProviderPanel.svelte';
 	import ClaudeApiKeyRow from './ClaudeApiKeyRow.svelte';
-	import ProviderEditForm from './ProviderEditForm.svelte';
-	import ManageModelsDrawer from './ManageModelsDrawer.svelte';
-	import BankedResetsDialog from './BankedResetsDialog.svelte';
 	import AddProviderModal, { type Step } from './AddProviderModal.svelte';
 	import ChatGptDeviceFlow from './flows/ChatGptDeviceFlow.svelte';
 	import GrokDeviceFlow from './flows/GrokDeviceFlow.svelte';
@@ -58,10 +55,6 @@
 	// The single Claude account backing the subscription row — the active one, or
 	// the sole saved account when none is flagged active.
 	const claudeAccount = $derived(s.claudeAccounts.find((a) => a.is_active) ?? s.claudeAccounts[0]);
-
-	// True once there is a Claude credential to manage (authenticated session or a
-	// saved account) — drives which panel the Claude slot shows.
-	let claudeConnected = $derived($claudeAuthenticated || s.claudeAccounts.length > 0);
 
 	// Token present but expired/invalid: the credential exists (so
 	// $claudeAuthenticated is true) yet the OAuth token can't be used.
@@ -80,24 +73,14 @@
 	let keyEditOpen = $state(false);
 	// Whether the Anthropic-key row is armed for delete (inline confirm).
 	let confirmDeleteKey = $state(false);
-	// Which gateway row's inline edit form is open (its id), or null.
-	let editingId: string | null = $state(null);
 	// Which provider row is armed for delete (inline confirm), or null.
 	let confirmDeleteId: string | null = $state(null);
-	// Which row's Manage-models drawer is open (its id), or null.
-	let manageModelsId = $state<string | null>(null);
-	// Which row's default-model save is in flight (its id), or null.
-	let savingDefaultId = $state<string | null>(null);
 	// Which ChatGPT/Grok row is mid-reconnect (its id, hosts the device-flow modal), or null.
 	let reconnectId = $state<string | null>(null);
 	// True while the reconnect device flow has an operation in flight — guards close.
 	let reconnectBusy = $state(false);
 	// True while the Claude sign-in flow has an operation in flight — guards close.
 	let claudeSignInBusy = $state(false);
-	// Connected subscription row whose banked reset inventory is open, plus the
-	// exact row button that must regain focus after the dialog unmounts.
-	let bankedResetsProvider = $state<ModelProvider | null>(null);
-	let bankedResetsOpener = $state<HTMLButtonElement | null>(null);
 
 	// Fullscreen at handheld widths for the reconnect modal (mirrors AddProviderModal).
 	let viewportWidth = $state(typeof window !== 'undefined' ? window.innerWidth : 1280);
@@ -122,21 +105,14 @@
 		if (claudeSignInOpen) claudeSignInDialogEl?.focus();
 	});
 
-	// The drawer is rendered once, outside the rows, so it survives its row
-	// collapsing and there is never more than one mounted.
-	const manageModelsProvider = $derived(
-		manageModelsId === null ? null : (s.providers.find((p) => p.id === manageModelsId) ?? null)
-	);
-
 	// ----- Expansion -----
-	// One panel at a time. Any armed confirm or open inline edit belongs to the
+	// One panel at a time. Any armed confirm or open inline form belongs to the
 	// panel that was showing, so switching rows drops it.
 	function toggleExpand(key: string) {
 		expandedKey = expandedKey === key ? null : key;
 		confirmDeleteClaude = false;
 		confirmDeleteKey = false;
 		keyEditOpen = false;
-		editingId = null;
 		confirmDeleteId = null;
 	}
 
@@ -152,19 +128,6 @@
 	}
 	function handleClaudeSignInKeydown(event: KeyboardEvent) {
 		if (event.key === 'Escape') closeClaudeSignIn();
-	}
-
-	function openBankedResets(provider: ModelProvider, opener: HTMLButtonElement) {
-		bankedResetsProvider = provider;
-		bankedResetsOpener = opener;
-	}
-
-	async function closeBankedResets() {
-		const opener = bankedResetsOpener;
-		bankedResetsProvider = null;
-		bankedResetsOpener = null;
-		await tick();
-		opener?.focus();
 	}
 
 	// ----- model_providers classification (ruling PR1) -----
@@ -294,16 +257,7 @@
 		}
 	}
 
-	function openEdit(id: string) {
-		confirmDeleteId = null;
-		editingId = id;
-	}
-	function closeEdit() {
-		editingId = null;
-	}
-
 	function armDelete(id: string) {
-		editingId = null;
 		confirmDeleteId = id;
 	}
 	function cancelDelete() {
@@ -311,103 +265,14 @@
 	}
 	async function confirmDelete(id: string) {
 		confirmDeleteId = null;
-		if (editingId === id) editingId = null;
 		await providers.deleteProvider(id);
 	}
 
-	// Empty string = "provider default", stored as null.
-	async function saveDefaultModel(p: ModelProvider, value: string) {
-		savingDefaultId = p.id;
-		try {
-			await updateModelProvider(p.id, { default_model: value || null });
-			await providers.refreshProviders();
-		} catch (e) {
-			toast.push(getErrorMessage(e, 'Could not save the default model'), { tone: 'error' });
-		} finally {
-			savingDefaultId = null;
-		}
+	/** `Sign in` on a ChatGPT/Grok row: reconnect the existing credential. */
+	function signInSub(p: ModelProvider) {
+		reconnectId = p.id;
 	}
 </script>
-
-{#snippet subPanel(p: ModelProvider)}
-	<div class="prov-actrow">
-		{#if confirmDeleteId === p.id}
-			<span class="acct-confirm">Delete?</span>
-			<button type="button" class="ed-btn danger acct-sm" onclick={() => confirmDelete(p.id)}>
-				Delete
-			</button>
-			<button type="button" class="ed-btn acct-sm" onclick={cancelDelete}>Cancel</button>
-		{:else}
-			<button type="button" class="ed-btn acct-sm" onclick={() => (manageModelsId = p.id)}>
-				Manage models
-			</button>
-			{#if p.codex_access_token_set && !p.needs_reauth}
-				<button
-					type="button"
-					class="ed-btn acct-sm"
-					onclick={(event) => openBankedResets(p, event.currentTarget)}
-				>
-					Banked resets
-				</button>
-			{/if}
-			<button type="button" class="ed-btn acct-sm" onclick={() => (reconnectId = p.id)}>
-				{p.needs_reauth ? 'Reconnect' : 'Sign in'}
-			</button>
-			<button type="button" class="ed-btn danger acct-sm" onclick={() => armDelete(p.id)}>
-				Remove
-			</button>
-		{/if}
-	</div>
-{/snippet}
-
-{#snippet gatewayPanel(p: ModelProvider)}
-	<dl class="prov-dl">
-		<dt>Endpoint</dt>
-		<dd>{p.base_url}</dd>
-		<dt>Token</dt>
-		<dd>{p.auth_token_masked || 'not set'}</dd>
-		<dt>Models</dt>
-		<dd>{p.models.length} enabled</dd>
-	</dl>
-
-	<div class="prov-field">
-		<label class="prov-label" for="prov-default-{p.id}">Default model</label>
-		<select
-			id="prov-default-{p.id}"
-			class="sel prov-sel"
-			value={p.default_model ?? ''}
-			disabled={savingDefaultId === p.id}
-			onchange={(event) => saveDefaultModel(p, event.currentTarget.value)}
-		>
-			<option value="">Provider default</option>
-			{#each p.models as model (model.id)}
-				<option value={model.id}>{model.label || model.id}</option>
-			{/each}
-		</select>
-	</div>
-
-	<div class="prov-actrow">
-		{#if confirmDeleteId === p.id}
-			<span class="acct-confirm">Delete?</span>
-			<button type="button" class="ed-btn danger acct-sm" onclick={() => confirmDelete(p.id)}>
-				Delete
-			</button>
-			<button type="button" class="ed-btn acct-sm" onclick={cancelDelete}>Cancel</button>
-		{:else}
-			<button type="button" class="ed-btn acct-sm" onclick={() => (manageModelsId = p.id)}>
-				Manage models
-			</button>
-			<button type="button" class="ed-btn acct-sm" onclick={() => openEdit(p.id)}>Edit</button>
-			<button type="button" class="ed-btn danger acct-sm" onclick={() => armDelete(p.id)}>
-				Remove
-			</button>
-		{/if}
-	</div>
-
-	{#if editingId === p.id}
-		<div class="prov-sub"><ProviderEditForm provider={p} onClose={closeEdit} /></div>
-	{/if}
-{/snippet}
 
 <!-- One subscription slot (ChatGPT / Grok): the row when configured, otherwise a
      "Not connected" placeholder whose panel opens the sign-in flow. -->
@@ -429,11 +294,7 @@
 			expanded={expandedKey === key}
 			onToggleExpand={() => toggleExpand(key)}
 		>
-			<div class="prov-actrow">
-				<button type="button" class="ed-btn primary acct-sm" onclick={() => (addStep = emptyStep)}>
-					Sign in
-				</button>
-			</div>
+			<ProviderPanel kind="subscription" onPrimary={() => (addStep = emptyStep)} />
 		</ProviderRow>
 	{:else}
 		{#each rows as p, i (p.id)}
@@ -451,7 +312,17 @@
 				onToggleEnabled={() => providers.toggleProvider(p.id)}
 				toggling={s.togglingProviderId === p.id}
 			>
-				{@render subPanel(p)}
+				<ProviderPanel
+					kind="subscription"
+					provider={p}
+					configured
+					bankedResets={!!p.codex_access_token_set && !p.needs_reauth}
+					onPrimary={() => signInSub(p)}
+					confirming={confirmDeleteId === p.id}
+					onArmRemove={() => armDelete(p.id)}
+					onConfirmRemove={() => confirmDelete(p.id)}
+					onCancelRemove={cancelDelete}
+				/>
 			</ProviderRow>
 		{/each}
 	{/if}
@@ -477,11 +348,7 @@
 			expanded={expandedKey === key}
 			onToggleExpand={() => toggleExpand(key)}
 		>
-			<div class="prov-actrow">
-				<button type="button" class="ed-btn primary acct-sm" onclick={() => (addStep = emptyStep)}>
-					Add API key
-				</button>
-			</div>
+			<ProviderPanel kind="key" onPrimary={() => (addStep = emptyStep)} />
 		</ProviderRow>
 	{:else}
 		{#each rows as p, i (p.id)}
@@ -499,9 +366,39 @@
 				onToggleEnabled={() => providers.toggleProvider(p.id)}
 				toggling={s.togglingProviderId === p.id}
 			>
-				{@render gatewayPanel(p)}
+				<ProviderPanel
+					kind="key"
+					provider={p}
+					configured
+					showDialect={classifyProvider(p) === 'custom'}
+					confirming={confirmDeleteId === p.id}
+					onArmRemove={() => armDelete(p.id)}
+					onConfirmRemove={() => confirmDelete(p.id)}
+					onCancelRemove={cancelDelete}
+				/>
 			</ProviderRow>
 		{/each}
+	{/if}
+{/snippet}
+
+<!-- Claude row extras: encryption / auth notices, under the action row. -->
+{#snippet claudeNotes()}
+	{#if !s.accountsEncryptionReady}
+		<p class="prov-note warn">
+			Encryption is locked — log in again as admin to manage the Claude account.
+		</p>
+	{:else if s.accountsError}
+		<p class="prov-note err">{s.accountsError}</p>
+	{/if}
+	{#if s.claudeAuthError}
+		<p class="prov-note err">{s.claudeAuthError}</p>
+	{/if}
+{/snippet}
+
+<!-- Anthropic-key row extras: the replace-key form `Add key` toggles. -->
+{#snippet anthropicKeyForm()}
+	{#if keyEditOpen}
+		<div class="prov-sub"><ClaudeApiKeyRow onClose={() => (keyEditOpen = false)} /></div>
 	{/if}
 {/snippet}
 
@@ -524,51 +421,17 @@
 		expanded={expandedKey === 'claude'}
 		onToggleExpand={() => toggleExpand('claude')}
 	>
-		{#if claudeConnected}
-			<div class="prov-actrow">
-				{#if confirmDeleteClaude}
-					<span class="acct-confirm">Disconnect?</span>
-					<button type="button" class="ed-btn danger acct-sm" onclick={confirmDeleteClaude_}>
-						Disconnect
-					</button>
-					<button type="button" class="ed-btn acct-sm" onclick={cancelDeleteClaude}>Cancel</button>
-				{:else}
-					<button
-						type="button"
-						class="ed-btn acct-sm"
-						onclick={() => (claudeSignInOpen = true)}
-					>
-						Reconnect
-					</button>
-					{#if s.claudeAccounts.length > 0}
-						<button type="button" class="ed-btn danger acct-sm" onclick={armDeleteClaude}>
-							Disconnect
-						</button>
-					{/if}
-				{/if}
-			</div>
-		{:else}
-			<div class="prov-actrow">
-				<button
-					type="button"
-					class="ed-btn primary acct-sm"
-					onclick={() => (claudeSignInOpen = true)}
-				>
-					Sign in
-				</button>
-			</div>
-		{/if}
-
-		{#if !s.accountsEncryptionReady}
-			<p class="prov-note warn">
-				Encryption is locked — log in again as admin to manage the Claude account.
-			</p>
-		{:else if s.accountsError}
-			<p class="prov-note err">{s.accountsError}</p>
-		{/if}
-		{#if s.claudeAuthError}
-			<p class="prov-note err">{s.claudeAuthError}</p>
-		{/if}
+		<ProviderPanel
+			kind="subscription"
+			nativeModels
+			configured={s.claudeAccounts.length > 0}
+			onPrimary={() => (claudeSignInOpen = true)}
+			confirming={confirmDeleteClaude}
+			onArmRemove={armDeleteClaude}
+			onConfirmRemove={confirmDeleteClaude_}
+			onCancelRemove={cancelDeleteClaude}
+			afterActions={claudeNotes}
+		/>
 	</ProviderRow>
 
 	<!-- 2. Anthropic API key — overrides the subscription while it is set. -->
@@ -581,33 +444,17 @@
 		expanded={expandedKey === 'anthropic-key'}
 		onToggleExpand={() => toggleExpand('anthropic-key')}
 	>
-		{#if s.anthropicKeySet}
-			<div class="prov-actrow">
-				{#if confirmDeleteKey}
-					<span class="acct-confirm">Delete?</span>
-					<button type="button" class="ed-btn danger acct-sm" onclick={confirmDeleteKey_}>
-						Delete
-					</button>
-					<button type="button" class="ed-btn acct-sm" onclick={cancelDeleteKey}>Cancel</button>
-				{:else}
-					<button type="button" class="ed-btn acct-sm" onclick={toggleKeyEdit}>Replace key</button>
-					<button type="button" class="ed-btn danger acct-sm" onclick={armDeleteKey}>Remove</button>
-				{/if}
-			</div>
-			{#if keyEditOpen}
-				<div class="prov-sub"><ClaudeApiKeyRow onClose={() => (keyEditOpen = false)} /></div>
-			{/if}
-		{:else}
-			<div class="prov-actrow">
-				<button
-					type="button"
-					class="ed-btn primary acct-sm"
-					onclick={() => (addStep = 'claude-key')}
-				>
-					Add API key
-				</button>
-			</div>
-		{/if}
+		<ProviderPanel
+			kind="key"
+			nativeModels
+			configured={s.anthropicKeySet}
+			onPrimary={() => (s.anthropicKeySet ? toggleKeyEdit() : (addStep = 'claude-key'))}
+			confirming={confirmDeleteKey}
+			onArmRemove={armDeleteKey}
+			onConfirmRemove={confirmDeleteKey_}
+			onCancelRemove={cancelDeleteKey}
+			afterActions={anthropicKeyForm}
+		/>
 	</ProviderRow>
 
 	<!-- 3. ChatGPT (Codex subscription) -->
@@ -678,18 +525,19 @@
 			onToggleEnabled={() => providers.toggleProvider(p.id)}
 			toggling={s.togglingProviderId === p.id}
 		>
-			{@render gatewayPanel(p)}
+			<ProviderPanel
+				kind="key"
+				provider={p}
+				configured
+				showDialect
+				confirming={confirmDeleteId === p.id}
+				onArmRemove={() => armDelete(p.id)}
+				onConfirmRemove={() => confirmDelete(p.id)}
+				onCancelRemove={cancelDelete}
+			/>
 		</ProviderRow>
 	{/each}
 </div>
-
-{#if manageModelsProvider}
-	<ManageModelsDrawer provider={manageModelsProvider} onClose={() => (manageModelsId = null)} />
-{/if}
-
-{#if bankedResetsProvider}
-	<BankedResetsDialog provider={bankedResetsProvider} onClose={closeBankedResets} />
-{/if}
 
 {#if addStep !== null}
 	<AddProviderModal initialStep={addStep} onClose={() => (addStep = null)} />
@@ -824,64 +672,7 @@
 		padding: 6px 2px 4px;
 	}
 
-	/* ----- Panel contents (rendered into ProviderRow's panel slot) ----- */
-	.prov-actrow {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		flex-wrap: wrap;
-	}
-	.acct-sm {
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		padding: 5px 10px;
-		font-size: 12px;
-	}
-	.acct-confirm {
-		font-size: 12px;
-		color: var(--warning, #d97706);
-		font-weight: 600;
-	}
-	/* Endpoint / token / model counts. */
-	.prov-dl {
-		margin: 0 0 10px;
-		display: grid;
-		grid-template-columns: auto 1fr;
-		gap: 2px 12px;
-		font-size: 12px;
-	}
-	.prov-dl dt {
-		color: var(--muted-foreground);
-	}
-	.prov-dl dd {
-		margin: 0;
-		min-width: 0;
-		color: var(--foreground);
-		font-family: var(--font-mono, monospace);
-		font-size: 11.5px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-	.prov-field {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		margin-bottom: 10px;
-	}
-	.prov-label {
-		font-size: 11px;
-		font-weight: 600;
-		letter-spacing: 0.03em;
-		text-transform: uppercase;
-		color: var(--muted-foreground);
-	}
-	.prov-sel {
-		width: 220px;
-		max-width: 100%;
-	}
-	/* Inline edit / replace-key panel sits under the panel's action row. */
+	/* Inline replace-key panel sits under the Anthropic row's action row. */
 	.prov-sub {
 		margin-top: 4px;
 	}
@@ -896,16 +687,5 @@
 	}
 	.prov-note.err {
 		color: var(--destructive);
-	}
-
-	@media (max-width: 560px) {
-		.prov-field {
-			align-items: flex-start;
-			flex-direction: column;
-			gap: 4px;
-		}
-		.prov-sel {
-			width: 100%;
-		}
 	}
 </style>

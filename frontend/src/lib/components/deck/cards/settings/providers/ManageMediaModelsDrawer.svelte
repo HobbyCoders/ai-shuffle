@@ -8,11 +8,11 @@
 	 * row. AIToolsSettings persists its own state, so there is no save/cancel
 	 * footer — the drawer is purely a close affordance around it.
 	 *
-	 * Drawer chrome mirrors `ManageModelsDrawer`: role="dialog", aria-modal,
+	 * Drawer chrome: role="dialog", aria-modal,
 	 * right-side drawer above 1080px / fullscreen at ≤1080px via
 	 * `isPanelFullscreenWidth`, backdrop-click + Esc + ✕ to close, self-contained
-	 * Tailwind theme-token utilities. Wider than ManageModelsDrawer (max-w-3xl) to
-	 * host the full media-model browser grid.
+	 * Tailwind theme-token utilities. Wide (max-w-3xl) to host the full
+	 * media-model browser grid.
 	 */
 	import { onMount } from 'svelte';
 	import { X } from 'lucide-svelte';
@@ -24,7 +24,7 @@
 	}
 	let { onClose }: Props = $props();
 
-	// ----- Fullscreen at handheld widths (mirrors ManageModelsDrawer) -----
+	// ----- Fullscreen at handheld widths (mirrors AddProviderModal) -----
 	let viewportWidth = $state(typeof window !== 'undefined' ? window.innerWidth : 1280);
 	let fullscreen = $derived(isPanelFullscreenWidth(viewportWidth));
 

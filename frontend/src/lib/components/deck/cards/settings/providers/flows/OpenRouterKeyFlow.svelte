@@ -8,7 +8,8 @@
 	 *            (`createModelProvider`, so we get the `id` for the fetch step),
 	 *            re-hydrates the registry, then advances to 'pick'.
 	 *   'pick' — the fetch-models check-select picker. Reuses the exact mechanics
-	 *            `ProviderEditForm.svelte` uses (fetch → check-select → persist the
+	 *            the Models block of `ProviderPanel.svelte` uses (fetch →
+	 *            check-select → persist the
 	 *            curated subset via `updateModelProvider(id, { models })` →
 	 *            `refreshProviders()`), copied here (NOT imported) with Tailwind
 	 *            classes for L3 immunity. "Use selected" saves + closes; "Cancel"
@@ -40,7 +41,7 @@
 	let creating = $state(false);
 	let error = $state('');
 
-	// ----- Fetch-models picker state (mirrors ProviderEditForm) -----
+	// ----- Fetch-models picker state (mirrors ProviderPanel's Models block) -----
 	let fetching = $state(false);
 	let fetchError = $state('');
 	let fetchSource = $state<'preset' | 'upstream' | ''>('');

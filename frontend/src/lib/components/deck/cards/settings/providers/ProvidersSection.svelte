@@ -143,7 +143,7 @@
 <!-- One home for every credential -->
 <div class="ed-note">
 	<Info />
-	<div><b>One home for every credential.</b> Your Claude account, API keys and model gateways live here together — each row shows its status and is masked. Pick which models a provider offers via its <b>Manage models</b>; chats choose among them when you start them.</div>
+	<div><b>One home for every credential.</b> Your Claude account, API keys and model gateways live here together — each row shows its status and is masked. Open a row to pick which models that provider offers; chats choose among them when you start them.</div>
 </div>
 
 <!-- Group A: model providers -->

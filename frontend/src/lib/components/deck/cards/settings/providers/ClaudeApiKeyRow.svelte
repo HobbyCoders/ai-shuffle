@@ -13,7 +13,7 @@
 	 * which throws with the server's message on failure — surfaced inline here.
 	 * Renders inside `.prov-sub` (within the `.ed-content` shell) so the shell
 	 * globals (`.inp` / `.ed-btn`) theme its controls, matching the other inline
-	 * panels (`ProviderEditForm`).
+	 * panels (`ProviderPanel`).
 	 */
 	import { Loader2 } from 'lucide-svelte';
 	import { providers } from '$lib/stores/providers.svelte';
@@ -75,7 +75,7 @@
 </div>
 
 <style>
-	/* Inline panel styles mirror ProviderEditForm's `.acct-addpanel` (rendered
+	/* Inline panel styles: a dashed-bordered `.acct-addpanel` (rendered
 	   inside `.ed-content`, so `.inp` / `.ed-btn` globals theme the controls). */
 	.acct-addpanel {
 		margin-top: 10px;
