@@ -854,6 +854,7 @@ class ChatWebSocketHandler:
                         model=(overrides or {}).get("model"),
                         effort=(overrides or {}).get("effort"),
                         permission_mode=(overrides or {}).get("permission_mode"),
+                        context_window=(overrides or {}).get("context_window"),
                         _conn=txn
                     )
                     _msg_role = "user"

@@ -203,7 +203,8 @@ class TestOneShotQuery:
             profile="test-profile",
             overrides=QueryOverrides(
                 model="opus",
-                permission_mode="bypassPermissions"
+                permission_mode="bypassPermissions",
+                context_window=200_000,
             )
         )
         api_user = {"id": "user1", "profile_id": "test-profile"}
@@ -213,6 +214,7 @@ class TestOneShotQuery:
         call_kwargs = mock_dependencies["execute"].call_args.kwargs
         assert call_kwargs["overrides"]["model"] == "opus"
         assert call_kwargs["overrides"]["permission_mode"] == "bypassPermissions"
+        assert call_kwargs["overrides"]["context_window"] == 200_000
 
     @pytest.mark.asyncio
     async def test_one_shot_query_value_error(self, mock_dependencies):

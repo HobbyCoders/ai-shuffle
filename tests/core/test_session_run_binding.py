@@ -32,7 +32,11 @@ def _mk_provider(provider_id="op", *, token="gw-secret"):
         provider_type="openrouter",
         base_url="https://openrouter.ai/api",
         auth_token=encryption.encrypt_value(token),
-        models=[{"id": "openai/gpt-5.6", "label": "GPT-5.6"}],
+        models=[{
+            "id": "openai/gpt-5.6",
+            "label": "GPT-5.6",
+            "context_window": 1_000_000,
+        }],
         enabled=True,
     )
 
@@ -65,11 +69,15 @@ class TestBindingStampedAtCreation:
             model="opus",
             effort="high",
             permission_mode="acceptEdits",
+            context_window=200_000,
         )
-        assert (row["model"], row["effort"], row["permission_mode"]) == (
+        assert (
+            row["model"], row["effort"], row["permission_mode"], row["context_window"]
+        ) == (
             "opus",
             "high",
             "acceptEdits",
+            200_000,
         )
         assert db.get_session("s-new")["model"] == "opus"
 
@@ -90,6 +98,7 @@ class TestBindingStampedAtCreation:
         assert row["model"] is None
         assert row["effort"] is None
         assert row["permission_mode"] is None
+        assert row["context_window"] is None
 
     def test_explicit_provider_beats_a_composite(self, mock_db):
         """A Task worker names its provider outright; the model rides along."""
@@ -116,13 +125,20 @@ class TestSetSessionRunBinding:
         _mk_profile("agent", {})
         db.create_session("s1", profile_id="agent", model="sonnet")
         db.set_session_run_binding(
-            "s1", model="opus", effort="max", permission_mode="plan"
+            "s1",
+            model="opus",
+            effort="max",
+            permission_mode="plan",
+            context_window=1_000_000,
         )
         row = db.get_session("s1")
-        assert (row["model"], row["effort"], row["permission_mode"]) == (
+        assert (
+            row["model"], row["effort"], row["permission_mode"], row["context_window"]
+        ) == (
             "opus",
             "max",
             "plan",
+            1_000_000,
         )
 
     def test_composite_rebinds_the_provider(self, mock_db):
@@ -184,6 +200,7 @@ class TestTurnResolution:
             model="opus",
             effort="high",
             permission_mode="acceptEdits",
+            context_window=200_000,
         )
         opts = _build_options(
             {"id": "agent", "config": {"cwd": str(tmp_path)}},
@@ -193,6 +210,9 @@ class TestTurnResolution:
         assert opts.model == "opus"
         assert opts.effort == "high"
         assert opts.permission_mode == "acceptEdits"
+        assert opts.aih_context_window == 200_000
+        assert opts.env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] == "1"
+        assert opts.env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "200000"
 
     def test_agent_config_never_overrides_the_session(self, mock_db, tmp_path):
         """A legacy agent that still carries a model does not reroute a session
@@ -223,19 +243,39 @@ class TestTurnResolution:
     def test_per_turn_override_still_wins(self, mock_db, tmp_path):
         _mk_profile("agent", {"cwd": str(tmp_path)})
         db.create_session(
-            "s-ovr", profile_id="agent", model="opus", permission_mode="plan"
+            "s-ovr",
+            profile_id="agent",
+            model="opus",
+            permission_mode="plan",
+            context_window=200_000,
         )
         opts = _build_options(
             {"id": "agent", "config": {"cwd": str(tmp_path)}},
             session_id="s-ovr",
             overrides={
                 "cwd": str(tmp_path),
-                "model": "haiku",
+                "model": "sonnet",
                 "permission_mode": "acceptEdits",
+                "context_window": 1_000_000,
             },
         )
-        assert opts.model == "haiku"
+        assert opts.model == "sonnet"
         assert opts.permission_mode == "acceptEdits"
+        assert opts.aih_context_window == 1_000_000
+        assert opts.env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] == "0"
+
+    def test_stale_window_is_ignored_for_an_ineligible_model(self, mock_db, tmp_path):
+        _mk_profile("agent", {"cwd": str(tmp_path)})
+        db.create_session(
+            "s-haiku", profile_id="agent", model="haiku", context_window=1_000_000
+        )
+        opts = _build_options(
+            {"id": "agent", "config": {"cwd": str(tmp_path)}},
+            session_id="s-haiku",
+            overrides={"cwd": str(tmp_path)},
+        )
+        assert opts.aih_context_window is None
+        assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in opts.env
 
     def test_pre_v79_session_falls_back_to_launched_model(self, mock_db, tmp_path):
         """No row binding (every session created before the migration): the model
@@ -303,6 +343,23 @@ class TestTurnResolution:
         assert opts.model == "openai/gpt-5.6"
         assert opts.env["ANTHROPIC_BASE_URL"] == "https://openrouter.ai/api"
 
+    def test_gpt_standard_context_uses_256k(self, mock_db, tmp_path):
+        _mk_provider("op")
+        _mk_profile("agent", {"cwd": str(tmp_path)})
+        db.create_session(
+            "s-gpt-standard",
+            profile_id="agent",
+            model="prov:op:openai/gpt-5.6",
+            context_window=256_000,
+        )
+        opts = _build_options(
+            {"id": "agent", "config": {"cwd": str(tmp_path)}},
+            session_id="s-gpt-standard",
+            overrides={"cwd": str(tmp_path)},
+        )
+        assert opts.aih_context_window == 256_000
+        assert opts.env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "256000"
+
 
 # ---------------------------------------------------------------------------
 # Only a person's turn re-binds the session
@@ -318,12 +375,13 @@ class TestSubmitPersistsTheBinding:
             "user",
             prompt="hi",
             profile_id="agent",
-            overrides={"model": "opus", "effort": "high"},
+            overrides={"model": "opus", "effort": "high", "context_window": 200_000},
             no_kick=True,
         )
         row = db.get_session("s-user")
         assert row["model"] == "opus"
         assert row["effort"] == "high"
+        assert row["context_window"] == 200_000
 
     def test_wakeup_replay_does_not_rebind(self, mock_db):
         """A wakeup replays the model the SCHEDULING turn used, which may be

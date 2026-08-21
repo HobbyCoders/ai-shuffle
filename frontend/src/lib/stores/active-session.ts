@@ -27,7 +27,7 @@ import {
 	getPersistedProfile, getPersistedProject,
 	getPersistedWorktreeIntent, setPersistedWorktreeIntent,
 	getPersistedModel, getPersistedEffort, getPersistedPermissionMode,
-	setPersistedRunBinding,
+	getPersistedContextWindowChoice, setPersistedRunBinding,
 } from './session/session-switcher';
 
 // Extracted sub-modules
@@ -46,6 +46,7 @@ import { git } from './git.svelte';
 import { untrack } from 'svelte';
 import { createStore, createSubscribers } from './store-utils';
 import { ensureModelRegistryHydrated } from '$lib/constants/models.svelte';
+import type { ContextWindowChoice } from '$lib/constants/model-context';
 // Shared types
 import type {
 	ChatMessage, MessageType,
@@ -131,6 +132,8 @@ export interface ActiveSessionState {
 	modelOverride: string | null;
 	permissionModeOverride: string | null;
 	effortLevelOverride: string | null;
+	/** Semantic 1M vs model-family standard-window choice for eligible GPT/Claude models. */
+	contextWindowChoice: ContextWindowChoice;
 	pendingPermissions: PermissionRequestType[];
 	/** Slice B (SDK 0.1.81): permission requests the user deferred — visible as a
 	 *  "N deferred" pill below the chat. Re-broadcast on `requeue_deferred_permissions`. */
@@ -207,6 +210,7 @@ export interface PersistedSession {
 	modelOverride: string | null;
 	permissionModeOverride: string | null;
 	effortLevelOverride: string | null;
+	contextWindowChoice?: ContextWindowChoice;
 	worktreeIntent?: ExecutionMode;
 	worktreeId?: string | null;
 	worktreeBranch?: string;
@@ -258,6 +262,7 @@ function defaultState(): ActiveSessionState {
 		modelOverride: getPersistedModel(),
 		permissionModeOverride: getPersistedPermissionMode(),
 		effortLevelOverride: getPersistedEffort(),
+		contextWindowChoice: getPersistedContextWindowChoice(),
 		pendingPermissions: [],
 		deferredPermissions: [],
 		pendingQuestions: [],
@@ -770,6 +775,7 @@ export const activeSession = {
 	setModelOverride(model: string | null) { _update(s => ({ ...s, modelOverride: model })); setPersistedRunBinding('model', model); persistSession(); },
 	setPermissionModeOverride(mode: string | null) { _update(s => ({ ...s, permissionModeOverride: mode })); setPersistedRunBinding('permissionMode', mode); persistSession(); },
 	setEffortLevelOverride(level: string | null) { _update(s => ({ ...s, effortLevelOverride: level })); setPersistedRunBinding('effort', level); persistSession(); },
+	setContextWindowChoice(choice: ContextWindowChoice) { _update(s => ({ ...s, contextWindowChoice: choice })); setPersistedRunBinding('contextWindowChoice', choice); persistSession(); },
 
 	// ── Ephemeral UI State (delegated to draft-manager) ─────────────
 

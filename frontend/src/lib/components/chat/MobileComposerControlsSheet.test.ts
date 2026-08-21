@@ -31,6 +31,8 @@ function props(overrides: Record<string, unknown> = {}) {
 		modelDefaultValue: 'sonnet',
 		modelOverridden: false,
 		onModelSelect: vi.fn(),
+		contextChoice: '1m' as const,
+		onContextChoiceSelect: vi.fn(),
 		effortOptions: [
 			{ value: 'low', label: 'Low', description: 'Quick' },
 			{ value: 'high', label: 'High', description: 'Thorough' }
@@ -74,10 +76,10 @@ describe('MobileComposerControlsSheet', () => {
 		await fireEvent.click(screen.getByRole('button', { name: /sonnet.*model used/i }));
 		expect(screen.getByRole('dialog', { name: /choose model/i })).toBeTruthy();
 
-		await fireEvent.input(screen.getByRole('searchbox', { name: /search models/i }), {
+		await fireEvent.input(screen.getByRole('textbox', { name: /search models/i }), {
 			target: { value: 'opus' }
 		});
-		expect(screen.queryByRole('button', { name: /sonnet/i })).toBeNull();
+		expect(screen.queryByRole('option', { name: /sonnet/i })).toBeNull();
 		await fireEvent.click(screen.getByRole('option', { name: /opus/i }));
 		expect(onModelSelect).toHaveBeenCalledWith('opus');
 	});
@@ -88,9 +90,24 @@ describe('MobileComposerControlsSheet', () => {
 		await fireEvent.click(screen.getByRole('button', { name: /sonnet.*model used/i }));
 		const dialog = screen.getByRole('dialog', { name: /choose model/i });
 		await waitFor(() => expect(document.activeElement).toBe(dialog));
-		expect(screen.getByRole('searchbox', { name: /search models/i })).not.toBe(
+		expect(screen.getByRole('textbox', { name: /search models/i })).not.toBe(
 			document.activeElement
 		);
+	});
+
+	it('reuses the shared picker and exposes its fixed context choice', async () => {
+		const onContextChoiceSelect = vi.fn();
+		render(MobileComposerControlsSheet, {
+			props: props({ onContextChoiceSelect })
+		});
+
+		await fireEvent.click(screen.getByRole('button', { name: /sonnet.*model used/i }));
+
+		expect(document.querySelector('[data-model-picker-panel]')).toBeTruthy();
+		const context = screen.getByRole('combobox', { name: /context window/i }) as HTMLSelectElement;
+		expect(context.value).toBe('1m');
+		await fireEvent.change(context, { target: { value: 'standard' } });
+		expect(onContextChoiceSelect).toHaveBeenCalledWith('standard');
 	});
 
 	it('applies effort, access, and computer-control changes without closing the sheet', async () => {

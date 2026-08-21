@@ -252,6 +252,8 @@
 					options={modelCatalog.options}
 					value={modelValue}
 					notice={modelNotice}
+					contextChoice={$activeSession.contextWindowChoice}
+					onContextChoiceSelect={(choice) => activeSession.setContextWindowChoice(choice)}
 					onSelect={(v) => {
 						activeSession.setModelOverride(v);
 						openDropdown = null;
@@ -388,6 +390,8 @@
 	modelLabel={modelButtonLabel}
 	modelNotice={modelNotice}
 	onModelSelect={(value) => activeSession.setModelOverride(value)}
+	contextChoice={$activeSession.contextWindowChoice}
+	onContextChoiceSelect={(choice) => activeSession.setContextWindowChoice(choice)}
 	effortOptions={effortLevels}
 	{effortValue}
 	onEffortSelect={(value) => activeSession.setEffortLevelOverride(value)}

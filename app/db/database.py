@@ -210,7 +210,10 @@ def _safe_json(value):
 #     created before this migration keep running on exactly what they ran on.
 #     Additive/nullable with no index; lands via the always-run guarded ADD
 #     COLUMN in _run_column_migrations.
-SCHEMA_VERSION = 79
+# 80 (2026-08-21): add sessions.context_window — the user-selected input-window
+#     limit that accompanies the model/effort/permission run binding. NULL keeps
+#     the model/provider default for pre-existing sessions.
+SCHEMA_VERSION = 80
 
 
 def _migrate_omni_tables_to_fluid(cursor):
@@ -1677,6 +1680,12 @@ def _run_column_migrations(cursor):
         if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", _col):
             cursor.execute(f"ALTER TABLE sessions ADD COLUMN {_col} TEXT")
             migrations_applied.append(f"sessions.{_col}")
+
+    # User-selected input-window binding (v80). NULL means use the selected
+    # model/provider's registered default, preserving every pre-v80 session.
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "context_window"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN context_window INTEGER")
+        migrations_applied.append("sessions.context_window")
 
     # Rename sessions.is_favorite -> is_active (v63). Favorites were reworked
     # into an "Active group": the flag now marks the session the user is

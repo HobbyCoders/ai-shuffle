@@ -6,20 +6,14 @@
 		ChevronRight,
 		Cpu,
 		Monitor,
-		Search,
 		ShieldCheck,
 		SlidersHorizontal,
-		Star,
 		Zap
 	} from 'lucide-svelte';
-	import ProviderGlyph from '$lib/components/settings/ProviderGlyph.svelte';
 	import ContextPillBar from './ContextPillBar.svelte';
+	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
 	import type { PickerGroup } from '$lib/constants/model-picker';
-	import {
-		getFavoriteModels,
-		isFavoriteModel,
-		toggleFavoriteModel
-	} from '$lib/stores/modelFavorites.svelte';
+	import type { ContextWindowChoice } from '$lib/constants/model-context';
 
 	interface ControlOption {
 		value: string;
@@ -44,6 +38,8 @@
 		modelLabel: string;
 		modelNotice?: string;
 		onModelSelect: (value: string) => void;
+		contextChoice: ContextWindowChoice;
+		onContextChoiceSelect: (choice: ContextWindowChoice) => void;
 		effortOptions: ControlOption[];
 		effortValue: string | null;
 		onEffortSelect: (value: string) => void;
@@ -66,6 +62,8 @@
 		modelLabel,
 		modelNotice,
 		onModelSelect,
+		contextChoice,
+		onContextChoiceSelect,
 		effortOptions,
 		effortValue,
 		onEffortSelect,
@@ -81,81 +79,31 @@
 
 	type SheetPage = 'overview' | 'models';
 	let page = $state<SheetPage>('overview');
-	let searchQuery = $state('');
 	let sheetRef = $state<HTMLElement | null>(null);
 	let dragging = $state(false);
 	let dragOffset = $state(0);
 	let dragStartY = 0;
 	let dragStartedAt = 0;
 
-	const FAVORITES = '__favorites__';
-
-	const isSearching = $derived(searchQuery.trim().length > 0);
-
-	// Rail entries: one per provider group (from `modelGroups` when the parent
-	// supplies them, else derived from the options), with brand glyphs.
+	// ModelPickerPanel owns the catalog interaction everywhere. This fallback only
+	// supplies neutral group metadata for isolated callers/tests that omit groups.
 	const railGroups = $derived.by<PickerGroup[]>(() => {
 		if (modelGroups && modelGroups.length > 0) return modelGroups;
 		const seen = new Map<string, PickerGroup>();
-		for (const o of modelOptions) {
-			if (!seen.has(o.groupKey)) {
-				seen.set(o.groupKey, {
-					key: o.groupKey,
-					name: o.group,
-					subtext: o.groupSubtext,
+		for (const option of modelOptions) {
+			if (!seen.has(option.groupKey)) {
+				seen.set(option.groupKey, {
+					key: option.groupKey,
+					name: option.group,
+					subtext: option.groupSubtext,
 					glyph: 'custom',
-					// The options carry no auth kind, so this fallback cannot know
-					// it — no API badge, same neutral stance as the 'custom' glyph
-					// beside it. A parent that supplies `modelGroups` (every real
-					// caller) carries the real value.
 					isApi: false
 				});
 			}
 		}
 		return [...seen.values()];
 	});
-	function groupFor(option: ModelOption): PickerGroup | undefined {
-		return railGroups.find((g) => g.key === option.groupKey);
-	}
 
-	const favoriteOptions = $derived(
-		getFavoriteModels()
-			.map((v) => modelOptions.find((o) => o.value === v))
-			.filter((o): o is ModelOption => o != null)
-	);
-	const hasFavorites = $derived(favoriteOptions.length > 0);
-
-	// Rail selection — favorites when any exist, else the current model's
-	// provider, else the first group. Re-validated against the live catalog.
-	let railKey = $state<string | null>(null);
-	const currentGroupKey = $derived(
-		modelOptions.find((o) => o.value === modelValue)?.groupKey ?? null
-	);
-	const effectiveRailKey = $derived.by(() => {
-		if (railKey === FAVORITES && hasFavorites) return FAVORITES;
-		if (railKey && railGroups.some((g) => g.key === railKey)) return railKey;
-		if (hasFavorites) return FAVORITES;
-		if (currentGroupKey) return currentGroupKey;
-		return railGroups[0]?.key ?? null;
-	});
-	const showRail = $derived(!isSearching && (railGroups.length > 1 || hasFavorites));
-
-	const visibleModels = $derived.by<ModelOption[]>(() => {
-		if (isSearching) {
-			const query = searchQuery.trim().toLowerCase();
-			return modelOptions.filter((option) =>
-				[option.label, option.description, option.group, option.groupSubtext ?? '']
-					.join(' ')
-					.toLowerCase()
-					.includes(query)
-			);
-		}
-		if (effectiveRailKey === FAVORITES) return favoriteOptions;
-		return modelOptions.filter((o) => o.groupKey === effectiveRailKey);
-	});
-	const showProviderLine = $derived(
-		isSearching || effectiveRailKey === FAVORITES || !showRail
-	);
 	const effortIndex = $derived.by(() => {
 		const index = effortOptions.findIndex((option) => option.value === effortValue);
 		return index < 0 ? 0 : index;
@@ -165,14 +113,8 @@
 		effortOptions.length > 1 ? (effortIndex / (effortOptions.length - 1)) * 100 : 0
 	);
 
-	function toggleFavorite(e: MouseEvent, value: string) {
-		e.stopPropagation();
-		toggleFavoriteModel(value);
-	}
-
 	function closeSheet() {
 		page = 'overview';
-		searchQuery = '';
 		dragging = false;
 		dragOffset = 0;
 		onClose();
@@ -192,7 +134,6 @@
 			event.preventDefault();
 			if (page === 'models') {
 				page = 'overview';
-				searchQuery = '';
 			} else {
 				closeSheet();
 			}
@@ -309,10 +250,7 @@
 						type="button"
 						class="header-button"
 						aria-label="Back to chat controls"
-						onclick={() => {
-							page = 'overview';
-							searchQuery = '';
-						}}
+						onclick={() => (page = 'overview')}
 					>
 						<ArrowLeft size={20} strokeWidth={1.8} />
 					</button>
@@ -324,109 +262,17 @@
 			</header>
 
 			{#if page === 'models'}
-				<div class="search-wrap">
-					<Search size={17} strokeWidth={1.8} aria-hidden="true" />
-					<input
-						bind:value={searchQuery}
-						type="search"
-						placeholder="Search models"
-						aria-label="Search models"
+				<div class="mobile-model-picker">
+					<ModelPickerPanel
+						groups={railGroups}
+						options={modelOptions}
+						value={modelValue}
+						onSelect={onModelSelect}
+						notice={modelNotice}
+						{contextChoice}
+						{onContextChoiceSelect}
+						onRequestClose={() => (page = 'overview')}
 					/>
-				</div>
-
-				{#if showRail}
-					<div class="provider-rail" role="tablist" aria-label="Providers">
-						{#if hasFavorites}
-							<button
-								type="button"
-								role="tab"
-								class="rail-chip"
-								class:selected={effectiveRailKey === FAVORITES}
-								aria-selected={effectiveRailKey === FAVORITES}
-								onclick={() => (railKey = FAVORITES)}
-							>
-								<Star size={14} strokeWidth={2} class="rail-star" />
-								<span>Favorites</span>
-							</button>
-						{/if}
-						{#each railGroups as g (g.key)}
-							<button
-								type="button"
-								role="tab"
-								class="rail-chip"
-								class:selected={effectiveRailKey === g.key}
-								aria-selected={effectiveRailKey === g.key}
-								title={g.subtext ? `${g.name} · ${g.subtext}` : g.name}
-								onclick={() => (railKey = g.key)}
-							>
-								<ProviderGlyph kind={g.glyph} size={14} />
-								<span>{g.name}</span>
-								{#if g.subtext}<small>{g.subtext}</small>{/if}
-							</button>
-						{/each}
-					</div>
-				{/if}
-
-				<div class="sheet-scroll model-scroll">
-					{#if visibleModels.length === 0}
-						<div class="empty-results">
-							{#if isSearching}
-								<Cpu size={22} strokeWidth={1.6} />
-								<p>No models match “{searchQuery}”.</p>
-							{:else if effectiveRailKey === FAVORITES}
-								<Star size={22} strokeWidth={1.6} />
-								<p>No favorites yet — star a model to pin it here.</p>
-							{:else}
-								<Cpu size={22} strokeWidth={1.6} />
-								<p>No models available.</p>
-							{/if}
-						</div>
-					{:else}
-						<div class="option-card">
-							{#each visibleModels as option (option.value)}
-								{@const g = groupFor(option)}
-								{@const fav = isFavoriteModel(option.value)}
-								<div
-									class="choice-row model-row"
-									class:selected={option.value === modelValue}
-									role="option"
-									aria-selected={option.value === modelValue}
-									tabindex="0"
-									onclick={() => onModelSelect(option.value)}
-									onkeydown={(e) => {
-										if (e.key === 'Enter' || e.key === ' ') {
-											e.preventDefault();
-											onModelSelect(option.value);
-										}
-									}}
-								>
-									<span class="choice-copy">
-										<span class="choice-title">
-											{option.label}
-										</span>
-										{#if showProviderLine && g}
-											<span class="choice-description model-provider">
-												<ProviderGlyph kind={g.glyph} size={12} />
-												<span>{g.name}{#if g.subtext} · {g.subtext}{/if}</span>
-											</span>
-										{:else}
-											<span class="choice-description">{option.description}</span>
-										{/if}
-									</span>
-									<button
-										type="button"
-										class="fav-btn"
-										class:on={fav}
-										aria-label={fav ? `Remove ${option.label} from favorites` : `Add ${option.label} to favorites`}
-										onclick={(e) => toggleFavorite(e, option.value)}
-									>
-										<Star size={16} strokeWidth={2} />
-									</button>
-									{#if option.value === modelValue}<Check size={18} strokeWidth={2.2} />{/if}
-								</div>
-							{/each}
-						</div>
-					{/if}
 				</div>
 			{:else}
 				<div class="sheet-scroll overview-scroll">
@@ -927,115 +773,14 @@
 		transform: translateX(18px);
 	}
 
-	.search-wrap {
-		margin: 10px 14px 6px;
-		height: 42px;
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 0 12px;
-		border: 1px solid var(--border-subtle);
-		border-radius: 13px;
-		background: var(--muted);
-		color: var(--muted-foreground);
-		flex-shrink: 0;
-	}
-
-	.search-wrap input {
-		min-width: 0;
+	/* The exact shared picker used by desktop fills the model subpage. Its own
+	   list scrolls while search, provider rail, and context selector stay fixed. */
+	.mobile-model-picker {
 		flex: 1;
-		border: 0;
-		outline: 0;
-		background: transparent;
-		color: var(--foreground);
-		font-size: 0.88rem;
-	}
-
-	.model-scroll {
-		padding: 6px 14px calc(18px + env(safe-area-inset-bottom, 0px));
-	}
-
-	/* Horizontal provider rail (the T3 icon rail, laid sideways for a phone). */
-	.provider-rail {
-		display: flex;
-		gap: 6px;
-		padding: 4px 14px 8px;
-		overflow-x: auto;
-		scrollbar-width: none;
-		flex-shrink: 0;
-	}
-	.provider-rail::-webkit-scrollbar {
-		display: none;
-	}
-	.rail-chip {
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		height: 32px;
-		padding: 0 11px;
-		border: 1px solid var(--border-subtle);
-		border-radius: 999px;
-		background: var(--muted);
-		color: var(--muted-foreground);
-		font-size: 0.8rem;
-		font-weight: 550;
-		white-space: nowrap;
-		cursor: pointer;
-		flex-shrink: 0;
-	}
-	.rail-chip small {
-		font-size: 0.7rem;
-		font-weight: 450;
-		opacity: 0.7;
-	}
-	.rail-chip.selected {
-		background: var(--selection-bg);
-		border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
-		color: var(--foreground);
-	}
-	.rail-chip :global(.rail-star) {
-		fill: currentColor;
-	}
-
-	.model-row {
-		cursor: pointer;
-	}
-	.model-provider {
-		display: inline-flex;
-		align-items: center;
-		gap: 5px;
-	}
-	.fav-btn {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		width: 32px;
-		height: 32px;
-		border: 0;
-		border-radius: 9px;
-		background: transparent;
-		color: var(--muted-foreground);
-		opacity: 0.6;
-		cursor: pointer;
-		flex-shrink: 0;
-	}
-	.fav-btn.on {
-		opacity: 1;
-		color: #eab308;
-	}
-	.fav-btn.on :global(svg) {
-		fill: currentColor;
-	}
-
-	.empty-results {
-		min-height: 180px;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		gap: 10px;
-		color: var(--muted-foreground);
-		font-size: 0.85rem;
+		min-height: 0;
+		padding-bottom: env(safe-area-inset-bottom, 0px);
+		--mpp-width: 100%;
+		--mpp-height: 100%;
 	}
 
 	.choice-row:active,

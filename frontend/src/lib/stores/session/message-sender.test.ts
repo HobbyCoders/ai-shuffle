@@ -166,6 +166,53 @@ describe('message-sender worktree send backstop', () => {
 	});
 });
 
+describe('message-sender context-window override', () => {
+	it('sends a numeric context_window that can force a 1M Claude model to normal 200k', async () => {
+		const { deps, wsConn } = makeDeps(baseState({
+			worktreeIntent: 'local',
+			modelOverride: 'sonnet',
+			contextWindowChoice: 'standard'
+		}));
+		const sender = createMessageSender(deps);
+
+		await sender.sendMessage('use the normal window');
+
+		const frame = wsConn.send.mock.calls.find(([message]) => (message as any).type === 'query')?.[0] as any;
+		expect(frame.overrides).toMatchObject({ model: 'sonnet', context_window: 200_000 });
+	});
+
+	it('uses the displayed registry default when context is selected before a model override', async () => {
+		const { deps, wsConn } = makeDeps(baseState({
+			worktreeIntent: 'local',
+			modelOverride: null,
+			contextWindowChoice: 'standard'
+		}));
+		const sender = createMessageSender(deps);
+
+		await sender.sendMessage('use the default model at its normal window');
+
+		const frame = wsConn.send.mock.calls.find(([message]) => (message as any).type === 'query')?.[0] as any;
+		// The backend still resolves its normal default model; context is explicitly
+		// applied to that same frontend-visible registry default.
+		expect(frame.overrides).toEqual({ context_window: 200_000 });
+	});
+
+	it('omits context_window for a model without a 1M choice', async () => {
+		const { deps, wsConn } = makeDeps(baseState({
+			worktreeIntent: 'local',
+			modelOverride: 'haiku',
+			contextWindowChoice: '1m'
+		}));
+		const sender = createMessageSender(deps);
+
+		await sender.sendMessage('small and fast');
+
+		const frame = wsConn.send.mock.calls.find(([message]) => (message as any).type === 'query')?.[0] as any;
+		expect(frame.overrides.model).toBe('haiku');
+		expect(frame.overrides.context_window).toBeUndefined();
+	});
+});
+
 describe('message-sender new-session adoption token (hijack fix)', () => {
 	function querySends(wsConn: { send: ReturnType<typeof vi.fn> }) {
 		return wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'query');

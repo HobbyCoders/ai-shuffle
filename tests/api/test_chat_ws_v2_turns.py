@@ -253,6 +253,31 @@ async def test_handle_query_ignores_legacy_worktree_id_key(mock_db):
     assert "worktree_id" not in submit.call_args.kwargs
 
 
+async def test_handle_query_persists_context_window_on_new_session(mock_db):
+    with _Patches():
+        with patch.object(cwh.turn_manager, "submit", MagicMock()):
+            handler = _make_handler()
+            await handler.handle_query({
+                "prompt": "new session with standard context",
+                "session_id": None,
+                "profile": "default",
+                "project": None,
+                "overrides": {
+                    "model": "sonnet",
+                    "effort": "high",
+                    "permission_mode": "plan",
+                    "context_window": 200_000,
+                },
+            })
+
+    session_id = _sent(handler, "session_created")[0]["session_id"]
+    row = database.get_session(session_id)
+    assert row["model"] == "sonnet"
+    assert row["effort"] == "high"
+    assert row["permission_mode"] == "plan"
+    assert row["context_window"] == 200_000
+
+
 # ═══ handle_queue_message — submit(queue) ════════════════════════════════════
 
 

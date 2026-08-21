@@ -62,6 +62,14 @@ def test_provider_env_key_delta_forces_reconnect(key):
     assert requires_reconnect(state, new) is True
 
 
+def test_context_window_change_forces_reconnect():
+    state = _make_state({})
+    state.connect_options.aih_context_window = 200_000
+    new = _new_options({})
+    new.aih_context_window = 1_000_000
+    assert requires_reconnect(state, new) is True
+
+
 def test_identity_env_keys_covered_individually():
     """Every IDENTITY key independently triggers a reconnect — even with no
     ANTHROPIC_BASE_URL present (identity keys are always compared)."""

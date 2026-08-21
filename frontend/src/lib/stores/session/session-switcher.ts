@@ -20,6 +20,12 @@ import { appData } from '../app-data.svelte';
 // V2 Phase 1: SSE-fed reducer store — the transcript authority for a session.
 import { feedController } from './v2/feed-controller';
 import { resolveNewChatProject, resolveSessionProject } from './session-project';
+import {
+	contextChoiceFromWindow,
+	DEFAULT_CONTEXT_WINDOW_CHOICE,
+	isContextWindowChoice,
+	type ContextWindowChoice
+} from '$lib/constants/model-context';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -153,16 +159,23 @@ export function getPersistedPermissionMode(): string | null {
 	return localStorage.getItem('aihub_lastPermissionMode') || null;
 }
 
+export function getPersistedContextWindowChoice(): ContextWindowChoice {
+	if (typeof window === 'undefined') return DEFAULT_CONTEXT_WINDOW_CHOICE;
+	const stored = localStorage.getItem('aihub_lastContextWindowChoice');
+	return isContextWindowChoice(stored) ? stored : DEFAULT_CONTEXT_WINDOW_CHOICE;
+}
+
 /** Remember one leg of the run binding. `null` clears it. */
 export function setPersistedRunBinding(
-	key: 'model' | 'effort' | 'permissionMode',
+	key: 'model' | 'effort' | 'permissionMode' | 'contextWindowChoice',
 	value: string | null
 ): void {
 	if (typeof window === 'undefined') return;
 	const storageKey = {
 		model: 'aihub_lastModel',
 		effort: 'aihub_lastEffort',
-		permissionMode: 'aihub_lastPermissionMode'
+		permissionMode: 'aihub_lastPermissionMode',
+		contextWindowChoice: 'aihub_lastContextWindowChoice'
 	}[key];
 	if (value) localStorage.setItem(storageKey, value);
 	else localStorage.removeItem(storageKey);
@@ -213,6 +226,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			modelOverride: state.modelOverride,
 			permissionModeOverride: state.permissionModeOverride,
 			effortLevelOverride: state.effortLevelOverride,
+			contextWindowChoice: state.contextWindowChoice,
 			worktreeIntent: state.worktreeIntent,
 			deviceIntent: state.deviceIntent,
 			worktreeId: state.worktreeId,
@@ -268,6 +282,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			modelOverride: state.modelOverride,
 			permissionModeOverride: state.permissionModeOverride,
 			effortLevelOverride: state.effortLevelOverride,
+			contextWindowChoice: state.contextWindowChoice,
 			worktreeIntent: state.worktreeIntent,
 			worktreeId: state.worktreeId,
 			worktreeBranch: state.worktreeBranch,
@@ -481,6 +496,10 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			modelOverride: ephemeral?.modelOverride ?? row?.model ?? null,
 			permissionModeOverride: ephemeral?.permissionModeOverride ?? row?.permission_mode ?? null,
 			effortLevelOverride: ephemeral?.effortLevelOverride ?? row?.effort ?? null,
+			contextWindowChoice:
+				ephemeral?.contextWindowChoice ??
+				contextChoiceFromWindow(row?.context_window) ??
+				DEFAULT_CONTEXT_WINDOW_CHOICE,
 			// Worktree fields: ephemeral > worktreeInfo from session list > safe defaults
 			worktreeIntent: ephemeral?.worktreeIntent ?? worktreeInfo?.worktreeIntent ?? 'local',
 			// Compose-time only: an existing session's device is already settled
@@ -641,9 +660,12 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			totalCacheReadTokens: 0,
 			contextUsed: null,
 			contextMax: 200_000,
-			modelOverride: null,
-			permissionModeOverride: null,
-			effortLevelOverride: null,
+			// A fresh compose restores the complete last-used run binding. Existing
+			// sessions still restore their own row/cache values in switchSession().
+			modelOverride: getPersistedModel(),
+			permissionModeOverride: getPersistedPermissionMode(),
+			effortLevelOverride: getPersistedEffort(),
+			contextWindowChoice: getPersistedContextWindowChoice(),
 			pendingPermissions: [],
 			deferredPermissions: [],
 			pendingQuestions: [],

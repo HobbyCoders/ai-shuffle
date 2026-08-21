@@ -13,6 +13,7 @@ import type { InternalMutableState } from './ws-message-handlers';
 // V2 Phase 1: the SSE-fed reducer owns the transcript; destroy() tears its feed down.
 import { feedController } from './v2/feed-controller';
 import { resolvePersistedProject } from './session-project';
+import { DEFAULT_CONTEXT_WINDOW_CHOICE } from '$lib/constants/model-context';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -159,6 +160,9 @@ export function createSessionInit(deps: SessionInitDeps) {
 							persisted.permissionModeOverride ?? (persisted.sessionId ? null : s.permissionModeOverride),
 						effortLevelOverride:
 							persisted.effortLevelOverride ?? (persisted.sessionId ? null : s.effortLevelOverride),
+						contextWindowChoice:
+							persisted.contextWindowChoice ??
+							(persisted.sessionId ? DEFAULT_CONTEXT_WINDOW_CHOICE : s.contextWindowChoice),
 						worktreeIntent: persisted.worktreeIntent || 'local',
 						worktreeBranch: persisted.worktreeBranch || '',
 						worktreeBaseBranch: persisted.worktreeBaseBranch || 'main',

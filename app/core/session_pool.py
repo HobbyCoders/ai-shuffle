@@ -1096,6 +1096,13 @@ def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> 
     ):
         return True
 
+    # Context limits are fixed into both delegated CLI env and native-loop
+    # compaction state at connect time, so a picker change must rebuild the leg.
+    if getattr(old, "aih_context_window", None) != getattr(
+        new_options, "aih_context_window", None
+    ):
+        return True
+
     # Tool-surface restriction (ruling CE12) — stamped by ``query_options`` as
     # ``aih_tool_allowlist`` and frozen into the engine at connect time (fluid
     # never renegotiates a session's tool surface mid-flight), so a change can

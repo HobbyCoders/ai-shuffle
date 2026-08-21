@@ -1,8 +1,8 @@
-"""Migration tests for the per-session run binding (v79).
+"""Migration tests for the per-session run binding (v79/v80).
 
 v79 adds three nullable TEXT columns — ``sessions.model``,
-``sessions.effort``, ``sessions.permission_mode`` — holding the model,
-reasoning effort and permission mode the user picks when a chat is created.
+``sessions.effort``, ``sessions.permission_mode`` — and v80 adds the nullable
+INTEGER ``sessions.context_window`` selected alongside them.
 Agents stopped pinning them, so the session row is where they live. Every
 pre-existing row is NULL, which resolves through ``launched_model`` and then
 the agent's legacy config — an upgrade reroutes nothing.
@@ -26,7 +26,7 @@ def test_fresh_db_has_binding_columns_and_version(mock_db):
     """A freshly built DB (create_postgres_schema) carries all three columns and
     the current schema version."""
     conn = mock_db
-    assert {"model", "effort", "permission_mode"} <= _column_names(conn, "sessions")
+    assert {"model", "effort", "permission_mode", "context_window"} <= _column_names(conn, "sessions")
     assert _schema_version(conn) == database.SCHEMA_VERSION
 
 
@@ -35,7 +35,7 @@ def test_init_upgrades_pre_v79_db(mock_db):
     upgraded in place — the guarded ADD COLUMNs land and the version bumps, with
     the existing row preserved and NULL across all three."""
     conn = mock_db
-    for column in ("model", "effort", "permission_mode"):
+    for column in ("model", "effort", "permission_mode", "context_window"):
         conn.execute(f"ALTER TABLE sessions DROP COLUMN {column}")
     conn.execute("DELETE FROM schema_version")
     conn.execute("INSERT INTO schema_version (version) VALUES (78)")
@@ -50,13 +50,14 @@ def test_init_upgrades_pre_v79_db(mock_db):
 
     database.init_database()
 
-    assert {"model", "effort", "permission_mode"} <= _column_names(conn, "sessions")
+    assert {"model", "effort", "permission_mode", "context_window"} <= _column_names(conn, "sessions")
     assert _schema_version(conn) == database.SCHEMA_VERSION
 
     row = database.get_session("s-legacy-binding")
     assert row["model"] is None
     assert row["effort"] is None
     assert row["permission_mode"] is None
+    assert row["context_window"] is None
     # The pre-v79 fallback the resolver reads is untouched.
     assert row["launched_model"] == "opus"
 
@@ -74,11 +75,18 @@ def test_session_model_exposes_the_binding():
         "updated_at": datetime.now(timezone.utc),
     }
     empty = Session(**base)
-    assert (empty.model, empty.effort, empty.permission_mode) == (None, None, None)
+    assert (empty.model, empty.effort, empty.permission_mode, empty.context_window) == (
+        None, None, None, None
+    )
 
     bound = Session(
-        **base, model="prov:op:openai/gpt-5.6", effort="high", permission_mode="plan"
+        **base,
+        model="prov:op:openai/gpt-5.6",
+        effort="high",
+        permission_mode="plan",
+        context_window=256_000,
     )
     assert bound.model == "prov:op:openai/gpt-5.6"
     assert bound.effort == "high"
     assert bound.permission_mode == "plan"
+    assert bound.context_window == 256_000

@@ -386,10 +386,21 @@ def inject_claude_code_auth(
 # NOTE (retired): ``apply_context_window_env`` used to force
 # ``CLAUDE_CODE_DISABLE_1M_CONTEXT`` on every NATIVE spawn, derived from the
 # app's ``[1m]`` model-id suffix. The suffix mechanism is gone — current Claude
-# slugs run the 1M window natively — so native legs now set NO context-window
-# env at all and inherit the CLI's own per-model defaults. Do not reintroduce a
-# blanket 200k pin here. The PROVIDER path below still pins its window vars,
-# driven by the per-model resolution in ``model_registry``.
+# slugs run the 1M window natively — so native legs with no explicit user choice
+# set NO context-window env and inherit the CLI's own per-model defaults. The
+# composer can now send an explicit per-session window; that path uses the
+# helper below and is deliberately authoritative over profile/provider defaults.
+
+
+def apply_context_window_override(env: Dict[str, str], context_window: int) -> None:
+    """Pin a user-selected input window onto a spawn environment in place."""
+    window = int(context_window)
+    if window <= 0:
+        raise ValueError("context_window must be a positive integer")
+    env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = "0" if window >= 1_000_000 else "1"
+    env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(window)
+    env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
+    env["CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE"] = str(window * 2)
 
 
 def is_provider_servable(provider: Optional[ModelProviderRow]) -> bool:

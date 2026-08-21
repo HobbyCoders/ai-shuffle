@@ -14,6 +14,8 @@ import { generateBranchName, generateBranchNameLocal } from '$lib/api/git';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
 // V2 Phase 1: SSE-fed reducer — the transcript authority for a session.
 import { feedController } from './v2/feed-controller';
+import { contextWindowForChoice } from '$lib/constants/model-context';
+import { getDefaultModel } from '$lib/constants/models';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -147,12 +149,27 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 	// ─── Build overrides from state ─────────────────────────────────
 
-	function buildOverrides(): Record<string, string> | undefined {
+	/**
+	 * The picker renders the registry default when no explicit model binding has
+	 * been saved yet. Context is selected against that visible model, so resolve
+	 * the same effective model here; otherwise choosing 200k on a fresh compose
+	 * would silently produce no override.
+	 */
+	function contextWindowOverride(state: ActiveSessionState): number | null {
+		return contextWindowForChoice(
+			state.modelOverride || getDefaultModel(),
+			state.contextWindowChoice
+		);
+	}
+
+	function buildOverrides(): Record<string, string | number> | undefined {
 		const _state = getState();
-		const overrides: Record<string, string> = {};
+		const overrides: Record<string, string | number> = {};
 		if (_state.modelOverride) overrides.model = _state.modelOverride;
 		if (_state.permissionModeOverride) overrides.permission_mode = _state.permissionModeOverride;
 		if (_state.effortLevelOverride) overrides.effort = _state.effortLevelOverride;
+		const contextWindow = contextWindowOverride(_state);
+		if (contextWindow != null) overrides.context_window = contextWindow;
 		return Object.keys(overrides).length > 0 ? overrides : undefined;
 	}
 
@@ -625,6 +642,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			const modelOverrideSnap = _state.modelOverride;
 			const permissionModeOverrideSnap = _state.permissionModeOverride;
 			const effortLevelOverrideSnap = _state.effortLevelOverride;
+			const contextWindowSnap = contextWindowOverride(_state);
 			const deviceIntentSnap = _state.deviceIntent;
 			const userMsgId = `user-${Date.now()}`;
 
@@ -635,10 +653,11 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// so we want the POST to finish even if the user navigates away,
 			// locks their phone, or closes the tab. Using ``keepalive: true``
 			// lets the browser complete the POST in the background.
-			const overridesPayload: Record<string, string> = {};
+			const overridesPayload: Record<string, string | number> = {};
 			if (modelOverrideSnap) overridesPayload.model = modelOverrideSnap;
 			if (permissionModeOverrideSnap) overridesPayload.permission_mode = permissionModeOverrideSnap;
 			if (effortLevelOverrideSnap) overridesPayload.effort = effortLevelOverrideSnap;
+			if (contextWindowSnap != null) overridesPayload.context_window = contextWindowSnap;
 
 			update(s => {
 				// eslint-disable-next-line no-console
