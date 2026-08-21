@@ -193,7 +193,11 @@ export interface UsageSnapshot {
 	providers?: ProviderUsageEntry[];
 }
 
-const STORAGE_KEY_V2 = 'usage-limit-buckets-v2';
+// Bumped to v3 when the backend started reporting Claude window utilization as
+// quota REMAINING: any cached v2 bucket holds percent-USED numbers that would
+// render as "1% left" on a barely-touched window until the next poll lands.
+// A fresh key discards them outright rather than showing a wrong figure first.
+const STORAGE_KEY_V3 = 'usage-limit-buckets-v3';
 const LEGACY_STORAGE_KEY = 'usage-limit-windows';
 
 // Human labels per known window type. Unknown types get a humanized fallback.
@@ -408,7 +412,7 @@ interface LoadedShape {
 
 function _load(): LoadedShape {
 	try {
-		const raw = localStorage.getItem(STORAGE_KEY_V2);
+		const raw = localStorage.getItem(STORAGE_KEY_V3);
 		if (raw) {
 			const parsed = JSON.parse(raw) as PersistedShape;
 			if (parsed && typeof parsed === 'object' && parsed.buckets && typeof parsed.buckets === 'object') {
@@ -420,7 +424,7 @@ function _load(): LoadedShape {
 			}
 			return { buckets: {}, selfInstanceId: null, providerBuckets: {} };
 		}
-		// v2 absent — migrate the legacy single-window map into a self bucket.
+		// v3 absent — migrate the legacy single-window map into a self bucket.
 		const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
 		if (legacy) {
 			const windows = JSON.parse(legacy) as Record<string, UsageWindow>;
@@ -447,7 +451,7 @@ function _save(state: RateLimitState) {
 			selfInstanceId: state.selfInstanceId,
 			providerBuckets: state.providerBuckets,
 		};
-		localStorage.setItem(STORAGE_KEY_V2, JSON.stringify(payload));
+		localStorage.setItem(STORAGE_KEY_V3, JSON.stringify(payload));
 	} catch {
 		// best-effort persistence
 	}

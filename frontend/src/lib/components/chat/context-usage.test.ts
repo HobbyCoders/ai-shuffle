@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { AUTO_COMPACTION_BASE } from '$lib/constants/chat';
 import {
 	computeContextBreakdown,
 	decideBreakdownRefresh,
@@ -50,12 +49,12 @@ describe('computeContextBreakdown', () => {
 		contextMax: 200_000,
 	};
 
-	it('totals system overhead plus conversation tokens', () => {
+	it('totals conversation tokens only — no autocompact-buffer reserve folded in', () => {
 		const b = computeContextBreakdown(base);
-		expect(b.totalUsed).toBe(AUTO_COMPACTION_BASE + 100_000);
+		expect(b.totalUsed).toBe(100_000);
 		expect(b.contextMax).toBe(200_000);
-		// (33000 + 100000) / 200000 = 66.5%
-		expect(b.totalPercent).toBeCloseTo(66.5, 5);
+		// 100000 / 200000 = 50%
+		expect(b.totalPercent).toBeCloseTo(50, 5);
 		expect(b.severity).toBe('neutral');
 	});
 
@@ -68,18 +67,17 @@ describe('computeContextBreakdown', () => {
 			'output',
 			'freeSpace',
 		]);
-		// The System overhead row is gone; its tokens live on autocompactTokens.
+		// The System overhead row is gone, and no buffer reserve is accounted anywhere.
 		expect(b.rows.find((r) => r.key === 'overhead')).toBeUndefined();
-		expect(b.autocompactTokens).toBe(AUTO_COMPACTION_BASE);
 		const input = b.rows.find((r) => r.key === 'input')!;
 		expect(input.tokens).toBe(20_000);
 		expect(input.barPercent).toBeCloseTo(10, 5); // 20k / 200k
 		const output = b.rows.find((r) => r.key === 'output')!;
 		expect(output.subline).toBe('session total · not in context');
-		// Free space = contextMax - totalUsed (which includes the buffer), grayed + last.
+		// Free space = contextMax - totalUsed, grayed + last.
 		const free = b.rows.find((r) => r.key === 'freeSpace')!;
 		expect(free.muted).toBe(true);
-		expect(free.tokens).toBe(200_000 - (AUTO_COMPACTION_BASE + 100_000));
+		expect(free.tokens).toBe(200_000 - 100_000);
 		expect(b.rows[b.rows.length - 1].key).toBe('freeSpace');
 	});
 
@@ -93,7 +91,7 @@ describe('computeContextBreakdown', () => {
 		expect(b.rows.find((r) => r.key === 'freeSpace')!.inBar).toBe(false);
 	});
 
-	it('invariant: sum of inBar row tokens plus autocompactTokens equals totalUsed (estimate path)', () => {
+	it('invariant: sum of inBar row tokens equals totalUsed (estimate path)', () => {
 		const b = computeContextBreakdown({
 			rawContextUsed: 987_654,
 			inputTokens: 111_111,
@@ -103,7 +101,7 @@ describe('computeContextBreakdown', () => {
 			contextMax: 1_000_000,
 		});
 		const inBarTokens = b.rows.filter((r) => r.inBar).reduce((sum, r) => sum + r.tokens, 0);
-		expect(inBarTokens + b.autocompactTokens).toBe(b.totalUsed);
+		expect(inBarTokens).toBe(b.totalUsed);
 	});
 
 	it('keeps showPercent true for every row on the estimate path (no deferred concept there)', () => {
@@ -141,7 +139,7 @@ describe('computeContextBreakdown', () => {
 			cacheReadTokens: 0,
 			contextMax: 200_000,
 		});
-		expect(b.totalUsed).toBe(AUTO_COMPACTION_BASE);
+		expect(b.totalUsed).toBe(0);
 		expect(b.rows.every((r) => r.barPercent >= 0)).toBe(true);
 	});
 
@@ -160,9 +158,9 @@ describe('computeContextBreakdown', () => {
 		// Em-dash placeholder rows never contribute a bar segment either.
 		expect(b.rows.every((r) => r.inBar === false)).toBe(true);
 		expect(b.rows.find((r) => r.key === 'freeSpace')).toBeUndefined();
-		// The buffer is still folded in, so the pill/header stay non-zero.
-		expect(b.totalUsed).toBe(AUTO_COMPACTION_BASE);
-		expect(b.autocompactTokens).toBe(AUTO_COMPACTION_BASE);
+		// Nothing has been consumed yet, so the pill/header read zero.
+		expect(b.totalUsed).toBe(0);
+		expect(b.totalPercent).toBe(0);
 	});
 
 	it('marks no category row empty and adds Free space once any usage has landed', () => {
@@ -228,7 +226,6 @@ describe('mapSdkContextUsage', () => {
 		expect(b.contextMax).toBe(200_000);
 		expect(b.totalPercent).toBe(50);
 		expect(b.severity).toBe('neutral');
-		expect(b.autocompactTokens).toBe(0);
 		// Descending by tokens (Messages 76k > MCP 20k > System 4k), Free space last.
 		expect(b.rows.map((r) => r.label)).toEqual([
 			'Messages',
@@ -258,7 +255,7 @@ describe('mapSdkContextUsage', () => {
 		expect(b.rows.find((r) => r.label === 'Free space')!.inBar).toBe(false);
 	});
 
-	it('invariant: sum of inBar row tokens plus autocompactTokens equals totalUsed (rich/SDK path)', () => {
+	it('invariant: sum of inBar row tokens equals totalUsed (rich/SDK path)', () => {
 		const b = mapSdkContextUsage(
 			sdk({
 				categories: [
@@ -274,7 +271,7 @@ describe('mapSdkContextUsage', () => {
 			})
 		);
 		const inBarTokens = b.rows.filter((r) => r.inBar).reduce((sum, r) => sum + r.tokens, 0);
-		expect(inBarTokens + b.autocompactTokens).toBe(b.totalUsed);
+		expect(inBarTokens).toBe(b.totalUsed);
 	});
 
 	it('falls back to the palette when a category colour is unparseable', () => {
@@ -318,7 +315,7 @@ describe('mapSdkContextUsage', () => {
 		expect(b.rows.find((r) => r.label === 'Messages')!.subline).toBeNull();
 	});
 
-	it('excludes the Autocompact buffer from rows but reports its tokens', () => {
+	it('drops the Autocompact buffer from the rows AND from every total', () => {
 		const b = mapSdkContextUsage(
 			sdk({
 				categories: [
@@ -327,13 +324,17 @@ describe('mapSdkContextUsage', () => {
 					{ name: 'Free space', tokens: 91_000, color: '#444' },
 				],
 				totalTokens: 76_000,
+				percentage: 38,
 			})
 		);
 		expect(b.rows.map((r) => r.label)).toEqual(['Messages', 'Free space']);
 		expect(b.rows.find((r) => r.label === 'Autocompact buffer')).toBeUndefined();
-		expect(b.autocompactTokens).toBe(33_000);
-		// Buffer still folded into the total.
-		expect(b.totalUsed).toBe(76_000 + 33_000);
+		// The reserve is not consumed context: the total and percent are the SDK's own.
+		expect(b.totalUsed).toBe(76_000);
+		expect(b.totalPercent).toBe(38);
+		// Nor does it reach the bar — inBar segments still sum to the header total.
+		const inBarTokens = b.rows.filter((r) => r.inBar).reduce((sum, r) => sum + r.tokens, 0);
+		expect(inBarTokens).toBe(b.totalUsed);
 	});
 
 	it('clamps percentage and bars to 0–100', () => {
@@ -361,7 +362,7 @@ describe('mapSdkContextUsage', () => {
 		expect(b.totalPercent).toBe(0);
 	});
 
-	it('folds the autocompact buffer into the total and recomputes the percentage', () => {
+	it('reports the SDK total/percentage verbatim when an autocompact buffer is present', () => {
 		const b = mapSdkContextUsage(
 			sdk({
 				categories: [
@@ -376,11 +377,10 @@ describe('mapSdkContextUsage', () => {
 				percentage: 64,
 			})
 		);
-		expect(b.totalUsed).toBe(160_600);
-		expect(b.totalPercent).toBeCloseTo(80.3, 5);
-		expect(b.severity).toBe('warning');
-		expect(b.autocompactTokens).toBe(33_000);
-		// The buffer is folded into the total but never rendered as its own row.
+		expect(b.totalUsed).toBe(127_600);
+		expect(b.totalPercent).toBeCloseTo(64, 5);
+		expect(b.severity).toBe('neutral');
+		// The buffer is neither a row nor part of the total.
 		expect(b.rows.find((r) => r.label === 'Autocompact buffer')).toBeUndefined();
 	});
 
@@ -416,10 +416,10 @@ describe('mapSdkContextUsage', () => {
 		expect(b.rows.filter((r) => r.label !== 'MCP tools (deferred)').every((r) => r.showPercent)).toBe(
 			true
 		);
-		// Invariant: sum(inBar tokens) + autocompactTokens === totalUsed, EXCLUDING
-		// the deferred category's tokens (they sit outside the window accounting).
+		// Invariant: sum(inBar tokens) === totalUsed, EXCLUDING the deferred
+		// category's tokens (they sit outside the window accounting).
 		const inBarTokens = b.rows.filter((r) => r.inBar).reduce((sum, r) => sum + r.tokens, 0);
-		expect(inBarTokens + b.autocompactTokens).toBe(b.totalUsed);
+		expect(inBarTokens).toBe(b.totalUsed);
 		expect(inBarTokens).toBe(4_000 + 76_000);
 	});
 
@@ -520,8 +520,6 @@ describe('mapSdkContextUsage', () => {
 			'Free space',
 			'Deferred tools',
 		]);
-		// No autocompact category and isAutoCompactEnabled:false -> no buffer fold.
-		expect(b.autocompactTokens).toBe(0);
 		expect(b.totalUsed).toBe(103_000);
 		// Deferred tokens stay OUT of the bar accounting.
 		const inBarTokens = b.rows.filter((r) => r.inBar).reduce((sum, r) => sum + r.tokens, 0);

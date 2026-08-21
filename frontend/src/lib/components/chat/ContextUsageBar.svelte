@@ -11,9 +11,9 @@
 	 * The popover is a wide, compact panel. It stacks, top → bottom:
 	 *   1. Context window — a collapsible header (persisted in localStorage under
 	 *      `aihub.contextBreakdownOpen`, default expanded) over ONE segmented bar.
-	 *      Expanded: a contiguous segment per category + a dim autocompact-buffer
-	 *      segment (the bare track tail is the free space), plus per-category rows
-	 *      (swatch + label + tokens + percent) followed by a trailing, muted Model
+	 *      Expanded: a contiguous segment per category (the bare track tail is the
+	 *      free space), plus per-category rows (swatch + label + tokens + percent)
+	 *      followed by a trailing, muted Model
 	 *      row (no swatch, no percent — just the effective model label). Collapsed:
 	 *      a single severity-coloured fill sized to the total percent — no
 	 *      per-category colour breakdown. The breakdown is fetched from the SDK
@@ -131,8 +131,8 @@
 	const isStreaming = $derived($activeSession.isStreaming);
 	const displayBreakdown = $derived<ContextBreakdown>(richBreakdown ?? breakdown);
 
-	// The pill ring prefers the rich breakdown when loaded (its totalPercent folds
-	// the buffer in the same way the popover header does — so they can't disagree),
+	// The pill ring prefers the rich breakdown when loaded (its totalPercent is
+	// the same figure the popover header shows — so they can't disagree),
 	// falling back to the poller estimate before the first fetch lands.
 	const contextPercent = $derived(displayBreakdown.totalPercent);
 
@@ -146,30 +146,18 @@
 	// Segmented progress bar: one contiguous segment per row whose tokens are
 	// actually part of totalUsed (row.inBar — excludes the grayed Free space row,
 	// em-dash placeholders, and, on the estimate path, Output tokens, which is
-	// session-cumulative and NOT part of context used), then one dim segment for
-	// the folded autocompact buffer. Remaining track = free space (no segment).
+	// session-cumulative and NOT part of context used). Remaining track = free
+	// space (no segment).
 	interface BarSegment {
 		key: string;
 		widthPct: number;
 		color: string;
-		dim: boolean;
 	}
-	const barSegments = $derived.by<BarSegment[]>(() => {
-		const max = displayBreakdown.contextMax;
-		const segs: BarSegment[] = displayBreakdown.rows
+	const barSegments = $derived.by<BarSegment[]>(() =>
+		displayBreakdown.rows
 			.filter((r) => r.inBar && r.tokens > 0)
-			.map((r) => ({ key: r.key, widthPct: r.barPercent, color: r.color, dim: false }));
-		const bufferPct = max > 0 ? Math.min((displayBreakdown.autocompactTokens / max) * 100, 100) : 0;
-		if (bufferPct > 0) {
-			segs.push({
-				key: '__autocompact',
-				widthPct: bufferPct,
-				color: 'color-mix(in oklch, var(--foreground) 28%, var(--background))',
-				dim: true,
-			});
-		}
-		return segs;
-	});
+			.map((r) => ({ key: r.key, widthPct: r.barPercent, color: r.color }))
+	);
 
 	let loadedSessionId: string | null = null;
 	let currentController: AbortController | null = null;
@@ -573,14 +561,14 @@
 					</svg>
 				</button>
 
-				<!-- Segmented bar (always shown). Expanded: one segment per category + a
-				     dim buffer segment; the bare track tail is the free space. Collapsed:
-				     a single severity-coloured fill, same total width as the header %. -->
+				<!-- Segmented bar (always shown). Expanded: one segment per category;
+				     the bare track tail is the free space. Collapsed: a single
+				     severity-coloured fill, same total width as the header %. -->
 				<div class="ctx-segbar" aria-hidden="true">
 					{#if breakdownOpen}
 						{#each barSegments as seg (seg.key)}
 							<span
-								class="ctx-seg {seg.dim ? 'dim' : ''}"
+								class="ctx-seg"
 								style="width: {seg.widthPct}%; background: {seg.color}"
 							></span>
 						{/each}
@@ -923,8 +911,8 @@
 		color: var(--destructive);
 	}
 
-	/* Single segmented progress bar — contiguous category segments + dim buffer,
-	   the remaining track is the free space. Same track colour as the pill ring. */
+	/* Single segmented progress bar — contiguous category segments; the
+	   remaining track is the free space. Same track colour as the pill ring. */
 	.ctx-segbar {
 		display: flex;
 		width: 100%;

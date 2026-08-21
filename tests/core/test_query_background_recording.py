@@ -301,6 +301,52 @@ async def test_background_records_regardless_of_v2_flag(mock_db):
     state.adapter.send_query.assert_awaited_once()
 
 
+# ─── subagent usage isolation ───────────────────────────────────────────────
+
+
+async def test_background_sidechain_usage_does_not_overwrite_last_call_tokens(mock_db):
+    """A subagent's AssistantMessage carries parent_tool_use_id and measures its
+    OWN context window. Recording it here would overwrite the parent session's
+    last-call token figures (which _persist_turn_results writes to
+    sessions.last_input_tokens/…) and collapse its context-usage pill mid-turn.
+    """
+    sid = "bg-sidechain-usage"
+    sessions_db.create_session(sid, "default")
+    main_usage = {
+        "input_tokens": 120_000,
+        "cache_creation_input_tokens": 4_000,
+        "cache_read_input_tokens": 90_000,
+    }
+    state = _fake_state(messages=[
+        SystemMessage(subtype="init", data={"session_id": "sdk-1"}),
+        AssistantMessage(content=[TextBlock("hi")], model="claude", usage=main_usage),
+        AssistantMessage(
+            content=[TextBlock("inner")],
+            model="claude",
+            parent_tool_use_id="toolu_task_1",
+            usage={
+                "input_tokens": 900,
+                "cache_creation_input_tokens": 10,
+                "cache_read_input_tokens": 20,
+            },
+        ),
+        _result_message(),
+    ])
+    pool = _StubPool(state)
+
+    with ExitStack() as stack:
+        _sync, persist_results, _finalize = _bg_patches(stack, pool)
+        await _run(sid)
+
+    meta = persist_results.await_args.kwargs["metadata"]
+    assert meta["last_call_tokens_in"] == 120_000
+    assert meta["last_call_cache_creation_tokens"] == 4_000
+    assert meta["last_call_cache_read_tokens"] == 90_000
+    # The subagent's call never reaches the turn.usage log either.
+    usage_rows = [r for r in se.get_events(sid) if r["event_type"] == "turn.usage"]
+    assert [r["payload"]["usage"] for r in usage_rows] == [main_usage]
+
+
 # ─── launched_model stamp (issue #577) ──────────────────────────────────────
 
 

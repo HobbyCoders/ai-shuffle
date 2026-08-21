@@ -5,7 +5,6 @@
  * tested without mounting the Svelte component.
  */
 
-import { AUTO_COMPACTION_BASE } from '$lib/constants/chat';
 import type { SdkContextUsage } from '$lib/api/sessions';
 
 export type UsageSeverity = 'neutral' | 'warning' | 'danger';
@@ -54,7 +53,7 @@ export interface ContextBreakdownRow {
 	 * segment in the segmented progress bar. False for rows that are muted,
 	 * empty (em-dash placeholder), or — on the estimate path — the Output
 	 * tokens row, which is session-cumulative and NOT part of context used
-	 * (`totalUsed = AUTO_COMPACTION_BASE + input + cacheCreation + cacheRead`).
+	 * (`totalUsed = input + cacheCreation + cacheRead`).
 	 * The segmented bar must build its segments from this flag rather than a
 	 * `!muted && !empty` heuristic, or Output would inflate the bar past the
 	 * header percentage.
@@ -70,19 +69,13 @@ export interface ContextBreakdownRow {
 }
 
 export interface ContextBreakdown {
-	/** Autocompact buffer + conversation tokens — the pill's number. */
+	/** Conversation tokens — the pill's number. Excludes the autocompact buffer. */
 	totalUsed: number;
 	contextMax: number;
 	/** Clamped 0–100. */
 	totalPercent: number;
 	severity: UsageSeverity;
 	rows: ContextBreakdownRow[];
-	/**
-	 * The auto-compaction buffer reserve folded into `totalUsed` but excluded from
-	 * `rows` — surfaced so the segmented bar can render its own dim buffer segment.
-	 * 0 when absent.
-	 */
-	autocompactTokens: number;
 }
 
 /**
@@ -159,7 +152,7 @@ export function computeContextBreakdown(input: ContextUsageInput): ContextBreakd
 		contextMax,
 	} = input;
 
-	const totalUsed = AUTO_COMPACTION_BASE + Math.max(rawContextUsed, 0);
+	const totalUsed = Math.max(rawContextUsed, 0);
 	const totalPercent = barPercent(totalUsed, contextMax);
 
 	// Fresh session: no conversation tokens of any kind have landed yet. The
@@ -224,8 +217,7 @@ export function computeContextBreakdown(input: ContextUsageInput): ContextBreakd
 		},
 	];
 
-	// Grayed "Free space" row (always last) — only once real usage has landed. The
-	// buffer is already folded into totalUsed, so free space never includes it.
+	// Grayed "Free space" row (always last) — only once real usage has landed.
 	if (!noUsageYet) {
 		const freeTokens = Math.max(contextMax - totalUsed, 0);
 		rows.push({
@@ -248,7 +240,6 @@ export function computeContextBreakdown(input: ContextUsageInput): ContextBreakd
 		totalPercent,
 		severity: usageSeverity(totalPercent),
 		rows,
-		autocompactTokens: AUTO_COMPACTION_BASE,
 	};
 }
 
@@ -311,12 +302,10 @@ export function decideBreakdownRefresh(
  * popover already renders, so the component can swap the estimate for the real
  * per-category breakdown without any layout change.
  *
- * - total: the SDK excludes the "Autocompact buffer" category from both
- *   usage.totalTokens and usage.percentage, so folding it back in here means
- *   the total matches effective usage (buffer + free space + total = max).
- *   Percentage is recomputed client-side from the folded total rather than
- *   trusting usage.percentage, with the existing severity thresholds applied
- *   on top.
+ * - total: the SDK's own `usage.totalTokens` / `usage.percentage`, used
+ *   verbatim — both already exclude the "Autocompact buffer" category, and the
+ *   buffer is a reserve, not consumed context, so it is never folded in. The
+ *   existing severity thresholds are applied on top of the SDK percentage.
  * - rows: one per category (label = name). Deferred categories (`isDeferred`,
  *   e.g. "MCP tools (deferred)") sit OUTSIDE the context-window accounting — like
  *   Claude Code's own panel, they render grayed with an em-dash instead of a
@@ -324,10 +313,10 @@ export function decideBreakdownRefresh(
  *   (`inBar: false`), and are ordered LAST, after Free space. Zero/negative-token
  *   categories are dropped EXCEPT "Free space", which is always kept, grayed, and
  *   ordered right before the deferred categories. The "Autocompact buffer"
- *   category is excluded from the rows entirely (its tokens are reported on
- *   `autocompactTokens` for the segmented bar's own dim buffer segment). Non-free,
- *   non-deferred categories are ordered by descending token count, then Free
- *   space, then deferred categories (also descending token count).
+ *   category is dropped entirely — it is not a row, not a bar segment, and not
+ *   part of any total. Non-free, non-deferred categories are ordered by
+ *   descending token count, then Free space, then deferred categories (also
+ *   descending token count).
  */
 export function mapSdkContextUsage(usage: SdkContextUsage): ContextBreakdown {
 	// An unknown window arrives as null (a native leg on a model with no
@@ -340,11 +329,15 @@ export function mapSdkContextUsage(usage: SdkContextUsage): ContextBreakdown {
 	const isAutocompact = (name: string) => name.toLowerCase() === 'autocompact buffer';
 	const isFreeSpace = (name: string) => name === 'Free space';
 
-	const autocompact = usage.categories.find((c) => isAutocompact(c.name));
-	const autocompactTokens = Math.max(autocompact?.tokens ?? 0, 0);
-	const totalUsed = usage.totalTokens + autocompactTokens;
+	// The autocompact buffer is a reserve, not consumed context: it is dropped
+	// from the rows, the bar and every total. `usage.totalTokens` already
+	// excludes it, so it is the header number verbatim, and `usage.percentage`
+	// (the CLI's own figure) is the ring/header percent as reported.
+	const totalUsed = usage.totalTokens;
 	const totalPercent =
-		max > 0 ? barPercent(totalUsed, max) : Math.min(Math.max(usage.percentage ?? 0, 0), 100);
+		usage.percentage != null
+			? Math.min(Math.max(usage.percentage, 0), 100)
+			: barPercent(totalUsed, max);
 
 	const kept = usage.categories
 		.filter((c) => !isAutocompact(c.name))
@@ -390,6 +383,5 @@ export function mapSdkContextUsage(usage: SdkContextUsage): ContextBreakdown {
 		totalPercent,
 		severity: usageSeverity(totalPercent),
 		rows,
-		autocompactTokens,
 	};
 }

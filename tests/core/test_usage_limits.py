@@ -2,9 +2,9 @@
 Tests for the Claude usage-limits monitor (app/core/usage_limits.py).
 
 Covers:
-  * parse_usage_response — the real endpoint shape, the scoped-Fable window that
-    only appears in the ``limits`` array, overage from ``extra_usage``, and
-    malformed/missing fields.
+  * parse_usage_response — the real endpoint shape, the used → remaining flip
+    every reading goes through, the scoped-Fable window that only appears in the
+    ``limits`` array, overage from ``extra_usage``, and malformed/missing fields.
   * UsageLimitsMonitor.fetch — happy path, missing credential (graceful empty),
     HTTP error and network error (keep last snapshot, warn once).
   * apply_live_event — update an existing window vs append a new one, and the
@@ -55,12 +55,32 @@ class TestParse:
         windows = parse_usage_response(REAL_RESPONSE)
         by_type = {w["type"]: w for w in windows}
 
-        assert by_type["five_hour"]["utilization"] == 12.0
+        # The endpoint reports percent USED; the snapshot carries REMAINING.
+        assert by_type["five_hour"]["utilization"] == 88.0  # 12% used
         assert by_type["five_hour"]["resets_at"] == "2026-07-09T05:00:00+00:00"
-        assert by_type["seven_day"]["utilization"] == 17.0
+        assert by_type["seven_day"]["utilization"] == 83.0  # 17% used
         # Fable weekly limit only exists in the limits[] array (weekly_scoped)
         # and must be surfaced as seven_day_overage_included.
-        assert by_type["seven_day_overage_included"]["utilization"] == 24.0
+        assert by_type["seven_day_overage_included"]["utilization"] == 76.0  # 24% used
+
+    def test_converts_used_percent_to_remaining(self):
+        # A window barely touched (1% used) must read as 99% LEFT, not 1% —
+        # the bug this conversion fixes (a window that had just reset showed 0).
+        windows = parse_usage_response({"five_hour": {"utilization": 1.0, "resets_at": None}})
+        assert windows[0]["utilization"] == 99.0
+
+        # A freshly reset window (0% used) is fully available.
+        assert parse_usage_response({"five_hour": {"utilization": 0.0}})[0]["utilization"] == 100.0
+        # An exhausted window has nothing left.
+        assert parse_usage_response({"five_hour": {"utilization": 100.0}})[0]["utilization"] == 0.0
+        # Out-of-range readings clamp instead of producing a negative remainder.
+        assert parse_usage_response({"five_hour": {"utilization": 140.0}})[0]["utilization"] == 0.0
+        assert parse_usage_response({"five_hour": {"utilization": -5.0}})[0]["utilization"] == 100.0
+
+    def test_limits_array_percent_is_also_converted(self):
+        data = {"limits": [{"kind": "session", "percent": 30, "resets_at": "y", "scope": None}]}
+        windows = parse_usage_response(data)
+        assert windows[0]["utilization"] == 70.0
 
     def test_top_level_wins_over_limits_array(self):
         data = {
@@ -69,13 +89,13 @@ class TestParse:
         }
         windows = parse_usage_response(data)
         by_type = {w["type"]: w for w in windows}
-        assert by_type["five_hour"]["utilization"] == 40.0  # not 5
+        assert by_type["five_hour"]["utilization"] == 60.0  # 40% used, not the limits[] 5
 
     def test_overage_from_extra_usage_when_enabled(self):
         data = {"extra_usage": {"is_enabled": True, "utilization": 8.0}}
         windows = parse_usage_response(data)
         by_type = {w["type"]: w for w in windows}
-        assert by_type["overage"]["utilization"] == 8.0
+        assert by_type["overage"]["utilization"] == 92.0  # 8% used
 
     def test_extra_usage_disabled_is_omitted(self):
         data = {"extra_usage": {"is_enabled": False, "utilization": None}}
@@ -307,9 +327,10 @@ class TestGenerationGuard:
             oauth.get_access_token.return_value = "tokA"
             snap = await monitor.fetch()
 
-        # Discarded: primed windows unchanged, the 99% straggler never applied.
+        # Discarded: primed windows unchanged, the 99%-used straggler (= 1%
+        # remaining once converted) never applied.
         assert snap["windows"] == primed
-        assert all(w["utilization"] != 99.0 for w in snap["windows"])
+        assert all(w["utilization"] != 1.0 for w in snap["windows"])
 
     @pytest.mark.asyncio
     async def test_fresh_fetch_applies_when_generation_stable(self, monitor):
@@ -321,7 +342,7 @@ class TestGenerationGuard:
             oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
             oauth.get_access_token.return_value = "tok"
             snap = await monitor.fetch()
-        assert any(w["utilization"] == 55.0 for w in snap["windows"])
+        assert any(w["utilization"] == 45.0 for w in snap["windows"])  # 55% used
 
 
 # ---------------------------------------------------------------------------
@@ -611,7 +632,8 @@ class TestPersistence:
             oauth.get_access_token.return_value = "tokA"
             await monitor.fetch()
 
-        # The discarded straggler never overwrote the persisted row.
+        # The discarded straggler (99% used = 1% remaining) never overwrote the
+        # persisted row.
         row = db.get_all_usage_snapshots()[0]
         assert row["windows"] == primed
-        assert all(w["utilization"] != 99.0 for w in row["windows"])
+        assert all(w["utilization"] != 1.0 for w in row["windows"])

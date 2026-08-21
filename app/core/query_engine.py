@@ -1020,7 +1020,12 @@ async def execute_query(
                 # Track per-API-call usage so we can persist the LAST call's
                 # values (= current context window size). ResultMessage.usage
                 # is cumulative across the agent loop and would inflate.
-                if getattr(message, "usage", None):
+                #
+                # Subagent (sidechain) messages carry parent_tool_use_id and run
+                # their own, separate context window — counting them here would
+                # overwrite the parent session's last-call figures with an
+                # unrelated number, so they are skipped entirely.
+                if getattr(message, "usage", None) and not getattr(message, "parent_tool_use_id", None):
                     metadata["last_call_tokens_in"] = message.usage.get("input_tokens", 0)
                     metadata["last_call_cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
                     metadata["last_call_cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
@@ -1688,8 +1693,12 @@ async def stream_query(
 
                 metadata["model"] = message.model
 
-                # Per-turn usage from AssistantMessage (SDK 0.1.49+)
-                if message.usage:
+                # Per-turn usage from AssistantMessage (SDK 0.1.49+).
+                # Subagent (sidechain) messages carry parent_tool_use_id and run
+                # their own, separate context window — counting them here would
+                # overwrite the parent session's last-call figures with an
+                # unrelated number, so they are skipped entirely.
+                if message.usage and not getattr(message, "parent_tool_use_id", None):
                     # Track per-API-call values (overwrite → last call wins).
                     # Used by _persist_turn_results as the real context-window
                     # size; ResultMessage.usage is cumulative and unusable here.
@@ -3538,8 +3547,13 @@ async def _stream_to_websocket_impl(
                     last_model_info = message.model
                     yield _model_info_frame(message.model)
 
-                # Per-turn usage from AssistantMessage (SDK 0.1.49+)
-                if message.usage:
+                # Per-turn usage from AssistantMessage (SDK 0.1.49+).
+                # Gated on the MAIN lane, exactly like the model_info note above:
+                # a subagent runs its own context window, so letting its usage
+                # through would overwrite the parent session's last-call figures
+                # (which _persist_turn_results writes to
+                # sessions.last_input_tokens/…) with an unrelated number.
+                if message.usage and not is_subagent_lane:
                     # Track per-API-call values (overwrite → last call wins).
                     # Used by _persist_turn_results as the real context-window
                     # size; ResultMessage.usage is cumulative and unusable here.

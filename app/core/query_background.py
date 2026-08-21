@@ -449,7 +449,12 @@ async def _run_background_query_impl(
                 # Track per-API-call usage so we can persist the LAST call's
                 # values (= current context window size). ResultMessage.usage
                 # is cumulative across the agent loop and would inflate.
-                if getattr(message, "usage", None):
+                #
+                # Subagent (sidechain) messages carry parent_tool_use_id and run
+                # their own, separate context window — counting them here would
+                # overwrite the parent session's last-call figures with an
+                # unrelated number, so they are skipped entirely.
+                if getattr(message, "usage", None) and not getattr(message, "parent_tool_use_id", None):
                     metadata["last_call_tokens_in"] = message.usage.get("input_tokens", 0)
                     metadata["last_call_cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
                     metadata["last_call_cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)

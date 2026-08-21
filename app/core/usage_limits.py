@@ -93,11 +93,29 @@ def _limit_entry_to_type(entry: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _used_to_remaining(value: Any) -> float:
+    """Convert a raw endpoint percentage into quota REMAINING (0-100).
+
+    ``GET /api/oauth/usage`` reports every window's ``utilization`` (and every
+    ``limits[].percent``) as percent USED — verified live: a weekly window that
+    had reset 34 minutes earlier reported 0. Our snapshot contract is percent
+    REMAINING (the same orientation ``apply_live_event`` flips SDK events into),
+    so flip it here, clamped to 0-100.
+
+    Raises TypeError/ValueError on a non-numeric input, which callers already
+    treat as "drop this window".
+    """
+    used = float(value)
+    return 100.0 - max(0.0, min(100.0, used))
+
+
 def parse_usage_response(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Normalise the raw usage payload into a list of window dicts.
 
     Each window: ``{"type": str, "utilization": float, "resets_at": str|None}``.
-    ``utilization`` is a percentage (0-100). Windows with no reading are omitted.
+    ``utilization`` is a percentage (0-100) of quota REMAINING — the endpoint
+    reports percent USED, so every reading is flipped on the way in (see
+    ``_used_to_remaining``). Windows with no reading are omitted.
     """
     windows: Dict[str, Dict[str, Any]] = {}
 
@@ -108,7 +126,7 @@ def parse_usage_response(data: Dict[str, Any]) -> List[Dict[str, Any]]:
             try:
                 windows[wtype] = {
                     "type": wtype,
-                    "utilization": float(block["utilization"]),
+                    "utilization": _used_to_remaining(block["utilization"]),
                     "resets_at": block.get("resets_at"),
                 }
             except (TypeError, ValueError):
@@ -127,7 +145,7 @@ def parse_usage_response(data: Dict[str, Any]) -> List[Dict[str, Any]]:
         try:
             windows[wtype] = {
                 "type": wtype,
-                "utilization": float(pct),
+                "utilization": _used_to_remaining(pct),
                 "resets_at": entry.get("resets_at"),
             }
         except (TypeError, ValueError):
@@ -139,7 +157,7 @@ def parse_usage_response(data: Dict[str, Any]) -> List[Dict[str, Any]]:
         try:
             windows["overage"] = {
                 "type": "overage",
-                "utilization": float(extra["utilization"]),
+                "utilization": _used_to_remaining(extra["utilization"]),
                 "resets_at": None,
             }
         except (TypeError, ValueError):

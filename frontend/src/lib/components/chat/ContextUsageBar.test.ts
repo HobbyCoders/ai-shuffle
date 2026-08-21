@@ -238,16 +238,16 @@ describe('ContextUsageBar — context breakdown', () => {
 		expect(container.querySelector('.breakdown-row .row-bar')).toBeNull();
 	});
 
-	it('renders only the dim buffer segment on a fresh session (breakdown expanded)', async () => {
+	it('renders no bar segments at all on a fresh session (breakdown expanded)', async () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		expect(container.querySelector('.ctx-header')?.getAttribute('aria-expanded')).toBe('true');
-		const segs = container.querySelectorAll('.ctx-seg');
-		expect(segs.length).toBe(1);
-		expect(segs[0].classList.contains('dim')).toBe(true);
+		// Nothing is consumed yet and the autocompact reserve is not counted, so the
+		// track is bare.
+		expect(container.querySelectorAll('.ctx-seg').length).toBe(0);
 	});
 
-	it('renders one segment per in-bar category plus a dim buffer segment, excluding Free space AND Output tokens (breakdown expanded)', async () => {
+	it('renders one segment per in-bar category, excluding Free space AND Output tokens (breakdown expanded)', async () => {
 		mocks.activeSession.set({
 			...mocks.DEFAULT,
 			sessionId: 's1',
@@ -262,23 +262,24 @@ describe('ContextUsageBar — context breakdown', () => {
 		expect(container.querySelector('.ctx-header')?.getAttribute('aria-expanded')).toBe('true');
 
 		const segs = Array.from(container.querySelectorAll('.ctx-seg'));
-		// Input + cacheRead + cacheCreation segments + 1 dim buffer segment. Output
-		// tokens are session-cumulative and NOT part of totalUsed, so — unlike
-		// Free space, which is the bare track — it renders no segment at all.
-		expect(segs.length).toBe(4);
-		expect(segs.filter((s) => s.classList.contains('dim')).length).toBe(1);
+		// Input + cacheRead + cacheCreation segments only. Output tokens are
+		// session-cumulative and NOT part of totalUsed, so — unlike Free space,
+		// which is the bare track — it renders no segment at all.
+		expect(segs.length).toBe(3);
 		// The rows still include both Output tokens and Free space (5 category rows
 		// total, plus the trailing Model row), but neither is a segment.
 		expect(container.querySelectorAll('.breakdown-row:not(.model-row)').length).toBe(5);
-		// Segment widths (as fractions of contextMax) plus the buffer sum to the
-		// same total the header reports — the invariant this fix restores.
+		// Segment widths (as fractions of contextMax) sum to the same total the
+		// header reports — the bar-sum invariant.
 		const contextMax = 1_000_000; // default model (sonnet) is natively 1M
 		const segTokens = Math.round(
-			segs
-				.filter((s) => !s.classList.contains('dim'))
-				.reduce((sum, s) => sum + (parseFloat((s as HTMLElement).style.width) / 100) * contextMax, 0)
+			segs.reduce(
+				(sum, s) => sum + (parseFloat((s as HTMLElement).style.width) / 100) * contextMax,
+				0
+			)
 		);
 		expect(segTokens).toBe(20_000 + 50_000 + 30_000); // input + cacheRead + cacheCreation
+		expect(segTokens).toBe(100_000); // === totalUsed / the header total
 	});
 
 	it('renders a deferred category row with tokens + em-dash (no percent) and no bar segment (breakdown expanded)', async () => {
@@ -316,11 +317,8 @@ describe('ContextUsageBar — context breakdown', () => {
 		expect(value).not.toMatch(/\d+(\.\d+)?%/);
 
 		// No segmented-bar segment for the deferred category: Messages (in-bar) is
-		// the only non-dim segment; no dim buffer here since there's no autocompact
-		// category in this fixture.
-		const segs = Array.from(container.querySelectorAll('.ctx-seg'));
-		expect(segs.length).toBe(1);
-		expect(segs[0].classList.contains('dim')).toBe(false);
+		// the only segment.
+		expect(container.querySelectorAll('.ctx-seg').length).toBe(1);
 	});
 
 	it('never leaves a stale breakdown on screen when the session switches mid-fetch (abort race)', async () => {
@@ -430,8 +428,8 @@ describe('ContextUsageBar — context breakdown', () => {
 		expect(ring).not.toBeNull();
 		expect(ring.classList.contains('warning')).toBe(false);
 		expect(ring.classList.contains('danger')).toBe(false);
-		// 10k used + the 33k auto-compaction reserve over sonnet's native 1M window.
-		expect(pill.getAttribute('aria-label')).toMatch(/4% of context window used/);
+		// 10k used over sonnet's native 1M window (no reserve folded in).
+		expect(pill.getAttribute('aria-label')).toMatch(/1% of context window used/);
 
 		await openPopover(container);
 		const planPct = container.querySelector('.popover-row .row-pct') as HTMLElement;
