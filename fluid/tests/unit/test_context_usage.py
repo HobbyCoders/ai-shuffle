@@ -41,6 +41,7 @@ from fluid.engine.delegated import DelegatedLoop
 from fluid.engine.delegated_proto import StreamJsonMapper, parse_control_response
 from fluid.engine.native import NativeLoop
 from fluid.events import UserTurn
+from fluid.events.model import Usage, event_from_dict, event_to_dict
 from fluid.messages import Message, Text, ToolResultBlock, ToolUseBlock
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import MemoryStore, SessionNode, new_id
@@ -326,10 +327,10 @@ async def _noop(input: dict, ctx) -> str:
     return ""
 
 
-def _loop(tmp_path, store, **kw) -> NativeLoop:
+def _loop(tmp_path, store, *, provider=None, **kw) -> NativeLoop:
     compiled = compile_prompt(_inputs(_project(tmp_path)))
     return NativeLoop(
-        provider=_IdleProvider(), store=store, model="claude-sonnet-5",
+        provider=provider or _IdleProvider(), store=store, model="claude-sonnet-5",
         system=compiled.text, system_sections=compiled,
         registry=_registry_with_deferred(), **kw,
     )
@@ -628,3 +629,226 @@ async def test_control_round_trip_leaves_the_turn_stream_intact(scenario) -> Non
     assert [type(e).__name__ for e in events] == [
         "TurnStarted", "BlockStart", "TextDelta", "BlockStop", "Usage", "TurnComplete",
     ] * 2
+
+
+# ─── Provider-measured totals ────────────────────────────────────────────────
+#
+# chars/4 is a stand-in for a number the provider knows exactly. Once a call has
+# been made, the breakdown reports the prompt the provider billed for and lets
+# "Messages" absorb the difference — the category the estimator misprices.
+
+
+def _measured(sections, prompt_tokens: int | None, **kw) -> dict:
+    return build_context_usage(
+        sections=sections,
+        history=[Message(role="user", content=[Text("x" * 4_000)])],
+        model="m", measured_prompt_tokens=prompt_tokens, **kw,
+    )
+
+
+def test_measured_total_is_the_providers_number(tmp_path) -> None:
+    sections = _sections(tmp_path)
+    estimated = _measured(sections, None)
+    measured = _measured(sections, 38_572)
+    assert estimated["measured"] is False
+    assert measured["measured"] is True
+    assert measured["totalTokens"] == 38_572
+    # Only Messages moved; every other row kept its own estimate.
+    est_rows, meas_rows = _by_name(estimated), _by_name(measured)
+    for name in (SYSTEM_PROMPT, MEMORY_FILES, SKILLS):
+        assert meas_rows[name]["tokens"] == est_rows[name]["tokens"]
+    others = sum(row["tokens"] for name, row in meas_rows.items() if name != MESSAGES)
+    assert meas_rows[MESSAGES]["tokens"] == 38_572 - others
+    # And the rows still add up to the total a host would render.
+    assert others + meas_rows[MESSAGES]["tokens"] == measured["totalTokens"]
+
+
+def test_measured_messages_never_go_negative(tmp_path) -> None:
+    """A prompt smaller than the static rows (a fully cached prefix reported as
+    a handful of tokens) must not push Messages below zero."""
+    usage = _measured(_sections(tmp_path), 5)
+    assert usage["totalTokens"] == 5
+    # Floored at 0, and a zero row is omitted like every other empty category.
+    assert MESSAGES not in _by_name(usage)
+
+
+def test_measured_zero_is_still_measured(tmp_path) -> None:
+    usage = _measured(_sections(tmp_path), 0)
+    assert usage["measured"] is True and usage["totalTokens"] == 0
+
+
+def test_measured_total_drives_free_space_and_percentage(tmp_path) -> None:
+    usage = _measured(_sections(tmp_path), 40_000, context_window=200_000)
+    assert _by_name(usage)[FREE_SPACE]["tokens"] == 160_000
+    assert usage["percentage"] == 20.0
+
+
+def test_measured_adds_no_other_keys_to_the_sdk_shape(tmp_path) -> None:
+    """SDK-shape parity: ``measured`` is the one addition, present either way."""
+    sections = _sections(tmp_path)
+    estimated = _measured(sections, None)
+    measured = _measured(sections, 40_000)
+    assert set(measured) == set(estimated)
+    assert "measured" in estimated
+
+
+# ─── NativeLoop: measured totals from the last call ──────────────────────────
+
+
+class _MeasuredProvider(_IdleProvider):
+    """Reports a real prompt: 1,000 fresh + 2,000 cache-read + 500 cache-write."""
+
+    PROMPT_TOKENS = 3_500
+
+    async def stream(self, request: ProviderRequest):
+        for chunk in [
+            StreamChunk("message_start", {"usage": {
+                "input_tokens": 1_000,
+                "cache_read_input_tokens": 2_000,
+                "cache_creation_input_tokens": 500,
+            }}),
+            StreamChunk("block_start", {"index": 0, "block_type": "text"}),
+            StreamChunk("text_delta", {"index": 0, "text": "ok"}),
+            StreamChunk("block_stop", {"index": 0}),
+            StreamChunk("usage", {"usage": {"output_tokens": 7}, "stop_reason": "end_turn"}),
+        ]:
+            yield chunk
+
+
+async def test_native_snapshot_is_an_estimate_before_any_call(tmp_path) -> None:
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    await store.append(sid, SessionNode(
+        node_id=new_id("node"), parent_id=None,
+        message=Message(role="user", content=[Text("x" * 4_000)]),
+    ))
+    loop = _loop(tmp_path, store, session_id=sid, provider=_MeasuredProvider())
+    try:
+        usage = await loop.get_context_usage()
+    finally:
+        await loop.aclose()
+    assert usage["measured"] is False
+    assert usage["totalTokens"] == sum(
+        c["tokens"] for c in usage["categories"] if not c.get("isDeferred")
+    )
+
+
+async def test_native_snapshot_prefers_the_last_calls_real_prompt(tmp_path) -> None:
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _loop(tmp_path, store, session_id=sid, provider=_MeasuredProvider(),
+                 context_window=200_000)
+    try:
+        await loop.submit(UserTurn(content="x" * 4_000))
+        await loop.wait_turn()
+        usage = await loop.get_context_usage()
+    finally:
+        await loop.aclose()
+    assert usage["measured"] is True
+    assert usage["totalTokens"] == _MeasuredProvider.PROMPT_TOKENS
+    assert _by_name(usage)[FREE_SPACE]["tokens"] == 200_000 - 3_500
+
+
+async def test_native_measured_total_drops_once_its_node_leaves_the_path(tmp_path) -> None:
+    """Rewound or forked past the call that produced it, the measurement
+    describes a prompt this session no longer sends — fall back to the estimate."""
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _loop(tmp_path, store, session_id=sid, provider=_MeasuredProvider())
+    try:
+        await loop.submit(UserTurn(content="x" * 4_000))
+        await loop.wait_turn()
+        node_id, raw = loop._last_call_usage[sid]
+        assert any(n.node_id == node_id for n in await store.load_path(sid))
+        loop._last_call_usage[sid] = ("node_no_longer_on_the_path", raw)
+        usage = await loop.get_context_usage()
+    finally:
+        await loop.aclose()
+    assert usage["measured"] is False
+
+
+async def test_native_per_call_usage_event_carries_the_snapshot(tmp_path) -> None:
+    """Hosts get the truthful breakdown per model call, not only on request."""
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _loop(tmp_path, store, session_id=sid, provider=_MeasuredProvider())
+    try:
+        await loop.submit(UserTurn(content="x" * 4_000))
+        await loop.wait_turn()
+        events = loop.bus.log(sid)
+    finally:
+        await loop.aclose()
+    usages = [e for e in events if isinstance(e, Usage)]
+    assert len(usages) == 1
+    snapshot = usages[0].context_usage
+    assert snapshot is not None
+    assert snapshot["measured"] is True
+    assert snapshot["totalTokens"] == _MeasuredProvider.PROMPT_TOKENS
+    assert usages[0].input_tokens == 1_000 and usages[0].cache_read_tokens == 2_000
+
+
+# ─── Delegated: the CLI's per-call breakdown ─────────────────────────────────
+
+
+async def test_delegated_usage_carries_the_clis_context_snapshot() -> None:
+    """The CLI answers the per-call query mid-turn; its payload rides a second
+    Usage event for the same node (token fields 0 — the first event billed them)."""
+    from tests.fixtures.fake_claude import CONTEXT_USAGE_PAYLOAD
+
+    loop = _delegated("j")
+    try:
+        await loop.submit(UserTurn(content="hi"))
+        await loop.wait_turn()
+        events = loop.bus.log(loop.session_id)
+    finally:
+        await loop.aclose()
+    assert [type(e).__name__ for e in events] == [
+        "TurnStarted", "BlockStart", "TextDelta", "BlockStop",
+        "Usage", "Usage", "TurnComplete",
+    ]
+    billed, snapshot = [e for e in events if isinstance(e, Usage)]
+    assert billed.context_usage is None and billed.input_tokens == 12
+    assert snapshot.context_usage == CONTEXT_USAGE_PAYLOAD
+    assert snapshot.node_id == billed.node_id
+    assert (snapshot.input_tokens, snapshot.output_tokens) == (0, 0)
+    assert not loop._pending_usage_snapshots
+
+
+async def test_delegated_unanswered_snapshot_adds_no_event() -> None:
+    """A CLI that never answers costs nothing: the billed Usage already said
+    context_usage=None, so the turn's stream is unchanged."""
+    loop = _delegated("h")  # never answers a control_request
+    try:
+        await loop.submit(UserTurn(content="hi"))
+        await loop.wait_turn()
+        events = loop.bus.log(loop.session_id)
+    finally:
+        await loop.aclose()
+    assert [type(e).__name__ for e in events] == [
+        "TurnStarted", "BlockStart", "TextDelta", "BlockStop", "Usage", "TurnComplete",
+    ]
+    assert [e.context_usage for e in events if isinstance(e, Usage)] == [None]
+    assert not loop._pending_usage_snapshots
+
+
+# ─── Durable codec ───────────────────────────────────────────────────────────
+
+
+def test_usage_events_round_trip_with_the_snapshot() -> None:
+    event = Usage(
+        session_id="s1", node_id="n1", turn_id="t1", input_tokens=3, output_tokens=1,
+        context_usage={"totalTokens": 9, "measured": True},
+    )
+    assert event_from_dict(event_to_dict(event)) == event
+
+
+def test_legacy_usage_rows_deserialize_without_the_snapshot() -> None:
+    """Rows persisted before the field existed still rehydrate."""
+    legacy = {
+        "_cls": "Usage", "session_id": "s1", "node_id": "n1", "turn_id": "t1",
+        "seq": 4, "input_tokens": 3, "output_tokens": 1, "cache_read_tokens": 0,
+        "cache_creation_tokens": 0, "raw": {"input_tokens": 3},
+    }
+    revived = event_from_dict(legacy)
+    assert isinstance(revived, Usage)
+    assert revived.context_usage is None and revived.input_tokens == 3

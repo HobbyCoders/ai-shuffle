@@ -129,6 +129,21 @@ def _is_context_overflow(message: str) -> bool:
     return any(marker in lowered for marker in _OVERFLOW_MARKERS)
 
 
+def _measured_prompt_tokens(usage: dict[str, Any]) -> int:
+    """What a provider actually billed for the PROMPT of one call.
+
+    Cache reads and cache writes are prompt tokens that happen to be priced
+    differently — all three keys have to be added back together to recover the
+    size of the context that was sent.
+    """
+    total = 0
+    for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
+        value = usage.get(key, 0)
+        if isinstance(value, int) and not isinstance(value, bool):
+            total += value
+    return total
+
+
 def _plain_text(blocks: list[Any]) -> str:
     """Concatenated Text-block text of a message (for the episodic journal)."""
     return "\n".join(b.text for b in blocks if isinstance(b, Text) and b.text).strip()
@@ -314,6 +329,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Compatibility seam: existing callers/tests reach the tier-1 trimmer.
         self._trimmer = self._compactor.trimmer
         self._compaction_rehydrated = False
+        # Last model call's real prompt accounting, per session:
+        # ``session_id -> (assistant node the call produced, provider usage)``.
+        # get_context_usage() prefers it over the chars/4 estimate, but only
+        # while that node is still on the loaded path — a fork or rewind past
+        # it means the numbers describe a prompt this session no longer sends.
+        self._last_call_usage: dict[str, tuple[str, dict[str, Any]]] = {}
         # MCP servers from config, connected lazily on the first turn (the
         # constructor is sync; connecting needs the event loop).
         self._mcp_servers = dict(mcp_servers or {})
@@ -542,10 +563,15 @@ class NativeLoop(BackgroundLifecycleMixin):
         and no node is written; a session that does not exist yet simply prices
         as an empty history rather than being created here.
 
+        The total is the last call's REAL prompt size whenever one is available
+        for the current path (see ``_last_call_usage``); with no call yet — or
+        after a fork/rewind past it — it falls back to the chars/4 estimate.
+
         See :mod:`fluid.context.usage` for the category rules and the palette.
         """
         history: list[Message] = []
         compaction_stats: dict[str, int] | None = None
+        measured: int | None = None
         # Resolve the session READ-ONLY: _ensure_session would create one, and
         # asking what the context looks like must not bring a session into being.
         sid = self._session.session_id if self._session is not None else None
@@ -555,24 +581,44 @@ class NativeLoop(BackgroundLifecycleMixin):
             nodes = await self.store.load_path(sid)
             history = repair_dangling_tool_calls(self._compactor.view(nodes))
             compaction_stats = self._compactor.stats(nodes)
-        deferred = (
-            [
-                s.to_api() for s in self.registry.deferred_tools()
-                if self._tool_permitted(s.name)
-            ]
-            if self.registry is not None and self._codemode is None
-            else []
+            recorded = self._last_call_usage.get(sid)
+            if recorded is not None and any(n.node_id == recorded[0] for n in nodes):
+                measured = _measured_prompt_tokens(recorded[1])
+        return self._context_usage_snapshot(
+            history=history,
+            compaction=compaction_stats,
+            measured_prompt_tokens=measured,
         )
+
+    def _deferred_tools_api(self) -> list[dict[str, Any]]:
+        """Schemas of known-but-unloaded tools — the ToolSearch catalog."""
+        if self.registry is None or self._codemode is not None:
+            return []
+        return [
+            s.to_api() for s in self.registry.deferred_tools()
+            if self._tool_permitted(s.name)
+        ]
+
+    def _context_usage_snapshot(
+        self,
+        *,
+        history: Sequence[Message],
+        compaction: dict[str, int] | None,
+        measured_prompt_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        """The breakdown for a given history — the one place its inputs are
+        assembled, so a between-turns snapshot and a per-call one agree."""
         return build_context_usage(
             sections=self.system_sections.sections if self.system_sections else (),
             system_text=self.system,
             history=history,
             tools_api=self._tools_api(),
-            deferred_tools_api=deferred,
+            deferred_tools_api=self._deferred_tools_api(),
             agents=self.agents,
             model=self.model,
             context_window=self.context_window,
-            compaction=compaction_stats,
+            compaction=compaction,
+            measured_prompt_tokens=measured_prompt_tokens,
         )
 
     # ─── Turn lifecycle ──────────────────────────────────────────────────
@@ -815,6 +861,22 @@ class NativeLoop(BackgroundLifecycleMixin):
                 node_id=new_id("node"), parent_id=parent.node_id, message=result.message
             )
             await self.store.append(sid, node)
+            prompt_tokens = _measured_prompt_tokens(result.usage)
+            if prompt_tokens > 0:
+                # A provider that reported nothing leaves the estimate in place
+                # rather than pinning the whole context at zero tokens.
+                self._last_call_usage[sid] = (node.node_id, dict(result.usage))
+            snapshot: dict[str, Any] | None = None
+            try:
+                snapshot = self._context_usage_snapshot(
+                    # `history` is exactly what this call sent, so the measured
+                    # prompt size and the category rows describe the same thing.
+                    history=history,
+                    compaction=self._compactor.stats(nodes),
+                    measured_prompt_tokens=prompt_tokens if prompt_tokens > 0 else None,
+                )
+            except Exception:  # accounting is never worth failing a turn over
+                log.debug("per-call context-usage snapshot failed", exc_info=True)
             await self._emit(Usage(
                 session_id=sid, node_id=node.node_id, turn_id=turn_id,
                 input_tokens=result.usage.get("input_tokens", 0),
@@ -822,6 +884,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 cache_read_tokens=result.usage.get("cache_read_input_tokens", 0),
                 cache_creation_tokens=result.usage.get("cache_creation_input_tokens", 0),
                 raw=dict(result.usage),
+                context_usage=snapshot,
             ))
             parent = node
 

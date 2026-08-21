@@ -194,13 +194,22 @@ class ContextCompaction(Event):
 
 @dataclass(frozen=True, kw_only=True)
 class Usage(Event):
-    """Per-model-call usage. ``cache_hit_rate`` = cache_read / total prompt tokens."""
+    """Per-model-call usage. ``cache_hit_rate`` = cache_read / total prompt tokens.
+
+    ``context_usage`` is the context breakdown for THIS call — the same dict
+    ``get_context_usage()`` returns (see :mod:`fluid.context.usage`), sized from
+    the tokens the provider actually billed rather than the chars/4 estimate.
+    None whenever the snapshot could not be taken: it is best-effort accounting,
+    never a reason to fail a turn. Optional and last so events persisted before
+    the field existed still rehydrate.
+    """
 
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
     raw: dict[str, Any] = field(default_factory=dict)
+    context_usage: dict[str, Any] | None = None
 
     @property
     def cache_hit_rate(self) -> float:

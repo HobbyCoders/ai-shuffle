@@ -10,6 +10,12 @@ Everything is estimated with the shared chars/4 heuristic
 trimmer triggers on. No tokenizer, no counting round-trip, so this is cheap
 enough to call between every turn.
 
+The estimate is a stand-in, not the truth: once a call has actually been made,
+the provider's own prompt accounting is available and ``measured_prompt_tokens``
+replaces the guessed total (the estimator can be an order of magnitude off on a
+history full of images and tool-result blobs). ``measured`` in the response says
+which of the two a host is looking at.
+
 Categories — the same labels Claude Code's ``/context`` uses
 ------------------------------------------------------------
 ``System prompt``   base prompt + environment block + app "extra" blocks + the
@@ -221,6 +227,7 @@ def build_context_usage(
     model: str,
     context_window: int | None = None,
     compaction: dict[str, int] | None = None,
+    measured_prompt_tokens: int | None = None,
 ) -> dict[str, Any]:
     """Assemble the breakdown dict (see the module docstring for the rules).
 
@@ -232,6 +239,15 @@ def build_context_usage(
     ``agents`` is host-declared (see :func:`agent_usage`): pass a descriptor
     per agent definition the host injected into the context — and only then,
     or the row would double-count text already priced elsewhere.
+
+    ``measured_prompt_tokens`` is what a provider actually billed for the prompt
+    (input + cache-read + cache-creation) on the call this breakdown describes.
+    Given it, ``totalTokens`` IS that number instead of a chars/4 guess, and
+    "Messages" absorbs the difference — it is the one category whose size the
+    estimator gets badly wrong (images, tool-result blobs, cached prefixes), so
+    the other rows keep their own estimates and Messages carries the remainder,
+    floored at 0. Free space and ``percentage`` then follow from the real total.
+    The response says which it was in ``measured``.
     """
     system_tokens = sum(
         estimate_tokens_of_text(s.text) for s in sections if s.kind in _SYSTEM_KINDS
@@ -289,7 +305,17 @@ def build_context_usage(
         (CUSTOM_AGENTS, agent_tokens),
         (MESSAGES, message_tokens),
     ]
-    total = sum(tokens for _, tokens in counted)
+    measured = measured_prompt_tokens is not None and measured_prompt_tokens >= 0
+    if measured_prompt_tokens is not None and measured_prompt_tokens >= 0:
+        others = sum(tokens for name, tokens in counted if name != MESSAGES)
+        message_tokens = max(0, measured_prompt_tokens - others)
+        counted = [
+            (name, message_tokens if name == MESSAGES else tokens)
+            for name, tokens in counted
+        ]
+        total = measured_prompt_tokens
+    else:
+        total = sum(tokens for _, tokens in counted)
 
     categories: list[dict[str, Any]] = [
         {"name": name, "tokens": tokens, "color": CATEGORY_COLORS[name]}
@@ -324,6 +350,10 @@ def build_context_usage(
         "rawMaxTokens": context_window,
         "percentage": percentage,
         "model": model,
+        # True when totalTokens came from the provider's own prompt accounting
+        # rather than the chars/4 estimator — the one thing a host cannot infer
+        # from the SDK-shaped rows themselves.
+        "measured": measured,
         # fluid never autocompacts in the CLI's sense (a model-written summary
         # replacing history). Its eviction ladder is mechanical and recoverable
         # — reported via ``compaction`` below, not by fabricating an

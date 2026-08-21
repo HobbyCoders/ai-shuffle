@@ -27,6 +27,10 @@ sequence on stdout, selected by ``FAKE_CLAUDE_SCENARIO``:
                             assistant → control_response → result. Forces the
                             reply to arrive through the turn's frame reader
                             while a between-turns pump is still waiting on it.
+  j  in-turn context usage: like (a), but the turn PAUSES after its assistant
+                            frame until a control_request arrives and answers
+                            it before the result frame — what a real CLI does
+                            when the loop asks for a per-call context snapshot.
 
 ``claude --version`` prints a version line and exits (the loop's version guard).
 Frames model the real vocabulary (``claude_agent_sdk`` message_parser + query.py).
@@ -209,6 +213,21 @@ def turn_with_deferred_control(sid: str, request_id: str | None) -> None:
     emit(result_frame(sid))
 
 
+def turn_inline_context(sid: str) -> None:
+    """A turn that answers the loop's per-call context query mid-stream.
+
+    The real CLI services control_requests while it streams; this fake is a
+    single stdin reader, so it parks after the assistant frame and waits for
+    the request the loop sends on seeing that frame's usage. EOF (no request
+    ever came) just ends the turn.
+    """
+    emit(assistant_frame(sid, [{"type": "text", "text": "Hello from fake."}], "end_turn"))
+    msg = wait_for("control_request")
+    if msg is not None:
+        emit(context_usage_response(msg.get("request_id", "")))
+    emit(result_frame(sid))
+
+
 def turn_partial(sid: str) -> None:
     emit(stream_event(sid, {"type": "message_start", "message": {"usage": {"input_tokens": 9}}}))
     emit(stream_event(sid, {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}))
@@ -257,6 +276,8 @@ def main() -> int:
         if scenario == "i":
             turn_with_deferred_control(session_id, deferred_control)
             deferred_control = None
+        elif scenario == "j":
+            turn_inline_context(session_id)
         elif scenario == "b":
             turn_tool(session_id)
         elif scenario == "d":

@@ -53,7 +53,14 @@ from fluid.engine.delegated_proto import (
     parse_control_response,
 )
 from fluid.events.bus import EventBus
-from fluid.events.model import ErrorEvent, Event, Interrupted, TurnComplete, TurnStarted
+from fluid.events.model import (
+    ErrorEvent,
+    Event,
+    Interrupted,
+    TurnComplete,
+    TurnStarted,
+    Usage,
+)
 from fluid.events.ops import (
     BackgroundTaskFinished,
     Interrupt,
@@ -167,6 +174,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # Loop-issued control_requests awaiting their control_response, by
         # request_id (the outbound mirror of _pending_permissions).
         self._pending_controls: dict[str, asyncio.Future] = {}
+        # Context-usage snapshots asked for mid-turn, one per model call the
+        # CLI reports: request_id -> the node that call produced. Answered
+        # through the turn's own frame reader (see _read_until_result);
+        # anything still outstanding when the turn ends is dropped.
+        self._pending_usage_snapshots: dict[str, str] = {}
         # Only one reader may consume the CLI's stdout at a time: a turn's
         # frame reader, or a between-turns control pump.
         self._stdout_lock = asyncio.Lock()
@@ -445,6 +457,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             )
         finally:
             self._active_turn_id = None
+            self._pending_usage_snapshots.clear()
             if mapper.cli_session_id and mapper.cli_session_id != self.cli_session_id:
                 self.cli_session_id = mapper.cli_session_id
                 self._persist_cli_session_id(sid, mapper.cli_session_id)
@@ -536,6 +549,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     await self._emit_terminal_with_park(event)
                 else:
                     await self._emit(event)
+                if isinstance(event, Usage) and event.node_id:
+                    await self._ask_usage_snapshot(event.node_id)
             if mapped.message is not None and mapped.node_id is not None:
                 node = SessionNode(
                     node_id=mapped.node_id, parent_id=parent.node_id, message=mapped.message,
@@ -547,8 +562,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if mapped.control_reply is not None:
                 # A control call issued while this turn runs: the turn owns
                 # stdout, so its reader is what delivers the answer.
-                self._resolve_control(mapped.control_reply)
+                if not await self._emit_usage_snapshot(sid, turn_id, mapped.control_reply):
+                    self._resolve_control(mapped.control_reply)
             if mapped.is_result:
+                # Snapshots the CLI never got round to answering die with the
+                # turn — their Usage event already reported context_usage=None.
+                self._pending_usage_snapshots.clear()
                 return
 
     # ─── permission bridge ───────────────────────────────────────────────
@@ -778,6 +797,51 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         stats field is absent here — the CLI compacts its own way.
         """
         return await self._request_control({"subtype": "get_context_usage"})
+
+    async def _ask_usage_snapshot(self, node_id: str) -> None:
+        """Ask the CLI what the context looked like for the call just reported.
+
+        Sent, not awaited. The turn's frame reader is the only stdout consumer
+        while a turn runs, so awaiting the reply from inside that reader would
+        deadlock against itself — the request goes out on stdin and the reply
+        comes back through the same reader that would have been blocked
+        (:meth:`_emit_usage_snapshot`), which is also why the answer arrives as
+        a second ``Usage`` event rather than as a field on the first one.
+        """
+        if self._proc is None or self._proc.returncode is not None:
+            return
+        request_id = self._next_req_id()
+        self._pending_usage_snapshots[request_id] = node_id
+        try:
+            await self._write_frame({
+                "type": "control_request",
+                "request_id": request_id,
+                "request": {"subtype": "get_context_usage"},
+            })
+        except Exception:
+            self._pending_usage_snapshots.pop(request_id, None)
+            logger.debug("context-usage snapshot request failed", exc_info=True)
+
+    async def _emit_usage_snapshot(
+        self, sid: str, turn_id: str, reply: ControlReply,
+    ) -> bool:
+        """Publish a snapshot reply as a second ``Usage`` for the same node.
+
+        Token fields stay 0 — the call's tokens were already reported by the
+        first event, and double-counting them would inflate every host's spend
+        accounting. Returns False when the reply belongs to somebody else.
+        """
+        node_id = self._pending_usage_snapshots.pop(reply.request_id, None)
+        if node_id is None:
+            return False
+        if reply.ok and reply.payload is not None:
+            await self._emit(Usage(
+                session_id=sid, node_id=node_id, turn_id=turn_id,
+                context_usage=reply.payload,
+            ))
+        else:
+            logger.debug("context-usage snapshot unavailable: %s", reply.error)
+        return True
 
     async def _send_interrupt(self) -> None:
         """Send the documented interrupt control_request; fall back to SIGINT."""

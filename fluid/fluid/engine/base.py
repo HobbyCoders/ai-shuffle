@@ -43,6 +43,10 @@ class ExecutionEngine(Protocol):
              "percentage": float | None,   # None when maxTokens is unknown
              "model": str,
              "isAutoCompactEnabled": bool,
+             # True when totalTokens is the prompt size a provider actually
+             # billed for, False when it is the chars/4 estimate. Native leg
+             # only — the delegated leg proxies the CLI's dict, which lacks it.
+             "measured"?: bool,
              # Native leg only — eviction-ladder stats (the delegated leg
              # proxies the CLI's dict, which lacks the key):
              "compaction"?: {"digestedSpans": int, "epochStubs": int,
