@@ -7,6 +7,9 @@
 	 * keycard row that opens `ManageMediaModelsDrawer` — the new home for the old
 	 * AI-models tab (ruling D5). Replaces the residual `ConnectionsSection`.
 	 *
+	 * Card order: fal.ai API key, GitHub, AI media models — the credentials
+	 * first, then the model catalog the fal key unlocks.
+	 *
 	 * The fal.ai keycard mechanics are lifted verbatim from ConnectionsSection
 	 * (self-contained local state + raw fetch to /settings/integrations/fal-ai).
 	 * The GitHub keycard is driven by the same six props ProvidersSection forwards.
@@ -171,25 +174,6 @@
 	{#if falError}<div class="kc-foot err" role="alert">{falError}</div>{/if}
 	{#if falSuccess}<div class="kc-foot ok">{falSuccess}</div>{/if}
 
-	<!-- AI media models (opens the manage-media-models drawer) -->
-	<div class="keycard">
-		<div class="kc-ic">
-			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-				<rect x="3" y="3" width="7" height="7" rx="1"/>
-				<rect x="14" y="3" width="7" height="7" rx="1"/>
-				<rect x="3" y="14" width="7" height="7" rx="1"/>
-				<rect x="14" y="14" width="7" height="7" rx="1"/>
-			</svg>
-		</div>
-		<div class="kc-body">
-			<h4>AI media models</h4>
-			<p>Image, video, audio and 3D generation models</p>
-		</div>
-		<div class="kc-acts">
-			<button type="button" class="ed-btn" onclick={() => (manageMediaOpen = true)}>Manage</button>
-		</div>
-	</div>
-
 	<!-- GitHub (verbatim; driven by the six forwarded props) -->
 	<div class="keycard">
 		<div class="kc-ic">
@@ -221,6 +205,25 @@
 			{/if}
 		</div>
 	</div>
+	<!-- AI media models (opens the manage-media-models drawer) -->
+	<div class="keycard">
+		<div class="kc-ic">
+			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<rect x="3" y="3" width="7" height="7" rx="1"/>
+				<rect x="14" y="3" width="7" height="7" rx="1"/>
+				<rect x="3" y="14" width="7" height="7" rx="1"/>
+				<rect x="14" y="14" width="7" height="7" rx="1"/>
+			</svg>
+		</div>
+		<div class="kc-body">
+			<h4>AI media models</h4>
+			<p>Image, video, audio and 3D generation models</p>
+		</div>
+		<div class="kc-acts">
+			<button type="button" class="ed-btn" onclick={() => (manageMediaOpen = true)}>Manage</button>
+		</div>
+	</div>
+
 </div>
 
 {#if manageMediaOpen}
@@ -287,6 +290,15 @@
 		align-self: center;
 		flex-wrap: wrap;
 		justify-content: flex-end;
+	}
+	/* Every action button reads the same width so the column lines up down the
+	   group, whatever the label says. */
+	.kc-acts .ed-btn {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 104px;
+		text-align: center;
 	}
 	.kc-acts .kc-in {
 		width: 200px;

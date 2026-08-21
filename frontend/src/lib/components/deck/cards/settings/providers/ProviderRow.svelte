@@ -1,153 +1,168 @@
 <script lang="ts">
 	/**
-	 * ProviderRow — one unified row in the Providers list (D2 contract, plan §1.1).
+	 * ProviderRow — one row in the static provider catalog.
 	 *
-	 * Presentational only: the parent (`ProviderList`) owns all state and hands
-	 * this row its display model + action callbacks. Reuses the `.acct-*` row
-	 * system relocated from `ConnectionsSection` so the visual style is unchanged.
+	 * Presentational only: `ProviderList` owns every piece of state and hands this
+	 * row a display model plus a `children` snippet that becomes the expanded
+	 * panel. The row itself is a flat list entry — no card border, no background,
+	 * just a bottom rule — so the catalog reads as one continuous list.
 	 *
-	 * A row shows: name, type badge, connection-status pill, and an actions
-	 * cluster. Gateway rows (OpenRouter/OpenAI/custom) carry an enable toggle;
-	 * native-auth rows (Claude subscription, ChatGPT subscription) show their
-	 * status pill instead of a toggle (§1.1).
+	 * Layout: a status dot pinned to the top-left corner of the brand glyph tile,
+	 * then the name (with an optional type badge) over a one-line status subtitle.
+	 * On the right: the expand control, and — for providers that can be switched
+	 * off — an enable toggle.
 	 *
-	 * "Manage models" and "Sign in" are rendered as buttons wired to no-op
-	 * callbacks in this chunk — Chunks 5/6/7 wire the modal/drawer behind them.
+	 * The whole header is the expand button, labelled "Show {title} settings" so
+	 * the control has a stable accessible name regardless of the subtitle text.
+	 * The toggle is a sibling of that button (never nested inside it) and stops
+	 * propagation, so flipping it never expands the row.
 	 */
-	import { Server, Pencil, Trash2, SlidersHorizontal, LogIn, RotateCcw } from 'lucide-svelte';
+	import type { Snippet } from 'svelte';
+	import { ChevronDown, Loader2 } from 'lucide-svelte';
+	import ProviderGlyph, {
+		type ProviderGlyphKind
+	} from '$lib/components/settings/ProviderGlyph.svelte';
 
 	type Tone = 'ok' | 'warn' | 'off';
 
 	interface Props {
 		title: string;
-		/** Type badge text (rendered uppercase by `.sb`). */
-		badge: string;
-		/** Connection-status pill. */
-		status: { label: string; tone: Tone };
-		/** Which leading icon to render. */
-		iconKind?: 'server' | 'claude';
-		/** Optional secondary meta line (e.g. "base_url · N models"). */
-		meta?: string;
-		/** Row highlights green when true (enabled gateway / active auth). */
-		highlight?: boolean;
+		/** One-line status text under the title. */
+		subtitle: string;
+		/** Brand mark drawn in the tile. */
+		glyph: ProviderGlyphKind;
+		/** Status-dot colour. */
+		tone: Tone;
+		/** Whether the panel is open. */
+		expanded: boolean;
+		onToggleExpand: () => void;
+		/** Small mono pill after the title (Subscription / API key / Gateway). */
+		badge?: string;
 
-		/** "Manage models" — no-op in this chunk (Chunk 7 wires the drawer). */
-		onManageModels?: () => void;
-		/** Open the connected ChatGPT provider's banked reset inventory. */
-		onBankedResets?: (opener: HTMLButtonElement) => void;
-		/** "Sign in" / "Reconnect" — no-op in this chunk (Chunk 5/6 wires it). */
-		onSignIn?: () => void;
-		signInLabel?: string;
+		/** Enable toggle — rendered only when `onToggleEnabled` is supplied. */
+		enabled?: boolean;
+		onToggleEnabled?: () => void;
+		/** Spinner in the toggle's slot while the flip is in flight. */
+		toggling?: boolean;
 
-		/** Edit (gateway rows). */
-		onEdit?: () => void;
-
-		/** Remove with inline confirm (state owned by the parent). */
-		onRemove?: () => void;
-		confirmingDelete?: boolean;
-		onConfirmDelete?: () => void;
-		onCancelDelete?: () => void;
+		/** Panel body, rendered while `expanded`. */
+		children?: Snippet;
 	}
 
 	let {
 		title,
+		subtitle,
+		glyph,
+		tone,
+		expanded,
+		onToggleExpand,
 		badge,
-		status,
-		iconKind = 'server',
-		meta,
-		highlight = false,
-		onManageModels,
-		onBankedResets,
-		onSignIn,
-		signInLabel = 'Sign in',
-		onEdit,
-		onRemove,
-		confirmingDelete = false,
-		onConfirmDelete,
-		onCancelDelete
+		enabled = false,
+		onToggleEnabled,
+		toggling = false,
+		children
 	}: Props = $props();
+
+	function onToggleClick(event: MouseEvent) {
+		event.stopPropagation();
+		onToggleEnabled?.();
+	}
 </script>
 
-<li class="acct-row prov-row" class:active={highlight}>
-	<div class="acct-ic prov-ic" aria-hidden="true">
-		{#if iconKind === 'claude'}
-			<svg viewBox="0 0 24 24" fill="currentColor">
-				<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
-			</svg>
-		{:else}
-			<Server />
-		{/if}
-	</div>
+<div class="prov-row">
+	<div class="prov-head">
+		<button
+			type="button"
+			class="prov-headbtn"
+			aria-expanded={expanded}
+			aria-label="Show {title} settings"
+			onclick={onToggleExpand}
+		>
+			<span class="prov-icwrap">
+				<span class="prov-ic"><ProviderGlyph kind={glyph} size={17} /></span>
+				<span class="prov-dot {tone}"></span>
+			</span>
 
-	<div class="acct-body">
-		<div class="acct-name">
-			<span class="acct-title">{title}</span>
-			<span class="sb off">{badge}</span>
-			<span class="sb {status.tone}">{status.label}</span>
+			<span class="prov-body">
+				<span class="prov-name">
+					<span class="prov-title">{title}</span>
+					{#if badge}<span class="sb">{badge}</span>{/if}
+				</span>
+				<span class="prov-subtitle">{subtitle}</span>
+			</span>
+
+			<span class="prov-chev" class:open={expanded}><ChevronDown /></span>
+		</button>
+
+		<!-- The slot is always present, empty on rows that can't be switched off,
+		     so the chevron sits in the same column down the whole list. -->
+		<div class="prov-toggle">
+			{#if onToggleEnabled}
+				{#if toggling}
+					<Loader2 class="mp-toggle-spin" />
+				{:else}
+					<button
+						type="button"
+						class="switch"
+						class:on={enabled}
+						role="switch"
+						aria-checked={enabled}
+						aria-label="Enable {title}"
+						onclick={onToggleClick}><i></i></button
+					>
+				{/if}
+			{:else}
+				<span class="prov-toggle-gap" aria-hidden="true"></span>
+			{/if}
 		</div>
-		{#if meta}
-			<p class="acct-meta"><span class="prov-meta-txt">{meta}</span></p>
-		{/if}
 	</div>
 
-	<div class="acct-acts">
-		{#if confirmingDelete}
-			<span class="acct-confirm">Delete?</span>
-			<button type="button" class="ed-btn danger acct-sm" onclick={onConfirmDelete}>Delete</button>
-			<button type="button" class="ed-btn acct-sm" onclick={onCancelDelete}>Cancel</button>
-		{:else}
-			{#if onManageModels}
-				<button type="button" class="ed-btn acct-sm" onclick={onManageModels}>
-					<SlidersHorizontal />Manage models
-				</button>
-			{/if}
-
-			{#if onBankedResets}
-				<button
-					type="button"
-					class="ed-btn acct-sm"
-					onclick={(event) => onBankedResets?.(event.currentTarget)}
-				>
-					<RotateCcw />Banked resets
-				</button>
-			{/if}
-
-			{#if onSignIn}
-				<button type="button" class="ed-btn acct-sm" onclick={onSignIn}>
-					<LogIn />{signInLabel}
-				</button>
-			{/if}
-
-			{#if onEdit}
-				<button type="button" class="ed-btn acct-sm" onclick={onEdit}><Pencil />Edit</button>
-			{/if}
-
-			{#if onRemove}
-				<button type="button" class="acct-iconbtn danger" title="Remove" aria-label="Remove provider" onclick={onRemove}><Trash2 /></button>
-			{/if}
-		{/if}
-	</div>
-</li>
+	{#if expanded}
+		<div class="prov-panel">{@render children?.()}</div>
+	{/if}
+</div>
 
 <style>
-	/* Row system relocated from ConnectionsSection (mechanics/visuals unchanged).
-	   These render inside `.ed-content`, so shell globals (.ed-btn/.switch/.inp)
-	   still theme the buttons — the styles below only cover the row layout. */
-	.acct-row {
+	/* Flat list: rows are separated by a rule, not boxed. */
+	.prov-row {
+		border-bottom: 1px solid var(--border);
+	}
+	.prov-row:last-child {
+		border-bottom: none;
+	}
+	.prov-head {
 		display: flex;
-		gap: 12px;
 		align-items: center;
-		padding: 10px 12px;
-		border: 1px solid var(--border);
-		border-radius: 10px;
-		background: var(--muted);
+		gap: 8px;
+		padding: 12px 4px;
 	}
-	.acct-row.active {
-		border-color: color-mix(in oklch, var(--success, #16a34a) 45%, var(--border));
-		background: color-mix(in oklch, var(--success, #16a34a) 7%, var(--muted));
+	/* The header IS the expand control, so it spans the row. */
+	.prov-headbtn {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		padding: 0;
+		border: none;
+		background: none;
+		color: inherit;
+		font: inherit;
+		text-align: left;
+		cursor: pointer;
 	}
-	.acct-ic {
+	.prov-headbtn:focus-visible {
+		outline: 2px solid var(--ring, var(--foreground));
+		outline-offset: 3px;
+		border-radius: 8px;
+	}
+
+	/* Glyph tile with the status dot pinned to its top-left corner. */
+	.prov-icwrap {
+		position: relative;
 		flex-shrink: 0;
+	}
+	.prov-ic {
 		width: 32px;
 		height: 32px;
 		border-radius: 8px;
@@ -155,24 +170,39 @@
 		place-items: center;
 		background: var(--background);
 		color: var(--foreground);
-		font-weight: 600;
-		font-size: 14px;
 	}
-	.prov-ic :global(svg) {
-		width: 17px;
-		height: 17px;
+	.prov-dot {
+		position: absolute;
+		top: -2px;
+		left: -2px;
+		width: 8px;
+		height: 8px;
+		border-radius: 999px;
+		box-shadow: 0 0 0 2px var(--card, var(--background));
 	}
-	.acct-body {
+	.prov-dot.ok {
+		background: var(--success, #16a34a);
+	}
+	.prov-dot.warn {
+		background: var(--warning, #d97706);
+	}
+	.prov-dot.off {
+		background: var(--muted-foreground);
+		opacity: 0.6;
+	}
+
+	.prov-body {
 		flex: 1;
 		min-width: 0;
+		display: block;
 	}
-	.acct-name {
+	.prov-name {
 		display: flex;
 		align-items: center;
 		gap: 8px;
 		flex-wrap: wrap;
 	}
-	.acct-title {
+	.prov-title {
 		font-size: 13px;
 		font-weight: 600;
 		color: var(--foreground);
@@ -181,76 +211,59 @@
 		white-space: nowrap;
 		max-width: 100%;
 	}
-	.acct-meta {
-		margin: 2px 0 0;
-		font-size: 11.5px;
+	.prov-subtitle {
+		display: block;
+		margin-top: 2px;
+		font-size: 12px;
+		line-height: 1.4;
 		color: var(--muted-foreground);
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		flex-wrap: wrap;
-	}
-	.prov-meta-txt {
-		font-family: var(--font-mono, monospace);
-		font-size: 11px;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-		max-width: 100%;
 	}
-	.acct-acts {
+
+	.prov-chev {
 		flex-shrink: 0;
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		flex-wrap: wrap;
-		justify-content: flex-end;
-	}
-	.acct-sm {
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		padding: 5px 10px;
-		font-size: 12px;
-	}
-	.acct-sm :global(svg) {
-		width: 13px;
-		height: 13px;
-	}
-	.acct-confirm {
-		font-size: 12px;
-		color: var(--warning, #d97706);
-		font-weight: 600;
-	}
-	.acct-iconbtn {
 		display: grid;
 		place-items: center;
-		width: 30px;
-		height: 30px;
-		border-radius: 8px;
-		border: 1px solid var(--border);
-		background: var(--background);
+		width: 24px;
+		height: 24px;
 		color: var(--muted-foreground);
-		cursor: pointer;
-		transition: color 0.15s, border-color 0.15s, background 0.15s;
+		transition: transform 0.15s;
 	}
-	.acct-iconbtn :global(svg) {
+	.prov-chev.open {
+		transform: rotate(180deg);
+	}
+	.prov-chev :global(svg) {
 		width: 15px;
 		height: 15px;
 	}
-	.acct-iconbtn:hover {
-		color: var(--foreground);
-		border-color: var(--foreground);
+	@media (prefers-reduced-motion: reduce) {
+		.prov-chev {
+			transition: none;
+		}
 	}
-	.acct-iconbtn.danger:hover {
-		color: var(--destructive);
-		border-color: var(--destructive);
+
+	/* Same width as the `.switch` it holds (34x20, StudioEditorShell). */
+	.prov-toggle {
+		flex-shrink: 0;
+		display: grid;
+		place-items: center;
+		width: 34px;
 	}
-	.acct-iconbtn:focus-visible {
-		outline: 2px solid var(--ring, var(--foreground));
-		outline-offset: 1px;
+	.prov-toggle-gap {
+		display: block;
+		width: 34px;
+		height: 20px;
 	}
-	/* Status/type pill. */
+
+	/* Panel body sits under the title, clear of the glyph tile. */
+	.prov-panel {
+		padding: 4px 0 14px 44px;
+		font-size: 12px;
+	}
+
+	/* Type badge. */
 	.sb {
 		font-family: var(--font-mono, monospace);
 		font-size: 10px;
@@ -260,19 +273,10 @@
 		padding: 2px 7px;
 		border-radius: 999px;
 		line-height: 1.5;
-	}
-	.sb.ok {
-		color: var(--success, #16a34a);
-		background: color-mix(in oklch, var(--success, #16a34a) 14%, transparent);
-	}
-	.sb.off {
 		color: var(--muted-foreground);
 		background: var(--muted);
 	}
-	.sb.warn {
-		color: var(--warning, #d97706);
-		background: color-mix(in oklch, var(--warning, #d97706) 16%, transparent);
-	}
+
 	/* Toggle-in-progress spinner sits where the .switch would be. */
 	:global(.mp-toggle-spin) {
 		width: 18px;
@@ -281,7 +285,9 @@
 		animation: acct-spin 0.8s linear infinite;
 	}
 	@keyframes acct-spin {
-		to { transform: rotate(360deg); }
+		to {
+			transform: rotate(360deg);
+		}
 	}
 	@media (prefers-reduced-motion: reduce) {
 		:global(.mp-toggle-spin) {
@@ -290,13 +296,15 @@
 	}
 
 	@media (max-width: 560px) {
-		.acct-row {
-			flex-wrap: wrap;
+		.prov-head {
+			/* Bigger touch target on handhelds. */
+			padding: 14px 4px;
 		}
-		.acct-acts {
-			width: 100%;
-			justify-content: flex-start;
-			padding-left: 44px;
+		.prov-panel {
+			padding-left: 8px;
+		}
+		.prov-subtitle {
+			white-space: normal;
 		}
 	}
 </style>

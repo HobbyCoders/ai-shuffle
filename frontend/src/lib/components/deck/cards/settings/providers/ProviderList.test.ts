@@ -1,11 +1,12 @@
 /**
- * Behavior test for the ProviderList → ChatGPT-row Reconnect wiring.
+ * Behavior tests for ProviderList — the static provider catalog.
  *
- * The ChatGPT row's "Sign in"/"Reconnect" button was a no-op stub; it must now
- * open the reconnect modal hosting `ChatGptDeviceFlow` against the existing row.
- * We hydrate the real `providers` store with one ChatGPT row (via a mocked list
- * API), render the list, click the row's button, and assert the dialog renders.
+ * Every supported provider holds a row whether or not it is configured, and the
+ * per-provider actions (reconnect, banked resets, manage models) live inside the
+ * row's panel — so each test expands the row first, via its "Show {title}
+ * settings" control, then clicks the action.
  *
+ * We hydrate the real `providers` store through a mocked list API.
  * `ChatGptDeviceFlow`'s device API is mocked so its mount does no real network I/O.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -60,6 +61,14 @@ vi.mock('$lib/constants/models.svelte', async (importOriginal) => {
 
 import ProviderList from './ProviderList.svelte';
 import { providers } from '$lib/stores/providers.svelte';
+
+/** Open a row's panel by clicking its expander. */
+async function expandRow(
+	getByRole: (role: string, options: { name: string | RegExp }) => HTMLElement,
+	name: string | RegExp
+) {
+	await fireEvent.click(getByRole('button', { name }));
+}
 
 function chatgptProvider(partial: Partial<ModelProvider> = {}): ModelProvider {
 	return {
@@ -124,7 +133,9 @@ describe('ProviderList — ChatGPT row reconnect', () => {
 		// No reconnect dialog before the click.
 		expect(queryByRole('dialog', { name: 'Reconnect ChatGPT' })).toBeNull();
 
-		// needs_reauth → the row's button label is "Reconnect".
+		await expandRow(getByRole, /show chatgpt settings/i);
+
+		// needs_reauth → the panel's button label is "Reconnect".
 		const btn = getByRole('button', { name: 'Reconnect' });
 		await fireEvent.click(btn);
 
@@ -141,6 +152,7 @@ describe('ProviderList — ChatGPT row reconnect', () => {
 		await providers.loadProviders();
 
 		const { getByRole } = render(ProviderList);
+		await expandRow(getByRole, /show chatgpt settings/i);
 		expect(getByRole('button', { name: 'Manage models' })).toBeTruthy();
 	});
 });
@@ -177,6 +189,8 @@ describe('ProviderList — Grok row reconnect', () => {
 		const { getByRole, queryByRole } = render(ProviderList);
 
 		expect(queryByRole('dialog', { name: 'Reconnect Grok' })).toBeNull();
+
+		await expandRow(getByRole, 'Show Grok settings');
 
 		const btn = getByRole('button', { name: 'Reconnect' });
 		await fireEvent.click(btn);
@@ -219,8 +233,24 @@ describe('ProviderList — banked resets action', () => {
 		});
 		await providers.loadProviders();
 
-		const { getAllByRole } = render(ProviderList);
-		expect(getAllByRole('button', { name: 'Banked resets' })).toHaveLength(2);
+		const { getByRole, queryByRole } = render(ProviderList);
+
+		// The first ChatGPT row fills the static slot, so it is titled "ChatGPT";
+		// the extras keep their own names. Only one panel opens at a time, so each
+		// row is checked in turn.
+		const expectBankedResets = async (rowName: string | RegExp, shown: boolean) => {
+			await expandRow(getByRole, rowName);
+			const btn = queryByRole('button', { name: 'Banked resets' });
+			if (shown) expect(btn).toBeTruthy();
+			else expect(btn).toBeNull();
+		};
+
+		await expectBankedResets(/show chatgpt settings/i, true);
+		await expectBankedResets('Show Legacy ChatGPT settings', true);
+		await expectBankedResets('Show Disconnected ChatGPT settings', false);
+		await expectBankedResets('Show Reconnect ChatGPT settings', false);
+		// The OpenAI-key row is a gateway: its panel never offers banked resets.
+		await expectBankedResets('Show OpenAI API key settings', false);
 	});
 
 	it('opens the clicked provider and restores focus to its exact opener', async () => {
@@ -232,9 +262,10 @@ describe('ProviderList — banked resets action', () => {
 		});
 		await providers.loadProviders();
 
-		const { getAllByRole, getByRole } = render(ProviderList);
-		const openers = getAllByRole('button', { name: 'Banked resets' });
-		await fireEvent.click(openers[1]);
+		const { getByRole } = render(ProviderList);
+		await expandRow(getByRole, 'Show Second ChatGPT settings');
+		const opener = getByRole('button', { name: 'Banked resets' });
+		await fireEvent.click(opener);
 
 		await waitFor(() =>
 			expect(mocks.listCodexRateLimitResetCredits).toHaveBeenCalledWith('second')
@@ -242,7 +273,7 @@ describe('ProviderList — banked resets action', () => {
 		expect(getByRole('dialog', { name: 'Banked resets' })).toBeTruthy();
 
 		await fireEvent.click(getByRole('button', { name: 'Close' }));
-		await waitFor(() => expect(document.activeElement).toBe(openers[1]));
+		await waitFor(() => expect(document.activeElement).toBe(opener));
 	});
 
 	it('shows Banked resets on a connected Grok row and opens the same dialog', async () => {
@@ -252,6 +283,7 @@ describe('ProviderList — banked resets action', () => {
 		await providers.loadProviders();
 
 		const { getByRole } = render(ProviderList);
+		await expandRow(getByRole, 'Show Grok settings');
 		expect(getByRole('button', { name: 'Banked resets' })).toBeTruthy();
 
 		await fireEvent.click(getByRole('button', { name: 'Banked resets' }));
@@ -278,22 +310,47 @@ describe('ProviderList — banked resets action', () => {
 		});
 		await providers.loadProviders();
 
-		const { queryByRole } = render(ProviderList);
+		const { getByRole, queryByRole } = render(ProviderList);
+		await expandRow(getByRole, 'Show Grok API key settings');
 		expect(queryByRole('button', { name: 'Banked resets' })).toBeNull();
 	});
 });
 
-describe('ProviderList — Anthropic API key row (conditional)', () => {
-	it('does NOT render the Anthropic key row when no key is set', async () => {
+describe('ProviderList — static catalog', () => {
+	it('renders every supported provider row with an empty providers list', async () => {
+		mocks.listModelProviders.mockResolvedValue({ providers: [] });
+		await providers.loadProviders();
+		await providers.loadIntegrations(); // default stub → no Anthropic key
+
+		const { getByText } = render(ProviderList);
+		for (const title of [
+			'Claude',
+			'Anthropic API key',
+			'ChatGPT',
+			'OpenAI API key',
+			'Grok',
+			'Grok API key',
+			'OpenRouter'
+		]) {
+			expect(getByText(title)).toBeTruthy();
+		}
+	});
+});
+
+describe('ProviderList — Anthropic API key row', () => {
+	it('renders the row as not connected when no key is set', async () => {
 		mocks.listModelProviders.mockResolvedValue({ providers: [] });
 		await providers.loadProviders();
 		await providers.loadIntegrations(); // default stub → key unset
 
-		const { queryByText } = render(ProviderList);
-		expect(queryByText('Anthropic API key')).toBeNull();
+		const { getByText } = render(ProviderList);
+		expect(getByText('Anthropic API key')).toBeTruthy();
+		expect(
+			getByText('Not connected — paste an Anthropic key to use it instead of the subscription.')
+		).toBeTruthy();
 	});
 
-	it('renders the Anthropic key row with masked meta when a key is set', async () => {
+	it('shows the masked key in the row subtitle when a key is set', async () => {
 		mocks.listModelProviders.mockResolvedValue({ providers: [] });
 		await providers.loadProviders();
 
@@ -312,18 +369,18 @@ describe('ProviderList — Anthropic API key row (conditional)', () => {
 
 		const { getByText } = render(ProviderList);
 		expect(getByText('Anthropic API key')).toBeTruthy();
-		// Masked key is shown as the row's meta line.
-		expect(getByText('sk-ant-…xyz')).toBeTruthy();
+		// Masked key is shown as the row's status line.
+		expect(getByText('Key set · sk-ant-…xyz')).toBeTruthy();
 	});
 });
 
-describe('ProviderList — Claude subscription row (conditional)', () => {
-	it('does NOT render the Claude subscription row when unauthenticated with no saved accounts', async () => {
+describe('ProviderList — Claude subscription row', () => {
+	it('reads as not connected when unauthenticated with no saved accounts', async () => {
 		mocks.listModelProviders.mockResolvedValue({ providers: [] });
 		await providers.loadProviders();
 
-		const { queryByText } = render(ProviderList);
+		const { getByText } = render(ProviderList);
 		// Default auth store is unauthenticated and no accounts were loaded.
-		expect(queryByText('Claude subscription')).toBeNull();
+		expect(getByText('Not connected — sign in with your Claude account.')).toBeTruthy();
 	});
 });

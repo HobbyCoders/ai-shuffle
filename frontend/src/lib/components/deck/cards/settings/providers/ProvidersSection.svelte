@@ -55,8 +55,6 @@
 		onDisconnectGithub
 	}: Props = $props();
 
-	const s = $derived(providers.current);
-
 	// Add-provider modal open flag. The modal owns its own step machine + flows;
 	// on completion or dismissal it calls back to close.
 	let addProviderOpen = $state(false);
@@ -157,7 +155,7 @@
 
 	<div class="prov-groupbody">
 		<div class="prov-toolbar">
-			<h4>Configured providers</h4>
+			<h4>All providers</h4>
 			<div class="prov-actions">
 				<button type="button" class="ed-btn prov-import-btn" onclick={onImportSettings}>
 					<FileInput />Import settings
@@ -167,10 +165,6 @@
 				</button>
 			</div>
 		</div>
-
-		{#if s.claudeAuthError}
-			<div class="prov-err" role="alert">{s.claudeAuthError}</div>
-		{/if}
 
 		<ProviderList />
 	</div>
@@ -188,12 +182,14 @@
 			<p>Used for session titles, commit messages, PR descriptions, branch names, and generating agents. Chats pick their own model when you start them.</p>
 		</div>
 		<div class="ctl textgen-ctl">
-			<ModelPicker
-				id="text-generation-model"
-				value={textGenValue}
-				allowCustom={false}
-				onSelect={(value) => saveTextGeneration({ text_generation_model: value })}
-			/>
+			<div class="textgen-model">
+				<ModelPicker
+					id="text-generation-model"
+					value={textGenValue}
+					allowCustom={false}
+					onSelect={(value) => saveTextGeneration({ text_generation_model: value })}
+				/>
+			</div>
 			<select
 				class="sel textgen-effort"
 				aria-label="Text generation effort"
@@ -228,18 +224,23 @@
 {/if}
 
 <style>
-	/* Model picker + effort sit side by side, wrapping to their own line on a
-	   narrow card rather than squeezing the picker below its 220px floor. */
+	/* Model picker + effort stay on one line beside the label, each at a fixed
+	   width so neither squeezes the other. They stack only on a narrow card. */
 	.textgen-ctl {
 		display: flex;
-		flex-wrap: wrap;
+		flex-wrap: nowrap;
 		align-items: center;
 		justify-content: flex-end;
 		gap: 8px;
 	}
+	.textgen-model {
+		flex-shrink: 0;
+		width: 260px;
+	}
 	.textgen-effort {
-		width: auto;
-		min-width: 132px;
+		flex-shrink: 0;
+		width: 140px;
+		min-width: 0;
 	}
 	.prov-groupbody {
 		padding: 4px 18px 14px;
@@ -285,12 +286,15 @@
 	.prov-import-btn:hover {
 		background: color-mix(in oklch, var(--primary) 11%, transparent);
 	}
-	.prov-err {
-		font-size: 12.5px;
-		color: var(--destructive);
-		padding: 4px 2px 8px;
-	}
 	@media (max-width: 640px) {
+		.textgen-ctl {
+			flex-wrap: wrap;
+			width: 100%;
+		}
+		.textgen-model,
+		.textgen-effort {
+			width: 100%;
+		}
 		.prov-toolbar {
 			align-items: flex-start;
 			flex-direction: column;

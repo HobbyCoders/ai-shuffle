@@ -1,68 +1,80 @@
 <script lang="ts">
 	/**
-	 * ProviderList — the unified, store-driven provider list (plan §1.1).
+	 * ProviderList — the static catalog of every provider the app supports.
 	 *
-	 * Every row is CONDITIONAL — it appears only once configured, so the page reads
-	 * as one mechanism where everything is added via "+ Add provider".
+	 * The list is FIXED: each supported provider holds a slot whether or not it is
+	 * configured, always in the same order, so the page reads as a catalog rather
+	 * than a log of what happens to be connected. Slots, top to bottom:
 	 *
-	 * Maps the state the `providers` store owns into one ordered list of rows:
-	 *   1. Claude subscription (native-auth) — rendered only when authenticated OR
-	 *      there is a saved account. Status pill + "Manage accounts" expander that
-	 *      reveals `ClaudeAccountsPanel` (switch / add / rename / delete). No toggle.
-	 *   2. Anthropic API key (native-auth) — rendered only when a key is stored
-	 *      (`s.anthropicKeySet`), as a uniform `ProviderRow`. Edit expands the
-	 *      replace-key panel (`ClaudeApiKeyRow`, now panel-only → `setAnthropicKey`);
-	 *      Remove inline-confirms → `clearAnthropicKey`. When set, `claudeCodeAuthMethod`
-	 *      is 'api_key', which row 1 shows as "Overridden by API key".
-	 *   3. model_providers rows, ordered ChatGPT → OpenRouter → OpenAI → custom:
-	 *        - ChatGPT subscription (auth_mode='chatgpt'): native-auth, status pill,
-	 *          no toggle, "Sign in / Reconnect" (opens the `ChatGptDeviceFlow` modal
-	 *          in reconnect mode against the existing row), removable.
-	 *        - gateway rows (OpenRouter / OpenAI / custom): "Manage models" (no-op
-	 *          this chunk — Chunk 7 wires the drawer), Edit (opens the real
-	 *          `ProviderEditForm`), and Remove.
+	 *   1. Claude              — native subscription auth (no toggle)
+	 *   2. Anthropic API key   — overrides the subscription while it is set
+	 *   3. ChatGPT             — Codex subscription (auth_mode='chatgpt')
+	 *   4. OpenAI API key      — gateway row, provider_type='openai'
+	 *   5. Grok                — SuperGrok subscription
+	 *   6. Grok API key        — gateway row, provider_type='xai'
+	 *   7. OpenRouter          — gateway row
+	 *   8. Custom gateways     — one row per remaining custom row (the only
+	 *                            dynamic group; renders nothing when empty)
 	 *
-	 * All mutations funnel through the store so the model registry re-hydrates
-	 * (landmine L4). Row presentation lives in `ProviderRow`; this component owns
-	 * only the row model + transient view state (which row is expanded / editing /
-	 * confirming delete).
+	 * A slot backed by no `model_providers` row still renders, reading "Not
+	 * connected", and its panel offers the sign-in / add-key action, which opens
+	 * `AddProviderModal` straight on that provider's step. When more than one row
+	 * matches a slot the first fills it and the rest render directly beneath with
+	 * the same glyph — a row is never dropped.
+	 *
+	 * Clicking a row header expands its panel; only one panel is open at a time.
+	 * The panel holds the ai-shuffle controls for that provider (reconnect, remove,
+	 * banked resets, manage models, default model, replace key). All mutations
+	 * funnel through the `providers` store so the model registry re-hydrates
+	 * (landmine L4); this component owns only the transient view state.
 	 */
 	import { onMount, tick } from 'svelte';
 	import { X } from 'lucide-svelte';
 	import { isPanelFullscreenWidth } from '$lib/utils/viewport';
 	import { claudeAuthenticated, claudeTokenValid } from '$lib/stores/auth.svelte';
-	import type { ModelProvider } from '$lib/api/model-providers';
+	import { updateModelProvider, type ModelProvider } from '$lib/api/model-providers';
+	import { getErrorMessage } from '$lib/api/client';
 	import { providers } from '$lib/stores/providers.svelte';
+	import { toast } from '$lib/stores/toast';
+	import type { ProviderGlyphKind } from '$lib/components/settings/ProviderGlyph.svelte';
 	import ProviderRow from './ProviderRow.svelte';
 	import ClaudeApiKeyRow from './ClaudeApiKeyRow.svelte';
 	import ProviderEditForm from './ProviderEditForm.svelte';
 	import ManageModelsDrawer from './ManageModelsDrawer.svelte';
 	import BankedResetsDialog from './BankedResetsDialog.svelte';
+	import AddProviderModal, { type Step } from './AddProviderModal.svelte';
 	import ChatGptDeviceFlow from './flows/ChatGptDeviceFlow.svelte';
 	import GrokDeviceFlow from './flows/GrokDeviceFlow.svelte';
 	import ClaudeSubscriptionFlow from './flows/ClaudeSubscriptionFlow.svelte';
 
+	type Tone = 'ok' | 'warn' | 'off';
+
 	const s = $derived(providers.current);
 
 	// Which auth method Claude Code is using, straight from the store's integration
-	// status. Drives the Claude-subscription row's "overridden by API key" status.
-	// API-key login wins whenever a key is set — no silent billing switch.
+	// status. API-key login wins whenever a key is set — no silent billing switch.
 	let usingApiKeyAuth = $derived(s.claudeCodeAuthMethod === 'api_key');
 
-	// ----- Claude subscription row visibility -----
-	// Only render the subscription row once there is something to show: an
-	// authenticated account OR at least one saved account.
-	let claudeRowVisible = $derived($claudeAuthenticated || s.claudeAccounts.length > 0);
-
 	// The single Claude account backing the subscription row — the active one, or
-	// the sole saved account when none is flagged active. Multiple accounts are no
-	// longer allowed; this is the one row we render.
+	// the sole saved account when none is flagged active.
 	const claudeAccount = $derived(s.claudeAccounts.find((a) => a.is_active) ?? s.claudeAccounts[0]);
 
+	// True once there is a Claude credential to manage (authenticated session or a
+	// saved account) — drives which panel the Claude slot shows.
+	let claudeConnected = $derived($claudeAuthenticated || s.claudeAccounts.length > 0);
+
+	// Token present but expired/invalid: the credential exists (so
+	// $claudeAuthenticated is true) yet the OAuth token can't be used.
+	let tokenExpired = $derived($claudeAuthenticated && !$claudeTokenValid);
+
 	// ----- Transient view state (component-local) -----
+	// Which row's panel is open (`claude`, `openai-key`, `custom:{id}`, …), or null.
+	let expandedKey = $state<string | null>(null);
+	// Which step the add-provider modal is pinned to, or null when it is closed.
+	let addStep = $state<Step | null>(null);
 	// Whether the Claude sign-in modal is open.
 	let claudeSignInOpen = $state(false);
-	// Whether the Claude subscription row is armed for delete (inline confirm).
+	// Whether the Claude row is armed for disconnect (inline confirm).
 	let confirmDeleteClaude = $state(false);
 	// Whether the Anthropic-key row's replace-key panel is expanded.
 	let keyEditOpen = $state(false);
@@ -72,15 +84,17 @@
 	let editingId: string | null = $state(null);
 	// Which provider row is armed for delete (inline confirm), or null.
 	let confirmDeleteId: string | null = $state(null);
-	// Which gateway row's Manage-models drawer is open (its id), or null.
+	// Which row's Manage-models drawer is open (its id), or null.
 	let manageModelsId = $state<string | null>(null);
+	// Which row's default-model save is in flight (its id), or null.
+	let savingDefaultId = $state<string | null>(null);
 	// Which ChatGPT/Grok row is mid-reconnect (its id, hosts the device-flow modal), or null.
 	let reconnectId = $state<string | null>(null);
 	// True while the reconnect device flow has an operation in flight — guards close.
 	let reconnectBusy = $state(false);
 	// True while the Claude sign-in flow has an operation in flight — guards close.
 	let claudeSignInBusy = $state(false);
-	// Connected ChatGPT provider whose banked reset inventory is open, plus the
+	// Connected subscription row whose banked reset inventory is open, plus the
 	// exact row button that must regain focus after the dialog unmounts.
 	let bankedResetsProvider = $state<ModelProvider | null>(null);
 	let bankedResetsOpener = $state<HTMLButtonElement | null>(null);
@@ -107,6 +121,24 @@
 	$effect(() => {
 		if (claudeSignInOpen) claudeSignInDialogEl?.focus();
 	});
+
+	// The drawer is rendered once, outside the rows, so it survives its row
+	// collapsing and there is never more than one mounted.
+	const manageModelsProvider = $derived(
+		manageModelsId === null ? null : (s.providers.find((p) => p.id === manageModelsId) ?? null)
+	);
+
+	// ----- Expansion -----
+	// One panel at a time. Any armed confirm or open inline edit belongs to the
+	// panel that was showing, so switching rows drops it.
+	function toggleExpand(key: string) {
+		expandedKey = expandedKey === key ? null : key;
+		confirmDeleteClaude = false;
+		confirmDeleteKey = false;
+		keyEditOpen = false;
+		editingId = null;
+		confirmDeleteId = null;
+	}
 
 	function closeReconnect() {
 		if (!reconnectBusy) reconnectId = null;
@@ -135,14 +167,10 @@
 		opener?.focus();
 	}
 
-	// Token present but expired/invalid: the credential exists (so
-	// $claudeAuthenticated is true) yet the OAuth token can't be used. Mirrors
-	// ConnectionsSection's derivation.
-	let tokenExpired = $derived($claudeAuthenticated && !$claudeTokenValid);
-
-	// ----- model_providers classification & ordering (ruling PR1) -----
+	// ----- model_providers classification (ruling PR1) -----
 	// Key on auth_mode FIRST (the Codex row is provider_type='custom' +
-	// auth_mode='chatgpt'), THEN provider_type.
+	// auth_mode='chatgpt'), THEN provider_type. Every row lands in exactly one
+	// bucket, and every bucket has a slot — so nothing can go missing.
 	type SubKind = 'chatgpt' | 'grok' | 'openrouter' | 'openai' | 'xai' | 'custom';
 	function classifyProvider(p: ModelProvider): SubKind {
 		if (p.auth_mode === 'chatgpt') return 'chatgpt'; // auth_mode wins (PR1)
@@ -153,14 +181,19 @@
 		if (p.provider_type === 'xai') return 'xai';
 		return 'custom';
 	}
-	const SUBKIND_ORDER: Record<SubKind, number> = {
-		chatgpt: 0,
-		grok: 1,
-		openrouter: 2,
-		openai: 3,
-		xai: 4,
-		custom: 5
-	};
+
+	const byKind = $derived.by(() => {
+		const buckets: Record<SubKind, ModelProvider[]> = {
+			chatgpt: [],
+			grok: [],
+			openrouter: [],
+			openai: [],
+			xai: [],
+			custom: []
+		};
+		for (const p of s.providers) buckets[classifyProvider(p)].push(p);
+		return buckets;
+	});
 
 	let reconnectKind = $derived.by((): SubKind | null => {
 		if (reconnectId === null) return null;
@@ -169,48 +202,67 @@
 	});
 	let reconnectTitle = $derived(reconnectKind === 'grok' ? 'Reconnect Grok' : 'Reconnect ChatGPT');
 
-	function badgeFor(kind: SubKind): string {
-		if (kind === 'chatgpt') return 'ChatGPT';
-		if (kind === 'grok' || kind === 'xai') return 'Grok';
-		if (kind === 'openrouter') return 'OpenRouter';
-		if (kind === 'openai') return 'OpenAI';
-		return 'Custom';
+	// ----- Status lines -----
+	/** Human name for a Claude plan code. Unknown or missing → the plain label. */
+	function subscriptionLabel(type: string | null | undefined): string {
+		const value = (type ?? '').trim().toLowerCase();
+		if (value === 'max') return 'Claude Max Subscription';
+		if (value === 'pro') return 'Claude Pro Subscription';
+		return 'Claude Subscription';
 	}
 
-	function providerMeta(p: ModelProvider, kind: SubKind): string {
-		const n = p.models.length;
-		const modelsTxt = `${n} ${n === 1 ? 'model' : 'models'}`;
-		// ChatGPT/Grok subscription rows authenticate via OAuth blobs, not a
-		// gateway auth token — "no token" there would contradict the Connected pill.
-		const noToken =
-			kind !== 'chatgpt' && kind !== 'grok' && !p.auth_token_set ? ' · no token' : '';
-		return `${p.base_url} · ${modelsTxt}${noToken}`;
-	}
-
-	// Providers sorted into their display order (stable within a subkind).
-	let sortedProviders = $derived(
-		[...s.providers].sort((a, b) => SUBKIND_ORDER[classifyProvider(a)] - SUBKIND_ORDER[classifyProvider(b)])
-	);
-
-	// ----- Claude subscription row status (mirrors ConnectionsSection) -----
-	let claudeStatus = $derived.by((): { label: string; tone: 'ok' | 'warn' | 'off' } => {
-		if (tokenExpired) return { label: 'Token expired — reconnect', tone: 'warn' };
-		if ($claudeAuthenticated && !usingApiKeyAuth) return { label: 'Active', tone: 'ok' };
-		if ($claudeAuthenticated) return { label: 'Overridden by API key', tone: 'off' };
-		return { label: 'Not connected', tone: 'off' };
+	let claudeStatus = $derived.by((): { subtitle: string; tone: Tone } => {
+		if (!$claudeAuthenticated) {
+			return { subtitle: 'Not connected — sign in with your Claude account.', tone: 'off' };
+		}
+		if (tokenExpired) return { subtitle: 'Token expired — reconnect', tone: 'warn' };
+		if (usingApiKeyAuth) return { subtitle: 'Overridden by Anthropic API key', tone: 'off' };
+		const label = subscriptionLabel(claudeAccount?.subscription_type);
+		const pending = claudeAccount?.sync_pending ? ' · sync pending' : '';
+		const email = claudeAccount?.email;
+		return {
+			subtitle: email ? `Authenticated as ${email} · ${label}${pending}` : `${label}${pending}`,
+			tone: 'ok'
+		};
 	});
-	let claudeHighlight = $derived($claudeAuthenticated && !usingApiKeyAuth && !tokenExpired);
 
-	// ----- ChatGPT (Codex) native row status -----
-	function chatgptStatus(p: ModelProvider): { label: string; tone: 'ok' | 'warn' | 'off' } {
-		if (p.needs_reauth) return { label: 'Reconnect needed', tone: 'warn' };
-		if (p.codex_access_token_set) return { label: 'Connected', tone: 'ok' };
-		return { label: 'Not connected', tone: 'off' };
+	let anthropicKeyStatus = $derived.by((): { subtitle: string; tone: Tone } => {
+		if (!s.anthropicKeySet) {
+			return {
+				subtitle: 'Not connected — paste an Anthropic key to use it instead of the subscription.',
+				tone: 'off'
+			};
+		}
+		const masked = s.anthropicKeyMasked;
+		return { subtitle: masked ? `Key set · ${masked}` : 'Key set', tone: 'ok' };
+	});
+
+	/** Subscription rows (ChatGPT / Grok) authenticate via OAuth blobs, not a token. */
+	function subStatus(p: ModelProvider): { subtitle: string; tone: Tone } {
+		const n = p.models.length;
+		let subtitle: string;
+		let tone: Tone;
+		if (p.needs_reauth) {
+			subtitle = 'Reconnect needed';
+			tone = 'warn';
+		} else if (p.codex_access_token_set) {
+			subtitle = `Connected · ${n} ${n === 1 ? 'model' : 'models'}`;
+			tone = 'ok';
+		} else {
+			subtitle = 'Not connected';
+			tone = 'off';
+		}
+		if (!p.enabled) return { subtitle: `Disabled · ${subtitle}`, tone: 'off' };
+		return { subtitle, tone };
+	}
+
+	function gatewayStatus(p: ModelProvider): { subtitle: string; tone: Tone } {
+		const noToken = p.auth_token_set ? '' : ' · no token';
+		if (!p.enabled) return { subtitle: `Disabled${noToken}`, tone: 'off' };
+		return { subtitle: `Active · ${p.base_url}${noToken}`, tone: 'ok' };
 	}
 
 	// ----- Actions -----
-	// Claude subscription delete: inline-confirm (parity with the ChatGPT rows),
-	// then fully disconnect via the store (deletes every saved account).
 	function armDeleteClaude() {
 		confirmDeleteClaude = true;
 	}
@@ -222,7 +274,6 @@
 		await providers.disconnectClaude();
 	}
 
-	// Anthropic-key row: Edit toggles the replace-key panel; delete is inline-confirmed.
 	function toggleKeyEdit() {
 		confirmDeleteKey = false;
 		keyEditOpen = !keyEditOpen;
@@ -239,8 +290,7 @@
 		try {
 			await providers.clearAnthropicKey();
 		} catch {
-			// The row's remove failure is non-fatal here; the reload leaves the row
-			// as-is and the user can retry. (Panel-level save owns its own surface.)
+			// Non-fatal: the row stays as-is and the user can retry.
 		}
 	}
 
@@ -264,131 +314,385 @@
 		if (editingId === id) editingId = null;
 		await providers.deleteProvider(id);
 	}
+
+	// Empty string = "provider default", stored as null.
+	async function saveDefaultModel(p: ModelProvider, value: string) {
+		savingDefaultId = p.id;
+		try {
+			await updateModelProvider(p.id, { default_model: value || null });
+			await providers.refreshProviders();
+		} catch (e) {
+			toast.push(getErrorMessage(e, 'Could not save the default model'), { tone: 'error' });
+		} finally {
+			savingDefaultId = null;
+		}
+	}
 </script>
 
-<ul class="prov-list">
-	<!-- 1. Claude subscription (native-auth) — only once there's an account to show. -->
-	{#if claudeRowVisible}
-		<li class="prov-item">
+{#snippet subPanel(p: ModelProvider)}
+	<div class="prov-actrow">
+		{#if confirmDeleteId === p.id}
+			<span class="acct-confirm">Delete?</span>
+			<button type="button" class="ed-btn danger acct-sm" onclick={() => confirmDelete(p.id)}>
+				Delete
+			</button>
+			<button type="button" class="ed-btn acct-sm" onclick={cancelDelete}>Cancel</button>
+		{:else}
+			<button type="button" class="ed-btn acct-sm" onclick={() => (manageModelsId = p.id)}>
+				Manage models
+			</button>
+			{#if p.codex_access_token_set && !p.needs_reauth}
+				<button
+					type="button"
+					class="ed-btn acct-sm"
+					onclick={(event) => openBankedResets(p, event.currentTarget)}
+				>
+					Banked resets
+				</button>
+			{/if}
+			<button type="button" class="ed-btn acct-sm" onclick={() => (reconnectId = p.id)}>
+				{p.needs_reauth ? 'Reconnect' : 'Sign in'}
+			</button>
+			<button type="button" class="ed-btn danger acct-sm" onclick={() => armDelete(p.id)}>
+				Remove
+			</button>
+		{/if}
+	</div>
+{/snippet}
+
+{#snippet gatewayPanel(p: ModelProvider)}
+	<dl class="prov-dl">
+		<dt>Endpoint</dt>
+		<dd>{p.base_url}</dd>
+		<dt>Token</dt>
+		<dd>{p.auth_token_masked || 'not set'}</dd>
+		<dt>Models</dt>
+		<dd>{p.models.length} enabled</dd>
+	</dl>
+
+	<div class="prov-field">
+		<label class="prov-label" for="prov-default-{p.id}">Default model</label>
+		<select
+			id="prov-default-{p.id}"
+			class="sel prov-sel"
+			value={p.default_model ?? ''}
+			disabled={savingDefaultId === p.id}
+			onchange={(event) => saveDefaultModel(p, event.currentTarget.value)}
+		>
+			<option value="">Provider default</option>
+			{#each p.models as model (model.id)}
+				<option value={model.id}>{model.label || model.id}</option>
+			{/each}
+		</select>
+	</div>
+
+	<div class="prov-actrow">
+		{#if confirmDeleteId === p.id}
+			<span class="acct-confirm">Delete?</span>
+			<button type="button" class="ed-btn danger acct-sm" onclick={() => confirmDelete(p.id)}>
+				Delete
+			</button>
+			<button type="button" class="ed-btn acct-sm" onclick={cancelDelete}>Cancel</button>
+		{:else}
+			<button type="button" class="ed-btn acct-sm" onclick={() => (manageModelsId = p.id)}>
+				Manage models
+			</button>
+			<button type="button" class="ed-btn acct-sm" onclick={() => openEdit(p.id)}>Edit</button>
+			<button type="button" class="ed-btn danger acct-sm" onclick={() => armDelete(p.id)}>
+				Remove
+			</button>
+		{/if}
+	</div>
+
+	{#if editingId === p.id}
+		<div class="prov-sub"><ProviderEditForm provider={p} onClose={closeEdit} /></div>
+	{/if}
+{/snippet}
+
+<!-- One subscription slot (ChatGPT / Grok): the row when configured, otherwise a
+     "Not connected" placeholder whose panel opens the sign-in flow. -->
+{#snippet subSlot(
+	key: string,
+	slotTitle: string,
+	glyph: ProviderGlyphKind,
+	rows: ModelProvider[],
+	emptySubtitle: string,
+	emptyStep: Step
+)}
+	{#if rows.length === 0}
+		<ProviderRow
+			title={slotTitle}
+			badge="Subscription"
+			{glyph}
+			tone="off"
+			subtitle={emptySubtitle}
+			expanded={expandedKey === key}
+			onToggleExpand={() => toggleExpand(key)}
+		>
+			<div class="prov-actrow">
+				<button type="button" class="ed-btn primary acct-sm" onclick={() => (addStep = emptyStep)}>
+					Sign in
+				</button>
+			</div>
+		</ProviderRow>
+	{:else}
+		{#each rows as p, i (p.id)}
+			{@const rowKey = i === 0 ? key : `${key}:${p.id}`}
+			{@const status = subStatus(p)}
 			<ProviderRow
-				title="Claude"
+				title={i === 0 ? slotTitle : p.name}
 				badge="Subscription"
-				iconKind="claude"
-				status={claudeStatus}
-				highlight={claudeHighlight}
-				meta={claudeAccount?.email
-					? `${claudeAccount.email}${claudeAccount.sync_pending ? ' · sync pending' : ''}`
-					: undefined}
-				onSignIn={() => (claudeSignInOpen = true)}
-				signInLabel={tokenExpired ? 'Reconnect' : 'Sign in'}
-				onRemove={s.claudeAccounts.length > 0 ? armDeleteClaude : undefined}
-				confirmingDelete={confirmDeleteClaude}
-				onConfirmDelete={confirmDeleteClaude_}
-				onCancelDelete={cancelDeleteClaude}
-			/>
-			{#if !s.accountsEncryptionReady}
-				<p class="prov-note warn">
-					Encryption is locked — log in again as admin to manage the Claude account.
-				</p>
-			{:else if s.accountsError}
-				<p class="prov-note err">{s.accountsError}</p>
-			{/if}
-		</li>
+				{glyph}
+				tone={status.tone}
+				subtitle={status.subtitle}
+				expanded={expandedKey === rowKey}
+				onToggleExpand={() => toggleExpand(rowKey)}
+				enabled={p.enabled}
+				onToggleEnabled={() => providers.toggleProvider(p.id)}
+				toggling={s.togglingProviderId === p.id}
+			>
+				{@render subPanel(p)}
+			</ProviderRow>
+		{/each}
 	{/if}
+{/snippet}
 
-	<!-- 2. Anthropic API key (native-auth) — only once a key is stored. It overrides
-	     the subscription, which the Claude row's "Overridden by API key" pill shows. -->
-	{#if s.anthropicKeySet}
-		<li class="prov-item">
+<!-- One gateway slot (OpenAI / Grok / OpenRouter API keys). -->
+{#snippet gatewaySlot(
+	key: string,
+	slotTitle: string,
+	badge: string,
+	glyph: ProviderGlyphKind,
+	rows: ModelProvider[],
+	emptySubtitle: string,
+	emptyStep: Step
+)}
+	{#if rows.length === 0}
+		<ProviderRow
+			title={slotTitle}
+			{badge}
+			{glyph}
+			tone="off"
+			subtitle={emptySubtitle}
+			expanded={expandedKey === key}
+			onToggleExpand={() => toggleExpand(key)}
+		>
+			<div class="prov-actrow">
+				<button type="button" class="ed-btn primary acct-sm" onclick={() => (addStep = emptyStep)}>
+					Add API key
+				</button>
+			</div>
+		</ProviderRow>
+	{:else}
+		{#each rows as p, i (p.id)}
+			{@const rowKey = i === 0 ? key : `${key}:${p.id}`}
+			{@const status = gatewayStatus(p)}
 			<ProviderRow
-				title="Anthropic API key"
-				badge="API key"
-				iconKind="claude"
-				status={{ label: 'Active', tone: 'ok' }}
-				highlight={true}
-				meta={s.anthropicKeyMasked ?? undefined}
-				onEdit={toggleKeyEdit}
-				onRemove={armDeleteKey}
-				confirmingDelete={confirmDeleteKey}
-				onConfirmDelete={confirmDeleteKey_}
-				onCancelDelete={cancelDeleteKey}
-			/>
+				title={i === 0 ? slotTitle : p.name}
+				{badge}
+				{glyph}
+				tone={status.tone}
+				subtitle={status.subtitle}
+				expanded={expandedKey === rowKey}
+				onToggleExpand={() => toggleExpand(rowKey)}
+				enabled={p.enabled}
+				onToggleEnabled={() => providers.toggleProvider(p.id)}
+				toggling={s.togglingProviderId === p.id}
+			>
+				{@render gatewayPanel(p)}
+			</ProviderRow>
+		{/each}
+	{/if}
+{/snippet}
+
+{#if s.providersError}
+	<div class="prov-err" role="alert">{s.providersError}</div>
+{/if}
+
+{#if s.providersLoading && s.providers.length === 0}
+	<div class="prov-empty">Loading providers…</div>
+{/if}
+
+<div class="prov-list">
+	<!-- 1. Claude subscription (native auth, no toggle). -->
+	<ProviderRow
+		title="Claude"
+		badge="Subscription"
+		glyph="claude"
+		tone={claudeStatus.tone}
+		subtitle={claudeStatus.subtitle}
+		expanded={expandedKey === 'claude'}
+		onToggleExpand={() => toggleExpand('claude')}
+	>
+		{#if claudeConnected}
+			<div class="prov-actrow">
+				{#if confirmDeleteClaude}
+					<span class="acct-confirm">Disconnect?</span>
+					<button type="button" class="ed-btn danger acct-sm" onclick={confirmDeleteClaude_}>
+						Disconnect
+					</button>
+					<button type="button" class="ed-btn acct-sm" onclick={cancelDeleteClaude}>Cancel</button>
+				{:else}
+					<button
+						type="button"
+						class="ed-btn acct-sm"
+						onclick={() => (claudeSignInOpen = true)}
+					>
+						Reconnect
+					</button>
+					{#if s.claudeAccounts.length > 0}
+						<button type="button" class="ed-btn danger acct-sm" onclick={armDeleteClaude}>
+							Disconnect
+						</button>
+					{/if}
+				{/if}
+			</div>
+		{:else}
+			<div class="prov-actrow">
+				<button
+					type="button"
+					class="ed-btn primary acct-sm"
+					onclick={() => (claudeSignInOpen = true)}
+				>
+					Sign in
+				</button>
+			</div>
+		{/if}
+
+		{#if !s.accountsEncryptionReady}
+			<p class="prov-note warn">
+				Encryption is locked — log in again as admin to manage the Claude account.
+			</p>
+		{:else if s.accountsError}
+			<p class="prov-note err">{s.accountsError}</p>
+		{/if}
+		{#if s.claudeAuthError}
+			<p class="prov-note err">{s.claudeAuthError}</p>
+		{/if}
+	</ProviderRow>
+
+	<!-- 2. Anthropic API key — overrides the subscription while it is set. -->
+	<ProviderRow
+		title="Anthropic API key"
+		badge="API key"
+		glyph="anthropic"
+		tone={anthropicKeyStatus.tone}
+		subtitle={anthropicKeyStatus.subtitle}
+		expanded={expandedKey === 'anthropic-key'}
+		onToggleExpand={() => toggleExpand('anthropic-key')}
+	>
+		{#if s.anthropicKeySet}
+			<div class="prov-actrow">
+				{#if confirmDeleteKey}
+					<span class="acct-confirm">Delete?</span>
+					<button type="button" class="ed-btn danger acct-sm" onclick={confirmDeleteKey_}>
+						Delete
+					</button>
+					<button type="button" class="ed-btn acct-sm" onclick={cancelDeleteKey}>Cancel</button>
+				{:else}
+					<button type="button" class="ed-btn acct-sm" onclick={toggleKeyEdit}>Replace key</button>
+					<button type="button" class="ed-btn danger acct-sm" onclick={armDeleteKey}>Remove</button>
+				{/if}
+			</div>
 			{#if keyEditOpen}
-				<div class="prov-sub">
-					<ClaudeApiKeyRow onClose={() => (keyEditOpen = false)} />
-				</div>
+				<div class="prov-sub"><ClaudeApiKeyRow onClose={() => (keyEditOpen = false)} /></div>
 			{/if}
-		</li>
-	{/if}
+		{:else}
+			<div class="prov-actrow">
+				<button
+					type="button"
+					class="ed-btn primary acct-sm"
+					onclick={() => (addStep = 'claude-key')}
+				>
+					Add API key
+				</button>
+			</div>
+		{/if}
+	</ProviderRow>
 
-	<!-- 3. model_providers rows (ChatGPT → OpenRouter → OpenAI → custom) -->
-	{#if s.providersError}
-		<li class="prov-item"><div class="prov-err" role="alert">{s.providersError}</div></li>
-	{/if}
+	<!-- 3. ChatGPT (Codex subscription) -->
+	{@render subSlot(
+		'chatgpt',
+		'ChatGPT',
+		'openai',
+		byKind.chatgpt,
+		'Not connected — sign in with ChatGPT.',
+		'openai-sub'
+	)}
 
-	{#if s.providersLoading && s.providers.length === 0}
-		<li class="prov-item"><div class="prov-empty">Loading providers…</div></li>
-	{:else if !claudeRowVisible && !s.anthropicKeySet && s.providers.length === 0}
-		<li class="prov-item"><div class="prov-empty">No providers yet. Use “+ Add provider” to connect your Claude account, ChatGPT, Grok, an API key, or a custom gateway.</div></li>
-	{/if}
+	<!-- 4. OpenAI API key -->
+	{@render gatewaySlot(
+		'openai-key',
+		'OpenAI API key',
+		'API key',
+		'openai',
+		byKind.openai,
+		'Not connected — paste an OpenAI API key.',
+		'openai-key'
+	)}
 
-	{#each sortedProviders as p (p.id)}
-		{@const kind = classifyProvider(p)}
-		<li class="prov-item">
-			{#if kind === 'chatgpt' || kind === 'grok'}
-				<!-- Subscription: native-auth, no toggle/edit, sign-in + manage models + banked resets. -->
-				<ProviderRow
-					title={p.name}
-					badge={badgeFor(kind)}
-					iconKind="server"
-					status={chatgptStatus(p)}
-					highlight={!!p.codex_access_token_set && !p.needs_reauth}
-					meta={providerMeta(p, kind)}
-					onManageModels={() => (manageModelsId = p.id)}
-					onBankedResets={p.codex_access_token_set && !p.needs_reauth
-						? (opener) => openBankedResets(p, opener)
-						: undefined}
-					onSignIn={() => (reconnectId = p.id)}
-					signInLabel={p.needs_reauth ? 'Reconnect' : 'Sign in'}
-					onRemove={() => armDelete(p.id)}
-					confirmingDelete={confirmDeleteId === p.id}
-					onConfirmDelete={() => confirmDelete(p.id)}
-					onCancelDelete={cancelDelete}
-				/>
-				{#if manageModelsId === p.id}
-					<ManageModelsDrawer provider={p} onClose={() => (manageModelsId = null)} />
-				{/if}
-			{:else}
-				<!-- Gateway row: manage-models(no-op) + edit + remove. -->
-				<ProviderRow
-					title={p.name}
-					badge={badgeFor(kind)}
-					iconKind="server"
-					status={p.enabled ? { label: 'Active', tone: 'ok' } : { label: 'Disabled', tone: 'off' }}
-					highlight={p.enabled}
-					meta={providerMeta(p, kind)}
-					onManageModels={() => (manageModelsId = p.id)}
-					onEdit={() => openEdit(p.id)}
-					onRemove={() => armDelete(p.id)}
-					confirmingDelete={confirmDeleteId === p.id}
-					onConfirmDelete={() => confirmDelete(p.id)}
-					onCancelDelete={cancelDelete}
-				/>
-				{#if editingId === p.id}
-					<div class="prov-sub">
-						<ProviderEditForm provider={p} onClose={closeEdit} />
-					</div>
-				{/if}
-				{#if manageModelsId === p.id}
-					<ManageModelsDrawer provider={p} onClose={() => (manageModelsId = null)} />
-				{/if}
-			{/if}
-		</li>
+	<!-- 5. Grok (SuperGrok subscription) -->
+	{@render subSlot(
+		'grok',
+		'Grok',
+		'grok',
+		byKind.grok,
+		'Not connected — sign in with SuperGrok.',
+		'grok-sub'
+	)}
+
+	<!-- 6. Grok API key -->
+	{@render gatewaySlot(
+		'grok-key',
+		'Grok API key',
+		'API key',
+		'grok',
+		byKind.xai,
+		'Not connected — paste a Grok API key.',
+		'grok-key'
+	)}
+
+	<!-- 7. OpenRouter -->
+	{@render gatewaySlot(
+		'openrouter',
+		'OpenRouter',
+		'Gateway',
+		'openrouter',
+		byKind.openrouter,
+		'Not connected — paste an OpenRouter API key.',
+		'openrouter-key'
+	)}
+
+	<!-- 8. Custom gateways — the only dynamic group; nothing renders when empty. -->
+	{#each byKind.custom as p (p.id)}
+		{@const status = gatewayStatus(p)}
+		<ProviderRow
+			title={p.name}
+			badge="Gateway"
+			glyph="custom"
+			tone={status.tone}
+			subtitle={status.subtitle}
+			expanded={expandedKey === `custom:${p.id}`}
+			onToggleExpand={() => toggleExpand(`custom:${p.id}`)}
+			enabled={p.enabled}
+			onToggleEnabled={() => providers.toggleProvider(p.id)}
+			toggling={s.togglingProviderId === p.id}
+		>
+			{@render gatewayPanel(p)}
+		</ProviderRow>
 	{/each}
-</ul>
+</div>
+
+{#if manageModelsProvider}
+	<ManageModelsDrawer provider={manageModelsProvider} onClose={() => (manageModelsId = null)} />
+{/if}
 
 {#if bankedResetsProvider}
 	<BankedResetsDialog provider={bankedResetsProvider} onClose={closeBankedResets} />
+{/if}
+
+{#if addStep !== null}
+	<AddProviderModal initialStep={addStep} onClose={() => (addStep = null)} />
 {/if}
 
 {#if reconnectId !== null}
@@ -506,23 +810,8 @@
 
 <style>
 	.prov-list {
-		list-style: none;
-		margin: 0;
-		padding: 0;
 		display: flex;
 		flex-direction: column;
-		gap: 8px;
-	}
-	.prov-item {
-		display: flex;
-		flex-direction: column;
-		gap: 0;
-	}
-	/* Expanded sub-content (accounts panel / edit form) sits indented under its row. */
-	.prov-sub {
-		margin: 2px 0 4px;
-		padding: 4px 4px 4px 14px;
-		border-left: 2px solid var(--border);
 	}
 	.prov-err {
 		font-size: 12.5px;
@@ -534,9 +823,71 @@
 		color: var(--muted-foreground);
 		padding: 6px 2px 4px;
 	}
-	/* One-line status notice under the Claude subscription row. */
+
+	/* ----- Panel contents (rendered into ProviderRow's panel slot) ----- */
+	.prov-actrow {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		flex-wrap: wrap;
+	}
+	.acct-sm {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		padding: 5px 10px;
+		font-size: 12px;
+	}
+	.acct-confirm {
+		font-size: 12px;
+		color: var(--warning, #d97706);
+		font-weight: 600;
+	}
+	/* Endpoint / token / model counts. */
+	.prov-dl {
+		margin: 0 0 10px;
+		display: grid;
+		grid-template-columns: auto 1fr;
+		gap: 2px 12px;
+		font-size: 12px;
+	}
+	.prov-dl dt {
+		color: var(--muted-foreground);
+	}
+	.prov-dl dd {
+		margin: 0;
+		min-width: 0;
+		color: var(--foreground);
+		font-family: var(--font-mono, monospace);
+		font-size: 11.5px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.prov-field {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		margin-bottom: 10px;
+	}
+	.prov-label {
+		font-size: 11px;
+		font-weight: 600;
+		letter-spacing: 0.03em;
+		text-transform: uppercase;
+		color: var(--muted-foreground);
+	}
+	.prov-sel {
+		width: 220px;
+		max-width: 100%;
+	}
+	/* Inline edit / replace-key panel sits under the panel's action row. */
+	.prov-sub {
+		margin-top: 4px;
+	}
+	/* One-line status notice inside the Claude panel. */
 	.prov-note {
-		margin: 4px 2px 0;
+		margin: 8px 0 0;
 		font-size: 11.5px;
 		line-height: 1.4;
 	}
@@ -548,8 +899,13 @@
 	}
 
 	@media (max-width: 560px) {
-		.prov-sub {
-			padding-left: 8px;
+		.prov-field {
+			align-items: flex-start;
+			flex-direction: column;
+			gap: 4px;
+		}
+		.prov-sel {
+			width: 100%;
 		}
 	}
 </style>

@@ -1,3 +1,16 @@
+<script lang="ts" module>
+	/** One screen in the add-provider flow: the chooser, or a single flow. */
+	export type Step =
+		| 'choose'
+		| 'openai-key'
+		| 'openai-sub'
+		| 'grok-key'
+		| 'grok-sub'
+		| 'claude-key'
+		| 'claude-sub'
+		| 'openrouter-key';
+</script>
+
 <script lang="ts">
 	/**
 	 * AddProviderModal — the "Add a provider" modal (plan §1.2).
@@ -30,19 +43,22 @@
 	interface Props {
 		/** Close the modal (from a completed flow, Esc, backdrop, or the ✕). */
 		onClose: () => void;
+		/**
+		 * Open straight on one flow instead of the chooser. The provider list
+		 * uses this so a row's own "Sign in" / "Add API key" button lands on that
+		 * provider's screen. There is no chooser to return to in that journey, so
+		 * Back and Cancel close the modal.
+		 */
+		initialStep?: Step;
 	}
-	let { onClose }: Props = $props();
+	let { onClose, initialStep }: Props = $props();
 
-	type Step =
-		| 'choose'
-		| 'openai-key'
-		| 'openai-sub'
-		| 'grok-key'
-		| 'grok-sub'
-		| 'claude-key'
-		| 'claude-sub'
-		| 'openrouter-key';
-	let step = $state<Step>('choose');
+	// The modal is mounted fresh per open, so the opening step is read once.
+	// svelte-ignore state_referenced_locally
+	let step = $state<Step>(initialStep ?? 'choose');
+	/** True when the modal skipped the chooser — Back/Cancel close instead. */
+	// svelte-ignore state_referenced_locally
+	const pinnedToStep = initialStep !== undefined && initialStep !== 'choose';
 	// True while the active flow has an operation in flight — guards Esc/backdrop.
 	let busy = $state(false);
 
@@ -86,7 +102,8 @@
 		onClose();
 	}
 	function onCancel() {
-		step = 'choose';
+		if (pinnedToStep) onClose();
+		else step = 'choose';
 	}
 	function onBusyChange(b: boolean) {
 		busy = b;
@@ -96,7 +113,9 @@
 		if (!busy) onClose();
 	}
 	function goBack() {
-		if (!busy) step = 'choose';
+		if (busy) return;
+		if (pinnedToStep) onClose();
+		else step = 'choose';
 	}
 	function handleKeydown(event: KeyboardEvent) {
 		if (event.key === 'Escape') requestClose();
