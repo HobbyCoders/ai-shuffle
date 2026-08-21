@@ -68,6 +68,7 @@ from app.core.system_message_filter import HIDDEN_SYSTEM_SUBTYPES
 # These were originally defined here; other files import them from query_engine.
 from app.core.query_streaming import (  # noqa: F401 — re-exports
     extract_mcp_image,
+    is_context_snapshot_only as _is_context_snapshot_only,
     truncate_large_payload,
     MAX_TOOL_OUTPUT_SIZE,
     MAX_DISPLAY_OUTPUT_SIZE,
@@ -1026,9 +1027,14 @@ async def execute_query(
                 # overwrite the parent session's last-call figures with an
                 # unrelated number, so they are skipped entirely.
                 if getattr(message, "usage", None) and not getattr(message, "parent_tool_use_id", None):
-                    metadata["last_call_tokens_in"] = message.usage.get("input_tokens", 0)
-                    metadata["last_call_cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
-                    metadata["last_call_cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
+                    # A snapshot-only record (delegated leg) reports a context
+                    # breakdown for a call whose tokens were already counted by
+                    # an earlier record; letting its zeroes land here would
+                    # blank the persisted context-window size.
+                    if not _is_context_snapshot_only(message.usage):
+                        metadata["last_call_tokens_in"] = message.usage.get("input_tokens", 0)
+                        metadata["last_call_cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
+                        metadata["last_call_cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
 
             elif isinstance(message, UserMessage):
                 # UserMessage contains tool results from Claude's tool executions
@@ -1702,9 +1708,13 @@ async def stream_query(
                     # Track per-API-call values (overwrite → last call wins).
                     # Used by _persist_turn_results as the real context-window
                     # size; ResultMessage.usage is cumulative and unusable here.
-                    metadata["last_call_tokens_in"] = message.usage.get("input_tokens", 0)
-                    metadata["last_call_cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
-                    metadata["last_call_cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
+                    # A snapshot-only record describes a call that was already
+                    # billed, so its zeroes must not blank the last-call size —
+                    # but it still ships, to carry the breakdown it exists for.
+                    if not _is_context_snapshot_only(message.usage):
+                        metadata["last_call_tokens_in"] = message.usage.get("input_tokens", 0)
+                        metadata["last_call_cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
+                        metadata["last_call_cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
                     yield {
                         "type": "turn_usage",
                         "usage": message.usage
@@ -3557,9 +3567,13 @@ async def _stream_to_websocket_impl(
                     # Track per-API-call values (overwrite → last call wins).
                     # Used by _persist_turn_results as the real context-window
                     # size; ResultMessage.usage is cumulative and unusable here.
-                    metadata["last_call_tokens_in"] = message.usage.get("input_tokens", 0)
-                    metadata["last_call_cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
-                    metadata["last_call_cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
+                    # A snapshot-only record describes a call that was already
+                    # billed, so its zeroes must not blank the last-call size —
+                    # but it still ships, to carry the breakdown it exists for.
+                    if not _is_context_snapshot_only(message.usage):
+                        metadata["last_call_tokens_in"] = message.usage.get("input_tokens", 0)
+                        metadata["last_call_cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
+                        metadata["last_call_cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
                     yield {
                         "type": "turn_usage",
                         "usage": message.usage

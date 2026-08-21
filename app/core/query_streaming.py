@@ -18,6 +18,29 @@ MAX_DISPLAY_OUTPUT_SIZE = settings.max_display_output_chars
 DEFAULT_SDK_BUFFER_SIZE = settings.sdk_buffer_size
 
 
+_USAGE_TOKEN_KEYS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
+
+
+def is_context_snapshot_only(usage: Any) -> bool:
+    """True for a usage record that reports ONLY a context breakdown.
+
+    Fluid's delegated leg answers a mid-turn context-usage request with a
+    second ``Usage`` for the same node: it carries the breakdown and leaves
+    every token field at zero, because the call's tokens were already billed
+    by the first record and counting them twice would inflate the turn. Such a
+    record must not overwrite the last-call token metadata — its zeroes are an
+    absence of new billing, not a context that shrank to nothing.
+    """
+    if not isinstance(usage, dict) or not usage.get("context_usage"):
+        return False
+    return not any(usage.get(key) for key in _USAGE_TOKEN_KEYS)
+
+
 def extract_mcp_image(content: Any) -> Optional[str]:
     """
     Extract the first image from a tool-result content block list as a data URI.

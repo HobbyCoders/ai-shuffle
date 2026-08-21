@@ -50,7 +50,7 @@
 		getClaudeAuth,
 		type ProviderDisplay
 	} from '$lib/constants/models';
-	import { getContextUsage } from '$lib/api/sessions';
+	import { getContextUsage, type SdkContextUsage } from '$lib/api/sessions';
 	import {
 		computeContextBreakdown,
 		mapSdkContextUsage,
@@ -216,6 +216,25 @@
 			case 'idle':
 				break;
 		}
+	});
+
+	// ── Live per-call breakdown (pushed, not fetched) ─────────────────────
+	// fluid reports a context snapshot with each model call's usage; the feed
+	// carries it to `liveContextUsage`. Treat it exactly like a landed fetch so
+	// the ring, header, and rows track a running turn instead of sitting stale
+	// until it ends. The turn-end fetch still runs afterwards and replaces this
+	// with the persisted final, which is authoritative.
+	let appliedLiveSnapshot: SdkContextUsage | null = null;
+	$effect(() => {
+		const live = $activeSession.liveContextUsage;
+		const sid = sessionId;
+		if (!live || !sid) return;
+		// Object identity is the change signal: the feed replaces the whole
+		// snapshot per call, so re-mapping the same one would be wasted work.
+		if (live === appliedLiveSnapshot) return;
+		appliedLiveSnapshot = live;
+		richBreakdown = mapSdkContextUsage(live);
+		loadedSessionId = sid;
 	});
 
 	// ── Category breakdown collapse state (persisted, default expanded) ────

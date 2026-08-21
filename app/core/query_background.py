@@ -39,7 +39,10 @@ from app.core.query_persistence import (
     schedule_context_usage_capture,
     log_captured_cli_stderr,
 )
-from app.core.query_streaming import truncate_large_payload
+from app.core.query_streaming import (
+    is_context_snapshot_only as _is_context_snapshot_only,
+    truncate_large_payload,
+)
 from app.core.memory_sync import reconcile_memory, push_memory
 from app.core.turn_finalize import persist_turn_end_state
 
@@ -455,9 +458,13 @@ async def _run_background_query_impl(
                 # overwrite the parent session's last-call figures with an
                 # unrelated number, so they are skipped entirely.
                 if getattr(message, "usage", None) and not getattr(message, "parent_tool_use_id", None):
-                    metadata["last_call_tokens_in"] = message.usage.get("input_tokens", 0)
-                    metadata["last_call_cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
-                    metadata["last_call_cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
+                    # A snapshot-only record describes a call that was already
+                    # billed, so its zeroes must not blank the last-call size —
+                    # but it still reaches the recorder, to carry the breakdown.
+                    if not _is_context_snapshot_only(message.usage):
+                        metadata["last_call_tokens_in"] = message.usage.get("input_tokens", 0)
+                        metadata["last_call_cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
+                        metadata["last_call_cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
                     if recorder:
                         await recorder.on_event({
                             "type": "turn_usage",

@@ -106,6 +106,7 @@ function mockState(): ActiveSessionState {
 		totalCacheCreationTokens: 0,
 		totalCacheReadTokens: 0,
 		contextUsed: null,
+		liveContextUsage: null,
 		contextMax: 0,
 		modelOverride: null,
 		permissionModeOverride: null,

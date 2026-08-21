@@ -68,6 +68,7 @@ function fullState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		totalCacheCreationTokens: 3000,
 		totalCacheReadTokens: 2000,
 		contextUsed: 14000,
+		liveContextUsage: null,
 		contextMax: 1_000_000,
 		modelOverride: 'model-A',
 		permissionModeOverride: 'plan',

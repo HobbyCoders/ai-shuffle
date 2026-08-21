@@ -173,6 +173,7 @@ def _build_event(
     turn_id: Optional[str] = None,
     command_id: Optional[str] = None,
     extra_payload: Optional[Dict[str, Any]] = None,
+    exclude_none: bool = False,
     **fields: Any,
 ) -> Dict[str, Any]:
     """Construct a contract event model and reduce it to append_events shape.
@@ -182,7 +183,10 @@ def _build_event(
     fields; only ``{"type", "payload", "turn_id", "command_id"}`` is appended.
     ``extra_payload`` carries §3 payload notes the frozen contract models have
     no field for (e.g. turn.aborted ``message``) — payload is a free-form JSON
-    column and the reducer ignores unknown keys.
+    column and the reducer ignores unknown keys. ``exclude_none`` drops unset
+    optional fields from the payload instead of writing them as nulls, for
+    events with an optional field that is usually absent (turn.usage's
+    ``context_usage``).
     """
     model = model_cls(
         id="",
@@ -193,7 +197,9 @@ def _build_event(
         command_id=command_id,
         **fields,
     )
-    payload = model.model_dump(mode="json", exclude=_ENVELOPE_FIELDS)
+    payload = model.model_dump(
+        mode="json", exclude=_ENVELOPE_FIELDS, exclude_none=exclude_none
+    )
     if extra_payload:
         payload.update(extra_payload)
     return {
@@ -414,6 +420,11 @@ class TurnRecorder:
         # turn.usage coalescing.
         self._last_usage_at: float = float("-inf")
         self._pending_usage: Optional[Dict[str, Any]] = None
+        # Latest per-call context breakdown seen this turn. Held separately
+        # from _pending_usage because coalescing drops whole usage records:
+        # a snapshot must survive being coalesced over, so the flushed event
+        # still describes the most recent model call.
+        self._pending_context_usage: Optional[Dict[str, Any]] = None
 
         self._terminal_recorded = False
         self._closed = False
@@ -573,9 +584,7 @@ class TurnRecorder:
             async with self._lock:
                 events = self._drain_buffered_events()
                 if self._pending_usage is not None:
-                    events.append(
-                        self._event(contract.TurnUsage, usage=self._pending_usage)
-                    )
+                    events.append(self._usage_event(self._pending_usage))
                     self._pending_usage = None
                 if not self._terminal_recorded:
                     # Crash path: the pump ended without done/interrupted/error.
@@ -873,19 +882,38 @@ class TurnRecorder:
     # usage coalescing
     # ------------------------------------------------------------------
 
+    def _usage_event(self, usage: Dict[str, Any]) -> Dict[str, Any]:
+        """A turn.usage event carrying the newest context breakdown available.
+
+        Coalescing discards whole usage records, so the snapshot is tracked
+        apart from the record it arrived on and re-attached here: a breakdown
+        is never lost just because a later usage record won the window.
+        """
+        return self._event(
+            contract.TurnUsage,
+            usage=usage,
+            context_usage=self._pending_context_usage,
+            exclude_none=True,
+        )
+
     def _coalesce_usage(self, usage: Dict[str, Any]) -> List[Dict[str, Any]]:
+        # A snapshot is the most recent truth about the context regardless of
+        # which branch below claims this record, so latch it first.
+        context_usage = usage.get("context_usage")
+        if context_usage:
+            self._pending_context_usage = context_usage
         # Native fluid emits one terminal snapshot per logical model call with
         # a stable call index. Those records are accounting/audit evidence, not
         # a rapidly-changing gauge, so never coalesce one call over another.
         if usage.get("model_call_index") is not None:
             self._pending_usage = None
             self._last_usage_at = time.monotonic()
-            return [self._event(contract.TurnUsage, usage=usage)]
+            return [self._usage_event(usage)]
         now = time.monotonic()
         if now - self._last_usage_at >= USAGE_COALESCE_SECONDS:
             self._last_usage_at = now
             self._pending_usage = None
-            return [self._event(contract.TurnUsage, usage=usage)]
+            return [self._usage_event(usage)]
         # Within the window — hold the LATEST value; flushed before terminals
         # and on close so the final gauge value is never lost.
         self._pending_usage = usage
@@ -897,7 +925,7 @@ class TurnRecorder:
         usage = self._pending_usage
         self._pending_usage = None
         self._last_usage_at = time.monotonic()
-        return [self._event(contract.TurnUsage, usage=usage)]
+        return [self._usage_event(usage)]
 
     # ------------------------------------------------------------------
     # plumbing

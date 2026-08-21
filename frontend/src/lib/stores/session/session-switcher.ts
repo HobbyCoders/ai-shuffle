@@ -484,6 +484,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// context bar holds its last value instead of flashing to 0%. The feed
 			// / metadata snapshot will populate with correct values.
 			contextUsed: null,
+			// Same reason: the leaving session's per-call breakdown must not
+			// describe the incoming one until its own feed replays.
+			liveContextUsage: null,
 			// Merge ephemeral state in the same update
 			draft: ephemeral?.draft || '',
 			scrollTop: ephemeral?.scrollTop || 0,
@@ -660,6 +663,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			totalCacheReadTokens: 0,
 			contextUsed: null,
 			contextMax: 200_000,
+			liveContextUsage: null,
 			// A fresh compose restores the complete last-used run binding. Existing
 			// sessions still restore their own row/cache values in switchSession().
 			modelOverride: getPersistedModel(),

@@ -50,6 +50,12 @@ class TurnCompleted(EventBase):
 class TurnUsage(EventBase):
     type: Literal["turn.usage"] = "turn.usage"
     usage: dict = Field(default_factory=dict)
+    # Context-window breakdown for the model call this usage record describes
+    # (fluid's per-call snapshot). Same shape as the /context-usage fetch, so
+    # the client can drive the live bar from the event stream instead of
+    # polling. None whenever the engine could not take a snapshot; the payload
+    # omits the key entirely in that case.
+    context_usage: dict | None = None
 
 
 class TurnAborted(EventBase):

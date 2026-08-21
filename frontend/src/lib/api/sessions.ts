@@ -304,6 +304,12 @@ export interface SdkContextUsage {
 	/** 0–100, or `null` when `maxTokens` is unknown. */
 	percentage: number | null;
 	model: string;
+	/**
+	 * True when `totalTokens` is the prompt size the provider actually billed
+	 * rather than the chars/4 estimate. Absent on breakdowns produced before
+	 * the engine reported it.
+	 */
+	measured?: boolean;
 	isAutoCompactEnabled: boolean;
 }
 

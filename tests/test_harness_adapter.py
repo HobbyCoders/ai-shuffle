@@ -257,6 +257,67 @@ async def test_usage_emits_immediately_as_its_own_assistant_record():
 
 
 @pytest.mark.asyncio
+async def test_usage_carries_per_call_context_snapshot():
+    # fluid attaches the context breakdown for the call to its Usage event.
+    # It has to survive the shim so the UI can drive the context bar off the
+    # event stream instead of re-fetching between calls.
+    snapshot = {
+        "categories": [{"name": "Messages", "tokens": 40, "color": "#fff"}],
+        "totalTokens": 40,
+        "maxTokens": 200_000,
+        "measured": True,
+    }
+    events = [
+        lm.TurnStarted(session_id=SID, model="m", provider="fake"),
+        lm.Usage(session_id=SID, input_tokens=10, output_tokens=3,
+                 context_usage=snapshot),
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=1),
+    ]
+    got = await _collect(_adapter_with(FakeEngine(events)))
+    usage = [e.usage for e in got if isinstance(e, AssistantMessage) and e.usage][0]
+    assert usage["context_usage"] == snapshot
+    assert usage["input_tokens"] == 10
+
+
+@pytest.mark.asyncio
+async def test_usage_without_snapshot_omits_the_key():
+    # Absent rather than None: downstream treats presence as the signal, so a
+    # null would read as "there is a snapshot" to a naive `in` check.
+    events = [
+        lm.TurnStarted(session_id=SID, model="m", provider="fake"),
+        lm.Usage(session_id=SID, input_tokens=10, output_tokens=3),
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=1),
+    ]
+    got = await _collect(_adapter_with(FakeEngine(events)))
+    usage = [e.usage for e in got if isinstance(e, AssistantMessage) and e.usage][0]
+    assert "context_usage" not in usage
+
+
+@pytest.mark.asyncio
+async def test_snapshot_only_usage_still_produces_a_shim_record():
+    # The delegated leg answers a mid-turn snapshot request with a SECOND Usage
+    # for the same node: breakdown set, every token field 0 (the tokens were
+    # billed by the first record). It must still reach the shim, or the
+    # breakdown never arrives.
+    snapshot = {"categories": [], "totalTokens": 128, "maxTokens": 200_000}
+    events = [
+        lm.TurnStarted(session_id=SID, model="m", provider="fake"),
+        lm.Usage(session_id=SID, context_usage=snapshot),
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=1),
+    ]
+    got = await _collect(_adapter_with(FakeEngine(events)))
+    usage = [e.usage for e in got if isinstance(e, AssistantMessage) and e.usage][0]
+    assert usage["context_usage"] == snapshot
+    assert usage["input_tokens"] == 0 and usage["output_tokens"] == 0
+
+    from app.core.query_streaming import is_context_snapshot_only
+
+    # ...and the streaming paths recognise it, so its zeroes never overwrite
+    # the persisted last-call context size.
+    assert is_context_snapshot_only(usage) is True
+
+
+@pytest.mark.asyncio
 async def test_interrupted_is_terminal():
     events = [
         lm.TextDelta(session_id=SID, index=0, text="hi"),

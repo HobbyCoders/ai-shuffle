@@ -86,6 +86,9 @@ export type TerminalReason1 = string | null;
 export type TurnId5 = string | null;
 export type Type5 = 'turn.aborted';
 export type CommandId6 = string | null;
+export type ContextUsage = {
+  [k: string]: unknown;
+} | null;
 export type CreatedAt6 = string;
 export type Id6 = string;
 export type RunId6 = string | null;
@@ -422,6 +425,7 @@ export interface TurnAborted {
 }
 export interface TurnUsage {
   command_id?: CommandId6;
+  context_usage?: ContextUsage;
   created_at: CreatedAt6;
   id: Id6;
   run_id?: RunId6;

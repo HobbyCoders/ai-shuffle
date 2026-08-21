@@ -1317,6 +1317,13 @@ class HarnessAdapter(ProviderAdapter):
             }
             if event.raw:
                 usage.update(event.raw)
+            # Per-call context breakdown (fluid >= baf8be0). Set after ``raw``
+            # so a stray raw key cannot shadow the real snapshot. Absent rather
+            # than None when the engine could not take one, so downstream
+            # ``.get("context_usage")`` checks stay a simple presence test.
+            context_usage = getattr(event, "context_usage", None)
+            if context_usage:
+                usage["context_usage"] = context_usage
             return [AssistantMessage(
                 content=[],
                 model=self._current_model

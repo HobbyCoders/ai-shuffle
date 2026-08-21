@@ -19,6 +19,7 @@
 import { reduce, initialState, type V2SessionState, type WireEvent } from './reducer';
 import { createSseFeed, type SseFeed } from './sse-feed';
 import type { ActiveSessionState } from '../../active-session';
+import type { SdkContextUsage } from '$lib/api/sessions';
 import type { QueuedMessage, Task } from '../../types';
 import { browserPanel } from '../../browser-panel.svelte';
 
@@ -188,6 +189,9 @@ function fold(): void {
 	if (deps.getState().sessionId !== currentSessionId) return;
 	const activeTasks = deriveActiveTasks(reducerState.activeTaskSummaries);
 	const usagePatch = deriveUsageFields(reducerState.usage);
+	// Passed through with the same "extra fields may be present" contract the
+	// /context-usage fetch uses; the mapper is what validates it.
+	const liveContextUsage = (reducerState.contextUsage as SdkContextUsage | null) ?? null;
 	deps.update((s) =>
 		s.sessionId === currentSessionId
 			? {
@@ -199,6 +203,7 @@ function fold(): void {
 					liveRequestedModel: reducerState.liveRequestedModel,
 					liveProvider: reducerState.liveProvider,
 					activeTasks,
+					liveContextUsage,
 					queuedMessages: reconcileQueuedMessages(s.queuedMessages),
 					...usagePatch,
 				}

@@ -78,6 +78,39 @@ describe('turn lifecycle', () => {
 		expect(s.usage).toEqual({ context_used: 42 });
 	});
 
+	it('turn.usage stores a per-call context breakdown', () => {
+		const snapshot = { categories: [], totalTokens: 42, maxTokens: 200_000 };
+		const s = fold([
+			ev('turn.started'),
+			ev('turn.usage', { usage: { input_tokens: 1 }, context_usage: snapshot }),
+		]);
+		expect(s.contextUsage).toEqual(snapshot);
+	});
+
+	it('contextUsage starts null and a snapshotless turn.usage leaves it alone', () => {
+		// The key is omitted when the engine had no snapshot; a later usage
+		// record must not blank the last known breakdown.
+		expect(fold([ev('turn.started')]).contextUsage).toBeNull();
+		const snapshot = { categories: [], totalTokens: 7, maxTokens: 200_000 };
+		const s = fold([
+			ev('turn.started'),
+			ev('turn.usage', { usage: {}, context_usage: snapshot }),
+			ev('turn.usage', { usage: { input_tokens: 9 } }),
+		]);
+		expect(s.contextUsage).toEqual(snapshot);
+	});
+
+	it('a newer turn.usage snapshot replaces the older one', () => {
+		const older = { categories: [], totalTokens: 10, maxTokens: 200_000 };
+		const newer = { categories: [], totalTokens: 20, maxTokens: 200_000 };
+		const s = fold([
+			ev('turn.started'),
+			ev('turn.usage', { usage: {}, context_usage: older }),
+			ev('turn.usage', { usage: {}, context_usage: newer }),
+		]);
+		expect(s.contextUsage).toEqual(newer);
+	});
+
 	it('turn.completed(terminal_reason=max_turns) appends a neutral info card', () => {
 		// SDK 0.2.126: a turn that hit the configured max-turns ceiling surfaces
 		// terminal_reason='max_turns' → a neutral (info, not error) system card.

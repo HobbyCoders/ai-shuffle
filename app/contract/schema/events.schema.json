@@ -2767,6 +2767,19 @@
           "default": null,
           "title": "Command Id"
         },
+        "context_usage": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Context Usage"
+        },
         "created_at": {
           "format": "date-time",
           "title": "Created At",

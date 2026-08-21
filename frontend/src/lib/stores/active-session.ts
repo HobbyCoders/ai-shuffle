@@ -17,6 +17,7 @@
  */
 
 import type { PermissionRequest as PermissionRequestType, UserQuestionRequest, Profile } from '$lib/api/client';
+import type { SdkContextUsage } from '$lib/api/sessions';
 import { notifySessionComplete, notifyWaitingForResponse } from '$lib/services/notifications';
 
 // Session infrastructure
@@ -129,6 +130,13 @@ export interface ActiveSessionState {
 	totalCacheReadTokens: number;
 	contextUsed: number | null;
 	contextMax: number;
+	/**
+	 * Context breakdown for the most recent model call, delivered on the
+	 * `turn.usage` event stream rather than fetched. Lets the context bar
+	 * refresh per model call while a turn runs; the turn-end fetch still
+	 * overrides it with the persisted final. Null until a snapshot arrives.
+	 */
+	liveContextUsage: SdkContextUsage | null;
 	modelOverride: string | null;
 	permissionModeOverride: string | null;
 	effortLevelOverride: string | null;
@@ -256,6 +264,7 @@ function defaultState(): ActiveSessionState {
 		totalCacheReadTokens: 0,
 		contextUsed: null,
 		contextMax: 200_000,
+		liveContextUsage: null,
 		// A new chat opens on the last binding the user picked (agents no
 		// longer supply one); an existing session overwrites these from its
 		// own row when it loads.

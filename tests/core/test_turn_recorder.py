@@ -494,6 +494,82 @@ async def test_indexed_model_call_usage_is_never_coalesced_and_keeps_request_ids
     await rec.close()
 
 
+async def test_turn_usage_carries_context_snapshot(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    snapshot = {"categories": [], "totalTokens": 42, "maxTokens": 200_000}
+    await rec.on_event({
+        "type": "turn_usage",
+        "usage": {"model_call_index": 1, "context_usage": snapshot},
+    })
+    row = _rows()[-1]
+    assert row["event_type"] == "turn.usage"
+    assert row["payload"]["context_usage"] == snapshot
+    await rec.close()
+
+
+async def test_turn_usage_without_snapshot_omits_the_key(mock_db):
+    # Every turn.usage would otherwise carry a null; the payload is the wire
+    # shape, and the reducer distinguishes "absent" from "cleared".
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({"type": "turn_usage", "usage": {"model_call_index": 1}})
+    row = _rows()[-1]
+    assert "context_usage" not in row["payload"]
+    await rec.close()
+
+
+async def test_coalescing_never_drops_a_context_snapshot(mock_db):
+    # Coalescing discards whole usage records. A snapshot that arrived on a
+    # discarded one is still the newest truth about the context, so the event
+    # that eventually flushes has to carry it.
+    _mk_session()
+    rec = await _recorder()
+    snapshot = {"categories": [], "totalTokens": 99, "maxTokens": 200_000}
+    # First record opens the coalescing window and is emitted immediately.
+    await rec.on_event({"type": "turn_usage", "usage": {"input_tokens": 1}})
+    # These two land inside the window: the snapshot-bearing one is coalesced
+    # over by the record after it.
+    await rec.on_event({"type": "turn_usage", "usage": {"context_usage": snapshot}})
+    await rec.on_event({"type": "turn_usage", "usage": {"input_tokens": 3}})
+    await rec.close()
+
+    usage_rows = [r for r in _rows() if r["event_type"] == "turn.usage"]
+    assert usage_rows[-1]["payload"]["usage"] == {"input_tokens": 3}
+    assert usage_rows[-1]["payload"]["context_usage"] == snapshot
+
+
+async def test_latest_context_snapshot_wins(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    older = {"categories": [], "totalTokens": 10, "maxTokens": 200_000}
+    newer = {"categories": [], "totalTokens": 20, "maxTokens": 200_000}
+    for index, snap in ((1, older), (2, newer)):
+        await rec.on_event({
+            "type": "turn_usage",
+            "usage": {"model_call_index": index, "context_usage": snap},
+        })
+    usage_rows = [r for r in _rows() if r["event_type"] == "turn.usage"]
+    assert [r["payload"]["context_usage"] for r in usage_rows] == [older, newer]
+    await rec.close()
+
+
+async def test_usage_after_a_snapshot_still_reports_it(mock_db):
+    # A later plain usage record must not blank the breakdown — the context did
+    # not stop existing just because this record had nothing to say about it.
+    _mk_session()
+    rec = await _recorder()
+    snapshot = {"categories": [], "totalTokens": 55, "maxTokens": 200_000}
+    await rec.on_event({
+        "type": "turn_usage",
+        "usage": {"model_call_index": 1, "context_usage": snapshot},
+    })
+    await rec.on_event({"type": "turn_usage", "usage": {"model_call_index": 2}})
+    usage_rows = [r for r in _rows() if r["event_type"] == "turn.usage"]
+    assert usage_rows[-1]["payload"]["context_usage"] == snapshot
+    await rec.close()
+
+
 async def test_done_maps_to_turn_completed_with_usage_summary(mock_db):
     _mk_session()
     rec = await _recorder()

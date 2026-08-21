@@ -48,6 +48,11 @@ export interface V2SessionState {
 	/** Last `turn.usage` payload (raw dict). feed-controller derives the context
 	 *  gauge / token totals from it best-effort. */
 	usage: Record<string, unknown> | null;
+	/** Context breakdown for the most recent model call, as carried by
+	 *  `turn.usage`. Same shape as the `/context-usage` fetch, so the bar can
+	 *  refresh per model call instead of polling. Null until a snapshot
+	 *  arrives; a `turn.usage` without one leaves the previous value in place. */
+	contextUsage: Record<string, unknown> | null;
 	lastSeq: number;
 	/** Deterministic bookkeeping: id of the currently-open streaming text /
 	 *  thinking message for the active turn (null = none open). Derived purely
@@ -121,6 +126,7 @@ export function initialState(): V2SessionState {
 		parked: false,
 		activeTaskSummaries: [],
 		usage: null,
+		contextUsage: null,
 		lastSeq: 0,
 		openTextId: null,
 		openThinkingId: null,
@@ -739,7 +745,14 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 		}
 
 		case 'turn.usage':
-			return { ...state, usage: obj(event.usage) ?? state.usage };
+			return {
+				...state,
+				usage: obj(event.usage) ?? state.usage,
+				// Only events that actually carry a snapshot move this — the
+				// key is omitted from the payload when the engine had none, and
+				// a later usage record must not blank the last known breakdown.
+				contextUsage: obj(event.context_usage) ?? state.contextUsage,
+			};
 
 		// ── User message (+ optimistic reconcile) ───────────────────────
 		case 'message.user': {

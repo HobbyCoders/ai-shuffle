@@ -31,6 +31,7 @@ const mocks = vi.hoisted(() => {
 		totalTokensOut: 0,
 		totalCacheCreationTokens: 0,
 		totalCacheReadTokens: 0,
+		liveContextUsage: null as Record<string, unknown> | null,
 	};
 	type State = typeof DEFAULT;
 	function store(initial: State) {
@@ -1207,5 +1208,122 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		// A window exists → the max-window pct chip wins; credits fallback stays hidden.
 		expect(container.querySelector('.row-pct.sec-summary')?.textContent).toBe('30%');
 		expect(container.querySelector('.sec-credits')).toBeNull();
+	});
+});
+
+describe('ContextUsageBar — live per-call breakdown', () => {
+	const live = (totalTokens: number) => ({
+		categories: [
+			{ name: 'Messages', tokens: totalTokens, color: '#333' },
+			{ name: 'Free space', tokens: 200_000 - totalTokens, color: '#444' },
+		],
+		totalTokens,
+		maxTokens: 200_000,
+		rawMaxTokens: 200_000,
+		percentage: (totalTokens / 200_000) * 100,
+		model: 'claude-x',
+		measured: true,
+		isAutoCompactEnabled: false,
+	});
+
+	it('applies a pushed snapshot with no breakdown fetch available', async () => {
+		// The default stub reports unavailable, so the rendered breakdown can
+		// only have come from the pushed snapshot.
+		mocks.activeSession.set({
+			...mocks.DEFAULT,
+			sessionId: 's1',
+			isStreaming: true,
+			liveContextUsage: live(120_000),
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		await waitFor(() =>
+			expect(container.querySelector('.ctx-pct')?.textContent).toContain('60%')
+		);
+	});
+
+	it('tracks successive model calls within one turn', async () => {
+		mocks.activeSession.set({
+			...mocks.DEFAULT,
+			sessionId: 's1',
+			isStreaming: true,
+			liveContextUsage: live(40_000),
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		await waitFor(() =>
+			expect(container.querySelector('.ctx-pct')?.textContent).toContain('20%')
+		);
+
+		mocks.activeSession.set({
+			...mocks.activeSession.current,
+			liveContextUsage: live(150_000),
+		});
+		await waitFor(() =>
+			expect(container.querySelector('.ctx-pct')?.textContent).toContain('75%')
+		);
+	});
+
+	it('renders category rows from the pushed snapshot', async () => {
+		mocks.activeSession.set({
+			...mocks.DEFAULT,
+			sessionId: 's1',
+			isStreaming: true,
+			liveContextUsage: live(80_000),
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		await waitFor(() => {
+			const labels = Array.from(
+				container.querySelectorAll('.breakdown-row:not(.model-row) .breakdown-label')
+			).map((n) => n.textContent?.trim());
+			expect(labels).toContain('Messages');
+		});
+	});
+
+	it('a null maxTokens does not crash the pill', async () => {
+		mocks.activeSession.set({
+			...mocks.DEFAULT,
+			sessionId: 's1',
+			isStreaming: true,
+			liveContextUsage: {
+				...live(1_000),
+				maxTokens: null,
+				rawMaxTokens: null,
+				percentage: null,
+			},
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.usage-indicator')).not.toBeNull();
+		expect(container.querySelector('.ctx-pct')?.textContent).toContain('0%');
+	});
+
+	it('the turn-end fetch overrides the pushed snapshot', async () => {
+		// The persisted final is authoritative — a live snapshot is only what
+		// the last model call saw. The fetch is unavailable mid-turn, so the
+		// bar runs on the pushed snapshot until the turn ends.
+		mocks.activeSession.set({
+			...mocks.DEFAULT,
+			sessionId: 's1',
+			isStreaming: true,
+			liveContextUsage: live(20_000),
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		await waitFor(() =>
+			expect(container.querySelector('.ctx-pct')?.textContent).toContain('10%')
+		);
+
+		// Streaming → idle is what triggers the refresh fetch.
+		mocks.getContextUsage.mockResolvedValue({
+			available: true,
+			source: 'live',
+			usage: live(180_000),
+		});
+		mocks.activeSession.set({ ...mocks.activeSession.current, isStreaming: false });
+		await waitFor(() =>
+			expect(container.querySelector('.ctx-pct')?.textContent).toContain('90%')
+		);
 	});
 });
