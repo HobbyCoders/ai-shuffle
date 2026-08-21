@@ -3160,12 +3160,14 @@ def test_amend_native_task_spec_swallows_a_registration_failure(monkeypatch):
 
 
 def test_native_mutation_tool_guidance_requires_write_or_edit_but_keeps_bash():
+    """The mutation/shell contract now ships in fluid's own tool specs (the
+    app-side ``_amend_native_mutation_specs`` downgrade patch is gone), so a
+    bare ``register_builtins`` must already carry it."""
     import app.core.provider.harness_adapter as ha
     from fluid.tools.builtins import register_builtins
 
     registry = ha.ToolRegistry()
     register_builtins(registry)
-    ha._amend_native_mutation_specs(registry)
 
     write = registry.get("Write").description
     edit = registry.get("Edit").description
@@ -3173,7 +3175,8 @@ def test_native_mutation_tool_guidance_requires_write_or_edit_but_keeps_bash():
     assert "invoke Write immediately" in write
     assert "invoke Edit immediately" in edit
     assert "git, builds" in bash
-    assert "use Write or Edit for direct file-content mutations" in bash
+    assert "Shell line" in bash
+    assert "Write/Edit" in bash
 
 
 def test_native_environment_declares_the_actual_windows_shell(tmp_path, monkeypatch):

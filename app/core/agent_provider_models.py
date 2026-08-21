@@ -83,7 +83,13 @@ def _clean_description(value: Any, *, limit: int = 240) -> str:
     text = " ".join(str(value or "").split())
     if len(text) <= limit:
         return text
-    return text[: limit - 1].rstrip() + "…"
+    # Cut at a word boundary — a mid-word chop ("how do A…") reads as prompt
+    # corruption to the model. Fall back to a hard cut only for a single
+    # pathological token.
+    cut = text.rfind(" ", 0, limit)
+    if cut < limit // 2:
+        cut = limit - 1
+    return text[:cut].rstrip() + "…"
 
 
 def available_subagents(
@@ -269,13 +275,16 @@ def build_task_contract(
 
     resolved_targets = tuple(targets)
     if resolved_targets:
+        # IDs and models only — each agent's description already rides the
+        # system prompt's "# Available agent types" index (built from the same
+        # roster), and repeating it here doubled the tokens for every session.
         roster = "\n".join(
             f"- {target.id} (model: {target.model}) — {target.name}"
-            + (f": {target.description}" if target.description else "")
             for target in resolved_targets
         )
         availability = (
-            "Available subagents on this provider:\n"
+            "Available subagents on this provider (descriptions are under "
+            "'# Available agent types' in the system prompt):\n"
             f"{roster}\nUse only these IDs; do not invent a model or provider."
         )
     else:

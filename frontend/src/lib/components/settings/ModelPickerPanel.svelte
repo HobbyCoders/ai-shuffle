@@ -215,7 +215,10 @@
 					title={g.subtext ? `${g.name} · ${g.subtext}` : g.name}
 					onclick={() => pickRail(g.key)}
 				>
-					<span class="mpp-rail-icon"><ProviderGlyph kind={g.glyph} size={18} /></span>
+					<span class="mpp-rail-icon">
+						<ProviderGlyph kind={g.glyph} size={18} />
+						{#if g.isApi}<span class="mpp-api-badge" data-provider-api-badge aria-hidden="true">API</span>{/if}
+					</span>
 				</button>
 			{/each}
 		</div>
@@ -398,6 +401,7 @@
 		fill: currentColor;
 	}
 	.mpp-rail-icon {
+		position: relative;
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -408,6 +412,24 @@
 	}
 	.mpp-rail-btn.selected .mpp-rail-icon {
 		background: var(--background);
+	}
+	.mpp-api-badge {
+		position: absolute;
+		left: 50%;
+		bottom: -3px;
+		transform: translateX(-50%);
+		min-width: 16px;
+		padding: 1px 2px;
+		border: 1px solid var(--popover);
+		border-radius: 999px;
+		background: var(--primary);
+		color: var(--primary-foreground);
+		font-size: 6px;
+		font-weight: 800;
+		line-height: 7px;
+		letter-spacing: 0.04em;
+		text-align: center;
+		box-shadow: 0 1px 2px color-mix(in srgb, var(--foreground) 18%, transparent);
 	}
 	.mpp-rail-sep {
 		border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);

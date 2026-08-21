@@ -12,8 +12,9 @@
 	 * identical on both.
 	 *
 	 * Data comes exclusively from the stores the app already loads ($sessions,
-	 * streamingSessions, backgroundPermissions). Internal worker sessions are
-	 * list-hidden and never enter the filters or either visible group.
+	 * streamingSessions, backgroundPermissions). Internal worker sessions, and
+	 * chats from deleted projects or devices, are list-hidden and never enter
+	 * the filters or either visible group.
 	 */
 	import { onDestroy, type Snippet } from 'svelte';
 	import {
@@ -34,7 +35,7 @@
 		BookOpen
 	} from 'lucide-svelte';
 	import type { Session } from '$lib/api/client';
-	import { sessions, projects } from '$lib/stores/app-data.svelte';
+	import { sessions, projects, clusterProjects } from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
 	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
@@ -44,8 +45,9 @@
 		sessionTimestamp,
 		sessionDeviceId,
 		projectKey,
-		isSidebarSession,
+		isVisibleSidebarSession,
 		isArchived,
+		liveProjectKeys,
 		UNGROUPED_PROJECT,
 		type SessionCardStatus
 	} from './session-card-data';
@@ -118,7 +120,8 @@
 	// ---------------------------------------------------------------- data
 	const activeId = $derived($activeSession.sessionId);
 	const projectsById = $derived(new Map($projects.map((p) => [p.id, p])));
-	const sidebarSessions = $derived($sessions.filter(isSidebarSession));
+	const liveKeys = $derived(liveProjectKeys($projects, $clusterProjects));
+	const sidebarSessions = $derived($sessions.filter((s) => isVisibleSidebarSession(s, liveKeys)));
 
 	function isStreaming(id: string): boolean {
 		if ($activeSession.sessionId === id) return $activeSession.isStreaming;

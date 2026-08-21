@@ -1,5 +1,5 @@
 """``GET /api/v1/cluster/projects`` — origin-keyed catalog of projects_v2
-with at least one active base checkout (PR 8).
+with at least one active base checkout on an approved online install (PR 8).
 
 Does **not** call ``require_origin_access`` (XOR 400 when both ids are
 absent). Scoped users filter by ``assigned_origin``. A scoped user whose
@@ -103,6 +103,40 @@ def test_includes_remote_only_and_does_not_expose_path(client, mock_db, tmp_path
             "is_self": False,
         }
     ]
+
+
+def test_omits_project_available_only_on_an_offline_install(
+    client, mock_db, tmp_path
+):
+    _seed_installs()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE installs SET last_seen = %s WHERE id = %s",
+            (datetime(2000, 1, 1, tzinfo=timezone.utc).isoformat(), PEER),
+        )
+    pv2 = projects_v2.upsert_project(ORIGIN, name="Offline")
+    checkouts_db.upsert_checkout(pv2["id"], PEER, str(tmp_path / "offline"))
+
+    resp = client.get("/api/v1/cluster/projects")
+
+    assert resp.status_code == 200
+    assert resp.json()["projects"] == []
+
+
+def test_merges_same_origin_across_online_installs(client, mock_db, tmp_path):
+    _seed_installs()
+    pv2 = projects_v2.upsert_project(ORIGIN, name="Shared")
+    checkouts_db.upsert_checkout(pv2["id"], ME, str(tmp_path / "local"))
+    checkouts_db.upsert_checkout(pv2["id"], PEER, str(tmp_path / "peer"))
+
+    resp = client.get("/api/v1/cluster/projects")
+
+    assert resp.status_code == 200
+    rows = resp.json()["projects"]
+    assert len(rows) == 1
+    assert rows[0]["origin"] == ORIGIN
+    assert {runner["install_id"] for runner in rows[0]["eligible"]} == {ME, PEER}
 
 
 def test_peer_projects_row_same_origin_is_not_local(client, mock_db, tmp_path):

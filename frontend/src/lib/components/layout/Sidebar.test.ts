@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => {
 	return {
 		sessions: store<unknown[]>([]),
 		projects: store<unknown[]>([]),
+		clusterProjects: store<unknown[]>([]),
 		activeSession: store({ sessionId: null as string | null, isStreaming: false }),
 		streamingSessions: store(new Set<string>()),
 		backgroundPermissions: store(new Set<string>()),
@@ -32,6 +33,7 @@ const mocks = vi.hoisted(() => {
 vi.mock('$lib/stores/app-data.svelte', () => ({
 	sessions: mocks.sessions,
 	projects: mocks.projects,
+	clusterProjects: mocks.clusterProjects,
 	appData: {
 		setSessionActive: vi.fn(),
 		deleteSession: vi.fn(),
@@ -63,12 +65,24 @@ vi.mock('$lib/stores/toast', () => ({
 
 import Sidebar from './Sidebar.svelte';
 
-function session(id: string, title: string, projectId: string, isActive: boolean, hidden = false) {
+function session(
+	id: string,
+	title: string,
+	projectId: string | null,
+	isActive: boolean,
+	hidden = false,
+	extra: Record<string, unknown> = {}
+) {
 	return {
 		id,
 		profile_id: 'default',
 		project_id: projectId,
-		project_name: projectId === 'visible-project' ? 'Visible Project' : 'Hidden Project',
+		project_name:
+			projectId === 'visible-project'
+				? 'Visible Project'
+				: projectId === 'hidden-project'
+					? 'Hidden Project'
+					: projectId,
 		title,
 		status: 'active',
 		is_active: isActive,
@@ -87,14 +101,22 @@ function session(id: string, title: string, projectId: string, isActive: boolean
 		created_at: '2026-08-20T12:00:00Z',
 		updated_at: `2026-08-20T12:0${id === 'active' ? '3' : '2'}:00Z`,
 		is_remote: false,
+		...extra,
 	};
 }
+
+const sidebarProps = {
+	onNewSession: vi.fn(),
+	onOpenSession: vi.fn(),
+	onOpenFeature: vi.fn(),
+};
 
 beforeEach(() => {
 	localStorage.clear();
 	mocks.activeSession.set({ sessionId: null, isStreaming: false });
 	mocks.streamingSessions.set(new Set());
 	mocks.backgroundPermissions.set(new Set());
+	mocks.clusterProjects.set([]);
 	mocks.projects.set([
 		{ id: 'visible-project', name: 'Visible Project' },
 		{ id: 'hidden-project', name: 'Hidden Project' },
@@ -139,5 +161,73 @@ describe('Sidebar session groups', () => {
 		await fireEvent.click(screen.getByRole('button', { name: /All projects/ }));
 		expect(screen.getByRole('menuitem', { name: /Visible Project/ })).toBeTruthy();
 		expect(screen.queryByRole('menuitem', { name: /Hidden Project/ })).toBeNull();
+	});
+
+	it('excludes chats from a deleted project and omits it from the project filter', async () => {
+		mocks.sessions.set([
+			session('active', 'Active chat', 'visible-project', true),
+			session('orphan', 'Orphan chat', 'deleted-project', false, false, {
+				origin: 'git:gone.git',
+				project_v2_id: 'pv2-gone',
+			}),
+		]);
+
+		render(Sidebar, { props: sidebarProps });
+
+		expect(screen.getByText('Active chat')).toBeTruthy();
+		expect(screen.queryByText('Orphan chat')).toBeNull();
+		await fireEvent.click(screen.getByRole('button', { name: /All projects/ }));
+		expect(screen.getByRole('menuitem', { name: /Visible Project/ })).toBeTruthy();
+		expect(screen.queryByRole('menuitem', { name: /Deleted Project/ })).toBeNull();
+	});
+
+	it('keeps a remote-only catalog project in the list and filter', async () => {
+		mocks.clusterProjects.set([
+			{
+				origin: 'git:other.git',
+				project_v2_id: 'pv2-remote',
+				local_project_id: null,
+				name: 'Other',
+			},
+		]);
+		mocks.sessions.set([
+			session('remote', 'Remote chat', 'foreign-project', false, false, {
+				origin: 'git:other.git',
+				project_v2_id: 'pv2-remote',
+				project_name: 'Other',
+			}),
+		]);
+
+		render(Sidebar, { props: sidebarProps });
+
+		expect(screen.getByText('Remote chat')).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: /All projects/ }));
+		expect(screen.getByRole('menuitem', { name: /Other/ })).toBeTruthy();
+	});
+
+	it('excludes chats from a deleted device and omits it from the device filter', async () => {
+		mocks.sessions.set([
+			session('local', 'Local chat', 'visible-project', true),
+			session('gone', 'Gone device chat', 'visible-project', false, false, {
+				is_remote: true,
+				instance_id: 'dead-install',
+				device_name: null,
+			}),
+			session('peer', 'Laptop chat', 'visible-project', false, false, {
+				is_remote: true,
+				instance_id: 'laptop',
+				device_name: 'Laptop',
+			}),
+		]);
+
+		render(Sidebar, { props: sidebarProps });
+
+		expect(screen.getByText('Local chat')).toBeTruthy();
+		expect(screen.getByText('Laptop chat')).toBeTruthy();
+		expect(screen.queryByText('Gone device chat')).toBeNull();
+		await fireEvent.click(screen.getByRole('button', { name: /All devices/ }));
+		expect(screen.getByRole('menuitem', { name: /This device/ })).toBeTruthy();
+		expect(screen.getByRole('menuitem', { name: /Laptop/ })).toBeTruthy();
+		expect(screen.queryByRole('menuitem', { name: /Unknown device/ })).toBeNull();
 	});
 });

@@ -31,6 +31,8 @@ export interface PickerGroup {
 	subtext: string | null;
 	/** Which brand glyph the rail/rows draw. */
 	glyph: ProviderGlyphKind;
+	/** Whether this provider authenticates with an API credential. */
+	isApi: boolean;
 }
 
 export interface PickerOption {
@@ -81,7 +83,13 @@ export function buildModelPickerCatalog(opts: BuildCatalogOptions = {}): PickerC
 		});
 		const models = getModels();
 		if (models.length > 0) {
-			groups.push({ key: NATIVE_GROUP_KEY, name: claude.name, subtext: claude.subtext, glyph: 'claude' });
+			groups.push({
+				key: NATIVE_GROUP_KEY,
+				name: claude.name,
+				subtext: claude.subtext,
+				glyph: 'claude',
+				isApi: claudeAuth.auth_kind === 'api'
+			});
 		}
 		for (const m of models) {
 			options.push({
@@ -102,7 +110,8 @@ export function buildModelPickerCatalog(opts: BuildCatalogOptions = {}): PickerC
 			key: p.id,
 			name: display.name,
 			subtext: display.subtext,
-			glyph: providerGlyphKind(p.provider_type)
+			glyph: providerGlyphKind(p.provider_type),
+			isApi: p.auth_kind === 'api'
 		});
 		for (const pm of p.models) {
 			options.push({

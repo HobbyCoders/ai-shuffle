@@ -206,6 +206,7 @@
 		try {
 			await deleteInstall(id);
 			installs = installs.filter((i) => i.id !== id);
+			appData.dropDeviceSessions(id);
 			confirmDeleteId = null;
 			flash('Device removed');
 		} catch (e: unknown) {

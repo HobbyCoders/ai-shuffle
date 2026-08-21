@@ -20,7 +20,7 @@ import { activeSession } from './active-session';
 interface AppDataState {
 	profiles: Profile[];
 	projects: Project[];
-	/** Origin-keyed cluster catalog (projects_v2 with an active base checkout). */
+	/** Origin-keyed catalog of projects available on approved online installs. */
 	clusterProjects: ClusterProject[];
 	sessions: Session[];
 	// Selection state for batch operations
@@ -398,7 +398,27 @@ export const appData = {
 		if (activeSession.current.sessionId && removedSessionIds.has(activeSession.current.sessionId)) {
 			activeSession.newChat();
 		}
-		await appData.loadProjects();
+		await Promise.all([appData.loadProjects(), appData.loadClusterProjects()]);
+	},
+
+	/**
+	 * Drop chats owned by a just-deleted install so they cannot linger in the
+	 * sidebar or its device filter. The rows stay in the DB; the sidebar hides
+	 * them because enrichment no longer resolves a device name.
+	 */
+	dropDeviceSessions(instanceId: string) {
+		const removedSessionIds = new Set(
+			_state.sessions.filter(session => session.instance_id === instanceId).map(session => session.id)
+		);
+		if (removedSessionIds.size === 0) return;
+		_update(s => ({
+			...s,
+			sessions: s.sessions.filter(session => session.instance_id !== instanceId),
+			sessionsTotal: Math.max(0, s.sessionsTotal - removedSessionIds.size),
+		}));
+		if (activeSession.current.sessionId && removedSessionIds.has(activeSession.current.sessionId)) {
+			activeSession.newChat();
+		}
 	},
 
 	// ── Session Operations ──────────────────────────────────────────────

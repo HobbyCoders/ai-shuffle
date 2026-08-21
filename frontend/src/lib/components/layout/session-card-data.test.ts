@@ -1,0 +1,117 @@
+import { describe, expect, it } from 'vitest';
+import type { Session } from '$lib/api/client';
+import {
+	isRemovedDeviceSession,
+	isRemovedProjectSession,
+	isVisibleSidebarSession,
+	liveProjectKeys,
+} from './session-card-data';
+
+function session(over: Partial<Session> = {}): Session {
+	return {
+		id: 's1',
+		profile_id: 'default',
+		project_id: 'proj-1',
+		title: 'Chat',
+		status: 'idle',
+		is_active: false,
+		total_cost_usd: 0,
+		total_tokens_in: 0,
+		total_tokens_out: 0,
+		cache_creation_tokens: 0,
+		cache_read_tokens: 0,
+		context_tokens: 0,
+		turn_count: 1,
+		tags: [],
+		parent_session_id: null,
+		fork_point_message_index: null,
+		has_forks: false,
+		created_at: '2026-08-20T12:00:00Z',
+		updated_at: '2026-08-20T12:00:00Z',
+		...over,
+	};
+}
+
+describe('liveProjectKeys', () => {
+	it('collects local ids, link groups, origins, and v2 ids', () => {
+		const keys = liveProjectKeys(
+			[{ id: 'local-1', link_group_id: 'lg-1' }],
+			[{ origin: 'git:example.git', project_v2_id: 'pv2-1', local_project_id: 'local-1' }]
+		);
+		expect(keys).toEqual(new Set(['local-1', 'lg-1', 'git:example.git', 'pv2-1']));
+	});
+});
+
+describe('isRemovedProjectSession', () => {
+	const live = liveProjectKeys(
+		[{ id: 'local-1' }],
+		[{ origin: 'git:other.git', project_v2_id: 'pv2-remote', local_project_id: null }]
+	);
+
+	it('keeps ungrouped chats', () => {
+		expect(isRemovedProjectSession(session({ project_id: null }), live)).toBe(false);
+	});
+
+	it('keeps a chat whose local project still exists', () => {
+		expect(isRemovedProjectSession(session({ project_id: 'local-1' }), live)).toBe(false);
+	});
+
+	it('keeps a chat whose origin is still in the cluster catalog', () => {
+		expect(isRemovedProjectSession(session({
+			project_id: 'foreign-1',
+			origin: 'git:other.git',
+			project_v2_id: 'pv2-remote',
+		}), live)).toBe(false);
+	});
+
+	it('hides a chat whose project is gone from both catalogs', () => {
+		expect(isRemovedProjectSession(session({
+			project_id: 'deleted-1',
+			origin: 'git:gone.git',
+			project_v2_id: 'pv2-gone',
+			project_name: 'Deleted',
+		}), live)).toBe(true);
+	});
+});
+
+describe('isRemovedDeviceSession', () => {
+	it('keeps this-device chats', () => {
+		expect(isRemovedDeviceSession(session({ is_remote: false, instance_id: 'self' }))).toBe(false);
+	});
+
+	it('keeps a remote chat whose install still has a name', () => {
+		expect(isRemovedDeviceSession(session({
+			is_remote: true,
+			instance_id: 'peer',
+			device_name: 'Laptop',
+		}))).toBe(false);
+	});
+
+	it('hides a remote chat whose install was deleted', () => {
+		expect(isRemovedDeviceSession(session({
+			is_remote: true,
+			instance_id: 'gone',
+			device_name: null,
+		}))).toBe(true);
+	});
+});
+
+describe('isVisibleSidebarSession', () => {
+	const live = liveProjectKeys([{ id: 'local-1' }], []);
+
+	it('hides worker sessions even when the project is live', () => {
+		expect(isVisibleSidebarSession(session({ project_id: 'local-1', hidden: true }), live)).toBe(false);
+	});
+
+	it('hides a live-project chat that belongs to a removed device', () => {
+		expect(isVisibleSidebarSession(session({
+			project_id: 'local-1',
+			is_remote: true,
+			device_name: null,
+		}), live)).toBe(false);
+	});
+
+	it('keeps a local chat on a live project', () => {
+		expect(isVisibleSidebarSession(session({ project_id: 'local-1' }), live)).toBe(true);
+	});
+});

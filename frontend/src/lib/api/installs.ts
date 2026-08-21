@@ -156,7 +156,7 @@ export async function getClusterGitState(
 	return api.get<ClusterGitState>(path);
 }
 
-/** One `projects_v2` the cluster knows, with an active base checkout on some runner. */
+/** One `projects_v2` available on at least one approved online install. */
 export interface ClusterProjectEligible {
 	install_id: string;
 	device_name: string;
@@ -177,7 +177,7 @@ export interface ClusterProjectsResponse {
 	projects: ClusterProject[];
 }
 
-/** Origin-keyed catalog of projects with an active base checkout. */
+/** Origin-keyed catalog of projects available across approved online installs. */
 export async function listClusterProjects(): Promise<ClusterProjectsResponse> {
 	return api.get<ClusterProjectsResponse>('/cluster/projects');
 }
