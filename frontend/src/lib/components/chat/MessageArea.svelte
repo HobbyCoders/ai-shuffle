@@ -25,10 +25,15 @@
 	import TurnNavigator from './TurnNavigator.svelte';
 	import { findStreamingAnchorIndex, shouldShowGapIndicator, shouldRenderAssistantText } from '$lib/stores/session/gap-indicator';
 	import {
-		isNearBottom as computeIsNearBottom,
+		JUMP_TO_LATEST_DELAY_MS,
+		MIN_TRANSCRIPT_TAIL_RESERVE,
 		isUserScrollUpGesture,
 		nextStickToBottom,
+		resolveAnchoredRevealDelta,
+		resolveAnchoredTailReserve,
+		resolveCurrentTurnAnchorScrollTop,
 		shouldAutoScrollOnChange,
+		shouldShowJumpToLatest,
 		type ScrollMetrics
 	} from '$lib/stores/session/auto-scroll';
 	import ToolUseMessage from './ToolUseMessage.svelte';
@@ -129,6 +134,18 @@
 	// even if intermediate DOM changes set shouldAutoScroll to false.
 	let pendingScrollToBottom = false;
 	let pendingScrollTimer: ReturnType<typeof setInterval> | null = null;
+
+	// Reader recovery affordance. Away-from-end waits briefly before appearing so
+	// session switches and layout settles never flash a transient button.
+	let showJumpToLatest = $state(false);
+	let jumpRevealTimer: ReturnType<typeof setTimeout> | null = null;
+
+	// Non-virtualized current-turn anchoring. The spacer grows only for the latest
+	// sent turn, then shrinks one-for-one beneath the response as it fills the view.
+	let tailSpacerRef = $state<HTMLDivElement | null>(null);
+	let currentTurnAnchorId: string | null = null;
+	let tailReservePx = $state(MIN_TRANSCRIPT_TAIL_RESERVE);
+	let anchorMaintenanceRaf: number | null = null;
 
 	/**
 	 * Aggressively scroll to bottom over multiple frames until stable.
@@ -286,7 +303,15 @@
 		return occurrence;
 	}
 
-	// Memoize the grouped display list by (messages, isStreaming) identity.
+	const latestTurnUnsettled = $derived(
+		$activeSession.isStreaming ||
+		Boolean($activeSession.liveTurnId) ||
+		($activeSession.activeTasks ?? []).some((task) => task.status === 'running') ||
+		($activeSession.pendingPermissions ?? []).length > 0 ||
+		($activeSession.pendingQuestions ?? []).length > 0
+	);
+
+	// Memoize the grouped display list by message and lifecycle identity.
 	// The active-session store emits a fresh state object on every SSE stream
 	// delta (the reducer coalesces deltas into `messages` via rAF). Many of
 	// those emissions do NOT change the `messages` array reference — yet without
@@ -295,18 +320,20 @@
 	// made streaming get progressively choppier as a session grew. A plain
 	// object (not $state) avoids Svelte 5 compiling these into reactive signals
 	// inside the derived.
-	const _displayCache: { messages: ChatMessage[] | null; isStreaming: boolean; groupingEnabled: boolean; items: DisplayItem[] } =
-		{ messages: null, isStreaming: false, groupingEnabled: true, items: [] };
+	const _displayCache: { messages: ChatMessage[] | null; isStreaming: boolean; latestTurnUnsettled: boolean; groupingEnabled: boolean; items: DisplayItem[] } =
+		{ messages: null, isStreaming: false, latestTurnUnsettled: false, groupingEnabled: true, items: [] };
 
 	const displayItems: DisplayItem[] = $derived.by(() => {
 		const messages = $activeSession.messages;
 		const isStreamingNow = $activeSession.isStreaming;
+		const latestIsUnsettled = latestTurnUnsettled;
 		// When grouping is off, groupable tools fall through to the plain
 		// single-message path (system grouping is unaffected by this toggle).
 		const groupingEnabled = chatPrefs?.groupToolCalls !== false;
 		if (
 			messages === _displayCache.messages
 			&& isStreamingNow === _displayCache.isStreaming
+			&& latestIsUnsettled === _displayCache.latestTurnUnsettled
 			&& groupingEnabled === _displayCache.groupingEnabled
 		) {
 			// Same message identities (e.g. a WS-delta-only update) — reuse the
@@ -322,11 +349,13 @@
 
 		const items = buildDisplayItems(messages, {
 			isStreaming: isStreamingNow,
+			latestTurnUnsettled: latestIsUnsettled,
 			groupingEnabled
 		});
 
 		_displayCache.messages = messages;
 		_displayCache.isStreaming = isStreamingNow;
+		_displayCache.latestTurnUnsettled = latestIsUnsettled;
 		_displayCache.groupingEnabled = groupingEnabled;
 		_displayCache.items = items;
 		return items;
@@ -489,16 +518,122 @@
 		};
 	}
 
-	// Check if near bottom of scroll container (within threshold).
-	// Delegates to the pure, unit-tested helper in auto-scroll.ts.
-	function isNearBottom(): boolean {
-		const m = readScrollMetrics();
-		if (!m) return true;
-		return computeIsNearBottom(m);
+	function clearJumpRevealTimer() {
+		if (jumpRevealTimer) {
+			clearTimeout(jumpRevealTimer);
+			jumpRevealTimer = null;
+		}
+	}
+
+	function updateJumpToLatestVisibility(metrics: ScrollMetrics | null = readScrollMetrics()) {
+		if (!metrics || !shouldShowJumpToLatest(metrics, programmaticScrollDepth > 0, currentTurnAnchorId !== null)) {
+			clearJumpRevealTimer();
+			showJumpToLatest = false;
+			return;
+		}
+		if (showJumpToLatest || jumpRevealTimer) return;
+		jumpRevealTimer = setTimeout(() => {
+			jumpRevealTimer = null;
+			const latest = readScrollMetrics();
+			if (latest && shouldShowJumpToLatest(latest, programmaticScrollDepth > 0, currentTurnAnchorId !== null)) {
+				showJumpToLatest = true;
+			}
+		}, JUMP_TO_LATEST_DELAY_MS);
+	}
+
+	function markProgrammaticScrollSettling() {
+		programmaticScrollDepth++;
+		requestAnimationFrame(() => {
+			requestAnimationFrame(() => {
+				programmaticScrollDepth = Math.max(0, programmaticScrollDepth - 1);
+				updateJumpToLatestVisibility();
+			});
+		});
+	}
+
+	function setProgrammaticScrollTop(top: number) {
+		if (!containerRef) return;
+		markProgrammaticScrollSettling();
+		containerRef.scrollTop = Math.max(0, top);
+		lastKnownScrollTop = containerRef.scrollTop;
+		lastScrollMetrics = readScrollMetrics();
+	}
+
+	function cancelCurrentTurnAnchor(resetTail = true) {
+		if (!currentTurnAnchorId && tailReservePx === MIN_TRANSCRIPT_TAIL_RESERVE) return;
+		currentTurnAnchorId = null;
+		if (anchorMaintenanceRaf !== null) {
+			cancelAnimationFrame(anchorMaintenanceRaf);
+			anchorMaintenanceRaf = null;
+		}
+		if (resetTail) {
+			markProgrammaticScrollSettling();
+			tailReservePx = MIN_TRANSCRIPT_TAIL_RESERVE;
+		}
+	}
+
+	async function maintainCurrentTurnAnchor(initial = false) {
+		if (!containerRef || !tailSpacerRef || !currentTurnAnchorId) return;
+		const anchor = document.getElementById(turnAnchorId(currentTurnAnchorId));
+		if (!anchor || !containerRef.contains(anchor)) {
+			cancelCurrentTurnAnchor();
+			return;
+		}
+
+		const containerBox = containerRef.getBoundingClientRect();
+		const anchorTop = containerRef.scrollTop + anchor.getBoundingClientRect().top - containerBox.top;
+		const contentEnd = containerRef.scrollTop + tailSpacerRef.getBoundingClientRect().top - containerBox.top;
+		const contentAfterAnchor = Math.max(0, contentEnd - anchorTop);
+		tailReservePx = resolveAnchoredTailReserve({
+			clientHeight: containerRef.clientHeight,
+			contentAfterAnchor
+		});
+		await tick();
+		if (!containerRef || !currentTurnAnchorId) return;
+
+		if (initial) {
+			setProgrammaticScrollTop(resolveCurrentTurnAnchorScrollTop(anchorTop));
+		} else {
+			const delta = resolveAnchoredRevealDelta(
+				containerRef.scrollTop,
+				containerRef.clientHeight,
+				contentEnd
+			);
+			if (delta > 0) setProgrammaticScrollTop(containerRef.scrollTop + delta);
+		}
+		updateJumpToLatestVisibility();
+	}
+
+	function scheduleCurrentTurnAnchorMaintenance(initial = false) {
+		if (!currentTurnAnchorId) return;
+		if (anchorMaintenanceRaf !== null) cancelAnimationFrame(anchorMaintenanceRaf);
+		anchorMaintenanceRaf = requestAnimationFrame(() => {
+			anchorMaintenanceRaf = null;
+			void maintainCurrentTurnAnchor(initial);
+		});
+	}
+
+	function startCurrentTurnAnchor(messageId: string) {
+		currentTurnAnchorId = messageId;
+		shouldAutoScroll = true;
+		clearJumpRevealTimer();
+		showJumpToLatest = false;
+	}
+
+	function jumpToLatest() {
+		clearJumpRevealTimer();
+		showJumpToLatest = false;
+		manualNavigationReleaseUntil = 0;
+		pendingScrollToBottom = false;
+		shouldAutoScroll = true;
+		cancelCurrentTurnAnchor();
+		tick().then(() => requestAnimationFrame(() => scrollToBottom()));
 	}
 
 	function scrollToBottom() {
 		if (containerRef) {
+			clearJumpRevealTimer();
+			showJumpToLatest = false;
 			programmaticScrollDepth++;
 			const preSH = containerRef.scrollHeight;
 			const preST = containerRef.scrollTop;
@@ -516,6 +651,7 @@
 			requestAnimationFrame(() => {
 				requestAnimationFrame(() => {
 					programmaticScrollDepth = Math.max(0, programmaticScrollDepth - 1);
+					updateJumpToLatestVisibility();
 				});
 			});
 		}
@@ -571,6 +707,11 @@
 				if (STREAM_DEBUG && resolvedNext !== shouldAutoScroll) console.log(`[AS] handleScroll ${resolvedNext ? 'ENABLE' : 'DISABLE'} currST=${currentScrollTop} prevST=${prev.scrollTop} SH=${currentMetrics.scrollHeight} CH=${currentMetrics.clientHeight}`);
 				shouldAutoScroll = resolvedNext;
 				lastScrollMetrics = currentMetrics;
+				// Scrollbar, keyboard, and accessibility scrolling do not emit our
+				// wheel/touch intent hooks. Release the controlled prompt anchor as
+				// soon as ordinary scroll geometry says the reader left the live edge.
+				if (!resolvedNext && currentTurnAnchorId) cancelCurrentTurnAnchor();
+				updateJumpToLatestVisibility(currentMetrics);
 			}
 
 			lastKnownScrollTop = currentScrollTop;
@@ -595,6 +736,7 @@
 	 * re-sticks via nextStickToBottom().
 	 */
 	function disengageAutoScroll() {
+		cancelCurrentTurnAnchor();
 		if (!shouldAutoScroll && !pendingScrollToBottom) return;
 		// Stop any in-flight programmatic scroll loop so it can't keep fighting
 		// the user after they've expressed intent to read earlier content.
@@ -720,6 +862,8 @@
 
 	onDestroy(() => {
 		if (pendingScrollTimer) { clearInterval(pendingScrollTimer); pendingScrollTimer = null; }
+		clearJumpRevealTimer();
+		if (anchorMaintenanceRaf !== null) cancelAnimationFrame(anchorMaintenanceRaf);
 		const cacheKey = $activeSession.sessionId ?? 'new';
 
 		if (containerRef) {
@@ -751,6 +895,11 @@
 		const prevId = untrack(() => prevTrackedSessionId);
 
 		if (currentId === prevId) return;
+		if (prevId) {
+			cancelCurrentTurnAnchor();
+			clearJumpRevealTimer();
+			showJumpToLatest = false;
+		}
 
 		// eslint-disable-next-line no-console
 		if (STREAM_DEBUG) console.log(`[AS] session-switch effect from=${prevId} to=${currentId} msgLen=${$activeSession.messages.length} lastId=${$activeSession.messages[$activeSession.messages.length - 1]?.id} lastRole=${$activeSession.messages[$activeSession.messages.length - 1]?.role} SH=${containerRef?.scrollHeight} ST=${containerRef?.scrollTop} CH=${containerRef?.clientHeight}`);
@@ -811,6 +960,10 @@
 
 		resizeObserver = new ResizeObserver(() => {
 			updateCurrentTurnIndex();
+			if (currentTurnAnchorId) {
+				scheduleCurrentTurnAnchorMaintenance();
+				return;
+			}
 			// If auto-scroll is enabled and we're supposed to be at bottom,
 			// ensure we stay at bottom after resize
 			if (shouldAutoScroll && containerRef) {
@@ -849,6 +1002,10 @@
 			const t = e.target as HTMLElement | null;
 			if (!t || (t.tagName !== 'IMG' && t.tagName !== 'VIDEO')) return;
 			if (!shouldAutoScroll) return;
+			if (currentTurnAnchorId) {
+				scheduleCurrentTurnAnchorMaintenance();
+				return;
+			}
 			// eslint-disable-next-line no-console
 			if (STREAM_DEBUG) console.log(`[AS] media load → scrollToBottom tag=${t.tagName} SH=${el.scrollHeight} ST=${el.scrollTop} CH=${el.clientHeight}`);
 			requestAnimationFrame(() => { if (shouldAutoScroll) scrollToBottom(); });
@@ -882,6 +1039,10 @@
 	$effect(() => {
 		if (!showGapIndicator || !containerRef || !isMounted) return;
 		if (!shouldAutoScroll) return;
+		if (currentTurnAnchorId) {
+			tick().then(() => scheduleCurrentTurnAnchorMaintenance());
+			return;
+		}
 		tick().then(() => {
 			if (!shouldAutoScroll || !containerRef) return;
 			scrollToBottom();
@@ -969,11 +1130,17 @@
 		// A new user message ALWAYS re-engages stick-to-bottom — they always want to
 		// see the response to what they just sent, regardless of where they'd scrolled
 		// (see shouldAutoScrollOnChange in auto-scroll.ts).
-		const newUserMessage =
-			hasNewMessage &&
-			currentLength > 0 &&
-			$activeSession.messages[currentLength - 1]?.role === 'user';
+		const newestMessage = currentLength > 0
+			? $activeSession.messages[currentLength - 1]
+			: null;
+		const newUserMessage = hasNewMessage && !!newestMessage && isNavigableUserTurn(newestMessage);
+		const newUserCommand = hasNewMessage && newestMessage?.role === 'user' && newestMessage.type === 'command';
 		if (newUserMessage) {
+			shouldAutoScroll = true;
+			if (newestMessage.id) startCurrentTurnAnchor(newestMessage.id);
+		} else if (newUserCommand) {
+			// Command rows are user-authored but intentionally have no turn-navigation
+			// anchor. Preserve the previous bottom-pinning behavior for them.
 			shouldAutoScroll = true;
 		}
 
@@ -999,18 +1166,13 @@
 				// Large content (tables, code blocks) may take multiple frames to render.
 				tick().then(() => scrollToBottomUntilStable());
 			} else if (newUserMessage) {
-				// Just-sent user message: its content (attachment previews, markdown)
-				// and the input-shrink reflow can land over several frames, so a single
-				// scroll can leave the message above the fold. Scroll across a few frames
-				// to stay pinned to the bottom without the long-running stable loop.
-				tick().then(() => {
-					let frames = 0;
-					const pin = () => {
-						scrollToBottom();
-						if (++frames < 4) requestAnimationFrame(pin);
-					};
-					pin();
-				});
+				// The newly-sent prompt owns a stable top anchor. Its responsive tail
+				// reserve leaves the response room to grow beneath it.
+				tick().then(() => scheduleCurrentTurnAnchorMaintenance(true));
+			} else if (currentTurnAnchorId) {
+				// While the reserve remains, growth consumes blank room without moving
+				// the prompt. Once it is exhausted, reveal only the new overflow.
+				tick().then(() => scheduleCurrentTurnAnchorMaintenance());
 			} else {
 				// Normal streaming: single scroll is enough. Re-check shouldAutoScroll
 				// in the deferred callback — the user may have scrolled up (wheel/touch
@@ -1094,6 +1256,7 @@
 						mode={item.mode}
 						folded={item.folded}
 						tail={item.tail}
+						sequence={item.sequence}
 						durationLabel={item.durationLabel}
 						summary={item.summary}
 						row={messageBody}
@@ -1120,9 +1283,34 @@
 					<button onclick={() => activeSession.clearError()} class="text-destructive hover:opacity-80">&times;</button>
 				</div>
 			{/if}
+
+			<!-- Responsive room belongs only to the live edge, never historical turns. -->
+			<div
+				bind:this={tailSpacerRef}
+				class="transcript-tail-spacer"
+				style:height={`calc(${tailReservePx}px + env(safe-area-inset-bottom, 0px))`}
+				aria-hidden="true"
+			></div>
 		</div>
 	{/if}
 </div>
+
+	{#if showJumpToLatest}
+		<div class="jump-latest-layer">
+			<button
+				type="button"
+				class="jump-latest"
+				onclick={jumpToLatest}
+				aria-label="Jump to latest message"
+				title="Jump to latest message"
+			>
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<path d="m6 9 6 6 6-6" />
+				</svg>
+				<span class="sr-only">Jump to latest message</span>
+			</button>
+		</div>
+	{/if}
 
 	{#if turnNavigationItems.length >= 2}
 		<TurnNavigator
@@ -1283,7 +1471,7 @@
 	.chat-column {
 		max-width: 768px;
 		margin: 0 auto;
-		padding: 26px 24px 24px;
+		padding: 26px 24px 0;
 		display: flex;
 		flex-direction: column;
 		gap: 22px;
@@ -1291,7 +1479,7 @@
 
 	@media (max-width: 640px) {
 		.chat-column {
-			padding: 18px 14px 16px;
+			padding: 18px 14px 0;
 			gap: 18px;
 		}
 	}
@@ -1312,6 +1500,73 @@
 	.msg-virtualized.msg-live {
 		content-visibility: visible;
 		contain-intrinsic-size: auto;
+	}
+
+	.transcript-tail-spacer {
+		flex: 0 0 auto;
+		min-height: calc(24px + env(safe-area-inset-bottom, 0px));
+		pointer-events: none;
+	}
+
+	.jump-latest-layer {
+		position: absolute;
+		z-index: 20;
+		left: 50%;
+		bottom: 12px;
+		transform: translateX(-50%);
+		pointer-events: none;
+	}
+
+	.jump-latest {
+		width: 40px;
+		height: 40px;
+		display: grid;
+		place-items: center;
+		padding: 0;
+		border: 1px solid color-mix(in oklch, var(--border) 84%, transparent);
+		border-radius: 999px;
+		background: color-mix(in oklch, var(--background) 86%, transparent);
+		color: var(--muted-foreground);
+		box-shadow: var(--shadow-m);
+		backdrop-filter: blur(12px) saturate(140%);
+		-webkit-backdrop-filter: blur(12px) saturate(140%);
+		pointer-events: auto;
+		cursor: pointer;
+		animation: jump-latest-in 160ms ease-out both;
+		transition: color 150ms ease, border-color 150ms ease, background-color 150ms ease, transform 150ms ease;
+	}
+
+	.jump-latest svg {
+		width: 17px;
+		height: 17px;
+	}
+
+	.jump-latest:hover {
+		color: var(--foreground);
+		border-color: var(--border-strong, var(--border));
+		background: color-mix(in oklch, var(--background) 94%, var(--scrim));
+		transform: translateY(-2px);
+	}
+
+	.jump-latest:active { transform: translateY(0) scale(0.94); }
+	.jump-latest:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+	.jump-latest:disabled { opacity: 0.45; pointer-events: none; }
+
+	@keyframes jump-latest-in {
+		from { opacity: 0; transform: translateY(5px) scale(0.94); }
+		to { opacity: 1; transform: translateY(0) scale(1); }
+	}
+
+	@media (max-width: 639px), (pointer: coarse) {
+		.jump-latest-layer { bottom: 8px; }
+		.jump-latest { width: 44px; height: 44px; }
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.jump-latest { animation: none; transition: none; }
 	}
 
 </style>

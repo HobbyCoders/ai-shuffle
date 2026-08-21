@@ -20,6 +20,15 @@ export interface WorkLogEntry {
 	index: number;
 }
 
+/**
+ * A settled turn keeps one ordered sequence inside its disclosure. Protected
+ * rows and the terminal assistant response have `hiddenWhenCollapsed=false`,
+ * so they remain visible without fragmenting the turn into several folds.
+ */
+export interface WorkLogSequenceEntry extends WorkLogEntry {
+	hiddenWhenCollapsed: boolean;
+}
+
 export type DisplayItem =
 	| { kind: 'message'; message: ChatMessage; index: number }
 	| { kind: 'system_group'; messages: ChatMessage[]; indices: number[] }
@@ -32,6 +41,8 @@ export type DisplayItem =
 			folded: WorkLogEntry[];
 			/** Rows always visible below the fold (live mode's newest row). */
 			tail: WorkLogEntry[];
+			/** Full settled-turn order, including protected rows and terminal prose. */
+			sequence: WorkLogSequenceEntry[];
 			/** "Worked for 2m 14s" / "You stopped after 12s". */
 			durationLabel: string | null;
 			/** Provider-neutral description such as "Read 3 files and ran 2 commands". */
@@ -83,7 +94,10 @@ function isAssistantPhantom(msg: ChatMessage): boolean {
 /** Only work known to be closed may disappear in a settled disclosure. */
 function isCompletedRoutineWork(msg: ChatMessage): boolean {
 	if (msg.type === 'thinking') return !msg.streaming;
-	return isRoutineTool(msg) && msg.toolStatus === 'complete' && !msg.streaming;
+	// Persisted/imported history has used both spellings. Normalize at the
+	// presentation boundary rather than widening transport semantics.
+	const status = msg.toolStatus as string | undefined;
+	return isRoutineTool(msg) && (status === 'complete' || status === 'completed') && !msg.streaming;
 }
 
 /** Human duration: "45s", "2m 14s", "1h 03m". */
@@ -243,32 +257,73 @@ function emitWithSystemGroups(entries: Positioned[], out: DisplayItem[]) {
 }
 
 export interface BuildOptions {
-	/** The session is mid-turn — its last turn renders in live mode. */
+	/** Main-lane streaming state, retained for live work-run behavior. */
 	isStreaming: boolean;
+	/**
+	 * Authoritative presentation lifecycle for the latest turn. This is true for
+	 * streaming, parked background work, and pending decision surfaces. When
+	 * omitted, legacy callers fall back to `isStreaming`.
+	 */
+	latestTurnUnsettled?: boolean;
 	/** User preference: false renders work rows flat, with no folds. */
 	groupingEnabled: boolean;
 }
 
-function countFoldRuns(
-	turn: Positioned[],
-	shouldFold: (entry: Positioned) => boolean
-): number {
-	let count = 0;
-	let inRun = false;
+function emitLiveTurn(turn: Positioned[], items: DisplayItem[]): void {
+	const newestRunningTool =
+		turn.findLast(
+			(entry) => isRoutineTool(entry.message) && entry.message.toolStatus === 'running'
+		) ?? null;
+	let plain: Positioned[] = [];
+	let run: WorkLogEntry[] = [];
+
+	const flushPlain = () => {
+		if (plain.length === 0) return;
+		emitWithSystemGroups(plain, items);
+		plain = [];
+	};
+	const flushRun = () => {
+		if (run.length === 0) return;
+		// One live row is already compact. It stays flat so active state never gets
+		// hidden behind a disclosure just because the lifecycle is parked.
+		if (run.length === 1) {
+			plain.push({ message: run[0].message, index: run[0].index });
+			run = [];
+			return;
+		}
+		flushPlain();
+		const hasActiveTail = run.at(-1)?.message.id === newestRunningTool?.message.id;
+		const folded = hasActiveTail ? run.slice(0, -1) : run;
+		const tail = hasActiveTail ? run.slice(-1) : [];
+		items.push({
+			kind: 'work_log',
+			key: `wl-live-${run[0].message.id ?? run[0].index}`,
+			mode: 'live',
+			folded,
+			tail,
+			sequence: [],
+			durationLabel: null,
+			summary: summarizeWork(folded)
+		});
+		run = [];
+	};
+
 	for (const entry of turn) {
-		if (shouldFold(entry)) {
-			if (!inRun) count++;
-			inRun = true;
+		if (isCompletedRoutineWork(entry.message) || entry === newestRunningTool) {
+			run.push({ message: entry.message, index: entry.index });
 		} else {
-			inRun = false;
+			flushRun();
+			plain.push(entry);
 		}
 	}
-	return count;
+	flushRun();
+	flushPlain();
 }
 
 /** Build the transcript display list without changing store or protocol semantics. */
 export function buildDisplayItems(messages: ChatMessage[], options: BuildOptions): DisplayItem[] {
 	const { isStreaming, groupingEnabled } = options;
+	const latestTurnUnsettled = options.latestTurnUnsettled ?? isStreaming;
 
 	// Duplicate ids crash Svelte's keyed each; drop repeats defensively.
 	const seen = new Set<string>();
@@ -288,89 +343,62 @@ export function buildDisplayItems(messages: ChatMessage[], options: BuildOptions
 	const turns = splitTurns(positioned);
 
 	turns.forEach((turn, turnIndex) => {
-		const liveTurn = isStreaming && turnIndex === turns.length - 1;
-		const interrupted = !liveTurn && turnWasInterrupted(turn.map((entry) => entry.message));
-		const terminalAssistant = liveTurn
-			? null
-			: (turn.findLast((entry) => isAssistantText(entry.message)) ?? null);
-		// A live group may include exactly the newest active routine tool as its
-		// visible tail. Any anomalous earlier running tools remain flat and visible.
-		const newestRunningTool = liveTurn
-			? (turn.findLast(
-					(entry) => isRoutineTool(entry.message) && entry.message.toolStatus === 'running'
-				) ?? null)
-			: null;
-		const shouldFold = (entry: Positioned) => {
-			if (!groupingEnabled) return false;
-			if (liveTurn) {
-				return isCompletedRoutineWork(entry.message) || entry === newestRunningTool;
-			}
-			return (
-				isCompletedRoutineWork(entry.message) ||
-				(isAssistantText(entry.message) && !entry.message.streaming && entry !== terminalAssistant)
-			);
-		};
-		const foldRunCount = countFoldRuns(turn, shouldFold);
-		const wholeTurnLabel = turnFoldLabel(turn.map((entry) => entry.message), interrupted);
+		if (!groupingEnabled) {
+			emitWithSystemGroups(turn, items);
+			return;
+		}
 
-		let plain: Positioned[] = [];
-		let run: WorkLogEntry[] = [];
+		const unsettledTurn = latestTurnUnsettled && turnIndex === turns.length - 1;
+		if (unsettledTurn) {
+			emitLiveTurn(turn, items);
+			return;
+		}
 
-		const flushPlain = () => {
-			if (plain.length === 0) return;
-			emitWithSystemGroups(plain, items);
-			plain = [];
-		};
+		// Never infer a fold for preamble/history records that are not associated
+		// with a user turn. Real and reloaded v2 transcripts both have user boundaries.
+		const userIndex = turn.findIndex((entry) => entry.message.role === 'user');
+		if (userIndex < 0) {
+			emitWithSystemGroups(turn, items);
+			return;
+		}
 
-		const flushRun = (isTurnEnd: boolean) => {
-			if (run.length === 0) return;
-			const liveRun = liveTurn && isTurnEnd;
+		const prefix = turn.slice(0, userIndex + 1);
+		const response = turn.slice(userIndex + 1);
+		const terminalAssistant = response.findLast((entry) => isAssistantText(entry.message)) ?? null;
+		const shouldHide = (entry: Positioned) =>
+			isCompletedRoutineWork(entry.message) ||
+			isGroupableSystem(entry.message) ||
+			entry.message.type === 'tool_result' ||
+			(isAssistantText(entry.message) && !entry.message.streaming && entry !== terminalAssistant);
+		const folded = response
+			.filter(shouldHide)
+			.map((entry) => ({ message: entry.message, index: entry.index }));
 
-			// A single live row is already compact and must stay visible. Settled
-			// single-row activity still folds, matching the finished-turn treatment.
-			if (liveRun && run.length === 1) {
-				plain.push({ message: run[0].message, index: run[0].index });
-				run = [];
-				return;
-			}
+		if (folded.length === 0) {
+			emitWithSystemGroups(turn, items);
+			return;
+		}
 
-			flushPlain();
-			const summary = summarizeWork(liveRun ? run.slice(0, -1) : run);
-			if (liveRun) {
-				items.push({
-					kind: 'work_log',
-					key: `wl-${run[0].message.id ?? run[0].index}`,
-					mode: 'live',
-					folded: run.slice(0, -1),
-					tail: run.slice(-1),
-					durationLabel: null,
-					summary
-				});
-			} else {
-				items.push({
-					kind: 'work_log',
-					key: `wl-${run[0].message.id ?? run[0].index}`,
-					mode: 'settled',
-					folded: run,
-					tail: [],
-					durationLabel: !liveTurn && foldRunCount === 1 ? wholeTurnLabel : summary,
-					summary: !liveTurn && foldRunCount === 1 ? summary : null
-				});
-			}
-			run = [];
-		};
-
-		turn.forEach((entry) => {
-			if (shouldFold(entry)) {
-				run.push({ message: entry.message, index: entry.index });
-				return;
-			}
-
-			flushRun(false);
-			plain.push(entry);
+		// The user prompt remains its own stable anchor. Everything after it is one
+		// turn-level disclosure: routine rows hide, while failures/screenshots,
+		// decisions, agents/teams/system rows, streaming anomalies, and the terminal
+		// assistant answer stay visible in their original order.
+		emitWithSystemGroups(prefix, items);
+		const interrupted = turnWasInterrupted(turn.map((entry) => entry.message));
+		items.push({
+			kind: 'work_log',
+			key: `wl-turn-${folded[0].message.id ?? folded[0].index}`,
+			mode: 'settled',
+			folded,
+			tail: [],
+			sequence: response.map((entry) => ({
+				message: entry.message,
+				index: entry.index,
+				hiddenWhenCollapsed: shouldHide(entry)
+			})),
+			durationLabel: turnFoldLabel(turn.map((entry) => entry.message), interrupted),
+			summary: summarizeWork(folded)
 		});
-		flushRun(true);
-		flushPlain();
 	});
 
 	return items;

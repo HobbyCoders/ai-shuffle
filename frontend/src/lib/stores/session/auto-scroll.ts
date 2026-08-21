@@ -56,6 +56,15 @@ export function distanceFromBottom(m: ScrollMetrics): number {
  */
 export const NEAR_BOTTOM_THRESHOLD = 64;
 
+/** Delayed reveal avoids a one-frame flash while session/layout scroll settles. */
+export const JUMP_TO_LATEST_DELAY_MS = 150;
+
+/** Current-turn prompt offset from the top edge of the transcript viewport. */
+export const CURRENT_TURN_ANCHOR_OFFSET = 16;
+
+/** Quiet end breathing room once a growing response has consumed its reserve. */
+export const MIN_TRANSCRIPT_TAIL_RESERVE = 24;
+
 /**
  * Minimum upward movement (px) that counts as a deliberate user scroll-up.
  *
@@ -173,4 +182,65 @@ export function nextStickToBottom(
  */
 export function shouldAutoScrollOnChange(stickToBottom: boolean, isNewUserMessage: boolean): boolean {
 	return stickToBottom || isNewUserMessage;
+}
+
+/**
+ * Visibility predicate for the transcript's jump-to-latest affordance. The DOM
+ * owner applies the reveal delay; this helper only answers the geometry/state
+ * question and deliberately suppresses programmatic-scroll transients.
+ */
+export function shouldShowJumpToLatest(
+	metrics: ScrollMetrics,
+	programmaticScrollInFlight = false,
+	controlledTurnAnchorActive = false
+): boolean {
+	return !programmaticScrollInFlight && !controlledTurnAnchorActive && !isNearBottom(metrics);
+}
+
+export interface AnchoredTailGeometry {
+	clientHeight: number;
+	/** Height from the anchored user's top edge through the current real content end. */
+	contentAfterAnchor: number;
+	anchorOffset?: number;
+	minimumReserve?: number;
+}
+
+/**
+ * Responsive trailing room for a newly-sent turn. It starts large enough to put
+ * the user row near the viewport top, then shrinks one-for-one as the response
+ * grows, bottoming out at normal transcript breathing room.
+ */
+export function resolveAnchoredTailReserve({
+	clientHeight,
+	contentAfterAnchor,
+	anchorOffset = CURRENT_TURN_ANCHOR_OFFSET,
+	minimumReserve = MIN_TRANSCRIPT_TAIL_RESERVE
+}: AnchoredTailGeometry): number {
+	return Math.max(
+		minimumReserve,
+		Math.ceil(Math.max(0, clientHeight - anchorOffset - Math.max(0, contentAfterAnchor)))
+	);
+}
+
+/** Exact non-virtualized equivalent of scrollToIndex(viewPosition=0). */
+export function resolveCurrentTurnAnchorScrollTop(
+	anchorTop: number,
+	anchorOffset = CURRENT_TURN_ANCHOR_OFFSET
+): number {
+	return Math.max(0, Math.round(anchorTop - anchorOffset));
+}
+
+/**
+ * Once the response consumes the reserve, advance only enough to reveal its end.
+ * This preserves the prompt anchor while room remains and naturally becomes
+ * ordinary live-edge following for a response taller than the viewport.
+ */
+export function resolveAnchoredRevealDelta(
+	scrollTop: number,
+	clientHeight: number,
+	contentEnd: number,
+	bottomInset = MIN_TRANSCRIPT_TAIL_RESERVE
+): number {
+	const visibleEnd = scrollTop + clientHeight - Math.max(0, bottomInset);
+	return Math.max(0, Math.ceil(contentEnd - visibleEnd));
 }

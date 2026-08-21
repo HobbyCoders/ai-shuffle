@@ -25,7 +25,10 @@
 	import { toast } from '$lib/stores/toast';
 	import { evaluateSubmitGuards } from './submit-guards';
 	import { attachmentBlockReason } from './attach-disable';
-	import { shouldCollapseMobileComposer } from './mobile-composer-collapse';
+	import {
+		reconcileMobileComposerExpanded,
+		shouldCollapseMobileComposer
+	} from './mobile-composer-collapse';
 	import Banner from '$lib/components/Banner.svelte';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
@@ -227,24 +230,66 @@
 		return typeof window !== 'undefined' && window.matchMedia('(max-width: 639px)').matches;
 	}
 
+	let mobileReconcileRaf: number | null = null;
+	let mobileComposerDestroyed = false;
+
+	function isComposerOwnedNode(target: EventTarget | Node | null): boolean {
+		if (!(target instanceof Node)) return false;
+		if (islandRef?.contains(target)) return true;
+		return target instanceof Element && !!target.closest('[data-composer-owned-overlay="true"]');
+	}
+
+	function reconcileMobileComposer() {
+		if (!isMobileComposerViewport()) return;
+		mobileComposerExpanded = reconcileMobileComposerExpanded(
+			mobileComposerExpanded,
+			{
+				compact,
+				hasDraft: inputValue.trim().length > 0,
+				composerFocused,
+				controlsOpen: mobileControlsOpen,
+				commandAutocompleteOpen: showCommandAutocomplete,
+				fileAutocompleteOpen: showFileAutocomplete,
+				activeElementOwned: isComposerOwnedNode(document.activeElement)
+			}
+		);
+	}
+
+	function scheduleMobileComposerReconciliation() {
+		if (!compact || !isMobileComposerViewport()) return;
+		if (mobileReconcileRaf !== null) cancelAnimationFrame(mobileReconcileRaf);
+		// Focusout, pointerdown, and a portaled sheet's focus restoration settle in
+		// separate microtasks. Reconcile on the next frame against final ownership.
+		tick().then(() => {
+			if (mobileComposerDestroyed) return;
+			mobileReconcileRaf = requestAnimationFrame(() => {
+				mobileReconcileRaf = null;
+				if (!mobileComposerDestroyed) reconcileMobileComposer();
+			});
+		});
+	}
+
 	function keepMobileComposerExpanded() {
 		if (isMobileComposerViewport()) mobileComposerExpanded = true;
 	}
 
 	function handleDocumentPointerDown(event: PointerEvent) {
 		if (!compact || !isMobileComposerViewport()) return;
-		const target = event.target;
-		if (!(target instanceof Node)) return;
-		if (islandRef?.contains(target)) {
+		if (isComposerOwnedNode(event.target)) {
 			mobileComposerExpanded = true;
 			return;
 		}
-		if (target instanceof Element && target.closest('.mobile-sheet')) {
-			mobileComposerExpanded = true;
-			return;
-		}
-		mobileComposerExpanded = false;
+		// A transcript/background tap is an explicit request to leave the empty
+		// composer. Blurring first makes the deferred ownership check deterministic
+		// even when the tapped element itself cannot receive focus.
+		editorRef?.blur();
+		scheduleMobileComposerReconciliation();
 	}
+
+	onDestroy(() => {
+		mobileComposerDestroyed = true;
+		if (mobileReconcileRaf !== null) cancelAnimationFrame(mobileReconcileRaf);
+	});
 
 	// Get selected profile name for display in placeholder
 	const selectedProfileName = $derived($profiles.find(p => p.id === $activeSession.profile)?.name || 'Profile');
@@ -444,7 +489,19 @@
 
 		const collapseMobileComposer = () => {
 			if (!isMobileComposerViewport()) return;
-			mobileComposerExpanded = false;
+			mobileComposerExpanded = reconcileMobileComposerExpanded(
+				mobileComposerExpanded,
+				{
+					compact,
+					hasDraft: false,
+					composerFocused: false,
+					controlsOpen: false,
+					commandAutocompleteOpen: false,
+					fileAutocompleteOpen: false,
+					activeElementOwned: false
+				},
+				'successful-send'
+			);
 			editorRef?.blur();
 		};
 
@@ -689,6 +746,7 @@
 <div
 	class="chat-input-wrapper"
 	class:mobile-collapsed={mobileCollapsed}
+	onfocusout={scheduleMobileComposerReconciliation}
 	role="region"
 	aria-label="Chat input with file drop"
 >
@@ -778,6 +836,7 @@
 							onFocusChange={(focused) => {
 								composerFocused = focused;
 								if (focused) keepMobileComposerExpanded();
+								else scheduleMobileComposerReconciliation();
 							}}
 						/>
 					</div>
@@ -792,7 +851,11 @@
 				<ControlsDock
 					{isUploading}
 					onAttachClick={triggerFileUpload}
-					onSheetOpenChange={(open) => (mobileControlsOpen = open)}
+					onSheetOpenChange={(open) => {
+						mobileControlsOpen = open;
+						if (open) keepMobileComposerExpanded();
+						else scheduleMobileComposerReconciliation();
+					}}
 				>
 					{#snippet actions()}
 						<!-- Voice Input (delegated to VoiceRecorder component) -->

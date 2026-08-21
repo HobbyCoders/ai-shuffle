@@ -9,6 +9,7 @@ import {
 	summarizeWork,
 	turnDurationMs,
 	turnWasInterrupted,
+	type DisplayItem,
 	type WorkLogEntry
 } from './work-log';
 
@@ -44,6 +45,19 @@ function workEntries(messages: ChatMessage[]): WorkLogEntry[] {
 	return messages.map((message, index) => ({ message, index }));
 }
 
+function collapsedVisibleMessages(items: DisplayItem[]): ChatMessage[] {
+	return items.flatMap((item) => {
+		if (item.kind === 'message') return [item.message];
+		if (item.kind === 'system_group') return item.messages;
+		if (item.sequence.length > 0) {
+			return item.sequence
+				.filter((entry) => !entry.hiddenWhenCollapsed)
+				.map((entry) => entry.message);
+		}
+		return item.tail.map((entry) => entry.message);
+	});
+}
+
 const SETTLED = { isStreaming: false, groupingEnabled: true };
 const LIVE = { isStreaming: true, groupingEnabled: true };
 
@@ -60,25 +74,35 @@ describe('buildDisplayItems — settled turns', () => {
 		];
 		const items = buildDisplayItems(messages, SETTLED);
 
-		expect(items.map((item) => item.kind)).toEqual(['message', 'work_log', 'message']);
+		expect(items.map((item) => item.kind)).toEqual(['message', 'work_log']);
 		const fold = items[1];
 		if (fold.kind !== 'work_log') throw new Error('expected a work_log');
 		expect(fold.mode).toBe('settled');
 		expect(fold.folded).toHaveLength(5);
 		expect(fold.folded.some((entry) => entry.message.content === 'progress so far')).toBe(true);
 		expect(fold.tail).toHaveLength(0);
-		const answer = items[2];
-		if (answer.kind !== 'message') throw new Error('expected the final answer');
-		expect(answer.message.content).toBe('done');
+		expect(fold.sequence.map((entry) => entry.message.content)).toEqual([
+			'', '', 'progress so far', '', '', 'done'
+		]);
+		expect(collapsedVisibleMessages(items).at(-1)?.content).toBe('done');
 	});
 
 	it('folds even a single completed routine tool after settlement', () => {
 		const items = buildDisplayItems([user('do it'), tool(), text('done')], SETTLED);
-		expect(items.map((item) => item.kind)).toEqual(['message', 'work_log', 'message']);
+		expect(items.map((item) => item.kind)).toEqual(['message', 'work_log']);
 		const fold = items[1];
 		if (fold.kind !== 'work_log') throw new Error('expected a work_log');
 		expect(fold.folded).toHaveLength(1);
 		expect(fold.summary).toBe('Ran 1 command');
+		expect(collapsedVisibleMessages(items).at(-1)?.content).toBe('done');
+	});
+
+	it('normalizes the historical completed tool status at the presentation boundary', () => {
+		const historical = tool({ toolStatus: 'completed' as never, streaming: false });
+		const fold = buildDisplayItems([user('go'), historical, text('done')], SETTLED)
+			.find((item) => item.kind === 'work_log');
+		if (fold?.kind !== 'work_log') throw new Error('expected a work_log');
+		expect(fold.folded.map((entry) => entry.message.id)).toContain(historical.id);
 	});
 
 	it('folds completed thinking alongside routine tools', () => {
@@ -97,9 +121,9 @@ describe('buildDisplayItems — settled turns', () => {
 			[user('go'), tool(), failed, screenshot, running, thinking, text('done')],
 			SETTLED
 		);
-		const visible = items.filter((item) => item.kind === 'message');
+		const visible = collapsedVisibleMessages(items);
 		for (const message of [failed, screenshot, running, thinking]) {
-			expect(visible.some((item) => item.kind === 'message' && item.message.id === message.id)).toBe(true);
+			expect(visible.some((item) => item.id === message.id)).toBe(true);
 		}
 	});
 
@@ -115,10 +139,7 @@ describe('buildDisplayItems — settled turns', () => {
 			tool({ toolName: 'AskUserQuestion' }),
 			text('done')
 		];
-		const visibleMessages = buildDisplayItems(messages, SETTLED)
-			.filter((item) => item.kind === 'message')
-			.map((item) => item.kind === 'message' ? item.message : null)
-			.filter(Boolean) as ChatMessage[];
+		const visibleMessages = collapsedVisibleMessages(buildDisplayItems(messages, SETTLED));
 
 		expect(visibleMessages.some((message) => message.type === 'subagent')).toBe(true);
 		for (const name of ['TodoWrite', 'Note', 'Task', 'Agent', 'AskUserQuestion']) {
@@ -208,6 +229,16 @@ describe('buildDisplayItems — live turn', () => {
 		expect(folds).toHaveLength(1);
 		if (folds[0].kind !== 'work_log') throw new Error('expected a work_log');
 		expect(folds[0].mode).toBe('settled');
+	});
+
+	it('does not fold a parked or otherwise unsettled latest turn', () => {
+		const items = buildDisplayItems([user('go'), tool(), text('waiting on background work')], {
+			isStreaming: false,
+			latestTurnUnsettled: true,
+			groupingEnabled: true
+		});
+		expect(items.some((item) => item.kind === 'work_log' && item.mode === 'settled')).toBe(false);
+		expect(items.some((item) => item.kind === 'message' && item.message.content === 'waiting on background work')).toBe(true);
 	});
 });
 

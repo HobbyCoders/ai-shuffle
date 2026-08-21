@@ -14,7 +14,7 @@
 	 */
 	import type { Snippet } from 'svelte';
 	import type { ChatMessage } from '$lib/stores/types';
-	import type { WorkLogEntry } from '$lib/utils/work-log';
+	import type { WorkLogEntry, WorkLogSequenceEntry } from '$lib/utils/work-log';
 
 	interface Props {
 		mode: 'live' | 'settled';
@@ -22,6 +22,8 @@
 		folded: WorkLogEntry[];
 		/** Rows always visible (live mode's newest row). */
 		tail: WorkLogEntry[];
+		/** Ordered settled turn; protected/final rows stay visible while collapsed. */
+		sequence?: WorkLogSequenceEntry[];
 		/** "Worked for 2m 14s" / "You stopped after 12s"; null when unknown. */
 		durationLabel?: string | null;
 		/** Action-specific description of the folded work. */
@@ -29,7 +31,8 @@
 		row: Snippet<[ChatMessage, number]>;
 	}
 
-	let { mode, folded, tail, durationLabel = null, summary = null, row }: Props = $props();
+	let { mode, folded, tail, sequence = [], durationLabel = null, summary = null, row }: Props = $props();
+	const retainedSequence = $derived(sequence.filter((entry) => !entry.hiddenWhenCollapsed));
 
 	let open = $state(false);
 	let previousMode = $state<'live' | 'settled' | null>(null);
@@ -50,17 +53,31 @@
 	const disclosureLabel = $derived(
 		open ? 'Hide work details' : `Show work details: ${collapsedLabel}${summary && mode === 'settled' ? `, ${summary}` : ''}`
 	);
+
+	function isAssistantProse(entry: WorkLogSequenceEntry): boolean {
+		return entry.message.role === 'assistant' && (entry.message.type === 'text' || !entry.message.type);
+	}
 </script>
 
 <section class="worklog" class:is-settled={mode === 'settled'} aria-label="Work log" data-work-log-mode={mode}>
 	{#if open}
 		<div class="wlhead">Work log{#if summary}<span> · {summary}</span>{/if}</div>
-		{#each folded as entry (entry.message.id ?? entry.index)}
-			{@render row(entry.message, entry.index)}
-		{/each}
-		{#each tail as entry (entry.message.id ?? entry.index)}
-			{@render row(entry.message, entry.index)}
-		{/each}
+		{#if mode === 'settled' && sequence.length > 0}
+			<div class="work-sequence is-expanded">
+				{#each sequence as entry (entry.message.id ?? entry.index)}
+					<div class="sequence-row" class:is-prose={isAssistantProse(entry)}>
+						{@render row(entry.message, entry.index)}
+					</div>
+				{/each}
+			</div>
+		{:else}
+			{#each folded as entry (entry.message.id ?? entry.index)}
+				{@render row(entry.message, entry.index)}
+			{/each}
+			{#each tail as entry (entry.message.id ?? entry.index)}
+				{@render row(entry.message, entry.index)}
+			{/each}
+		{/if}
 		<button type="button" class="wlrow fold" onclick={() => (open = false)} aria-expanded="true" aria-label={disclosureLabel}>
 			<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 				<path d="m18 15-6-6-6 6" />
@@ -84,9 +101,19 @@
 				<span class="fold-summary" title={summary}>· {summary}</span>
 			{/if}
 		</button>
-		{#each tail as entry (entry.message.id ?? entry.index)}
-			{@render row(entry.message, entry.index)}
-		{/each}
+		{#if mode === 'settled' && sequence.length > 0}
+			<div class="work-sequence is-collapsed">
+				{#each retainedSequence as entry (entry.message.id ?? entry.index)}
+					<div class="sequence-row" class:is-prose={isAssistantProse(entry)}>
+						{@render row(entry.message, entry.index)}
+					</div>
+				{/each}
+			</div>
+		{:else}
+			{#each tail as entry (entry.message.id ?? entry.index)}
+				{@render row(entry.message, entry.index)}
+			{/each}
+		{/if}
 	{/if}
 </section>
 
@@ -115,6 +142,33 @@
 		font-weight: 400;
 		letter-spacing: 0;
 		text-transform: none;
+	}
+
+	.work-sequence {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		min-width: 0;
+	}
+
+	.work-sequence.is-collapsed {
+		gap: 12px;
+	}
+
+	.sequence-row {
+		min-width: 0;
+	}
+
+	.sequence-row.is-prose {
+		margin-top: 12px;
+	}
+
+	.work-sequence.is-collapsed .sequence-row.is-prose {
+		margin-top: 8px;
+	}
+
+	.work-sequence + .wlrow.fold {
+		margin-top: 8px;
 	}
 
 	.wlrow.fold {
