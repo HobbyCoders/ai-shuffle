@@ -7,6 +7,7 @@
  */
 
 import type { DeviceIntent, ExecutionMode } from './types';
+import type { ContextWindowChoice } from '$lib/constants/model-context';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -19,6 +20,7 @@ export interface SessionEphemeral {
 	modelOverride: string | null;
 	permissionModeOverride: string | null;
 	effortLevelOverride: string | null;
+	contextWindowChoice?: ContextWindowChoice;
 	worktreeIntent: ExecutionMode;
 	/** Compose-time device pick — memory-only, exactly like the rest of this
 	 *  cache, so a draft keeps its device across a switch away and back without

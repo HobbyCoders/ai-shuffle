@@ -34,6 +34,8 @@ export interface WsClientQuery {
 		permission_mode?: string;
 		thinking_mode?: string;
 		effort?: string;
+		/** Explicit token ceiling: 200k/256k standard, or 1m extended. */
+		context_window?: number;
 	};
 	worktree_id?: string | null;
 	/**

@@ -72,6 +72,7 @@ function fullState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		modelOverride: 'model-A',
 		permissionModeOverride: 'plan',
 		effortLevelOverride: 'high',
+		contextWindowChoice: '1m',
 		pendingPermissions: [],
 		deferredPermissions: [],
 		pendingQuestions: [],
@@ -161,6 +162,7 @@ describe('session-switcher · switchSession isolation', () => {
 		expect(s.modelOverride).toBeNull();
 		expect(s.permissionModeOverride).toBeNull();
 		expect(s.effortLevelOverride).toBeNull();
+		expect(s.contextWindowChoice).toBe('1m');
 		expect(s.draft).toBe('');
 	});
 
@@ -340,13 +342,36 @@ describe('session-switcher · remote-only project survives switch', () => {
 describe('session run binding on switch', () => {
 	beforeEach(() => {
 		_mockSessions.current = [];
+		localStorage.clear();
+	});
+
+	it('restores the complete last-used binding for a new chat', () => {
+		localStorage.setItem('aihub_lastModel', 'prov:openai:gpt-5.6-sol');
+		localStorage.setItem('aihub_lastEffort', 'xhigh');
+		localStorage.setItem('aihub_lastPermissionMode', 'plan');
+		localStorage.setItem('aihub_lastContextWindowChoice', 'standard');
+		const { switcher, getState } = makeSwitcher(fullState());
+
+		switcher.newChat();
+		switcher.destroy();
+
+		expect(getState().modelOverride).toBe('prov:openai:gpt-5.6-sol');
+		expect(getState().effortLevelOverride).toBe('xhigh');
+		expect(getState().permissionModeOverride).toBe('plan');
+		expect(getState().contextWindowChoice).toBe('standard');
 	});
 
 	it('hydrates the target session own binding from its row', async () => {
 		// Agents carry no model, so the row is the only source for a session
 		// opened without a local ephemeral entry — e.g. from another device.
 		_mockSessions.current = [
-			{ id: 'session-B', model: 'prov:op:openai/gpt-5.6', effort: 'high', permission_mode: 'plan' },
+			{
+				id: 'session-B',
+				model: 'prov:op:openai/gpt-5.6',
+				effort: 'high',
+				permission_mode: 'plan',
+				context_window: 256_000
+			},
 		];
 		const { switcher, getState } = makeSwitcher(fullState());
 
@@ -357,6 +382,7 @@ describe('session run binding on switch', () => {
 		expect(s.modelOverride).toBe('prov:op:openai/gpt-5.6');
 		expect(s.effortLevelOverride).toBe('high');
 		expect(s.permissionModeOverride).toBe('plan');
+		expect(s.contextWindowChoice).toBe('standard');
 	});
 
 	it('prefers an unsent local pick over the stored binding', async () => {

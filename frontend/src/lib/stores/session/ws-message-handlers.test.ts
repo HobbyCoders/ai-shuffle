@@ -110,6 +110,7 @@ function mockState(): ActiveSessionState {
 		modelOverride: null,
 		permissionModeOverride: null,
 		effortLevelOverride: null,
+		contextWindowChoice: '1m',
 		pendingPermissions: [],
 		deferredPermissions: [],
 		pendingQuestions: [],

@@ -41,6 +41,7 @@ function minimalState(): ActiveSessionState {
 		modelOverride: null,
 		permissionModeOverride: null,
 		effortLevelOverride: null,
+		contextWindowChoice: 'standard',
 		worktreeIntent: 'local',
 		worktreeId: null,
 		worktreeBranch: '',
@@ -149,7 +150,10 @@ describe('session-switcher · persistSession (writes both slots)', () => {
 		// (a) sessionStorage slot holds the serialized value.
 		const raw = sessionStorage.getItem(TAB_ACTIVE_SESSION_KEY);
 		expect(raw).toBeTruthy();
-		expect(JSON.parse(raw as string)).toMatchObject({ sessionId: 'sess-1' });
+		expect(JSON.parse(raw as string)).toMatchObject({
+			sessionId: 'sess-1',
+			contextWindowChoice: 'standard'
+		});
 
 		// (b) server PUT targets the DEVICE key — never a tab-scoped key.
 		const [url, opts] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];

@@ -28,6 +28,11 @@
 	import ProviderGlyph from './ProviderGlyph.svelte';
 	import type { PickerGroup, PickerOption } from '$lib/constants/model-picker';
 	import { matchesPickerQuery } from '$lib/constants/model-picker';
+	import { getModelLabel } from '$lib/constants/models';
+	import {
+		getModelContextControl,
+		type ContextWindowChoice
+	} from '$lib/constants/model-context';
 	import {
 		getFavoriteModels,
 		isFavoriteModel,
@@ -51,6 +56,9 @@
 		/** One-line warning rendered above the list (e.g. a reroute explanation). */
 		notice?: string;
 		ariaLabel?: string;
+		/** Optional session context control. Omit both props on profile-only pickers. */
+		contextChoice?: ContextWindowChoice;
+		onContextChoiceSelect?: (choice: ContextWindowChoice) => void;
 		/** Escape pressed inside the search box. */
 		onRequestClose?: () => void;
 	}
@@ -64,6 +72,8 @@
 		trailingRows = [],
 		notice,
 		ariaLabel = 'Model',
+		contextChoice,
+		onContextChoiceSelect,
 		onRequestClose
 	}: Props = $props();
 
@@ -83,6 +93,9 @@
 			.filter((o): o is PickerOption => o != null)
 	);
 	const hasFavorites = $derived(favoriteOptions.length > 0);
+	const contextControl = $derived(
+		contextChoice && onContextChoiceSelect ? getModelContextControl(value) : null
+	);
 
 	// ---- rail selection -------------------------------------------------------
 	// Initial rail pick: favorites when any exist, else the group owning the
@@ -91,14 +104,18 @@
 	let railKey = $state<string | null>(null);
 	const currentGroupKey = $derived(options.find((o) => o.value === value)?.groupKey ?? null);
 	const effectiveRailKey = $derived.by(() => {
-		if (railKey === FAVORITES && hasFavorites) return FAVORITES;
+		// Favorites stays addressable even while empty, so its rail button has a
+		// useful empty state instead of disappearing after the final unstar.
+		if (railKey === FAVORITES) return FAVORITES;
 		if (railKey && groups.some((g) => g.key === railKey)) return railKey;
-		if (hasFavorites) return FAVORITES;
 		if (currentGroupKey) return currentGroupKey;
+		if (hasFavorites) return FAVORITES;
 		return groups[0]?.key ?? null;
 	});
 
-	const showRail = $derived(!isSearching && (groups.length > 1 || hasFavorites));
+	// The Favorites tab is a stable first-class rail destination, including in a
+	// one-provider scoped picker. Search still spans the full width.
+	const showRail = $derived(!isSearching && groups.length > 0);
 
 	// ---- visible rows ---------------------------------------------------------
 	const visibleOptions = $derived.by<PickerOption[]>(() => {
@@ -189,21 +206,19 @@
 <div class="mpp" data-model-picker-panel>
 	{#if showRail}
 		<div class="mpp-rail" role="tablist" aria-label="Providers">
-			{#if hasFavorites}
-				<button
-					type="button"
-					role="tab"
-					class="mpp-rail-btn"
-					class:selected={effectiveRailKey === FAVORITES}
-					aria-selected={effectiveRailKey === FAVORITES}
-					aria-label="Favorites"
-					title="Favorites"
-					onclick={() => pickRail(FAVORITES)}
-				>
-					<Star size={18} class="mpp-rail-star" />
-				</button>
-				<div class="mpp-rail-sep" aria-hidden="true"></div>
-			{/if}
+			<button
+				type="button"
+				role="tab"
+				class="mpp-rail-btn"
+				class:selected={effectiveRailKey === FAVORITES}
+				aria-selected={effectiveRailKey === FAVORITES}
+				aria-label={hasFavorites ? `Favorites, ${favoriteOptions.length} models` : 'Favorites, empty'}
+				title="Favorites"
+				onclick={() => pickRail(FAVORITES)}
+			>
+				<Star size={18} class="mpp-rail-star" />
+			</button>
+			<div class="mpp-rail-sep" aria-hidden="true"></div>
 			{#each groups as g (g.key)}
 				<button
 					type="button"
@@ -275,18 +290,16 @@
 							</div>
 						{/if}
 					</div>
-					<!-- svelte-ignore a11y_click_events_have_key_events -->
-					<span
+					<button
+						type="button"
 						class="mpp-fav"
 						class:on={fav}
-						role="button"
-						tabindex="-1"
-						aria-label={fav ? 'Remove from favorites' : 'Add to favorites'}
+						aria-label={fav ? `Remove ${o.label} from favorites` : `Add ${o.label} to favorites`}
 						title={fav ? 'Remove from favorites' : 'Add to favorites'}
 						onclick={(e) => toggleFavorite(e, o.value)}
 					>
 						<Star size={14} />
-					</span>
+					</button>
 				</div>
 			{/each}
 
@@ -306,6 +319,30 @@
 				{@render plainRow(r)}
 			{/each}
 		</div>
+
+		{#if contextControl && contextChoice && onContextChoiceSelect}
+			<div class="mpp-context" data-model-context-control>
+				<label for="mpp-context-choice">
+					<span>Context</span>
+					<small>For {getModelLabel(value)}</small>
+				</label>
+				<div class="mpp-context-select-wrap">
+					<select
+						id="mpp-context-choice"
+						value={contextChoice}
+						aria-label="Context window"
+						onchange={(event) =>
+							onContextChoiceSelect(event.currentTarget.value as ContextWindowChoice)}
+					>
+						<option value="standard">{contextControl.standardLabel} · Normal</option>
+						<option value="1m">{contextControl.extendedLabel} · Extended</option>
+					</select>
+					<svg viewBox="0 0 20 20" aria-hidden="true">
+						<path d="m6 8 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
+					</svg>
+				</div>
+			</div>
+		{/if}
 	</div>
 </div>
 
@@ -573,10 +610,13 @@
 		align-items: center;
 		justify-content: center;
 		flex-shrink: 0;
-		width: 24px;
-		height: 24px;
-		margin-right: -4px;
+		width: 28px;
+		height: 28px;
+		margin: -2px -4px -2px 0;
+		padding: 0;
+		border: 0;
 		border-radius: 6px;
+		background: transparent;
 		color: var(--muted-foreground);
 		opacity: 0.55;
 		cursor: pointer;
@@ -590,12 +630,84 @@
 		color: var(--foreground);
 		background: var(--mpp-hover);
 	}
+	.mpp-fav:focus-visible {
+		opacity: 1;
+		outline: 2px solid var(--ring);
+		outline-offset: -1px;
+	}
 	.mpp-fav.on {
 		opacity: 1;
 		color: #eab308;
 	}
 	.mpp-fav.on :global(svg) {
 		fill: currentColor;
+	}
+
+	/* Context selector is pinned below the independently scrolling model list. */
+	.mpp-context {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		min-height: 54px;
+		padding: 8px 10px 8px 12px;
+		border-top: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+		background: color-mix(in srgb, var(--popover) 92%, var(--muted));
+		box-shadow: 0 -8px 18px color-mix(in srgb, var(--popover) 72%, transparent);
+		flex-shrink: 0;
+	}
+	.mpp-context label {
+		display: flex;
+		flex: 1;
+		min-width: 0;
+		flex-direction: column;
+		gap: 1px;
+		color: var(--foreground);
+		font-size: 12px;
+		font-weight: 600;
+	}
+	.mpp-context label small {
+		overflow: hidden;
+		color: var(--muted-foreground);
+		font-size: 10px;
+		font-weight: 450;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.mpp-context-select-wrap {
+		position: relative;
+		flex: 0 0 auto;
+	}
+	.mpp-context select {
+		min-width: 126px;
+		height: 34px;
+		appearance: none;
+		padding: 0 30px 0 10px;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		background: var(--background);
+		color: var(--foreground);
+		font: inherit;
+		font-size: 12px;
+		font-weight: 550;
+		cursor: pointer;
+	}
+	.mpp-context select:hover {
+		border-color: var(--border-strong);
+		background: var(--muted);
+	}
+	.mpp-context select:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
+	}
+	.mpp-context-select-wrap > svg {
+		position: absolute;
+		top: 50%;
+		right: 8px;
+		width: 16px;
+		height: 16px;
+		transform: translateY(-50%);
+		color: var(--muted-foreground);
+		pointer-events: none;
 	}
 
 	.mpp-empty {

@@ -181,6 +181,7 @@ def submit(
                 model=overrides.get("model"),
                 effort=overrides.get("effort"),
                 permission_mode=overrides.get("permission_mode"),
+                context_window=overrides.get("context_window"),
             )
         except Exception:  # noqa: BLE001 — never let this break an enqueue.
             logger.exception(

@@ -333,14 +333,13 @@ async def test_boot_reap_requeues_dead_lease_turns_and_kicks(
 # Schema: version parity + parked_task_kind column
 # =============================================================================
 
-def test_schema_version_parity_v79():
+def test_schema_version_parity_v80():
     from app.db.database import SCHEMA_VERSION as db_version
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 79 for the per-session run binding: sessions.model /
-    # sessions.effort / sessions.permission_mode, the model, reasoning effort
-    # and permission mode the user picks when a chat is created. Agents stopped
+    # Bumped to 80 for sessions.context_window, the explicit input-window limit
+    # selected alongside the v79 model/effort/permission run binding. Agents stopped
     # pinning them, so the session row is where they live; NULL on every
     # pre-existing row, which falls back to launched_model and then the agent's
     # legacy config. v78 was one-time pairing grants, scoped controller
@@ -408,8 +407,8 @@ def test_schema_version_parity_v79():
     # the Phase-2 turns table; v58 was the Phase-1 deletion (v2_stream forced
     # TRUE + default flipped); v57 added the opt-in flag; v56 added the Phase-0
     # primitives.
-    assert db_version == 79
-    assert pg_version == 79
+    assert db_version == 80
+    assert pg_version == 80
     assert db_version == pg_version
 
 

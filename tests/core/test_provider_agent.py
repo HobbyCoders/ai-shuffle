@@ -348,15 +348,6 @@ class TestHelpers:
         assert not pa.is_worker_session("s1")
         assert pa.is_worker_session("s4")
 
-    def test_timeout_is_configurable_and_floored(self, monkeypatch):
-        from app.core.config import settings
-
-        monkeypatch.setattr(settings, "provider_agent_timeout_seconds", 1234)
-        assert pa.worker_timeout_seconds() == 1234.0
-
-        monkeypatch.setattr(settings, "provider_agent_timeout_seconds", 1)
-        assert pa.worker_timeout_seconds() == 30.0
-
 
 # ---------------------------------------------------------------------------
 # dispatch_worker
@@ -619,19 +610,6 @@ class TestDispatchWorker:
 
     # -- failure modes ----------------------------------------------------
 
-    def test_timeout_fails_and_interrupts(self, dispatch_env):
-        from app.core.task_registry import task_registry
-
-        dispatch_env.tm.idle = False
-
-        outcome = _dispatch(timeout_seconds=5)
-
-        assert not outcome.ok
-        assert "did not finish within 5s" in outcome.error
-        assert dispatch_env.tm.interrupts == [(outcome.session_id, "stop")]
-        assert task_registry.get_task("parent-1", outcome.session_id)["status"] == "error"
-        task_registry.clear_session("parent-1")
-
     def test_worker_turn_error_fails(self, dispatch_env, monkeypatch):
         monkeypatch.setattr(
             pa, "final_turn_outcome",
@@ -890,15 +868,13 @@ class TestDispatchWorkerFailsClosed:
         assert not _dispatch().ok
         sup.reset()
 
-    def test_a_timed_out_worker_that_was_torn_down_reports_the_teardown(
-        self, dispatch_env
-    ):
+    def test_a_torn_down_worker_reports_the_teardown(self, dispatch_env):
         from app.core import provider_agent_supervisor as sup
 
         dispatch_env.tm.idle = False
         dispatch_env.tm.on_wait = self._latch(sup.STOP_ALL_REASON)
 
-        outcome = _dispatch(timeout_seconds=5)
+        outcome = _dispatch()
 
         assert not outcome.ok
         assert "stop-all" in outcome.error
@@ -955,7 +931,7 @@ class TestDispatchWorkerFailsClosed:
 
 class TestDispatchWorkerRateLimitFailFast:
     """A worker whose provider is refusing everything must die in seconds, not
-    at the (minutes-long) worker timeout."""
+    block indefinitely (there is no wall-clock worker timeout)."""
 
     @pytest.fixture(autouse=True)
     def _clean_breaker(self):
@@ -991,7 +967,7 @@ class TestDispatchWorkerRateLimitFailFast:
         pool = MagicMock(name="session_pool")
         pool.remove_broken = AsyncMock(return_value=object())
         with patch("app.core.session_pool.get_session_pool", return_value=pool):
-            outcome = _dispatch(timeout_seconds=600)
+            outcome = _dispatch()
 
         assert not outcome.ok
         assert "prov-openai" in outcome.error
@@ -1040,18 +1016,18 @@ class TestDispatchWorkerRateLimitFailFast:
         pool = MagicMock(name="session_pool")
         pool.remove_broken = AsyncMock(return_value=object())
         with patch("app.core.session_pool.get_session_pool", return_value=pool):
-            outcome = _dispatch(timeout_seconds=600)
+            outcome = _dispatch()
 
         assert swept == [(outcome.session_id, "parent-1")]
         task_registry.clear_session("parent-1")
         sup.reset()
 
-    def test_an_untripped_breaker_preserves_the_timeout_semantics(
+    def test_an_untripped_breaker_waits_without_a_deadline(
         self, dispatch_env, monkeypatch
     ):
-        """The breaker never trips → byte-identical behaviour to before: one
-        ``wait_session_idle`` with the SAME overall timeout, and the ordinary
-        timeout failure when it lapses."""
+        """No wall-clock cap (2026-08-21 ruling): the underlying idle wait is
+        handed an infinite timeout, so a long-running worker is never killed on
+        the clock — only a tripped breaker or a genuine idle settles it."""
         from app.core import turn_manager as tm_mod
         from app.core.task_registry import task_registry
 
@@ -1059,16 +1035,15 @@ class TestDispatchWorkerRateLimitFailFast:
 
         async def _wait(session_id, timeout=300.0):
             seen.append(timeout)
-            return False
+            return True
 
         monkeypatch.setattr(pa, "WAIT_SLICE_SECONDS", 0.01)
         monkeypatch.setattr(tm_mod, "wait_session_idle", _wait)
 
-        outcome = _dispatch(timeout_seconds=42)
+        outcome = _dispatch()
 
-        assert seen == [42.0]
-        assert not outcome.ok
-        assert "did not finish within 42s" in outcome.error
+        assert seen == [float("inf")]
+        assert outcome.ok
         task_registry.clear_session("parent-1")
 
     def test_another_providers_trip_is_ignored(self, dispatch_env, monkeypatch):
@@ -1339,18 +1314,6 @@ class TestWorkerFailedStatus:
 
         assert outcome.ok
         assert dispatch_env.status_updates == []
-
-    def test_timed_out_worker_marks_its_session_failed(self, dispatch_env):
-        """A worker that never went idle keeps the initial ``"error"`` status,
-        so its row is stamped too."""
-        dispatch_env.tm.idle = False
-
-        outcome = _dispatch()
-
-        assert not outcome.ok
-        assert dispatch_env.status_updates == [
-            {"session_id": outcome.session_id, "status": "failed"}
-        ]
 
     def test_status_write_failure_never_breaks_the_dispatch(
         self, dispatch_env, monkeypatch

@@ -24,6 +24,11 @@ from app.core.platform import detect_deployment_mode, DeploymentMode
 
 from app.core.project_utils import get_project_working_dir
 from app.core.query_streaming import DEFAULT_SDK_BUFFER_SIZE
+from app.core.model_registry import (
+    get_context_window,
+    get_model,
+    resolve_provider_context_window,
+)
 
 # --- Re-exports for backward compatibility ---
 # All symbols that were previously defined here are re-exported so that
@@ -47,6 +52,7 @@ from app.core.environment import (  # noqa: F401
     _get_hook_tool_names,
     _build_extra_args,
     _build_env_with_ai_tools,
+    apply_context_window_override,
     apply_provider_env,
     generate_environment_details,
 )
@@ -870,6 +876,15 @@ def build_options_from_profile(
             _binding_row = None
     _session_effort = (_binding_row or {}).get("effort")
     _session_permission_mode = (_binding_row or {}).get("permission_mode")
+    _context_window_value = overrides.get("context_window") or (
+        _binding_row or {}
+    ).get("context_window")
+    try:
+        context_window = int(_context_window_value) if _context_window_value else None
+    except (TypeError, ValueError):
+        context_window = None
+    if context_window is not None and context_window <= 0:
+        context_window = None
 
     # Determine permission mode. Like the model and effort, this is the
     # session's own binding (v79) with the agent's legacy config as the
@@ -1021,6 +1036,30 @@ def build_options_from_profile(
         is_non_claude_provider_session = (
             (main_provider_row or {}).get("provider_type") != "anthropic"
         )
+
+    # Only honor the two choices exposed by the picker, and only for GPT/Claude
+    # models whose registry ceiling is at least 1M. This also makes a stale
+    # context_window harmless after the session switches to an ineligible model.
+    if context_window is not None:
+        registered_window = (
+            resolve_provider_context_window(main_provider_row, model_to_use)
+            if main_provider_row is not None
+            else get_context_window(model_to_use) if get_model(model_to_use) else None
+        )
+        model_identity = str(model_to_use or "").lower()
+        is_claude = get_model(model_to_use) is not None or "claude" in model_identity
+        is_gpt = "gpt" in model_identity
+        allowed_windows = (
+            {200_000, 1_000_000}
+            if is_claude
+            else {256_000, 1_000_000} if is_gpt else set()
+        )
+        if (
+            registered_window is None
+            or registered_window < 1_000_000
+            or context_window not in allowed_windows
+        ):
+            context_window = None
 
     # Model-facing orchestration contract. The same provider-scoped resolver
     # builds Task's schema and enforces dispatch, so prompt prose cannot promise
@@ -1180,6 +1219,9 @@ def build_options_from_profile(
             model_to_use,
             session_id=session_id,
         )
+
+    if context_window is not None:
+        apply_context_window_override(full_env, context_window)
 
     ai_tool_env = full_env if full_env else None
 
@@ -1455,6 +1497,10 @@ def build_options_from_profile(
     # instead of failing with a missing-credential 401. Always stamped (None for
     # a native Anthropic session) so the attribute's presence is not a signal.
     options.aih_provider_id = provider_id
+    # A user-selected input window is fixed when the provider loop connects.
+    # The harness adapter uses this for native-loop compaction/usage accounting;
+    # delegated Claude also receives the authoritative env pins above.
+    options.aih_context_window = context_window
 
     # The bound row's SHAPE, carried alongside the id so the fluid
     # HarnessAdapter can decide the leg from the provider row instead of

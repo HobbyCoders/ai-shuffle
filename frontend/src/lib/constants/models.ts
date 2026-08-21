@@ -37,6 +37,7 @@ export {
 	normalizeModel,
 	isPresetModel,
 	getClaudeContextWindow,
+	getProviderContextWindow,
 	getModelLabel,
 	getModelFamily,
 	inferModelFamily,

@@ -337,6 +337,10 @@ export interface QueryRequest {
 	project?: string;
 	overrides?: {
 		model?: string;
+		permission_mode?: string;
+		effort?: string;
+		/** Explicit token ceiling: 200k/256k standard, or 1m extended. */
+		context_window?: number;
 		system_prompt_append?: string;
 	};
 }
@@ -348,6 +352,10 @@ export interface ConversationRequest {
 	project?: string;
 	overrides?: {
 		model?: string;
+		permission_mode?: string;
+		effort?: string;
+		/** Explicit token ceiling: 200k/256k standard, or 1m extended. */
+		context_window?: number;
 		system_prompt_append?: string;
 	};
 }

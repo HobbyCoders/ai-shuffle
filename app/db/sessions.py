@@ -97,6 +97,7 @@ class SessionRow(TypedDict):
     model: Optional[str]
     effort: Optional[str]
     permission_mode: Optional[str]
+    context_window: Optional[int]
     # Interaction mode (v74, ruling VM4): 'voice' for an OpenAI Realtime call,
     # NULL/'chat' for a normal chat session.
     mode: Optional[str]
@@ -483,6 +484,7 @@ def create_session(
     model: Optional[str] = None,
     effort: Optional[str] = None,
     permission_mode: Optional[str] = None,
+    context_window: Optional[int] = None,
     mode: Optional[str] = None,
     hidden: bool = False,
     target_instance_id: Optional[str] = None,
@@ -530,6 +532,8 @@ def create_session(
             ``query_options.build_options_from_profile``).
         effort: Reasoning effort chosen for this session, or ``None``.
         permission_mode: Permission mode chosen for this session, or ``None``.
+        context_window: Explicit input-window limit in tokens, or ``None`` to use
+            the selected model/provider's registered default.
         mode: Interaction mode for this session (ruling VM4) — ``'voice'`` for an
             OpenAI Realtime voice call. ``None`` (the default, and every
             pre-existing row) means chat; the API model coalesces NULL to
@@ -575,6 +579,12 @@ def create_session(
     selected_model = (model or "").strip() or None
     selected_effort = (effort or "").strip() or None
     selected_permission_mode = (permission_mode or "").strip() or None
+    try:
+        selected_context_window = int(context_window) if context_window else None
+    except (TypeError, ValueError):
+        selected_context_window = None
+    if selected_context_window is not None and selected_context_window <= 0:
+        selected_context_window = None
     if resolved_provider_id is None and selected_model:
         from app.core.query_options import decode_provider_model
 
@@ -592,8 +602,8 @@ def create_session(
             resolved_provider_id = None
     resolved_mode = (mode or "").strip() or None
     _ph = ph()
-    columns = ["id", "profile_id", "project_id", "project_v2_id", "title", "api_user_id", "parent_session_id", "fork_point_message_index", "worktree_id", "worktree_branch", "worktree_path", "automation_id", "instance_id", "is_active", "v2_stream", "created_at", "updated_at", "provider_id", "model", "effort", "permission_mode", "mode", "hidden"]
-    params = [session_id, profile_id, project_id, project_v2_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, True, now, now, resolved_provider_id, selected_model, selected_effort, selected_permission_mode, resolved_mode, hidden]
+    columns = ["id", "profile_id", "project_id", "project_v2_id", "title", "api_user_id", "parent_session_id", "fork_point_message_index", "worktree_id", "worktree_branch", "worktree_path", "automation_id", "instance_id", "is_active", "v2_stream", "created_at", "updated_at", "provider_id", "model", "effort", "permission_mode", "context_window", "mode", "hidden"]
+    params = [session_id, profile_id, project_id, project_v2_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, True, now, now, resolved_provider_id, selected_model, selected_effort, selected_permission_mode, selected_context_window, resolved_mode, hidden]
     if target_instance_id:
         # Serialized to a JSON string (not a dict) so the SQLite test shim, which
         # stores JSONB columns as TEXT, round-trips identically to Postgres —
@@ -804,6 +814,7 @@ def set_session_run_binding(
     model: Optional[str] = None,
     effort: Optional[str] = None,
     permission_mode: Optional[str] = None,
+    context_window: Optional[int] = None,
 ) -> None:
     """Persist the run binding a turn actually used onto its session (v79).
 
@@ -843,6 +854,13 @@ def set_session_run_binding(
     if clean_permission:
         updates.append(f"permission_mode = {_ph}")
         values.append(clean_permission)
+    try:
+        clean_context_window = int(context_window) if context_window else None
+    except (TypeError, ValueError):
+        clean_context_window = None
+    if clean_context_window is not None and clean_context_window > 0:
+        updates.append(f"context_window = {_ph}")
+        values.append(clean_context_window)
 
     if not updates:
         return

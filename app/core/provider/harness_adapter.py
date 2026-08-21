@@ -647,6 +647,9 @@ class HarnessAdapter(ProviderAdapter):
             provider_dialect = getattr(sdk_options, "aih_provider_dialect", None)
             if provider_dialect:
                 opts.extra["provider_dialect"] = provider_dialect
+        context_window = getattr(sdk_options, "aih_context_window", None)
+        if context_window:
+            opts.extra["context_window"] = int(context_window)
         # The app's own session id (``sessions.id``) rides alongside it as
         # ``aih_session_id``. Native legs need it for Task dispatch: the fluid
         # session id is a ``ses_...`` handle, not an app session row, and on a
@@ -2118,6 +2121,15 @@ def _native_context_window(kind: str, options: SessionOptions) -> Optional[int]:
     ``resolve_api_model_id`` output handed to the loop: both registries key on
     the slug, and the API id ("claude-opus-4-8") would miss every lookup.
     """
+    selected_window = (options.extra or {}).get("context_window")
+    if selected_window:
+        try:
+            window = int(selected_window)
+        except (TypeError, ValueError):
+            window = 0
+        if window > 0:
+            return window
+
     provider_id = (options.extra or {}).get("provider_id")
     if provider_id:
         window = resolve_provider_context_window(

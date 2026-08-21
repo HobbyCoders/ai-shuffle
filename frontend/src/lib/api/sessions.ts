@@ -73,6 +73,8 @@ export interface Session {
 	model?: string | null;
 	effort?: string | null;
 	permission_mode?: string | null;
+	/** Optional persisted concrete context ceiling once the backend stores the override. */
+	context_window?: number | null;
 	mode?: string;  // Interaction mode: 'chat' (default) or 'voice' (Realtime call)
 	v2_stream?: boolean;  // Per-session opt-in to the V2 streaming path (V2 Phase 1)
 	hidden?: boolean;  // List-hidden internal sessions (for example delegated workers)
