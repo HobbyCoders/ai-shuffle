@@ -692,3 +692,29 @@ async def test_run_pump_broadcast_trims_render_frames(mock_db):
     broadcast_events = [c.args[1] for c in env["broadcaster"].await_args_list]
     assert [e["type"] for e in broadcast_events] == ["tool_use", "subagent_tool_use", "done"]
     assert all(e["session_id"] == "s11" for e in broadcast_events)
+
+
+async def test_unpark_turn_threads_completion_frames_to_provider_overrides(mock_db):
+    frames = [{
+        "task_id": "worker-1",
+        "status": "completed",
+        "summary": "done",
+        "origin": "provider_agent",
+    }]
+    turn = turns_db.enqueue_turn(
+        "s12",
+        "unpark",
+        prompt="background task completed",
+        payload={"pending_frames": frames, "task_ids": ["worker-1"]},
+    )
+    captured = {}
+
+    async def pump(**kwargs):
+        captured.update(kwargs)
+        yield {"type": "done", "metadata": {}}
+
+    with _runtime_env(pump=pump):
+        outcome = await session_runtime.SessionRuntime(turn).execute()
+
+    assert outcome == "completed"
+    assert captured["overrides"]["background_task_completions"] == frames

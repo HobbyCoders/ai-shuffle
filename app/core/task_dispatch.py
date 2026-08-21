@@ -23,8 +23,9 @@ What this module adds on top of raw ``dispatch_worker``:
   land on the ROOT session (the one with a human watching), while
   project/worktree/cwd inheritance still reads the direct caller;
 * modes (A8) — ``sync`` blocks and returns the worker's report;
-  ``background`` returns the worker session id immediately and announces
-  completion to the parent without a polling loop.
+  ``background`` pre-allocates and returns the exact worker session id as a
+  Fluid ``BackgroundTaskReceipt``, then announces completion to the parent
+  without a polling loop.
 
 File-defined agents (Claude-ecosystem compat, ruling CE6)
 ---------------------------------------------------------
@@ -70,6 +71,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 if TYPE_CHECKING:  # pragma: no cover — annotation-only; every DB import here is
@@ -592,18 +594,48 @@ async def dispatch_task_tool(
         kwargs["tool_allowlist"] = tool_allowlist
 
     if mode == "background":
+        # Allocate the durable identity before scheduling the worker. Fluid uses
+        # this exact id as its detach receipt; polling by label could bind two
+        # same-label launches to the wrong worker or return None under load.
+        worker_id = str(uuid.uuid4())
+        kwargs["worker_session_id"] = worker_id
         task = asyncio.create_task(
             provider_agent.dispatch_worker(background=True, **kwargs)
         )
         _BACKGROUND_TASKS.add(task)
         task.add_done_callback(_BACKGROUND_TASKS.discard)
-        worker_id = await _await_worker_registration(root_session_id, label)
+        registered = await _await_worker_registration(
+            root_session_id, worker_id, task=task
+        )
+        if not registered and task.done():
+            try:
+                early = task.result()
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001
+                return {
+                    "ok": False,
+                    "error": f"Background worker failed during registration: {exc}",
+                }
+            if not early.ok:
+                return {
+                    "ok": False,
+                    "error": early.error or "Background worker failed to start.",
+                    "worker_session_id": worker_id,
+                }
+        elif not registered:
+            logger.warning(
+                "task_dispatch: worker %s did not register within the spawn "
+                "grace period; returning its durable id while the host-owned "
+                "dispatch continues",
+                worker_id,
+            )
         return {
             "ok": True,
             "mode": "background",
             "agent": result_agent,
             "model": model_id,
+            "task_id": worker_id,
             "worker_session_id": worker_id,
+            "description": label,
             "note": (
                 "Worker dispatched in the background. Completion will be "
                 "announced to the parent automatically; continue useful work. "
@@ -630,19 +662,27 @@ async def dispatch_task_tool(
 
 
 async def _await_worker_registration(
-    root_session_id: str, label: str, timeout: float = 5.0
-) -> Optional[str]:
-    """Best-effort: return the just-dispatched background worker's session id
-    once the supervisor sees it (labels match)."""
+    root_session_id: str,
+    worker_session_id: str,
+    timeout: float = 5.0,
+    *,
+    task: Optional[asyncio.Task] = None,
+) -> bool:
+    """Wait briefly for the pre-allocated worker id to enter the supervisor.
+
+    This is only a spawn-settlement grace period. The background dispatch task
+    remains host-owned and strongly referenced if registration takes longer.
+    """
     from app.core import provider_agent_supervisor as sup
 
     deadline = asyncio.get_event_loop().time() + timeout
     while asyncio.get_event_loop().time() < deadline:
-        for record in reversed(sup.live_workers(root_session_id)):
-            if (record.label or "").strip() == label.strip():
-                return record.worker_session_id
+        if sup.get_worker(root_session_id, worker_session_id) is not None:
+            return True
+        if task is not None and task.done():
+            return False
         await asyncio.sleep(0.05)
-    return None
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -674,7 +714,7 @@ def make_fluid_dispatcher(
     """
 
     async def _dispatch(input: Dict[str, Any], ctx: Any) -> Any:
-        from fluid.tools.registry import ToolOutcome
+        from fluid.tools.registry import BackgroundTaskReceipt, ToolOutcome
 
         caller_session_id: Any = session_id
         if callable(caller_session_id):
@@ -731,10 +771,20 @@ def make_fluid_dispatcher(
             launch_tool_use_id=launch_tool_use_id,
             agent_registry=agent_registry,
         )
+        receipt = None
+        if payload.get("ok") and payload.get("mode") == "background":
+            task_id = payload.get("task_id") or payload.get("worker_session_id")
+            if task_id:
+                receipt = BackgroundTaskReceipt(
+                    task_id=str(task_id),
+                    worker_session_id=str(payload.get("worker_session_id") or task_id),
+                    description=payload.get("description") or input.get("label"),
+                )
         return ToolOutcome(
             text=json.dumps(payload, default=str),
             ui=payload,
             is_error=not bool(payload.get("ok")),
+            background_task=receipt,
         )
 
     return _dispatch

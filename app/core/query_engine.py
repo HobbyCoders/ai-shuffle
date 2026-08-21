@@ -1539,6 +1539,15 @@ async def stream_query(
         raise
 
     try:
+        prepare_completions = getattr(
+            state.adapter, "prepare_background_completions", None
+        )
+        if callable(prepare_completions):
+            prepared = prepare_completions(
+                getattr(options, "aih_background_task_completions", None)
+            )
+            if asyncio.iscoroutine(prepared):
+                await prepared
         await state.adapter.send_query(prompt)
 
         async for message in state.adapter.receive_events():
@@ -2704,6 +2713,15 @@ async def _stream_to_websocket_impl(
         prompt = resolve_note_references(prompt)
 
         _query_send_start = time.monotonic()
+        prepare_completions = getattr(
+            state.adapter, "prepare_background_completions", None
+        )
+        if callable(prepare_completions):
+            prepared = prepare_completions(
+                getattr(options, "aih_background_task_completions", None)
+            )
+            if asyncio.iscoroutine(prepared):
+                await prepared
         await state.adapter.send_query(prompt)
         _query_send_elapsed = time.monotonic() - _query_send_start
         if _query_send_elapsed > 1.0:

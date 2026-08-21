@@ -44,7 +44,7 @@ from app.core.provider.events import (
 )
 
 from fluid.events import model as lm
-from fluid.events.ops import RespondPermission, UserTurn
+from fluid.events.ops import BackgroundTaskFinished, RespondPermission, UserTurn
 from fluid.providers.base import ProviderCaps, StreamChunk
 from fluid.store.base import MemoryStore
 
@@ -108,6 +108,45 @@ async def _collect(adapter, limit: int = 100) -> list:
         if len(out) >= limit:
             break
     return out
+
+
+@pytest.mark.asyncio
+async def test_host_background_completion_clears_fluid_without_double_wake():
+    engine = FakeEngine([])
+    adapter = _adapter_with(engine)
+
+    await adapter.prepare_background_completions([{
+        "task_id": "worker-1",
+        "status": "completed",
+        "summary": "done",
+    }])
+
+    assert len(engine.ops) == 1
+    op = engine.ops[0]
+    assert isinstance(op, BackgroundTaskFinished)
+    assert op.task_id == "worker-1"
+    assert op.status == "finished"
+    assert op.summary == "done"
+    assert op.wake is False
+
+
+@pytest.mark.asyncio
+async def test_host_owned_fluid_lifecycle_events_are_not_mirrored_twice():
+    events = [
+        lm.SubagentEvent(
+            session_id=SID,
+            task_id="worker-1",
+            kind="started",
+            worker_session_id="worker-1",
+        ),
+        lm.SessionParked(session_id=SID, pending_task_ids=("worker-1",)),
+        lm.SessionWoken(session_id=SID, task_ids=("worker-1",)),
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=1),
+    ]
+    got = await _collect(_adapter_with(FakeEngine(events)))
+
+    assert len(got) == 1
+    assert isinstance(got[0], ResultMessage)
 
 
 # ─── 1. Translation table ───────────────────────────────────────────────────

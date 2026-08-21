@@ -1546,11 +1546,18 @@ async def get_session_subagent_messages(
 
 
 async def _cleanup_session_artifacts(session_id: str, sdk_sid: Optional[str], project_id: Optional[str]):
-    """Background cleanup: terminate pooled subprocess + delete SDK JSONL.
+    """Background cleanup: stop workers, terminate the pool, and delete SDK JSONL.
 
     Runs after the HTTP response returns so clients don't block on subprocess
     teardown (which can hold worktree CWD locks and take time to exit).
     """
+    try:
+        from app.core import provider_agent_supervisor
+
+        await provider_agent_supervisor.stop_all_workers(session_id)
+    except Exception as e:
+        logger.warning(f"Background worker cleanup failed for {session_id}: {e}")
+
     try:
         from app.core.session_pool import get_session_pool
         await get_session_pool().remove(session_id)

@@ -1476,6 +1476,12 @@ def build_options_from_profile(
     # fluid id at connect time at all.
     options.aih_session_id = session_id
     options.aih_profile_id = profile.get("id")
+    _completion_frames = overrides.get("background_task_completions")
+    options.aih_background_task_completions = (
+        [dict(frame) for frame in _completion_frames if isinstance(frame, dict)]
+        if isinstance(_completion_frames, (list, tuple))
+        else []
+    )
 
     # Per-turn TOOL-SURFACE restriction (ruling CE12), set today by Task
     # dispatch when the target is a file/plugin agent whose definition carries a

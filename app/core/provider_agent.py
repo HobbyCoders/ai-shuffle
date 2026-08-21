@@ -917,6 +917,21 @@ async def _notify_caller_terminal(
     reports.
     """
     try:
+        from app.db import database
+
+        try:
+            parent = await asyncio.to_thread(database.get_session, parent_session_id)
+        except Exception:  # fail open: a transient lookup must not lose a real wake
+            parent = True
+        if parent is None:
+            logger.info(
+                "ProviderAgent: suppressing completion wake for deleted parent %s "
+                "(worker %s)",
+                parent_session_id,
+                worker_session_id,
+            )
+            return
+
         from app.core import turn_scheduler
 
         await turn_scheduler.on_task_terminal(parent_session_id, {
@@ -948,6 +963,7 @@ async def dispatch_worker(
     system_prompt_append: Optional[str] = None,
     tool_allowlist: Optional[List[str]] = None,
     agent_name: Optional[str] = None,
+    worker_session_id: Optional[str] = None,
 ) -> WorkerOutcome:
     """Run ``prompt`` in a fresh session bound to ``provider_id``/``model_id``.
 
@@ -1017,7 +1033,7 @@ async def dispatch_worker(
     # Task supplies the caller's provider and the target's configured model on
     # that provider. ``provider_id=None`` is an explicit native-Claude binding,
     # not permission to fall back to the target profile's top-level provider.
-    worker_session_id = str(uuid.uuid4())
+    worker_session_id = worker_session_id or str(uuid.uuid4())
     title = (label or "").strip() or f"Task worker · {model_id or profile_id}"
     # The provider's NAME, not its row id: the registry summary and the card's
     # settle frame are user-facing, and a raw `model_providers` UUID told nobody

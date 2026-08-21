@@ -356,6 +356,15 @@ async def _run_background_query_impl(
         raise
 
     try:
+        prepare_completions = getattr(
+            state.adapter, "prepare_background_completions", None
+        )
+        if callable(prepare_completions):
+            prepared = prepare_completions(
+                getattr(options, "aih_background_task_completions", None)
+            )
+            if asyncio.iscoroutine(prepared):
+                await prepared
         await state.adapter.send_query(prompt)
 
         async for message in state.adapter.receive_events():

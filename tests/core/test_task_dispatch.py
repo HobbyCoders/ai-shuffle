@@ -293,6 +293,29 @@ def test_background_mode_returns_immediately(agents):
     payload = asyncio.run(run())
     assert payload["ok"] is True and payload["mode"] == "background"
     assert started.get("background") is True
+    assert payload["task_id"] == payload["worker_session_id"]
+    assert started["worker_session_id"] == payload["worker_session_id"]
+
+
+def test_background_registration_failure_is_not_returned_as_a_receipt(agents):
+    _mk_session(agents, "s-bg-fail", "root-agent")
+
+    async def fake_worker(**kwargs):
+        return WorkerOutcome(
+            ok=False,
+            session_id=kwargs["worker_session_id"],
+            error="could not create worker",
+        )
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        payload = asyncio.run(_dispatch(
+            {"agent": "helper", "prompt": "go", "mode": "background"},
+            "s-bg-fail",
+        ))
+
+    assert payload["ok"] is False
+    assert payload["error"] == "could not create worker"
+    assert "task_id" not in payload
 
 
 def test_launch_tool_use_id_threads_to_the_worker(agents):
@@ -319,6 +342,30 @@ def test_launch_tool_use_id_threads_to_the_worker(agents):
     with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
         asyncio.run(dispatcher({"agent": "helper", "prompt": "go"}, SimpleNamespace(extra={})))
     assert seen["launch_tool_use_id"] is None
+
+
+def test_fluid_dispatcher_returns_structured_background_receipt(monkeypatch):
+    from types import SimpleNamespace
+
+    async def fake_dispatch(*args, **kwargs):
+        return {
+            "ok": True,
+            "mode": "background",
+            "task_id": "worker-42",
+            "worker_session_id": "worker-42",
+            "description": "research",
+        }
+
+    monkeypatch.setattr(td, "dispatch_task_tool", fake_dispatch)
+    outcome = asyncio.run(td.make_fluid_dispatcher("parent-1")(
+        {"agent": "helper", "prompt": "go", "mode": "background"},
+        SimpleNamespace(extra={}),
+    ))
+
+    assert outcome.background_task is not None
+    assert outcome.background_task.task_id == "worker-42"
+    assert outcome.background_task.worker_session_id == "worker-42"
+    assert outcome.background_task.description == "research"
 
 
 def test_root_routing_passes_root_as_parent(agents, monkeypatch):

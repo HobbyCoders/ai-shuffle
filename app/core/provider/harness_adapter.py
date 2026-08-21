@@ -204,6 +204,7 @@ from app.core.provider.events import (
 from fluid.engine.native import NativeLoop
 from fluid.engine.delegated import DelegatedLoop
 from fluid.events.ops import (
+    BackgroundTaskFinished,
     Interrupt,
     RespondPermission,
     RespondQuestion,
@@ -667,6 +668,9 @@ class HarnessAdapter(ProviderAdapter):
         # _bridge_permission) — same wiring the SDK path uses.
         self._can_use_tool = getattr(sdk_options, "can_use_tool", None)
         await self.connect(opts)
+        await self.prepare_background_completions(
+            getattr(sdk_options, "aih_background_task_completions", None)
+        )
 
     async def disconnect(
         self,
@@ -716,6 +720,40 @@ class HarnessAdapter(ProviderAdapter):
         return self._connected and self._engine is not None
 
     # ─── Query Execution ──────────────────────────────────────────────
+
+    async def prepare_background_completions(self, frames: Any) -> None:
+        """Clear Fluid's pending Task receipts before the host-owned wake turn.
+
+        AI Shuffle's durable turn queue owns wake admission, leases, batching,
+        and user-message ordering. Fluid therefore records these completions with
+        ``wake=False``: the app's already-claimed ``source=unpark`` turn is the
+        continuation, so allowing Fluid to start another would double-run it.
+        """
+        if self._engine is None or self._is_delegated or not frames:
+            return
+        status_map = {
+            "completed": "finished",
+            "finished": "finished",
+            "error": "failed",
+            "failed": "failed",
+            "killed": "cancelled",
+            "cancelled": "cancelled",
+            "stopped": "cancelled",
+        }
+        for frame in frames:
+            if not isinstance(frame, dict):
+                continue
+            task_id = frame.get("task_id")
+            if not task_id:
+                continue
+            status = status_map.get(str(frame.get("status") or "completed"), "failed")
+            await self._engine.submit(BackgroundTaskFinished(
+                task_id=str(task_id),
+                status=status,
+                summary=str(frame.get("summary") or "") or None,
+                worker_session_id=str(task_id),
+                wake=False,
+            ))
 
     async def send_query(self, prompt: str) -> None:
         if self._engine is None:
@@ -1312,7 +1350,18 @@ class HarnessAdapter(ProviderAdapter):
                 )
             ]
 
+        if cls in ("SessionParked", "SessionWoken"):
+            # AI Shuffle exposes its own durable turn.parked / queued-unpark
+            # lifecycle. Fluid's matching engine-internal events are persisted for
+            # rehydration but must not create a second app-level lifecycle frame.
+            return []
+
         if cls == "SubagentEvent":
+            if getattr(event, "worker_session_id", None):
+                # Host-owned ProviderAgent workers already stream through
+                # WorkerFeed/task_registry. Mirroring Fluid's receipt events would
+                # duplicate the same task card and terminal wake.
+                return []
             common = {
                 "uuid": self._uuid(event),
                 "session_id": getattr(event, "session_id", "") or "",

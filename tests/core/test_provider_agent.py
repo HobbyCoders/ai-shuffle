@@ -1485,6 +1485,18 @@ class TestWorkerWakesItsCaller:
         assert dispatch_env.wakes == []
         assert dispatch_env.status_updates == []
 
+    def test_deleted_parent_suppresses_background_completion_wake(
+        self, dispatch_env, monkeypatch
+    ):
+        from app.db import database as db
+
+        monkeypatch.setattr(db, "get_session", lambda sid: None)
+
+        outcome = _dispatch_bg()
+
+        assert outcome.ok
+        assert dispatch_env.wakes == []
+
     def test_wake_failure_never_breaks_the_dispatch_bg(
         self, dispatch_env, monkeypatch
     ):

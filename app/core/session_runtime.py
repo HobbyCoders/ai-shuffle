@@ -669,6 +669,15 @@ class SessionRuntime:
         from app.core.query_engine import _stream_to_websocket_impl
 
         prompt = self.turn.get("prompt") or ""
+        turn_overrides = dict(self.turn.get("overrides") or {})
+        completion_frames = list(
+            ((self.turn.get("payload") or {}).get("pending_frames") or [])
+        )
+        if completion_frames:
+            # The app turn queue owns wake admission and exactly-once execution.
+            # Carry the claimed completions to HarnessAdapter so Fluid can clear
+            # its durable pending-task state without starting a second wake turn.
+            turn_overrides["background_task_completions"] = completion_frames
         await recorder.start(prompt, profile_id=self.turn.get("profile_id"))
         try:
             async for event in _stream_to_websocket_impl(
@@ -681,7 +690,7 @@ class SessionRuntime:
                 # which are project_v2-keyed yet (OD-7 amended; that migration is
                 # post-V2 backlog).
                 project_id=self.turn.get("project_id"),
-                overrides=self.turn.get("overrides") or None,
+                overrides=turn_overrides or None,
                 broadcast_func=self._broadcast,
                 api_user_id=self.api_user_id,
                 user_id=self.user_id,

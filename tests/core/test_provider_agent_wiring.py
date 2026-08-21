@@ -104,6 +104,12 @@ def test_no_override_leaves_the_surface_unrestricted():
     assert _build_with({"tool_allowlist": ["", "  "]}).aih_tool_allowlist is None
 
 
+def test_background_completion_frames_are_stamped_for_fluid():
+    frames = [{"task_id": "worker-1", "status": "completed", "summary": "done"}]
+    opts = _build_with({"background_task_completions": frames})
+    assert opts.aih_background_task_completions == frames
+
+
 def test_the_permission_allowlist_is_not_the_tool_surface():
     """``allowed_tools`` keeps its SDK PERMISSION meaning — it is full of MCP
     names and (under a tools preset) holds no builtins at all, so it must never
