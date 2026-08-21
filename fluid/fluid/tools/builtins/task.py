@@ -32,11 +32,20 @@ SPEC = ToolSpec(
     name="Task",
     description=(
         "Delegate a self-contained task to a configured subagent. The "
-        "subagent runs in its own "
-        "session with its own configuration, memory, and tools, and reports "
-        "back. mode='sync' (default) waits for the result; mode='background' "
-        "returns immediately with the worker session id. Completion is "
-        "push-based; use task tools only for an on-demand status check."
+        "subagent runs in an isolated session with its own configuration, "
+        "memory, and tools — it does not see this conversation, so give it a "
+        "complete brief: objective, relevant paths and context, constraints, "
+        "and the report you expect back.\n"
+        "\n"
+        "Delegate independent or context-heavy work (broad searches, "
+        "multi-file investigations, parallelizable changes); handle a quick "
+        "lookup or single edit yourself. Do not duplicate delegated work by "
+        "also starting it yourself.\n"
+        "\n"
+        "mode='sync' (default) waits for the subagent's report; "
+        "mode='background' returns immediately with the worker session id "
+        "and completion is pushed to you later — keep doing other useful "
+        "work instead of polling."
     ),
     input_schema={
         "type": "object",

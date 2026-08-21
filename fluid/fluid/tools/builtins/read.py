@@ -43,16 +43,32 @@ MAX_LINE_CHARS = 2_000  # longer lines are cut with a marker
 SPEC = ToolSpec(
     name="Read",
     description=(
-        "Read a file from the filesystem. Returns contents with line numbers. "
-        "Reads up to 2000 lines by default; use offset/limit for more. "
-        "Images (png/jpg/gif/webp) are returned visually."
+        "Read a file from the filesystem. Text is returned with `lineno<TAB>` "
+        "prefixes (display formatting only — never copy it into Edit "
+        "old_string). Images (png/jpg/gif/webp) are returned visually so you "
+        "can see them.\n"
+        "\n"
+        "Usage notes:\n"
+        "- Reads up to 2000 lines from the start by default. When you only "
+        "need part of a large file, pass offset/limit — a truncation marker "
+        "tells you the offset to continue from.\n"
+        "- Lines longer than 2000 characters are cut with a marker. Other "
+        "binary files are refused with a diagnostic rather than dumped.\n"
+        "- Reading a file is what licenses a later Edit of it, so Read a "
+        "file before modifying it. Prefer Read over cat/head/tail via Bash."
     ),
     input_schema={
         "type": "object",
         "properties": {
             "file_path": {"type": "string", "description": "Absolute or cwd-relative path."},
-            "offset": {"type": "integer", "description": "1-based first line to read."},
-            "limit": {"type": "integer", "description": "Max lines to read."},
+            "offset": {
+                "type": "integer",
+                "description": "1-based line number to start reading from (default 1).",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum lines to return (default 2000).",
+            },
         },
         "required": ["file_path"],
     },

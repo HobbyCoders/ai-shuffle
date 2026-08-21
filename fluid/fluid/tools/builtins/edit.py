@@ -15,15 +15,43 @@ from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 SPEC = ToolSpec(
     name="Edit",
-    description="Replace an exact string in a file. Requires the file to have been Read; "
-    "old_string must be unique unless replace_all is true.",
+    description=(
+        "Perform an exact string replacement in an existing file. When you "
+        "say you will edit or update file content, invoke Edit immediately.\n"
+        "\n"
+        "Rules:\n"
+        "- The file must have been Read earlier in this session, or the call "
+        "fails.\n"
+        "- old_string must match the file byte-for-byte, including "
+        "indentation and line breaks. Do not include Read's line-number "
+        "prefix (the leading number and tab) — that is display formatting, "
+        "not file content.\n"
+        "- old_string must be unique in the file; if it matches more than "
+        "once the edit fails. Add surrounding lines to make it unique, or "
+        "pass replace_all=true to change every occurrence (useful for "
+        "renames).\n"
+        "- After a successful Edit, do not Read the file back just to "
+        "verify — a failed match would have returned an error instead."
+    ),
     input_schema={
         "type": "object",
         "properties": {
-            "file_path": {"type": "string"},
-            "old_string": {"type": "string"},
-            "new_string": {"type": "string"},
-            "replace_all": {"type": "boolean"},
+            "file_path": {
+                "type": "string",
+                "description": "Absolute or cwd-relative path of the file to modify.",
+            },
+            "old_string": {
+                "type": "string",
+                "description": "The exact existing text to replace.",
+            },
+            "new_string": {
+                "type": "string",
+                "description": "The replacement text (must differ from old_string).",
+            },
+            "replace_all": {
+                "type": "boolean",
+                "description": "Replace every occurrence of old_string (default false).",
+            },
         },
         "required": ["file_path", "old_string", "new_string"],
     },

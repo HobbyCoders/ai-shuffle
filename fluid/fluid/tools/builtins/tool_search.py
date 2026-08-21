@@ -32,8 +32,16 @@ _CATALOG_DESC_CAP = 100
 def _one_line(text: str) -> str:
     for line in (text or "").strip().splitlines():
         line = line.strip()
-        if line:
-            return line if len(line) <= _CATALOG_DESC_CAP else line[: _CATALOG_DESC_CAP - 1] + "…"
+        if not line:
+            continue
+        if len(line) <= _CATALOG_DESC_CAP:
+            return line
+        # Cut at a word boundary: a mid-word (or mid-JSON) chop reads as
+        # corruption, and the catalog only needs enough to pick keywords.
+        cut = line.rfind(" ", 0, _CATALOG_DESC_CAP)
+        if cut < _CATALOG_DESC_CAP // 2:
+            cut = _CATALOG_DESC_CAP - 1
+        return line[:cut].rstrip() + "…"
     return ""
 
 

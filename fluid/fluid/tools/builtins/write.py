@@ -10,12 +10,29 @@ from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 SPEC = ToolSpec(
     name="Write",
-    description="Write content to a file, creating parent directories as needed.",
+    description=(
+        "Create a new file or fully overwrite an existing one; parent "
+        "directories are created as needed. When you say you will create or "
+        "write file content, invoke Write immediately — do not draft the "
+        "content only in reasoning or route it through shell redirection.\n"
+        "\n"
+        "Use Write for new files or complete rewrites; use Edit for partial "
+        "changes to an existing file (overwriting a large file to change a "
+        "few lines wastes tokens and risks losing content). Overwriting is "
+        "destructive: for a file you did not create this session, Read it "
+        "first so you know what you are replacing."
+    ),
     input_schema={
         "type": "object",
         "properties": {
-            "file_path": {"type": "string"},
-            "content": {"type": "string"},
+            "file_path": {
+                "type": "string",
+                "description": "Absolute or cwd-relative path of the file to write.",
+            },
+            "content": {
+                "type": "string",
+                "description": "The complete new file content (UTF-8).",
+            },
         },
         "required": ["file_path", "content"],
     },

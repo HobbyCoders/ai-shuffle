@@ -17,9 +17,13 @@ from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 SPEC = ToolSpec(
     name="Skill",
     description=(
-        "Load the full instructions of an available skill by name. Skills are "
-        "listed (name + description) in the system prompt; call this before "
-        "performing a task a skill covers."
+        "Load the full instructions of an installed skill by name. When any "
+        "skills are installed they appear under '# Available skills' in the "
+        "system prompt (name + description only — bodies load on demand "
+        "here); no such section means none are installed. When the task at "
+        "hand is one a listed skill covers, call this first and follow the "
+        "loaded instructions in place of your default approach. Calling with "
+        "an unknown name returns the list of known skills."
     ),
     input_schema={
         "type": "object",

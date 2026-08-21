@@ -22,9 +22,15 @@ DEADLINE_S = 10.0
 SPEC = ToolSpec(
     name="Glob",
     description=(
-        "Find files by glob pattern (e.g. **/*.py). Returns paths sorted by "
-        f"modification time, newest first (default cap {MAX_RESULTS}, raise "
-        f"with limit up to {MAX_LIMIT})."
+        "Find files by glob pattern (e.g. **/*.py, src/**/*.ts). Prefer this "
+        "over find/ls via Bash for locating files by name or extension.\n"
+        "\n"
+        "Returns matching paths sorted by modification time, newest first — "
+        "so the files most likely to matter come first. Results are capped "
+        f"at {MAX_RESULTS} by default (a note tells you when the cap was "
+        f"hit; raise `limit` up to {MAX_LIMIT} or narrow the pattern). Heavy "
+        "directories (node_modules, .git, build output, virtualenvs) are "
+        "pruned from the walk."
     ),
     input_schema={
         "type": "object",

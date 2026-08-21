@@ -37,9 +37,22 @@ _MAX_FILESIZE = "2M"
 SPEC = ToolSpec(
     name="Grep",
     description=(
-        "Search file contents by regular expression. Returns matching lines "
-        f"(default cap {MAX_MATCHES}, raise with limit up to {MAX_LIMIT}); "
-        "respects ignore files unless no_ignore is set."
+        "Search file contents by regular expression. Always prefer this over "
+        "running grep/rg through Bash — it is bounded, labels its output, and "
+        "cannot hang the session.\n"
+        "\n"
+        "Results come back as `path:line:content` under a header naming the "
+        "search engine (ripgrep when installed, otherwise a bounded Python "
+        f"fallback). Matches are capped at {MAX_MATCHES} by default — a note "
+        "tells you when the cap was hit; raise `limit` (up to "
+        f"{MAX_LIMIT}) or narrow the pattern to see more. Ignored and hidden "
+        "files are skipped unless no_ignore is set. An empty result means no "
+        "matches in the searched scope, not an error.\n"
+        "\n"
+        "Patterns use ripgrep/Rust regex syntax when ripgrep is installed "
+        "(escape literal braces, e.g. interface\\{\\}) and Python re syntax "
+        "in the fallback; stick to the shared core (alternation, classes, "
+        "quantifiers) for portable patterns."
     ),
     input_schema={
         "type": "object",
