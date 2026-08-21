@@ -8,7 +8,6 @@
 	 *   3. foot row   — ControlsDock (model / effort / permission pills, context
 	 *      ring, computer-use + attach buttons) with the dictate / voice-call /
 	 *      send cluster passed in as its `actions` snippet.
-	 * A keyboard-hint line sits below the island.
 	 *
 	 * Delegates voice recording to VoiceRecorder, controls dock to ControlsDock,
 	 * and drag-and-drop to DragDropOverlay.
@@ -294,8 +293,7 @@
 	// Get selected profile name for display in placeholder
 	const selectedProfileName = $derived($profiles.find(p => p.id === $activeSession.profile)?.name || 'Profile');
 
-	// Modifier label for the queue shortcut in the hint line. Mirrors the
-	// send-later button's own title so the two can't disagree.
+	// Modifier label for the send-later button title.
 	const metaLabel =
 		typeof navigator !== 'undefined' && navigator.platform?.includes('Mac') ? '⌘' : 'Ctrl';
 
@@ -919,20 +917,6 @@
 					{/snippet}
 				</ControlsDock>
 			</div>
-
-			<!-- Keyboard hints. Desktop only: on touch devices Enter inserts a
-			     newline (see handleKeyDown), so the send/newline pair would be wrong.
-			     The queue shortcut is only bound while a turn is streaming, so it
-			     only appears then. -->
-			<div class="composer-hint">
-				<span class="kbd">↵</span> send
-				<span class="hint-sep">·</span>
-				<span class="kbd">⇧↵</span> newline
-				{#if $activeSession.isStreaming}
-					<span class="hint-sep">·</span>
-					<span class="kbd">{metaLabel}↵</span> queue for later
-				{/if}
-			</div>
 		</form>
 	</div>
 </div>
@@ -1122,40 +1106,6 @@
 
 	.send-btn.send-later-btn:hover:not(:disabled) svg {
 		color: var(--foreground);
-	}
-
-	/* ===== KEYBOARD HINT LINE ===== */
-	.composer-hint {
-		display: none;
-		align-items: center;
-		gap: 6px;
-		margin: 8px 2px 0;
-		font-size: 11px;
-		color: var(--subtle-foreground);
-		user-select: none;
-	}
-
-	/* On touch devices Enter inserts a newline instead of sending (see
-	   handleKeyDown), so the hint only shows where the shortcuts actually apply. */
-	@media (min-width: 640px) and (pointer: fine) {
-		.composer-hint {
-			display: flex;
-		}
-	}
-
-	.composer-hint .kbd {
-		font-family: var(--font-mono);
-		font-size: 10.5px;
-		line-height: 1;
-		padding: 3.5px 5px;
-		border-radius: 5px;
-		color: var(--subtle-foreground);
-		background: var(--scrim);
-		border: 1px solid var(--border);
-	}
-
-	.hint-sep {
-		opacity: 0.55;
 	}
 
 	@keyframes fadeIn {
