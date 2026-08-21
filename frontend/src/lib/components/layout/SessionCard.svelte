@@ -9,6 +9,9 @@
 	 * The mockup's third line also carries a +add/−del diffstat and a provider
 	 * glyph; neither is derivable from the sessions store without new API work,
 	 * so those two segments are omitted rather than faked.
+	 *
+	 * Hover/swipe exposes a single action: Settle (active) or Move to Active
+	 * (settled). Rename, Fork, and Delete live on the header session-title menu.
 	 */
 	import { onDestroy, onMount } from 'svelte';
 	import {
@@ -18,16 +21,10 @@
 		Monitor,
 		Cloud,
 		GitBranch,
-		Undo2,
-		Pencil,
-		GitFork,
-		Trash2,
-		X
+		Undo2
 	} from 'lucide-svelte';
 	import type { Session } from '$lib/api/client';
-	import { forkSession } from '$lib/api/client';
 	import { appData } from '$lib/stores/app-data.svelte';
-	import { activeSession } from '$lib/stores/active-session';
 	import { toast } from '$lib/stores/toast';
 	import {
 		STATUS_LABELS,
@@ -66,14 +63,9 @@
 	let actionsOpen = $state(false);
 	let swipeLayout = $state(false);
 	let dragOffset = $state<number | null>(null);
-	let deleteArmed = $state(false);
-	let deleteLoading = $state(false);
-	let deleteConfirmTimer: ReturnType<typeof setTimeout> | null = null;
 	let suppressClickTimer: ReturnType<typeof setTimeout> | null = null;
-	let renaming = $state(false);
-	let renameValue = $state('');
 
-	const ACTION_REVEAL_WIDTH = 176;
+	const ACTION_REVEAL_WIDTH = 44;
 	const SWIPE_COMMIT_DISTANCE = 44;
 	let pointerId: number | null = null;
 	let pointerStartX = 0;
@@ -82,18 +74,9 @@
 	let horizontalDrag = false;
 	let suppressNextClick = false;
 
-	function disarmDelete() {
-		if (deleteConfirmTimer !== null) {
-			clearTimeout(deleteConfirmTimer);
-			deleteConfirmTimer = null;
-		}
-		deleteArmed = false;
-	}
-
 	function closeActions() {
 		actionsOpen = false;
 		dragOffset = null;
-		disarmDelete();
 	}
 
 	function handleWindowClick(event: MouseEvent) {
@@ -101,13 +84,7 @@
 	}
 
 	function handleWindowKeydown(event: KeyboardEvent) {
-		if (event.key === 'Escape') {
-			if (renaming) {
-				renaming = false;
-				renameValue = '';
-			}
-			closeActions();
-		}
+		if (event.key === 'Escape') closeActions();
 	}
 
 	async function toggleSettled(event: MouseEvent | KeyboardEvent) {
@@ -120,97 +97,6 @@
 		}
 	}
 
-	async function handleFork(event: MouseEvent | KeyboardEvent) {
-		event.stopPropagation();
-		actionsOpen = false;
-		try {
-			const result = await forkSession(session.id);
-			await appData.loadSessions();
-			toast.push('Session forked', { tone: 'success' });
-			onOpen(result.session_id);
-		} catch {
-			toast.push('Failed to fork session', { tone: 'error' });
-		}
-	}
-
-	function armDelete() {
-		disarmDelete();
-		deleteArmed = true;
-		actionsOpen = true;
-		deleteConfirmTimer = setTimeout(() => {
-			deleteArmed = false;
-			deleteConfirmTimer = null;
-		}, 8000);
-	}
-
-	async function handleDelete(event: MouseEvent | KeyboardEvent) {
-		event.stopPropagation();
-		if (!deleteArmed) {
-			armDelete();
-			return;
-		}
-
-		disarmDelete();
-		actionsOpen = false;
-		deleteLoading = true;
-		try {
-			await appData.deleteSession(session.id);
-			if (activeSession.current.sessionId === session.id) activeSession.newChat();
-		} catch {
-			toast.push('Failed to delete session', { tone: 'error' });
-		} finally {
-			deleteLoading = false;
-		}
-	}
-
-	function cancelDelete(event: MouseEvent | KeyboardEvent) {
-		event.stopPropagation();
-		closeActions();
-	}
-
-	function focusSelect(node: HTMLInputElement) {
-		node.focus();
-		node.select();
-	}
-
-	function startRename(event: MouseEvent | KeyboardEvent) {
-		event.stopPropagation();
-		actionsOpen = false;
-		disarmDelete();
-		renaming = true;
-		renameValue = session.title || '';
-	}
-
-	function cancelRename() {
-		renaming = false;
-		renameValue = '';
-	}
-
-	async function commitRename() {
-		if (!renaming) return;
-		const next = renameValue.trim();
-		const current = (session.title || '').trim();
-		cancelRename();
-		if (!next || next === current) return;
-		try {
-			await appData.renameSession(session.id, next);
-			activeSession.setTitle(session.id, next);
-		} catch {
-			toast.push('Failed to rename session', { tone: 'error' });
-		}
-	}
-
-	function handleRenameKeydown(event: KeyboardEvent) {
-		event.stopPropagation();
-		if (event.key === 'Enter') {
-			event.preventDefault();
-			commitRename();
-		} else if (event.key === 'Escape') {
-			event.preventDefault();
-			cancelRename();
-		}
-	}
-
 	function openCard() {
 		if (suppressNextClick) {
 			suppressNextClick = false;
@@ -220,7 +106,6 @@
 			closeActions();
 			return;
 		}
-		if (deleteArmed || deleteLoading || renaming) return;
 		onOpen(session.id);
 	}
 
@@ -316,7 +201,6 @@
 	});
 
 	onDestroy(() => {
-		disarmDelete();
 		if (suppressClickTimer !== null) clearTimeout(suppressClickTimer);
 	});
 </script>
@@ -326,7 +210,7 @@
 <div
 	bind:this={cardRef}
 	class="scard-frame"
-	class:actions-open={actionsOpen || deleteArmed}
+	class:actions-open={actionsOpen}
 	class:dragging={dragOffset !== null}
 	role="group"
 	aria-label={`${title} session`}
@@ -363,20 +247,7 @@
 			<span class="timer" class:live>{timer}</span>
 		</span>
 
-		{#if renaming}
-			<input
-				class="rename-input"
-				type="text"
-				bind:value={renameValue}
-				use:focusSelect
-				onclick={(event) => event.stopPropagation()}
-				onkeydown={handleRenameKeydown}
-				onblur={commitRename}
-				aria-label="Rename session"
-			/>
-		{:else}
-			<span class="l2">{title}</span>
-		{/if}
+		<span class="l2">{title}</span>
 
 		<span class="l3">
 			<span class="seg">
@@ -402,16 +273,11 @@
 		aria-hidden={swipeLayout && !actionsOpen ? 'true' : undefined}
 		inert={swipeLayout && !actionsOpen}
 	>
-		{#if deleteArmed}
-			<button class="row-action cancel" title="Cancel" aria-label="Cancel delete" onclick={cancelDelete}>
-				<X size={16} strokeWidth={2} />
-			</button>
-		{:else if session.is_active}
+		{#if session.is_active}
 			<button
 				class="row-action state-toggle"
 				title="Settle session"
 				aria-label="Settle session"
-				disabled={deleteLoading}
 				onclick={toggleSettled}
 			>
 				<Check size={16} strokeWidth={1.8} />
@@ -421,40 +287,11 @@
 				class="row-action state-toggle"
 				title="Move to Active"
 				aria-label="Move session to Active"
-				disabled={deleteLoading}
 				onclick={toggleSettled}
 			>
 				<Undo2 size={16} strokeWidth={1.8} />
 			</button>
 		{/if}
-		<button
-			class="row-action"
-			title="Rename session"
-			aria-label="Rename session"
-			disabled={deleteArmed || deleteLoading}
-			onclick={startRename}
-		>
-			<Pencil size={13} strokeWidth={1.7} />
-		</button>
-		<button
-			class="row-action"
-			title="Fork session"
-			aria-label="Fork session"
-			disabled={deleteArmed || deleteLoading}
-			onclick={handleFork}
-		>
-			<GitFork size={13} strokeWidth={1.7} />
-		</button>
-		<button
-			class="row-action"
-			class:danger={deleteArmed}
-			title={deleteArmed ? 'Confirm delete' : 'Delete session'}
-			aria-label={deleteArmed ? 'Confirm delete' : 'Delete session'}
-			disabled={deleteLoading}
-			onclick={handleDelete}
-		>
-			<Trash2 size={13} strokeWidth={deleteArmed ? 2 : 1.7} />
-		</button>
 	</span>
 </div>
 
@@ -521,12 +358,6 @@
 		text-overflow: ellipsis;
 		max-width: 96px;
 	}
-	.scard-frame:hover .proj,
-	.scard-frame:hover .proj-sep,
-	.scard-frame:focus-within .proj,
-	.scard-frame:focus-within .proj-sep,
-	.scard-frame.actions-open .proj,
-	.scard-frame.actions-open .proj-sep { display: none; }
 	.dot {
 		width: 2px;
 		height: 2px;
@@ -582,20 +413,6 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
-	}
-	.rename-input {
-		display: block;
-		width: 100%;
-		height: 24px;
-		margin-top: 1px;
-		padding: 2px 6px;
-		border: 1px solid var(--ring);
-		border-radius: 6px;
-		background: var(--background);
-		color: var(--foreground);
-		font: inherit;
-		font-size: 13px;
-		outline: none;
 	}
 
 	.l3 {
@@ -674,10 +491,6 @@
 		background: color-mix(in oklch, var(--sidebar-accent-active) 78%, transparent);
 	}
 	.row-action.state-toggle { color: var(--muted-foreground); }
-	.row-action.danger {
-		color: var(--destructive);
-		background: color-mix(in oklch, var(--destructive) 14%, transparent);
-	}
 	.row-action:disabled { opacity: 0.45; cursor: not-allowed; }
 	.row-action:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 
@@ -699,7 +512,7 @@
 				linear-gradient(var(--sidebar-accent-active), var(--sidebar-accent-active)),
 				var(--sidebar);
 		}
-		.scard-frame.actions-open .scard { transform: translateX(-176px); }
+		.scard-frame.actions-open .scard { transform: translateX(-44px); }
 		.scard-frame.dragging .scard { transition: none; }
 		.scard-frame:hover .scard { background: var(--sidebar); }
 		.scard-frame:hover .scard.active {
@@ -708,14 +521,11 @@
 				var(--sidebar);
 		}
 
-		.scard-frame.actions-open .proj,
-		.scard-frame.actions-open .proj-sep { display: block; }
-
 		.card-actions {
 			top: 0;
 			right: 0;
 			bottom: 0;
-			width: 176px;
+			width: 44px;
 			justify-content: flex-end;
 			gap: 0;
 			padding-left: 0;
@@ -733,9 +543,6 @@
 		}
 		.card-actions > *:hover {
 			background: color-mix(in oklch, var(--sidebar-accent-active) 88%, transparent);
-		}
-		.row-action.danger {
-			background: color-mix(in oklch, var(--destructive) 18%, transparent);
 		}
 	}
 

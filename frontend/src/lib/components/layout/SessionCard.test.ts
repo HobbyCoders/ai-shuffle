@@ -121,13 +121,13 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('SessionCard actions', () => {
-	it('restores settle, rename, fork, and delete controls', () => {
+	it('keeps settle and omits rename, fork, and delete controls', () => {
 		renderCard();
 
 		expect(screen.getByTitle('Settle session')).toBeTruthy();
-		expect(screen.getByTitle('Rename session')).toBeTruthy();
-		expect(screen.getByTitle('Fork session')).toBeTruthy();
-		expect(screen.getByTitle('Delete session')).toBeTruthy();
+		expect(screen.queryByTitle('Rename session')).toBeNull();
+		expect(screen.queryByTitle('Fork session')).toBeNull();
+		expect(screen.queryByTitle('Delete session')).toBeNull();
 	});
 
 	it('settles an active session without opening it', async () => {
@@ -145,30 +145,6 @@ describe('SessionCard actions', () => {
 		await fireEvent.click(screen.getByTitle('Move to Active'));
 
 		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', true);
-	});
-
-	it('requires confirmation before deleting and resets the open chat in place', async () => {
-		mocks.activeSession.set({ sessionId: 'session-a' });
-		const { onOpen } = renderCard();
-
-		await fireEvent.click(screen.getByTitle('Delete session'));
-		expect(mocks.deleteSession).not.toHaveBeenCalled();
-
-		await fireEvent.click(screen.getByTitle('Confirm delete'));
-
-		expect(mocks.deleteSession).toHaveBeenCalledWith('session-a');
-		await vi.waitFor(() => expect(mocks.newChat).toHaveBeenCalledOnce());
-		expect(onOpen).not.toHaveBeenCalled();
-	});
-
-	it('forks the selected session and opens the fork', async () => {
-		const { onOpen } = renderCard();
-
-		await fireEvent.click(screen.getByTitle('Fork session'));
-
-		expect(mocks.forkSession).toHaveBeenCalledWith('session-a');
-		await vi.waitFor(() => expect(onOpen).toHaveBeenCalledWith('forked-session'));
-		expect(onOpen).not.toHaveBeenCalledWith('session-a');
 	});
 
 	it('keeps mobile actions hidden until a left swipe reveals them', async () => {

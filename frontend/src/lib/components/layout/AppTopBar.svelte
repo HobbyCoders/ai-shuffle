@@ -17,6 +17,8 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import NotificationCenter from '$lib/components/NotificationCenter.svelte';
 	import Sidebar from './Sidebar.svelte';
+	import SessionTitleMenu from './SessionTitleMenu.svelte';
+	import { chatHeaderTitle } from './chat-empty-state';
 
 	interface Props {
 		isAdmin?: boolean;
@@ -51,10 +53,16 @@
 	// In a chat, the mobile bar shows the chat name (the old PageHeader title row
 	// is dropped on mobile, so the name lives here, centered). Mirrors MainPanel's
 	// headerTitle derivation.
+	const boundChatId = $derived(
+		currentType === 'chat' ? ($activeSession.sessionId ?? null) : null
+	);
 	const chatTitle = $derived.by(() => {
 		const s = $activeSession;
-		if (s && s.messages.length > 0) return s.title || 'Untitled';
-		return 'New Chat';
+		return chatHeaderTitle({
+			sessionId: s?.sessionId,
+			title: s?.title,
+			messageCount: s?.messages?.length ?? 0
+		});
 	});
 	const mobileTitle = $derived.by(() => {
 		if (currentType === 'chat') return chatTitle;
@@ -86,7 +94,11 @@
 		<Menu size={20} strokeWidth={1.8} />
 	</button>
 
-	<span class="tb-context-title">{mobileTitle}</span>
+	{#if boundChatId}
+		<SessionTitleMenu title={mobileTitle} sessionId={boundChatId} variant="mobile" />
+	{:else}
+		<span class="tb-context-title">{mobileTitle}</span>
+	{/if}
 
 	<NotificationCenter />
 

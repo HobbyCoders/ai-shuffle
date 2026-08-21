@@ -20,6 +20,8 @@ type HeaderDropdownId =
 	| 'sheet-branch'
 	| 'runner'
 	| 'notifications'
+	// Bound-chat session title in the header breadcrumb (rename / fork / delete).
+	| 'session-title'
 	// Git-action option popovers (split-button chevrons). Listing them here means
 	// opening any one closes every other header dropdown — including the branch
 	// selector and any sibling git-action popover — so only one is ever open.

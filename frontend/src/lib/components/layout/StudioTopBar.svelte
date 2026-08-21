@@ -15,12 +15,15 @@
 	import { PanelLeft, ChevronRight } from 'lucide-svelte';
 	import { username } from '$lib/stores/auth.svelte';
 	import NotificationCenter from '$lib/components/NotificationCenter.svelte';
+	import SessionTitleMenu from './SessionTitleMenu.svelte';
 
 	interface Props {
 		/** Left crumb — the project (or section) the current view belongs to. */
 		projectLabel?: string | null;
 		/** Right crumb — the open session / page title. */
 		title?: string | null;
+		/** Bound chat session id. Null on New Chat and non-chat pages (inert title). */
+		sessionId?: string | null;
 		sidebarCollapsed?: boolean;
 		onToggleSidebar?: () => void;
 		/** Project crumb activation (returns to the sessions board). */
@@ -32,6 +35,7 @@
 	let {
 		projectLabel = null,
 		title = null,
+		sessionId = null,
 		sidebarCollapsed = false,
 		onToggleSidebar,
 		onOpenProject,
@@ -72,7 +76,7 @@
 			{/if}
 		{/if}
 		{#if title}
-			<span class="crumb-title" aria-current="page">{title}</span>
+			<SessionTitleMenu {title} sessionId={sessionId} />
 		{/if}
 	</nav>
 
@@ -138,16 +142,6 @@
 	}
 	.crumb-proj:hover { color: var(--foreground); }
 	.crumbs :global(.crumb-sep) { color: var(--subtle-foreground); flex: none; }
-	.crumb-title {
-		font-size: 13.5px;
-		font-weight: 500;
-		letter-spacing: -0.008em;
-		color: var(--foreground);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		min-width: 0;
-	}
 
 	.tb-right {
 		margin-left: auto;

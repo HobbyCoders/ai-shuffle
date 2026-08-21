@@ -821,6 +821,7 @@
 		<StudioTopBar
 			projectLabel={crumbProject}
 			title={crumbTitle}
+			sessionId={activeTab?.sessionId ?? null}
 			{sidebarCollapsed}
 			{onToggleSidebar}
 		>
