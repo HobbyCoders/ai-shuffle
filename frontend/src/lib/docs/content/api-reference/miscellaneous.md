@@ -187,6 +187,41 @@ Remove the Anthropic API key.
 
 **Auth:** Admin only
 
+### GET /api/v1/settings/text-generation
+
+The model and effort behind every internal one-shot AI call: session titles,
+commit messages, PR descriptions, branch names, and generated agents. Agents do
+not carry a model, and generation runs outside any session, so this one setting
+governs all of it.
+
+**Response:**
+
+```json
+{
+  "text_generation_model": "prov:prov-or:openai/gpt-5.6",
+  "text_generation_effort": "low"
+}
+```
+
+`text_generation_model` is the raw picker value: a bare id or alias (`sonnet`),
+or a `prov:<providerId>:<modelId>` composite for a gateway model. Empty means
+unset, which resolves to the default model at call time. `text_generation_effort`
+is `low` | `medium` | `high` | `xhigh` | `max`, or empty for the provider's own
+default.
+
+### PUT /api/v1/settings/text-generation
+
+Partial update — only the keys present in the body are written; an empty string
+clears one back to its default. A composite model is validated against the
+provider row, so a model that provider does not serve is refused here rather
+than failing every generation afterwards.
+
+**Auth:** Admin only
+
+```bash
+curl -X PUT http://localhost:8000/api/v1/settings/text-generation   -H "Authorization: Bearer aih_your_key"   -H "Content-Type: application/json"   -d '{"text_generation_model": "haiku", "text_generation_effort": "low"}'
+```
+
 ## Preferences
 
 User preferences are stored and accessed per key.
