@@ -23,20 +23,17 @@
 		(message.agentChildren || []).filter(c => c && c.id)
 	);
 
-	// Count children by type. `errorTools` mirrors the main feed's tool GROUP
-	// chip ("17/21 tools (4 failed)") — a collapsed failed card used to give no
-	// hint of failures beyond the tiny red X in its header.
+	// Count children by type — the collapsed header shows a completed/total
+	// ratio only.
 	const childCounts = $derived.by(() => {
 		const children = validChildren;
 		const toolUseChildren = children.filter(c => c.type === 'tool_use');
 		const completedTools = toolUseChildren.filter(c => c.toolStatus === 'complete').length;
-		const errorTools = toolUseChildren.filter(c => c.toolStatus === 'error').length;
 
 		return {
 			total: children.length,
 			toolUse: toolUseChildren.length,
-			completedTools,
-			errorTools
+			completedTools
 		};
 	});
 
@@ -245,13 +242,12 @@
 				{/if}
 			{/if}
 
-			<!-- Tool count, with failures called out — a collapsed failed card
-			     showed no count at all. -->
+			<!-- Tool count. Failures are NOT spelled out here: the extra
+			     "(n failed)" text overflowed the summary row on phones and put a
+			     horizontal scrollbar on the whole chat. The red X glyph and the
+			     completed/total ratio still carry the signal. -->
 			{#if childCounts.toolUse > 0}
 				<span class="sa-count mono">{childCounts.completedTools}/{childCounts.toolUse}</span>
-				{#if childCounts.errorTools > 0}
-					<span class="sa-failed mono">({childCounts.errorTools} failed)</span>
-				{/if}
 			{/if}
 
 			<svg class="sa-chev" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -470,6 +466,7 @@
 		border-radius: 8px;
 		cursor: pointer;
 		list-style: none;
+		overflow: hidden;
 		transition: background-color 0.13s ease;
 	}
 
@@ -498,7 +495,10 @@
 	}
 
 	.sa-name {
-		flex: none;
+		flex: 0 1 auto;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
 		font-size: 12.5px;
 		font-weight: 600;
 		color: var(--foreground);
@@ -535,8 +535,7 @@
 	}
 
 	.sa-usage,
-	.sa-count,
-	.sa-failed {
+	.sa-count {
 		font-family: var(--font-mono);
 		font-size: 11px;
 		font-variant-numeric: tabular-nums;
@@ -549,10 +548,6 @@
 
 	@media (min-width: 640px) {
 		.sa-usage { display: inline; }
-	}
-
-	.sa-failed {
-		color: var(--rose);
 	}
 
 	.sa-chev {
