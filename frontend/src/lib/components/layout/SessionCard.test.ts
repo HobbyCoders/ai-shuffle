@@ -143,6 +143,16 @@ describe('SessionCard actions', () => {
 		expect(container.querySelector('.scard.receded')).toBeNull();
 	});
 
+	it('renders a settled row as a single compact line, keeping its action', () => {
+		const { container } = renderCard({ is_active: false }, { compact: true });
+
+		expect(container.querySelector('.scard.compact')).toBeTruthy();
+		expect(container.querySelector('.ctitle')?.textContent).toContain('Sidebar work');
+		// The three-line device/branch meta is dropped in compact mode.
+		expect(container.querySelector('.l3')).toBeNull();
+		expect(screen.getByTitle('Move to Active')).toBeTruthy();
+	});
+
 	it('settles an active session without opening it', async () => {
 		const { onOpen } = renderCard();
 

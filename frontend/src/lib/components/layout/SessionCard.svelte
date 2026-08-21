@@ -46,10 +46,12 @@
 		active?: boolean;
 		/** Current clock (ms) supplied by the sidebar's shared ticker. */
 		now: number;
+		/** Single-line dense row — used for the settled/archived groups. */
+		compact?: boolean;
 		onOpen: (sessionId: string) => void;
 	}
 
-	let { session, status, projectLabel, active = false, now, onOpen }: Props = $props();
+	let { session, status, projectLabel, active = false, now, compact = false, onOpen }: Props = $props();
 
 	const live = $derived(isLiveStatus(status));
 	const elapsed = $derived(Math.max(0, now - sessionTimestamp(session)));
@@ -213,6 +215,7 @@
 <div
 	bind:this={cardRef}
 	class="scard-frame"
+	class:compact
 	class:actions-open={actionsOpen}
 	class:dragging={dragOffset !== null}
 	role="group"
@@ -226,6 +229,7 @@
 		class="scard"
 		class:active
 		class:receded
+		class:compact
 		role="button"
 		tabindex="0"
 		aria-current={active ? 'true' : undefined}
@@ -234,41 +238,48 @@
 		title={title}
 		style:transform={dragOffset === null ? undefined : `translateX(${dragOffset}px)`}
 	>
-		<span class="l1">
-			<span class="proj">{projectLabel}</span>
-			<span class="dot proj-sep" aria-hidden="true"></span>
-			<span class="status {status}">
-				{#if status === 'working'}
-					<Loader2 size={11} strokeWidth={2.6} class="spin" />
-				{:else if status === 'await'}
-					<AlertCircle size={11} strokeWidth={2.2} />
-				{:else if status === 'done'}
-					<Check size={11} strokeWidth={2.6} />
-				{/if}
-				{statusLabel}
+		{#if compact}
+			<span class="l1 cline">
+				<span class="ctitle">{title}</span>
+				<span class="timer" class:live>{timer}</span>
 			</span>
-			<span class="dot" aria-hidden="true"></span>
-			<span class="timer" class:live>{timer}</span>
-		</span>
-
-		<span class="l2">{title}</span>
-
-		<span class="l3">
-			<span class="seg">
-				{#if session.is_remote}
-					<Cloud size={12} strokeWidth={1.9} />
-				{:else}
-					<Monitor size={12} strokeWidth={1.9} />
-				{/if}
-				<span class="dev">{device}</span>
-			</span>
-			{#if branch}
-				<span class="seg">
-					<GitBranch size={12} strokeWidth={1.9} />
-					<span class="branch">{branch}</span>
+		{:else}
+			<span class="l1">
+				<span class="proj">{projectLabel}</span>
+				<span class="dot proj-sep" aria-hidden="true"></span>
+				<span class="status {status}">
+					{#if status === 'working'}
+						<Loader2 size={11} strokeWidth={2.6} class="spin" />
+					{:else if status === 'await'}
+						<AlertCircle size={11} strokeWidth={2.2} />
+					{:else if status === 'done'}
+						<Check size={11} strokeWidth={2.6} />
+					{/if}
+					{statusLabel}
 				</span>
-			{/if}
-		</span>
+				<span class="dot" aria-hidden="true"></span>
+				<span class="timer" class:live>{timer}</span>
+			</span>
+
+			<span class="l2">{title}</span>
+
+			<span class="l3">
+				<span class="seg">
+					{#if session.is_remote}
+						<Cloud size={12} strokeWidth={1.9} />
+					{:else}
+						<Monitor size={12} strokeWidth={1.9} />
+					{/if}
+					<span class="dev">{device}</span>
+				</span>
+				{#if branch}
+					<span class="seg">
+						<GitBranch size={12} strokeWidth={1.9} />
+						<span class="branch">{branch}</span>
+					</span>
+				{/if}
+			</span>
+		{/if}
 	</div>
 
 	<span
@@ -343,6 +354,26 @@
 		box-shadow: 0 0 8px -1px var(--glow);
 	}
 	.scard:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+
+	/* Compact single-line row for settled/archived sessions: title + age only,
+	   so the inactive lists read as a dense stack that visually breaks up the
+	   taller active cards above. The timer still swaps to the quick action on
+	   hover, and the mobile swipe strip is untouched. */
+	.scard.compact { padding: 6px 8px; }
+	.l1.cline { display: flex; align-items: center; gap: 8px; }
+	.ctitle {
+		flex: 1 1 auto;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: 13px;
+		font-weight: 500;
+		letter-spacing: -0.008em;
+		color: var(--sidebar-foreground);
+	}
+	.scard.compact .timer { flex: none; }
+	.scard.compact.active::before { top: 6px; bottom: 6px; }
 
 	.l1 {
 		display: flex;

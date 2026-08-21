@@ -370,6 +370,7 @@
 		{#if activeRows.length > 0}
 			<button class="grouplabel" onclick={() => toggleGroup('active')} aria-expanded={!collapsedGroups.active}>
 				Active <span class="count">{activeRows.length}</span>
+				<span class="rule" aria-hidden="true"></span>
 				<span class="group-chev" class:is-collapsed={collapsedGroups.active}>
 					<ChevronDown size={13} strokeWidth={2} />
 				</span>
@@ -393,6 +394,7 @@
 
 		<button class="grouplabel" onclick={() => toggleGroup('settled')} aria-expanded={!collapsedGroups.settled}>
 			Settled <span class="count">{settledRows.length}</span>
+			<span class="rule" aria-hidden="true"></span>
 			<span class="group-chev" class:is-collapsed={collapsedGroups.settled}>
 				<ChevronDown size={13} strokeWidth={2} />
 			</span>
@@ -409,6 +411,7 @@
 							projectLabel={projectLabel(row.session)}
 							active={row.session.id === activeId}
 							{now}
+							compact
 							onOpen={onOpenSession}
 						/>
 					{/each}
@@ -451,6 +454,7 @@
 							projectLabel={projectLabel(row.session)}
 							active={row.session.id === activeId}
 							{now}
+							compact
 							onOpen={onOpenSession}
 						/>
 					{/each}
@@ -667,6 +671,9 @@
 		color: var(--subtle-foreground);
 		opacity: 0.8;
 	}
+	/* Rule fills the header row after the label so each group reads as a titled
+	   divider, breaking up the stacked lists below it. */
+	.grouplabel .rule { flex: 1 1 auto; height: 1px; background: var(--sidebar-border); }
 	.divider { height: 1px; background: var(--sidebar-border); margin: 8px 8px 0; }
 	.empty {
 		margin: 0;
