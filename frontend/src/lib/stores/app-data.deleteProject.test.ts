@@ -57,6 +57,7 @@ beforeEach(() => {
 			};
 		}
 		if (url === '/projects') return deleted ? [projects[1]] : projects;
+		if (url === '/cluster/projects') return { projects: [] };
 		return [];
 	});
 });
