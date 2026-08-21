@@ -14,7 +14,7 @@ const message = {
 } as ChatMessage;
 
 const row = createRawSnippet<[ChatMessage, number]>((getMessage) => ({
-	render: () => `<div data-testid="work-row">${getMessage().toolName}</div>`
+	render: () => `<div data-testid="work-row">${getMessage().content || getMessage().toolName}</div>`
 }));
 
 const baseProps = {
@@ -41,5 +41,31 @@ describe('WorkLogGroup', () => {
 		await view.rerender({ ...baseProps, mode: 'settled', durationLabel: 'Worked for 4s' });
 		expect(screen.queryByTestId('work-row')).toBeNull();
 		expect(screen.getByRole('button', { name: /Show work details: Worked for 4s, Read 1 file/i })).toBeTruthy();
+	});
+
+	it('keeps the terminal answer visible while settled work is collapsed', async () => {
+		const answer = {
+			id: 'answer-1',
+			role: 'assistant',
+			type: 'text',
+			content: 'Final answer'
+		} as ChatMessage;
+		render(WorkLogGroup, {
+			props: {
+				...baseProps,
+				mode: 'settled',
+				durationLabel: 'Worked for 4s',
+				sequence: [
+					{ message, index: 0, hiddenWhenCollapsed: true },
+					{ message: answer, index: 1, hiddenWhenCollapsed: false }
+				]
+			}
+		});
+
+		expect(screen.getByText('Final answer')).toBeTruthy();
+		expect(screen.queryByText('Read')).toBeNull();
+		await fireEvent.click(screen.getByRole('button', { name: /Show work details/i }));
+		expect(screen.getByText('Read')).toBeTruthy();
+		expect(screen.getByText('Final answer')).toBeTruthy();
 	});
 });

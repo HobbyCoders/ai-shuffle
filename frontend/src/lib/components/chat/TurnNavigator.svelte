@@ -155,15 +155,10 @@
 		.turn-preview { display: none; }
 	}
 
+	/* Turn-to-turn minimap is a desktop reading aid. On compact/coarse-pointer
+	   surfaces it competes with transcript scrolling and the composer island. */
 	@media (max-width: 639px), (pointer: coarse) {
-		.turn-nav {
-			top: auto;
-			bottom: 12px;
-			flex-direction: row;
-			transform: none;
-		}
-		.turn-button { width: 44px; height: 44px; }
-		.turn-preview { display: none; }
+		.turn-nav { display: none; }
 	}
 
 	@media (prefers-reduced-motion: reduce) {

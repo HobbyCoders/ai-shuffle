@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
+	reconcileMobileComposerExpanded,
 	shouldCollapseMobileComposer,
-	type MobileComposerCollapseState
+	type MobileComposerCollapseState,
+	type MobileComposerReconcileState
 } from './mobile-composer-collapse';
 
 const chatInput = readFileSync(
@@ -25,6 +27,16 @@ const idleCompactComposer: MobileComposerCollapseState = {
 	fileAutocompleteOpen: false
 };
 
+const idleReconcileState: MobileComposerReconcileState = {
+	compact: true,
+	hasDraft: false,
+	composerFocused: false,
+	controlsOpen: false,
+	commandAutocompleteOpen: false,
+	fileAutocompleteOpen: false,
+	activeElementOwned: false
+};
+
 describe('mobile composer collapse predicate', () => {
 	it('collapses only an idle compact composer', () => {
 		expect(shouldCollapseMobileComposer(idleCompactComposer)).toBe(true);
@@ -43,6 +55,37 @@ describe('mobile composer collapse predicate', () => {
 		['file autocomplete is open', { fileAutocompleteOpen: true }]
 	])('stays expanded when %s', (_label, state) => {
 		expect(shouldCollapseMobileComposer({ ...idleCompactComposer, ...state })).toBe(false);
+	});
+});
+
+describe('mobile composer deferred ownership reconciliation', () => {
+	it('collapses an empty composer after blur or an outside pointer settles', () => {
+		expect(reconcileMobileComposerExpanded(true, idleReconcileState)).toBe(false);
+	});
+
+	it('stays expanded when focus moves to an island control', () => {
+		expect(reconcileMobileComposerExpanded(true, {
+			...idleReconcileState,
+			activeElementOwned: true
+		})).toBe(true);
+	});
+
+	it.each([
+		['controls sheet', { controlsOpen: true }],
+		['command autocomplete', { commandAutocompleteOpen: true }],
+		['file autocomplete', { fileAutocompleteOpen: true }],
+		['draft', { hasDraft: true }],
+		['editor focus', { composerFocused: true }]
+	])('never collapses while %s owns the interaction', (_label, patch) => {
+		expect(reconcileMobileComposerExpanded(true, { ...idleReconcileState, ...patch })).toBe(true);
+	});
+
+	it('collapses immediately after a successful send', () => {
+		expect(reconcileMobileComposerExpanded(true, {
+			...idleReconcileState,
+			activeElementOwned: true,
+			controlsOpen: true
+		}, 'successful-send')).toBe(false);
 	});
 });
 

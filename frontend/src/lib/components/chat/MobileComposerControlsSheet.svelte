@@ -222,7 +222,7 @@
 <svelte:window onkeydown={handleKeydown} />
 
 {#if open}
-	<div use:portal class="sheet-layer" role="presentation">
+	<div use:portal class="sheet-layer" data-composer-owned-overlay="true" role="presentation">
 		<button class="sheet-backdrop" type="button" aria-label="Close chat controls" onclick={closeSheet}></button>
 
 		<div

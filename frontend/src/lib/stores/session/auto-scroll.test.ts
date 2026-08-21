@@ -13,6 +13,8 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+	CURRENT_TURN_ANCHOR_OFFSET,
+	MIN_TRANSCRIPT_TAIL_RESERVE,
 	NEAR_BOTTOM_THRESHOLD,
 	USER_SCROLL_UP_MIN_DELTA,
 	USER_TOUCH_DRAG_MIN,
@@ -22,7 +24,11 @@ import {
 	isNearBottom,
 	isUserScrollUpGesture,
 	nextStickToBottom,
-	shouldAutoScrollOnChange
+	resolveAnchoredRevealDelta,
+	resolveAnchoredTailReserve,
+	resolveCurrentTurnAnchorScrollTop,
+	shouldAutoScrollOnChange,
+	shouldShowJumpToLatest
 } from './auto-scroll';
 
 /** Build metrics for a 600px-tall viewport over a 2000px-tall scroll area. */
@@ -193,5 +199,39 @@ describe('shouldAutoScrollOnChange', () => {
 
 	it('scrolls on a new user message while already stuck', () => {
 		expect(shouldAutoScrollOnChange(true, true)).toBe(true);
+	});
+});
+
+describe('jump to latest visibility', () => {
+	it('hides at the live edge and shows just beyond the threshold', () => {
+		expect(shouldShowJumpToLatest(metrics(BOTTOM))).toBe(false);
+		expect(shouldShowJumpToLatest(metrics(BOTTOM - NEAR_BOTTOM_THRESHOLD - 1))).toBe(true);
+	});
+
+	it('does not flash during a programmatic scroll or controlled turn anchor', () => {
+		expect(shouldShowJumpToLatest(metrics(BOTTOM - 500), true)).toBe(false);
+		expect(shouldShowJumpToLatest(metrics(BOTTOM - 500), false, true)).toBe(false);
+	});
+});
+
+describe('current-turn anchor geometry', () => {
+	it('positions the sent user row at the stable top offset', () => {
+		expect(resolveCurrentTurnAnchorScrollTop(640)).toBe(640 - CURRENT_TURN_ANCHOR_OFFSET);
+		expect(resolveCurrentTurnAnchorScrollTop(8)).toBe(0);
+	});
+
+	it('reserves the remaining viewport and shrinks as the response grows', () => {
+		const initial = resolveAnchoredTailReserve({ clientHeight: 700, contentAfterAnchor: 80 });
+		const grown = resolveAnchoredTailReserve({ clientHeight: 700, contentAfterAnchor: 420 });
+		expect(initial).toBe(700 - CURRENT_TURN_ANCHOR_OFFSET - 80);
+		expect(grown).toBe(700 - CURRENT_TURN_ANCHOR_OFFSET - 420);
+		expect(resolveAnchoredTailReserve({ clientHeight: 700, contentAfterAnchor: 900 }))
+			.toBe(MIN_TRANSCRIPT_TAIL_RESERVE);
+	});
+
+	it('advances only the overflow needed to reveal an outgrown response', () => {
+		expect(resolveAnchoredRevealDelta(400, 600, 980)).toBe(4);
+		expect(resolveAnchoredRevealDelta(400, 600, 1200)).toBe(224);
+		expect(resolveAnchoredRevealDelta(400, 600, 900)).toBe(0);
 	});
 });
