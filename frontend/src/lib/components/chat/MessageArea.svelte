@@ -21,7 +21,8 @@
 	import { STREAM_DEBUG } from '$lib/utils/debug-log';
 	import UserMessage from './UserMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
-	import StreamingIndicator from './StreamingIndicator.svelte';
+	import TurnActivity from './TurnActivity.svelte';
+	import TurnNavigator from './TurnNavigator.svelte';
 	import { findStreamingAnchorIndex, shouldShowGapIndicator, shouldRenderAssistantText } from '$lib/stores/session/gap-indicator';
 	import {
 		isNearBottom as computeIsNearBottom,
@@ -33,6 +34,12 @@
 	import ToolUseMessage from './ToolUseMessage.svelte';
 	import WorkLogGroup from './WorkLogGroup.svelte';
 	import { buildDisplayItems, type DisplayItem } from '$lib/utils/work-log';
+	import {
+		deriveUserTurnNavigationItems,
+		isNavigableUserTurn,
+		resolveCurrentTurnIndex,
+		turnAnchorId
+	} from '$lib/utils/transcript-navigation';
 	import { getModelLabel } from '$lib/constants/models.svelte';
 	import SystemMessageGroup from './SystemMessageGroup.svelte';
 	import ThinkingBlock from './ThinkingBlock.svelte';
@@ -60,6 +67,18 @@
 	const scrollPositionCache = new Map<string, number>();
 	// Persist auto-scroll state across component mount/destroy cycles
 	const autoScrollCache = new Map<string, boolean>();
+
+	/** Exhaustive keyed identity for every presentation-model variant. */
+	function displayItemKey(item: DisplayItem): string {
+		switch (item.kind) {
+			case 'message':
+				return `message-${item.message.id || item.index}`;
+			case 'system_group':
+				return `system-group-${item.messages[0]?.id || item.indices[0] || 0}`;
+			case 'work_log':
+				return item.key;
+		}
+	}
 
 	function evictOldest(map: Map<string, unknown>, max: number) {
 		if (map.size <= max) return;
@@ -313,6 +332,65 @@
 		return items;
 	});
 
+	// Transcript-local navigation: one stable anchor per user prompt. The compact
+	// control is only mounted when it can move somewhere (two or more turns).
+	const turnNavigationItems = $derived(deriveUserTurnNavigationItems($activeSession.messages));
+	const turnNavigationSignature = $derived(
+		turnNavigationItems.map((item) => item.id).join('\u0000')
+	);
+	let currentTurnIndex = $state(0);
+	let manualNavigationReleaseUntil = 0;
+
+	const liveTurnStartedAt = $derived.by(() => {
+		if (!$activeSession.isStreaming) return null;
+		const messages = $activeSession.messages;
+		const userStart = messages.findLast((message) => isNavigableUserTurn(message));
+		return userStart?.timestamp ?? messages[0]?.timestamp ?? null;
+	});
+
+	function updateCurrentTurnIndex() {
+		if (!containerRef || turnNavigationItems.length === 0) {
+			currentTurnIndex = 0;
+			return;
+		}
+		const containerTop = containerRef.getBoundingClientRect().top;
+		const readingLine = Math.min(140, containerRef.clientHeight * 0.3);
+		const tops = turnNavigationItems.map((item) => {
+			const anchor = document.getElementById(turnAnchorId(item.id));
+			return anchor && containerRef?.contains(anchor)
+				? anchor.getBoundingClientRect().top - containerTop
+				: Number.POSITIVE_INFINITY;
+		});
+		currentTurnIndex = resolveCurrentTurnIndex(tops, readingLine);
+	}
+
+	function navigateToTurn(index: number) {
+		if (!containerRef) return;
+		const item = turnNavigationItems[index];
+		if (!item) return;
+		const anchor = document.getElementById(turnAnchorId(item.id));
+		if (!anchor || !containerRef.contains(anchor)) return;
+
+		disengageAutoScroll();
+		manualNavigationReleaseUntil = Date.now() + 600;
+		currentTurnIndex = index;
+		const containerBox = containerRef.getBoundingClientRect();
+		const anchorBox = anchor.getBoundingClientRect();
+		const top = containerRef.scrollTop + anchorBox.top - containerBox.top - 24;
+		const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+		containerRef.scrollTo({ top: Math.max(0, top), behavior: reduceMotion ? 'auto' : 'smooth' });
+	}
+
+	$effect(() => {
+		// Key the effect to turn identities rather than the whole message array so
+		// token-by-token assistant deltas do not scan every historical anchor.
+		const navigationVersion = `${$activeSession.sessionId ?? 'new'}:${turnNavigationSignature}`;
+		tick().then(() => {
+			void navigationVersion;
+			updateCurrentTurnIndex();
+		});
+	});
+
 	/**
 	 * Extract todos from a TodoWrite message, handling both complete and partial input.
 	 * During streaming, the toolInput might not be fully parsed yet, so we also try
@@ -486,13 +564,17 @@
 			if (currentMetrics) {
 				const prev = lastScrollMetrics ?? currentMetrics;
 				const next = nextStickToBottom(shouldAutoScroll, prev, currentMetrics);
+				// Smooth turn navigation must not accidentally re-arm follow mode merely
+				// because its destination happens to be near the live edge.
+				const resolvedNext = Date.now() < manualNavigationReleaseUntil ? false : next;
 				// eslint-disable-next-line no-console
-				if (STREAM_DEBUG && next !== shouldAutoScroll) console.log(`[AS] handleScroll ${next ? 'ENABLE' : 'DISABLE'} currST=${currentScrollTop} prevST=${prev.scrollTop} SH=${currentMetrics.scrollHeight} CH=${currentMetrics.clientHeight}`);
-				shouldAutoScroll = next;
+				if (STREAM_DEBUG && resolvedNext !== shouldAutoScroll) console.log(`[AS] handleScroll ${resolvedNext ? 'ENABLE' : 'DISABLE'} currST=${currentScrollTop} prevST=${prev.scrollTop} SH=${currentMetrics.scrollHeight} CH=${currentMetrics.clientHeight}`);
+				shouldAutoScroll = resolvedNext;
 				lastScrollMetrics = currentMetrics;
 			}
 
 			lastKnownScrollTop = currentScrollTop;
+			updateCurrentTurnIndex();
 		});
 	}
 
@@ -728,6 +810,7 @@
 		}
 
 		resizeObserver = new ResizeObserver(() => {
+			updateCurrentTurnIndex();
 			// If auto-scroll is enabled and we're supposed to be at bottom,
 			// ensure we stay at bottom after resize
 			if (shouldAutoScroll && containerRef) {
@@ -946,6 +1029,7 @@
 	});
 </script>
 
+<div class="transcript-shell">
 <div
 	bind:this={containerRef}
 	onscroll={handleScroll}
@@ -994,11 +1078,16 @@
 	{:else}
 		<!-- Messages -->
 		<div class="chat-column">
-			{#each displayItems as item, i (item.kind === 'work_log' ? item.key : item.kind === 'system_group' ? 'sg-' + item.messages[0].id : item.message.id)}
+			{#each displayItems as item, i (displayItemKey(item))}
 				<!-- content-visibility: auto lets the browser skip paint/layout for off-screen
 				     messages. The last LIVE_TAIL items opt OUT (.msg-live) so the growing
 				     streaming region near the viewport bottom is never re-estimated. -->
-				<div class="msg-virtualized" class:msg-live={i >= displayItems.length - LIVE_TAIL}>
+				<div
+					class="msg-virtualized"
+					class:msg-live={i >= displayItems.length - LIVE_TAIL}
+					id={item.kind === 'message' && item.message.id && isNavigableUserTurn(item.message) ? turnAnchorId(item.message.id) : undefined}
+					data-user-turn-id={item.kind === 'message' && item.message.id && isNavigableUserTurn(item.message) ? item.message.id : undefined}
+				>
 				{#if item.kind === 'work_log'}
 					<!-- Routine steps of one turn, folded (see $lib/utils/work-log) -->
 					<WorkLogGroup
@@ -1006,6 +1095,7 @@
 						folded={item.folded}
 						tail={item.tail}
 						durationLabel={item.durationLabel}
+						summary={item.summary}
 						row={messageBody}
 					/>
 				{:else if item.kind === 'system_group'}
@@ -1017,13 +1107,10 @@
 			</div>
 			{/each}
 
-			<!-- Reuse the existing streaming indicator to fill the gap between steps
-			     (e.g. after a text block, while the model generates the next tool
-			     call) so the agent never appears frozen while it's still working. -->
+			<!-- The gap predicate guarantees this does not duplicate a prose cursor,
+			     running-tool spinner, visible thinking state, or active subagent row. -->
 			{#if showGapIndicator}
-				<div class="pl-2 py-1">
-					<StreamingIndicator />
-				</div>
+				<TurnActivity startedAt={liveTurnStartedAt} />
 			{/if}
 
 			<!-- Error -->
@@ -1034,6 +1121,15 @@
 				</div>
 			{/if}
 		</div>
+	{/if}
+</div>
+
+	{#if turnNavigationItems.length >= 2}
+		<TurnNavigator
+			items={turnNavigationItems}
+			currentIndex={currentTurnIndex}
+			onSelect={navigateToTurn}
+		/>
 	{/if}
 </div>
 
@@ -1168,8 +1264,17 @@
 	   while the tail streams) adjusts scrollTop to hold the visible content
 	   still, instead of letting earlier content shift under the reader. This is
 	   the default, but we assert it so nothing downstream defeats it. */
+	.transcript-shell {
+		position: relative;
+		flex: 1 1 0%;
+		min-width: 0;
+		min-height: 0;
+	}
+
 	.msg-scroll {
+		height: 100%;
 		overflow-anchor: auto;
+		scroll-padding-block: 24px;
 	}
 
 	/* The reading column. A fixed 768px measure keeps prose at a comfortable

@@ -22,32 +22,46 @@
 		folded: WorkLogEntry[];
 		/** Rows always visible (live mode's newest row). */
 		tail: WorkLogEntry[];
-		/** "Worked for 2m 14s" / "Stopped after 12s"; null when unknown. */
+		/** "Worked for 2m 14s" / "You stopped after 12s"; null when unknown. */
 		durationLabel?: string | null;
+		/** Action-specific description of the folded work. */
+		summary?: string | null;
 		row: Snippet<[ChatMessage, number]>;
 	}
 
-	let { mode, folded, tail, durationLabel = null, row }: Props = $props();
+	let { mode, folded, tail, durationLabel = null, summary = null, row }: Props = $props();
 
 	let open = $state(false);
+	let previousMode = $state<'live' | 'settled' | null>(null);
+
+	// A live run may be open while the user inspects it. Once the turn settles,
+	// deliberately return to the compact finished presentation.
+	$effect(() => {
+		const currentMode = mode;
+		if (previousMode === 'live' && currentMode === 'settled') open = false;
+		previousMode = currentMode;
+	});
 
 	const collapsedLabel = $derived(
 		mode === 'live'
-			? `+${folded.length} previous tool ${folded.length === 1 ? 'call' : 'calls'}`
-			: (durationLabel ?? 'Show work log')
+			? (summary ?? `+${folded.length} previous tool ${folded.length === 1 ? 'call' : 'calls'}`)
+			: (durationLabel ?? 'Worked')
+	);
+	const disclosureLabel = $derived(
+		open ? 'Hide work details' : `Show work details: ${collapsedLabel}${summary && mode === 'settled' ? `, ${summary}` : ''}`
 	);
 </script>
 
-<section class="worklog" class:is-settled={mode === 'settled'} aria-label="Work log">
+<section class="worklog" class:is-settled={mode === 'settled'} aria-label="Work log" data-work-log-mode={mode}>
 	{#if open}
-		<div class="wlhead">Work Log</div>
+		<div class="wlhead">Work log{#if summary}<span> · {summary}</span>{/if}</div>
 		{#each folded as entry (entry.message.id ?? entry.index)}
 			{@render row(entry.message, entry.index)}
 		{/each}
 		{#each tail as entry (entry.message.id ?? entry.index)}
 			{@render row(entry.message, entry.index)}
 		{/each}
-		<button type="button" class="wlrow fold" onclick={() => (open = false)} aria-expanded="true">
+		<button type="button" class="wlrow fold" onclick={() => (open = false)} aria-expanded="true" aria-label={disclosureLabel}>
 			<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 				<path d="m18 15-6-6-6 6" />
 			</svg>
@@ -60,11 +74,15 @@
 			class:hairline={mode === 'settled'}
 			onclick={() => (open = true)}
 			aria-expanded="false"
+			aria-label={disclosureLabel}
 		>
 			<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 				<path d="m6 9 6 6 6-6" />
 			</svg>
-			{collapsedLabel}
+			<span class="fold-label">{collapsedLabel}</span>
+			{#if mode === 'settled' && summary}
+				<span class="fold-summary" title={summary}>· {summary}</span>
+			{/if}
 		</button>
 		{#each tail as entry (entry.message.id ?? entry.index)}
 			{@render row(entry.message, entry.index)}
@@ -81,13 +99,22 @@
 		min-width: 0;
 	}
 
+	.worklog.is-settled {
+		animation: worklog-settle 180ms ease-out both;
+	}
+
 	.wlhead {
 		padding: 10px 8px 5px;
 		font-size: 10.5px;
 		font-weight: 600;
-		letter-spacing: 0.075em;
-		text-transform: uppercase;
+		letter-spacing: 0.045em;
 		color: var(--subtle-foreground);
+	}
+
+	.wlhead span {
+		font-weight: 400;
+		letter-spacing: 0;
+		text-transform: none;
 	}
 
 	.wlrow.fold {
@@ -101,14 +128,33 @@
 		border-radius: 8px;
 		text-align: left;
 		cursor: pointer;
-		font-size: 12px;
+		font-size: 13px;
+		line-height: 1.5;
+		color: var(--muted-foreground);
+		transition: background-color 180ms ease-out, color 180ms ease-out;
+	}
+
+	.fold-label {
+		flex: none;
+		font-variant-numeric: tabular-nums;
+	}
+
+	.fold-summary {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: 11.5px;
 		color: var(--subtle-foreground);
-		transition: background-color 0.13s ease, color 0.13s ease;
 	}
 
 	.wlrow.fold:hover {
 		background: var(--scrim);
-		color: var(--muted-foreground);
+		color: var(--foreground);
+	}
+
+	.wlrow.fold:active {
+		background: var(--active-overlay, var(--scrim));
 	}
 
 	.wlrow.fold:focus-visible {
@@ -117,8 +163,17 @@
 	}
 
 	.wlrow.fold.hairline {
-		border-bottom: 1px solid var(--border);
+		border-bottom: 1px solid color-mix(in oklch, var(--border) 72%, transparent);
 		border-radius: 8px 8px 0 0;
+	}
+
+	@keyframes worklog-settle {
+		from { opacity: 0; transform: translateY(2px); }
+		to { opacity: 1; transform: translateY(0); }
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.worklog.is-settled { animation: none; }
 	}
 
 	@media (max-width: 639px) {

@@ -1,23 +1,19 @@
 /**
- * Transcript grouping — turns the flat message array into the display list the
- * transcript renders.
+ * Transcript presentation model.
  *
- * The shape follows the T3 work-log pattern, folded PER RUN:
- *  - A fold spans one run of consecutive work entries (tool calls + thinking)
- *    between assistant text messages. Assistant text is never folded and always
- *    ends the current run, so the transcript reads text → fold → text → fold.
- *  - While a turn is IN PROGRESS its current run keeps the newest row on
- *    screen; the earlier ones sit behind a "+N previous tool calls" toggle, so
- *    a long tool run doesn't push the live output off the top of the viewport.
- *  - A SETTLED run collapses behind one "Worked for {duration}" row ("{N} tool
- *    calls" when no timestamps are available). A single-row run renders flat —
- *    fold chrome around one row hides nothing.
+ * AI Shuffle keeps the wire/store model flat and derives the compact transcript
+ * here. The rules deliberately mirror T3 Code's readable turn rhythm without
+ * adopting its data model:
  *
- * Some things are never folded, because hiding them would hide a decision or a
- * failure: subagent cards, todo/notes lists, questions, screenshots, and any
- * tool row that errored.
+ * - assistant prose is never withheld while a turn is live;
+ * - a contiguous live tool run keeps its newest active call visible;
+ * - once a turn settles, non-final commentary, reasoning, and routine tools fold
+ *   behind one compact work row while the final answer remains visible;
+ * - failures, screenshots, plans/questions, and agent surfaces never disappear
+ *   behind a fold.
  */
 import type { ChatMessage } from '$lib/stores/types';
+import { displayToolName } from './tool-icons';
 
 export interface WorkLogEntry {
 	message: ChatMessage;
@@ -36,15 +32,13 @@ export type DisplayItem =
 			folded: WorkLogEntry[];
 			/** Rows always visible below the fold (live mode's newest row). */
 			tail: WorkLogEntry[];
-			/** "Worked for 2m 14s" / "Stopped after 12s", or null when unknown. */
+			/** "Worked for 2m 14s" / "You stopped after 12s". */
 			durationLabel: string | null;
+			/** Provider-neutral description such as "Read 3 files and ran 2 commands". */
+			summary: string | null;
 	  };
 
-/**
- * Low-signal system subtypes that collapse into a single summary row when they
- * arrive back-to-back. Errors, compact boundaries, mode changes and rewind
- * notices are deliberately absent — those stay full cards.
- */
+/** Low-signal system messages that may collapse when consecutive. */
 const GROUPABLE_SYSTEM_SUBTYPES = new Set([
 	'hook_started',
 	'hook_response',
@@ -60,7 +54,7 @@ export function isGroupableSystem(msg: ChatMessage): boolean {
 	return msg.type === 'system' && GROUPABLE_SYSTEM_SUBTYPES.has(msg.systemSubtype || '');
 }
 
-/** Tool rows that get their own dedicated presentation, so never a work-log row. */
+/** Dedicated/decision-bearing tools retain their own presentation. */
 function isSpecialTool(msg: ChatMessage): boolean {
 	return (
 		msg.toolName === 'TodoWrite' ||
@@ -71,25 +65,25 @@ function isSpecialTool(msg: ChatMessage): boolean {
 	);
 }
 
-/** A tool row that may be hidden behind a fold. */
-function isFoldableTool(msg: ChatMessage): boolean {
-	if (msg.type !== 'tool_use') return false;
-	if (isSpecialTool(msg)) return false;
-	// A failure must stay on screen; so must a screenshot, which is the whole
-	// point of the call that produced it.
-	if (msg.toolStatus === 'error') return false;
-	if (msg.toolScreenshot) return false;
-	return true;
+function isRoutineTool(msg: ChatMessage): boolean {
+	if (msg.type !== 'tool_use' || isSpecialTool(msg)) return false;
+	// A failure must remain visible, as must a screenshot (the screenshot is the
+	// useful result rather than incidental detail).
+	return msg.toolStatus !== 'error' && !msg.toolScreenshot;
 }
 
 function isAssistantText(msg: ChatMessage): boolean {
 	return msg.role === 'assistant' && (msg.type === 'text' || !msg.type) && !!msg.content?.trim();
 }
 
-/** A work entry a fold may swallow: a routine tool row or a thinking block. */
-function isFoldableWork(msg: ChatMessage): boolean {
-	if (msg.type === 'thinking') return true;
-	return isFoldableTool(msg);
+function isAssistantPhantom(msg: ChatMessage): boolean {
+	return msg.role === 'assistant' && (msg.type === 'text' || !msg.type) && !msg.content?.trim();
+}
+
+/** Only work known to be closed may disappear in a settled disclosure. */
+function isCompletedRoutineWork(msg: ChatMessage): boolean {
+	if (msg.type === 'thinking') return !msg.streaming;
+	return isRoutineTool(msg) && msg.toolStatus === 'complete' && !msg.streaming;
 }
 
 /** Human duration: "45s", "2m 14s", "1h 03m". */
@@ -106,51 +100,97 @@ export function formatDuration(ms: number): string {
 
 function parseStamp(value: string | undefined): number | null {
 	if (!value) return null;
-	const t = Date.parse(value);
-	return Number.isFinite(t) ? t : null;
+	const timestamp = Date.parse(value);
+	return Number.isFinite(timestamp) ? timestamp : null;
 }
 
-/**
- * Elapsed wall time across a turn, from its first to its last stamped message.
- * Returns null when fewer than two messages carry a usable timestamp — the
- * label then degrades to a plain "Show work log" rather than a made-up number.
- */
+/** Elapsed wall time across a turn's first and last usable timestamp. */
 export function turnDurationMs(turn: ChatMessage[]): number | null {
+	const reportedDuration = turn
+		.toReversed()
+		.map((message) => message.metadata?.duration_ms)
+		.find((value): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0);
+	if (reportedDuration !== undefined) return reportedDuration;
+
 	let first: number | null = null;
 	let last: number | null = null;
-	for (const m of turn) {
-		const t = parseStamp(m.timestamp);
-		if (t === null) continue;
-		if (first === null || t < first) first = t;
-		if (last === null || t > last) last = t;
+	for (const message of turn) {
+		const timestamp = parseStamp(message.timestamp);
+		if (timestamp === null) continue;
+		if (first === null || timestamp < first) first = timestamp;
+		if (last === null || timestamp > last) last = timestamp;
 	}
 	if (first === null || last === null || last <= first) return null;
 	return last - first;
 }
 
-/**
- * True when the turn was cut short by the user. The reducer stamps "[Stopped]"
- * onto the truncated assistant text on `turn.aborted(reason='interrupt')`, and
- * that marker is the only interrupt signal that survives a reload.
- */
+/** Interrupt marker that survives transcript reloads. */
 export function turnWasInterrupted(turn: ChatMessage[]): boolean {
-	return turn.some((m) => isAssistantText(m) && m.content.trimEnd().endsWith('[Stopped]'));
+	return turn.some((message) =>
+		isAssistantText(message) && message.content.trimEnd().endsWith('[Stopped]')
+	);
 }
 
-/**
- * Label for one settled run. Timestamps give "Worked for 2m 14s" (or "Stopped
- * after" on an interrupted turn's final run); without them the label degrades
- * to a plain count.
- */
-function runLabel(run: WorkLogEntry[], interrupted: boolean): string {
-	const msgs = run.map((r) => r.message);
-	const ms = turnDurationMs(msgs);
-	if (ms === null) {
-		const tools = msgs.filter((m) => m.type === 'tool_use').length;
-		const n = tools || run.length;
-		return `${n} tool ${n === 1 ? 'call' : 'calls'}`;
+function turnFoldLabel(turn: ChatMessage[], interrupted: boolean): string {
+	const duration = turnDurationMs(turn);
+	if (interrupted) {
+		return duration === null ? 'You stopped this response' : `You stopped after ${formatDuration(duration)}`;
 	}
-	return `${interrupted ? 'Stopped after' : 'Worked for'} ${formatDuration(ms)}`;
+	return duration === null ? 'Worked' : `Worked for ${formatDuration(duration)}`;
+}
+
+type ToolAction = 'read' | 'edit' | 'command' | 'code-search' | 'web-search' | 'other';
+
+function toolAction(message: ChatMessage): ToolAction {
+	const name = displayToolName(message.toolName || '');
+	if (['Read', 'BashOutput', 'TaskOutput', 'TaskGet'].includes(name)) return 'read';
+	if (['Write', 'Edit', 'NotebookEdit'].includes(name)) return 'edit';
+	if (['Bash', 'KillShell', 'SlashCommand', 'Monitor', 'TaskStop'].includes(name)) return 'command';
+	if (['Grep', 'Glob', 'ToolSearch', 'LSP'].includes(name)) return 'code-search';
+	if (['WebSearch', 'WebFetch'].includes(name) || /(?:^|_)search$/i.test(name)) return 'web-search';
+	return 'other';
+}
+
+function actionLabel(action: ToolAction, count: number): string {
+	switch (action) {
+		case 'read':
+			return `Read ${count} ${count === 1 ? 'file' : 'files'}`;
+		case 'edit':
+			return `Changed ${count} ${count === 1 ? 'file' : 'files'}`;
+		case 'command':
+			return `Ran ${count} ${count === 1 ? 'command' : 'commands'}`;
+		case 'code-search':
+			return `Searched code ${count} ${count === 1 ? 'time' : 'times'}`;
+		case 'web-search':
+			return `Searched the web ${count} ${count === 1 ? 'time' : 'times'}`;
+		case 'other':
+			return `Used ${count} ${count === 1 ? 'tool' : 'tools'}`;
+	}
+}
+
+function sentenceJoin(labels: string[]): string {
+	const normalized = labels.map((label, index) =>
+		index === 0 ? label : label.charAt(0).toLowerCase() + label.slice(1)
+	);
+	if (normalized.length < 2) return normalized[0] ?? '';
+	if (normalized.length === 2) return normalized.join(' and ');
+	return `${normalized.slice(0, -1).join(', ')}, and ${normalized.at(-1)}`;
+}
+
+/** Provider-neutral, action-specific summary for a folded tool run. */
+export function summarizeWork(entries: WorkLogEntry[]): string | null {
+	const tools = entries.filter((entry) => entry.message.type === 'tool_use');
+	if (tools.length === 0) {
+		if (entries.some((entry) => entry.message.type === 'thinking')) return 'Reasoning and interim work';
+		return entries.length > 0 ? 'Interim work' : null;
+	}
+
+	const counts = new Map<ToolAction, number>();
+	for (const entry of tools) {
+		const action = toolAction(entry.message);
+		counts.set(action, (counts.get(action) ?? 0) + 1);
+	}
+	return sentenceJoin([...counts].map(([action, count]) => actionLabel(action, count))) || null;
 }
 
 interface Positioned {
@@ -158,7 +198,7 @@ interface Positioned {
 	index: number;
 }
 
-/** Split the (deduplicated) message list into turns, each starting at a user message. */
+/** Split a deduplicated list into turns, each beginning at a user message. */
 function splitTurns(messages: Positioned[]): Positioned[][] {
 	const turns: Positioned[][] = [];
 	let current: Positioned[] = [];
@@ -173,57 +213,70 @@ function splitTurns(messages: Positioned[]): Positioned[][] {
 	return turns;
 }
 
-/** Fold consecutive low-signal system messages inside an already-ordered run. */
+/** Fold consecutive low-signal system messages without disturbing order. */
 function emitWithSystemGroups(entries: Positioned[], out: DisplayItem[]) {
-	let i = 0;
-	while (i < entries.length) {
-		const entry = entries[i];
+	let index = 0;
+	while (index < entries.length) {
+		const entry = entries[index];
 		if (isGroupableSystem(entry.message)) {
 			const run: Positioned[] = [entry];
-			let j = i + 1;
-			while (j < entries.length && isGroupableSystem(entries[j].message)) {
-				run.push(entries[j]);
-				j++;
+			let cursor = index + 1;
+			while (cursor < entries.length && isGroupableSystem(entries[cursor].message)) {
+				run.push(entries[cursor]);
+				cursor++;
 			}
 			if (run.length >= 2) {
 				out.push({
 					kind: 'system_group',
-					messages: run.map((r) => r.message),
-					indices: run.map((r) => r.index)
+					messages: run.map((item) => item.message),
+					indices: run.map((item) => item.index)
 				});
 			} else {
 				out.push({ kind: 'message', message: entry.message, index: entry.index });
 			}
-			i = j;
+			index = cursor;
 		} else {
 			out.push({ kind: 'message', message: entry.message, index: entry.index });
-			i++;
+			index++;
 		}
 	}
 }
 
 export interface BuildOptions {
-	/** The session is mid-turn — its LAST turn renders in live mode. */
+	/** The session is mid-turn — its last turn renders in live mode. */
 	isStreaming: boolean;
-	/** User preference: false renders every tool row flat, with no folds. */
+	/** User preference: false renders work rows flat, with no folds. */
 	groupingEnabled: boolean;
 }
 
-/**
- * Build the transcript's display list.
- *
- * Ordering rule: everything is emitted in transcript order. A fold sits exactly
- * where its run of work entries happened; assistant text, subagent cards, and
- * every other non-work row stay in place and end the run they interrupt.
- */
+function countFoldRuns(
+	turn: Positioned[],
+	shouldFold: (entry: Positioned) => boolean
+): number {
+	let count = 0;
+	let inRun = false;
+	for (const entry of turn) {
+		if (shouldFold(entry)) {
+			if (!inRun) count++;
+			inRun = true;
+		} else {
+			inRun = false;
+		}
+	}
+	return count;
+}
+
+/** Build the transcript display list without changing store or protocol semantics. */
 export function buildDisplayItems(messages: ChatMessage[], options: BuildOptions): DisplayItem[] {
 	const { isStreaming, groupingEnabled } = options;
 
-	// Duplicate ids crash Svelte's keyed {#each}; they can arrive from delta-merge
-	// edge cases and corrupted caches, so drop repeats before anything else.
+	// Duplicate ids crash Svelte's keyed each; drop repeats defensively.
 	const seen = new Set<string>();
 	const positioned: Positioned[] = [];
 	messages.forEach((message, index) => {
+		// Empty assistant placeholders intentionally have no visual row. Keeping them
+		// in this model can split the final live tool run and hide its active tail.
+		if (isAssistantPhantom(message)) return;
 		if (message.id) {
 			if (seen.has(message.id)) return;
 			seen.add(message.id);
@@ -234,11 +287,32 @@ export function buildDisplayItems(messages: ChatMessage[], options: BuildOptions
 	const items: DisplayItem[] = [];
 	const turns = splitTurns(positioned);
 
-	turns.forEach((turn, turnIdx) => {
-		const isLiveTurn = isStreaming && turnIdx === turns.length - 1;
-		const interrupted = !isLiveTurn && turnWasInterrupted(turn.map((t) => t.message));
+	turns.forEach((turn, turnIndex) => {
+		const liveTurn = isStreaming && turnIndex === turns.length - 1;
+		const interrupted = !liveTurn && turnWasInterrupted(turn.map((entry) => entry.message));
+		const terminalAssistant = liveTurn
+			? null
+			: (turn.findLast((entry) => isAssistantText(entry.message)) ?? null);
+		// A live group may include exactly the newest active routine tool as its
+		// visible tail. Any anomalous earlier running tools remain flat and visible.
+		const newestRunningTool = liveTurn
+			? (turn.findLast(
+					(entry) => isRoutineTool(entry.message) && entry.message.toolStatus === 'running'
+				) ?? null)
+			: null;
+		const shouldFold = (entry: Positioned) => {
+			if (!groupingEnabled) return false;
+			if (liveTurn) {
+				return isCompletedRoutineWork(entry.message) || entry === newestRunningTool;
+			}
+			return (
+				isCompletedRoutineWork(entry.message) ||
+				(isAssistantText(entry.message) && !entry.message.streaming && entry !== terminalAssistant)
+			);
+		};
+		const foldRunCount = countFoldRuns(turn, shouldFold);
+		const wholeTurnLabel = turnFoldLabel(turn.map((entry) => entry.message), interrupted);
 
-		// Plain rows waiting to be emitted, and the current run of work entries.
 		let plain: Positioned[] = [];
 		let run: WorkLogEntry[] = [];
 
@@ -248,29 +322,29 @@ export function buildDisplayItems(messages: ChatMessage[], options: BuildOptions
 			plain = [];
 		};
 
-		// `isTurnEnd` marks the flush at the end of the turn: on a live turn that
-		// run is the one still growing, and on an interrupted turn it is the run
-		// that was cut short.
 		const flushRun = (isTurnEnd: boolean) => {
 			if (run.length === 0) return;
-			const live = isLiveTurn && isTurnEnd;
+			const liveRun = liveTurn && isTurnEnd;
 
-			// Fold chrome around a single row hides nothing — render it flat.
-			if (run.length === 1) {
+			// A single live row is already compact and must stay visible. Settled
+			// single-row activity still folds, matching the finished-turn treatment.
+			if (liveRun && run.length === 1) {
 				plain.push({ message: run[0].message, index: run[0].index });
 				run = [];
 				return;
 			}
 
 			flushPlain();
-			if (live) {
+			const summary = summarizeWork(liveRun ? run.slice(0, -1) : run);
+			if (liveRun) {
 				items.push({
 					kind: 'work_log',
 					key: `wl-${run[0].message.id ?? run[0].index}`,
 					mode: 'live',
 					folded: run.slice(0, -1),
 					tail: run.slice(-1),
-					durationLabel: null
+					durationLabel: null,
+					summary
 				});
 			} else {
 				items.push({
@@ -279,19 +353,21 @@ export function buildDisplayItems(messages: ChatMessage[], options: BuildOptions
 					mode: 'settled',
 					folded: run,
 					tail: [],
-					durationLabel: runLabel(run, interrupted && isTurnEnd)
+					durationLabel: !liveTurn && foldRunCount === 1 ? wholeTurnLabel : summary,
+					summary: !liveTurn && foldRunCount === 1 ? summary : null
 				});
 			}
 			run = [];
 		};
 
 		turn.forEach((entry) => {
-			if (groupingEnabled && isFoldableWork(entry.message)) {
+			if (shouldFold(entry)) {
 				run.push({ message: entry.message, index: entry.index });
-			} else {
-				flushRun(false);
-				plain.push(entry);
+				return;
 			}
+
+			flushRun(false);
+			plain.push(entry);
 		});
 		flushRun(true);
 		flushPlain();

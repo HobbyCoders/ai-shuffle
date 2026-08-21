@@ -15,7 +15,7 @@
 	import ToolScreenshot from './ToolScreenshot.svelte';
 	import ToolIcon from './ToolIcon.svelte';
 	import { displayToolName } from '$lib/utils/tool-icons';
-	import { toolPreview } from '$lib/utils/tool-preview';
+	import { liveToolLabel, toolPreview, toolStateLabel } from '$lib/utils/tool-preview';
 	import { isDismissedQuestion, QUESTION_DISMISSED_LABEL } from './question-outcome';
 
 	interface Props {
@@ -55,6 +55,13 @@
 	// no "unanswered" value). Mechanically correct, but not a failure — so the
 	// row drops the error chrome for neutral, muted "dismissed" styling.
 	const dismissedQuestion = $derived(isDismissedQuestion(name, status, result));
+	const compactName = $derived(
+		status === 'running' ? liveToolLabel(name, input, partialInput) : displayToolName(name)
+	);
+	const stateLabel = $derived(toolStateLabel(status, dismissedQuestion));
+	const accessibleLabel = $derived(
+		`${compactName}${preview ? `: ${preview}` : ''}. ${stateLabel}`
+	);
 
 	function toolResultHasMedia(content: string): boolean {
 		try {
@@ -88,9 +95,10 @@
 		class:is-open={expanded}
 		onclick={toggle}
 		aria-expanded={expanded}
+		aria-label={accessibleLabel}
 	>
 		<ToolIcon {name} class="wig" />
-		<span class="wname" title={name}>{displayToolName(name)}</span>
+		<span class="wname" title={name}>{compactName}</span>
 
 		{#if serverSide}
 			<span class="wl-badge" title="Executed server-side by Anthropic API">server</span>
@@ -104,6 +112,9 @@
 		{/if}
 
 		<span class="wright">
+			{#if status !== 'complete' || dismissedQuestion}
+				<span class="wl-state" class:is-error={status === 'error' && !dismissedQuestion}>{stateLabel}</span>
+			{/if}
 			<svg class="wl-chev" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 				<path d="m6 9 6 6 6-6" />
 			</svg>
@@ -128,20 +139,22 @@
 		</span>
 	</button>
 
-	{#if expanded && (partialInput || input)}
+	{#if expanded && (partialInput || input || result || status === 'running' || status === 'error')}
 		<div class="wl-body">
-			<div class="wl-panel">
-				<div class="wl-panel-label">Input</div>
-				<div class="wl-pane">
-					{#if streaming && partialInput}
-						<pre>{partialInput}<span class="wl-caret"></span></pre>
-					{:else if input && Object.keys(input).length > 0}
-						<pre>{JSON.stringify(input, null, 2)}</pre>
-					{:else if partialInput}
-						<pre>{partialInput}</pre>
-					{/if}
+			{#if partialInput || (input && Object.keys(input).length > 0)}
+				<div class="wl-panel">
+					<div class="wl-panel-label">Input</div>
+					<div class="wl-pane">
+						{#if streaming && partialInput}
+							<pre>{partialInput}<span class="wl-caret"></span></pre>
+						{:else if input && Object.keys(input).length > 0}
+							<pre>{JSON.stringify(input, null, 2)}</pre>
+						{:else if partialInput}
+							<pre>{partialInput}</pre>
+						{/if}
+					</div>
 				</div>
-			</div>
+			{/if}
 			<div class="wl-panel">
 				<div class="wl-panel-label">Result</div>
 				<div class="wl-pane">
@@ -188,11 +201,15 @@
 		background: transparent;
 		border: none;
 		cursor: pointer;
-		transition: background-color 0.13s ease;
+		transition: background-color 180ms ease-out;
 	}
 
 	.wlrow:hover {
 		background: var(--scrim);
+	}
+
+	.wlrow:active {
+		background: var(--active-overlay, var(--scrim));
 	}
 
 	.wlrow:focus-visible {
@@ -246,8 +263,19 @@
 		flex: none;
 	}
 
+	.wl-state {
+		font-family: var(--font-mono);
+		font-size: 9.5px;
+		font-variant-numeric: tabular-nums;
+		color: var(--subtle-foreground);
+	}
+
+	.wl-state.is-error {
+		color: var(--rose);
+	}
+
 	.wl-chev {
-		transition: transform 0.16s ease;
+		transition: transform 180ms ease-out;
 	}
 
 	.wlrow.is-open .wl-chev {
@@ -278,8 +306,9 @@
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.wl-glyph.is-running {
-			animation-duration: 2.4s;
+		.wl-glyph.is-running,
+		.wl-caret {
+			animation: none;
 		}
 	}
 

@@ -104,3 +104,27 @@ describe('isDismissedQuestion', () => {
 		).toBe(true);
 	});
 });
+
+describe('ToolUseMessage — compact live and failure states', () => {
+	it('uses a concise action label for a running command', () => {
+		render(ToolUseMessage, {
+			props: {
+				name: 'Bash',
+				input: { command: 'pnpm run check' },
+				status: 'running',
+				streaming: true
+			}
+		});
+		expect(screen.getByText('Running pnpm')).toBeTruthy();
+		expect(screen.getByRole('button', { name: /Running pnpm: pnpm run check\. Running/ })).toBeTruthy();
+	});
+
+	it('keeps the failed state explicit in text and icon', () => {
+		const { container } = render(ToolUseMessage, {
+			props: { name: 'Bash', input: { command: 'false' }, result: 'exit 1', status: 'error' }
+		});
+		expect(screen.getByText('Failed')).toBeTruthy();
+		expect(container.querySelector('[data-testid="tool-status-error"]')).not.toBeNull();
+		expect(screen.getByRole('button', { name: /Bash: false\. Failed/ })).toBeTruthy();
+	});
+});

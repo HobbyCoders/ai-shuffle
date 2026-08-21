@@ -9,6 +9,7 @@
 	 */
 	import MessageActions from './MessageActions.svelte';
 	import { formatMessageTime } from '$lib/utils/message-time';
+	import { shouldCollapseUserMessage } from '$lib/utils/message-presentation';
 
 	interface Props {
 		content: string;
@@ -24,6 +25,9 @@
 	let { content, timestamp, sessionId = null, messageUuid = null, userPromptOccurrence = null, streaming = false, onRewindComplete, fileCheckpointingEnabled = false }: Props = $props();
 
 	let isHovered = $state(false);
+	let expanded = $state(false);
+	const collapsible = $derived(shouldCollapseUserMessage(content));
+	const collapsed = $derived(collapsible && !expanded);
 	const showActions = $derived(isHovered && !streaming);
 </script>
 
@@ -34,7 +38,23 @@
 	role="article"
 >
 	<div class="usercol">
-		<div class="bubble" title={formatMessageTime(timestamp)}>{content}</div>
+		<div class="bubble" title={formatMessageTime(timestamp)}>
+			<div class="bubble-text" class:is-collapsed={collapsed}>{content}</div>
+			{#if collapsible}
+				<button
+					type="button"
+					class="message-disclosure"
+					onclick={() => (expanded = !expanded)}
+					aria-expanded={expanded}
+					aria-label={expanded ? 'Collapse user message' : 'Expand full user message'}
+				>
+					{expanded ? 'Show less' : 'Show full message'}
+					<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+						<path d={expanded ? 'm5 12 5-5 5 5' : 'm5 8 5 5 5-5'} />
+					</svg>
+				</button>
+			{/if}
+		</div>
 		<div class="useractions" class:is-visible={showActions}>
 			{#if timestamp}<span class="user-time">{formatMessageTime(timestamp)}</span>{/if}
 			<MessageActions
@@ -75,7 +95,8 @@
 		transition: opacity 0.12s ease;
 	}
 
-	.useractions.is-visible {
+	.useractions.is-visible,
+	.usercol:focus-within .useractions {
 		height: auto;
 		opacity: 1;
 		pointer-events: auto;
@@ -96,10 +117,57 @@
 		color: var(--card-foreground);
 		font-size: 14px;
 		line-height: 1.58;
+		min-width: 0;
+	}
+
+	.bubble-text {
 		white-space: pre-wrap;
 		overflow-wrap: anywhere;
 		word-break: break-word;
-		min-width: 0;
+	}
+
+	.bubble-text.is-collapsed {
+		max-height: calc(1.58em * 8);
+		overflow: hidden;
+		-webkit-mask-image: linear-gradient(to bottom, black 78%, transparent 100%);
+		mask-image: linear-gradient(to bottom, black 78%, transparent 100%);
+	}
+
+	.message-disclosure {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 4px;
+		min-height: 32px;
+		margin: 3px -6px -5px;
+		padding: 4px 6px;
+		border: 0;
+		border-radius: 8px;
+		background: transparent;
+		color: var(--muted-foreground);
+		font-size: 11.5px;
+		font-weight: 600;
+		cursor: pointer;
+		transition: background-color 180ms ease-out, color 180ms ease-out;
+	}
+
+	.message-disclosure svg {
+		width: 13px;
+		height: 13px;
+	}
+
+	.message-disclosure:hover {
+		background: var(--scrim);
+		color: var(--foreground);
+	}
+
+	.message-disclosure:active {
+		background: var(--active-overlay, var(--scrim));
+	}
+
+	.message-disclosure:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
 	}
 
 	:global(html.light) .bubble {
@@ -120,5 +188,15 @@
 			pointer-events: auto;
 			margin-top: 4px;
 		}
+
+		.message-disclosure {
+			min-height: 44px;
+			margin-bottom: -9px;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.useractions,
+		.message-disclosure { transition: none; }
 	}
 </style>

@@ -3,7 +3,7 @@
  * each tool contributes — the identifying one, not merely the first present.
  */
 import { describe, it, expect } from 'vitest';
-import { toolPreview } from './tool-preview';
+import { liveToolLabel, toolPreview, toolStateLabel } from './tool-preview';
 
 describe('toolPreview', () => {
 	it('shows the command for Bash', () => {
@@ -55,5 +55,29 @@ describe('toolPreview', () => {
 		const out = toolPreview({ name: 'Bash', input: { command: `echo   ${long}` } });
 		expect(out.length).toBeLessThanOrEqual(160);
 		expect(out.endsWith('…')).toBe(true);
+	});
+});
+
+describe('live tool labels and state', () => {
+	it('names command programs without exposing the full command', () => {
+		expect(liveToolLabel('Bash', { command: 'pnpm test -- --run' })).toBe('Running pnpm');
+		expect(liveToolLabel('Bash', { command: 'sudo -u web env NODE_ENV=test npm run build' })).toBe('Running npm');
+		expect(liveToolLabel('Bash', undefined, '{"command":"git status --short"'))
+			.toBe('Running git');
+	});
+
+	it('uses concise verbs for common active tools', () => {
+		expect(liveToolLabel('Read')).toBe('Reading');
+		expect(liveToolLabel('Edit')).toBe('Editing');
+		expect(liveToolLabel('Grep')).toBe('Searching code');
+		expect(liveToolLabel('WebSearch')).toBe('Searching the web');
+		expect(liveToolLabel('WebFetch')).toBe('Fetching page');
+	});
+
+	it('maps completed, live, failure, and neutral dismissal text exactly', () => {
+		expect(toolStateLabel('running')).toBe('Running');
+		expect(toolStateLabel('complete')).toBe('Complete');
+		expect(toolStateLabel('error')).toBe('Failed');
+		expect(toolStateLabel('error', true)).toBe('Dismissed');
 	});
 });

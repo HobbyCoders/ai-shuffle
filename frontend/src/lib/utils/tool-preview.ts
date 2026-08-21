@@ -153,6 +153,69 @@ export interface ToolPreviewArgs {
 }
 
 /** The mono preview string for a tool row. May be empty. */
+export type ToolDisplayStatus = 'running' | 'complete' | 'error';
+
+export function toolStateLabel(status: ToolDisplayStatus, dismissed = false): string {
+	if (dismissed) return 'Dismissed';
+	if (status === 'running') return 'Running';
+	if (status === 'error') return 'Failed';
+	return 'Complete';
+}
+
+function commandProgram(command: string): string | null {
+	const tokens = command.trim().match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
+	let index = 0;
+	while (index < tokens.length) {
+		const token = tokens[index]?.replace(/^['"]|['"]$/g, '') ?? '';
+		if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
+			index++;
+			continue;
+		}
+		if (token === 'sudo') {
+			index++;
+			while (tokens[index]?.startsWith('-')) {
+				const option = tokens[index++];
+				if (['-u', '-g', '-h', '-p', '-C', '-T', '-R', '--user', '--group', '--host'].includes(option)) {
+					index++;
+				}
+			}
+			continue;
+		}
+		if (token === 'env') {
+			index++;
+			while (tokens[index]?.startsWith('-')) index++;
+			continue;
+		}
+		return token.split(/[\\/]/).at(-1) || null;
+	}
+	return null;
+}
+
+/** Active-call heading modelled after T3's concise "Running pnpm" row. */
+export function liveToolLabel(
+	name: string,
+	input?: Record<string, unknown>,
+	partialInput?: string
+): string {
+	const bare = displayToolName(name);
+	const command =
+		typeof input?.command === 'string'
+			? input.command
+			: partialInput
+				? extractFieldFromPartial(partialInput, 'command')
+				: '';
+	if (bare === 'Bash' || bare === 'Monitor' || bare === 'SlashCommand') {
+		const program = commandProgram(command);
+		return program ? `Running ${program}` : 'Running command';
+	}
+	if (['Read', 'BashOutput', 'TaskOutput', 'TaskGet'].includes(bare)) return 'Reading';
+	if (['Write', 'Edit', 'NotebookEdit'].includes(bare)) return 'Editing';
+	if (['Grep', 'Glob', 'ToolSearch', 'LSP'].includes(bare)) return 'Searching code';
+	if (bare === 'WebSearch') return 'Searching the web';
+	if (bare === 'WebFetch') return 'Fetching page';
+	return `Using ${bare || 'tool'}`;
+}
+
 export function toolPreview({ name, input, partialInput, result, streaming }: ToolPreviewArgs): string {
 	let value = '';
 
