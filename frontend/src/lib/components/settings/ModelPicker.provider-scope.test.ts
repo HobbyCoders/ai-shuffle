@@ -66,6 +66,22 @@ describe('ModelPicker provider scope', () => {
 		expect(document.activeElement).toBe(trigger);
 	});
 
+	it('badges API-authenticated provider glyphs in the rail', async () => {
+		const { getByRole } = render(ModelPicker, {
+			props: {
+				value: 'sonnet',
+				onSelect: vi.fn()
+			}
+		});
+
+		await fireEvent.click(getByRole('button', { name: 'Sonnet' }));
+
+		const apiProvider = getByRole('tab', { name: 'OpenAI · API' });
+		const nativeProvider = getByRole('tab', { name: 'Claude' });
+		expect(apiProvider.querySelector('[data-provider-api-badge]')?.textContent).toBe('API');
+		expect(nativeProvider.querySelector('[data-provider-api-badge]')).toBeNull();
+	});
+
 	it('shows only the selected provider and emits its composite model value', async () => {
 		const onSelect = vi.fn();
 		const { getByRole, queryByText } = render(ModelPicker, {
