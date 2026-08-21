@@ -106,7 +106,8 @@ def _build_cluster_catalog(
     me: str,
 ) -> list:
     """Join one checkout SELECT + pv2 + installs in Python. Drop pv2
-    rows with no active base checkout. Never expose foreign ``path``."""
+    rows with no active base checkout on an approved online install. Never
+    expose foreign ``path``."""
     from app.core.project_resolver import origin_for_legacy_project
 
     by_pv2: Dict[str, list] = {}
@@ -138,7 +139,11 @@ def _build_cluster_catalog(
             if not runner_id or runner_id in seen:
                 continue
             install = install_map.get(runner_id)
-            if not install or not install.get("approved", True):
+            if (
+                not install
+                or not install.get("approved", True)
+                or not install.get("online")
+            ):
                 continue
             seen.add(runner_id)
             eligible.append({
@@ -147,6 +152,8 @@ def _build_cluster_catalog(
                 "online": bool(install.get("online")),
                 "is_self": runner_id == me,
             })
+        if not eligible:
+            continue
         catalog.append({
             "project_v2_id": pv2_id,
             "origin": origin,
@@ -163,7 +170,7 @@ async def list_cluster_projects(
     request: Request,
     token: str = Depends(require_auth),
 ) -> Dict[str, Any]:
-    """Origin-keyed catalog of ``projects_v2`` with an active base checkout.
+    """Origin-keyed catalog of ``projects_v2`` available on an online install.
 
     Compose accepts ``project_v2_id`` so a viewer can start a remote
     session without a local clone. Scoped users are filtered by

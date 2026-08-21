@@ -20,7 +20,7 @@ import { activeSession } from './active-session';
 interface AppDataState {
 	profiles: Profile[];
 	projects: Project[];
-	/** Origin-keyed cluster catalog (projects_v2 with an active base checkout). */
+	/** Origin-keyed catalog of projects available on approved online installs. */
 	clusterProjects: ClusterProject[];
 	sessions: Session[];
 	// Selection state for batch operations

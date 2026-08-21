@@ -11,7 +11,6 @@
 	import AddProjectModal from '$lib/components/AddProjectModal.svelte';
 	import GroupedSelector from '$lib/components/GroupedSelector.svelte';
 	import {
-		ON_OTHER_RUNNERS,
 		buildWorkspacePickerItems,
 		pickerItemName,
 		selectedPickerId
@@ -32,10 +31,12 @@
 	// Add project modal state
 	let showAddModal = $state(false);
 
-	const picker = $derived(buildWorkspacePickerItems($projects, $clusterProjects));
-	const selectedId = $derived(selectedPickerId(selectedProject, selectedProjectV2Id));
+	const pickerItems = $derived(buildWorkspacePickerItems($projects, $clusterProjects));
+	const selectedId = $derived(
+		selectedPickerId(selectedProject, selectedProjectV2Id, pickerItems)
+	);
 	const selectedProjectName = $derived(
-		pickerItemName(picker.items, picker.remoteItems, selectedId) ||
+		pickerItemName(pickerItems, selectedId) ||
 			$projects.find((p) => p.id === selectedProject)?.name ||
 			'your project'
 	);
@@ -48,9 +49,7 @@
 	}
 
 	function handleSelect(id: string) {
-		const item =
-			picker.items.find((i) => i.id === id) ||
-			picker.remoteItems.find((i) => i.id === id);
+		const item = pickerItems.find((i) => i.id === id);
 		if (item) {
 			onSelectProject(item.project, item.projectV2Id);
 		} else {
@@ -107,7 +106,7 @@
 			<div class="picker-dropdown">
 				<GroupedSelector
 					bind:this={groupedSelector}
-					items={picker.items}
+					items={pickerItems}
 					entityType="projects"
 					selectedId={selectedId}
 					onSelect={handleSelect}
@@ -116,9 +115,6 @@
 					onAdd={openAddModal}
 					emptyMessage="No workspaces available"
 					itemIcon={FolderClosed}
-					extraGroups={picker.remoteItems.length
-						? [{ name: ON_OTHER_RUNNERS, items: picker.remoteItems }]
-						: []}
 				/>
 			</div>
 		{/if}
