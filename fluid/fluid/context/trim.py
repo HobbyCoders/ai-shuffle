@@ -28,7 +28,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from fluid.messages import Message, Text, ToolResultBlock
+from fluid.messages import Image, Message, Text, ToolResultBlock
 from fluid.store.base import SessionNode
 
 
@@ -105,8 +105,45 @@ class ToolResultTrimmer:
     # lifetime so the rendered prefix is stable between batch trims.
     _trimmed: set = field(default_factory=set)
 
-    def _render(self, nodes: list[SessionNode]) -> list[Message]:
-        if not self._trimmed:
+    @staticmethod
+    def _has_image(block: ToolResultBlock) -> bool:
+        return any(isinstance(inner, Image) for inner in block.content or [])
+
+    def _consumed_image_results(
+        self, nodes: list[SessionNode]
+    ) -> set[tuple[str, str]]:
+        """Image results already consumed by a later assistant response.
+
+        A screenshot must reach the model once, but retaining its base64 in the
+        durable tree must not resend it for every subsequent tool iteration or
+        user turn. A later assistant node proves the image was available to a
+        completed model call, so future request views replace it with the same
+        sticky placeholder used for ordinary microcompaction.
+        """
+        out: set[tuple[str, str]] = set()
+        later_assistant = False
+        for node in reversed(nodes):
+            if node.message.role == "assistant":
+                later_assistant = True
+                continue
+            if node.message.role != "user" or not later_assistant:
+                continue
+            for block in node.message.content:
+                if (
+                    isinstance(block, ToolResultBlock)
+                    and not block.is_error
+                    and self._has_image(block)
+                ):
+                    out.add((node.node_id, block.tool_use_id))
+        return out
+
+    def _render(
+        self,
+        nodes: list[SessionNode],
+        trimmed: set[tuple[str, str]] | None = None,
+    ) -> list[Message]:
+        trimmed = self._trimmed if trimmed is None else trimmed
+        if not trimmed:
             return [n.message for n in nodes]
         out: list[Message] = []
         for node in nodes:
@@ -119,7 +156,7 @@ class ToolResultTrimmer:
             for block in message.content:
                 if (
                     isinstance(block, ToolResultBlock)
-                    and (node.node_id, block.tool_use_id) in self._trimmed
+                    and (node.node_id, block.tool_use_id) in trimmed
                 ):
                     blocks.append(
                         ToolResultBlock(
@@ -190,12 +227,20 @@ class ToolResultTrimmer:
         """
         if not self.config.enabled:
             return [n.message for n in nodes]
-        return self._render(nodes)
+        # Keep this read-only while still reporting the exact view the next
+        # request will carry: previously consumed images are deterministically
+        # compacted even before apply() persists the sticky key.
+        trimmed = self._trimmed | self._consumed_image_results(nodes)
+        return self._render(nodes, trimmed)
 
     def apply(self, nodes: list[SessionNode]) -> list[Message]:
         """Render history with sticky trims; arm a new batch when over trigger."""
         if not self.config.enabled:
             return [n.message for n in nodes]
+        # Consume-once semantics for screenshots and image reads. This is
+        # independent of the ordinary text-size trigger because provider image
+        # tokenization can dwarf the base64 chars/4 estimate.
+        self._trimmed.update(self._consumed_image_results(nodes))
         rendered = self._render(nodes)
         if estimate_tokens_of_messages(rendered) > self.config.trigger_tokens:
             newly = self._eligible(nodes)

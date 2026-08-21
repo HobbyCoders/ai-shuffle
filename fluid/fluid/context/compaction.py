@@ -281,6 +281,15 @@ class Compactor:
 
     def _render(self, nodes: list[SessionNode]) -> list[Message]:
         index = {n.node_id: i for i, n in enumerate(nodes)}
+        # Consume-once image trims need the FULL path: a later assistant node
+        # is the evidence an image was already delivered, and the per-node
+        # trimmer calls below can never see one. Recomputed every render
+        # (a deterministic view, like trimmer.view); apply() persists the pairs.
+        trimmed = self.trimmer._trimmed
+        if self.trimmer.config.enabled:
+            consumed = self.trimmer._consumed_image_results(nodes)
+            if consumed:
+                trimmed = trimmed | consumed
         out: list[Message] = []
         i = 0
         while i < len(nodes):
@@ -303,12 +312,18 @@ class Compactor:
                 )
                 i = j + 1
                 continue
-            out.append(self._render_live(node))
+            out.append(self._render_live(node, trimmed))
             i += 1
         return out
 
-    def _render_live(self, node: SessionNode) -> Message:
-        message = self.trimmer.view([node])[0]
+    def _render_live(
+        self, node: SessionNode, trimmed: set[tuple[str, str]]
+    ) -> Message:
+        message = (
+            self.trimmer._render([node], trimmed)[0]
+            if self.trimmer.config.enabled
+            else node.message
+        )
         if message.role != "user":
             return message
         blocks: list[Any] = []
@@ -344,6 +359,14 @@ class Compactor:
         run the ladder as one amortized batch and return what it did."""
         if not self.config.enabled:
             return [n.message for n in nodes], []
+        # Persist consume-once image trims into the sticky set (mirrors
+        # trimmer.apply, which the Compactor path never calls). The decision
+        # is deterministic from the path, so this is about keeping the
+        # rendered prefix byte-identical between requests, not durability.
+        if self.trimmer.config.enabled:
+            self.trimmer._trimmed.update(
+                self.trimmer._consumed_image_results(nodes)
+            )
         rendered = self._render(nodes)
         threshold = self.config.trigger_tokens
         if context_window is not None:

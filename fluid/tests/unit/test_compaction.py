@@ -21,7 +21,7 @@ from fluid.context.trim import TrimConfig
 from fluid.engine.native import NativeLoop, repair_dangling_tool_calls
 from fluid.events import ContextCompaction, UserTurn
 from fluid.events.model import event_from_dict, event_to_dict
-from fluid.messages import Message, Text, ToolResultBlock, ToolUseBlock
+from fluid.messages import Image, Message, Text, ToolResultBlock, ToolUseBlock
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import SessionNode
 from fluid.store.jsonl import JsonlStore
@@ -187,6 +187,73 @@ def test_tier3_epoch_fold() -> None:
     joined = "\n".join(_texts(c.view(nodes)))
     assert "[epoch node_u0.." in joined
     assert "older turns folded" in joined
+
+
+# ─── Consume-once image results ──────────────────────────────────────────────
+
+
+def _image_history(*, consumed: bool = True) -> list[SessionNode]:
+    nodes = [
+        _node("u0", "user", [Text("look at this")]),
+        _node("a0", "assistant", [
+            Text("taking screenshot"),
+            ToolUseBlock(id="call0", name="Screenshot", input={}),
+        ]),
+        _node("r0", "user", [
+            ToolResultBlock(
+                tool_use_id="call0",
+                content=[Image(media_type="image/png", data="a" * 20_000)],
+                is_error=False,
+            )
+        ]),
+    ]
+    if consumed:
+        nodes.append(_node("f0", "assistant", [Text("I see it")]))
+    return nodes
+
+
+def _images(message: Message) -> list[Image]:
+    return [
+        inner
+        for block in message.content
+        for inner in getattr(block, "content", None) or []
+        if isinstance(inner, Image)
+    ]
+
+
+def test_compactor_trims_consumed_image_results() -> None:
+    """The Compactor renders node-by-node, so the consume-once decision has to
+    be computed over the WHOLE path before those per-node renders happen."""
+    nodes = _image_history()
+    c = Compactor(config=CompactionConfig())
+
+    viewed = c.view(nodes)
+    assert _images(viewed[2]) == []
+    assert "trimmed to save context" in "\n".join(_texts([viewed[2]]))
+    assert c.trimmer._trimmed == set()  # view stays read-only
+
+    rendered, promotions = c.apply(nodes)
+    assert _images(rendered[2]) == []
+    assert "trimmed to save context" in "\n".join(_texts([rendered[2]]))
+    assert promotions == []                   # no tier fired; only consume-once
+    assert ("r0", "call0") in c.trimmer._trimmed   # persisted into the sticky set
+
+
+def test_compactor_keeps_images_when_trim_disabled() -> None:
+    nodes = _image_history()
+    c = Compactor(config=CompactionConfig(trim=TrimConfig(enabled=False)))
+
+    assert _images(c.view(nodes)[2]) == _images(nodes[2].message)
+    rendered, _promos = c.apply(nodes)
+    assert _images(rendered[2]) == _images(nodes[2].message)
+    assert c.trimmer._trimmed == set()
+
+
+def test_compactor_keeps_unconsumed_image() -> None:
+    """No later assistant node → the image has not reached the model yet."""
+    nodes = _image_history(consumed=False)
+    c = Compactor(config=CompactionConfig())
+    assert _images(c.view(nodes)[2]) == _images(nodes[2].message)
 
 
 # ─── Threshold arithmetic ────────────────────────────────────────────────────

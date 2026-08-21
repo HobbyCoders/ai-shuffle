@@ -5,7 +5,7 @@ from typing import AsyncIterator
 from fluid.context.trim import ToolResultTrimmer, TrimConfig
 from fluid.engine.native import NativeLoop
 from fluid.events import Handoff, HandoffCreated, UserTurn
-from fluid.messages import Message, Text, ToolResultBlock, ToolUseBlock
+from fluid.messages import Image, Message, Text, ToolResultBlock, ToolUseBlock
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import MemoryStore, SessionNode
 from fluid.tools.registry import ToolCtx
@@ -77,6 +77,54 @@ def test_trim_is_sticky_and_batchy() -> None:
     second = _tool_result_texts(trimmer.apply(nodes))
     assert second[2] == "x" * 8_000
     assert second[:2] == first[:2]  # earlier trims unchanged (sticky)
+
+
+def test_browser_screenshot_is_available_once_then_compacted() -> None:
+    """Regression: a 531k PNG once made every Grok follow-up ~450k tokens."""
+    image_result = _node("image-result", "user", [
+        ToolResultBlock(
+            tool_use_id="shot-1",
+            content=[
+                Text("screenshot taken"),
+                Image(media_type="image/png", data="a" * 531_476),
+            ],
+        )
+    ])
+    assistant = _node("assistant-after-image", "assistant", [Text("I inspected it")])
+    trimmer = ToolResultTrimmer(config=TrimConfig(trigger_tokens=10_000_000))
+
+    first = trimmer.apply([image_result])
+    assert any(
+        isinstance(inner, Image)
+        for block in first[0].content
+        for inner in getattr(block, "content", [])
+    )
+
+    # A later assistant node proves the image was already delivered to one
+    # model call. It is compacted even though the ordinary text trigger is far
+    # above this transcript and even though it is the newest tool result.
+    second = trimmer.apply([image_result, assistant])
+    assert "trimmed to save context" in _tool_result_texts(second)[0]
+    assert not any(
+        isinstance(inner, Image)
+        for block in second[0].content
+        for inner in getattr(block, "content", [])
+    )
+
+
+def test_consumed_screenshot_view_is_read_only_but_matches_next_request() -> None:
+    image_result = _node("image-result", "user", [
+        ToolResultBlock(
+            tool_use_id="shot-1",
+            content=[Image(media_type="image/png", data="a" * 20_000)],
+        )
+    ])
+    assistant = _node("assistant-after-image", "assistant", [Text("done")])
+    trimmer = ToolResultTrimmer(config=TrimConfig(trigger_tokens=10_000_000))
+
+    rendered = trimmer.view([image_result, assistant])
+    assert "trimmed to save context" in _tool_result_texts(rendered)[0]
+    assert trimmer._trimmed == set()
 
 
 # ─── Note builtin ────────────────────────────────────────────────────────────
