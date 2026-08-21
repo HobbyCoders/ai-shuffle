@@ -213,7 +213,15 @@ def _safe_json(value):
 # 80 (2026-08-21): add sessions.context_window — the user-selected input-window
 #     limit that accompanies the model/effort/permission run binding. NULL keeps
 #     the model/provider default for pre-existing sessions.
-SCHEMA_VERSION = 80
+# 81 (2026-08-21): add sessions.fast — the per-session "fast mode" toggle that
+#     rides alongside the model/effort/permission/context_window run binding.
+#     TRUE asks the leg for its expedited service (the Claude CLI's
+#     ``fastMode`` setting on the delegated lane; ``service_tier: priority`` on
+#     the OpenAI Responses lane). NULL/FALSE — every pre-existing row — runs
+#     standard, so nothing changes speed or price on upgrade. Additive/nullable
+#     with no index; lands via the always-run guarded ADD COLUMN in
+#     _run_column_migrations.
+SCHEMA_VERSION = 81
 
 
 def _migrate_omni_tables_to_fluid(cursor):
@@ -1686,6 +1694,13 @@ def _run_column_migrations(cursor):
     if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "context_window"):
         cursor.execute("ALTER TABLE sessions ADD COLUMN context_window INTEGER")
         migrations_applied.append("sessions.context_window")
+
+    # Per-session fast-mode binding (v81). One nullable BOOLEAN, exactly like
+    # ``hidden`` above: TRUE asks the leg for its expedited service, NULL/FALSE
+    # runs standard. Pre-existing rows are NULL and therefore unchanged.
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "fast"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN fast BOOLEAN")
+        migrations_applied.append("sessions.fast")
 
     # Rename sessions.is_favorite -> is_active (v63). Favorites were reworked
     # into an "Active group": the flag now marks the session the user is

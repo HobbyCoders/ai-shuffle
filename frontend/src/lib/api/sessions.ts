@@ -73,6 +73,9 @@ export interface Session {
 	model?: string | null;
 	effort?: string | null;
 	permission_mode?: string | null;
+	/** Fast service tier for this session's run binding. Null on sessions
+	 *  created before the flag existed, and on models that never supported it. */
+	fast?: boolean | null;
 	/** Optional persisted concrete context ceiling once the backend stores the override. */
 	context_window?: number | null;
 	mode?: string;  // Interaction mode: 'chat' (default) or 'voice' (Realtime call)

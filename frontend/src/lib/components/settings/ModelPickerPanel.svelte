@@ -193,7 +193,6 @@
 	function pickRail(key: string) {
 		railKey = key;
 		highlighted = null;
-		searchEl?.focus();
 	}
 
 	function toggleFavorite(e: MouseEvent, optionValue: string) {

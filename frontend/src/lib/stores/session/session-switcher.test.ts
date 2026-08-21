@@ -73,6 +73,7 @@ function fullState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		modelOverride: 'model-A',
 		permissionModeOverride: 'plan',
 		effortLevelOverride: 'high',
+		fastMode: false,
 		contextWindowChoice: '1m',
 		pendingPermissions: [],
 		deferredPermissions: [],
@@ -362,6 +363,25 @@ describe('session run binding on switch', () => {
 		expect(getState().contextWindowChoice).toBe('standard');
 	});
 
+	it('restores the last-used fast-tier pick for a new chat', () => {
+		localStorage.setItem('aihub_lastFastMode', '1');
+		const { switcher, getState } = makeSwitcher(fullState());
+
+		switcher.newChat();
+		switcher.destroy();
+
+		expect(getState().fastMode).toBe(true);
+	});
+
+	it('opens a new chat with fast mode off when nothing was remembered', () => {
+		const { switcher, getState } = makeSwitcher(fullState());
+
+		switcher.newChat();
+		switcher.destroy();
+
+		expect(getState().fastMode).toBe(false);
+	});
+
 	it('hydrates the target session own binding from its row', async () => {
 		// Agents carry no model, so the row is the only source for a session
 		// opened without a local ephemeral entry — e.g. from another device.
@@ -371,7 +391,8 @@ describe('session run binding on switch', () => {
 				model: 'prov:op:openai/gpt-5.6',
 				effort: 'high',
 				permission_mode: 'plan',
-				context_window: 256_000
+				context_window: 256_000,
+				fast: true
 			},
 		];
 		const { switcher, getState } = makeSwitcher(fullState());
@@ -384,6 +405,18 @@ describe('session run binding on switch', () => {
 		expect(s.effortLevelOverride).toBe('high');
 		expect(s.permissionModeOverride).toBe('plan');
 		expect(s.contextWindowChoice).toBe('standard');
+		// Cross-device: the row is the only carrier of the fast-tier pick.
+		expect(s.fastMode).toBe(true);
+	});
+
+	it('defaults fast mode to off for a row that never stored one', async () => {
+		_mockSessions.current = [{ id: 'session-C', model: 'opus' }];
+		const { switcher, getState } = makeSwitcher(fullState());
+
+		await switcher.switchSession('session-C');
+		switcher.destroy();
+
+		expect(getState().fastMode).toBe(false);
 	});
 
 	it('prefers an unsent local pick over the stored binding', async () => {

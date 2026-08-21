@@ -387,6 +387,44 @@ export function getClaudeContextWindow(value: string | null | undefined): number
 }
 
 /**
+ * `provider_type` values that identify an OpenAI/Codex row — the only gateway
+ * kinds whose GPT-5 models expose the fast-output service tier. `chatgpt` is
+ * the Codex subscription row, `openai` the API-key one.
+ */
+const OPENAI_PROVIDER_TYPES: readonly string[] = ['chatgpt', 'openai'];
+
+/** Provider model ids that carry the fast tier (`gpt-5`, `gpt-5.6-sol`, …). */
+const FAST_PROVIDER_MODEL_RE = /^gpt-5/i;
+
+/**
+ * True when `value` names a model that supports "fast mode" — the higher-priced
+ * service tier that trades prompt-cache continuity for lower latency.
+ *
+ * Two shapes qualify:
+ *  - a native Claude preset in the `opus` family;
+ *  - a `prov:<providerId>:<modelId>` composite whose model id starts with
+ *    `gpt-5` AND whose provider row is an OpenAI/Codex kind. When the provider
+ *    row isn't in the hydrated registry (pre-hydration, or a row that was
+ *    disabled after the pick was stored) the id match alone decides, so the
+ *    toggle doesn't blink out while `/models` is still in flight.
+ *
+ * Everything else — haiku/sonnet/fable, bare custom ids, unset — is false.
+ */
+export function isFastModeCapable(value: string | null): boolean {
+	if (!value) return false;
+	const composite = decodeProviderModel(value);
+	if (composite) {
+		if (!FAST_PROVIDER_MODEL_RE.test(composite.modelId)) return false;
+		const provider = _registry.providers.find((p) => p.id === composite.providerId);
+		if (!provider) return true;
+		return OPENAI_PROVIDER_TYPES.includes(provider.provider_type);
+	}
+	const base = normalizeModel(value);
+	if (!base) return false;
+	return _registry.models.find((m) => m.value === base)?.family === 'opus';
+}
+
+/**
  * Human-readable label for a stored model value.
  * Falls back to the raw value, or `'Default'` when nothing is set.
  *

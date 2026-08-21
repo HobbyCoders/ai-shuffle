@@ -5,6 +5,7 @@
 		Check,
 		ChevronRight,
 		Cpu,
+		Gauge,
 		Monitor,
 		ShieldCheck,
 		SlidersHorizontal,
@@ -43,6 +44,10 @@
 		effortOptions: ControlOption[];
 		effortValue: string | null;
 		onEffortSelect: (value: string) => void;
+		/** Whether the picked model carries the fast service tier. */
+		fastSupported?: boolean;
+		fastEnabled?: boolean;
+		onToggleFast?: () => void;
 		permissionOptions: ControlOption[];
 		permissionValue: string | null;
 		onPermissionSelect: (value: string) => void;
@@ -67,6 +72,9 @@
 		effortOptions,
 		effortValue,
 		onEffortSelect,
+		fastSupported = false,
+		fastEnabled = false,
+		onToggleFast,
 		permissionOptions,
 		permissionValue,
 		onPermissionSelect,
@@ -293,13 +301,26 @@
 					</section>
 
 					<section class="control-section">
-						<div class="section-label"><Zap size={15} strokeWidth={1.8} /><span>Reasoning effort</span></div>
+						<div class="section-label"><Gauge size={15} strokeWidth={1.8} /><span>Reasoning effort</span></div>
 						<div class="effort-slider-card">
 							<div class="effort-current">
 								<span>
 									<strong>{selectedEffort?.label ?? 'Effort'}</strong>
 									<small>{selectedEffort?.description ?? 'Reasoning depth'}</small>
 								</span>
+								{#if fastSupported}
+									<button
+										type="button"
+										class="fast-toggle"
+										class:on={fastEnabled}
+										onclick={() => onToggleFast?.()}
+										aria-pressed={fastEnabled}
+										aria-label="Fast mode"
+										title="Fast mode: faster output at a higher price. Switching clears the prompt cache."
+									>
+										<Zap size={16} strokeWidth={2} aria-hidden="true" />
+									</button>
+								{/if}
 							</div>
 							<input
 								type="range"
@@ -597,6 +618,39 @@
 	.effort-current small {
 		font-size: 0.72rem;
 		color: var(--muted-foreground);
+	}
+
+	/* Fast-tier toggle — top-right of the effort card, opposite the current
+	   effort copy. Muted until on, then a primary-tinted chip. */
+	.fast-toggle {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		flex: 0 0 auto;
+		align-self: flex-start;
+		width: 34px;
+		height: 34px;
+		background: transparent;
+		border: 1px solid var(--border-subtle);
+		border-radius: 11px;
+		color: var(--subtle-foreground);
+		cursor: pointer;
+		transition: background-color 0.13s ease, color 0.13s ease, border-color 0.13s ease;
+	}
+
+	.fast-toggle:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
+	}
+
+	.fast-toggle.on {
+		background: color-mix(in oklch, var(--primary) 14%, transparent);
+		border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
+		color: var(--primary);
+	}
+
+	.fast-toggle.on :global(svg) {
+		fill: currentColor;
 	}
 
 	.effort-slider-card input[type='range'] {

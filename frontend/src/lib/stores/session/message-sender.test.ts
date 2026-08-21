@@ -166,6 +166,38 @@ describe('message-sender worktree send backstop', () => {
 	});
 });
 
+describe('message-sender fast-mode override', () => {
+	it('sends fast: true when the session has fast mode on', async () => {
+		const { deps, wsConn } = makeDeps(baseState({
+			worktreeIntent: 'local',
+			modelOverride: 'opus',
+			fastMode: true,
+		}));
+		const sender = createMessageSender(deps);
+
+		await sender.sendMessage('go fast');
+
+		const frame = wsConn.send.mock.calls.find(([message]) => (message as any).type === 'query')?.[0] as any;
+		expect(frame.overrides).toMatchObject({ model: 'opus', fast: true });
+	});
+
+	it('sends fast: false when the session has fast mode off', async () => {
+		const { deps, wsConn } = makeDeps(baseState({
+			worktreeIntent: 'local',
+			modelOverride: 'opus',
+			fastMode: false,
+		}));
+		const sender = createMessageSender(deps);
+
+		await sender.sendMessage('normal speed');
+
+		// An absent key would let the backend fall back to the session row,
+		// which still holds the earlier `true` — so "off" must be explicit.
+		const frame = wsConn.send.mock.calls.find(([message]) => (message as any).type === 'query')?.[0] as any;
+		expect(frame.overrides).toMatchObject({ model: 'opus', fast: false });
+	});
+});
+
 describe('message-sender context-window override', () => {
 	it('sends a numeric context_window that can force a 1M Claude model to normal 200k', async () => {
 		const { deps, wsConn } = makeDeps(baseState({

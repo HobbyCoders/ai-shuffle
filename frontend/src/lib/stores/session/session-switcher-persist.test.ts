@@ -41,6 +41,7 @@ function minimalState(): ActiveSessionState {
 		modelOverride: null,
 		permissionModeOverride: null,
 		effortLevelOverride: null,
+		fastMode: true,
 		contextWindowChoice: 'standard',
 		worktreeIntent: 'local',
 		worktreeId: null,
@@ -152,7 +153,9 @@ describe('session-switcher · persistSession (writes both slots)', () => {
 		expect(raw).toBeTruthy();
 		expect(JSON.parse(raw as string)).toMatchObject({
 			sessionId: 'sess-1',
-			contextWindowChoice: 'standard'
+			contextWindowChoice: 'standard',
+			// The fast-tier pick rides the persisted binding, so a reload restores it.
+			fastMode: true
 		});
 
 		// (b) server PUT targets the DEVICE key — never a tab-scoped key.
@@ -162,6 +165,7 @@ describe('session-switcher · persistSession (writes both slots)', () => {
 		const body = JSON.parse(opts.body as string);
 		expect(body.key).toBe(DEVICE_KEY);
 		expect(body.value.sessionId).toBe('sess-1');
+		expect(body.value.fastMode).toBe(true);
 
 		switcher.destroy();
 	});

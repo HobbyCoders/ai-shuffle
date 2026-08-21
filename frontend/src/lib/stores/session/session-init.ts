@@ -160,6 +160,8 @@ export function createSessionInit(deps: SessionInitDeps) {
 							persisted.permissionModeOverride ?? (persisted.sessionId ? null : s.permissionModeOverride),
 						effortLevelOverride:
 							persisted.effortLevelOverride ?? (persisted.sessionId ? null : s.effortLevelOverride),
+						fastMode:
+							persisted.fastMode ?? (persisted.sessionId ? false : s.fastMode),
 						contextWindowChoice:
 							persisted.contextWindowChoice ??
 							(persisted.sessionId ? DEFAULT_CONTEXT_WINDOW_CHOICE : s.contextWindowChoice),

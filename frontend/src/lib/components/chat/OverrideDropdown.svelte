@@ -6,6 +6,7 @@
 	 */
 	import { onMount } from 'svelte';
 	import type { Snippet } from 'svelte';
+	import { Zap } from 'lucide-svelte';
 
 	interface OverrideMode {
 		value: string | null;
@@ -59,6 +60,15 @@
 		 *  passes the T3-style `ModelPickerPanel` here). The popover then drops
 		 *  its padding/header so the panel can fill it edge to edge. */
 		content?: Snippet;
+		/** Render the fast-tier toggle in the popover header. Off for every
+		 *  dropdown whose model doesn't offer the tier — and for the model /
+		 *  permission pills, which never pass it. */
+		fastSupported?: boolean;
+		/** Current fast-tier state, reflected as `aria-pressed`. */
+		fastEnabled?: boolean;
+		/** Flip the tier. Deliberately does NOT close the dropdown — the user is
+		 *  usually mid-way through tuning the run binding. */
+		onToggleFast?: () => void;
 	}
 
 	let {
@@ -75,7 +85,10 @@
 		warn = false,
 		warnTitle,
 		notice,
-		content
+		content,
+		fastSupported = false,
+		fastEnabled = false,
+		onToggleFast
 	}: Props = $props();
 
 	const isActive = $derived(isOverridden ?? currentValue !== null);
@@ -117,6 +130,13 @@
 	function handleSelect(value: string | null) {
 		onSelect(value);
 		onOpenChange(false);
+	}
+
+	function handleFastClick(e: MouseEvent) {
+		// The document-level outside-click handler would otherwise see this as a
+		// click landing outside the trigger and close the popover.
+		e.stopPropagation();
+		onToggleFast?.();
 	}
 
 	function handleClickOutside(e: MouseEvent) {
@@ -174,7 +194,22 @@
 		</div>
 	{:else if isOpen}
 		<div class="override-dropdown" role="menu" aria-label={title}>
-			<div class="override-dropdown-header">{title}</div>
+			<div class="override-dropdown-header">
+				<span>{title}</span>
+				{#if fastSupported}
+					<button
+						type="button"
+						class="override-fast-toggle"
+						class:on={fastEnabled}
+						onclick={handleFastClick}
+						aria-pressed={fastEnabled}
+						aria-label="Fast mode"
+						title="Fast mode: faster output at a higher price. Switching clears the prompt cache."
+					>
+						<Zap size={13} strokeWidth={2} aria-hidden="true" />
+					</button>
+				{/if}
+			</div>
 			{#if notice}
 				<div class="override-dropdown-notice">{notice}</div>
 			{/if}
@@ -396,12 +431,58 @@
 	}
 
 	.override-dropdown-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
 		padding: 6px 10px 4px;
 		font-size: 10px;
 		font-weight: 600;
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
 		color: var(--muted-foreground);
+	}
+
+	/* Fast-tier toggle — icon-only, pinned to the header's right edge. Muted
+	   until it's on, then a primary-tinted chip like the other active states. */
+	.override-fast-toggle {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		flex: 0 0 auto;
+		width: 22px;
+		height: 22px;
+		margin: -3px -3px -3px 0;
+		background: transparent;
+		border: 1px solid transparent;
+		border-radius: 7px;
+		color: var(--subtle-foreground);
+		cursor: pointer;
+		transition: background-color 0.13s ease, color 0.13s ease, border-color 0.13s ease;
+	}
+
+	.override-fast-toggle:hover {
+		background: var(--hover-overlay);
+		color: var(--foreground);
+	}
+
+	.override-fast-toggle:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
+	}
+
+	.override-fast-toggle.on {
+		background: color-mix(in oklch, var(--primary) 14%, transparent);
+		border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
+		color: var(--primary);
+	}
+
+	.override-fast-toggle.on:hover {
+		background: color-mix(in oklch, var(--primary) 20%, transparent);
+	}
+
+	.override-fast-toggle.on :global(svg) {
+		fill: currentColor;
 	}
 
 	.override-dropdown-item {

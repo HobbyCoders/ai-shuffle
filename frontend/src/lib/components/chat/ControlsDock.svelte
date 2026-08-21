@@ -17,10 +17,11 @@
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
 	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
 	import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
-	import { Monitor, SlidersHorizontal } from 'lucide-svelte';
+	import { Gauge, Monitor, SlidersHorizontal } from 'lucide-svelte';
 	import {
 		getModelLabel,
 		getDefaultModel,
+		isFastModeCapable,
 		isReroute
 	} from '$lib/constants/models';
 	import { computerUse } from '$lib/stores/computerUse.svelte';
@@ -100,6 +101,19 @@
 	// when an existing one is opened, so the registry default is only ever the
 	// first-run floor.
 	const modelValue = $derived($activeSession.modelOverride ?? getDefaultModel());
+
+	// ── Fast service tier ───────────────────────────────────────────
+	// Offered only on models that carry the tier (Claude Opus, OpenAI GPT-5 on
+	// an OpenAI/Codex provider row). It rides the effort dropdown because both
+	// are knobs on how hard — and how fast — the turn runs.
+	const fastMode = $derived($activeSession.fastMode);
+	const fastSupported = $derived(isFastModeCapable(modelValue));
+
+	// Switching to a model without the tier must not leave a stale flag on the
+	// session — the toggle would be invisible while every send still asked for it.
+	$effect(() => {
+		if (fastMode && !fastSupported) activeSession.setFastMode(false);
+	});
 
 	// Live reroute detection: the backend `model_info` note tells us which model
 	// the SDK's MAIN lane is ACTUALLY running. Compare at FAMILY level — exact-ID
@@ -280,11 +294,12 @@
 			onSelect={(v) => activeSession.setEffortLevelOverride(v)}
 			title="Effort Level"
 			buttonLabel={effortButtonLabel}
+			{fastSupported}
+			fastEnabled={fastMode}
+			onToggleFast={() => activeSession.setFastMode(!fastMode)}
 		>
 			{#snippet icon()}
-				<svg class="w-[16px] h-[16px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M13 10V3L4 14h7v7l9-11h-7z" />
-				</svg>
+				<Gauge size={16} strokeWidth={1.75} aria-hidden="true" />
 			{/snippet}
 		</OverrideDropdown>
 
@@ -395,6 +410,9 @@
 	effortOptions={effortLevels}
 	{effortValue}
 	onEffortSelect={(value) => activeSession.setEffortLevelOverride(value)}
+	{fastSupported}
+	fastEnabled={fastMode}
+	onToggleFast={() => activeSession.setFastMode(!fastMode)}
 	permissionOptions={permissionModes}
 	permissionValue={permissionValue}
 	onPermissionSelect={(value) => activeSession.setPermissionModeOverride(value)}

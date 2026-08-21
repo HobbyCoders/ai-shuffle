@@ -875,6 +875,7 @@ def build_options_from_profile(
         except Exception:  # noqa: BLE001 — a lookup failure falls back to config
             _binding_row = None
     _session_effort = (_binding_row or {}).get("effort")
+    _session_fast = (_binding_row or {}).get("fast")
     _session_permission_mode = (_binding_row or {}).get("permission_mode")
     _context_window_value = overrides.get("context_window") or (
         _binding_row or {}
@@ -885,6 +886,16 @@ def build_options_from_profile(
         context_window = None
     if context_window is not None and context_window <= 0:
         context_window = None
+    # Fast mode (v81). A BOOLEAN, so the usual ``or`` chain would swallow an
+    # explicit False: test the override for presence, not truthiness, and only
+    # fall back to the session row when the turn said nothing. There is no
+    # agent-config fallback — fast mode is a per-session user choice.
+    _fast_value = (
+        overrides["fast"]
+        if overrides.get("fast") is not None
+        else _session_fast
+    )
+    fast = None if _fast_value is None else bool(_fast_value)
 
     # Determine permission mode. Like the model and effort, this is the
     # session's own binding (v79) with the agent's legacy config as the
@@ -1501,6 +1512,12 @@ def build_options_from_profile(
     # The harness adapter uses this for native-loop compaction/usage accounting;
     # delegated Claude also receives the authoritative env pins above.
     options.aih_context_window = context_window
+    # Per-session fast mode (v81), same ride-along pattern: the harness adapter
+    # reads it off the options object and projects it onto SessionOptions.fast,
+    # where the delegated lane turns it into the CLI's ``fastMode`` setting and
+    # the OpenAI Responses lane into ``service_tier: priority``. None/False both
+    # mean standard; stamped unconditionally so presence is not a signal.
+    options.aih_fast = fast
 
     # The bound row's SHAPE, carried alongside the id so the fluid
     # HarnessAdapter can decide the leg from the provider row instead of

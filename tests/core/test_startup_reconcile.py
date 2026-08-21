@@ -333,12 +333,18 @@ async def test_boot_reap_requeues_dead_lease_turns_and_kicks(
 # Schema: version parity + parked_task_kind column
 # =============================================================================
 
-def test_schema_version_parity_v80():
+def test_schema_version_parity_v81():
     from app.db.database import SCHEMA_VERSION as db_version
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 80 for sessions.context_window, the explicit input-window limit
+    # Bumped to 81 for sessions.fast, the per-session fast-mode toggle that
+    # rides alongside the rest of the run binding: TRUE asks the leg for its
+    # expedited service (the Claude CLI's fastMode setting on the delegated
+    # lane, service_tier: priority on the OpenAI Responses one), and NULL —
+    # every pre-existing row — runs standard, so an upgrade changes nobody's
+    # speed or price.
+    # v80 added sessions.context_window, the explicit input-window limit
     # selected alongside the v79 model/effort/permission run binding. Agents stopped
     # pinning them, so the session row is where they live; NULL on every
     # pre-existing row, which falls back to launched_model and then the agent's
@@ -407,8 +413,8 @@ def test_schema_version_parity_v80():
     # the Phase-2 turns table; v58 was the Phase-1 deletion (v2_stream forced
     # TRUE + default flipped); v57 added the opt-in flag; v56 added the Phase-0
     # primitives.
-    assert db_version == 80
-    assert pg_version == 80
+    assert db_version == 81
+    assert pg_version == 81
     assert db_version == pg_version
 
 

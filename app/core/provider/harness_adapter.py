@@ -153,6 +153,7 @@ SUPPLIED BY FLUID ITSELF, WITH NO WIRING HERE (Claude-ecosystem compat, CE1):
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import os
@@ -379,6 +380,16 @@ class HarnessAdapter(ProviderAdapter):
                 # Reasoning depth (profile config or chat override) → CLI
                 # --effort. Validated app-side to the CLI's vocabulary.
                 effort=_valid_effort(getattr(options, "effort", None)),
+                # Per-session fast mode (v81) → the CLI's ``fastMode`` setting,
+                # handed over as a --settings JSON blob. Only sent when the user
+                # turned it on: an explicit ``{"fastMode": false}`` would be the
+                # same as the default, and a missing --settings keeps the CLI on
+                # whatever the account's own settings say.
+                settings=(
+                    json.dumps({"fastMode": True})
+                    if getattr(options, "fast", None)
+                    else None
+                ),
                 # Ruling A6: the CLI's native subagent tools are BANNED — the
                 # app's Task tool (mcp__builtins__Task here) is the one
                 # orchestration surface. Profile-level disallows ride along.
@@ -484,6 +495,16 @@ class HarnessAdapter(ProviderAdapter):
                 # get_context_usage() breakdown; None when unresolvable, which
                 # fluid reports as an unknown window instead of guessing.
                 context_window=_native_context_window(kind, options),
+                # Per-session fast mode (v81). Only the OpenAI Responses lane
+                # has a wire-level expedited service in v1 — ``service_tier:
+                # priority``, merged into the request body by fluid's
+                # ``request_extra``. The anthropic and openrouter native lanes
+                # have no equivalent knob and ignore ``fast`` entirely.
+                request_extra=(
+                    {"service_tier": "priority"}
+                    if kind == "openai_responses" and getattr(options, "fast", None)
+                    else None
+                ),
                 **native_caps,
                 # Native legs have no Claude Code preset — they always run the
                 # fluid-compiled prompt: the profile's configured prompt as the
@@ -625,6 +646,9 @@ class HarnessAdapter(ProviderAdapter):
             # query_options). Delegated leg → --effort; native legs → the
             # provider's effort/reasoning param via fluid's serializers.
             effort=getattr(sdk_options, "effort", None),
+            # Per-session fast mode (v81), stamped by query_options as
+            # ``aih_fast`` (override for this turn, else the session row).
+            fast=getattr(sdk_options, "aih_fast", None),
         )
         # The session's bound model provider (``sessions.provider_id``) rides on
         # the SDK options object as ``aih_provider_id`` (stamped by
@@ -1110,6 +1134,12 @@ class HarnessAdapter(ProviderAdapter):
         # builder / DelegatedLoop argv), so a change needs a rebuild.
         if _valid_effort(old.effort) != _valid_effort(
             new_options.effort if new_options.effort is not None else old.effort
+        ):
+            return True
+        # Fast mode is baked in the same way (DelegatedLoop --settings argv /
+        # NativeLoop request_extra), so a flip is a rebuild, not a hot-swap.
+        if bool(getattr(old, "fast", None)) != bool(
+            getattr(new_options, "fast", None)
         ):
             return True
         # Resolved provider binding (PA13 / W-R4) — mirrors

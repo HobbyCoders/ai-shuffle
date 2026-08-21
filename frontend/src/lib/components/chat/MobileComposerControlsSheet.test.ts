@@ -139,6 +139,35 @@ describe('MobileComposerControlsSheet', () => {
 		expect(screen.queryByRole('button', { name: /done/i })).toBeNull();
 	});
 
+	it('shows the fast-mode toggle in the effort card when the model supports it', () => {
+		render(MobileComposerControlsSheet, { props: props({ fastSupported: true, fastEnabled: true }) });
+
+		const toggle = screen.getByRole('button', { name: 'Fast mode' });
+		expect(toggle.getAttribute('aria-pressed')).toBe('true');
+		expect(toggle.getAttribute('title')).toMatch(/clears the prompt cache/i);
+		expect(toggle.closest('.effort-slider-card')).toBeTruthy();
+	});
+
+	it('hides the fast-mode toggle for a model without the tier', () => {
+		render(MobileComposerControlsSheet, { props: props({ fastSupported: false }) });
+
+		expect(screen.queryByRole('button', { name: 'Fast mode' })).toBeNull();
+	});
+
+	it('flips fast mode without closing the sheet', async () => {
+		const onToggleFast = vi.fn();
+		const onClose = vi.fn();
+		render(MobileComposerControlsSheet, {
+			props: props({ fastSupported: true, fastEnabled: false, onToggleFast, onClose })
+		});
+
+		await fireEvent.click(screen.getByRole('button', { name: 'Fast mode' }));
+
+		expect(onToggleFast).toHaveBeenCalledTimes(1);
+		expect(onClose).not.toHaveBeenCalled();
+		expect(screen.getByRole('dialog')).toBeTruthy();
+	});
+
 	it('uses Escape to go back from models before dismissing the sheet', async () => {
 		const onClose = vi.fn();
 		render(MobileComposerControlsSheet, { props: props({ onClose }) });

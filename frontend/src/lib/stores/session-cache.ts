@@ -20,6 +20,8 @@ export interface SessionEphemeral {
 	modelOverride: string | null;
 	permissionModeOverride: string | null;
 	effortLevelOverride: string | null;
+	/** Fast service tier — part of the run binding, cached like the rest of it. */
+	fastMode?: boolean;
 	contextWindowChoice?: ContextWindowChoice;
 	worktreeIntent: ExecutionMode;
 	/** Compose-time device pick — memory-only, exactly like the rest of this

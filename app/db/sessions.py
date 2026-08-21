@@ -98,6 +98,9 @@ class SessionRow(TypedDict):
     effort: Optional[str]
     permission_mode: Optional[str]
     context_window: Optional[int]
+    # Per-session fast mode (v81): TRUE asks the leg for its expedited service,
+    # NULL/FALSE runs standard.
+    fast: Optional[bool]
     # Interaction mode (v74, ruling VM4): 'voice' for an OpenAI Realtime call,
     # NULL/'chat' for a normal chat session.
     mode: Optional[str]
@@ -485,6 +488,7 @@ def create_session(
     effort: Optional[str] = None,
     permission_mode: Optional[str] = None,
     context_window: Optional[int] = None,
+    fast: Optional[bool] = None,
     mode: Optional[str] = None,
     hidden: bool = False,
     target_instance_id: Optional[str] = None,
@@ -534,6 +538,8 @@ def create_session(
         permission_mode: Permission mode chosen for this session, or ``None``.
         context_window: Explicit input-window limit in tokens, or ``None`` to use
             the selected model/provider's registered default.
+        fast: Fast mode chosen for this session (v81), or ``None`` to leave the
+            row unbound (the session runs at standard speed).
         mode: Interaction mode for this session (ruling VM4) — ``'voice'`` for an
             OpenAI Realtime voice call. ``None`` (the default, and every
             pre-existing row) means chat; the API model coalesces NULL to
@@ -585,6 +591,7 @@ def create_session(
         selected_context_window = None
     if selected_context_window is not None and selected_context_window <= 0:
         selected_context_window = None
+    selected_fast = None if fast is None else bool(fast)
     if resolved_provider_id is None and selected_model:
         from app.core.query_options import decode_provider_model
 
@@ -602,8 +609,8 @@ def create_session(
             resolved_provider_id = None
     resolved_mode = (mode or "").strip() or None
     _ph = ph()
-    columns = ["id", "profile_id", "project_id", "project_v2_id", "title", "api_user_id", "parent_session_id", "fork_point_message_index", "worktree_id", "worktree_branch", "worktree_path", "automation_id", "instance_id", "is_active", "v2_stream", "created_at", "updated_at", "provider_id", "model", "effort", "permission_mode", "context_window", "mode", "hidden"]
-    params = [session_id, profile_id, project_id, project_v2_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, True, now, now, resolved_provider_id, selected_model, selected_effort, selected_permission_mode, selected_context_window, resolved_mode, hidden]
+    columns = ["id", "profile_id", "project_id", "project_v2_id", "title", "api_user_id", "parent_session_id", "fork_point_message_index", "worktree_id", "worktree_branch", "worktree_path", "automation_id", "instance_id", "is_active", "v2_stream", "created_at", "updated_at", "provider_id", "model", "effort", "permission_mode", "context_window", "fast", "mode", "hidden"]
+    params = [session_id, profile_id, project_id, project_v2_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, True, now, now, resolved_provider_id, selected_model, selected_effort, selected_permission_mode, selected_context_window, selected_fast, resolved_mode, hidden]
     if target_instance_id:
         # Serialized to a JSON string (not a dict) so the SQLite test shim, which
         # stores JSONB columns as TEXT, round-trips identically to Postgres —
@@ -815,6 +822,7 @@ def set_session_run_binding(
     effort: Optional[str] = None,
     permission_mode: Optional[str] = None,
     context_window: Optional[int] = None,
+    fast: Optional[bool] = None,
 ) -> None:
     """Persist the run binding a turn actually used onto its session (v79).
 
@@ -832,7 +840,10 @@ def set_session_run_binding(
     provider does not curate clears the binding back to native.
 
     ``None`` leaves a field alone; only non-empty values are written (a turn
-    that sent no override must not erase the binding).
+    that sent no override must not erase the binding). ``fast`` is the one
+    exception to "non-empty": it is a BOOLEAN, so ``False`` is a real value the
+    user picked and is written through — only ``None`` (the field was absent)
+    leaves the row alone.
     """
     _ph = ph()
     updates: List[str] = []
@@ -861,6 +872,11 @@ def set_session_run_binding(
     if clean_context_window is not None and clean_context_window > 0:
         updates.append(f"context_window = {_ph}")
         values.append(clean_context_window)
+    # Boolean binding (v81): False is a real pick ("turn fast mode off"), so it
+    # must reach the row. Only an absent field (None) is a no-op.
+    if fast is not None:
+        updates.append(f"fast = {_ph}")
+        values.append(bool(fast))
 
     if not updates:
         return

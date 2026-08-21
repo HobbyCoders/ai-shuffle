@@ -3838,3 +3838,168 @@ def test_with_agents_index_is_idempotent():
     assert ha._with_agents_index(None, None, index) == (None, index)
     # Nothing to advertise -> untouched.
     assert ha._with_agents_index("BASE", None, None) == ("BASE", None)
+
+
+# ─── Per-session fast mode (v81) ─────────────────────────────────────────────
+#
+# ``SessionOptions.fast`` is the user's per-session toggle. Each leg spends it
+# differently, and only where the leg actually has an expedited service:
+# the delegated CLI gets a ``--settings`` blob carrying ``fastMode``; the
+# OpenAI Responses native lane gets ``service_tier: priority`` through fluid's
+# ``request_extra``. The anthropic and openrouter native lanes have no such
+# knob in v1 and must ignore ``fast`` entirely.
+
+
+def _delegated_fast_options(fast):
+    from fluid.tools.registry import ToolRegistry
+
+    return SessionOptions(
+        model="fable",
+        fast=fast,
+        # Prebuilt registry short-circuits _build_registry (no MCP dial-out).
+        extra={"fluid_registry": ToolRegistry()},
+    )
+
+
+@pytest.mark.asyncio
+async def test_delegated_fast_mode_sends_settings_json(monkeypatch):
+    import json
+
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(_delegated_fast_options(True))
+
+    assert adapter._is_delegated is True
+    assert json.loads(_CapturingLoop.captured["settings"]) == {"fastMode": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fast", [False, None])
+async def test_delegated_without_fast_sends_no_settings(monkeypatch, fast):
+    """Standard speed means NO --settings at all — an explicit fastMode:false
+    would say the same thing while overriding the account's own settings file."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+    await ha.HarnessAdapter().connect(_delegated_fast_options(fast))
+
+    assert _CapturingLoop.captured["settings"] is None
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_fast_mode_sets_priority_service_tier(
+    monkeypatch, tmp_path
+):
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    await ha.HarnessAdapter().connect(
+        SessionOptions(
+            model="gpt-5",
+            fast=True,
+            cwd=str(tmp_path),
+            extra={"fluid_provider": "openai_responses"},
+        )
+    )
+    assert _CapturingLoop.captured["request_extra"] == {"service_tier": "priority"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fast", [False, None])
+async def test_openai_responses_without_fast_sends_no_request_extra(
+    monkeypatch, tmp_path, fast
+):
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    await ha.HarnessAdapter().connect(
+        SessionOptions(
+            model="gpt-5",
+            fast=fast,
+            cwd=str(tmp_path),
+            extra={"fluid_provider": "openai_responses"},
+        )
+    )
+    assert _CapturingLoop.captured["request_extra"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["anthropic", "openrouter"])
+async def test_other_native_lanes_ignore_fast_mode(monkeypatch, tmp_path, kind):
+    """Only the Responses lane has a wire-level expedited tier in v1."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    await ha.HarnessAdapter().connect(
+        SessionOptions(
+            model="claude-sonnet-5" if kind == "anthropic" else "openai/gpt-5",
+            fast=True,
+            cwd=str(tmp_path),
+            extra={"fluid_provider": kind},
+        )
+    )
+    assert _CapturingLoop.captured["request_extra"] is None
+
+
+@pytest.mark.asyncio
+async def test_sdk_options_fast_rides_onto_session_options(monkeypatch):
+    """query_options stamps ``aih_fast``; connect_with_sdk_options projects it
+    onto SessionOptions.fast, which is what the two lanes above read."""
+    from types import SimpleNamespace
+
+    import app.core.provider.harness_adapter as ha
+
+    adapter = ha.HarnessAdapter()
+    captured: dict = {}
+
+    async def fake_connect(opts):
+        captured["opts"] = opts
+
+    monkeypatch.setattr(adapter, "connect", fake_connect)
+    await adapter.connect_with_sdk_options(
+        SimpleNamespace(model="fable", aih_fast=True)
+    )
+    assert captured["opts"].fast is True
+
+
+@pytest.mark.asyncio
+async def test_fast_mode_flip_requires_a_reconnect(monkeypatch):
+    """Fast mode is baked into the engine at construction (CLI argv / native
+    request builder), so flipping it can only be honored by a rebuild."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(_delegated_fast_options(True))
+
+    assert adapter.requires_reconnect(_delegated_fast_options(True)) is False
+    assert adapter.requires_reconnect(_delegated_fast_options(False)) is True
+
+
+@pytest.mark.asyncio
+async def test_fast_mode_absent_matches_off_for_reconnect(monkeypatch):
+    """``None`` and ``False`` both mean standard speed, so switching between
+    them must NOT rebuild the engine.
+
+    The composer now always sends an explicit ``fast`` boolean (it used to omit
+    the key when off, which is how "turn fast mode off" never reached the CLI).
+    A session that never had fast mode would otherwise see its first
+    ``fast: false`` turn as a change and pay a pointless reconnect.
+    """
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(_delegated_fast_options(None))
+
+    assert adapter.requires_reconnect(_delegated_fast_options(False)) is False
+    assert adapter.requires_reconnect(_delegated_fast_options(None)) is False
+    assert adapter.requires_reconnect(_delegated_fast_options(True)) is True

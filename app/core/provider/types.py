@@ -59,6 +59,13 @@ class SessionOptions:
     thinking: Optional[Any] = None
     effort: Optional[str] = None
 
+    # Per-session fast mode (v81). True asks the leg for its expedited service:
+    # the delegated CLI gets ``--settings {"fastMode": true}``, the OpenAI
+    # Responses native lane gets ``service_tier: priority`` on the request body.
+    # The anthropic and openrouter native lanes have no equivalent and ignore
+    # it. None/False both mean standard.
+    fast: Optional[bool] = None
+
     # Permission mode
     permission_mode: Optional[str] = None
 

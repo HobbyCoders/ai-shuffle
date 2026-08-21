@@ -413,6 +413,10 @@ class Session(SessionBase):
     effort: Optional[str] = None
     permission_mode: Optional[str] = None
     context_window: Optional[int] = None
+    # Per-session fast mode (v81): True asks the leg for its expedited service.
+    # NULL on every pre-v81 row, which runs standard — left uncoalesced so the
+    # client can tell "never picked" from an explicit off.
+    fast: Optional[bool] = None
     # Interaction mode (v74, ruling VM4 of docs/VOICE_MODE_PLAN.md): 'chat' (the
     # default) or 'voice' (an OpenAI Realtime voice call). The column is
     # nullable and NULL means chat, so the validator below coalesces — that
@@ -538,6 +542,9 @@ class QueryOverrides(BaseModel):
     thinking_mode: Optional[str] = None  # default, disabled, adaptive, think, think_harder, ultra_think
     effort: Optional[str] = None  # low, medium, high, max, xhigh (xhigh only for Opus 4.7+)
     context_window: Optional[int] = Field(None, gt=0)
+    # Fast mode for this turn (v81). True asks the leg for its expedited
+    # service, False explicitly turns it off, None defers to the session row.
+    fast: Optional[bool] = None
 
 
 class QueryRequest(BaseModel):

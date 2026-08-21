@@ -135,6 +135,41 @@ describe('session-init · isRestoringSession on persisted restore', () => {
 		expect(getState().isRestoringSession).toBe(false);
 	});
 
+	it('restores a persisted fast-tier pick', async () => {
+		const { init, getState } = makeInit({
+			sessionId: 'persisted-fast',
+			title: 'Fast chat',
+			profile: 'profile-1',
+			project: 'proj-1',
+			modelOverride: 'opus',
+			permissionModeOverride: null,
+			effortLevelOverride: null,
+			fastMode: true,
+		});
+
+		await init();
+
+		expect(getState().fastMode).toBe(true);
+	});
+
+	it('clears fast mode for a restored session that never stored one', async () => {
+		// A session predating the flag must not inherit the seeded last-used pick —
+		// same rule the rest of the run binding follows.
+		const { init, getState } = makeInit({
+			sessionId: 'persisted-old',
+			title: 'Old chat',
+			profile: 'profile-1',
+			project: 'proj-1',
+			modelOverride: null,
+			permissionModeOverride: null,
+			effortLevelOverride: null,
+		});
+
+		await init();
+
+		expect(getState().fastMode).toBe(false);
+	});
+
 	it('does not replace a v2-only persisted session with the last local default', async () => {
 		const { init, getState } = makeInit({
 			sessionId: 'persisted-v2',

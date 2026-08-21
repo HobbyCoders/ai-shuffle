@@ -1103,6 +1103,16 @@ def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> 
     ):
         return True
 
+    # Per-session fast mode (v81) is baked in at connect time the same way — a
+    # ``--settings {"fastMode": true}`` CLI arg on the delegated leg, a
+    # ``service_tier`` on the native request builder — so a flip must rebuild
+    # the leg rather than ride an in-place set_model. Compared as a bool so
+    # absent and explicitly-off are the same standard-speed state.
+    if bool(getattr(old, "aih_fast", None)) != bool(
+        getattr(new_options, "aih_fast", None)
+    ):
+        return True
+
     # Tool-surface restriction (ruling CE12) — stamped by ``query_options`` as
     # ``aih_tool_allowlist`` and frozen into the engine at connect time (fluid
     # never renegotiates a session's tool surface mid-flight), so a change can

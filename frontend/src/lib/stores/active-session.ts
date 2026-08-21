@@ -27,7 +27,7 @@ import {
 	createSessionSwitcher,
 	getPersistedProfile, getPersistedProject,
 	getPersistedWorktreeIntent, setPersistedWorktreeIntent,
-	getPersistedModel, getPersistedEffort, getPersistedPermissionMode,
+	getPersistedModel, getPersistedEffort, getPersistedPermissionMode, getPersistedFastMode,
 	getPersistedContextWindowChoice, setPersistedRunBinding,
 } from './session/session-switcher';
 
@@ -140,6 +140,10 @@ export interface ActiveSessionState {
 	modelOverride: string | null;
 	permissionModeOverride: string | null;
 	effortLevelOverride: string | null;
+	/** Fast service tier for this session — faster output at a higher price, and
+	 *  a cleared prompt cache whenever it flips. Only offered on models that
+	 *  support it (`isFastModeCapable`); false everywhere else. */
+	fastMode: boolean;
 	/** Semantic 1M vs model-family standard-window choice for eligible GPT/Claude models. */
 	contextWindowChoice: ContextWindowChoice;
 	pendingPermissions: PermissionRequestType[];
@@ -218,6 +222,7 @@ export interface PersistedSession {
 	modelOverride: string | null;
 	permissionModeOverride: string | null;
 	effortLevelOverride: string | null;
+	fastMode?: boolean;
 	contextWindowChoice?: ContextWindowChoice;
 	worktreeIntent?: ExecutionMode;
 	worktreeId?: string | null;
@@ -271,6 +276,7 @@ function defaultState(): ActiveSessionState {
 		modelOverride: getPersistedModel(),
 		permissionModeOverride: getPersistedPermissionMode(),
 		effortLevelOverride: getPersistedEffort(),
+		fastMode: getPersistedFastMode(),
 		contextWindowChoice: getPersistedContextWindowChoice(),
 		pendingPermissions: [],
 		deferredPermissions: [],
@@ -784,6 +790,7 @@ export const activeSession = {
 	setModelOverride(model: string | null) { _update(s => ({ ...s, modelOverride: model })); setPersistedRunBinding('model', model); persistSession(); },
 	setPermissionModeOverride(mode: string | null) { _update(s => ({ ...s, permissionModeOverride: mode })); setPersistedRunBinding('permissionMode', mode); persistSession(); },
 	setEffortLevelOverride(level: string | null) { _update(s => ({ ...s, effortLevelOverride: level })); setPersistedRunBinding('effort', level); persistSession(); },
+	setFastMode(on: boolean) { _update(s => ({ ...s, fastMode: on })); setPersistedRunBinding('fastMode', on ? '1' : ''); persistSession(); },
 	setContextWindowChoice(choice: ContextWindowChoice) { _update(s => ({ ...s, contextWindowChoice: choice })); setPersistedRunBinding('contextWindowChoice', choice); persistSession(); },
 
 	// ── Ephemeral UI State (delegated to draft-manager) ─────────────

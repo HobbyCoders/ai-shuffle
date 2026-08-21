@@ -162,12 +162,17 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		);
 	}
 
-	function buildOverrides(): Record<string, string | number> | undefined {
+	function buildOverrides(): Record<string, string | number | boolean> | undefined {
 		const _state = getState();
-		const overrides: Record<string, string | number> = {};
+		const overrides: Record<string, string | number | boolean> = {};
 		if (_state.modelOverride) overrides.model = _state.modelOverride;
 		if (_state.permissionModeOverride) overrides.permission_mode = _state.permissionModeOverride;
 		if (_state.effortLevelOverride) overrides.effort = _state.effortLevelOverride;
+		// Always an explicit boolean. Omitting the key when fast mode is OFF made
+		// the backend fall back to the session row, which still held the earlier
+		// `true` — so turning fast mode off never reached the CLI. `false` is a
+		// real pick and has to travel.
+		overrides.fast = _state.fastMode;
 		const contextWindow = contextWindowOverride(_state);
 		if (contextWindow != null) overrides.context_window = contextWindow;
 		return Object.keys(overrides).length > 0 ? overrides : undefined;
@@ -642,6 +647,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			const modelOverrideSnap = _state.modelOverride;
 			const permissionModeOverrideSnap = _state.permissionModeOverride;
 			const effortLevelOverrideSnap = _state.effortLevelOverride;
+			const fastModeSnap = _state.fastMode;
 			const contextWindowSnap = contextWindowOverride(_state);
 			const deviceIntentSnap = _state.deviceIntent;
 			const userMsgId = `user-${Date.now()}`;
@@ -653,10 +659,12 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// so we want the POST to finish even if the user navigates away,
 			// locks their phone, or closes the tab. Using ``keepalive: true``
 			// lets the browser complete the POST in the background.
-			const overridesPayload: Record<string, string | number> = {};
+			const overridesPayload: Record<string, string | number | boolean> = {};
 			if (modelOverrideSnap) overridesPayload.model = modelOverrideSnap;
 			if (permissionModeOverrideSnap) overridesPayload.permission_mode = permissionModeOverrideSnap;
 			if (effortLevelOverrideSnap) overridesPayload.effort = effortLevelOverrideSnap;
+			// Explicit boolean, same reason as buildOverrides above.
+			overridesPayload.fast = fastModeSnap;
 			if (contextWindowSnap != null) overridesPayload.context_window = contextWindowSnap;
 
 			update(s => {

@@ -159,6 +159,12 @@ export function getPersistedPermissionMode(): string | null {
 	return localStorage.getItem('aihub_lastPermissionMode') || null;
 }
 
+/** Last-used fast-tier pick. Stored as `'1'` / absent, so anything else is off. */
+export function getPersistedFastMode(): boolean {
+	if (typeof window === 'undefined') return false;
+	return localStorage.getItem('aihub_lastFastMode') === '1';
+}
+
 export function getPersistedContextWindowChoice(): ContextWindowChoice {
 	if (typeof window === 'undefined') return DEFAULT_CONTEXT_WINDOW_CHOICE;
 	const stored = localStorage.getItem('aihub_lastContextWindowChoice');
@@ -167,7 +173,7 @@ export function getPersistedContextWindowChoice(): ContextWindowChoice {
 
 /** Remember one leg of the run binding. `null` clears it. */
 export function setPersistedRunBinding(
-	key: 'model' | 'effort' | 'permissionMode' | 'contextWindowChoice',
+	key: 'model' | 'effort' | 'permissionMode' | 'contextWindowChoice' | 'fastMode',
 	value: string | null
 ): void {
 	if (typeof window === 'undefined') return;
@@ -175,7 +181,8 @@ export function setPersistedRunBinding(
 		model: 'aihub_lastModel',
 		effort: 'aihub_lastEffort',
 		permissionMode: 'aihub_lastPermissionMode',
-		contextWindowChoice: 'aihub_lastContextWindowChoice'
+		contextWindowChoice: 'aihub_lastContextWindowChoice',
+		fastMode: 'aihub_lastFastMode'
 	}[key];
 	if (value) localStorage.setItem(storageKey, value);
 	else localStorage.removeItem(storageKey);
@@ -226,6 +233,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			modelOverride: state.modelOverride,
 			permissionModeOverride: state.permissionModeOverride,
 			effortLevelOverride: state.effortLevelOverride,
+			fastMode: state.fastMode,
 			contextWindowChoice: state.contextWindowChoice,
 			worktreeIntent: state.worktreeIntent,
 			deviceIntent: state.deviceIntent,
@@ -282,6 +290,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			modelOverride: state.modelOverride,
 			permissionModeOverride: state.permissionModeOverride,
 			effortLevelOverride: state.effortLevelOverride,
+			fastMode: state.fastMode,
 			contextWindowChoice: state.contextWindowChoice,
 			worktreeIntent: state.worktreeIntent,
 			worktreeId: state.worktreeId,
@@ -499,6 +508,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			modelOverride: ephemeral?.modelOverride ?? row?.model ?? null,
 			permissionModeOverride: ephemeral?.permissionModeOverride ?? row?.permission_mode ?? null,
 			effortLevelOverride: ephemeral?.effortLevelOverride ?? row?.effort ?? null,
+			// Cross-device hydration: the row carries the session's own fast-tier
+			// pick, so a chat opened elsewhere shows the tier it actually runs on.
+			fastMode: ephemeral?.fastMode ?? (row?.fast ?? false),
 			contextWindowChoice:
 				ephemeral?.contextWindowChoice ??
 				contextChoiceFromWindow(row?.context_window) ??
@@ -669,6 +681,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			modelOverride: getPersistedModel(),
 			permissionModeOverride: getPersistedPermissionMode(),
 			effortLevelOverride: getPersistedEffort(),
+			fastMode: getPersistedFastMode(),
 			contextWindowChoice: getPersistedContextWindowChoice(),
 			pendingPermissions: [],
 			deferredPermissions: [],

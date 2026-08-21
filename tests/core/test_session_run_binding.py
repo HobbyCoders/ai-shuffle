@@ -410,3 +410,107 @@ class TestSubmitPersistsTheBinding:
             no_kick=True,
         )
         assert db.get_session("s-auto")["model"] == "opus"
+
+
+# ---------------------------------------------------------------------------
+# Fast mode (v81) — a BOOLEAN leg of the same binding
+# ---------------------------------------------------------------------------
+#
+# Every other leg is a string, where "absent" and "empty" mean the same thing.
+# ``fast`` is not: False is a real pick the user made, so it has to travel all
+# the way to the row and to the turn, and only None may be treated as a no-op.
+
+
+class TestFastModeBinding:
+    def test_creation_stamps_fast(self, mock_db):
+        _mk_profile("agent", {})
+        row = db.create_session("f-new", profile_id="agent", fast=True)
+        # The SQLite test shim hands BOOLEAN columns back as ints (the
+        # tests/db/test_sessions_hidden.py precedent); Postgres returns bools.
+        assert row["fast"] in (True, 1)
+        assert db.get_session("f-new")["fast"] in (True, 1)
+
+    def test_creation_without_fast_leaves_it_null(self, mock_db):
+        _mk_profile("agent", {})
+        assert db.create_session("f-bare", profile_id="agent")["fast"] is None
+
+    def test_binding_writes_fast_on(self, mock_db):
+        _mk_profile("agent", {})
+        db.create_session("f-on", profile_id="agent")
+        db.set_session_run_binding("f-on", fast=True)
+        assert db.get_session("f-on")["fast"] in (True, 1)
+
+    def test_binding_clears_fast_with_false(self, mock_db):
+        """Turning fast mode off is a write, not a no-op — the empty-string
+        idiom the string legs use would silently strand the session on fast."""
+        _mk_profile("agent", {})
+        db.create_session("f-off", profile_id="agent", fast=True)
+        db.set_session_run_binding("f-off", fast=False)
+        assert db.get_session("f-off")["fast"] in (False, 0)
+
+    def test_binding_omitting_fast_leaves_it_alone(self, mock_db):
+        _mk_profile("agent", {})
+        db.create_session("f-keep", profile_id="agent", fast=True)
+        db.set_session_run_binding("f-keep", model="sonnet")
+        row = db.get_session("f-keep")
+        assert row["model"] == "sonnet"
+        assert row["fast"] in (True, 1)
+
+    def test_session_row_drives_the_turn(self, mock_db, tmp_path):
+        _mk_profile("agent", {"cwd": str(tmp_path)})
+        db.create_session("f-turn", profile_id="agent", fast=True)
+        opts = _build_options(
+            {"id": "agent", "config": {"cwd": str(tmp_path)}},
+            session_id="f-turn",
+            overrides={"cwd": str(tmp_path)},
+        )
+        assert opts.aih_fast is True
+
+    def test_override_beats_the_session_row(self, mock_db, tmp_path):
+        _mk_profile("agent", {"cwd": str(tmp_path)})
+        db.create_session("f-ovr", profile_id="agent", fast=False)
+        opts = _build_options(
+            {"id": "agent", "config": {"cwd": str(tmp_path)}},
+            session_id="f-ovr",
+            overrides={"cwd": str(tmp_path), "fast": True},
+        )
+        assert opts.aih_fast is True
+
+    def test_false_override_clears_a_fast_session(self, mock_db, tmp_path):
+        """The precedence chain must test the override for PRESENCE. A plain
+        ``override or row`` would swallow False and keep running fast."""
+        _mk_profile("agent", {"cwd": str(tmp_path)})
+        db.create_session("f-clear", profile_id="agent", fast=True)
+        opts = _build_options(
+            {"id": "agent", "config": {"cwd": str(tmp_path)}},
+            session_id="f-clear",
+            overrides={"cwd": str(tmp_path), "fast": False},
+        )
+        assert opts.aih_fast is False
+
+    def test_unbound_session_runs_standard(self, mock_db, tmp_path):
+        """No row value and no override: None, and there is deliberately no
+        agent-config fallback — fast mode is a per-session user choice."""
+        _mk_profile("agent", {"cwd": str(tmp_path), "fast": True})
+        db.create_session("f-none", profile_id="agent")
+        opts = _build_options(
+            {"id": "agent", "config": {"cwd": str(tmp_path), "fast": True}},
+            session_id="f-none",
+            overrides={"cwd": str(tmp_path)},
+        )
+        assert opts.aih_fast is None
+
+    def test_turn_manager_persists_the_flip(self, mock_db, tmp_path):
+        """A mid-session toggle sent with a user turn sticks server-side, the
+        same way a model switch does."""
+        _mk_profile("agent", {"cwd": str(tmp_path)})
+        db.create_session("f-flip", profile_id="agent", fast=True)
+        turn_manager.submit(
+            "f-flip",
+            "user",
+            prompt="hi",
+            profile_id="agent",
+            overrides={"fast": False},
+            no_kick=True,
+        )
+        assert db.get_session("f-flip")["fast"] in (False, 0)

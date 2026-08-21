@@ -69,6 +69,10 @@ export interface QueryRequest {
 		effort?: string;
 		/** Explicit token ceiling: 200k/256k standard, or 1m extended. */
 		context_window?: number;
+		/** Fast service tier — faster output at a higher price, and a cleared
+		 *  prompt cache whenever it flips. Only sent when the picked model
+		 *  supports it. */
+		fast?: boolean;
 		system_prompt_append?: string;
 	};
 }
@@ -84,6 +88,10 @@ export interface ConversationRequest {
 		effort?: string;
 		/** Explicit token ceiling: 200k/256k standard, or 1m extended. */
 		context_window?: number;
+		/** Fast service tier — faster output at a higher price, and a cleared
+		 *  prompt cache whenever it flips. Only sent when the picked model
+		 *  supports it. */
+		fast?: boolean;
 		system_prompt_append?: string;
 	};
 }
