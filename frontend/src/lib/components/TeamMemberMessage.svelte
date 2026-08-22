@@ -4,10 +4,13 @@
 	 * Mirrors SubagentMessage patterns but surfaces team/teammate identity,
 	 * teammate status, and a Kill action when a PID is known.
 	 */
-	import type { ChatMessage, SubagentChildMessage, TeammateStatus } from '$lib/stores/types';
+	import type { ChatMessage, TeammateStatus } from '$lib/stores/types';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { killTeammate } from '$lib/api/client';
-	import ToolScreenshot from '$lib/components/chat/ToolScreenshot.svelte';
+	import ToolUseMessage from '$lib/components/chat/ToolUseMessage.svelte';
+
+	/** Child toolStatus values are trusted — they only arrive as these three. */
+	type ChildStatus = 'running' | 'complete' | 'error';
 
 	interface Props {
 		message: ChatMessage;
@@ -91,54 +94,6 @@
 			}
 		}
 		return parts.length > 0 ? parts.join(' \u00b7 ') : null;
-	}
-
-	function formatToolInput(input: Record<string, unknown> | undefined): string {
-		if (!input) return '';
-		try {
-			if (input.file_path) return String(input.file_path);
-			if (input.pattern) return String(input.pattern);
-			if (input.command) return String(input.command).substring(0, 100);
-			if (input.query) return String(input.query).substring(0, 100);
-			return JSON.stringify(input, null, 2);
-		} catch {
-			return String(input);
-		}
-	}
-
-	function getChildSummary(child: SubagentChildMessage): string {
-		const candidates = [
-			'description',
-			'file_path',
-			'path',
-			'pattern',
-			'command',
-			'query',
-			'prompt',
-			'url',
-			'skill',
-			'glob'
-		];
-		if (child.toolInput) {
-			for (const key of candidates) {
-				if (child.toolInput[key]) {
-					const val = String(child.toolInput[key]);
-					return val.length > 80 ? val.slice(0, 80) + '\u2026' : val;
-				}
-			}
-			return '';
-		}
-		if (child.partialToolInput) {
-			for (const key of candidates) {
-				const regex = new RegExp(`"${key}"\\s*:\\s*"([^"]*)"?`);
-				const match = child.partialToolInput.match(regex);
-				if (match?.[1]) {
-					const val = match[1];
-					return val.length > 80 ? val.slice(0, 80) + '\u2026' : val;
-				}
-			}
-		}
-		return '';
 	}
 
 	function truncateContent(content: string, maxLength: number = 500): string {
@@ -295,91 +250,30 @@
 			{#if validChildren.length > 0}
 				{#each validChildren as child (child.id)}
 					{#if child.type === 'tool_use'}
-						<div class="px-4 py-2 border-b border-border/50 last:border-b-0">
-							<details class="group/tool">
-								<summary class="team-tool-summary flex items-center gap-2 cursor-pointer list-none -mx-1 px-1 py-1 rounded">
-									{#if child.toolStatus === 'running'}
-										<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-										</svg>
-									{:else if child.toolStatus === 'error'}
-										<svg class="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-										</svg>
-									{:else}
-										<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-										</svg>
-									{/if}
-									<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-									</svg>
-									<span class="text-sm font-medium text-foreground">{child.toolName || 'Tool'}</span>
-									{#if getChildSummary(child)}
-										<span class="text-sm text-muted-foreground truncate min-w-0">{getChildSummary(child)}</span>
-									{/if}
-									<svg class="w-4 h-4 text-muted-foreground ml-auto flex-shrink-0 transition-transform group-open/tool:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-									</svg>
-								</summary>
-								<div class="mt-2 space-y-2">
-									{#if child.toolInput}
-										<div class="p-2 bg-muted/50 rounded">
-											<div class="text-xs text-muted-foreground/70 mb-1 font-medium">Input</div>
-											<pre class="text-xs text-muted-foreground overflow-x-auto max-h-32 whitespace-pre-wrap break-words font-mono">{formatToolInput(child.toolInput)}</pre>
-										</div>
-									{:else if child.partialToolInput}
-										<div class="p-2 bg-muted/50 rounded">
-											<div class="text-xs text-muted-foreground/70 mb-1 font-medium">Input</div>
-											<pre class="text-xs text-muted-foreground overflow-x-auto max-h-32 whitespace-pre-wrap break-words font-mono">{child.partialToolInput}<span class="inline-block w-1.5 h-3 ml-0.5 bg-primary animate-pulse"></span></pre>
-										</div>
-									{/if}
-									{#if child.toolResult}
-										<div class="p-2 bg-muted/50 rounded">
-											<div class="text-xs text-muted-foreground/70 mb-1 font-medium">Result</div>
-											{#if toolResultHasImage(child.toolResult)}
-												{@html sanitizeHtml(renderToolResult(child.toolResult))}
-											{:else}
-												<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{truncateContent(child.toolResult)}</pre>
-											{/if}
-										</div>
-									{/if}
-								</div>
-							</details>
-							{#if child.toolScreenshot}
-								<ToolScreenshot screenshot={child.toolScreenshot} name={child.toolName || 'Tool'} />
-							{/if}
-						</div>
+						<!-- Same work-log row the main feed and subagent cards use, so
+						     nested tool calls read exactly like top-level ones. -->
+						<ToolUseMessage
+							name={child.toolName || 'Tool'}
+							input={child.toolInput}
+							partialInput={child.partialToolInput}
+							result={child.toolResult ?? ''}
+							status={(child.toolStatus as ChildStatus) || 'running'}
+							screenshot={child.toolScreenshot}
+						/>
 					{:else if child.type === 'tool_result'}
-						<div class="px-4 py-2 border-b border-border/50 last:border-b-0">
-							<details class="group/result">
-								<summary class="team-tool-summary flex items-center gap-2 cursor-pointer list-none -mx-1 px-1 py-1 rounded">
-									<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-									</svg>
-									<span class="text-sm font-medium text-muted-foreground">Result</span>
-									{#if child.toolName}
-										<span class="text-xs text-muted-foreground/70">({child.toolName})</span>
-									{/if}
-									<svg class="w-4 h-4 text-muted-foreground ml-auto transition-transform group-open/result:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-									</svg>
-								</summary>
-								{#if child.content}
-									{#if toolResultHasImage(child.content)}
-										<div class="mt-2 p-2 bg-muted/50 rounded">
-											{@html sanitizeHtml(renderToolResult(child.content))}
-										</div>
-									{:else}
-										<pre class="mt-2 p-2 bg-muted/50 rounded text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{truncateContent(child.content)}</pre>
-									{/if}
-								{/if}
-							</details>
-							{#if child.toolScreenshot}
-								<ToolScreenshot screenshot={child.toolScreenshot} name={child.toolName || 'Tool'} />
-							{/if}
+						<!-- Standalone tool result (fallback) — no matching tool_use row
+						     arrived, so render the payload as a plain muted block. -->
+						<div class="team-orphan-result">
+							<pre>{truncateContent(child.content)}</pre>
 						</div>
+						{#if child.toolScreenshot}
+							<ToolUseMessage
+								name={child.toolName || 'Tool'}
+								result={child.content ?? ''}
+								status="complete"
+								screenshot={child.toolScreenshot}
+							/>
+						{/if}
 					{:else if child.type === 'text'}
 						<div class="px-4 py-2 border-b border-border/50 last:border-b-0">
 							<div class="flex items-start gap-2">
@@ -437,13 +331,6 @@
 		outline: 2px solid var(--ring);
 		outline-offset: -2px;
 	}
-	.team-tool-summary:hover {
-		background: var(--hover-overlay);
-	}
-	.team-tool-summary:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: -2px;
-	}
 
 	.team-body {
 		margin: 2px 0 6px 14px;
@@ -460,5 +347,26 @@
 		.team-summary button {
 			min-height: 36px;
 		}
+	}
+
+	/* Orphan tool_result fallback (no matching tool_use row arrived). */
+	.team-orphan-result {
+		max-height: 15rem;
+		overflow: auto;
+		border-radius: 7px;
+		border: 1px solid var(--border);
+		background: var(--code-bg);
+		padding: 7px 9px;
+		margin-bottom: 6px;
+	}
+
+	.team-orphan-result pre {
+		margin: 0;
+		font-family: var(--font-mono);
+		font-size: 11.5px;
+		line-height: 1.6;
+		color: var(--muted-foreground);
+		white-space: pre-wrap;
+		word-break: break-word;
 	}
 </style>
