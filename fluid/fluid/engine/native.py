@@ -1468,7 +1468,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         if resp.decision == "allow_always" and self.permissions is not None:
             # Sticky for the rest of the session: future calls to this tool
             # skip the prompt (fix: allow_always used to be a one-shot allow).
-            self.permissions.allow_always(name)
+            spec = self.registry.get(name) if self.registry is not None else None
+            self.permissions.allow_always(
+                name, spec.scope_of(input) if spec is not None else None
+            )
         return (
             "allow" if allowed else "deny",
             resp.message,

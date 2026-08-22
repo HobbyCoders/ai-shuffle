@@ -366,3 +366,43 @@ async def test_doom_loop_forced_prompt_carries_reason(tmp_path) -> None:
     assert results[-1].is_error
     assert "permission denied by the user at the prompt" in results[-1].output
     assert "doom-loop guard" in results[-1].output
+
+
+# ─── allow_always is scoped to the programs a Bash command runs ──────────────
+
+
+def test_program_names_collects_every_program() -> None:
+    from fluid.tools.builtins.bash_risk import program_names
+
+    assert program_names("cat a | grep b && ls") == frozenset({"cat", "grep", "ls"})
+    assert program_names('"C:\Program Files\Git\bin\git.exe" status') == frozenset({"git"})
+    assert program_names("FOO=1 git log") == frozenset({"git"})
+    assert program_names("echo $(rm x)") is None
+    assert program_names("") is None
+
+
+def test_allow_always_on_bash_covers_same_programs_only() -> None:
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.tools.builtins.bash import SPEC as bash_spec
+
+    engine = PermissionEngine("on_write")
+    push = {"command": "git push origin main"}
+    assert engine.decide(bash_spec, push).decision == "ask"
+    engine.allow_always(bash_spec.name, bash_spec.scope_of(push))
+    assert engine.decide(bash_spec, push).source == "session"
+    assert engine.decide(bash_spec, {"command": "git commit -m x"}).source == "session"
+    assert engine.decide(bash_spec, {"command": "rm -rf build"}).decision == "ask"
+    assert engine.decide(bash_spec, {"command": "git push | tee log"}).decision == "ask"
+    # A later unscoped allow widens to every Bash call.
+    engine.allow_always(bash_spec.name, None)
+    assert engine.decide(bash_spec, {"command": "rm -rf build"}).source == "session"
+
+
+def test_allow_always_without_scope_hook_covers_every_call() -> None:
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.tools.registry import ToolSpec
+
+    spec = ToolSpec(name="Write", description="", input_schema={}, risk="write")
+    engine = PermissionEngine("on_write")
+    engine.allow_always("Write", spec.scope_of({"file_path": "a"}))
+    assert engine.decide(spec, {"file_path": "b"}).source == "session"

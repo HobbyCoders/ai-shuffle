@@ -55,6 +55,21 @@ class ToolSpec:
     classify_risk: Callable[[dict[str, Any]], str] | None = field(
         default=None, compare=False, repr=False
     )
+    # Optional ``allow_always`` scoping: ``session_scope(input)`` returns the
+    # set of labels a session allow covers (Bash: the programs the command
+    # runs). None → the allow covers every call to the tool.
+    session_scope: Callable[[dict[str, Any]], "frozenset[str] | None"] | None = field(
+        default=None, compare=False, repr=False
+    )
+
+    def scope_of(self, input: dict[str, Any]) -> "frozenset[str] | None":
+        """Labels an ``allow_always`` for this call would cover (None = all)."""
+        if self.session_scope is None:
+            return None
+        try:
+            return self.session_scope(input)
+        except Exception:
+            return None
 
     def effective_risk(self, input: dict[str, Any]) -> str:
         """Risk of one concrete call: the hook's answer, capped at ``risk``."""

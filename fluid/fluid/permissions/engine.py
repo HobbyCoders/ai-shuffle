@@ -89,7 +89,8 @@ class PermissionEngine:
         self._last_key: tuple[str, str] | None = None
         self._streak = 0
         # Session-scoped "allow always" responses (see allow_always()).
-        self._always_allowed: set[str] = set()
+        # tool name → labels allowed (None = every call to the tool).
+        self._always_allowed: dict[str, set[str] | None] = {}
 
     def evaluate(self, spec: ToolSpec, input: dict[str, Any]) -> str:
         """Return ``allow`` | ``deny`` | ``ask`` for one tool call."""
@@ -106,7 +107,7 @@ class PermissionEngine:
         rule = match_rule(self.rules, spec.name, input)
         if rule is not None:
             return Verdict(rule.decision, "rule", risk, rule)
-        if spec.name in self._always_allowed:
+        if self._session_allows(spec, input):
             return Verdict("allow", "session", risk)
         return Verdict(self._policy_decision(risk), "policy", risk)
 
@@ -118,14 +119,33 @@ class PermissionEngine:
         # on_write
         return "ask" if risk in _WRITE_RISKS else "allow"
 
-    def allow_always(self, name: str) -> None:
+    def allow_always(
+        self, name: str, scope: "frozenset[str] | None" = None
+    ) -> None:
         """Record a session-scoped allow for ``name`` (the ``allow_always``
         permission response). Beats the policy's ask for future calls, but
         never an explicit configured rule — those keep last-match-wins.
 
-        Keyed by tool name only: an ``allow_always`` on one Bash command
-        allows every later Bash command in the session, whatever it runs."""
-        self._always_allowed.add(name)
+        ``scope`` narrows the allow to labels the tool derives from the call
+        (Bash: the programs it runs), so allowing ``git status`` once covers
+        later ``git`` commands but not ``rm``. None covers every call."""
+        if scope is None:
+            self._always_allowed[name] = None
+            return
+        current = self._always_allowed.get(name, set())
+        if current is None:
+            return
+        current.update(scope)
+        self._always_allowed[name] = current
+
+    def _session_allows(self, spec: ToolSpec, input: dict[str, Any]) -> bool:
+        if spec.name not in self._always_allowed:
+            return False
+        allowed = self._always_allowed[spec.name]
+        if allowed is None:
+            return True
+        scope = spec.scope_of(input)
+        return scope is not None and scope <= allowed
 
     def note_execution(self, name: str, input: dict[str, Any]) -> bool:
         """Record a call; return True when it should be force-asked (doom loop).

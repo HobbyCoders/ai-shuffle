@@ -251,6 +251,40 @@ def is_read_only(command: str) -> bool:
     return True
 
 
+def program_names(command: str) -> frozenset[str] | None:
+    """Every program a command invokes (``cat a | grep b`` → {cat, grep}).
+
+    None when the command cannot be lexed or uses substitution/subshells,
+    so callers fall back to the broadest scope rather than a wrong one.
+    """
+    if not command or not command.strip() or "$(" in command or "`" in command:
+        return None
+    names: set[str] = set()
+    for line in command.splitlines():
+        if not line.strip():
+            continue
+        tokens = _lex(line)
+        if tokens is None:
+            return None
+        expect_program = True
+        for tok in tokens:
+            if tok in _SEPARATORS:
+                expect_program = True
+                continue
+            if tok and all(ch in "();<>|&" for ch in tok):
+                return None
+            if expect_program and not _ENV_ASSIGNMENT.match(tok):
+                names.add(_program_name(tok))
+                expect_program = False
+    return frozenset(names) or None
+
+
+def session_scope(input: dict[str, Any]) -> frozenset[str] | None:
+    """``allow_always`` scope for Bash: the programs the command runs."""
+    command = input.get("command")
+    return program_names(command) if isinstance(command, str) else None
+
+
 def classify(input: dict[str, Any]) -> str:
     """Effective risk of one Bash tool input: ``safe`` or ``write``."""
     command = input.get("command")
