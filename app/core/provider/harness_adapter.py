@@ -1500,12 +1500,21 @@ class HarnessAdapter(ProviderAdapter):
                 "session_id": getattr(event, "session_id", "") or "",
             }
             if event.kind == "started":
+                # A receipt without a worker session is a host Monitor shell
+                # (Task/ProviderAgent workers always carry one). Stamp the CLI's
+                # local-bash marker so query_engine._record_task_message files
+                # it under kind="shell" instead of clobbering the SHELL
+                # registration the spawner made with kind="agent".
                 return [
                     TaskStartedMessage(
                         subtype="task_started",
                         data={"task_id": event.task_id},
                         task_id=event.task_id,
                         description=event.description or "",
+                        task_type=(
+                            None if getattr(event, "worker_session_id", None)
+                            else "local_bash"
+                        ),
                         **common,
                     )
                 ]

@@ -214,6 +214,32 @@ async def test_translation_table():
 
 
 @pytest.mark.asyncio
+async def test_host_monitor_receipt_translates_as_a_shell_task():
+    """A SubagentEvent receipt WITHOUT a worker session is a host Monitor
+    shell: its TaskStarted must carry task_type="local_bash" so
+    _record_task_message files it kind="shell" instead of clobbering the
+    spawner's SHELL registration with kind="agent". A Task/ProviderAgent
+    worker (worker_session_id set) keeps the agent classification."""
+    events = [
+        lm.SubagentEvent(
+            session_id=SID, task_id="mon-1", kind="started", description="ci run",
+        ),
+        # A Task/ProviderAgent worker (worker_session_id set) never mirrors at
+        # all — the host owns its lifecycle (existing dedup rule).
+        lm.SubagentEvent(
+            session_id=SID, task_id="agent-1", kind="started",
+            worker_session_id="agent-1", description="research",
+        ),
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=1),
+    ]
+    got = await _collect(_adapter_with(FakeEngine(events)))
+    started = [e for e in got if isinstance(e, TaskStartedMessage)]
+    assert len(started) == 1
+    assert started[0].task_id == "mon-1"
+    assert started[0].task_type == "local_bash"
+
+
+@pytest.mark.asyncio
 async def test_translation_non_partial_buffers_deltas():
     # Default options (include_partial_messages=False): deltas are buffered
     # silently and surface once, as the complete AssistantMessage at BlockStop.
