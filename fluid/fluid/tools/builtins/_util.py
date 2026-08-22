@@ -157,3 +157,27 @@ def glob_to_regex(pattern: str, *, case_sensitive: bool | None = None) -> re.Pat
     if case_sensitive is None:
         case_sensitive = os.name != "nt"
     return re.compile(expr + r"\Z", 0 if case_sensitive else re.IGNORECASE)
+
+
+def detect_newline(text: str) -> str:
+    """The text's dominant line ending: CRLF when it has more CRLF than bare LF."""
+    crlf = text.count("\r\n")
+    lf = text.count("\n") - crlf
+    return "\r\n" if crlf > lf else "\n"
+
+
+def read_text_preserving(path: Path) -> tuple[str, str]:
+    """Return ``(text normalized to LF, original newline)`` without translation."""
+    with path.open("r", encoding="utf-8", newline="") as fh:
+        raw = fh.read()
+    return raw.replace("\r\n", "\n"), detect_newline(raw)
+
+
+def write_text_with_newline(path: Path, text: str, newline: str) -> None:
+    """Write LF-normalized ``text`` using ``newline`` for every line break, with
+    no platform translation (so LF files stay LF on Windows)."""
+    normalized = text.replace("\r\n", "\n")
+    if newline != "\n":
+        normalized = normalized.replace("\n", newline)
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        fh.write(normalized)

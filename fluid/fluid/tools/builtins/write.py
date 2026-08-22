@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fluid.tools.builtins._util import resolve
+from fluid.tools.builtins._util import detect_newline, read_text_preserving, resolve, write_text_with_newline
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 SPEC = ToolSpec(
@@ -44,7 +44,13 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     path: Path = resolve(input["file_path"], ctx)
     content = input.get("content", "")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    # Keep an existing file's line ending; a new file takes whatever the
+    # content uses (LF unless it is CRLF throughout). Never platform-translate.
+    if path.exists():
+        newline = read_text_preserving(path)[1]
+    else:
+        newline = detect_newline(content)
+    write_text_with_newline(path, content, newline)
     # A freshly written file is known to the session (so a follow-up Edit works).
     ctx.read_files.add(str(path))
     return ToolOutcome(text=f"wrote {len(content)} bytes to {path}")

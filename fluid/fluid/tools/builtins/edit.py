@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fluid.tools.builtins._util import resolve
+from fluid.tools.builtins._util import read_text_preserving, resolve, write_text_with_newline
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 SPEC = ToolSpec(
@@ -71,7 +71,11 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     old = input["old_string"]
     new = input["new_string"]
     replace_all = bool(input.get("replace_all", False))
-    content = path.read_text(encoding="utf-8")
+    # Match on LF-normalized text so a model quoting CRLF or LF both work,
+    # then write back with the file's own line ending and no translation.
+    content, newline = read_text_preserving(path)
+    old = old.replace("\r\n", "\n")
+    new = new.replace("\r\n", "\n")
     count = content.count(old)
     if count == 0:
         return ToolOutcome(text="old_string not found in file", is_error=True)
@@ -81,6 +85,6 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             is_error=True,
         )
     updated = content.replace(old, new) if replace_all else content.replace(old, new, 1)
-    path.write_text(updated, encoding="utf-8")
+    write_text_with_newline(path, updated, newline)
     n = count if replace_all else 1
     return ToolOutcome(text=f"edited {path} ({n} replacement{'s' if n != 1 else ''})")
