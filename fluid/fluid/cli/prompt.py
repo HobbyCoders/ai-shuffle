@@ -200,7 +200,8 @@ loop and filter in Python — rather than one cell per call. Keep data in the \
 kernel: variables persist between cells, large results come back as refs you \
 can slice later, and only what you print or return enters the conversation. \
 Print what the user needs, not whole results. Every in-kernel call passes the \
-same permission gate; a denied call raises, and the rule above still holds — \
+same permission gate; a denied or failed call raises (a command's non-zero exit \
+code does not: Bash returns its output with an [exit code N] line), and the rule above still holds — \
 do not route around it. The file tools are the only way to touch the \
 filesystem; `open()` and the network are disabled.
 """

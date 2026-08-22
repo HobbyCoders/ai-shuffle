@@ -261,3 +261,17 @@ async def test_syntax_error_has_no_runner_frames() -> None:
         assert "Traceback" not in r.error and "_runner" not in r.error
     finally:
         await k.stop()
+
+
+async def test_bash_nonzero_exit_is_data_in_code_mode(tmp_path) -> None:
+    """A failing command returns its output with an exit-code line; it must not
+    abort the cell the way a real tool error does."""
+    import sys
+
+    from fluid.tools.builtins.bash import handler
+
+    from fluid.tools.registry import ToolCtx
+
+    out = await handler({"command": f'"{sys.executable}" -c "import sys; print(\'no\'); sys.exit(3)"'}, ToolCtx(cwd=str(tmp_path)))
+    assert out.is_error and out.soft_error
+    assert "[exit code 3]" in out.text and "no" in out.text

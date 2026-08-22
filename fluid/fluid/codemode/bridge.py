@@ -88,7 +88,7 @@ class HostCallBridge:
         outcome = await loop._gated_call(
             self._sid, self._turn_id, name, tool_use_id, dict(kwargs)
         )
-        if outcome.is_error:
+        if outcome.is_error and not outcome.soft_error:
             if outcome.text.startswith("permission denied"):
                 return HostReply(denied=True, message=outcome.text)
             return HostReply(error=outcome.text)
@@ -176,6 +176,6 @@ class HostBridge:
                 },
             )
 
-        if outcome.is_error:
+        if outcome.is_error and not outcome.soft_error:
             return HostReply(error=outcome.text)
         return HostReply(result=outcome.text, images=outcome.images)

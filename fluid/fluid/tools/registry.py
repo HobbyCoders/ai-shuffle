@@ -139,6 +139,11 @@ class ToolOutcome:
     text: str
     ui: Any = None
     is_error: bool = False
+    # The tool ran to completion and the "error" is ordinary data (a command's
+    # non-zero exit code). The JSON surface still flags is_error so the model
+    # notices; code mode returns the text instead of raising, so a cell that
+    # probes exit codes (git merge-base, grep -q, test) keeps running.
+    soft_error: bool = False
     input_required: InputRequired | None = None
     images: tuple[ToolImage, ...] = ()
     background_task: BackgroundTaskReceipt | None = None

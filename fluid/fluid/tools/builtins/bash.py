@@ -35,8 +35,10 @@ SPEC = ToolSpec(
         "interactive git flags (e.g. `git rebase -i`) are not supported.\n"
         "- Output is capped at ~30KB (head and tail kept, middle dropped). "
         "Redirect to a file and Read it in windows when you expect more.\n"
-        "- A non-zero exit code is reported as an error together with the "
-        "output — read the output before retrying.\n"
+        "- A non-zero exit code appends an [exit code N] line to the output and "
+        "is flagged as an error — read the output before retrying. In code mode "
+        "Bash() returns that text instead of raising, so exit codes can be "
+        "tested in Python (git merge-base, grep -q, test).\n"
         "- Quote file paths that contain spaces. Under Git Bash, write Windows "
         "paths with forward slashes or inside quotes so backslashes survive.\n"
         "\n"
@@ -90,5 +92,11 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         proc.kill()
         await proc.wait()
         return ToolOutcome(text=f"command timed out after {timeout}s", is_error=True)
-    text = truncate(stdout.decode(errors="replace"))
-    return ToolOutcome(text=text or "(no output)", is_error=proc.returncode != 0)
+    text = truncate(stdout.decode(errors="replace")) or "(no output)"
+    if proc.returncode:
+        return ToolOutcome(
+            text=f"{text.rstrip()}\n[exit code {proc.returncode}]",
+            is_error=True,
+            soft_error=True,
+        )
+    return ToolOutcome(text=text)
