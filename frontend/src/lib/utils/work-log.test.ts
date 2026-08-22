@@ -41,6 +41,10 @@ function text(content: string, timestamp?: string): ChatMessage {
 	return msg({ type: 'text', content, timestamp });
 }
 
+function subagent(over: Partial<ChatMessage> = {}): ChatMessage {
+	return msg({ type: 'subagent', agentName: 'Explore', agentStatus: 'completed', ...over });
+}
+
 function workEntries(messages: ChatMessage[]): WorkLogEntry[] {
 	return messages.map((message, index) => ({ message, index }));
 }
@@ -136,6 +140,30 @@ describe('buildDisplayItems — settled turns', () => {
 		expect(fold.folded.map((entry) => entry.message.id)).toContain(failed.id);
 		const entry = fold.sequence.find((item) => item.message.id === failed.id);
 		expect(entry?.hiddenWhenCollapsed).toBe(true);
+	});
+
+	it('folds settled subagent cards and counts them as delegated work', () => {
+		const first = subagent();
+		const second = subagent({ agentStatus: 'error' });
+		const items = buildDisplayItems(
+			[user('go'), tool({ toolName: 'Grep' }), first, second, text('done')],
+			SETTLED
+		);
+		const fold = items.find((item) => item.kind === 'work_log');
+		if (fold?.kind !== 'work_log') throw new Error('expected a work_log');
+
+		expect(fold.summary).toBe('Searched code 1 time and delegated 2 tasks');
+		for (const card of [first, second]) {
+			expect(fold.folded.map((entry) => entry.message.id)).toContain(card.id);
+			expect(fold.sequence.find((entry) => entry.message.id === card.id)?.hiddenWhenCollapsed).toBe(true);
+		}
+		expect(collapsedVisibleMessages(items).some((message) => message.type === 'subagent')).toBe(false);
+	});
+
+	it('keeps a still-running subagent card visible', () => {
+		const running = subagent({ agentStatus: 'running' });
+		const items = buildDisplayItems([user('go'), tool(), running, text('done')], SETTLED);
+		expect(collapsedVisibleMessages(items).some((message) => message.id === running.id)).toBe(true);
 	});
 
 	it('never folds agent, todo, note, question, or subagent surfaces', () => {
@@ -234,6 +262,30 @@ describe('buildDisplayItems — live turn', () => {
 		expect(items.some((item) => item.kind === 'message' && item.message.content === '')).toBe(false);
 	});
 
+	it('keeps one live chip across a settled subagent card', () => {
+		const items = buildDisplayItems([user('go'), tool(), subagent(), tool()], LIVE);
+		const folds = items.filter((item) => item.kind === 'work_log');
+		expect(folds).toHaveLength(1);
+		if (folds[0].kind !== 'work_log') throw new Error('expected a work_log');
+		expect(folds[0].mode).toBe('live');
+		expect(folds[0].folded).toHaveLength(3);
+		expect(folds[0].summary).toBe('Ran 2 commands and delegated 1 task');
+	});
+
+	it('never shows a running code-mode cell as the live active row', () => {
+		const cell = tool({ toolName: 'run_python', toolStatus: 'running', streaming: true });
+		const items = buildDisplayItems([user('go'), tool(), cell, tool()], LIVE);
+		const fold = items.find((item) => item.kind === 'work_log');
+		if (fold?.kind !== 'work_log') throw new Error('expected a work_log');
+		expect(fold.tail).toHaveLength(0);
+		expect(fold.folded.map((entry) => entry.message.id)).toContain(cell.id);
+		expect(fold.summary).toBe('Ran 2 commands');
+
+		// A turn whose only work is the invisible cell has no chip to show at all.
+		const lone = buildDisplayItems([user('go'), tool({ toolName: 'run_python', toolStatus: 'running', streaming: true })], LIVE);
+		expect(lone.some((item) => item.kind === 'work_log')).toBe(false);
+	});
+
 	it('settles earlier turns while the final turn streams', () => {
 		const messages = [user('one'), tool(), text('answer'), user('two'), tool({ toolStatus: 'running' })];
 		const folds = buildDisplayItems(messages, LIVE).filter((item) => item.kind === 'work_log');
@@ -290,11 +342,25 @@ describe('work action summaries', () => {
 		]);
 		expect(summarizeWork(withCell)).toBe('Ran 1 command');
 
+		const runningCell = workEntries([
+			tool({ toolName: 'run_python', toolStatus: 'running' }),
+			tool({ toolName: 'Bash', toolStatus: 'complete' })
+		]);
+		expect(summarizeWork(runningCell)).toBe('Ran 1 command');
+
 		const failedCell = workEntries([
 			tool({ toolName: 'run_python', toolStatus: 'error' }),
 			tool({ toolName: 'Bash', toolStatus: 'complete' })
 		]);
 		expect(summarizeWork(failedCell)).toBe('Used 1 tool and ran 1 command, 1 failed');
+	});
+
+	it('closes the sentence with delegated tasks', () => {
+		const entries = workEntries([
+			msg({ type: 'subagent', agentStatus: 'completed' }),
+			tool({ toolName: 'Read' })
+		]);
+		expect(summarizeWork(entries)).toBe('Read 1 file and delegated 1 task');
 	});
 
 	it('describes reasoning-only and empty groups', () => {

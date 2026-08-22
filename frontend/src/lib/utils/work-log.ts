@@ -10,8 +10,8 @@
  * - once a turn settles, non-final commentary, reasoning, and routine tools fold
  *   behind one compact work row while the final answer remains visible;
  * - failed tool calls fold with the rest of the run and are counted in the work
- *   summary, while screenshots, plans/questions, and agent surfaces never
- *   disappear behind a fold.
+ *   summary, while screenshots, plans/questions, and still-running agent surfaces
+ *   never disappear behind a fold.
  */
 import type { ChatMessage } from '$lib/stores/types';
 import { displayToolName } from './tool-icons';
@@ -84,6 +84,15 @@ function isRoutineTool(msg: ChatMessage): boolean {
 	return !msg.toolScreenshot;
 }
 
+/**
+ * A subagent card whose `agentStatus` has settled ('completed'/'error') is a
+ * finished delegation: routine work that belongs inside the turn's fold. A
+ * 'pending'/'running' card is live and keeps its own row.
+ */
+function isSettledSubagent(msg: ChatMessage): boolean {
+	return msg.type === 'subagent' && (msg.agentStatus === 'completed' || msg.agentStatus === 'error');
+}
+
 function isAssistantText(msg: ChatMessage): boolean {
 	return msg.role === 'assistant' && (msg.type === 'text' || !msg.type) && !!msg.content?.trim();
 }
@@ -95,6 +104,10 @@ function isAssistantPhantom(msg: ChatMessage): boolean {
 /** Only work known to be closed may disappear in a settled disclosure. */
 function isCompletedRoutineWork(msg: ChatMessage): boolean {
 	if (msg.type === 'thinking') return !msg.streaming;
+	if (msg.type === 'subagent') return isSettledSubagent(msg);
+	// A hidden code-mode cell draws nothing at all. Folding it keeps a live run
+	// contiguous instead of splitting the chip around an invisible row.
+	if (isHiddenCodeModeCell(msg)) return true;
 	// Persisted/imported history has used both spellings. Normalize at the
 	// presentation boundary rather than widening transport semantics.
 	const status = msg.toolStatus as string | undefined;
@@ -155,9 +168,11 @@ function turnFoldLabel(turn: ChatMessage[], interrupted: boolean): string {
 	return duration === null ? 'Worked' : `Worked for ${formatDuration(duration)}`;
 }
 
-type ToolAction = 'read' | 'edit' | 'command' | 'code-search' | 'web-search' | 'other';
+type ToolAction = 'read' | 'edit' | 'command' | 'code-search' | 'web-search' | 'delegate' | 'other';
 
 function toolAction(message: ChatMessage): ToolAction {
+	// A subagent card is work handed to someone else, not a tool call of its own.
+	if (message.type === 'subagent') return 'delegate';
 	const name = displayToolName(message.toolName || '');
 	if (['Read', 'BashOutput', 'TaskOutput', 'TaskGet'].includes(name)) return 'read';
 	if (['Write', 'Edit', 'NotebookEdit'].includes(name)) return 'edit';
@@ -179,6 +194,8 @@ function actionLabel(action: ToolAction, count: number): string {
 			return `Searched code ${count} ${count === 1 ? 'time' : 'times'}`;
 		case 'web-search':
 			return `Searched the web ${count} ${count === 1 ? 'time' : 'times'}`;
+		case 'delegate':
+			return `Delegated ${count} ${count === 1 ? 'task' : 'tasks'}`;
 		case 'other':
 			return `Used ${count} ${count === 1 ? 'tool' : 'tools'}`;
 	}
@@ -194,20 +211,22 @@ function sentenceJoin(labels: string[]): string {
 }
 
 /**
- * A successful code-mode cell has no row of its own in the transcript, so it
- * must not appear in the fold's tally either — only the tool calls made from
- * inside it are real work. A failed cell still renders, and still counts.
+ * A code-mode cell has no row of its own in the transcript unless it failed, so
+ * it must not appear in the fold's tally either — only the tool calls made from
+ * inside it are real work, and those arrive as their own rows while the cell is
+ * still running. A failed cell renders, and counts.
  */
 function isHiddenCodeModeCell(message: ChatMessage): boolean {
 	if (message.type !== 'tool_use' || message.toolName !== 'run_python') return false;
-	const status = message.toolStatus as string | undefined;
-	return status === 'complete' || status === 'completed';
+	return message.toolStatus !== 'error';
 }
 
 /** Provider-neutral, action-specific summary for a folded tool run. */
 export function summarizeWork(rows: WorkLogEntry[]): string | null {
 	const entries = rows.filter((entry) => !isHiddenCodeModeCell(entry.message));
-	const tools = entries.filter((entry) => entry.message.type === 'tool_use');
+	const tools = entries.filter(
+		(entry) => entry.message.type === 'tool_use' || entry.message.type === 'subagent'
+	);
 	if (tools.length === 0) {
 		if (entries.some((entry) => entry.message.type === 'thinking')) return 'Reasoning and interim work';
 		return entries.length > 0 ? 'Interim work' : null;
@@ -220,7 +239,11 @@ export function summarizeWork(rows: WorkLogEntry[]): string | null {
 		counts.set(action, (counts.get(action) ?? 0) + 1);
 		if (entry.message.toolStatus === 'error') failed++;
 	}
-	const sentence = sentenceJoin([...counts].map(([action, count]) => actionLabel(action, count)));
+	// Delegation closes the sentence: "Read 3 files and delegated 2 tasks".
+	const ordered = [...counts].sort(
+		(a, b) => Number(a[0] === 'delegate') - Number(b[0] === 'delegate')
+	);
+	const sentence = sentenceJoin(ordered.map(([action, count]) => actionLabel(action, count)));
 	if (!sentence) return null;
 	return failed > 0 ? `${sentence}, ${failed} failed` : sentence;
 }
@@ -290,7 +313,10 @@ export interface BuildOptions {
 function emitLiveTurn(turn: Positioned[], items: DisplayItem[]): void {
 	const newestRunningTool =
 		turn.findLast(
-			(entry) => isRoutineTool(entry.message) && entry.message.toolStatus === 'running'
+			(entry) =>
+				isRoutineTool(entry.message) &&
+				entry.message.toolStatus === 'running' &&
+				!isHiddenCodeModeCell(entry.message)
 		) ?? null;
 	let plain: Positioned[] = [];
 	let run: WorkLogEntry[] = [];

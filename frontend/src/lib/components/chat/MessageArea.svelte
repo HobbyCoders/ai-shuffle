@@ -1408,11 +1408,12 @@
 				streaming={message.streaming}
 			/>
 		{/if}
-	{:else if message.type === 'tool_use' && message.toolName === 'run_python' && message.toolStatus === 'complete'}
-		<!-- Code mode: a run_python cell that succeeded is plumbing, not work. The
-		     tool calls it made are reported by their own cards, so the cell itself
-		     adds a wall of Python and nothing else. Failed and still-running cells
-		     keep their card - one is a problem to read, the other is progress. -->
+	{:else if message.type === 'tool_use' && message.toolName === 'run_python' && message.toolStatus !== 'error'}
+		<!-- Code mode: a run_python cell is plumbing, not work. The tool calls it
+		     makes are reported by their own cards as they fire, so the cell itself
+		     adds a wall of Python and nothing else - while it runs as much as once
+		     it succeeds. Only a failed cell keeps its card: that one is a problem
+		     worth reading. -->
 	{:else if message.type === 'tool_use'}
 		<ToolUseMessage
 			name={message.toolName || 'Tool'}

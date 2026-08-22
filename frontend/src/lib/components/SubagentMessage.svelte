@@ -18,9 +18,16 @@
 
 	let { message, runningToolIds }: Props = $props();
 
+	// Code mode: a run_python cell that is running or succeeded is plumbing, not
+	// work. The tool calls it makes arrive as their own child rows, so showing
+	// the cell adds a wall of Python and inflates the done/total counter. A
+	// failed cell still renders - that one is a problem worth reading.
+	const isHiddenCodeModeCell = (c: { toolName?: string; toolStatus?: string }) =>
+		c.toolName === 'run_python' && c.toolStatus !== 'error';
+
 	// Filter valid children (ensure they have required id field)
 	const validChildren = $derived(
-		(message.agentChildren || []).filter(c => c && c.id)
+		(message.agentChildren || []).filter(c => c && c.id && !isHiddenCodeModeCell(c))
 	);
 
 	// Count children by type — the collapsed header shows a completed/total

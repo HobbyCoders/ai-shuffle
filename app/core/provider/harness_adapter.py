@@ -2239,9 +2239,13 @@ the X tool" mean import and call X inside run_python. An instruction not to \
 call a tool still applies.
 
 ## Batch work into one cell
-Code mode exists so one run_python cell can do a whole step of work, not a \
-single tool call. Loop over results, filter in Python, and print only what you \
-need to see:
+Code mode exists so one run_python cell does a whole step of work. A cell that \
+makes a single tool call is wrong unless the next call depends on that result \
+and nothing else can be done meanwhile. Before each cell ask what else you will \
+need afterwards and fetch it in the same cell: search then read every hit, read \
+several files at once, run a command and inspect the related files, launch \
+independent subagents together. Loop over results, filter in Python, and print \
+only what you need to see:
 ```python
 from tools.Grep import Grep
 from tools.Read import Read
