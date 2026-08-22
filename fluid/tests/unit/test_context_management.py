@@ -201,3 +201,16 @@ async def test_handoff_creates_seeded_session_and_event() -> None:
     handoff_req = provider.requests[-1]
     assert "finish the migration" in handoff_req.messages[0].content[0].text
     assert "do the thing" in handoff_req.messages[0].content[0].text
+
+
+def test_trim_placeholder_keeps_a_head_excerpt() -> None:
+    from fluid.context.trim import block_head, _placeholder
+    from fluid.messages.content import Text, ToolResultBlock
+
+    block = ToolResultBlock(
+        tool_use_id="t", content=[Text(text="# Module 7 — secret: M7-1234\n" + "x" * 5000)]
+    )
+    head = block_head(block)
+    assert head.startswith("# Module 7 — secret: M7-1234")
+    text = _placeholder("node_abc", 5030, head).text
+    assert "M7-1234" in text and "node_abc" in text and "do not reconstruct" in text

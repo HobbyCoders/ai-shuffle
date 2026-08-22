@@ -92,10 +92,26 @@ def estimate_tokens_of_text(text: str | None) -> int:
     return len(text) // 4 if text else 0
 
 
-def _placeholder(node_id: str, chars: int) -> Text:
+HEAD_EXCERPT_CHARS = 160
+
+
+def block_head(block: Any, limit: int = HEAD_EXCERPT_CHARS) -> str:
+    """The first line or so of a tool result's text, whitespace-collapsed."""
+    parts: list[str] = []
+    for item in getattr(block, "content", None) or ():
+        text = getattr(item, "text", None)
+        if isinstance(text, str) and text.strip():
+            parts.append(text)
+    head = " ".join(" ".join(parts).split())
+    return head[:limit] + ("…" if len(head) > limit else "")
+
+
+def _placeholder(node_id: str, chars: int, head: str = "") -> Text:
+    excerpt = f' It began: "{head}"' if head else ""
     return Text(
-        f"[old tool result trimmed to save context — {chars} chars removed; "
-        f'recover verbatim with HistoryExpand("{node_id}") if needed]'
+        f"[old tool result trimmed to save context — {chars} chars removed.{excerpt} "
+        f'The rest is NOT in context: do not reconstruct it from memory; recover it '
+        f'verbatim with HistoryExpand("{node_id}") when any detail matters]'
     )
 
 
@@ -164,7 +180,11 @@ class ToolResultTrimmer:
                     blocks.append(
                         ToolResultBlock(
                             tool_use_id=block.tool_use_id,
-                            content=[_placeholder(node.node_id, block_chars(block))],
+                            content=[
+                                _placeholder(
+                                    node.node_id, block_chars(block), block_head(block)
+                                )
+                            ],
                             is_error=block.is_error,
                         )
                     )
