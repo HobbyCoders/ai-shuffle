@@ -240,3 +240,20 @@ async def test_ask_permission_maps_answers() -> None:
     assert await answer("y") == "allow"
     assert await answer("a") == "allow_always"
     assert await answer("") == "deny"
+
+
+def test_model_override_beats_provider_model_line(tmp_path) -> None:
+    from fluid.config.loader import load_config
+
+    (tmp_path / ".fluid").mkdir()
+    (tmp_path / ".fluid" / "config.toml").write_text(
+        '[providers.openrouter]\nkind = "openrouter"\nmodel = "a/b"\n', encoding="utf-8"
+    )
+    base = load_config(cwd=tmp_path, include_user=False, include_system=False)
+    assert base.model_for("openrouter") == "a/b"
+    cli = load_config(cwd=tmp_path, include_user=False, include_system=False,
+                      overrides={"model_override": "x/y"})
+    assert cli.model_for("openrouter") == "x/y"
+    env = load_config(cwd=tmp_path, include_user=False, include_system=False,
+                      env={"FLUID_MODEL": "p/q"})
+    assert env.model_for("openrouter") == "p/q"

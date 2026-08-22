@@ -223,6 +223,9 @@ class ContextConfig:
 class HarnessConfig:
     default_provider: str = "anthropic"
     default_model: str = "claude-sonnet-5"
+    # Highest-precedence model choice (CLI --model / FLUID_MODEL). It beats a
+    # provider's own ``model`` line, which ``default_model`` does not.
+    model_override: str | None = None
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
     permission: PermissionConfig = field(default_factory=PermissionConfig)
     code_mode: bool = False
@@ -267,6 +270,7 @@ class HarnessConfig:
         return cls(
             default_provider=d.get("default_provider", "anthropic"),
             default_model=d.get("default_model", "claude-sonnet-5"),
+            model_override=d.get("model_override") or None,
             providers=providers,
             permission=PermissionConfig.from_dict(d.get("permission", {})),
             code_mode=bool(d.get("code_mode", False)),
@@ -298,6 +302,8 @@ class HarnessConfig:
             ) from None
 
     def model_for(self, name: str | None = None) -> str:
+        if self.model_override:
+            return self.model_override
         pc = self.provider(name)
         return pc.model or self.default_model
 
@@ -306,6 +312,7 @@ class HarnessConfig:
         return {
             "default_provider": self.default_provider,
             "default_model": self.default_model,
+            "model_override": self.model_override,
             "code_mode": self.code_mode,
             "skills_dir": self.skills_dir,
             "continual": self.continual,

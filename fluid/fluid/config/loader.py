@@ -270,6 +270,8 @@ def env_overrides(env: dict[str, str] | None = None) -> dict[str, Any]:
         out["default_provider"] = env["FLUID_DEFAULT_PROVIDER"]
     if "FLUID_DEFAULT_MODEL" in env:
         out["default_model"] = env["FLUID_DEFAULT_MODEL"]
+    if "FLUID_MODEL" in env:
+        out["model_override"] = env["FLUID_MODEL"]
     if "FLUID_CWD" in env:
         out["cwd"] = env["FLUID_CWD"]
     if "FLUID_CODE_MODE" in env:
@@ -469,7 +471,7 @@ def build_engine(
 
     provider_name = provider_name or config.default_provider
     pc = config.provider(provider_name)
-    model = pc.model or config.default_model
+    model = config.model_for(provider_name)  # honours --model / FLUID_MODEL
 
     if registry is None:
         registry = ToolRegistry()

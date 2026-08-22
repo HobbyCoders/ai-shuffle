@@ -14,6 +14,8 @@ from collections.abc import AsyncIterator
 
 import httpx
 
+from fluid.providers._trace import trace_request
+
 from fluid.providers._retry import RETRIABLE_STATUSES, RetryPolicy
 from fluid.providers._sse import sse_events
 from fluid.providers.anthropic.pricing import estimate_cost as _estimate_cost
@@ -67,6 +69,7 @@ class AnthropicClient:
             while True:
                 yielded = False
                 try:
+                    trace_request("anthropic", body)
                     async with client.stream(
                         "POST", self._base_url, json=body, headers=headers
                     ) as resp:

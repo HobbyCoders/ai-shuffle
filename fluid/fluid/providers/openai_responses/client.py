@@ -21,6 +21,8 @@ from typing import Protocol, runtime_checkable
 
 import httpx
 
+from fluid.providers._trace import trace_request
+
 from fluid.providers._retry import RETRIABLE_STATUSES, RetryPolicy
 from fluid.providers._sse import sse_events
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
@@ -100,6 +102,7 @@ class OpenAIResponsesClient:
                 yielded = False
                 try:
                     headers = await self._headers()
+                    trace_request("openai_responses", body)
                     async with client.stream(
                         "POST", self._base_url, json=body, headers=headers
                     ) as resp:

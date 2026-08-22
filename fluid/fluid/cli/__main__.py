@@ -45,7 +45,7 @@ def _cli_overrides(args: argparse.Namespace) -> dict[str, Any]:
     if getattr(args, "provider", None):
         overrides["default_provider"] = args.provider
     if getattr(args, "model", None):
-        overrides["default_model"] = args.model
+        overrides["model_override"] = args.model
     if getattr(args, "code_mode", False):
         overrides["code_mode"] = True
     if getattr(args, "continual", False):

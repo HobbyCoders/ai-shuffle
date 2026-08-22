@@ -17,6 +17,8 @@ from typing import Any
 
 import httpx
 
+from fluid.providers._trace import trace_request
+
 from fluid.messages import (
     Image,
     Message,
@@ -327,6 +329,7 @@ async def stream_chat_completions(
         while True:
             yielded = False
             try:
+                trace_request("chat_completions", body)
                 async with client.stream("POST", url, json=body, headers=headers) as resp:
                     if resp.status_code != 200:
                         text = (await resp.aread()).decode(errors="replace")
