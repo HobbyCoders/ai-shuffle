@@ -296,16 +296,14 @@
 			onSelect={(v) => activeSession.setEffortLevelOverride(v)}
 			title="Effort Level"
 			buttonLabel={effortButtonLabel}
+			wide
 		>
 			{#snippet content()}
 				<EffortSliderCard
 					frameless
 					options={effortLevels}
 					value={effortValue}
-					onSelect={(v) => {
-						activeSession.setEffortLevelOverride(v);
-						openDropdown = null;
-					}}
+					onSelect={(v) => activeSession.setEffortLevelOverride(v)}
 					{fastSupported}
 					fastEnabled={fastMode}
 					onToggleFast={() => activeSession.setFastMode(!fastMode)}
