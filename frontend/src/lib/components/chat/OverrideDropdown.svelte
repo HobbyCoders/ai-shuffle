@@ -69,6 +69,9 @@
 		/** Flip the tier. Deliberately does NOT close the dropdown — the user is
 		 *  usually mid-way through tuning the run binding. */
 		onToggleFast?: () => void;
+		/** Widens the plain popover (the effort slider card needs more room than
+		 *  a flat option list). Ignored when a `content` snippet owns the body. */
+		wide?: boolean;
 	}
 
 	let {
@@ -88,7 +91,8 @@
 		content,
 		fastSupported = false,
 		fastEnabled = false,
-		onToggleFast
+		onToggleFast,
+		wide = false
 	}: Props = $props();
 
 	const isActive = $derived(isOverridden ?? currentValue !== null);
@@ -189,11 +193,11 @@
 	</button>
 
 	{#if isOpen && content}
-		<div class="override-dropdown override-dropdown--panel" aria-label={title}>
+		<div class="override-dropdown override-dropdown--panel" class:wide aria-label={title}>
 			{@render content()}
 		</div>
 	{:else if isOpen}
-		<div class="override-dropdown" role="menu" aria-label={title}>
+		<div class="override-dropdown" class:wide role="menu" aria-label={title}>
 			<div class="override-dropdown-header">
 				<span>{title}</span>
 				{#if fastSupported}
@@ -399,6 +403,12 @@
 		overflow: hidden;
 		--mpp-width: min(360px, calc(100vw - 24px));
 		--mpp-height: min(346px, 60vh);
+	}
+
+	/* Wide variant: room for the effort slider card — a flat option list fits in
+	   the default width, but five slider labels + the Fast toggle do not. */
+	.override-dropdown.wide {
+		width: min(320px, calc(100vw - 24px));
 	}
 
 	/* Section heading for grouped lists (model override: Claude + one per

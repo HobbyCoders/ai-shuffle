@@ -243,6 +243,25 @@
 				<span class="ctitle">{title}</span>
 				<span class="timer" class:live>{timer}</span>
 			</span>
+			<span class="l3">
+				<span class="seg">
+					<span class="cproj">{projectLabel}</span>
+				</span>
+				<span class="seg">
+					{#if session.is_remote}
+						<Cloud size={12} strokeWidth={1.9} />
+					{:else}
+						<Monitor size={12} strokeWidth={1.9} />
+					{/if}
+					<span class="dev">{device}</span>
+				</span>
+				{#if branch}
+					<span class="seg">
+						<GitBranch size={12} strokeWidth={1.9} />
+						<span class="branch">{branch}</span>
+					</span>
+				{/if}
+			</span>
 		{:else}
 			<span class="l1">
 				<span class="proj">{projectLabel}</span>
@@ -355,12 +374,20 @@
 	}
 	.scard:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 
-	/* Compact single-line row for settled/archived sessions: title + age only,
-	   so the inactive lists read as a dense stack that visually breaks up the
-	   taller active cards above. The timer still swaps to the quick action on
+	/* Compact two-line row for settled/archived sessions: title + age, then a
+	   muted meta line (project · device · branch). Still denser than the
+	   three-line active cards. The timer still swaps to the quick action on
 	   hover, and the mobile swipe strip is untouched. */
-	.scard.compact { padding: 6px 8px; }
+	.scard.compact { padding: 6px 8px 7px; }
 	.l1.cline { display: flex; align-items: center; gap: 8px; }
+	.cproj {
+		color: var(--sidebar-muted);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		max-width: 96px;
+	}
+	.scard.compact .l3 { margin-top: 3px; font-size: 10.5px; }
 	.ctitle {
 		flex: 1 1 auto;
 		min-width: 0;
@@ -412,6 +439,10 @@
 	.status :global(svg) { flex: none; }
 	.status.working :global(svg) {
 		filter: drop-shadow(0 0 4px var(--glow));
+	}
+	/* The pulse is for static glyphs only; scoping it off .spin lets the
+	   lower-specificity spin rule below own the loader's animation. */
+	.status.working :global(svg:not(.spin)) {
 		animation: card-pulse 2.4s ease-in-out infinite;
 	}
 	.status.await :global(svg) { animation: card-pulse 2.4s ease-in-out infinite; }

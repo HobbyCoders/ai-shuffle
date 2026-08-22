@@ -118,6 +118,168 @@ class TestTranslateInput:
         with pytest.raises(Exception):
             browser_stream.translate_input({"type": "input", "kind": "touch", "x": 1, "y": 1})
 
+    def test_command_reload_and_stop_map_to_page_commands(self):
+        assert browser_stream.translate_input({"type": "command", "command": "reload"}) == {
+            "method": "Page.reload",
+            "params": {"ignoreCache": False},
+        }
+        assert browser_stream.translate_input({"type": "command", "command": "stop"}) == {
+            "method": "Page.stopLoading"
+        }
+
+    def test_command_back_forward_probe_history_first(self):
+        for command, offset in (("back", -1), ("forward", 1)):
+            cmd = browser_stream.translate_input({"type": "command", "command": command})
+            assert cmd["method"] == "Page.getNavigationHistory"
+            assert cmd["__history_offset__"] == offset
+
+    def test_command_rejects_unknown_command(self):
+        with pytest.raises(Exception):
+            browser_stream.translate_input({"type": "command", "command": "minimize"})
+
+
+# ===========================================================================
+# Page-state tracking (toolbar url + loading) and history jumps
+# ===========================================================================
+def _page_event(method, **params):
+    return {"method": method, "params": params}
+
+
+class TestPageEventTracking:
+    def test_main_frame_navigation_updates_url_and_clears_loading(self):
+        hub = browser_stream.BrowserStreamHub("x")
+        hub.page_loading = True
+        assert hub._handle_page_event(
+            _page_event(
+                "Page.frameNavigated",
+                frame={"frameId": "f1", "url": "https://a/", "parentId": None},
+            )
+        )
+        assert hub.page_url == "https://a/"
+        assert not hub.page_loading
+        # Unchanged URL is a no-op.
+        assert not hub._handle_page_event(
+            _page_event("Page.frameNavigated", frame={"frameId": "f1", "url": "https://a/"})
+        )
+
+    def test_subframe_navigation_does_not_change_url(self):
+        hub = browser_stream.BrowserStreamHub("x")
+        hub.page_url = "https://a/"
+        assert not hub._handle_page_event(
+            _page_event(
+                "Page.frameNavigated",
+                frame={"frameId": "sub", "url": "https://iframe.example/", "parentId": "f1"},
+            )
+        )
+        assert hub.page_url == "https://a/"
+
+    def test_started_and_stopped_loading_flip_the_flag(self):
+        hub = browser_stream.BrowserStreamHub("x")
+        assert hub._handle_page_event(_page_event("Page.frameStartedLoading", frameId="f1"))
+        assert hub.page_loading
+        assert hub._handle_page_event(_page_event("Page.frameStoppedLoading", frameId="f1"))
+        assert not hub.page_loading
+
+    def test_navigated_within_document_updates_url_only(self):
+        hub = browser_stream.BrowserStreamHub("x")
+        hub.page_url = "https://a/"
+        assert hub._handle_page_event(
+            _page_event("Page.navigatedWithinDocument", frameId="f1", url="https://a/#sec2")
+        )
+        assert hub.page_url == "https://a/#sec2"
+        assert not hub.page_loading
+
+
+async def _hub_with_fake_upstream(monkeypatch, sid="hub-cmd"):
+    # Attach one viewer over a FakeUpstream; returns (hub, viewer, fake).
+    registry.register(sid, "t-cmd", None, "http://start/")
+    fake = FakeUpstream()
+
+    async def opener(uri):
+        return fake
+
+    monkeypatch.setattr(browser_stream, "_open_upstream", opener)
+    ws = FakeViewerWS()
+    hub, viewer = await browser_stream.attach_viewer(sid, ws)
+    await _wait_for(lambda: any(m["method"] == "Page.startScreencast" for m in fake.sent))
+    return hub, viewer, fake
+
+
+class TestToolbarCommands:
+    async def test_reload_goes_straight_upstream(self, monkeypatch):
+        hub, viewer, fake = await _hub_with_fake_upstream(monkeypatch)
+        await hub.dispatch_input(
+            browser_stream.translate_input({"type": "command", "command": "reload"})
+        )
+        reloads = [m for m in fake.sent if m["method"] == "Page.reload"]
+        assert reloads and reloads[0]["params"] == {"ignoreCache": False}
+        await browser_stream.detach_viewer("hub-cmd", viewer)
+
+    async def test_back_walks_history(self, monkeypatch):
+        hub, viewer, fake = await _hub_with_fake_upstream(monkeypatch)
+        # Seed the attachment-time probe reply: index 1 of 3 entries.
+        probe_id = next(
+            m["id"] for m in fake.sent if m["method"] == "Page.getNavigationHistory"
+        )
+        await hub._complete_history_jump(
+            probe_id,
+            {
+                "currentIndex": 1,
+                "entries": [
+                    {"id": 11, "url": "http://start/"},
+                    {"id": 22, "url": "https://ex/one"},
+                    {"id": 33, "url": "https://ex/two"},
+                ],
+            },
+        )
+        await hub.dispatch_input(
+            browser_stream.translate_input({"type": "command", "command": "back"})
+        )
+
+        # The back command probed again; answer it to complete the jump.
+        probes = [m for m in fake.sent if m["method"] == "Page.getNavigationHistory"]
+        assert len(probes) >= 2
+        await hub._complete_history_jump(
+            probes[-1]["id"],
+            {
+                "currentIndex": 1,
+                "entries": [
+                    {"id": 11, "url": "http://start/"},
+                    {"id": 22, "url": "https://ex/one"},
+                    {"id": 33, "url": "https://ex/two"},
+                ],
+            },
+        )
+        jumps = [m for m in fake.sent if m["method"] == "Page.navigateToHistoryEntry"]
+        assert jumps and jumps[-1]["params"] == {"entryId": 11}
+        await browser_stream.detach_viewer("hub-cmd", viewer)
+
+    async def test_forward_at_end_of_history_is_a_noop(self, monkeypatch):
+        hub, viewer, fake = await _hub_with_fake_upstream(monkeypatch)
+        await hub.dispatch_input(
+            browser_stream.translate_input({"type": "command", "command": "forward"})
+        )
+        probes = [m for m in fake.sent if m["method"] == "Page.getNavigationHistory"]
+        await hub._complete_history_jump(
+            probes[-1]["id"], {"currentIndex": 0, "entries": [{"id": 11, "url": "u"}]}
+        )
+        assert not any(m["method"] == "Page.navigateToHistoryEntry" for m in fake.sent)
+        await browser_stream.detach_viewer("hub-cmd", viewer)
+
+    async def test_page_events_broadcast_to_viewers(self, monkeypatch):
+        hub, viewer, fake = await _hub_with_fake_upstream(monkeypatch)
+        fake._incoming.put_nowait(json.dumps(_page_event(
+            "Page.frameNavigated",
+            frame={"frameId": "f1", "url": "https://next/", "parentId": None},
+        )))
+        # The per-viewer sender task may drain the queue before we look, so
+        # assert on what landed on the socket.
+        await _wait_for(lambda: any(m.get("type") == "page" for m in viewer.websocket.sent))
+        msg = next(m for m in viewer.websocket.sent if m.get("type") == "page")
+        assert msg["url"] == "https://next/"
+        assert msg["loading"] is False
+        await browser_stream.detach_viewer("hub-cmd", viewer)
+
 
 # ===========================================================================
 # Hub state machine
@@ -194,7 +356,7 @@ async def _wait_for(cond, timeout=2.0):
 
 @pytest.fixture(autouse=True)
 def _reset_hubs():
-    for sid in ("hub-start", "hub-ack", "hub-stable", "hub-reattach", "hub-death"):
+    for sid in ("hub-start", "hub-ack", "hub-stable", "hub-reattach", "hub-death", "hub-cmd"):
         registry.clear(sid)
     browser_stream._hubs.clear()
     yield

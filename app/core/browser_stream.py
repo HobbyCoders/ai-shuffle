@@ -80,6 +80,12 @@ class _NavigateInput(BaseModel):
     url: str
 
 
+class _CommandInput(BaseModel):
+    """A toolbar command: history walk, reload, or stop loading."""
+
+    command: str  # back | forward | reload | stop
+
+
 _MOUSE_CDP_TYPE = {
     "move": "mouseMoved",
     "down": "mousePressed",
@@ -143,6 +149,29 @@ def _translate_navigate(msg: dict) -> dict:
     return {"method": "Page.navigate", "params": {"url": nav.url}}
 
 
+def _translate_command(msg: dict) -> dict:
+    """Translate a toolbar command into its first CDP step.
+
+    reload / stop map straight onto Page.* commands. back / forward need the
+    page's navigation history first, so they return the ``getNavigationHistory``
+    probe carrying a private ``__history_offset__`` marker; ``dispatch_input``
+    consumes the marker and the pump loop completes the jump when the reply
+    arrives (see :meth:`BrowserStreamHub._complete_history_jump`).
+    """
+    cmd = _CommandInput(**msg).command
+    if cmd == "reload":
+        return {"method": "Page.reload", "params": {"ignoreCache": False}}
+    if cmd == "stop":
+        return {"method": "Page.stopLoading"}
+    if cmd in ("back", "forward"):
+        return {
+            "method": "Page.getNavigationHistory",
+            "params": {},
+            "__history_offset__": -1 if cmd == "back" else 1,
+        }
+    raise ValueError(f"invalid command: {cmd!r}")
+
+
 def translate_input(msg: dict, bounds: Optional[Tuple[int, int]] = None) -> Optional[dict]:
     """Translate one client message into a CDP command dict (or None).
 
@@ -154,6 +183,8 @@ def translate_input(msg: dict, bounds: Optional[Tuple[int, int]] = None) -> Opti
     mtype = msg.get("type")
     if mtype == "navigate":
         return _translate_navigate(msg)
+    if mtype == "command":
+        return _translate_command(msg)
     if mtype == "input":
         kind = msg.get("kind")
         if kind == "mouse":
@@ -210,6 +241,11 @@ class BrowserStreamHub:
         self._upstream = None
         self._upstream_msg_id = 0
         self._last_metadata: Optional[dict] = None
+        # Toolbar state tracked from CDP page events, mirrored to viewers as
+        # ``page`` messages. msg-id -> history offset awaiting its reply.
+        self._pending_jumps: Dict[int, int] = {}
+        self.page_url: Optional[str] = None
+        self.page_loading: bool = False
 
     # -- lifecycle -----------------------------------------------------------
     def start(self) -> None:
@@ -273,6 +309,48 @@ class BrowserStreamHub:
         for viewer in list(self.viewers):
             await self.send_to_viewer(viewer, msg)
 
+    def _broadcast_page(self) -> None:
+        """Fan out toolbar page state (url + loading), latest-wins, never blocks."""
+        msg = {"type": "page", "url": self.page_url, "loading": self.page_loading}
+        for viewer in list(self.viewers):
+            q = viewer.queue
+            if q.full():
+                with suppress(asyncio.QueueEmpty):
+                    q.get_nowait()
+            with suppress(asyncio.QueueFull):
+                q.put_nowait(msg)
+
+    def _handle_page_event(self, msg: dict) -> bool:
+        """Update tracked page state from a CDP event. True if state changed."""
+        method = msg.get("method")
+        params = msg.get("params", {})
+        if method == "Page.frameStartedLoading":
+            # Subframe loads count too — while any frame loads, show busy.
+            self.page_loading = True
+            return True
+        if method == "Page.frameStoppedLoading":
+            self.page_loading = False
+            return True
+        if method == "Page.frameNavigated":
+            frame = params.get("frame", {})
+            # Main frames carry no parentId (or an absent/null one).
+            if frame.get("parentId") is not None:
+                return False
+            url = frame.get("url")
+            if url is not None and url != self.page_url:
+                self.page_url = url
+                self.page_loading = False
+                return True
+            if self.page_loading:
+                self.page_loading = False
+                return True
+        if method == "Page.navigatedWithinDocument":
+            url = params.get("url")
+            if url is not None and url != self.page_url:
+                self.page_url = url
+                return True
+        return False
+
     def _fan_out_frame(self, data: str, metadata: dict) -> None:
         """Enqueue a frame to every viewer, latest-frame-wins. Never blocks."""
         msg = {"type": "frame", "data": data, "metadata": metadata}
@@ -299,15 +377,57 @@ class BrowserStreamHub:
         ws = self._upstream
         if ws is None:
             return
-        with suppress(Exception):
-            await self._send_upstream(ws, cdp_cmd["method"], cdp_cmd.get("params"))
+        offset = cdp_cmd.pop("__history_offset__", None)
+        if not await self._send_upstream(
+            ws,
+            cdp_cmd["method"],
+            cdp_cmd.get("params"),
+            response=offset is not None,
+        ):
+            return
+        if offset is not None:
+            # The pump loop pairs the reply (same id) back to this jump.
+            self._pending_jumps[self._upstream_msg_id] = int(offset)
 
-    async def _send_upstream(self, ws, method: str, params: Optional[dict] = None) -> None:
-        self._upstream_msg_id += 1
-        payload: dict = {"id": self._upstream_msg_id, "method": method}
-        if params is not None:
-            payload["params"] = params
-        await ws.send(json.dumps(payload))
+    async def _complete_history_jump(self, msg_id: int, reply: dict) -> None:
+        """Finish a back/forward command once getNavigationHistory replies.
+
+        Offset 0 marks the attachment-time history probe: seed the tracked URL
+        from the current entry instead of navigating.
+        """
+        offset = self._pending_jumps.pop(msg_id, None)
+        if offset is None:
+            return
+        entries = reply.get("entries", [])
+        index = reply.get("currentIndex", 0)
+        if not 0 <= index < len(entries):
+            return
+        current_url = entries[index].get("url")
+        if offset == 0:
+            if current_url and current_url != self.page_url:
+                self.page_url = current_url
+                self._broadcast_page()
+            return
+        if self._upstream is not None and 0 <= index + offset < len(entries):
+            await self._send_upstream(
+                self._upstream,
+                "Page.navigateToHistoryEntry",
+                {"entryId": entries[index + offset]["id"]},
+            )
+
+    async def _send_upstream(
+        self, ws, method: str, params: Optional[dict] = None, *, response: bool = False
+    ) -> bool:
+        """Send one CDP command. Returns False on a dead upstream socket."""
+        try:
+            self._upstream_msg_id += 1
+            payload: dict = {"id": self._upstream_msg_id, "method": method}
+            if params is not None:
+                payload["params"] = params
+            await ws.send(json.dumps(payload))
+            return True
+        except Exception:
+            return False
 
     # -- state machine -------------------------------------------------------
     async def _run(self) -> None:
@@ -341,11 +461,19 @@ class BrowserStreamHub:
         ws = await _open_upstream(uri)
         self._upstream = ws
         self._upstream_msg_id = 0
+        self._pending_jumps.clear()
+        self.page_url = target.url
+        self.page_loading = False
         change_task: Optional[asyncio.Task] = None
         recv_task: Optional[asyncio.Task] = None
         try:
             await self._send_upstream(ws, "Page.enable")
             await self._send_upstream(ws, "Page.startScreencast", _SCREENCAST_PARAMS)
+
+            # Ask for the current URL up front; the reply lands in the pump loop
+            # below via the same pending-jumps channel (offset 0 = no jump).
+            await self._send_upstream(ws, "Page.getNavigationHistory", response=True)
+            self._pending_jumps[self._upstream_msg_id] = 0
 
             change_task = asyncio.create_task(registry.wait_for_change(self.session_id))
             recv_task = asyncio.create_task(ws.recv())
@@ -362,7 +490,24 @@ class BrowserStreamHub:
                         msg = json.loads(raw)
                     except (TypeError, ValueError):
                         continue
-                    if msg.get("method") == "Page.screencastFrame":
+                    method = msg.get("method")
+                    if "id" in msg and msg["id"] in self._pending_jumps:
+                        await self._complete_history_jump(msg["id"], msg.get("result", {}))
+                        continue
+                    changed = False
+                    if method in (
+                        "Page.frameStartedLoading",
+                        "Page.frameStoppedLoading",
+                        "Page.frameNavigated",
+                        "Page.navigatedWithinDocument",
+                    ):
+                        changed = self._handle_page_event(msg)
+                    elif method is None:
+                        continue
+                    if changed:
+                        self._broadcast_page()
+                        continue
+                    if method == "Page.screencastFrame":
                         params = msg.get("params", {})
                         metadata = params.get("metadata", {})
                         self._last_metadata = metadata

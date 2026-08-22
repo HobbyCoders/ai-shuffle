@@ -466,6 +466,60 @@ class TestListProjects:
         assert response.json() == []
 
 
+    def test_list_projects_backfills_missing_link_group(self, client, mock_database, sample_project):
+        """A project with NULL link_group_id gets one derived from its git remote."""
+        mock_database.get_all_projects.return_value = [dict(sample_project, link_group_id=None)]
+        mock_database.get_remote_urls_for_projects.return_value = {
+            "test-project": "https://github.com/Owner/Repo.git"
+        }
+        expected = "git:" + __import__("hashlib").sha256(
+            b"https://github.com/owner/repo"
+        ).hexdigest()[:16]
+
+        response = client.get("/api/v1/projects")
+
+        assert response.status_code == 200
+        mock_database.set_project_link_group.assert_called_once_with("test-project", expected)
+        assert response.json()[0]["link_group_id"] == expected
+
+    def test_list_projects_keeps_locked_link_group(self, client, mock_database, sample_project):
+        """A manually linked (locked) row keeps its manual group."""
+        locked = dict(
+            sample_project,
+            link_group_id="manual:abc",
+            settings={"link_group_locked": True},
+        )
+        mock_database.get_all_projects.return_value = [locked]
+
+        response = client.get("/api/v1/projects")
+
+        assert response.status_code == 200
+        mock_database.get_remote_urls_for_projects.assert_not_called()
+        mock_database.set_project_link_group.assert_not_called()
+        assert response.json()[0]["link_group_id"] == "manual:abc"
+
+    def test_list_projects_skips_remoteless_rows(self, client, mock_database, sample_project):
+        """A project with no git remote stays NULL and is not written."""
+        mock_database.get_all_projects.return_value = [dict(sample_project, link_group_id=None)]
+        mock_database.get_remote_urls_for_projects.return_value = {"test-project": None}
+
+        response = client.get("/api/v1/projects")
+
+        assert response.status_code == 200
+        mock_database.set_project_link_group.assert_not_called()
+        assert response.json()[0]["link_group_id"] is None
+
+    def test_list_projects_backfill_failure_does_not_break_listing(self, client, mock_database, sample_project):
+        """A backfill error degrades to the plain project list."""
+        mock_database.get_all_projects.return_value = [dict(sample_project, link_group_id=None)]
+        mock_database.get_remote_urls_for_projects.side_effect = RuntimeError("db down")
+
+        response = client.get("/api/v1/projects")
+
+        assert response.status_code == 200
+        assert len(response.json()) == 1
+
+
 # =============================================================================
 # Test Get Project Endpoint
 # =============================================================================

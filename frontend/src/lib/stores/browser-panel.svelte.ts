@@ -30,8 +30,16 @@ interface BrowserPanelState {
 	width: number;
 	/** Latest stream status. */
 	status: BrowserStatus;
-	/** Current page URL, or null when unknown. */
+	/**
+	 * Current page URL. Two sources feed it: the coarse `status` frames from the
+	 * hub (registry metadata) and the finer `page` frames tracked from CDP page
+	 * events — `page` wins once it has reported at least once.
+	 */
 	url: string | null;
+	/** Whether the streamed page is mid-navigation (drives reload→stop). */
+	pageLoading: boolean;
+	/** True once a `page` frame has been seen this attachment. */
+	pageTracked: boolean;
 	/**
 	 * The session id the user last CLOSED the panel for. While set, `autoOpenFor`
 	 * that same session is suppressed so a later browser tool doesn't reopen a
@@ -128,6 +136,8 @@ let _state = $state<BrowserPanelState>({
 	width: loadPersistedWidth(),
 	status: 'disconnected',
 	url: null,
+	pageLoading: false,
+	pageTracked: false,
 	userClosedForSession: null,
 });
 
@@ -192,8 +202,25 @@ export const browserPanel = {
 		_update((s) => ({
 			...s,
 			status,
-			url: url === undefined ? s.url : url,
+			// Registry-metadata URLs only fill the gap before CDP tracking kicks
+			// in; once live page events have spoken they are authoritative.
+			url: s.pageTracked ? s.url : (url === undefined ? s.url : url),
 		}));
+	},
+
+	/** Toolbar page state from a `page` frame (CDP-tracked url + loading). */
+	setPage(url: string | null, loading: boolean) {
+		_update((s) => ({
+			...s,
+			url,
+			pageLoading: loading,
+			pageTracked: true,
+		}));
+	},
+
+	/** Reset per-attachment page tracking (session switch / stream teardown). */
+	resetPageTracking() {
+		_update((s) => ({ ...s, pageLoading: false, pageTracked: false }));
 	},
 
 	/**

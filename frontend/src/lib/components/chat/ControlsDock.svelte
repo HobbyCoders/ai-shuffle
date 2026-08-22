@@ -14,6 +14,7 @@
 	import { profiles } from '$lib/stores/app-data.svelte';
 	import ContextUsageBar from './ContextUsageBar.svelte';
 	import OverrideDropdown from './OverrideDropdown.svelte';
+	import EffortSliderCard from './EffortSliderCard.svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
 	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
 	import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
@@ -284,7 +285,8 @@
 			{/snippet}
 		</OverrideDropdown>
 
-		<!-- Effort Level Override -->
+		<!-- Effort Level Override — the popover body is the same slider card the
+		     mobile sheet shows, Fast toggle included in its top-right corner. -->
 		<OverrideDropdown
 			modes={effortLevels}
 			currentValue={effortValue}
@@ -294,10 +296,19 @@
 			onSelect={(v) => activeSession.setEffortLevelOverride(v)}
 			title="Effort Level"
 			buttonLabel={effortButtonLabel}
-			{fastSupported}
-			fastEnabled={fastMode}
-			onToggleFast={() => activeSession.setFastMode(!fastMode)}
+			wide
 		>
+			{#snippet content()}
+				<EffortSliderCard
+					frameless
+					options={effortLevels}
+					value={effortValue}
+					onSelect={(v) => activeSession.setEffortLevelOverride(v)}
+					{fastSupported}
+					fastEnabled={fastMode}
+					onToggleFast={() => activeSession.setFastMode(!fastMode)}
+				/>
+			{/snippet}
 			{#snippet icon()}
 				<Gauge size={16} strokeWidth={1.75} aria-hidden="true" />
 			{/snippet}

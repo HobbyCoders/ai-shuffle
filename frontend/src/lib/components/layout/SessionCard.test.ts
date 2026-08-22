@@ -143,13 +143,16 @@ describe('SessionCard actions', () => {
 		expect(container.querySelector('.scard.receded')).toBeNull();
 	});
 
-	it('renders a settled row as a single compact line, keeping its action', () => {
+	it('renders a settled row as two compact lines, keeping its action', () => {
 		const { container } = renderCard({ is_active: false }, { compact: true });
 
 		expect(container.querySelector('.scard.compact')).toBeTruthy();
 		expect(container.querySelector('.ctitle')?.textContent).toContain('Sidebar work');
-		// The three-line device/branch meta is dropped in compact mode.
-		expect(container.querySelector('.l3')).toBeNull();
+		// The meta line keeps project · device · branch on its own row.
+		const meta = container.querySelector('.l3');
+		expect(meta).toBeTruthy();
+		expect(meta?.textContent).toContain('Project A');
+		expect(meta?.textContent).toContain('This device');
 		expect(screen.getByTitle('Move to Active')).toBeTruthy();
 	});
 
