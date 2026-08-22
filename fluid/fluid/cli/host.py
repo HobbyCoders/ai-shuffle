@@ -59,6 +59,7 @@ from fluid.events.model import (
 from fluid.events.ops import BackgroundTaskFinished, RespondPermission, UserTurn
 from fluid.store.base import new_id
 from fluid.tools.registry import BackgroundTaskReceipt, ToolCtx, ToolOutcome
+from fluid.tools.shell import resolve_shell
 
 log = logging.getLogger(__name__)
 
@@ -250,7 +251,8 @@ class CliHost:
         spawn_kwargs: dict[str, Any] = {}
         if sys.platform != "win32":
             spawn_kwargs["start_new_session"] = True  # own process group for cancel
-        process = await asyncio.create_subprocess_shell(
+        process = await asyncio.create_subprocess_exec(
+            *resolve_shell().argv_prefix,
             command,
             cwd=cwd,
             stdin=asyncio.subprocess.DEVNULL,

@@ -8,16 +8,18 @@ from typing import Any
 from fluid.tools.builtins._util import truncate
 from fluid.tools.builtins.bash_risk import classify as classify_bash_risk, session_scope as bash_session_scope
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
+from fluid.tools.shell import resolve_shell
 
 SPEC = ToolSpec(
     name="Bash",
     description=(
         "Execute a shell command and return its combined stdout+stderr.\n"
         "\n"
-        "The command runs in the platform's default shell — the Shell line in "
-        "the environment block tells you which syntax to use; follow it "
-        "exactly. Use this tool for git, builds, tests, package managers, and "
-        "other command-line programs.\n"
+        "The command runs through a POSIX shell (sh/bash on POSIX, Git Bash "
+        "on Windows) unless the Shell line in the environment block says "
+        "otherwise; that line names the real shell and the syntax to write "
+        "for it, so follow it exactly. Use this tool for git, builds, tests, "
+        "package managers, and other command-line programs.\n"
         "\n"
         "Usage notes:\n"
         "- Each call is a fresh process: environment variables, shell "
@@ -34,7 +36,8 @@ SPEC = ToolSpec(
         "Redirect to a file and Read it in windows when you expect more.\n"
         "- A non-zero exit code is reported as an error together with the "
         "output — read the output before retrying.\n"
-        "- Quote file paths that contain spaces.\n"
+        "- Quote file paths that contain spaces. Under Git Bash, write Windows "
+        "paths with forward slashes or inside quotes so backslashes survive.\n"
         "\n"
         "Git discipline: never commit, push, or open a PR unless the user "
         "asks. When they do, write commit messages that explain the why, and "
@@ -73,7 +76,8 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     command = input["command"]
     timeout = float(input.get("timeout", 120))
     cwd = input.get("cwd") or ctx.cwd
-    proc = await asyncio.create_subprocess_shell(
+    proc = await asyncio.create_subprocess_exec(
+        *resolve_shell().argv_prefix,
         command,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,

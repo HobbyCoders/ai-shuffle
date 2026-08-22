@@ -16,6 +16,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from fluid.tools.shell import describe as describe_shell
+
 _GIT_TIMEOUT = 3.0  # seconds; env gathering must never stall a session start
 
 
@@ -78,11 +80,7 @@ def environment_block(cwd: str | os.PathLike[str] = ".") -> str:
     always non-empty (cwd + date at minimum).
     """
     cwd_str = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
-    shell = (
-        "cmd.exe (the Bash tool uses Windows cmd syntax, not PowerShell or POSIX shell syntax)"
-        if os.name == "nt"
-        else "/bin/sh-compatible shell (the Bash tool uses POSIX shell syntax)"
-    )
+    shell = describe_shell()
     lines = [
         "# Environment",
         f"Working directory: {cwd_str}",
