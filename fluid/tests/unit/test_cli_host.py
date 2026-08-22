@@ -344,3 +344,22 @@ def test_make_engine_without_host_leaves_tools_unavailable(tmp_path) -> None:
                          provider=ScriptedProvider([_text("x")]), background_host=False)
     assert host_of(engine) is None
     assert "task_dispatch" not in engine.ctx.extra
+
+
+def test_worker_finish_note_is_deferred_until_turn_end() -> None:
+    """A worker finishing mid-stream must not splice into the answer text."""
+    import io
+
+    from fluid.cli.repl import render_event
+    from fluid.events.model import SubagentEvent, TextDelta, TurnComplete
+
+    out = io.StringIO()
+    render_event(TextDelta(session_id="s", index=0, text="The answer is"), out)
+    render_event(
+        SubagentEvent(session_id="s", kind="finished", task_id="t1", description="slow job"), out
+    )
+    render_event(TextDelta(session_id="s", index=0, text=" forty-two."), out)
+    render_event(TurnComplete(session_id="s", stop_reason="end_turn", num_model_calls=1), out)
+    text = out.getvalue()
+    assert "The answer is forty-two." in text
+    assert text.index("t1") > text.index("forty-two.")

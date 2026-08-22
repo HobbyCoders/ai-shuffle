@@ -51,6 +51,8 @@ _TERMINAL = (TurnComplete, Interrupted, ErrorEvent)
 # Per-stream render mode ("text" | "thinking"), keyed by id(out), so thinking
 # and answer text get separated without threading state through every caller.
 _mode: dict[int, str] = {}
+# Worker notes that arrived mid-turn, flushed at TurnComplete (keyed by id(out)).
+_deferred_notes: dict[int, list[str]] = {}
 
 
 def _switch_mode(out: TextIO, mode: str) -> None:
@@ -96,7 +98,9 @@ def render_event(event: Event, out: TextIO) -> None:
     elif isinstance(event, TurnComplete):
         _switch_mode(out, "text")
         _mode.pop(id(out), None)
-        cost = f" cost=${event.cost_usd:.4f}" if event.cost_usd is not None else ""
+        for note in _deferred_notes.pop(id(out), []):
+            out.write(f"\n  {note}\n")
+        cost =f" cost=${event.cost_usd:.4f}" if event.cost_usd is not None else ""
         out.write(f"\n[done] stop={event.stop_reason} calls={event.num_model_calls}{cost}\n")
     elif isinstance(event, Interrupted):
         out.write("\n[interrupted]\n")
@@ -104,7 +108,13 @@ def render_event(event: Event, out: TextIO) -> None:
         out.write(f"\n[error] {event.message}\n")
     elif isinstance(event, (SubagentEvent, SessionParked, SessionWoken)):
         line = render_worker_event(event)
-        if line is not None:
+        if line is None:
+            return
+        if isinstance(event, SubagentEvent) and id(out) in _mode:
+            # A worker finishing while the model is mid-sentence: hold the
+            # note until the turn ends rather than splicing it into the text.
+            _deferred_notes.setdefault(id(out), []).append(line)
+        else:
             out.write(f"\n  {line}\n")
     out.flush()
 
