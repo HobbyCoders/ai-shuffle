@@ -48,6 +48,22 @@ the durable event log when an engine is recreated.
 Set `wake=False` only when the host wants to persist a terminal task result
 without autonomously continuing the parent agent.
 
+## Monitor: detached shell commands
+
+The `Monitor` builtin uses the same lifecycle for plain processes the agent
+wants to supervise — a CI run, a frontend build, a log watcher. The host
+injects an async spawner as `ToolCtx.extra["monitor_spawn"]`; it receives
+`(input, ctx)` where `input` carries `command` and optional `cwd`, and returns
+the same receipt shapes as a background Task (a `BackgroundTaskReceipt`, an
+`Outcome` carrying one, or a mapping with `task_id`). The spawner must run the
+command detached from the turn and buffer its output; when the command reaches
+a terminal state, submit `BackgroundTaskFinished` with the output tail as
+`summary`. The session parks if the turn ends first and is woken with the
+output when the command finishes.
+
+Without an injected spawner, Monitor reports itself unavailable (the same
+graceful degradation as Task without a dispatcher).
+
 ## AI Shuffle integration requirements
 
 The AI Shuffle task manager should keep worker records in its session/task store,
