@@ -4,7 +4,9 @@ Reads a line, submits a ``UserTurn``, subscribes to the engine's EventBus, and
 renders the stream: ``TextDelta``/``ThinkingDelta`` inline, tool use + results,
 permission prompts (y/n on stdin → ``RespondPermission``), and per-turn usage on
 ``TurnComplete``. Slash commands ``/model``, ``/fork``, ``/rewind``, ``/exit`` map
-to the corresponding ops.
+to the corresponding ops; ``/context`` (alias ``/usage``), ``/tools`` and
+``/skills`` are read-only views over the engine's context breakdown, tool
+registry and discovered skills.
 
 Everything routes through :func:`stream_turn` and the small ``on_permission`` /
 ``input_fn`` seams so the one-shot ``run`` path and the unit tests reuse the exact
@@ -93,6 +95,85 @@ def render_event(event: Event, out: TextIO) -> None:
     elif isinstance(event, ErrorEvent):
         out.write(f"\n[error] {event.message}\n")
     out.flush()
+
+
+def format_context_usage(
+    usage: dict[str, Any] | None, *, last_usage: Usage | None = None
+) -> str:
+    """Render ``get_context_usage()`` output as a compact table.
+
+    Header: total prompt tokens against the context window and the percentage
+    used; then one row per category with tokens and percent of the window (or
+    of the total when the window is unknown). Deferred rows are marked since
+    they are not in the prompt. The last call's cache hit rate follows when a
+    ``Usage`` event is available, and the compaction stats when present.
+    """
+    if not usage:
+        return "context usage unavailable for this engine"
+    total = int(usage.get("totalTokens") or 0)
+    window = usage.get("maxTokens")
+    lines: list[str] = []
+    if window:
+        pct = usage.get("percentage")
+        pct = pct if pct is not None else round(total / window * 100, 1)
+        lines.append(f"context: {total:,} / {window:,} tokens ({pct}%)")
+    else:
+        lines.append(f"context: {total:,} tokens (window unknown)")
+    if usage.get("model"):
+        lines.append(f"model: {usage['model']}" + ("" if usage.get("measured") else " (estimated)"))
+    denominator = window or total or 1
+    rows = [
+        c for c in usage.get("categories", []) if c.get("name") != "Free space"
+    ]
+    name_width = max((len(c["name"]) for c in rows), default=10) + 2
+    for c in rows:
+        tokens = int(c.get("tokens") or 0)
+        share = tokens / denominator * 100
+        mark = "  (deferred, not in prompt)" if c.get("isDeferred") else ""
+        lines.append(f"  {c['name'].ljust(name_width)}{tokens:>9,}  {share:5.1f}%{mark}")
+    if window:
+        lines.append(f"  {'Free space'.ljust(name_width)}{max(0, window - total):>9,}")
+    if last_usage is not None:
+        lines.append(
+            f"last call: cache hit rate {last_usage.cache_hit_rate * 100:.0f}% "
+            f"(read={last_usage.cache_read_tokens:,} write={last_usage.cache_creation_tokens:,} "
+            f"in={last_usage.input_tokens:,})"
+        )
+    compaction = usage.get("compaction")
+    if compaction:
+        lines.append("compaction: " + ", ".join(f"{k}={v}" for k, v in compaction.items()))
+    return "\n".join(lines)
+
+
+def format_tools(registry) -> str:
+    """One line per registered tool: name, loaded/deferred, risk."""
+    if registry is None:
+        return "(no tool registry)"
+    specs = sorted(registry.list_tools(loaded_only=False), key=lambda s: s.name)
+    if not specs:
+        return "(no tools registered)"
+    deferred = {s.name for s in registry.deferred_tools()}
+    width = max(len(s.name) for s in specs) + 2
+    lines = [f"{len(specs)} tools ({len(specs) - len(deferred)} loaded, {len(deferred)} deferred)"]
+    for s in specs:
+        state = "deferred" if s.name in deferred else "loaded"
+        lines.append(f"  {s.name.ljust(width)}{state:<9} risk={s.risk}")
+    return "\n".join(lines)
+
+
+def format_skills(skills) -> str:
+    """One line per discovered SKILL.md: name, scope, description."""
+    skills = list(skills)
+    if not skills:
+        return "(no skills discovered)"
+    width = max(len(s.name) for s in skills) + 2
+    lines = [f"{len(skills)} skills"]
+    for s in skills:
+        desc = " ".join((s.description or "").split())
+        if len(desc) > 80:
+            desc = desc[:79] + "\u2026"
+        lines.append(f"  {s.name.ljust(width)}[{s.scope}] {desc}".rstrip())
+    return "\n".join(lines)
 
 
 async def auto_deny(event: PermissionRequest) -> str:
@@ -184,9 +265,17 @@ class Repl:
             return False
         if cmd == "/help":
             self.out.write(
-                "commands: /model <name>, /fork <node_id>, /rewind <node_id>, /exit,\n"
+                "commands: /model <name>, /fork <node_id>, /rewind <node_id>,\n"
+                "  /context (or /usage), /tools, /skills, /exit,\n"
                 "plus any ~/.fluid/commands or .agents/commands *.md file as /<name> [args]\n"
+                "resume a session later with: fluid chat --resume <session-id> (or --continue)\n"
             )
+        elif cmd in ("/context", "/usage"):
+            self.out.write(await self.render_context_usage() + "\n")
+        elif cmd == "/tools":
+            self.out.write(format_tools(getattr(self.engine, "registry", None)) + "\n")
+        elif cmd == "/skills":
+            self.out.write(self.render_skills() + "\n")
         elif cmd == "/model":
             if arg:
                 await set_model(self.engine, arg)
@@ -211,6 +300,25 @@ class Repl:
                 self.out.write(f"unknown command: {cmd} (try /help)\n")
         self.out.flush()
         return True
+
+    async def render_context_usage(self) -> str:
+        """The ``/context`` text: breakdown plus the last call's cache stats."""
+        getter = getattr(self.engine, "get_context_usage", None)
+        if getter is None:
+            return "context usage unavailable for this engine"
+        usage = await getter()
+        last = None
+        for event in reversed(self.engine.bus.log(self.session_id)):
+            if isinstance(event, Usage):
+                last = event
+                break
+        return format_context_usage(usage, last_usage=last)
+
+    def render_skills(self) -> str:
+        from fluid.context.instructions import discover_skills
+
+        cwd = getattr(getattr(self.engine, "ctx", None), "cwd", None) or "."
+        return format_skills(discover_skills(cwd))
 
     def _render_user_command(self, name: str, arg: str):
         """Resolve a discovered command file to its rendered prompt, or None.
