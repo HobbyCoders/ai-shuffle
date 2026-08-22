@@ -439,6 +439,10 @@
 	.status :global(svg) { flex: none; }
 	.status.working :global(svg) {
 		filter: drop-shadow(0 0 4px var(--glow));
+	}
+	/* The pulse is for static glyphs only; scoping it off .spin lets the
+	   lower-specificity spin rule below own the loader's animation. */
+	.status.working :global(svg:not(.spin)) {
 		animation: card-pulse 2.4s ease-in-out infinite;
 	}
 	.status.await :global(svg) { animation: card-pulse 2.4s ease-in-out infinite; }
