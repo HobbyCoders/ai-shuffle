@@ -13,7 +13,7 @@
 	 * Hover/swipe exposes a single action: Settle (active) or Move to Active
 	 * (settled). Rename, Fork, and Delete live on the header session-title menu.
 	 */
-	import { onDestroy, onMount } from 'svelte';
+	import { onMount } from 'svelte';
 	import {
 		Loader2,
 		AlertCircle,
@@ -68,16 +68,18 @@
 	let actionsOpen = $state(false);
 	let swipeLayout = $state(false);
 	let dragOffset = $state<number | null>(null);
-	let suppressClickTimer: ReturnType<typeof setTimeout> | null = null;
 
 	const ACTION_REVEAL_WIDTH = 44;
-	const SWIPE_COMMIT_DISTANCE = 44;
+	// Commit at half the reveal width so a normal swipe latches the actions open;
+	// the old full-width threshold meant most swipes snapped shut again.
+	const SWIPE_COMMIT_DISTANCE = 22;
 	let pointerId: number | null = null;
 	let pointerStartX = 0;
 	let pointerStartY = 0;
 	let pointerStartOffset = 0;
 	let horizontalDrag = false;
 	let suppressNextClick = false;
+	let actionJustCommitted = false;
 
 	function closeActions() {
 		actionsOpen = false;
@@ -92,14 +94,34 @@
 		if (event.key === 'Escape') closeActions();
 	}
 
-	async function toggleSettled(event: MouseEvent | KeyboardEvent) {
-		event.stopPropagation();
+	async function commitToggle() {
 		actionsOpen = false;
 		try {
 			await appData.setSessionActive(session.id, !session.is_active);
 		} catch {
 			toast.push('Failed to update session', { tone: 'error' });
 		}
+	}
+
+	// Touch/pen: the synthetic click after a swipe is unreliable — pointer capture on
+	// the frame can reroute or drop it, which is why the first tap on a freshly
+	// revealed action was being lost. Commit straight from pointerup and mark the
+	// trailing click handled so it can't double-fire.
+	function handleActionPointerUp(event: PointerEvent) {
+		if (event.pointerType === 'mouse') return;
+		event.stopPropagation();
+		actionJustCommitted = true;
+		void commitToggle();
+	}
+
+	// Mouse and keyboard path; skips the work when pointerup already handled a tap.
+	function handleActionClick(event: MouseEvent) {
+		event.stopPropagation();
+		if (actionJustCommitted) {
+			actionJustCommitted = false;
+			return;
+		}
+		void commitToggle();
 	}
 
 	function openCard() {
@@ -127,6 +149,9 @@
 	}
 
 	function handlePointerDown(event: PointerEvent) {
+		// Any fresh press clears the one-shot click guards left by the last gesture.
+		suppressNextClick = false;
+		actionJustCommitted = false;
 		if (!swipeLayout || event.isPrimary === false || event.button !== 0 || isActionTarget(event.target)) return;
 		pointerId = event.pointerId;
 		pointerStartX = event.clientX;
@@ -163,12 +188,8 @@
 			actionsOpen = actionsOpen
 				? nextOffset < -(ACTION_REVEAL_WIDTH - SWIPE_COMMIT_DISTANCE)
 				: nextOffset <= -SWIPE_COMMIT_DISTANCE;
+			// Swallow the trailing click from this gesture; cleared on the next press.
 			suppressNextClick = true;
-			if (suppressClickTimer !== null) clearTimeout(suppressClickTimer);
-			suppressClickTimer = setTimeout(() => {
-				suppressNextClick = false;
-				suppressClickTimer = null;
-			}, 0);
 		} else if (Math.abs(dx) > 6) {
 			suppressNextClick = true;
 		}
@@ -203,10 +224,6 @@
 		syncLayout();
 		query.addEventListener('change', syncLayout);
 		return () => query.removeEventListener('change', syncLayout);
-	});
-
-	onDestroy(() => {
-		if (suppressClickTimer !== null) clearTimeout(suppressClickTimer);
 	});
 </script>
 
@@ -312,7 +329,8 @@
 				class="row-action state-toggle"
 				title="Settle session"
 				aria-label="Settle session"
-				onclick={toggleSettled}
+				onpointerup={handleActionPointerUp}
+				onclick={handleActionClick}
 			>
 				<Check size={16} strokeWidth={1.8} />
 			</button>
@@ -321,7 +339,8 @@
 				class="row-action state-toggle"
 				title="Move to Active"
 				aria-label="Move session to Active"
-				onclick={toggleSettled}
+				onpointerup={handleActionPointerUp}
+				onclick={handleActionClick}
 			>
 				<Undo2 size={16} strokeWidth={1.8} />
 			</button>
