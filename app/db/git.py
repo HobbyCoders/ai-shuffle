@@ -88,6 +88,23 @@ def get_all_git_repositories() -> List[GitRepositoryRow]:
         return rows_to_list(cursor.fetchall())
 
 
+def get_remote_urls_for_projects(project_ids: List[str]) -> Dict[str, Optional[str]]:
+    """project_id -> remote_url for the given projects, in ONE query.
+
+    Callers backfilling ``projects.link_group_id`` for a whole listing use this
+    instead of per-project ``get_git_repository_by_project`` round-trips.
+    """
+    if not project_ids:
+        return {}
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT project_id, remote_url FROM git_repositories WHERE project_id = ANY(%s)",
+            (project_ids,),
+        )
+        return {row["project_id"]: row.get("remote_url") for row in rows_to_list(cursor.fetchall())}
+
+
 def create_git_repository(
     repository_id: str,
     project_id: str,

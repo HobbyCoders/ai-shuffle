@@ -2211,6 +2211,7 @@ from app.db.git import (  # noqa: F401
     get_git_repository,
     get_git_repository_by_project,
     get_all_git_repositories,
+    get_remote_urls_for_projects,
     create_git_repository,
     update_git_repository,
     update_git_repository_synced,

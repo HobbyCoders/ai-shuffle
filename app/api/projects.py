@@ -20,6 +20,7 @@ from app.core.platform import is_local_mode
 from app.db import database
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
 from app.api.common import check_project_access, format_file_size, api_error_handler
+from app.core.project_links import is_link_locked
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,34 @@ class ProjectLinkRequest(BaseModel):
     target_project_id: str
 
 router = APIRouter(prefix="/api/v1/projects", tags=["Projects"])
+
+
+def _backfill_link_groups(projects: List[dict]) -> None:
+    """Best-effort: fill NULL link_group_id from each project's git remote.
+
+    The workspace picker collapses same-repo clones by ``link_group_id``, but
+    the auto path only runs when a git-repository record is touched — a fresh
+    clone that was never git-polled stays NULL and shows as a duplicate entry.
+    Deriving it here keeps the picker list identical to the sessions board.
+    Locked rows keep their manual group; failures never break the listing.
+    """
+    pending = [
+        p for p in projects
+        if not p.get("link_group_id") and not is_link_locked(p)
+    ]
+    if not pending:
+        return
+    try:
+        from app.core.project_links import auto_link_group_id
+
+        remotes = database.get_remote_urls_for_projects([p["id"] for p in pending])
+        for project in pending:
+            group_id = auto_link_group_id(remotes.get(project["id"]))
+            if group_id:
+                database.set_project_link_group(project["id"], group_id)
+                project["link_group_id"] = group_id
+    except Exception:  # noqa: BLE001 — listing must never fail on the backfill
+        logger.debug("link_group_id backfill failed", exc_info=True)
 
 
 def normalize_docker_path(path: str) -> str:
@@ -126,6 +155,7 @@ async def list_projects(request: Request, token: str = Depends(require_auth)):
         # API user with assigned project - only return that project
         project = database.get_project(api_user["project_id"])
         if project:
+            _backfill_link_groups([project])
             project["session_count"] = session_counts.get(project["id"], 0)
             if not is_absolute_project_path(project["path"]):
                 project["path"] = get_project_working_dir(project)
@@ -134,6 +164,7 @@ async def list_projects(request: Request, token: str = Depends(require_auth)):
 
     # Admin or unrestricted API user - return all projects
     projects = database.get_all_projects()
+    _backfill_link_groups(projects)
     for project in projects:
         project["session_count"] = session_counts.get(project["id"], 0)
         # Resolve relative paths to absolute for display
