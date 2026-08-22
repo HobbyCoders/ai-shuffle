@@ -1539,6 +1539,26 @@ def build_options_from_profile(
     # fluid id at connect time at all.
     options.aih_session_id = session_id
     options.aih_profile_id = profile.get("id")
+
+    # The NATIVE leg's project-memory dir (rulings MEM1/MEM3). Anchored on the
+    # PROJECT's root path where we have one — the same anchor memory_sync uses,
+    # so a worktree session points at the main checkout's dir rather than a
+    # per-worktree mirror nothing syncs. Stamped unconditionally: the leg isn't
+    # settled until the adapter connects, and this is inert on the delegated leg
+    # (the claude CLI owns ~/.claude/projects/<slug>/memory itself). The adapter
+    # projects it onto SessionOptions.extra["memory_dir"] and only a native leg
+    # reads it, where it becomes the prompt's "# Project memory" section.
+    try:
+        from app.core.memory_sync import memory_dir_for_working_dir
+
+        _memory_anchor = get_project_working_dir(project) if project else None
+        _memory_dir = memory_dir_for_working_dir(
+            _memory_anchor or working_dir, "native"
+        )
+        options.aih_memory_dir = str(_memory_dir) if _memory_dir else None
+    except Exception:  # noqa: BLE001 — a memory dir is context, never a blocker
+        logger.warning("could not resolve native project-memory dir", exc_info=True)
+        options.aih_memory_dir = None
     _completion_frames = overrides.get("background_task_completions")
     options.aih_background_task_completions = (
         [dict(frame) for frame in _completion_frames if isinstance(frame, dict)]

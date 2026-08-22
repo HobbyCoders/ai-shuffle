@@ -43,7 +43,9 @@ from app.core.query_streaming import (
     is_context_snapshot_only as _is_context_snapshot_only,
     truncate_large_payload,
 )
-from app.core.memory_sync import reconcile_memory, push_memory
+from app.core.memory_sync import (
+    memory_leg_for_options, reconcile_memory, push_memory,
+)
 from app.core.turn_finalize import persist_turn_end_state
 
 logger = logging.getLogger(__name__)
@@ -304,7 +306,9 @@ async def _run_background_query_impl(
 
         # Pull shared agent-memory from the DB before the CLI reads it.
         await reconcile_memory(
-            project.get("id") if project else None, getattr(options, "cwd", None)
+            project.get("id") if project else None,
+            getattr(options, "cwd", None),
+            memory_leg_for_options(options),
         )
 
         # Backend selection via the provider seam (see
@@ -644,7 +648,9 @@ async def _run_background_query_impl(
 
     # Push agent-memory the CLI wrote this turn up to the shared DB.
     await push_memory(
-        project.get("id") if project else None, getattr(options, "cwd", None)
+        project.get("id") if project else None,
+        getattr(options, "cwd", None),
+        memory_leg_for_options(options),
     )
 
     logger.debug(f"[Background] Query completed for session {session_id}")

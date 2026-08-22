@@ -1,9 +1,23 @@
 """Cross-install agent-memory sync.
 
-Mirrors the Claude Code CLI's per-project memory directory
-(``<claude_projects>/<slug>/memory/`` — ``MEMORY.md`` plus per-fact ``*.md``
+Mirrors a per-project memory directory (``MEMORY.md`` plus per-fact ``*.md``
 files) to and from the shared database so installs that share a git remote
 share one logical memory.
+
+WHICH directory depends on the session's LEG (ruling MEM2, 2026-08-21):
+
+* ``leg="delegated"`` — the claude CLI owns ``<claude_projects>/<slug>/memory/``
+  and writes it itself; sync only mirrors it.
+* ``leg="native"`` — a fluid NativeLoop session has no CLI behind it, so the app
+  owns ``<fluid_projects>/<slug>/memory/`` (ruling MEM1, ~/.fluid/projects by
+  default) and the native system prompt points the model at it (ruling MEM3,
+  see ``_compile_prompt_sections`` in app/core/provider/harness_adapter.py).
+
+Both legs slug the SAME project path and share the SAME ``memory_key``, so the
+two dirs are two local mirrors of one logical memory: a project that has been
+running on the CLI gets its existing memory materialized into the fluid dir by
+the first native reconcile. That IS the migration — nothing is ever copied
+directly between the two dirs.
 
 Two operations drive it from the session lifecycle (see app/core/query_engine.py):
 
@@ -28,6 +42,8 @@ never tombstones a shared file merely because its own local dir lacks it — onl
 a file it demonstrably HELD and then dropped. This is what stops two installs
 that share a memory_key (git link group) but keep separate on-disk memory dirs
 (different project slugs / worktrees) from mirror-deleting each other's files.
+The same guard is what makes the two LEGS safe to run side by side: they share a
+memory_key but not a dir, so the gate and the baseline are keyed per dir.
 """
 
 from __future__ import annotations
@@ -48,12 +64,15 @@ from app.db import database
 
 logger = logging.getLogger(__name__)
 
-# memory_keys reconciled at least once in THIS process. push() only tombstones
-# (propagates deletes) for a key once reconcile has established the local dir as
-# authoritative — otherwise a stale/empty local dir could wrongly wipe the DB.
+# (memory_key, memory_dir) pairs reconciled at least once in THIS process. push()
+# only tombstones (propagates deletes) for a pair once reconcile has established
+# THAT dir as authoritative — otherwise a stale/empty local dir could wrongly
+# wipe the DB. Keyed by dir, not by key alone: the delegated and native legs
+# share a memory_key but keep separate mirrors (ruling MEM2), so a reconcile of
+# one leg's dir must never authorize deletes against the other's.
 _reconciled_keys: set = set()
 
-# Per-memory_key baseline: the set of relative_paths this process has confirmed
+# Per-(memory_key, memory_dir) baseline: the set of relative_paths this process has confirmed
 # were materialized locally (pulled from the DB during reconcile, or uploaded by
 # us during push). This is the three-way-merge anchor that lets push tell a
 # genuine LOCAL DELETE (a path that WAS in our baseline and is now gone) apart
@@ -62,7 +81,12 @@ _reconciled_keys: set = set()
 # dir. Without this anchor, push tombstoned every DB row absent from the local
 # scan, so concurrent installs/worktrees (same memory_key, different memory dir)
 # mirror-deleted each other's freshly-authored topic files.
-_local_baseline: Dict[str, set] = {}
+_local_baseline: Dict[Tuple[str, str], set] = {}
+
+
+def _state_key(memory_key: str, memory_dir: Path) -> Tuple[str, str]:
+    """Gate/baseline key: one entry per (memory_key, local mirror dir)."""
+    return (memory_key, str(memory_dir))
 
 # (content, sha256, mtime) for each local memory file, keyed by relative path.
 _LocalState = Dict[str, Tuple[str, str, datetime]]
@@ -130,22 +154,59 @@ def _repo_root_for_working_dir(working_dir: str) -> str:
     return working_dir[: match.start()] if match else working_dir
 
 
-def memory_dir_for_working_dir(working_dir: str) -> Optional[Path]:
-    """`<claude_projects>/<slug>/memory/` for a session's working directory.
+def memory_dir_for_working_dir(
+    working_dir: str, leg: str = "delegated"
+) -> Optional[Path]:
+    """`<projects_root>/<slug>/memory/` for a session's working directory.
+
+    The root is the LEG's (ruling MEM1/MEM2): ``~/.claude/projects`` for the
+    delegated claude CLI, ``~/.fluid/projects`` for a native fluid leg. The slug
+    is the same path-based normalization either way, so the two mirrors line up
+    project-for-project.
 
     Worktree cwds are folded back to the main checkout first (see above) so the
     slug matches the dir the CLI actually writes memory into.
     """
     try:
+        root = (
+            settings.get_fluid_projects_dir
+            if leg == "native"
+            else settings.get_claude_projects_dir
+        )
         anchor = _repo_root_for_working_dir(working_dir)
-        return settings.get_claude_projects_dir / get_project_dir_name(anchor) / "memory"
+        return root / get_project_dir_name(anchor) / "memory"
     except Exception:  # noqa: BLE001
         logger.debug("memory_sync: could not resolve memory dir for %r", working_dir, exc_info=True)
         return None
 
 
+def memory_leg_for_options(options: object) -> str:
+    """"native" | "delegated" for a built ``ClaudeAgentOptions`` object.
+
+    Defers to the harness adapter's single leg-decision table (see
+    ``provider_kind_for_sdk_options`` / ``_decide_provider_kind`` in
+    app/core/provider/harness_adapter.py) rather than re-deriving it here — a
+    second copy would drift the moment the provider table changes. Imported
+    lazily: memory_sync is on the import path of modules that must not drag the
+    fluid harness in.
+
+    Anything unknowable (no options, an adapter import failure, a kind this
+    module has never heard of) degrades to "delegated", i.e. today's behaviour.
+    """
+    if options is None:
+        return "delegated"
+    try:
+        from app.core.provider.harness_adapter import provider_kind_for_sdk_options
+
+        kind = provider_kind_for_sdk_options(options)
+    except Exception:  # noqa: BLE001 — never break a turn over a dir choice
+        logger.debug("memory_sync: could not decide leg; assuming delegated", exc_info=True)
+        return "delegated"
+    return "delegated" if kind in (None, "delegated") else "native"
+
+
 def _resolve_target(
-    project_id: str, working_dir: str
+    project_id: str, working_dir: str, leg: str = "delegated"
 ) -> Tuple[Optional[str], Optional[Path]]:
     """Resolve a session's (memory_key, memory_dir), anchored on the project.
 
@@ -155,6 +216,9 @@ def _resolve_target(
     main checkout's slug dir. Falling back to ``working_dir`` (itself folded to
     a repo root by ``memory_dir_for_working_dir``) preserves behaviour when the
     project lookup yields nothing.
+
+    ``leg`` picks the projects root (ruling MEM2); the memory_key is the same
+    either way, which is what makes the two mirrors one shared memory.
     """
     try:
         project = database.get_project(project_id)
@@ -171,7 +235,7 @@ def _resolve_target(
             anchor = resolved
     except Exception:  # noqa: BLE001 — fall back to the session cwd
         logger.debug("memory_sync: could not resolve project working dir", exc_info=True)
-    return memory_key, memory_dir_for_working_dir(anchor)
+    return memory_key, memory_dir_for_working_dir(anchor, leg)
 
 
 def _scan_local(memory_dir: Path) -> _LocalState:
@@ -223,7 +287,8 @@ def _remove_local(memory_dir: Path, relative_path: str) -> None:
 # Core reconcile / push (operate on a resolved memory_key + dir; testable)
 # ---------------------------------------------------------------------------
 
-def reconcile(memory_key: str, memory_dir: Path, instance_id: Optional[str]) -> None:
+def reconcile(memory_key: str, memory_dir: Path, instance_id: Optional[str],
+              leg: str = "delegated") -> None:
     """Bring the local memory dir into agreement with the DB (last-write-wins)."""
     db_rows = {r["relative_path"]: r for r in memdb.get_memory_files(memory_key)}
     local = _scan_local(memory_dir)
@@ -254,18 +319,18 @@ def reconcile(memory_key: str, memory_dir: Path, instance_id: Optional[str]) -> 
             # local newer (or equal content) → keep; push() will sync it up
 
     # Files only on local disk are left as-is; push() uploads them.
-    _reconciled_keys.add(memory_key)
-    _local_baseline[memory_key] = present
+    _reconciled_keys.add(_state_key(memory_key, memory_dir))
+    _local_baseline[_state_key(memory_key, memory_dir)] = present
     # One visible line so a silently-mis-resolved dir (e.g. a worktree slug the
     # CLI never writes) can't hide as a clean no-op ever again.
     logger.info(
-        "memory_sync: reconcile key=%s dir=%s db_files=%d local_files=%d",
-        memory_key, memory_dir, len(db_rows), len(local),
+        "memory_sync: reconcile key=%s leg=%s dir=%s db_files=%d local_files=%d",
+        memory_key, leg, memory_dir, len(db_rows), len(local),
     )
 
 
 def push(memory_key: str, memory_dir: Path, instance_id: Optional[str],
-         allow_deletes: bool) -> None:
+         allow_deletes: bool, leg: str = "delegated") -> None:
     """Upload local changes to the DB; tombstone local deletions if allowed."""
     db_rows = {r["relative_path"]: r for r in memdb.get_memory_files(memory_key)}
     local = _scan_local(memory_dir)
@@ -287,7 +352,7 @@ def push(memory_key: str, memory_dir: Path, instance_id: Optional[str],
         # from disk. A live DB row we never held is a peer's file — leave it be,
         # reconcile will pull it down. This is the guard that stops installs
         # sharing a memory_key but not a memory dir from wiping each other.
-        baseline = _local_baseline.get(memory_key, set())
+        baseline = _local_baseline.get(_state_key(memory_key, memory_dir), set())
         for rel in baseline - set(local.keys()):
             row = db_rows.get(rel)
             if row is not None and not row.get("deleted"):
@@ -296,10 +361,10 @@ def push(memory_key: str, memory_dir: Path, instance_id: Optional[str],
     # Refresh the baseline to the current on-disk set: files we just uploaded are
     # now ours to track; files we tombstoned are gone. A peer file still absent
     # here stays out of the baseline until a reconcile materializes it.
-    _local_baseline[memory_key] = set(local.keys())
+    _local_baseline[_state_key(memory_key, memory_dir)] = set(local.keys())
     logger.info(
-        "memory_sync: push key=%s dir=%s db_files=%d local_files=%d deletes=%s",
-        memory_key, memory_dir, len(db_rows), len(local), allow_deletes,
+        "memory_sync: push key=%s leg=%s dir=%s db_files=%d local_files=%d deletes=%s",
+        memory_key, leg, memory_dir, len(db_rows), len(local), allow_deletes,
     )
 
 
@@ -308,23 +373,27 @@ def push(memory_key: str, memory_dir: Path, instance_id: Optional[str],
 # Synchronous — call via asyncio.to_thread from the async lifecycle.
 # ---------------------------------------------------------------------------
 
-def reconcile_memory_sync(project_id: Optional[str], working_dir: Optional[str]) -> None:
+def reconcile_memory_sync(project_id: Optional[str], working_dir: Optional[str],
+                          leg: str = "delegated") -> None:
     if not settings.agent_memory_sync or not project_id or not working_dir:
         return
-    memory_key, memory_dir = _resolve_target(project_id, working_dir)
+    memory_key, memory_dir = _resolve_target(project_id, working_dir, leg)
     if not memory_key or memory_dir is None:
         return
-    reconcile(memory_key, memory_dir, settings.effective_instance_id)
+    reconcile(memory_key, memory_dir, settings.effective_instance_id, leg)
 
 
-def push_memory_sync(project_id: Optional[str], working_dir: Optional[str]) -> None:
+def push_memory_sync(project_id: Optional[str], working_dir: Optional[str],
+                     leg: str = "delegated") -> None:
     if not settings.agent_memory_sync or not project_id or not working_dir:
         return
-    memory_key, memory_dir = _resolve_target(project_id, working_dir)
+    memory_key, memory_dir = _resolve_target(project_id, working_dir, leg)
     if not memory_key or memory_dir is None:
         return
-    allow_deletes = memory_key in _reconciled_keys and memory_dir.exists()
-    push(memory_key, memory_dir, settings.effective_instance_id, allow_deletes)
+    allow_deletes = (
+        _state_key(memory_key, memory_dir) in _reconciled_keys and memory_dir.exists()
+    )
+    push(memory_key, memory_dir, settings.effective_instance_id, allow_deletes, leg)
 
 
 # ---------------------------------------------------------------------------
@@ -332,19 +401,21 @@ def push_memory_sync(project_id: Optional[str], working_dir: Optional[str]) -> N
 # never raise into the caller (a sync failure must not break a chat turn).
 # ---------------------------------------------------------------------------
 
-async def reconcile_memory(project_id: Optional[str], working_dir: Optional[str]) -> None:
+async def reconcile_memory(project_id: Optional[str], working_dir: Optional[str],
+                           leg: str = "delegated") -> None:
     if not settings.agent_memory_sync:
         return
     try:
-        await asyncio.to_thread(reconcile_memory_sync, project_id, working_dir)
+        await asyncio.to_thread(reconcile_memory_sync, project_id, working_dir, leg)
     except Exception:  # noqa: BLE001
         logger.debug("memory_sync: reconcile failed", exc_info=True)
 
 
-async def push_memory(project_id: Optional[str], working_dir: Optional[str]) -> None:
+async def push_memory(project_id: Optional[str], working_dir: Optional[str],
+                      leg: str = "delegated") -> None:
     if not settings.agent_memory_sync:
         return
     try:
-        await asyncio.to_thread(push_memory_sync, project_id, working_dir)
+        await asyncio.to_thread(push_memory_sync, project_id, working_dir, leg)
     except Exception:  # noqa: BLE001
         logger.debug("memory_sync: push failed", exc_info=True)

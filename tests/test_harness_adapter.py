@@ -1245,6 +1245,230 @@ async def test_connect_native_leg_passes_builtin_registry_to_native_loop(monkeyp
     assert _FLUID_BUILTINS <= _names(captured["registry"])
 
 
+# ─── Native-leg code-mode + continual harness ────────────────────────────────
+
+
+async def _connect_native_capturing(monkeypatch, tmp_path, model="gpt-4o"):
+    """Connect a native leg over a fake NativeLoop and return its kwargs.
+
+    ``data_dir`` is pointed at tmp_path so the skill store (which mkdirs its
+    root eagerly) never writes into the real home directory.
+    """
+    import app.core.provider.harness_adapter as ha
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+
+    captured: dict = {}
+
+    class FakeNativeLoop:
+        def __init__(self, **kwargs):
+            captured.clear()
+            captured.update(kwargs)
+
+        async def _ensure_session(self):
+            class _Meta:
+                session_id = "ses_native"
+
+            return _Meta()
+
+        async def aclose(self):
+            pass
+
+    async def fake_client(kind, options):
+        return FakeProvider([]), None
+
+    monkeypatch.setattr(ha, "NativeLoop", FakeNativeLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", fake_client)
+
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(
+        SessionOptions(model=model, extra={"fluid_provider": "openai_responses"})
+    )
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_native_leg_gets_code_mode_and_continual_by_default(monkeypatch, tmp_path):
+    """Both defaults are ON: NativeLoop receives a CodeModeSession whose skill
+    store is rooted under the app data dir, with a synthesizer attached."""
+    from fluid.codemode.session import CodeModeSession
+    from fluid.codemode.skills import SkillStore
+    from app.core.config import settings
+
+    # The suite-wide isolation fixture pins ``fluid_skills_dir`` so no test can
+    # write into the real data dir. Clear it here — this test is precisely the
+    # one that asserts the UNSET default resolution (<data_dir>/fluid/skills),
+    # and ``_connect_native_capturing`` already points data_dir at tmp_path.
+    monkeypatch.setattr(settings, "fluid_skills_dir", None)
+
+    captured = await _connect_native_capturing(monkeypatch, tmp_path)
+
+    codemode = captured["codemode"]
+    assert isinstance(codemode, CodeModeSession)
+    assert isinstance(codemode.skills, SkillStore)
+    assert codemode.skills.root == tmp_path / "fluid" / "skills"
+    assert codemode._synthesizer is not None
+
+
+@pytest.mark.asyncio
+async def test_native_leg_code_mode_can_be_turned_off(monkeypatch, tmp_path):
+    """FLUID_CODE_MODE=false → no code-mode session at all."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "fluid_code_mode", False)
+    captured = await _connect_native_capturing(monkeypatch, tmp_path)
+    assert captured["codemode"] is None
+
+
+@pytest.mark.asyncio
+async def test_native_leg_continual_off_keeps_code_mode(monkeypatch, tmp_path):
+    """FLUID_CONTINUAL=false leaves code-mode running but stops the background
+    skill-synthesis passes."""
+    from fluid.codemode.session import CodeModeSession
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "fluid_continual", False)
+    captured = await _connect_native_capturing(monkeypatch, tmp_path)
+
+    codemode = captured["codemode"]
+    assert isinstance(codemode, CodeModeSession)
+    assert codemode._synthesizer is None
+
+
+@pytest.mark.asyncio
+async def test_native_leg_continual_model_pins_synthesis(monkeypatch, tmp_path):
+    """fluid_continual_model pins synthesis to one model; unset it would be the
+    session's own model."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "fluid_continual_model", "foo")
+    captured = await _connect_native_capturing(monkeypatch, tmp_path)
+    assert captured["codemode"]._synthesizer._model == "foo"
+
+    monkeypatch.setattr(settings, "fluid_continual_model", None)
+    captured = await _connect_native_capturing(monkeypatch, tmp_path)
+    assert captured["codemode"]._synthesizer._model == "gpt-4o"
+
+
+@pytest.mark.asyncio
+async def test_native_leg_code_mode_failure_degrades_to_none(monkeypatch, tmp_path):
+    """A broken skill store must never fail the connect — the leg falls back to
+    plain JSON tool calling."""
+    import app.core.provider.harness_adapter as ha
+
+    def _boom(root):
+        raise OSError("no such volume")
+
+    monkeypatch.setattr(ha, "SkillStore", _boom)
+    captured = await _connect_native_capturing(monkeypatch, tmp_path)
+    assert captured["codemode"] is None
+
+
+# ─── Code-mode prompt rewrites ───────────────────────────────────────────────
+#
+# Under code mode the model's schema holds ONLY run_python/list_tools/
+# search_tools/read_tool_docs, and fluid injects nothing about that into the
+# system prompt. Every "use the X tool" line the app writes therefore has to
+# say how X is actually reached — and the rewrite must key on the session
+# really coming up, because its construction is fail-open.
+#
+# ``agent_workspace``/``_agents_options``/``_write_file`` live further down the
+# module with the agents-index tests; they give a real project cwd, which is
+# what makes a skills section and an agents index exist at all.
+
+
+async def _connect_code_mode(monkeypatch, workspace):
+    """Native connect over ``_CapturingLoop`` in a workspace with a skill."""
+    import app.core.provider.harness_adapter as ha
+
+    _write_file(
+        workspace / ".agents" / "skills" / "demo" / "SKILL.md",
+        "---\nname: demo\ndescription: Demo skill\n---\nSKILL BODY",
+    )
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+    await ha.HarnessAdapter().connect(
+        _agents_options(
+            workspace, declared=[{"name": "Helper", "description": "Helps out"}]
+        )
+    )
+    return _CapturingLoop.captured
+
+
+@pytest.mark.asyncio
+async def test_code_mode_rewrites_the_compiled_prompt(monkeypatch, agent_workspace):
+    """Defaults ON: the skills/agents headers name the import path and the
+    ``# Code mode`` rule closes the prompt."""
+    import app.core.provider.harness_adapter as ha
+
+    captured = await _connect_code_mode(monkeypatch, agent_workspace)
+    assert captured["codemode"] is not None
+    system = captured["system"]
+
+    # LAST — the operating rule for every instruction above it.
+    assert system.endswith(ha.CODE_MODE_SECTION)
+    # Skills: header rewritten, index body untouched.
+    assert "from tools.Skill import Skill" in system
+    assert "- demo: Demo skill" in system
+    assert "full instructions with the Skill tool" not in system
+    # Agents: fluid's own sentence, extended with how Task is reached.
+    assert "delegated to with the Task tool, called from run_python" in system
+    assert system.count("# Available agent types") == 1
+
+
+@pytest.mark.asyncio
+async def test_code_mode_section_is_priced_as_a_section(monkeypatch, agent_workspace):
+    """The block rides ``system_sections`` too, so get_context_usage() prices
+    it instead of seeing a prompt longer than the sections it was given."""
+    import app.core.provider.harness_adapter as ha
+
+    captured = await _connect_code_mode(monkeypatch, agent_workspace)
+    compiled = captured["system_sections"]
+    assert [s for s in compiled.sections if s.text == ha.CODE_MODE_SECTION]
+    assert sum(s.text.startswith("# Code mode") for s in compiled.sections) == 1
+    # The two views never drift: joined sections ARE the prompt.
+    assert compiled.text == captured["system"]
+
+
+@pytest.mark.asyncio
+async def test_code_mode_off_leaves_the_prompt_alone(monkeypatch, agent_workspace):
+    """FLUID_CODE_MODE=false → the plain JSON-tool-calling prompt, verbatim."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "fluid_code_mode", False)
+    captured = await _connect_code_mode(monkeypatch, agent_workspace)
+
+    assert captured["codemode"] is None
+    system = captured["system"]
+    assert "# Code mode" not in system
+    assert "Load a skill's full instructions with the Skill tool" in system
+    assert "delegated to with the Task tool." in system
+    assert "run_python" not in system
+
+
+@pytest.mark.asyncio
+async def test_code_mode_prompt_keys_on_the_session_not_the_setting(
+    monkeypatch, agent_workspace
+):
+    """The setting is on but the session failed to build (fail-open): the
+    prompt must NOT tell the model to import tools inside a run_python it does
+    not have."""
+    import app.core.provider.harness_adapter as ha
+
+    def _boom(root):
+        raise OSError("no such volume")
+
+    monkeypatch.setattr(ha, "SkillStore", _boom)
+    captured = await _connect_code_mode(monkeypatch, agent_workspace)
+
+    assert captured["codemode"] is None
+    system = captured["system"]
+    assert "# Code mode" not in system
+    assert "run_python" not in system
+    assert "Load a skill's full instructions with the Skill tool" in system
+
+
 # ─── Native-leg context window (feeds get_context_usage) ─────────────────────
 
 
@@ -1483,7 +1707,7 @@ async def test_native_leg_compiler_failure_degrades_sections_to_none(
     monkeypatch.setattr(
         ha.HarnessAdapter,
         "_compile_prompt_sections",
-        staticmethod(lambda system, append_system, options: None),
+        staticmethod(lambda system, append_system, options, **kwargs: None),
     )
 
     await ha.HarnessAdapter().connect(
@@ -3767,6 +3991,10 @@ async def test_delegated_append_mode_advertises_agents(monkeypatch, agent_worksp
     # Index-only, exactly like the native leg: no definition bodies.
     assert "PLUGIN AGENT PROMPT" not in append
     assert "BODY" not in append
+    # The CLI owns its own tool surface — code mode never reaches this leg, so
+    # neither do its prompt rewrites.
+    assert "# Code mode" not in append
+    assert "These agent types can be delegated to with the Task tool." in append
 
 
 @pytest.mark.asyncio
@@ -3838,6 +4066,135 @@ def test_with_agents_index_is_idempotent():
     assert ha._with_agents_index(None, None, index) == (None, index)
     # Nothing to advertise -> untouched.
     assert ha._with_agents_index("BASE", None, None) == ("BASE", None)
+
+
+# ─── Native-leg project memory (ruling MEM3) ─────────────────────────────────
+#
+# The native leg has no CLI behind it, so nothing told the model a memory dir
+# existed and nothing was ever written or read. ``extra["memory_dir"]`` (stamped
+# by query_options as ``aih_memory_dir``) is what turns that on: the prompt names
+# the dir, states the file convention, and inlines the current MEMORY.md.
+
+
+async def _connect_with_memory_dir(monkeypatch, workspace, memory_dir):
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+    options = _agents_options(workspace)
+    if memory_dir is not None:
+        options.extra["memory_dir"] = str(memory_dir)
+    await ha.HarnessAdapter().connect(options)
+    return _CapturingLoop.captured
+
+
+@pytest.mark.asyncio
+async def test_native_prompt_carries_the_project_memory_section(
+    monkeypatch, agent_workspace, tmp_path
+):
+    import app.core.provider.harness_adapter as ha
+
+    memory_dir = tmp_path / "fluid-projects" / "-proj" / "memory"
+    _write_file(
+        memory_dir / "MEMORY.md",
+        "- [Deploy recipe](deploy.md) — build, copy, restart",
+    )
+
+    captured = await _connect_with_memory_dir(monkeypatch, agent_workspace, memory_dir)
+    system = captured["system"]
+
+    assert "# Project memory" in system
+    assert str(memory_dir) in system
+    assert "- [Deploy recipe](deploy.md) — build, copy, restart" in system
+    assert "## MEMORY.md" in system
+    # Code mode stays LAST: it is the operating rule for everything above it,
+    # this section included.
+    assert system.index("# Project memory") < system.index("# Code mode")
+    assert system.endswith(ha.CODE_MODE_SECTION)
+
+
+@pytest.mark.asyncio
+async def test_project_memory_section_is_priced_as_a_memory_file(
+    monkeypatch, agent_workspace, tmp_path
+):
+    from fluid.context.usage import build_context_usage
+
+    memory_dir = tmp_path / "fluid-projects" / "-proj" / "memory"
+    _write_file(memory_dir / "MEMORY.md", "- [Thing](thing.md) — a thing")
+
+    captured = await _connect_with_memory_dir(monkeypatch, agent_workspace, memory_dir)
+    compiled = captured["system_sections"]
+
+    memory_sections = [
+        s for s in compiled.sections if s.text.startswith("# Project memory")
+    ]
+    assert len(memory_sections) == 1
+    # Memory-kind, pathed at the real file: that is what puts it under the
+    # breakdown's "Memory files" category with a per-file detail row.
+    assert memory_sections[0].kind == "memory"
+    assert memory_sections[0].path == str(memory_dir / "MEMORY.md")
+    assert memory_sections[0].scope == "project"
+    # The two views never drift: joined sections ARE the prompt.
+    assert compiled.text == captured["system"]
+
+    # …and the breakdown a host renders says the same thing. Exactly one row
+    # for this file — the AGENTS.md instruction stack rides the same category
+    # without either counting the other.
+    usage = build_context_usage(
+        sections=compiled.sections, model="claude-opus-4-6", context_window=200_000
+    )
+    rows = [
+        f for f in usage["memoryFiles"]
+        if f["path"] == str(memory_dir / "MEMORY.md")
+    ]
+    assert len(rows) == 1
+    assert rows[0]["type"] == "Project"
+    assert rows[0]["tokens"] > 0
+    memory_category = [
+        c for c in usage["categories"] if c["name"] == "Memory files"
+    ]
+    assert len(memory_category) == 1
+    assert memory_category[0]["tokens"] == sum(
+        f["tokens"] for f in usage["memoryFiles"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_empty_memory_dir_says_so_rather_than_going_quiet(
+    monkeypatch, agent_workspace, tmp_path
+):
+    """A dir with no MEMORY.md still gets the section — the model has to know
+    where to write the first fact."""
+    captured = await _connect_with_memory_dir(
+        monkeypatch, agent_workspace, tmp_path / "never-written"
+    )
+    assert "# Project memory" in captured["system"]
+    assert "(empty — nothing saved yet)" in captured["system"]
+
+
+@pytest.mark.asyncio
+async def test_no_memory_dir_means_no_project_memory_section(
+    monkeypatch, agent_workspace
+):
+    captured = await _connect_with_memory_dir(monkeypatch, agent_workspace, None)
+    assert "# Project memory" not in captured["system"]
+    assert not [
+        s for s in captured["system_sections"].sections
+        if s.text.startswith("# Project memory")
+    ]
+
+
+def test_oversized_memory_index_is_truncated(tmp_path):
+    import app.core.provider.harness_adapter as ha
+
+    memory_dir = tmp_path / "memory"
+    _write_file(memory_dir / "MEMORY.md", "x" * (ha._MEMORY_INDEX_CHAR_CAP + 500))
+
+    text = ha._project_memory_section(str(memory_dir))
+
+    assert text.endswith("[truncated]")
+    assert len(text) < ha._MEMORY_INDEX_CHAR_CAP + 2000
+
 
 
 # ─── Per-session fast mode (v81) ─────────────────────────────────────────────

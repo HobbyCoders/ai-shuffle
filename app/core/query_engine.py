@@ -102,7 +102,9 @@ from app.core.query_persistence import (  # noqa: F401 — re-exports
     log_captured_cli_stderr,
 )
 from app.core.session_context import set_current_session_id
-from app.core.memory_sync import reconcile_memory, push_memory
+from app.core.memory_sync import (
+    memory_leg_for_options, reconcile_memory, push_memory,
+)
 from app.core.query_background import (  # noqa: F401 — re-exports
     _pending_background_tasks,
     _store_background_task,
@@ -910,7 +912,9 @@ async def execute_query(
     sdk_link_persisted = False
 
     # Pull shared agent-memory from the DB before the CLI reads it.
-    await reconcile_memory(project_id, getattr(options, "cwd", None))
+    await reconcile_memory(
+        project_id, getattr(options, "cwd", None), memory_leg_for_options(options)
+    )
 
     # Backend selection goes through the provider seam (see
     # app/core/provider/factory.py); the fluid HarnessAdapter is the only
@@ -1139,7 +1143,9 @@ async def execute_query(
         logger.warning(f"Failed to record ad-hoc turn for {session_id}: {e}")
 
     # Push agent-memory the CLI wrote this turn up to the shared DB.
-    await push_memory(project_id, getattr(options, "cwd", None))
+    await push_memory(
+        project_id, getattr(options, "cwd", None), memory_leg_for_options(options)
+    )
 
     # Notify connected frontends that this session has new messages
     # (non-streaming queries render nothing live, so we broadcast a
@@ -1476,7 +1482,9 @@ async def stream_query(
         options.stderr, cli_stderr_lines = _wrap_stderr_capture(options.stderr)
 
         # Pull shared agent-memory from the DB before the CLI reads it.
-        await reconcile_memory(project_id, getattr(options, "cwd", None))
+        await reconcile_memory(
+            project_id, getattr(options, "cwd", None), memory_leg_for_options(options)
+        )
 
         # Backend selection via the provider seam, same as the WS path below:
         # make_adapter() always returns the fluid HarnessAdapter.
@@ -1880,7 +1888,9 @@ async def stream_query(
     schedule_context_usage_capture(session_id, log_prefix="")
 
     # Push agent-memory the CLI wrote this turn up to the shared DB.
-    await push_memory(project_id, getattr(options, "cwd", None))
+    await push_memory(
+        project_id, getattr(options, "cwd", None), memory_leg_for_options(options)
+    )
 
     # Yield terminal event. CancelledError path already yielded 'interrupted'
     # at the top of the except block; only yield here for SDK interrupt (no
@@ -2535,7 +2545,7 @@ async def _stream_to_websocket_impl(
 
         # Pull shared agent-memory from the DB into the local memory dir before
         # the CLI reads it, so this install sees memories written elsewhere.
-        await reconcile_memory(project_id, options.cwd)
+        await reconcile_memory(project_id, options.cwd, memory_leg_for_options(options))
 
         # Backend selection via the provider seam: make_adapter() always
         # returns the fluid HarnessAdapter (see app/core/provider/factory.py).
@@ -4003,7 +4013,9 @@ async def _stream_to_websocket_impl(
     schedule_context_usage_capture(session_id, log_prefix="[WS] ")
 
     # Push any agent-memory the CLI wrote this turn up to the shared DB.
-    await push_memory(project_id, getattr(options, "cwd", None))
+    await push_memory(
+        project_id, getattr(options, "cwd", None), memory_leg_for_options(options)
+    )
 
     # For slash commands that produced no visible content, yield a notification
     # SDK built-in commands like /memory, /cost, /model execute inside the subprocess

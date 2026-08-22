@@ -130,7 +130,8 @@ def test_reconcile_pulls_new_db_file_into_empty_dir(memdb, memdir):
     memory_sync.reconcile(KEY, memdir, "inst-a")
 
     assert read_file(memdir, "MEMORY.md") == "shared index"
-    assert KEY in memory_sync._reconciled_keys
+    # The gate is keyed per (memory_key, local mirror dir) — see ruling MEM2.
+    assert (KEY, str(memdir)) in memory_sync._reconciled_keys
 
 
 def test_reconcile_applies_remote_tombstone(memdb, memdir):
@@ -434,3 +435,137 @@ def test_push_entrypoint_delete_gate_requires_prior_reconcile(memdb, memdir):
         os.remove(memdir / "keep.md")  # reconcile pulled it down; user removes it
         memory_sync.push_memory_sync("p1", "/work/x")
         assert memdb.get_memory_file(KEY, "keep.md")["deleted"] is True
+
+
+# =============================================================================
+# Leg-aware memory dirs (rulings MEM1/MEM2)
+# =============================================================================
+
+def test_native_leg_resolves_under_the_fluid_projects_root(tmp_path):
+    # Same slug, different root: the native leg's mirror lives in
+    # <fluid_projects_dir>/<slug>/memory, never in ~/.claude/projects.
+    claude_root = tmp_path / "claude-projects"
+    fluid_root = tmp_path / "fluid-projects"
+    slug = memory_sync.get_project_dir_name("/workspace/ai-shuffle")
+
+    with patch.object(memory_sync.settings, "claude_projects_dir", claude_root), \
+         patch.object(memory_sync.settings, "fluid_projects_dir", str(fluid_root)):
+        native = memory_sync.memory_dir_for_working_dir(
+            "/workspace/ai-shuffle", "native"
+        )
+        delegated = memory_sync.memory_dir_for_working_dir(
+            "/workspace/ai-shuffle", "delegated"
+        )
+        default = memory_sync.memory_dir_for_working_dir("/workspace/ai-shuffle")
+
+    assert native == fluid_root / slug / "memory"
+    assert delegated == claude_root / slug / "memory"
+    # An untouched caller keeps today's behaviour.
+    assert default == delegated
+
+
+def test_worktree_fold_applies_on_both_legs(tmp_path):
+    claude_root = tmp_path / "claude-projects"
+    fluid_root = tmp_path / "fluid-projects"
+    worktree = "/workspace/ai-shuffle/.claude/worktrees/fix-thing-bb7d"
+
+    with patch.object(memory_sync.settings, "claude_projects_dir", claude_root), \
+         patch.object(memory_sync.settings, "fluid_projects_dir", str(fluid_root)):
+        for leg in ("delegated", "native"):
+            assert memory_sync.memory_dir_for_working_dir(worktree, leg) == \
+                memory_sync.memory_dir_for_working_dir("/workspace/ai-shuffle", leg)
+
+
+def test_resolve_target_shares_the_key_across_legs(tmp_path):
+    # MEM2: one memory_key, two mirrors — that is what makes the existing CLI
+    # memory materialize into the fluid dir on the first native reconcile.
+    project = {"id": "p1", "link_group_id": KEY, "path": "/workspace/ai-shuffle"}
+    with patch.object(memory_sync.settings, "claude_projects_dir", tmp_path / "c"), \
+         patch.object(memory_sync.settings, "fluid_projects_dir", str(tmp_path / "f")), \
+         patch.object(memory_sync.database, "get_project", return_value=project):
+        d_key, d_dir = memory_sync._resolve_target("p1", "/work/x", "delegated")
+        n_key, n_dir = memory_sync._resolve_target("p1", "/work/x", "native")
+
+    assert d_key == n_key == KEY
+    assert d_dir != n_dir
+
+
+def test_native_reconcile_materializes_existing_shared_memory(memdb, tmp_path):
+    # The migration (MEM2): memory the CLI leg already shared comes down into
+    # the fluid dir on the first native reconcile. Nothing is copied dir-to-dir.
+    memdb.seed_live("MEMORY.md", "shared index", T0)
+    fluid_root = tmp_path / "fluid-projects"
+    project = {"id": "p1", "link_group_id": KEY, "path": "/workspace/ai-shuffle"}
+
+    with patch.object(memory_sync.settings, "agent_memory_sync", True), \
+         patch.object(memory_sync.settings, "fluid_projects_dir", str(fluid_root)), \
+         patch.object(memory_sync.database, "get_project", return_value=project):
+        memory_sync.reconcile_memory_sync("p1", "/work/x", "native")
+
+    slug = memory_sync.get_project_dir_name("/workspace/ai-shuffle")
+    assert (fluid_root / slug / "memory" / "MEMORY.md").read_text(
+        encoding="utf-8"
+    ) == "shared index"
+
+
+def test_delete_authorization_does_not_leak_across_legs(memdb, tmp_path):
+    # Reconciling the NATIVE dir must not authorize deletes against the
+    # DELEGATED dir: the two share a memory_key but not a mirror, so an empty
+    # (or merely stale) sibling dir would otherwise tombstone live files.
+    memdb.seed_live("keep.md", "precious", T0)
+    claude_root = tmp_path / "claude-projects"
+    fluid_root = tmp_path / "fluid-projects"
+    project = {"id": "p1", "link_group_id": KEY, "path": "/workspace/ai-shuffle"}
+    slug = memory_sync.get_project_dir_name("/workspace/ai-shuffle")
+    (claude_root / slug / "memory").mkdir(parents=True)  # exists, but empty
+
+    with patch.object(memory_sync.settings, "agent_memory_sync", True), \
+         patch.object(memory_sync.settings, "claude_projects_dir", claude_root), \
+         patch.object(memory_sync.settings, "fluid_projects_dir", str(fluid_root)), \
+         patch.object(memory_sync.database, "get_project", return_value=project):
+        memory_sync.reconcile_memory_sync("p1", "/work/x", "native")
+        memory_sync.push_memory_sync("p1", "/work/x", "delegated")
+        assert memdb.get_memory_file(KEY, "keep.md")["deleted"] is False
+
+        # The native dir's own reconcile DID authorize deletes for the native
+        # mirror, so removing the file there still propagates.
+        os.remove(fluid_root / slug / "memory" / "keep.md")
+        memory_sync.push_memory_sync("p1", "/work/x", "native")
+        assert memdb.get_memory_file(KEY, "keep.md")["deleted"] is True
+
+
+# =============================================================================
+# Leg decision (memory_leg_for_options)
+# =============================================================================
+
+class _Options:
+    """Stand-in for a built ClaudeAgentOptions (only the read attrs matter)."""
+
+    def __init__(self, **attrs):
+        self.model = attrs.pop("model", "sonnet")
+        for name, value in attrs.items():
+            setattr(self, name, value)
+
+
+def test_memory_leg_for_delegated_claude_options():
+    assert memory_sync.memory_leg_for_options(_Options(model="sonnet")) == "delegated"
+
+
+def test_memory_leg_for_native_openai_shaped_options():
+    options = _Options(
+        model="gpt-4o",
+        aih_provider_id="prov-1",
+        aih_provider_type="openai",
+        aih_provider_auth_mode="api_key",
+    )
+    assert memory_sync.memory_leg_for_options(options) == "native"
+
+
+def test_memory_leg_degrades_to_delegated_when_undecidable():
+    assert memory_sync.memory_leg_for_options(None) == "delegated"
+    with patch.object(
+        memory_sync.logger, "debug"
+    ):  # the decision table raising must not surface
+        assert memory_sync.memory_leg_for_options(object()) in (
+            "delegated", "native"
+        )

@@ -76,6 +76,22 @@ HONORED:
     dispatch (ruling CE12) — the profile blocklist is now a wall, not just a
     permission-callback denial. Delegated: the CLI's ``--disallowed-tools``,
     unioned with the banned-tool set (Task/Agent/wake family, ruling A6).
+  * code-mode + the continual harness → native ``NativeLoop(codemode=...)``.
+    Both are ON by default for every native leg (the delegated CLI leg caps
+    ``code_mode`` off and is not touched). Four app settings drive it, mirroring
+    fluid's own ``config/loader.py`` wiring: ``fluid_code_mode`` builds the
+    ``SkillStore`` + ``CodeModeSession``, ``fluid_continual`` attaches the
+    ``Synthesizer`` that distills journaled cells into saved skills,
+    ``fluid_continual_model`` pins synthesis to one model (None = the session's
+    model), and ``fluid_skills_dir`` relocates the skill/journal root (None =
+    ``<data_dir>/fluid/skills``, so nothing lands in fluid's ``~/.fluid``
+    default). Construction is best-effort: any failure degrades to
+    ``codemode=None`` rather than failing the turn. ``NativeLoop.aclose()``
+    already closes the session, so there is no teardown here. When the session
+    really came up (fail-open, so never on the setting alone) the compiled
+    prompt gains a trailing ``# Code mode`` section and its skills/agents
+    headers are rewritten to say that Skill and Task are imported inside
+    run_python — fluid itself puts nothing about code mode in the prompt.
   * ``tool_allowlist``       → native ``NativeLoop(allowed_tools=...)``: the
     session's ENTIRE tool surface when set, None = unrestricted (CE12). Set for
     a worker dispatched onto a file/plugin agent whose definition carries a
@@ -157,6 +173,8 @@ import json
 import logging
 import math
 import os
+from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional, Tuple, cast
 
 import httpx
@@ -202,6 +220,9 @@ from app.core.provider.events import (
 
 # fluid imports (the library we wrap). Its top-level __init__ is intentionally
 # empty, so we import from submodules directly.
+from fluid.codemode.continual import Synthesizer
+from fluid.codemode.session import CodeModeSession
+from fluid.codemode.skills import SkillStore
 from fluid.engine.native import NativeLoop
 from fluid.engine.delegated import DelegatedLoop
 from fluid.events.ops import (
@@ -473,10 +494,54 @@ class HarnessAdapter(ProviderAdapter):
             # name+description index for the prompt, plus the matching
             # descriptors for the "Custom agents" usage row.
             _, declared_agent_descriptors = _agent_context(options)
+            # Code-mode + the continual harness, mirroring fluid's own
+            # config/loader.py wiring. ON by default for every native leg; the
+            # skill store and its episodic journal live under the app's data
+            # dir rather than fluid's ~/.fluid default. Best-effort throughout:
+            # a broken skills dir or an unavailable kernel must never take down
+            # a turn, so any failure degrades to plain JSON tool calling.
+            # NativeLoop.aclose() closes the session, so there is no teardown.
+            codemode = None
+            try:
+                from app.core.config import settings
+
+                if settings.fluid_code_mode and self._registry is not None:
+                    skills_root = (
+                        Path(settings.fluid_skills_dir)
+                        if settings.fluid_skills_dir
+                        else settings.effective_data_dir / "fluid" / "skills"
+                    )
+                    skills = SkillStore(skills_root)
+                    synthesizer = None
+                    if settings.fluid_continual:
+                        # Session provider; fluid_continual_model pins synthesis
+                        # to one model so skill quality doesn't drift with the
+                        # session's provider choice. Passes are background and
+                        # best-effort (see fluid/codemode/continual.py).
+                        synthesizer = Synthesizer(
+                            provider_client,
+                            settings.fluid_continual_model or cast(str, native_model),
+                            skills,
+                        )
+                    codemode = CodeModeSession(
+                        self._registry, skills=skills, synthesizer=synthesizer
+                    )
+            except Exception:  # noqa: BLE001 — degrade to JSON tool calling
+                logger.warning(
+                    "[HarnessAdapter] code-mode/continual setup FAILED (fluid "
+                    "session=%s) — this native leg runs plain JSON tool calls",
+                    fluid_session_id, exc_info=True,
+                )
+                codemode = None
             # Compiled ONCE, used twice below: the joined text is the prompt
             # the engine sends; the labeled sections feed get_context_usage().
+            # Compiled AFTER the block above on purpose — the code-mode prompt
+            # rewrites key on whether the session actually came up, never on
+            # the setting: the build is fail-open, and a prompt that told the
+            # model to import tools inside run_python when run_python is not in
+            # its schema would be worse than saying nothing.
             compiled_prompt = self._compile_prompt_sections(
-                system, append_system, options
+                system, append_system, options, code_mode=codemode is not None
             )
             self._engine = NativeLoop(
                 provider=provider_client,
@@ -529,6 +594,11 @@ class HarnessAdapter(ProviderAdapter):
                 # definitions fluid discovered — passing this list at all
                 # suppresses fluid's own auto-fill, so it has to carry both.
                 agents=declared_agent_descriptors or None,
+                # Code-mode session built above (None when disabled or when its
+                # construction failed) — NativeLoop registers the four code-mode
+                # tools onto the registry and swaps the model's tool schema for
+                # them when this is present.
+                codemode=codemode,
                 registry=self._registry,
                 permissions=permissions,
                 ctx=native_ctx,
@@ -684,6 +754,12 @@ class HarnessAdapter(ProviderAdapter):
         profile_id = getattr(sdk_options, "aih_profile_id", None)
         if profile_id:
             opts.extra["profile_id"] = profile_id
+        # The native leg's project-memory dir (rulings MEM1/MEM3), resolved by
+        # query_options from the project's root path. Only the native prompt
+        # builder reads it — the delegated leg's memory belongs to the CLI.
+        memory_dir = getattr(sdk_options, "aih_memory_dir", None)
+        if memory_dir:
+            opts.extra["memory_dir"] = str(memory_dir)
         # The DB agents the profile declares into its model's context (2026-08-17
         # ruling, superseding A10) — ``[{"name", "description"}]`` resolved by
         # query_options from agent_invoke_mode/enabled_agents. Merged into the
@@ -1515,6 +1591,9 @@ class HarnessAdapter(ProviderAdapter):
         system: Optional[str],
         append_system: Optional[str],
         options: SessionOptions,
+        *,
+        code_mode: bool = False,
+        native: bool = True,
     ) -> Any:
         """Run the fluid prompt compiler, keeping the labeled sections.
 
@@ -1532,6 +1611,22 @@ class HarnessAdapter(ProviderAdapter):
         :func:`_agent_context` supplies the merged one, slotted where the
         compiler would have put it (after skills, before environment) so the
         prompt prefix stays cache-stable.
+
+        ``code_mode`` reflects whether this leg actually runs a
+        ``CodeModeSession`` (never merely whether the setting is on — the
+        build is fail-open). Under code mode the model's schema holds only
+        run_python/list_tools/search_tools/read_tool_docs, so every "use the X
+        tool" line in this prompt would otherwise name something the model
+        cannot see. Two headers are rewritten to say how the tool is reached
+        (skills, agents) and a trailing ``# Code mode`` section states the rule
+        once for everything above it.
+
+        ``native`` says whether this compilation feeds a native leg. It is the
+        gate on the ``# Project memory`` section (ruling MEM3): only a native
+        leg has an app-owned memory dir to point at — under
+        ``prompt_full_replace`` this same compiler also builds the DELEGATED
+        leg's prompt, and there the claude CLI owns memory and gathers it
+        itself, so naming the fluid dir would send it to the wrong place.
         """
         try:
             from fluid.context.compiler import (
@@ -1551,16 +1646,58 @@ class HarnessAdapter(ProviderAdapter):
                     include_agents=False,
                 )
             )
-            index, _ = _agent_context(options)
-            if not index:
-                return compiled
+            index, _ = _agent_context(options, code_mode=code_mode)
             sections = list(compiled.sections)
-            insert_at = len(sections)
-            for position, section in enumerate(sections):
-                if section.kind in ("environment", "extra"):
-                    insert_at = position
-                    break
-            sections.insert(insert_at, PromptSection(kind="agents", text=index))
+            if code_mode:
+                # The compiler's skills header points at "the Skill tool",
+                # which is not in a code-mode schema. Keyed by section kind,
+                # the same way the agents block is slotted below.
+                sections = [
+                    (
+                        replace(section, text=_code_mode_skills_text(section.text))
+                        if section.kind == "skills"
+                        else section
+                    )
+                    for section in sections
+                ]
+            if index:
+                insert_at = len(sections)
+                for position, section in enumerate(sections):
+                    if section.kind in ("environment", "extra"):
+                        insert_at = position
+                        break
+                sections.insert(insert_at, PromptSection(kind="agents", text=index))
+            memory_dir = (options.extra or {}).get("memory_dir") if native else None
+            if memory_dir:
+                # Ruling MEM3. Before the code-mode section, which must stay
+                # last: it is the operating rule for everything above it, this
+                # section included ("write a file" means the file tools, which
+                # under code mode are reached from run_python). Carried as a
+                # ``memory`` section so get_context_usage() prices it under
+                # "Memory files" with a per-file row naming MEMORY.md — the
+                # section IS that file's contents plus its header, and the
+                # AGENTS.md instruction stack (also memory-kind, gathered by
+                # the compiler above) sits alongside it rather than clashing:
+                # the memory dir lives outside the tree, so no file is counted
+                # twice.
+                sections.append(
+                    PromptSection(
+                        kind="memory",
+                        text=_project_memory_section(str(memory_dir)),
+                        path=str(Path(memory_dir) / "MEMORY.md"),
+                        scope="project",
+                    )
+                )
+            if code_mode:
+                # LAST, after env and the app's extra blocks: it is the
+                # operating rule for every "use the X tool" line above it.
+                # Carried as a real section (not a text-only append) so the
+                # leg's get_context_usage() prices it like the rest.
+                sections.append(
+                    PromptSection(kind="extra", text=CODE_MODE_SECTION)
+                )
+            if sections == list(compiled.sections):
+                return compiled
             return CompiledPrompt(
                 sections=tuple(sections),
                 text="\n\n".join(s.text for s in sections) if sections else None,
@@ -1583,9 +1720,13 @@ class HarnessAdapter(ProviderAdapter):
         compiler adds fluid's own gathering: instruction files, skills index,
         environment. Never raises — a compiler failure falls back to the
         pre-compiler string so a session can always start.
+
+        This is the DELEGATED full-replace path (the native leg calls
+        ``_compile_prompt_sections`` directly for the labeled sections), hence
+        ``native=False``: memory there is the claude CLI's own.
         """
         compiled = HarnessAdapter._compile_prompt_sections(
-            system, append_system, options
+            system, append_system, options, native=False
         )
         if compiled is None:
             return system if system is not None else append_system
@@ -2038,19 +2179,150 @@ def _context_declared_agents(options: SessionOptions) -> List[Dict[str, str]]:
     return out
 
 
-def _agents_header() -> str:
+# ─── Code-mode prompt text ───────────────────────────────────────────────────
+#
+# fluid injects NOTHING about code mode into the system prompt: NativeLoop
+# sends ``system`` verbatim and the compiler knows nothing about it, so the
+# model's only hint is the run_python tool description. Everything else in the
+# prompt — this app's security block, the agents catalog, the memory/app-config
+# instructions, MCP server instructions — still says "call the X tool" about
+# tools that are no longer in its schema. These strings close that gap.
+
+# The compiler's skills header, rewritten for a schema that has no Skill tool.
+CODE_MODE_SKILLS_HEADER = (
+    "# Available skills\n"
+    "Load a skill's full instructions before doing a task it covers: inside "
+    "run_python, `from tools.Skill import Skill` and call it with the skill "
+    "name."
+)
+
+# Appended to fluid's AGENTS_HEADER sentence about the Task tool.
+_CODE_MODE_TASK_SUFFIX = (
+    "delegated to with the Task tool, called from run_python "
+    "(`from tools.Task import Task`)."
+)
+
+CODE_MODE_SECTION = """# Code mode
+The only tools in your schema are run_python, list_tools, search_tools and \
+read_tool_docs. Every other tool named in these instructions — file, shell, \
+search, Skill, Task, Memory, Ledger, Note, app-config, computer-use, media and \
+MCP tools — is called from Python inside run_python: `from tools.<name> import \
+<name>`, then call it. Each call is still permission-gated on the host exactly \
+as a direct tool call would be.
+
+Tool names in these instructions map to their leaf name: `mcp__server__name` \
+is imported as `tools.name`. "Call the X tool" and "use the X tool" mean \
+import and call X inside run_python. An instruction NOT to call a tool still \
+applies.
+
+Discover before guessing: list_tools for the catalog, search_tools to search \
+it by keyword, read_tool_docs for a tool's exact signature. Catalog \
+descriptions are one line; read_tool_docs has the full stub.
+
+Batch related calls into one run_python cell — loop, filter, combine — rather \
+than one cell per call. The kernel is persistent, so variables and ResultRefs \
+survive across cells.
+
+Two different things are called skills. The "# Available skills" list above is \
+instruction files, loaded through the Skill tool. The "Saved skills" that \
+list_tools reports are Python modules from your continual skill store, \
+imported with `from skills.<name> import <name>`. Once you have repeated a \
+workflow, save it as a skill.
+
+Network access and direct file I/O are disabled inside the kernel — go through \
+the file tools."""
+
+
+# Ruling MEM3: the native leg had no memory surface at all — no CLI behind it
+# means nothing tells the model a memory dir exists, so nothing was ever
+# written or read. This section is that surface. It ships as a ``memory``
+# section pathed at the real MEMORY.md, so the context-usage breakdown lists
+# it under "Memory files" next to the AGENTS.md stack.
+#
+# The inlined index is prompt prefix on every turn, so it is capped. 24k chars
+# is roughly 6k tokens — far more than a healthy index needs, and small enough
+# that a runaway MEMORY.md cannot eat the window.
+_MEMORY_INDEX_CHAR_CAP = 24_000
+
+_PROJECT_MEMORY_HEADER = """# Project memory
+Your memory for this project lives in {memory_dir}. MEMORY.md in that \
+directory is the index, and it is loaded at the start of every session — its \
+current contents are below.
+
+Save one fact per file: a short .md file with frontmatter (name, description, \
+metadata.type = user | feedback | project | reference), then add a one-line \
+pointer to MEMORY.md so the next session can find it:
+
+- [Title](file.md) — the hook, in a few words
+
+Update the existing file when a fact changes; do not write a second file on \
+the same subject. Keep the index in step with the files.
+
+Worth saving: the user's preferences and rulings, how this system actually \
+behaves, decisions and the reasons behind them, traps that cost you time. Not \
+worth saving: anything the repository already records — code, docs and commit \
+history are there to be read."""
+
+_MEMORY_INDEX_EMPTY = "(empty — nothing saved yet)"
+
+
+def _project_memory_section(memory_dir: str) -> str:
+    """The ``# Project memory`` prompt text, with MEMORY.md inlined.
+
+    Reading the index at compile time is deliberate: the model gets the current
+    memory as context instead of having to spend a tool call on it, exactly as
+    the CLI leg does. A missing or unreadable file is stated as empty rather
+    than hidden — "there is a dir, it holds nothing yet" is the useful answer.
+    """
+    index = _MEMORY_INDEX_EMPTY
+    try:
+        text = (Path(memory_dir) / "MEMORY.md").read_text(encoding="utf-8").strip()
+        if text:
+            index = (
+                text
+                if len(text) <= _MEMORY_INDEX_CHAR_CAP
+                else text[:_MEMORY_INDEX_CHAR_CAP] + "\n\n[truncated]"
+            )
+    except (OSError, UnicodeDecodeError):
+        pass
+    header = _PROJECT_MEMORY_HEADER.format(memory_dir=memory_dir)
+    return f"{header}\n\n## MEMORY.md\n{index}"
+
+
+def _code_mode_skills_text(text: str) -> str:
+    """Swap the compiler's skills header for its code-mode wording.
+
+    Only the header line is touched; the index body (one line per skill) is
+    left exactly as compiled. A header fluid has since reworded leaves the
+    section untouched rather than producing a mangled one.
+    """
+    try:
+        from fluid.context.compiler import SKILLS_HEADER
+    except Exception:  # noqa: BLE001
+        return text
+    return text.replace(SKILLS_HEADER, CODE_MODE_SKILLS_HEADER, 1)
+
+
+def _agents_header(code_mode: bool = False) -> str:
     """fluid's own "Available agent types" heading, with a literal fallback.
 
     Shared by the index builder and the delegated-leg idempotence check so the
     two can never drift apart (a header the check does not recognise would
-    double the block on the CLI's prompt).
+    double the block on the CLI's prompt). ``code_mode`` only extends the
+    sentence about the Task tool with how Task is reached — the FIRST line,
+    which is all the idempotence check compares, is untouched either way.
     """
     try:
         from fluid.context.compiler import AGENTS_HEADER
 
-        return AGENTS_HEADER
+        header = AGENTS_HEADER
     except Exception:  # noqa: BLE001
-        return "# Available agent types"
+        header = "# Available agent types"
+    if code_mode:
+        header = header.replace(
+            "delegated to with the Task tool.", _CODE_MODE_TASK_SUFFIX, 1
+        )
+    return header
 
 
 def _with_agents_index(
@@ -2079,7 +2351,9 @@ def _with_agents_index(
     return system, index
 
 
-def _agent_context(options: SessionOptions) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+def _agent_context(
+    options: SessionOptions, *, code_mode: bool = False
+) -> Tuple[Optional[str], List[Dict[str, Any]]]:
     """``(agents index text, host-declared descriptors)`` for a fluid leg.
 
     fluid's own ``compiler.agents_index`` only knows what it can find on disk
@@ -2100,6 +2374,9 @@ def _agent_context(options: SessionOptions) -> Tuple[Optional[str], List[Dict[st
     the same records fluid would have auto-filled, which passing ``agents=`` at
     all would otherwise suppress.
 
+    ``code_mode`` only reaches the header (see :func:`_agents_header`): the
+    index body and the descriptors are identical either way.
+
     Never raises: discovery is best-effort context (CE11).
     """
     declared = _context_declared_agents(options)
@@ -2119,7 +2396,7 @@ def _agent_context(options: SessionOptions) -> Tuple[Optional[str], List[Dict[st
     index: Optional[str] = None
     if lines:
         body = "\n".join(f"- {name}: {lines[name]}" for name in sorted(lines))
-        index = f"{_agents_header()}\n{body}"
+        index = f"{_agents_header(code_mode)}\n{body}"
 
     descriptors: List[Dict[str, Any]] = [
         {"agentType": entry["name"], "source": "app", "description": entry["description"]}
@@ -2299,6 +2576,31 @@ def _decide_provider_kind(options: SessionOptions) -> str:
     if "/" in model:  # vendor/model OpenRouter slug, e.g. "meta-llama/llama-3.1-70b"
         return "openrouter"
     return "anthropic"
+
+
+def provider_kind_for_sdk_options(sdk_options: Any) -> str:
+    """Leg decision for a built ``ClaudeAgentOptions``, WITHOUT connecting.
+
+    Callers outside the adapter (memory_sync, which has to pick the leg's
+    project-memory dir before the turn starts — ruling MEM2) need the same
+    answer ``connect()`` will reach. Rather than copy the decision table, this
+    projects the same ``aih_*`` fields ``connect_with_sdk_options`` forwards
+    onto a throwaway ``SessionOptions`` and defers to
+    :func:`_decide_provider_kind`, which stays the single source of truth.
+    """
+    opts = SessionOptions(model=getattr(sdk_options, "model", None) or DEFAULT_MODEL)
+    provider_id = getattr(sdk_options, "aih_provider_id", None)
+    if provider_id:
+        opts.extra["provider_id"] = provider_id
+        for attr, key in (
+            ("aih_provider_type", "provider_type"),
+            ("aih_provider_auth_mode", "provider_auth_mode"),
+            ("aih_provider_dialect", "provider_dialect"),
+        ):
+            value = getattr(sdk_options, attr, None)
+            if value:
+                opts.extra[key] = value
+    return _decide_provider_kind(opts)
 
 
 def _chat_completions_url(base: str) -> str:

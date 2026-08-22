@@ -97,6 +97,15 @@ class Settings(BaseSettings):
     data_dir: Optional[Path] = None
     workspace_dir: Optional[Path] = None
     claude_projects_dir: Optional[Path] = None  # Legacy Claude CLI transcript root (defaults to ~/.claude/projects)
+    # Native-leg project-memory root (ruling MEM1, 2026-08-21). A native (fluid
+    # NativeLoop) session keeps its per-project memory under
+    # ``<fluid_projects_dir>/<slug>/memory/``, where <slug> is the SAME
+    # path-based normalization the Claude CLI uses for ~/.claude/projects — so
+    # two projects with the same NAME never collide. Defaults to ~/.fluid/projects
+    # deliberately: that is fluid's own home, mirroring ~/.claude/projects for the
+    # delegated leg. (Unlike the skills store, which is pinned under the app's
+    # data dir precisely to stay OUT of ~/.fluid.) Env: FLUID_PROJECTS_DIR.
+    fluid_projects_dir: Optional[str] = None
     tools_dir: Optional[Path] = None  # Path to AI tools directory (defaults to /workspace/ai-shuffle/tools in Docker)
 
     # Database (PostgreSQL). Set the individual connection pieces — the app
@@ -216,6 +225,22 @@ class Settings(BaseSettings):
     # the refresh-on-401 hook still works on demand). Defaults to the Codex
     # interval so both sweeps wake together.
     xai_token_refresh_interval_seconds: int = 3600
+
+    # fluid code-mode + continual harness (native legs only — the delegated
+    # claude-CLI leg has code_mode capped off and is untouched). Code-mode moves
+    # the tool surface into a persistent Python kernel; the continual harness
+    # journals every executed cell and distills recurring workflows into saved
+    # skills in the background. Both default ON; env overrides are the usual
+    # pydantic ones (FLUID_CODE_MODE=false, FLUID_CONTINUAL=false, ...).
+    #   - fluid_continual_model: pins skill synthesis to one model so skill
+    #     quality doesn't drift with the session's provider choice. None = the
+    #     session's own model.
+    #   - fluid_skills_dir: where saved skills + the episodic journal live.
+    #     None = <data_dir>/fluid/skills (never fluid's ~/.fluid default).
+    fluid_code_mode: bool = True
+    fluid_continual: bool = True
+    fluid_continual_model: Optional[str] = None
+    fluid_skills_dir: Optional[str] = None
 
     # Timeouts (milliseconds)
     hook_timeout_ms: int = 30_000
@@ -503,6 +528,13 @@ class Settings(BaseSettings):
         if self.claude_projects_dir:
             return self.claude_projects_dir
         return Path.home() / ".claude" / "projects"
+
+    @property
+    def get_fluid_projects_dir(self) -> Path:
+        """Native-leg project-memory root (ruling MEM1) — ~/.fluid/projects."""
+        if self.fluid_projects_dir:
+            return Path(self.fluid_projects_dir)
+        return Path.home() / ".fluid" / "projects"
 
     @property
     def effective_tools_dir(self) -> Path:

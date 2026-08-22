@@ -429,6 +429,39 @@ def reset_environment():
 
 
 @pytest.fixture(autouse=True)
+def isolate_fluid_skills_dir(monkeypatch, tmp_path):
+    """Keep fluid's skill store out of the real user data directory.
+
+    Code-mode + the continual harness are ON by default, so every native
+    HarnessAdapter.connect() builds a ``SkillStore`` — which mkdirs its root and
+    appends to ``journal.jsonl`` immediately. Unpinned, that root resolves to
+    ``settings.effective_data_dir/fluid/skills`` (i.e. the live ~/.ai-shuffle),
+    so merely running tests would pollute real user data. Point it at tmp_path;
+    monkeypatch restores the original value after each test.
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "fluid_skills_dir", str(tmp_path / "fluid-skills"))
+    yield
+
+
+@pytest.fixture(autouse=True)
+def isolate_fluid_projects_dir(monkeypatch, tmp_path):
+    """Keep the native-leg project-memory root out of the real ~/.fluid.
+
+    Ruling MEM1 puts a native session's memory under
+    ``<fluid_projects_dir>/<slug>/memory``, defaulting to ~/.fluid/projects.
+    Anything that builds options or reconciles memory would otherwise resolve
+    (and, on reconcile, create) a dir in the developer's own home. Point it at
+    tmp_path; monkeypatch restores the original value after each test.
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "fluid_projects_dir", str(tmp_path / "fluid-projects"))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def reset_shutdown_flag():
     """Clear ``startup.is_shutting_down`` before each test.
 
