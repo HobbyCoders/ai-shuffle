@@ -10,6 +10,11 @@ import pytest
 from fluid.context.settings_import import apply_settings_import, preview_settings_import
 
 
+def posix(path: str | None) -> str:
+    """Compare destinations with forward slashes so the asserts hold on Windows."""
+    return (path or "").replace("\\", "/")
+
+
 def write(path: Path, text: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -96,7 +101,7 @@ def test_combined_exact_duplicate_collapses_and_different_collision_does_not_win
     collision = preview_settings_import(sources=("claude", "codex"), source_home=source, destination_home=destination)
     instructions = [item for item in collision.items if item.kind == "global_instruction"]
     assert instructions and all(item.status == "ready" for item in instructions)
-    assert all("/.fluid/imports/" in item.destination for item in instructions)
+    assert all("/.fluid/imports/" in posix(item.destination) for item in instructions)
     assert all(item.provenance["activation"] == "review_required" for item in instructions)
 
 
@@ -123,7 +128,7 @@ def test_existing_native_wins_or_is_reported_as_exact_duplicate(tmp_path: Path) 
     conflict = preview_settings_import(sources=("claude",), source_home=source, destination_home=destination)
     sidecar = next(item for item in conflict.items if item.kind == "global_instruction")
     assert sidecar.status == "ready"
-    assert "/.fluid/imports/claude/" in sidecar.destination
+    assert "/.fluid/imports/claude/" in posix(sidecar.destination)
     apply_settings_import(conflict)
     assert (destination / ".fluid/AGENTS.md").read_text() == "same"
     assert Path(sidecar.destination).read_text() == "different"
@@ -217,7 +222,9 @@ def test_project_inventory_and_native_codex_project_items(tmp_path: Path) -> Non
 
     write(project / "AGENTS.override.md", "native")
     write(project / ".agents/skills/already/SKILL.md", "native skill")
-    write(source / ".codex/config.toml", f'[projects."{project}"]\ntrust_level = "trusted"\n')
+    # A TOML literal (single-quoted) key: Windows paths hold backslashes that a
+    # basic string would treat as escapes.
+    write(source / ".codex/config.toml", f"[projects.'{project}']\ntrust_level = \"trusted\"\n")
     codex = preview_settings_import(sources=("codex",), source_home=source, destination_home=destination)
     assert any(item.kind == "project_native_instruction" and item.status == "duplicate" for item in codex.items)
     assert any(item.kind == "project_native_skill" and item.status == "duplicate" for item in codex.items)
