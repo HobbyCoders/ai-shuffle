@@ -99,7 +99,7 @@ _AWAIT_HINT = "Hint: tools are synchronous functions — call them without await
 
 
 def _error_hint(exc: BaseException) -> str:
-    """A one-line nudge for the two mistakes the projected stubs invite.
+    """A one-line nudge for the mistakes the projected stubs invite.
 
     Cells run at module level, so ``await tool(...)`` is a SyntaxError with no
     clue that the stubs are plain functions; a wrong kwarg is a bare TypeError
@@ -109,6 +109,13 @@ def _error_hint(exc: BaseException) -> str:
     message = str(exc)
     if isinstance(exc, SyntaxError) and "'await' outside function" in message:
         return _AWAIT_HINT
+    if isinstance(exc, ImportError) and message.startswith("cannot import name "):
+        pkg = getattr(exc, "name", None) or ""
+        if pkg in ("tools", "skills"):
+            return (
+                f"Hint: no such {'tool' if pkg == 'tools' else 'skill'} — run "
+                "list_tools or search_tools to find the right name."
+            )
     if isinstance(exc, TypeError) and "got an unexpected keyword argument" in message:
         name = message.split("(", 1)[0].strip().rsplit(".", 1)[-1] or "the tool"
         return (
@@ -116,6 +123,24 @@ def _error_hint(exc: BaseException) -> str:
             f'read_tool_docs("{name}") to see it.'
         )
     return ""
+
+
+def _format_cell_traceback(exc: BaseException) -> str:
+    """Traceback text starting at the model's own code.
+
+    The cell runs under ``exec``/``eval`` inside :func:`_run_cell`, so a raw
+    ``format_exc`` leads with runner internals (``eval(compile(ast.Expression
+    ...``) the model cannot act on. Frames are dropped up to the first one
+    whose file is ``<cell>``; a failure with no cell frame at all (a
+    SyntaxError from parsing, an error in a stub import before the cell ran)
+    renders as just the exception line.
+    """
+    tb = exc.__traceback__
+    while tb is not None and tb.tb_frame.f_code.co_filename != "<cell>":
+        tb = tb.tb_next
+    if tb is None:
+        return "".join(traceback.format_exception_only(type(exc), exc))
+    return "".join(traceback.format_exception(type(exc), exc, tb))
 
 
 def _run_cell(code: str):
@@ -136,7 +161,7 @@ def _run_cell(code: str):
         else:
             exec(compile(tree, "<cell>", "exec"), _NS)
     except Exception as exc:
-        err = traceback.format_exc()
+        err = _format_cell_traceback(exc)
         hint = _error_hint(exc)
         if hint:
             err = err.rstrip("\n") + "\n" + hint + "\n"

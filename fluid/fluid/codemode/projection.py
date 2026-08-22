@@ -3,8 +3,10 @@
 Progressive disclosure, code-mode flavor: instead of N tool schemas in the
 prompt, the model gets four tools and a virtual ``tools/`` package. It calls
 ``list_tools`` / ``search_tools`` to find a tool, ``read_tool_docs`` to see the
-generated stub (signature + docstring), then ``from tools.<name> import <name>``
-inside ``run_python``. Importing/calling a stub routes to ``__host_call__``.
+generated stub (signature + docstring), then ``from tools import <name>`` inside
+``run_python`` (``tools.<name>`` as a module path still resolves to the stub, so
+``from tools.<name> import <name>`` keeps working). Calling a stub routes to
+``__host_call__``.
 
 JSON Schema → signature mapping (per the plan): ``string→str``, ``integer→int``,
 ``number→float``, ``boolean→bool``, ``array→list``, ``object→dict``; required

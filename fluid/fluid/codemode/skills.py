@@ -3,7 +3,7 @@
 Skills are model-authored Python modules that survive the session. They live as
 plain ``.py`` files under a skills root (default ``~/.fluid/skills``), are
 mounted into every code-mode kernel as a virtual ``skills`` package (imported
-with ``from skills.<name> import <name>``), and are written from inside the
+with ``from skills import <name>``), and are written from inside the
 kernel through the host-gated ``save_skill`` tool — so persistence itself goes
 through the same permission engine as any write.
 
@@ -255,11 +255,15 @@ class SkillStore:
         self._save_meta(meta)
 
 
-# Referenced-skill extraction: ``skills.foo`` attribute use and
-# ``from skills.foo import ...`` / ``import skills.foo`` forms.
+# Referenced-skill extraction: ``skills.foo`` attribute use, the
+# ``from skills.foo import ...`` / ``import skills.foo`` forms, and the package
+# form ``from skills import foo, bar``.
 _USE_RE = re.compile(
-    r"(?:\bskills\.([a-z_][a-z0-9_]*))|(?:\bfrom\s+skills\.([a-z_][a-z0-9_]*)\s+import\b)"
+    r"(?:\bskills\.([a-z_][a-z0-9_]*))"
+    r"|(?:\bfrom\s+skills\.([a-z_][a-z0-9_]*)\s+import\b)"
+    r"|(?:\bfrom\s+skills\s+import\s+(?:\(([^)]*)\)|([^\n]+)))"
 )
+_NAME_RE = re.compile(r"[a-z_][a-z0-9_]*")
 
 
 def referenced_skills(code: str) -> list[str]:
@@ -269,4 +273,10 @@ def referenced_skills(code: str) -> list[str]:
         name = m.group(1) or m.group(2)
         if name:
             seen.setdefault(name)
+        elif m.group(3) or m.group(4):
+            # ``from skills import a, b as c`` — the imported names, not aliases.
+            for item in (m.group(3) or m.group(4)).split(","):
+                head = _NAME_RE.match(item.strip())
+                if head:
+                    seen.setdefault(head.group(0))
     return list(seen)

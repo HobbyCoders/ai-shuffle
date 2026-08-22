@@ -48,9 +48,10 @@ SKILLS_SOURCE = "skills"
 _RUN_PYTHON_DESC = (
     "Execute Python in a persistent per-session kernel (state survives across "
     "calls). Discover tools with list_tools/search_tools/read_tool_docs, then "
-    "`from tools.<name> import <name>` and call them — each call is permission-"
-    "gated on the host. Saved skills (reusable helpers that persist across "
-    "sessions) import via `from skills.<name> import <name>`; persist a new one "
+    "`from tools import Read, Edit` and call them as plain synchronous "
+    "functions (`import tools; tools.Read(...)` also works) — each call is "
+    "permission-gated on the host. Saved skills (reusable helpers that persist "
+    "across sessions) import via `from skills import <name>`; persist a new one "
     "with the save_skill tool when you notice a reusable pattern. Network and "
     "direct file I/O are disabled (use the file tools); only a stdlib-safe "
     "import allowlist is available. The last expression's repr is returned "
@@ -103,12 +104,12 @@ class CodeModeSession:
         entries = self._projection().entries()
         lines: list[str] = []
         if entries:
-            lines.append("Tools callable from run_python via `from tools.<name> import <name>`:")
+            lines.append("Tools callable from run_python via `from tools import <name>`:")
             lines += [f"- {leaf}: {one}" for leaf, one in entries]
         if self._skills is not None:
             saved = self._skills.list()
             if saved:
-                lines.append("Saved skills, import via `from skills.<name> import <name>`:")
+                lines.append("Saved skills, import via `from skills import <name>`:")
                 for s in saved:
                     flag = f" [BROKEN, not mounted: {s.broken}]" if s.broken else ""
                     lines.append(f"- {s.name}: {s.description} [used {s.uses}x]{flag}")
@@ -397,7 +398,7 @@ def register_code_mode_tools(registry: ToolRegistry, session: CodeModeSession) -
     # Continual-harness persistence tools — registered only with a SkillStore.
     # Source is SKILLS_SOURCE (not codemode) so they are *projected into the
     # kernel* rather than into the prompt schema: the model reaches them via
-    # `from tools.save_skill import save_skill`, and every save/delete rides
+    # `from tools import save_skill`, and every save/delete rides
     # the same host permission gate as any write-risk tool.
     store = session.skills
     if store is None:
@@ -428,7 +429,7 @@ def register_code_mode_tools(registry: ToolRegistry, session: CodeModeSession) -
         return ToolOutcome(
             text=(
                 f"skill {skill.name!r} saved and verified — import with "
-                f"`from skills.{skill.name} import {skill.name}` (next run_python "
+                f"`from skills import {skill.name}` (next run_python "
                 f"call onward, and in every future session): {skill.description}"
             )
         )
@@ -444,7 +445,7 @@ def register_code_mode_tools(registry: ToolRegistry, session: CodeModeSession) -
             name="save_skill",
             description=(
                 "Persist a reusable Python skill module across sessions. It "
-                "mounts as skills.<name> in the run_python kernel. Module "
+                "is imported with `from skills import <name>` in the run_python kernel. Module "
                 "docstring required (first line = one-sentence description); "
                 "define a function named like the skill. Include a pure "
                 "_selftest() (inline fixture data, no tool calls) — it runs "

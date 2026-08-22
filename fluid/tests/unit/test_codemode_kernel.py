@@ -130,3 +130,134 @@ def test_host_reply_defaults_to_no_images() -> None:
     """Images are an opt-in host-side extra; the kernel never sees them."""
     reply = HostReply(result="ok")
     assert reply.images == ()
+
+
+# ── import forms: the package namespace exposes each tool's callable ────────
+
+_ECHO_STUB = {
+    "Echo": (
+        "def Echo(text: str) -> str:\n"
+        '    """Echo text back."""\n'
+        "    return __host_call__('Echo', {'text': text})\n"
+    ),
+    "Upper": (
+        "def Upper(text: str) -> str:\n"
+        "    return __host_call__('Upper', {'text': text})\n"
+    ),
+}
+
+
+async def _echo_host(name: str, kwargs: dict) -> HostReply:
+    text = kwargs.get("text", "")
+    return HostReply(result=text.upper() if name == "Upper" else text)
+
+
+@pytest.mark.parametrize("code", [
+    # package form — what models try first
+    "from tools import Echo, Upper\nUpper(Echo('hi'))",
+    # bare package import, attribute access
+    "import tools\ntools.Upper(tools.Echo('hi'))",
+    # explicit submodule import: the package attribute is still the callable
+    "import tools.Echo\nimport tools.Upper\ntools.Upper(tools.Echo('hi'))",
+    # long form (the original spelling) keeps working
+    "from tools.Echo import Echo\nfrom tools.Upper import Upper\nUpper(Echo('hi'))",
+    # star import
+    "from tools import *\nUpper(Echo('hi'))",
+])
+async def test_tool_import_forms_all_resolve_to_the_callable(code: str) -> None:
+    k = SubprocessKernel()
+    await k.start()
+    try:
+        await k.set_vfs(dict(_ECHO_STUB))
+        r = await k.exec(code, timeout=10, on_host_call=_echo_host)
+        assert r.error is None, r.error
+        assert r.value_repr == "'HI'"
+        assert r.host_calls == 2
+    finally:
+        await k.stop()
+
+
+async def test_tool_package_attribute_is_function_and_module_path_keeps_docs() -> None:
+    k = SubprocessKernel()
+    await k.start()
+    try:
+        await k.set_vfs(dict(_ECHO_STUB))
+        r = await k.exec(
+            "import tools\n"
+            "from tools import Echo as fn\n"
+            "from tools.Echo import Echo\n"
+            "(fn is tools.Echo, fn.Echo is Echo, fn.__doc__, callable(fn), tools.Echo('x'))",
+            timeout=10, on_host_call=_echo_host,
+        )
+        assert r.error is None, r.error
+        assert r.value_repr == "(True, True, 'Echo text back.', True, 'x')"
+    finally:
+        await k.stop()
+
+
+async def test_unknown_tool_in_package_form_points_at_discovery() -> None:
+    k = SubprocessKernel()
+    await k.start()
+    try:
+        await k.set_vfs(dict(_ECHO_STUB))
+        r = await k.exec("from tools import Nope", timeout=10, on_host_call=_echo_host)
+        assert r.error is not None
+        assert "ImportError" in r.error
+        assert "Hint: no such tool — run list_tools or search_tools" in r.error
+    finally:
+        await k.stop()
+
+
+async def test_skills_package_exposes_callables_and_plain_modules() -> None:
+    k = SubprocessKernel()
+    await k.start()
+    try:
+        await k.set_vfs(dict(_ECHO_STUB), skills={
+            "greet": '"""Greet."""\ndef greet(n):\n    return "hello " + n\n',
+            "consts": '"""Constants only."""\nANSWER = 42\n',
+        })
+        r = await k.exec(
+            "from skills import greet, consts\n"
+            "import skills\n"
+            "import skills.greet as mod\n"
+            "(greet('bob'), skills.greet('al'), consts.ANSWER, skills.consts.ANSWER, mod.__doc__)",
+            timeout=10, on_host_call=_echo_host,
+        )
+        assert r.error is None, r.error
+        assert r.value_repr == "('hello bob', 'hello al', 42, 42, 'Greet.')"
+    finally:
+        await k.stop()
+
+
+# ── traceback trimming: the model sees only its own frames ──────────────────
+
+async def test_traceback_starts_at_the_cell() -> None:
+    k = SubprocessKernel()
+    await k.start()
+    try:
+        code = "def boom():\n    return 1 / 0\n\nx = 1\nboom()\n"
+        r = await k.exec(code, timeout=5, on_host_call=_no_tools)
+        assert r.error is not None
+        assert r.error.startswith("Traceback (most recent call last):")
+        assert "_runner" not in r.error and "eval(compile" not in r.error
+        assert r.error.count('File "<cell>"') == 2  # the call site and boom()
+        assert "ZeroDivisionError" in r.error
+        # same when the failing statement is the trailing expression (eval path)
+        r2 = await k.exec("y = 2\n{}['missing']", timeout=5, on_host_call=_no_tools)
+        assert r2.error is not None
+        assert "_runner" not in r2.error and "eval(compile" not in r2.error
+        assert 'File "<cell>", line 2' in r2.error and "KeyError" in r2.error
+    finally:
+        await k.stop()
+
+
+async def test_syntax_error_has_no_runner_frames() -> None:
+    k = SubprocessKernel()
+    await k.start()
+    try:
+        r = await k.exec("def (:\n", timeout=5, on_host_call=_no_tools)
+        assert r.error is not None
+        assert "SyntaxError" in r.error
+        assert "Traceback" not in r.error and "_runner" not in r.error
+    finally:
+        await k.stop()

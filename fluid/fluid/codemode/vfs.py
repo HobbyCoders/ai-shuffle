@@ -7,12 +7,18 @@ launched with ``python -I -S <runner>``, so its own directory — ``fluid/codemo
 Two responsibilities:
 
 1. **Tool VFS** — projected typed stubs live under a virtual ``tools`` package.
-   ``from tools.get_weather import get_weather`` compiles the stub source on
-   demand (list → read → import, lazy) and, when the stub is called, routes to
-   ``__host_call__`` which RPCs the host. A second virtual package, ``skills``,
+   ``from tools import get_weather`` compiles the stub source on demand
+   (list → read → import, lazy) and, when the stub is called, routes to
+   ``__host_call__`` which RPCs the host. Every spelling a model reaches for
+   resolves to the same callable: ``from tools import X``, ``import tools;
+   tools.X(...)``, ``import tools.X; tools.X(...)`` and the long form
+   ``from tools.X import X``. Stub modules are *callable modules* that
+   forward to the function they define (see :class:`_VfsPackage` and
+   :class:`_LeafModule`), so ``tools.X(...)`` is never "'module' object is
+   not callable". A second virtual package, ``skills``,
    mounts the persistent model-authored modules from the SkillStore (the
-   continual harness); those execute under guarded builtins since they are
-   untrusted model output.
+   continual harness) with the same dual shape; those execute under guarded
+   builtins since they are untrusted model output.
 2. **Import guard** — a replacement ``__import__`` installed in the exec
    namespace's builtins. Only a stdlib-safe allowlist (plus the ``tools`` and
    ``skills`` VFS packages) is importable; ``os``/``sys``/``subprocess``/
@@ -24,9 +30,11 @@ Two responsibilities:
 from __future__ import annotations
 
 import builtins
+import importlib
 import importlib.abc
 import importlib.util
 import sys
+import types
 from typing import Any, Callable
 
 # Stdlib-safe subset the model may import from inside the kernel. Submodules of
@@ -70,6 +78,67 @@ class ResultRef(str):
         head = str.__str__(self)[: self._PREVIEW]
         more = " …" if n > self._PREVIEW else ""
         return f"<ResultRef {n} bytes; preview={head!r}{more}>"
+
+
+def _leaf_callable(leaf: str, module: types.ModuleType) -> Any:
+    """The function a leaf module exports under its own name, or None."""
+    value = getattr(module, leaf, None)
+    return value if callable(value) else None
+
+
+class _LeafModule(types.ModuleType):
+    """A ``tools.<leaf>`` / ``skills.<leaf>`` module that is itself callable.
+
+    After ``import tools.Glob`` importlib binds the *module* as ``tools.Glob``;
+    a plain module is not callable, so ``tools.Glob(...)`` would fail with
+    "'module' object is not callable". Calling this module forwards to the
+    function it defines under its own name, so every spelling of the import
+    reaches the tool. ``import skills.x as m; m._selftest()`` keeps working
+    because it is still a module underneath.
+    """
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        leaf = self.__name__.split(".", 1)[1]
+        func = _leaf_callable(leaf, self)
+        if func is None:
+            raise TypeError(
+                f"{self.__name__} defines no function named {leaf!r}; "
+                f"use its attributes instead ({', '.join(n for n in dir(self) if not n.startswith('_')) or 'none'})"
+            )
+        return func(*args, **kwargs)
+
+
+class _VfsPackage(types.ModuleType):
+    """The ``tools`` / ``skills`` package object.
+
+    ``__getattr__`` (missing attribute) imports ``<pkg>.<leaf>`` lazily, so
+    ``from tools import Glob`` and ``import tools; tools.Glob(...)`` work with
+    no explicit submodule import. Whichever spelling the model uses, the
+    object it holds is the same :class:`_LeafModule`: callable (forwards to
+    the stub function), carrying the tool's docstring, and still a module, so
+    ``import skills.x as m; m._selftest()`` and attribute access on a skill
+    that only exports helpers keep working. The plain function remains
+    reachable as ``tools.Glob.Glob`` / ``from tools.Glob import Glob``.
+    """
+
+    def __init__(self, name: str, doc: str, leaves: Callable[[], list[str]]) -> None:
+        super().__init__(name, doc)
+        self._leaves = leaves
+        self.__path__ = []  # mark as a (namespace-ish) package
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__") or name not in self._leaves():
+            raise AttributeError(f"{self.__name__} has no tool {name!r}")
+        # importlib binds the submodule as ``self.<name>`` on first load, so
+        # this runs once per leaf.
+        return importlib.import_module(f"{self.__name__}.{name}")
+
+    def __dir__(self) -> list[str]:
+        return sorted(set(super().__dir__()) | set(self._leaves()))
+
+    @property
+    def __all__(self) -> list[str]:  # ``from tools import *``
+        return sorted(self._leaves())
 
 
 def make_guarded_import(allowlist: set[str]) -> Callable[..., Any]:
@@ -127,18 +196,22 @@ class VfsFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
 
     # ── loader ──
     def create_module(self, spec):  # noqa: D102
-        return None
+        if spec.name == "tools":
+            return _VfsPackage(
+                "tools", "Projected tool stubs (code-mode VFS).",
+                lambda: list(self._sources),
+            )
+        if spec.name == "skills":
+            return _VfsPackage(
+                "skills", "Persistent model-authored skills (continual harness).",
+                lambda: list(self._skills),
+            )
+        return _LeafModule(spec.name)
 
     def exec_module(self, module):  # noqa: D102
         name = module.__name__
-        if name == "tools":
-            module.__path__ = []  # mark as a (namespace-ish) package
-            module.__doc__ = "Projected tool stubs (code-mode VFS)."
-            return
-        if name == "skills":
-            module.__path__ = []
-            module.__doc__ = "Persistent model-authored skills (continual harness)."
-            return
+        if name in ("tools", "skills"):
+            return  # fully built by create_module
         pkg, leaf = name.split(".", 1)
         module.__host_call__ = self._host_call
         module.ResultRef = ResultRef
@@ -152,6 +225,11 @@ class VfsFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
             source = self._sources[leaf]
         code = compile(source, f"{pkg}/{leaf}.py", "exec")
         exec(code, module.__dict__)
+        # ``tools.Glob.__doc__`` reads as the tool's docs whichever object the
+        # model ended up holding (module or function).
+        func = _leaf_callable(leaf, module)
+        if func is not None and not module.__doc__:
+            module.__doc__ = func.__doc__
 
 
 def install_finder(

@@ -445,3 +445,14 @@ async def test_cell_images_are_capped_with_an_explicit_note() -> None:
         assert "(5 further images omitted — read fewer per cell)" in outcome.text
     finally:
         await session.aclose()
+
+
+def test_prompt_text_leads_with_the_package_import_form() -> None:
+    from fluid.codemode.session import _RUN_PYTHON_DESC
+
+    assert "from tools import Read, Edit" in _RUN_PYTHON_DESC
+    assert "from tools.<name>" not in _RUN_PYTHON_DESC
+    session = CodeModeSession(_weather_registry())
+    listing = session.render_list()
+    assert "`from tools import <name>`" in listing
+    assert "from tools.<name>" not in listing
