@@ -1484,6 +1484,99 @@ def _run_column_migrations(cursor):
                 if branch_backfilled:
                     migrations_applied.append(f"sessions.branch({branch_backfilled})")
 
+        # Step G: consolidate duplicate projects_v2 rows and purge orphans.
+        # Two failure modes accumulated in the wild, both rooted in the same
+        # gap: origin used to derive from a lazily-populated link_group_id, so
+        # a project seeded as `local:<id>` pre-poll re-seeded under its
+        # `git:<hash>` once the remote was read — one logical repo, two v2
+        # rows. And rows whose legacy `projects` row is gone everywhere were
+        # never cleaned up. Rebind sessions + checkouts onto the surviving
+        # row, then delete the twin/orphan. Deterministic ids + guarded WHERE
+        # clauses keep it idempotent (re-run = zero writes) and concurrent-boot
+        # safe; legacy columns are never touched.
+        if table_exists(cursor, "projects_v2"):
+            cursor.execute("SELECT id, name, origin FROM projects_v2")
+            pv2_rows = cursor.fetchall()
+            merged, purged = 0, 0
+
+            # Pass 1 — twin merge: a local:-keyed row whose name also has a
+            # git:/manual:-keyed sibling is the pre-backfill duplicate; the
+            # sibling wins (it is what every post-poll derivation resolves to).
+            for row in pv2_rows:
+                origin = row["origin"]
+                if not origin.startswith("local:"):
+                    continue
+
+                survivor = next(
+                    (r for r in pv2_rows if r["id"] != row["id"] and r["name"] == row["name"]
+                     and r["origin"].startswith(("git:", "manual:"))),
+                    None,
+                )
+                if survivor is None:
+                    continue
+                cursor.execute(
+                    "UPDATE sessions SET project_v2_id = %s WHERE project_v2_id = %s",
+                    (survivor["id"], row["id"]),
+                )
+                moved_sessions = cursor.rowcount or 0
+                # A twin checkout colliding with an existing survivor checkout
+                # (same runner + path, e.g. both seeded 'ck-<legacy id>') cannot
+                # be moved onto the survivor's UNIQUE (project_id, runner_id,
+                # path) — drop it as the duplicate it is instead of stranding a
+                # reference to the row about to be deleted.
+                cursor.execute(
+                    "DELETE FROM checkouts WHERE project_id = %s AND EXISTS ("
+                    "SELECT 1 FROM checkouts c2 WHERE c2.project_id = %s "
+                    "AND c2.id <> checkouts.id "
+                    "AND c2.runner_id = checkouts.runner_id "
+                    "AND c2.path IS NOT DISTINCT FROM checkouts.path)",
+                    (row["id"], survivor["id"]),
+                )
+                cursor.execute(
+                    "UPDATE checkouts SET project_id = %s WHERE project_id = %s",
+                    (survivor["id"], row["id"]),
+                )
+                moved_checkouts = cursor.rowcount or 0
+                cursor.execute("DELETE FROM projects_v2 WHERE id = %s", (row["id"],))
+                deleted = cursor.rowcount or 0
+                if deleted:
+                    merged += 1
+                    migrations_applied.append(
+                        f"projects_v2.merge({row['name']}:local->"
+                        f"{survivor['origin'][:12]}..,{moved_sessions}s,{moved_checkouts}c)"
+                    )
+
+            # Orphan purge (second pass — needs post-merge state): a local:-keyed
+            # row whose legacy projects id exists NOWHERE is a leftover registry
+            # entry (deleted project, dropped E2E fixture). Purge it only when
+            # sessions AND checkouts are both empty so an in-use row can never
+            # vanish; rows with references keep surfacing their history through
+            # the removed-project handling instead of stranding it.
+            cursor.execute("SELECT id, name, origin FROM projects_v2")
+            pv2_rows = cursor.fetchall()
+            cursor.execute("SELECT id FROM projects")
+            all_legacy_ids = {r["id"] for r in cursor.fetchall()}
+            for row in pv2_rows:
+                origin = row["origin"]
+                if not origin.startswith("local:"):
+                    continue
+                legacy_id = origin[len("local:"):]
+                if legacy_id in all_legacy_ids:
+                    continue
+                cursor.execute("SELECT 1 FROM sessions WHERE project_v2_id = %s LIMIT 1", (row["id"],))
+                has_sessions = cursor.fetchone() is not None
+                cursor.execute("SELECT 1 FROM checkouts WHERE project_id = %s LIMIT 1", (row["id"],))
+                has_checkouts = cursor.fetchone() is not None
+                if has_sessions or has_checkouts:
+                    continue
+                cursor.execute("DELETE FROM projects_v2 WHERE id = %s", (row["id"],))
+                if cursor.rowcount and cursor.rowcount > 0:
+                    purged += 1
+            if merged:
+                migrations_applied.append(f"projects_v2.twins-merged({merged})")
+            if purged:
+                migrations_applied.append(f"projects_v2.orphans-purged({purged})")
+
     # turns — durable per-session turn queue + live-turn state machine (v59,
     # V2 Phase 2). Idempotent so upgrades from any older version land the table
     # (same defensive pattern as the v2-core block above). The partial unique
