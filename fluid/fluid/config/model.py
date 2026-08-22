@@ -198,7 +198,12 @@ class HarnessConfig:
     # maxTokens/rawMaxTokens/percentage in the context-usage breakdown; None
     # leaves those None rather than guessing a window.
     context_window: int | None = None
+    # Your own base prompt. When set it replaces the CLI's shipped default
+    # (fluid.cli.prompt.DEFAULT_BASE_PROMPT); base_prompt=False drops the
+    # default without replacing it. Embedding hosts pass their own base to the
+    # compiler directly and ignore both.
     system: str | None = None
+    base_prompt: bool = True
     # MCP servers to connect at session start: name → transport config, e.g.
     # {"transport": "stdio", "command": "npx", "args": [...]} or
     # {"transport": "http", "url": "https://..."}. Kept as raw dicts — the
@@ -229,6 +234,7 @@ class HarnessConfig:
                 int(d["context_window"]) if d.get("context_window") else None
             ),
             system=d.get("system"),
+            base_prompt=bool(d.get("base_prompt", True)),
             mcp={name: dict(cfg) for name, cfg in d.get("mcp", {}).items()},
         )
 
@@ -259,6 +265,7 @@ class HarnessConfig:
             "max_tokens": self.max_tokens,
             "context_window": self.context_window,
             "system": self.system,
+            "base_prompt": self.base_prompt,
             "permission": {
                 "approval_policy": self.permission.approval_policy,
                 "rules": [

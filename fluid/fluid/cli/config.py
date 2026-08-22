@@ -1,10 +1,10 @@
 """Shared CLI plumbing: store location, engine construction, session listing.
 
-The one job worth calling out is :func:`make_engine`: it builds the resolved
-instruction stack (``build_instruction_stack``) and injects it as the system-
-prompt *prefix*, prepended before any per-run system text, then hands off to
-:func:`fluid.config.build_engine`. Every CLI subcommand goes through here so the
-instruction-file ecosystem is wired in exactly once.
+The one job worth calling out is :func:`make_engine`: it compiles the CLI's
+system prompt (:func:`resolved_prompt` — the shipped base prompt, the
+instruction stack, the skills/agents indexes, the environment block, then any
+per-run text) and hands off to :func:`fluid.config.build_engine`. Every CLI
+subcommand goes through here so the prompt is assembled in exactly one place.
 """
 
 from __future__ import annotations
@@ -33,25 +33,41 @@ def make_store(directory: str | os.PathLike[str] | None = None):
 def resolved_prompt(config: HarnessConfig, *, extra_system: str | None = None):
     """CLI prompt assembly, delegated to the shared compiler.
 
-    The CLI's historical layering (instruction stack first, then config/per-run
-    system text) predates the compiler's base-first order; ``config.system`` and
-    ``extra_system`` therefore ride as ``extra_blocks``, preserving the CLI's
-    observable ordering. Native agent definitions are always included when
-    instruction discovery is enabled. The CLI keeps env injection off — its REPL banner
-    already shows cwd/model, and pre-compiler behavior carried no env block.
+    The CLI is an application in the compiler's sense, so it supplies the
+    ``base`` section itself (ruling A12 forbids only a *hidden* base):
+
+    * ``config.system`` set → it IS the base. It replaces the default rather
+      than being appended — ``system`` in config.toml is "your own base
+      prompt".
+    * otherwise ``base_prompt = true`` (the default) → the shipped
+      :data:`~fluid.cli.prompt.DEFAULT_BASE_PROMPT`; ``false`` → no base.
+
+    The base comes first, so it is the byte-stable prefix providers cache.
+    Environment injection is on: the base prompt and the tool descriptions
+    both point the model at the environment block for shell syntax, cwd, and
+    date. ``extra_system`` (per-run text) and, under code mode, the code-mode
+    addendum ride as ``extra_blocks`` after everything else. Native agent
+    definitions are always included when instruction discovery is enabled.
 
     Returns the :class:`~fluid.context.compiler.CompiledPrompt` (text + labeled
     sections); :func:`resolved_system` is its ``.text``.
     """
+    from fluid.cli.prompt import code_mode_addendum, default_base_prompt
     from fluid.context.compiler import PromptInputs, compile_prompt
 
+    if config.system:
+        base: str | None = config.system
+    elif config.base_prompt:
+        base = default_base_prompt(config)
+    else:
+        base = None
     enabled = config.instruction_files.enabled
     return compile_prompt(
         PromptInputs(
-            base=None,
-            extra_blocks=[b for b in (config.system, extra_system) if b],
+            base=base,
+            extra_blocks=[b for b in (code_mode_addendum(config), extra_system) if b],
             cwd=config.cwd,
-            include_env=False,
+            include_env=True,
             include_global_instructions=enabled and config.instruction_files.discover_global,
             include_project_instructions=enabled and config.instruction_files.discover_project,
             include_skills=enabled and config.instruction_files.discover_skills,

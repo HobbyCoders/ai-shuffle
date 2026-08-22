@@ -41,7 +41,11 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "cwd": ".",
     "max_tokens": 8192,
     "context_window": None,
+    # CLI prompt. ``system`` is your own base prompt: when set it REPLACES the
+    # shipped default (fluid.cli.prompt.DEFAULT_BASE_PROMPT). ``base_prompt``
+    # turns the shipped default off without supplying a replacement.
     "system": None,
+    "base_prompt": True,
     "permission": {"approval_policy": "on_write", "rules": []},
     "instruction_files": {
         "enabled": True,
@@ -190,6 +194,8 @@ def env_overrides(env: dict[str, str] | None = None) -> dict[str, Any]:
         out["cwd"] = env["FLUID_CWD"]
     if "FLUID_CODE_MODE" in env:
         out["code_mode"] = _coerce_bool(env["FLUID_CODE_MODE"])
+    if "FLUID_BASE_PROMPT" in env:
+        out["base_prompt"] = _coerce_bool(env["FLUID_BASE_PROMPT"])
     if "FLUID_SKILLS_DIR" in env:
         out["skills_dir"] = env["FLUID_SKILLS_DIR"]
     if "FLUID_CONTINUAL" in env:
