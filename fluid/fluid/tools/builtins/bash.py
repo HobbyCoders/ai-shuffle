@@ -6,6 +6,7 @@ import asyncio
 from typing import Any
 
 from fluid.tools.builtins._util import truncate
+from fluid.tools.builtins.bash_risk import classify as classify_bash_risk
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 SPEC = ToolSpec(
@@ -61,6 +62,9 @@ SPEC = ToolSpec(
         "required": ["command"],
     },
     risk="write",
+    # Read-only commands (git status, ls, grep ...) are reported as safe per
+    # call so the on_write policy does not prompt for them. See bash_risk.py.
+    classify_risk=classify_bash_risk,
 )
 
 

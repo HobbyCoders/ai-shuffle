@@ -26,7 +26,11 @@ from typing import Any, Awaitable, Callable
 from fluid.codemode.kernel import HostReply
 from fluid.events.model import ToolUse
 from fluid.hooks.bus import POST_TOOL_USE, PRE_TOOL_USE, HookBus
-from fluid.permissions.engine import PermissionEngine
+from fluid.permissions.engine import (
+    PROMPT_DENIAL,
+    PermissionEngine,
+    non_interactive_denial,
+)
 from fluid.store.base import new_id
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
 
@@ -84,7 +88,7 @@ class HostCallBridge:
             self._sid, self._turn_id, name, tool_use_id, dict(kwargs)
         )
         if outcome.is_error:
-            if outcome.text == "permission denied":
+            if outcome.text.startswith("permission denied"):
                 return HostReply(denied=True, message=outcome.text)
             return HostReply(error=outcome.text)
         return HostReply(result=outcome.text, images=outcome.images)
@@ -142,19 +146,21 @@ class HostBridge:
                 tool_input = decision.replacement_input
 
         # PermissionEngine: allow / deny / ask, plus the doom-loop guard.
-        verdict = self._permissions.evaluate(spec, tool_input)
+        decided = self._permissions.decide(spec, tool_input)
+        verdict = decided.decision
         if verdict != "deny" and self._doom_loop:
             if self._permissions.note_execution(tool_name, tool_input):
                 verdict = "ask"
         if verdict == "deny":
-            return HostReply(denied=True, message="permission denied")
+            return HostReply(denied=True, message=decided.deny_message())
         if verdict == "ask":
             if self._on_permission is None:
                 return HostReply(
-                    denied=True, message="permission required but no handler is wired"
+                    denied=True,
+                    message=non_interactive_denial(tool_name, "no permission handler is wired"),
                 )
             if not await self._on_permission(spec, tool_input):
-                return HostReply(denied=True, message="permission denied")
+                return HostReply(denied=True, message=PROMPT_DENIAL)
 
         outcome = await self._registry.dispatch(tool_name, tool_input, self._ctx)
 

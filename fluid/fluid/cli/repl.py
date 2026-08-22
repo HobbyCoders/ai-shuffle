@@ -31,9 +31,12 @@ from fluid.events.model import (
     Usage,
 )
 from fluid.events.ops import Fork, RespondPermission, Rewind, SetModel, UserTurn
+from fluid.permissions.engine import PROMPT_DENIAL, non_interactive_denial
 
 # A permission responder: given the request event, return a decision string.
-PermissionResponder = Callable[[PermissionRequest], Awaitable[str]]
+# A responder returns either a bare decision ("allow" | "deny" | "allow_always")
+# or a full RespondPermission when it wants to attach a reason.
+PermissionResponder = Callable[[PermissionRequest], Awaitable["str | RespondPermission"]]
 
 _TERMINAL = (TurnComplete, Interrupted, ErrorEvent)
 
@@ -68,9 +71,26 @@ def render_event(event: Event, out: TextIO) -> None:
     out.flush()
 
 
-async def auto_deny(event: PermissionRequest) -> str:
-    """Non-interactive default responder — deny (used by the one-shot path)."""
-    return "deny"
+async def auto_deny(event: PermissionRequest) -> RespondPermission:
+    """Non-interactive default responder (the one-shot ``fluid run`` path).
+
+    Denies, and tells the model why: there is nobody to ask, and how the
+    caller can unblock the call next time.
+    """
+    return RespondPermission(
+        request_id=event.request_id, decision="deny",
+        message=non_interactive_denial(event.name, event.reason),
+    )
+
+
+def _to_response(event: PermissionRequest, answer: "str | RespondPermission") -> RespondPermission:
+    """Responders may return a bare decision string or a full op."""
+    if isinstance(answer, RespondPermission):
+        return answer
+    message = PROMPT_DENIAL if answer == "deny" else None
+    if message and event.reason:
+        message = f"{message} ({event.reason})"
+    return RespondPermission(request_id=event.request_id, decision=answer, message=message)
 
 
 async def stream_turn(
@@ -94,8 +114,7 @@ async def stream_turn(
     async for event in engine.bus.subscribe(session_id, since_seq=start_seq):
         render_event(event, out)
         if isinstance(event, PermissionRequest):
-            decision = await on_permission(event)
-            await engine.submit(RespondPermission(request_id=event.request_id, decision=decision))
+            await engine.submit(_to_response(event, await on_permission(event)))
         elif isinstance(event, TurnComplete):
             result = event.stop_reason
             break

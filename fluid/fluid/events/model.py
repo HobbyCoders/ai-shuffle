@@ -146,7 +146,10 @@ class PermissionRequest(Event):
     tool_use_id: str
     name: str
     input: Any
-    risk: str = "safe"
+    risk: str = "safe"  # effective risk of this call (Bash read-only commands are "safe")
+    # Why the engine is asking, when it is not simply the policy: e.g. the
+    # doom-loop guard. Responders fold it into their denial text.
+    reason: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

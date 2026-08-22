@@ -48,6 +48,25 @@ class ToolSpec:
     risk: str = "safe"  # "safe" | "write" | "destructive"
     source: str = "builtin"  # "builtin" | "inproc" | "mcp"
     code_mode_allowed: bool = True
+    # Optional per-input risk override, consulted by the permission engine at
+    # evaluation time: ``classify_risk(input) -> "safe" | "write" | "destructive"``.
+    # ``risk`` stays the static ceiling used for schema-level decisions (plan
+    # mode); the hook lets a tool like Bash report a read-only command as safe.
+    classify_risk: Callable[[dict[str, Any]], str] | None = field(
+        default=None, compare=False, repr=False
+    )
+
+    def effective_risk(self, input: dict[str, Any]) -> str:
+        """Risk of one concrete call: the hook's answer, capped at ``risk``."""
+        if self.classify_risk is None:
+            return self.risk
+        try:
+            risk = self.classify_risk(input)
+        except Exception:  # a broken classifier must never lower the guard
+            return self.risk
+        if risk not in _RISK_ORDER:
+            return self.risk
+        return risk if _RISK_ORDER[risk] <= _RISK_ORDER[self.risk] else self.risk
 
     def to_api(self) -> dict[str, Any]:
         """Anthropic tool-def shape (the serializer places cache_control)."""
