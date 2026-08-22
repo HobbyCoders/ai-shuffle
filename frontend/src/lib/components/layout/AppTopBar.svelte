@@ -11,7 +11,7 @@
 	 * On desktop the sidebar itself replaces this bar's old tab row, and the main
 	 * panel's StudioTopBar carries the breadcrumbs and actions.
 	 */
-	import { Plus, Menu, X } from 'lucide-svelte';
+	import { SquarePen, Menu, X } from 'lucide-svelte';
 	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { activeSession } from '$lib/stores/active-session';
@@ -103,7 +103,7 @@
 	<NotificationCenter />
 
 	<button class="tb-new-icon" onclick={onNewSession} aria-label="New session (Cmd/Ctrl+N)" title="New session">
-		<Plus size={18} strokeWidth={2.2} />
+		<SquarePen size={18} strokeWidth={1.85} />
 	</button>
 </header>
 
@@ -185,21 +185,20 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		/* Slightly smaller than the 40px ☰ hamburger: the filled primary
-		   background reads heavier than the borderless menu icon, so 36px gives
-		   the two buttons matching visual weight. */
-		width: 36px;
-		height: 36px;
+		/* Ghost button matching the sidebar's new-chat icon, sized to the 40px
+		   hamburger beside it. */
+		width: 40px;
+		height: 40px;
 		flex-shrink: 0;
-		background: var(--primary);
-		color: var(--primary-foreground);
+		background: transparent;
+		color: var(--muted-foreground);
 		border: none;
 		border-radius: 8px;
 		cursor: pointer;
-		transition: filter 120ms ease;
+		transition: background-color 0.13s ease, color 0.13s ease;
 		-webkit-tap-highlight-color: transparent;
 	}
-	.tb-new-icon:hover { filter: brightness(1.08); }
+	.tb-new-icon:hover { background: var(--accent); color: var(--foreground); }
 
 	/* Drawer */
 	.drawer-overlay {
@@ -258,5 +257,6 @@
 	@media (prefers-reduced-motion: reduce) {
 		.drawer,
 		.drawer-overlay { animation: none; }
+		.tb-new-icon { transition: none; }
 	}
 </style>

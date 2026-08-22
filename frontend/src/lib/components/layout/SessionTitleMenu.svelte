@@ -8,6 +8,7 @@
 	 * plain non-interactive title with the same visual weight.
 	 */
 	import { onDestroy } from 'svelte';
+	import { ChevronDown } from 'lucide-svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import { forkSession } from '$lib/api/client';
 	import { appData } from '$lib/stores/app-data.svelte';
@@ -182,7 +183,8 @@
 				aria-expanded={open}
 				aria-current="page"
 			>
-				{title}
+				<span class="title-text">{title}</span>
+				<ChevronDown class="title-caret" size={13} strokeWidth={2} aria-hidden="true" />
 			</button>
 		{:else}
 			<span class="title-trigger" aria-current="page">{title}</span>
@@ -264,9 +266,23 @@
 	}
 
 	button.title-trigger {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
 		cursor: pointer;
 		border-radius: 8px;
-		transition: background-color 0.13s ease;
+		color: var(--muted-foreground);
+		transition: color 0.13s ease;
+	}
+	button.title-trigger .title-text {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	button.title-trigger :global(.title-caret) {
+		flex: none;
+		opacity: 0.85;
 	}
 	.crumb button.title-trigger {
 		padding: 3px 6px;
@@ -277,7 +293,7 @@
 	}
 	button.title-trigger:hover,
 	button.title-trigger.open {
-		background: var(--accent);
+		color: var(--foreground);
 	}
 	button.title-trigger:focus-visible {
 		outline: 2px solid var(--ring);
