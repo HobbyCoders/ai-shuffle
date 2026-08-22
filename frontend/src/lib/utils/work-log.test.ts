@@ -7,6 +7,7 @@ import {
 	buildDisplayItems,
 	formatDuration,
 	summarizeWork,
+	summarizeWorkCompact,
 	turnDurationMs,
 	turnWasInterrupted,
 	type DisplayItem,
@@ -355,6 +356,16 @@ describe('work action summaries', () => {
 		expect(summarizeWork(failedCell)).toBe('Used 1 tool and ran 1 command, 1 failed');
 	});
 
+	it('mentions folded thinking as part of the work', () => {
+		const entries = workEntries([
+			msg({ type: 'thinking', content: 'hmm' }),
+			tool({ toolName: 'Read' }),
+			msg({ type: 'thinking', content: 'again' })
+		]);
+		expect(summarizeWork(entries)).toBe('Read 1 file and thought 2 times');
+		expect(summarizeWorkCompact(entries)).toBe('Read 1 · Thought 2');
+	});
+
 	it('closes the sentence with delegated tasks', () => {
 		const entries = workEntries([
 			msg({ type: 'subagent', agentStatus: 'completed' }),
@@ -367,6 +378,57 @@ describe('work action summaries', () => {
 		expect(summarizeWork(workEntries([msg({ type: 'thinking', content: 'hmm' })])))
 			.toBe('Reasoning and interim work');
 		expect(summarizeWork([])).toBeNull();
+	});
+});
+
+describe('compact work summaries', () => {
+	it('condenses the same tally into tokens that fit a phone row', () => {
+		const entries = workEntries([
+			tool({ toolName: 'Read' }),
+			tool({ toolName: 'Read' }),
+			tool({ toolName: 'Edit' }),
+			tool({ toolName: 'Bash' }),
+			tool({ toolName: 'Grep' }),
+			tool({ toolName: 'Glob' }),
+			tool({ toolName: 'WebSearch' }),
+			tool({ toolName: 'WebFetch' }),
+			tool({ toolName: 'CustomTool' })
+		]);
+		expect(summarizeWorkCompact(entries)).toBe('Read 2 · Edit 1 · Ran 1 · Search 2 · Web 2 · Tools 1');
+	});
+
+	it('keeps the failure count and delegates, matching the prose order', () => {
+		const entries = workEntries([
+			tool({ toolName: 'Read' }),
+			tool({ toolName: 'Read', toolStatus: 'error' }),
+			msg({ type: 'subagent', agentStatus: 'completed' })
+		]);
+		expect(summarizeWorkCompact(entries)).toBe('Read 2 · Delegated 1 · 1 failed');
+	});
+
+	it('excludes hidden code-mode cells like the prose summary', () => {
+		const entries = workEntries([
+			tool({ toolName: 'run_python', toolStatus: 'complete' }),
+			tool({ toolName: 'Bash', toolStatus: 'complete' })
+		]);
+		expect(summarizeWorkCompact(entries)).toBe('Ran 1');
+	});
+
+	it('reports a thinking-only fold instead of hiding it, and null otherwise', () => {
+		expect(summarizeWorkCompact(workEntries([msg({ type: 'thinking', content: 'hmm' })])))
+			.toBe('Thought 1');
+		expect(summarizeWorkCompact(workEntries([msg({ type: 'text', content: 'hi' })]))).toBeNull();
+		expect(summarizeWorkCompact([])).toBeNull();
+	});
+});
+
+describe('buildDisplayItems — compact summary plumbing', () => {
+	it('attaches compactSummary wherever a summary is built', () => {
+		const items = buildDisplayItems([user('go'), tool({ toolName: 'Read' }), tool({ toolName: 'Grep' }), text('done')], SETTLED);
+		const folds = items.filter((item): item is Extract<DisplayItem, { kind: 'work_log' }> => item.kind === 'work_log');
+		expect(folds.length).toBe(1);
+		expect(folds[0].summary).toBe('Read 1 file and searched code 1 time');
+		expect(folds[0].compactSummary).toBe('Read 1 · Search 1');
 	});
 });
 

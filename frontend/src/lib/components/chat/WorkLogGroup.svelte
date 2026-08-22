@@ -28,10 +28,21 @@
 		durationLabel?: string | null;
 		/** Action-specific description of the folded work. */
 		summary?: string | null;
+		/** Token-condensed variant shown instead of `summary` on narrow screens. */
+		compactSummary?: string | null;
 		row: Snippet<[ChatMessage, number]>;
 	}
 
-	let { mode, folded, tail, sequence = [], durationLabel = null, summary = null, row }: Props = $props();
+	let {
+		mode,
+		folded,
+		tail,
+		sequence = [],
+		durationLabel = null,
+		summary = null,
+		compactSummary = null,
+		row
+	}: Props = $props();
 	const retainedSequence = $derived(sequence.filter((entry) => !entry.hiddenWhenCollapsed));
 
 	let open = $state(false);
@@ -96,9 +107,18 @@
 			<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 				<path d="m6 9 6 6 6-6" />
 			</svg>
-			<span class="fold-label">{collapsedLabel}</span>
+			<span class="fold-label">
+				{#if mode === 'live' && summary && compactSummary}
+					<!-- Phones swap the prose sentence for its token-condensed form;
+					     the title attribute keeps the full sentence reachable. -->
+					<span class="fold-prose" title={summary}>{summary}</span>
+					<span class="fold-compact">{compactSummary}</span>
+				{:else}
+					{collapsedLabel}
+				{/if}
+			</span>
 			{#if mode === 'settled' && summary}
-				<span class="fold-summary" title={summary}>· {summary}</span>
+				<span class="fold-summary" title={summary}>· {#if compactSummary}<span class="fold-prose">{summary}</span><span class="fold-compact">{compactSummary}</span>{:else}{summary}{/if}</span>
 			{/if}
 		</button>
 		{#if mode === 'settled' && sequence.length > 0}
@@ -189,7 +209,10 @@
 	}
 
 	.fold-label {
-		flex: none;
+		flex: 0 1 auto;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
 		font-variant-numeric: tabular-nums;
 	}
 
@@ -200,6 +223,24 @@
 		white-space: nowrap;
 		font-size: 11.5px;
 		color: var(--subtle-foreground);
+	}
+
+
+	/* The token-condensed form is the only summary a phone sees; the prose
+	   sentence returns at tablet width. Both stay in the DOM so the title
+	   tooltip keeps the full sentence reachable everywhere. */
+	.fold-compact {
+		display: none;
+	}
+
+	@media (max-width: 639px) {
+		.fold-prose {
+			display: none;
+		}
+
+		.fold-compact {
+			display: inline;
+		}
 	}
 
 	.wlrow.fold:hover {

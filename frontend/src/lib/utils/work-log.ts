@@ -48,6 +48,8 @@ export type DisplayItem =
 			durationLabel: string | null;
 			/** Provider-neutral description such as "Read 3 files and ran 2 commands". */
 			summary: string | null;
+			/** Token-condensed variant ("Read 3 · Ran 2") for narrow screens. */
+			compactSummary: string | null;
 	  };
 
 /** Low-signal system messages that may collapse when consecutive. */
@@ -210,6 +212,47 @@ function sentenceJoin(labels: string[]): string {
 	return `${normalized.slice(0, -1).join(', ')}, and ${normalized.at(-1)}`;
 }
 
+/** Narrow-screen condensation of an action label: "Read 3 files" -> "Read 3". */
+const COMPACT_ACTION_LABELS: Record<ToolAction, (count: number) => string> = {
+	read: (n) => `Read ${n}`,
+	edit: (n) => `Edit ${n}`,
+	command: (n) => `Ran ${n}`,
+	'code-search': (n) => `Search ${n}`,
+	'web-search': (n) => `Web ${n}`,
+	delegate: (n) => `Delegated ${n}`,
+	other: (n) => `Tools ${n}`
+};
+
+/**
+ * The same tally as `summarizeWork`, condensed to fit a phone's fold row:
+ * "Read 2 · Edit 1 · Ran 4 · Search 3 · 1 failed". Every token still carries
+ * its count, so no information is lost — only the words around it.
+ */
+export function summarizeWorkCompact(rows: WorkLogEntry[]): string | null {
+	const entries = rows.filter((entry) => !isHiddenCodeModeCell(entry.message));
+	const tools = entries.filter(
+		(entry) => entry.message.type === 'tool_use' || entry.message.type === 'subagent'
+	);
+	const thoughtCount = entries.filter(
+		(entry) => entry.message.type === 'thinking'
+	).length;
+	if (tools.length === 0 && thoughtCount === 0) return null;
+
+	const counts = new Map<ToolAction, number>();
+	let failed = 0;
+	for (const entry of tools) {
+		const action = toolAction(entry.message);
+		counts.set(action, (counts.get(action) ?? 0) + 1);
+		if (entry.message.toolStatus === 'error') failed++;
+	}
+	const tokens = [...counts.entries()].map(([action, count]) =>
+		COMPACT_ACTION_LABELS[action](count)
+	);
+	if (thoughtCount > 0) tokens.push(`Thought ${thoughtCount}`);
+	if (failed > 0) tokens.push(`${failed} failed`);
+	return tokens.length > 0 ? tokens.join(' · ') : null;
+}
+
 /**
  * A code-mode cell has no row of its own in the transcript unless it failed, so
  * it must not appear in the fold's tally either — only the tool calls made from
@@ -239,11 +282,19 @@ export function summarizeWork(rows: WorkLogEntry[]): string | null {
 		counts.set(action, (counts.get(action) ?? 0) + 1);
 		if (entry.message.toolStatus === 'error') failed++;
 	}
+
 	// Delegation closes the sentence: "Read 3 files and delegated 2 tasks".
 	const ordered = [...counts].sort(
 		(a, b) => Number(a[0] === 'delegate') - Number(b[0] === 'delegate')
 	);
-	const sentence = sentenceJoin(ordered.map(([action, count]) => actionLabel(action, count)));
+	// Thinking folds too; without a mention the reader has no way to know it
+	// happened without expanding the fold.
+	const thoughtCount = entries.filter((entry) => entry.message.type === 'thinking').length;
+	const labels = ordered.map(([action, count]) => actionLabel(action, count));
+	if (thoughtCount > 0) {
+		labels.push(`thought ${thoughtCount} ${thoughtCount === 1 ? 'time' : 'times'}`);
+	}
+	const sentence = sentenceJoin(labels);
 	if (!sentence) return null;
 	return failed > 0 ? `${sentence}, ${failed} failed` : sentence;
 }
@@ -347,7 +398,8 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[]): void {
 			tail,
 			sequence: [],
 			durationLabel: null,
-			summary: summarizeWork(folded)
+			summary: summarizeWork(folded),
+			compactSummary: summarizeWorkCompact(folded)
 		});
 		run = [];
 	};
@@ -441,7 +493,8 @@ export function buildDisplayItems(messages: ChatMessage[], options: BuildOptions
 				hiddenWhenCollapsed: shouldHide(entry)
 			})),
 			durationLabel: turnFoldLabel(turn.map((entry) => entry.message), interrupted),
-			summary: summarizeWork(folded)
+			summary: summarizeWork(folded),
+			compactSummary: summarizeWorkCompact(folded)
 		});
 	});
 

@@ -1259,6 +1259,7 @@
 						sequence={item.sequence}
 						durationLabel={item.durationLabel}
 						summary={item.summary}
+						compactSummary={item.compactSummary}
 						row={messageBody}
 					/>
 				{:else if item.kind === 'system_group'}
