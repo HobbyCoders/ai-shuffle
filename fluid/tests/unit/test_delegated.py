@@ -559,7 +559,7 @@ async def test_bundled_child_subprocess_speaks_mcp(transport, tmp_path) -> None:
                 assert [t.name for t in listed.tools] == ["mcp__wx__get_weather"]
                 called = await session.call_tool("mcp__wx__get_weather", {"city": "Paris"})
                 assert [c.text for c in called.content] == ["Paris: sunny"]
-                assert called.isError is False
+                assert called.is_error is False
 
 
 @pytest.mark.parametrize("transport", TRANSPORTS)
@@ -669,14 +669,24 @@ def test_field_name_prefers_declared_spelling() -> None:
     assert _field_name(object(), "inputSchema", "input_schema") == "inputSchema"
 
 
-def test_server_rejects_handler_kwargs_on_installed_mcp() -> None:
-    """Pins the API this file targets: mcp 1.29's low-level ``Server`` takes no
-    ``on_list_tools`` / ``on_call_tool`` constructor kwargs (decorators only).
-    If a future SDK reinstates them, this test is the reminder to revisit."""
+def test_server_registers_handlers_via_constructor_kwargs() -> None:
+    """Pins the API this file targets: mcp 2.0's low-level ``Server`` takes
+    ``on_list_tools`` / ``on_call_tool`` constructor kwargs and exposes them by
+    method string through ``get_request_handler``. If a future SDK drops
+    either, this test is the reminder to revisit ``build_child_server``."""
     from mcp.server import Server
 
-    with pytest.raises(TypeError):
-        Server("probe", version="0.1.0", on_list_tools=lambda: None)  # type: ignore[call-arg]
+    async def noop(ctx, params):  # pragma: no cover - never invoked
+        raise AssertionError
+
+    server = Server("probe", version="0.1.0", on_list_tools=noop, on_call_tool=noop)
+    assert server.get_request_handler("tools/list").handler is noop
+    assert server.get_request_handler("tools/call").handler is noop
+    assert server.get_request_handler("resources/list") is None
+
+    bundled = build_child_server("tcp:127.0.0.1:1")
+    assert bundled.get_request_handler("tools/list") is not None
+    assert bundled.get_request_handler("tools/call") is not None
 
 
 @pytest.mark.parametrize("transport", TRANSPORTS)
@@ -688,26 +698,24 @@ async def test_child_server_handlers_answer_over_bridge(transport, tmp_path) -> 
     reg = _weather_registry()
     async with _bridge(reg, transport, tmp_path) as address:
         server = build_child_server(address)
-        assert t.ListToolsRequest in server.request_handlers
-        assert t.CallToolRequest in server.request_handlers
+        list_entry = server.get_request_handler("tools/list")
+        call_entry = server.get_request_handler("tools/call")
+        assert list_entry is not None and call_entry is not None
 
-        listed = await server.request_handlers[t.ListToolsRequest](
-            t.ListToolsRequest(method="tools/list"),
-        )
-        tools = listed.root.tools
+        # The handlers ignore the request context, so pass None where the
+        # runner would hand them a ServerRequestContext.
+        listed = await list_entry.handler(None, None)
+        tools = listed.tools
         assert [tool_obj.name for tool_obj in tools] == ["mcp__wx__get_weather"]
         schema = _declared(tools[0], "inputSchema", "input_schema")
         assert schema["properties"] == {"city": {"type": "string"}}
 
-        called = await server.request_handlers[t.CallToolRequest](
-            t.CallToolRequest(method="tools/call", params=t.CallToolRequestParams(
-                name="mcp__wx__get_weather", arguments={"city": "Paris"},
-            )),
+        result = await call_entry.handler(
+            None, t.CallToolRequestParams(name="mcp__wx__get_weather", arguments={"city": "Paris"}),
         )
-        result = called.root
         assert isinstance(result, t.CallToolResult)
         assert [c.text for c in result.content] == ["Paris: sunny"]
-        assert result.isError is False
+        assert result.is_error is False
 
 
 @pytest.mark.parametrize("transport", TRANSPORTS)
@@ -723,10 +731,8 @@ async def test_child_server_propagates_tool_errors(transport, tmp_path) -> None:
     reg.register_inproc(create_inproc_server("bad", [boom]))
     async with _bridge(reg, transport, tmp_path) as address:
         server = build_child_server(address)
-        called = await server.request_handlers[t.CallToolRequest](
-            t.CallToolRequest(method="tools/call", params=t.CallToolRequestParams(
-                name="mcp__bad__boom", arguments={},
-            )),
+        called = await server.get_request_handler("tools/call").handler(
+            None, t.CallToolRequestParams(name="mcp__bad__boom", arguments={}),
         )
-        assert called.root.isError is True
-        assert [c.text for c in called.root.content] == ["kaboom"]
+        assert called.is_error is True
+        assert [c.text for c in called.content] == ["kaboom"]
