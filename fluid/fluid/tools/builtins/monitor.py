@@ -5,8 +5,10 @@ with the harness, Claude Code-parity); the actual supervision — detached proce
 management, output buffering, lifetime beyond the turn — is host-app territory.
 The embedding application injects an async spawner as
 ``ctx.extra["monitor_spawn"]``; without one the tool reports itself unavailable
-instead of pretending to work (fluid's own CLI runs without it until it grows a
-spawner of its own).
+instead of pretending to work. Fluid's own CLI is a host too:
+:class:`fluid.cli.host.CliHost` injects a spawner that runs the command as a
+detached asyncio subprocess, so ``fluid chat`` / ``fluid run`` get working
+Monitor out of the box.
 
 The spawner receives ``(input, ctx)`` and must return a ``BackgroundTaskReceipt``
 (or a ``ToolOutcome`` carrying one, or a mapping with ``task_id``). Contract for

@@ -20,11 +20,16 @@ import sys
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TextIO
 
+from fluid.cli.config import host_of
+from fluid.cli.host import render_worker_event
 from fluid.events.model import (
     ErrorEvent,
     Event,
     Interrupted,
     PermissionRequest,
+    SessionParked,
+    SessionWoken,
+    SubagentEvent,
     TextDelta,
     ThinkingDelta,
     ToolResult,
@@ -97,6 +102,10 @@ def render_event(event: Event, out: TextIO) -> None:
         out.write("\n[interrupted]\n")
     elif isinstance(event, ErrorEvent):
         out.write(f"\n[error] {event.message}\n")
+    elif isinstance(event, (SubagentEvent, SessionParked, SessionWoken)):
+        line = render_worker_event(event)
+        if line is not None:
+            out.write(f"\n  {line}\n")
     out.flush()
 
 
@@ -209,30 +218,46 @@ async def stream_turn(
     out: TextIO,
     on_permission: PermissionResponder = auto_deny,
     parent_node_id: str | None = None,
+    wait_background: bool = False,
+    on_event: Callable[[Event], None] | None = None,
 ) -> str:
     """Submit a turn and render its event stream until a terminal event.
 
     Returns the terminal ``stop_reason`` (or ``"interrupted"``/``"error"``).
     Permission requests are answered via ``on_permission`` while the turn is
     parked, then the loop resumes.
+
+    ``wait_background=True`` keeps consuming past a terminal event while the
+    attached :class:`~fluid.cli.host.CliHost` still has workers running or a
+    wake pending, so the park → wake continuation renders too and the caller
+    only gets control back once nothing is in flight (the one-shot ``run``
+    path). The REPL leaves it off: the prompt returns while work runs and a
+    watcher renders the wake turn later.
     """
+    host = host_of(engine)
     start_seq = len(engine.bus.log(session_id))
     await engine.submit(UserTurn(content=text, parent_node_id=parent_node_id))
     result = "end_turn"
     async for event in engine.bus.subscribe(session_id, since_seq=start_seq):
         render_event(event, out)
+        if on_event is not None:
+            on_event(event)
         if isinstance(event, PermissionRequest):
             await engine.submit(_to_response(event, await on_permission(event)))
-        elif isinstance(event, TurnComplete):
+            continue
+        if isinstance(event, TurnComplete):
             result = event.stop_reason
-            break
         elif isinstance(event, Interrupted):
             result = "interrupted"
-            break
         elif isinstance(event, ErrorEvent):
             result = "error"
-            break
-    await engine.wait_turn()
+        else:
+            continue
+        if wait_background and host is not None and host.busy():
+            continue
+        break
+    if host is None or not host.busy():
+        await engine.wait_turn()
     return result
 
 
@@ -261,6 +286,15 @@ class Repl:
         self.input_fn = input_fn or input
         self.out = out or sys.stdout
         self.prompt = prompt
+        # Background rendering state: the foreground turn renders its own
+        # events; the watcher renders everything after ``_rendered_seq`` while
+        # no foreground turn is active (park/wake continuations).
+        self._foreground = False
+        self._rendered_seq = 0
+        self._watcher: asyncio.Task | None = None
+        host = host_of(engine)
+        if host is not None:
+            host.permission_responder = self.handle_permission
 
     async def _read_line(self, prompt: str) -> str:
         return await asyncio.to_thread(self.input_fn, prompt)
@@ -270,10 +304,46 @@ class Repl:
         return "allow" if answer.strip().lower() in ("y", "yes") else "deny"
 
     async def run_turn(self, text: "str | list[Any]") -> str:
-        return await stream_turn(
-            self.engine, self.session_id, text,
-            out=self.out, on_permission=self.handle_permission,
-        )
+        self._foreground = True
+        try:
+            return await stream_turn(
+                self.engine, self.session_id, text,
+                out=self.out, on_permission=self.handle_permission,
+                on_event=self._note_rendered,
+            )
+        finally:
+            self._foreground = False
+
+    def _note_rendered(self, event: Event) -> None:
+        self._rendered_seq = max(self._rendered_seq, event.seq)
+
+    async def _watch_background(self) -> None:
+        """Render wake-turn events that arrive while the user is at the prompt."""
+        since = len(self.engine.bus.log(self.session_id))
+        self._rendered_seq = max(self._rendered_seq, since)
+        async for event in self.engine.bus.subscribe(self.session_id, since_seq=since):
+            if self._foreground or event.seq <= self._rendered_seq:
+                continue
+            self._rendered_seq = event.seq
+            render_event(event, self.out)
+            if isinstance(event, PermissionRequest):
+                decision = await self.handle_permission(event)
+                await self.engine.submit(
+                    RespondPermission(request_id=event.request_id, decision=decision)
+                )
+
+    def _start_watcher(self) -> None:
+        if self._watcher is None and host_of(self.engine) is not None:
+            self._watcher = asyncio.create_task(self._watch_background())
+
+    async def _stop_watcher(self) -> None:
+        if self._watcher is not None:
+            self._watcher.cancel()
+            try:
+                await self._watcher
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            self._watcher = None
 
     async def dispatch_slash(self, line: str) -> bool:
         """Handle a ``/command``. Returns False to signal exit, True otherwise."""
@@ -285,8 +355,8 @@ class Repl:
         if cmd == "/help":
             self.out.write(
                 "commands: /model <name>, /fork <node_id>, /rewind <node_id>,\n"
-                "  /context (or /usage), /tools, /skills, /exit,\n"
-                "plus any ~/.fluid/commands or .agents/commands *.md file as /<name> [args]\n"
+                "  /context (or /usage), /tools, /skills, /tasks, /cancel <task_id>,\n"
+                "  /exit\n"
                 "resume a session later with: fluid chat --resume <session-id> (or --continue)\n"
             )
         elif cmd in ("/context", "/usage"):
@@ -295,6 +365,21 @@ class Repl:
             self.out.write(format_tools(getattr(self.engine, "registry", None)) + "\n")
         elif cmd == "/skills":
             self.out.write(self.render_skills() + "\n")
+        elif cmd == "/tasks":
+            host = host_of(self.engine)
+            workers = list(host.workers.values()) if host is not None else []
+            if not workers:
+                self.out.write("(no background tasks)\n")
+            for w in workers:
+                self.out.write(f"{w.task_id}  {w.kind:8} {w.status:9} {w.description}\n")
+        elif cmd == "/cancel":
+            host = host_of(self.engine)
+            if host is None or not arg:
+                self.out.write("usage: /cancel <task_id>\n")
+            elif await host.cancel(arg):
+                self.out.write(f"cancelled {arg}\n")
+            else:
+                self.out.write(f"no running task {arg}\n")
         elif cmd == "/model":
             if arg:
                 await set_model(self.engine, arg)
@@ -372,16 +457,20 @@ class Repl:
 
     async def run(self) -> None:
         """Main loop: read lines, dispatch slash-commands or run turns."""
-        while True:
-            try:
-                line = await self._read_line(self.prompt)
-            except (EOFError, KeyboardInterrupt):
-                self.out.write("\n")
-                break
-            if not line.strip():
-                continue
-            if line.strip().startswith("/"):
-                if not await self.dispatch_slash(line):
+        self._start_watcher()
+        try:
+            while True:
+                try:
+                    line = await self._read_line(self.prompt)
+                except (EOFError, KeyboardInterrupt):
+                    self.out.write("\n")
                     break
-                continue
-            await self.run_turn(line)
+                if not line.strip():
+                    continue
+                if line.strip().startswith("/"):
+                    if not await self.dispatch_slash(line):
+                        break
+                    continue
+                await self.run_turn(line)
+        finally:
+            await self._stop_watcher()

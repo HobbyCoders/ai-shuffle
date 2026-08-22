@@ -64,6 +64,35 @@ output when the command finishes.
 Without an injected spawner, Monitor reports itself unavailable (the same
 graceful degradation as Task without a dispatcher).
 
+## Standalone CLI host
+
+`fluid chat` and `fluid run` are a first-class host: `fluid.cli.config.make_engine`
+attaches a `fluid.cli.host.CliHost` to every engine it builds, which injects both
+`task_dispatch` and `monitor_spawn` (the host itself rides along as
+`ToolCtx.extra["cli_host"]`).
+
+- **Monitor** runs the command as a detached asyncio subprocess, buffers
+  stdout+stderr (head + tail, capped), and submits `BackgroundTaskFinished`
+  with the exit code and output tail when it exits. Cancellation kills the
+  whole process tree (`taskkill /T` on Windows, the process group on POSIX).
+- **Task** builds a child `NativeLoop` from the same config and provider
+  client, with its own session in the shared store. A named agent definition
+  supplies the child's system prompt, tool restriction, and model override;
+  otherwise a generic subagent prompt applies. Children never get `Task`
+  themselves (no recursive fan-out) but do get `Monitor`. `mode="sync"` runs
+  inline; `mode="background"` detaches and reports the child's final assistant
+  text as the summary.
+- **Permissions**: the child inherits the parent's approval policy and rules.
+  Its permission prompts route to the host's `permission_responder` — the REPL
+  wires in its own y/N prompt; the one-shot `run` path denies with a message
+  that names the parent's policy as the reason.
+- **Lifecycle in the CLI**: `fluid run` streams through park and wake and only
+  exits once no worker is in flight. The REPL returns the prompt while work
+  runs, renders `SubagentEvent` / `SessionParked` / `SessionWoken` (and the
+  wake turn itself) through a background watcher, and adds `/tasks` and
+  `/cancel <task_id>`. Closing the host cancels whatever still runs and
+  reports it as `cancelled`.
+
 ## AI Shuffle integration requirements
 
 The AI Shuffle task manager should keep worker records in its session/task store,
