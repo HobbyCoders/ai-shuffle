@@ -139,6 +139,31 @@ def _node_rows(session_id: str) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def _event_rows(session_id: str) -> List[Dict[str, Any]]:
+    """The session's durable event log, in emission order.
+
+    ``fluid_session_events`` is the only record of the tool calls a code-mode
+    cell makes: ``CodeModeSession._host_call`` emits a ``ToolUse``/``ToolResult``
+    pair per in-kernel call, and none of them reach the node tree (the model
+    only ever emitted the enclosing ``run_python`` block).
+    """
+    from app.db.base import get_cursor, get_db
+    from app.db.compat import ph
+
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"SELECT seq, event FROM fluid_session_events "
+            f"WHERE session_id = {ph()} ORDER BY seq",
+            (session_id,),
+        )
+        rows = cursor.fetchall()
+    return [
+        {"seq": dict(r).get("seq"), "event": _as_dict(dict(r).get("event"))}
+        for r in rows
+    ]
+
+
 def _as_dict(value: Any) -> Dict[str, Any]:
     """``jsonb`` arrives as a dict from psycopg2 but as a JSON string from the
     test shim's SQLite — normalize (mirrors ``fluid_pg_store._as_dict``)."""
@@ -259,20 +284,213 @@ def _node_to_entry(node: Dict[str, Any], sdk_session_id: str) -> Dict[str, Any]:
     }
 
 
-def fluid_transcript_entries(sdk_session_id: str) -> List[Dict[str, Any]]:
+# ─── Code-mode inner calls ───────────────────────────────────────────────────
+#
+# In code mode the model emits ONE ``run_python`` tool_use per cell; the tools
+# the cell calls (Grep, Read, Bash, Task…) are dispatched host-side by
+# ``CodeModeSession._host_call``, which emits a ``ToolUse``/``ToolResult`` pair
+# per call to the event bus. Those events are persisted to
+# ``fluid_session_events`` and never appear in the node tree, so a transcript
+# read from nodes alone shows a bare ``run_python`` card where the live chat
+# showed the individual tool cards. The helpers below recover the inner calls
+# from the event log and splice them back in for read-only renderers.
+
+#: Code-mode's cell tool. Only blocks with this name get inner calls spliced.
+_CODE_MODE_TOOL = "run_python"
+
+
+def _inner_calls_by_block(
+    events: Sequence[Dict[str, Any]], outer_ids: set
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Group the event log's in-kernel tool calls by the block that ran them.
+
+    ``outer_ids`` are the tool_use ids that DO appear in the node tree. Any
+    ToolUse/ToolResult carrying an id the node tree does not know about was
+    dispatched from inside one of those blocks — the question is which one.
+
+    The engine emits every outer ``ToolUse`` while the assistant message is
+    still STREAMING (``NativeLoop._stream_call``), before it has dispatched
+    anything, and only then runs the blocks one at a time in order. So an
+    assistant message with two tool_use blocks logs
+    ``ToolUse(a), ToolUse(b), <a's inner calls>, ToolResult(a), <b's inner
+    calls>, ToolResult(b)`` — tracking a single "current" outer id would hand
+    every one of a's inner calls to b, because b's ToolUse was seen last.
+
+    The walk therefore keeps an ordered list of OPEN outer ids (an outer
+    ``ToolUse`` appends, its ``ToolResult`` removes it) and attributes an inner
+    event to the OLDEST one still open, which is the block actually being
+    dispatched. Inner events with nothing open are ignored — they belong to the
+    engine, not to a cell.
+
+    Returns ``{outer_tool_use_id: [{"id", "name", "input", "output",
+    "is_error"}, ...]}`` in first-seen order. An inner ``ToolUse`` with no
+    matching result still yields a record, with ``output`` None.
+    """
+    calls: Dict[str, List[Dict[str, Any]]] = {}
+    records: Dict[str, Dict[str, Any]] = {}
+    open_outer: List[str] = []
+
+    for row in events:
+        event = row.get("event") or {}
+        cls = event.get("_cls")
+        if cls not in ("ToolUse", "ToolResult"):
+            continue
+        tool_use_id = event.get("tool_use_id") or ""
+        if tool_use_id in outer_ids:
+            if cls == "ToolUse":
+                if tool_use_id not in open_outer:
+                    open_outer.append(tool_use_id)
+            elif tool_use_id in open_outer:
+                open_outer.remove(tool_use_id)
+            continue
+        if not open_outer:
+            continue
+        current = open_outer[0]
+        if cls == "ToolUse":
+            if tool_use_id in records:
+                continue
+            record = {
+                "id": tool_use_id,
+                "name": event.get("name") or "",
+                "input": event.get("input") or {},
+                "output": None,
+                "is_error": False,
+            }
+            records[tool_use_id] = record
+            calls.setdefault(current, []).append(record)
+        else:
+            record = records.get(tool_use_id)
+            if record is None:
+                continue
+            record["output"] = event.get("output")
+            record["is_error"] = bool(event.get("is_error"))
+
+    return calls
+
+
+def _tool_use_blocks(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if entry.get("type") != "assistant":
+        return []
+    content = (entry.get("message") or {}).get("content") or []
+    return [
+        b for b in content
+        if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id")
+    ]
+
+
+def _synthetic_entry(
+    uuid_: str,
+    parent_uuid: Optional[str],
+    role: str,
+    block: Dict[str, Any],
+    host: Dict[str, Any],
+    model: Optional[str],
+) -> Dict[str, Any]:
+    """One spliced entry, shaped exactly like :func:`_node_to_entry` output."""
+    message: Dict[str, Any] = {"role": role, "content": [block]}
+    if model:
+        message["model"] = model
+    return {
+        "uuid": uuid_,
+        "parentUuid": parent_uuid,
+        "type": role,
+        "timestamp": host.get("timestamp"),
+        "sessionId": host.get("sessionId"),
+        "message": message,
+    }
+
+
+def _splice_inner_calls(
+    entries: List[Dict[str, Any]], sdk_session_id: str
+) -> List[Dict[str, Any]]:
+    """Insert each ``run_python`` block's in-kernel calls after its entry.
+
+    Every inner call becomes the same tool_use/tool_result pair a JSON-surface
+    call produces, so the shared transform merges it into an ordinary tool card.
+    The pair goes between the ``run_python`` tool_use entry and the tool_result
+    entry that closes it, which is the order the live feed showed.
+    """
+    outer_ids = {
+        block["id"] for entry in entries for block in _tool_use_blocks(entry)
+    }
+    has_cells = any(
+        block.get("name") == _CODE_MODE_TOOL
+        for entry in entries
+        for block in _tool_use_blocks(entry)
+    )
+    if not has_cells:  # nothing to splice — don't pay for the event query
+        return entries
+
+    calls = _inner_calls_by_block(_event_rows(sdk_session_id), outer_ids)
+    if not calls:
+        return entries
+
+    out: List[Dict[str, Any]] = []
+    for entry in entries:
+        out.append(entry)
+        model = (entry.get("message") or {}).get("model")
+        parent_uuid = entry.get("uuid")
+        for block in _tool_use_blocks(entry):
+            if block.get("name") != _CODE_MODE_TOOL:
+                continue
+            for record in calls.get(block["id"], []):
+                use_uuid = f"evt_{record['id']}"
+                out.append(_synthetic_entry(
+                    use_uuid, parent_uuid, "assistant",
+                    {
+                        "type": "tool_use",
+                        "id": record["id"],
+                        "name": record["name"],
+                        "input": record["input"],
+                    },
+                    entry, model,
+                ))
+                parent_uuid = use_uuid
+                if record["output"] is None:
+                    continue
+                result_uuid = f"{use_uuid}_result"
+                out.append(_synthetic_entry(
+                    result_uuid, parent_uuid, "user",
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": record["id"],
+                        "content": str(record["output"]),
+                        "is_error": bool(record["is_error"]),
+                    },
+                    entry, model,
+                ))
+                parent_uuid = result_uuid
+    return out
+
+
+def fluid_transcript_entries(
+    sdk_session_id: str, include_inner_calls: bool = False
+) -> List[Dict[str, Any]]:
     """The session's transcript as JSONL-shaped entries, root-first.
 
     This is the facade's core: hand the result to any existing entries-based
     reader (``checkpoints_from_entries``, ``compute_rewind_keep_count``,
     ``jsonl_parser._transform_entries``, ``rewind_db_sync``'s matchers) and it
     behaves exactly as it does for a legacy transcript.
+
+    ``include_inner_calls`` adds the tool calls a code-mode cell made from
+    inside the kernel, read from the event log and spliced in as ordinary
+    tool_use/tool_result entries. It defaults to False because the default
+    result MUST stay index-aligned with :func:`load_fluid_path` — rewind maps a
+    keep-count over entries straight back to the node that becomes the new head,
+    and fork and the checkpoint list depend on the same 1:1 mapping. Splicing
+    breaks that alignment, so only read-only renderers (``/live``, the detail
+    read, the export) may pass True.
     """
     if not looks_like_fluid_session_id(sdk_session_id):
         return []
-    return [
+    entries = [
         _node_to_entry(node, sdk_session_id)
         for node in load_fluid_path(sdk_session_id)
     ]
+    if not include_inner_calls or not entries:
+        return entries
+    return _splice_inner_calls(entries, sdk_session_id)
 
 
 # ─── Checkpoints ─────────────────────────────────────────────────────────────
@@ -815,8 +1033,12 @@ def fluid_live_messages(
     identical transform (tool cards, thinking blocks, subagent rows, usage
     accounting) as every other source. Subagent children are not resolvable
     from the node tree yet, so no children loader is supplied.
+
+    Code-mode inner calls are included: this is a rendering path, so it wants
+    the cards the live feed showed rather than the node-aligned entries rewind
+    needs.
     """
-    entries = fluid_transcript_entries(sdk_session_id)
+    entries = fluid_transcript_entries(sdk_session_id, include_inner_calls=True)
     if not entries:
         return [], {}
     from app.core.jsonl_parser import _transform_entries

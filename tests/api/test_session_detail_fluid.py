@@ -91,3 +91,69 @@ async def test_detail_read_renders_fluid_tool_cards_through_the_shared_transform
     assert len(tool_rows) == 1
     assert tool_rows[0]["toolName"] == "Read"
     assert tool_rows[0]["toolResult"] == "file body"
+
+
+def _seed_events(events):
+    from psycopg2.extras import Json
+
+    from app.db.base import get_cursor, get_db
+
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        for seq, event in enumerate(events, start=1):
+            cursor.execute(
+                "INSERT INTO fluid_session_events (session_id, seq, event) "
+                "VALUES (%s, %s, %s)",
+                (SDK_ID, seq, Json(event)),
+            )
+
+
+def _event(cls, tool_use_id, name, **extra):
+    """One persisted fluid event (``fluid.events.model.event_to_dict``)."""
+    return {
+        "_cls": cls,
+        "session_id": SDK_ID,
+        "node_id": None,
+        "turn_id": "turn_1",
+        "seq": -1,
+        "tool_use_id": tool_use_id,
+        "name": name,
+        **extra,
+    }
+
+
+async def test_detail_read_lists_the_tools_a_code_mode_cell_ran(mock_db):
+    """In code mode the model emits one ``run_python`` block per cell and the
+    tools it calls live only in the event log — the detail read must show them
+    as their own cards, not as a single opaque cell."""
+    cell = {"code": "grep('needle')"}
+    _seed_fluid([
+        ("n1", None, _text("user", "find the needle")),
+        ("n2", "n1", _msg("assistant", [{
+            "kind": "tooluseblock", "id": "rp1", "name": "run_python",
+            "input": cell,
+        }])),
+        ("n3", "n2", _msg("user", [{
+            "kind": "toolresultblock", "tool_use_id": "rp1",
+            "content": [{"kind": "text", "text": "=> 2 hits"}],
+            "is_error": False,
+        }])),
+    ])
+    _seed_events([
+        _event("ToolUse", "rp1", "run_python", input=cell),
+        _event("ToolUse", "c1", "Grep", input={"pattern": "needle"}),
+        _event("ToolResult", "c1", "Grep", output="app/main.py:12",
+               is_error=False, ui=None),
+        _event("ToolUse", "c2", "Read", input={"file_path": "/x"}),
+        _event("ToolResult", "c2", "Read", output="file body",
+               is_error=False, ui=None),
+        _event("ToolResult", "rp1", "run_python", output="=> 2 hits",
+               is_error=False, ui=None),
+    ])
+
+    result = await get_session(request=_request(), session_id=SID, token="tok")
+
+    tool_rows = [m for m in result["messages"] if m.get("type") == "tool_use"]
+    assert [m["toolName"] for m in tool_rows] == ["run_python", "Grep", "Read"]
+    assert tool_rows[1]["toolResult"] == "app/main.py:12"
+    assert tool_rows[2]["toolResult"] == "file body"

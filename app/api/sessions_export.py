@@ -85,7 +85,13 @@ async def _load_jsonl_content(session: dict, working_dir: str) -> str:
             )
 
             if await run_sync(is_fluid_session, sdk_session_id):
-                entries = await run_sync(fluid_transcript_entries, sdk_session_id)
+                # The export is a read-only render, so it takes the code-mode
+                # inner calls too — a bare run_python line would hide every
+                # tool the cell actually ran.
+                entries = await run_sync(
+                    fluid_transcript_entries, sdk_session_id,
+                    include_inner_calls=True,
+                )
             else:
                 from app.core.jsonl_parser import get_session_jsonl_path
 
