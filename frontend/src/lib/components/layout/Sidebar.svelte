@@ -674,7 +674,7 @@
 	/* Rule fills the header row after the label so each group reads as a titled
 	   divider, breaking up the stacked lists below it. */
 	.grouplabel .rule { flex: 1 1 auto; height: 1px; background: var(--sidebar-border); }
-	.divider { height: 1px; background: var(--sidebar-border); margin: 8px 8px 0; }
+	.divider { height: 1px; margin: 8px 8px 0; }
 	.empty {
 		margin: 0;
 		padding: 6px 8px 10px;
