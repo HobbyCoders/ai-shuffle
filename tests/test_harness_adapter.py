@@ -1406,15 +1406,21 @@ async def test_code_mode_rewrites_the_compiled_prompt(monkeypatch, agent_workspa
     assert captured["codemode"] is not None
     system = captured["system"]
 
-    # LAST — the operating rule for every instruction above it.
-    assert system.endswith(ha.CODE_MODE_SECTION)
+    # LAST — the operating rule for every instruction above it, immediately
+    # followed by the "# Tools" catalog it points at.
+    assert ha.CODE_MODE_SECTION in system
+    assert system.index(ha.CODE_MODE_SECTION) < system.index(_TOOLS_HEADING)
     # Skills: header rewritten, index body untouched.
     assert "from tools.Skill import Skill" in system
     assert "- demo: Demo skill" in system
     assert "full instructions with the Skill tool" not in system
     # Agents: fluid's own sentence, extended with how Task is reached.
     assert "delegated to with the Task tool, called from run_python" in system
-    assert system.count("# Available agent types") == 1
+    # Line-anchored: the Task tool's own description names the heading in
+    # prose ("descriptions are under '# Available agent types'"), and under
+    # code mode that description now rides the prompt inside the # Tools
+    # catalog. What must never appear twice is the INDEX BLOCK itself.
+    assert system.count("\n# Available agent types\n") == 1
 
 
 @pytest.mark.asyncio
@@ -1468,6 +1474,115 @@ async def test_code_mode_prompt_keys_on_the_session_not_the_setting(
     assert "run_python" not in system
     assert "Load a skill's full instructions with the Skill tool" in system
 
+
+# The catalog section's heading, anchored to a line start so a "# Tools"
+# inside some tool's own description cannot satisfy the assertion.
+_TOOLS_HEADING = "\n# Tools\n"
+
+
+class _FakeCodeMode:
+    """A codemode session that is nothing but its projection.
+
+    The catalog is built from ``_projection()`` — the same snapshot behind
+    ``list_tools`` and the VFS stubs — so a real ``Projection`` over hand-built
+    specs exercises the real leaf naming, ordering and signature rules.
+    """
+
+    def __init__(self, specs):
+        self._specs = list(specs)
+
+    def _projection(self):
+        from fluid.codemode.projection import Projection
+
+        return Projection(self._specs)
+
+
+def test_code_mode_tools_section_carries_full_tool_documentation(agent_workspace):
+    """The whole point of the section: the descriptions and parameter docs the
+    JSON-tool path sends, which a four-tool code-mode schema otherwise drops."""
+    import app.core.provider.harness_adapter as ha
+    from fluid.tools.registry import ToolSpec
+
+    grep = ToolSpec(
+        name="Grep",
+        description=(
+            "Search file contents with a regex.\n"
+            "\n"
+            "Prefer this over shelling out to grep."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "The regex to run"},
+                "output_mode": {
+                    "type": "string",
+                    "description": "How matches are reported.",
+                    "enum": ["content", "count"],
+                    "default": "content",
+                },
+            },
+            "required": ["pattern"],
+        },
+    )
+    danger = ToolSpec(
+        name="mcp__acme__Danger",
+        description="Escape hatch the kernel may not reach.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "What to do it to"},
+            },
+            "required": ["target"],
+        },
+        code_mode_allowed=False,
+    )
+
+    compiled = ha.HarnessAdapter._compile_prompt_sections(
+        "BASE",
+        None,
+        _agents_options(agent_workspace),
+        code_mode=True,
+        codemode=_FakeCodeMode([grep, danger]),
+    )
+    system = compiled.text
+
+    # After the rule, never before it.
+    assert system.index("# Code mode") < system.index(_TOOLS_HEADING)
+    # Import line, Python signature (required first, optionals ``| None = None``).
+    assert "## Grep" in system
+    assert "`from tools.Grep import Grep`" in system
+    assert "`Grep(pattern: str, output_mode: str | None = None)`" in system
+    # Full description, not the one-line catalog blurb.
+    assert "Search file contents with a regex." in system
+    assert "Prefer this over shelling out to grep." in system
+    # Parameter docs, with enum values and defaults.
+    assert "Parameters:" in system
+    assert "- pattern (str, required): The regex to run" in system
+    assert (
+        "- output_mode (str, optional): How matches are reported. "
+        "one of: content, count default: content"
+    ) in system
+    # MCP tool -> leaf name; the JSON-path-only escape hatch says so.
+    assert "## Danger" in system
+    assert "`from tools.Danger import Danger`" in system
+    assert "Escape hatch the kernel may not reach." in system
+    assert "Not callable from code mode — use it as a direct tool call." in system
+    assert "- target (str, required): What to do it to" in system
+    # And it is a priced section like the rest, not a text-only append.
+    assert [s for s in compiled.sections if s.text.startswith("# Tools")]
+
+
+def test_code_mode_tools_section_skipped_without_a_projection(agent_workspace):
+    """A codemode object with no projection (a double, a future refactor) must
+    degrade to no section rather than failing the prompt."""
+    import app.core.provider.harness_adapter as ha
+
+    compiled = ha.HarnessAdapter._compile_prompt_sections(
+        "BASE", None, _agents_options(agent_workspace),
+        code_mode=True, codemode=object(),
+    )
+    assert "# Code mode" in compiled.text
+    assert _TOOLS_HEADING not in compiled.text
 
 # ─── Native-leg context window (feeds get_context_usage) ─────────────────────
 
@@ -3857,7 +3972,11 @@ async def test_agents_index_carries_file_plugin_and_db_agents(
         )
     )
     system = _CapturingLoop.captured["system"]
-    assert system.count("# Available agent types") == 1
+    # Line-anchored: the Task tool's own description names the heading in
+    # prose ("descriptions are under '# Available agent types'"), and under
+    # code mode that description now rides the prompt inside the # Tools
+    # catalog. What must never appear twice is the INDEX BLOCK itself.
+    assert system.count("\n# Available agent types\n") == 1
     assert "- researcher: Reads the codebase" in system      # (a) file agent
     assert "myplug:reviewer" not in system                   # legacy plugin is inert
     assert "- Helper: Helps out" in system                   # (c) DB agent
@@ -4110,7 +4229,7 @@ async def test_native_prompt_carries_the_project_memory_section(
     # Code mode stays LAST: it is the operating rule for everything above it,
     # this section included.
     assert system.index("# Project memory") < system.index("# Code mode")
-    assert system.endswith(ha.CODE_MODE_SECTION)
+    assert ha.CODE_MODE_SECTION in system
 
 
 @pytest.mark.asyncio

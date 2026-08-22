@@ -1408,6 +1408,11 @@
 				streaming={message.streaming}
 			/>
 		{/if}
+	{:else if message.type === 'tool_use' && message.toolName === 'run_python' && message.toolStatus === 'complete'}
+		<!-- Code mode: a run_python cell that succeeded is plumbing, not work. The
+		     tool calls it made are reported by their own cards, so the cell itself
+		     adds a wall of Python and nothing else. Failed and still-running cells
+		     keep their card - one is a problem to read, the other is progress. -->
 	{:else if message.type === 'tool_use'}
 		<ToolUseMessage
 			name={message.toolName || 'Tool'}

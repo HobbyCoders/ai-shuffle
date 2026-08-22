@@ -541,7 +541,8 @@ class HarnessAdapter(ProviderAdapter):
             # model to import tools inside run_python when run_python is not in
             # its schema would be worse than saying nothing.
             compiled_prompt = self._compile_prompt_sections(
-                system, append_system, options, code_mode=codemode is not None
+                system, append_system, options, code_mode=codemode is not None,
+                codemode=codemode,
             )
             self._engine = NativeLoop(
                 provider=provider_client,
@@ -1593,6 +1594,7 @@ class HarnessAdapter(ProviderAdapter):
         options: SessionOptions,
         *,
         code_mode: bool = False,
+        codemode: Any = None,
         native: bool = True,
     ) -> Any:
         """Run the fluid prompt compiler, keeping the labeled sections.
@@ -1619,7 +1621,10 @@ class HarnessAdapter(ProviderAdapter):
         tool" line in this prompt would otherwise name something the model
         cannot see. Two headers are rewritten to say how the tool is reached
         (skills, agents) and a trailing ``# Code mode`` section states the rule
-        once for everything above it.
+        once for everything above it. ``codemode`` is that session itself, and
+        it supplies the ``# Tools`` catalog that follows the rule — the full
+        tool documentation the model would otherwise never see, since a
+        code-mode schema carries four tools instead of forty.
 
         ``native`` says whether this compilation feeds a native leg. It is the
         gate on the ``# Project memory`` section (ruling MEM3): only a native
@@ -1696,6 +1701,14 @@ class HarnessAdapter(ProviderAdapter):
                 sections.append(
                     PromptSection(kind="extra", text=CODE_MODE_SECTION)
                 )
+                # ... and the catalog it points at. Separate section so the
+                # usage breakdown prices the tool docs on their own line;
+                # empty (no projection) simply omits it.
+                tools_section = _code_mode_tools_section(codemode)
+                if tools_section:
+                    sections.append(
+                        PromptSection(kind="extra", text=tools_section)
+                    )
             if sections == list(compiled.sections):
                 return compiled
             return CompiledPrompt(
@@ -2203,34 +2216,166 @@ _CODE_MODE_TASK_SUFFIX = (
 )
 
 CODE_MODE_SECTION = """# Code mode
-The only tools in your schema are run_python, list_tools, search_tools and \
+Your tool schema contains only run_python, list_tools, search_tools and \
 read_tool_docs. Every other tool named in these instructions — file, shell, \
-search, Skill, Task, Memory, Ledger, Note, app-config, computer-use, media and \
-MCP tools — is called from Python inside run_python: `from tools.<name> import \
-<name>`, then call it. Each call is still permission-gated on the host exactly \
-as a direct tool call would be.
+search, Skill, Task, Memory, Ledger, Note, app-config, computer-use, media \
+and MCP tools — is called from Python inside run_python. The "# Tools" \
+section below lists every tool with its Python signature and full \
+documentation; it is the same documentation those tools carry as direct tool \
+calls, so do not guess names or parameters.
 
-Tool names in these instructions map to their leaf name: `mcp__server__name` \
-is imported as `tools.name`. "Call the X tool" and "use the X tool" mean \
-import and call X inside run_python. An instruction NOT to call a tool still \
-applies.
+## How calls work
+- `from tools.<name> import <name>`, then call it as an ordinary synchronous \
+function: `out = Read(file_path="/abs/path")`. Tools are not coroutines — \
+never `await` them; `await` outside a function is a syntax error in the kernel.
+- Pass arguments by keyword using exactly the parameter names in the \
+signature. Unknown keywords raise TypeError.
+- Every tool returns a string. Large results come back as a ResultRef — \
+slice, search or iterate it rather than printing it whole.
+- Each call is permission-gated on the host exactly as a direct tool call \
+would be; a denial raises HostCallDenied inside the cell.
+- `mcp__server__name` is imported as `tools.name`. "Call the X tool" and "use \
+the X tool" mean import and call X inside run_python. An instruction not to \
+call a tool still applies.
 
-Discover before guessing: list_tools for the catalog, search_tools to search \
-it by keyword, read_tool_docs for a tool's exact signature. Catalog \
-descriptions are one line; read_tool_docs has the full stub.
+## Batch work into one cell
+Code mode exists so one run_python cell can do a whole step of work, not a \
+single tool call. Loop over results, filter in Python, and print only what you \
+need to see:
+```python
+from tools.Grep import Grep
+from tools.Read import Read
+hits = Grep(pattern="usage", path="/repo/src").splitlines()
+for path in hits[:10]:
+    print(path, Read(file_path=path)[:400])
+```
+Wrap calls that may fail in try/except so one failure does not abort the \
+batch. The kernel is persistent: variables, imports and ResultRefs survive \
+across cells, so build on earlier results instead of re-fetching. Independent \
+tool calls that you would otherwise issue one per turn belong in the same cell.
 
-Batch related calls into one run_python cell — loop, filter, combine — rather \
-than one cell per call. The kernel is persistent, so variables and ResultRefs \
-survive across cells.
+## Kernel limits
+- Imports are limited to the allowlist: __future__, base64, bisect, \
+collections, csv, dataclasses, datetime, decimal, enum, fractions, functools, \
+hashlib, heapq, io, itertools, json, math, operator, pathlib, random, re, \
+statistics, string, textwrap, typing, uuid, plus the `tools` and `skills` \
+packages. There is no inspect, os, subprocess or asyncio — use read_tool_docs \
+for signatures and the shell tool for processes.
+- Network access and direct file I/O are disabled inside the kernel; go \
+through the file tools.
+- A cell's compute budget is `timeout` seconds (default 30); time spent \
+waiting on host tool calls is not charged. A tool's own limits (for example \
+the shell tool's command timeout) are set through that tool's parameters, not \
+through run_python's timeout.
+- Long text arguments (subagent prompts, file contents): build them in a \
+variable first and never nest `\"\"\"` inside a triple-quoted string.
 
+## Discovery
+list_tools returns the catalog, search_tools searches it by keyword, \
+read_tool_docs returns a tool's full stub. The "# Tools" section below already \
+contains all of this.
+
+## Skills
 Two different things are called skills. The "# Available skills" list above is \
 instruction files, loaded through the Skill tool. The "Saved skills" that \
 list_tools reports are Python modules from your continual skill store, \
 imported with `from skills.<name> import <name>`. Once you have repeated a \
-workflow, save it as a skill.
+workflow, save it as a skill."""
 
-Network access and direct file I/O are disabled inside the kernel — go through \
-the file tools."""
+
+# The four code-mode tools plus the skill-store pair describe themselves in the
+# model's own schema, so re-documenting them in the catalog would be dead prompt.
+_CODE_MODE_CATALOG_SKIP = frozenset({
+    "run_python", "list_tools", "search_tools", "read_tool_docs",
+    "save_skill", "delete_skill",
+})
+
+
+def _code_mode_tools_section(codemode: Any) -> str:
+    """The ``# Tools`` catalog: every projected tool's signature and full docs.
+
+    Ruling of 2026-08-21. A code-mode schema carries four tools, so the model
+    never sees the descriptions the JSON-tool path sends — a live run guessed
+    parameter names because nothing in the prompt held the real ones. This
+    section is that missing text: same descriptions, same parameter docs, keyed
+    to the Python call shape the kernel actually exposes.
+
+    Built from the session's own projection (the snapshot behind ``list_tools``
+    and the VFS stubs), so the catalog and the importable modules can never
+    disagree. Best-effort: a codemode object without a projection (a test
+    double, a future refactor) returns "" and the section is simply skipped
+    rather than failing the prompt.
+    """
+    try:
+        from fluid.codemode.projection import _annotation, _py_ident
+    except Exception:  # noqa: BLE001 — no projection helpers, no section
+        return ""
+    build = getattr(codemode, "_projection", None)
+    if not callable(build):
+        return ""
+    try:
+        projection = build()
+        leaves = list(projection.leaves())
+    except Exception:  # noqa: BLE001 — a broken registry must not kill the turn
+        logger.warning("[HarnessAdapter] code-mode tool catalog FAILED", exc_info=True)
+        return ""
+
+    blocks: list[str] = []
+    for leaf in leaves:
+        spec = projection.spec_for(leaf)
+        if spec is None or leaf in _CODE_MODE_CATALOG_SKIP:
+            continue
+        if getattr(spec, "name", None) in _CODE_MODE_CATALOG_SKIP:
+            continue
+        schema = getattr(spec, "input_schema", None) or {}
+        props: dict = schema.get("properties") or {}
+        required = list(schema.get("required") or [])
+        # Signature exactly as projection.stub_source renders it: required
+        # params first, then optionals as ``| None = None``.
+        ordered = [p for p in props if p in required]
+        ordered += [p for p in props if p not in required]
+        params: list[str] = []
+        for jname in ordered:
+            ann = _annotation(props.get(jname) or {})
+            pyname = _py_ident(jname)
+            params.append(
+                f"{pyname}: {ann}" if jname in required
+                else f"{pyname}: {ann} | None = None"
+            )
+        lines = [
+            f"## {leaf}",
+            f"`from tools.{leaf} import {leaf}`",
+            f"`{leaf}({', '.join(params)})`",
+        ]
+        description = (getattr(spec, "description", "") or "").strip()
+        if description:
+            lines.append(description)
+        if not getattr(spec, "code_mode_allowed", True):
+            lines.append(
+                "Not callable from code mode — use it as a direct tool call."
+            )
+        if ordered:
+            lines.append("Parameters:")
+            for jname in ordered:
+                prop = props.get(jname) or {}
+                ann = _annotation(prop)
+                need = "required" if jname in required else "optional"
+                detail = (prop.get("description") or "").strip()
+                enum = prop.get("enum")
+                if enum:
+                    detail = (
+                        f"{detail} one of: {', '.join(str(v) for v in enum)}"
+                    ).strip()
+                if "default" in prop:
+                    detail = f"{detail} default: {prop['default']}".strip()
+                head = f"- {_py_ident(jname)} ({ann}, {need})"
+                lines.append(f"{head}: {detail}" if detail else head)
+        blocks.append("\n".join(lines))
+
+    if not blocks:
+        return ""
+    return "# Tools\n" + "\n\n".join(blocks)
+
 
 
 # Ruling MEM3: the native leg had no memory surface at all — no CLI behind it
