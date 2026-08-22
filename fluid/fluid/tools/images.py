@@ -62,7 +62,6 @@ def condition_image(media_type: str, data_b64: str) -> tuple[str, str]:
             if not resized and len(raw) <= _REENCODE_RAW_BYTES:
                 return media_type, data_b64
 
-            from PIL import Image
 
             out_type = media_type
             if out_type in ("image/gif", "image/webp") or (

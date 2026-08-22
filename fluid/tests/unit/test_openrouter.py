@@ -1,13 +1,20 @@
 """OpenRouter provider: SSE normalization, request body, e2e chunk walk."""
 
 import json
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import AsyncIterator
 
 import httpx
 import pytest
 
-from fluid.messages import Image, Message, Reasoning, Text, ToolResultBlock, ToolUseBlock
+from fluid.messages import (
+    Image,
+    Message,
+    Reasoning,
+    Text,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 from fluid.providers._sse import sse_events
 from fluid.providers.base import ProviderRequest, StreamChunk
 from fluid.providers.openrouter.client import OpenRouterClient

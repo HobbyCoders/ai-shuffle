@@ -7,9 +7,8 @@ hundreds of KB of base64 as TEXT instead of an image part.
 
 import json
 
-from fluid.messages import Image, Message, Text, ToolResultBlock, ToolUseBlock
+from fluid.messages import Image, Message, Text, ToolResultBlock
 from fluid.providers._chat_completions import (
-    tool_result_content,
     tool_result_text,
     translate_message,
 )

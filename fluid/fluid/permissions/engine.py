@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any
 
 from fluid.permissions.rules import Rule, match_rule
 from fluid.tools.registry import ToolSpec
@@ -120,7 +121,7 @@ class PermissionEngine:
         return "ask" if risk in _WRITE_RISKS else "allow"
 
     def allow_always(
-        self, name: str, scope: "frozenset[str] | None" = None
+        self, name: str, scope: frozenset[str] | None = None
     ) -> None:
         """Record a session-scoped allow for ``name`` (the ``allow_always``
         permission response). Beats the policy's ask for future calls, but

@@ -35,7 +35,7 @@ class ProviderConfig:
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "ProviderConfig":
+    def from_dict(cls, d: dict[str, Any]) -> ProviderConfig:
         kind = d.get("kind", "anthropic")
         if kind not in PROVIDER_KINDS:
             raise ValueError(f"unknown provider kind: {kind!r} (expected one of {PROVIDER_KINDS})")
@@ -61,7 +61,7 @@ class RuleConfig:
     input_globs: dict[str, str] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "RuleConfig":
+    def from_dict(cls, d: dict[str, Any]) -> RuleConfig:
         return cls(
             tool=d["tool"],
             decision=d.get("decision", "ask"),
@@ -75,7 +75,7 @@ class PermissionConfig:
     rules: tuple[RuleConfig, ...] = ()
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "PermissionConfig":
+    def from_dict(cls, d: dict[str, Any]) -> PermissionConfig:
         policy = d.get("approval_policy", "on_write")
         if policy not in APPROVAL_POLICIES:
             raise ValueError(
@@ -101,7 +101,7 @@ class HookConfig:
     timeout: float = 60.0
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "HookConfig":
+    def from_dict(cls, d: dict[str, Any]) -> HookConfig:
         event = d.get("event")
         if event not in HOOK_EVENTS:
             raise ValueError(f"unknown hook event: {event!r} (expected one of {HOOK_EVENTS})")
@@ -140,7 +140,7 @@ class InstructionFilesConfig:
     discover_nested: bool = True
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "InstructionFilesConfig":
+    def from_dict(cls, d: dict[str, Any]) -> InstructionFilesConfig:
         # Accept both the terse toml keys (``global``/``project``/...) and the
         # explicit ``discover_*`` field names.
         def pick(*keys: str, default: bool) -> bool:
@@ -173,7 +173,7 @@ class ToolsConfig:
     disallowed: tuple[str, ...] = ()
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "ToolsConfig":
+    def from_dict(cls, d: dict[str, Any]) -> ToolsConfig:
         allowed = d.get("allowed")
         return cls(
             allowed=tuple(allowed) if allowed is not None else None,
@@ -204,7 +204,7 @@ class ContextConfig:
     min_result_chars: int = 2_000
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "ContextConfig":
+    def from_dict(cls, d: dict[str, Any]) -> ContextConfig:
         return cls(
             enabled=bool(d.get("enabled", True)),
             trigger_tokens=int(d.get("trigger_tokens", 120_000)),
@@ -259,7 +259,7 @@ class HarnessConfig:
     mcp: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "HarnessConfig":
+    def from_dict(cls, d: dict[str, Any]) -> HarnessConfig:
         providers = {
             name: ProviderConfig.from_dict(pc)
             for name, pc in d.get("providers", {}).items()

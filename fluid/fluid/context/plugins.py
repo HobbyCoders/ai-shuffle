@@ -50,7 +50,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from fluid.context.claude_settings import enabled_plugins, load_claude_settings, mcp_toggles
+from fluid.context.claude_settings import (
+    enabled_plugins,
+    load_claude_settings,
+    mcp_toggles,
+)
 from fluid.context.instructions import Command, Skill, parse_frontmatter
 
 log = logging.getLogger(__name__)

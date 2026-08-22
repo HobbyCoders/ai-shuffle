@@ -29,7 +29,6 @@ from fluid.events import (
     PermissionRequest,
     RespondPermission,
     TextDelta,
-    ThinkingDelta,
     ToolResult,
     ToolUse,
     TurnComplete,
@@ -37,7 +36,6 @@ from fluid.events import (
     Usage,
     UserTurn,
 )
-from fluid.messages import Text
 from fluid.store.base import MemoryStore
 from fluid.store.jsonl import JsonlStore
 from fluid.tools.inproc import create_inproc_server, tool

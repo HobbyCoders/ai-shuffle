@@ -9,7 +9,7 @@ turn, which makes the session permanently unusable. The loop repairs the
 rendered history at request-build time instead of mutating the store.
 """
 
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from fluid.engine.native import (
     LOST_TOOL_RESULT_TEXT,

@@ -1,6 +1,6 @@
 """M6 — layered config precedence, TOML parsing, and the engine factory."""
 
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from fluid.config.loader import (
     BUILTIN_DEFAULTS,

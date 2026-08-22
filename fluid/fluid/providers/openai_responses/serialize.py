@@ -34,7 +34,8 @@ chunk model is simpler, so this is a port of the *knowledge*, not the code:
 from __future__ import annotations
 
 import json
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any
 
 from fluid.messages import (
     Image,

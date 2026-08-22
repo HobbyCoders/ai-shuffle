@@ -171,7 +171,7 @@ class CliHost:
 
     # ── wiring ──
 
-    def attach(self, engine: Any) -> "CliHost":
+    def attach(self, engine: Any) -> CliHost:
         """Inject the spawners into ``engine.ctx.extra`` and remember the engine."""
         self.engine = engine
         ctx = getattr(engine, "ctx", None)
@@ -493,7 +493,7 @@ async def _stop_worker(worker: Worker) -> None:
         if task is not None and task is not current and not task.done():
             try:
                 await asyncio.wait_for(asyncio.shield(task), timeout=5)
-            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):  # noqa: BLE001
+            except (TimeoutError, asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
     if task is not None and task is not current and not task.done():
         task.cancel()
@@ -504,7 +504,7 @@ async def _stop_worker(worker: Worker) -> None:
     if process is not None and process.returncode is None:
         try:
             await asyncio.wait_for(process.wait(), timeout=5)
-        except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+        except (TimeoutError, Exception):  # noqa: BLE001
             pass
 
 
@@ -552,9 +552,9 @@ def render_worker_event(event: Event) -> str | None:
 
 
 __all__ = [
+    "GENERIC_SUBAGENT_PROMPT",
     "CliHost",
     "Worker",
-    "GENERIC_SUBAGENT_PROMPT",
     "deny_permission",
     "render_worker_event",
 ]

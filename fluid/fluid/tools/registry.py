@@ -14,8 +14,9 @@ their bare names (``Read``, ``Edit``, ...).
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from fluid.tools.mcp.manager import McpManager
 
@@ -58,11 +59,11 @@ class ToolSpec:
     # Optional ``allow_always`` scoping: ``session_scope(input)`` returns the
     # set of labels a session allow covers (Bash: the programs the command
     # runs). None → the allow covers every call to the tool.
-    session_scope: Callable[[dict[str, Any]], "frozenset[str] | None"] | None = field(
+    session_scope: Callable[[dict[str, Any]], frozenset[str] | None] | None = field(
         default=None, compare=False, repr=False
     )
 
-    def scope_of(self, input: dict[str, Any]) -> "frozenset[str] | None":
+    def scope_of(self, input: dict[str, Any]) -> frozenset[str] | None:
         """Labels an ``allow_always`` for this call would cover (None = all)."""
         if self.session_scope is None:
             return None
@@ -194,7 +195,7 @@ class ToolRegistry:
         self._entries[spec.name] = _Entry(spec=spec, handler=handler)
         self._loaded.add(spec.name)
 
-    def register_inproc(self, server: "Any", *, defer: bool = False) -> None:
+    def register_inproc(self, server: Any, *, defer: bool = False) -> None:
         """Register an in-process MCP server (from ``create_inproc_server``).
 
         Each tool surfaces as ``mcp__<server>__<tool>``. By default schemas

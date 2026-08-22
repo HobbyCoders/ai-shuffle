@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 
@@ -28,7 +29,6 @@ from fluid.messages import (
 from fluid.providers._retry import RETRIABLE_STATUSES, RetryPolicy
 from fluid.providers._sse import sse_events
 from fluid.providers.base import StreamChunk
-
 
 # ─── request: Message[] → chat/completions messages ──────────────────────────
 

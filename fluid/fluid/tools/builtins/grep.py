@@ -132,7 +132,7 @@ async def _ripgrep(
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=RG_TIMEOUT_S)
-    except (TimeoutError, asyncio.TimeoutError):
+    except TimeoutError:
         with contextlib.suppress(ProcessLookupError, OSError):
             proc.kill()
         with contextlib.suppress(Exception):

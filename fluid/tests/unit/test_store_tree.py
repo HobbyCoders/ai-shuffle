@@ -5,7 +5,7 @@ reloads from disk with a fresh store instance to prove the tree, the head
 tracking, and the event log all survive a restart.
 """
 
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from fluid.engine.native import NativeLoop
 from fluid.events import Fork, Rewind, UserTurn

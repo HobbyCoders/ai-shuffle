@@ -9,17 +9,27 @@ The MCP layer is faked at the McpManager seam (the engine talks to it through
 ``registry.dispatch``), so the whole loop runs offline in the test process.
 """
 
-import asyncio
-from typing import Any, AsyncIterator
-
-import pytest
+from collections.abc import AsyncIterator
+from typing import Any
 
 from fluid.engine.native import NativeLoop
-from fluid.events import QuestionRequest, RespondQuestion, ToolResult, TurnComplete, UserTurn
+from fluid.events import (
+    QuestionRequest,
+    RespondQuestion,
+    ToolResult,
+    TurnComplete,
+    UserTurn,
+)
 from fluid.permissions.engine import PermissionEngine
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import MemoryStore
-from fluid.tools.registry import InputRequired, ToolOutcome, ToolRegistry, ToolSpec, _Entry
+from fluid.tools.registry import (
+    InputRequired,
+    ToolOutcome,
+    ToolRegistry,
+    ToolSpec,
+    _Entry,
+)
 
 
 class ScriptedProvider:

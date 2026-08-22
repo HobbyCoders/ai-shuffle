@@ -7,8 +7,6 @@ Covers connect → list/search/load/dispatch, the ttlMs list cache, and the MRTR
 import sys
 from pathlib import Path
 
-import pytest
-
 from fluid.tools.registry import InputRequired, ToolCtx, ToolRegistry
 
 FIXTURE = str(Path(__file__).parent.parent / "fixtures" / "fake_mcp_server.py")

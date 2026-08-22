@@ -71,10 +71,16 @@ from fluid.events.model import (
     TurnComplete,
     Usage,
 )
-from fluid.messages import Message, Reasoning, Text, Thinking, ToolResultBlock, ToolUseBlock
+from fluid.messages import (
+    Message,
+    Reasoning,
+    Text,
+    Thinking,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 from fluid.providers.anthropic.serialize import sse_to_chunk
 from fluid.store.base import new_id
-
 
 # ─── Pure helpers ────────────────────────────────────────────────────────────
 
@@ -106,7 +112,7 @@ def flatten_tool_content(content: Any) -> str:
     return json.dumps(content, default=str)
 
 
-def parse_control_response(frame: dict[str, Any]) -> "ControlReply | None":
+def parse_control_response(frame: dict[str, Any]) -> ControlReply | None:
     """``control_response`` frame → :class:`ControlReply` (None if unattributable).
 
     Both subtypes key on ``request_id`` inside the inner ``response`` object;

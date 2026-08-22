@@ -7,7 +7,7 @@ The stored tree is never mutated; every tier is a view transform.
 """
 
 import asyncio
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from fluid.context.compaction import (
     CompactionConfig,

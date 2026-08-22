@@ -13,7 +13,7 @@ import os
 import platform as _platform
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fluid.tools.shell import describe as describe_shell
@@ -87,7 +87,7 @@ def environment_block(cwd: str | os.PathLike[str] = ".") -> str:
         f"Platform: {sys.platform}",
         f"OS: {_os_version()}",
         f"Shell: {shell}",
-        f"Today's date: {datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
+        f"Today's date: {datetime.now(UTC).strftime('%Y-%m-%d')}",
     ]
     git = git_context(cwd_str)
     if git is not None:

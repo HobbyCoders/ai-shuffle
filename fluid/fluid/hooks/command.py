@@ -24,9 +24,10 @@ import os
 import re
 import signal
 import subprocess
+from collections.abc import Iterable
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
-from typing import Any, Iterable
+from typing import Any
 
 from fluid.hooks.bus import (
     POST_TOOL_USE,
@@ -110,7 +111,7 @@ class CommandHook:
         stdin = json.dumps(self.build_payload(event, payload), default=str).encode("utf-8")
         try:
             code, stdout, stderr = await self._run(stdin)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return HookDecision(
                 warnings=(f"{self.label} timed out after {self.timeout:g}s; continuing",)
             )
@@ -136,7 +137,7 @@ class CommandHook:
         )
         try:
             out, err = await asyncio.wait_for(proc.communicate(stdin), self.timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             await _kill_tree(proc)
             raise
         return (
@@ -205,7 +206,7 @@ async def _kill_tree(proc: asyncio.subprocess.Process) -> None:
         pass
     try:
         await asyncio.wait_for(proc.wait(), 5)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         log.warning("hook process %s did not exit after kill", proc.pid)
 
 

@@ -15,7 +15,8 @@ kernel but ``fluid.codemode.vfs`` on the host).
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 DEFAULT_LIMIT = 8192  # bytes; results larger than this ride behind a ResultRef
 

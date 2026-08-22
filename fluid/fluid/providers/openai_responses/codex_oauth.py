@@ -35,9 +35,8 @@ import logging
 import os
 import secrets
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 from urllib.parse import urlencode
 
 import httpx
@@ -108,8 +107,8 @@ class AuthorizationStart:
 class TokenBundle:
     access_token: str
     refresh_token: str
-    id_token: Optional[str] = None
-    account_id: Optional[str] = None
+    id_token: str | None = None
+    account_id: str | None = None
 
 
 class CodexAuthPending(Exception):
@@ -123,7 +122,7 @@ class CodexAuthPending(Exception):
 class CodexAuthError(Exception):
     """A terminal auth error. ``is_permanent`` marks the rotating-refresh death."""
 
-    def __init__(self, code: str, message: Optional[str] = None):
+    def __init__(self, code: str, message: str | None = None):
         super().__init__(message or code)
         self.code = code
 
@@ -156,12 +155,12 @@ def _decode_jwt_payload(token: str) -> dict:
         raw = base64.urlsafe_b64decode(payload_b64 + padding)
         obj = json.loads(raw)
         return obj if isinstance(obj, dict) else {}
-    except Exception:  # noqa: BLE001 — malformed token must not break auth
+    except Exception:
         logger.debug("codex_oauth: id_token payload decode failed", exc_info=True)
         return {}
 
 
-def extract_account_id(id_token: Optional[str]) -> Optional[str]:
+def extract_account_id(id_token: str | None) -> str | None:
     """Extract the ``chatgpt_account_id`` claim from an id_token."""
     if not id_token:
         return None
@@ -177,14 +176,14 @@ def extract_account_id(id_token: Optional[str]) -> Optional[str]:
     return None
 
 
-def _access_token_exp(token: Optional[str]) -> Optional[datetime]:
+def _access_token_exp(token: str | None) -> datetime | None:
     """Read the ``exp`` claim (a UNIX timestamp) from a JWT, if present."""
     if not token:
         return None
     exp = _decode_jwt_payload(token).get("exp")
     if isinstance(exp, (int, float)):
         try:
-            return datetime.fromtimestamp(exp, tz=timezone.utc)
+            return datetime.fromtimestamp(exp, tz=UTC)
         except (ValueError, OverflowError, OSError):
             return None
     return None
@@ -194,11 +193,11 @@ def _access_token_exp(token: Optional[str]) -> Optional[datetime]:
 
 
 async def _post(
-    client: Optional[httpx.AsyncClient],
+    client: httpx.AsyncClient | None,
     url: str,
     *,
-    data: Optional[dict] = None,
-    json_body: Optional[dict] = None,
+    data: dict | None = None,
+    json_body: dict | None = None,
 ) -> httpx.Response:
     if client is not None:
         return await client.post(url, data=data, json=json_body, timeout=_HTTP_TIMEOUT)
@@ -214,7 +213,7 @@ def _safe_json(resp: httpx.Response) -> dict:
         return {}
 
 
-def _error_code(body: dict) -> tuple[Optional[str], Optional[str]]:
+def _error_code(body: dict) -> tuple[str | None, str | None]:
     err = body.get("error")
     if isinstance(err, dict):
         code = err.get("code") or err.get("type")
@@ -225,7 +224,7 @@ def _error_code(body: dict) -> tuple[Optional[str], Optional[str]]:
 
 
 def _bundle_from_token_response(
-    body: dict, *, prior_refresh_token: Optional[str] = None
+    body: dict, *, prior_refresh_token: str | None = None
 ) -> TokenBundle:
     access_token = body.get("access_token")
     if not access_token:
@@ -246,7 +245,7 @@ def _bundle_from_token_response(
 
 
 def build_authorize_url(
-    redirect_uri: str, *, client_id_override: Optional[str] = None
+    redirect_uri: str, *, client_id_override: str | None = None
 ) -> AuthorizationStart:
     """Build the ``/oauth/authorize`` URL for the PKCE browser-redirect flow."""
     verifier, challenge = generate_pkce()
@@ -274,7 +273,7 @@ async def exchange_authorization_code(
     code_verifier: str,
     redirect_uri: str,
     *,
-    client: Optional[httpx.AsyncClient] = None,
+    client: httpx.AsyncClient | None = None,
 ) -> TokenBundle:
     """PKCE authorization-code exchange → the initial token bundle."""
     resp = await _post(
@@ -297,7 +296,7 @@ async def exchange_authorization_code(
 # ─── device-code flow ─────────────────────────────────────────────────────────
 
 
-async def start_device_code(*, client: Optional[httpx.AsyncClient] = None) -> DeviceCodeStart:
+async def start_device_code(*, client: httpx.AsyncClient | None = None) -> DeviceCodeStart:
     """Begin the device-code flow: request a user-code."""
     verifier, _challenge = generate_pkce()
     resp = await _post(client, DEVICE_USERCODE_URL, json_body={"client_id": client_id()})
@@ -318,8 +317,8 @@ async def start_device_code(*, client: Optional[httpx.AsyncClient] = None) -> De
         try:
             exp = datetime.fromisoformat(str(body["expires_at"]).replace("Z", "+00:00"))
             if exp.tzinfo is None:
-                exp = exp.replace(tzinfo=timezone.utc)
-            expires_in = max(0, int((exp - datetime.now(timezone.utc)).total_seconds()))
+                exp = exp.replace(tzinfo=UTC)
+            expires_in = max(0, int((exp - datetime.now(UTC)).total_seconds()))
         except ValueError:
             pass
     return DeviceCodeStart(
@@ -337,7 +336,7 @@ async def poll_device_code(
     code_verifier: str,
     user_code: str,
     *,
-    client: Optional[httpx.AsyncClient] = None,
+    client: httpx.AsyncClient | None = None,
 ) -> TokenBundle:
     """One poll step. Raises :class:`CodexAuthPending` until authorized."""
     resp = await _post(
@@ -378,7 +377,7 @@ async def poll_device_code(
 
 
 async def refresh_tokens(
-    refresh_token: str, *, client: Optional[httpx.AsyncClient] = None
+    refresh_token: str, *, client: httpx.AsyncClient | None = None
 ) -> TokenBundle:
     """Refresh the access token; returns the ROTATED bundle."""
     resp = await _post(
@@ -396,12 +395,12 @@ async def refresh_tokens(
     return _bundle_from_token_response(_safe_json(resp), prior_refresh_token=refresh_token)
 
 
-async def revoke_token(token: str, *, client: Optional[httpx.AsyncClient] = None) -> bool:
+async def revoke_token(token: str, *, client: httpx.AsyncClient | None = None) -> bool:
     """Best-effort token revoke. Never raises."""
     try:
         resp = await _post(client, REVOKE_URL, data={"client_id": client_id(), "token": token})
         return 200 <= resp.status_code < 300
-    except Exception:  # noqa: BLE001 — revoke is best-effort
+    except Exception:
         logger.debug("codex_oauth: revoke failed", exc_info=True)
         return False
 
@@ -410,16 +409,16 @@ async def revoke_token(token: str, *, client: Optional[httpx.AsyncClient] = None
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
-def _parse_iso(value: Optional[str]) -> Optional[datetime]:
+def _parse_iso(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
         dt = datetime.fromisoformat(value)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         return dt
     except (ValueError, TypeError):
         return None
@@ -431,12 +430,12 @@ class StoredBundle:
 
     access_token: str
     refresh_token: str
-    id_token: Optional[str] = None
-    account_id: Optional[str] = None
-    last_refresh: Optional[str] = None  # ISO-8601 of the last successful refresh
+    id_token: str | None = None
+    account_id: str | None = None
+    last_refresh: str | None = None  # ISO-8601 of the last successful refresh
 
     @classmethod
-    def from_bundle(cls, b: TokenBundle, *, last_refresh: Optional[str] = None) -> "StoredBundle":
+    def from_bundle(cls, b: TokenBundle, *, last_refresh: str | None = None) -> StoredBundle:
         return cls(
             access_token=b.access_token,
             refresh_token=b.refresh_token,
@@ -446,7 +445,7 @@ class StoredBundle:
         )
 
 
-def save_bundle(bundle: StoredBundle, path: Optional[Path] = None) -> Path:
+def save_bundle(bundle: StoredBundle, path: Path | None = None) -> Path:
     """Persist a bundle as JSON with ``0600`` perms (dir created ``0700``)."""
     target = Path(path or DEFAULT_TOKEN_PATH)
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -456,7 +455,7 @@ def save_bundle(bundle: StoredBundle, path: Optional[Path] = None) -> Path:
     return target
 
 
-def load_bundle(path: Optional[Path] = None) -> Optional[StoredBundle]:
+def load_bundle(path: Path | None = None) -> StoredBundle | None:
     """Load a bundle from JSON, or ``None`` if the file is absent/unreadable."""
     target = Path(path or DEFAULT_TOKEN_PATH)
     if not target.exists():
@@ -473,7 +472,7 @@ def load_bundle(path: Optional[Path] = None) -> Optional[StoredBundle]:
 
 def _needs_refresh(bundle: StoredBundle) -> bool:
     """Proactive-refresh window: 8-day interval elapsed OR JWT exp within 5 min."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     last_refresh = _parse_iso(bundle.last_refresh)
     if last_refresh is None:
         return True
@@ -497,16 +496,16 @@ class CodexAuth:
     def __init__(
         self,
         *,
-        token_path: Optional[Path] = None,
-        client: Optional[httpx.AsyncClient] = None,
+        token_path: Path | None = None,
+        client: httpx.AsyncClient | None = None,
     ) -> None:
         self.token_path = Path(token_path or DEFAULT_TOKEN_PATH)
         self._client = client
-        self._bundle: Optional[StoredBundle] = None
+        self._bundle: StoredBundle | None = None
         self._lock = asyncio.Lock()
 
     @property
-    def account_id(self) -> Optional[str]:
+    def account_id(self) -> str | None:
         return self._bundle.account_id if self._bundle else None
 
     def _ensure_loaded(self) -> StoredBundle:

@@ -8,7 +8,7 @@ function (unit-level) rather than a pty.
 import asyncio
 import io
 import json
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 import pytest
 
@@ -17,7 +17,7 @@ from fluid.cli.config import list_sessions, make_engine, make_store
 from fluid.cli.repl import Repl, stream_turn
 from fluid.config.loader import BUILTIN_DEFAULTS, deep_merge
 from fluid.config.model import HarnessConfig
-from fluid.events.model import PermissionRequest, ToolResult, TurnComplete
+from fluid.events.model import ToolResult
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import MemoryStore
 from fluid.tools.inproc import create_inproc_server, tool

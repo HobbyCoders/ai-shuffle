@@ -3,9 +3,9 @@
 import asyncio
 import json
 
-import fluid.engine.native as native_module
 import pytest
 
+import fluid.engine.native as native_module
 from fluid.engine.delegated import DelegatedLoop
 from fluid.engine.native import NativeLoop
 from fluid.events import (
@@ -25,7 +25,6 @@ from fluid.store.jsonl import JsonlStore
 from fluid.tools.builtins import register_builtins
 from fluid.tools.mcp.bundled_server import _answer
 from fluid.tools.registry import BackgroundTaskReceipt, ToolCtx, ToolRegistry
-
 from tests.unit.test_tool_loop import ScriptedProvider, _text, _tool
 
 

@@ -29,8 +29,8 @@ import traceback
 # ``-I`` drops the script dir from sys.path; re-add it for the sibling imports.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import truncate  # noqa: E402  (top-level sibling, stdlib-only)
-import vfs  # noqa: E402
+import truncate
+import vfs
 
 _IN = sys.stdin.buffer  # binary framing channels, captured before any redirect
 _OUT = sys.stdout.buffer

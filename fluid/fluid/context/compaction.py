@@ -35,20 +35,21 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any
 
-from fluid.messages import (
-    Message,
-    Text,
-    ToolResultBlock,
-    ToolUseBlock,
-)
 from fluid.context.trim import (
     ToolResultTrimmer,
     TrimConfig,
     block_chars,
     estimate_tokens_of_messages,
+)
+from fluid.messages import (
+    Message,
+    Text,
+    ToolResultBlock,
+    ToolUseBlock,
 )
 from fluid.store.base import SessionNode
 

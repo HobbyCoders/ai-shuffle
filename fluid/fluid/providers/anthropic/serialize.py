@@ -16,7 +16,6 @@ from typing import Any
 
 from fluid.messages import (
     Image,
-    Message,
     Reasoning,
     Text,
     Thinking,

@@ -42,7 +42,8 @@ import os
 import signal
 import socket
 import tempfile
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from fluid.engine.background import BackgroundLifecycleMixin
 from fluid.engine.base import EngineCaps
@@ -264,7 +265,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             try:
                 self._proc.terminate()
                 await asyncio.wait_for(self._proc.wait(), timeout=5)
-            except (asyncio.TimeoutError, ProcessLookupError):
+            except (TimeoutError, ProcessLookupError):
                 try:
                     self._proc.kill()
                 except ProcessLookupError:
@@ -327,7 +328,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         """
         if self.registry is None or self._socket_server is not None:
             return
-        from fluid.tools.mcp.bundled_server import serve_registry_socket, write_bundled_config
+        from fluid.tools.mcp.bundled_server import (
+            serve_registry_socket,
+            write_bundled_config,
+        )
 
         specs = [
             s for s in self.registry.list_tools(loaded_only=True)
@@ -508,7 +512,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         for _ in range(1000):  # backstop against a continuously-spewing child
             try:
                 line = await asyncio.wait_for(self._proc.stdout.readline(), timeout=0.05)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 return
             if not line:  # EOF — let the turn's reader surface the closed stream
                 return
@@ -679,7 +683,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             })
             await self._await_control_reply(fut, timeout)
             reply: ControlReply = fut.result()
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.debug("control_request %r timed out", request.get("subtype"))
             return None
         except asyncio.CancelledError:
@@ -726,7 +730,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         while not fut.done():
             remaining = deadline - loop.time()
             if remaining <= 0:
-                raise asyncio.TimeoutError
+                raise TimeoutError
             if self._turn_is_active() or self._stdout_lock.locked():
                 # Someone else owns stdout; poll so a turn ending mid-wait hands
                 # the pump back to us before the deadline.
@@ -737,12 +741,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if outcome is _PumpOutcome.EOF and not fut.done():
                 # stdout hit EOF: the CLI is gone and no reply is coming — stop
                 # rather than spinning on a closed stream until the deadline.
-                raise asyncio.TimeoutError
+                raise TimeoutError
             # REPLY / DEADLINE / YIELDED all fall back to the loop head, which
             # re-derives the state: reply → exit, deadline → TimeoutError,
             # yielded → poll while the turn's reader owns stdout.
         if not fut.done():
-            raise asyncio.TimeoutError
+            raise TimeoutError
 
     async def _pump_control_stdout(
         self, fut: asyncio.Future, deadline: float,
@@ -774,7 +778,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 line = await asyncio.wait_for(
                     self._proc.stdout.readline(), timeout=min(remaining, _CONTROL_POLL),
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue  # nothing to read yet — re-check turn/deadline
             if not line:  # EOF — the CLI is gone; no reply is coming
                 return _PumpOutcome.EOF

@@ -21,7 +21,8 @@ model's code — the error stays in context rather than being silently dropped.
 
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from fluid.codemode.kernel import HostReply
 from fluid.events.model import ToolUse

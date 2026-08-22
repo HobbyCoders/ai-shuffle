@@ -56,7 +56,6 @@ def test_bloated_within_edge_png_reencodes_smaller() -> None:
 
 def test_gif_flattens_to_jpeg() -> None:
     import io as _io
-
     import random
 
     rng = random.Random(3)
@@ -78,7 +77,7 @@ def test_garbage_base64_passes_through() -> None:
 def test_dispatch_tool_conditions_images(monkeypatch) -> None:
     """The engine seam: ToolOutcome images are conditioned before becoming blocks."""
     from fluid.messages import Image, Text, ToolResultBlock
-    from fluid.tools.registry import ToolCtx, ToolImage, ToolOutcome
+    from fluid.tools.registry import ToolImage, ToolOutcome
 
     big_png = _png(2400, 1400)
     outcome = ToolOutcome(

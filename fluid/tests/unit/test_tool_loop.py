@@ -6,7 +6,7 @@ call, so the whole loop runs offline.
 
 import asyncio
 import json
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 import pytest
 

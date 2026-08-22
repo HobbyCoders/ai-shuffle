@@ -10,9 +10,7 @@ import asyncio
 import io
 import json
 import sys
-from typing import AsyncIterator
-
-import pytest
+from collections.abc import AsyncIterator
 
 from fluid.cli.__main__ import run_once
 from fluid.cli.config import host_of, make_engine
@@ -24,12 +22,10 @@ from fluid.events import (
     SessionParked,
     SessionWoken,
     SubagentEvent,
-    TurnComplete,
     UserTurn,
 )
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import MemoryStore
-
 from tests.unit.test_tool_loop import ScriptedProvider, _text, _tool
 
 PY = sys.executable

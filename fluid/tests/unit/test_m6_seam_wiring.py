@@ -4,7 +4,7 @@ on NativeLoop."""
 
 import io
 import json
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from fluid.cli.repl import Repl
 from fluid.engine.native import NativeLoop
@@ -12,9 +12,9 @@ from fluid.events import SetModel, SetPermissionMode, UserTurn
 from fluid.permissions.engine import PermissionEngine
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import MemoryStore
-from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
 from fluid.tools.builtins import register_builtins
 from fluid.tools.builtins.skill import handler as skill_handler
+from fluid.tools.registry import ToolCtx, ToolRegistry
 
 
 class ScriptedProvider:

@@ -120,7 +120,7 @@ class Synthesizer:
         """
         try:
             await asyncio.wait_for(self._drain_inner(), timeout=self._close_timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self.last_error = (
                 f"synthesis on close exceeded {self._close_timeout:.0f}s and was abandoned"
             )
@@ -141,7 +141,7 @@ class Synthesizer:
     async def _run_safe(self) -> list[str]:
         try:
             return await asyncio.wait_for(self.run(), timeout=self._pass_timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self.last_error = f"synthesis pass exceeded {self._pass_timeout:.0f}s"
             return []
         except Exception as exc:  # never let synthesis break the session

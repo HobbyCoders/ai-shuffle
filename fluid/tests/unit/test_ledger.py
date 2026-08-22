@@ -5,7 +5,7 @@ recites it onto every user turn as a system-reminder, and digests strip old
 copies while the newest rides the recent window."""
 
 import asyncio
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from fluid.context.compaction import CompactionConfig, render_span_digest
 from fluid.engine.native import NativeLoop
@@ -15,6 +15,8 @@ from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import MemoryStore, SessionNode
 from fluid.tools.builtins.ledger import (
     handler as ledger_handler,
+)
+from fluid.tools.builtins.ledger import (
     read_ledger,
     render_ledger_reminder,
 )

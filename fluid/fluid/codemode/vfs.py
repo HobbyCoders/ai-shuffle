@@ -35,7 +35,8 @@ import importlib.abc
 import importlib.util
 import sys
 import types
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 # Stdlib-safe subset the model may import from inside the kernel. Submodules of
 # these (``collections.abc``, ``os.path`` is NOT here on purpose) are allowed via
@@ -73,7 +74,7 @@ class ResultRef(str):
 
     _PREVIEW = 200
 
-    def __repr__(self) -> str:  # noqa: D105
+    def __repr__(self) -> str:
         n = len(self)
         head = str.__str__(self)[: self._PREVIEW]
         more = " …" if n > self._PREVIEW else ""
@@ -145,7 +146,7 @@ def make_guarded_import(allowlist: set[str]) -> Callable[..., Any]:
     """Return an ``__import__`` permitting only ``allowlist`` + ``tools``/``skills``."""
     real_import = builtins.__import__
 
-    def guarded(name, globals=None, locals=None, fromlist=(), level=0):  # noqa: A002
+    def guarded(name, globals=None, locals=None, fromlist=(), level=0):
         top = name.split(".", 1)[0] if name else name
         if top in ("tools", "skills") or top in allowlist:
             return real_import(name, globals, locals, fromlist, level)
@@ -183,7 +184,7 @@ class VfsFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
         self._host_call = host_call
 
     # ── finder ──
-    def find_spec(self, fullname, path=None, target=None):  # noqa: D102
+    def find_spec(self, fullname, path=None, target=None):
         if fullname in ("tools", "skills"):
             return importlib.util.spec_from_loader(fullname, self, is_package=True)
         if fullname.startswith("tools."):
@@ -195,7 +196,7 @@ class VfsFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
         return None
 
     # ── loader ──
-    def create_module(self, spec):  # noqa: D102
+    def create_module(self, spec):
         if spec.name == "tools":
             return _VfsPackage(
                 "tools", "Projected tool stubs (code-mode VFS).",
@@ -208,7 +209,7 @@ class VfsFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
             )
         return _LeafModule(spec.name)
 
-    def exec_module(self, module):  # noqa: D102
+    def exec_module(self, module):
         name = module.__name__
         if name in ("tools", "skills"):
             return  # fully built by create_module

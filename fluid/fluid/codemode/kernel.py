@@ -15,8 +15,9 @@ arbitrary code, so the hard gate lives host-side, never in the kernel.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from fluid.tools.registry import ToolImage
 

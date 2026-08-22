@@ -12,7 +12,6 @@ The three "not yet" items from docs/agent-experience.md made real:
    what survived.
 """
 
-import pytest
 
 from fluid.codemode import (
     HostBridge,

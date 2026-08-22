@@ -9,7 +9,6 @@ from fluid.providers.base import ProviderRequest
 from fluid.providers.local.client import LocalClient
 from fluid.providers.local.serialize import build_request_body, normalize_base_url
 
-
 # ─── base_url normalization ──────────────────────────────────────────────────
 
 
@@ -236,7 +235,7 @@ def test_local_kind_registered_and_buildable() -> None:
 
 
 def test_tool_style_text_wraps_with_adapter() -> None:
-    from fluid.config.loader import BUILTIN_DEFAULTS, deep_merge, _build_provider_client
+    from fluid.config.loader import BUILTIN_DEFAULTS, _build_provider_client, deep_merge
     from fluid.config.model import HarnessConfig
     from fluid.providers.local.text_tools import TextToolsAdapter
 
@@ -270,7 +269,7 @@ def test_tool_style_round_trips_to_dict() -> None:
 
 async def test_config_extra_reaches_the_request_body() -> None:
     # [providers.local.extra] in TOML → standing knobs on every request.
-    from fluid.config.loader import BUILTIN_DEFAULTS, deep_merge, _build_provider_client
+    from fluid.config.loader import BUILTIN_DEFAULTS, _build_provider_client, deep_merge
     from fluid.config.model import HarnessConfig
 
     merged = deep_merge(

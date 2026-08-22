@@ -1,7 +1,8 @@
 """OpenAI Responses provider: SSE normalization, request body, e2e chunk walk."""
 
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 
 import httpx
 
@@ -309,7 +310,8 @@ async def test_client_account_id_header_present() -> None:
 
 
 def test_effort_overrides_thinking_and_clamps() -> None:
-    from fluid.messages import Message as _Msg, Text as _Text
+    from fluid.messages import Message as _Msg
+    from fluid.messages import Text as _Text
 
     request = ProviderRequest(
         model="gpt-5.6",
@@ -322,7 +324,8 @@ def test_effort_overrides_thinking_and_clamps() -> None:
 
 
 def test_thinking_effort_still_honored_without_explicit_effort() -> None:
-    from fluid.messages import Message as _Msg, Text as _Text
+    from fluid.messages import Message as _Msg
+    from fluid.messages import Text as _Text
 
     request = ProviderRequest(
         model="gpt-5.6",

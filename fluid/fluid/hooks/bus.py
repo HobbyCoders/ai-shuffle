@@ -14,8 +14,9 @@ and is what the engine ultimately dispatches.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 PRE_TOOL_USE = "PreToolUse"
 POST_TOOL_USE = "PostToolUse"

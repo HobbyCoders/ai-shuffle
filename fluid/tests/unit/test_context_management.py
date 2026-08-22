@@ -1,15 +1,15 @@
 """Context management: cache-safe trimming, Note recitation, Amp-style handoff."""
 
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from fluid.context.trim import ToolResultTrimmer, TrimConfig
 from fluid.engine.native import NativeLoop
 from fluid.events import Handoff, HandoffCreated, UserTurn
-from fluid.messages import Image, Message, Text, ToolResultBlock, ToolUseBlock
+from fluid.messages import Image, Message, Text, ToolResultBlock
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import MemoryStore, SessionNode
-from fluid.tools.registry import ToolCtx
 from fluid.tools.builtins.note import handler as note_handler
+from fluid.tools.registry import ToolCtx
 
 
 def _node(nid: str, role: str, blocks: list) -> SessionNode:

@@ -20,7 +20,7 @@ host-side) — so the escape hatch cannot be bypassed from inside the kernel.
 from __future__ import annotations
 
 import keyword
-from typing import Iterable
+from collections.abc import Iterable
 
 from fluid.tools.registry import ToolSpec
 
@@ -41,8 +41,7 @@ def func_name(tool_name: str) -> str:
 
 def _sanitize_full(tool_name: str) -> str:
     base = tool_name
-    if base.startswith("mcp__"):
-        base = base[len("mcp__"):]
+    base = base.removeprefix("mcp__")
     return base.replace("__", "_")
 
 

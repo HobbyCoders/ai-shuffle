@@ -202,7 +202,7 @@ filesystem; `open()` and the network are disabled.
 """
 
 
-def default_base_prompt(config: "HarnessConfig | None" = None) -> str:
+def default_base_prompt(config: HarnessConfig | None = None) -> str:
     """The base prompt for a CLI run.
 
     Takes the config for symmetry with the rest of the CLI plumbing, but the
@@ -212,7 +212,7 @@ def default_base_prompt(config: "HarnessConfig | None" = None) -> str:
     return DEFAULT_BASE_PROMPT
 
 
-def code_mode_addendum(config: "HarnessConfig | None" = None) -> str | None:
+def code_mode_addendum(config: HarnessConfig | None = None) -> str | None:
     """The code-mode block, or ``None`` when code mode is off."""
     if config is not None and config.code_mode:
         return CODE_MODE_ADDENDUM

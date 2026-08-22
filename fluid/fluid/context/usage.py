@@ -96,8 +96,9 @@ without a legend lookup, and distinct enough to stay readable side by side:
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any
 
 from fluid.context.compiler import PromptSection
 from fluid.context.trim import estimate_tokens_of_messages, estimate_tokens_of_text

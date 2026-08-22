@@ -127,7 +127,7 @@ class SubprocessKernel:
                 pass
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5)
-            except (asyncio.TimeoutError, Exception):
+            except (TimeoutError, Exception):
                 pass
         if job is not None:
             _win_close_handle(job)  # KILL_ON_JOB_CLOSE reaps any survivor
@@ -198,7 +198,7 @@ class SubprocessKernel:
             started = loop.time()
             try:
                 frame = await asyncio.wait_for(self._read_frame(), remaining)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 note = await self._restart_and_restore()
                 return KernelResult(
                     error=(

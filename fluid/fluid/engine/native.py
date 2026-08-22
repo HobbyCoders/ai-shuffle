@@ -17,10 +17,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
-from typing import Any, AsyncIterator, Sequence
+from typing import Any
 
+from fluid.codemode.session import CodeModeSession, register_code_mode_tools
 from fluid.context.cache_plan import plan_cache
 from fluid.context.compaction import CompactionConfig, Compactor, Promotion
 from fluid.context.compiler import CompiledPrompt
@@ -35,10 +37,10 @@ from fluid.events.model import (
     BlockStop,
     ContextCompaction,
     ErrorEvent,
-    HookEvent,
     Event,
-    Interrupted,
     HandoffCreated,
+    HookEvent,
+    Interrupted,
     PermissionRequest,
     QuestionRequest,
     TextDelta,
@@ -80,9 +82,11 @@ from fluid.messages import (
 )
 from fluid.permissions.engine import PROMPT_DENIAL, PermissionEngine, plan_mode_tools
 from fluid.providers.base import ProviderClient, ProviderRequest
-from fluid.codemode.session import CodeModeSession, register_code_mode_tools
 from fluid.store.base import SessionMeta, SessionNode, SessionStore, new_id
-from fluid.tools.builtins.tool_search import parse_deferred_catalog, render_deferred_catalog
+from fluid.tools.builtins.tool_search import (
+    parse_deferred_catalog,
+    render_deferred_catalog,
+)
 from fluid.tools.images import condition_image
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
 
@@ -241,7 +245,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         session_id: str | None = None,
         model: str,
         system: str | None = None,
-        system_sections: "CompiledPrompt | None" = None,
+        system_sections: CompiledPrompt | None = None,
         context_window: int | None = None,
         max_tokens: int = 8192,
         effort: str | None = None,
@@ -250,7 +254,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         hooks: HookBus | None = None,
         ctx: ToolCtx | None = None,
         plan_mode: bool = False,
-        codemode: "CodeModeSession | None" = None,
+        codemode: CodeModeSession | None = None,
         max_model_calls_per_turn: int = 50,
         trim: TrimConfig | None = None,
         compaction: CompactionConfig | None = None,
@@ -1188,7 +1192,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                         asyncio.shield(dispatch),
                         timeout=_BACKGROUND_SPAWN_INTERRUPT_GRACE,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     dispatch.cancel()
                     try:
                         await dispatch

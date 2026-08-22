@@ -2,8 +2,6 @@
 
 from pathlib import Path
 
-import pytest
-
 from fluid.hooks.bus import PRE_TOOL_USE, HookBus, HookDecision
 from fluid.permissions.engine import PermissionEngine, plan_mode_tools
 from fluid.permissions.rules import Rule, evaluate_rules

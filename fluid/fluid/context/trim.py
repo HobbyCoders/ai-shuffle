@@ -25,8 +25,9 @@ drives it through :meth:`ToolResultTrimmer.trim_batch`.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any
 
 from fluid.messages import Image, Message, Text, ToolResultBlock
 from fluid.store.base import SessionNode

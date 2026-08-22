@@ -8,7 +8,7 @@ and auto-denied because the run cannot prompt.
 
 import asyncio
 import json
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 import pytest
 
@@ -375,7 +375,7 @@ def test_program_names_collects_every_program() -> None:
     from fluid.tools.builtins.bash_risk import program_names
 
     assert program_names("cat a | grep b && ls") == frozenset({"cat", "grep", "ls"})
-    assert program_names('"C:\Program Files\Git\bin\git.exe" status') == frozenset({"git"})
+    assert program_names('"C:\\Program Files\\Git\bin\\git.exe" status') == frozenset({"git"})
     assert program_names("FOO=1 git log") == frozenset({"git"})
     assert program_names("echo $(rm x)") is None
     assert program_names("") is None

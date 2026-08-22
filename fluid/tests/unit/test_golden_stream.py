@@ -6,24 +6,21 @@ assembled assistant message (incl. verbatim reasoning envelope and
 byte-accumulated tool args), and cache accounting.
 """
 
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import AsyncIterator
 
 import pytest
 
 from fluid.engine.native import NativeLoop
 from fluid.events import (
-    BlockStart,
-    BlockStop,
     TextDelta,
     ThinkingDelta,
     ToolUse,
     TurnComplete,
-    TurnStarted,
     Usage,
     UserTurn,
 )
-from fluid.messages import Reasoning, Text, Thinking, ToolUseBlock
+from fluid.messages import Reasoning, ToolUseBlock
 from fluid.providers._sse import sse_events
 from fluid.providers.anthropic.serialize import sse_to_chunk
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk

@@ -9,7 +9,7 @@ from the arg or ``OPENROUTER_API_KEY``. The streaming/retry loop is the shared
 from __future__ import annotations
 
 import os
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 import httpx
 

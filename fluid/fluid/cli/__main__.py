@@ -256,7 +256,10 @@ def _cmd_config(args: argparse.Namespace) -> int:
 
 
 def _cmd_import_settings(args: argparse.Namespace) -> int:
-    from fluid.context.settings_import import apply_settings_import, preview_settings_import
+    from fluid.context.settings_import import (
+        apply_settings_import,
+        preview_settings_import,
+    )
 
     command_defaults = {
         "import-claude": ("claude",),

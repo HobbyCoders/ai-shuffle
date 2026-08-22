@@ -11,7 +11,8 @@ and the delegated leg's ``--allowed-tools`` emission.
 from __future__ import annotations
 
 import json
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from fluid.config.loader import build_engine, load_config
 from fluid.engine.native import NativeLoop

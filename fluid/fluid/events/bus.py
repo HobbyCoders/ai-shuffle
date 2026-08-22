@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+from collections.abc import AsyncIterator
 from dataclasses import replace
-from typing import AsyncIterator
 
 from fluid.events.model import Event
 

@@ -6,7 +6,7 @@ import base64
 import json
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -31,12 +31,12 @@ def _jwt(claims: dict) -> str:
 
 
 def _far_future_access() -> str:
-    exp = int((datetime.now(timezone.utc) + timedelta(hours=1)).timestamp())
+    exp = int((datetime.now(UTC) + timedelta(hours=1)).timestamp())
     return _jwt({"exp": exp})
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 # ─── PKCE ─────────────────────────────────────────────────────────────────────
@@ -90,7 +90,7 @@ def test_load_bundle_ignores_unknown_keys(tmp_path) -> None:
 
 
 def test_needs_refresh_proactive_8_day_interval() -> None:
-    old = (datetime.now(timezone.utc) - timedelta(days=9)).isoformat()
+    old = (datetime.now(UTC) - timedelta(days=9)).isoformat()
     bundle = StoredBundle(
         access_token=_far_future_access(), refresh_token="rt", last_refresh=old
     )
@@ -105,7 +105,7 @@ def test_needs_refresh_false_when_fresh() -> None:
 
 
 def test_needs_refresh_true_when_exp_within_skew() -> None:
-    exp = int((datetime.now(timezone.utc) + timedelta(minutes=2)).timestamp())
+    exp = int((datetime.now(UTC) + timedelta(minutes=2)).timestamp())
     bundle = StoredBundle(
         access_token=_jwt({"exp": exp}), refresh_token="rt", last_refresh=_now_iso()
     )
@@ -140,7 +140,7 @@ def _token_endpoint(calls: list, *, rotate_to: str):
 
 async def test_get_access_token_refreshes_and_persists_rotation(tmp_path) -> None:
     path = tmp_path / "codex_auth.json"
-    old = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+    old = (datetime.now(UTC) - timedelta(days=10)).isoformat()
     save_bundle(
         StoredBundle(
             access_token="at_old",

@@ -12,7 +12,6 @@ and blew up with AttributeError on every real connect:
     camelCase ``inputSchema``
 """
 
-import asyncio
 from typing import Any
 
 import pytest

@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Awaitable, Callable, TextIO
+from typing import Any, TextIO
 
 from fluid.cli.config import host_of
 from fluid.cli.host import render_worker_event
@@ -108,8 +109,7 @@ def render_event(event: Event, out: TextIO) -> None:
     elif isinstance(event, TurnComplete):
         _switch_mode(out, "text")
         _mode.pop(id(out), None)
-        for note in _deferred_notes.pop(id(out), []):
-            out.write(f"\n  {note}\n")
+        out.writelines(f"\n  {note}\n" for note in _deferred_notes.pop(id(out), []))
         cost =f" cost=${event.cost_usd:.4f}" if event.cost_usd is not None else ""
         out.write(f"\n[done] stop={event.stop_reason} calls={event.num_model_calls}{cost}\n")
     elif isinstance(event, Interrupted):
@@ -222,7 +222,7 @@ async def auto_deny(event: PermissionRequest) -> RespondPermission:
     )
 
 
-def _to_response(event: PermissionRequest, answer: "str | RespondPermission") -> RespondPermission:
+def _to_response(event: PermissionRequest, answer: str | RespondPermission) -> RespondPermission:
     """Responders may return a bare decision string or a full op."""
     if isinstance(answer, RespondPermission):
         return answer
@@ -235,7 +235,7 @@ def _to_response(event: PermissionRequest, answer: "str | RespondPermission") ->
 async def stream_turn(
     engine,
     session_id: str,
-    text: "str | list[Any]",
+    text: str | list[Any],
     *,
     out: TextIO,
     on_permission: PermissionResponder = auto_deny,
@@ -325,7 +325,7 @@ class Repl:
         answer = await self._read_line(f"  allow {event.name}? [y/N] ")
         return "allow" if answer.strip().lower() in ("y", "yes") else "deny"
 
-    async def run_turn(self, text: "str | list[Any]") -> str:
+    async def run_turn(self, text: str | list[Any]) -> str:
         self._foreground = True
         try:
             return await stream_turn(

@@ -6,7 +6,8 @@ import asyncio
 from typing import Any
 
 from fluid.tools.builtins._util import truncate
-from fluid.tools.builtins.bash_risk import classify as classify_bash_risk, session_scope as bash_session_scope
+from fluid.tools.builtins.bash_risk import classify as classify_bash_risk
+from fluid.tools.builtins.bash_risk import session_scope as bash_session_scope
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 from fluid.tools.shell import resolve_shell
 
@@ -85,7 +86,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     )
     try:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         proc.kill()
         await proc.wait()
         return ToolOutcome(text=f"command timed out after {timeout}s", is_error=True)

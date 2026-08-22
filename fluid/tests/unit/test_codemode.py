@@ -11,7 +11,7 @@ Exit criteria exercised here:
 """
 
 import asyncio
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 import pytest
 
@@ -20,13 +20,19 @@ from fluid.codemode.projection import Projection, func_name, stub_source
 from fluid.codemode.session import CodeModeSession
 from fluid.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
 from fluid.engine.native import NativeLoop
-from fluid.events import PermissionRequest, RespondPermission, ToolResult, ToolUse, TurnComplete, UserTurn
+from fluid.events import (
+    PermissionRequest,
+    RespondPermission,
+    ToolResult,
+    ToolUse,
+    TurnComplete,
+    UserTurn,
+)
 from fluid.permissions.engine import PermissionEngine
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import MemoryStore
 from fluid.tools.inproc import create_inproc_server, tool
 from fluid.tools.registry import ToolCtx, ToolImage, ToolOutcome, ToolRegistry, ToolSpec
-
 
 # ── scripted provider (same shape as test_tool_loop) ──────────────────────
 

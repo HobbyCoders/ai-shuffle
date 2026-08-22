@@ -12,7 +12,7 @@ from __future__ import annotations
 import itertools
 import json
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +26,7 @@ def trace_request(provider: str, body: dict[str, Any]) -> None:
     try:
         directory = Path(target)
         directory.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%f")
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%f")
         path = directory / f"{stamp}-{next(_counter):04d}-{provider}.json"
         path.write_text(
             json.dumps(body, indent=1, ensure_ascii=False, default=str),

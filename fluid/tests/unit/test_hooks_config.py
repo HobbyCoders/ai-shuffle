@@ -3,8 +3,8 @@ subprocess hooks (deny, rewrite, timeout, payload shape) through the engine."""
 
 import json
 import sys
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import AsyncIterator
 
 import pytest
 

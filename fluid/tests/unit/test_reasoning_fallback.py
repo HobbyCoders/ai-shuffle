@@ -7,7 +7,7 @@ non-tool call — streamed as a TextDelta so live text-channel clients render
 it, and present in the assembled Message so ``text()`` is non-empty.
 """
 
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from fluid.engine.native import NativeLoop
 from fluid.events import TextDelta, TurnComplete, UserTurn

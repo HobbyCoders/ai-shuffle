@@ -34,11 +34,12 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from fluid.messages import Image, Message, Text, ToolResultBlock, ToolUseBlock
-from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.providers._chat_completions import system_message
+from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 
 TOOL_OPEN = "<tool_call>"
 TOOL_CLOSE = "</tool_call>"

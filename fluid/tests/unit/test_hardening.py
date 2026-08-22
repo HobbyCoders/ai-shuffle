@@ -4,11 +4,10 @@ context-overflow recovery, client retry, ToolSearch, [mcp] config.
 """
 
 import asyncio
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import AsyncIterator
 
 import httpx
-import pytest
 
 from fluid.config.loader import load_config
 from fluid.context.trim import ToolResultTrimmer, TrimConfig, estimate_tokens
@@ -28,7 +27,7 @@ from fluid.permissions.engine import PermissionEngine
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import MemoryStore, SessionNode
 from fluid.tools.inproc import create_inproc_server, tool
-from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
+from fluid.tools.registry import ToolCtx, ToolRegistry, ToolSpec
 
 GOLDEN = Path(__file__).parent.parent / "golden" / "anthropic_text_thinking_tool.sse"
 

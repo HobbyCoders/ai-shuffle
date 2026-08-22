@@ -16,11 +16,17 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
-from fluid.context.instructions import _read_opt, _unquote, _walk_up_dirs, parse_frontmatter
+from fluid.context.instructions import (
+    _read_opt,
+    _unquote,
+    _walk_up_dirs,
+    parse_frontmatter,
+)
 
 log = logging.getLogger(__name__)
 

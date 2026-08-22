@@ -103,7 +103,7 @@ class Message:
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "Message":
+    def from_dict(cls, d: dict[str, Any]) -> Message:
         return cls(
             role=d["role"],
             content=[block_from_dict(b) for b in d["content"]],

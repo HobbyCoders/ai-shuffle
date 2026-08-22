@@ -1,7 +1,7 @@
 """Text-protocol tool calling: parser, adapter stream, history round-trip."""
 
 import json
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from fluid.messages import Message, Text, ToolResultBlock, ToolUseBlock
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk

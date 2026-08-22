@@ -46,8 +46,8 @@ and only switch to the compiled form under full-replace (ruling A3).
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Sequence
 
 from fluid.context.agents import discover_agents
 from fluid.context.environment import environment_block

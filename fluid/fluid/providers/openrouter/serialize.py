@@ -22,7 +22,7 @@ from __future__ import annotations
 from typing import Any
 
 from fluid.providers._chat_completions import (
-    ChatCompletionsNormalizer,  # noqa: F401  (re-export: response-side normalizer)
+    ChatCompletionsNormalizer,
     system_message,
     translate_message,
     translate_tools,

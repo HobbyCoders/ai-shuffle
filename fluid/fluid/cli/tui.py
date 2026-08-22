@@ -53,7 +53,7 @@ async def run_tui(engine, session_id: str) -> int:
     class _LogWriter:
         """Adapt a RichLog to the ``write``/``flush`` surface render_event uses."""
 
-        def __init__(self, log: "RichLog") -> None:
+        def __init__(self, log: RichLog) -> None:
             self._log = log
             self._buf = ""
 

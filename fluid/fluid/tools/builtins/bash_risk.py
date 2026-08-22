@@ -52,7 +52,8 @@ from __future__ import annotations
 
 import re
 import shlex
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 SAFE = "safe"
 WRITE = "write"
@@ -195,7 +196,7 @@ READ_ONLY_PROGRAMS.update({
 
 def _program_name(token: str) -> str:
     name = re.split(r"[\\/]", token)[-1].lower()
-    return name[:-4] if name.endswith(".exe") else name
+    return name.removesuffix(".exe")
 
 
 def _lex(line: str) -> list[str] | None:

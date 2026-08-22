@@ -3,8 +3,20 @@
 from __future__ import annotations
 
 from fluid.tools.builtins import (
-    bash, edit, glob, grep, history_expand, history_search, ledger, monitor,
-    note, read, skill, task, tool_search, write,
+    bash,
+    edit,
+    glob,
+    grep,
+    history_expand,
+    history_search,
+    ledger,
+    monitor,
+    note,
+    read,
+    skill,
+    task,
+    tool_search,
+    write,
 )
 from fluid.tools.registry import ToolRegistry
 

@@ -77,7 +77,7 @@ class CodeModeSession:
         config: KernelConfig | None = None,
         exec_timeout: float = 30.0,
         skills: SkillStore | None = None,
-        synthesizer: "Any | None" = None,  # fluid.codemode.continual.Synthesizer
+        synthesizer: Any | None = None,  # fluid.codemode.continual.Synthesizer
     ) -> None:
         self._registry = registry
         self._config = config or KernelConfig()

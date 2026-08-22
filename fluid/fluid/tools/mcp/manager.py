@@ -37,7 +37,7 @@ class McpManager:
         *,
         input_responses: Any = None,
         request_state: str | None = None,
-    ) -> "Any":
+    ) -> Any:
         # Imported here to avoid a cycle (registry imports the manager).
         from fluid.tools.registry import InputRequired, ToolImage, ToolOutcome
 
