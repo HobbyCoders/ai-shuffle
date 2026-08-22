@@ -1,24 +1,23 @@
 /**
  * browser_screenshot — viewport by default; `region` [x,y,w,h] crop (in page /
  * document pixels); `full_page` opt-in. Encoding is done natively by Playwright
- * (`page.screenshot({ type:"jpeg", quality, scale:"css" })`) — we no longer hand
- * a PNG to page-controlled canvas JS to re-encode. Native CSS-pixel captures are
- * emitted 1:1, so the returned pixel dimensions are exactly the coordinate space
- * browser_act must use. If the encoded image would be very large (a big
- * full_page or region on a tall page) we return a text note instead of blowing
- * the token budget on an oversized image.
+ * (`page.screenshot({ type:"jpeg", quality, scale:"css", clip })`). Captures
+ * whose longest edge exceeds MAX_EDGE are downscaled to it before being sent to
+ * the model: the JPEG buffer is re-encoded in-page via createImageBitmap + a
+ * canvas at the capped size (the stored scale mapping keeps coordinate-based
+ * browser_act correct). Providers bill images by pixels, so oversized originals
+ * cost tokens without adding model-visible detail.
  */
 
 import type { Session } from "../session.js";
 import { text, errorResult, type McpToolResult } from "./result.js";
 
-/** Longest edge (CSS px) beyond which a native capture is considered oversized. */
+/** Longest edge (CSS px) beyond which a capture is downscaled before encoding. */
 export const MAX_EDGE = 1280;
 export const JPEG_QUALITY = 80;
 /**
- * Hard cap on emitted base64 length (~2.5 MB). Native JPEG can't downscale to a
- * target size, so instead of shipping a huge image we bail with a text note
- * telling the model to capture a smaller region/viewport.
+ * Hard cap on emitted base64 length (~2.5 MB). Backstop for pages where the
+ * in-page re-encode fails AND the capture is huge.
  */
 export const MAX_BASE64_LEN = 2_621_440;
 
@@ -28,8 +27,7 @@ export interface ScreenshotInput {
 }
 
 /**
- * Longest-edge-<=max downscale factor (<= 1). Retained for callers/tests that
- * reason about oversize captures; the native path emits at CSS scale (factor 1).
+ * Longest-edge-<=max downscale factor (<= 1).
  */
 export function scaleFor(width: number, height: number, maxEdge = MAX_EDGE): number {
   const longest = Math.max(width, height);
@@ -116,7 +114,56 @@ export async function runScreenshot(session: Session, input: ScreenshotInput): P
     fullPage,
     clip,
   });
-  const data = buffer.toString("base64");
+  let data = buffer.toString("base64");
+
+  // Oversized capture: downscale to the vision budget. The re-encode runs
+  // in-page (createImageBitmap decodes without tainting the canvas); if it
+  // fails we ship the original — MAX_BASE64_LEN stays the hard backstop.
+  const factor = scaleFor(width, height);
+  if (factor < 1) {
+    try {
+      // NOTE: fully self-contained — page.evaluate serializes only this
+      // function, so it cannot reference helpers from this module.
+      const shrunk = await page.evaluate(
+        async ([jpegB64, tw, th, q]: [string, number, number, number]) => {
+          const binary = atob(jpegB64);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
+          try {
+            const canvas = document.createElement("canvas");
+            canvas.width = tw;
+            canvas.height = th;
+            const ctx = canvas.getContext("2d");
+            if (!ctx) throw new Error("no 2d context");
+            ctx.fillStyle = "#fff";
+            ctx.fillRect(0, 0, tw, th);
+            ctx.imageSmoothingEnabled = true;
+            ctx.drawImage(bitmap, 0, 0, tw, th);
+            const dataUrl = canvas.toDataURL("image/jpeg", q);
+            return dataUrl.slice(dataUrl.indexOf(",") + 1);
+          } finally {
+            bitmap.close();
+          }
+        },
+        [
+          data,
+          Math.max(1, Math.round(width * factor)),
+          Math.max(1, Math.round(height * factor)),
+          JPEG_QUALITY,
+        ] as [string, number, number, number],
+      );
+      session.setLastScreenshot({ scale: factor, offsetX, offsetY });
+      return {
+        content: [
+          { type: "image", data: shrunk, mimeType: "image/jpeg" },
+          text(`${Math.round(width * factor)}x${Math.round(height * factor)} — coordinates for browser_act must use this space`),
+        ],
+      };
+    } catch {
+      // fall through: emit the native-size capture below
+    }
+  }
 
   // Store the document-space mapping (scale 1: native CSS pixels are 1:1).
   session.setLastScreenshot({ scale: 1, offsetX, offsetY });

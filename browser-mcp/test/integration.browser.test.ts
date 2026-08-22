@@ -21,7 +21,7 @@ import { Session } from "../src/session.js";
 import { runNavigate } from "../src/tools/navigate.js";
 import { runSnapshot } from "../src/tools/snapshot.js";
 import { runAct } from "../src/tools/act.js";
-import { runScreenshot } from "../src/tools/screenshot.js";
+import { runScreenshot, MAX_EDGE } from "../src/tools/screenshot.js";
 import { runFind } from "../src/tools/find.js";
 import { runReadText } from "../src/tools/read_text.js";
 import { runEval } from "../src/tools/eval.js";
@@ -240,6 +240,24 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     const img = res.content.find((c) => c.type === "image");
     expect(img && img.type === "image" ? img.mimeType : "").toBe("image/jpeg");
     expect(firstText(res)).toMatch(/\d+x\d+ — coordinates/);
+  });
+
+  it("oversized viewport screenshot is downscaled to MAX_EDGE", async () => {
+    const page = await session.ensurePage();
+    await page.setViewportSize({ width: 1600, height: 1000 });
+    try {
+      const res = await runScreenshot(session, {});
+      if (res.isError) throw new Error(firstText(res));
+      const m = firstText(res).match(/(\d+)x(\d+) — coordinates/);
+      expect(m).not.toBeNull();
+      const [w, h] = [Number(m![1]), Number(m![2])];
+      expect(Math.max(w, h)).toBeLessThanOrEqual(MAX_EDGE);
+      // The stored mapping must let coordinate acts scale back to page pixels.
+      const decoded = res.content.find((c) => c.type === "image");
+      expect(decoded && decoded.type === "image" ? decoded.data.length : 0).toBeGreaterThan(0);
+    } finally {
+      await page.setViewportSize({ width: 1280, height: 720 });
+    }
   });
 
   it("acting on a bogus ref yields a stale_ref error", async () => {
