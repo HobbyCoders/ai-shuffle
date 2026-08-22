@@ -2307,7 +2307,7 @@ def _code_mode_tools_section(codemode: Any) -> str:
     rather than failing the prompt.
     """
     try:
-        from fluid.codemode.projection import _annotation, _py_ident
+        from fluid.codemode.projection import _annotation, _param_doc, _py_ident
     except Exception:  # noqa: BLE001 — no projection helpers, no section
         return ""
     build = getattr(codemode, "_projection", None)
@@ -2357,19 +2357,13 @@ def _code_mode_tools_section(codemode: Any) -> str:
         if ordered:
             lines.append("Parameters:")
             for jname in ordered:
-                prop = props.get(jname) or {}
-                ann = _annotation(prop)
-                need = "required" if jname in required else "optional"
-                detail = (prop.get("description") or "").strip()
-                enum = prop.get("enum")
-                if enum:
-                    detail = (
-                        f"{detail} one of: {', '.join(str(v) for v in enum)}"
-                    ).strip()
-                if "default" in prop:
-                    detail = f"{detail} default: {prop['default']}".strip()
-                head = f"- {_py_ident(jname)} ({ann}, {need})"
-                lines.append(f"{head}: {detail}" if detail else head)
+                # Same renderer the VFS stub docstrings use, so a parameter's
+                # enum/default text can never drift between prompt and stub.
+                lines.append("- " + _param_doc(
+                    _py_ident(jname),
+                    props.get(jname) or {},
+                    required=jname in required,
+                ))
         blocks.append("\n".join(lines))
 
     if not blocks:

@@ -1558,9 +1558,14 @@ def test_code_mode_tools_section_carries_full_tool_documentation(agent_workspace
     # Parameter docs, with enum values and defaults.
     assert "Parameters:" in system
     assert "- pattern (str, required): The regex to run" in system
-    assert (
-        "- output_mode (str, optional): How matches are reported. "
-        "one of: content, count default: content"
+    # Rendered by the same helper the VFS stub docstrings use, so the enum and
+    # default text in the prompt is byte-identical to the stubs'.
+    from fluid.codemode.projection import _param_doc
+
+    assert "- " + _param_doc(
+        "output_mode",
+        grep.input_schema["properties"]["output_mode"],
+        required=False,
     ) in system
     # MCP tool -> leaf name; the JSON-path-only escape hatch says so.
     assert "## Danger" in system

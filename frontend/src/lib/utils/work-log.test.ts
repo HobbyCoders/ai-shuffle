@@ -283,6 +283,20 @@ describe('work action summaries', () => {
 		expect(summarizeWork(oneFailure)).toBe('Ran 1 command, 1 failed');
 	});
 
+	it('leaves hidden code-mode cells out of the tally', () => {
+		const withCell = workEntries([
+			tool({ toolName: 'run_python', toolStatus: 'complete' }),
+			tool({ toolName: 'Bash', toolStatus: 'complete' })
+		]);
+		expect(summarizeWork(withCell)).toBe('Ran 1 command');
+
+		const failedCell = workEntries([
+			tool({ toolName: 'run_python', toolStatus: 'error' }),
+			tool({ toolName: 'Bash', toolStatus: 'complete' })
+		]);
+		expect(summarizeWork(failedCell)).toBe('Used 1 tool and ran 1 command, 1 failed');
+	});
+
 	it('describes reasoning-only and empty groups', () => {
 		expect(summarizeWork(workEntries([msg({ type: 'thinking', content: 'hmm' })])))
 			.toBe('Reasoning and interim work');

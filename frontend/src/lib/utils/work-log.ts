@@ -193,8 +193,20 @@ function sentenceJoin(labels: string[]): string {
 	return `${normalized.slice(0, -1).join(', ')}, and ${normalized.at(-1)}`;
 }
 
+/**
+ * A successful code-mode cell has no row of its own in the transcript, so it
+ * must not appear in the fold's tally either — only the tool calls made from
+ * inside it are real work. A failed cell still renders, and still counts.
+ */
+function isHiddenCodeModeCell(message: ChatMessage): boolean {
+	if (message.type !== 'tool_use' || message.toolName !== 'run_python') return false;
+	const status = message.toolStatus as string | undefined;
+	return status === 'complete' || status === 'completed';
+}
+
 /** Provider-neutral, action-specific summary for a folded tool run. */
-export function summarizeWork(entries: WorkLogEntry[]): string | null {
+export function summarizeWork(rows: WorkLogEntry[]): string | null {
+	const entries = rows.filter((entry) => !isHiddenCodeModeCell(entry.message));
 	const tools = entries.filter((entry) => entry.message.type === 'tool_use');
 	if (tools.length === 0) {
 		if (entries.some((entry) => entry.message.type === 'thinking')) return 'Reasoning and interim work';
