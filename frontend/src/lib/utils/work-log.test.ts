@@ -263,28 +263,42 @@ describe('buildDisplayItems — live turn', () => {
 		expect(items.some((item) => item.kind === 'message' && item.message.content === '')).toBe(false);
 	});
 
+	it('keeps the newest completed tool visible until the next row replaces it', () => {
+		const messages = [user('go'), tool(), tool({ toolStatus: 'complete' })];
+		const items = buildDisplayItems(messages, LIVE);
+		const fold = items.find((item) => item.kind === 'work_log');
+		if (fold?.kind !== 'work_log') throw new Error('expected a work_log');
+		expect(fold.folded).toHaveLength(1);
+		expect(fold.tail.map((entry) => entry.message.id)).toEqual([messages[2].id]);
+	});
+
 	it('keeps one live chip across a settled subagent card', () => {
 		const items = buildDisplayItems([user('go'), tool(), subagent(), tool()], LIVE);
 		const folds = items.filter((item) => item.kind === 'work_log');
 		expect(folds).toHaveLength(1);
 		if (folds[0].kind !== 'work_log') throw new Error('expected a work_log');
 		expect(folds[0].mode).toBe('live');
-		expect(folds[0].folded).toHaveLength(3);
-		expect(folds[0].summary).toBe('Ran 2 commands and delegated 1 task');
+		// The newest (completed) tool stays visible as the live tail.
+		expect(folds[0].folded).toHaveLength(2);
+		expect(folds[0].tail).toHaveLength(1);
+		expect(folds[0].summary).toBe('Ran 1 command and delegated 1 task');
 	});
 
-	it('never shows a running code-mode cell as the live active row', () => {
+	it('shows a streaming code-mode cell as the live tail instead of going silent', () => {
 		const cell = tool({ toolName: 'run_python', toolStatus: 'running', streaming: true });
-		const items = buildDisplayItems([user('go'), tool(), cell, tool()], LIVE);
+		// A turn whose only work is the streaming cell keeps the cell itself visible.
+		const lone = buildDisplayItems([user('go'), cell], LIVE);
+		expect(lone.some((item) => item.kind === 'message' && item.message.id === cell.id)).toBe(true);
+
+		// Once the cell is executing inner calls (no longer streaming), it hides
+		// again and the newest inner call becomes the tail.
+		const executing = tool({ toolName: 'run_python', toolStatus: 'running', streaming: false });
+		const inner = tool({ toolName: 'Read', toolStatus: 'running', streaming: true });
+		const items = buildDisplayItems([user('go'), executing, inner], LIVE);
 		const fold = items.find((item) => item.kind === 'work_log');
 		if (fold?.kind !== 'work_log') throw new Error('expected a work_log');
-		expect(fold.tail).toHaveLength(0);
-		expect(fold.folded.map((entry) => entry.message.id)).toContain(cell.id);
-		expect(fold.summary).toBe('Ran 2 commands');
-
-		// A turn whose only work is the invisible cell has no chip to show at all.
-		const lone = buildDisplayItems([user('go'), tool({ toolName: 'run_python', toolStatus: 'running', streaming: true })], LIVE);
-		expect(lone.some((item) => item.kind === 'work_log')).toBe(false);
+		expect(fold.folded.map((entry) => entry.message.id)).toContain(executing.id);
+		expect(fold.tail.map((entry) => entry.message.id)).toEqual([inner.id]);
 	});
 
 	it('settles earlier turns while the final turn streams', () => {
@@ -354,6 +368,22 @@ describe('work action summaries', () => {
 			tool({ toolName: 'Bash', toolStatus: 'complete' })
 		]);
 		expect(summarizeWork(failedCell)).toBe('Used 1 tool and ran 1 command, 1 failed');
+	});
+
+	it('names media generation instead of lumping it into used-tools', () => {
+		const entries = workEntries([
+			tool({ toolName: 'generateImage' }),
+			tool({ toolName: 'generateImage' }),
+			tool({ toolName: 'editImage' }),
+			tool({ toolName: 'generateVideo' }),
+			tool({ toolName: 'generateAudio' }),
+			tool({ toolName: 'textTo3D' }),
+			tool({ toolName: 'mcp__builtins__generateImage' })
+		]);
+		expect(summarizeWork(entries)).toBe(
+			'Generated 3 images, edited 1 image, generated 1 video, generated 1 audio track, and built 1 3D model'
+		);
+		expect(summarizeWorkCompact(entries)).toBe('Images 3 · ImgEdits 1 · Videos 1 · Audio 1 · 3D 1');
 	});
 
 	it('mentions folded thinking as part of the work', () => {

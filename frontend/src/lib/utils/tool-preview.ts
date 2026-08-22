@@ -213,6 +213,7 @@ export function liveToolLabel(
 	if (['Grep', 'Glob', 'ToolSearch', 'LSP'].includes(bare)) return 'Searching code';
 	if (bare === 'WebSearch') return 'Searching the web';
 	if (bare === 'WebFetch') return 'Fetching page';
+	if (bare === 'run_python') return 'Writing Python';
 	return `Using ${bare || 'tool'}`;
 }
 

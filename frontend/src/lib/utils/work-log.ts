@@ -170,12 +170,37 @@ function turnFoldLabel(turn: ChatMessage[], interrupted: boolean): string {
 	return duration === null ? 'Worked' : `Worked for ${formatDuration(duration)}`;
 }
 
-type ToolAction = 'read' | 'edit' | 'command' | 'code-search' | 'web-search' | 'delegate' | 'other';
+
+type ToolAction =
+	| 'read'
+	| 'edit'
+	| 'command'
+	| 'code-search'
+	| 'web-search'
+	| 'delegate'
+	| 'image-gen'
+	| 'image-edit'
+	| 'video-gen'
+	| 'audio-gen'
+	| 'threed-gen'
+	| 'other';
+
+/** Media-generation tool families, matched on the MCP-stripped bare name. */
+const IMAGE_GEN_TOOLS = ['generateImage', 'generateWithReference'];
+const IMAGE_EDIT_TOOLS = ['editImage'];
+const VIDEO_GEN_TOOLS = ['generateVideo', 'imageToVideo', 'extendVideo'];
+const AUDIO_GEN_TOOLS = ['generateAudio', 'audioToAudio'];
+const THREED_GEN_TOOLS = ['textTo3D', 'imageTo3D', 'retexture3D', 'rig3D', 'animate3D'];
 
 function toolAction(message: ChatMessage): ToolAction {
 	// A subagent card is work handed to someone else, not a tool call of its own.
 	if (message.type === 'subagent') return 'delegate';
 	const name = displayToolName(message.toolName || '');
+	if (IMAGE_GEN_TOOLS.includes(name)) return 'image-gen';
+	if (IMAGE_EDIT_TOOLS.includes(name)) return 'image-edit';
+	if (VIDEO_GEN_TOOLS.includes(name)) return 'video-gen';
+	if (AUDIO_GEN_TOOLS.includes(name)) return 'audio-gen';
+	if (THREED_GEN_TOOLS.includes(name)) return 'threed-gen';
 	if (['Read', 'BashOutput', 'TaskOutput', 'TaskGet'].includes(name)) return 'read';
 	if (['Write', 'Edit', 'NotebookEdit'].includes(name)) return 'edit';
 	if (['Bash', 'KillShell', 'SlashCommand', 'Monitor', 'TaskStop'].includes(name)) return 'command';
@@ -198,6 +223,16 @@ function actionLabel(action: ToolAction, count: number): string {
 			return `Searched the web ${count} ${count === 1 ? 'time' : 'times'}`;
 		case 'delegate':
 			return `Delegated ${count} ${count === 1 ? 'task' : 'tasks'}`;
+		case 'image-gen':
+			return `Generated ${count} ${count === 1 ? 'image' : 'images'}`;
+		case 'image-edit':
+			return `Edited ${count} ${count === 1 ? 'image' : 'images'}`;
+		case 'video-gen':
+			return `Generated ${count} ${count === 1 ? 'video' : 'videos'}`;
+		case 'audio-gen':
+			return `Generated ${count} ${count === 1 ? 'audio track' : 'audio tracks'}`;
+		case 'threed-gen':
+			return `Built ${count} ${count === 1 ? '3D model' : '3D models'}`;
 		case 'other':
 			return `Used ${count} ${count === 1 ? 'tool' : 'tools'}`;
 	}
@@ -220,6 +255,11 @@ const COMPACT_ACTION_LABELS: Record<ToolAction, (count: number) => string> = {
 	'code-search': (n) => `Search ${n}`,
 	'web-search': (n) => `Web ${n}`,
 	delegate: (n) => `Delegated ${n}`,
+	'image-gen': (n) => `Images ${n}`,
+	'image-edit': (n) => `ImgEdits ${n}`,
+	'video-gen': (n) => `Videos ${n}`,
+	'audio-gen': (n) => `Audio ${n}`,
+	'threed-gen': (n) => `3D ${n}`,
 	other: (n) => `Tools ${n}`
 };
 
@@ -362,12 +402,18 @@ export interface BuildOptions {
 }
 
 function emitLiveTurn(turn: Positioned[], items: DisplayItem[]): void {
-	const newestRunningTool =
+	// The live tail is the NEWEST routine row — running or just-finished. A
+	// completed tail stays visible until the next row replaces it, so the
+	// transcript never collapses to nothing between calls mid-turn.
+	const newestLiveTool =
+		turn.findLast((entry) => isRoutineTool(entry.message) && !isHiddenCodeModeCell(entry.message)) ??
+		null;
+	// While a code-mode cell streams, it IS the active work surface. Showing the
+	// cell itself (instead of the last inner call) tells the reader why nothing
+	// else has moved yet.
+	const streamingCell =
 		turn.findLast(
-			(entry) =>
-				isRoutineTool(entry.message) &&
-				entry.message.toolStatus === 'running' &&
-				!isHiddenCodeModeCell(entry.message)
+			(entry) => entry.message.type === 'tool_use' && entry.message.toolName === 'run_python' && entry.message.streaming === true
 		) ?? null;
 	let plain: Positioned[] = [];
 	let run: WorkLogEntry[] = [];
@@ -387,7 +433,7 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[]): void {
 			return;
 		}
 		flushPlain();
-		const hasActiveTail = run.at(-1)?.message.id === newestRunningTool?.message.id;
+		const hasActiveTail = run.at(-1)?.message.id === newestLiveTool?.message.id;
 		const folded = hasActiveTail ? run.slice(0, -1) : run;
 		const tail = hasActiveTail ? run.slice(-1) : [];
 		items.push({
@@ -405,7 +451,9 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[]): void {
 	};
 
 	for (const entry of turn) {
-		if (isCompletedRoutineWork(entry.message) || entry === newestRunningTool) {
+		const isLiveTail =
+			entry === newestLiveTool || (streamingCell !== null && entry === streamingCell);
+		if (isCompletedRoutineWork(entry.message) || isLiveTail) {
 			run.push({ message: entry.message, index: entry.index });
 		} else {
 			flushRun();

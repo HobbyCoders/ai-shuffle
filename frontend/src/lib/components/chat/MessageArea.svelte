@@ -1409,6 +1409,19 @@
 				streaming={message.streaming}
 			/>
 		{/if}
+	{:else if message.type === 'tool_use' && message.toolName === 'run_python' && message.streaming}
+		<!-- A cell that is still STREAMING is the visible work surface: while the
+		     model writes it, nothing else has happened yet, and hiding it made the
+		     transcript go silent for the whole write. Once it executes, its inner
+		     tool cards take over and the finished/succeeded cell hides again. -->
+		<ToolUseMessage
+			name="Python"
+			input={message.toolInput}
+			partialInput={message.partialToolInput}
+			result={message.toolResult}
+			status={message.toolStatus || 'running'}
+			streaming={message.streaming}
+		/>
 	{:else if message.type === 'tool_use' && message.toolName === 'run_python' && message.toolStatus !== 'error'}
 		<!-- Code mode: a run_python cell is plumbing, not work. The tool calls it
 		     makes are reported by their own cards as they fire, so the cell itself
