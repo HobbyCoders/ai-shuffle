@@ -200,9 +200,9 @@ def _field_name(model: Any, *candidates: str) -> str:
     ``mcp``'s models are ``extra="allow"``, so handing them the *wrong* spelling
     does not raise where it should: the value lands in an ignored extra field
     and the real one falls back to its default (or errors as "missing"). Probing
-    ``model_fields`` keeps this file honest across SDK naming churn — mcp 1.29
-    wants camelCase (``inputSchema``, ``isError``); a future release renaming
-    them to snake_case is picked up for free.
+    ``model_fields`` keeps this file honest across SDK naming churn — mcp 2.0
+    declares snake_case (``input_schema``, ``is_error``) with camelCase aliases;
+    whichever spelling the installed models declare is the one used.
     """
     fields = getattr(model, "model_fields", None) or {}
     for name in candidates:
@@ -239,27 +239,32 @@ def build_child_server(socket_path: str) -> Any:
     import mcp.types as t
     from mcp.server import Server
 
-    # mcp's low-level ``Server`` takes only descriptive kwargs (name, version,
-    # instructions, …); handlers are registered through decorators, not
-    # ``on_list_tools`` / ``on_call_tool`` constructor arguments.
-    server = Server(_BUNDLED_SERVER_NAME, version="0.1.0")
-
-    @server.list_tools()
-    async def on_list_tools() -> list[Any]:
+    # mcp 2.0's low-level ``Server`` registers handlers through constructor
+    # kwargs (``on_list_tools`` / ``on_call_tool``). Each handler receives the
+    # per-request ``ServerRequestContext`` plus the validated params model and
+    # returns the full result model; the 1.x decorator API and its bare-content
+    # shortcut are gone.
+    async def on_list_tools(ctx: Any, params: Any) -> Any:
         data = await _socket_rpc(socket_path, {"op": "list"})
-        return [_tool_from_spec(t, td) for td in data.get("tools", [])]
-
-    @server.call_tool()
-    async def on_call_tool(name: str, arguments: dict[str, Any] | None) -> Any:
-        data = await _socket_rpc(
-            socket_path, {"op": "call", "name": name, "arguments": arguments or {}},
+        return t.ListToolsResult(
+            tools=[_tool_from_spec(t, td) for td in data.get("tools", [])],
         )
-        # Returning a CallToolResult (rather than bare content) is what lets the
-        # parent's is_error survive: the decorator's own normalization path
-        # always reports success.
+
+    async def on_call_tool(ctx: Any, params: Any) -> Any:
+        data = await _socket_rpc(
+            socket_path,
+            {"op": "call", "name": params.name, "arguments": params.arguments or {}},
+        )
+        # Build the CallToolResult ourselves so the parent's is_error survives
+        # instead of being flattened into a success.
         return _call_result(t, data.get("text", ""), bool(data.get("is_error")))
 
-    return server
+    return Server(
+        _BUNDLED_SERVER_NAME,
+        version="0.1.0",
+        on_list_tools=on_list_tools,
+        on_call_tool=on_call_tool,
+    )
 
 
 async def _run_child(socket_path: str) -> None:
