@@ -472,6 +472,22 @@ class HarnessAdapter(ProviderAdapter):
                     "unavailable on this native leg",
                     fluid_session_id, options.cwd, exc_info=True,
                 )
+            # Same A13 split for fluid's bare Monitor builtin: shape in fluid,
+            # spawning here. The spawner reuses the app's detached-shell task
+            # manager and its unpark wake path.
+            try:
+                from app.core.monitor_spawn import make_fluid_monitor_spawner
+
+                native_ctx.extra["monitor_spawn"] = make_fluid_monitor_spawner(
+                    self._resolve_app_session_id
+                )
+            except Exception:  # noqa: BLE001 — Monitor degrades to "unavailable"
+                logger.warning(
+                    "[HarnessAdapter] monitor_spawn injection FAILED (fluid "
+                    "session=%s, cwd=%s) — the Monitor tool will report itself "
+                    "unavailable on this native leg",
+                    fluid_session_id, options.cwd, exc_info=True,
+                )
             # Only explicit user configuration may limit a native turn. There
             # is deliberately no install-wide model/token/cost/loop ceiling and
             # no automatic context trimming: provider usage remains telemetry,
@@ -1800,12 +1816,13 @@ class HarnessAdapter(ProviderAdapter):
             DEFERRED_SDK_SERVERS,
             register_recorded_sdk_servers,
         )
-        # Native legs run fluid's bare-named Task builtin (ruling A13) and its
-        # ToolSearch (the functional deferred-schema loader for THIS registry)
-        # — the bridged mcp__builtins__ copies are excluded so the model sees
-        # ONE of each. The delegated leg keeps the MCP copies (the CLI can
-        # only receive external tools via --mcp-config, and its own native
-        # ToolSearch serves the CLI-side registry).
+        # Native legs run fluid's bare-named Task and Monitor builtins
+        # (ruling A13) and its ToolSearch (the functional deferred-schema
+        # loader for THIS registry) — the bridged mcp__builtins__ copies are
+        # excluded so the model sees ONE of each. The delegated leg keeps the
+        # MCP copies (the CLI can only receive external tools via
+        # --mcp-config, and its own native ToolSearch serves the CLI-side
+        # registry).
         #
         # Deferral is native-only too: fluid's ToolSearch is what makes a
         # deferred schema reachable, and the delegated leg's bundled socket
@@ -1813,7 +1830,7 @@ class HarnessAdapter(ProviderAdapter):
         recorded = register_recorded_sdk_servers(
             registry,
             options.mcp_servers,
-            skip_tools={"builtins": {"Task", "ToolSearch"}} if native else None,
+            skip_tools={"builtins": {"Task", "Monitor", "ToolSearch"}} if native else None,
             defer_servers=DEFERRED_SDK_SERVERS if native else None,
         )
         if recorded:
