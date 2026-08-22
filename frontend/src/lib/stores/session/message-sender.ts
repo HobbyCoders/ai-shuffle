@@ -226,6 +226,16 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 			const _state = getState();
 
+			// A first send from an unbound compose spends the new-chat compose
+			// state. Invalidate the shared '__new_chat__' ephemeral entry here —
+			// BEFORE the worktree-setup branch below — so every creation path
+			// (plain query, createWorktree, autoCreateWorktree) clears it. The
+			// worktree branches used to leave the entry behind, and the next
+			// New Chat restored the previous chat's prompt into the composer.
+			if (!_state.sessionId) {
+				sessionEphemeralCache.remove('__new_chat__');
+			}
+
 			// Worktree sessions never block on send: the backend resolves/validates
 			// the cwd on the query path (worktreeDeleted is a display-only badge).
 
@@ -352,7 +362,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				internal.awaitingNewSession = true;
 				requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 				internal.pendingRequestId = requestId;
-				sessionEphemeralCache.remove('__new_chat__');
 			}
 			console.debug(`[ActiveSession] sendMessage: sessionId=${_state.sessionId}, awaitingNewSession=${internal.awaitingNewSession}, wsConnected=${wsConn.isConnected()}, mustInterrupt=${mustInterrupt}`);
 
