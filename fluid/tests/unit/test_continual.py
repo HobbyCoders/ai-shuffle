@@ -389,7 +389,7 @@ async def test_drain_is_bounded_when_the_model_stalls(tmp_path) -> None:
             yield None  # pragma: no cover
 
     store = SkillStore(tmp_path)
-    store.journal({"kind": "cell", "code": "print(1)", "stdout": "1\n"})
+    store.journal_append({"kind": "cell", "code": "print(1)", "stdout": "1\n"})
     synth = Synthesizer(
         _StalledProvider(), "m", store, min_new_entries=1,
         pass_timeout=0.2, close_timeout=0.5,
