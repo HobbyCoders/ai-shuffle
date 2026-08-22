@@ -21,6 +21,9 @@ try:  # pragma: no cover - trivial import guard
 except ImportError:  # pragma: no cover
     _HAVE_TEXTUAL = False
 
+# Slash commands the TUI answers in place (read-only views; no turn submitted).
+_INFO_COMMANDS = frozenset({"/help", "/context", "/usage", "/tools", "/skills", "/model"})
+
 _INSTALL_HINT = (
     "The TUI needs the optional 'textual' dependency.\n"
     "Install it with:  pip install 'fluid[tui]'\n"
@@ -42,7 +45,7 @@ async def run_tui(engine, session_id: str) -> int:
     from textual.containers import VerticalScroll
     from textual.widgets import Input, RichLog
 
-    from fluid.cli.repl import render_event
+    from fluid.cli.repl import Repl, render_event
     from fluid.events.model import PermissionRequest
     from fluid.events.ops import RespondPermission, UserTurn
 
@@ -104,6 +107,11 @@ async def run_tui(engine, session_id: str) -> int:
                 return
             if text in ("/exit", "/quit"):
                 self.exit()
+                return
+            if text.split(maxsplit=1)[0].lower() in _INFO_COMMANDS:
+                # Read-only views shared with the line REPL; they never
+                # submit a turn, so they cannot collide with the event pump.
+                await Repl(self.engine, self.session_id, out=self._writer).dispatch_slash(text)
                 return
             await self.engine.submit(UserTurn(content=text))
 

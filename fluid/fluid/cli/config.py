@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -37,8 +38,14 @@ def resolved_prompt(config: HarnessConfig, *, extra_system: str | None = None):
     system text) predates the compiler's base-first order; ``config.system`` and
     ``extra_system`` therefore ride as ``extra_blocks``, preserving the CLI's
     observable ordering. Native agent definitions are always included when
-    instruction discovery is enabled. The CLI keeps env injection off — its REPL banner
-    already shows cwd/model, and pre-compiler behavior carried no env block.
+    instruction discovery is enabled.
+
+    The environment block (cwd, platform, OS, shell, date, git state) is on:
+    models lean on it for shell syntax and the current date, and Claude Code
+    always sends one. The compiler places it after the instruction stack and
+    skills/agents indexes and before the extra blocks, so the daily date change
+    only invalidates the cached prefix from that point on, never the
+    instruction stack in front of it.
 
     Returns the :class:`~fluid.context.compiler.CompiledPrompt` (text + labeled
     sections); :func:`resolved_system` is its ``.text``.
@@ -51,7 +58,7 @@ def resolved_prompt(config: HarnessConfig, *, extra_system: str | None = None):
             base=None,
             extra_blocks=[b for b in (config.system, extra_system) if b],
             cwd=config.cwd,
-            include_env=False,
+            include_env=True,
             include_global_instructions=enabled and config.instruction_files.discover_global,
             include_project_instructions=enabled and config.instruction_files.discover_project,
             include_skills=enabled and config.instruction_files.discover_skills,
@@ -95,11 +102,18 @@ def make_engine(
     )
 
 
-def list_sessions(directory: str | os.PathLike[str] | None = None) -> list[dict[str, Any]]:
+def list_sessions(
+    directory: str | os.PathLike[str] | None = None, *, limit: int | None = None
+) -> list[dict[str, Any]]:
     """List persisted sessions in a JSONL store directory (newest first).
 
-    Reads each ``<sid>.jsonl`` header line (the ``meta`` record) without loading
-    the whole tree — cheap enough to list hundreds of sessions.
+    Each row carries ``session_id``, ``created_at``, ``last_active`` (the newest
+    node's timestamp, or ``created_at`` for an empty session), ``nodes``,
+    ``first_message`` (the first user turn's text, untruncated) and the
+    ``model``/``provider`` of the most recent turn when the event log recorded
+    one. Reads each ``<sid>.jsonl`` line by line without building the tree, and
+    only scans the event log for ``TurnStarted`` records — cheap enough to list
+    hundreds of sessions. ``limit`` keeps the newest N rows.
     """
     d = Path(directory or default_store_dir())
     if not d.is_dir():
@@ -110,7 +124,9 @@ def list_sessions(directory: str | os.PathLike[str] | None = None) -> list[dict[
             continue
         session_id = log.name[: -len(".jsonl")]
         created_at = 0.0
+        last_active = 0.0
         nodes = 0
+        first_message: str | None = None
         try:
             with log.open(encoding="utf-8") as fh:
                 for line in fh:
@@ -122,8 +138,103 @@ def list_sessions(directory: str | os.PathLike[str] | None = None) -> list[dict[
                         created_at = rec.get("created_at", 0.0)
                     elif rec.get("t") == "node":
                         nodes += 1
-        except (OSError, json.JSONDecodeError):
+                        node = rec.get("node") or {}
+                        last_active = max(last_active, float(node.get("ts") or 0.0))
+                        if first_message is None:
+                            first_message = _first_user_text(node.get("message") or {})
+        except (OSError, json.JSONDecodeError, ValueError):
             continue
-        out.append({"session_id": session_id, "created_at": created_at, "nodes": nodes})
-    out.sort(key=lambda s: s["created_at"], reverse=True)
+        model, provider = _last_turn_model(d / f"{session_id}.events.jsonl")
+        out.append({
+            "session_id": session_id,
+            "created_at": created_at,
+            "last_active": last_active or created_at,
+            "nodes": nodes,
+            "first_message": first_message,
+            "model": model,
+            "provider": provider,
+        })
+    out.sort(key=lambda s: (s["last_active"], s["created_at"]), reverse=True)
+    if limit is not None:
+        out = out[: max(0, limit)]
     return out
+
+
+def _first_user_text(message: dict[str, Any]) -> str | None:
+    """Text of a stored user message, or None when it is not a user turn."""
+    if message.get("role") != "user":
+        return None
+    parts = [
+        b.get("text", "") for b in message.get("content", [])
+        if isinstance(b, dict) and b.get("kind") == "text"
+    ]
+    text = " ".join(p for p in parts if p).strip()
+    return text or None
+
+
+def _last_turn_model(events_path: Path) -> tuple[str | None, str | None]:
+    """(model, provider) from the newest ``TurnStarted`` event, if any."""
+    if not events_path.exists():
+        return None, None
+    model = provider = None
+    try:
+        with events_path.open(encoding="utf-8") as fh:
+            for line in fh:
+                if '"TurnStarted"' not in line:
+                    continue
+                rec = json.loads(line)
+                if rec.get("_cls") == "TurnStarted":
+                    model = rec.get("model") or model
+                    provider = rec.get("provider") or provider
+    except (OSError, json.JSONDecodeError):
+        pass
+    return model, provider
+
+
+def latest_session_id(directory: str | os.PathLike[str] | None = None) -> str | None:
+    """The most recently active session in the store, for ``--continue``."""
+    rows = list_sessions(directory, limit=1)
+    return rows[0]["session_id"] if rows else None
+
+
+def _snippet(text: str | None, width: int) -> str:
+    if not text:
+        return "-"
+    flat = " ".join(text.split())
+    return flat if len(flat) <= width else flat[: width - 1] + "…"
+
+
+def _stamp(ts: float) -> str:
+    if not ts:
+        return "-"
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
+def format_sessions(rows: list[dict[str, Any]], *, snippet_width: int = 48) -> str:
+    """Render :func:`list_sessions` rows as an aligned table (newest first).
+
+    Columns: id, created, last active, node count, model (``provider/model``
+    when both are known), first user message truncated to ``snippet_width``.
+    """
+    if not rows:
+        return "(no sessions)"
+    header = ("SESSION", "CREATED", "LAST ACTIVE", "NODES", "MODEL", "FIRST MESSAGE")
+    table = [header]
+    for r in rows:
+        model = r.get("model") or "-"
+        if r.get("provider") and r.get("model"):
+            model = f"{r['provider']}/{r['model']}"
+        table.append((
+            str(r["session_id"]),
+            _stamp(r.get("created_at", 0.0)),
+            _stamp(r.get("last_active", 0.0)),
+            str(r.get("nodes", 0)),
+            model,
+            _snippet(r.get("first_message"), snippet_width),
+        ))
+    widths = [max(len(row[i]) for row in table) for i in range(len(header) - 1)]
+    lines = []
+    for row in table:
+        cells = [row[i].ljust(widths[i]) for i in range(len(widths))] + [row[-1]]
+        lines.append("  ".join(cells).rstrip())
+    return "\n".join(lines)

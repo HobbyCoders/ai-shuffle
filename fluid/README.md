@@ -105,6 +105,8 @@ for free.
 Early development, moving fast. Working today: both engine legs (native API loop
 and delegated Claude CLI), all five provider backends, the code-as-actions
 kernel with continual skills, MCP 2.0 (spec 2026-07-28), permissions, hooks, and
-the TUI/REPL. Fluid-native instruction, skill, and agent discovery is available;
+the TUI/REPL (`fluid chat`, `fluid run`, `fluid sessions`; `--resume <id>` and
+`--continue` pick up a stored session, and the REPL answers `/context`, `/tools`,
+`/skills`, `/model`, `/fork`, `/rewind`). Fluid-native instruction, skill, and agent discovery is available;
 the explicit provider-settings importer inventories and copies portable Claude
 and Codex content without enabling provider-owned runtime discovery.

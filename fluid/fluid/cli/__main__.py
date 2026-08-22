@@ -2,7 +2,12 @@
 
   fluid chat [--tui]        interactive REPL (or Textual TUI)
   fluid run "<prompt>"      one-shot: stream the reply, then exit
-  fluid sessions            list persisted sessions from the JSONL store
+  fluid sessions [--limit]  list persisted sessions from the JSONL store
+
+``chat`` and ``run`` accept ``--resume <session-id>`` to pick up an existing
+session, or ``--continue`` for the most recently active one. Both build the
+engine against the stored session, so the engine's own resume path (deferred
+catalog, compaction, background tasks) rehydrates on the first turn.
   fluid config              print the resolved layered config
   fluid import-settings     preview an explicit provider-to-Fluid migration
 
@@ -20,7 +25,13 @@ import json
 import sys
 from typing import Any
 
-from fluid.cli.config import list_sessions, make_engine, make_store
+from fluid.cli.config import (
+    format_sessions,
+    latest_session_id,
+    list_sessions,
+    make_engine,
+    make_store,
+)
 from fluid.cli.repl import Repl, auto_deny, stream_turn
 from fluid.config.loader import load_config
 from fluid.config.model import HarnessConfig
@@ -60,14 +71,16 @@ async def run_once(
     provider_name: str | None = None,
     out=None,
     on_permission=auto_deny,
+    session_id: str | None = None,
 ) -> int:
     """Run a single turn and stream it to ``out``. Returns a process exit code.
 
     ``provider`` injects a ProviderClient (offline test hook); when omitted the
-    engine is built from ``config`` (real provider).
+    engine is built from ``config`` (real provider). ``session_id`` resumes an
+    existing session instead of creating a fresh one.
     """
     out = out or sys.stdout
-    meta = await store.create_session()
+    meta = await open_session(store, session_id)
     engine = make_engine(
         config, store, provider=provider, provider_name=provider_name,
         session_id=meta.session_id,
@@ -81,17 +94,43 @@ async def run_once(
     return 0 if stop != "error" else 1
 
 
+class SessionNotFound(LookupError):
+    """``--resume`` named a session the store does not have."""
+
+
+async def open_session(store, session_id: str | None):
+    """The session meta to run against: the existing one, or a fresh one.
+
+    The engine is always handed the session id of a session the store already
+    holds, so ``NativeLoop._ensure_session`` finds it through ``get_session``
+    and its first turn runs the rehydration path (deferred catalog, compaction
+    events, background tasks) instead of starting from an empty tree.
+    """
+    if session_id is None:
+        return await store.create_session()
+    meta = await store.get_session(session_id)
+    if meta is None:
+        raise SessionNotFound(session_id)
+    return meta
+
+
 async def chat_session(
-    config: HarnessConfig, store, *, provider_name: str | None = None, use_tui: bool = False
+    config: HarnessConfig,
+    store,
+    *,
+    provider_name: str | None = None,
+    use_tui: bool = False,
+    session_id: str | None = None,
 ) -> int:
-    meta = await store.create_session()
+    meta = await open_session(store, session_id)
     engine = make_engine(config, store, provider_name=provider_name, session_id=meta.session_id)
     try:
         if use_tui:
             from fluid.cli.tui import run_tui
 
             return await run_tui(engine, meta.session_id)
-        print(f"fluid chat — session {meta.session_id} (/help, /exit)", file=sys.stderr)
+        verb = "resumed" if session_id else "session"
+        print(f"fluid chat — {verb} {meta.session_id} (/help, /exit)", file=sys.stderr)
         await Repl(engine, meta.session_id).run()
         return 0
     finally:
@@ -114,6 +153,10 @@ def _add_common(p: argparse.ArgumentParser) -> None:
                    help="persistent skills root (default ~/.fluid/skills)")
     p.add_argument("--approval-policy", default=None,
                    choices=["never_ask", "on_write", "always_ask"])
+    p.add_argument("--resume", default=None, metavar="SESSION_ID",
+                   help="pick up an existing session from the store")
+    p.add_argument("--continue", action="store_true", dest="continue_last",
+                   help="pick up the most recently active session in the store")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -130,6 +173,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_sessions = sub.add_parser("sessions", help="list persisted sessions")
     p_sessions.add_argument("--store", default=None, help="JSONL session store directory")
+    p_sessions.add_argument("--limit", type=int, default=None, help="show only the newest N sessions")
 
     p_config = sub.add_parser("config", help="print the resolved config")
     _add_common(p_config)
@@ -168,13 +212,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _cmd_sessions(args: argparse.Namespace) -> int:
-    rows = list_sessions(args.store)
-    if not rows:
-        print("(no sessions)")
-        return 0
-    for row in rows:
-        print(f"{row['session_id']}  nodes={row['nodes']}  created={row['created_at']:.0f}")
+    print(format_sessions(list_sessions(args.store, limit=args.limit)))
     return 0
+
+
+def _resume_target(args: argparse.Namespace, store_dir) -> str | None:
+    """The session id ``--resume``/``--continue`` asks for, or None for a new one."""
+    if getattr(args, "resume", None):
+        return args.resume
+    if getattr(args, "continue_last", False):
+        latest = latest_session_id(store_dir)
+        if latest is None:
+            raise SessionNotFound("(no sessions to continue)")
+        return latest
+    return None
 
 
 def _cmd_config(args: argparse.Namespace) -> int:
@@ -215,11 +266,19 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_import_settings(args)
 
     config = _resolve_config(args)
-    store = make_store(getattr(args, "store", None))
-    if args.command == "run":
-        return asyncio.run(run_once(config, store, args.prompt))
-    if args.command == "chat":
-        return asyncio.run(chat_session(config, store, use_tui=args.tui))
+    store_dir = getattr(args, "store", None)
+    store = make_store(store_dir)
+    try:
+        session_id = _resume_target(args, store_dir)
+        if args.command == "run":
+            return asyncio.run(run_once(config, store, args.prompt, session_id=session_id))
+        if args.command == "chat":
+            return asyncio.run(
+                chat_session(config, store, use_tui=args.tui, session_id=session_id)
+            )
+    except SessionNotFound as exc:
+        print(f"fluid: no such session: {exc}", file=sys.stderr)
+        return 2
     return 2  # unreachable: subparsers are required
 
 
