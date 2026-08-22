@@ -226,9 +226,10 @@ def test_resume_unknown_session_is_an_error(tmp_path, capsys) -> None:
 
 
 def test_cli_prompt_carries_environment_block_before_extra_blocks(tmp_path) -> None:
-    config = HarnessConfig.from_dict({**BUILTIN_DEFAULTS, "cwd": str(tmp_path),
-                                      "system": "app block"})
-    compiled = resolved_prompt(config)
+    # ``system`` is now the base prompt, so the extra block comes from a
+    # per-run append instead.
+    config = HarnessConfig.from_dict({**BUILTIN_DEFAULTS, "cwd": str(tmp_path)})
+    compiled = resolved_prompt(config, extra_system="app block")
     kinds = [s.kind for s in compiled.sections]
     assert "environment" in kinds
     assert kinds.index("environment") < kinds.index("extra")

@@ -95,6 +95,12 @@ and whenever it changes — broken skills are unmounted and flagged, not silentl
 trusted. Over time the harness gets genuinely better at *your* work. (Design
 rationale: [docs/agent-experience.md](docs/agent-experience.md).)
 
+**A real base prompt.** The CLI ships a curated system prompt — a behavioral
+contract covering communication, scope, tool use, permissions, and context
+hygiene — the way Claude Code and Codex do, and layers your `AGENTS.md` stack,
+skills index, and environment block on top of it. Set `system` in `config.toml`
+to use your own base prompt instead, or `base_prompt = false` to run with none.
+
 **Replayable by construction.** The engine consumes operations and emits a
 sequence-numbered event stream. Every UI, log, and integration is a subscriber
 of that stream — which means sessions are replayable, debuggable, and embeddable
