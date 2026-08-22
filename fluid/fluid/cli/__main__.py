@@ -23,6 +23,8 @@ import argparse
 import asyncio
 import json
 import sys
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _dist_version
 from typing import Any
 
 from fluid.cli.config import (
@@ -170,8 +172,16 @@ def _add_common(p: argparse.ArgumentParser) -> None:
                    help="pick up the most recently active session in the store")
 
 
+def _version() -> str:
+    try:
+        return _dist_version("fluid")
+    except PackageNotFoundError:
+        return "0.1.0"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fluid", description="fluid agent harness CLI")
+    parser.add_argument("--version", action="version", version=f"fluid {_version()}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_chat = sub.add_parser("chat", help="interactive REPL")

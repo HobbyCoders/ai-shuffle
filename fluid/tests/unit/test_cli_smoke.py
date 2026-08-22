@@ -10,7 +10,9 @@ import io
 import json
 from typing import AsyncIterator
 
-from fluid.cli.__main__ import build_parser, main, run_once
+import pytest
+
+from fluid.cli.__main__ import _version, build_parser, main, run_once
 from fluid.cli.config import list_sessions, make_engine, make_store
 from fluid.cli.repl import Repl, stream_turn
 from fluid.config.loader import BUILTIN_DEFAULTS, deep_merge
@@ -204,6 +206,13 @@ def test_import_settings_cli_previews_then_applies_selected_item(tmp_path, capsy
     outcome = next(entry for entry in result["items"] if entry["id"] == item["id"])
     assert outcome["status"] == "imported"
     assert (destination / ".fluid" / "AGENTS.md").read_text() == "imported guidance"
+
+
+def test_version_flag_prints_and_exits_zero(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["--version"])
+    assert exc.value.code == 0
+    assert capsys.readouterr().out.strip() == f"fluid {_version()}"
 
 
 def test_import_settings_cli_aliases_choose_one_provider() -> None:
