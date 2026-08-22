@@ -58,6 +58,7 @@ _deferred_notes: dict[int, list[str]] = {}
 def _switch_mode(out: TextIO, mode: str) -> None:
     key = id(out)
     previous = _mode.get(key, "text")
+    _mode[key] = mode  # also marks "a turn is streaming" for note deferral
     if previous == mode:
         return
     dim = getattr(out, "isatty", lambda: False)()
