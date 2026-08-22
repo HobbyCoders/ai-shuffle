@@ -38,6 +38,10 @@ DEFAULT_ALLOWLIST = frozenset({
     "collections", "datetime", "textwrap", "pathlib", "csv", "io",
     "base64", "hashlib", "random", "string", "typing", "dataclasses",
     "decimal", "fractions", "enum", "operator", "heapq", "bisect", "uuid",
+    # Pure text/data helpers models reach for constantly; none touch the
+    # filesystem, network, or process state.
+    "shlex", "fnmatch", "difflib", "copy", "pprint", "unicodedata", "html",
+    "ipaddress", "struct", "zlib", "time",
 })
 
 
