@@ -36,7 +36,7 @@
 	 * Escape listener that closes when the target is outside — works for desktop
 	 * click and mobile tap (tap-away closes).
 	 */
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { getContextMaxForModel } from '$lib/constants/chat';
 	import {
@@ -126,10 +126,45 @@
 	// ── Popover open/close (click + tap-away) ─────────────────────────────
 	let open = $state(false);
 	let wrapperRef = $state<HTMLDivElement | null>(null);
+	let popoverEl = $state<HTMLDivElement | null>(null);
+	let popShift = $state(0);
+
+	function measurePopoverShift() {
+		const el = popoverEl;
+		if (!el || !open) {
+			popShift = 0;
+			return;
+		}
+		const r = el.getBoundingClientRect();
+		const PAD = 12;
+		let shift = 0;
+		if (r.right > window.innerWidth - PAD) shift = window.innerWidth - PAD - r.right;
+		if (r.left + shift < PAD) shift = PAD - r.left;
+		popShift = Math.round(shift);
+	}
+
+	function attachPopShiftListener() {
+		window.removeEventListener('resize', measurePopoverShift);
+		window.addEventListener('resize', measurePopoverShift);
+	}
+
+	function detachPopShiftListener() {
+		window.removeEventListener('resize', measurePopoverShift);
+	}
 
 	function setOpen(next: boolean) {
 		open = next;
 		onOpenChange?.(next);
+		if (next) {
+			void tick().then(() => {
+				if (!open) return;
+				measurePopoverShift();
+				attachPopShiftListener();
+			});
+		} else {
+			detachPopShiftListener();
+			popShift = 0;
+		}
 	}
 
 	function toggle() {
@@ -459,6 +494,16 @@
 		});
 	}
 
+	// Alphabetical by resolved display name. Raw bucket order follows
+	// record-insertion, which re-shuffles on every usage fold-in — rows must
+	// hold still under the user's eye instead.
+	function sortedProviderBuckets() {
+		return Object.values($rateLimit.providerBuckets ?? {})
+			.map((pb) => ({ pb, name: providerDisplayFor(pb).name }))
+			.sort((a, b) => a.name.localeCompare(b.name))
+			.map((entry) => entry.pb);
+	}
+
 	/**
 	 * Claude, ChatGPT and SuperGrok subscription sections present quota remaining.
 	 * SuperGrok billing reports used-%, which `remainingFromUsedPct` converts — so
@@ -527,6 +572,7 @@
 		return () => {
 			document.removeEventListener('click', handleClickOutside);
 			document.removeEventListener('keydown', handleEscape);
+			detachPopShiftListener();
 			cancelFetch();
 		};
 	});
@@ -561,7 +607,7 @@
 	</button>
 
 	{#if open}
-		<div class="usage-popover" role="dialog" aria-label="Context and usage">
+		<div class="usage-popover" bind:this={popoverEl} style="transform: translateX({popShift}px)" role="dialog" aria-label="Context and usage">
 			<!-- ═══ Context window ═══ -->
 			<div class="ctx-section">
 				<button
@@ -714,7 +760,7 @@
 			     their collapsed summary uses the least remaining window. xAI API-key,
 			     other API-key and credit windows keep used-of-100 and summarize the
 			     highest-utilization window. -->
-			{#each Object.values($rateLimit.providerBuckets ?? {}) as pb (pb.providerId)}
+			{#each sortedProviderBuckets() as pb (pb.providerId)}
 				{@const sectionId = `provider:${pb.providerId}`}
 				{@const pbDisplay = providerDisplayFor(pb)}
 				{@const pbOpen = isSectionOpen(sectionId)}
