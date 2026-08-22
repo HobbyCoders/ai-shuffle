@@ -612,6 +612,49 @@ describe('createWorktree remote-only compose', () => {
 	});
 });
 
+
+/**
+ * A first send from an unbound compose (no sessionId) must invalidate the
+ * shared '__new_chat__' ephemeral entry — it holds the new-chat draft, and a
+ * stale one made the NEXT New Chat restore the previous chat's prompt into the
+ * composer. The invalidation has to fire on EVERY creation path, including the
+ * worktree branches that return before the plain WS query path.
+ */
+describe('sendMessage clears the new-chat compose cache on first send', () => {
+	const firstSendCases: Array<[string, Partial<ActiveSessionState>]> = [
+		['plain local query', { worktreeIntent: 'local', sessionId: null, messages: [] }],
+		['auto worktree creation', {
+			worktreeIntent: 'worktree', sessionId: null, worktreeBranch: '', messages: [],
+		}],
+		['existing-worktree creation', {
+			worktreeIntent: 'worktree', sessionId: null, messages: [],
+			worktreeMode: 'existing', worktreeId: 'wt-1',
+		}],
+	];
+	it.each(firstSendCases)('clears __new_chat__ for %s', async (_name, overrides) => {
+		const { deps } = makeDeps(baseState({ ...overrides }));
+		const sender = createMessageSender(deps);
+
+		await sender.sendMessage('first message');
+
+		expect(deps.sessionEphemeralCache.remove).toHaveBeenCalledWith('__new_chat__');
+	});
+
+	it('does NOT clear __new_chat__ on a follow-up send to an existing session', async () => {
+		const { deps } = makeDeps(baseState({
+			worktreeIntent: 'local',
+			sessionId: 'existing-session',
+			title: 'Existing',
+			messages: [{ id: 'user-1', role: 'user', content: 'earlier' } as any],
+		}));
+		const sender = createMessageSender(deps);
+
+		await sender.sendMessage('follow up');
+
+		expect(deps.sessionEphemeralCache.remove).not.toHaveBeenCalled();
+	});
+});
+
 describe('sendMessage remote-only compose', () => {
 	it('sends project_v2_id and never upload_paths', async () => {
 		const { deps, wsConn } = makeDeps(baseState({
