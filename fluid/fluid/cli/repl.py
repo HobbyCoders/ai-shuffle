@@ -25,6 +25,7 @@ from fluid.cli.host import render_worker_event
 from fluid.events.model import (
     ErrorEvent,
     Event,
+    HookEvent,
     Interrupted,
     PermissionRequest,
     SessionParked,
@@ -69,6 +70,14 @@ def _switch_mode(out: TextIO, mode: str) -> None:
     _mode[key] = mode
 
 
+def render_hook_event(event: HookEvent) -> str:
+    """``[hook] ...`` line for a hook denial or warning."""
+    if event.level == "deny":
+        target = f" {event.tool_name}" if event.tool_name else ""
+        return f"[hook] denied{target}: {event.message}"
+    return f"[hook] {event.message}"
+
+
 def render_event(event: Event, out: TextIO) -> None:
     """Render one event to ``out`` (matches native + delegated event shapes).
 
@@ -107,6 +116,8 @@ def render_event(event: Event, out: TextIO) -> None:
         out.write("\n[interrupted]\n")
     elif isinstance(event, ErrorEvent):
         out.write(f"\n[error] {event.message}\n")
+    elif isinstance(event, HookEvent):
+        out.write(f"  {render_hook_event(event)}\n")
     elif isinstance(event, (SubagentEvent, SessionParked, SessionWoken)):
         line = render_worker_event(event)
         if line is None:

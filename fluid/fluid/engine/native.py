@@ -35,6 +35,7 @@ from fluid.events.model import (
     BlockStop,
     ContextCompaction,
     ErrorEvent,
+    HookEvent,
     Event,
     Interrupted,
     HandoffCreated,
@@ -673,7 +674,10 @@ class NativeLoop(BackgroundLifecycleMixin):
             )
         )
         if self.hooks is not None:
-            await self.hooks.emit(TURN_START, {"session_id": sid, "turn_id": turn_id})
+            decision = await self.hooks.emit(
+                TURN_START, {"session_id": sid, "turn_id": turn_id}
+            )
+            await self._report_hook_warnings(sid, turn_id, TURN_START, decision)
         try:
             await self._agent_loop(sid, turn_id, user_node)
         except asyncio.CancelledError:
@@ -946,7 +950,12 @@ class NativeLoop(BackgroundLifecycleMixin):
             # Episodic journal: the turn's final text (acceptance/feedback signal).
             self._codemode.record_event("assistant", _plain_text(result.message.content))
         if self.hooks is not None:
-            await self.hooks.emit(TURN_END, {"session_id": sid, "turn_id": turn_id})
+            decision = await self.hooks.emit(
+                TURN_END,
+                {"session_id": sid, "turn_id": turn_id,
+                 "text": _plain_text(result.message.content)},
+            )
+            await self._report_hook_warnings(sid, turn_id, TURN_END, decision)
         # Cost rides its own TurnComplete field; keep the usage dict token-shaped.
         cost_total = total_usage.pop("cost_usd", None)
         await self._emit_terminal_with_park(TurnComplete(
@@ -1317,12 +1326,21 @@ class NativeLoop(BackgroundLifecycleMixin):
         # modify replaces the input before permissions/dispatch see it.
         if self.hooks is not None:
             decision = await self.hooks.emit(
-                PRE_TOOL_USE, {"name": name, "input": input, "tool_use_id": tool_use_id}
+                PRE_TOOL_USE,
+                {"name": name, "input": input, "tool_use_id": tool_use_id,
+                 "session_id": sid},
             )
+            await self._report_hook_warnings(sid, turn_id, PRE_TOOL_USE, decision, name)
             if decision.action == "deny":
+                reason = decision.note or "denied"
+                await self._emit(HookEvent(
+                    session_id=sid, turn_id=turn_id, level="deny",
+                    message=reason, hook_event=PRE_TOOL_USE, tool_name=name,
+                ))
                 return await self._finish_tool(
                     sid, turn_id, name, tool_use_id,
-                    ToolOutcome(text=f"blocked by hook: {decision.note or 'denied'}", is_error=True),
+                    ToolOutcome(text=f"blocked by hook: {reason}", is_error=True),
+                    input=input,
                 )
             if decision.action == "modify" and decision.replacement_input is not None:
                 input = decision.replacement_input
@@ -1399,7 +1417,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 text=f"tool {name} still input_required after {rounds} round-trips",
                 is_error=True,
             )
-        return await self._finish_tool(sid, turn_id, name, tool_use_id, outcome)
+        return await self._finish_tool(sid, turn_id, name, tool_use_id, outcome, input=input)
 
     async def _collect_input_responses(
         self, sid: str, turn_id: str, name: str, tool_use_id: str, marker: Any
@@ -1478,15 +1496,30 @@ class NativeLoop(BackgroundLifecycleMixin):
             resp.updated_input if allowed else None,
         )
 
+    async def _report_hook_warnings(
+        self, sid: str, turn_id: str, event: str, decision: Any,
+        tool_name: str | None = None,
+    ) -> None:
+        """Surface non-fatal hook diagnostics (timeouts, odd exit codes) as
+        HookEvents. Never changes the decision."""
+        for message in getattr(decision, "warnings", ()):
+            await self._emit(HookEvent(
+                session_id=sid, turn_id=turn_id, level="warning",
+                message=message, hook_event=event, tool_name=tool_name,
+            ))
+
     async def _finish_tool(
-        self, sid: str, turn_id: str, name: str, tool_use_id: str, outcome: ToolOutcome
+        self, sid: str, turn_id: str, name: str, tool_use_id: str, outcome: ToolOutcome,
+        input: dict[str, Any] | None = None,
     ) -> ToolOutcome:
         if self.hooks is not None:
-            await self.hooks.emit(
+            decision = await self.hooks.emit(
                 POST_TOOL_USE,
-                {"name": name, "tool_use_id": tool_use_id,
-                 "output": outcome.text, "is_error": outcome.is_error},
+                {"name": name, "tool_use_id": tool_use_id, "input": input,
+                 "output": outcome.text, "is_error": outcome.is_error,
+                 "session_id": sid},
             )
+            await self._report_hook_warnings(sid, turn_id, POST_TOOL_USE, decision, name)
         await self._emit(ToolResult(
             session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id, name=name,
             output=outcome.text, is_error=outcome.is_error, ui=outcome.ui,

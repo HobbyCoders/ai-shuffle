@@ -238,6 +238,19 @@ class SubagentEvent(Event):
     status: str | None = None
 
 
+@dataclass(frozen=True, kw_only=True)
+class HookEvent(Event):
+    """A configured hook spoke: ``level`` is ``"deny"`` (a PreToolUse hook
+    blocked a call; the model sees the same reason as an error ToolResult) or
+    ``"warning"`` (a hook timed out or exited with an unexpected code and the
+    engine carried on). Never terminal — clients render it and move on."""
+
+    level: str
+    message: str
+    hook_event: str = ""
+    tool_name: str | None = None
+
+
 # ─── Durable event codec ─────────────────────────────────────────────────────
 #
 # The EventBus keeps an in-process log; durable replay across restarts belongs
@@ -252,7 +265,7 @@ _EVENT_TYPES: dict[str, type[Event]] = {
         Interrupted, ErrorEvent,
         BlockStart, BlockStop, TextDelta, ThinkingDelta,
         ToolUse, ToolResult, PermissionRequest, QuestionRequest, HandoffCreated,
-        ContextCompaction, Usage, RateLimit, SubagentEvent,
+        ContextCompaction, Usage, RateLimit, SubagentEvent, HookEvent,
     )
 }
 
