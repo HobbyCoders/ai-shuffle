@@ -38,13 +38,38 @@ PermissionResponder = Callable[[PermissionRequest], Awaitable[str]]
 _TERMINAL = (TurnComplete, Interrupted, ErrorEvent)
 
 
+# Per-stream render mode ("text" | "thinking"), keyed by id(out), so thinking
+# and answer text get separated without threading state through every caller.
+_mode: dict[int, str] = {}
+
+
+def _switch_mode(out: TextIO, mode: str) -> None:
+    key = id(out)
+    previous = _mode.get(key, "text")
+    if previous == mode:
+        return
+    dim = getattr(out, "isatty", lambda: False)()
+    if mode == "thinking":
+        out.write("\n  [thinking] " + ("\x1b[2m" if dim else ""))
+    else:
+        out.write(("\x1b[0m" if dim else "") + "\n\n")
+    _mode[key] = mode
+
+
 def render_event(event: Event, out: TextIO) -> None:
-    """Render one event to ``out`` (matches native + delegated event shapes)."""
+    """Render one event to ``out`` (matches native + delegated event shapes).
+
+    Thinking is shown under a ``[thinking]`` marker (dimmed on a tty) so it can
+    never be mistaken for the answer; the answer resumes on its own lines.
+    """
     if isinstance(event, TextDelta):
+        _switch_mode(out, "text")
         out.write(event.text)
     elif isinstance(event, ThinkingDelta):
+        _switch_mode(out, "thinking")
         out.write(event.text)
     elif isinstance(event, ToolUse):
+        _switch_mode(out, "text")
         out.write(f"\n  [tool] {event.name} {event.input}\n")
     elif isinstance(event, ToolResult):
         tag = "tool!" if event.is_error else "tool"
@@ -59,6 +84,8 @@ def render_event(event: Event, out: TextIO) -> None:
             f"hit_rate={event.cache_hit_rate:.2f}\n"
         )
     elif isinstance(event, TurnComplete):
+        _switch_mode(out, "text")
+        _mode.pop(id(out), None)
         cost = f" cost=${event.cost_usd:.4f}" if event.cost_usd is not None else ""
         out.write(f"\n[done] stop={event.stop_reason} calls={event.num_model_calls}{cost}\n")
     elif isinstance(event, Interrupted):

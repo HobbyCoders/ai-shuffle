@@ -206,6 +206,14 @@ def _cmd_import_settings(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows consoles default to a legacy code page; model output is Unicode.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
     args = build_parser().parse_args(argv)
     if args.command == "sessions":
         return _cmd_sessions(args)
