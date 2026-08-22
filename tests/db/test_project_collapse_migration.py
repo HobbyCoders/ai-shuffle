@@ -413,3 +413,148 @@ def test_duplicate_legacy_project_paths_do_not_abort_migration(test_db):
         )
         # Exactly one base checkout row survives the collision.
         assert cur.fetchone()["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Step G: duplicate projects_v2 consolidation (local: twin -> git: survivor)
+# and orphan purge (local: row with no legacy projects row left anywhere).
+# ---------------------------------------------------------------------------
+
+
+def _seed_pv2_row(shim, origin, name):
+    shim.cursor().execute(
+        "INSERT INTO projects_v2 (id, origin, name, settings) VALUES (%s, %s, %s, '{}')",
+        (origin_id(origin), origin, name),
+    )
+
+
+def test_local_twin_merges_into_git_sibling(test_db):
+    from tests.pg_shim import route_db_to
+
+    with route_db_to(test_db) as shim:
+        # The wild shape: a project seeded as local:<id> pre-git-poll re-seeded
+        # under git:<hash> after the remote was read. Same name, two rows.
+        _seed_pv2_row(shim, "local:t3-code", "t3-code")
+        _seed_pv2_row(shim, "git:t3hash", "t3-code")
+        # Sessions + a branch checkout stranded on the twin.
+        shim.cursor().execute(
+            "INSERT INTO sessions (id, project_id, project_v2_id) VALUES (%s, %s, %s)",
+            ("sess-twin", "t3-code", origin_id("local:t3-code")),
+        )
+        shim.cursor().execute(
+            "INSERT INTO checkouts (id, project_id, runner_id, path, status) "
+            "VALUES ('ck-wt-x', %s, 'r1', '/x/wt', 'active')",
+            (origin_id("local:t3-code"),),
+        )
+
+        database._run_column_migrations(shim.cursor())
+
+        rows = pv2.list_projects_v2()
+        assert len(rows) == 1 and rows[0]["origin"] == "git:t3hash"
+
+        cur = shim.cursor()
+        cur.execute("SELECT project_v2_id FROM sessions WHERE id = 'sess-twin'")
+        assert cur.fetchone()["project_v2_id"] == origin_id("git:t3hash")
+        cur.execute("SELECT project_id FROM checkouts WHERE id = 'ck-wt-x'")
+        assert cur.fetchone()["project_id"] == origin_id("git:t3hash")
+
+
+def test_twin_checkout_colliding_with_survivor_is_dropped(test_db):
+    from tests.pg_shim import route_db_to
+
+    with route_db_to(test_db) as shim:
+        # Both twins seeded a base checkout at the same runner+path — moving the
+        # twin's would violate the survivor's UNIQUE (project_id, runner_id,
+        # path), so the colliding row must be deleted instead of moved.
+        _seed_pv2_row(shim, "local:t3-code", "t3-code")
+        _seed_pv2_row(shim, "git:t3hash", "t3-code")
+        shim.cursor().execute(
+            "INSERT INTO checkouts (id, project_id, runner_id, path, status) "
+            "VALUES ('ck-surv', %s, 'r1', '/x/repo', 'active')",
+            (origin_id("git:t3hash"),),
+        )
+        shim.cursor().execute(
+            "INSERT INTO checkouts (id, project_id, runner_id, path, status) "
+            "VALUES ('ck-twin', %s, 'r1', '/x/repo', 'active')",
+            (origin_id("local:t3-code"),),
+        )
+
+        database._run_column_migrations(shim.cursor())
+
+        cur = shim.cursor()
+        cur.execute("SELECT COUNT(*) AS n FROM checkouts")
+        assert cur.fetchone()["n"] == 1
+        cur.execute("SELECT project_id FROM checkouts WHERE id = 'ck-surv'")
+        assert cur.fetchone()["project_id"] == origin_id("git:t3hash")
+
+
+def test_distinct_name_local_rows_are_not_merged(test_db):
+    from tests.pg_shim import route_db_to
+
+    with route_db_to(test_db) as shim:
+        # discord has no git sibling — it must survive untouched even though
+        # other projects on this install have git origins.
+        _seed_project(shim, "discord", "discord", "/d/discord", "inst1", None)
+        _seed_project(shim, "repo-a", "repo", "/a/repo", "inst1", "git:shared")
+        database._run_column_migrations(shim.cursor())
+
+        origins = {r["origin"] for r in pv2.list_projects_v2()}
+        assert "local:discord" in origins and "git:shared" in origins
+
+
+def test_orphaned_local_row_with_no_references_is_purged(test_db):
+    from tests.pg_shim import route_db_to
+
+    with route_db_to(test_db) as shim:
+        # read2me: legacy projects row deleted everywhere, zero sessions AND
+        # zero checkouts — nothing references the registry row; purge it.
+        _seed_pv2_row(shim, "local:read2me", "Read2Me")
+
+        database._run_column_migrations(shim.cursor())
+
+        assert pv2.list_projects_v2() == []
+
+
+def test_orphaned_local_row_with_sessions_is_kept(test_db):
+    from tests.pg_shim import route_db_to
+
+    with route_db_to(test_db) as shim:
+        # History still hangs off the row — keep it so removed-project
+        # handling can surface the sessions; never strand them.
+        _seed_pv2_row(shim, "local:read2me", "Read2Me")
+        shim.cursor().execute(
+            "INSERT INTO sessions (id, project_id, project_v2_id) VALUES (%s, %s, %s)",
+            ("sess-r2m", "read2me", origin_id("local:read2me")),
+        )
+
+        database._run_column_migrations(shim.cursor())
+
+        rows = pv2.list_projects_v2()
+        assert len(rows) == 1 and rows[0]["origin"] == "local:read2me"
+
+
+def test_step_g_rerun_is_zero_write(test_db):
+    from tests.pg_shim import route_db_to
+
+    with route_db_to(test_db) as shim:
+        _seed_pv2_row(shim, "local:t3-code", "t3-code")
+        _seed_pv2_row(shim, "git:t3hash", "t3-code")
+        _seed_pv2_row(shim, "local:read2me", "Read2Me")
+        shim.cursor().execute(
+            "INSERT INTO sessions (id, project_id, project_v2_id) VALUES (%s, %s, %s)",
+            ("sess-twin", "t3-code", origin_id("local:t3-code")),
+        )
+
+        database._run_column_migrations(shim.cursor())
+        cur = shim.cursor()
+        cur.execute("SELECT * FROM projects_v2 ORDER BY id")
+        after_first = cur.fetchall()
+        cur.execute("SELECT * FROM checkouts ORDER BY id")
+        cks_first = cur.fetchall()
+
+        database._run_column_migrations(shim.cursor())
+        cur = shim.cursor()
+        cur.execute("SELECT * FROM projects_v2 ORDER BY id")
+        assert cur.fetchall() == after_first
+        cur.execute("SELECT * FROM checkouts ORDER BY id")
+        assert cur.fetchall() == cks_first

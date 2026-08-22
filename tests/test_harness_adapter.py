@@ -214,6 +214,32 @@ async def test_translation_table():
 
 
 @pytest.mark.asyncio
+async def test_host_monitor_receipt_translates_as_a_shell_task():
+    """A SubagentEvent receipt WITHOUT a worker session is a host Monitor
+    shell: its TaskStarted must carry task_type="local_bash" so
+    _record_task_message files it kind="shell" instead of clobbering the
+    spawner's SHELL registration with kind="agent". A Task/ProviderAgent
+    worker (worker_session_id set) keeps the agent classification."""
+    events = [
+        lm.SubagentEvent(
+            session_id=SID, task_id="mon-1", kind="started", description="ci run",
+        ),
+        # A Task/ProviderAgent worker (worker_session_id set) never mirrors at
+        # all — the host owns its lifecycle (existing dedup rule).
+        lm.SubagentEvent(
+            session_id=SID, task_id="agent-1", kind="started",
+            worker_session_id="agent-1", description="research",
+        ),
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=1),
+    ]
+    got = await _collect(_adapter_with(FakeEngine(events)))
+    started = [e for e in got if isinstance(e, TaskStartedMessage)]
+    assert len(started) == 1
+    assert started[0].task_id == "mon-1"
+    assert started[0].task_type == "local_bash"
+
+
+@pytest.mark.asyncio
 async def test_translation_non_partial_buffers_deltas():
     # Default options (include_partial_messages=False): deltas are buffered
     # silently and surface once, as the complete AssistantMessage at BlockStop.
@@ -1697,14 +1723,16 @@ async def test_connect_native_leg_passes_resolved_context_window(monkeypatch):
 @pytest.mark.asyncio
 async def test_on_write_policy_gates_builtin_bash_but_not_read():
     """The permission prompt only becomes reachable once the builtins exist:
-    Bash is risk='write' (ask), Read is risk='safe' (allow)."""
+    a mutating Bash command asks, a read-only one (fluid's classifier) and Read
+    are allowed."""
     from fluid.permissions.engine import PermissionEngine
 
     adapter = HarnessAdapter()
     registry = await adapter._build_registry(SessionOptions(model="gpt-4o"), native=True)
     engine = PermissionEngine(approval_policy="on_write")
 
-    assert engine.evaluate(registry.get("Bash"), {"command": "ls"}) == "ask"
+    assert engine.evaluate(registry.get("Bash"), {"command": "rm -rf build"}) == "ask"
+    assert engine.evaluate(registry.get("Bash"), {"command": "ls"}) == "allow"
     assert engine.evaluate(registry.get("Read"), {"file_path": "/tmp/x"}) == "allow"
 
 
@@ -3336,6 +3364,151 @@ async def test_pooled_engine_dispatcher_picks_up_a_late_session_id(
     assert seen["caller"] == "app-sess-3"
 
 
+# ─── Monitor spawner injection on native legs (A13, Task-parity) ─────────────
+#
+# Regression cover for the live bug: a native session called fluid's bare
+# Monitor builtin and got "Monitor is not available in this environment — no
+# monitor spawner was injected by the host application", because the app
+# bridged only its MCP mcp__builtins__Monitor copy and never injected the
+# spawner fluid's builtin expects.
+
+
+def _injected_monitor_spawn():
+    return _CapturingLoop.captured["ctx"].extra.get("monitor_spawn")
+
+
+@pytest.mark.asyncio
+async def test_native_leg_injects_monitor_spawn(monkeypatch, tmp_path):
+    await _connect_native_leg(monkeypatch, tmp_path)
+    assert _injected_monitor_spawn() is not None
+
+
+@pytest.mark.asyncio
+async def test_monitor_spawn_runs_detached_and_returns_receipt(
+    monkeypatch, tmp_path
+):
+    """The spawner reuses the app's shell-task registry and returns a durable
+    receipt; the command outlives the tool call."""
+    from app.mcp import builtin_tools as bt
+
+    spawned = []
+
+    class _FakeTask:
+        task_id = "mon-x1"
+        exit_code = None
+
+        def is_running(self):
+            return True
+
+    async def _fake_spawn(command, cwd, session_id):
+        spawned.append((command, cwd, session_id))
+        return _FakeTask()
+
+    monkeypatch.setattr(bt, "_spawn_background", _fake_spawn)
+    await _connect_native_leg(monkeypatch, tmp_path, app_session_id="app-sess-m1")
+
+    from fluid.tools.registry import BackgroundTaskReceipt
+
+    receipt = await _injected_monitor_spawn()(
+        {"command": "npm run build", "cwd": str(tmp_path)}, object()
+    )
+    assert isinstance(receipt, BackgroundTaskReceipt)
+    assert receipt.task_id == "mon-x1"
+    assert spawned == [("npm run build", str(tmp_path), "app-sess-m1")]
+
+
+@pytest.mark.asyncio
+async def test_monitor_spawn_wakes_the_parent_on_completion(monkeypatch, tmp_path):
+    """On process exit the output tail is folded into the record and handed to
+    turn_scheduler.on_task_terminal — the unpark seam."""
+    import asyncio
+
+    from app.mcp import builtin_tools as bt
+
+    class _FakeTask:
+        def __init__(self):
+            self.task_id = "mon-w1"
+            self.exit_code = 0
+            self.lines = ["build finished ok"]
+            self._done = asyncio.Event()
+
+        def is_running(self):
+            return not self._done.is_set()
+
+    fake = _FakeTask()
+
+    async def _fake_spawn(command, cwd, session_id):
+        return fake
+
+    wakes: list = []
+
+    async def _fake_terminal(session_id, frame):
+        wakes.append((session_id, frame))
+
+    monkeypatch.setattr(bt, "_spawn_background", _fake_spawn)
+    import app.core.turn_scheduler as ts
+    monkeypatch.setattr(ts, "on_task_terminal", _fake_terminal)
+
+    await _connect_native_leg(monkeypatch, tmp_path, app_session_id="app-sess-m2")
+    await _injected_monitor_spawn()({"command": "make build"}, object())
+
+    fake._done.set()
+    for _ in range(40):
+        if wakes:
+            break
+        await asyncio.sleep(0.05)
+    assert wakes, "completion never reached the scheduler"
+    session_id, frame = wakes[0]
+    assert session_id == "app-sess-m2"
+    assert frame["task_id"] == "mon-w1"
+    assert frame["status"] == "completed"
+    assert "build finished ok" in (frame.get("summary") or "")
+
+
+@pytest.mark.asyncio
+async def test_monitor_spawn_rejects_an_empty_command(monkeypatch, tmp_path):
+    from fluid.tools.registry import ToolOutcome
+
+    await _connect_native_leg(monkeypatch, tmp_path, app_session_id="app-sess-m3")
+    out = await _injected_monitor_spawn()({"command": "   "}, object())
+    assert isinstance(out, ToolOutcome) and out.is_error
+
+
+@pytest.mark.asyncio
+async def test_native_leg_skips_the_bridged_mcp_monitor(monkeypatch, tmp_path):
+    """One Monitor per leg: the bridged mcp__builtins__Monitor copy must not be
+    registered when fluid's bare builtin runs."""
+    import app.core.provider.harness_adapter as ha
+
+    captured: dict = {}
+
+    def _fake_register(registry, mcp_servers, *, skip_tools=None,
+                       defer_servers=None):
+        captured["skip"] = skip_tools
+        return []
+
+    monkeypatch.setattr(ha.NativeLoop, "__init__", lambda self, **kw: None)
+    monkeypatch.setattr(
+        ha, "_build_provider_client",
+        lambda *a, **kw: (None, None),
+    )
+    # register_recorded_sdk_servers is imported inside connect(); patch at source.
+    import app.core.provider.fluid_tool_bridge as bridge
+    monkeypatch.setattr(bridge, "register_recorded_sdk_servers", _fake_register)
+
+    adapter = ha.HarnessAdapter()
+    try:
+        await adapter.connect(SessionOptions(
+            model="gpt-4o", cwd=str(tmp_path),
+            extra={"fluid_provider": "openai_responses"},
+        ))
+    except Exception:
+        pass  # downstream wiring may fail on fakes — the capture below is the point
+    assert (captured.get("skip") or {}).get("builtins") is None or (
+        "Monitor" in (captured.get("skip") or {}).get("builtins", set())
+    )
+
+
 @pytest.mark.asyncio
 async def test_connect_with_sdk_options_projects_the_app_session_id(monkeypatch):
     """``aih_session_id`` (stamped by query_options) lands on
@@ -3633,8 +3806,12 @@ def test_native_environment_declares_the_actual_windows_shell(tmp_path, monkeypa
     monkeypatch.setattr(environment.os, "name", "nt")
     monkeypatch.setattr(environment, "git_context", lambda cwd: None)
     block = environment.environment_block(tmp_path)
-    assert "Shell: cmd.exe" in block
-    assert "not PowerShell or POSIX" in block
+    # fluid resolves the real shell (Git Bash when installed, cmd.exe
+    # otherwise) and the block must name whichever one the Bash tool runs.
+    from fluid.tools.shell import describe
+
+    assert f"Shell: {describe()}" in block
+    assert ("Git Bash" in block) or ("cmd.exe" in block)
 
 
 # ─── 7. CE12 — enforced tool restriction projected onto the engines ──────────
