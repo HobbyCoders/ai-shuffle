@@ -63,6 +63,10 @@ _JOURNAL_STDOUT_CAP = 1500
 _JOURNAL_VALUE_CAP = 300
 _JOURNAL_EVENT_CAP = 2000  # user/assistant conversation events
 
+# Images produced by in-kernel tool calls ride out on the cell's tool result.
+# Capped so one loop over a directory of screenshots can't blow up the request.
+_CELL_IMAGE_CAP = 20
+
 
 class CodeModeSession:
     def __init__(
@@ -195,6 +199,10 @@ class CodeModeSession:
         )
 
         called_tools: list[str] = []
+        # Image results are host-side only: the kernel gets the "[image: …]"
+        # caption as text, and the real blocks ride out on this cell's outcome
+        # so the model can actually see them (JSON-path parity).
+        collected_images: list[Any] = []
 
         async def _host_call(name: str, kwargs: dict) -> HostReply:
             called_tools.append(name)
@@ -221,6 +229,7 @@ class CodeModeSession:
                         extra["tool_use_id"] = previous
                     else:
                         extra.pop("tool_use_id", None)
+            collected_images.extend(reply.images)
             if reply.result is not None:
                 out, is_error = reply.result, False
             elif reply.denied:
@@ -244,7 +253,14 @@ class CodeModeSession:
         text = "\n".join(parts) if parts else "(no output)"
         if result.error:
             text = (text + "\n" if parts else "") + f"Error: {result.error}"
-        return ToolOutcome(text=text, is_error=bool(result.error))
+        dropped = len(collected_images) - _CELL_IMAGE_CAP
+        if dropped > 0:
+            text += f"\n({dropped} further images omitted — read fewer per cell)"
+        return ToolOutcome(
+            text=text,
+            is_error=bool(result.error),
+            images=tuple(collected_images[:_CELL_IMAGE_CAP]),
+        )
 
     # ── continual harness hooks ──
     def _record_cell(self, code: str, result: Any, called_tools: list[str]) -> None:

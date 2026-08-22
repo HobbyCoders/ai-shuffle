@@ -25,7 +25,7 @@ from fluid.permissions.engine import PermissionEngine
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import MemoryStore
 from fluid.tools.inproc import create_inproc_server, tool
-from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
+from fluid.tools.registry import ToolCtx, ToolImage, ToolOutcome, ToolRegistry, ToolSpec
 
 
 # ── scripted provider (same shape as test_tool_loop) ──────────────────────
@@ -379,3 +379,69 @@ async def test_code_mode_disallowed_tool_is_rejected_host_side() -> None:
         assert "JSON-path only" in session.render_docs("transfer")
     finally:
         await loop.aclose()
+
+
+async def test_image_results_ride_out_on_the_cell_outcome() -> None:
+    """An in-kernel image read reaches the model, not just its caption.
+
+    In the sandbox the call returns the ``[image: …]`` text (base64 never
+    crosses the pipe); the blocks themselves land on the run_python outcome,
+    which ``_dispatch_tool`` turns into Image content — JSON-path parity.
+    """
+
+    async def _shot(_input: dict, _ctx: ToolCtx) -> ToolOutcome:
+        return ToolOutcome(
+            text="[image: x.png]",
+            images=(ToolImage(media_type="image/png", data="AAAA"),),
+        )
+
+    registry = ToolRegistry()
+    registry.register_builtin(
+        ToolSpec(name="shot", description="Return a picture.",
+                 input_schema={"type": "object", "properties": {}}),
+        _shot,
+    )
+    session = CodeModeSession(registry)
+    loop = _CtxProbeLoop(registry, ToolCtx(extra={}))
+    try:
+        outcome = await session.run_python(
+            sid="s1", turn_id="t1", loop=loop,
+            input={"code": "from tools.shot import shot\nprint(shot())\n", "timeout": 20},
+        )
+        assert outcome.images == (ToolImage(media_type="image/png", data="AAAA"),)
+        # the kernel still only ever saw the caption
+        assert "[image: x.png]" in outcome.text
+        # and the inner ToolResult event stays text-only (no base64 on the bus)
+        inner = next(e for e in loop.events if isinstance(e, ToolResult) and e.name == "shot")
+        assert inner.output == "[image: x.png]"
+    finally:
+        await session.aclose()
+
+
+async def test_cell_images_are_capped_with_an_explicit_note() -> None:
+    async def _many(_input: dict, _ctx: ToolCtx) -> ToolOutcome:
+        return ToolOutcome(
+            text="[25 images]",
+            images=tuple(
+                ToolImage(media_type="image/png", data=f"IMG{i}") for i in range(25)
+            ),
+        )
+
+    registry = ToolRegistry()
+    registry.register_builtin(
+        ToolSpec(name="many", description="Return a pile of pictures.",
+                 input_schema={"type": "object", "properties": {}}),
+        _many,
+    )
+    session = CodeModeSession(registry)
+    loop = _CtxProbeLoop(registry, ToolCtx(extra={}))
+    try:
+        outcome = await session.run_python(
+            sid="s1", turn_id="t1", loop=loop,
+            input={"code": "from tools.many import many\nprint(many())\n", "timeout": 20},
+        )
+        assert len(outcome.images) == 20
+        assert outcome.images[0].data == "IMG0"
+        assert "(5 further images omitted — read fewer per cell)" in outcome.text
+    finally:
+        await session.aclose()

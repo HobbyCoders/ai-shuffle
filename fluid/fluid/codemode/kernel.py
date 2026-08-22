@@ -18,6 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Protocol, runtime_checkable
 
+from fluid.tools.registry import ToolImage
+
 
 @dataclass(frozen=True)
 class HostReply:
@@ -27,12 +29,19 @@ class HostReply:
     - ``result``  — the tool's text output (delivered to the kernel);
     - ``error``   — the tool failed / was unknown (raised as ``ToolError``);
     - ``denied``  — the permission gate rejected it (raised as ``HostCallDenied``).
+
+    ``images`` carries any binary image output the tool produced (a ``Read`` of a
+    PNG, an MCP screenshot). It stays **host-side**: the kernel only ever receives
+    ``result`` text — in-sandbox the call returns the ``[image: …]`` caption — and
+    the host attaches the images to the enclosing cell's tool result so the model
+    can actually see them.
     """
 
     result: str | None = None
     error: str | None = None
     denied: bool = False
     message: str | None = None
+    images: tuple[ToolImage, ...] = ()
 
 
 @dataclass(frozen=True)

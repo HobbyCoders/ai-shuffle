@@ -124,3 +124,9 @@ async def test_kernel_satisfies_protocol() -> None:
     from fluid.codemode.kernel import Kernel
 
     assert isinstance(SubprocessKernel(), Kernel)
+
+
+def test_host_reply_defaults_to_no_images() -> None:
+    """Images are an opt-in host-side extra; the kernel never sees them."""
+    reply = HostReply(result="ok")
+    assert reply.images == ()
