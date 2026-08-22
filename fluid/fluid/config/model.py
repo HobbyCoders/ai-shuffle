@@ -18,6 +18,8 @@ APPROVAL_POLICIES = ("never_ask", "on_write", "always_ask")
 # "text" = the <tool_call> text protocol for local models that can't do
 # reliable native tool calling (see fluid.providers.local.text_tools).
 TOOL_STYLES = ("native", "text")
+# Lifecycle events a ``[[hooks]]`` entry may subscribe to (fluid.hooks.bus).
+HOOK_EVENTS = ("PreToolUse", "PostToolUse", "TurnStart", "TurnEnd")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -81,6 +83,49 @@ class PermissionConfig:
             )
         rules = tuple(RuleConfig.from_dict(r) for r in d.get("rules", []))
         return cls(approval_policy=policy, rules=rules)
+
+
+@dataclass(frozen=True, kw_only=True)
+class HookConfig:
+    """One ``[[hooks]]`` entry: a shell command run on a lifecycle event.
+
+    ``matcher`` narrows tool events to a tool name (fnmatch, or a regex when it
+    contains ``^``, ``|`` or ``(``); it is ignored for turn events. ``timeout``
+    is in seconds. See docs/hooks.md for the stdin payload and exit-code
+    contract.
+    """
+
+    event: str  # one of HOOK_EVENTS
+    command: str
+    matcher: str | None = None
+    timeout: float = 60.0
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "HookConfig":
+        event = d.get("event")
+        if event not in HOOK_EVENTS:
+            raise ValueError(f"unknown hook event: {event!r} (expected one of {HOOK_EVENTS})")
+        command = d.get("command")
+        if not isinstance(command, str) or not command.strip():
+            raise ValueError(f"hook for {event} needs a non-empty command")
+        matcher = d.get("matcher")
+        timeout = float(d.get("timeout", 60.0))
+        if timeout <= 0:
+            raise ValueError(f"hook timeout must be positive, got {timeout!r}")
+        return cls(
+            event=event,
+            command=command,
+            matcher=str(matcher) if matcher not in (None, "") else None,
+            timeout=timeout,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "event": self.event,
+            "matcher": self.matcher,
+            "command": self.command,
+            "timeout": self.timeout,
+        }
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -191,6 +236,9 @@ class HarnessConfig:
     instruction_files: InstructionFilesConfig = field(default_factory=InstructionFilesConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
+    # Shell-command hooks, user layer first then project layer (the loader
+    # concatenates ``hooks`` lists instead of replacing them).
+    hooks: tuple[HookConfig, ...] = ()
     cwd: str = "."
     max_tokens: int = 8192
     # Model context window, when the host app knows it (model ids come and go
@@ -228,6 +276,7 @@ class HarnessConfig:
             instruction_files=InstructionFilesConfig.from_dict(d.get("instruction_files", {})),
             tools=ToolsConfig.from_dict(d.get("tools", {})),
             context=ContextConfig.from_dict(d.get("context", {})),
+            hooks=tuple(HookConfig.from_dict(h) for h in d.get("hooks") or ()),
             cwd=d.get("cwd", "."),
             max_tokens=int(d.get("max_tokens", 8192)),
             context_window=(
@@ -297,6 +346,7 @@ class HarnessConfig:
                 "keep_recent_tool_results": self.context.keep_recent_tool_results,
                 "min_result_chars": self.context.min_result_chars,
             },
+            "hooks": [h.to_dict() for h in self.hooks],
             "providers": {
                 name: {
                     "kind": pc.kind,

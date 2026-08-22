@@ -4,13 +4,16 @@ Precedence (lowest → highest, later layers deep-merge over earlier ones):
 
   1. built-in defaults (:data:`BUILTIN_DEFAULTS`)
   2. system   ``/etc/fluid/config.toml``            (skipped if absent)
-  3. user     ``~/.fluid/mcp.json`` then ``~/.fluid/config.toml``
-  4. project  ``./.fluid/mcp.json`` then ``./.fluid/config.toml`` or ``./fluid.toml``
+  3. user     ``~/.fluid/mcp.json``, ``~/.fluid/hooks.json``, then ``~/.fluid/config.toml``
+  4. project  ``./.fluid/mcp.json``, ``./.fluid/hooks.json``, then
+              ``./.fluid/config.toml`` or ``./fluid.toml``
   5. env      ``FLUID_*`` overrides
   6. explicit CLI/`overrides` argument
 
-The TOML layer follows the MCP JSON layer at each scope, so a native ``[mcp]``
-entry wins a same-named imported server definition.
+The TOML layer follows the JSON layers at each scope, so a native ``[mcp]``
+entry wins a same-named imported server definition. ``hooks`` is the one list
+that accumulates across layers instead of being replaced: user hooks run
+first, project hooks after them.
 
 Parsing uses the stdlib :mod:`tomllib` (3.11+), so the core stays dependency-free.
 ``build_engine`` turns a resolved :class:`HarnessConfig` into a ready
@@ -62,6 +65,9 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
         "allowed": None,
         "disallowed": [],
     },
+    # Shell-command hooks ([[hooks]] entries; see docs/hooks.md). Lists from
+    # every layer are concatenated, not replaced.
+    "hooks": [],
     # The mechanical eviction ladder (context/compaction.py): trigger,
     # headroom reserve, digest/epoch shape, intake stub size, tier-1 knobs.
     "context": {
@@ -129,16 +135,36 @@ def _project_mcp_path(cwd: Path) -> Path:
     return cwd / ".fluid" / "mcp.json"
 
 
+def _user_hooks_path() -> Path:
+    return Path.home() / ".fluid" / "hooks.json"
+
+
+def _project_hooks_path(cwd: Path) -> Path:
+    return cwd / ".fluid" / "hooks.json"
+
+
 # ─── merge + parse ───────────────────────────────────────────────────────────
+
+
+# Top-level keys whose list values accumulate across layers instead of the
+# higher layer replacing the lower one.
+ADDITIVE_LIST_KEYS = frozenset({"hooks"})
 
 
 def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     """Recursively merge ``overlay`` onto a copy of ``base`` (dicts merge,
-    scalars/lists replace)."""
+    scalars/lists replace — except the top-level ``hooks`` list, which
+    appends so project hooks follow user hooks)."""
     out = dict(base)
     for key, value in overlay.items():
         if isinstance(value, dict) and isinstance(out.get(key), dict):
             out[key] = deep_merge(out[key], value)
+        elif (
+            key in ADDITIVE_LIST_KEYS
+            and isinstance(value, list)
+            and isinstance(out.get(key), list)
+        ):
+            out[key] = [*out[key], *value]
         else:
             out[key] = value
     return out
@@ -176,6 +202,60 @@ def _load_mcp_json(path: Path) -> dict[str, Any]:
                 config["transport"] = "http"
         normalized[name] = config
     return {"mcp": normalized}
+
+
+# Claude Code event names that fluid's bus spells differently.
+_CLAUDE_HOOK_EVENT_ALIASES = {
+    "UserPromptSubmit": "TurnStart",
+    "Stop": "TurnEnd",
+}
+
+
+def _load_hooks_json(path: Path) -> dict[str, Any]:
+    """Load a Claude Code-shaped ``hooks.json`` as a ``{"hooks": [...]}`` overlay.
+
+    Accepts ``{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type":
+    "command", "command": "...", "timeout": 30}]}]}}`` (the envelope is
+    optional) so a user can copy the ``hooks`` block straight out of Claude
+    Code's settings.json. ``UserPromptSubmit`` maps to ``TurnStart`` and
+    ``Stop`` to ``TurnEnd``; events fluid has no bus for, and non-command hook
+    types, are skipped. A malformed file is ignored rather than fatal.
+    """
+    from fluid.config.model import HOOK_EVENTS
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    groups = raw.get("hooks", raw)
+    if not isinstance(groups, dict):
+        return {}
+    entries: list[dict[str, Any]] = []
+    for event_name, matchers in groups.items():
+        event = _CLAUDE_HOOK_EVENT_ALIASES.get(event_name, event_name)
+        if event not in HOOK_EVENTS or not isinstance(matchers, list):
+            continue
+        for group in matchers:
+            if not isinstance(group, dict):
+                continue
+            matcher = group.get("matcher")
+            for hook in group.get("hooks") or ():
+                if not isinstance(hook, dict):
+                    continue
+                if hook.get("type", "command") != "command":
+                    continue
+                command = hook.get("command")
+                if not isinstance(command, str) or not command.strip():
+                    continue
+                entry: dict[str, Any] = {"event": event, "command": command}
+                if isinstance(matcher, str) and matcher:
+                    entry["matcher"] = matcher
+                if isinstance(hook.get("timeout"), (int, float)):
+                    entry["timeout"] = hook["timeout"]
+                entries.append(entry)
+    return {"hooks": entries}
 
 
 def _coerce_bool(raw: str) -> bool:
@@ -254,12 +334,18 @@ def load_config(
         user_mcp_path = _user_mcp_path()
         if user_mcp_path.is_file():
             merged = deep_merge(merged, _load_mcp_json(user_mcp_path))
+        user_hooks_path = _user_hooks_path()
+        if user_hooks_path.is_file():
+            merged = deep_merge(merged, _load_hooks_json(user_hooks_path))
         user_path = _user_config_path()
         if user_path.is_file():
             merged = deep_merge(merged, _load_toml(user_path))
     project_mcp_path = _project_mcp_path(cwd_path)
     if project_mcp_path.is_file():
         merged = deep_merge(merged, _load_mcp_json(project_mcp_path))
+    project_hooks_path = _project_hooks_path(cwd_path)
+    if project_hooks_path.is_file():
+        merged = deep_merge(merged, _load_hooks_json(project_hooks_path))
     project_path = _project_config_path(cwd_path)
     if project_path is not None:
         merged = deep_merge(merged, _load_toml(project_path))
@@ -369,6 +455,10 @@ def build_engine(
     reports on, its own prompt). ``allowed_tools``/``disallowed_tools`` override
     ``config.tools`` — a host building a child engine with a narrower tool
     surface (an agent definition's ``tools:`` list) passes them here.
+    ``hooks`` is the caller's own :class:`~fluid.hooks.bus.HookBus`; the
+    config's ``[[hooks]]`` commands are registered onto it after whatever the
+    caller already attached (a fresh bus is created when the config has hooks
+    and none was passed).
     """
     from fluid.tools.registry import ToolCtx, ToolRegistry
 
@@ -412,6 +502,14 @@ def build_engine(
 
     # Native providers.
     from fluid.engine.native import NativeLoop
+
+    if config.hooks:
+        from fluid.hooks.bus import HookBus
+        from fluid.hooks.command import register_config_hooks
+
+        if hooks is None:
+            hooks = HookBus()
+        register_config_hooks(hooks, config.hooks, cwd=config.cwd)
 
     client = provider if provider is not None else _build_provider_client(config, provider_name)
     if permissions is None:

@@ -52,6 +52,10 @@ opt-in `tool_style = "text"` that runs tool calling over a `<tool_call>` text
 protocol — so small local models without reliable native tool calls still work
 as full agents. See [docs/local-models.md](docs/local-models.md).
 
+Shell-command hooks (`[[hooks]]` in config.toml, or a copied Claude Code
+`hooks.json`) run before and after tool calls and at turn boundaries, and can
+deny or rewrite a call. See [docs/hooks.md](docs/hooks.md).
+
 ## Under the hood
 
 A few of the ideas that make fluid different, in plain terms:
