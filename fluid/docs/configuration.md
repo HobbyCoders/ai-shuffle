@@ -36,7 +36,8 @@ upward search for a project file.
 | Key | Default | Meaning |
 |---|---|---|
 | `default_provider` | `"anthropic"` | Name of the provider block to use when `--provider` is not given. |
-| `default_model` | `"claude-sonnet-5"` | Model id used when the selected provider block has no `model` of its own. `--model` and `FLUID_DEFAULT_MODEL` set this key; a provider's `model` line still takes precedence over it. |
+| `default_model` | `"claude-sonnet-5"` | Model id used when the selected provider block has no `model` of its own. `FLUID_DEFAULT_MODEL` sets this key; a provider's `model` line takes precedence over it. |
+| `model_override` | `null` | Highest-precedence model choice: beats a provider's `model` line. Set by `--model` or `FLUID_MODEL`; not normally written in a file. |
 | `code_mode` | `false` | Expose tools through the sandboxed Python kernel (`run_python`) instead of as individual tool calls. Adds the code-mode addendum to the CLI prompt. |
 | `continual` | `false` | Code mode only. Journal kernel cells and synthesize reusable skills in the background. `--continual` turns this and `code_mode` on together. |
 | `continual_model` | none | Pin skill synthesis to one model id regardless of the session's model. |
@@ -219,8 +220,8 @@ fluid chat
 fluid chat --provider openrouter
 ```
 
-Because the block sets `model`, `--model` will not change it; remove the
-`model` line (or edit it) to pick the model from the command line.
+`--model` (or `FLUID_MODEL`) overrides the block's `model` for one run without
+editing the file.
 
 Adding a second block of the same kind is just a new name:
 
@@ -266,6 +267,7 @@ Config overrides, applied as layer 5 (`env_overrides` in the loader):
 |---|---|
 | `FLUID_DEFAULT_PROVIDER` | `default_provider` |
 | `FLUID_DEFAULT_MODEL` | `default_model` |
+| `FLUID_MODEL` | `model_override` (beats a provider's `model` line) |
 | `FLUID_CWD` | `cwd` |
 | `FLUID_CODE_MODE` | `code_mode` (`1`, `true`, `yes`, `on` are true) |
 | `FLUID_BASE_PROMPT` | `base_prompt` (same boolean spellings) |

@@ -83,7 +83,7 @@ file.
 |---|---|---|
 | `--cwd DIR` | `cwd` | Working directory for config and instruction discovery, and for the environment block in the prompt. |
 | `--provider NAME` | `default_provider` | A provider block name from config (`anthropic`, `openai`, `openrouter`, `local`, `claude`, or your own). |
-| `--model NAME` | `default_model` | Model id. This is the fallback used when the selected provider block has no `model` line; a provider's own `model` still wins. Clear or change the provider's `model` in config if you want the flag to take effect for that provider. |
+| `--model NAME` | `model_override` | Model id for this run. It beats both `default_model` and the selected provider block's own `model` line. `FLUID_MODEL` is the environment equivalent. |
 | `--store DIR` | (store path, not config) | JSONL session store directory. Default `$XDG_DATA_HOME/fluid/sessions`, or `~/.local/share/fluid/sessions`. |
 | `--code-mode` | `code_mode = true` | Expose tools through the sandboxed Python kernel (`run_python`) instead of one call at a time. |
 | `--continual` | `continual = true` and `code_mode = true` | Journal kernel cells and synthesize reusable skills in the background. Implies code mode. |
