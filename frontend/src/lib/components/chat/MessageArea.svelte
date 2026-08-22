@@ -361,8 +361,8 @@
 		return items;
 	});
 
-	// Transcript-local navigation: one stable anchor per user prompt. The compact
-	// control is only mounted when it can move somewhere (two or more turns).
+	// Transcript-local navigation: one stable anchor per user prompt. The left
+	// timeline is only mounted when it can move somewhere (two or more turns).
 	const turnNavigationItems = $derived(deriveUserTurnNavigationItems($activeSession.messages));
 	const turnNavigationSignature = $derived(
 		turnNavigationItems.map((item) => item.id).join('\u0000')

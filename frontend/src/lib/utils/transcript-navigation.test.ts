@@ -6,7 +6,9 @@ import {
 	isNavigableUserTurn,
 	resolveCurrentTurnIndex,
 	resolveTurnNavigationIndex,
-	turnAnchorId
+	splitTurnPreview,
+	turnAnchorId,
+	turnBarWeight
 } from './transcript-navigation';
 
 function message(over: Partial<ChatMessage>): ChatMessage {
@@ -23,16 +25,38 @@ describe('transcript navigation derivation', () => {
 			message({ id: 'command', role: 'user', type: 'command', content: '/commit' }),
 			message({ id: 'user-two', role: 'user', content: 'Second prompt' })
 		]);
-		expect(items).toEqual([
-			{ id: 'user/one', label: 'First prompt' },
-			{ id: 'user-two', label: 'Second prompt' }
+		expect(items.map(({ id, label, title, preview }) => ({ id, label, title, preview }))).toEqual([
+			{ id: 'user/one', label: 'First prompt', title: 'First', preview: 'prompt' },
+			{ id: 'user-two', label: 'Second prompt', title: 'Second prompt', preview: '' }
 		]);
+		expect(items[0].weight).toBeGreaterThan(0);
+		expect(items[0].weight).toBeLessThanOrEqual(1);
 		expect(turnAnchorId(items[0].id)).toBe('user-turn-user%2Fone');
 	});
 
 	it('compacts labels and provides an empty-content fallback', () => {
 		expect(compactTurnLabel('   ')).toBe('User message');
 		expect(compactTurnLabel('abcdefgh', 6)).toBe('abcde…');
+	});
+
+	it('splits the first line as the hover title', () => {
+		expect(splitTurnPreview('')).toEqual({ title: 'User message', preview: '' });
+		expect(splitTurnPreview('Short ask')).toEqual({ title: 'Short ask', preview: '' });
+		expect(splitTurnPreview('Also theres a bug\nImplemented the mobile composer updates')).toEqual({
+			title: 'Also theres a bug',
+			preview: 'Implemented the mobile composer updates'
+		});
+		const long = 'A'.repeat(80);
+		expect(splitTurnPreview(long)).toEqual({
+			title: `${'A'.repeat(63)}…`,
+			preview: long
+		});
+	});
+
+	it('maps longer prompts to longer timeline bars', () => {
+		expect(turnBarWeight('hi')).toBe(0.38);
+		expect(turnBarWeight('A'.repeat(400))).toBe(1);
+		expect(turnBarWeight('A'.repeat(100))).toBeGreaterThan(turnBarWeight('A'.repeat(40)));
 	});
 
 	it('recognizes only non-command user messages', () => {
