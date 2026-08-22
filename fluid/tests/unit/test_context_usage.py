@@ -668,8 +668,11 @@ def test_measured_messages_never_go_negative(tmp_path) -> None:
     a handful of tokens) must not push Messages below zero."""
     usage = _measured(_sections(tmp_path), 5)
     assert usage["totalTokens"] == 5
-    # Floored at 0, and a zero row is omitted like every other empty category.
-    assert MESSAGES not in _by_name(usage)
+    # Every row scales down to the billed total; nothing goes negative and the
+    # rows never add up to more than what was billed.
+    rows = [c["tokens"] for c in usage["categories"] if not c.get("isDeferred")]
+    assert all(t >= 0 for t in rows)
+    assert sum(rows) <= 5 + len(rows)  # rounding slack
 
 
 def test_measured_zero_is_still_measured(tmp_path) -> None:
@@ -852,3 +855,18 @@ def test_legacy_usage_rows_deserialize_without_the_snapshot() -> None:
     revived = event_from_dict(legacy)
     assert isinstance(revived, Usage)
     assert revived.context_usage is None and revived.input_tokens == 3
+
+
+def test_measured_total_below_estimates_scales_rows_instead_of_dropping_messages() -> None:
+    from fluid.context.usage import MESSAGES, SYSTEM_PROMPT, build_context_usage
+    from fluid.messages.content import Message, Text
+
+    history = [Message(role="user", content=[Text(text="x" * 400)])]
+    usage = build_context_usage(
+        system_text="s" * 4000, sections=(), tools_api=[], deferred_tools_api=[],
+        history=history, measured_prompt_tokens=600, context_window=10_000, model="m",
+    )
+    names = {c["name"]: c["tokens"] for c in usage["categories"]}
+    assert usage["totalTokens"] == 600
+    assert names[MESSAGES] > 0
+    assert names[SYSTEM_PROMPT] < 1000  # scaled down from the ~1000 estimate

@@ -308,11 +308,19 @@ def build_context_usage(
     measured = measured_prompt_tokens is not None and measured_prompt_tokens >= 0
     if measured_prompt_tokens is not None and measured_prompt_tokens >= 0:
         others = sum(tokens for name, tokens in counted if name != MESSAGES)
-        message_tokens = max(0, measured_prompt_tokens - others)
-        counted = [
-            (name, message_tokens if name == MESSAGES else tokens)
-            for name, tokens in counted
-        ]
+        if measured_prompt_tokens >= others:
+            message_tokens = measured_prompt_tokens - others
+            counted = [
+                (name, message_tokens if name == MESSAGES else tokens)
+                for name, tokens in counted
+            ]
+        else:
+            # The provider billed less than the chars/4 estimate of the fixed
+            # rows alone (a compact tokenizer). Scale every row to the billed
+            # total so Messages does not vanish behind an over-estimate.
+            estimated = others + message_tokens
+            scale = measured_prompt_tokens / estimated if estimated else 0.0
+            counted = [(name, int(round(tokens * scale))) for name, tokens in counted]
         total = measured_prompt_tokens
     else:
         total = sum(tokens for _, tokens in counted)
