@@ -118,5 +118,14 @@ def _glob(pattern: str, root: Path, limit: int = MAX_RESULTS) -> ToolOutcome:
         notes.append(f"[walk stopped: hard ceiling {MAX_LIMIT} matched files reached]")
     if state.deadline_hit:
         notes.append(f"[search truncated: deadline reached after {state.files_seen} files]")
-    body = truncate("\n".join(str(p) for _, p in hits)) or "(no matches)"
+    # Paths print relative to the root named in the header: the root is stated
+    # once, and a deep working directory would otherwise cost ~30 tokens per
+    # line for nothing.
+    def _show(path: Path) -> str:
+        try:
+            return path.relative_to(root).as_posix()
+        except ValueError:
+            return str(path)
+
+    body = truncate("\n".join(_show(p) for _, p in hits)) or "(no matches)"
     return ToolOutcome(text="\n".join([head, body, *notes]))
