@@ -53,9 +53,36 @@ def tool_result_text(block: ToolResultBlock) -> str:
     for c in block.content:
         if isinstance(c, Text):
             parts.append(c.text)
+        elif isinstance(c, Image):
+            # Never dump block dicts — a full base64 payload as text is worse
+            # than useless. Images ride the content array (see
+            # tool_result_content) when the leg carries them at all.
+            parts.append("[image attached]")
         else:
             parts.append(json.dumps(c.to_dict(), separators=(",", ":"), ensure_ascii=False))
     return "".join(parts)
+
+
+def tool_result_content(block: ToolResultBlock) -> str | list[dict[str, Any]]:
+    """Content for a role:"tool" message.
+
+    Plain string when the result is text-only (maximum compatibility); a
+    multimodal content-part array — text plus image_url parts — when it
+    carries images. Providers that cannot take images in tool results will
+    reject or ignore the image parts but still see the text; the previous
+    behavior (json.dumps of the Image block) shipped hundreds of KB of
+    base64 as TEXT on every subsequent request.
+    """
+    has_image = any(isinstance(c, Image) for c in block.content)
+    if not has_image:
+        return tool_result_text(block)
+    out: list[dict[str, Any]] = []
+    for c in block.content:
+        if isinstance(c, Text):
+            out.append({"type": "text", "text": c.text})
+        elif isinstance(c, Image):
+            out.append(image_part(c))
+    return out
 
 
 def image_part(block: Image) -> dict[str, Any]:
@@ -101,7 +128,7 @@ def translate_message(msg: Message) -> list[dict[str, Any]]:
                 {
                     "role": "tool",
                     "tool_call_id": block.tool_use_id,
-                    "content": tool_result_text(block),
+                    "content": tool_result_content(block),
                 }
             )
         elif isinstance(block, (Reasoning, Thinking)):
