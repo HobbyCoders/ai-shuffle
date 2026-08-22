@@ -14,7 +14,7 @@ The built-in defaults already include a `local` provider pointed at
 `http://127.0.0.1:8080`, so this is enough:
 
 ```sh
-fluid --provider local
+fluid chat --provider local
 ```
 
 `llama-server` serves whichever model it was started with and ignores the
