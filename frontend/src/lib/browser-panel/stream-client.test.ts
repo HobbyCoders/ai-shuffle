@@ -62,7 +62,6 @@ function latest(): FakeWebSocket {
 
 describe('browser stream client revive path', () => {
 	let client: BrowserStreamClient | null = null;
-
 	beforeEach(() => {
 		vi.useFakeTimers();
 		FakeWebSocket.instances = [];
@@ -142,5 +141,52 @@ describe('browser stream client revive path', () => {
 
 		document.dispatchEvent(new Event('visibilitychange'));
 		expect(FakeWebSocket.instances).toHaveLength(2);
+	});
+});
+
+describe('page frames (toolbar url + loading)', () => {
+	beforeEach(() => {
+		FakeWebSocket.instances = [];
+		globalThis.WebSocket = FakeWebSocket as any;
+	});
+
+	afterEach(() => {
+		globalThis.WebSocket = originalWebSocket;
+	});
+
+	it('routes a page frame to onPage with url + loading', () => {
+		const seen: Array<{ url: string | null; loading: boolean }> = [];
+		const client = createBrowserStreamClient({
+			sessionId: 's1',
+			getAuthToken: () => 'tok',
+			onStatus: () => {},
+			onFrame: () => {},
+			onPage: (url, loading) => seen.push({ url, loading }),
+		});
+		try {
+			client.connect();
+			latest().receive({ type: 'page', url: 'https://ex/path', loading: true });
+			expect(seen).toEqual([{ url: 'https://ex/path', loading: true }]);
+		} finally {
+			client.destroy();
+		}
+	});
+
+	it('coerces missing/invalid page fields to (null, false)', () => {
+		const seen: Array<{ url: string | null; loading: boolean }> = [];
+		const client = createBrowserStreamClient({
+			sessionId: 's1',
+			getAuthToken: () => 'tok',
+			onStatus: () => {},
+			onFrame: () => {},
+			onPage: (url, loading) => seen.push({ url, loading }),
+		});
+		try {
+			client.connect();
+			latest().receive({ type: 'page' });
+			expect(seen).toEqual([{ url: null, loading: false }]);
+		} finally {
+			client.destroy();
+		}
 	});
 });

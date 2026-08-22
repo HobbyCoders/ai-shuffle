@@ -9,6 +9,9 @@ beforeEach(() => {
 	browserPanel.setWidth(480);
 	// Settle the debounced write so no timer from one test lands in another.
 	flushWidthPersist();
+	// Reset per-attachment page tracking so url assertions start clean.
+	browserPanel.resetPageTracking();
+	browserPanel.setStatus('disconnected', null);
 });
 
 describe('browserPanel open/close/toggle', () => {
@@ -113,5 +116,33 @@ describe('browserPanel setStatus', () => {
 		browserPanel.setStatus('connecting');
 		expect(browserPanel.current.status).toBe('connecting');
 		expect(browserPanel.current.url).toBe('https://example.com'); // preserved
+	});
+});
+
+describe('browserPanel page tracking', () => {
+	it('setPage records url + loading and marks tracking live', () => {
+		browserPanel.setPage('https://tracked.example/', true);
+		expect(browserPanel.current.url).toBe('https://tracked.example/');
+		expect(browserPanel.current.pageLoading).toBe(true);
+		expect(browserPanel.current.pageTracked).toBe(true);
+	});
+
+	it('once tracked, coarse status frames no longer overwrite the CDP url', () => {
+		browserPanel.setPage('https://tracked.example/page2', false);
+		browserPanel.setStatus('live', 'https://stale-registry.example/');
+		expect(browserPanel.current.url).toBe('https://tracked.example/page2');
+
+		// …but before any page frame, registry metadata still fills the gap.
+		browserPanel.resetPageTracking();
+		browserPanel.setStatus('connecting', 'https://registry.example/');
+		expect(browserPanel.current.url).toBe('https://registry.example/');
+	});
+
+	it('resetPageTracking clears loading + tracked but keeps the last url', () => {
+		browserPanel.setPage('https://kept.example/', true);
+		browserPanel.resetPageTracking();
+		expect(browserPanel.current.pageLoading).toBe(false);
+		expect(browserPanel.current.pageTracked).toBe(false);
+		expect(browserPanel.current.url).toBe('https://kept.example/');
 	});
 });
