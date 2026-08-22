@@ -10,7 +10,18 @@
 	 * Layout: a right-aligned, left-edge-resizable overlay on wide screens; a
 	 * fullscreen overlay at/under the app's 1080px handheld cutoff.
 	 */
-	import { X, Loader2, MonitorOff, Globe, PlugZap, MousePointer2 } from 'lucide-svelte';
+	import {
+		X,
+		Loader2,
+		MonitorOff,
+		Globe,
+		PlugZap,
+		MousePointer2,
+		ArrowLeft,
+		ArrowRight,
+		RotateCw,
+		X as StopIcon,
+	} from 'lucide-svelte';
 	import { browserPanel } from '$lib/stores/browser-panel.svelte';
 	import { isPanelFullscreenWidth } from '$lib/utils/viewport';
 	import {
@@ -32,6 +43,7 @@
 	const status = $derived(panel.status);
 	const url = $derived(panel.url);
 	const width = $derived(panel.width);
+	const pageLoading = $derived(panel.pageLoading);
 
 	let latestFrame = $state<{ data: string; metadata: FrameMessageMetadata } | null>(null);
 
@@ -46,7 +58,8 @@
 	}
 
 	// ── Stream client lifecycle: connect only while open && session set ────
-	let client: BrowserStreamClient | null = null;
+	// $state so toolbar enable/disable reacts to connect/disconnect cycles.
+	let client = $state<BrowserStreamClient | null>(null);
 	// Last session we held a frame for. The canvas keeps its last picture across
 	// reconnects and transient status changes; only a genuine session switch
 	// invalidates it (showing another session's page would be wrong).
@@ -60,12 +73,14 @@
 		if (framedSessionId !== sid) {
 			latestFrame = null;
 			framedSessionId = sid;
+			browserPanel.resetPageTracking();
 		}
 		browserPanel.setStatus('connecting');
 		const c = createBrowserStreamClient({
 			sessionId: sid,
 			getAuthToken,
 			onStatus: (s, u) => browserPanel.setStatus(s, u),
+			onPage: (u, loading) => browserPanel.setPage(u, loading),
 			onFrame: (data, metadata) => {
 				latestFrame = { data, metadata };
 			},
@@ -133,6 +148,39 @@
 		}[status],
 	);
 
+	// ── Toolbar: nav buttons + editable address bar ──────────────────────
+	let addressDraft = $state<string | null>(null); // non-null while editing
+	let addressEl: HTMLInputElement | undefined = $state();
+
+	function startEditing() {
+		addressDraft = displayUrl === 'No page open' ? '' : (url ?? '');
+		// Select everything so typing replaces, like a real browser.
+		queueMicrotask(() => {
+			addressEl?.focus();
+			addressEl?.select();
+		});
+	}
+
+	function commitAddress() {
+		if (addressDraft === null) return;
+		const raw = addressDraft.trim();
+		addressDraft = null;
+		if (!raw || !client?.isConnected()) return;
+		const withScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw) ? raw : `https://${raw}`;
+		client.send({ type: 'navigate', url: withScheme });
+	}
+
+	function cancelEditing() {
+		addressDraft = null;
+	}
+
+	function sendCommand(command: string) {
+		if (!client?.isConnected()) return;
+		client.send({ type: 'command', command });
+	}
+
+	const canNavigate = $derived(client !== null && client.isConnected() && status === 'live');
+
 	const displayUrl = $derived(url || 'No page open');
 	const isLive = $derived(status === 'live');
 	/** A frame is on the canvas — keep showing it, whatever the socket is doing. */
@@ -172,11 +220,77 @@
 		{/if}
 
 		<header class="panel-header">
-			<span class="status-dot status-{status}" aria-hidden="true"></span>
-			<div class="header-text">
-				<span class="status-label">{statusLabel}</span>
-				<span class="url" title={displayUrl}>{displayUrl}</span>
+			<div class="nav-buttons">
+				<button
+					class="tool-btn"
+					onclick={() => sendCommand('back')}
+					disabled={!canNavigate}
+					aria-label="Go back"
+					title="Back"
+				>
+					<ArrowLeft size={15} strokeWidth={1.75} />
+				</button>
+				<button
+					class="tool-btn"
+					onclick={() => sendCommand('forward')}
+					disabled={!canNavigate}
+					aria-label="Go forward"
+					title="Forward"
+				>
+					<ArrowRight size={15} strokeWidth={1.75} />
+				</button>
+				<button
+					class="tool-btn"
+					class:loading={pageLoading}
+					onclick={() => sendCommand(pageLoading ? 'stop' : 'reload')}
+					disabled={!canNavigate}
+					aria-label={pageLoading ? 'Stop loading' : 'Reload page'}
+					title={pageLoading ? 'Stop' : 'Reload'}
+				>
+					{#if pageLoading}
+						<StopIcon size={14} strokeWidth={2} />
+					{:else}
+						<RotateCw size={14} strokeWidth={1.75} />
+					{/if}
+				</button>
 			</div>
+
+			<form
+				class="address-bar"
+				role="presentation"
+				onsubmit={(e) => {
+					e.preventDefault();
+					commitAddress();
+				}}
+			>
+				{#if addressDraft !== null}
+					<input
+						bind:this={addressEl}
+						bind:value={addressDraft}
+						class="address-input"
+						type="text"
+						spellcheck="false"
+						autocomplete="off"
+						aria-label="Page address"
+						onkeydown={(e) => {
+							if (e.key === 'Escape') cancelEditing();
+						}}
+						onblur={commitAddress}
+					/>
+				{:else}
+					<button
+						type="button"
+						class="address-display"
+						onclick={startEditing}
+						disabled={!canNavigate}
+						title={canNavigate ? 'Edit address' : displayUrl}
+					>
+						<span class="status-dot status-{status}" aria-hidden="true"></span>
+						<span class="address-text">{displayUrl}</span>
+					</button>
+				{/if}
+			</form>
+
 			<button class="close-btn" onclick={close} aria-label="Close browser panel">
 				<X size={16} strokeWidth={1.5} />
 			</button>
@@ -291,15 +405,113 @@
 		height: 64px;
 	}
 
-	/* ── Header ─────────────────────────────────────────────────────────── */
+	/* ── Header / toolbar ──────────────────────────────────────────────── */
 	.panel-header {
 		display: flex;
 		align-items: center;
-		gap: 8px;
-		padding: 8px 10px 8px 12px;
-		min-height: 40px;
+		gap: 6px;
+		padding: 6px 10px 6px 10px;
+		min-height: 44px;
 		border-bottom: 1px solid var(--border);
 		flex-shrink: 0;
+	}
+
+	.nav-buttons {
+		display: flex;
+		align-items: center;
+		gap: 2px;
+		flex-shrink: 0;
+	}
+
+	.tool-btn {
+		width: 28px;
+		height: 28px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: transparent;
+		border: none;
+		border-radius: calc(var(--radius) - 4px);
+		color: var(--muted-foreground);
+		cursor: pointer;
+		transition: background 150ms ease, color 150ms ease, opacity 150ms ease;
+		-webkit-tap-highlight-color: transparent;
+	}
+	.tool-btn:hover:not(:disabled) {
+		background: var(--hover-overlay);
+		color: var(--foreground);
+	}
+	.tool-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: -2px;
+	}
+	.tool-btn:disabled {
+		opacity: 0.4;
+		cursor: default;
+	}
+	/* Mid-navigation: the reload button is now a stop button — pulse it so the
+	   mode swap reads as "busy", not as a broken icon. */
+	.tool-btn.loading {
+		color: var(--foreground);
+		animation: dot-pulse 1.4s ease-in-out infinite;
+	}
+
+	.address-bar {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+	}
+
+	.address-display {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 5px 10px;
+		background: color-mix(in oklch, var(--muted) 55%, transparent);
+		border: 1px solid transparent;
+		border-radius: 999px;
+		color: var(--foreground);
+		font-size: 0.75rem;
+		font-family: var(--font-mono, monospace);
+		cursor: text;
+		text-align: left;
+		transition: background 150ms ease, border-color 150ms ease;
+		-webkit-tap-highlight-color: transparent;
+	}
+	.address-display:hover:not(:disabled) {
+		background: color-mix(in oklch, var(--muted) 80%, transparent);
+		border-color: color-mix(in oklch, var(--border) 60%, transparent);
+	}
+	.address-display:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: -2px;
+	}
+	.address-display:disabled {
+		cursor: default;
+	}
+
+	.address-text {
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.address-input {
+		flex: 1;
+		min-width: 0;
+		padding: 5px 12px;
+		background: var(--background);
+		border: 1px solid var(--ring);
+		border-radius: 999px;
+		color: var(--foreground);
+		font-size: 0.75rem;
+		font-family: var(--font-mono, monospace);
+		outline: none;
+	}
+	.address-input::placeholder {
+		color: var(--muted-foreground);
 	}
 
 	.status-dot {
@@ -333,32 +545,6 @@
 		50% {
 			opacity: 0.35;
 		}
-	}
-
-	.header-text {
-		display: flex;
-		flex-direction: column;
-		gap: 1px;
-		min-width: 0;
-		flex: 1;
-	}
-
-	.status-label {
-		font-size: 0.625rem;
-		font-weight: 600;
-		letter-spacing: 0.06em;
-		text-transform: uppercase;
-		color: var(--muted-foreground);
-		line-height: 1;
-	}
-
-	.url {
-		font-size: 0.75rem;
-		color: var(--foreground);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		font-family: var(--font-mono, monospace);
 	}
 
 	.close-btn {
@@ -480,6 +666,7 @@
 
 	@media (prefers-reduced-motion: reduce) {
 		.status-connecting,
+		.tool-btn.loading,
 		.stream-badge :global(.spin),
 		.empty-state :global(.spin) {
 			animation: none;

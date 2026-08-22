@@ -7,8 +7,8 @@
  *
  *   ws(s)://{host}/api/v1/ws/browser/{sessionId}?token=…
  *
- *   server→client: hello · status · frame · error · ping
- *   client→server: input · navigate · pong
+ *   server→client: hello · status · page · frame · error · ping
+ *   client→server: input · navigate · command · pong
  *
  * The caller creates ONE client per (open panel, session). `connect()` is a
  * no-op while already connected/connecting; `destroy()` tears down the socket
@@ -53,6 +53,11 @@ export interface BrowserStreamConfig {
 	getAuthToken: () => string | null;
 	/** A `status` frame arrived. */
 	onStatus: (state: StreamStatus, url: string | null) => void;
+	/**
+	 * Toolbar page state changed (main-frame URL / loading flag). Optional —
+	 * absent on the very first `hello` exchange until the hub has tracked state.
+	 */
+	onPage?: (url: string | null, loading: boolean) => void;
 	/** A `frame` (base64 JPEG + metadata) arrived. */
 	onFrame: (dataBase64: string, metadata: FrameMessageMetadata) => void;
 	/** An `error` frame arrived. */
@@ -170,6 +175,12 @@ export function createBrowserStreamClient(config: BrowserStreamConfig): BrowserS
 				config.onStatus(
 					(msg.state as StreamStatus) ?? 'disconnected',
 					typeof msg.url === 'string' ? msg.url : null,
+				);
+				break;
+			case 'page':
+				config.onPage?.(
+					typeof msg.url === 'string' ? msg.url : null,
+					msg.loading === true,
 				);
 				break;
 			case 'frame':

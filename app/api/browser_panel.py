@@ -162,6 +162,14 @@ async def browser_panel_websocket(
     await safe_ws_send(websocket, await _initial_status(session_id))
 
     hub, viewer = await browser_stream.attach_viewer(session_id, websocket)
+    # Toolbar state for a hub that already existed (mid-navigation reconnect):
+    # a brand-new hub broadcasts its first page frame soon after anyway.
+    if isinstance(hub, browser_stream.BrowserStreamHub) and (
+        hub.page_url is not None or hub.page_loading
+    ):
+        await safe_ws_send(
+            websocket, {"type": "page", "url": hub.page_url, "loading": hub.page_loading}
+        )
     ping_task = asyncio.create_task(_panel_ping(hub, viewer))
 
     try:
@@ -182,7 +190,7 @@ async def browser_panel_websocket(
             mtype = data.get("type")
             if mtype == "pong":
                 continue
-            if mtype in ("input", "navigate"):
+            if mtype in ("input", "navigate", "command"):
                 try:
                     cdp_cmd = browser_stream.translate_input(
                         data, bounds=hub.last_bounds()
