@@ -5,8 +5,10 @@ harness, Claude Code-parity); the actual dispatch machinery — agent registry,
 session creation, approval routing, nesting/budget enforcement — is host-app
 territory. The embedding application injects an async dispatcher as
 ``ctx.extra["task_dispatch"]``; without one the tool reports itself
-unavailable instead of pretending to work (fluid's own CLI runs without it
-until it grows a dispatcher of its own).
+unavailable instead of pretending to work. Fluid's own CLI is a host too:
+:class:`fluid.cli.host.CliHost` injects a dispatcher that runs the subagent as
+a child NativeLoop, so ``fluid chat`` / ``fluid run`` get working Task out of
+the box.
 
 The dispatcher receives ``(input, ctx)`` and must return a ``ToolOutcome`` (or
 a plain string, which is wrapped). Contract for ``input``:

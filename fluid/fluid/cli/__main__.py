@@ -20,7 +20,7 @@ import json
 import sys
 from typing import Any
 
-from fluid.cli.config import list_sessions, make_engine, make_store
+from fluid.cli.config import host_of, list_sessions, make_engine, make_store
 from fluid.cli.repl import Repl, auto_deny, stream_turn
 from fluid.config.loader import load_config
 from fluid.config.model import HarnessConfig
@@ -70,13 +70,20 @@ async def run_once(
     meta = await store.create_session()
     engine = make_engine(
         config, store, provider=provider, provider_name=provider_name,
-        session_id=meta.session_id,
+        session_id=meta.session_id, permission_responder=on_permission,
     )
+    host = host_of(engine)
     try:
+        # Background work (Task/Monitor) parks the session instead of ending
+        # it; the one-shot run keeps streaming through park and wake until
+        # nothing is in flight, so it never exits with workers running.
         stop = await stream_turn(
-            engine, meta.session_id, prompt, out=out, on_permission=on_permission
+            engine, meta.session_id, prompt, out=out, on_permission=on_permission,
+            wait_background=True,
         )
     finally:
+        if host is not None:
+            await host.aclose()
         await engine.aclose()
     return 0 if stop != "error" else 1
 
@@ -95,6 +102,9 @@ async def chat_session(
         await Repl(engine, meta.session_id).run()
         return 0
     finally:
+        host = host_of(engine)
+        if host is not None:
+            await host.aclose()
         await engine.aclose()
 
 

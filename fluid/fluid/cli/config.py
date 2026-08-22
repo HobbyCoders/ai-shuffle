@@ -4,7 +4,9 @@ The one job worth calling out is :func:`make_engine`: it builds the resolved
 instruction stack (``build_instruction_stack``) and injects it as the system-
 prompt *prefix*, prepended before any per-run system text, then hands off to
 :func:`fluid.config.build_engine`. Every CLI subcommand goes through here so the
-instruction-file ecosystem is wired in exactly once.
+instruction-file ecosystem is wired in exactly once. It also attaches a
+:class:`~fluid.cli.host.CliHost` so the ``Task`` and ``Monitor`` builtins have
+a dispatcher; the host rides along as ``engine.ctx.extra["cli_host"]``.
 """
 
 from __future__ import annotations
@@ -77,10 +79,17 @@ def make_engine(
     plan_mode: bool = False,
     registry: Any | None = None,
     claude_cmd: list[str] | None = None,
+    permission_responder: Any | None = None,
+    background_host: bool = True,
 ):
-    """Construct the engine for a CLI run with the instruction stack injected."""
+    """Construct the engine for a CLI run with the instruction stack injected.
+
+    ``permission_responder`` answers permission prompts raised by child
+    subagents (the REPL passes its own y/N prompt; one-shot runs deny).
+    ``background_host=False`` skips the host, leaving Task/Monitor unavailable.
+    """
     compiled = resolved_prompt(config, extra_system=extra_system)
-    return build_engine(
+    engine = build_engine(
         config,
         store,
         provider_name=provider_name,
@@ -93,6 +102,20 @@ def make_engine(
         registry=registry,
         claude_cmd=claude_cmd,
     )
+    if background_host:
+        from fluid.cli.host import CliHost
+
+        CliHost(
+            config, store, provider=provider, provider_name=provider_name,
+            permission_responder=permission_responder,
+        ).attach(engine)
+    return engine
+
+
+def host_of(engine: Any):
+    """The :class:`~fluid.cli.host.CliHost` attached to ``engine``, or None."""
+    ctx = getattr(engine, "ctx", None)
+    return ctx.extra.get("cli_host") if ctx is not None else None
 
 
 def list_sessions(directory: str | os.PathLike[str] | None = None) -> list[dict[str, Any]]:

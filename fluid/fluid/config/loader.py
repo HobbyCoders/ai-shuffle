@@ -348,6 +348,8 @@ def build_engine(
     plan_mode: bool = False,
     with_builtins: bool = True,
     claude_cmd: list[str] | None = None,
+    allowed_tools: Any | None = None,
+    disallowed_tools: Any | None = None,
 ):
     """Build the engine for ``provider_name`` (default: ``config.default_provider``).
 
@@ -358,9 +360,16 @@ def build_engine(
     :class:`~fluid.context.compiler.CompiledPrompt` ``system`` was compiled from,
     when the caller has it — it only feeds the context-usage breakdown's
     per-section attribution (the delegated leg ignores it: the CLI compiles, and
-    reports on, its own prompt).
+    reports on, its own prompt). ``allowed_tools``/``disallowed_tools`` override
+    ``config.tools`` — a host building a child engine with a narrower tool
+    surface (an agent definition's ``tools:`` list) passes them here.
     """
     from fluid.tools.registry import ToolCtx, ToolRegistry
+
+    if allowed_tools is None:
+        allowed_tools = config.tools.allowed
+    if disallowed_tools is None:
+        disallowed_tools = config.tools.disallowed
 
     provider_name = provider_name or config.default_provider
     pc = config.provider(provider_name)
@@ -390,9 +399,9 @@ def build_engine(
             claude_cmd=claude_cmd,
             permission_mode="plan" if plan_mode else None,
             allowed_tools=(
-                list(config.tools.allowed) if config.tools.allowed is not None else None
+                list(allowed_tools) if allowed_tools is not None else None
             ),
-            disallowed_tools=list(config.tools.disallowed) or None,
+            disallowed_tools=list(disallowed_tools) or None,
         )
 
     # Native providers.
@@ -456,7 +465,7 @@ def build_engine(
         plan_mode=plan_mode,
         codemode=codemode,
         mcp_servers=config.mcp,
-        allowed_tools=config.tools.allowed,
-        disallowed_tools=config.tools.disallowed,
+        allowed_tools=allowed_tools,
+        disallowed_tools=disallowed_tools,
         compaction=compaction,
     )
