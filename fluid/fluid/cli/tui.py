@@ -48,6 +48,7 @@ async def run_tui(engine, session_id: str) -> int:
     from fluid.cli.repl import Repl, render_event
     from fluid.events.model import PermissionRequest
     from fluid.events.ops import RespondPermission, UserTurn
+    from fluid.permissions.engine import PROMPT_DENIAL
 
     class _LogWriter:
         """Adapt a RichLog to the ``write``/``flush`` surface render_event uses."""
@@ -101,7 +102,10 @@ async def run_tui(engine, session_id: str) -> int:
             if self._pending_perm is not None:
                 decision = "allow" if text.lower() in ("y", "yes") else "deny"
                 await self.engine.submit(
-                    RespondPermission(request_id=self._pending_perm, decision=decision)
+                    RespondPermission(
+                        request_id=self._pending_perm, decision=decision,
+                        message=PROMPT_DENIAL if decision == "deny" else None,
+                    )
                 )
                 self._pending_perm = None
                 return

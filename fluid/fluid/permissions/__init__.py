@@ -1,4 +1,4 @@
 from fluid.permissions.engine import PermissionEngine, plan_mode_tools
-from fluid.permissions.rules import Rule, evaluate_rules
+from fluid.permissions.rules import Rule, evaluate_rules, match_rule
 
-__all__ = ["PermissionEngine", "Rule", "evaluate_rules", "plan_mode_tools"]
+__all__ = ["PermissionEngine", "Rule", "evaluate_rules", "match_rule", "plan_mode_tools"]

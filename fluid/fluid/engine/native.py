@@ -77,7 +77,7 @@ from fluid.messages import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from fluid.permissions.engine import PermissionEngine, plan_mode_tools
+from fluid.permissions.engine import PROMPT_DENIAL, PermissionEngine, plan_mode_tools
 from fluid.providers.base import ProviderClient, ProviderRequest
 from fluid.codemode.session import CodeModeSession, register_code_mode_tools
 from fluid.store.base import SessionMeta, SessionNode, SessionStore, new_id
@@ -88,6 +88,17 @@ from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
 log = logging.getLogger(__name__)
 
 _BACKGROUND_SPAWN_INTERRUPT_GRACE = 1.0
+
+# Doom-loop guard texts. The first is the in-context denial under never_ask;
+# the second rides on the PermissionRequest (and any denial) when the guard
+# forces a prompt, so the model learns why the call was questioned.
+_DOOM_LOOP_DENIAL = (
+    "doom-loop guard: this exact tool call has now been repeated several times "
+    "in a row — not running it again. Change the input or the approach."
+)
+_DOOM_LOOP_REASON = (
+    "doom-loop guard: this exact tool call was repeated several times in a row"
+)
 
 
 @dataclass
@@ -1318,8 +1329,11 @@ class NativeLoop(BackgroundLifecycleMixin):
 
         # Permission gate.
         if self.permissions is not None and spec is not None:
-            verdict = self.permissions.evaluate(spec, input)
-            deny_message: str | None = None
+            decided = self.permissions.decide(spec, input)
+            verdict = decided.decision
+            # Default denial text: names the configured rule when one decided.
+            deny_message: str | None = decided.deny_message()
+            ask_reason: str | None = None
             if verdict == "allow" and self.permissions.note_execution(name, input):
                 # Doom-loop checkpoint. Under never_ask there may be nobody
                 # listening for permission prompts (headless embedders), so an
@@ -1328,28 +1342,25 @@ class NativeLoop(BackgroundLifecycleMixin):
                 if self.permissions.approval_policy == "never_ask":
                     return await self._finish_tool(
                         sid, turn_id, name, tool_use_id,
-                        ToolOutcome(
-                            text=(
-                                "doom-loop guard: this exact tool call has now "
-                                "been repeated several times in a row — not "
-                                "running it again. Change the input or the "
-                                "approach."
-                            ),
-                            is_error=True,
-                        ),
+                        ToolOutcome(text=_DOOM_LOOP_DENIAL, is_error=True),
                     )
                 verdict = "ask"
+                ask_reason = _DOOM_LOOP_REASON
             if verdict == "ask":
-                verdict, deny_message, updated_input = await self._await_permission(
-                    sid, turn_id, name, tool_use_id, input, spec.risk,
+                verdict, responder_message, updated_input = await self._await_permission(
+                    sid, turn_id, name, tool_use_id, input, decided.risk,
+                    reason=ask_reason,
                 )
+                # The responder's reason is what the model reads back; only
+                # fall back to the generic prompt text when none was given.
+                deny_message = responder_message or PROMPT_DENIAL
+                if ask_reason and responder_message is None:
+                    deny_message = f"{deny_message} ({ask_reason})"
                 if verdict != "deny" and updated_input is not None:
                     input = updated_input
             if verdict == "deny":
                 return await self._finish_tool(
                     sid, turn_id, name, tool_use_id,
-                    # The responder's reason is what the model reads back; only
-                    # fall back to the generic text when none was given.
                     ToolOutcome(text=deny_message or "permission denied", is_error=True),
                 )
 
@@ -1426,7 +1437,7 @@ class NativeLoop(BackgroundLifecycleMixin):
 
     async def _await_permission(
         self, sid: str, turn_id: str, name: str, tool_use_id: str,
-        input: dict[str, Any], risk: str,
+        input: dict[str, Any], risk: str, *, reason: str | None = None,
     ) -> tuple[str, str | None, dict[str, Any] | None]:
         """Publish a PermissionRequest and park the turn until RespondPermission.
 
@@ -1440,7 +1451,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._pending_permissions[request_id] = fut
         await self._emit(PermissionRequest(
             session_id=sid, turn_id=turn_id, request_id=request_id,
-            tool_use_id=tool_use_id, name=name, input=input, risk=risk,
+            tool_use_id=tool_use_id, name=name, input=input, risk=risk, reason=reason,
         ))
         interrupt_wait = asyncio.create_task(self._interrupted.wait())
         try:

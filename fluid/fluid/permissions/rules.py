@@ -28,10 +28,16 @@ class Rule:
         return True
 
 
-def evaluate_rules(rules: list[Rule], name: str, input: dict[str, Any]) -> str | None:
-    """Return the last matching rule's decision, or None if none match."""
-    result: str | None = None
+def match_rule(rules: list[Rule], name: str, input: dict[str, Any]) -> Rule | None:
+    """Return the last matching rule, or None if none match."""
+    result: Rule | None = None
     for rule in rules:
         if rule.matches(name, input):
-            result = rule.decision
+            result = rule
     return result
+
+
+def evaluate_rules(rules: list[Rule], name: str, input: dict[str, Any]) -> str | None:
+    """Return the last matching rule's decision, or None if none match."""
+    rule = match_rule(rules, name, input)
+    return rule.decision if rule is not None else None

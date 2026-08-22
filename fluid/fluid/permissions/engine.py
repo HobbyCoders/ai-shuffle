@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import Any, Sequence
 
-from fluid.permissions.rules import Rule, evaluate_rules
+from fluid.permissions.rules import Rule, match_rule
 from fluid.tools.registry import ToolSpec
 
 _WRITE_RISKS = {"write", "destructive"}
@@ -29,6 +30,48 @@ _WRITE_RISKS = {"write", "destructive"}
 def _input_hash(input: dict[str, Any]) -> str:
     blob = json.dumps(input, sort_keys=True, default=str)
     return hashlib.sha1(blob.encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """One tool call's permission outcome plus where it came from.
+
+    ``source`` is ``rule`` (a configured rule matched — ``rule`` names it),
+    ``session`` (an earlier ``allow_always``), or ``policy``. ``risk`` is the
+    effective risk the policy saw, after the tool's per-input classifier.
+    """
+
+    decision: str  # "allow" | "deny" | "ask"
+    source: str
+    risk: str
+    rule: Rule | None = None
+
+    def deny_message(self) -> str:
+        """Model-facing text for a denial from this verdict."""
+        if self.source == "rule" and self.rule is not None:
+            return (
+                f"permission denied by a configured rule (tool pattern "
+                f"{self.rule.tool!r}). This call will not be allowed in this "
+                "session; do not retry the same action through another tool."
+            )
+        return "permission denied"
+
+
+NON_INTERACTIVE_DENIAL = (
+    "permission denied: this non-interactive run cannot prompt. Re-run with "
+    "--approval-policy never_ask, or add a permission rule for {name} in "
+    ".fluid/config.toml. Do not retry the same action through another tool."
+)
+PROMPT_DENIAL = (
+    "permission denied by the user at the prompt. Do not retry the same "
+    "action through another tool; ask the user how to proceed if it matters."
+)
+
+
+def non_interactive_denial(name: str, reason: str | None = None) -> str:
+    """Denial text for a responder that has nobody to ask (``fluid run``)."""
+    text = NON_INTERACTIVE_DENIAL.format(name=name)
+    return f"{text} ({reason})" if reason else text
 
 
 class PermissionEngine:
@@ -50,25 +93,38 @@ class PermissionEngine:
 
     def evaluate(self, spec: ToolSpec, input: dict[str, Any]) -> str:
         """Return ``allow`` | ``deny`` | ``ask`` for one tool call."""
-        override = evaluate_rules(self.rules, spec.name, input)
-        if override is not None:
-            return override
-        if spec.name in self._always_allowed:
-            return "allow"
-        return self._policy_decision(spec)
+        return self.decide(spec, input).decision
 
-    def _policy_decision(self, spec: ToolSpec) -> str:
+    def decide(self, spec: ToolSpec, input: dict[str, Any]) -> Verdict:
+        """Like :meth:`evaluate`, but says where the decision came from.
+
+        The policy axis keys off the call's *effective* risk — the tool's
+        ``classify_risk`` hook when it has one (Bash reports read-only
+        commands as safe), its static ``risk`` otherwise.
+        """
+        risk = spec.effective_risk(input)
+        rule = match_rule(self.rules, spec.name, input)
+        if rule is not None:
+            return Verdict(rule.decision, "rule", risk, rule)
+        if spec.name in self._always_allowed:
+            return Verdict("allow", "session", risk)
+        return Verdict(self._policy_decision(risk), "policy", risk)
+
+    def _policy_decision(self, risk: str) -> str:
         if self.approval_policy == "never_ask":
             return "allow"
         if self.approval_policy == "always_ask":
             return "ask"
         # on_write
-        return "ask" if spec.risk in _WRITE_RISKS else "allow"
+        return "ask" if risk in _WRITE_RISKS else "allow"
 
     def allow_always(self, name: str) -> None:
         """Record a session-scoped allow for ``name`` (the ``allow_always``
         permission response). Beats the policy's ask for future calls, but
-        never an explicit configured rule — those keep last-match-wins."""
+        never an explicit configured rule — those keep last-match-wins.
+
+        Keyed by tool name only: an ``allow_always`` on one Bash command
+        allows every later Bash command in the session, whatever it runs."""
         self._always_allowed.add(name)
 
     def note_execution(self, name: str, input: dict[str, Any]) -> bool:
