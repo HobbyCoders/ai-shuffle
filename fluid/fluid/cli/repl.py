@@ -210,6 +210,32 @@ def format_skills(skills) -> str:
     return "\n".join(lines)
 
 
+async def ask_permission(
+    event: PermissionRequest, read_line: Callable[[str], Awaitable[str]]
+) -> str:
+    """Interactive responder: y = allow once, a = allow this tool (and, for
+    Bash, these programs) for the rest of the session, anything else = deny."""
+    answer = (await read_line(f"  allow {event.name}? [y/N/a=always] ")).strip().lower()
+    if answer in ("a", "always"):
+        return "allow_always"
+    return "allow" if answer in ("y", "yes") else "deny"
+
+
+def tty_permission_responder() -> PermissionResponder:
+    """The one-shot ``fluid run`` responder: ask on a terminal, deny otherwise.
+
+    Claude Code's print mode denies silently; fluid asks whenever a human is
+    actually attached, since a denied Write usually means a wasted run.
+    """
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return auto_deny
+
+    async def _ask(event: PermissionRequest) -> str:
+        return await ask_permission(event, lambda p: asyncio.to_thread(input, p))
+
+    return _ask
+
+
 async def auto_deny(event: PermissionRequest) -> RespondPermission:
     """Non-interactive default responder (the one-shot ``fluid run`` path).
 
@@ -322,8 +348,7 @@ class Repl:
         return await asyncio.to_thread(self.input_fn, prompt)
 
     async def handle_permission(self, event: PermissionRequest) -> str:
-        answer = await self._read_line(f"  allow {event.name}? [y/N] ")
-        return "allow" if answer.strip().lower() in ("y", "yes") else "deny"
+        return await ask_permission(event, self._read_line)
 
     async def run_turn(self, text: str | list[Any]) -> str:
         self._foreground = True

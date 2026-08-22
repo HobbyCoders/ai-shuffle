@@ -35,7 +35,7 @@ from fluid.cli.config import (
     make_engine,
     make_store,
 )
-from fluid.cli.repl import Repl, auto_deny, stream_turn
+from fluid.cli.repl import Repl, auto_deny, stream_turn, tty_permission_responder
 from fluid.config.loader import load_config
 from fluid.config.model import HarnessConfig
 
@@ -303,7 +303,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         session_id = _resume_target(args, store_dir)
         if args.command == "run":
-            return asyncio.run(run_once(config, store, args.prompt, session_id=session_id))
+            return asyncio.run(run_once(
+                config, store, args.prompt, session_id=session_id,
+                on_permission=tty_permission_responder(),
+            ))
         if args.command == "chat":
             return asyncio.run(
                 chat_session(config, store, use_tui=args.tui, session_id=session_id)

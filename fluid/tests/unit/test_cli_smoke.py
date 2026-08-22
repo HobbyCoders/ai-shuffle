@@ -219,3 +219,24 @@ def test_import_settings_cli_aliases_choose_one_provider() -> None:
     parser = build_parser()
     assert parser.parse_args(["import-claude"]).command == "import-claude"
     assert parser.parse_args(["import-codex"]).command == "import-codex"
+
+
+def test_run_responder_denies_without_a_tty(monkeypatch) -> None:
+    from fluid.cli.repl import auto_deny, tty_permission_responder
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    assert tty_permission_responder() is auto_deny
+
+
+async def test_ask_permission_maps_answers() -> None:
+    from fluid.cli.repl import ask_permission
+    from fluid.events.model import PermissionRequest
+
+    event = PermissionRequest(session_id="s", request_id="r", tool_use_id="t",
+                              name="Bash", input={}, risk="write")
+    async def answer(text):
+        async def _read(_prompt): return text
+        return await ask_permission(event, _read)
+    assert await answer("y") == "allow"
+    assert await answer("a") == "allow_always"
+    assert await answer("") == "deny"
