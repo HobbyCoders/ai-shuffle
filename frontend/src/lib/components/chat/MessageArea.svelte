@@ -146,6 +146,13 @@
 	let currentTurnAnchorId: string | null = null;
 	let tailReservePx = $state(MIN_TRANSCRIPT_TAIL_RESERVE);
 	let anchorMaintenanceRaf: number | null = null;
+	// Passive reserve for the LATEST user turn once the sent-turn anchor has
+	// released. Without it the deepest possible scroll bottoms out right after
+	// the last response, so a short final response can never bring its prompt to
+	// the viewport top — scroll-to-bottom AND timeline navigation to the newest
+	// tick both fall short. Mirrors the anchored-turn reserve; recomputed from
+	// live geometry so it shrinks back as content grows.
+	let latestTurnTailPx = $state(MIN_TRANSCRIPT_TAIL_RESERVE);
 
 	/**
 	 * Aggressively scroll to bottom over multiple frames until stable.
@@ -405,9 +412,31 @@
 		currentTurnIndex = index;
 		const containerBox = containerRef.getBoundingClientRect();
 		const anchorBox = anchor.getBoundingClientRect();
+		// Navigating to the newest tick: grow the trailing reserve first so the
+		// prompt can actually reach the viewport top instead of the browser
+		// clamping the scroll at the current content end. The spacer sits BELOW
+		// the content, so the pre-growth target offset stays valid; the scroll
+		// itself must wait one tick for the taller DOM or it clamps anyway.
+		let needsNewestTickRoom = false;
+		if (!currentTurnAnchorId && turnNavigationItems[index + 1] === undefined && tailSpacerRef) {
+			const anchorTop = containerRef.scrollTop + anchorBox.top - containerBox.top;
+			const contentEnd = containerRef.scrollTop + tailSpacerRef.getBoundingClientRect().top - containerBox.top;
+			const desired = resolveAnchoredTailReserve({
+				clientHeight: containerRef.clientHeight,
+				contentAfterAnchor: Math.max(0, contentEnd - anchorTop)
+			});
+			if (desired > Math.max(tailReservePx, latestTurnTailPx)) {
+				latestTurnTailPx = desired;
+				needsNewestTickRoom = true;
+			}
+		}
 		const top = containerRef.scrollTop + anchorBox.top - containerBox.top - 24;
 		const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-		containerRef.scrollTo({ top: Math.max(0, top), behavior: reduceMotion ? 'auto' : 'smooth' });
+		const applyScroll = () => {
+			containerRef?.scrollTo({ top: Math.max(0, top), behavior: reduceMotion ? 'auto' : 'smooth' });
+		};
+		if (needsNewestTickRoom) void tick().then(applyScroll);
+		else applyScroll();
 	}
 
 	$effect(() => {
@@ -568,6 +597,10 @@
 		}
 		if (resetTail) {
 			markProgrammaticScrollSettling();
+			// Hand the anchored reserve to the passive latest-turn reserve in the
+			// same frame: collapsing straight to the minimum would clamp scrollTop
+			// downward for a frame before the refresh recomputes the height.
+			if (tailReservePx > latestTurnTailPx) latestTurnTailPx = tailReservePx;
 			tailReservePx = MIN_TRANSCRIPT_TAIL_RESERVE;
 		}
 	}
@@ -613,6 +646,42 @@
 		});
 	}
 
+	/**
+	 * Keep enough trailing room below the transcript for the LATEST user turn to
+	 * sit at the viewport top when scrolled fully down. The anchored-turn reserve
+	 * only covers a freshly-sent prompt; once it releases (or on session load),
+	 * this recomputes the same geometry from the last navigable user message so
+	 * scroll-to-bottom and timeline navigation can both reach "prompt first on
+	 * screen". Shrinks one-for-one as the response grows, bottoming out at the
+	 * normal breathing-room reserve.
+	 */
+	function refreshLatestTurnTailReserve() {
+		if (!containerRef || !tailSpacerRef || currentTurnAnchorId) return;
+		const messages = $activeSession.messages;
+		const latestTurn = messages.findLast((message) => isNavigableUserTurn(message) && message.id);
+		if (!latestTurn?.id) {
+			if (latestTurnTailPx !== MIN_TRANSCRIPT_TAIL_RESERVE) latestTurnTailPx = MIN_TRANSCRIPT_TAIL_RESERVE;
+			return;
+		}
+		const anchor = document.getElementById(turnAnchorId(latestTurn.id));
+		if (!anchor || !containerRef.contains(anchor)) {
+			if (latestTurnTailPx !== MIN_TRANSCRIPT_TAIL_RESERVE) latestTurnTailPx = MIN_TRANSCRIPT_TAIL_RESERVE;
+			return;
+		}
+		const containerBox = containerRef.getBoundingClientRect();
+		const anchorTop = containerRef.scrollTop + anchor.getBoundingClientRect().top - containerBox.top;
+		const contentEnd = containerRef.scrollTop + tailSpacerRef.getBoundingClientRect().top - containerBox.top;
+		latestTurnTailPx = resolveAnchoredTailReserve({
+			clientHeight: containerRef.clientHeight,
+			contentAfterAnchor: Math.max(0, contentEnd - anchorTop)
+		});
+	}
+
+	function scheduleLatestTurnTailRefresh() {
+		if (currentTurnAnchorId) return;
+		requestAnimationFrame(() => { void tick().then(refreshLatestTurnTailReserve); });
+	}
+
 	function startCurrentTurnAnchor(messageId: string) {
 		currentTurnAnchorId = messageId;
 		shouldAutoScroll = true;
@@ -627,7 +696,10 @@
 		pendingScrollToBottom = false;
 		shouldAutoScroll = true;
 		cancelCurrentTurnAnchor();
-		tick().then(() => requestAnimationFrame(() => scrollToBottom()));
+		tick().then(() => requestAnimationFrame(() => {
+			scrollToBottom();
+			scheduleLatestTurnTailRefresh();
+		}));
 	}
 
 	function scrollToBottom() {
@@ -818,6 +890,7 @@
 				pendingScrollToBottom = true;
 				scrollToBottomUntilStable();
 			}
+			if (!currentTurnAnchorId) scheduleLatestTurnTailRefresh();
 		});
 	});
 
@@ -944,6 +1017,7 @@
 		tick().then(() => {
 			if (!containerRef) return;
 			scrollToBottomUntilStable();
+			scheduleLatestTurnTailRefresh();
 		});
 	});
 
@@ -964,6 +1038,7 @@
 				scheduleCurrentTurnAnchorMaintenance();
 				return;
 			}
+			scheduleLatestTurnTailRefresh();
 			// If auto-scroll is enabled and we're supposed to be at bottom,
 			// ensure we stay at bottom after resize
 			if (shouldAutoScroll && containerRef) {
@@ -1006,6 +1081,7 @@
 				scheduleCurrentTurnAnchorMaintenance();
 				return;
 			}
+			scheduleLatestTurnTailRefresh();
 			// eslint-disable-next-line no-console
 			if (STREAM_DEBUG) console.log(`[AS] media load → scrollToBottom tag=${t.tagName} SH=${el.scrollHeight} ST=${el.scrollTop} CH=${el.clientHeight}`);
 			requestAnimationFrame(() => { if (shouldAutoScroll) scrollToBottom(); });
@@ -1183,6 +1259,9 @@
 				}));
 			}
 		}
+		if (!currentTurnAnchorId && (hasNewMessage || hasContentChange)) {
+			scheduleLatestTurnTailRefresh();
+		}
 
 		// Update previous values
 		prevMessagesLength = currentLength;
@@ -1289,7 +1368,7 @@
 			<div
 				bind:this={tailSpacerRef}
 				class="transcript-tail-spacer"
-				style:height={`calc(${tailReservePx}px + env(safe-area-inset-bottom, 0px))`}
+				style:height={`calc(${Math.max(tailReservePx, latestTurnTailPx)}px + env(safe-area-inset-bottom, 0px))`}
 				aria-hidden="true"
 			></div>
 		</div>
