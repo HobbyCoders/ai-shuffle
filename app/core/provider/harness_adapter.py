@@ -1453,6 +1453,19 @@ class HarnessAdapter(ProviderAdapter):
                 },
             )]
 
+        if cls == "HookEvent":
+            # fluid >= 483e750: a configured hook denied a tool call ("deny")
+            # or misbehaved and was ignored ("warning"). Never terminal; shown
+            # the same way the legacy safety warnings were.
+            return [SystemMessage(
+                subtype="hook_deny" if event.level == "deny" else "hook_warning",
+                data={
+                    "content": event.message,
+                    "hook_event": getattr(event, "hook_event", ""),
+                    "tool_name": getattr(event, "tool_name", None),
+                },
+            )]
+
         if cls == "RateLimit":
             return [
                 RateLimitEvent(
