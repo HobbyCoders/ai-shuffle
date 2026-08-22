@@ -140,6 +140,11 @@ def test_referenced_skills() -> None:
     )
     assert referenced_skills(code) == ["greet", "fetch_all"]
     assert referenced_skills("print('skills')") == []
+    # package form: the imported names, not aliases
+    assert referenced_skills("from skills import greet, fetch_all as fa\nfa()") == [
+        "greet", "fetch_all",
+    ]
+    assert referenced_skills("from skills import (\n    greet,\n)") == ["greet"]
 
 
 def test_journal_and_cursor(tmp_path) -> None:
