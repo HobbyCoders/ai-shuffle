@@ -82,6 +82,7 @@ from fluid.providers.base import ProviderClient, ProviderRequest
 from fluid.codemode.session import CodeModeSession, register_code_mode_tools
 from fluid.store.base import SessionMeta, SessionNode, SessionStore, new_id
 from fluid.tools.builtins.tool_search import parse_deferred_catalog, render_deferred_catalog
+from fluid.tools.images import condition_image
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
 
 log = logging.getLogger(__name__)
@@ -1206,9 +1207,14 @@ class NativeLoop(BackgroundLifecycleMixin):
         content: list[Any] = [Text(outcome.text)]
         # Image payloads (file reads, MCP screenshots) become Image blocks on
         # the result; the base64 never rides the event bus — ToolResult events
-        # carry only ``outcome.text``.
+        # carry only ``outcome.text``. Each is conditioned to the model-facing
+        # pixel budget first (providers bill by pixels; oversized originals are
+        # transport waste that also poisons the chars/4 context estimate).
         content.extend(
-            Image(media_type=img.media_type, data=img.data) for img in outcome.images
+            Image(media_type=media_type, data=data_b64)
+            for media_type, data_b64 in (
+                condition_image(img.media_type, img.data) for img in outcome.images
+            )
         )
         # Nested-instruction injection (instruction-file seam): when a tool
         # touches a path whose own directory carries an AGENTS-family file not
