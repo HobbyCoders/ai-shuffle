@@ -2232,6 +2232,9 @@ never `await` them; `await` outside a function is a syntax error in the kernel.
 signature. Unknown keywords raise TypeError.
 - Every tool returns a string. Large results come back as a ResultRef — \
 slice, search or iterate it rather than printing it whole.
+- Image results (Read on an image file, screenshots) are attached to the \
+cell's result as images you can see; inside the kernel the call returns only a \
+`[image: ...]` caption. Read at most a few images per cell.
 - Each call is permission-gated on the host exactly as a direct tool call \
 would be; a denial raises HostCallDenied inside the cell.
 - `mcp__server__name` is imported as `tools.name`. "Call the X tool" and "use \
