@@ -8,7 +8,8 @@ inside ``run_python``. Importing/calling a stub routes to ``__host_call__``.
 
 JSON Schema → signature mapping (per the plan): ``string→str``, ``integer→int``,
 ``number→float``, ``boolean→bool``, ``array→list``, ``object→dict``; required
-params first, optionals default ``None``; docstring = description + ``[risk: X]``.
+params first, optionals default ``None``; docstring = the full description + a
+``Parameters:`` block + ``[risk: X]``.
 Tools with ``code_mode_allowed=False`` are still *listed* and get a stub, but the
 stub is annotated "JSON-path only" and the host gate rejects the call (hard,
 host-side) — so the escape hatch cannot be bypassed from inside the kernel.
@@ -67,6 +68,38 @@ def _first_line(text: str) -> str:
     return ""
 
 
+def _param_doc(pyname: str, prop: dict, *, required: bool) -> str:
+    """One ``Parameters:`` entry — ``name (type, required|optional): desc``."""
+    head = f"{pyname} ({_annotation(prop)}, {'required' if required else 'optional'})"
+    desc = str(prop.get("description") or "").strip()
+    extras: list[str] = []
+    enum = prop.get("enum")
+    if isinstance(enum, (list, tuple)) and enum:
+        extras.append("one of: " + ", ".join(str(v) for v in enum))
+    if "default" in prop:
+        extras.append(f"default: {prop['default']!r}")
+    if extras:
+        joined = "; ".join(extras)
+        desc = f"{desc} ({joined})" if desc else joined
+    return f"{head}: {desc}" if desc else f"{head}:"
+
+
+def _docstring_block(lines: list[str]) -> str:
+    """Render doc lines as a compilable, correctly indented docstring literal.
+
+    The tool description is reproduced verbatim, so it may contain anything —
+    backslashes, quotes, even a literal ``\"\"\"``. Backslashes are doubled and
+    triple quotes escaped so the generated module still parses; both render
+    back to the original text when the model reads ``__doc__``.
+    """
+    first, *rest = lines or [""]
+    body = "\n".join([first] + [f"    {line}" if line else "" for line in rest])
+    body = body.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
+    if body.endswith('"'):
+        body = body[:-1] + '\\"'
+    return f'    """{body}\n    """'
+
+
 def stub_source(spec: ToolSpec, func: str) -> str:
     """Generate the typed stub module source for one tool."""
     schema = spec.input_schema or {}
@@ -86,14 +119,24 @@ def stub_source(spec: ToolSpec, func: str) -> str:
             params.append(f"{pyname}: {ann} | None = None")
     sig = ", ".join(params)
 
-    doc_lines = [_first_line(spec.description) or func]
+    # The docstring carries the tool's FULL description (the model has no other
+    # schema for it in code-mode) plus a Parameters block, so a stub read via
+    # read_tool_docs is as informative as the JSON schema would have been.
+    description = (spec.description or "").strip()
+    doc_lines: list[str] = description.splitlines() if description else [func]
+    if ordered:
+        doc_lines.append("")
+        doc_lines.append("Parameters:")
+        for jname in ordered:
+            doc_lines.append("  " + _param_doc(
+                py_by_json[jname], props.get(jname, {}) or {}, required=jname in required,
+            ))
     doc_lines.append("")
     doc_lines.append(f"[risk: {spec.risk}]")
     if not spec.code_mode_allowed:
         doc_lines.append("JSON-path only — not callable from code-mode; the host gate rejects it.")
-    docstring = "\n    ".join(doc_lines)
 
-    body: list[str] = [f'def {func}({sig}) -> str:', f'    """{docstring}\n    """', "    _args: dict = {}"]
+    body: list[str] = [f'def {func}({sig}) -> str:', _docstring_block(doc_lines), "    _args: dict = {}"]
     for jname in ordered:
         pyname = py_by_json[jname]
         if jname in required:

@@ -54,6 +54,35 @@ async def test_exception_returns_traceback() -> None:
         await k.stop()
 
 
+async def test_await_at_cell_level_gets_a_hint() -> None:
+    k = SubprocessKernel()
+    await k.start()
+    try:
+        r = await k.exec("rows = await Grep('x')", timeout=5, on_host_call=_no_tools)
+        assert r.error is not None
+        assert "'await' outside function" in r.error
+        assert "Hint: tools are synchronous functions — call them without await." in r.error
+    finally:
+        await k.stop()
+
+
+async def test_unexpected_keyword_argument_gets_a_hint() -> None:
+    k = SubprocessKernel()
+    await k.start()
+    try:
+        r = await k.exec(
+            "def Grep(pattern):\n"
+            "    return pattern\n"
+            "Grep('x', output_mode='content')\n",
+            timeout=5, on_host_call=_no_tools,
+        )
+        assert r.error is not None
+        assert "unexpected keyword argument" in r.error
+        assert 'run read_tool_docs("Grep") to see it.' in r.error
+    finally:
+        await k.stop()
+
+
 async def test_disallowed_import_blocked() -> None:
     k = SubprocessKernel()
     await k.start()

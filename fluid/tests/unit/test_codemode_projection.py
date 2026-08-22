@@ -121,6 +121,91 @@ def test_catalog_entries_and_search() -> None:
     assert proj.docs("nonexistent") is None
 
 
+def test_docstring_carries_full_description_and_parameters() -> None:
+    spec = ToolSpec(
+        name="Grep",
+        description=(
+            "Search file contents.\n"
+            "\n"
+            "Usage notes:\n"
+            "- full regex syntax is supported.\n"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "The regex to search for."},
+                "output_mode": {
+                    "type": "string",
+                    "description": "What to print.",
+                    "enum": ["content", "files_with_matches", "count"],
+                    "default": "files_with_matches",
+                },
+                "head_limit": {"type": "integer"},
+            },
+            "required": ["pattern"],
+        },
+        risk="safe",
+    )
+    src = stub_source(spec, "Grep")
+    compile(src, "<stub>", "exec")
+
+    # every description line survives, not just the first
+    assert "Search file contents." in src
+    assert "Usage notes:" in src
+    assert "- full regex syntax is supported." in src
+
+    # the Parameters block documents every property in signature order
+    assert "Parameters:" in src
+    assert "pattern (str, required): The regex to search for." in src
+    assert "output_mode (str, optional): What to print." in src
+    assert "one of: content, files_with_matches, count" in src
+    assert "default: 'files_with_matches'" in src
+    assert "head_limit (int, optional):" in src
+    doc = src.index("Parameters:")
+    assert src.index("pattern (str", doc) < src.index("output_mode (str", doc)
+
+    # risk (and the JSON-path note) still come last
+    assert src.index("[risk: safe]") > src.index("Parameters:")
+
+    # and the rendered docstring is the description verbatim, not an escaped copy
+    ns: dict = {"__host_call__": lambda *a: "ok"}
+    exec(compile(src, "<stub>", "exec"), ns)
+    assert "Search file contents.\n" in ns["Grep"].__doc__
+
+
+def test_stub_compiles_with_hostile_description_characters() -> None:
+    spec = ToolSpec(
+        name="mcp__x__quote",
+        description=(
+            'Docstring hazard: """ inside the text.\n'
+            "\n"
+            "A Windows path C:\\Users\\me and a regex \\d+\\s*\n"
+            'Ends with a quote: "'
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "description": "Which mode.",
+                    "enum": ["fast", "slow"],
+                },
+            },
+            "required": ["mode"],
+        },
+    )
+    src = stub_source(spec, "quote")
+    ns: dict = {"__host_call__": lambda *a: "ok"}
+    exec(compile(src, "<stub>", "exec"), ns)  # raises if the escaping is wrong
+
+    doc = ns["quote"].__doc__
+    assert '"""' in doc
+    assert "C:\\Users\\me" in doc
+    assert "\\d+\\s*" in doc
+    assert 'Ends with a quote: "' in doc
+    assert "mode (str, required): Which mode. (one of: fast, slow)" in doc
+
+
 def test_sources_are_all_compilable() -> None:
     specs = [_spec("mcp__slack__post_message"), _spec("mcp__x__y")]
     for leaf, src in Projection(specs).sources().items():

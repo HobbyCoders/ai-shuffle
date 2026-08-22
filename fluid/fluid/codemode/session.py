@@ -203,7 +203,24 @@ class CodeModeSession:
                 session_id=sid, turn_id=turn_id,
                 tool_use_id=tool_use_id, name=name, input=kwargs,
             ))
-            reply = await bridge.on_host_call(name, kwargs)
+            # Correlate host-side work with THIS inner call, not the outer
+            # run_python block: _dispatch_tool stamped run_python's id on the
+            # ctx, and tools that spawn UI-joined work (Task) read it from
+            # there. Restore the outer value afterwards.
+            extra = getattr(getattr(loop, "ctx", None), "extra", None)
+            stamped = isinstance(extra, dict)
+            had_previous = stamped and "tool_use_id" in extra
+            previous = extra.get("tool_use_id") if had_previous else None
+            if stamped:
+                extra["tool_use_id"] = tool_use_id
+            try:
+                reply = await bridge.on_host_call(name, kwargs)
+            finally:
+                if stamped:
+                    if had_previous:
+                        extra["tool_use_id"] = previous
+                    else:
+                        extra.pop("tool_use_id", None)
             if reply.result is not None:
                 out, is_error = reply.result, False
             elif reply.denied:

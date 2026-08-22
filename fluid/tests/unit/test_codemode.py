@@ -25,7 +25,7 @@ from fluid.permissions.engine import PermissionEngine
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import MemoryStore
 from fluid.tools.inproc import create_inproc_server, tool
-from fluid.tools.registry import ToolRegistry, ToolSpec
+from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
 
 
 # ── scripted provider (same shape as test_tool_loop) ──────────────────────
@@ -108,8 +108,9 @@ def test_func_name_and_stub_signature() -> None:
     assert "def get_weather(city: str, days: int | None = None) -> str:" in src
     assert "[risk: write]" in src
     assert "__host_call__('mcp__geo__get_weather', _args)" in src
-    # docstring uses only the first description line
-    assert "Get the weather." in src and "Second line." not in src
+    # docstring carries the whole description, plus a Parameters block
+    assert "Get the weather." in src and "Second line." in src
+    assert "city (str, required):" in src and "days (int, optional):" in src
 
 
 def test_projection_lists_searches_and_docs() -> None:
@@ -287,6 +288,65 @@ async def test_destructive_host_call_triggers_permission_request(decision, expec
             assert "wiped u1" in rp.output
     finally:
         await loop.aclose()
+
+
+class _CtxProbeLoop:
+    """Minimal ``loop`` surface CodeModeSession.run_python reads."""
+
+    def __init__(self, registry: ToolRegistry, ctx: ToolCtx) -> None:
+        self.registry = registry
+        self.ctx = ctx
+        self.hooks = None
+        self.permissions = PermissionEngine("never_ask")
+        self.events: list = []
+
+    async def _emit(self, event) -> None:
+        self.events.append(event)
+
+    async def _await_permission(self, *args, **kwargs):  # pragma: no cover - never asked
+        return "allow", None, None
+
+
+async def test_inner_host_call_uses_its_own_tool_use_id_and_restores() -> None:
+    seen: dict = {}
+
+    async def _probe(_input: dict, ctx: ToolCtx) -> ToolOutcome:
+        seen["during"] = ctx.extra.get("tool_use_id")
+        return ToolOutcome(text="probed")
+
+    registry = ToolRegistry()
+    registry.register_builtin(
+        ToolSpec(name="probe", description="Record the ambient tool_use_id.",
+                 input_schema={"type": "object", "properties": {}}),
+        _probe,
+    )
+    session = CodeModeSession(registry)
+    code = "from tools.probe import probe\nprint(probe())\n"
+
+    # _dispatch_tool stamps run_python's OWN id before the dispatch; the inner
+    # call must override it and hand it back.
+    ctx = ToolCtx(extra={"tool_use_id": "outer-run-python"})
+    loop = _CtxProbeLoop(registry, ctx)
+    try:
+        outcome = await session.run_python(
+            sid="s1", turn_id="t1", input={"code": code, "timeout": 20}, loop=loop
+        )
+        assert "probed" in outcome.text
+
+        inner_use = next(e for e in loop.events if isinstance(e, ToolUse) and e.name == "probe")
+        assert seen["during"] == inner_use.tool_use_id
+        assert seen["during"] != "outer-run-python"
+        # the outer id is back in place once the host call returns
+        assert ctx.extra["tool_use_id"] == "outer-run-python"
+
+        # with no prior value the key is popped, not left behind
+        ctx.extra.pop("tool_use_id")
+        await session.run_python(
+            sid="s1", turn_id="t2", input={"code": code, "timeout": 20}, loop=loop
+        )
+        assert "tool_use_id" not in ctx.extra
+    finally:
+        await session.aclose()
 
 
 async def test_code_mode_disallowed_tool_is_rejected_host_side() -> None:

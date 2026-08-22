@@ -95,6 +95,28 @@ def _host_call(tool_name: str, kwargs: dict):
 
 # ─── cell execution ──────────────────────────────────────────────────────────
 
+_AWAIT_HINT = "Hint: tools are synchronous functions — call them without await."
+
+
+def _error_hint(exc: BaseException) -> str:
+    """A one-line nudge for the two mistakes the projected stubs invite.
+
+    Cells run at module level, so ``await tool(...)`` is a SyntaxError with no
+    clue that the stubs are plain functions; a wrong kwarg is a bare TypeError
+    with no pointer at the signature. Both are appended to the traceback so the
+    correction rides back in the model's context.
+    """
+    message = str(exc)
+    if isinstance(exc, SyntaxError) and "'await' outside function" in message:
+        return _AWAIT_HINT
+    if isinstance(exc, TypeError) and "got an unexpected keyword argument" in message:
+        name = message.split("(", 1)[0].strip().rsplit(".", 1)[-1] or "the tool"
+        return (
+            "Hint: pass only the parameters in the tool's signature; run "
+            f'read_tool_docs("{name}") to see it.'
+        )
+    return ""
+
 
 def _run_cell(code: str):
     buf = io.StringIO()
@@ -113,8 +135,11 @@ def _run_cell(code: str):
                 value_repr = repr(value)
         else:
             exec(compile(tree, "<cell>", "exec"), _NS)
-    except Exception:
+    except Exception as exc:
         err = traceback.format_exc()
+        hint = _error_hint(exc)
+        if hint:
+            err = err.rstrip("\n") + "\n" + hint + "\n"
     finally:
         sys.stdout = saved
     out = buf.getvalue()
