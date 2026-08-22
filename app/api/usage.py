@@ -165,16 +165,30 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
 
 
 @router.get("/limits", response_model=UsageSnapshot)
-async def get_usage_limits(_: str = Depends(require_auth)) -> UsageSnapshot:
+async def get_usage_limits(
+    refresh: bool = False, _: str = Depends(require_auth)
+) -> UsageSnapshot:
     """Return the latest Claude usage snapshot for every install in the cluster.
 
     Serves the cached snapshot; fetches on demand if it is stale or has never
-    been fetched. Returns ``available: false`` with empty windows when there is
-    no usable Claude OAuth credential (never errors). The legacy top-level fields
-    describe the LOCAL install; ``snapshots`` adds every install's per-account
-    data so offloaded sessions render the correct (owning account's) reset time.
-    ``providers`` adds every non-Claude provider's usage snapshot (best-effort).
+    been fetched. Pass ``refresh=true`` to force a live fetch + persist + WS
+    broadcast (so other tabs update too) and a best-effort provider-usage poll
+    before assembling the response. Returns ``available: false`` with empty
+    windows when there is no usable Claude OAuth credential (never errors). The
+    legacy top-level fields describe the LOCAL install; ``snapshots`` adds every
+    install's per-account data so offloaded sessions render the correct (owning
+    account's) reset time. ``providers`` adds every non-Claude provider's usage
+    snapshot (best-effort).
     """
-    snapshot = await usage_limits_monitor.get_cluster_snapshot()
+    if refresh:
+        snapshot = await usage_limits_monitor.refresh_and_broadcast()
+        try:
+            from app.core.provider_usage import provider_usage_monitor
+
+            await provider_usage_monitor.poll_once()
+        except Exception:
+            logger.debug("provider usage refresh poll failed; continuing", exc_info=True)
+    else:
+        snapshot = await usage_limits_monitor.get_cluster_snapshot()
     providers = await _load_provider_usage()
     return UsageSnapshot(**snapshot, providers=providers)

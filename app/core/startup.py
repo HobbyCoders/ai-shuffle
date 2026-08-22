@@ -484,56 +484,6 @@ def start_background_tasks() -> List[asyncio.Task]:
             f"Notes disk-sync task started (every {notes_interval}s, first run in 10s)"
         )
 
-    async def _periodic_usage_limits():
-        """Background task: poll the Claude usage endpoint every 5 minutes.
-
-        Fetches the authoritative subscription usage snapshot (all rate-limit
-        windows) and broadcasts it to connected clients as a ``usage_snapshot``
-        WS event. First run shortly after startup so the pill populates early.
-        """
-        from app.core.usage_limits import usage_limits_monitor
-
-        await asyncio.sleep(5)  # let startup settle before the first fetch
-        while True:
-            try:
-                await usage_limits_monitor.refresh_and_broadcast()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Periodic usage-limits poll failed: {e}")
-            try:
-                await asyncio.sleep(300)  # 5 minutes
-            except asyncio.CancelledError:
-                break
-
-    tasks.append(asyncio.create_task(_periodic_usage_limits()))
-    logger.info("Usage-limits poll task started (every 5 minutes, first run in 5s)")
-
-    async def _periodic_provider_usage():
-        """Background task: poll enabled OpenRouter providers' /key endpoint.
-
-        Fetches each enabled OpenRouter provider's credit/usage snapshot and
-        persists it via ``upsert_provider_usage_snapshot``. First run shortly
-        after startup, same 5-minute cadence as the Claude usage-limits poll.
-        """
-        from app.core.provider_usage import provider_usage_monitor
-
-        await asyncio.sleep(5)  # let startup settle before the first fetch
-        while True:
-            try:
-                await provider_usage_monitor.poll_once()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Periodic provider-usage poll failed: {e}")
-            try:
-                await asyncio.sleep(300)  # 5 minutes
-            except asyncio.CancelledError:
-                break
-
-    tasks.append(asyncio.create_task(_periodic_provider_usage()))
-    logger.info("Provider-usage poll task started (every 5 minutes, first run in 5s)")
-
     codex_refresh_interval = settings.codex_token_refresh_interval_seconds
     if codex_refresh_interval and codex_refresh_interval > 0:
         async def _periodic_codex_token_refresh():

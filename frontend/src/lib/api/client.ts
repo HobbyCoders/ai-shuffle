@@ -551,10 +551,12 @@ export type UsageLimitsSnapshot = UsageSnapshot;
 
 /**
  * Fetch the latest Claude usage-limits snapshot. Used on chat load to populate
- * the usage pill before the first `usage_snapshot` WS event arrives.
+ * the usage pill before the first `usage_snapshot` WS event arrives. Pass
+ * `refresh=true` to force a live fetch (and provider-usage poll) on the server.
  */
-export async function getUsageLimits(): Promise<UsageLimitsSnapshot> {
-	return api.get<UsageLimitsSnapshot>('/usage/limits');
+export async function getUsageLimits(refresh = false): Promise<UsageLimitsSnapshot> {
+	const path = refresh ? '/usage/limits?refresh=true' : '/usage/limits';
+	return api.get<UsageLimitsSnapshot>(path);
 }
 
 /**

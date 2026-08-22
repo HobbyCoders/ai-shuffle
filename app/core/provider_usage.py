@@ -470,8 +470,6 @@ async def _persist_anthropic_capture(provider_id: str, headers: Dict[str, str]) 
 # OpenRouter poller (U3)
 # ---------------------------------------------------------------------------
 
-# Parity with app.core.usage_limits._periodic_usage_limits's cadence.
-_POLL_INTERVAL_SECONDS = 300
 _KEY_PATH = "/api/v1/key"
 # Account-level credit ledger (lifetime purchased vs lifetime spent). Distinct
 # from /key's `usage`/`limit`, which describe the API KEY's own spend cap.

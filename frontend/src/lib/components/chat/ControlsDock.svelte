@@ -159,9 +159,9 @@
 	// Single owner of usage-limit fetching. A shared in-flight promise dedupes
 	// concurrent triggers (e.g. mount + a rapid target change) into ONE GET.
 	let usageFetchInFlight: Promise<void> | null = null;
-	function refreshUsageLimits(): Promise<void> {
+	function refreshUsageLimits(force = false): Promise<void> {
 		if (usageFetchInFlight) return usageFetchInFlight;
-		usageFetchInFlight = getUsageLimits()
+		usageFetchInFlight = getUsageLimits(force)
 			.then((snap) => rateLimit.applySnapshot(snap))
 			.catch(() => {
 				// Non-fatal — reset so a later target change / WS event retries.
@@ -322,7 +322,7 @@
 		</OverrideDropdown>
 
 		<!-- Context-usage ring (16px SVG arc + its popover) -->
-		<ContextUsageBar />
+		<ContextUsageBar onOpenChange={(o) => { if (o) void refreshUsageLimits(true); }} />
 	</div>
 
 	<!-- Mobile keeps the primary actions visible and moves the configuration
@@ -339,7 +339,7 @@
 		>
 			<SlidersHorizontal size={16} strokeWidth={1.8} aria-hidden="true" />
 		</button>
-		<ContextUsageBar />
+		<ContextUsageBar onOpenChange={(o) => { if (o) void refreshUsageLimits(true); }} />
 	</div>
 
 	<!-- Right: computer-use, attach, then the parent's action cluster -->

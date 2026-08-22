@@ -77,6 +77,12 @@
 	} from '$lib/stores/rate-limit';
 	import { usageTargetInstance } from '$lib/stores/usage-target';
 
+	interface Props {
+		onOpenChange?: (open: boolean) => void;
+	}
+
+	let { onOpenChange }: Props = $props();
+
 	// ── Effective model → context window (200k / 1M) ──────────────────────
 	// The session's model pick may be a `prov:<providerId>:<modelId>` composite
 	// (PA13's cross-provider switch) — decode it once and let BOTH the model id
@@ -121,8 +127,13 @@
 	let open = $state(false);
 	let wrapperRef = $state<HTMLDivElement | null>(null);
 
+	function setOpen(next: boolean) {
+		open = next;
+		onOpenChange?.(next);
+	}
+
 	function toggle() {
-		open = !open;
+		setOpen(!open);
 	}
 
 	// ── SDK/persisted breakdown = the single display source for the context section ─
@@ -503,11 +514,11 @@
 		// `{#if !pbOpen}`) before this document-level listener runs — `contains` then
 		// reads the click as outside. `composedPath()` is frozen at dispatch time.
 		if (open && wrapperRef && !e.composedPath().includes(wrapperRef)) {
-			open = false;
+			setOpen(false);
 		}
 	}
 	function handleEscape(e: KeyboardEvent) {
-		if (e.key === 'Escape' && open) open = false;
+		if (e.key === 'Escape' && open) setOpen(false);
 	}
 
 	onMount(() => {
