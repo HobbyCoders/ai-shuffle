@@ -370,3 +370,25 @@ async def test_synthesizer_prompt_contains_library_and_journal(tmp_path) -> None
     assert "greeting = 1" in prompt
     assert "get_weather" in prompt
     assert request.tools == []
+
+
+async def test_drain_is_bounded_when_the_model_stalls(tmp_path) -> None:
+    """Session close must not hang on a synthesis pass that never returns."""
+    import asyncio
+
+    from fluid.codemode.skills import SkillStore
+
+    class _StalledProvider:
+        async def stream(self, request):
+            await asyncio.sleep(3600)
+            yield None  # pragma: no cover
+
+    store = SkillStore(tmp_path)
+    store.journal({"kind": "cell", "code": "print(1)", "stdout": "1\n"})
+    synth = Synthesizer(
+        _StalledProvider(), "m", store, min_new_entries=1,
+        pass_timeout=0.2, close_timeout=0.5,
+    )
+    assert synth.due()
+    await asyncio.wait_for(synth.drain(), timeout=5)
+    assert "exceeded" in (synth.last_error or "")

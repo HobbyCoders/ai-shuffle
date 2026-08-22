@@ -84,6 +84,8 @@ class Synthesizer:
         min_new_entries: int = MIN_NEW_ENTRIES,
         max_entries: int = MAX_ENTRIES_PER_PASS,
         max_tokens: int = 4096,
+        pass_timeout: float = 180.0,
+        close_timeout: float = 90.0,
     ) -> None:
         self._provider = provider
         self._model = model
@@ -92,6 +94,10 @@ class Synthesizer:
         self._max_entries = max_entries
         self._max_tokens = max_tokens
         self._task: asyncio.Task | None = None
+        # A pass is one model call plus verification kernels; bound it so a
+        # stalled stream can never wedge a turn or, worse, session close.
+        self._pass_timeout = pass_timeout
+        self._close_timeout = close_timeout
         self.last_error: str | None = None
 
     # ─── triggering ──────────────────────────────────────────────────────
@@ -112,6 +118,17 @@ class Synthesizer:
         Called from session close; only synthesizes when the remaining slice
         meets the normal threshold, so short sessions don't pay a model call.
         """
+        try:
+            await asyncio.wait_for(self._drain_inner(), timeout=self._close_timeout)
+        except asyncio.TimeoutError:
+            self.last_error = (
+                f"synthesis on close exceeded {self._close_timeout:.0f}s and was abandoned"
+            )
+            if self._task is not None:
+                self._task.cancel()
+                self._task = None
+
+    async def _drain_inner(self) -> None:
         if self._task is not None:
             try:
                 await self._task
@@ -123,7 +140,10 @@ class Synthesizer:
 
     async def _run_safe(self) -> list[str]:
         try:
-            return await self.run()
+            return await asyncio.wait_for(self.run(), timeout=self._pass_timeout)
+        except asyncio.TimeoutError:
+            self.last_error = f"synthesis pass exceeded {self._pass_timeout:.0f}s"
+            return []
         except Exception as exc:  # never let synthesis break the session
             self.last_error = f"{type(exc).__name__}: {exc}"
             return []
