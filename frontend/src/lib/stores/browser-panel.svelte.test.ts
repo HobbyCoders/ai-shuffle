@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { browserPanel } from './browser-panel.svelte';
+import { browserPanel, flushWidthPersist } from './browser-panel.svelte';
 
 // The store is a module singleton; openPanel() gives every test a known baseline
 // (open=true, userClosedForSession=null) without needing a private reset.
@@ -7,6 +7,8 @@ beforeEach(() => {
 	localStorage.clear();
 	browserPanel.openPanel();
 	browserPanel.setWidth(480);
+	// Settle the debounced write so no timer from one test lands in another.
+	flushWidthPersist();
 });
 
 describe('browserPanel open/close/toggle', () => {
@@ -78,11 +80,27 @@ describe('browserPanel width clamp + persistence', () => {
 		expect(browserPanel.current.width).toBe(513);
 	});
 
-	it('persists the clamped width to localStorage', () => {
+	it('persists the clamped width to localStorage once the debounce settles', () => {
 		browserPanel.setWidth(720);
+		flushWidthPersist();
 		const raw = localStorage.getItem('ai-shuffle-browser-panel');
 		expect(raw).not.toBeNull();
 		expect(JSON.parse(raw!).width).toBe(720);
+	});
+
+	// A drag-resize calls setWidth on every pointermove; a synchronous write per
+	// move stalls the main thread and stutters the live canvas.
+	it('debounces the write during a drag, keeping the in-memory width live', () => {
+		flushWidthPersist();
+		localStorage.clear();
+
+		for (let w = 500; w <= 560; w += 10) browserPanel.setWidth(w);
+		expect(browserPanel.current.width).toBe(560);
+		expect(localStorage.getItem('ai-shuffle-browser-panel')).toBeNull();
+
+		flushWidthPersist();
+		const raw = localStorage.getItem('ai-shuffle-browser-panel');
+		expect(JSON.parse(raw!).width).toBe(560);
 	});
 });
 

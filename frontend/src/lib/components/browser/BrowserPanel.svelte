@@ -47,13 +47,20 @@
 
 	// ── Stream client lifecycle: connect only while open && session set ────
 	let client: BrowserStreamClient | null = null;
+	// Last session we held a frame for. The canvas keeps its last picture across
+	// reconnects and transient status changes; only a genuine session switch
+	// invalidates it (showing another session's page would be wrong).
+	let framedSessionId: string | null = null;
 
 	$effect(() => {
 		const isOpen = open;
 		const sid = sessionId;
 		if (!isOpen || !sid) return;
 
-		latestFrame = null;
+		if (framedSessionId !== sid) {
+			latestFrame = null;
+			framedSessionId = sid;
+		}
 		browserPanel.setStatus('connecting');
 		const c = createBrowserStreamClient({
 			sessionId: sid,
@@ -73,7 +80,6 @@
 		return () => {
 			c.destroy();
 			if (client === c) client = null;
-			latestFrame = null;
 		};
 	});
 
@@ -129,6 +135,18 @@
 
 	const displayUrl = $derived(url || 'No page open');
 	const isLive = $derived(status === 'live');
+	/** A frame is on the canvas — keep showing it, whatever the socket is doing. */
+	const hasFrame = $derived(latestFrame !== null);
+	/** Short overlay text shown over a stale frame while the stream isn't live. */
+	const overlayLabel = $derived(
+		{
+			live: '',
+			connecting: 'Reconnecting…',
+			disconnected: 'Reconnecting…',
+			no_page: 'No page',
+			browser_off: 'Browser off',
+		}[status],
+	);
 </script>
 
 <svelte:window onresize={handleResize} />
@@ -165,8 +183,20 @@
 		</header>
 
 		<div class="panel-body">
-			{#if isLive}
-				<BrowserLiveView frame={latestFrame} interactive={true} onInput={sendInput} />
+			{#if hasFrame}
+				<!-- The canvas stays mounted across reconnects and target re-attaches:
+				     unmounting it made every transient status blank the preview. -->
+				<div class="live-holder">
+					<BrowserLiveView frame={latestFrame} interactive={isLive} onInput={sendInput} />
+					{#if !isLive}
+						<div class="stream-badge" role="status">
+							{#if status === 'connecting' || status === 'disconnected'}
+								<Loader2 class="spin" size={12} strokeWidth={2} />
+							{/if}
+							<span>{overlayLabel}</span>
+						</div>
+					{/if}
+				</div>
 			{:else}
 				<div class="empty-state">
 					{#if status === 'connecting'}
@@ -364,6 +394,39 @@
 		background: color-mix(in oklch, var(--muted) 30%, transparent);
 	}
 
+	/* Holds the live canvas plus the non-blocking status overlay. */
+	.live-holder {
+		position: relative;
+		flex: 1;
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
+	}
+
+	/* Small corner pill over a still-visible frame while the stream isn't live. */
+	.stream-badge {
+		position: absolute;
+		top: 8px;
+		right: 8px;
+		z-index: 2;
+		display: flex;
+		align-items: center;
+		gap: 5px;
+		padding: 3px 9px;
+		font-size: 0.6875rem;
+		font-weight: 500;
+		letter-spacing: 0.02em;
+		color: var(--foreground);
+		background: color-mix(in oklch, var(--popover) 88%, transparent);
+		border: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
+		border-radius: 999px;
+		backdrop-filter: blur(6px);
+		pointer-events: none;
+	}
+	.stream-badge :global(.spin) {
+		animation: spin 1s linear infinite;
+	}
+
 	.empty-state {
 		flex: 1;
 		display: flex;
@@ -417,6 +480,7 @@
 
 	@media (prefers-reduced-motion: reduce) {
 		.status-connecting,
+		.stream-badge :global(.spin),
 		.empty-state :global(.spin) {
 			animation: none;
 		}

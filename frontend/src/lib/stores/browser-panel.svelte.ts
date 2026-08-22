@@ -70,13 +70,53 @@ function loadPersistedWidth(): number {
 	}
 }
 
-function persistWidth(width: number) {
+function writeWidth(width: number) {
 	if (!browser) return;
 	try {
 		localStorage.setItem(STORAGE_KEY, JSON.stringify({ width }));
 	} catch {
 		// Ignore storage errors
 	}
+}
+
+/**
+ * Debounced width persistence. A drag-resize fires `setWidth` on every
+ * pointermove; a synchronous localStorage write per move stalls the main thread
+ * and makes the live canvas stutter. The in-memory width still updates on every
+ * move — only the disk write waits for the drag to settle.
+ */
+const PERSIST_DEBOUNCE_MS = 150;
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingWidth: number | null = null;
+
+function persistWidth(width: number) {
+	if (!browser) return;
+	pendingWidth = width;
+	if (persistTimer !== null) return;
+	persistTimer = setTimeout(() => {
+		persistTimer = null;
+		if (pendingWidth !== null) {
+			writeWidth(pendingWidth);
+			pendingWidth = null;
+		}
+	}, PERSIST_DEBOUNCE_MS);
+}
+
+/** Flush any pending width write immediately (tests / teardown). */
+export function flushWidthPersist() {
+	if (persistTimer !== null) {
+		clearTimeout(persistTimer);
+		persistTimer = null;
+	}
+	if (pendingWidth !== null) {
+		writeWidth(pendingWidth);
+		pendingWidth = null;
+	}
+}
+
+// A resize finished right before a navigation must not be lost to the debounce.
+if (browser && typeof window !== 'undefined') {
+	window.addEventListener('pagehide', flushWidthPersist);
 }
 
 // ============================================

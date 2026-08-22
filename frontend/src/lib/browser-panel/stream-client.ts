@@ -19,6 +19,14 @@
 
 const MAX_RECONNECT_ATTEMPTS = 50;
 const MAX_RECONNECT_DELAY_MS = 30_000;
+/**
+ * The server pings every 30 s, so a healthy socket is never silent for longer
+ * than that. Anything past this window is treated as possibly half-open and
+ * gets probed rather than trusted.
+ */
+const STALE_SILENCE_MS = 45_000;
+/** Grace period after a keepalive probe before declaring the socket dead. */
+const PROBE_TIMEOUT_MS = 3_000;
 
 // ─── Protocol types ──────────────────────────────────────────────────────────
 
@@ -86,6 +94,15 @@ export function createBrowserStreamClient(config: BrowserStreamConfig): BrowserS
 	let reconnectAttempts = 0;
 	let intentionalDisconnect = false;
 	let destroyed = false;
+	let lastMessageAt = 0;
+	let probeTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function clearProbe() {
+		if (probeTimer) {
+			clearTimeout(probeTimer);
+			probeTimer = null;
+		}
+	}
 
 	let visibilityHandler: (() => void) | null = null;
 	let onlineHandler: (() => void) | null = null;
@@ -103,6 +120,8 @@ export function createBrowserStreamClient(config: BrowserStreamConfig): BrowserS
 
 		ws.onopen = () => {
 			reconnectAttempts = 0;
+			lastMessageAt = Date.now();
+			clearProbe();
 			config.onOpen?.();
 		};
 
@@ -128,6 +147,9 @@ export function createBrowserStreamClient(config: BrowserStreamConfig): BrowserS
 		};
 
 		ws.onmessage = (event) => {
+			// Traffic of ANY kind proves the socket is alive: cancel a pending probe.
+			lastMessageAt = Date.now();
+			clearProbe();
 			let msg: Record<string, unknown>;
 			try {
 				msg = JSON.parse(event.data as string);
@@ -189,16 +211,34 @@ export function createBrowserStreamClient(config: BrowserStreamConfig): BrowserS
 			connect();
 			return;
 		}
-		if (ws.readyState === WebSocket.OPEN) {
-			// Half-open socket after a network change: close it and let the
-			// reconnect path re-establish (matches the chat WS revive strategy).
+		if (ws.readyState !== WebSocket.OPEN) return;
+
+		// An OPEN socket is presumed healthy. Tearing it down on every tab focus
+		// or `online` event was the panel's main flicker source: each close cost a
+		// full reconnect, and the reconnect re-ran the server's connecting → live
+		// handshake. Only a socket that has already missed a server ping is
+		// suspicious enough to probe.
+		if (Date.now() - lastMessageAt < STALE_SILENCE_MS) return;
+		if (probeTimer) return; // a probe is already in flight
+
+		// Keepalive write. `pong` is the only unsolicited client frame the server
+		// tolerates — anything else (including `ping`) is a protocol violation and
+		// gets the socket closed with 4400, which is exactly what we're avoiding.
+		send({ type: 'pong' });
+
+		probeTimer = setTimeout(() => {
+			probeTimer = null;
+			if (destroyed || !ws || ws.readyState !== WebSocket.OPEN) return;
+			if (Date.now() - lastMessageAt < STALE_SILENCE_MS) return;
+			// Silent through the probe window: really half-open. Close and let the
+			// reconnect path re-establish.
 			console.warn(`[BrowserStream] force reconnect: ${reason}`);
 			try {
 				ws.close(4000, reason);
 			} catch {
 				/* ignore */
 			}
-		}
+		}, PROBE_TIMEOUT_MS);
 	}
 
 	// ── Disconnect / Send ──────────────────────────────────────────────────
@@ -208,6 +248,7 @@ export function createBrowserStreamClient(config: BrowserStreamConfig): BrowserS
 			clearTimeout(reconnectTimer);
 			reconnectTimer = null;
 		}
+		clearProbe();
 		intentionalDisconnect = true;
 		if (ws) {
 			try {

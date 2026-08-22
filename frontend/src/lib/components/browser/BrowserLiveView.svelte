@@ -63,6 +63,12 @@
 		if (!f || !canvasEl) return;
 		try {
 			const bmp = await createImageBitmap(base64ToBlob(f.data));
+			if (!metaIsDrawable(f.metadata)) {
+				// Unusable geometry: drop the new bitmap and keep the last good
+				// picture on screen rather than swapping in something unpaintable.
+				bmp.close?.();
+				return;
+			}
 			currentBitmap?.close?.();
 			currentBitmap = bmp;
 			currentMeta = f.metadata;
@@ -80,39 +86,54 @@
 		else runDraw();
 	}
 
+	/** Frame metadata is only usable if both device dimensions are finite and positive. */
+	function metaIsDrawable(meta: FrameMetadata | null): meta is FrameMetadata {
+		return (
+			!!meta &&
+			Number.isFinite(meta.deviceWidth) &&
+			Number.isFinite(meta.deviceHeight) &&
+			meta.deviceWidth > 0 &&
+			meta.deviceHeight > 0
+		);
+	}
+
 	function paint() {
-		if (!canvasEl || !currentBitmap || !currentMeta) return;
+		const bitmap = currentBitmap;
+		const meta = currentMeta;
+		if (!canvasEl || !bitmap || !metaIsDrawable(meta)) return;
 		const rect = canvasEl.getBoundingClientRect();
 		if (rect.width <= 0 || rect.height <= 0) return;
+
+		// Validate EVERYTHING before touching the canvas. Clearing first and then
+		// bailing (or throwing inside drawImage on NaN geometry) blanked the panel
+		// for a whole frame — the visible flicker.
+		const box = { left: 0, top: 0, width: rect.width, height: rect.height };
+		const scale = fitScale(box, meta);
+		if (!(scale > 0)) return; // also rejects NaN
+		const off = letterbox(box, meta, scale);
+		if (!Number.isFinite(off.x) || !Number.isFinite(off.y)) return;
+
+		const ctx = canvasEl.getContext('2d');
+		if (!ctx) return;
 		const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
 		const bw = Math.round(rect.width * dpr);
 		const bh = Math.round(rect.height * dpr);
 		if (canvasEl.width !== bw) canvasEl.width = bw;
 		if (canvasEl.height !== bh) canvasEl.height = bh;
-		const ctx = canvasEl.getContext('2d');
-		if (!ctx) return;
 		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 		ctx.clearRect(0, 0, rect.width, rect.height);
-		const box = { left: 0, top: 0, width: rect.width, height: rect.height };
-		const scale = fitScale(box, currentMeta);
-		if (scale <= 0) return;
-		const off = letterbox(box, currentMeta, scale);
 		ctx.imageSmoothingQuality = 'high';
-		ctx.drawImage(
-			currentBitmap,
-			off.x,
-			off.y,
-			currentMeta.deviceWidth * scale,
-			currentMeta.deviceHeight * scale,
-		);
+		ctx.drawImage(bitmap, off.x, off.y, meta.deviceWidth * scale, meta.deviceHeight * scale);
 	}
 
-	// Repaint on container resize so the letterbox re-fits.
+	// Repaint on container resize so the letterbox re-fits. Observe the WRAPPER,
+	// never the canvas: paint() resizes the canvas backing store, so observing the
+	// canvas can feed its own resize notifications back into an endless loop.
 	let resizeObserver: ResizeObserver | null = null;
 	$effect(() => {
-		if (!canvasEl || typeof ResizeObserver === 'undefined') return;
+		if (!wrapperEl || typeof ResizeObserver === 'undefined') return;
 		resizeObserver = new ResizeObserver(() => paint());
-		resizeObserver.observe(canvasEl);
+		resizeObserver.observe(wrapperEl);
 		return () => {
 			resizeObserver?.disconnect();
 			resizeObserver = null;
@@ -281,13 +302,19 @@
 				50% / 20px 20px;
 		touch-action: none;
 		cursor: crosshair;
+		overflow: hidden;
 	}
 
 	.live-wrapper.non-interactive {
 		cursor: default;
 	}
 
+	/* Taken out of flow entirely: the backing-store size (set in paint()) can then
+	   never influence the wrapper's layout, so resizing it can't retrigger the
+	   ResizeObserver. */
 	.live-canvas {
+		position: absolute;
+		inset: 0;
 		width: 100%;
 		height: 100%;
 		display: block;
