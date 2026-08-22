@@ -112,7 +112,7 @@ describe('buildDisplayItems — settled turns', () => {
 		expect(fold.folded).toHaveLength(2);
 	});
 
-	it('never folds failures, screenshots, running tools, or still-streaming reasoning', () => {
+	it('folds failures but never screenshots, running tools, or still-streaming reasoning', () => {
 		const failed = tool({ toolStatus: 'error' });
 		const screenshot = tool({ toolScreenshot: 'data:image/png;base64,x' });
 		const running = tool({ toolStatus: 'running', streaming: true });
@@ -122,9 +122,20 @@ describe('buildDisplayItems — settled turns', () => {
 			SETTLED
 		);
 		const visible = collapsedVisibleMessages(items);
-		for (const message of [failed, screenshot, running, thinking]) {
+		expect(visible.some((item) => item.id === failed.id)).toBe(false);
+		for (const message of [screenshot, running, thinking]) {
 			expect(visible.some((item) => item.id === message.id)).toBe(true);
 		}
+	});
+
+	it('marks a failed tool call hidden inside the settled sequence', () => {
+		const failed = tool({ toolStatus: 'error' });
+		const fold = buildDisplayItems([user('go'), tool(), failed, text('done')], SETTLED)
+			.find((item) => item.kind === 'work_log');
+		if (fold?.kind !== 'work_log') throw new Error('expected a work_log');
+		expect(fold.folded.map((entry) => entry.message.id)).toContain(failed.id);
+		const entry = fold.sequence.find((item) => item.message.id === failed.id);
+		expect(entry?.hiddenWhenCollapsed).toBe(true);
 	});
 
 	it('never folds agent, todo, note, question, or subagent surfaces', () => {
@@ -258,6 +269,18 @@ describe('work action summaries', () => {
 		expect(summarizeWork(entries)).toBe(
 			'Read 2 files, changed 1 file, ran 1 command, searched code 2 times, searched the web 2 times, and used 1 tool'
 		);
+	});
+
+	it('counts failed tool calls after the action sentence', () => {
+		const withFailures = workEntries([
+			tool({ toolName: 'Read' }),
+			tool({ toolName: 'Read', toolStatus: 'error' }),
+			tool({ toolName: 'Bash', toolStatus: 'error' })
+		]);
+		expect(summarizeWork(withFailures)).toBe('Read 2 files and ran 1 command, 2 failed');
+
+		const oneFailure = workEntries([tool({ toolName: 'Bash', toolStatus: 'error' })]);
+		expect(summarizeWork(oneFailure)).toBe('Ran 1 command, 1 failed');
 	});
 
 	it('describes reasoning-only and empty groups', () => {

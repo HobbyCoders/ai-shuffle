@@ -9,8 +9,9 @@
  * - a contiguous live tool run keeps its newest active call visible;
  * - once a turn settles, non-final commentary, reasoning, and routine tools fold
  *   behind one compact work row while the final answer remains visible;
- * - failures, screenshots, plans/questions, and agent surfaces never disappear
- *   behind a fold.
+ * - failed tool calls fold with the rest of the run and are counted in the work
+ *   summary, while screenshots, plans/questions, and agent surfaces never
+ *   disappear behind a fold.
  */
 import type { ChatMessage } from '$lib/stores/types';
 import { displayToolName } from './tool-icons';
@@ -78,9 +79,9 @@ function isSpecialTool(msg: ChatMessage): boolean {
 
 function isRoutineTool(msg: ChatMessage): boolean {
 	if (msg.type !== 'tool_use' || isSpecialTool(msg)) return false;
-	// A failure must remain visible, as must a screenshot (the screenshot is the
-	// useful result rather than incidental detail).
-	return msg.toolStatus !== 'error' && !msg.toolScreenshot;
+	// A screenshot stays visible because the image is the result. A failure folds
+	// with the rest of the run; the summary line reports how many failed.
+	return !msg.toolScreenshot;
 }
 
 function isAssistantText(msg: ChatMessage): boolean {
@@ -97,7 +98,8 @@ function isCompletedRoutineWork(msg: ChatMessage): boolean {
 	// Persisted/imported history has used both spellings. Normalize at the
 	// presentation boundary rather than widening transport semantics.
 	const status = msg.toolStatus as string | undefined;
-	return isRoutineTool(msg) && (status === 'complete' || status === 'completed') && !msg.streaming;
+	const settled = status === 'complete' || status === 'completed' || status === 'error';
+	return isRoutineTool(msg) && settled && !msg.streaming;
 }
 
 /** Human duration: "45s", "2m 14s", "1h 03m". */
@@ -200,11 +202,15 @@ export function summarizeWork(entries: WorkLogEntry[]): string | null {
 	}
 
 	const counts = new Map<ToolAction, number>();
+	let failed = 0;
 	for (const entry of tools) {
 		const action = toolAction(entry.message);
 		counts.set(action, (counts.get(action) ?? 0) + 1);
+		if (entry.message.toolStatus === 'error') failed++;
 	}
-	return sentenceJoin([...counts].map(([action, count]) => actionLabel(action, count))) || null;
+	const sentence = sentenceJoin([...counts].map(([action, count]) => actionLabel(action, count)));
+	if (!sentence) return null;
+	return failed > 0 ? `${sentence}, ${failed} failed` : sentence;
 }
 
 interface Positioned {
