@@ -697,6 +697,34 @@ class NativeLoop(BackgroundLifecycleMixin):
     async def wait_turn(self) -> None:
         await self._wait_background_turns()
 
+    async def cancel_steer(self, steer_id: str) -> bool:
+        """Recall a pending ``Steer`` before it reaches the model.
+
+        Returns True when the steer was still queued and is now removed: it
+        will never ride out on a tool result, never produce a
+        ``SteerDelivered`` receipt, and never show up in the turn-end drop log.
+        False means there was nothing to recall — an unknown id, or a steer
+        already folded into a tool result, which is part of the conversation
+        from that point on and cannot be un-sent.
+
+        The decision is atomic against delivery: this coroutine and
+        ``_finish_tool`` both run on the engine's event loop and neither
+        suspends between reading and clearing ``_pending_steers``, so a steer
+        is either cancelled here or already delivered there — never both, never
+        half of each.
+
+        Bare-string entries in the queue carry no id and so never match.
+        """
+        pending = self._pending_steers
+        keep = [
+            op for op in pending
+            if not (isinstance(op, Steer) and op.id == steer_id)
+        ]
+        if len(keep) == len(pending):
+            return False
+        pending[:] = keep  # in place: _finish_tool may hold this exact list
+        return True
+
     async def aclose(self) -> None:
         await self._close_background_lifecycle()
         self._interrupted.set()
@@ -1312,8 +1340,10 @@ class NativeLoop(BackgroundLifecycleMixin):
             await self._report_hook_warnings(sid, turn_id, TURN_END, decision)
         if self._pending_steers:
             # No further tool result will carry them; the user should send a
-            # normal message. Dropping silently would lose user input, so log.
-            log.warning(
+            # normal message. This is the designed fallback for a turn that
+            # ends without another tool call, not an anomaly — but dropping
+            # silently would lose user input, so log it.
+            log.info(
                 "dropping %d undelivered mid-turn steer(s) at turn end (ids: %s)",
                 len(self._pending_steers),
                 ", ".join(

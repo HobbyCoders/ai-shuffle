@@ -31,6 +31,20 @@ class ExecutionEngine(Protocol):
     def events(self, *, since_seq: int = 0) -> AsyncIterator[Event]: ...
     async def aclose(self) -> None: ...
 
+    async def cancel_steer(self, steer_id: str) -> bool:
+        """Recall a submitted ``Steer`` that has not reached the model yet.
+
+        Returns True only when the steer was still pending and is now gone:
+        it will never be delivered, never receipted with ``SteerDelivered``,
+        and never dropped at turn end. False means there was nothing to recall
+        — unknown id, or already delivered, in which case the host must treat
+        the text as part of the conversation.
+
+        The default is False: an engine that cannot recall a steer must say so
+        rather than let a caller believe it un-sent something.
+        """
+        return False
+
     async def get_context_usage(self) -> dict[str, Any] | None:
         """Context-window breakdown, or ``None`` when unavailable.
 

@@ -307,16 +307,95 @@ async def test_undelivered_steer_is_dropped_with_its_id_and_no_receipt(caplog) -
     await loop._ensure_session()
     # Queued but never carried: this turn calls no tool, so nothing delivers it.
     loop._pending_steers.append(Steer(text="too late", id="q9"))
-    with caplog.at_level(logging.WARNING):
+    # INFO, not WARNING: the drop is the designed fallback when a turn ends
+    # without another tool call, so it must not read as an anomaly.
+    with caplog.at_level(logging.INFO):
         await loop.submit(UserTurn(content="hi"))
         await loop.wait_turn()
 
     assert not [e for e in loop.bus.log(loop.session_id) if isinstance(e, SteerDelivered)]
     assert loop._pending_steers == []
-    assert any(
-        "undelivered mid-turn steer" in r.getMessage() and "q9" in r.getMessage()
-        for r in caplog.records
+    drops = [
+        r for r in caplog.records
+        if "undelivered mid-turn steer" in r.getMessage() and "q9" in r.getMessage()
+    ]
+    assert drops and all(r.levelno == logging.INFO for r in drops)
+
+
+# ─── cancelling a steer before it is delivered ───────────────────────────────
+
+
+async def test_cancel_steer_before_delivery_removes_it_without_a_receipt(
+    tmp_path, caplog,
+) -> None:
+    """Un-sending a queued steer: gone from the queue, never seen by the model."""
+    import logging
+
+    from fluid.engine.native import NativeLoop
+    from fluid.events.model import SteerDelivered
+    from fluid.store.jsonl import JsonlStore
+    from fluid.tools.registry import ToolOutcome
+
+    loop = NativeLoop(provider=_NullProvider(), store=JsonlStore(tmp_path), model="m")
+    await loop._ensure_session()
+    loop._pending_steers.append(Steer(text="recall me", id="q1"))
+    loop._pending_steers.append(Steer(text="keep me", id="q2"))
+
+    with caplog.at_level(logging.INFO):
+        assert await loop.cancel_steer("q1") is True
+    # The sibling steer is untouched and still delivers.
+    assert [op.id for op in loop._pending_steers] == ["q2"]
+
+    outcome = await loop._finish_tool(
+        loop.session_id, "turn_1", "Read", "tu_1", ToolOutcome(text="body"),
     )
+    assert "recall me" not in outcome.text
+    assert "keep me" in outcome.text
+
+    receipts = [
+        e for e in loop.bus.log(loop.session_id) if isinstance(e, SteerDelivered)
+    ]
+    assert len(receipts) == 1
+    assert receipts[0].steers == [{"id": "q2", "text": "keep me"}]
+    # No turn-end drop log for a cancelled steer either — it simply never was.
+    assert not any("q1" in r.getMessage() for r in caplog.records)
+
+
+async def test_cancel_steer_after_delivery_is_false(tmp_path) -> None:
+    from fluid.engine.native import NativeLoop
+    from fluid.store.jsonl import JsonlStore
+    from fluid.tools.registry import ToolOutcome
+
+    loop = NativeLoop(provider=_NullProvider(), store=JsonlStore(tmp_path), model="m")
+    await loop._ensure_session()
+    loop._pending_steers.append(Steer(text="already gone", id="q1"))
+    await loop._finish_tool(
+        loop.session_id, "turn_1", "Read", "tu_1", ToolOutcome(text="body"),
+    )
+    # Delivered text is part of the conversation; it cannot be un-sent.
+    assert await loop.cancel_steer("q1") is False
+
+
+async def test_cancel_steer_ignores_unknown_ids_and_bare_strings(tmp_path) -> None:
+    from fluid.engine.native import NativeLoop
+    from fluid.store.jsonl import JsonlStore
+
+    loop = NativeLoop(provider=_NullProvider(), store=JsonlStore(tmp_path), model="m")
+    await loop._ensure_session()
+    assert await loop.cancel_steer("nope") is False
+
+    loop._pending_steers.append("bare text with no id")
+    assert await loop.cancel_steer("nope") is False
+    assert loop._pending_steers == ["bare text with no id"]
+
+
+async def test_delegated_cancel_steer_is_always_false() -> None:
+    """Written-to-stdin is delivered: the delegated leg can never recall."""
+    from fluid.engine.delegated import DelegatedLoop
+    from fluid.store.base import MemoryStore
+
+    loop = DelegatedLoop(store=MemoryStore(), model="m")
+    assert await loop.cancel_steer("q1") is False
 
 
 # ─── availability probes ─────────────────────────────────────────────────────

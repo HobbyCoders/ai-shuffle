@@ -236,6 +236,17 @@ class DelegatedLoop(BackgroundLifecycleMixin):
     async def wait_turn(self) -> None:
         await self._wait_background_turns()
 
+    async def cancel_steer(self, steer_id: str) -> bool:
+        """Always False: a delegated steer is delivered the moment it is sent.
+
+        There is no pending queue to recall from here. ``_deliver_steer``
+        writes the text straight to the CLI's stdin and receipts it as soon as
+        the write drains, so by the time any caller could ask to cancel, the
+        CLI already owns the message. Saying False keeps the host honest: the
+        text is part of the conversation and must be treated as sent.
+        """
+        return False
+
     # ─── ExecutionEngine interface ───────────────────────────────────────
 
     async def submit(self, op: Op) -> None:
