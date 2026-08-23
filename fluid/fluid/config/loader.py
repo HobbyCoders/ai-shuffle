@@ -50,6 +50,14 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     # turns the shipped default off without supplying a replacement.
     "system": None,
     "base_prompt": True,
+    # Identity layer: inline persona text, or (when unset) ~/.fluid/IDENTITY.md
+    # via ``identity_file``. Replaces only the base prompt's identity block;
+    # the operating contract always applies.
+    "identity": None,
+    "identity_file": True,
+    # Model-family guidance blocks: "auto" (shipped family tables) | true |
+    # false | list of model-id substrings. See fluid.cli.prompt.
+    "model_guidance": "auto",
     "permission": {"approval_policy": "on_write", "rules": []},
     "instruction_files": {
         "enabled": True,
@@ -279,6 +287,13 @@ def env_overrides(env: dict[str, str] | None = None) -> dict[str, Any]:
         out["code_mode"] = _coerce_bool(env["FLUID_CODE_MODE"])
     if "FLUID_BASE_PROMPT" in env:
         out["base_prompt"] = _coerce_bool(env["FLUID_BASE_PROMPT"])
+    if "FLUID_IDENTITY_FILE" in env:
+        out["identity_file"] = _coerce_bool(env["FLUID_IDENTITY_FILE"])
+    if "FLUID_MODEL_GUIDANCE" in env:
+        raw = env["FLUID_MODEL_GUIDANCE"].strip()
+        out["model_guidance"] = (
+            [p.strip() for p in raw.split(",") if p.strip()] if "," in raw else raw
+        )
     if "FLUID_SKILLS_DIR" in env:
         out["skills_dir"] = env["FLUID_SKILLS_DIR"]
     if "FLUID_CONTINUAL" in env:

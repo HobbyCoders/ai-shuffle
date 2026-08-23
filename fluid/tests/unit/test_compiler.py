@@ -55,7 +55,7 @@ def test_environment_block_git_repo(git_repo: Path):
 def test_git_context_dirty(git_repo: Path):
     (git_repo / "b.txt").write_text("dirty")
     ctx = git_context(str(git_repo))
-    assert ctx is not None and "1 changed path(s)" in ctx
+    assert ctx is not None and "Working tree: 1 untracked" in ctx
 
 
 def test_git_context_none_outside_repo(plain_dir: Path):

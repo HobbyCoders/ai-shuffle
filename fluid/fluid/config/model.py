@@ -22,6 +22,20 @@ TOOL_STYLES = ("native", "text")
 HOOK_EVENTS = ("PreToolUse", "PostToolUse", "TurnStart", "TurnEnd")
 
 
+def _model_guidance_from(raw: Any) -> bool | str | tuple[str, ...]:
+    """Normalize the ``model_guidance`` knob: auto | bool | substring list."""
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (list, tuple)):
+        return tuple(str(item) for item in raw)
+    value = str(raw or "auto").strip().lower()
+    if value in ("true", "always", "on", "yes", "1"):
+        return True
+    if value in ("false", "never", "off", "no", "0"):
+        return False
+    return "auto"
+
+
 @dataclass(frozen=True, kw_only=True)
 class ProviderConfig:
     kind: str  # one of PROVIDER_KINDS
@@ -256,6 +270,17 @@ class HarnessConfig:
     # compiler directly and ignore both.
     system: str | None = None
     base_prompt: bool = True
+    # The identity layer: durable voice/persona injected as the base prompt's
+    # first block, above the operating contract (which always applies).
+    # ``identity`` is inline text; when unset and ``identity_file`` is on,
+    # ~/.fluid/IDENTITY.md fills the slot. Neither replaces the contract —
+    # that's what ``system`` is for.
+    identity: str | None = None
+    identity_file: bool = True
+    # Model-family guidance blocks ("auto" matches the shipped family tables;
+    # True = always inject, False = never, a list of substrings = custom
+    # match). Resolved once per session; see fluid.cli.prompt.
+    model_guidance: bool | str | tuple[str, ...] = "auto"
     # MCP servers to connect at session start: name → transport config, e.g.
     # {"transport": "stdio", "command": "npx", "args": [...]} or
     # {"transport": "http", "url": "https://..."}. Kept as raw dicts — the
@@ -290,6 +315,9 @@ class HarnessConfig:
             ),
             system=d.get("system"),
             base_prompt=bool(d.get("base_prompt", True)),
+            identity=d.get("identity"),
+            identity_file=bool(d.get("identity_file", True)),
+            model_guidance=_model_guidance_from(d.get("model_guidance", "auto")),
             mcp={name: dict(cfg) for name, cfg in d.get("mcp", {}).items()},
         )
 
@@ -325,6 +353,13 @@ class HarnessConfig:
             "context_window": self.context_window,
             "system": self.system,
             "base_prompt": self.base_prompt,
+            "identity": self.identity,
+            "identity_file": self.identity_file,
+            "model_guidance": (
+                list(self.model_guidance)
+                if isinstance(self.model_guidance, tuple)
+                else self.model_guidance
+            ),
             "permission": {
                 "approval_policy": self.permission.approval_policy,
                 "rules": [

@@ -34,7 +34,12 @@ def make_store(directory: str | os.PathLike[str] | None = None):
     return JsonlStore(directory or default_store_dir())
 
 
-def resolved_prompt(config: HarnessConfig, *, extra_system: str | None = None):
+def resolved_prompt(
+    config: HarnessConfig,
+    *,
+    extra_system: str | None = None,
+    provider_name: str | None = None,
+):
     """CLI prompt assembly, delegated to the shared compiler.
 
     The CLI is an application in the compiler's sense, so it supplies the
@@ -66,7 +71,7 @@ def resolved_prompt(config: HarnessConfig, *, extra_system: str | None = None):
     if config.system:
         base: str | None = config.system
     elif config.base_prompt:
-        base = default_base_prompt(config)
+        base = default_base_prompt(config, provider_name=provider_name)
     else:
         base = None
     enabled = config.instruction_files.enabled
@@ -110,7 +115,9 @@ def make_engine(
     subagents (the REPL passes its own y/N prompt; one-shot runs deny).
     ``background_host=False`` skips the host, leaving Task/Monitor unavailable.
     """
-    compiled = resolved_prompt(config, extra_system=extra_system)
+    compiled = resolved_prompt(
+        config, extra_system=extra_system, provider_name=provider_name
+    )
     engine = build_engine(
         config,
         store,

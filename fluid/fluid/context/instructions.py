@@ -36,6 +36,30 @@ from typing import Any
 _AGENTS_NAMES = ("AGENTS.md", "AGENT.md", ".agents/AGENTS.md")
 _AGENTS_OVERRIDE = "AGENTS.override.md"
 
+# Per-file size caps. Instruction files enter the cached prompt prefix, so an
+# unbounded AGENTS.md silently eats the window; the cap keeps the head (where
+# the load-bearing rules usually live) and a slice of the tail, and the marker
+# names the exact path so the model can Read the elided middle on demand —
+# recoverable, never silently lossy. Nested files ride tool results every time
+# a directory is first touched, so their cap is tighter.
+INSTRUCTION_FILE_MAX_CHARS = 24_000
+NESTED_FILE_MAX_CHARS = 8_000
+_CAP_HEAD_RATIO = 0.7
+_CAP_TAIL_RATIO = 0.2
+
+
+def _cap_content(content: str, path: str, max_chars: int) -> str:
+    """Head/tail truncation with a recovery marker naming ``path``."""
+    if len(content) <= max_chars:
+        return content
+    head = content[: int(max_chars * _CAP_HEAD_RATIO)]
+    tail = content[-int(max_chars * _CAP_TAIL_RATIO):]
+    return (
+        f"{head}\n\n[...instruction file truncated: kept {len(head)}+{len(tail)} "
+        f"of {len(content)} chars. The middle is omitted — Read {path} for the "
+        f"full text.]\n\n{tail}"
+    )
+
 
 def _kind_for(rel_name: str) -> str:
     return "agent" if os.path.basename(rel_name) == "AGENT.md" else "agents"
@@ -213,17 +237,27 @@ def _agents_names_for(directory: Path) -> tuple[str, ...]:
 
 
 def _files_in_dir(directory: Path, scope: str) -> list[InstructionFile]:
-    """Discover Fluid-native instruction files under ``directory``."""
+    """Discover Fluid-native instruction files under ``directory``.
+
+    Content is @-import-expanded, screened for prompt-injection patterns
+    (:mod:`fluid.context.screening` — these files enter the prompt verbatim,
+    so a poisoned one must be caught before injection, not after), and capped
+    to the per-scope size limit with a Read-back marker.
+    """
+    from fluid.context.screening import screen
+
+    limit = NESTED_FILE_MAX_CHARS if scope == "nested" else INSTRUCTION_FILE_MAX_CHARS
     found: list[InstructionFile] = []
     for rel in _agents_names_for(directory):
         p = directory / rel
         if p.is_file():
+            content = screen(expand_imports(_read(p), p), str(p))
             found.append(
                 InstructionFile(
                     path=str(p),
                     scope=scope,
                     kind=_kind_for(rel),
-                    content=expand_imports(_read(p), p),
+                    content=_cap_content(content, str(p), limit),
                 )
             )
     return found
@@ -261,15 +295,18 @@ def discover_global_instruction_files() -> list[InstructionFile]:
     XDG is reserved for TOML configuration. Legacy Claude/Codex instruction
     files remain inert until explicitly imported.
     """
+    from fluid.context.screening import screen
+
     path = Path.home() / ".fluid" / "AGENTS.md"
     if not path.is_file():
         return []
+    content = screen(expand_imports(_read(path), path), str(path))
     return [
         InstructionFile(
             path=str(path),
             scope="global",
             kind="agents",
-            content=expand_imports(_read(path), path),
+            content=_cap_content(content, str(path), INSTRUCTION_FILE_MAX_CHARS),
         )
     ]
 
