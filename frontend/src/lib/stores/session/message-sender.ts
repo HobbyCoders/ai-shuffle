@@ -780,9 +780,17 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// between them, which produced a visible gap where the typing
 				// indicator and streaming UI were missing on auto-worktree
 				// sessions.
+				// The title must be derived here too: the backend backfills the
+				// row from this prompt, but its session_updated broadcast only
+				// reaches devices watching the session — and a headless
+				// worktree turn has no registered watcher, so this device
+				// would otherwise show 'New Chat' until the session is
+				// reopened from the sidebar.
+				const derivedTitle = prompt.substring(0, 100) + (prompt.length > 100 ? '...' : '');
 				update(s => ({
 					...s,
 					sessionId: response.session_id,
+					title: derivedTitle,
 					selectedWorktreeBranch: response.branch_name,
 					isCreatingWorktree: false,
 					// Reset on session commit (PR #448): the freshly auto-created

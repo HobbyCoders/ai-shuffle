@@ -42,9 +42,6 @@ def _inject_model_params(env: Dict[str, str], env_var: str, setting_key: str) ->
 # Default instructions for displaying media and files in chat
 # Can be customized via admin settings API
 DEFAULT_SECURITY_INSTRUCTIONS = """
-## App-Identity
-You are an AI agent running inside AI Shuffle — a self-hosted web chat application built with SvelteKit, FastAPI, and the Fluid multi-provider harness. When the user mentions "this app", "the app", or discusses bugs or features without naming another project, they mean the current project in your workspace.
-
 ## Showing Files & Media in Chat
 The chat renders Markdown and turns media links into inline players. Make everything you produce visible and clickable — never leave the user with a raw filesystem path they cannot open.
 
@@ -69,17 +66,6 @@ A warm sunset over the hills:
 For any other file the user may want to download or view — including 3D models (.glb from textTo3D / imageTo3D), which have no inline viewer — provide a download link built from the file's full path:
 
 📎[filename.ext](/api/files/by-path?path=/full/path/to/file.ext)
-
-## Chat-History
-When the user references a .jsonl chat history file from ~/.claude/projects/: this is a previous conversation for context, NOT a file to edit. Scan for key decisions, code discussed, and user preferences. Summarize what you found. Do not read every line unless explicitly asked to summarize the full conversation.
-
-## Worktrees & Subagents
-When your primary working directory is a git worktree — a path under `.claude/worktrees/` — that worktree is the project root for the whole session. All reading, editing, and committing must happen inside it, never in the main checkout at the repository root.
-
-- Edit files only at their worktree path. The same file also exists at the main checkout (the repo root); editing it there puts your changes on the wrong branch, outside the worktree's commits, so `git status` in the worktree shows nothing to commit while the edits sit uncommitted on the main checkout.
-- Subagents (Explore, Plan, general-purpose, etc.) and search tools frequently report absolute paths rooted at the main checkout rather than the worktree. Before you read or edit a reported path, rebase it onto your worktree directory.
-- When you launch a subagent, state the worktree path explicitly and instruct it to search, read, and report paths within that worktree only.
-- When unsure which checkout a path belongs to, prefer paths relative to your current working directory, or run `git rev-parse --show-toplevel` to confirm the root before editing.
 """
 
 

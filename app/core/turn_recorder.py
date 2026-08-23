@@ -28,7 +28,7 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from app.contract import events as contract
 from app.core import artifact_ingest, artifact_store
@@ -56,16 +56,18 @@ _ENVELOPE_FIELDS = {
 }
 
 
-def _notify_run_change(session_id: str) -> None:
+def _notify_run_change(session_id: str, *, force: bool = False) -> None:
     """Run-lifecycle hook for the board spinner (streaming_status re-check).
 
     Lazy import + never raises: a status/broadcast bug must never break
-    recording or the turn.
+    recording or the turn. ``force=True`` at CLAIM time: the previous turn's
+    stale busy entry in ``_last_broadcast`` would otherwise suppress the ON
+    frame the frontend already consumed via its done-frame cleanup.
     """
     try:
         from app.core import streaming_status
 
-        streaming_status.notify(session_id)
+        streaming_status.notify(session_id, force=force)
     except Exception:
         logger.debug(
             "[TurnRecorder] streaming_status notify failed for %s",
@@ -387,6 +389,10 @@ def _translate_shared(
     return []
 
 
+class _Superseded(Exception):
+    """Internal: unwinds ``close()`` past the append it must not attempt."""
+
+
 class TurnRecorder:
     """Per-turn recorder: one instance per ``stream_to_websocket`` turn."""
 
@@ -428,6 +434,15 @@ class TurnRecorder:
 
         self._terminal_recorded = False
         self._closed = False
+        # Fence state. The first FenceViolation from append_events means the
+        # run lease moved to another runner: every later append from this
+        # recorder would be rejected too, so the recorder goes silent (drops
+        # and counts) instead of logging one WARNING per batch for the rest
+        # of the turn. ``on_superseded`` (set by the owning SessionRuntime)
+        # fires once so the owner can stop the pump it is still driving.
+        self._superseded = False
+        self._superseded_dropped = 0
+        self.on_superseded: Optional[Callable[[], None]] = None
         # seq of this turn's FIRST appended event — the truncation point for
         # an empty-turn discard (record_empty_turn_discard, wired in a later
         # commit).
@@ -476,8 +491,9 @@ class TurnRecorder:
         if run:
             run_id = run["id"]
             fence_token = run["fence_token"]
-            # Run went active — let the durable busy view re-check + broadcast.
-            _notify_run_change(session_id)
+            # Run went active — force the durable busy view to broadcast ON
+            # even if a stale previous-turn busy entry is still last-broadcast.
+            _notify_run_change(session_id, force=True)
         else:
             logger.warning(
                 "[TurnRecorder] could not claim run lease for %s "
@@ -563,6 +579,9 @@ class TurnRecorder:
         try:
             if not isinstance(event, dict):
                 return
+            if self._superseded:
+                self._superseded_dropped += 1
+                return
             async with self._lock:
                 await self._on_event_locked(event)
         except Exception:
@@ -580,8 +599,22 @@ class TurnRecorder:
         if self._closed:
             return
         self._closed = True
+        if self._superseded:
+            # Nothing here can be appended (the fence rejects it). Account for
+            # what was still buffered, then say so ONCE.
+            self._superseded_dropped += len(self._drain_buffered_events())
+            if self._pending_usage is not None:
+                self._superseded_dropped += 1
+                self._pending_usage = None
+            logger.warning(
+                "[TurnRecorder] fence violation for %s run %s — superseded "
+                "runner; %d event(s) dropped for the rest of the turn",
+                self.session_id, self.run_id, self._superseded_dropped,
+            )
         try:
             async with self._lock:
+                if self._superseded:
+                    raise _Superseded()
                 events = self._drain_buffered_events()
                 if self._pending_usage is not None:
                     events.append(self._usage_event(self._pending_usage))
@@ -598,6 +631,8 @@ class TurnRecorder:
                     )
                     self._terminal_recorded = True
                 await self._append(events)
+        except _Superseded:
+            pass
         except Exception:
             logger.warning(
                 "[TurnRecorder] close failed for %s", self.session_id,
@@ -941,6 +976,9 @@ class TurnRecorder:
         """Append a batch under the fence (or unfenced). Never raises."""
         if not events:
             return
+        if self._superseded:
+            self._superseded_dropped += len(events)
+            return
         try:
             if self.run_id is not None and self.fence_token is not None:
                 seqs = await asyncio.to_thread(
@@ -955,16 +993,45 @@ class TurnRecorder:
             if self._first_seq is None and seqs:
                 self._first_seq = seqs[0]
         except session_events_db.FenceViolation:
-            logger.warning(
-                "[TurnRecorder] fence violation for %s run %s — %d event(s) "
-                "dropped (superseded runner)",
-                self.session_id, self.run_id, len(events),
-            )
+            self._mark_superseded(len(events))
         except Exception:
             logger.warning(
                 "[TurnRecorder] append failed for %s (%d event(s) dropped)",
                 self.session_id, len(events), exc_info=True,
             )
+
+    def _mark_superseded(self, dropped: int) -> None:
+        """First fence violation: go silent, stop the heartbeat, tell the owner.
+
+        Logging is deferred to ``close()`` so the whole episode produces one
+        WARNING carrying the total drop count. The heartbeat is cancelled
+        because the lease is no longer ours to renew. ``on_superseded`` runs
+        exactly once, synchronously on the loop; it must not raise.
+        """
+        self._superseded_dropped += dropped
+        if self._superseded:
+            return
+        self._superseded = True
+        self._cancel_task(self._renew_task)
+        self._renew_task = None
+        callback = self.on_superseded
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:  # noqa: BLE001 — owner hook is best-effort
+            logger.warning(
+                "[TurnRecorder] on_superseded hook failed for %s run %s",
+                self.session_id, self.run_id, exc_info=True,
+            )
+
+    @property
+    def superseded(self) -> bool:
+        return self._superseded
+
+    @property
+    def superseded_dropped(self) -> int:
+        return self._superseded_dropped
 
     async def _renew_loop(self) -> None:
         """Heartbeat the run lease every RUN_LEASE_RENEW_SECONDS."""

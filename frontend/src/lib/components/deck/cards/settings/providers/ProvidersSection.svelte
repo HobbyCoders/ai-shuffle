@@ -3,9 +3,8 @@
 	 * ProvidersSection — the "Providers" settings tab (Chunk 4 build-out).
 	 *
 	 * Replaces the Chunk-3 passthrough shell with the real, store-driven provider
-	 * surface. It owns Group A of the plan (§1.1): the intro callout, an "Add
-	 * provider" button (no-op this chunk — Chunk 5 wires the Add-provider modal),
-	 * and the unified `ProviderList` (Claude subscription, Claude API key, then the
+	 * surface. It owns Group A of the plan (§1.1): the intro callout and the
+	 * unified `ProviderList` (Claude subscription, Claude API key, then the
 	 * model_providers rows).
 	 *
 	 * The remaining credential groups (Media & tools / fal, Integrations / GitHub)
@@ -23,11 +22,10 @@
 	 * `ensureLoaded()`; that path is untouched.)
 	 */
 	import { onMount } from 'svelte';
-	import { Info, Server, Plus, FileInput, Type } from 'lucide-svelte';
+	import { Info, Server, FileInput, Type } from 'lucide-svelte';
 	import { providers } from '$lib/stores/providers.svelte';
 	import MediaToolsSection from './MediaToolsSection.svelte';
 	import ProviderList from './ProviderList.svelte';
-	import AddProviderModal from './AddProviderModal.svelte';
 	import SettingsImportDialog from './SettingsImportDialog.svelte';
 	import ModelPicker from '$lib/components/settings/ModelPicker.svelte';
 	import {
@@ -55,15 +53,8 @@
 		onDisconnectGithub
 	}: Props = $props();
 
-	// Add-provider modal open flag. The modal owns its own step machine + flows;
-	// on completion or dismissal it calls back to close.
-	let addProviderOpen = $state(false);
 	let importDialogOpen = $state(false);
 	let importOpener = $state<HTMLButtonElement | null>(null);
-
-	function onAddProvider() {
-		addProviderOpen = true;
-	}
 
 	function onImportSettings(event: MouseEvent) {
 		importOpener = event.currentTarget as HTMLButtonElement;
@@ -160,9 +151,6 @@
 				<button type="button" class="ed-btn prov-import-btn" onclick={onImportSettings}>
 					<FileInput />Import settings
 				</button>
-				<button type="button" class="ed-btn prov-add-btn" onclick={onAddProvider}>
-					<Plus />Add provider
-				</button>
 			</div>
 		</div>
 
@@ -215,10 +203,6 @@
 	{onDisconnectGithub}
 />
 
-{#if addProviderOpen}
-	<AddProviderModal onClose={() => (addProviderOpen = false)} />
-{/if}
-
 {#if importDialogOpen}
 	<SettingsImportDialog onClose={closeImportDialog} />
 {/if}
@@ -266,14 +250,12 @@
 		justify-content: flex-end;
 		gap: 8px;
 	}
-	.prov-add-btn,
 	.prov-import-btn {
 		display: inline-flex;
 		min-height: 36px;
 		align-items: center;
 		gap: 6px;
 	}
-	.prov-add-btn :global(svg),
 	.prov-import-btn :global(svg) {
 		width: 14px;
 		height: 14px;

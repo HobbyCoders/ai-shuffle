@@ -86,6 +86,7 @@ function session(overrides: Record<string, unknown> = {}) {
 
 function renderCard(overrides: Record<string, unknown> = {}, propOverrides: Record<string, unknown> = {}) {
 	const onOpen = vi.fn();
+	const onSettled = vi.fn();
 	const row = session(overrides);
 	const result = render(SessionCard, {
 		props: {
@@ -95,10 +96,11 @@ function renderCard(overrides: Record<string, unknown> = {}, propOverrides: Reco
 			active: false,
 			now: Date.parse('2026-08-20T12:06:00Z'),
 			onOpen,
+			onSettled,
 			...propOverrides,
 		},
 	});
-	return { onOpen, ...result };
+	return { onOpen, onSettled, ...result };
 }
 
 beforeEach(() => {
@@ -163,6 +165,33 @@ describe('SessionCard actions', () => {
 
 		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', false);
 		expect(onOpen).not.toHaveBeenCalled();
+	});
+
+	it('fires onSettled when the OPEN session is settled', async () => {
+		const { onSettled } = renderCard({ is_active: true }, { active: true });
+
+		await fireEvent.click(screen.getByTitle('Settle session'));
+
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', false);
+		expect(onSettled).toHaveBeenCalledOnce();
+	});
+
+	it("doesn't fire onSettled when a background session is settled", async () => {
+		const { onSettled } = renderCard({ is_active: true }, { active: false });
+
+		await fireEvent.click(screen.getByTitle('Settle session'));
+
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', false);
+		expect(onSettled).not.toHaveBeenCalled();
+	});
+
+	it("doesn't fire onSettled when moving back to Active", async () => {
+		const { onSettled } = renderCard({ is_active: false }, { active: true });
+
+		await fireEvent.click(screen.getByTitle('Move to Active'));
+
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', true);
+		expect(onSettled).not.toHaveBeenCalled();
 	});
 
 	it('moves a settled session back to Active', async () => {

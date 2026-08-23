@@ -182,6 +182,44 @@ async def test_broadcast_uses_exact_legacy_wire_shape(mock_db, monkeypatch):
     }
 
 
+async def test_force_notify_rebroadcasts_on_despite_stale_busy_entry(
+    mock_db, monkeypatch
+):
+    """A run CLAIM must emit an ON frame even when _last_broadcast still holds
+    the PREVIOUS turn's busy entry (the frontend already consumed that turn's
+    spinner-off via its done-frame cleanup — the stale entry suppresses the
+    next turn's ON frame, leaving the board spinner dark until the session is
+    selected or the page refreshed)."""
+    rec = _Recorder()
+    monkeypatch.setattr(streaming_status, "_send_streaming_changed", rec)
+    database.create_session(session_id="s1", profile_id="default")
+    r1 = runs.claim_run("s1", "runnerA", 60)
+
+    # Turn 1: plain notify (gateway-tick path) broadcasts ON once.
+    streaming_status.notify("s1")
+    assert await _wait_until(lambda: len(rec.calls) == 1)
+    assert rec.calls[0][:2] == ("s1", True)
+
+    # Turn 1's lease releases with NO notify reaching the module (pre-fix
+    # release path / sweep hasn't run): _last_broadcast still says busy.
+    runs.release_run(r1["id"], r1["fence_token"])
+
+    # Turn 2 claims. A plain re-notify (the gateway tick its first event
+    # append produces) reads busy-again and is SUPPRESSED as "unchanged"...
+    r2 = runs.claim_run("s1", "runnerA", 60)
+    streaming_status.notify("s1")
+    await asyncio.sleep(0.15)
+    assert len(rec.calls) == 1
+
+    # ...but the CLAIM-time forced notify pushes the ON frame through.
+    streaming_status.notify("s1", force=True)
+    assert await _wait_until(lambda: len(rec.calls) == 2)
+    assert rec.calls[1][:2] == ("s1", True)
+
+    # Cleanup for the autouse state reset.
+    runs.release_run(r2["id"], r2["fence_token"])
+
+
 # =============================================================================
 # Sweep reconciler — lease expiry with no terminal event
 # =============================================================================

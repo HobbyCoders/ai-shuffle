@@ -454,6 +454,7 @@
 	<AppLayout
 		isAdmin={$isAdmin}
 		onNewSession={handleNewSession}
+		onSettledOpenSession={handleNewSession}
 		onNewSessionForProject={handleNewSessionForProject}
 		onOpenSession={handleOpenSession}
 		onOpenFeature={handleOpenFeature}

@@ -243,6 +243,7 @@ async def generate_commit_message(
     project_id: str,
     body: GenerateCommitMessageRequest,
     worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
     token: str = Depends(require_auth)
 ):
     """
@@ -251,7 +252,7 @@ async def generate_commit_message(
     When worktree_id is provided, generates message based on worktree's diff.
     """
     check_project_access(request, project_id)
-    working_dir = get_working_dir(project_id, worktree_id)
+    working_dir = get_working_dir(project_id, worktree_id, session_id)
     message = await generate_commit_message_for_dir(working_dir, body.include_unstaged)
     return GenerateCommitMessageResponse(message=message)
 
@@ -262,6 +263,7 @@ async def generate_pr_description(
     project_id: str,
     body: GeneratePRDescriptionRequest,
     worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
     token: str = Depends(require_auth)
 ):
     """
@@ -270,7 +272,7 @@ async def generate_pr_description(
     When worktree_id is provided, generates description from worktree's branch.
     """
     check_project_access(request, project_id)
-    working_dir = get_working_dir(project_id, worktree_id)
+    working_dir = get_working_dir(project_id, worktree_id, session_id)
     title, pr_body = await generate_pr_description_for_dir(working_dir, body.base_branch)
     return GeneratePRDescriptionResponse(title=title, body=pr_body)
 

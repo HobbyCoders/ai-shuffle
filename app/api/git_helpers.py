@@ -150,11 +150,19 @@ def get_project_path(project_id: str, allow_missing: bool = False) -> Optional[s
     return str(result) if result is not None else None
 
 
-def get_working_dir(project_id: str, worktree_id: Optional[str] = None) -> str:
+def get_working_dir(
+    project_id: str,
+    worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> str:
     """
     Get the working directory for git operations.
 
-    When worktree_id is provided, returns the worktree's path.
+    Resolution order:
+    1. ``worktree_id`` — a legacy worktrees row's directory.
+    2. ``session_id`` — a v2 branch session's own checkout (sessions.branch +
+       project_v2_id), so chat-header git actions target the branch checkout
+       rather than silently falling back to the base checkout.
     Otherwise returns the main project path.
     """
     if worktree_id:
@@ -165,6 +173,15 @@ def get_working_dir(project_id: str, worktree_id: Optional[str] = None) -> str:
                 detail=f"Worktree not found: {worktree_id}"
             )
         return get_worktree_working_dir(worktree)
+
+    if session_id:
+        from app.core.project_resolver import resolve_existing_cwd
+
+        session = database.get_session(session_id)
+        if session:
+            cwd = resolve_existing_cwd(session)
+            if cwd:
+                return cwd
 
     return get_project_path(project_id)
 

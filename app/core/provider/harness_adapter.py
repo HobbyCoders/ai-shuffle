@@ -334,7 +334,9 @@ class HarnessAdapter(ProviderAdapter):
         # Decide the leg BEFORE building the registry: the native legs need
         # fluid's builtin file/shell tools registered, the delegated leg must not
         # get them (the claude CLI ships its own).
-        kind = _decide_provider_kind(options)
+        # Off the loop: a bound provider id without its shape fields makes this
+        # read the model_providers row synchronously.
+        kind = await asyncio.to_thread(_decide_provider_kind, options)
         self._is_delegated = kind == "delegated"
         self._provider_kind = kind
 
@@ -358,7 +360,9 @@ class HarnessAdapter(ProviderAdapter):
                 # The compiled prompt already carries the merged agents index
                 # (``_compile_prompt_sections`` slots it in), so nothing is
                 # added here — that is what keeps the block un-doubled.
-                delegated_system = self._compile_prompt(system, append_system, options)
+                delegated_system = await asyncio.to_thread(
+                    self._compile_prompt, system, append_system, options
+                )
                 delegated_append = None
             else:
                 # Append mode still owes the model the delegation catalog. The
@@ -367,10 +371,14 @@ class HarnessAdapter(ProviderAdapter):
                 # learns which agents exist — it could not name a target for
                 # the Task tool at all. Same block as the native leg, attached
                 # to whichever part the CLI actually reads.
-                agents_index, _ = _agent_context(options)
+                # discover_agents walks .claude/agents + plugin dirs (rglob)
+                # — disk IO, so it runs in a worker thread.
+                agents_index, _ = await asyncio.to_thread(_agent_context, options)
                 delegated_system, delegated_append = _with_agents_index(
                     system, append_system, agents_index
                 )
+            # shutil.which + the bundled-CLI resolver stat the filesystem.
+            claude_cmd = await asyncio.to_thread(_resolve_claude_cmd)
             self._engine = DelegatedLoop(
                 store=store,
                 model=options.model,
@@ -441,7 +449,7 @@ class HarnessAdapter(ProviderAdapter):
                 # the two legs agree on intent and the CLI stops prompting for
                 # exactly the tools the definition sanctioned.
                 allowed_tools=_tool_allowlist(options),
-                claude_cmd=_resolve_claude_cmd(),
+                claude_cmd=claude_cmd,
             )
         else:
             provider_client, provider_http = await _build_provider_client(kind, options)
@@ -509,7 +517,7 @@ class HarnessAdapter(ProviderAdapter):
             # The delegation catalog (CE6 + the app's own DB agents) — one
             # name+description index for the prompt, plus the matching
             # descriptors for the "Custom agents" usage row.
-            _, declared_agent_descriptors = _agent_context(options)
+            _, declared_agent_descriptors = await asyncio.to_thread(_agent_context, options)
             # Code-mode + the continual harness, mirroring fluid's own
             # config/loader.py wiring. ON by default for every native leg; the
             # skill store and its episodic journal live under the app's data
@@ -556,7 +564,12 @@ class HarnessAdapter(ProviderAdapter):
             # the setting: the build is fail-open, and a prompt that told the
             # model to import tools inside run_python when run_python is not in
             # its schema would be worse than saying nothing.
-            compiled_prompt = self._compile_prompt_sections(
+            # The compiler gathers instruction files, the skills index and the
+            # git-backed environment block (subprocess + rglob) and runs the
+            # agent discovery walk again — all synchronous disk/process IO,
+            # so it runs off the loop.
+            compiled_prompt = await asyncio.to_thread(
+                self._compile_prompt_sections,
                 system, append_system, options, code_mode=codemode is not None,
                 codemode=codemode,
             )
@@ -1739,13 +1752,14 @@ class HarnessAdapter(ProviderAdapter):
                 sections.append(
                     PromptSection(kind="extra", text=CODE_MODE_SECTION)
                 )
-                # ... and the catalog it points at. Separate section so the
-                # usage breakdown prices the tool docs on their own line;
-                # empty (no projection) simply omits it.
-                tools_section = _code_mode_tools_section(codemode)
-                if tools_section:
+                # ... and the catalog it points at. ONE section per tool
+                # (kind "tools", tool_name set) so the usage breakdown prices
+                # each block under System/MCP tools like a JSON schema would
+                # be; empty (no projection) simply omits it.
+                for tool_text, tool_name in _code_mode_tool_sections(codemode):
                     sections.append(
-                        PromptSection(kind="extra", text=tools_section)
+                        PromptSection(kind="tools", text=tool_text,
+                                      tool_name=tool_name)
                     )
             if sections == list(compiled.sections):
                 return compiled
@@ -2337,34 +2351,40 @@ _CODE_MODE_CATALOG_SKIP = frozenset({
 })
 
 
-def _code_mode_tools_section(codemode: Any) -> str:
-    """The ``# Tools`` catalog: every projected tool's signature and full docs.
+def _code_mode_tool_sections(codemode: Any) -> List[Tuple[str, str]]:
+    """Per-tool ``(section text, registry tool name)`` pairs for the catalog.
+
+    One section per tool — not one blob — so fluid's context-usage breakdown
+    can price each block under "System tools"/"MCP tools" by ``tool_name``,
+    exactly where the equivalent JSON schema would sit on the direct-tool path.
+    The FIRST section carries the ``# Tools`` heading; the joined text is
+    byte-identical to the single-section form this used to build.
 
     Ruling of 2026-08-21. A code-mode schema carries four tools, so the model
     never sees the descriptions the JSON-tool path sends — a live run guessed
-    parameter names because nothing in the prompt held the real ones. This
-    section is that missing text: same descriptions, same parameter docs, keyed
-    to the Python call shape the kernel actually exposes.
+    parameter names because nothing in the prompt held the real ones. This is
+    that missing text: same descriptions, same parameter docs, keyed to the
+    Python call shape the kernel actually exposes.
 
     Built from the session's own projection (the snapshot behind ``list_tools``
     and the VFS stubs), so the catalog and the importable modules can never
     disagree. Best-effort: a codemode object without a projection (a test
-    double, a future refactor) returns "" and the section is simply skipped
+    double, a future refactor) returns [] and the section is simply skipped
     rather than failing the prompt.
     """
     try:
         from fluid.codemode.projection import _annotation, _param_doc, _py_ident
     except Exception:  # noqa: BLE001 — no projection helpers, no section
-        return ""
+        return []
     build = getattr(codemode, "_projection", None)
     if not callable(build):
-        return ""
+        return []
     try:
         projection = build()
         leaves = list(projection.leaves())
     except Exception:  # noqa: BLE001 — a broken registry must not kill the turn
         logger.warning("[HarnessAdapter] code-mode tool catalog FAILED", exc_info=True)
-        return ""
+        return []
 
     blocks: list[str] = []
     for leaf in leaves:
@@ -2410,11 +2430,14 @@ def _code_mode_tools_section(codemode: Any) -> str:
                     props.get(jname) or {},
                     required=jname in required,
                 ))
-        blocks.append("\n".join(lines))
+        blocks.append(("\n".join(lines), str(getattr(spec, "name", "") or leaf)))
 
     if not blocks:
-        return ""
-    return "# Tools\n" + "\n\n".join(blocks)
+        return []
+    # The heading rides the first tool's section, so the joined text is
+    # byte-identical to the old single-blob catalog.
+    blocks[0] = ("# Tools\n" + blocks[0][0], blocks[0][1])
+    return blocks
 
 
 

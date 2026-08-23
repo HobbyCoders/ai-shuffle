@@ -54,6 +54,27 @@ logger = logging.getLogger(__name__)
 RUN_LEASE_TTL_SECONDS = 60
 RUN_LEASE_RENEW_SECONDS = 20
 
+
+def _notify_run_change(session_id: str, *, force: bool = False) -> None:
+    """Run-lifecycle hook for the board spinner (streaming_status re-check).
+
+    The v2 claim/release boundary is INVISIBLE to streaming_status's own
+    triggers (the event gateway only ticks on event appends, and the terminal
+    append lands before release), so without an explicit notify the spinner-off
+    waits for the 15s sweep and a back-to-back turn's ON frame is suppressed as
+    "unchanged". Lazy import + never raises: a status bug must never break the
+    turn.
+    """
+    try:
+        from app.core import streaming_status
+
+        streaming_status.notify(session_id, force=force)
+    except Exception:
+        logger.debug(
+            "SessionRuntime: streaming_status notify failed for %s",
+            session_id, exc_info=True,
+        )
+
 # How long a runtime-driven interrupt waits for the turn to settle before it
 # escalates (mirrors chat_ws_handler._INTERRUPT_DRAIN_TIMEOUT_SECONDS). Tests
 # shrink it.
@@ -432,6 +453,12 @@ class SessionRuntime:
             return None
         run_id = run["id"]
         fence_token = run["fence_token"]
+        # Run went active — force the board-spinner ON frame NOW. The first
+        # event append would eventually tick the gateway recheck, but by then
+        # _last_broadcast may still hold the PREVIOUS turn's stale busy entry,
+        # which suppresses the ON frame the frontend already consumed via its
+        # done-frame cleanup.
+        _notify_run_change(sid, force=True)
 
         renew_task = asyncio.create_task(self._renew_loop(run_id, runner_id, fence_token))
         renew_task.add_done_callback(lambda t: t.cancelled() or t.exception())
@@ -569,6 +596,10 @@ class SessionRuntime:
                 command_id=self.turn.get("command_id"),
                 runner_id=runner_id,
             )
+            # A fence violation means another runner now owns this run: the
+            # recorder goes silent and this hook stops the pump we are still
+            # driving (same cancel path as interrupt escalation).
+            recorder.on_superseded = self._on_recorder_superseded
 
             # 6/7. Pump under the reader token, then ALWAYS finalize. A pump
             #    crash is absorbed (``_terminal`` stays ``None`` → finalize
@@ -644,6 +675,9 @@ class SessionRuntime:
                     "SessionRuntime: release_run failed for %s run %s",
                     sid, run_id, exc_info=True,
                 )
+            # Lease left active — re-check + broadcast the OFF diff now rather
+            # than waiting for the sweep loop (mirrors TurnRecorder.close).
+            _notify_run_change(sid)
             renew_task.cancel()
             try:
                 await renew_task
@@ -957,6 +991,37 @@ class SessionRuntime:
         self._drain_after_cancel = True
         self._cancel_pump()
         return "draining"
+
+    def _on_recorder_superseded(self) -> None:
+        """The run lease moved to another runner mid-turn (fence violation).
+
+        Runs once, synchronously on the loop, from the recorder's first
+        rejected append. Stops the pump through the escalation cancel path
+        (finalize then settles ``aborted`` with a distinct stop reason) and
+        asks the SDK to interrupt the turn so the pooled client stops
+        generating for a run nobody is recording.
+        """
+        sid = self.session_id
+        logger.warning(
+            "SessionRuntime: run superseded for %s turn %s (fence violation) — "
+            "stopping pump",
+            sid, self.turn_id,
+        )
+        if self._abort_reason is None:
+            self._abort_reason = "fence_superseded"
+        self._cancel_pump()
+        try:
+            from app.core.query_session_lifecycle import interrupt_session
+
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(interrupt_session(sid))
+            task.add_done_callback(
+                lambda t: t.exception() if not t.cancelled() else None
+            )
+        except Exception:  # noqa: BLE001 — best-effort
+            logger.debug(
+                "SessionRuntime: interrupt after supersede failed for %s", sid, exc_info=True
+            )
 
     def _cancel_pump(self) -> None:
         """Cancel the in-flight pump task, if any (escalation teardown)."""

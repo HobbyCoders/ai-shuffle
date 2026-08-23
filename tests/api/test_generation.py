@@ -252,6 +252,43 @@ class TestGenerateWithClaude:
         assert adapter.disconnect_calls == 1
 
     @pytest.mark.asyncio
+    async def test_generate_with_claude_writes_usage_row(self):
+        """A successful turn writes one usage_log row (session/profile NULL).
+
+        Regression: the accounting block referenced an unbound ``profile``
+        name, so every generation raised NameError inside the best-effort
+        try and no usage was ever recorded.
+        """
+        from app.api.generation import generate_with_claude
+        from app.core.provider.events import ResultMessage
+
+        result = ResultMessage(
+            subtype="success",
+            is_error=False,
+            usage={"input_tokens": 12, "output_tokens": 7},
+            total_cost_usd=0.0042,
+            duration_ms=321,
+        )
+        adapter = FakeAdapter([assistant_text("fix/thing"), result])
+        log_usage = MagicMock()
+        with patch(
+                    "app.core.generation_options.text_generation_config",
+                    return_value={"model": "sonnet", "provider": None, "effort": None},
+                ),                 patch("app.core.generation_options.build_generation_options", return_value=MagicMock()),                 patch("app.api.generation.database.log_usage", log_usage),                 patch_adapter(adapter):
+            text = await generate_with_claude("Test prompt")
+
+        assert text == "fix/thing"
+        log_usage.assert_called_once()
+        kwargs = log_usage.call_args.kwargs
+        assert kwargs["session_id"] is None
+        assert kwargs["profile_id"] is None
+        assert kwargs["model"] == "sonnet"
+        assert kwargs["tokens_in"] == 12
+        assert kwargs["tokens_out"] == 7
+        assert kwargs["cost_usd"] == 0.0042
+        assert kwargs["duration_ms"] == 321
+
+    @pytest.mark.asyncio
     async def test_generate_with_claude_uses_app_local_event_classes(self):
         """Regression guard: the loop must match app.core.provider.events.
 

@@ -55,6 +55,8 @@
 	interface Props {
 		isAdmin?: boolean;
 		onNewSession: () => void;
+		/** Settled the session currently open in the main panel — same as New Session. */
+		onSettledOpenSession: () => void;
 		onOpenSession: (sessionId: string) => void;
 		onOpenFeature: (type: ViewType) => void;
 		onOpenSpotlight?: () => void;
@@ -65,6 +67,7 @@
 	let {
 		isAdmin = false,
 		onNewSession,
+		onSettledOpenSession,
 		onOpenSession,
 		onOpenFeature,
 		onOpenSpotlight,
@@ -385,6 +388,7 @@
 							active={row.session.id === activeId}
 							{now}
 							onOpen={onOpenSession}
+							onSettled={onSettledOpenSession}
 						/>
 					{/each}
 				</div>

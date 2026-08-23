@@ -175,7 +175,10 @@ async def _run_background_query_impl(
     if session_row:
         await ensure_pending_checkout(session_row)
     try:
-        options, agents_dict = build_session_options(
+        # Off the event loop — the build can run git fetch/worktree add and
+        # several DB reads synchronously (see query_engine.execute_query).
+        options, agents_dict = await asyncio.to_thread(
+            build_session_options,
             profile=profile,
             project=project,
             overrides=overrides,
@@ -286,7 +289,8 @@ async def _run_background_query_impl(
     if not reusing_client:
         # Admission backpressure: refuse a NEW session if the box is at its
         # process/RAM/pool ceiling, rather than killing in-flight work later.
-        refusal = pool.admission_check()
+        # psutil process-tree walk — off the loop.
+        refusal = await asyncio.to_thread(pool.admission_check)
         if refusal is not None:
             logger.warning(f"[Admission] Refusing new background session {session_id}: {refusal}")
             raise RuntimeError(f"Server is at capacity — {refusal}. Please retry shortly.")
