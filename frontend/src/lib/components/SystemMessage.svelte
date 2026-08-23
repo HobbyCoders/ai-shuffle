@@ -652,7 +652,11 @@
 					// back, via the Retry button on the row.
 					let spent = `Empty response from the provider ${maxAttempts} times in a row. Fix the issue, then retry from here.`;
 					if (retryModel) spent += ` · ${retryModel}`;
-					if (data.resumed) spent += ' · resumed';
+					// The card only leaves the failure state two ways: a resume
+					// that actually got an answer back, or the user typing
+					// something else instead.
+					if (data.recovered) spent += ' · recovered';
+					else if (data.superseded) spent += ' · superseded';
 					return {
 						title: 'Retry failed',
 						content: spent,
@@ -774,8 +778,21 @@
 		message.systemSubtype === 'provider_retry' &&
 			!!(message.systemData as Record<string, unknown> | undefined)?.exhausted
 	);
-	const retryResumed = $derived(
-		!!(message.systemData as Record<string, unknown> | undefined)?.resumed
+	// A resume launched from this card is in flight. The provider can stay
+	// silent for a minute or two, so the row keeps spinning and the button
+	// says "Retrying…" instead of vanishing.
+	const retryResuming = $derived(
+		retryExhausted && !!(message.systemData as Record<string, unknown> | undefined)?.resuming
+	);
+	// A reply actually came back — the failure is history, so the row takes the
+	// green check and the button is gone for good.
+	const retryRecovered = $derived(
+		retryExhausted && !!(message.systemData as Record<string, unknown> | undefined)?.recovered
+	);
+	// The user typed something else instead of retrying. The card retires
+	// without claiming the new turn's answer as its own.
+	const retrySuperseded = $derived(
+		retryExhausted && !!(message.systemData as Record<string, unknown> | undefined)?.superseded
 	);
 	// The reducer stamps `settled` on any terminal turn event, so a card that
 	// counted a few attempts and then got its answer stops spinning and takes
@@ -787,20 +804,26 @@
 	const isProviderRetry = $derived(
 		message.systemSubtype === 'provider_retry' && !retryExhausted && !retrySettled
 	);
-	// The button retires the moment any new turn starts (the reducer stamps
-	// `resumed`), so a card can never launch two resumes.
-	const canRetry = $derived(retryExhausted && !retryResumed);
+	// The way back stays on offer until the session genuinely recovers, or the
+	// user moves on. A resume that fails again re-arms it.
+	const canRetry = $derived(retryExhausted && !retryRecovered && !retrySuperseded);
 
+	// Covers the gap between the click and turn.started arriving; from then on
+	// the reducer's `resuming` drives the disabled state.
 	let retrying = $state(false);
+	const retryInFlight = $derived(retrying || retryResuming);
+	$effect(() => {
+		if (retryResuming) retrying = false;
+	});
 
 	async function handleRetry() {
 		const sessionId = $activeSession.sessionId;
-		if (!sessionId || retrying) return;
+		if (!sessionId || retryInFlight) return;
 		retrying = true;
 		try {
 			await resumeSession(sessionId);
-			// Leave the button disabled: turn.started marks the card resumed and
-			// the row re-renders without it.
+			// Leave the button disabled: turn.started stamps `resuming` and the
+			// row keeps showing the work until a reply lands.
 		} catch (e) {
 			retrying = false;
 			notify.error(
@@ -1003,12 +1026,14 @@
 		<div class="w-full sys-flat">
 			<div class="compact-summary sys-row w-full flex items-center gap-2 min-w-0">
 				<!-- Status icon matching tool message pattern -->
-				{#if isProviderRetry}
-					<!-- Still in flight: spinner, not a settled check/cross -->
+				{#if isProviderRetry || retryResuming}
+					<!-- Still in flight: spinner, not a settled check/cross. A
+					     spent card whose resume is running spins again so the
+					     wait for the provider is visible. -->
 					<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
 					</svg>
-				{:else if formatted.badgeColor === 'green'}
+				{:else if retryRecovered || formatted.badgeColor === 'green'}
 					<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
 					</svg>
@@ -1041,18 +1066,19 @@
 				{/if}
 				<!--
 					Retry — resume the loop from the same head node, no new
-					message. Only on a spent card that has not already been
-					resumed; a new turn of any kind retires it.
+					message. It stays on the card, disabled while a resume runs,
+					until the session actually gets a reply back or the user
+					sends something else.
 				-->
 				{#if canRetry}
 					<button
 						type="button"
 						class="retry-chip ml-auto flex-shrink-0"
 						data-testid="provider-retry-button"
-						disabled={retrying}
+						disabled={retryInFlight}
 						onclick={handleRetry}
 					>
-						{retrying ? 'Retrying…' : 'Retry'}
+						{retryInFlight ? 'Retrying…' : 'Retry'}
 					</button>
 				{/if}
 			</div>

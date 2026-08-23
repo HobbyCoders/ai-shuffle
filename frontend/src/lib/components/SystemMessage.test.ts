@@ -225,13 +225,39 @@ describe('SystemMessage — provider_retry exhausted', () => {
 		expect(container.querySelector('[data-testid="provider-retry-button"]')).not.toBeNull();
 	});
 
-	it('drops the button once the card has been resumed', () => {
+	it('keeps the button — disabled and spinning — while a resume runs', () => {
 		const { container } = render(SystemMessage, {
-			props: { message: exhausted({ resumed: true }) }
+			props: { message: exhausted({ resuming: true }) }
+		});
+
+		const button = container.querySelector(
+			'[data-testid="provider-retry-button"]'
+		) as HTMLButtonElement;
+		expect(button).not.toBeNull();
+		expect(button.disabled).toBe(true);
+		expect(button.textContent?.trim()).toBe('Retrying…');
+		// The wait is visible: the row spins instead of showing the settled cross.
+		expect(container.querySelector('.animate-spin')).not.toBeNull();
+	});
+
+	it('drops the button once the session actually recovers', () => {
+		const { container } = render(SystemMessage, {
+			props: { message: exhausted({ recovered: true }) }
 		});
 
 		expect(screen.getByText('Retry failed')).toBeTruthy();
-		expect(container.textContent).toContain('resumed');
+		expect(container.textContent).toContain('· recovered');
+		expect(container.querySelector('.text-green-500')).not.toBeNull();
+		expect(container.querySelector('[data-testid="provider-retry-button"]')).toBeNull();
+	});
+
+	it('drops the button once the user has moved on', () => {
+		const { container } = render(SystemMessage, {
+			props: { message: exhausted({ superseded: true }) }
+		});
+
+		expect(container.textContent).toContain('· superseded');
+		expect(container.querySelector('.animate-spin')).toBeNull();
 		expect(container.querySelector('[data-testid="provider-retry-button"]')).toBeNull();
 	});
 

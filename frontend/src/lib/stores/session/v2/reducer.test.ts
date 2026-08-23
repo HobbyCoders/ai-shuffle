@@ -1577,20 +1577,85 @@ describe('system + unknown events', () => {
 		expect(errors[0].content).toBe('stream died');
 	});
 
-	it('a new turn retires the Retry button on an exhausted card', () => {
+	// The exhausted card's Retry button survives until the session actually
+	// answers. A resume can sit silent for a minute or two and then fail again;
+	// retiring the button on turn.started left the user with no way back that
+	// did not cost a fresh prompt.
+	const spentCard = [
+		ev('turn.started'),
+		ev('system.note', {
+			id: 'pr1',
+			subtype: 'provider_retry',
+			data: { attempt: 10, max_attempts: 10 },
+		}),
+		ev('turn.aborted', { reason: 'error', message: 'giving up' }),
+	];
+
+	it('a resume turn marks the exhausted card in flight, not recovered', () => {
+		const s = fold([...spentCard, ev('turn.started')]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries).toHaveLength(1);
+		expect(retries[0].systemData).toMatchObject({ exhausted: true, resuming: true });
+		expect(retries[0].systemData).not.toHaveProperty('recovered');
+	});
+
+	it('a real reply on the resume turn recovers the card', () => {
 		const s = fold([
+			...spentCard,
+			ev('turn.started'),
+			ev('assistant.text_delta', { id: 'd1', text: 'hello' }),
+		]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries[0].systemData).toMatchObject({
+			exhausted: true,
+			recovered: true,
+			resuming: false,
+		});
+	});
+
+	it('a resume that dies re-arms the Retry button', () => {
+		const s = fold([...spentCard, ev('turn.started'), ev('turn.aborted', { reason: 'interrupt' })]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries).toHaveLength(1);
+		expect(retries[0].systemData).toMatchObject({ exhausted: true, resuming: false });
+		// Still the way back: neither outcome has claimed the card.
+		expect(retries[0].systemData).not.toHaveProperty('recovered');
+		expect(retries[0].systemData).not.toHaveProperty('superseded');
+	});
+
+	it('a resume that empties out again hands Retry to the new card', () => {
+		const s = fold([
+			...spentCard,
 			ev('turn.started'),
 			ev('system.note', {
-				id: 'pr1',
+				id: 'pr2',
 				subtype: 'provider_retry',
 				data: { attempt: 10, max_attempts: 10 },
 			}),
-			ev('turn.aborted', { reason: 'error', message: 'giving up' }),
-			ev('turn.started'),
+			ev('turn.aborted', { reason: 'error', message: 'giving up again' }),
 		]);
 		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
-		expect(retries).toHaveLength(1);
-		expect(retries[0].systemData).toMatchObject({ exhausted: true, resumed: true });
+		expect(retries.map((m) => m.id)).toEqual(['pr1', 'pr2']);
+		expect(retries[0].systemData).toMatchObject({ exhausted: true, superseded: true });
+		expect(retries[1].systemData).toMatchObject({ exhausted: true });
+		expect(retries[1].systemData).not.toHaveProperty('resuming');
+	});
+
+	it('a typed user message supersedes the exhausted card', () => {
+		const s = fold([...spentCard, ev('message.user', { content: 'never mind, do this' })]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries[0].systemData).toMatchObject({ exhausted: true, superseded: true });
+		expect(retries[0].systemData).not.toHaveProperty('recovered');
+	});
+
+	it('the recovery sequence folds identically on replay', () => {
+		const log = [
+			...spentCard,
+			ev('turn.started'),
+			ev('assistant.text_delta', { id: 'd1', text: 'hello' }),
+			ev('turn.completed', {}),
+		];
+		expect(fold(log)).toEqual(fold(log));
 	});
 
 	it('a retry note after an exhausted card appends a fresh card', () => {
@@ -1614,7 +1679,7 @@ describe('system + unknown events', () => {
 		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
 		expect(retries).toHaveLength(2);
 		expect(retries.map((m) => m.id)).toEqual(['pr1', 'pr2']);
-		expect(retries[0].systemData).toMatchObject({ exhausted: true, resumed: true });
+		expect(retries[0].systemData).toMatchObject({ exhausted: true, resuming: true });
 		expect(retries[1].systemData).toMatchObject({ attempt: 1 });
 	});
 

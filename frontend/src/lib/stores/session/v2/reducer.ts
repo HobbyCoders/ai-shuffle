@@ -293,6 +293,72 @@ function settleRetryCards(messages: ChatMessage[]): ChatMessage[] {
 	return touched ? out : messages;
 }
 
+/** systemData of a `provider_retry` card, or undefined for any other message. */
+function retryCardData(m: ChatMessage): Record<string, unknown> | undefined {
+	if (m.role !== 'system' || m.systemSubtype !== 'provider_retry') return undefined;
+	return m.systemData as Record<string, unknown> | undefined;
+}
+
+/**
+ * The resume launched from an exhausted card produced a real reply.
+ *
+ * The provider can sit silent for a minute or two before the first token, so
+ * `resuming` alone never proves anything came back. Recovery is the first sign
+ * of an actual answer — text, thinking, a tool call, or the turn finishing —
+ * and only then does the card give up its Retry button for good.
+ *
+ * Returns the SAME array when no card is resuming, so the hot delta paths pay
+ * one `some()` and a replay folding the same log twice lands on equal state.
+ */
+function markRetryRecovered(messages: ChatMessage[]): ChatMessage[] {
+	if (!messages.some((m) => retryCardData(m)?.resuming)) return messages;
+	return messages.map((m) => {
+		const d = retryCardData(m);
+		if (!d?.resuming) return m;
+		return { ...m, systemData: { ...d, resuming: false, recovered: true } };
+	});
+}
+
+/** markRetryRecovered lifted to the state, keeping identity when nothing moved. */
+function withRetryRecovered(state: V2SessionState): V2SessionState {
+	const messages = markRetryRecovered(state.messages);
+	return messages === state.messages ? state : { ...state, messages };
+}
+
+/**
+ * A resume turn ended without a reply — re-arm the Retry button.
+ *
+ * Every terminal abort lands here (interrupt, error, anything else): the card
+ * stops reading as in-flight and offers the way back again, because nothing
+ * else will. Cards that already recovered are untouched — they hold no
+ * `resuming` flag by then.
+ */
+function clearRetryResuming(messages: ChatMessage[]): ChatMessage[] {
+	if (!messages.some((m) => retryCardData(m)?.resuming)) return messages;
+	return messages.map((m) => {
+		const d = retryCardData(m);
+		if (!d?.resuming) return m;
+		return { ...m, systemData: { ...d, resuming: false } };
+	});
+}
+
+/**
+ * The user typed something instead of retrying — retire the spent cards.
+ *
+ * A reply to a NEW prompt is not this card's recovery, so the card must not
+ * claim it. It reads as superseded: no button, no green check.
+ */
+function supersedeRetryCards(messages: ChatMessage[]): ChatMessage[] {
+	const stale = (d: Record<string, unknown> | undefined) =>
+		!!d?.exhausted && !d.recovered && !d.superseded;
+	if (!messages.some((m) => stale(retryCardData(m)))) return messages;
+	return messages.map((m) => {
+		const d = retryCardData(m);
+		if (!stale(d)) return m;
+		return { ...m, systemData: { ...d, superseded: true, resuming: false } };
+	});
+}
+
 function str(v: unknown): string {
 	return typeof v === 'string' ? v : '';
 }
@@ -562,24 +628,19 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// their selection. Replay order preserves correctness: a backfill
 			// replays turn.started then that turn's model_info.
 			//
-			// Any exhausted retry card has been acted on the moment a new turn
-			// starts — whether the user pressed Retry or just typed something
-			// else — so its Retry button retires. `resumed` is sticky, and a
-			// from_seq=0 replay reaches the same state.
+			// A new turn on top of an exhausted retry card is that card's resume
+			// in flight: the button goes quiet ("Retrying…") but does NOT retire.
+			// It only retires once a reply actually lands (markRetryRecovered) or
+			// the user moves on (supersedeRetryCards) — the provider can take a
+			// minute or two to answer, and a resume that fails again must leave
+			// the way back on screen. Pure state, so a from_seq=0 replay agrees.
+			const arming = (d: Record<string, unknown> | undefined) =>
+				!!d?.exhausted && !d.recovered && !d.superseded && !d.resuming;
 			let messages = state.messages;
-			if (
-				messages.some(
-					(m) =>
-						m.systemSubtype === 'provider_retry' &&
-						(m.systemData as Record<string, unknown> | undefined)?.exhausted &&
-						!(m.systemData as Record<string, unknown> | undefined)?.resumed
-				)
-			) {
+			if (messages.some((m) => arming(retryCardData(m)))) {
 				messages = messages.map((m) => {
-					const d = m.systemData as Record<string, unknown> | undefined;
-					return m.systemSubtype === 'provider_retry' && d?.exhausted && !d.resumed
-						? { ...m, systemData: { ...d, resumed: true } }
-						: m;
+					const d = retryCardData(m);
+					return arming(d) ? { ...m, systemData: { ...d, resuming: true } } : m;
 				});
 			}
 			return {
@@ -642,6 +703,8 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 		}
 
 		case 'turn.completed': {
+			// A resume that reached the end of a turn got its answer.
+			state = withRetryRecovered(state);
 			// turn.completed fires unconditionally when the pump drains — background
 			// work may still remain, in which case the park gate emits turn.parked
 			// right after. Speculatively settle any still-'running' subagent card /
@@ -784,11 +847,23 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 						typeof retryData.max_attempts === 'number' &&
 						retryData.attempt >= retryData.max_attempts;
 					if (exhausted) {
-						const messages = next.messages.slice();
-						messages[messages.length - 1] = {
-							...last,
-							systemData: { ...retryData, exhausted: true, error: message },
+						// The freshly spent card owns Retry from here, so it starts
+						// clean: whatever resume brought it about is over. Older
+						// exhausted cards step aside rather than offering a second,
+						// competing button for the same head.
+						const folded: Record<string, unknown> = {
+							...retryData,
+							exhausted: true,
+							error: message,
 						};
+						delete folded.resuming;
+						const lastIndex = next.messages.length - 1;
+						const messages = next.messages.map((m, i) => {
+							if (i === lastIndex) return { ...last, systemData: folded };
+							const d = retryCardData(m);
+							if (!d?.exhausted || d.recovered || d.superseded) return m;
+							return { ...m, systemData: { ...d, superseded: true, resuming: false } };
+						});
 						return {
 							...next,
 							messages,
@@ -819,10 +894,11 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// Every abort that did NOT fold into an exhausted card lands here —
 			// an interrupt, or an error that arrived without a retry card at the
 			// cap. Any retry note still counting is over either way, so settle it
-			// rather than leaving a spinner behind. See settleRetryCards.
+			// rather than leaving a spinner behind. See settleRetryCards. A resume
+			// that died here answered nothing, so its card re-arms Retry.
 			return {
 				...next,
-				messages: settleRetryCards(next.messages),
+				messages: clearRetryResuming(settleRetryCards(next.messages)),
 				isStreaming: false,
 				parked: false,
 				liveTurnId: null,
@@ -881,6 +957,12 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				// substring present but no complete block parsed → safe fallback.
 			}
 
+			// A real typed message (wake-turn notifications returned above): the
+			// user chose to move on rather than retry, so any spent retry card
+			// retires. Whatever this new prompt gets back is not its recovery.
+			const superseded = supersedeRetryCards(state.messages);
+			if (superseded !== state.messages) state = { ...state, messages: superseded };
+
 			const commandId = typeof event.command_id === 'string' ? event.command_id : null;
 			// 1. Reconcile against an optimistic message with a matching command_id.
 			let idx = -1;
@@ -938,6 +1020,8 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 
 		// ── Assistant text / thinking deltas ────────────────────────────
 		case 'assistant.text_delta': {
+			// First real token back — a resume that was in flight has recovered.
+			state = withRetryRecovered(state);
 			const text = str(event.text);
 			let next = closeOpenThinking(state);
 			// Quiet-pump suppression: while watching the live pump turn's reply,
@@ -1031,6 +1115,8 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 		}
 
 		case 'assistant.thinking_delta': {
+			// Thinking counts too: the provider is answering.
+			state = withRetryRecovered(state);
 			const text = str(event.text);
 			let next = closeOpenText(state);
 			if (next.openThinkingId) {
@@ -1059,6 +1145,8 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 		case 'tool.use': {
 			const toolUseId = str(event.tool_use_id);
 			if (!toolUseId) return state;
+			// The model acted, so a resume in flight has its answer.
+			state = withRetryRecovered(state);
 			// A tool use means the model is acting → stop watching for an "ok" ack.
 			let next = { ...closeOpen(state), pendingPumpAck: null, pumpAckBuffer: '' };
 			const input = obj(event.input);
