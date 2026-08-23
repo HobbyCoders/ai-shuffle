@@ -141,6 +141,25 @@ class ToolResult(Event):
 
 
 @dataclass(frozen=True, kw_only=True)
+class SteerDelivered(Event):
+    """Pending mid-turn steers were appended to a tool result the model will
+    read on its next call — the delivery receipt for the ``Steer`` op.
+
+    Emitted once per delivery batch, immediately after the ``ToolResult`` that
+    carries the markers, and only when the text is irrevocably attached.
+    ``steers`` holds one record per delivered steer in submission order:
+    ``{"id": <the Steer's id, or None>, "text": <the user's text>}``.
+
+    A host with a durable queue retires an entry the moment its id shows up
+    here. An id that never arrives was never seen by the model: the engine
+    drops undelivered steers at turn end (with a warning naming the ids), and
+    the host should re-send that text as an ordinary turn.
+    """
+
+    steers: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True, kw_only=True)
 class PermissionRequest(Event):
     request_id: str
     tool_use_id: str
@@ -301,7 +320,8 @@ _EVENT_TYPES: dict[str, type[Event]] = {
         TurnStarted, TurnComplete, SessionParked, SessionWoken,
         Interrupted, ErrorEvent,
         BlockStart, BlockStop, TextDelta, ThinkingDelta,
-        ToolUse, ToolResult, PermissionRequest, QuestionRequest, HandoffCreated,
+        ToolUse, ToolResult, SteerDelivered,
+        PermissionRequest, QuestionRequest, HandoffCreated,
         ContextCompaction, Usage, RateLimit, ProviderRetry, SubagentEvent, HookEvent,
         DelegatedSurface,
     )

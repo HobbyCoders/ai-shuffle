@@ -68,6 +68,7 @@ from fluid.events.model import (
     PermissionRequest,
     ProviderRetry,
     QuestionRequest,
+    SteerDelivered,
     TextDelta,
     ThinkingDelta,
     ToolResult,
@@ -138,6 +139,18 @@ _CONTINUE_NUDGE = (
     "exactly where you stopped without repeating what you already said. "
     "Use tools to act rather than narrating long plans."
 )
+
+
+def _steer_parts(pending: Steer | str) -> tuple[str | None, str]:
+    """Split a queued steer into ``(id, text)``.
+
+    The queue normally holds Steer ops, but a bare string is accepted so
+    callers that pushed text straight onto ``_pending_steers`` keep working;
+    such a steer simply has no correlation id.
+    """
+    if isinstance(pending, str):
+        return (None, pending)
+    return (pending.id, pending.text)
 
 
 @dataclass
@@ -440,7 +453,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._pending_permissions: dict[str, asyncio.Future] = {}
         self._pending_questions: dict[str, asyncio.Future] = {}
         # Mid-turn steers awaiting the next tool result (see the Steer op).
-        self._pending_steers: list[str] = []
+        self._pending_steers: list[Steer | str] = []
         # Nested-instruction injection: instruction-file paths already injected
         # this session (each nested AGENTS-family file enters context once).
         self._nested_injected: set[str] = set()
@@ -567,10 +580,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         elif isinstance(op, Steer):
             # Mid-turn user text: queued here, appended to the NEXT tool
             # result inside the steering marker (fluid.context.steering) —
-            # the one role-alternation-safe slot. Dropped with a warning if
-            # the turn ends first (the user can just send a message then).
+            # the one role-alternation-safe slot. Delivery is receipted with a
+            # SteerDelivered event; if the turn ends first the steer is dropped
+            # with a warning (the user can just send a message then).
             if self._turn_task is not None and not self._turn_task.done():
-                self._pending_steers.append(op.text)
+                self._pending_steers.append(op)
             else:
                 raise RuntimeError(
                     "no turn is running — send a normal message instead of a steer"
@@ -1297,8 +1311,11 @@ class NativeLoop(BackgroundLifecycleMixin):
             # No further tool result will carry them; the user should send a
             # normal message. Dropping silently would lose user input, so log.
             log.warning(
-                "dropping %d undelivered mid-turn steer(s) at turn end",
+                "dropping %d undelivered mid-turn steer(s) at turn end (ids: %s)",
                 len(self._pending_steers),
+                ", ".join(
+                    _steer_parts(pending)[0] or "-" for pending in self._pending_steers
+                ),
             )
             self._pending_steers.clear()
         # Cost rides its own TurnComplete field; keep the usage dict token-shaped.
@@ -1971,16 +1988,26 @@ class NativeLoop(BackgroundLifecycleMixin):
             self._journal.record_tool(
                 name, input or {}, outcome.text, outcome.is_error
             )
+        delivered: list[tuple[str | None, str]] = []
         if self._pending_steers:
             from fluid.context.steering import format_steer
 
-            steers = "".join(format_steer(s) for s in self._pending_steers)
+            delivered = [_steer_parts(pending) for pending in self._pending_steers]
             self._pending_steers.clear()
+            steers = "".join(format_steer(text) for _, text in delivered)
             outcome = replace(outcome, text=outcome.text + steers)
         await self._emit(ToolResult(
             session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id, name=name,
             output=outcome.text, is_error=outcome.is_error, ui=outcome.ui,
         ))
+        if delivered:
+            # Receipt, ordered after the result that carries the markers: the
+            # steers are now part of immutable history, so a host can retire
+            # its durable copy of every id listed here.
+            await self._emit(SteerDelivered(
+                session_id=sid, turn_id=turn_id,
+                steers=[{"id": steer_id, "text": text} for steer_id, text in delivered],
+            ))
         return outcome
 
     @staticmethod

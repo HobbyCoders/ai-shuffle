@@ -6,7 +6,8 @@ import httpx
 import pytest
 
 from fluid.context.steering import STEER_CLOSE, STEER_OPEN, format_steer
-from fluid.events.ops import Steer
+from fluid.events.ops import Steer, UserTurn
+from fluid.providers.base import ProviderCaps, StreamChunk
 from fluid.tools.builtins.web import (
     check_url,
     fetch_handler,
@@ -181,6 +182,141 @@ class _NullProvider:
     async def stream(self, request):  # pragma: no cover
         if False:
             yield None
+
+
+# ─── steer delivery receipts ─────────────────────────────────────────────────
+
+
+def _text_script(text: str) -> list[StreamChunk]:
+    return [
+        StreamChunk("message_start", {"usage": {"input_tokens": 5}}),
+        StreamChunk("block_start", {"index": 0, "block_type": "text"}),
+        StreamChunk("text_delta", {"index": 0, "text": text}),
+        StreamChunk("block_stop", {"index": 0}),
+        StreamChunk("usage", {"usage": {"output_tokens": 2}, "stop_reason": "end_turn"}),
+        StreamChunk("message_stop", {}),
+    ]
+
+
+def _tool_script(tuid: str, name: str) -> list[StreamChunk]:
+    return [
+        StreamChunk("message_start", {"usage": {"input_tokens": 5}}),
+        StreamChunk("block_start", {
+            "index": 0, "block_type": "tool_use",
+            "tool_name": name, "tool_use_id": tuid,
+        }),
+        StreamChunk("tool_args_delta", {"index": 0, "partial_json": "{}"}),
+        StreamChunk("block_stop", {"index": 0}),
+        StreamChunk("usage", {"usage": {"output_tokens": 2}, "stop_reason": "tool_use"}),
+        StreamChunk("message_stop", {}),
+    ]
+
+
+class _ScriptedProvider:
+    name = "anthropic"
+    caps = ProviderCaps()
+
+    def __init__(self, scripts: list[list[StreamChunk]]) -> None:
+        self.scripts = scripts
+        self.calls = 0
+
+    async def stream(self, request):
+        script = self.scripts[min(self.calls, len(self.scripts) - 1)]
+        self.calls += 1
+        for chunk in script:
+            yield chunk
+
+
+async def test_steer_with_id_is_receipted_after_the_tool_result() -> None:
+    from fluid.engine.native import NativeLoop
+    from fluid.events.model import SteerDelivered, ToolResult
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.store.base import MemoryStore
+    from fluid.tools.inproc import create_inproc_server, tool
+    from fluid.tools.registry import ToolRegistry
+
+    holder: dict = {}
+
+    @tool("interject", "Steer from inside the tool", {"type": "object"})
+    async def interject(args: dict) -> dict:
+        # The turn is live here, which is the only time a Steer is accepted.
+        await holder["loop"].submit(Steer(text="use the staging config", id="q1"))
+        return {"content": [{"type": "text", "text": "tool ran"}]}
+
+    registry = ToolRegistry()
+    registry.register_inproc(create_inproc_server("sv", [interject]))
+    loop = NativeLoop(
+        provider=_ScriptedProvider([
+            _tool_script("t1", "mcp__sv__interject"),
+            _text_script("switched"),
+        ]),
+        store=MemoryStore(), model="m", registry=registry,
+        permissions=PermissionEngine("never_ask"),
+    )
+    holder["loop"] = loop
+    await loop.submit(UserTurn(content="go"))
+    await loop.wait_turn()
+
+    events = loop.bus.log(loop.session_id)
+    result = next(e for e in events if isinstance(e, ToolResult))
+    receipt = next(e for e in events if isinstance(e, SteerDelivered))
+    assert receipt.seq > result.seq  # receipt rides behind the result it rode on
+    assert receipt.steers == [{"id": "q1", "text": "use the staging config"}]
+    # The model really sees it: the marker is inside the tool result text.
+    assert STEER_OPEN in result.output and "use the staging config" in result.output
+
+
+async def test_two_steers_are_receipted_together_in_submission_order(tmp_path) -> None:
+    from fluid.engine.native import NativeLoop
+    from fluid.events.model import SteerDelivered, ToolResult
+    from fluid.store.jsonl import JsonlStore
+    from fluid.tools.registry import ToolOutcome
+
+    loop = NativeLoop(provider=_NullProvider(), store=JsonlStore(tmp_path), model="m")
+    await loop._ensure_session()
+    loop._pending_steers.append(Steer(text="first", id="q1"))
+    loop._pending_steers.append(Steer(text="second", id="q2"))
+    outcome = await loop._finish_tool(
+        loop.session_id, "turn_1", "Read", "tu_1", ToolOutcome(text="body"),
+    )
+    assert outcome.text.index("first") < outcome.text.index("second")
+
+    events = loop.bus.log(loop.session_id)
+    receipts = [e for e in events if isinstance(e, SteerDelivered)]
+    assert len(receipts) == 1  # one batch, not one event per steer
+    assert receipts[0].steers == [
+        {"id": "q1", "text": "first"},
+        {"id": "q2", "text": "second"},
+    ]
+    result = next(e for e in events if isinstance(e, ToolResult))
+    assert receipts[0].seq > result.seq
+    assert loop._pending_steers == []
+
+
+async def test_undelivered_steer_is_dropped_with_its_id_and_no_receipt(caplog) -> None:
+    import logging
+
+    from fluid.engine.native import NativeLoop
+    from fluid.events.model import SteerDelivered
+    from fluid.store.base import MemoryStore
+
+    loop = NativeLoop(
+        provider=_ScriptedProvider([_text_script("no tools needed")]),
+        store=MemoryStore(), model="m",
+    )
+    await loop._ensure_session()
+    # Queued but never carried: this turn calls no tool, so nothing delivers it.
+    loop._pending_steers.append(Steer(text="too late", id="q9"))
+    with caplog.at_level(logging.WARNING):
+        await loop.submit(UserTurn(content="hi"))
+        await loop.wait_turn()
+
+    assert not [e for e in loop.bus.log(loop.session_id) if isinstance(e, SteerDelivered)]
+    assert loop._pending_steers == []
+    assert any(
+        "undelivered mid-turn steer" in r.getMessage() and "q9" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 # ─── availability probes ─────────────────────────────────────────────────────

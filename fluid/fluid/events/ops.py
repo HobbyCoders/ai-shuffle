@@ -55,9 +55,15 @@ class Steer(Op):
     treat as historical once an assistant message follows it). Steers queued
     when the turn ends without another tool call are dropped with a warning —
     the user can simply send a normal message then.
+
+    ``id`` is an optional caller-chosen correlation handle. A host holding the
+    message in a durable queue sets one and waits for it to come back on a
+    ``SteerDelivered`` event before retiring the queued copy; if the turn ends
+    first the id never appears and the host re-sends the text as a normal turn.
     """
 
     text: str
+    id: str | None = None
 
 
 @dataclass(kw_only=True)
