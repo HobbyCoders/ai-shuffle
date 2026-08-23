@@ -294,16 +294,35 @@ def _warn_removed_env_vars() -> None:
     """Log (once, at boot) about legacy / removed env vars that are still set.
 
     DATABASE_URL was replaced by the POSTGRES_HOST/PORT/USER/PASSWORD/DB
-    pieces but is still honored as a legacy fallback — an existing install has
-    no way to re-run setup, so its old .env must keep working. It takes
-    precedence when set, which deserves a note (and a louder one when
-    POSTGRES_* values are ALSO configured, since those are then shadowed).
+    pieces. A URL-only install is auto-imported into those fields at settings
+    load (config._import_legacy_database_url), so it is fully configured — the
+    note just says so. When explicit POSTGRES_* values are ALSO present the
+    import left them untouched and the URL still wins at connect time
+    (get_database_url prefers it verbatim); warn that the pieces are shadowed.
     SESSION_STORE_MODE, PRESERVE_BACKGROUND_ON_INTERRUPT and START_CHROME were
     removed outright (their enabled behavior is now always-on / their feature
     retired), so setting them would be silently ignored — say so.
     """
     if settings.database_url and settings.database_url.strip():
-        if settings.postgres_password:
+        from app.core.config import legacy_database_url_imported
+
+        if legacy_database_url_imported:
+            logger.info(
+                "Legacy DATABASE_URL imported into the POSTGRES_* settings "
+                "(host=%s port=%s db=%s user=%s) — the install is fully "
+                "configured; consider dropping DATABASE_URL from .env.",
+                settings.postgres_host, settings.postgres_port,
+                settings.postgres_db, settings.postgres_user,
+            )
+        elif settings.postgres_password == settings.database_url.strip():
+            # Docker compose passes the URL itself as the POSTGRES_PASSWORD
+            # value purely to open the fail-fast gate on legacy .env files
+            # (see docker-compose.yml) — not a genuine dual configuration.
+            logger.info(
+                "Legacy DATABASE_URL connection string in use — the install "
+                "is fully configured."
+            )
+        elif settings.postgres_password:
             logger.warning(
                 "Both the legacy DATABASE_URL and the POSTGRES_* settings are "
                 "configured — DATABASE_URL takes precedence and the POSTGRES_* "
@@ -312,10 +331,10 @@ def _warn_removed_env_vars() -> None:
             )
         else:
             logger.info(
-                "Using the legacy DATABASE_URL connection string. This keeps "
-                "working, but consider migrating to the POSTGRES_HOST/"
-                "POSTGRES_PORT/POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB "
-                "settings in .env (see .env.example)."
+                "Using the legacy DATABASE_URL connection string (it could not "
+                "be parsed into POSTGRES_* pieces). Consider migrating to the "
+                "POSTGRES_HOST/POSTGRES_PORT/POSTGRES_USER/POSTGRES_PASSWORD/"
+                "POSTGRES_DB settings in .env (see .env.example)."
             )
 
     import os

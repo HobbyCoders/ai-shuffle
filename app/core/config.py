@@ -25,7 +25,38 @@ def _get_default_workspace_dir() -> Path:
     return get_default_workspace_dir()
 
 
+def _parse_legacy_database_url(db_url: str) -> dict:
+    """Decompose a PostgreSQL URL into its connection pieces.
+
+    Canonical implementation lives here because Settings must parse a legacy
+    DATABASE_URL at load time — app.db.base imports this module for
+    ``settings``, so config cannot import back (circular import). app.db.
+    base.parse_database_url delegates here.
+
+    urlparse splits userinfo at the LAST ``@`` and credentials are unquoted,
+    so both percent-encoded passwords and literal-``@`` passwords work.
+    Tolerates URLs missing the ``postgresql://`` scheme prefix.
+    """
+    from urllib.parse import urlparse, unquote
+
+    if not db_url.startswith(("postgresql://", "postgres://")):
+        db_url = f"postgresql://{db_url}"
+    parsed = urlparse(db_url)
+    return {
+        "host": parsed.hostname,
+        "port": parsed.port or 5432,
+        "dbname": parsed.path.lstrip("/"),
+        "user": unquote(parsed.username or ""),
+        "password": unquote(parsed.password or ""),
+    }
+
+
 _cached_persisted_instance_id: Optional[str] = None
+
+# Set by Settings._import_legacy_database_url when it filled POSTGRES_* fields
+# from a legacy DATABASE_URL — lets startup logging distinguish an explicitly
+# configured POSTGRES_* setup from an auto-imported one without re-parsing.
+legacy_database_url_imported = False
 
 
 def _get_or_create_persisted_instance_id(data_dir: Path, service_name: str) -> str:
@@ -120,14 +151,15 @@ class Settings(BaseSettings):
     #                       compose fails fast if unset).
     #   POSTGRES_DB       — default "ai_shuffle".
     #   DATABASE_URL      — LEGACY full connection string from versions before
-    #                       the split. Still honored — an existing install that
-    #                       upgraded has no way to re-run setup, so its old
-    #                       .env must keep working as-is. Takes precedence when
-    #                       set (it captures the user's complete previous
-    #                       config, including a custom user/db/host the
-    #                       POSTGRES_* defaults would get wrong). New installs
-    #                       use the pieces above; setup comments the legacy URL
-    #                       out when it writes new values.
+    #                       the split. Auto-imported into the POSTGRES_* fields
+    #                       at load (see _import_legacy_database_url), so a
+    #                       URL-only install counts as fully configured and
+    #                       every "is the database set up?" check passes without
+    #                       re-running setup. Takes precedence when explicit
+    #                       POSTGRES_* values are also present (it captures the
+    #                       user's complete previous config). New installs use
+    #                       the pieces above; setup comments the legacy URL out
+    #                       when it writes new values.
     postgres_host: Optional[str] = None
     postgres_port: int = 5432
     postgres_user: str = "ai_shuffle"
@@ -482,6 +514,62 @@ class Settings(BaseSettings):
         # Set workspace_dir if not provided
         if self.workspace_dir is None:
             object.__setattr__(self, 'workspace_dir', _get_default_workspace_dir())
+
+        # A pre-split install carries only a legacy DATABASE_URL. Decompose it
+        # into the POSTGRES_* fields so the rest of the app (setup checks, the
+        # Docker compose gate, harness_adapter's has-database probe) sees a
+        # fully configured database without re-running setup.
+        self._import_legacy_database_url()
+
+    def _import_legacy_database_url(self) -> None:
+        """Fill empty POSTGRES_* fields from a legacy DATABASE_URL.
+
+        Pre-split installs carry only the full connection string; without this
+        import their POSTGRES_PASSWORD stays unset and every "is the database
+        configured?" check (run_local.py's start gate, harness_adapter's probe,
+        the get_database_url() error path) treats the install as unconfigured
+        even though get_database_url() itself would have worked. Only EMPTY
+        fields are filled — an explicit POSTGRES_* value always wins so a user
+        overriding one piece isn't clobbered.
+        """
+        if not self.database_url or not self.database_url.strip():
+            return
+
+        try:
+            parts = _parse_legacy_database_url(self.database_url.strip())
+        except Exception:  # noqa: BLE001 — malformed URL must never block boot
+            return
+
+        if not parts.get("dbname"):
+            return  # Not a usable connection string — leave fields untouched.
+
+        # Only EMPTY/default fields are filled — an explicit POSTGRES_* value
+        # always wins so a user overriding one piece isn't clobbered.
+        # object.__setattr__ is required: pydantic models are frozen here.
+        filled = False
+
+        def _fill(attr, value):
+            nonlocal filled
+            if value:
+                object.__setattr__(self, attr, value)
+                filled = True
+
+        if not self.postgres_host and parts.get("host"):
+            _fill("postgres_host", parts["host"])
+        if not self.postgres_password:
+            _fill("postgres_password", parts.get("password"))
+        if self.postgres_user == "ai_shuffle" and parts.get("user"):
+            _fill("postgres_user", parts["user"])
+        if self.postgres_db == "ai_shuffle" and parts.get("dbname"):
+            _fill("postgres_db", parts["dbname"])
+        if self.postgres_port == 5432 and parts.get("port", 5432) != 5432:
+            # int() coercion is required: object.__setattr__ bypasses
+            # pydantic's validation on this typed field.
+            _fill("postgres_port", int(parts["port"]))
+
+        if filled:
+            global legacy_database_url_imported
+            legacy_database_url_imported = True
 
     @property
     def effective_instance_id(self) -> str:
