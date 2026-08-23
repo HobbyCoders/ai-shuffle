@@ -752,7 +752,9 @@ class SessionPool:
         # dead-tree reaper can clean up any orphaned descendants (e.g. subagent
         # node CLIs) that outlive the parent after disconnect terminates it.
         pid = subprocess_pid(state)
-        descendants = snapshot_descendants(pid)
+        # psutil's recursive children() scans the whole process table — off
+        # the loop (this runs on the new-session admission path).
+        descendants = await asyncio.to_thread(snapshot_descendants, pid)
         if state.is_connected and is_subprocess_alive(state):
             try:
                 await graceful_disconnect(state.adapter, session_id)
@@ -778,7 +780,9 @@ class SessionPool:
         if state is None:
             return None
         pid = subprocess_pid(state)
-        descendants = snapshot_descendants(pid)
+        # psutil's recursive children() scans the whole process table — off
+        # the loop (this runs on the new-session admission path).
+        descendants = await asyncio.to_thread(snapshot_descendants, pid)
         if state.is_connected and is_subprocess_alive(state):
             try:
                 await graceful_disconnect(state.adapter, session_id)

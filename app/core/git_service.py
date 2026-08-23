@@ -79,6 +79,12 @@ class GitService(
         Returns:
             CompletedProcess with returncode, stdout, stderr
         """
+        # Never let git (or a credential helper it spawns) wait on a terminal
+        # prompt: the server has no TTY, so a fetch/clone that needs
+        # credentials would otherwise sit until the timeout. The caller's env
+        # wins when it sets the variable explicitly.
+        run_env = dict(env if env is not None else os.environ)
+        run_env.setdefault("GIT_TERMINAL_PROMPT", "0")
         try:
             return subprocess.run(
                 ["git"] + args,
@@ -89,7 +95,7 @@ class GitService(
                 errors="replace",
                 timeout=timeout,
                 check=check,
-                env=env,
+                env=run_env,
             )
         except subprocess.TimeoutExpired:
             logger.warning(f"Git command timed out: git {' '.join(args)}")

@@ -334,7 +334,9 @@ class HarnessAdapter(ProviderAdapter):
         # Decide the leg BEFORE building the registry: the native legs need
         # fluid's builtin file/shell tools registered, the delegated leg must not
         # get them (the claude CLI ships its own).
-        kind = _decide_provider_kind(options)
+        # Off the loop: a bound provider id without its shape fields makes this
+        # read the model_providers row synchronously.
+        kind = await asyncio.to_thread(_decide_provider_kind, options)
         self._is_delegated = kind == "delegated"
         self._provider_kind = kind
 
@@ -358,7 +360,9 @@ class HarnessAdapter(ProviderAdapter):
                 # The compiled prompt already carries the merged agents index
                 # (``_compile_prompt_sections`` slots it in), so nothing is
                 # added here — that is what keeps the block un-doubled.
-                delegated_system = self._compile_prompt(system, append_system, options)
+                delegated_system = await asyncio.to_thread(
+                    self._compile_prompt, system, append_system, options
+                )
                 delegated_append = None
             else:
                 # Append mode still owes the model the delegation catalog. The
@@ -367,10 +371,14 @@ class HarnessAdapter(ProviderAdapter):
                 # learns which agents exist — it could not name a target for
                 # the Task tool at all. Same block as the native leg, attached
                 # to whichever part the CLI actually reads.
-                agents_index, _ = _agent_context(options)
+                # discover_agents walks .claude/agents + plugin dirs (rglob)
+                # — disk IO, so it runs in a worker thread.
+                agents_index, _ = await asyncio.to_thread(_agent_context, options)
                 delegated_system, delegated_append = _with_agents_index(
                     system, append_system, agents_index
                 )
+            # shutil.which + the bundled-CLI resolver stat the filesystem.
+            claude_cmd = await asyncio.to_thread(_resolve_claude_cmd)
             self._engine = DelegatedLoop(
                 store=store,
                 model=options.model,
@@ -441,7 +449,7 @@ class HarnessAdapter(ProviderAdapter):
                 # the two legs agree on intent and the CLI stops prompting for
                 # exactly the tools the definition sanctioned.
                 allowed_tools=_tool_allowlist(options),
-                claude_cmd=_resolve_claude_cmd(),
+                claude_cmd=claude_cmd,
             )
         else:
             provider_client, provider_http = await _build_provider_client(kind, options)
@@ -509,7 +517,7 @@ class HarnessAdapter(ProviderAdapter):
             # The delegation catalog (CE6 + the app's own DB agents) — one
             # name+description index for the prompt, plus the matching
             # descriptors for the "Custom agents" usage row.
-            _, declared_agent_descriptors = _agent_context(options)
+            _, declared_agent_descriptors = await asyncio.to_thread(_agent_context, options)
             # Code-mode + the continual harness, mirroring fluid's own
             # config/loader.py wiring. ON by default for every native leg; the
             # skill store and its episodic journal live under the app's data
@@ -556,7 +564,12 @@ class HarnessAdapter(ProviderAdapter):
             # the setting: the build is fail-open, and a prompt that told the
             # model to import tools inside run_python when run_python is not in
             # its schema would be worse than saying nothing.
-            compiled_prompt = self._compile_prompt_sections(
+            # The compiler gathers instruction files, the skills index and the
+            # git-backed environment block (subprocess + rglob) and runs the
+            # agent discovery walk again — all synchronous disk/process IO,
+            # so it runs off the loop.
+            compiled_prompt = await asyncio.to_thread(
+                self._compile_prompt_sections,
                 system, append_system, options, code_mode=codemode is not None,
                 codemode=codemode,
             )
