@@ -43,6 +43,37 @@ describe('WorkLogGroup', () => {
 		expect(screen.getByRole('button', { name: /Show work details: Worked for 4s, Read 1 file/i })).toBeTruthy();
 	});
 
+	it('holds peak height while live and releases it on settle', async () => {
+		// jsdom has no ResizeObserver; stub one that reports a growing height so we
+		// can drive the reserve deterministically.
+		class FakeRO {
+			cb: ResizeObserverCallback;
+			constructor(cb: ResizeObserverCallback) {
+				this.cb = cb;
+			}
+			observe = (el: Element) => {
+				Object.defineProperty(el, 'getBoundingClientRect', {
+					value: () => ({ height: 80 }),
+					configurable: true
+				});
+				this.cb([], this as unknown as ResizeObserver);
+			};
+			unobserve = () => {};
+			disconnect = () => {};
+		}
+		const g = globalThis as unknown as { ResizeObserver?: unknown };
+		g.ResizeObserver = FakeRO;
+
+		const view = render(WorkLogGroup, { props: { ...baseProps, mode: 'live' as const } });
+		const section = view.container.querySelector('section.worklog') as HTMLElement;
+		expect(section.style.minHeight).toBe('80px');
+
+		await view.rerender({ ...baseProps, mode: 'settled' as const, durationLabel: 'Worked for 4s' });
+		expect(section.style.minHeight).toBe('');
+
+		delete g.ResizeObserver;
+	});
+
 	it('keeps the terminal answer visible while settled work is collapsed', async () => {
 		const answer = {
 			id: 'answer-1',

@@ -48,6 +48,29 @@
 	let open = $state(false);
 	let previousMode = $state<'live' | 'settled' | null>(null);
 
+	// Reserve space below the live group: the active tool row is replaced every
+	// time the next call starts, and a shorter successor would drag the whole
+	// transcript below it up and down for the length of the turn. Hold the
+	// tallest height seen while live as a min-height; the reservation releases
+	// when the turn settles.
+	let sectionEl = $state<HTMLElement | null>(null);
+	let reservedPx = $state(0);
+
+	$effect(() => {
+		if (!sectionEl || typeof ResizeObserver === 'undefined') return;
+		const observer = new ResizeObserver(() => {
+			if (mode !== 'live') return;
+			const height = sectionEl?.getBoundingClientRect().height ?? 0;
+			if (height > reservedPx) reservedPx = height;
+		});
+		observer.observe(sectionEl);
+		return () => observer.disconnect();
+	});
+
+	$effect(() => {
+		if (mode !== 'live') reservedPx = 0;
+	});
+
 	// A live run may be open while the user inspects it. Once the turn settles,
 	// deliberately return to the compact finished presentation.
 	$effect(() => {
@@ -70,7 +93,14 @@
 	}
 </script>
 
-<section class="worklog" class:is-settled={mode === 'settled'} aria-label="Work log" data-work-log-mode={mode}>
+<section
+	bind:this={sectionEl}
+	class="worklog"
+	class:is-settled={mode === 'settled'}
+	style:min-height={mode === 'live' && reservedPx > 0 ? `${reservedPx}px` : undefined}
+	aria-label="Work log"
+	data-work-log-mode={mode}
+>
 	{#if open}
 		<div class="wlhead">Work log{#if summary}<span> · {summary}</span>{/if}</div>
 		{#if mode === 'settled' && sequence.length > 0}
