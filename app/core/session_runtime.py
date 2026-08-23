@@ -569,6 +569,10 @@ class SessionRuntime:
                 command_id=self.turn.get("command_id"),
                 runner_id=runner_id,
             )
+            # A fence violation means another runner now owns this run: the
+            # recorder goes silent and this hook stops the pump we are still
+            # driving (same cancel path as interrupt escalation).
+            recorder.on_superseded = self._on_recorder_superseded
 
             # 6/7. Pump under the reader token, then ALWAYS finalize. A pump
             #    crash is absorbed (``_terminal`` stays ``None`` → finalize
@@ -957,6 +961,37 @@ class SessionRuntime:
         self._drain_after_cancel = True
         self._cancel_pump()
         return "draining"
+
+    def _on_recorder_superseded(self) -> None:
+        """The run lease moved to another runner mid-turn (fence violation).
+
+        Runs once, synchronously on the loop, from the recorder's first
+        rejected append. Stops the pump through the escalation cancel path
+        (finalize then settles ``aborted`` with a distinct stop reason) and
+        asks the SDK to interrupt the turn so the pooled client stops
+        generating for a run nobody is recording.
+        """
+        sid = self.session_id
+        logger.warning(
+            "SessionRuntime: run superseded for %s turn %s (fence violation) — "
+            "stopping pump",
+            sid, self.turn_id,
+        )
+        if self._abort_reason is None:
+            self._abort_reason = "fence_superseded"
+        self._cancel_pump()
+        try:
+            from app.core.query_session_lifecycle import interrupt_session
+
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(interrupt_session(sid))
+            task.add_done_callback(
+                lambda t: t.exception() if not t.cancelled() else None
+            )
+        except Exception:  # noqa: BLE001 — best-effort
+            logger.debug(
+                "SessionRuntime: interrupt after supersede failed for %s", sid, exc_info=True
+            )
 
     def _cancel_pump(self) -> None:
         """Cancel the in-flight pump task, if any (escalation teardown)."""

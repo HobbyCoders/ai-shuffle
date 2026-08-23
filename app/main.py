@@ -133,6 +133,7 @@ async def lifespan(app: FastAPI):
         shutdown_services,
     )
     from app.core.resource_monitor import start_resource_monitor, stop_resource_monitor
+    from app.core.loop_watchdog import start_loop_watchdog, stop_loop_watchdog
     from app.core.plugin_auto_update import start_plugin_auto_update, stop_plugin_auto_update
 
     # Persistent, crash-surviving on-disk logging: attach a RotatingFileHandler
@@ -210,6 +211,9 @@ async def lifespan(app: FastAPI):
         await start_services()
         bg_tasks = start_background_tasks()
         monitor_task = await start_resource_monitor(interval_seconds=300)
+        # Thread-based: keeps working while the loop is frozen and logs the
+        # loop thread's stack so a stall is diagnosable after the fact.
+        start_loop_watchdog()
         plugin_task = start_plugin_auto_update()
     else:
         logger.warning(
@@ -254,6 +258,7 @@ async def lifespan(app: FastAPI):
         await stop_plugin_auto_update(plugin_task)
     if monitor_task is not None:
         await stop_resource_monitor(monitor_task)
+    stop_loop_watchdog()
     try:
         from app.core.team_transcript_watcher import team_transcript_watcher
         await team_transcript_watcher.stop_all()

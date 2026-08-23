@@ -891,7 +891,12 @@ async def execute_query(
     # loop: a sync poll would occupy a run_sync worker for 30s.
     if session:
         await ensure_pending_checkout(session)
-    options, agents_dict = build_session_options(
+    # Off the event loop: build_options_from_profile is synchronous and, for a
+    # branch session, materializes the checkout (git fetch + git worktree add
+    # via subprocess.run, up to 90s) plus several DB reads. Running it inline
+    # blocked every other coroutine in the process for the whole spawn.
+    options, agents_dict = await asyncio.to_thread(
+        build_session_options,
         profile=profile,
         project=project,
         overrides=overrides,
@@ -1347,7 +1352,10 @@ async def stream_query(
     if session:
         await ensure_pending_checkout(session)
     try:
-        options, agents_dict = build_session_options(
+        # Off the event loop — see execute_query: the build can run git
+        # fetch/worktree add and several DB reads synchronously.
+        options, agents_dict = await asyncio.to_thread(
+            build_session_options,
             profile=profile,
             project=project,
             overrides=overrides,
@@ -1461,7 +1469,8 @@ async def stream_query(
     if not reusing_client:
         # Admission backpressure: refuse a NEW session if the box is at its
         # process/RAM/pool ceiling, rather than killing in-flight work later.
-        refusal = pool.admission_check()
+        # psutil process-tree walk — off the loop.
+        refusal = await asyncio.to_thread(pool.admission_check)
         if refusal is not None:
             logger.warning(f"[Admission] Refusing new session {session_id}: {refusal}")
             yield {"type": "error", "message": f"Server is at capacity — {refusal}. Please retry shortly."}
@@ -2063,7 +2072,10 @@ async def _stream_to_websocket_impl(
         await ensure_pending_checkout(session)
     _build_opts_start = time.monotonic()
     try:
-        options, agents_dict = build_session_options(
+        # Off the event loop — see execute_query: the build can run git
+        # fetch/worktree add and several DB reads synchronously.
+        options, agents_dict = await asyncio.to_thread(
+            build_session_options,
             profile=profile,
             project=project,
             overrides=overrides,
@@ -2515,7 +2527,8 @@ async def _stream_to_websocket_impl(
 
         # Admission backpressure: refuse a NEW session if the box is at its
         # process/RAM/pool ceiling, rather than killing in-flight work later.
-        refusal = pool.admission_check()
+        # psutil process-tree walk — off the loop.
+        refusal = await asyncio.to_thread(pool.admission_check)
         if refusal is not None:
             logger.warning(f"[Admission] Refusing new session {session_id}: {refusal}")
             yield {"type": "error", "message": f"Server is at capacity — {refusal}. Please retry shortly."}

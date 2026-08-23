@@ -320,12 +320,19 @@ async def generate_with_claude(
     )
     from app.core.environment import ProviderConfigError
 
-    generation_config = text_generation_config()
+    # Both reads hit the settings / model_providers tables synchronously
+    # (``text_generation_config`` reads two system settings,
+    # ``build_generation_options`` fetches and decrypts the bound provider row).
+    # Run them off the event loop: this function sits in front of interactive
+    # flows (branch naming, commit messages) and a slow DB round-trip here used
+    # to stall every other request in the process.
+    generation_config = await run_sync(text_generation_config)
     effective_model = model or generation_config.get("model") or DEFAULT_MODEL
 
     # Single-shot turn: max_turns=1 since we only send one prompt.
     try:
-        options = build_generation_options(
+        options = await run_sync(
+            build_generation_options,
             generation_config,
             model_override=model,
             max_turns=1,
@@ -452,12 +459,17 @@ async def generate_with_claude(
     # sessions, so this spend lands in the totals without inventing a session
     # row. log_usage's in-memory per-session cache append is gated on a truthy
     # session_id, so None skips it — intended, there is nothing to cache.
+    # ``profile_id`` is NULL too: generation is routed by the text-generation
+    # setting (a provider + model pair), not by an agent profile, so there is
+    # no profile row to attribute the spend to. (This used to read an unbound
+    # ``profile`` name and raised NameError on every call, so no generation
+    # usage was ever written.)
     if result_usage is not None:
         try:
             await run_sync(
                 database.log_usage,
                 session_id=None,
-                profile_id=(profile or {}).get("id"),
+                profile_id=None,
                 model=effective_model,
                 tokens_in=result_usage.get("input_tokens", 0),
                 tokens_out=result_usage.get("output_tokens", 0),
