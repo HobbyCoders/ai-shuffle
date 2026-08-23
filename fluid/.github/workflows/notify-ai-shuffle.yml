@@ -1,0 +1,26 @@
+# Every push to fluid main tells HobbyCoders/ai-shuffle to re-vendor. The
+# receiving workflow is .github/workflows/vendor-sync.yml there, which also
+# runs daily on a schedule, so a missing dispatch delays a sync by up to a day
+# rather than losing it.
+#
+# Requires a repository secret AI_SHUFFLE_DISPATCH_TOKEN in the fluid repo: a
+# fine-grained PAT on HobbyCoders/ai-shuffle with contents: write (the scope
+# repository_dispatch is filed under).
+
+name: Notify AI Shuffle
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Tell ai-shuffle to re-vendor fluid
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.AI_SHUFFLE_DISPATCH_TOKEN }}
+          repository: HobbyCoders/ai-shuffle
+          event-type: fluid-main-updated
+          client-payload: '{"sha": "${{ github.sha }}"}'
