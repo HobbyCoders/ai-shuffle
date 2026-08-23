@@ -87,20 +87,24 @@
 		min-width: 0;
 	}
 
+	/* Space is always reserved so revealing the controls on hover never
+	   reflows the transcript — only opacity changes. */
 	.useractions {
-		height: 0;
-		overflow: visible;
+		display: flex;
+		align-items: center;
+		gap: 5px;
+		margin-top: 4px;
 		opacity: 0;
 		pointer-events: none;
+		user-select: none;
 		transition: opacity 0.12s ease;
 	}
 
 	.useractions.is-visible,
 	.usercol:focus-within .useractions {
-		height: auto;
 		opacity: 1;
 		pointer-events: auto;
-		margin-top: 4px;
+		user-select: auto;
 	}
 
 	.user-time {
@@ -179,14 +183,11 @@
 			max-width: 85%;
 		}
 
+		/* Controls stay visible on touch; base rule already reserves their space. */
 		.useractions {
-			height: auto;
-			display: flex;
-			align-items: center;
-			gap: 5px;
 			opacity: 1;
 			pointer-events: auto;
-			margin-top: 4px;
+			user-select: auto;
 		}
 
 		.message-disclosure {
