@@ -1739,13 +1739,14 @@ class HarnessAdapter(ProviderAdapter):
                 sections.append(
                     PromptSection(kind="extra", text=CODE_MODE_SECTION)
                 )
-                # ... and the catalog it points at. Separate section so the
-                # usage breakdown prices the tool docs on their own line;
-                # empty (no projection) simply omits it.
-                tools_section = _code_mode_tools_section(codemode)
-                if tools_section:
+                # ... and the catalog it points at. ONE section per tool
+                # (kind "tools", tool_name set) so the usage breakdown prices
+                # each block under System/MCP tools like a JSON schema would
+                # be; empty (no projection) simply omits it.
+                for tool_text, tool_name in _code_mode_tool_sections(codemode):
                     sections.append(
-                        PromptSection(kind="extra", text=tools_section)
+                        PromptSection(kind="tools", text=tool_text,
+                                      tool_name=tool_name)
                     )
             if sections == list(compiled.sections):
                 return compiled
@@ -2337,34 +2338,40 @@ _CODE_MODE_CATALOG_SKIP = frozenset({
 })
 
 
-def _code_mode_tools_section(codemode: Any) -> str:
-    """The ``# Tools`` catalog: every projected tool's signature and full docs.
+def _code_mode_tool_sections(codemode: Any) -> List[Tuple[str, str]]:
+    """Per-tool ``(section text, registry tool name)`` pairs for the catalog.
+
+    One section per tool — not one blob — so fluid's context-usage breakdown
+    can price each block under "System tools"/"MCP tools" by ``tool_name``,
+    exactly where the equivalent JSON schema would sit on the direct-tool path.
+    The FIRST section carries the ``# Tools`` heading; the joined text is
+    byte-identical to the single-section form this used to build.
 
     Ruling of 2026-08-21. A code-mode schema carries four tools, so the model
     never sees the descriptions the JSON-tool path sends — a live run guessed
-    parameter names because nothing in the prompt held the real ones. This
-    section is that missing text: same descriptions, same parameter docs, keyed
-    to the Python call shape the kernel actually exposes.
+    parameter names because nothing in the prompt held the real ones. This is
+    that missing text: same descriptions, same parameter docs, keyed to the
+    Python call shape the kernel actually exposes.
 
     Built from the session's own projection (the snapshot behind ``list_tools``
     and the VFS stubs), so the catalog and the importable modules can never
     disagree. Best-effort: a codemode object without a projection (a test
-    double, a future refactor) returns "" and the section is simply skipped
+    double, a future refactor) returns [] and the section is simply skipped
     rather than failing the prompt.
     """
     try:
         from fluid.codemode.projection import _annotation, _param_doc, _py_ident
     except Exception:  # noqa: BLE001 — no projection helpers, no section
-        return ""
+        return []
     build = getattr(codemode, "_projection", None)
     if not callable(build):
-        return ""
+        return []
     try:
         projection = build()
         leaves = list(projection.leaves())
     except Exception:  # noqa: BLE001 — a broken registry must not kill the turn
         logger.warning("[HarnessAdapter] code-mode tool catalog FAILED", exc_info=True)
-        return ""
+        return []
 
     blocks: list[str] = []
     for leaf in leaves:
@@ -2410,11 +2417,14 @@ def _code_mode_tools_section(codemode: Any) -> str:
                     props.get(jname) or {},
                     required=jname in required,
                 ))
-        blocks.append("\n".join(lines))
+        blocks.append(("\n".join(lines), str(getattr(spec, "name", "") or leaf)))
 
     if not blocks:
-        return ""
-    return "# Tools\n" + "\n\n".join(blocks)
+        return []
+    # The heading rides the first tool's section, so the joined text is
+    # byte-identical to the old single-blob catalog.
+    blocks[0] = ("# Tools\n" + blocks[0][0], blocks[0][1])
+    return blocks
 
 
 
