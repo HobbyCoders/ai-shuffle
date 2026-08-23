@@ -33,6 +33,14 @@ class UserTurn(Op):
 
 
 @dataclass(kw_only=True)
+class Resume(Op):
+    """Run the agent loop again from the session head without appending a
+    user node. Valid only when the head is a user-role node the model has
+    not answered yet (a text prompt or tool results); otherwise the engine
+    ends the turn with an ErrorEvent saying there is nothing to resume."""
+
+
+@dataclass(kw_only=True)
 class Interrupt(Op):
     pass
 
