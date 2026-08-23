@@ -1,7 +1,7 @@
 """In-process tool servers — surface-compatible with claude_agent_sdk.
 
 Mirrors the ``@tool(name, description, schema)`` decorator + ``create_sdk_mcp_server``
-pattern AI-Shuffle's ~10 tool modules already use, so porting them is an
+pattern a host app's own tool modules already use, so porting them is an
 import-line change. Handlers are async, take an ``args`` dict, and return the
 SDK envelope ``{"content": [{"type": "text", "text": ...}]}`` — but a plain
 str or a ``ToolOutcome`` is accepted too (normalized at dispatch).

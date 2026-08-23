@@ -22,6 +22,7 @@ from fluid.events.model import (
     TurnComplete,
     TurnStarted,
     Usage,
+    register_event_type,
 )
 from fluid.events.ops import (
     BackgroundTaskFinished,
@@ -74,4 +75,5 @@ __all__ = [
     "TurnStarted",
     "Usage",
     "UserTurn",
+    "register_event_type",
 ]

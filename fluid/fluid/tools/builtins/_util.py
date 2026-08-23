@@ -13,6 +13,21 @@ from fluid.tools.registry import ToolCtx
 
 _TRUNCATE_LIMIT = 30_000  # ~30KB; keep head + tail, drop the middle
 
+# Terminal control sequences: CSI (colours, cursor moves), OSC (title/hyperlink
+# strings, terminated by BEL or ST) and the lone two-byte escapes. Test runners
+# and package managers emit these even into a pipe on some platforms, and they
+# reach the model — and the UI — as gibberish.
+ANSI_RE = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]"
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|\x1b[@-Z\\-_]"
+)
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from captured process output."""
+    return ANSI_RE.sub("", text)
+
 # Directories never worth walking for a content search or a file glob: VCS
 # metadata, dependency trees, build output, tool caches. Pruning these in place
 # is what keeps a repo-wide walk in the thousands of paths instead of hundreds

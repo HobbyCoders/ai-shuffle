@@ -169,7 +169,7 @@ def _normalize(result: Any) -> ToolOutcome:
 
     Accepts a ToolOutcome, a plain string, or the claude_agent_sdk MCP envelope
     (``{"content": [{"type": "text", "text": ...}], "isError"?: bool}``) so the
-    ~10 AI-Shuffle tool modules port over with import-line changes only.
+    a host app's own tool modules port over with import-line changes only.
     """
     if isinstance(result, ToolOutcome):
         return result

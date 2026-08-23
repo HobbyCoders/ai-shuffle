@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any
 
-from fluid.tools.builtins._util import truncate
+from fluid.tools.builtins._util import strip_ansi, truncate
 from fluid.tools.builtins.bash_risk import classify as classify_bash_risk
 from fluid.tools.builtins.bash_risk import session_scope as bash_session_scope
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
@@ -90,6 +91,9 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         cwd=cwd,
+        # Ask the child not to colourise; anything that ignores the hint gets
+        # its escapes stripped from the captured output below.
+        env=dict(os.environ, NO_COLOR="1", FORCE_COLOR="0"),
     )
     try:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -97,7 +101,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         proc.kill()
         await proc.wait()
         return ToolOutcome(text=f"command timed out after {timeout}s", is_error=True)
-    text = truncate(stdout.decode(errors="replace")) or "(no output)"
+    text = truncate(strip_ansi(stdout.decode(errors="replace"))) or "(no output)"
     if proc.returncode:
         return ToolOutcome(
             text=f"{text.rstrip()}\n[exit code {proc.returncode}]",

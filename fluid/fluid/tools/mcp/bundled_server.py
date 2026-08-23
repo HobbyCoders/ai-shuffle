@@ -2,7 +2,7 @@
 
 Under the delegated (``claude`` CLI) backend the CLI, not the harness, runs the
 agent loop and dispatches tools. To let the CLI reach the harness's *in-process*
-tools (the ~10 AI-Shuffle modules, builtins), we front the same
+tools (a host app's own modules, builtins), we front the same
 ``ToolRegistry`` behind an MCP server the CLI connects to like any other.
 
 Two halves, because tool handlers are live Python closures that cannot be
@@ -239,32 +239,61 @@ def build_child_server(socket_path: str) -> Any:
     import mcp.types as t
     from mcp.server import Server
 
-    # mcp 2.0's low-level ``Server`` registers handlers through constructor
-    # kwargs (``on_list_tools`` / ``on_call_tool``). Each handler receives the
-    # per-request ``ServerRequestContext`` plus the validated params model and
-    # returns the full result model; the 1.x decorator API and its bare-content
-    # shortcut are gone.
-    async def on_list_tools(ctx: Any, params: Any) -> Any:
-        data = await _socket_rpc(socket_path, {"op": "list"})
-        return t.ListToolsResult(
-            tools=[_tool_from_spec(t, td) for td in data.get("tools", [])],
+    # The installed mcp generation is whatever the host's own dependency tree
+    # resolved — an embedder pinned to a CLI/SDK that requires mcp<2.0 gets 1.x
+    # here — so the child supports both. mcp 2.0 registers handlers through
+    # constructor kwargs (``on_list_tools`` / ``on_call_tool``), each taking the
+    # per-request context plus the validated params model and returning the
+    # full result model; mcp 1.x registers them through decorators and accepts
+    # bare content. Detect which one is installed from the constructor.
+    import inspect
+
+    try:
+        modern = "on_list_tools" in inspect.signature(Server.__init__).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic SDK builds
+        modern = False
+
+    if modern:
+        async def on_list_tools(ctx: Any, params: Any) -> Any:
+            data = await _socket_rpc(socket_path, {"op": "list"})
+            return t.ListToolsResult(
+                tools=[_tool_from_spec(t, td) for td in data.get("tools", [])],
+            )
+
+        async def on_call_tool(ctx: Any, params: Any) -> Any:
+            data = await _socket_rpc(
+                socket_path,
+                {"op": "call", "name": params.name, "arguments": params.arguments or {}},
+            )
+            # Build the CallToolResult ourselves so the parent's is_error
+            # survives instead of being flattened into a success.
+            return _call_result(t, data.get("text", ""), bool(data.get("is_error")))
+
+        return Server(
+            _BUNDLED_SERVER_NAME,
+            version="0.1.0",
+            on_list_tools=on_list_tools,
+            on_call_tool=on_call_tool,
         )
 
-    async def on_call_tool(ctx: Any, params: Any) -> Any:
+    server = Server(_BUNDLED_SERVER_NAME, version="0.1.0")
+
+    @server.list_tools()
+    async def legacy_list_tools() -> list[Any]:
+        data = await _socket_rpc(socket_path, {"op": "list"})
+        return [_tool_from_spec(t, td) for td in data.get("tools", [])]
+
+    @server.call_tool()
+    async def legacy_call_tool(name: str, arguments: dict[str, Any] | None) -> Any:
         data = await _socket_rpc(
-            socket_path,
-            {"op": "call", "name": params.name, "arguments": params.arguments or {}},
+            socket_path, {"op": "call", "name": name, "arguments": arguments or {}},
         )
-        # Build the CallToolResult ourselves so the parent's is_error survives
-        # instead of being flattened into a success.
+        # Returning a CallToolResult (rather than bare content) is what lets
+        # the parent's is_error survive: the decorator's own normalization path
+        # always reports success.
         return _call_result(t, data.get("text", ""), bool(data.get("is_error")))
 
-    return Server(
-        _BUNDLED_SERVER_NAME,
-        version="0.1.0",
-        on_list_tools=on_list_tools,
-        on_call_tool=on_call_tool,
-    )
+    return server
 
 
 async def _run_child(socket_path: str) -> None:

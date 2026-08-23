@@ -287,6 +287,24 @@ _EVENT_TYPES: dict[str, type[Event]] = {
 }
 
 
+def register_event_type(cls: type[Event]) -> type[Event]:
+    """Teach the codec about an event class defined outside fluid.
+
+    An embedder that emits its own Event subclasses — or that has to keep
+    decoding a shape fluid itself no longer emits — registers the class once at
+    import time so ``event_from_dict`` can rebuild it. Returns the class, so it
+    also works as a decorator. Re-registering the same class is a no-op; a
+    different class under a name already registered is refused, because the
+    codec would otherwise decode existing events into a foreign type.
+    """
+    name = cls.__name__
+    existing = _EVENT_TYPES.get(name)
+    if existing is not None and existing is not cls:
+        raise ValueError(f"event type {name!r} is already registered")
+    _EVENT_TYPES[name] = cls
+    return cls
+
+
 def event_to_dict(event: Event) -> dict[str, Any]:
     d: dict[str, Any] = {"_cls": type(event).__name__}
     for f in dataclasses.fields(event):
