@@ -57,6 +57,9 @@
 	import TeamStatusBar from '$lib/components/TeamStatusBar.svelte';
 	import TodoList from '$lib/components/TodoList.svelte';
 	import MediaLightbox from './MediaLightbox.svelte';
+	import ActiveTasks from './ActiveTasks.svelte';
+	import { stopSessionTask } from '$lib/api/sessions';
+	import { notify } from '$lib/stores/notifications';
 
 	// Non-reactive scroll position cache to avoid triggering effects.
 	// Module-level so it persists across component instances.
@@ -1179,6 +1182,29 @@
 		return content;
 	});
 
+	// Stop one in-flight background task (the "x" on the ActiveTasks tail line).
+	// The task drops off the next /live poll once the backend confirms the stop.
+	// Returns true on a successful stop; false (with a toast) when the stop
+	// didn't take — so ActiveTasks can re-enable the button instead of leaving
+	// it stuck disabled on a ghost row.
+	async function handleStopTask(taskId: string): Promise<boolean> {
+		const sessionId = $activeSession.sessionId;
+		if (!sessionId) return false;
+		try {
+			const result = await stopSessionTask(sessionId, taskId);
+			if (!result.ok) {
+				notify.error(
+					`Couldn't stop task — ${result.detail ?? 'it may have already finished'}.`
+				);
+				return false;
+			}
+			return true;
+		} catch {
+			notify.error('Failed to stop task. Please try again.');
+			return false;
+		}
+	}
+
 	// Get metadata for the last assistant message that has metadata (cost/duration
 	// rendered there). This message may not be the absolute last in the array
 	// (e.g. a TodoWrite tool_use could follow it).
@@ -1370,6 +1396,11 @@
 					<button onclick={() => activeSession.clearError()} class="text-destructive hover:opacity-80">&times;</button>
 				</div>
 			{/if}
+
+			<!-- In-flight background tasks: a collapsible line pinned to the history
+			     tail (spinner + "N running tasks"; expands to a |__ tree with per-task
+			     stop). Renders nothing when there are no tasks. -->
+			<ActiveTasks tasks={$activeSession.activeTasks ?? []} onStop={handleStopTask} />
 
 			<!-- Responsive room belongs only to the live edge, never historical turns. -->
 			<div

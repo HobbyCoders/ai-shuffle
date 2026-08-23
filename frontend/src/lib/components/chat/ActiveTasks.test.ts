@@ -1,14 +1,12 @@
 /**
- * Behavior tests for ActiveTasks — the live background-tasks strip.
- *
- * Covers the additions: the collapse/minimize toggle (+ its "Running N tasks"
- * line and persistence), per-task stop buttons, and the empty-state guard.
+ * Behavior tests for ActiveTasks — the collapsible tail line for background
+ * tasks: a spinner + "N running tasks" collapsed line that expands to a |__
+ * tree of each task with an "x" to stop it.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/svelte';
 import ActiveTasks from './ActiveTasks.svelte';
 import type { Task } from '$lib/stores/types';
-import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 
 function makeTask(over: Partial<Task> = {}): Task {
 	return {
@@ -26,9 +24,6 @@ function makeTask(over: Partial<Task> = {}): Task {
 
 beforeEach(() => {
 	localStorage.clear();
-	// The collapse state lives in the shared chat-preferences singleton; reset it
-	// so persistence from one test doesn't leak into the next.
-	chatPreferences.reset();
 });
 
 afterEach(() => {
@@ -41,19 +36,62 @@ describe('ActiveTasks', () => {
 		expect(container.querySelector('.active-tasks')).toBeNull();
 	});
 
-	it('shows the expanded header and a row per task', () => {
+	it('shows the "N running tasks" line with a spinner and a row per task (expanded default)', () => {
 		const tasks = [
 			makeTask({ id: 'a', subject: 'Task A' }),
 			makeTask({ id: 'b', subject: 'Task B', kind: 'shell' })
 		];
-		render(ActiveTasks, { props: { tasks } });
+		const { container } = render(ActiveTasks, { props: { tasks } });
 
-		expect(screen.getByText('Background (2)')).toBeTruthy();
+		expect(screen.getByText('2 running tasks')).toBeTruthy();
+		expect(container.querySelector('.spinner')).not.toBeNull();
 		expect(screen.getByText('Task A')).toBeTruthy();
 		expect(screen.getByText('Task B')).toBeTruthy();
 	});
 
-	it('renders a stop button per task when onStop is provided and calls it with the task id', async () => {
+	it('pluralizes the label (1 task vs N tasks)', () => {
+		render(ActiveTasks, { props: { tasks: [makeTask()] } });
+		expect(screen.getByText('1 running task')).toBeTruthy();
+	});
+
+	it('draws a |__ tree branch per task row', () => {
+		const { container } = render(ActiveTasks, {
+			props: { tasks: [makeTask({ subject: 'A' }), makeTask({ id: 'b', subject: 'B' })] }
+		});
+		expect(container.querySelectorAll('.tree-branch').length).toBe(2);
+	});
+
+	it('shows a kind badge per task — agent vs shell', () => {
+		render(ActiveTasks, {
+			props: { tasks: [makeTask({ kind: 'agent' }), makeTask({ id: 'b', kind: 'shell' })] }
+		});
+		expect(screen.getByText('agent')).toBeTruthy();
+		expect(screen.getByText('shell')).toBeTruthy();
+	});
+
+	it('collapses to just the tail line and hides task rows', async () => {
+		const { container } = render(ActiveTasks, {
+			props: { tasks: [makeTask({ id: 'a', subject: 'Task A' })] }
+		});
+
+		await fireEvent.click(screen.getByRole('button', { name: /1 running task/i }));
+
+		expect(screen.getByText('1 running task')).toBeTruthy();
+		expect(screen.queryByText('Task A')).toBeNull();
+		expect(container.querySelector('.task-tree')).toBeNull();
+	});
+
+	it('expands again from the collapsed state on a second click', async () => {
+		render(ActiveTasks, { props: { tasks: [makeTask({ subject: 'Task A' })] } });
+
+		await fireEvent.click(screen.getByRole('button', { name: /1 running task/i }));
+		expect(screen.queryByText('Task A')).toBeNull();
+
+		await fireEvent.click(screen.getByRole('button', { name: /1 running task/i }));
+		expect(screen.getByText('Task A')).toBeTruthy();
+	});
+
+	it('renders a stop button per running task when onStop is provided and calls it with the task id', async () => {
 		const onStop = vi.fn();
 		const tasks = [makeTask({ id: 'kill-me', subject: 'Doomed task' })];
 		render(ActiveTasks, { props: { tasks, onStop } });
@@ -82,9 +120,8 @@ describe('ActiveTasks', () => {
 	});
 
 	it('re-enables the stop button when the stop fails (onStop resolves false)', async () => {
-		// Bug 4: a stop that did not take (ghost task / dead session) resolves
-		// `false`. The button must re-enable so the user can retry — not stick
-		// disabled forever on a row the next poll won't remove.
+		// A stop that did not take (ghost task / dead session) resolves `false`.
+		// The button must re-enable so the user can retry.
 		const onStop = vi.fn(async () => false);
 		render(ActiveTasks, { props: { tasks: [makeTask()], onStop } });
 
@@ -93,7 +130,6 @@ describe('ActiveTasks', () => {
 
 		expect(onStop).toHaveBeenCalledTimes(1);
 		expect(stopBtn.disabled).toBe(false);
-		// A second attempt is allowed (the guard reset).
 		await fireEvent.click(stopBtn);
 		expect(onStop).toHaveBeenCalledTimes(2);
 	});
@@ -122,72 +158,17 @@ describe('ActiveTasks', () => {
 		expect(stopBtn.disabled).toBe(true);
 	});
 
-	it('collapses to a single "Running N tasks" line and hides task rows', async () => {
-		const tasks = [makeTask({ id: 'a', subject: 'Task A' }), makeTask({ id: 'b', subject: 'Task B' })];
-		render(ActiveTasks, { props: { tasks } });
-
-		await fireEvent.click(screen.getByRole('button', { name: /minimize background tasks/i }));
-
-		expect(screen.getByText('Running 2 tasks')).toBeTruthy();
-		expect(screen.queryByText('Task A')).toBeNull();
-		expect(screen.queryByText('Background (2)')).toBeNull();
-	});
-
-	it('pluralizes the collapsed label (1 task vs N tasks)', async () => {
-		render(ActiveTasks, { props: { tasks: [makeTask()] } });
-		await fireEvent.click(screen.getByRole('button', { name: /minimize background tasks/i }));
-		expect(screen.getByText('Running 1 task')).toBeTruthy();
-	});
-
-	it('toggles back to expanded from the collapsed state', async () => {
-		render(ActiveTasks, { props: { tasks: [makeTask({ subject: 'Task A' })] } });
-
-		await fireEvent.click(screen.getByRole('button', { name: /minimize background tasks/i }));
-		expect(screen.queryByText('Task A')).toBeNull();
-
-		await fireEvent.click(screen.getByRole('button', { name: /expand background tasks/i }));
-		expect(screen.getByText('Task A')).toBeTruthy();
-	});
-
-	it('persists the collapsed state to the chat-preferences store', async () => {
-		render(ActiveTasks, { props: { tasks: [makeTask()] } });
-		await fireEvent.click(screen.getByRole('button', { name: /minimize background tasks/i }));
-		expect(chatPreferences.current.activeTasksCollapsed).toBe(true);
-	});
-
-	it('starts collapsed when the persisted preference says so', () => {
-		chatPreferences.setActiveTasksCollapsed(true);
-		render(ActiveTasks, { props: { tasks: [makeTask({ subject: 'Task A' })] } });
-
-		expect(screen.getByText('Running 1 task')).toBeTruthy();
-		expect(screen.queryByText('Task A')).toBeNull();
-	});
-
-	it('keeps the collapsed state across a remount (persistence round-trip)', async () => {
-		const { unmount } = render(ActiveTasks, { props: { tasks: [makeTask({ subject: 'Task A' })] } });
-		await fireEvent.click(screen.getByRole('button', { name: /minimize background tasks/i }));
-		expect(screen.getByText('Running 1 task')).toBeTruthy();
-		unmount();
-
-		// A fresh instance (e.g. after a reload / new turn) reads the persisted state.
-		render(ActiveTasks, { props: { tasks: [makeTask({ subject: 'Task A' })] } });
-		expect(screen.getByText('Running 1 task')).toBeTruthy();
-		expect(screen.queryByText('Task A')).toBeNull();
-	});
-
-	// ── Terminal (failed/killed) tasks — the silent-vanish fix ────────────────
-	// A background task whose SDK client died is reaped to "killed" and surfaced
-	// for a retention window (see task_registry.get_visible) so the strip shows
-	// the failure instead of the row disappearing with no indication.
+	// ── Terminal (failed/killed) tasks ────────────────────────────────────────
+	// A background task whose client died is reaped to killed/error and surfaced
+	// for a retention window so the tree shows the failure instead of silently
+	// vanishing. Terminal rows sort BELOW running ones and carry no stop button.
 	describe('terminal task surfacing', () => {
-		it('renders a strip of only terminal tasks (the failure is still shown)', () => {
+		it('shows terminal rows with their status and style hook', () => {
 			const { container } = render(ActiveTasks, {
 				props: { tasks: [makeTask({ id: 'dead', subject: 'Crashed task', status: 'killed' })] }
 			});
-			// The strip renders rather than collapsing to nothing.
 			expect(container.querySelector('.active-tasks')).not.toBeNull();
 			expect(screen.getByText('Crashed task')).toBeTruthy();
-			// The failed status is visible and the row carries the killed style hook.
 			expect(screen.getByText('killed')).toBeTruthy();
 			expect(container.querySelector('.task-row.is-killed')).not.toBeNull();
 		});
@@ -200,9 +181,15 @@ describe('ActiveTasks', () => {
 			expect(container.querySelector('.task-row.is-error')).not.toBeNull();
 		});
 
+		it('swaps the spinner for a static dot when nothing is running', () => {
+			const { container } = render(ActiveTasks, {
+				props: { tasks: [makeTask({ id: 'dead', status: 'killed' })] }
+			});
+			expect(container.querySelector('.spinner')).toBeNull();
+			expect(container.querySelector('.done-dot')).not.toBeNull();
+		});
+
 		it('omits the stop button for a terminal task even when onStop is provided', () => {
-			// A dead task can't be stopped — the "x" is hidden so the only control
-			// shown is for genuinely-running work.
 			const onStop = vi.fn();
 			render(ActiveTasks, {
 				props: { tasks: [makeTask({ id: 'dead', status: 'killed' })], onStop }
@@ -221,8 +208,33 @@ describe('ActiveTasks', () => {
 					onStop
 				}
 			});
-			// Exactly one stop button — for the running task only.
 			expect(screen.getAllByRole('button', { name: /stop task/i }).length).toBe(1);
+		});
+
+		it('sorts running tasks above terminal ones', () => {
+			const { container } = render(ActiveTasks, {
+				props: {
+					tasks: [
+						makeTask({ id: 'dead', subject: 'Crashed', status: 'killed' }),
+						makeTask({ id: 'live', subject: 'Still going', status: 'running' })
+					]
+				}
+			});
+			const subjects = Array.from(
+				container.querySelectorAll('.task-row .task-subject')
+			).map((el) => el.textContent);
+			expect(subjects).toEqual(['Still going', 'Crashed']);
+		});
+	});
+
+	// ── Agent display names ──────────────────────────────────────────────────
+	describe('agent display names', () => {
+		it('shows the dispatched agent name instead of the generic badge', () => {
+			render(ActiveTasks, {
+				props: { tasks: [makeTask({ agent: 'Explore' })] }
+			});
+			expect(screen.getByText('Explore')).toBeTruthy();
+			expect(screen.queryByText('agent')).toBeNull();
 		});
 	});
 });
