@@ -27,7 +27,12 @@ from app.api.auth import require_auth
 from app.api.sse_utils import is_client_disconnect
 from app.core.event_gateway import get_gateway
 from app.core.history_backfill import ensure_backfilled
-from app.db.session_events import get_events, get_max_seq
+from app.db.session_events import (
+    get_events,
+    get_first_user_seq_after,
+    get_max_seq,
+    get_user_seq_at_ordinal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +42,173 @@ router = APIRouter(prefix="/api/v1/sessions", tags=["Sessions"])
 KEEPALIVE_SECONDS = 15.0
 
 _PAGE = 500
+
+# Replay elision. Opening a long session must load its latest compacted state,
+# not stream the entire append-only log into a fresh browser. Two independent
+# bounds:
+#
+# * fluid sessions with persisted ContextCompaction promotions replay only the
+#   events AFTER the last promotion's end node — everything earlier is what the
+#   engine already folded into digests/epoch stubs.
+# * every log additionally gets a hard event-count cap so a never-compacted
+#   session (delegated CLI legs have no fluid ladder) still cannot ship an
+#   unbounded payload; the cut snaps forward to the next message.user row so a
+#   tool_use/tool_result pair is never split across it.
+#
+# Both paths lead with a synthetic system.compaction_boundary frame (no ``id:``
+# line — like caught_up, it does not advance the reconnect cursor) so the UI
+# shows a "context was compacted" marker where history was elided.
+MAX_REPLAY_EVENTS = 600
+
+
+def _sdk_session_id(session_id: str) -> Optional[str]:
+    """The session's engine transcript id (``ses_...`` for fluid sessions)."""
+    try:
+        from app.db import sessions as sessions_db
+
+        row = sessions_db.get_session(session_id)
+        sdk = (row or {}).get("sdk_session_id")
+        return str(sdk) if sdk else None
+    except Exception:
+        logger.debug("sdk_session_id lookup failed for %s", session_id, exc_info=True)
+        return None
+
+
+def _turn_start_nodes(sdk_session_id: str) -> list:
+    """The session's turn-start user nodes, root-first.
+
+    Mirrors fluid's ``is_turn_start``: a user node with any non-tool-result
+    content block. These are exactly the nodes a compaction span may end
+    before, and exactly what a ``message.user`` event was recorded for.
+    """
+    try:
+        from app.core.provider.fluid_transcript import (
+            looks_like_fluid_session_id,
+            load_fluid_path,
+        )
+
+        if not looks_like_fluid_session_id(sdk_session_id):
+            return []
+        from app.core.provider.fluid_transcript import _as_dict
+
+        starts = []
+        for node in load_fluid_path(sdk_session_id):
+            message = _as_dict(node.get("message"))
+            blocks = message.get("content") or []
+            if (
+                (message.get("role") == "user")
+                and any(
+                    isinstance(b, dict) and b.get("kind") != "toolresultblock"
+                    for b in blocks
+                )
+            ):
+                starts.append(node)
+        return starts
+    except Exception:
+        logger.debug(
+            "turn-start walk failed for %s", sdk_session_id, exc_info=True
+        )
+        return []
+
+
+def _compaction_turn_cutoff(session_id: str) -> Optional[int]:
+    """Seq of the FIRST turn the engine still holds verbatim, or None.
+
+    The last persisted ContextCompaction promotion ends at some node E; the
+    next turn-start node after it is the first content a compacted replay must
+    show. Turn ordinals bridge node-space to event-log space: the k-th
+    turn-start node was recorded as the k-th ``message.user`` row (both live
+    recording and the legacy backfill emit exactly one per human turn), so
+    cutting at that row's seq keeps whole turns only.
+    """
+    sdk = _sdk_session_id(session_id)
+    if not sdk:
+        return None
+    try:
+        from app.core.provider.fluid_transcript import latest_compaction_boundary
+
+        boundary = latest_compaction_boundary(sdk)
+        if boundary is None:
+            return None
+        starts = _turn_start_nodes(sdk)
+        cut_index = None
+        for i, node in enumerate(starts):
+            if node.get("node_id") == boundary["node_id"]:
+                cut_index = i + 1  # first turn AFTER the promoted region
+                break
+        if cut_index is None:
+            return None
+        from app.db.session_events import get_user_seq_at_ordinal
+
+        return get_user_seq_at_ordinal(session_id, cut_index + 1)
+    except Exception:
+        logger.debug(
+            "compaction-aware cutoff failed for %s", session_id, exc_info=True
+        )
+        return None
+
+
+def _replay_elision(session_id: str) -> tuple:
+    """``(cutoff_seq, elided_count, reason)`` for this replay, or ``(0, 0, "")``.
+
+    Compaction-aware when the session's engine ladder has promoted spans;
+    otherwise a plain count cap bounds a never-compacted long log (delegated
+    CLI legs have no fluid ladder). Both bounds then snap FORWARD to the next
+    ``message.user`` row so the elided prefix always ends on a completed turn
+    and no tool_use ever loses its result. When no turn-start row exists at or
+    after a bound (the log tail is mid-turn), nothing is elided — replaying is
+    always safe, truncating is not.
+    """
+    try:
+        total = get_max_seq(session_id)
+        if total <= MAX_REPLAY_EVENTS:
+            return 0, 0, ""
+
+        count_bound = max(1, total - MAX_REPLAY_EVENTS + 1)
+        compaction_bound = _compaction_turn_cutoff(session_id)
+
+        # The tighter (larger) bound wins; both are already turn-start rows,
+        # so the snap below is a belt-and-braces guard for the cap path only
+        # when compaction produced nothing.
+        candidates = [b for b in (count_bound, compaction_bound) if b]
+        if not candidates:
+            return 0, 0, ""
+        bound = max(candidates)
+        if compaction_bound is not None and bound >= compaction_bound:
+            reason = "compacted"
+        else:
+            reason = "capped"
+
+        # Everything strictly before the cutoff row is elided; the boundary
+        # marker tells the UI how much.
+        snapped, _n = get_first_user_seq_after(session_id, bound - 1)
+        if snapped is None:
+            return 0, 0, ""
+        return snapped, snapped - 1, reason
+    except Exception:
+        logger.debug(
+            "replay elision failed for %s", session_id, exc_info=True
+        )
+        return 0, 0, ""
+
+
+def _boundary_frame(seq: int, elided: int, reason: str) -> str:
+    """A synthetic system.compaction_boundary SSE frame (no ``id:`` line)."""
+    data = json.dumps({
+        "id": f"elided-{seq}",
+        "session_id": "",
+        "type": "system.compaction_boundary",
+        "subtype": "compact_boundary",
+        "data": {
+            "trigger": reason,
+            "preTokens": None,
+            "elidedEvents": elided,
+        },
+        "seq": seq,
+        "created_at": None,
+    }, default=str)
+    return f"event: system.compaction_boundary\ndata: {data}\n\n"
+
 
 
 def _wire(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -84,7 +256,17 @@ async def event_stream(session_id: str, from_seq: int = 0):
         "SSE feed connected: session=%s from_seq=%s", session_id, from_seq
     )
     try:
-        # 1. Backfill everything already persisted.
+        # 1. Backfill the persisted log — from the latest compacted state when
+        #    the log is long enough to warrant it (see _replay_elision), else
+        #    in full. A full-load (from_seq == 0) only: a reconnect resumes at
+        #    its own cursor and must never skip events.
+        if cursor == 0:
+            cutoff, elided_count, reason = await asyncio.to_thread(
+                _replay_elision, session_id
+            )
+            if cutoff > 0:
+                yield _boundary_frame(cutoff, elided_count, reason)
+                cursor = cutoff - 1
         while True:
             page = await asyncio.to_thread(get_events, session_id, cursor, _PAGE)
             for row in page:

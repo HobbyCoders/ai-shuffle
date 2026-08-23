@@ -269,6 +269,43 @@ describe('feedController history-batch hydration', () => {
 		expect(msgs[0].content).toBe('foobar');
 	});
 
+	it('(a-fallback-idle) a long backfill stays batched — each frame re-arms the fallback', () => {
+		// A big session backfills for many seconds. The fallback is IDLE-based:
+		// every arriving frame re-arms it, so the stream never flips to per-frame
+		// live painting mid-backfill (which replayed the transcript visibly and
+		// sent the auto-scroll chasing the repaints).
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		const callsAfterStart = deps.update.mock.calls.length;
+
+		for (let i = 0; i < 50; i++) {
+			hoisted.onEvent!(textDelta(`e${i}`, 'x'));
+			vi.advanceTimersByTime(900); // < CATCHUP_FALLBACK_MS between frames
+		}
+		// Still batching: not one intermediate fold across 45 seconds of frames.
+		expect(deps.update.mock.calls.length).toBe(callsAfterStart);
+
+		// The sentinel folds the whole accumulated transcript in ONE batch.
+		hoisted.onEvent!(caughtUp(50));
+		expect(deps.update.mock.calls.length).toBe(callsAfterStart + 1);
+		const msgs = deps.state.messages as Array<{ id: string }>;
+		expect(msgs).toHaveLength(1); // 50 deltas → one joined message
+	});
+
+	it('(a-fallback-idle) a true idle gap during backfill still folds (stuck view safety)', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		const callsAfterStart = deps.update.mock.calls.length;
+
+		hoisted.onEvent!(textDelta('e1', 'foo'));
+		// Silence for longer than CATCHUP_FALLBACK_MS with no sentinel: fold so
+		// the view can never be stuck blank.
+		vi.advanceTimersByTime(1100);
+		expect(deps.update.mock.calls.length).toBe(callsAfterStart + 1);
+	});
+
 	it('(c) #611: after catch-up, a reconnect (onOpen) folds live events immediately — no re-batch', () => {
 		const deps = makeDeps();
 		feedController.attach(deps);

@@ -79,9 +79,13 @@ let caughtUp = false;
 // `caughtUp === true` so live events fold immediately instead of waiting on the
 // throttleable `CATCHUP_FALLBACK_MS` timer in a hidden tab. Reset in start()/stop().
 let everCaughtUp = false;
-// Safety net for an old backend that never emits `caught_up`: if the sentinel
-// hasn't arrived within this window, fold whatever has accumulated so the view
-// can never be stuck blank. Re-armed per connect; cleared on `caught_up`.
+// Safety net for an old backend that never emits `caught_up`: if NO frame has
+// arrived for this long, fold whatever has accumulated so the view can never be
+// stuck blank. IDLE-based, not a deadline from connect: a long backfill is a
+// steady stream of frames, each of which re-arms the timer — flipping to live
+// cadence mid-backfill made every remaining history frame repaint individually,
+// which surfaced as the transcript visibly replaying (and auto-scroll chasing)
+// on large sessions. Cleared on `caught_up`.
 let catchupFallbackTimer: ReturnType<typeof setTimeout> | null = null;
 const CATCHUP_FALLBACK_MS = 1_000;
 
@@ -97,8 +101,8 @@ function armCatchupFallback(): void {
 	catchupFallbackTimer = setTimeout(() => {
 		catchupFallbackTimer = null;
 		if (!caughtUp) {
-			// No sentinel arrived (old backend). Give up batching and fold what we
-			// have; subsequent events flush per the normal live cadence.
+			// No sentinel AND a full second of silence: give up batching and fold
+			// what we have; subsequent events flush per the normal live cadence.
 			caughtUp = true;
 			everCaughtUp = true;
 			fold();
@@ -326,6 +330,9 @@ export const feedController: FeedController = {
 					deliveredTurnIds.add(ev.turn_id);
 				}
 				seedOptimistic();
+				// A frame just arrived while still batching: the stream is alive,
+				// so keep waiting for `caught_up` (idle-based fallback above).
+				if (!caughtUp) armCatchupFallback();
 				reducerState = reduce(reducerState, ev);
 				// #606 item 4 — cross-device settle: the permission/question CARD was
 				// added on THIS device via the legacy `get_pending_*` WS relay on

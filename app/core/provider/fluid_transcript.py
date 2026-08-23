@@ -1044,3 +1044,75 @@ def fluid_live_messages(
     from app.core.jsonl_parser import _transform_entries
 
     return _transform_entries(entries, sdk_session_id, working_dir)
+
+
+# ─── Compaction boundary ─────────────────────────────────────────────────────
+#
+# fluid's mechanical eviction ladder (fluid.context.compaction) never mutates
+# the node tree — it persists its promotion decisions as ContextCompaction
+# events in "fluid_session_events" and renders a compacted VIEW on the next
+# request. The app's read paths were blind to those decisions and served the
+# full-fidelity tree, so reopening a long session replayed everything the UI
+# had already summarized away. This section is the one place that reads the
+# persisted decisions and resolves where "the latest compacted state" begins.
+
+def _compaction_events(sdk_session_id: str) -> List[Dict[str, Any]]:
+    """Persisted ContextCompaction events (_cls-tagged dicts), in order."""
+    return [
+        row["event"]
+        for row in _event_rows(sdk_session_id)
+        if (row.get("event") or {}).get("_cls") == "ContextCompaction"
+    ]
+
+
+def latest_compaction_boundary(
+    sdk_session_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Where the session's latest compacted state begins, or None.
+
+    Returns {"node_id", "ts", "spans", "tier"} for the END node of the LAST
+    persisted promotion — everything up to and including it has been folded
+    into digests/epoch stubs by the engine, so a replay can start after it.
+    None when the session has never compacted (no promotions with spans, an
+    unknown id, or any store hiccup — callers must treat failure as "no
+    elision", never as an error).
+    """
+    try:
+        events = _compaction_events(sdk_session_id)
+        if not events:
+            return None
+        last_end: Optional[str] = None
+        spans = 0
+        tier = 0
+        for event in events:
+            span_list = event.get("spans") or []
+            spans += len(span_list)
+            tier = max(tier, int(event.get("tier") or 0))
+            for span in span_list:
+                if isinstance(span, (list, tuple)) and len(span) >= 2:
+                    last_end = span[1]
+        if not last_end:
+            return None
+        # Tier-1 trims carry no spans; a log of only trims has no cut point.
+        end_ts: Optional[float] = None
+        for node in load_fluid_path(sdk_session_id):
+            if node.get("node_id") == last_end:
+                end_ts = node.get("ts")
+                break
+        if end_ts is None:
+            # The promotion's end node left the path (a rewind moved the head
+            # above it) — the decision is inert now, so nothing may be elided.
+            return None
+        return {
+            "node_id": last_end,
+            "ts": end_ts,
+            "spans": spans,
+            "tier": tier,
+        }
+    except Exception:
+        logger.debug(
+            "compaction boundary lookup failed for %s",
+            sdk_session_id, exc_info=True,
+        )
+        return None
+

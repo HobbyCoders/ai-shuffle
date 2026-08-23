@@ -300,6 +300,58 @@ def has_subagent_started(session_id: str, task_id: str) -> bool:
         return cursor.fetchone() is not None
 
 
+def get_first_user_seq_after(
+    session_id: str, after_seq: int
+) -> Tuple[Optional[int], Optional[int]]:
+    """``(seq, ordinal)`` of the first ``message.user`` row with seq > after_seq.
+
+    The ordinal is 1-based among ALL of the session's message.user rows — the
+    same turn numbering the fluid node path uses (the k-th human turn), so a
+    compaction boundary expressed as "turn k" maps to the row whose ordinal is
+    k+1. ``(None, None)`` when no such row exists.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT MIN(seq) AS first_seq FROM session_events "
+            "WHERE session_id = %s AND event_type = 'message.user' AND seq > %s",
+            (session_id, after_seq),
+        )
+        row = cursor.fetchone() or {}
+        first_seq = row.get("first_seq")
+        if first_seq is None:
+            return None, None
+        cursor.execute(
+            "SELECT COUNT(*) AS n FROM session_events "
+            "WHERE session_id = %s AND event_type = 'message.user' AND seq < %s",
+            (session_id, first_seq),
+        )
+        ord_row = cursor.fetchone() or {}
+        return int(first_seq), int(ord_row.get("n") or 0) + 1
+
+
+def get_user_seq_at_ordinal(session_id: str, ordinal: int) -> Optional[int]:
+    """Seq of the session's ``ordinal``-th ``message.user`` row (1-based).
+
+    Turns are recorded one ``message.user`` per human turn in order, so this
+    bridges "the engine kept turns k.. onward" to an event-log seq.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT MIN(seq) AS seq FROM ("
+            "  SELECT seq, ROW_NUMBER() OVER "
+            "    (PARTITION BY session_id ORDER BY seq) AS rn"
+            "  FROM session_events"
+            "  WHERE session_id = %s AND event_type = 'message.user'"
+            ") ranked WHERE rn = %s",
+            (session_id, ordinal),
+        )
+        row = cursor.fetchone() or {}
+        seq = row.get("seq")
+        return int(seq) if seq is not None else None
+
+
 def get_max_seq(session_id: str) -> int:
     """Return the highest allocated seq for a session (0 if none)."""
     with get_db() as conn:
