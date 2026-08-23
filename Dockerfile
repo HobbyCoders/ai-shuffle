@@ -118,11 +118,12 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ── fluid harness (REQUIRED — the only provider backend) ──
-# CI vendors the harness source tree as
-# a checkout into vendor/fluid before the docker build (see
-# .github/workflows/docker-publish.yml). A build without the checkout produces
-# an image that cannot serve queries at all (make_adapter imports fluid), so the
-# skip branch below is a loud warning, not a supported configuration.
+# vendor/fluid contains the harness source as a
+# pristine copy of fluid main, committed to this repo and kept current by
+# .github/workflows/vendor-sync.yml, so the build needs no cross-repo
+# credentials. A build without that directory produces an image that cannot
+# serve queries at all (make_adapter imports fluid), so the skip branch below
+# is a loud warning, not a supported configuration.
 COPY vendor/ /opt/vendor/
 RUN if [ -f /opt/vendor/fluid/pyproject.toml ]; then         pip install --no-cache-dir /opt/vendor/fluid &&         python -c "import fluid; print('fluid installed')";     else         echo "WARNING: vendor/fluid not present — fluid backend NOT baked in; this image cannot serve queries";     fi
 
