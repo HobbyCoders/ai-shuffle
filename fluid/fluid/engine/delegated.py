@@ -67,6 +67,7 @@ from fluid.events.ops import (
     Interrupt,
     Op,
     RespondPermission,
+    Resume,
     SetModel,
     SetPermissionMode,
     UserTurn,
@@ -229,6 +230,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 raise RuntimeError("a turn is already running; Interrupt it first")
             self._interrupted.clear()
             self._turn_task = asyncio.create_task(self._run_turn(op))
+        elif isinstance(op, Resume):
+            # The CLI owns its own transcript; fluid cannot hand it a head node
+            # to continue from. Say so plainly rather than dropping the op.
+            raise NotImplementedError("Resume is not supported by the delegated engine")
         elif isinstance(op, Interrupt):
             self._interrupted.set()
             await self._send_interrupt()

@@ -22,6 +22,13 @@ each attempt and backing off (interruptibly) in between; only after the cap is
 reached does the turn end with the usual terminal ErrorEvent. No empty
 assistant node is ever written, and each failed call's usage is still folded
 into the turn totals so nothing billed is lost.
+
+A turn that ends on an ErrorEvent leaves the head on an unanswered user node —
+a text prompt, or the tool results the model never got to read. The Resume op
+picks the loop back up from exactly that node without appending anything, so
+the retry re-sends the same history the failed call saw. Resume on a head that
+is already an assistant reply has nothing to continue and ends the turn with an
+ErrorEvent saying so.
 """
 
 from __future__ import annotations
@@ -72,6 +79,7 @@ from fluid.events.ops import (
     Op,
     RespondPermission,
     RespondQuestion,
+    Resume,
     Rewind,
     SetModel,
     SetPermissionMode,
@@ -500,7 +508,7 @@ class NativeLoop(BackgroundLifecycleMixin):
     async def submit(self, op: Op) -> None:
         if isinstance(op, BackgroundTaskFinished):
             await self._finish_background_task(op)
-        elif isinstance(op, UserTurn):
+        elif isinstance(op, UserTurn | Resume):
             if self._turn_task and not self._turn_task.done():
                 raise RuntimeError("a turn is already running; Interrupt it first")
             self._interrupted.clear()
@@ -705,7 +713,7 @@ class NativeLoop(BackgroundLifecycleMixin):
 
     # ─── Turn lifecycle ──────────────────────────────────────────────────
 
-    async def _run_turn(self, op: UserTurn) -> None:
+    async def _run_turn(self, op: UserTurn | Resume) -> None:
         meta = await self._ensure_session()
         sid = meta.session_id
         turn_id = new_id("turn")
@@ -717,6 +725,35 @@ class NativeLoop(BackgroundLifecycleMixin):
         await self._connect_mcp_once(sid, turn_id)
         await self._rehydrate_deferred_announced(sid, meta.head_node_id)
         await self._rehydrate_compaction(sid)
+
+        if isinstance(op, Resume):
+            # Nothing is appended: the head user node IS the prompt, so the
+            # request is byte-identical to the one that failed and the cache
+            # survives. Everything a fresh user turn carries (reminders, the
+            # background wake marker, the code-mode journal entry) belongs to
+            # writing a node, so none of it applies here.
+            path = await self.store.load_path(sid)
+            head = path[-1] if path else None
+            if head is None or head.message.role != "user":
+                await self._emit(TurnStarted(
+                    session_id=sid, node_id=head.node_id if head else "",
+                    turn_id=turn_id, model=self.model, provider=self.provider.name,
+                ))
+                await self._emit_terminal_with_park(ErrorEvent(
+                    session_id=sid,
+                    node_id=head.node_id if head else None,
+                    turn_id=turn_id,
+                    message=(
+                        "nothing to resume: the last message is already an "
+                        "assistant reply"
+                    ),
+                    retriable=False,
+                ))
+                self._active_turn_id = None
+                return
+            await self._start_and_loop(sid, turn_id, head)
+            return
+
         content: list[Any] = (
             [Text(op.content)] if isinstance(op.content, str) else list(op.content)
         )
@@ -736,9 +773,18 @@ class NativeLoop(BackgroundLifecycleMixin):
         if self._codemode is not None:
             # Episodic half of the continual journal: the intent behind the turn.
             self._codemode.record_event("user", _plain_text(content))
+        await self._start_and_loop(sid, turn_id, user_node)
+
+    async def _start_and_loop(
+        self, sid: str, turn_id: str, from_node: SessionNode
+    ) -> None:
+        """The half of a turn that runs once the user node exists: announce it,
+        fire TURN_START, run the agent loop, and end on a terminal event. Shared
+        by UserTurn (which just wrote the node) and Resume (which continues from
+        the node already at the head)."""
         await self._emit(
             TurnStarted(
-                session_id=sid, node_id=user_node.node_id, turn_id=turn_id,
+                session_id=sid, node_id=from_node.node_id, turn_id=turn_id,
                 model=self.model, provider=self.provider.name,
             )
         )
@@ -748,7 +794,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             )
             await self._report_hook_warnings(sid, turn_id, TURN_START, decision)
         try:
-            await self._agent_loop(sid, turn_id, user_node)
+            await self._agent_loop(sid, turn_id, from_node)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # surface, never swallow
