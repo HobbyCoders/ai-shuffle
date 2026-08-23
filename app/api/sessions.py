@@ -1762,6 +1762,20 @@ async def set_session_active(
             detail="Failed to update active status"
         )
 
+    # Fan the Active-membership flip out to the user's other devices so their
+    # sidebars re-group without waiting for a refetch. Best-effort: the caller
+    # already got its authoritative row back.
+    try:
+        from app.core.sync_engine import sync_engine
+        await sync_engine.broadcast_user_session_updated(
+            user_id=session.get("api_user_id") or "admin",
+            session_id=session_id,
+            updates={"is_active": payload.is_active},
+            source_device_id=None,
+        )
+    except Exception:  # noqa: BLE001 — list refresh is best-effort
+        pass
+
     return session
 
 

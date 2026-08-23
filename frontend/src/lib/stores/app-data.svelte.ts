@@ -505,6 +505,13 @@ export const appData = {
 
 		try {
 			await apiSetSessionActive(sessionId, isActive);
+			// Reconcile with an authoritative reload. A paginated load that was
+			// already in flight when the user clicked (e.g. the turn-done refresh)
+			// carries the PRE-patch row and its per-page commits would overwrite
+			// the optimistic flip — the card snaps back into Active. Starting a
+			// fresh load bumps the request-id guard, so those stale loads discard
+			// themselves instead.
+			await loadSessionsInternal(_state.sessionsTagFilter);
 		} catch (err) {
 			// Roll the optimistic change back and let the caller surface the error.
 			_update(s => ({ ...s, sessions: prevSessions }));
