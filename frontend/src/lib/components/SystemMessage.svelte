@@ -661,6 +661,20 @@
 						compact: true
 					};
 				}
+				if (data.settled) {
+					// The turn reached its end without exhausting the cap, so the
+					// retries worked. The row stops counting and reports what it
+					// cost — a settled outcome, no spinner and no Retry button.
+					let recovered = `Empty response from the provider — recovered after ${attempt} ${attempt === 1 ? 'retry' : 'retries'}`;
+					if (retryModel) recovered += ` · ${retryModel}`;
+					return {
+						title: 'Retried',
+						content: recovered,
+						badge: 'retry',
+						badgeColor: 'green',
+						compact: true
+					};
+				}
 				const base = `Empty response from the provider — retrying (attempt ${attempt} of ${maxAttempts})`;
 				return {
 					title: 'Retrying',
@@ -763,8 +777,15 @@
 	const retryResumed = $derived(
 		!!(message.systemData as Record<string, unknown> | undefined)?.resumed
 	);
+	// The reducer stamps `settled` on any terminal turn event, so a card that
+	// counted a few attempts and then got its answer stops spinning and takes
+	// the green check the other finished compact rows use.
+	const retrySettled = $derived(
+		message.systemSubtype === 'provider_retry' &&
+			!!(message.systemData as Record<string, unknown> | undefined)?.settled
+	);
 	const isProviderRetry = $derived(
-		message.systemSubtype === 'provider_retry' && !retryExhausted
+		message.systemSubtype === 'provider_retry' && !retryExhausted && !retrySettled
 	);
 	// The button retires the moment any new turn starts (the reducer stamps
 	// `resumed`), so a card can never launch two resumes.

@@ -158,6 +158,39 @@ describe('SystemMessage — provider_retry', () => {
 
 		expect(container.textContent).toContain('attempt ? of ?');
 	});
+
+	it('reads as a recovered row once the turn settles it', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'provider_retry',
+					systemData: { attempt: 3, max_attempts: 10, model: 'ox-alpha', settled: true }
+				})
+			}
+		});
+
+		expect(screen.getByText('Retried')).toBeTruthy();
+		expect(container.textContent).toContain('recovered after 3 retries');
+		expect(container.textContent).toContain('ox-alpha');
+		// Finished work: the green check replaces the spinner, and there is
+		// nothing to retry.
+		expect(container.querySelector('.animate-spin')).toBeNull();
+		expect(container.querySelector('.text-green-500')).not.toBeNull();
+		expect(container.querySelector('[data-testid="provider-retry-button"]')).toBeNull();
+	});
+
+	it('says "retry" in the singular when only one attempt was spent', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'provider_retry',
+					systemData: { attempt: 1, max_attempts: 10, settled: true }
+				})
+			}
+		});
+
+		expect(container.textContent).toContain('recovered after 1 retry');
+	});
 });
 
 describe('SystemMessage — provider_retry exhausted', () => {

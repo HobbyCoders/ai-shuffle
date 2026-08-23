@@ -268,6 +268,31 @@ function settleStaleBackgroundWork(state: V2SessionState): V2SessionState {
 	};
 }
 
+/**
+ * Close out open retry cards when the turn reaches a terminal state.
+ *
+ * A `provider_retry` card renders as live work — a spinner counting attempts —
+ * because the engine is mid-retry when the note arrives. Nothing else ever
+ * finishes it: the engine stops emitting notes on success, so without this the
+ * card spins forever after the turn is over. Stamping `settled` lets
+ * SystemMessage render it as a finished "Retried N times" row.
+ *
+ * An `exhausted` card is left alone: it records a failure and owns the Retry
+ * button, which the settled rendering does not offer. Already-settled cards are
+ * skipped so the array identity survives a replay folding the same log twice.
+ */
+function settleRetryCards(messages: ChatMessage[]): ChatMessage[] {
+	let touched = false;
+	const out = messages.map((m) => {
+		if (m.role !== 'system' || m.systemSubtype !== 'provider_retry') return m;
+		const data = m.systemData as Record<string, unknown> | undefined;
+		if (data?.exhausted || data?.settled) return m;
+		touched = true;
+		return { ...m, systemData: { ...(data ?? {}), settled: true } };
+	});
+	return touched ? out : messages;
+}
+
 function str(v: unknown): string {
 	return typeof v === 'string' ? v : '';
 }
@@ -622,7 +647,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// right after. Speculatively settle any still-'running' subagent card /
 			// task summary that missed its terminal event (#609 self-heal); a
 			// following turn.parked reverts that settle. See settleStaleBackgroundWork.
-			const completed = settleStaleBackgroundWork(
+			const drained = settleStaleBackgroundWork(
 				closeOpen({
 					...state,
 					isStreaming: false,
@@ -634,6 +659,11 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					usage: obj(event.usage) ?? state.usage,
 				})
 			);
+			// A retry card left mid-count is finished business now — the turn
+			// succeeded despite the empty responses. See settleRetryCards.
+			const retrySettled = settleRetryCards(drained.messages);
+			const completed =
+				retrySettled === drained.messages ? drained : { ...drained, messages: retrySettled };
 			// SDK 0.2.126: a turn that stopped because it hit the configured
 			// max-turns ceiling carries terminal_reason='max_turns'. Surface a
 			// neutral (non-error) informational system card so the user knows the
@@ -786,8 +816,13 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					}
 				}
 			}
+			// Every abort that did NOT fold into an exhausted card lands here —
+			// an interrupt, or an error that arrived without a retry card at the
+			// cap. Any retry note still counting is over either way, so settle it
+			// rather than leaving a spinner behind. See settleRetryCards.
 			return {
 				...next,
+				messages: settleRetryCards(next.messages),
 				isStreaming: false,
 				parked: false,
 				liveTurnId: null,

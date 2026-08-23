@@ -4065,14 +4065,20 @@ async def _stream_to_websocket_impl(
             "message": "Query was interrupted",
             "metadata": {"terminal_reason": metadata.get("terminal_reason")}
         }
-    elif metadata.get("is_error") and not has_visible_content:
-        # The turn ended on an is_error ResultMessage without rendering ANY
-        # content — the fluid legs deliver provider failures this way (an
-        # ErrorEvent becomes a terminal ResultMessage, the generator ends
-        # cleanly, `crashed` never flips). A bare `done` here made the
-        # frontend chime "session complete" over a silently dead turn with no
-        # explanation. Surface it as the terminal `error` frame instead — the
-        # frontend shows the banner and resets streaming state.
+    elif metadata.get("is_error") and (
+        not has_visible_content
+        or (isinstance(metadata.get("errors"), list) and metadata.get("errors"))
+    ):
+        # An is_error result that carries error messages is a failed turn
+        # whether or not content was rendered first. The fluid legs deliver
+        # every provider failure this way — an ErrorEvent becomes a terminal
+        # ResultMessage with `errors`, the generator ends cleanly, and
+        # `crashed` never flips — so anything already on screen (a retry note,
+        # a model banner, a tool call) used to flip `has_visible_content` and
+        # downgrade the failure to `done`. That hid the failure from the
+        # transcript, from the sidebar, and from the retry card, which kept
+        # spinning with no way to retry. Surface the terminal `error` frame
+        # instead: the frontend shows the banner and resets streaming state.
         _errs = metadata.get("errors")
         _msg = (
             "; ".join(str(e) for e in _errs)

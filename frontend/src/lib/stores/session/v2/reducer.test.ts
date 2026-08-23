@@ -1618,6 +1618,53 @@ describe('system + unknown events', () => {
 		expect(retries[1].systemData).toMatchObject({ attempt: 1 });
 	});
 
+	it('turn.completed settles a retry card that still had attempts left', () => {
+		// The retries worked: the turn finished. The card must stop reading as
+		// live work, or it spins forever with nothing left to move it.
+		const s = fold([
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 2, max_attempts: 10, model: 'ox-alpha' },
+			}),
+			ev('turn.completed', {}),
+		]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries).toHaveLength(1);
+		expect(retries[0].systemData).toMatchObject({ attempt: 2, settled: true });
+		expect(retries[0].systemData).not.toHaveProperty('exhausted');
+	});
+
+	it('an exhausted card is never settled', () => {
+		const s = fold([
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 10, max_attempts: 10 },
+			}),
+			ev('turn.aborted', { reason: 'error', message: 'giving up' }),
+		]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries[0].systemData).toMatchObject({ exhausted: true });
+		expect(retries[0].systemData).not.toHaveProperty('settled');
+	});
+
+	it('an interrupt settles a retry card mid-count', () => {
+		const s = fold([
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 4, max_attempts: 10 },
+			}),
+			ev('turn.aborted', { reason: 'interrupt' }),
+		]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries[0].systemData).toMatchObject({ attempt: 4, settled: true });
+	});
+
 	it('compaction_boundary renders a system marker', () => {
 		const s = fold([ev('system.compaction_boundary', { id: 'cb1' })]);
 		expect(s.messages[0]).toMatchObject({ systemSubtype: 'compaction_boundary' });
