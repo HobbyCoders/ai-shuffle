@@ -532,7 +532,7 @@ async def _prepare_operation(
     Returns ``(working_dir, current_branch, repo, op)``.
     """
     check_project_access(request, project_id)
-    working_dir = get_working_dir(project_id, worktree_id)
+    working_dir = get_working_dir(project_id, worktree_id, session_id)
 
     if not await run_git(git_service.is_git_repo, working_dir):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Project is not a git repository")

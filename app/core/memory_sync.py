@@ -140,16 +140,19 @@ def memory_key_for_project(project: dict) -> Optional[str]:
     return project.get("link_group_id") or project.get("id")
 
 
-# A session's cwd may be a git worktree at ``<repo>/.claude/worktrees/<name>``
-# (see worktree_manager.py). The Claude CLI anchors a project's NATIVE memory
-# dir to the MAIN checkout's slug regardless of the worktree cwd, so slugging
-# the worktree path targets a per-worktree mirror the CLI never populates —
-# sync then silently no-ops. Reduce such a cwd to its repo root before slugging.
-_WORKTREE_MARKER_RE = re.compile(r"[\\/]\.claude[\\/]worktrees[\\/]")
+# A session's cwd may be a git worktree at ``<repo>/.fluid/worktrees/<name>``
+# or a legacy ``<repo>/.claude/worktrees/<name>`` (see worktree_manager.py).
+# The Claude CLI anchors a project's NATIVE memory dir to the MAIN checkout's
+# slug regardless of the worktree cwd, so slugging the worktree path targets a
+# per-worktree mirror the CLI never populates — sync then silently no-ops.
+# Reduce such a cwd to its repo root before slugging.
+_WORKTREE_MARKER_RE = re.compile(
+    r"[\\/](?:\.fluid|\.claude)[\\/]worktrees[\\/]"
+)
 
 
 def _repo_root_for_working_dir(working_dir: str) -> str:
-    """Strip a trailing ``.claude/worktrees/<name>`` segment to the repo root."""
+    """Strip a trailing ``.fluid/worktrees/<name>`` segment to the repo root."""
     match = _WORKTREE_MARKER_RE.search(working_dir)
     return working_dir[: match.start()] if match else working_dir
 
@@ -212,7 +215,7 @@ def _resolve_target(
 
     The memory dir is slugged from the PROJECT record's root path (its main
     checkout), not the raw session cwd: a worktree session runs under
-    ``<repo>/.claude/worktrees/<name>`` but the CLI writes native memory to the
+    ``<repo>/.fluid/worktrees/<name>`` but the CLI writes native memory to the
     main checkout's slug dir. Falling back to ``working_dir`` (itself folded to
     a repo root by ``memory_dir_for_working_dir``) preserves behaviour when the
     project lookup yields nothing.

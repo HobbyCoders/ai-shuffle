@@ -567,10 +567,10 @@ class TestFinishEndpoint:
         """
         resp = op_client.post(
             "/api/v1/projects/p1/git/finish",
-            json={"worktree_id": "wt-1", "cleanup": True},
+            json={"worktree_id": "wt-1", "session_id": "ses-1", "cleanup": True},
         )
         assert resp.status_code == 200
-        gitops.get_working_dir.assert_any_call("p1", "wt-1")
+        gitops.get_working_dir.assert_any_call("p1", "wt-1", "ses-1")
 
 
 class TestShipEndpoint:
@@ -589,10 +589,10 @@ class TestShipEndpoint:
     def test_worktree_id_from_body_reaches_working_dir(self, op_client):
         resp = op_client.post(
             "/api/v1/projects/p1/git/ship",
-            json={"worktree_id": "wt-9"},
+            json={"worktree_id": "wt-9", "session_id": "ses-2"},
         )
         assert resp.status_code == 200
-        gitops.get_working_dir.assert_any_call("p1", "wt-9")
+        gitops.get_working_dir.assert_any_call("p1", "wt-9", "ses-2")
 
     def test_head_equals_base_400(self, op_client, mock_git_service):
         """Backstop: can't ship the base branch onto itself (head == base)."""

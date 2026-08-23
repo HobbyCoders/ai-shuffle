@@ -639,12 +639,15 @@ async def list_worktree_files(
         if item.name.startswith('.') and not show_hidden:
             continue
 
-        # Never surface nested git worktree checkouts (.claude/worktrees/...),
-        # which are app internals rather than real project content, even when
-        # show_hidden is requested.
+        # Never surface nested git worktree checkouts (.fluid/worktrees/... or
+        # legacy .claude/worktrees/...), which are app internals rather than real
+        # project content, even when show_hidden is requested.
         try:
             rel_to_base = item.relative_to(worktree_base)
-            if os.path.normpath(str(rel_to_base)) == os.path.join(".claude", "worktrees"):
+            if os.path.normpath(str(rel_to_base)) in (
+                os.path.join(".fluid", "worktrees"),
+                os.path.join(".claude", "worktrees"),
+            ):
                 continue
         except ValueError:
             pass
