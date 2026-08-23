@@ -405,7 +405,7 @@
 	   muted meta line (project · device · branch). Still denser than the
 	   three-line active cards. Hover reveals the quick action centered at the
 	   row's right edge; the mobile swipe strip is untouched. */
-	.scard.compact { padding: 6px 8px 7px; }
+	.scard.compact { padding: 6px calc(8px + var(--ram-reveal) * 30px) 7px 8px; }
 	.l1.cline { display: flex; align-items: center; gap: 8px; }
 	.cproj {
 		color: var(--sidebar-muted);
@@ -560,13 +560,14 @@
 		font-size: 10px;
 	}
 
+	/* Rail spans the full row height so the button's hit area does too. */
 	.card-actions {
 		position: absolute;
-		top: 50%;
-		transform: translateY(-50%);
+		top: 0;
 		right: 6px;
+		bottom: 0;
 		display: flex;
-		align-items: center;
+		align-items: stretch;
 		gap: 1px;
 		opacity: var(--ram-reveal);
 		transition: opacity 120ms ease;
@@ -575,9 +576,10 @@
 	.card-actions > * {
 		transition: color 120ms ease, background-color 120ms ease;
 	}
+	/* Hit area is a touch wider than the glyph and the full row height, with
+	   the icon centered inside — easy to land on without moving the icon. */
 	.row-action {
-		width: 22px;
-		height: 22px;
+		width: 28px;
 		padding: 0;
 		border: none;
 		border-radius: 6px;
