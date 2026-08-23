@@ -310,6 +310,45 @@ async def test_client_end_to_end() -> None:
     assert any(c.kind == "tool_args_delta" for c in chunks)
 
 
+async def _stream_with(sse_text: str) -> list:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=sse_text.encode(), headers={"content-type": "text/event-stream"}
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OpenRouterClient(api_key="or-test", http_client=http)
+    request = ProviderRequest(
+        model="stealth/ox-alpha", messages=[Message(role="user", content=[Text("hi")])]
+    )
+    chunks = [c async for c in client.stream(request)]
+    await http.aclose()
+    return chunks
+
+
+async def test_in_stream_error_chunk_surfaces_as_error() -> None:
+    # OpenRouter answers upstream failures with HTTP 200 and an error chunk.
+    sse = (
+        'data: {"error":{"message":"Provider returned error","code":502}}\n\n'
+        "data: [DONE]\n\n"
+    )
+    chunks = await _stream_with(sse)
+    kinds = [c.kind for c in chunks]
+    assert kinds == ["message_start", "error"]
+    assert chunks[-1].payload["status"] == 502
+    assert "Provider returned error" in chunks[-1].payload["message"]
+
+
+async def test_stream_without_usage_chunk_is_an_error() -> None:
+    sse = (
+        'data: {"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+    chunks = await _stream_with(sse)
+    assert chunks[-1].kind == "error"
+    assert "terminal usage chunk" in chunks[-1].payload["message"]
+
+
 def test_effort_clamped_into_reasoning() -> None:
     request = ProviderRequest(
         model="meta-llama/llama-4",

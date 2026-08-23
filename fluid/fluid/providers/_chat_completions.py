@@ -209,6 +209,8 @@ class ChatCompletionsNormalizer:
     StreamChunks. One instance per stream."""
 
     def __init__(self) -> None:
+        self.errored = False
+        self.finished = False
         self._started = False
         self._index_of: dict[str, int] = {}  # logical key → fluid block index
         self._order: list[str] = []
@@ -241,6 +243,25 @@ class ChatCompletionsNormalizer:
         if not self._started:
             self._started = True
             out.append(StreamChunk("message_start", {"usage": {}, "message": {}}))
+
+        # OpenRouter (and some proxies) answer upstream failures and rate
+        # limits with HTTP 200 and a chunk carrying only ``{"error": ...}``.
+        # Without this the turn would end silently with zero usage.
+        err = data.get("error")
+        if err and not data.get("choices"):
+            if isinstance(err, dict):
+                message = str(err.get("message") or err)
+                code = err.get("code")
+            else:
+                message, code = str(err), None
+            self.errored = True
+            out.append(
+                StreamChunk(
+                    "error",
+                    {"status": code, "message": message[:2000], "retriable": False},
+                )
+            )
+            return out
 
         for choice in data.get("choices") or []:
             delta = choice.get("delta") or {}
@@ -300,6 +321,7 @@ class ChatCompletionsNormalizer:
                 )
             )
             out.append(StreamChunk("message_stop", {}))
+            self.finished = True
         return out
 
 
@@ -354,6 +376,17 @@ async def stream_chat_completions(
                         for chunk in normalizer.consume(event_name, data):
                             yielded = True
                             yield chunk
+                    if not normalizer.finished and not normalizer.errored:
+                        # Stream closed before the usage/terminal chunk: the
+                        # provider dropped the connection or sent nothing.
+                        yield StreamChunk(
+                            "error",
+                            {
+                                "message": "stream ended before the provider sent "
+                                "a terminal usage chunk (empty or truncated response)",
+                                "retriable": False,
+                            },
+                        )
                     return
             except httpx.TransportError as exc:
                 # Pre-stream connection failures retry; mid-stream ones
