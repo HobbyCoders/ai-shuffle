@@ -319,10 +319,12 @@ async def test_env_fallback_when_no_provider_bound(monkeypatch, kind, env_var, f
     client, http_client = await harness_adapter._build_provider_client(
         kind, _opts(provider_id=None)
     )
-    # Constructed bare — the fluid client reads the env var itself.
+    # Constructed bare — the fluid client reads the env var itself. The
+    # openrouter lane additionally carries a ``pricing`` map (empty without a
+    # provider row), so assert on the credential rather than the whole kwargs.
     assert http_client is None
     assert isinstance(client, fake)
-    assert fake.last == {"api_key": None}
+    assert fake.last["api_key"] is None
 
 
 # ─── 4. No credentials at all ────────────────────────────────────────────────

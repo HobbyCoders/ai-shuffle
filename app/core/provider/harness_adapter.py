@@ -93,22 +93,20 @@ HONORED:
     headers are rewritten to say that Skill and Task are imported inside
     run_python — fluid itself puts nothing about code mode in the prompt.
   * ``tool_allowlist``       → native ``NativeLoop(allowed_tools=...)``: the
-    session's ENTIRE tool surface when set, None = unrestricted (CE12). Set for
-    a worker dispatched onto a file/plugin agent whose definition carries a
-    ``tools:`` list (``app.core.task_dispatch`` → ``overrides["tool_allowlist"]``
-    → ``ClaudeAgentOptions.aih_tool_allowlist``). On the delegated leg it rides
-    ``--allowed-tools``, which the claude CLI reads as PERMISSION rules — that
-    leg therefore grants rather than restricts, because the CLI owns its own
-    tool surface and fluid cannot filter it.
+    session's ENTIRE tool surface when set, None = unrestricted (CE12 + T3).
+    ``query_options`` composes two sources into it — the AGENT's own ``allow``
+    list (ruling T2/T3) and, for a worker dispatched onto a file/plugin agent
+    whose definition carries a ``tools:`` list, that definition's list
+    (``app.core.task_dispatch`` → ``overrides["tool_allowlist"]``). When both
+    exist the surface is their INTERSECTION; an empty intersection becomes a
+    ``["*"]`` deny instead of an empty list, which would mean "unrestricted".
+    Both reach here as ``ClaudeAgentOptions.aih_tool_allowlist``. On the
+    delegated leg it rides
+    ``--allowed-tools``; because the claude CLI reads that flag as PERMISSION
+    rules, this leg ALSO passes the complement as ``--disallowed-tools`` so the
+    restriction is real there too (ruling T4 — see ``_delegated_disallowed``).
 
 DEGRADED / NOT YET HONORED (documented gaps — mechanical follow-up):
-  * ``allowed_tools`` — the SDK's PERMISSION allowlist (every MCP tool name plus
-    the profile's legacy list) is still enforced only by the app's own
-    ``can_use_tool`` callback. It is NOT projected onto the engines: fluid's
-    ``allowed_tools`` is a tool-SURFACE restriction, and this list is empty of
-    builtins whenever a tools preset is active, so projecting it would delete
-    Read/Bash/Edit from every native session. The surface channel is
-    ``tool_allowlist`` above.
   * ``thinking`` — fluid manages thinking via provider caps, not passed through.
   * ``hooks`` / ``include_hook_events`` — fluid has its own HookBus; app SDK hooks not wired.
   * ``extra_args`` / ``setting_sources`` — SDK/CLI-specific, ignored.
@@ -427,35 +425,17 @@ class HarnessAdapter(ProviderAdapter):
                     if getattr(options, "fast", None)
                     else None
                 ),
-                # Ruling A6: the CLI's native subagent tools are BANNED — the
-                # app's Task tool (mcp__builtins__Task here) is the one
-                # orchestration surface. Profile-level disallows ride along.
-                # The CLI's native session-cron/wake tools (ScheduleWakeup and
-                # the CronCreate family) are banned for the same reason: the CLI
-                # fires those wake turns between queries, so the delegated client
-                # never reads them and they vanish from app history and cost
-                # accounting. The bridged app builtin
-                # mcp__builtins__ScheduleWakeup (wakeup_service-backed) is the
-                # one supported wake path on this leg.
-                disallowed_tools=sorted(
-                    {
-                        "Task",
-                        "Agent",
-                        "Workflow",
-                        "ScheduleWakeup",
-                        "CronCreate",
-                        "CronDelete",
-                        "CronList",
-                    }
-                    | set(options.disallowed_tools or [])
-                ),
-                # CE12: the definition's tool list for a file-agent worker. The
-                # CLI reads --allowed-tools as PERMISSION rules, so on this leg
-                # the list grants (no prompt for those tools) rather than
-                # restricting — the enforced surface wall exists only on the
-                # native leg, where fluid owns the registry. Passed anyway so
-                # the two legs agree on intent and the CLI stops prompting for
-                # exactly the tools the definition sanctioned.
+                # Ruling A6's ban set, the agent's own blocklist, and (ruling
+                # T4) the CLI-surface complement of an ``allow``-mode surface.
+                # The bridged app builtin mcp__builtins__ScheduleWakeup
+                # (wakeup_service-backed) is the one supported wake path on this
+                # leg. See _delegated_disallowed for the full derivation.
+                disallowed_tools=_delegated_disallowed(options),
+                # The session's tool surface: the agent's ``allow`` list (T3)
+                # intersected with a file-agent worker's definition list (CE12).
+                # The CLI reads --allowed-tools as PERMISSION rules, so on this
+                # leg the list grants rather than restricts — the restriction
+                # comes from the complement passed as --disallowed-tools above.
                 allowed_tools=_tool_allowlist(options),
                 claude_cmd=claude_cmd,
             )
@@ -582,6 +562,9 @@ class HarnessAdapter(ProviderAdapter):
                 self._compile_prompt_sections,
                 system, append_system, options, code_mode=codemode is not None,
                 codemode=codemode,
+                # The session's real tool registry — the name set the T9 prompt
+                # filter is computed from (MCP bridge names included).
+                registry=self._registry,
             )
             self._engine = NativeLoop(
                 provider=provider_client,
@@ -1684,6 +1667,7 @@ class HarnessAdapter(ProviderAdapter):
         code_mode: bool = False,
         codemode: Any = None,
         native: bool = True,
+        registry: Any = None,
     ) -> Any:
         """Run the fluid prompt compiler, keeping the labeled sections.
 
@@ -1730,16 +1714,39 @@ class HarnessAdapter(ProviderAdapter):
             # app's <env> block (which knows worktree/execution mode fluid
             # doesn't) — skip fluid's env section rather than injecting twice.
             has_app_env = bool(system) and "<env>" in system
-            compiled = compile_prompt(
-                PromptInputs(
-                    base=system,
-                    extra_blocks=[append_system] if append_system else [],
-                    cwd=options.cwd or ".",
-                    include_env=not has_app_env,
-                    include_agents=False,
-                )
+            # Ruling T9: the prompt never describes a tool the session cannot
+            # call. ``tools`` is the permitted name set; fluid drops its skills
+            # index when ``Skill`` is missing from it and its agents index when
+            # ``Task`` is. None = no restriction, and the kwarg is then omitted
+            # entirely so nothing changes for an unrestricted agent.
+            permitted = _permitted_tool_names(options, registry)
+            prompt_kwargs = dict(
+                base=system,
+                extra_blocks=[append_system] if append_system else [],
+                cwd=options.cwd or ".",
+                include_env=not has_app_env,
+                include_agents=False,
             )
+            if permitted is not None:
+                prompt_kwargs["tools"] = permitted
+            try:
+                compiled = compile_prompt(PromptInputs(**prompt_kwargs))
+            except TypeError:
+                # TEMPORARY: ``PromptInputs.tools`` lands with the fluid half of
+                # T9 (Quickkill0/fluid) and reaches this tree through the vendor
+                # sync. Until then the kwarg is unknown and the compiler would
+                # raise; degrade to the unfiltered compile rather than losing
+                # the prompt. REMOVE this guard once the vendored fluid carries
+                # the field.
+                prompt_kwargs.pop("tools", None)
+                compiled = compile_prompt(PromptInputs(**prompt_kwargs))
+            permit = _tool_predicate(options)
             index, _ = _agent_context(options, code_mode=code_mode)
+            if index and permitted is not None and "Task" not in permitted:
+                # The app's merged agents index is the app's own section (see
+                # the docstring), so fluid's ``tools`` filter cannot reach it —
+                # gate it here on the same rule.
+                index = None
             sections = list(compiled.sections)
             if code_mode:
                 # The compiler's skills header points at "the Skill tool",
@@ -1793,7 +1800,7 @@ class HarnessAdapter(ProviderAdapter):
                 # (kind "tools", tool_name set) so the usage breakdown prices
                 # each block under System/MCP tools like a JSON schema would
                 # be; empty (no projection) simply omits it.
-                for tool_text, tool_name in _code_mode_tool_sections(codemode):
+                for tool_text, tool_name in _code_mode_tool_sections(codemode, permit):
                     sections.append(
                         PromptSection(kind="tools", text=tool_text,
                                       tool_name=tool_name)
@@ -2118,6 +2125,67 @@ def _valid_effort(value: Any) -> Optional[str]:
     return None
 
 
+# Ruling A6: the CLI's native subagent tools are BANNED — the app's Task tool
+# (mcp__builtins__Task) is the one orchestration surface. The CLI's native
+# session-cron/wake tools are banned for the same reason: the CLI fires those
+# wake turns between queries, so the delegated client never reads them and they
+# vanish from app history and cost accounting.
+DELEGATED_BANNED_TOOLS = frozenset({
+    "Task",
+    "Agent",
+    "Workflow",
+    "ScheduleWakeup",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+})
+
+
+def _delegated_disallowed(options: SessionOptions) -> list:
+    """``--disallowed-tools`` for the delegated (claude CLI) leg — ruling T4.
+
+    Three sources, unioned:
+
+    1. ``DELEGATED_BANNED_TOOLS`` (ruling A6), always.
+    2. ``options.disallowed_tools`` — the agent's own blocklist. In ``none``
+       mode this is ``["*"]``, which the pinned CLI honors: its deny rules are
+       glob-matched, so one entry denies every tool. (Verified by reading the
+       bundled binary rather than guessing — see ``app.core.cli_tool_surface``
+       for the exact call chain.)
+    3. For ``allow`` mode only: the CLI's own surface MINUS the allowed set.
+       The CLI reads ``--allowed-tools`` as a permission GRANT, so without this
+       subtraction "allow only selected" would merely stop prompting for the
+       selected tools while leaving every other one callable.
+
+    Source 3 needs the CLI's surface, which the CLI announces only in its
+    ``init`` frame — after connect, and fluid's mapper drops it. Rather than
+    reconnect (which would kill the CLI session and re-prime its prompt cache)
+    the subtraction reads the last-seen surface from a module-level cache; on a
+    cold cache it is skipped and only ``--allowed-tools`` goes out for that
+    connect. The app's ``can_use_tool`` permission callback runs on this leg
+    either way, so a cold cache degrades the surface wall, never the gate.
+    """
+    from app.core.cli_tool_surface import cached_cli_tools
+    from app.core.tool_access import tool_permitted
+
+    banned = set(DELEGATED_BANNED_TOOLS) | set(options.disallowed_tools or ())
+
+    surface = _tool_allowlist(options)
+    if surface:
+        known = cached_cli_tools()
+        if known:
+            banned.update(
+                name for name in known if not tool_permitted(name, surface, None)
+            )
+        else:
+            logger.debug(
+                "[HarnessAdapter] no cached claude CLI tool surface yet — "
+                "allow-mode restriction rides --allowed-tools + can_use_tool "
+                "for this connect"
+            )
+    return sorted(banned)
+
+
 def _tool_allowlist(options: SessionOptions) -> Optional[list]:
     """This session's ENTIRE tool surface, or None for "unrestricted" (CE12).
 
@@ -2388,7 +2456,57 @@ _CODE_MODE_CATALOG_SKIP = frozenset({
 })
 
 
-def _code_mode_tool_sections(codemode: Any) -> List[Tuple[str, str]]:
+def _tool_predicate(options: SessionOptions):
+    """``(name) -> bool`` for this session's resolved tool access, or None.
+
+    None means "no restriction" — callers skip the filtering work entirely.
+    The two channels are the ones the engines already enforce: the surface
+    (``tool_allowlist``, T3) and the blocklist (``disallowed_tools``, T2).
+    """
+    from app.core.tool_access import tool_permitted
+
+    surface = _tool_allowlist(options)
+    blocked = list(options.disallowed_tools or ())
+    if not surface and not blocked:
+        return None
+    return lambda name: tool_permitted(name, surface, blocked)
+
+
+def _permitted_tool_names(options: SessionOptions, registry: Any) -> Optional[frozenset]:
+    """The names this session may actually call, or None when unrestricted.
+
+    Ruling T9: the compiled prompt must not describe a tool the session cannot
+    call, so fluid's ``compile_prompt`` takes the permitted set and drops the
+    skills index when ``Skill`` is missing from it and the agents index when
+    ``Task`` is. The set is the REGISTRY's names run through the predicate —
+    MCP bridge names (``mcp__builtins__*`` …) included, since those are real
+    entries on the same registry.
+
+    Without a registry (the ``_compile_prompt`` helper, tests) the fluid
+    builtins are registered into a throwaway one so ``Skill``/``Task`` still
+    resolve honestly, rather than guessing.
+    """
+    permit = _tool_predicate(options)
+    if permit is None:
+        return None
+    names: List[str] = []
+    try:
+        if registry is not None:
+            names = [spec.name for spec in registry.list_tools(loaded_only=False)]
+        else:
+            from fluid.tools.builtins import register_builtins
+            from fluid.tools.registry import ToolRegistry
+
+            throwaway = ToolRegistry()
+            register_builtins(throwaway)
+            names = [spec.name for spec in throwaway.list_tools(loaded_only=False)]
+    except Exception:  # noqa: BLE001 — an unreadable registry must not kill the turn
+        logger.warning("[HarnessAdapter] could not enumerate tools for the prompt filter", exc_info=True)
+        return None
+    return frozenset(name for name in names if permit(name))
+
+
+def _code_mode_tool_sections(codemode: Any, permit=None) -> List[Tuple[str, str]]:
     """Per-tool ``(section text, registry tool name)`` pairs for the catalog.
 
     One section per tool — not one blob — so fluid's context-usage breakdown
@@ -2408,6 +2526,12 @@ def _code_mode_tool_sections(codemode: Any) -> List[Tuple[str, str]]:
     disagree. Best-effort: a codemode object without a projection (a test
     double, a future refactor) returns [] and the section is simply skipped
     rather than failing the prompt.
+
+    ``permit`` is this session's tool predicate (ruling T9). fluid's projection
+    is already filtered once the code-mode session carries a ``tool_filter``,
+    so this is belt and braces: a leaf the agent cannot call never gets a docs
+    section here either, whichever side of the vendor boundary the filter lands
+    on.
     """
     try:
         from fluid.codemode.projection import _annotation, _param_doc, _py_ident
@@ -2429,6 +2553,8 @@ def _code_mode_tool_sections(codemode: Any) -> List[Tuple[str, str]]:
         if spec is None or leaf in _CODE_MODE_CATALOG_SKIP:
             continue
         if getattr(spec, "name", None) in _CODE_MODE_CATALOG_SKIP:
+            continue
+        if permit is not None and not permit(getattr(spec, "name", None) or leaf):
             continue
         schema = getattr(spec, "input_schema", None) or {}
         props: dict = schema.get("properties") or {}
