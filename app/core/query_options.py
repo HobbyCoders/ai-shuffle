@@ -173,6 +173,23 @@ from app.core.tool_access import (  # noqa: F401  (re-exports, see above)
 )
 
 
+def _ai_tools_available() -> bool:
+    """Whether the AI-generation tools have a credential to run on.
+
+    Ruling T5 attaches the ai-tools server when at least one AI tool is both
+    AVAILABLE and permitted — every one of them runs on the same fal.ai key, so
+    without it the picker's selection would put non-functional tools on the
+    model's surface.
+    """
+    try:
+        from app.mcp.ai_tools_sdk import _get_fal_api_key
+
+        return bool(_get_fal_api_key())
+    except Exception:  # noqa: BLE001 — an unreadable key is an unavailable one
+        logger.debug("could not resolve the fal.ai key", exc_info=True)
+        return False
+
+
 def _app_config_permitted(config: Optional[Dict[str, Any]]) -> bool:
     """Whether this agent's tool access permits ANY ``mcp__app-config__*`` tool.
 
@@ -1156,7 +1173,7 @@ def build_options_from_profile(
         name
         for name in ai_tool_names_for_config(None, every=True)
         if tool_permitted(name, access.allowed, access.disallowed)
-    ]
+    ] if _ai_tools_available() else []
     if ai_tool_names:
         mcp_allowed_tools.extend(ai_tool_names)
         logger.debug(f"AI MCP tools to allow: {ai_tool_names}")
