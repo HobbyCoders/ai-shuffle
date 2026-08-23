@@ -54,6 +54,27 @@ logger = logging.getLogger(__name__)
 RUN_LEASE_TTL_SECONDS = 60
 RUN_LEASE_RENEW_SECONDS = 20
 
+
+def _notify_run_change(session_id: str, *, force: bool = False) -> None:
+    """Run-lifecycle hook for the board spinner (streaming_status re-check).
+
+    The v2 claim/release boundary is INVISIBLE to streaming_status's own
+    triggers (the event gateway only ticks on event appends, and the terminal
+    append lands before release), so without an explicit notify the spinner-off
+    waits for the 15s sweep and a back-to-back turn's ON frame is suppressed as
+    "unchanged". Lazy import + never raises: a status bug must never break the
+    turn.
+    """
+    try:
+        from app.core import streaming_status
+
+        streaming_status.notify(session_id, force=force)
+    except Exception:
+        logger.debug(
+            "SessionRuntime: streaming_status notify failed for %s",
+            session_id, exc_info=True,
+        )
+
 # How long a runtime-driven interrupt waits for the turn to settle before it
 # escalates (mirrors chat_ws_handler._INTERRUPT_DRAIN_TIMEOUT_SECONDS). Tests
 # shrink it.
@@ -432,6 +453,12 @@ class SessionRuntime:
             return None
         run_id = run["id"]
         fence_token = run["fence_token"]
+        # Run went active — force the board-spinner ON frame NOW. The first
+        # event append would eventually tick the gateway recheck, but by then
+        # _last_broadcast may still hold the PREVIOUS turn's stale busy entry,
+        # which suppresses the ON frame the frontend already consumed via its
+        # done-frame cleanup.
+        _notify_run_change(sid, force=True)
 
         renew_task = asyncio.create_task(self._renew_loop(run_id, runner_id, fence_token))
         renew_task.add_done_callback(lambda t: t.cancelled() or t.exception())
@@ -644,6 +671,9 @@ class SessionRuntime:
                     "SessionRuntime: release_run failed for %s run %s",
                     sid, run_id, exc_info=True,
                 )
+            # Lease left active — re-check + broadcast the OFF diff now rather
+            # than waiting for the sweep loop (mirrors TurnRecorder.close).
+            _notify_run_change(sid)
             renew_task.cancel()
             try:
                 await renew_task
