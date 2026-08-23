@@ -145,10 +145,35 @@ function parseFrame(raw: string): ParsedFrame | null {
 	return { id, event, data: dataLines.join('\n') };
 }
 
+// ─── Single-feed invariant ───────────────────────────────────────────────────
+// One live feed per (this browser instance, session). A second createSseFeed
+// for a session still being read closes the earlier reader first: the server
+// saw the same device open three feeds to one session within a second
+// (2026-08-22), each a full backfill from the same cursor, while it was
+// already overloaded.
+const liveFeeds = new Map<string, SseFeed>();
+
+/** Number of feeds currently reading (exported for tests / diagnostics). */
+export function liveFeedCount(): number {
+	return liveFeeds.size;
+}
+
+// Revive triggers arrive in bursts: a laptop wake fires `visibilitychange`,
+// `online` and `pageshow` back to back, and the chat WS reconnect calls
+// `revive()` on top. Each would abort the fresh reader and open another.
+// Coalesce them: once a revive has started a connect, further revives inside
+// this window are no-ops — the reader they would create is already on its way.
+export const REVIVE_COALESCE_MS = 1_000;
+
 // ─── Feed factory ─────────────────────────────────────────────────────────────
 
 export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFeed {
+	// Idempotent per (device, session): a previous live feed for this session
+	// is closed before the new one opens.
+	liveFeeds.get(sessionId)?.stop();
+
 	let running = true;
+	let lastReviveAt = 0;
 	let lastSeq = typeof options.fromSeq === 'number' ? Math.max(0, options.fromSeq) : 0;
 	// `nextFrom` is the from_seq to use for the NEXT connect attempt. First
 	// connect replays from the seed cursor; reconnects resume at lastSeq. The
@@ -184,6 +209,9 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 	/** Immediately (re)connect — used by revive handlers. */
 	function reviveNow() {
 		if (!running) return;
+		const now = Date.now();
+		if (now - lastReviveAt < REVIVE_COALESCE_MS) return;
+		lastReviveAt = now;
 		if (reconnectTimer !== null) {
 			clearTimeout(reconnectTimer);
 			reconnectTimer = null;
@@ -360,7 +388,7 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 	startWatchdog();
 	void connect();
 
-	return {
+	const feed: SseFeed = {
 		get running() {
 			return running;
 		},
@@ -373,6 +401,7 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 		stop() {
 			if (!running) return;
 			running = false;
+			if (liveFeeds.get(sessionId) === feed) liveFeeds.delete(sessionId);
 			stopWatchdog();
 			if (reconnectTimer !== null) {
 				clearTimeout(reconnectTimer);
@@ -389,4 +418,6 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 			teardownReviveListeners();
 		},
 	};
+	liveFeeds.set(sessionId, feed);
+	return feed;
 }
