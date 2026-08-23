@@ -224,6 +224,65 @@ async def test_force_notify_rebroadcasts_on_despite_stale_busy_entry(
     runs.release_run(r2["id"], r2["fence_token"])
 
 
+async def test_rechecks_serialize_per_session_in_notify_order(
+    mock_db, monkeypatch
+):
+    """Two transitions in quick succession (turn N releases, turn N+1 claims)
+    must evaluate strictly in notify order: if the OFF recheck's DB read
+    happens before the claim but its SEND lands after the ON's, the frontend
+    map ends dark on a working session with no sweep recovery."""
+    events = []
+
+    class _Journal:
+        async def __call__(self, session_id, is_streaming, info):
+            events.append(("send", is_streaming))
+
+    monkeypatch.setattr(streaming_status, "_send_streaming_changed", _Journal())
+
+    import threading
+
+    gate = threading.Event()
+    reads = {"n": 0}
+
+    # Real ON broadcast first, so both gated OFF evaluations have a busy entry
+    # to pop (the exact race shape: release-OFF then another evaluation).
+    database.create_session(session_id="s1", profile_id="default")
+    r = runs.claim_run("s1", "runnerA", 60)
+    streaming_status.notify("s1")
+    assert await _wait_until(lambda: events == [("send", True)])
+
+    def _gated_read(session_id):
+        reads["n"] += 1
+        n = reads["n"]
+        events.append(("read", n))
+        if n == 1:
+            gate.wait(timeout=5)  # hold the FIRST recheck mid-evaluation
+        return False  # both evaluations see idle
+
+    monkeypatch.setattr(streaming_status, "_has_active_run_db", _gated_read)
+
+    # First notify blocks inside its DB read; the second must queue behind it,
+    # not interleave.
+    streaming_status.notify("s1")
+    await asyncio.sleep(0.05)
+    assert ("read", 1) in events
+    streaming_status.notify("s1")
+    await asyncio.sleep(0.05)
+    assert ("read", 2) not in events  # serialized behind the first
+
+    gate.set()
+    assert await _wait_until(lambda: ("read", 2) in events)
+    await asyncio.sleep(0.1)
+
+    # Strict order after the initial ON: read1 → send1(OFF) → read2; the
+    # second OFF is diff-suppressed (the first already popped the busy entry)
+    # — crucially it evaluated AFTER the first finished, never interleaved.
+    assert [kind for kind, _ in events] == ["send", "read", "send", "read"]
+    assert events[2][1] is False
+
+    runs.release_run(r["id"], r["fence_token"])
+
+
 # =============================================================================
 # Sweep reconciler — lease expiry with no terminal event
 # =============================================================================
