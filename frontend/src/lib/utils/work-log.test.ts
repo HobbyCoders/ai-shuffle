@@ -301,6 +301,34 @@ describe('buildDisplayItems — live turn', () => {
 		expect(fold.tail.map((entry) => entry.message.id)).toEqual([inner.id]);
 	});
 
+	it('never lets a still-streaming cell mask the long-running tool it dispatched', () => {
+		// The cell's input finished streaming but its result is minutes away while
+		// the video generation inside it runs. The visible row must be the real
+		// work — never the enclosing Python cell.
+		const cell = tool({ toolName: 'run_python', toolStatus: 'running', streaming: true });
+		const video = tool({ toolName: 'mcp__builtins__generateVideo', toolStatus: 'running', streaming: true });
+		const items = buildDisplayItems([user('go'), cell, video], LIVE);
+		const visible = collapsedVisibleMessages(items);
+		expect(visible.some((m) => m.id === video.id)).toBe(true);
+		expect(visible.some((m) => m.id === cell.id)).toBe(false);
+	});
+
+	it('hides a lone streaming cell once its non-routine inner call takes over', () => {
+		// Screenshot-bearing tools are never routine rows, so before this rule the
+		// cell fell back to being the live tail and showed raw Python mid-capture.
+		const cell = tool({ toolName: 'run_python', toolStatus: 'running', streaming: true });
+		const shot = tool({
+			toolName: 'browser_screenshot',
+			toolStatus: 'running',
+			streaming: true,
+			toolScreenshot: 'data:image/png;base64,abc'
+		});
+		const items = buildDisplayItems([user('go'), cell, shot], LIVE);
+		const visible = collapsedVisibleMessages(items);
+		expect(visible.some((m) => m.id === shot.id)).toBe(true);
+		expect(visible.some((m) => m.id === cell.id)).toBe(false);
+	});
+
 	it('settles earlier turns while the final turn streams', () => {
 		const messages = [user('one'), tool(), text('answer'), user('two'), tool({ toolStatus: 'running' })];
 		const folds = buildDisplayItems(messages, LIVE).filter((item) => item.kind === 'work_log');

@@ -213,7 +213,17 @@ export function liveToolLabel(
 	if (['Grep', 'Glob', 'ToolSearch', 'LSP'].includes(bare)) return 'Searching code';
 	if (bare === 'WebSearch') return 'Searching the web';
 	if (bare === 'WebFetch') return 'Fetching page';
-	if (bare === 'run_python') return 'Writing Python';
+	// Media generation is the long-tail family: a video can run for minutes, and
+	// "Using generateVideo" tells the reader nothing about the wait.
+	if (['generateImage', 'generateWithReference', 'editImage'].includes(bare)) return 'Generating image';
+	if (['generateVideo', 'imageToVideo', 'extendVideo'].includes(bare)) return 'Generating video';
+	if (['generateAudio', 'audioToAudio'].includes(bare)) return 'Generating audio';
+	if (['textTo3D', 'imageTo3D', 'retexture3D', 'rig3D', 'animate3D', 'getTask3D'].includes(bare)) return 'Building 3D model';
+	if (bare === 'browser_screenshot' || bare === 'browser_screenshot_full') return 'Taking screenshot';
+	if (['ScheduleWakeup', 'CronCreate', 'CronList', 'CronDelete', 'RemoteTrigger'].includes(bare)) return 'Scheduling';
+	// The streaming code-mode cell renders as name="Python" (MessageArea); give
+	// it a verb rather than the bare fallback.
+	if (bare === 'run_python' || bare === 'Python') return 'Writing Python';
 	return `Using ${bare || 'tool'}`;
 }
 
