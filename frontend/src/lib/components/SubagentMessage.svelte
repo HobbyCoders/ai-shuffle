@@ -60,7 +60,6 @@
 		'explore': 'Explore',
 		'plan': 'Plan',
 		'frontend-designer': 'Frontend',
-		'chat-history-summarizer': 'Summarizer',
 		'statusline-setup': 'Status Line',
 		'plugin-dev:create-plugin': 'Plugin',
 		'plugin-dev:agent-creator': 'Agent Creator',

@@ -236,6 +236,14 @@ def init_core() -> None:
     if promoted:
         logger.info(f"Promoted to built-in subagents: {', '.join(promoted)}")
 
+    # Retire the chat-history-summarizer builtin (superseded by fluid's
+    # session-search tool). Seeding no longer prunes removed builtins, so
+    # drop the stale row explicitly — once; later boots find nothing.
+    from app.core.builtin_subagents import get_builtin_subagent_ids
+    if "chat-history-summarizer" not in get_builtin_subagent_ids():
+        if database.delete_subagent("chat-history-summarizer"):
+            logger.info("Removed retired built-in subagent: chat-history-summarizer")
+
 
 def init_encryption_and_sessions() -> None:
     """Phase 2: Initialize encryption key and manage sessions."""

@@ -347,7 +347,7 @@ A general-purpose coding profile with full tool access:
       "preset": "claude_code",
       "append": "Prefer writing clean, well-documented code. Always run tests after making changes."
     },
-    "enabled_agents": ["chat-history-summarizer"]
+    "enabled_agents": ["general-purpose"]
   }
 }
 ```

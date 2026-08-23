@@ -171,11 +171,11 @@ Get the full nested-agent objects enabled for this agent.
 ```json
 [
   {
-    "id": "chat-history-summarizer",
-    "name": "Chat History Summarizer",
-    "description": "Reads and summarizes .jsonl chat history files",
-    "prompt": "You are a chat history summarizer...",
-    "tools": ["Read", "Grep", "Glob"],
+    "id": "Explore",
+    "name": "Explore",
+    "description": "Fast agent specialized for exploring codebases",
+    "prompt": "You are a file search specialist...",
+    "tools": ["Read", "Grep", "Glob", "Bash", "Skill"],
     "model": "haiku",
     "skills": null,
     "memory": null,
@@ -259,7 +259,7 @@ Replace the entire enabled agents list.
 curl -X PUT http://localhost:8000/api/v1/agents/default/enabled-agents \
   -H "Authorization: Bearer aih_your_key" \
   -H "Content-Type: application/json" \
-  -d '{"enabled_agents": ["chat-history-summarizer", "my-custom-agent"]}'
+  -d '{"enabled_agents": ["Explore", "my-custom-agent"]}'
 ```
 
 ### POST /api/v1/agents/{agent_id}/enabled-agents/{subagent_id}
