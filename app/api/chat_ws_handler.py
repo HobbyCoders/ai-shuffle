@@ -931,13 +931,31 @@ class ChatWebSocketHandler:
             self.current_session_id = session_id
 
         if not is_new_session:
+            existing_session = await run_sync(database.get_session, session_id)
+            # Sending a message re-activates a settled session: the user is
+            # clearly working in it again, so it moves back into the sidebar's
+            # Active group. Two fan-outs: session-scoped reaches THIS device
+            # (it just registered on the session) plus any watcher, and the
+            # user-wide one covers devices that never opened the session.
+            if existing_session and not existing_session.get("is_active", True):
+                await run_sync(database.set_session_active, session_id, True)
+                await sync_engine.broadcast_session_updated(
+                    session_id=session_id,
+                    updates={"is_active": True},
+                    source_device_id=None,
+                )
+                await sync_engine.broadcast_user_session_updated(
+                    user_id=self.user_id,
+                    session_id=session_id,
+                    updates={"is_active": True},
+                    source_device_id=self.device_id,
+                )
             # Backfill title from first user message for sessions created without
             # one (e.g. via the auto-worktree REST endpoint, which creates the
             # session before any user prompt exists). Harmless if this query is
             # later preempted — the title derives from a prompt that will still
             # run via the queue. (The user-message persist itself happens further
             # down, only after this query WINS the check-and-register.)
-            existing_session = await run_sync(database.get_session, session_id)
             if existing_session and not (existing_session.get("title") or "").strip():
                 derived_title = prompt[:100].strip()
                 if len(prompt) > 100:

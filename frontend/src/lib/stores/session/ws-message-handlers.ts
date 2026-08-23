@@ -316,13 +316,16 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 
 			// session_updated carries metadata changes (e.g. a backfilled title
-			// for sessions created without one, like via auto-worktree). Apply
-			// the title to the active session immediately and refresh the
-			// sidebar list so the new title is visible everywhere.
+			// for sessions created without one, like via auto-worktree, or a
+			// settled session re-activated by a new send). Apply the title to
+			// the active session immediately and refresh the sidebar list so
+			// the change is visible everywhere.
 			if (eventType === 'session_updated') {
 				const syncData = data.data as Record<string, unknown> | undefined;
 				const updates = (syncData?.updates ?? {}) as Record<string, unknown>;
 				const updatedTitle = typeof updates.title === 'string' ? updates.title : undefined;
+				const reactivated = updates.is_active === true;
+				if (reactivated) appLoadSessions();
 				if (updatedTitle) {
 					const updatedSessionId = data.session_id as string | undefined;
 					const currentState = getState();
