@@ -191,10 +191,12 @@ export interface ActiveSessionState {
 	worktreeDeleted: boolean;
 	sessionLocked: boolean;
 	sessionLockedBy: string | undefined;
-	/** Holds the user's message text while waiting for interrupt confirmation.
-	 *  If the interrupt fails/times out, ChatInput restores this to the editor
-	 *  so the user doesn't lose their message. Cleared on success or session switch. */
-	pendingInterruptPrompt: string | null;
+	/** User prompt text waiting to be restored into the composer so the user
+	 *  can edit or resend it. Set when a stopped turn's orphan message is
+	 *  discarded (`user_message_discarded`) and when a rewind removes the
+	 *  target user message. ChatInput refills an EMPTY editor and clears this,
+	 *  so it fires exactly once and never clobbers typed text. */
+	pendingRestorePrompt: string | null;
 	/** True from the moment init() adopts a persisted sessionId until that
 	 *  session's history has been fetched (onConnected's loadSession settles).
 	 *  During this window the UI looks like "New Chat" (messages=[]) while
@@ -304,7 +306,7 @@ function defaultState(): ActiveSessionState {
 		worktreeDeleted: false,
 		sessionLocked: false,
 		sessionLockedBy: undefined,
-		pendingInterruptPrompt: null,
+		pendingRestorePrompt: null,
 		isRestoringSession: false,
 		isLoadingSession: false,
 	};
@@ -812,7 +814,8 @@ export const activeSession = {
 	},
 
 	setDraft: draftManager.setDraft,
-	clearPendingInterruptPrompt: draftManager.clearPendingInterruptPrompt,
+	setPendingRestorePrompt: draftManager.setPendingRestorePrompt,
+	clearPendingRestorePrompt: draftManager.clearPendingRestorePrompt,
 	setScrollTop: draftManager.setScrollTop,
 	clearError: draftManager.clearError,
 	clearWorktreeError: draftManager.clearWorktreeError,

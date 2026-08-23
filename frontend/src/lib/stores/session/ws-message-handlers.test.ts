@@ -134,7 +134,7 @@ function mockState(): ActiveSessionState {
 		worktreeDeleted: false,
 		sessionLocked: false,
 		sessionLockedBy: undefined,
-		pendingInterruptPrompt: null,
+		pendingRestorePrompt: null,
 		isRestoringSession: false,
 		isLoadingSession: false,
 	};
@@ -474,7 +474,7 @@ describe('ws-message-handlers', () => {
 			deps = createMockDeps({
 				getState: vi.fn(() => state),
 				update: vi.fn((fn) => {
-					captured = fn(state).pendingInterruptPrompt;
+					captured = fn(state).pendingRestorePrompt;
 				}),
 			});
 			handlers = createMessageHandlers(deps);
