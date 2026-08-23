@@ -409,8 +409,13 @@ async def test_a_clean_turn_keeps_the_key_on_every_call() -> None:
     assert nodes[-1].message.text() == "It is sunny in Paris."
 
 
-async def test_poisoning_does_not_outlive_the_turn() -> None:
-    """The flag is loop-local: the next turn probes stickiness once again."""
+async def test_poisoning_outlives_the_turn() -> None:
+    """The flag is instance state: a known-bad key is never re-sent.
+
+    Re-probing once per turn was cheap while dead replicas failed fast. A
+    replica that hangs instead makes each probe cost a full first-data
+    watchdog timeout, so the loop stops probing for good.
+    """
     provider = ScriptedProvider([_empty(), _text("done"), _text("again")])
     loop, store, sid = await _run(provider)
 
@@ -418,8 +423,8 @@ async def test_poisoning_does_not_outlive_the_turn() -> None:
     await asyncio.wait_for(loop.wait_turn(), timeout=10)
 
     assert provider.calls == 3
-    # Turn 1: sticky probe, keyless retry. Turn 2: sticky probe again.
-    assert _session_ids(provider) == [sid, None, sid]
+    # Turn 1: sticky probe, keyless retry. Turn 2: still keyless.
+    assert _session_ids(provider) == [sid, None, None]
 
 
 # ─── (i) the upstream verdict reaches the user ───────────────────────────────

@@ -454,6 +454,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._pending_questions: dict[str, asyncio.Future] = {}
         # Mid-turn steers awaiting the next tool result (see the Steer op).
         self._pending_steers: list[Steer | str] = []
+        # Set once a sticky-routed call comes back empty: this loop instance
+        # never sends the routing key again (see _agent_loop).
+        self._sticky_poisoned = False
         # Nested-instruction injection: instruction-file paths already injected
         # this session (each nested AGENTS-family file enters context once).
         self._nested_injected: set[str] = set()
@@ -1029,9 +1032,6 @@ class NativeLoop(BackgroundLifecycleMixin):
         overflow_retries = 0
         result: _CallResult | None = None
         empty_retries = 0  # CONSECUTIVE empty completions; any real call resets it
-        # Turn-scoped: once a sticky call comes back empty, this turn stops
-        # sending the routing key at all. Local, so the next turn re-probes.
-        sticky_poisoned = False
         continuations = 0
 
         while True:
@@ -1046,7 +1046,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             for promo in promotions:
                 await self._emit_compaction(sid, turn_id, promo)
             projected_prompt = self._estimate_request_input_tokens(history)
-            call_was_sticky = not sticky_poisoned and empty_retries == 0
+            call_was_sticky = not self._sticky_poisoned and empty_retries == 0
             result = await self._stream_once(
                 sid, turn_id, history, sticky=call_was_sticky
             )
@@ -1063,10 +1063,13 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # A key whose replica is dead stays dead for longer than one
                 # call: a turn that re-probed stickiness after every recovery
                 # paid a dud call plus a backoff on all 16 of its model calls.
-                # So if THIS call carried the key, drop it for the rest of the
-                # turn; a fresh turn starts unpoisoned and probes again once.
+                # So if THIS call carried the key, drop it — and keep it dropped
+                # past the end of the turn. Re-probing once per turn was cheap
+                # while dead replicas failed fast, but a replica that HANGS
+                # makes every probe cost a full first-data watchdog timeout. A
+                # new session (or a new process) starts clean.
                 if call_was_sticky:
-                    sticky_poisoned = True
+                    self._sticky_poisoned = True
                 empty_retries += 1
                 # The dud call may still have billed something.
                 self._fold_call_usage(total_usage, result.usage)

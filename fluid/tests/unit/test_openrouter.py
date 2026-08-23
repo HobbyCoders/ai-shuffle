@@ -1,5 +1,6 @@
 """OpenRouter provider: SSE normalization, request body, e2e chunk walk."""
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -15,6 +16,7 @@ from fluid.messages import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from fluid.providers import _chat_completions
 from fluid.providers._retry import RetryPolicy
 from fluid.providers._sse import sse_events
 from fluid.providers.base import ProviderRequest, StreamChunk
@@ -484,6 +486,61 @@ async def test_stream_without_usage_chunk_is_an_error() -> None:
     chunks = await _stream_with(sse)
     assert chunks[-1].kind == "error"
     assert "terminal usage chunk" in chunks[-1].payload["message"]
+
+
+async def _stream_bytes(chunks, monkeypatch, timeout: float) -> list:
+    """Drive the client against a hand-fed byte stream with a tiny watchdog."""
+    monkeypatch.setattr(_chat_completions, "FIRST_DATA_TIMEOUT", timeout)
+
+    async def body() -> AsyncIterator[bytes]:
+        for piece in chunks:
+            if isinstance(piece, float):
+                await asyncio.sleep(piece)
+            else:
+                yield piece
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=body(), headers={"content-type": "text/event-stream"}
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OpenRouterClient(api_key="or-test", http_client=http)
+    request = ProviderRequest(
+        model="stealth/ox-alpha", messages=[Message(role="user", content=[Text("hi")])]
+    )
+    out = [c async for c in client.stream(request)]
+    await http.aclose()
+    return out
+
+
+async def test_hung_stream_gives_up_after_the_first_data_deadline(monkeypatch) -> None:
+    # A dead replica: 200 headers, keepalive comments, no data event ever.
+    keepalive = b": OPENROUTER PROCESSING\n\n"
+    chunks = await _stream_bytes([keepalive, keepalive, 5.0], monkeypatch, 0.05)
+    error = next(c for c in chunks if c.kind == "error")
+    assert "terminal usage chunk" in error.payload["message"]
+    assert "no data within 0.05s" in error.payload["message"]
+    assert error.payload["retriable"] is False
+    # Keepalive comments are not data: nothing was ever normalized.
+    assert not any(c.kind == "message_start" for c in chunks)
+
+
+async def test_first_event_in_time_disarms_the_watchdog(monkeypatch) -> None:
+    # First data lands well inside the deadline; the rest of the stream may
+    # then take as long as it likes.
+    head = (
+        'data: {"choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n'
+    ).encode()
+    tail = (
+        'data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n'
+        "data: [DONE]\n\n"
+    ).encode()
+    chunks = await _stream_bytes([head, 0.2, tail], monkeypatch, 0.05)
+    kinds = [c.kind for c in chunks]
+    assert "error" not in kinds
+    assert kinds[-1] == "message_stop"
+    assert any(c.kind == "text_delta" for c in chunks)
 
 
 def test_effort_clamped_into_reasoning() -> None:

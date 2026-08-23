@@ -370,6 +370,13 @@ class ChatCompletionsNormalizer:
 # ─── streaming POST loop (shared by OpenRouter + local clients) ──────────────
 
 
+# A dead upstream replica can answer 200 and then emit nothing but SSE keepalive
+# comments (": OPENROUTER PROCESSING") indefinitely. Deadline the FIRST data
+# event so the engine's empty-completion retry gets a chance to route around it
+# instead of the caller staring at dead air.
+FIRST_DATA_TIMEOUT = 30.0
+
+
 async def stream_chat_completions(
     url: str,
     body: dict[str, Any],
@@ -456,7 +463,28 @@ async def stream_chat_completions(
                         )
                         return
                     normalizer = ChatCompletionsNormalizer()
-                    async for event_name, data in sse_events(resp.aiter_lines()):
+                    events = sse_events(resp.aiter_lines()).__aiter__()
+                    starved = False
+                    awaiting_first = True
+                    while True:
+                        try:
+                            if awaiting_first:
+                                # Only the first data event is deadlined; once
+                                # the provider says anything the watchdog is
+                                # done (mid-stream stalls are out of scope).
+                                # sse_events drops comment lines, so a keepalive
+                                # heartbeat can never satisfy this.
+                                event_name, data = await asyncio.wait_for(
+                                    events.__anext__(), FIRST_DATA_TIMEOUT
+                                )
+                            else:
+                                event_name, data = await events.__anext__()
+                        except StopAsyncIteration:
+                            break
+                        except (asyncio.TimeoutError, TimeoutError):
+                            starved = True
+                            break
+                        awaiting_first = False
                         for chunk in normalizer.consume(event_name, data):
                             if chunk.kind == "usage" and track_provider_requests:
                                 payload = dict(chunk.payload)
@@ -469,15 +497,22 @@ async def stream_chat_completions(
                                 chunk = StreamChunk("usage", payload)
                             yielded = True
                             yield chunk
-                    if not normalizer.finished and not normalizer.errored:
-                        # Stream closed before the usage/terminal chunk: the
-                        # provider dropped the connection or sent nothing. This
-                        # is the shape that carries native_finish_reason without
-                        # ever reaching usage/message_stop, so the upstream
-                        # verdict rides the error chunk instead.
+                    if starved or (not normalizer.finished and not normalizer.errored):
+                        # Stream closed before the usage/terminal chunk, or the
+                        # watchdog gave up waiting for its first byte of data:
+                        # the provider dropped the connection, sent nothing, or
+                        # is hanging. This is the shape that carries
+                        # native_finish_reason without ever reaching
+                        # usage/message_stop, so the upstream verdict rides the
+                        # error chunk instead.
+                        message = (
+                            "stream ended before the provider sent "
+                            "a terminal usage chunk (empty or truncated response)"
+                        )
+                        if starved:
+                            message += f" (no data within {FIRST_DATA_TIMEOUT:g}s)"
                         truncated: dict[str, Any] = {
-                            "message": "stream ended before the provider sent "
-                            "a terminal usage chunk (empty or truncated response)",
+                            "message": message,
                             "retriable": False,
                         }
                         if normalizer.native_stop_reason:
