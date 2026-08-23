@@ -1636,6 +1636,32 @@ describe('system + unknown events', () => {
 		expect(retries[0].systemData).not.toHaveProperty('exhausted');
 	});
 
+	it('a retry note after a settled card appends a fresh card', () => {
+		// The next turn hit empties too. The settled card records a turn that
+		// already finished, so it must survive intact beside the new one.
+		const s = fold([
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 2, max_attempts: 10 },
+			}),
+			ev('turn.completed', {}),
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr2',
+				subtype: 'provider_retry',
+				data: { attempt: 1, max_attempts: 10 },
+			}),
+		]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries).toHaveLength(2);
+		expect(retries.map((m) => m.id)).toEqual(['pr1', 'pr2']);
+		expect(retries[0].systemData).toMatchObject({ attempt: 2, settled: true });
+		expect(retries[1].systemData).toMatchObject({ attempt: 1 });
+		expect(retries[1].systemData).not.toHaveProperty('settled');
+	});
+
 	it('an exhausted card is never settled', () => {
 		const s = fold([
 			ev('turn.started'),

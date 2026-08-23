@@ -1516,16 +1516,18 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// An EXHAUSTED card is finished business — it records a turn that
 			// already failed, and its Retry button is the only way back — so a
 			// retry note from the NEXT turn appends a fresh card beside it
-			// rather than overwriting the failure.
+			// rather than overwriting the failure. A SETTLED card is finished
+			// the same way: it records a turn that already ended, so the next
+			// turn's retries append beside it instead of rewriting history.
 			if (str(event.subtype) === 'provider_retry') {
 				const last = state.messages[state.messages.length - 1];
-				const lastExhausted = !!(last?.systemData as Record<string, unknown> | undefined)
-					?.exhausted;
+				const lastData = last?.systemData as Record<string, unknown> | undefined;
+				const lastFinished = !!(lastData?.exhausted || lastData?.settled);
 				if (
 					last &&
 					last.type === 'system' &&
 					last.systemSubtype === 'provider_retry' &&
-					!lastExhausted
+					!lastFinished
 				) {
 					const messages = state.messages.slice();
 					messages[messages.length - 1] = {
