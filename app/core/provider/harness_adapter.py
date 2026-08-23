@@ -209,6 +209,7 @@ from app.core.provider.events import (
     RateLimitEvent,
     RateLimitInfo,
     ResultMessage,
+    SteerDeliveredEvent,
     StreamEvent,
     SystemMessage,
     TaskNotificationMessage,
@@ -238,6 +239,7 @@ from fluid.events.ops import (
     Resume,
     SetModel,
     SetPermissionMode,
+    Steer,
     UserTurn,
 )
 from fluid.permissions.engine import PermissionEngine
@@ -901,6 +903,25 @@ class HarnessAdapter(ProviderAdapter):
             raise RuntimeError("Adapter not connected")
         await self._engine.submit(Resume())
 
+    async def steer(self, text: str, *, id: Optional[str] = None) -> None:
+        """Hand ``text`` to the RUNNING turn as a fluid ``Steer``.
+
+        Both legs accept it and both receipt it with ``SteerDelivered`` (mirrored
+        to :class:`SteerDeliveredEvent`), but they deliver differently: the
+        native leg folds the text into the next tool result inside fluid's
+        steering marker, while the delegated leg writes a second ``user`` frame
+        to the CLI's stdin. Either way the receipt — not this call — is what
+        says the model has the words.
+
+        fluid raises ``RuntimeError`` when there is nothing live to steer into
+        (no running turn, an interrupt already requested, no CLI process yet).
+        That is propagated verbatim: the caller leaves the message queued so the
+        next turn picks it up.
+        """
+        if self._engine is None:
+            raise RuntimeError("Adapter not connected")
+        await self._engine.submit(Steer(text=text, id=id))
+
     async def receive_events(self) -> AsyncIterator[ProviderEvent]:
         """Translate the fluid Event stream into ProviderEvents for one turn.
 
@@ -1415,6 +1436,22 @@ class HarnessAdapter(ProviderAdapter):
                 )
             ]
 
+        if cls == "SteerDelivered":
+            # A queued message just became part of immutable history — the model
+            # reads it on its next call. The pump turns this into the user
+            # message's transcript record and retires the queue row it came
+            # from, so it must reach the stream rather than being swallowed.
+            return [
+                SteerDeliveredEvent(
+                    steers=[
+                        dict(steer) for steer in (event.steers or [])
+                        if isinstance(steer, dict)
+                    ],
+                    session_id=getattr(event, "session_id", "") or "",
+                    uuid=self._uuid(event),
+                )
+            ]
+
         if cls == "QuestionRequest":
             # MRTR input_required round-trip (fluid engine). Record the id so
             # respond_to_user_question routes the answer back; surface the
@@ -1757,6 +1794,24 @@ class HarnessAdapter(ProviderAdapter):
                         insert_at = position
                         break
                 sections.insert(insert_at, PromptSection(kind="agents", text=index))
+            if native:
+                # Mid-turn steering, native leg only. A steer arrives INSIDE a
+                # tool result — the one channel the base prompt teaches the
+                # model to distrust — so fluid pairs the marker with a prompt
+                # block that grants that exact marker user authority. fluid
+                # carries the block in its own composed base prompt, which the
+                # app replaces wholesale with the agent's configured prompt
+                # (ruling A12), so without this the marker would read as
+                # suspected injection and be ignored.
+                #
+                # The delegated leg needs nothing: its steers are real ``user``
+                # frames on the CLI's stdin, indistinguishable from any other
+                # thing the user typed.
+                from fluid.context.steering import PROMPT_BLOCK as STEERING_BLOCK
+
+                sections.append(
+                    PromptSection(kind="extra", text=STEERING_BLOCK)
+                )
             memory_dir = (options.extra or {}).get("memory_dir") if native else None
             if memory_dir:
                 # Ruling MEM3. Before the code-mode section, which must stay

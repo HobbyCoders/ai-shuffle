@@ -272,6 +272,41 @@ def test_settle_rejects_bad_outcome(mock_db):
         turns.settle_turn(t["id"], "parked")
 
 
+def test_absorb_retires_a_queued_turn_as_steered(mock_db):
+    """A queued prompt handed to the live turn as a steer settles completed with
+    stop_reason='steered' — out of the queue, still in history."""
+    live = turns.enqueue_turn("s1", "user", prompt="running")
+    turns.start_turn(live["id"])
+    t = turns.enqueue_turn("s1", "user", prompt="and also this")
+
+    assert turns.absorb_queued_turn(t["id"]) is True
+    row = turns.get_turn(t["id"])
+    assert row["state"] == "completed"
+    assert row["stop_reason"] == "steered"
+    assert row["ended_at"] is not None
+    # Gone from the queue, so the drain can never run it a second time.
+    assert turns.get_queued_turns("s1") == []
+    assert turns.pop_ready("s1") is None
+    # The live turn is untouched.
+    assert turns.get_live_turn("s1")["id"] == live["id"]
+
+
+def test_absorb_only_from_queued_and_is_idempotent(mock_db):
+    """The guard lives in the UPDATE: a row that already left the queue (raced
+    to live, removed, or absorbed once) is never touched again."""
+    running = turns.enqueue_turn("s1", "user")
+    turns.start_turn(running["id"])
+    assert turns.absorb_queued_turn(running["id"]) is False
+    assert turns.get_turn(running["id"])["state"] == "running"
+
+    queued = turns.enqueue_turn("s2", "queue", prompt="p")
+    assert turns.absorb_queued_turn(queued["id"]) is True
+    assert turns.absorb_queued_turn(queued["id"]) is False
+    assert turns.get_turn(queued["id"])["stop_reason"] == "steered"
+
+    assert turns.absorb_queued_turn("turn-does-not-exist") is False
+
+
 def test_park_records_task_ids_and_frees_slot(mock_db):
     t = turns.enqueue_turn("s1", "user", payload={"keep": 1})
     turns.start_turn(t["id"])

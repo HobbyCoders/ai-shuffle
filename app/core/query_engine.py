@@ -41,6 +41,7 @@ from app.core.provider.events import (
     ServerToolUseBlock, ServerToolResultBlock,
     TaskStartedMessage, TaskProgressMessage, TaskNotificationMessage,
     TaskUpdatedMessage, RateLimitEvent, HookEventMessage,
+    SteerDeliveredEvent,
 )
 _SERVER_TOOL_TYPES: tuple = (ServerToolUseBlock,)
 _SERVER_TOOL_RESULT_TYPES: tuple = (ServerToolResultBlock,)
@@ -2826,6 +2827,21 @@ async def _stream_to_websocket_impl(
                     session_id,
                     type(message).__name__,
                 )
+
+            if isinstance(message, SteerDeliveredEvent):
+                # A queued message reached the model mid-turn. The frame carries
+                # the correlation ids straight through to the runtime, which
+                # owns the two durable consequences (record the user message at
+                # THIS position; retire the queue row). Nothing here touches the
+                # turn's own accumulators: a steer is the user speaking, not
+                # assistant output, so it is neither visible content nor a
+                # turn_event of this turn.
+                yield {
+                    "type": "steer_delivered",
+                    "session_id": session_id,
+                    "steers": list(message.steers or []),
+                }
+                continue
 
             if isinstance(message, TaskNotificationMessage):
                 # Only count this as visible content when there's an actual

@@ -87,6 +87,20 @@ class ProviderAdapter(ABC):
         """
         raise NotImplementedError("resume is only supported on fluid sessions")
 
+    async def steer(self, text: str, *, id: Optional[str] = None) -> None:
+        """Hand user text to the RUNNING turn so the model reads it mid-stream.
+
+        ``id`` is a caller-chosen correlation handle echoed back on the
+        delivery receipt, which is how a host with a durable queue knows the
+        text is irrevocably in history and can retire its copy.
+
+        Raises ``RuntimeError`` when there is no live turn to steer into — the
+        caller then leaves the message queued for the next turn. Adapters that
+        cannot inject mid-turn text say so here, so every non-fluid backend is
+        inert rather than silently dropping the message.
+        """
+        raise NotImplementedError("steering is only supported on fluid sessions")
+
     @abstractmethod
     def receive_events(self) -> AsyncIterator[ProviderEvent]:
         """Yield provider events for the current query.

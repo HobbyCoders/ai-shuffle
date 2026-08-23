@@ -125,3 +125,31 @@ async def test_clean_result_after_retry_notes_still_yields_done(mock_db, tmp_pat
 
     assert [f for f in frames if f.get("type") == "done"]
     assert not [f for f in frames if f.get("type") == "error"]
+
+
+async def test_steer_receipt_yields_its_own_frame_and_nothing_else(mock_db, tmp_path):
+    """A delivery receipt is not assistant output: it leaves the pump as its own
+    ``steer_delivered`` frame (carrying the queue ids the runtime retires) and
+    never as a rendered system card."""
+    from app.core.provider.events import SteerDeliveredEvent
+
+    steers = [{"id": "turn-9", "text": "check staging too"}]
+    frames = await _frames(
+        [
+            SteerDeliveredEvent(steers=steers, session_id="ses_x"),
+            AssistantMessage(content=[TextBlock(text="on it")], model="grok-4.6"),
+            ResultMessage(subtype="success", is_error=False, session_id="ses_x"),
+        ],
+        tmp_path,
+    )
+
+    receipts = [f for f in frames if f.get("type") == "steer_delivered"]
+    assert len(receipts) == 1
+    assert receipts[0]["steers"] == steers
+    # No system card: the user's own words are recorded by the runtime as a
+    # message, not surfaced here as engine chatter.
+    assert not [
+        f for f in frames
+        if f.get("type") == "system" and f.get("subtype") != "model_info"
+    ]
+    assert [f for f in frames if f.get("type") == "done"]

@@ -981,46 +981,7 @@ class ChatWebSocketHandler:
         # rides SOLELY the SSE typed-event feed; new-session adoption is
         # authenticated by the ``session_created`` request_id echo already sent
         # above (B4) — no origin-socket passthrough, no start-frame token.
-        # Persist + broadcast the user message (P3 session_messages dual-write
-        # survives — the recorder also logs ``message.user`` to the event
-        # feed). New sessions persisted their first message atomically at
-        # creation; existing sessions persist here. Ordered before submit is
-        # safe: v2 ``submit`` always enqueues durably (never a
-        # preempted-and-discarded query), so there is no double-persist race.
-        try:
-            if not is_new_session:
-                _msg_role = "user"
-                _msg_meta = None
-                if prompt.strip().startswith("/"):
-                    _parts = prompt.strip().split(None, 1)
-                    _msg_role = "command"
-                    _msg_meta = {
-                        "command_name": _parts[0],
-                        "command_args": _parts[1] if len(_parts) > 1 else "",
-                    }
-                await run_sync(
-                    database.add_session_message,
-                    session_id=session_id,
-                    role=_msg_role,
-                    content=prompt,
-                    metadata=_msg_meta,
-                    profile_id=profile_id,
-                )
-            await sync_engine.broadcast_message_added(
-                session_id=session_id,
-                message={
-                    "role": "user",
-                    "content": prompt,
-                    "profile_id": profile_id,
-                },
-                source_device_id=self.device_id,
-            )
-        except Exception as persist_exc:  # noqa: BLE001
-            logger.warning(
-                f"[v2] user-message persist/broadcast failed for session "
-                f"{session_id} (turn will still run): {persist_exc}"
-            )
-
+        #
         # A turn already live for the session means this query queues behind
         # it (busy-write guard implicit). Checked BEFORE submit — submit's
         # kick does not make a turn live synchronously, so a post-submit read
@@ -1029,9 +990,64 @@ class ChatWebSocketHandler:
             await run_sync(turns_db.get_live_turn, session_id) is not None
         )
 
+        # Persist + broadcast the user message (P3 session_messages dual-write
+        # survives — the recorder also logs ``message.user`` to the event
+        # feed). New sessions persisted their first message atomically at
+        # creation; existing sessions persist here. Ordered before submit is
+        # safe: v2 ``submit`` always enqueues durably (never a
+        # preempted-and-discarded query), so there is no double-persist race.
+        #
+        # DEFERRED when a turn is already live: the model has not seen this
+        # prompt yet and may not for a while, so writing it into the transcript
+        # now would put it above the answer to the PREVIOUS message. It renders
+        # as a pending bubble from the queue view instead, and the record is
+        # written where it is actually delivered — mid-turn by the steer receipt
+        # (``session_runtime._on_steer_delivered``) or at the start of the turn
+        # the row becomes (``payload.deferred_user_record``).
+        if not had_live:
+            try:
+                if not is_new_session:
+                    _msg_role = "user"
+                    _msg_meta = None
+                    if prompt.strip().startswith("/"):
+                        _parts = prompt.strip().split(None, 1)
+                        _msg_role = "command"
+                        _msg_meta = {
+                            "command_name": _parts[0],
+                            "command_args": _parts[1] if len(_parts) > 1 else "",
+                        }
+                    await run_sync(
+                        database.add_session_message,
+                        session_id=session_id,
+                        role=_msg_role,
+                        content=prompt,
+                        metadata=_msg_meta,
+                        profile_id=profile_id,
+                    )
+                await sync_engine.broadcast_message_added(
+                    session_id=session_id,
+                    message={
+                        "role": "user",
+                        "content": prompt,
+                        "profile_id": profile_id,
+                    },
+                    source_device_id=self.device_id,
+                )
+            except Exception as persist_exc:  # noqa: BLE001
+                logger.warning(
+                    f"[v2] user-message persist/broadcast failed for session "
+                    f"{session_id} (turn will still run): {persist_exc}"
+                )
+
         payload: Dict[str, Any] = {}
         if request_id and is_new_session:
             payload["request_id"] = request_id
+        if had_live:
+            # The persist above was skipped — tell the turn to write it when it
+            # runs. Harmless if the turn is instead absorbed by a mid-turn
+            # steer: that path records the message itself and the row never
+            # runs.
+            payload["deferred_user_record"] = True
         if self.api_user_id:
             payload["api_user_id"] = self.api_user_id
         if getattr(self, "user_id", None):
@@ -1104,13 +1120,21 @@ class ChatWebSocketHandler:
             return
 
         if had_live:
-            # Queued behind the live turn: surface the chip (re-sourced from
-            # turns) and send the F5 query_queued ack so the client leaves its
-            # optimistic streaming state instead of spinning forever.
+            # Queued behind the live turn: surface the pending bubble
+            # (re-sourced from turns) and send the F5 query_queued ack so the
+            # client leaves its optimistic streaming state instead of spinning
+            # forever.
             await self._v2_broadcast_queue(session_id)
             await self.send_json(
                 {"type": "query_queued", "session_id": session_id}
             )
+            # ...then try to get it in front of the model NOW rather than at the
+            # next turn. The engine folds it into the running turn if it can;
+            # if not, the row stays queued and the settle-drain runs it. Either
+            # way the message is already durable, so this is pure latency.
+            from app.core.session_runtime import try_steer_pending
+
+            await try_steer_pending(session_id)
         return
     # ------------------------------------------------------------------
     # handle_stop

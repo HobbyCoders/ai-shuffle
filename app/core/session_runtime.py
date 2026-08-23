@@ -110,6 +110,43 @@ def get_live_runtime(session_id: str) -> Optional["SessionRuntime"]:
     return _live_runtimes.get(session_id)
 
 
+# Queue sources a steer may pull from — the two that render as the user's own
+# pending messages. Mirrors ``chat_ws_handler._V2_QUEUE_SOURCES``; an internal
+# turn (unpark, failover, automation) is never someone talking mid-turn.
+_STEERABLE_SOURCES = ("user", "queue")
+
+# Override keys that BIND a turn's run and cannot change once it started. A
+# queued message asking for a different one of these is a request the live turn
+# cannot honor, so it waits and runs as its own turn instead of being folded in
+# under settings the user did not pick. ``fast`` and ``context_window`` are
+# deliberately NOT in this set (product ruling): they shape throughput and
+# budget rather than which agent answers.
+_STEER_BINDING_KEYS = ("model", "effort", "permission_mode")
+
+
+async def try_steer_pending(session_id: str) -> int:
+    """Try to hand this session's queued user messages to its RUNNING turn.
+
+    A no-op unless THIS process owns the session's live turn: a session running
+    on another install falls back to the ordinary drain (cross-install steering
+    is not a thing this build does), and so does one with nothing live.
+
+    Returns the number of messages actually handed over. Never raises — a steer
+    is an optimization over the queue, and the queue is already durable.
+    """
+    runtime = _live_runtimes.get(session_id)
+    if runtime is None:
+        return 0
+    try:
+        return await runtime.steer_pending()
+    except Exception:  # noqa: BLE001 — the drain is the correctness path.
+        logger.warning(
+            "SessionRuntime: steer attempt failed for %s", session_id,
+            exc_info=True,
+        )
+        return 0
+
+
 def get_reader_lock(session_id: str) -> asyncio.Lock:
     """Return (creating on first use) the session's reader-token lock.
 
@@ -381,6 +418,13 @@ class SessionRuntime:
         self._drain_after_cancel = False
         # stop_reason override for an escalation-forced abort.
         self._abort_reason: Optional[str] = None
+        # Queued turn ids already handed to the engine as steers THIS turn.
+        # ``try_steer_pending`` fires once per send, so without this a message
+        # still awaiting its receipt would be submitted again by the next send.
+        # Per-turn by construction (one runtime per turn row); cleared in
+        # ``_finalize`` so an undelivered steer is free to be tried again by
+        # whatever turn comes next.
+        self._steer_attempted: set = set()
         # Idempotency guard for the interrupt-observe pass (V2 Phase 4, O4):
         # once interrupt() has been driven for THIS turn, later observers
         # (claim-loop pass, duplicate executor fire) are no-ops. Per-turn by
@@ -716,6 +760,13 @@ class SessionRuntime:
         # prompt is sent and no message.user is recorded, so the transcript
         # gains only the answer the failed turn never produced.
         resume = self.source == "resume"
+        # A message the composer deferred (sent while a turn was live) was never
+        # written to the legacy ``session_messages`` store at send time — the
+        # transcript must show it where the model actually receives it, which is
+        # here. The event-log side is unchanged: ``recorder.start`` appends the
+        # ``message.user`` for every non-resume turn either way.
+        if not resume and (self.turn.get("payload") or {}).get("deferred_user_record"):
+            await self._persist_user_message(prompt)
         await recorder.start(
             prompt,
             profile_id=self.turn.get("profile_id"),
@@ -745,8 +796,14 @@ class SessionRuntime:
                     "upload_blob_ids"
                 ),
             ):
-                await recorder.on_event(event)
                 etype = event.get("type") if isinstance(event, dict) else None
+                if etype == "steer_delivered":
+                    # Internal receipt, not a render frame: it becomes a
+                    # ``message.user`` in the log (below) and never reaches the
+                    # WS leg as itself.
+                    await self._on_steer_delivered(recorder, event)
+                    continue
+                await recorder.on_event(event)
                 if etype in ("done", "interrupted", "error"):
                     self._terminal = etype
                 # Render frames ride the recorder → SSE path; only the kept
@@ -784,6 +841,220 @@ class SessionRuntime:
         )
 
     # ------------------------------------------------------------------
+    # mid-turn steering — hand queued messages to the running turn
+    # ------------------------------------------------------------------
+
+    async def steer_pending(self) -> int:
+        """Submit this session's eligible queued messages to the live engine.
+
+        Walks the queue IN ORDER and stops at the first row that cannot be
+        steered: a later message must never overtake an earlier one, so an
+        ineligible row (an attachment, a different model, a different agent)
+        pins everything behind it to the ordinary drain. The rows stay
+        ``queued`` throughout — only fluid's delivery receipt retires one (see
+        ``_on_steer_delivered``), so a steer the engine drops at turn end simply
+        runs as the turn it always was.
+
+        Returns how many rows were submitted.
+        """
+        adapter = self._live_adapter()
+        if adapter is None:
+            return 0
+        try:
+            rows = await asyncio.to_thread(turns_db.get_queued_turns, self.session_id)
+        except Exception:
+            logger.warning(
+                "SessionRuntime: could not read the queue for %s", self.session_id,
+                exc_info=True,
+            )
+            return 0
+
+        submitted = 0
+        for row in rows:
+            if row.get("source") not in _STEERABLE_SOURCES:
+                continue
+            if not self._steer_eligible(row):
+                break
+            row_id = row["id"]
+            if row_id in self._steer_attempted:
+                continue
+            prompt = row.get("prompt") or ""
+            if not prompt:
+                break
+            self._steer_attempted.add(row_id)
+            try:
+                await adapter.steer(prompt, id=row_id)
+            except NotImplementedError:
+                # A backend with no mid-turn channel at all — stop asking for
+                # the rest of this turn.
+                logger.debug(
+                    "SessionRuntime: adapter cannot steer %s — leaving the "
+                    "queue to the drain", self.session_id,
+                )
+                return submitted
+            except RuntimeError as exc:
+                # Nothing live to steer into (the turn is ending, interrupting,
+                # or its process has not come up). The row is untouched; the
+                # settle-drain will run it.
+                self._steer_attempted.discard(row_id)
+                logger.info(
+                    "SessionRuntime: %s not steerable right now (%s) — turn %s "
+                    "stays queued", self.session_id, exc, row_id,
+                )
+                break
+            except Exception:
+                self._steer_attempted.discard(row_id)
+                logger.warning(
+                    "SessionRuntime: steer submit failed for %s turn %s",
+                    self.session_id, row_id, exc_info=True,
+                )
+                break
+            submitted += 1
+        return submitted
+
+    def _live_adapter(self) -> Optional[Any]:
+        """The provider adapter behind this session's pooled client, or None."""
+        try:
+            from app.core.session_pool import get_session_pool
+
+            state = get_session_pool().peek(self.session_id)
+        except Exception:  # noqa: BLE001
+            return None
+        return getattr(state, "adapter", None) if state is not None else None
+
+    def _steer_eligible(self, row: Dict[str, Any]) -> bool:
+        """Whether ``row``'s prompt can join the LIVE turn as it stands.
+
+        Three things disqualify it, all for the same reason — the live turn is
+        already running under settings this row would change, and folding the
+        text in would silently ignore what the user picked:
+
+        * attachments (``upload_blob_ids``): the files have to be materialized
+          into the working dir before the prompt makes sense, which is turn
+          setup, not something a tool result can carry;
+        * a different model / effort / permission mode;
+        * a different profile — a message addressed to another agent.
+        """
+        payload = row.get("payload") or {}
+        if payload.get("upload_blob_ids"):
+            return False
+        if (row.get("profile_id") or None) != (self.turn.get("profile_id") or None):
+            return False
+        live_overrides = self.turn.get("overrides") or {}
+        row_overrides = row.get("overrides") or {}
+        for key in _STEER_BINDING_KEYS:
+            if (row_overrides.get(key) or None) != (live_overrides.get(key) or None):
+                return False
+        return True
+
+    async def _on_steer_delivered(
+        self, recorder: TurnRecorder, event: Dict[str, Any]
+    ) -> None:
+        """Record + retire every queued row fluid just delivered into this turn.
+
+        The receipt means the text is in immutable history at the position the
+        stream is at right now, so this is exactly where the user message
+        belongs — both in the legacy ``session_messages`` store and as a
+        ``message.user`` on the live turn, stamped with the QUEUED row's
+        command id so the frontend's pending bubble collapses onto it.
+
+        Record first, absorb second: a crash between fluid's delivery and the
+        absorb leaves the row ``queued``, so it re-runs as an ordinary turn —
+        a rare, visible duplicate rather than a silently lost message.
+        """
+        steers = event.get("steers") or []
+        absorbed = False
+        for steer in steers:
+            if not isinstance(steer, dict):
+                continue
+            row_id = steer.get("id")
+            if not row_id:
+                logger.info(
+                    "SessionRuntime: steer delivered for %s with no queue id — "
+                    "nothing to record", self.session_id,
+                )
+                continue
+            try:
+                row = await asyncio.to_thread(turns_db.get_turn, row_id)
+            except Exception:
+                logger.warning(
+                    "SessionRuntime: could not load steered turn %s", row_id,
+                    exc_info=True,
+                )
+                continue
+            if row is None or row.get("session_id") != self.session_id:
+                logger.warning(
+                    "SessionRuntime: steer receipt names unknown turn %s for "
+                    "%s — skipping", row_id, self.session_id,
+                )
+                continue
+            content = row.get("prompt") or steer.get("text") or ""
+            profile_id = row.get("profile_id") or self.turn.get("profile_id")
+            await self._persist_user_message(content, profile_id=profile_id)
+            await recorder.record_steered_user_message(
+                content,
+                profile_id=profile_id,
+                command_id=row.get("command_id"),
+            )
+            try:
+                if await asyncio.to_thread(turns_db.absorb_queued_turn, row_id):
+                    absorbed = True
+            except Exception:
+                logger.warning(
+                    "SessionRuntime: absorb failed for steered turn %s", row_id,
+                    exc_info=True,
+                )
+        if absorbed:
+            # The rows left the queue — clear their pending bubbles everywhere.
+            await _broadcast_queue_after_start(self.session_id)
+
+    async def _persist_user_message(
+        self, content: str, *, profile_id: Optional[str] = None
+    ) -> None:
+        """Dual-write one user message to ``session_messages`` + fan it out.
+
+        The same two steps ``handle_query`` runs for an idle send, moved to
+        delivery time for a message that waited. Slash commands classify exactly
+        as they do there. Best-effort: the event log is the transcript
+        authority, so a legacy-store failure must never kill the turn.
+        """
+        try:
+            from app.core.sync_engine import sync_engine
+            from app.db import database as database_mod
+
+            role = "user"
+            metadata = None
+            if content.strip().startswith("/"):
+                parts = content.strip().split(None, 1)
+                role = "command"
+                metadata = {
+                    "command_name": parts[0],
+                    "command_args": parts[1] if len(parts) > 1 else "",
+                }
+            await asyncio.to_thread(
+                database_mod.add_session_message,
+                session_id=self.session_id,
+                role=role,
+                content=content,
+                metadata=metadata,
+                profile_id=profile_id or self.turn.get("profile_id"),
+            )
+            await sync_engine.broadcast_message_added(
+                session_id=self.session_id,
+                message={
+                    "role": "user",
+                    "content": content,
+                    "profile_id": profile_id or self.turn.get("profile_id"),
+                },
+                source_device_id=None,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "SessionRuntime: user-message persist failed for %s "
+                "(the turn still runs)", self.session_id, exc_info=True,
+            )
+
+    # ------------------------------------------------------------------
     # finalize — always runs; decides completed | aborted | parked
     # ------------------------------------------------------------------
 
@@ -801,6 +1072,12 @@ class SessionRuntime:
         ``turn.parked`` — which the recorder never emits during the pump — is
         appended here (``record_parked``).
         """
+        # The turn is over, so nothing is steerable into it any more. Anything
+        # this runtime submitted but never saw receipted was dropped by the
+        # engine at turn end; its row is still ``queued`` and the settle-drain
+        # below runs it as an ordinary turn.
+        self._steer_attempted.clear()
+
         # Absorb turn_finalize.persist_turn_end_state (durable parked marker +
         # unpark-latch backstop). Legacy stays intact — we CALL it.
         try:

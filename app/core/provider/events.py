@@ -190,6 +190,22 @@ class ResultMessage(ProviderEvent):
 
 
 @dataclass
+class SteerDeliveredEvent(ProviderEvent):
+    """Queued user text was handed to the running turn and the model will read it.
+
+    Mirrors fluid's ``SteerDelivered``: ``steers`` holds one
+    ``{"id": <correlation handle or None>, "text": <the user's words>}`` record
+    per delivered message, in submission order, and arrives immediately after
+    the frame that carried them. The id is what lets the host retire the
+    durable queue row it steered from — a steer that never shows up here never
+    reached the model and must still run as an ordinary turn.
+    """
+    steers: List[Dict[str, Any]] = field(default_factory=list)
+    session_id: str = ""
+    uuid: Optional[str] = None
+
+
+@dataclass
 class StreamEvent(ProviderEvent):
     """Partial-message stream event; ``event`` is the raw API stream event."""
     uuid: str
