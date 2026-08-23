@@ -20,7 +20,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 81
+SCHEMA_VERSION = 82
 
 
 def create_postgres_schema(cursor) -> None:

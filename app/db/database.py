@@ -221,7 +221,7 @@ def _safe_json(value):
 #     standard, so nothing changes speed or price on upgrade. Additive/nullable
 #     with no index; lands via the always-run guarded ADD COLUMN in
 #     _run_column_migrations.
-SCHEMA_VERSION = 81
+SCHEMA_VERSION = 82
 
 
 def _migrate_omni_tables_to_fluid(cursor):
@@ -342,6 +342,62 @@ def subagent_row_to_agent_config(row: dict) -> dict:
     if mcp_servers:
         config["mcp_servers"] = mcp_servers
     return config
+
+
+def _migrate_agent_tool_access(cursor, migrations_applied=None):
+    """v82 (rulings T2 + T5): stamp ``tool_selection_mode`` onto every agent
+    config and fold the retired ``ai_tools`` / ``app_config_tools`` switches
+    into the tool lists.
+
+    Before T2 the runtime inferred intent from list emptiness, so
+    ``allowed_tools: []`` ("Disable all tools" in the editor) read as
+    *unrestricted* everywhere. Stamping the mode the editor was actually
+    showing preserves each agent's visible intent while letting the runtime
+    drop the inference entirely.
+
+    Idempotent: an agent whose config already carries one of the four valid
+    modes is left alone, so this can run on every startup (which it does — it
+    sits in the always-run column-migration pass, like every other guarded
+    block here).
+    """
+    import json as _json
+
+    if not table_exists(cursor, "agents"):
+        return
+
+    from app.core.tool_access import TOOL_SELECTION_MODES, fold_legacy_tool_switches
+
+    cursor.execute("SELECT id, config FROM agents")
+    rows = cursor.fetchall() or []
+    stamped = 0
+    for row in rows:
+        raw = row["config"]
+        if isinstance(raw, str):
+            try:
+                config = _json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+        elif isinstance(raw, dict):
+            config = raw
+        else:
+            continue
+        if config.get("tool_selection_mode") in TOOL_SELECTION_MODES:
+            continue
+        try:
+            updated = fold_legacy_tool_switches(config)
+        except Exception:
+            logger.warning("v82: could not fold tool access for agent %s", row["id"], exc_info=True)
+            continue
+        cursor.execute(
+            "UPDATE agents SET config = %s WHERE id = %s",
+            (_json.dumps(updated), row["id"]),
+        )
+        stamped += 1
+
+    if stamped and migrations_applied is not None:
+        migrations_applied.append(f"agents.tool_selection_mode({stamped})")
+    if stamped:
+        logger.info("v82: stamped tool_selection_mode onto %d agent(s)", stamped)
 
 
 def _run_column_migrations(cursor):
@@ -1850,6 +1906,13 @@ def _run_column_migrations(cursor):
         "CREATE INDEX IF NOT EXISTS idx_upload_blobs_session "
         "ON upload_blobs(session_id)"
     )
+
+    # Tool access (v82, rulings T2 + T5). Stamp ``tool_selection_mode`` into
+    # every agent config so the runtime rule has no legacy branch, and fold the
+    # two retired switches (``ai_tools`` / ``app_config_tools``) into the tool
+    # lists. Runs once — an agent that already carries a valid mode is skipped,
+    # which is also what makes this idempotent across restarts.
+    _migrate_agent_tool_access(cursor, migrations_applied)
 
     if (
         table_exists(cursor, "sessions")
