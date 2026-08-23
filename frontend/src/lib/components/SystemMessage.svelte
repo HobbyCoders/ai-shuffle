@@ -635,6 +635,24 @@
 				};
 			}
 
+			case 'provider_retry': {
+				// The engine got an empty 200 back and is re-sending the same
+				// request. One card counts the attempts up (the reducer
+				// replaces it in place), so this row reads as live progress,
+				// not a stack of ten warnings.
+				const attempt = data.attempt ?? '?';
+				const maxAttempts = data.max_attempts ?? '?';
+				const retryModel = typeof data.model === 'string' ? data.model : '';
+				const base = `Empty response from the provider — retrying (attempt ${attempt} of ${maxAttempts})`;
+				return {
+					title: 'Retrying',
+					content: retryModel ? `${base} · ${retryModel}` : base,
+					badge: 'retry',
+					badgeColor: 'amber',
+					compact: true
+				};
+			}
+
 			case 'plugin_warning': {
 				// Plugin hook stderr output (security warnings, etc.)
 				const metadataPlugin = message.metadata?.plugin;
@@ -715,6 +733,10 @@
 		message.systemSubtype === 'task_updated' ||
 			message.systemSubtype === 'task_notification'
 	);
+
+	// A retry row is work in flight, not a settled outcome: it takes the
+	// spinner the running-task rows use instead of a check or a cross.
+	const isProviderRetry = $derived(message.systemSubtype === 'provider_retry');
 
 	// Badge color classes
 	function getBadgeClasses(color: string): string {
@@ -910,7 +932,12 @@
 		<div class="w-full sys-flat">
 			<div class="compact-summary sys-row w-full flex items-center gap-2 min-w-0">
 				<!-- Status icon matching tool message pattern -->
-				{#if formatted.badgeColor === 'green'}
+				{#if isProviderRetry}
+					<!-- Still in flight: spinner, not a settled check/cross -->
+					<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+					</svg>
+				{:else if formatted.badgeColor === 'green'}
 					<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
 					</svg>
@@ -930,6 +957,12 @@
 				</svg>
 				<!-- Title -->
 				<span class="text-sm font-medium text-foreground flex-shrink-0">{formatted.title}</span>
+				<!-- Badge chip -->
+				{#if formatted.badge}
+					<span class="px-1.5 py-0.5 text-[10px] rounded flex-shrink-0 {getBadgeClasses(formatted.badgeColor || 'gray')}">
+						{formatted.badge}
+					</span>
+				{/if}
 				<!-- Content summary -->
 				{#if formatted.content}
 					<span class="text-muted-foreground flex-shrink-0">&bull;</span>
@@ -938,36 +971,48 @@
 			</div>
 		</div>
 	{:else}
-		<!-- Full card rendering for important system messages -->
-		<div class="w-full sys-card">
-			<div class="px-4 py-2 bg-muted/30 flex items-center gap-2">
-				<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-				</svg>
-				<span class="text-sm font-medium text-foreground">{formatted.title}</span>
-				{#if formatted.badge}
-					<span class="px-1.5 py-0.5 text-xs rounded {getBadgeClasses(formatted.badgeColor || 'gray')}">
-						{formatted.badge}
-					</span>
-				{/if}
-			</div>
-			<div class="px-4 py-3 bg-card">
-				{#if isMarkdownContent(message.systemSubtype)}
-					<div class="prose prose-sm prose-invert max-w-none system-message-content">
-						{@html sanitizeHtml(renderMarkdown(formatted.content))}
-					</div>
-				{:else}
-					<pre class="text-xs text-muted-foreground overflow-x-auto whitespace-pre-wrap break-words font-mono">{formatted.content}</pre>
-				{/if}
-			</div>
+		<!--
+			Generic system message. Also a row in the work log, not a stacked
+			panel: icon, title, badge chip, one-line summary, chevron — the
+			body lives behind a collapse and is closed by default.
+		-->
+		<div class="w-full sys-flat">
+			<details class="group/sys">
+				<summary class="sys-summary sys-row w-full flex items-center gap-2 min-w-0 cursor-pointer list-none">
+					<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+					</svg>
+					<span class="text-sm font-medium text-foreground flex-shrink-0">{formatted.title}</span>
+					{#if formatted.badge}
+						<span class="px-1.5 py-0.5 text-[10px] rounded flex-shrink-0 {getBadgeClasses(formatted.badgeColor || 'gray')}">
+							{formatted.badge}
+						</span>
+					{/if}
+					{#if formatted.content}
+						<span class="text-muted-foreground flex-shrink-0">&bull;</span>
+						<span class="text-sm text-muted-foreground truncate min-w-0" title={formatted.content}>{formatted.content}</span>
+					{/if}
+					<svg class="w-4 h-4 text-muted-foreground ml-auto flex-shrink-0 transition-transform group-open/sys:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+					</svg>
+				</summary>
+				<div class="sys-body">
+					{#if isMarkdownContent(message.systemSubtype)}
+						<div class="prose prose-sm prose-invert max-w-none system-message-content">
+							{@html sanitizeHtml(renderMarkdown(formatted.content))}
+						</div>
+					{:else}
+						<pre class="text-xs text-muted-foreground overflow-x-auto whitespace-pre-wrap break-words font-mono">{formatted.content}</pre>
+					{/if}
+				</div>
+			</details>
 		</div>
 	{/if}
 {/if}
 
 <style>
-	/* Flat-row idiom, shared with the work log: system events are steps in the
-	   log, not stacked panels. Only genuinely important messages (.sys-card)
-	   keep card chrome. */
+	/* Flat-row idiom, shared with the work log: every system event is a step in
+	   the log, not a stacked panel. */
 	.sys-flat {
 		min-width: 0;
 		margin: 0 -8px;
@@ -989,12 +1034,16 @@
 		border-left: 1px solid var(--border);
 	}
 
-	.sys-card {
-		border: 1px solid var(--border);
-		border-radius: 10px;
-		overflow: hidden;
-		background: var(--card);
-		box-shadow: var(--shadow-s);
+	/* Generic system row: same tap target as the hook row. */
+	.sys-summary {
+		min-height: 44px; /* CLAUDE.md mandate: touch targets >= 44px */
+	}
+	.sys-summary::-webkit-details-marker {
+		display: none;
+	}
+	.sys-summary:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: -2px;
 	}
 
 	/* Hook event row — collapsed chrome, restrained styling, mobile tap target */

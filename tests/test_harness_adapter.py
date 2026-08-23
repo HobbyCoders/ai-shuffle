@@ -241,6 +241,33 @@ async def test_host_monitor_receipt_translates_as_a_shell_task():
 
 
 @pytest.mark.asyncio
+async def test_provider_retry_translates_to_a_system_note():
+    """The engine's empty-completion retry surfaces as a plain SystemMessage
+    the turn recorder files as a system.note; the UI folds consecutive ones
+    into a single counting card."""
+    events = [
+        lm.TurnStarted(session_id=SID, model="m", provider="fake"),
+        lm.ProviderRetry(
+            session_id=SID, attempt=3, max_attempts=10,
+            reason="empty response from provider",
+            delay_seconds=4.0, model="ox-alpha",
+        ),
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=1),
+    ]
+    got = await _collect(_adapter_with(FakeEngine(events)))
+    notes = [e for e in got if isinstance(e, SystemMessage)
+             and e.subtype == "provider_retry"]
+    assert len(notes) == 1
+    assert notes[0].data == {
+        "attempt": 3,
+        "max_attempts": 10,
+        "reason": "empty response from provider",
+        "delay_seconds": 4.0,
+        "model": "ox-alpha",
+    }
+
+
+@pytest.mark.asyncio
 async def test_translation_non_partial_buffers_deltas():
     # Default options (include_partial_messages=False): deltas are buffered
     # silently and surface once, as the complete AssistantMessage at BlockStop.

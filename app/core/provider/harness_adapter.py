@@ -1495,6 +1495,21 @@ class HarnessAdapter(ProviderAdapter):
                 },
             )]
 
+        if cls == "ProviderRetry":
+            # The engine is about to re-send the same request after an empty
+            # provider response. Never terminal; the UI folds consecutive
+            # attempts into one card that counts up.
+            return [SystemMessage(
+                subtype="provider_retry",
+                data={
+                    "attempt": event.attempt,
+                    "max_attempts": event.max_attempts,
+                    "reason": event.reason,
+                    "delay_seconds": event.delay_seconds,
+                    "model": getattr(event, "model", None),
+                },
+            )]
+
         if cls == "RateLimit":
             return [
                 RateLimitEvent(

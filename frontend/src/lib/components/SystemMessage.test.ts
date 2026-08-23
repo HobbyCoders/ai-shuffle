@@ -106,3 +106,64 @@ describe('SystemMessage — task_updated / task_notification', () => {
 		expect(container.querySelector('.animate-spin')).toBeNull();
 	});
 });
+
+describe('SystemMessage — provider_retry', () => {
+	it('renders a counting "Retrying" row with a spinner', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'provider_retry',
+					systemData: {
+						attempt: 3,
+						max_attempts: 10,
+						reason: 'empty response from provider',
+						delay_seconds: 4,
+						model: 'ox-alpha'
+					}
+				})
+			}
+		});
+
+		expect(screen.getByText('Retrying')).toBeTruthy();
+		expect(container.textContent).toContain('attempt 3 of 10');
+		expect(container.textContent).toContain('ox-alpha');
+		// Work in flight: spinner, never a settled check or cross.
+		expect(container.querySelector('.animate-spin')).not.toBeNull();
+		expect(container.querySelector('.text-green-500')).toBeNull();
+		expect(container.querySelector('.text-red-500')).toBeNull();
+	});
+
+	it('falls back to "?" when the attempt counters are missing', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({ systemSubtype: 'provider_retry', systemData: {} })
+			}
+		});
+
+		expect(container.textContent).toContain('attempt ? of ?');
+	});
+});
+
+describe('SystemMessage — generic system rows', () => {
+	it('renders as a flat row with a collapsed details body', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'informational',
+					content: 'Something worth noting',
+					systemData: { content: 'Something worth noting' }
+				})
+			}
+		});
+
+		// Flat-row idiom, not the old boxed card.
+		expect(container.querySelector('.sys-card')).toBeNull();
+		expect(container.querySelector('.sys-flat')).not.toBeNull();
+		const details = container.querySelector('details');
+		expect(details).not.toBeNull();
+		// Collapsed by default; the body lives behind the summary row.
+		expect((details as HTMLDetailsElement).open).toBe(false);
+		expect(container.querySelector('summary.sys-row')).not.toBeNull();
+		expect(container.querySelector('.sys-body')).not.toBeNull();
+	});
+});

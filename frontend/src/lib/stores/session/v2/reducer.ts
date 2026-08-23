@@ -1418,6 +1418,26 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				};
 			}
 			const data = obj(event.data);
+			// `provider_retry` arrives once per attempt while the engine
+			// re-sends an empty completion — up to ten of them in a row. They
+			// must read as ONE card counting 1 → 2 → 3, not ten stacked
+			// cards, so when the newest message is already a retry note the
+			// new attempt replaces it in place. The id is reused so
+			// messageOriginSeq and transcript rewind keep lining up, and a
+			// retry that follows anything else still appends a fresh card.
+			if (str(event.subtype) === 'provider_retry') {
+				const last = state.messages[state.messages.length - 1];
+				if (last && last.type === 'system' && last.systemSubtype === 'provider_retry') {
+					const messages = state.messages.slice();
+					messages[messages.length - 1] = {
+						...last,
+						content: str(data?.content ?? data?.text),
+						...(data ? { systemData: data } : {}),
+						timestamp: stampTs(event, createdAt) || undefined,
+					};
+					return { ...state, messages };
+				}
+			}
 			const msg: ChatMessage = {
 				id: event.id,
 				role: 'system',

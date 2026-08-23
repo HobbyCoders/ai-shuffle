@@ -1475,6 +1475,62 @@ describe('system + unknown events', () => {
 		expect(s.activeTaskSummaries[0]).toMatchObject({ id: 'bg-1', status: 'running' });
 	});
 
+	it('consecutive provider_retry notes update one card in place', () => {
+		const s = fold([
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 1, max_attempts: 10, delay_seconds: 1, model: 'ox-alpha' },
+			}),
+			ev('system.note', {
+				id: 'pr2',
+				subtype: 'provider_retry',
+				data: { attempt: 2, max_attempts: 10, delay_seconds: 2, model: 'ox-alpha' },
+			}),
+		]);
+		expect(s.messages).toHaveLength(1);
+		expect(s.messages[0].id).toBe('pr1'); // same card, not a second one
+		expect(s.messages[0].systemData).toMatchObject({ attempt: 2, max_attempts: 10 });
+	});
+
+	it('a provider_retry after an unrelated message appends a new card', () => {
+		const s = fold([
+			ev('turn.started'),
+			ev('message.user', { content: 'go' }),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 1, max_attempts: 10 },
+			}),
+		]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries).toHaveLength(1);
+		expect(s.messages.length).toBeGreaterThan(1);
+	});
+
+	it('a provider_retry after an interruption starts a fresh card', () => {
+		const s = fold([
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 1, max_attempts: 10 },
+			}),
+			ev('system.note', { id: 'note1', subtype: 'informational', data: { content: 'hi' } }),
+			ev('system.note', {
+				id: 'pr2',
+				subtype: 'provider_retry',
+				data: { attempt: 1, max_attempts: 10 },
+			}),
+		]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries).toHaveLength(2);
+		expect(retries.map((m) => m.id)).toEqual(['pr1', 'pr2']);
+		// The earlier card was not mutated by the later one.
+		expect(retries[0].systemData).toMatchObject({ attempt: 1 });
+	});
+
 	it('compaction_boundary renders a system marker', () => {
 		const s = fold([ev('system.compaction_boundary', { id: 'cb1' })]);
 		expect(s.messages[0]).toMatchObject({ systemSubtype: 'compaction_boundary' });
