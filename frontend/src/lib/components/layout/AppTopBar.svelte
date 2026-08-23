@@ -23,6 +23,7 @@
 	interface Props {
 		isAdmin?: boolean;
 		onNewSession: () => void;
+		onSettledOpenSession: () => void;
 		onOpenSession: (sessionId: string) => void;
 		onOpenFeature: (type: ViewType) => void;
 		onOpenSpotlight?: () => void;
@@ -31,6 +32,7 @@
 	let {
 		isAdmin = false,
 		onNewSession,
+		onSettledOpenSession,
 		onOpenSession,
 		onOpenFeature,
 		onOpenSpotlight
@@ -121,6 +123,7 @@
 		<Sidebar
 			{isAdmin}
 			onNewSession={drawerGo(onNewSession)}
+			onSettledOpenSession={drawerGo(onSettledOpenSession)}
 			onOpenSession={drawerGo(onOpenSession)}
 			onOpenFeature={drawerGo(onOpenFeature)}
 			onOpenSpotlight={onOpenSpotlight ? drawerGo(onOpenSpotlight) : undefined}
