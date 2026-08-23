@@ -11,9 +11,10 @@ now an ordinary spawned STDIO MCP server: the SDK launches
   2. The mcp_servers builder INCLUDES it (unlike the old CLI-flag server), and
      injects the curated per-session env subset for it (and only it).
   3. build_options_from_profile adds the ``mcp__browser`` tool wildcard and sets
-     NO ``--chrome`` extra_arg; a disabled built-in omits the wildcard.
-  4. A legacy ``claude-in-chrome`` disable entry keeps the ``browser`` server
-     disabled (settings.json key migration).
+     NO ``--chrome`` extra_arg.
+  4. The built-in is ALWAYS ON: stale disable entries (legacy
+     ``claude-in-chrome`` included) are stripped from settings.json reads and a
+     disable write refuses, so no gate can unspawn it.
 
 build_options_from_profile makes one unavoidable DB call (get_security_instructions);
 we patch that single boundary and let the rest run against on-disk config.
@@ -32,6 +33,7 @@ from app.core.mcp_config import _build_mcp_servers_dict, _build_browser_server_e
 from app.core.mcp_service import (
     McpServerConfig,
     McpServerType,
+    McpService,
     _normalize_disabled_servers,
 )
 
@@ -125,49 +127,76 @@ class TestBuildOptionsWiring:
         assert "browser" in servers
         assert servers["browser"]["command"] == "node"
 
-    def test_disabled_omits_browser_wildcard_and_server(self):
-        """When the built-in is disabled, neither wildcard nor spawned server appears."""
-        disabled_service = MagicMock()
-        disabled_service.get_disabled_servers.return_value = ["browser"]
-        disabled_builtin = get_browser_server_config()
-        disabled_builtin.enabled = False
-        disabled_service.get_all_servers.return_value = {
-            "builtin": [disabled_builtin],
+    def test_stale_disable_entry_still_spawns_browser(self):
+        """The built-in is always on: even a stale disable list must not gate it.
+
+        The service honours _normalize_disabled_servers (which strips
+        ``browser``), so a settings.json leftover cannot unspawn the server.
+        """
+        stale_service = MagicMock()
+        stale_service.get_disabled_servers.return_value = []
+        builtin = get_browser_server_config()
+        stale_service.get_all_servers.return_value = {
+            "builtin": [builtin],
             "user": [],
         }
 
         with patch.object(qo, "get_security_instructions", return_value=""), \
-             patch("app.core.mcp_service.get_mcp_service", return_value=disabled_service), \
-             patch("app.core.mcp_config.get_mcp_service", return_value=disabled_service):
+             patch("app.core.mcp_service.get_mcp_service", return_value=stale_service), \
+             patch("app.core.mcp_config.get_mcp_service", return_value=stale_service):
             opts, _ = qo.build_options_from_profile(profile=_profile())
 
         extra = opts.extra_args or {}
         assert "chrome" not in extra
-        assert "mcp__browser" not in (opts.allowed_tools or [])
+        assert "mcp__browser" in (opts.allowed_tools or [])
         servers = opts.mcp_servers if isinstance(opts.mcp_servers, dict) else {}
-        assert "browser" not in servers
+        assert "browser" in servers
 
 
-class TestLegacyDisableMigration:
-    def test_normalize_maps_legacy_name(self):
-        assert _normalize_disabled_servers(["claude-in-chrome"]) == ["browser"]
+class TestAlwaysOn:
+    """The browser built-in has no setting anymore — it is always enabled.
+
+    A stale disable entry (including the legacy ``claude-in-chrome`` name) must
+    be stripped from every normalized read, and a disable write must refuse.
+    """
+    def test_normalize_strips_browser(self):
+        assert _normalize_disabled_servers(["browser", "other"]) == ["other"]
+        assert _normalize_disabled_servers(["browser"]) == []
+
+    def test_normalize_strips_legacy_name_too(self):
+        # Legacy entry would map to ``browser``, which is then stripped.
+        assert _normalize_disabled_servers(["claude-in-chrome"]) == []
+        assert _normalize_disabled_servers(["other", "claude-in-chrome"]) == ["other"]
 
     def test_normalize_is_idempotent_and_dedups(self):
-        # Legacy + new both present must collapse to a single ``browser`` entry.
-        assert _normalize_disabled_servers(
-            ["other", "claude-in-chrome", "browser"]
-        ) == ["other", "browser"]
-        # Already-normalized list is unchanged.
-        assert _normalize_disabled_servers(["browser", "other"]) == ["browser", "other"]
+        assert _normalize_disabled_servers(["other", "more", "other"]) == [
+            "other",
+            "more",
+        ]
 
-    def test_legacy_disabled_name_keeps_browser_disabled(self):
-        """A settings.json entry for the old name disables the new built-in."""
-        # Simulate the normalized disable list the read path produces.
-        disabled = set(_normalize_disabled_servers(["claude-in-chrome"]))
+    def test_builtin_reports_enabled_even_with_stale_disable_entry(self):
         servers = get_builtin_servers()
         for s in servers:
-            if s.name in disabled:
+            if s.name in set(_normalize_disabled_servers(["browser"])):
                 s.enabled = False
         browser = next(s for s in servers if s.name == BROWSER_SERVER_NAME)
-        assert browser.enabled is False
-        assert "browser" in disabled
+        assert browser.enabled is True
+
+    def test_set_server_enabled_refuses_to_disable(self):
+        service = McpService()
+        with patch.object(service, "_read_json_file",
+                          return_value={"disabledMcpServers": []}), \
+             patch.object(service, "_write_json_file", return_value=True) as w:
+            assert service.set_server_enabled(BROWSER_SERVER_NAME, False) is True
+            # The refusal happens before any settings.json write-back.
+            w.assert_not_called()
+
+    def test_set_server_enabled_can_enable_other_servers(self):
+        service = McpService()
+        with patch.object(service, "_read_json_file",
+                          return_value={"disabledMcpServers": ["foo"]}), \
+             patch.object(service, "_write_json_file", return_value=True) as w:
+            assert service.set_server_enabled("foo", True) is True
+            (path, data), _ = w.call_args
+            assert path == service.SETTINGS_FILE
+            assert data["disabledMcpServers"] == []
