@@ -1,6 +1,6 @@
 """Codex / ChatGPT-subscription OAuth — standalone port for fluid.
 
-Ported from AI-Shuffle's ``codex_oauth.py`` + ``codex_token_refresh.py`` with the
+Ported from a production ``codex_oauth.py`` + ``codex_token_refresh.py`` with the
 app/DB dependencies removed: the token bundle persists to a JSON file (default
 ``~/.config/fluid/codex_auth.json``, ``0600``) instead of an encrypted Postgres
 row. Pure logic + outbound HTTP only; every call takes an optional ``client`` so

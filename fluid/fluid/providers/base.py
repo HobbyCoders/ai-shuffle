@@ -2,7 +2,7 @@
 
 All provider quirks live in each provider's ``serialize.py``; the engine only
 ever sees StreamChunks. The chunk vocabulary mirrors the proven normalized
-event set from AI-Shuffle's translator gateway, including the discipline that
+event set from a production translator gateway, including the discipline that
 tool-call argument fragments are accumulated byte-for-byte and only parsed
 once the tool block closes.
 """
@@ -30,7 +30,7 @@ class ProviderCaps:
 class StreamChunk:
     """Normalized streaming event.
 
-    kind ∈ {message_start, block_start, text_delta, thinking_delta,
+    kind ∈ {provider_request, message_start, block_start, text_delta, thinking_delta,
             tool_args_delta, block_stop, usage, message_stop, rate_limit}
     """
 

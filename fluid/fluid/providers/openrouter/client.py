@@ -43,12 +43,44 @@ class OpenRouterClient:
         timeout: float = 600.0,
         http_client: httpx.AsyncClient | None = None,
         retry: RetryPolicy | None = None,
+        pricing: dict[str, dict[str, float]] | None = None,
+        allow_fallbacks: bool = False,
     ) -> None:
         self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
         self._base_url = base_url
         self._timeout = timeout
         self._http = http_client
-        self._retry = retry or RetryPolicy()
+        # OpenRouter already performs provider fallback before the first token.
+        # A client-side retry after an ambiguous transport failure can create a
+        # second billable generation with no idempotency guarantee, so metered
+        # requests do not retry by default. Tests/embedders may opt in explicitly.
+        self._retry = retry or RetryPolicy(max_retries=0)
+        self._pricing = dict(pricing or {})
+        # Serialized as ``provider.allow_fallbacks``. Off by default so one
+        # logical call stays bound to one upstream generation; set it when the
+        # embedder prefers OpenRouter's silent failover to visible failures.
+        self._allow_fallbacks = allow_fallbacks
+
+    def estimate_input_cost(self, model: str, input_tokens: int) -> float | None:
+        row = self._pricing.get(model)
+        if not row or "prompt" not in row:
+            return None
+        return max(input_tokens, 0) * row["prompt"]
+
+    def estimate_cost(self, model: str, usage: dict) -> float | None:
+        row = self._pricing.get(model)
+        if not row:
+            return None
+        prompt = float(row.get("prompt", 0.0))
+        completion = float(row.get("completion", 0.0))
+        cache_read = float(row.get("input_cache_read", prompt))
+        cache_write = float(row.get("input_cache_write", prompt))
+        return (
+            float(usage.get("input_tokens", 0) or 0) * prompt
+            + float(usage.get("cache_read_input_tokens", 0) or 0) * cache_read
+            + float(usage.get("cache_creation_input_tokens", 0) or 0) * cache_write
+            + float(usage.get("output_tokens", 0) or 0) * completion
+        )
 
     async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
         headers = {
@@ -56,7 +88,7 @@ class OpenRouterClient:
             "content-type": "application/json",
             "accept": "text/event-stream",
         }
-        body = build_request_body(request)
+        body = build_request_body(request, allow_fallbacks=self._allow_fallbacks)
         async for chunk in stream_chat_completions(
             self._base_url,
             body,
@@ -64,5 +96,6 @@ class OpenRouterClient:
             http_client=self._http,
             timeout=self._timeout,
             retry=self._retry,
+            track_provider_requests=True,
         ):
             yield chunk

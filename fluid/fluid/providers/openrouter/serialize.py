@@ -65,7 +65,10 @@ def _mark_trailing_breakpoint(messages: list[dict[str, Any]]) -> None:
                     return
 
 
-def build_request_body(request: ProviderRequest) -> dict[str, Any]:
+def build_request_body(
+    request: ProviderRequest, *, allow_fallbacks: bool = False
+) -> dict[str, Any]:
+    """Serialize ``request``; ``allow_fallbacks`` is the client's standing knob."""
     breakpoints = (
         request.cache_breakpoints if _supports_cache_control(request.model) else 0
     )
@@ -101,6 +104,11 @@ def build_request_body(request: ProviderRequest) -> dict[str, Any]:
         # OpenRouter usage accounting: adds `cost` (USD credits) to the
         # terminal chunk's usage object alongside the token counts.
         "usage": {"include": True},
+        # OpenRouter otherwise retries another upstream provider invisibly
+        # before the first token. The harness owns retry visibility/budgets, so
+        # keep one logical call bound to one upstream generation. Embedders that
+        # would rather have the silent failover set allow_fallbacks on the client.
+        "provider": {"allow_fallbacks": allow_fallbacks},
     }
     if request.tools:
         body["tools"] = translate_tools(request.tools)

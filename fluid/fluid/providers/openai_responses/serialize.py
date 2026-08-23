@@ -10,7 +10,7 @@ The Responses stream is stateful (item ids, lazily-opened blocks, authoritative
 final items delivered only on ``response.output_item.done``), so unlike the
 Anthropic per-event ``sse_to_chunk`` this side is a small stateful normalizer.
 
-Event-mapping knowledge is ported from AI-Shuffle's translator gateway
+Event-mapping knowledge is ported from a production translator gateway
 (``responses_to_anthropic.py``) and ``docs/CODEX_SPIKE_FINDINGS.md`` — fluid's
 chunk model is simpler, so this is a port of the *knowledge*, not the code:
 

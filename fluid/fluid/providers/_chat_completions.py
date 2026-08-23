@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -208,10 +209,14 @@ def normalize_usage(usage: dict[str, Any]) -> dict[str, int]:
     prompt = int(usage.get("prompt_tokens", 0) or 0)
     completion = int(usage.get("completion_tokens", 0) or 0)
     cached = int((usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0)
+    cache_write = int(
+        (usage.get("prompt_tokens_details") or {}).get("cache_write_tokens", 0) or 0
+    )
     return {
-        "input_tokens": max(prompt - cached, 0),
+        "input_tokens": max(prompt - cached - cache_write, 0),
         "output_tokens": completion,
         "cache_read_input_tokens": cached,
+        "cache_creation_input_tokens": cache_write,
         "total_tokens": int(usage.get("total_tokens", 0) or 0),
     }
 
@@ -231,6 +236,7 @@ class ChatCompletionsNormalizer:
         self._order: list[str] = []
         self._next_index = 0
         self._stop_reason = "end_turn"
+        self._response_meta: dict[str, Any] = {}
 
     def _open(self, key: str, block_type: str, **kw: Any) -> list[StreamChunk]:
         if key in self._index_of:
@@ -254,6 +260,12 @@ class ChatCompletionsNormalizer:
 
     def consume(self, name: str, data: dict[str, Any]) -> list[StreamChunk]:
         data = data or {}
+        for source, target in (
+            ("id", "generation_id"), ("model", "effective_model"),
+            ("provider", "effective_provider"),
+        ):
+            if isinstance(data.get(source), str) and data[source]:
+                self._response_meta[target] = data[source]
         out: list[StreamChunk] = []
         if not self._started:
             self._started = True
@@ -325,6 +337,8 @@ class ChatCompletionsNormalizer:
             for key in self._order:
                 out.append(StreamChunk("block_stop", {"index": self._index_of[key]}))
             normalized: dict[str, Any] = dict(normalize_usage(usage))
+            if self._response_meta:
+                normalized["provider_response"] = dict(self._response_meta)
             cost = usage.get("cost")
             if isinstance(cost, (int, float)) and not isinstance(cost, bool):
                 # Provider-reported cost (USD credits) wins over any estimate.
@@ -351,6 +365,7 @@ async def stream_chat_completions(
     http_client: httpx.AsyncClient | None,
     timeout: float,
     retry: RetryPolicy,
+    track_provider_requests: bool = False,
 ) -> AsyncIterator[StreamChunk]:
     """POST ``body`` to ``url`` and normalize the SSE response into StreamChunks.
 
@@ -362,12 +377,53 @@ async def stream_chat_completions(
     client = http_client or httpx.AsyncClient(timeout=timeout)
     owns_client = http_client is None
     attempt = 0
+    logical_call_id = f"fluid-{uuid.uuid4().hex}"
+    request_headers = dict(headers)
+    if track_provider_requests:
+        # Correlation only: OpenRouter does not document this as an idempotency key.
+        request_headers["X-Fluid-Call-ID"] = logical_call_id
+    attempts: list[dict[str, Any]] = []
+
+    def with_request_evidence(payload: dict[str, Any]) -> dict[str, Any]:
+        if track_provider_requests:
+            payload["provider_requests"] = {
+                "logical_call_id": logical_call_id,
+                "attempts": list(attempts),
+            }
+        return payload
     try:
         while True:
             yielded = False
             try:
                 trace_request("chat_completions", body)
-                async with client.stream("POST", url, json=body, headers=headers) as resp:
+                async with client.stream(
+                    "POST", url, json=body, headers=request_headers
+                ) as resp:
+                    attempt_meta = {
+                        "attempt": attempt + 1,
+                        "status": resp.status_code,
+                    }
+                    for header, field in (
+                        ("x-generation-id", "generation_id"),
+                        ("x-request-id", "request_id"),
+                    ):
+                        value = resp.headers.get(header)
+                        if value:
+                            attempt_meta[field] = value
+                    attempts.append(attempt_meta)
+                    # Surface the physical provider request as soon as its
+                    # response headers arrive.  A stream may be interrupted
+                    # before OpenRouter emits its terminal usage chunk; this
+                    # early correlation record keeps that billable request
+                    # visible to the engine even in that case.  Do not set the
+                    # local ``yielded`` flag here: it deliberately means
+                    # provider *content* was delivered and controls whether a
+                    # pre-content transport failure may be retried.
+                    if track_provider_requests:
+                        yield StreamChunk(
+                            "provider_request",
+                            with_request_evidence({}),
+                        )
                     if resp.status_code != 200:
                         text = (await resp.aread()).decode(errors="replace")
                         retriable = resp.status_code in RETRIABLE_STATUSES
@@ -379,16 +435,25 @@ async def stream_chat_completions(
                             continue
                         yield StreamChunk(
                             "error",
-                            {
+                            with_request_evidence({
                                 "status": resp.status_code,
                                 "message": text[:2000],
                                 "retriable": retriable,
-                            },
+                            }),
                         )
                         return
                     normalizer = ChatCompletionsNormalizer()
                     async for event_name, data in sse_events(resp.aiter_lines()):
                         for chunk in normalizer.consume(event_name, data):
+                            if chunk.kind == "usage" and track_provider_requests:
+                                payload = dict(chunk.payload)
+                                usage = dict(payload.get("usage") or {})
+                                usage["provider_requests"] = {
+                                    "logical_call_id": logical_call_id,
+                                    "attempts": list(attempts),
+                                }
+                                payload["usage"] = usage
+                                chunk = StreamChunk("usage", payload)
                             yielded = True
                             yield chunk
                     if not normalizer.finished and not normalizer.errored:
@@ -406,13 +471,23 @@ async def stream_chat_completions(
             except httpx.TransportError as exc:
                 # Pre-stream connection failures retry; mid-stream ones
                 # don't (chunks were already delivered downstream).
+                if attempts and attempts[-1].get("attempt") == attempt + 1:
+                    attempts[-1]["transport_error"] = type(exc).__name__
+                else:
+                    attempts.append({
+                        "attempt": attempt + 1,
+                        "transport_error": type(exc).__name__,
+                    })
                 if not yielded and attempt < retry.max_retries:
                     await asyncio.sleep(retry.delay(attempt))
                     attempt += 1
                     continue
                 yield StreamChunk(
                     "error",
-                    {"message": f"{type(exc).__name__}: {exc}", "retriable": False},
+                    with_request_evidence({
+                        "message": f"{type(exc).__name__}: {exc}",
+                        "retriable": False,
+                    }),
                 )
                 return
     finally:

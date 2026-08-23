@@ -74,6 +74,18 @@ class OpenAIResponsesClient:
         """Optional engine cost hook: list-price estimate for one model call."""
         return _estimate_cost(model, usage)
 
+    def _is_codex_backend(self) -> bool:
+        """True when this client is pointed at the ChatGPT/Codex responses URL.
+
+        Codex-only headers (``chatgpt-account-id``, ``OpenAI-Beta``,
+        ``originator``) must not leak to other Responses endpoints such as
+        ``api.x.ai``.
+        """
+        return (
+            self._base_url == CODEX_RESPONSES_URL
+            or "chatgpt.com" in (self._base_url or "")
+        )
+
     async def _headers(self) -> dict[str, str]:
         headers = {
             "content-type": "application/json",
@@ -82,11 +94,12 @@ class OpenAIResponsesClient:
         if self._auth is not None:
             token = await self._auth.get_access_token()
             headers["Authorization"] = f"Bearer {token}"
-            account_id = getattr(self._auth, "account_id", None)
-            if account_id:
-                headers["chatgpt-account-id"] = account_id
-            headers["OpenAI-Beta"] = "responses=experimental"
-            headers["originator"] = "codex_cli_rs"
+            if self._is_codex_backend():
+                account_id = getattr(self._auth, "account_id", None)
+                if account_id:
+                    headers["chatgpt-account-id"] = account_id
+                headers["OpenAI-Beta"] = "responses=experimental"
+                headers["originator"] = "codex_cli_rs"
         else:
             headers["Authorization"] = f"Bearer {self._api_key}"
         return headers
