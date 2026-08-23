@@ -61,6 +61,8 @@ export interface Task {
 	startedAt: string;
 	/** ISO-8601 timestamp of the last update. */
 	updatedAt: string;
+	/** Display name of the dispatched agent (Task-tool workers only; additive). */
+	agent?: string | null;
 }
 
 // Todo item for task tracking

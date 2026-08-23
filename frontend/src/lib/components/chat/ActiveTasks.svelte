@@ -1,45 +1,42 @@
 <script lang="ts">
 	/**
-	 * ActiveTasks — compact strip listing the session's in-flight background
-	 * tasks (background sub-agents + shell subprocesses).
+	 * ActiveTasks — a collapsible line pinned to the TAIL of the chat history,
+	 * summarizing in-flight background work (background sub-agents + shell
+	 * subprocesses).
 	 *
-	 * Rendered above the composer during a turn (and especially while the turn is
-	 * PARKED waiting on tasks, when isStreaming is false) so the user can see
-	 * what's pending. Reads `activeTasks` from the active session — the poller
-	 * keeps it fresh on every /live poll. Renders nothing when there are no tasks.
+	 * Collapsed: "N running tasks" with a spinner. Click expands to an indented
+	 * "|__" tree of each task — kind badge (agent/shell), subject, elapsed time,
+	 * status, and an "x" to stop it. Click again collapses.
 	 *
-	 * Per task: a kind badge (agent/shell), the subject, the status, the elapsed
-	 * time since `startedAt` (ticking live), and an "x" to stop it.
-	 *
-	 * Clicking anywhere on the header toggles minimized: the whole panel shrinks
-	 * to a single "Running N tasks" line. The collapsed state is a chat preference
-	 * (localStorage + cross-device server sync, same store the tool-result blocks
-	 * use) so it persists across turns, reloads, and devices.
+	 * Presentational: `tasks` comes in as a prop (MessageArea feeds it from the
+	 * session store's /live-polled `activeTasks`) so it stays unit-testable, and
+	 * lives INSIDE the transcript column where it scrolls with history but always
+	 * renders last.
 	 */
 	import { onDestroy } from 'svelte';
 	import type { Task } from '$lib/stores/types';
-	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 
 	interface Props {
 		tasks: Task[];
 		/**
-		 * Stop one task by id. The task drops off the next /live poll once stopped.
-		 * Resolves `false` when the stop didn't take (e.g. the task was already
-		 * gone) so the row's close button can be re-enabled instead of sticking
-		 * disabled forever; `true`/`void` means the stop is in flight.
+		 * Stop one task by id. Resolves `false` when the stop didn't take (e.g.
+		 * the task was already gone) so the row's close button can be re-enabled
+		 * instead of sticking disabled forever.
 		 */
 		onStop?: (taskId: string) => boolean | void | Promise<boolean | void>;
 	}
 
 	let { tasks, onStop }: Props = $props();
 
-	// Persisted via the chat-preferences store (instant localStorage + debounced
-	// server sync), so the minimized state survives reloads and follows the user
-	// across devices.
-	const collapsed = $derived(chatPreferences.current.activeTasksCollapsed);
+	// Local expand/collapse state — expanded by default when tasks appear; not
+	// persisted (the tail line is transient per-turn chrome, unlike the old strip).
+	let expanded = $state(true);
 
-	function toggleCollapsed() {
-		chatPreferences.setActiveTasksCollapsed(!collapsed);
+	const runningCount = $derived(tasks.filter((t) => t.status === 'running').length);
+	const hasRunning = $derived(runningCount > 0);
+
+	function toggle() {
+		expanded = !expanded;
 	}
 
 	// Tasks the user has asked to stop — disable + dim their row until the next
@@ -51,37 +48,34 @@
 		stopping = { ...stopping, [id]: true };
 		let ok = false;
 		try {
-			// onStop resolves `false` when the stop didn't take (task already
-			// gone, dead session); `true`/`undefined` means it's in flight.
+			// onStop resolves `false` when the stop didn't take (task already gone,
+			// dead session); `true`/`undefined` means it's in flight.
 			ok = (await onStop?.(id)) !== false;
 		} catch {
 			ok = false;
 		}
 		if (!ok) {
 			// Re-enable so the user can retry — the row is still here because the
-			// stop didn't take (the next poll won't remove it). On success we
-			// leave it disabled + dimmed; the next /live poll drops the row once
-			// the registry marks the task terminal.
+			// stop didn't take. On success we leave it disabled + dimmed; the next
+			// /live poll drops the row once the registry marks the task terminal.
 			const next = { ...stopping };
 			delete next[id];
 			stopping = next;
 		}
 	}
 
-	// Live clock so the elapsed time ticks without a new poll. Updated once per
-	// second; only mounts a timer when there's at least one task to show.
+	// Live clock so elapsed times tick without a new poll — only while there is
+	// at least one RUNNING task AND the tree is visible.
 	let now = $state(Date.now());
 	let timer: ReturnType<typeof setInterval> | null = null;
 
 	$effect(() => {
-		// Only tick while at least one RUNNING task is visible — a strip of purely
-		// terminal (failed/finished) rows has frozen clocks, so the timer would
-		// churn with nothing to update.
-		const hasRunning = tasks.some((t) => t.status === 'running');
-		if (hasRunning && !collapsed) {
+		if (hasRunning && expanded) {
 			if (timer === null) {
 				now = Date.now();
-				timer = setInterval(() => { now = Date.now(); }, 1000);
+				timer = setInterval(() => {
+					now = Date.now();
+				}, 1000);
 			}
 		} else if (timer !== null) {
 			clearInterval(timer);
@@ -107,10 +101,6 @@
 		return remMins > 0 ? `${hours}h ${remMins}m` : `${hours}h`;
 	}
 
-	function kindLabel(kind: Task['kind']): string {
-		return kind === 'agent' ? 'agent' : 'shell';
-	}
-
 	/** A task is terminal (no longer doing work) once it has failed or finished. */
 	function isTerminal(status: Task['status']): boolean {
 		return status === 'error' || status === 'killed' || status === 'completed';
@@ -118,194 +108,249 @@
 
 	/**
 	 * Clock endpoint for the elapsed display. A running task counts up against the
-	 * live `now`; a terminal (failed/finished) task FREEZES at its `updatedAt` so a
-	 * dead row doesn't keep ticking "running for 5m…". Falls back to `now` when the
-	 * timestamp is missing/unparseable.
+	 * live `now`; a terminal (failed/finished) task FREEZES at its `updatedAt`.
 	 */
 	function clockEnd(task: Task, nowMs: number): number {
 		if (!isTerminal(task.status)) return nowMs;
 		const end = Date.parse(task.updatedAt);
 		return Number.isNaN(end) ? nowMs : end;
 	}
+
+	/** Sort: running first, then terminal failures, then completed. */
+	function sortKey(t: Task): number {
+		if (t.status === 'running') return 0;
+		if (t.status === 'completed') return 2;
+		return 1;
+	}
+
+	let sortedTasks = $derived([...tasks].sort((a, b) => sortKey(a) - sortKey(b)));
 </script>
 
 {#if tasks.length > 0}
-	<div class="active-tasks">
-		<div class="active-tasks-inner">
-			<button
-				type="button"
-				class="active-tasks-header"
-				onclick={toggleCollapsed}
-				aria-expanded={!collapsed}
-				title={collapsed ? 'Expand background tasks' : 'Minimize background tasks'}
-				aria-label={collapsed ? 'Expand background tasks' : 'Minimize background tasks'}
-			>
-				<svg class="w-3 h-3 tasks-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-				</svg>
-				<span class="tasks-label">
-					{#if collapsed}
-						Running {tasks.length} {tasks.length === 1 ? 'task' : 'tasks'}
-					{:else}
-						Background ({tasks.length})
-					{/if}
-				</span>
-				<svg class="chevron" class:is-collapsed={collapsed} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
-				</svg>
-			</button>
-			{#if !collapsed}
-				<div class="task-rows">
-					{#each tasks as task (task.id)}
-						<div
-							class="task-row"
-							class:is-error={task.status === 'error'}
-							class:is-killed={task.status === 'killed'}
-							class:is-stopping={stopping[task.id]}
-						>
-							<span class="task-badge" class:badge-agent={task.kind === 'agent'} class:badge-shell={task.kind === 'shell'}>
-								{kindLabel(task.kind)}
-							</span>
-							<span class="task-subject" title={task.summary ?? task.subject}>
-								{task.subject || task.summary || 'Task'}
-							</span>
-							<span class="task-status" data-status={task.status}>{task.status}</span>
-							{#if task.startedAt}
-								{@const e = elapsed(task.startedAt, clockEnd(task, now))}
-								{#if e}<span class="task-elapsed">{e}</span>{/if}
-							{/if}
-							{#if onStop && !isTerminal(task.status)}
-								<button
-									type="button"
-									class="stop-btn"
-									disabled={stopping[task.id]}
-									onclick={() => stopTask(task.id)}
-									title="Stop task"
-									aria-label="Stop task {task.subject || task.summary || ''}"
-								>
-									<svg class="stop-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 6l12 12M18 6L6 18" />
-									</svg>
-								</button>
-							{/if}
-						</div>
-					{/each}
-				</div>
+	<div class="active-tasks" data-expanded={expanded}>
+		<button
+			type="button"
+			class="tasks-toggle"
+			onclick={toggle}
+			aria-expanded={expanded}
+			title={expanded ? 'Collapse task list' : 'Show running tasks'}
+			data-testid="tasks-toggle"
+		>
+			{#if hasRunning}
+				<span class="spinner" aria-hidden="true"></span>
+			{:else}
+				<span class="done-dot" aria-hidden="true"></span>
 			{/if}
-		</div>
+			<span class="tasks-label">
+				{#if hasRunning}
+					{runningCount} running {runningCount === 1 ? 'task' : 'tasks'}
+				{:else}
+					{tasks.length} background {tasks.length === 1 ? 'task' : 'tasks'}
+				{/if}
+			</span>
+			<svg
+				class="chevron"
+				class:is-open={expanded}
+				fill="none"
+				stroke="currentColor"
+				viewBox="0 0 24 24"
+				aria-hidden="true"
+			>
+				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
+			</svg>
+		</button>
+		{#if expanded}
+			<ul class="task-tree" role="list">
+				{#each sortedTasks as task (task.id)}
+					<li
+						class="task-row"
+						class:is-error={task.status === 'error'}
+						class:is-killed={task.status === 'killed'}
+						class:is-stopping={stopping[task.id]}
+					>
+						<span class="tree-branch" aria-hidden="true">|__</span>
+						<span
+							class="task-kind"
+							class:kind-agent={task.kind === 'agent'}
+							class:kind-shell={task.kind === 'shell'}
+							title={task.kind === 'agent' ? 'Background agent' : 'Shell subprocess'}
+						>
+							{task.kind === 'agent' ? task.agent || 'agent' : 'shell'}
+						</span>
+						<span class="task-subject" title={task.summary ?? task.subject}>
+							{task.subject || task.summary || 'Task'}
+						</span>
+						{#if task.startedAt}
+							{@const e = elapsed(task.startedAt, clockEnd(task, now))}
+							{#if e}<span class="task-elapsed">{e}</span>{/if}
+						{/if}
+						<span class="task-status" data-status={task.status}>{task.status}</span>
+						{#if onStop && !isTerminal(task.status)}
+							<button
+								type="button"
+								class="stop-btn"
+								disabled={stopping[task.id]}
+								onclick={() => stopTask(task.id)}
+								title="Stop task"
+								aria-label="Stop task {task.subject || task.summary || ''}"
+							>
+								<svg
+									class="stop-icon"
+									fill="none"
+									stroke="currentColor"
+									viewBox="0 0 24 24"
+									aria-hidden="true"
+								>
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 6l12 12M18 6L6 18" />
+								</svg>
+							</button>
+						{/if}
+					</li>
+				{/each}
+			</ul>
+		{/if}
 	</div>
 {/if}
 
 <style>
+	/* Pinned to the transcript tail: full column width, no card chrome — just a
+	   text line that reads as part of the conversation flow. */
 	.active-tasks {
-		padding: 0 0.75rem;
 		flex-shrink: 0;
+		font-size: 0.75rem;
+		color: var(--muted-foreground);
 	}
 
-	@media (min-width: 640px) {
-		.active-tasks {
-			padding: 0 1rem;
-		}
-	}
-
-	.active-tasks-inner {
-		max-width: 56rem;
-		margin: 0 auto;
-		background: color-mix(in oklch, var(--card) 80%, transparent);
-		border: 1px solid var(--border-subtle);
-		border-radius: calc(var(--radius, 0.75rem) * 0.67);
-		overflow: hidden;
-		display: flex;
-		flex-direction: column;
-	}
-
-	/* The whole header is the collapse toggle — click anywhere on it. */
-	.active-tasks-header {
-		display: flex;
+	.tasks-toggle {
+		display: inline-flex;
 		align-items: center;
-		gap: 0.375rem;
-		width: 100%;
-		padding: 0.375rem 0.625rem;
+		gap: 0.5rem;
+		padding: 0.125rem 0.25rem;
+		margin-left: -0.25rem;
 		border: none;
 		background: transparent;
 		font: inherit;
-		font-size: 0.6875rem;
-		color: var(--muted-foreground);
+		color: inherit;
 		text-align: left;
 		cursor: pointer;
+		border-radius: 0.375rem;
 		transition: color 0.12s ease, background 0.12s ease;
 	}
 
-	.active-tasks-header:hover {
+	.tasks-toggle:hover {
 		color: var(--foreground);
 		background: var(--hover-overlay);
 	}
 
-	.active-tasks-header:focus-visible {
+	.tasks-toggle:focus-visible {
 		outline: 2px solid var(--ring);
 		outline-offset: -2px;
 	}
 
-	.tasks-icon {
-		flex-shrink: 0;
-		color: var(--primary);
-	}
-
 	.tasks-label {
 		font-weight: 500;
+		white-space: nowrap;
 	}
 
-	/* Expanded → chevron points up (collapse). Collapsed → points down (expand). */
-	.chevron {
-		margin-left: auto;
+	/* Spinner: small circular arc rotating while any task is running. */
+	.spinner {
 		flex-shrink: 0;
-		width: 0.875rem;
-		height: 0.875rem;
-		transform: rotate(180deg);
-		transition: transform 0.15s ease;
+		width: 0.625rem;
+		height: 0.625rem;
+		border-radius: 9999px;
+		border: 1.5px solid color-mix(in srgb, var(--primary) 30%, transparent);
+		border-top-color: var(--primary);
+		animation: spin 0.8s linear infinite;
 	}
 
-	.chevron.is-collapsed {
+	@keyframes spin {
+		to {
+			transform: rotate(360deg);
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.spinner {
+			animation-duration: 2.4s;
+		}
+	}
+
+	/* All-terminal state: static dot instead of spinner. */
+	.done-dot {
+		flex-shrink: 0;
+		width: 0.625rem;
+		height: 0.625rem;
+		border-radius: 9999px;
+		background: var(--muted-foreground);
+		opacity: 0.5;
+	}
+
+	.chevron {
+		flex-shrink: 0;
+		width: 0.75rem;
+		height: 0.75rem;
+		transform: rotate(-90deg);
+		transition: transform 0.15s ease;
+		opacity: 0.7;
+	}
+
+	.chevron.is-open {
 		transform: rotate(0deg);
 	}
 
-	.task-rows {
+	.task-tree {
+		list-style: none;
+		margin: 0.25rem 0 0;
+		padding: 0;
 		display: flex;
 		flex-direction: column;
 		gap: 0.25rem;
-		padding: 0.25rem 0.625rem 0.375rem;
+		padding-left: 0.25rem;
 	}
 
 	.task-row {
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
-		font-size: 0.6875rem;
-		color: var(--foreground);
 		min-width: 0;
+		color: var(--foreground);
+		line-height: 1.4;
 	}
 
 	.task-row.is-stopping {
 		opacity: 0.5;
 	}
 
-	.task-badge {
+	.tree-branch {
 		flex-shrink: 0;
-		padding: 0.0625rem 0.375rem;
+		color: var(--muted-foreground);
+		opacity: 0.6;
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		font-size: 0.6875rem;
+		user-select: none;
+	}
+
+	.task-kind {
+		flex-shrink: 0;
+		max-width: 8rem;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		padding: 0 0.375rem;
 		border-radius: 9999px;
 		font-size: 0.625rem;
 		font-weight: 600;
-		text-transform: uppercase;
+		text-transform: lowercase;
 		letter-spacing: 0.02em;
-		line-height: 1.4;
+		line-height: 1.5;
 	}
 
-	.badge-agent {
+	.kind-agent {
 		background: color-mix(in srgb, var(--primary) 15%, transparent);
 		color: var(--primary);
 	}
 
-	.badge-shell {
+	.kind-shell {
 		background: var(--muted);
 		color: var(--muted-foreground);
 	}
@@ -316,6 +361,13 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+	}
+
+	.task-elapsed {
+		flex-shrink: 0;
+		font-variant-numeric: tabular-nums;
+		font-size: 0.6875rem;
+		color: var(--muted-foreground);
 	}
 
 	.task-status {
@@ -332,13 +384,6 @@
 	.task-row.is-error .task-status,
 	.task-row.is-killed .task-status {
 		color: var(--destructive);
-	}
-
-	.task-elapsed {
-		flex-shrink: 0;
-		font-variant-numeric: tabular-nums;
-		font-size: 0.625rem;
-		color: var(--muted-foreground);
 	}
 
 	.stop-btn {

@@ -17,7 +17,6 @@
 	 */
 	import { onDestroy, untrack } from 'svelte';
 	import { activeSession, activeWsConnected } from '$lib/stores/active-session';
-	import { stopSessionTask } from '$lib/api/sessions';
 	import { notify } from '$lib/stores/notifications';
 	import { createConnectionBannerGrace } from '$lib/stores/session/connection-banner-grace';
 	import Banner from '$lib/components/Banner.svelte';
@@ -25,7 +24,6 @@
 	import TeamStatusBar from '$lib/components/TeamStatusBar.svelte';
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
 	import QueuedMessages from '$lib/components/chat/QueuedMessages.svelte';
-	import ActiveTasks from '$lib/components/chat/ActiveTasks.svelte';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import WorkspaceSelector from './WorkspaceSelector.svelte';
@@ -161,29 +159,6 @@
 		});
 	}
 
-	// Stop one in-flight background task (the "x" on the ActiveTasks strip).
-	// The task drops off the next /live poll once the backend confirms the stop.
-	// Returns true on a successful stop; false (with a toast) when the stop
-	// didn't take — so ActiveTasks can re-enable the button instead of leaving
-	// it stuck disabled on a ghost row.
-	async function handleStopTask(taskId: string): Promise<boolean> {
-		const sessionId = $activeSession.sessionId;
-		if (!sessionId) return false;
-		try {
-			const result = await stopSessionTask(sessionId, taskId);
-			if (!result.ok) {
-				notify.error(
-					`Couldn't stop task — ${result.detail ?? 'it may have already finished'}.`
-				);
-				return false;
-			}
-			return true;
-		} catch (e) {
-			notify.error('Failed to stop task. Please try again.');
-			return false;
-		}
-	}
-
 	// Handle project selection from WorkspaceSelector
 	function handleProjectSelect(projectId: string, projectV2Id?: string | null) {
 		activeSession.setProject(projectId, projectV2Id ?? null);
@@ -303,17 +278,6 @@
 	     conditional strips below are siblings of ChatInput, not ancestors, so they
 	     never remount it. -->
 	<div class="input-slot" class:input-wrapper={!showEmptyHero} class:empty-input-layout={showEmptyHero}>
-		{#if !showEmptyHero}
-			<!-- In-flight background tasks (sub-agents + shell subprocesses).
-			     Renders nothing when empty; appears during a turn — and notably
-			     while the turn is PARKED waiting on tasks — so the user can see
-			     what's pending. -->
-			{#if $activeSession.activeTasks && $activeSession.activeTasks.length > 0}
-				<div class="active-tasks-strip">
-					<ActiveTasks tasks={$activeSession.activeTasks} onStop={handleStopTask} />
-				</div>
-			{/if}
-		{/if}
 		{#if voiceCallActive && $activeSession.sessionId}
 			<!-- VM18: the call OWNS the composer slot while it is up. The ChatInput is
 			     unmounted here, not hidden — its draft is persisted on destroy (store
@@ -443,10 +407,6 @@
 	.connection-banner {
 		flex-shrink: 0;
 		padding: 6px 12px 0;
-	}
-
-	.active-tasks-strip {
-		padding: 4px 0 0;
 	}
 
 	.transitioning-from-empty .message-area-wrapper {
