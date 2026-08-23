@@ -279,7 +279,7 @@
 					<span class="dev">{device}</span>
 				</span>
 				{#if branch}
-					<span class="seg">
+					<span class="seg branch-seg">
 						<GitBranch size={12} strokeWidth={1.9} />
 						<span class="branch">{branch}</span>
 					</span>
@@ -315,7 +315,7 @@
 					<span class="dev">{device}</span>
 				</span>
 				{#if branch}
-					<span class="seg">
+					<span class="seg branch-seg">
 						<GitBranch size={12} strokeWidth={1.9} />
 						<span class="branch">{branch}</span>
 					</span>
@@ -542,6 +542,11 @@
 		flex: none;
 		white-space: nowrap;
 	}
+	/* Branch gives back space first: it grows to fit long names when line 3
+	   has room and only ellipsizes once the row actually fills up. */
+	.seg.branch-seg {
+		flex: 0 1 auto;
+	}
 	.dev {
 		display: block;
 		min-width: 0;
@@ -551,7 +556,7 @@
 		white-space: nowrap;
 	}
 	.branch {
-		max-width: 78px;
+		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
