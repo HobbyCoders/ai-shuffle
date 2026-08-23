@@ -4,8 +4,8 @@ Built-in (managed) MCP servers / integrations.
 These are browser-automation (and similar) capabilities that AI Shuffle ships
 and manages itself, rather than ones the user adds via .mcp.json / ~/.claude.json.
 They are surfaced through the normal McpService paths so they appear in the admin
-MCP server list and respect the same enable/disable mechanism
-(settings.json -> disabledMcpServers).
+MCP server list. The ``browser`` built-in is ALWAYS ON — there is no setting;
+stale ``disabledMcpServers`` entries for it are stripped on read.
 
 Currently this provides a single built-in:
 
@@ -98,8 +98,8 @@ def get_browser_server_config() -> McpServerConfig:
 
     Returns a spawnable STDIO server (``command="node"``,
     ``args=[<entry>]``) — an ordinary MCP server the SDK launches per session,
-    NOT a CLI-flag integration. It is surfaced in the admin MCP list and toggled
-    like any other server via ``disabledMcpServers``.
+    NOT a CLI-flag integration. It is surfaced in the admin MCP list and is
+    always enabled (stale disable entries are ignored).
     """
     return McpServerConfig(
         name=BROWSER_SERVER_NAME,
@@ -122,8 +122,8 @@ def get_builtin_servers() -> List[McpServerConfig]:
     """
     Return all built-in/managed MCP server configs.
 
-    The ``enabled`` flag reflects the global disable list from settings.json
-    (``disabledMcpServers``), so admins can toggle these the same way as other
-    servers.
+    Always returned enabled: the browser suite has no setting, and stale
+    ``disabledMcpServers`` entries are stripped by the read path
+    (``_normalize_disabled_servers``).
     """
     return [get_browser_server_config()]

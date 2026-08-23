@@ -661,14 +661,14 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// removed the orphan user message from the live store (so the
 				// turn isn't shown as a saved-but-empty exchange) and sent its
 				// text back so we can restore it to the input box for editing or
-				// resending. Set pendingInterruptPrompt (ChatInput watches it and
+				// resending. Set pendingRestorePrompt (ChatInput watches it and
 				// repopulates the editor); the SSE feed drops the now-removed user
 				// message from the transcript.
 				const discardedSessionId = data.session_id as string | undefined;
 				const prompt = typeof data.prompt === 'string' ? data.prompt : '';
 				const discardState = getState();
 				if (discardedSessionId && discardedSessionId === discardState.sessionId) {
-					update(s => ({ ...s, pendingInterruptPrompt: prompt }));
+					update(s => ({ ...s, pendingRestorePrompt: prompt }));
 				}
 				break;
 			}

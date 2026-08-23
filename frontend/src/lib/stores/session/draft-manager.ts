@@ -36,8 +36,12 @@ export function createDraftManager(deps: DraftManagerDeps) {
 			update(s => ({ ...s, draft: text }));
 		},
 
-		clearPendingInterruptPrompt() {
-			update(s => s.pendingInterruptPrompt ? { ...s, pendingInterruptPrompt: null } : s);
+		setPendingRestorePrompt(prompt: string) {
+			update(s => ({ ...s, pendingRestorePrompt: prompt }));
+		},
+
+		clearPendingRestorePrompt() {
+			update(s => s.pendingRestorePrompt ? { ...s, pendingRestorePrompt: null } : s);
 		},
 
 		setScrollTop(pos: number) {

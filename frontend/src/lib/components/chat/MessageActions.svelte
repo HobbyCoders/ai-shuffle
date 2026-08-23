@@ -19,7 +19,7 @@
 		onCopy?: (content: string) => void;
 		onRead?: () => void;
 		isReading?: boolean;
-		onRewindComplete?: (warning?: string) => void;  // Optional warning for partial success
+		onRewindComplete?: (warning?: string, rewoundPrompt?: string) => void;  // Optional warning for partial success + the removed user message's text (chat-input restore)
 		fileCheckpointingEnabled?: boolean;  // If true, show option to rewind files too
 	}
 
@@ -149,8 +149,13 @@
 
 			if (result.success || result.chat_rewound) {
 				showRewindDialog = false;
+				// A user-message rewind removes this very message — hand its text to
+				// the parent so the composer is refilled for editing/resending.
+				// Assistant-message rewinds keep their preceding prompt in the
+				// transcript, so there is nothing to restore.
+				const rewoundPrompt = messageRole === 'user' ? messageContent : undefined;
 				// Pass warning to parent to show as system message (for partial success)
-				onRewindComplete?.(result.warning ?? undefined);
+				onRewindComplete?.(result.warning ?? undefined, rewoundPrompt);
 			} else {
 				rewindError = result.error || 'Rewind failed';
 			}

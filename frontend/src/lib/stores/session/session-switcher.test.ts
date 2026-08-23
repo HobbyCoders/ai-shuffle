@@ -96,7 +96,7 @@ function fullState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		worktreeDeleted: false,
 		sessionLocked: false,
 		sessionLockedBy: undefined,
-		pendingInterruptPrompt: null,
+		pendingRestorePrompt: null,
 		isRestoringSession: false,
 		isLoadingSession: false,
 		...overrides,

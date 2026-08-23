@@ -142,13 +142,42 @@ def get_detail() -> Optional[str]:
 
 async def _cdp_answers(port: int) -> bool:
     """True if something answers ``GET /json/version`` on the loopback CDP port."""
+    return await cdp_get(path="/json/version", port=port) is not None
+
+
+async def cdp_get(path: str, port: Optional[int] = None) -> Optional[object]:
+    """GET a Chrome DevTools HTTP endpoint (loopback only). None on failure.
+
+    Shared probe for the supervisor and the browser-panel API; ``port`` defaults
+    to ``CHROME_CDP_PORT`` (9221).
+    """
     try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            resp = await client.get(f"http://127.0.0.1:{port}/json/version")
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(
+                f"http://127.0.0.1:{port or _cdp_port()}{path}"
+            )
             resp.raise_for_status()
-            return True
+            return resp.json()
     except Exception:
-        return False
+        return None
+
+
+def unreachable_detail() -> str:
+    """Best explanation for why no browser answers on the CDP port.
+
+    Supervisor's own last detail (crash-loop, no executable, external owner…)
+    → the browser-mcp build being absent → a generic "nothing answering" note.
+    """
+    if get_detail():
+        return get_detail()
+
+    from app.core.builtin_mcp_servers import _browser_mcp_entry
+
+    entry = _browser_mcp_entry()
+    if not os.path.exists(entry):
+        return f"browser-mcp not built: {entry} missing"
+
+    return f"no browser answering CDP on 127.0.0.1:{_cdp_port()}"
 
 
 def _launch_args(port: int) -> List[str]:

@@ -171,14 +171,14 @@
 		}
 	});
 
-	// Restore a discarded interrupted prompt back into the editor so the user can
-	// edit or resend it. Set by the backend's `user_message_discarded` event when
-	// a turn is stopped before any assistant output (the orphan user message is
-	// removed from chat). Only fill an EMPTY editor so we never clobber text the
-	// user has already started typing; either way clear the pending prompt so it
-	// fires exactly once.
+	// Restore a removed user prompt back into the editor so the user can edit or
+	// resend it. Set by the backend's `user_message_discarded` event when a turn
+	// is stopped before any assistant output, and by a successful rewind that
+	// truncated away the target user message. Only fill an EMPTY editor so we
+	// never clobber text the user has already started typing; either way clear
+	// the pending prompt so it fires exactly once.
 	$effect(() => {
-		const pending = $activeSession.pendingInterruptPrompt;
+		const pending = $activeSession.pendingRestorePrompt;
 		if (!pending) return;
 		const current = (editorRef?.getMessage() ?? inputValue ?? '').trim();
 		if (current.length === 0) {
@@ -187,7 +187,7 @@
 			editorRef?.setContent(pending);
 			tick().then(() => editorRef?.focus());
 		}
-		activeSession.clearPendingInterruptPrompt();
+		activeSession.clearPendingRestorePrompt();
 	});
 
 
