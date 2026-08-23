@@ -67,10 +67,10 @@ class PanelRegisterRequest(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 async def _browser_running() -> bool:
-    """Live CDP liveness probe (reuses the one in app/api/browser.py)."""
-    from app.api.browser import _cdp_get
+    """Live CDP liveness probe (shared one in app/core/native_chrome)."""
+    from app.core.native_chrome import cdp_get
 
-    return await _cdp_get("/json/version") is not None
+    return await cdp_get("/json/version") is not None
 
 
 async def _initial_status(session_id: str) -> dict:

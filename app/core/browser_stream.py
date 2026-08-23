@@ -30,7 +30,7 @@ import websockets
 from fastapi import WebSocket
 from pydantic import BaseModel
 
-from app.api.browser import CDP_HOST, CDP_PORT
+from app.core import native_chrome
 from app.api.ws_utils import WSPayloadEncodeError, safe_ws_send
 from app.core import browser_panel_registry as registry
 
@@ -457,7 +457,10 @@ class BrowserStreamHub:
             pass
 
     async def _attach_and_pump(self, target: registry.PanelTarget) -> None:
-        uri = f"ws://{CDP_HOST}:{CDP_PORT}/devtools/page/{target.target_id}"
+        uri = (
+            f"ws://127.0.0.1:{native_chrome._cdp_port()}"
+            f"/devtools/page/{target.target_id}"
+        )
         ws = await _open_upstream(uri)
         self._upstream = ws
         self._upstream_msg_id = 0

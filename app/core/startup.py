@@ -352,30 +352,15 @@ def _check_browser_mcp_prereqs() -> None:
 
     The browser built-in is a spawned STDIO MCP server that attaches to the
     supervised Chromium over CDP (``CHROME_CDP_PORT``, default 9221). What it
-    CANNOT do on its own is provide that running browser — so when the built-in
-    is enabled we just remind operators that a supervised Chromium must be up.
-    This is a guidance log only; it never blocks startup.
+    CANNOT do on its own is provide that running browser — so we just remind
+    operators that a supervised Chromium must be up. This is a guidance log
+    only; it never blocks startup.
     """
     try:
-        from app.core.builtin_mcp_servers import (
-            get_builtin_servers,
-            BROWSER_SERVER_NAME,
-        )
-        from app.core.mcp_service import get_mcp_service
-
-        disabled = set(get_mcp_service().get_disabled_servers())
-        enabled = any(
-            s.name == BROWSER_SERVER_NAME and s.name not in disabled
-            for s in get_builtin_servers()
-        )
-        if not enabled:
-            return
-
         logger.info(
             "Browser automation is ENABLED (sessions spawn the 'browser' MCP "
             "server, exposing mcp__browser__* tools). Requires a supervised "
-            "Chromium reachable over CDP (CHROME_CDP_PORT, default 9221). Disable "
-            "the 'browser' server in the MCP admin UI to turn this off."
+            "Chromium reachable over CDP (CHROME_CDP_PORT, default 9221)."
         )
 
         # On native (non-container) installs nothing else launches Chromium, so

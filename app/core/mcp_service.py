@@ -25,31 +25,28 @@ from app.core.platform import is_docker_mode, get_claude_credentials_dir
 logger = logging.getLogger(__name__)
 
 
-# One-time rename migration for built-in servers whose registered name changed.
-# The browser built-in used to be the CLI-flag "Claude in Chrome" integration
-# (``claude-in-chrome``); it is now a spawned STDIO server named ``browser``.
-# Installs that had the old server disabled must stay disabled under the new
-# name, so ``disabledMcpServers`` entries are mapped on read (and the normalized
-# list is persisted on the next write). Keep this map minimal and idempotent.
-_LEGACY_SERVER_NAME_MAP: Dict[str, str] = {
-    "claude-in-chrome": "browser",
-}
+# Built-in servers that can no longer be disabled. The browser automation
+# suite is always on; a stale ``disabledMcpServers`` entry (including the
+# legacy ``claude-in-chrome`` name from before it became a spawned STDIO
+# server) is stripped on read so every gate honours the same truth.
+_ALWAYS_ON_SERVERS = {"browser"}
+
+_LEGACY_ALWAYS_ON_NAMES = {"claude-in-chrome": "browser"}
 
 
 def _normalize_disabled_servers(disabled: List[str]) -> List[str]:
     """
-    Rewrite legacy built-in server names in a ``disabledMcpServers`` list.
+    Drop always-on built-ins from a ``disabledMcpServers`` list.
 
-    Order-preserving and de-duplicating so remapping ``claude-in-chrome`` ->
-    ``browser`` never produces a duplicate ``browser`` entry. Idempotent: a list
-    with no legacy names (or already normalized) is returned unchanged in value.
+    Legacy built-in names are resolved first so an old disable entry for a
+    now-always-on server strips too. Idempotent, order-preserving,
+    de-duplicating.
     """
-    result: List[str] = []
-    for name in disabled:
-        mapped = _LEGACY_SERVER_NAME_MAP.get(name, name)
-        if mapped not in result:
-            result.append(mapped)
-    return result
+    return [
+        name
+        for name in dict.fromkeys(disabled)
+        if _LEGACY_ALWAYS_ON_NAMES.get(name, name) not in _ALWAYS_ON_SERVERS
+    ]
 
 
 class McpScope(str, Enum):
@@ -517,10 +514,12 @@ class McpService:
             True if successful
         """
         data = self._read_json_file(self.SETTINGS_FILE, {})
-        # Normalize legacy built-in names first so the write-back persists the
-        # migration (e.g. an existing ``claude-in-chrome`` entry becomes
-        # ``browser``) and toggles resolve against the current name.
         disabled = _normalize_disabled_servers(data.get("disabledMcpServers", []))
+
+        # Always-on built-ins cannot be disabled (the browser suite has no
+        # setting anymore); enabling one is a harmless no-op on the list.
+        if not enabled and name in _ALWAYS_ON_SERVERS:
+            return True
 
         if enabled:
             disabled = [s for s in disabled if s != name]
