@@ -10,6 +10,18 @@ Turn lifecycle:
 
 Tools/permissions/hooks are all optional: with no registry the loop behaves as
 the M0 text/thinking streamer (a tool_use stop is terminal).
+
+Empty completions are retried rather than accepted. Some providers answer a
+request with HTTP 200 and nothing in it — either a terminal usage chunk
+reporting zero tokens and no content, or a stream that closes before any
+terminal chunk arrives (which the chat-completions client reports as an error).
+Both used to end the turn, the first by persisting an empty assistant node and
+stopping the agent mid-work. The loop now re-sends the same history up to
+``EMPTY_COMPLETION_MAX_RETRIES`` times, emitting a ProviderRetry event before
+each attempt and backing off (interruptibly) in between; only after the cap is
+reached does the turn end with the usual terminal ErrorEvent. No empty
+assistant node is ever written, and each failed call's usage is still folded
+into the turn totals so nothing billed is lost.
 """
 
 from __future__ import annotations
@@ -42,6 +54,7 @@ from fluid.events.model import (
     HookEvent,
     Interrupted,
     PermissionRequest,
+    ProviderRetry,
     QuestionRequest,
     TextDelta,
     ThinkingDelta,
@@ -166,6 +179,49 @@ def _measured_prompt_tokens(usage: dict[str, Any]) -> int:
         if isinstance(value, int) and not isinstance(value, bool):
             total += value
     return total
+
+
+# ─── Empty-completion retry ──────────────────────────────────────────────────
+#
+# A provider can answer 200 with nothing in it. Two shapes are seen in the
+# wild (both on OpenRouter): a terminal usage chunk reporting zero prompt
+# tokens with no content blocks, and a stream that closes before any terminal
+# chunk, which _chat_completions turns into an error chunk naming the missing
+# "terminal usage chunk". Both are transient — the same request on another
+# session succeeds — so the loop re-sends rather than ending the turn.
+
+EMPTY_COMPLETION_MAX_RETRIES = 10
+
+_EMPTY_STREAM_MARKER = "terminal usage chunk"
+
+
+def _empty_retry_delay(attempt: int) -> float:
+    """Backoff before retry ``attempt`` (1-based): 1, 2, 4, 8, 16, 30, 30 …
+
+    Module-level so tests can replace it with a zero-delay stub.
+    """
+    return min(1.0 * 2 ** (attempt - 1), 30.0)
+
+
+def _is_empty_completion(result: _CallResult) -> bool:
+    """Did this call come back with no content whatsoever?
+
+    Deliberately narrow. An interrupted call, a call carrying tool uses, and a
+    call whose message has any text or thinking are all real results. A
+    reasoning-only completion is not empty either: _stream_once has already
+    promoted its thinking to a text block by the time this runs. What is left
+    is a completion the provider billed nothing for, or one whose stream died
+    before the terminal chunk — never a genuine provider error, which carries
+    its own message and keeps the existing error path.
+    """
+    if result.interrupted or result.tool_uses:
+        return False
+    for block in result.message.content:
+        if isinstance(block, (Text, Thinking)) and block.text:
+            return False
+    if result.stop_reason == "error":
+        return bool(result.error_message and _EMPTY_STREAM_MARKER in result.error_message)
+    return _measured_prompt_tokens(result.usage) == 0
 
 
 def _plain_text(blocks: list[Any]) -> str:
@@ -842,6 +898,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         total_usage: dict[str, Any] = {}
         final_stop = "end_turn"
         overflow_retries = 0
+        empty_retries = 0  # CONSECUTIVE empty completions; any real call resets it
         continuations = 0
 
         while True:
@@ -857,6 +914,52 @@ class NativeLoop(BackgroundLifecycleMixin):
                 await self._emit_compaction(sid, turn_id, promo)
             result = await self._stream_once(sid, turn_id, history)
             num_calls += 1
+            if not _is_empty_completion(result):
+                empty_retries = 0
+            elif empty_retries < EMPTY_COMPLETION_MAX_RETRIES:
+                # Nothing came back. Re-send the SAME history: the transcript
+                # gains no node, so a retry is byte-identical to the call that
+                # failed (and stays cache-warm).
+                empty_retries += 1
+                # The dud call may still have billed something.
+                self._fold_call_usage(total_usage, result.usage)
+                delay = _empty_retry_delay(empty_retries)
+                await self._emit(ProviderRetry(
+                    session_id=sid, turn_id=turn_id,
+                    attempt=empty_retries,
+                    max_attempts=EMPTY_COMPLETION_MAX_RETRIES,
+                    reason="empty response from provider",
+                    delay_seconds=delay, model=self.model,
+                ))
+                try:
+                    await asyncio.wait_for(self._interrupted.wait(), timeout=delay)
+                except TimeoutError:
+                    pass  # normal case: the backoff elapsed uninterrupted
+                if self._interrupted.is_set():
+                    # Stop pressed during the backoff — end the turn the same
+                    # way an interrupt between model calls does.
+                    partial, partial_cost = self._partial_usage(total_usage)
+                    await self._emit_terminal_with_park(Interrupted(
+                        session_id=sid, node_id=parent.node_id, turn_id=turn_id,
+                        usage=partial, cost_usd=partial_cost,
+                    ))
+                    return
+                continue
+            else:
+                # Out of retries. Hand the existing error path a result it can
+                # end the turn on; the message deliberately carries no
+                # context-overflow marker, so the trim-and-retry branch below
+                # cannot mistake it for a too-long prompt.
+                result = _CallResult(
+                    message=result.message,
+                    usage=result.usage,
+                    stop_reason="error",
+                    error_message=(
+                        f"provider returned an empty response "
+                        f"{empty_retries + 1} times in a row; giving up"
+                    ),
+                    error_retriable=False,
+                )
             if result.stop_reason == "error":
                 if (
                     overflow_retries < 3

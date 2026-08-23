@@ -228,6 +228,23 @@ class RateLimit(Event):
 
 
 @dataclass(frozen=True, kw_only=True)
+class ProviderRetry(Event):
+    """The engine is about to re-send the same request after a bad response.
+
+    Emitted once per retry attempt, BEFORE the backoff sleep, so a client can
+    show "retrying (attempt N of M)" while the wait is happening. Never
+    terminal: either a retry eventually succeeds, or the loop gives up and
+    emits the usual ErrorEvent.
+    """
+
+    attempt: int  # 1-based retry number about to be made
+    max_attempts: int  # total retries allowed
+    reason: str  # short human text, e.g. "empty response from provider"
+    delay_seconds: float  # backoff before this retry
+    model: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
 class SubagentEvent(Event):
     task_id: str
     kind: str  # started | progress | completion_pending | finished | failed | cancelled
@@ -265,7 +282,7 @@ _EVENT_TYPES: dict[str, type[Event]] = {
         Interrupted, ErrorEvent,
         BlockStart, BlockStop, TextDelta, ThinkingDelta,
         ToolUse, ToolResult, PermissionRequest, QuestionRequest, HandoffCreated,
-        ContextCompaction, Usage, RateLimit, SubagentEvent, HookEvent,
+        ContextCompaction, Usage, RateLimit, ProviderRetry, SubagentEvent, HookEvent,
     )
 }
 
