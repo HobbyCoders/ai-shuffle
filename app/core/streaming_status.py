@@ -220,12 +220,18 @@ def _broadcast_info(session_id: str) -> Dict[str, Optional[str]]:
 # Notify (run lifecycle changes) -> diff -> user_streaming_changed
 # ----------------------------------------------------------------------
 
-def notify(session_id: str) -> None:
+def notify(session_id: str, force: bool = False) -> None:
     """Run-lifecycle change hook. Cheap, synchronous, thread-safe, never raises.
 
     Drops the guard cache entry (so guards see the transition promptly) and
     schedules an uncached async re-check + diff + broadcast. Callable from the
     event loop (TurnRecorder) or a foreign thread (event gateway listener).
+
+    ``force=True`` bypasses the last-broadcast diff for the spinner-ON side:
+    a run CLAIM must always produce an ON frame even when ``_last_broadcast``
+    still holds a stale busy entry from a previous turn whose OFF was only
+    just swept (or not yet swept) — otherwise back-to-back turns leave the
+    board spinner dark while the session works.
     """
     if not session_id:
         return
@@ -238,9 +244,9 @@ def notify(session_id: str) -> None:
             loop = _loop
             if loop is None or loop.is_closed():
                 return
-            loop.call_soon_threadsafe(_schedule_recheck, session_id)
+            loop.call_soon_threadsafe(_schedule_recheck, session_id, force)
             return
-        loop.create_task(_recheck(session_id))
+        loop.create_task(_recheck(session_id, force))
     except Exception:
         logger.debug(
             "[streaming_status] notify scheduling failed for %s",
@@ -248,10 +254,10 @@ def notify(session_id: str) -> None:
         )
 
 
-def _schedule_recheck(session_id: str) -> None:
+def _schedule_recheck(session_id: str, force: bool = False) -> None:
     """Loop-thread trampoline for cross-thread notify()."""
     try:
-        asyncio.get_running_loop().create_task(_recheck(session_id))
+        asyncio.get_running_loop().create_task(_recheck(session_id, force))
     except Exception:
         logger.debug(
             "[streaming_status] recheck scheduling failed for %s",
@@ -259,7 +265,7 @@ def _schedule_recheck(session_id: str) -> None:
         )
 
 
-async def _recheck(session_id: str) -> None:
+async def _recheck(session_id: str, force: bool = False) -> None:
     """Uncached busy re-check; broadcast the diff if the state flipped."""
     try:
         busy = await asyncio.to_thread(_has_active_run_db, session_id)
@@ -269,21 +275,28 @@ async def _recheck(session_id: str) -> None:
             session_id, exc_info=True,
         )
         return
-    await _apply_busy_state(session_id, busy)
+    await _apply_busy_state(session_id, busy, force=force)
 
 
-async def _apply_busy_state(session_id: str, busy: bool) -> None:
+async def _apply_busy_state(session_id: str, busy: bool, force: bool = False) -> None:
     """Diff ``busy`` against the last-broadcast state; broadcast on change.
 
     Dict mutations happen between awaits on the event loop, so concurrent
-    rechecks resolve to at most one broadcast per transition.
+    rechecks resolve to at most one broadcast per transition. ``force=True``
+    (a run claim) re-sends the ON frame even when the last-broadcast map says
+    already-busy — the map can hold a stale entry from a PREVIOUS turn whose
+    spinner-off the frontend already consumed via the done frame.
     """
     if busy:
-        if session_id in _last_broadcast:
-            return  # unchanged — no broadcast
-        info = await asyncio.to_thread(_broadcast_info, session_id)
-        if session_id in _last_broadcast:
-            return  # lost a benign race to a concurrent recheck
+        existing = _last_broadcast.get(session_id)
+        if existing is not None:
+            if not force:
+                return  # unchanged — no broadcast
+            info = existing
+        else:
+            info = await asyncio.to_thread(_broadcast_info, session_id)
+            if session_id in _last_broadcast and not force:
+                return  # lost a benign race to a concurrent recheck
         _last_broadcast[session_id] = info
     else:
         info = _last_broadcast.pop(session_id, None)

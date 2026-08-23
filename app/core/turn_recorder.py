@@ -56,16 +56,18 @@ _ENVELOPE_FIELDS = {
 }
 
 
-def _notify_run_change(session_id: str) -> None:
+def _notify_run_change(session_id: str, *, force: bool = False) -> None:
     """Run-lifecycle hook for the board spinner (streaming_status re-check).
 
     Lazy import + never raises: a status/broadcast bug must never break
-    recording or the turn.
+    recording or the turn. ``force=True`` at CLAIM time: the previous turn's
+    stale busy entry in ``_last_broadcast`` would otherwise suppress the ON
+    frame the frontend already consumed via its done-frame cleanup.
     """
     try:
         from app.core import streaming_status
 
-        streaming_status.notify(session_id)
+        streaming_status.notify(session_id, force=force)
     except Exception:
         logger.debug(
             "[TurnRecorder] streaming_status notify failed for %s",
@@ -489,8 +491,9 @@ class TurnRecorder:
         if run:
             run_id = run["id"]
             fence_token = run["fence_token"]
-            # Run went active — let the durable busy view re-check + broadcast.
-            _notify_run_change(session_id)
+            # Run went active — force the durable busy view to broadcast ON
+            # even if a stale previous-turn busy entry is still last-broadcast.
+            _notify_run_change(session_id, force=True)
         else:
             logger.warning(
                 "[TurnRecorder] could not claim run lease for %s "

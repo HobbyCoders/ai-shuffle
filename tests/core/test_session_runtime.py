@@ -193,6 +193,26 @@ async def test_live_runtime_registered_during_pump_and_popped_after(mock_db):
     assert session_runtime.get_live_runtime("s1r") is None
 
 
+async def test_execute_notifies_streaming_status_at_claim_and_release(mock_db):
+    """The board-spinner seam: the runtime must notify streaming_status at the
+    lease boundary — FORCE at claim (a stale previous-turn busy entry would
+    otherwise suppress the ON frame) and plain at release (immediate OFF
+    instead of waiting for the sweep)."""
+    calls = []
+
+    def _spy(session_id, force=False):
+        calls.append((session_id, force))
+
+    turn = turns_db.enqueue_turn("s1n", "user", prompt="hi")
+
+    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+        with patch("app.core.session_runtime._notify_run_change", new=_spy):
+            await session_runtime.SessionRuntime(turn).execute()
+
+    assert ("s1n", True) in calls   # claim — force=True
+    assert ("s1n", False) in calls  # release — force=False
+
+
 # ---------------------------------------------------------------------------
 # 2. Reader-token serialization
 # ---------------------------------------------------------------------------
