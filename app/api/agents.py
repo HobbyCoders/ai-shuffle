@@ -573,6 +573,14 @@ async def delete_profile_agent(
             detail=f"Subagent not found: {agent_name}"
         )
 
+    blocking = database.get_automations_for_profile(subagent["id"])
+    if blocking:
+        names = ", ".join(a["name"] for a in blocking)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Agent is used by {len(blocking)} automation(s): {names} — delete or reassign them first"
+        )
+
     # Remove from profile's enabled agents
     config = profile.get("config", {})
     enabled_agents = config.get("enabled_agents", [])

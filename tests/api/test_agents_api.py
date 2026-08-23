@@ -1030,6 +1030,7 @@ class TestDeleteProfileAgentEndpoint:
             mock_db.get_subagent.return_value = subagent
             mock_db.update_profile.return_value = profile_with_agent
             mock_db.delete_subagent.return_value = True
+            mock_db.get_automations_for_profile.return_value = []
 
             result = await delete_profile_agent("test-profile", "test-subagent", token="test-token")
 
@@ -1056,12 +1057,46 @@ class TestDeleteProfileAgentEndpoint:
             mock_db.get_subagent.return_value = subagent
             mock_db.update_profile.return_value = profile_with_agent
             mock_db.delete_subagent.return_value = True
+            mock_db.get_automations_for_profile.return_value = []
 
             await delete_profile_agent("test-profile", "test-subagent", token="test-token")
 
             # Verify update_profile was called with agent removed
             call_kwargs = mock_db.update_profile.call_args[1]
             assert "test-subagent" not in call_kwargs["config"]["enabled_agents"]
+
+    @pytest.mark.asyncio
+    async def test_delete_profile_agent_blocked_by_automation(self):
+        """Subagent referenced by automations should raise 409 and leave everything untouched."""
+        from app.api.agents import delete_profile_agent
+        from fastapi import HTTPException
+
+        profile_with_agent = {
+            "id": "test-profile",
+            "name": "Test Profile",
+            "config": {"enabled_agents": ["test-subagent"]},
+            "is_builtin": False,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        subagent = sample_subagent()
+
+        with patch("app.api.agents.database") as mock_db:
+            mock_db.get_profile.return_value = profile_with_agent
+            mock_db.get_subagent.return_value = subagent
+            mock_db.get_automations_for_profile.return_value = [
+                {"name": "Nightly Sync"}, {"name": "Weekly Report"}
+            ]
+
+            with pytest.raises(HTTPException) as exc_info:
+                await delete_profile_agent("test-profile", "test-subagent", token="test-token")
+
+            assert exc_info.value.status_code == 409
+            assert "2 automation(s)" in exc_info.value.detail
+            assert "Nightly Sync" in exc_info.value.detail
+            assert "Weekly Report" in exc_info.value.detail
+            mock_db.update_profile.assert_not_called()
+            mock_db.delete_subagent.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_delete_profile_agent_not_found(self):
@@ -2114,6 +2149,7 @@ class TestEdgeCases:
             mock_db.get_subagent.side_effect = mock_get_subagent
             mock_db.update_profile.return_value = profile
             mock_db.delete_subagent.return_value = True
+            mock_db.get_automations_for_profile.return_value = []
 
             result = await delete_profile_agent("test-profile", "My Subagent", token="test-token")
 
