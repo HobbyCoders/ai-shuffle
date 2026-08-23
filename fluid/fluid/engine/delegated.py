@@ -29,7 +29,8 @@ The process is kept alive across turns; ``cli_session_id`` (from the ``init``
 frame) is the ``--resume`` handle for reconnecting to the same CLI conversation.
 It is written back to the store's ``SessionMeta`` every time it changes, so a
 process restart can hand the CLI a handle it actually recognises instead of an
-fluid session id.
+fluid session id. The same frame announces the child's tool surface, kept on the
+loop as ``cli_tools`` / ``cli_mcp_servers`` and published as ``DelegatedSurface``.
 """
 
 from __future__ import annotations
@@ -171,6 +172,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # omits the flag entirely, leaving the CLI on its own settings files.
         self.settings = settings
         self.cli_version: str | None = None
+        # The tool surface the child CLI announced in its `init` frame — the
+        # names it will actually accept, MCP servers included. The CLI decides
+        # that surface from its own settings/flags, so this is the only place
+        # the harness learns it. None until an init frame announces a tool
+        # list; also published as a DelegatedSurface event.
+        self.cli_tools: tuple[str, ...] | None = None
+        self.cli_mcp_servers: tuple[dict[str, Any], ...] | None = None
 
         self._session: SessionMeta | None = None
         self._session_id = session_id
@@ -561,6 +569,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 continue  # non-JSON diagnostic line — skip
 
             mapped = mapper.feed(frame)
+            if mapper.cli_tools is not None and mapper.cli_tools != self.cli_tools:
+                self.cli_tools = mapper.cli_tools
+                self.cli_mcp_servers = mapper.cli_mcp_servers
             for event in mapped.events:
                 if isinstance(event, (TurnComplete, Interrupted, ErrorEvent)):
                     await self._emit_terminal_with_park(event)

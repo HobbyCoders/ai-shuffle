@@ -8,10 +8,13 @@ cannot tell the two engines apart (modulo the documented capability matrix).
 
 Frame vocabulary handled (see ``claude_agent_sdk`` message_parser + query.py):
 
-  * ``{"type":"system","subtype":"init","session_id":...}`` — captures
-    ``cli_session_id`` (the ``--resume`` handle). TurnStarted is emitted by the
-    loop at turn start (native parity: a persistent process only emits ``init``
-    once, so binding TurnStarted to it would miss turns 2+).
+  * ``{"type":"system","subtype":"init","session_id":...,"tools":[...],
+    "mcp_servers":[...]}`` — captures ``cli_session_id`` (the ``--resume``
+    handle) plus the announced tool surface (``cli_tools`` /
+    ``cli_mcp_servers``), which is re-emitted as a ``DelegatedSurface`` event.
+    TurnStarted is emitted by the loop at turn start (native parity: a
+    persistent process only emits ``init`` once, so binding TurnStarted to it
+    would miss turns 2+).
   * ``{"type":"assistant","message":{"content":[...],"usage":{...},...}}`` — each
     content block becomes BlockStart + a whole-block delta + BlockStop (+ ToolUse
     for ``tool_use``); ``usage`` becomes a per-model-call Usage event. The full
@@ -61,6 +64,7 @@ from typing import Any
 from fluid.events.model import (
     BlockStart,
     BlockStop,
+    DelegatedSurface,
     Event,
     PermissionRequest,
     RateLimit,
@@ -209,6 +213,10 @@ class StreamJsonMapper:
         self.provider = provider
         self.user_node_id = user_node_id
         self.cli_session_id: str | None = None
+        # The tool surface the CLI announced in its init frame. None until an
+        # init frame carries a `tools` list (see _on_system).
+        self.cli_tools: tuple[str, ...] | None = None
+        self.cli_mcp_servers: tuple[dict[str, Any], ...] | None = None
 
         self._tool_names: dict[str, str] = {}  # tool_use_id → tool name
         self._usage_emitted = False
@@ -288,9 +296,23 @@ class StreamJsonMapper:
     # ─── per-frame handlers ──────────────────────────────────────────────
 
     def _on_system(self, frame: dict[str, Any]) -> Mapped:
-        if frame.get("subtype") == "init":
-            self.cli_session_id = frame.get("session_id") or self.cli_session_id
-        return Mapped()
+        if frame.get("subtype") != "init":
+            return Mapped()
+        self.cli_session_id = frame.get("session_id") or self.cli_session_id
+        tools = frame.get("tools")
+        if not isinstance(tools, list):
+            # No tool list announced: leave the surface unknown (None) rather
+            # than claiming the child can call nothing.
+            return Mapped()
+        self.cli_tools = tuple(str(t) for t in tools)
+        servers = frame.get("mcp_servers")
+        if not isinstance(servers, list):
+            servers = []
+        self.cli_mcp_servers = tuple(s for s in servers if isinstance(s, dict))
+        return Mapped(events=[DelegatedSurface(
+            session_id=self.session_id, turn_id=self.turn_id,
+            tools=self.cli_tools, mcp_servers=self.cli_mcp_servers,
+        )])
 
     def _on_assistant(self, frame: dict[str, Any]) -> Mapped:
         msg = frame.get("message", {})

@@ -25,6 +25,7 @@ from fluid.engine.delegated_proto import StreamJsonMapper, stop_reason_from_subt
 from fluid.events import (
     BlockStart,
     BlockStop,
+    DelegatedSurface,
     ErrorEvent,
     PermissionRequest,
     RespondPermission,
@@ -36,6 +37,7 @@ from fluid.events import (
     Usage,
     UserTurn,
 )
+from fluid.events.model import event_from_dict, event_to_dict
 from fluid.store.base import MemoryStore
 from fluid.store.jsonl import JsonlStore
 from fluid.tools.inproc import create_inproc_server, tool
@@ -102,8 +104,9 @@ def test_golden_frame_mapping() -> None:
 
     assert mapper.cli_session_id == "cli-sess-golden"
     types = [type(e).__name__ for e in events]
-    # thinking block, then text block, then usage, then turn-complete
+    # announced surface (init), thinking block, text block, usage, turn-complete
     assert types == [
+        "DelegatedSurface",                           # init frame's tool list
         "BlockStart", "ThinkingDelta", "BlockStop",   # thinking (index 0)
         "BlockStart", "TextDelta", "BlockStop",       # text (index 1)
         "Usage",
@@ -118,6 +121,58 @@ def test_golden_frame_mapping() -> None:
     # The assistant message assembled for persistence carries both blocks.
     assert len(node_msgs) == 1
     assert node_msgs[0].text() == "Hello from the golden turn."
+
+
+# ─── Announced tool surface (init frame) ─────────────────────────────────────
+
+
+def _mapper() -> StreamJsonMapper:
+    return StreamJsonMapper(
+        session_id="s1", turn_id="t1", model="claude-fake", user_node_id="node_user",
+    )
+
+
+def test_init_frame_surfaces_the_announced_tools() -> None:
+    """The CLI picks its own tool surface; the init frame is where it says so."""
+    mapper = _mapper()
+    mapped = mapper.feed({
+        "type": "system", "subtype": "init", "session_id": "cli-1",
+        "tools": ["Read", "Write", "mcp__fluid__Task"],
+        "mcp_servers": [{"name": "fluid", "status": "connected"}],
+    })
+
+    assert mapper.cli_tools == ("Read", "Write", "mcp__fluid__Task")
+    assert mapper.cli_mcp_servers == ({"name": "fluid", "status": "connected"},)
+
+    assert len(mapped.events) == 1
+    event = mapped.events[0]
+    assert isinstance(event, DelegatedSurface)
+    assert event.tools == mapper.cli_tools
+    assert event.mcp_servers == mapper.cli_mcp_servers
+    assert event.session_id == "s1" and event.turn_id == "t1"
+
+
+def test_init_frame_without_tools_leaves_the_surface_unknown() -> None:
+    """No announcement is not the same as "no tools" — stay None, say nothing."""
+    mapper = _mapper()
+    mapped = mapper.feed({"type": "system", "subtype": "init", "session_id": "cli-1"})
+
+    assert mapper.cli_tools is None
+    assert mapper.cli_mcp_servers is None
+    assert mapped.events == []
+    assert mapper.cli_session_id == "cli-1"  # the handle is still captured
+
+
+def test_delegated_surface_round_trips_through_the_codec() -> None:
+    event = DelegatedSurface(
+        session_id="s1", turn_id="t1",
+        tools=("Read", "Bash"),
+        mcp_servers=({"name": "fluid", "status": "connected"},),
+    )
+    assert event_from_dict(event_to_dict(event)) == event
+    # Durable stores go through JSON, which brings both tuples back as lists.
+    revived = event_from_dict(json.loads(json.dumps(event_to_dict(event))))
+    assert revived == event
 
 
 # ─── Capability matrix ───────────────────────────────────────────────────────
@@ -149,8 +204,11 @@ async def test_simple_text_turn() -> None:
         events = loop.bus.log(sid)
 
         types = [type(e).__name__ for e in events]
+        # DelegatedSurface lands right after TurnStarted: the CLI announces its
+        # tool list in the init frame, once per process.
         assert types == [
-            "TurnStarted", "BlockStart", "TextDelta", "BlockStop", "Usage", "TurnComplete",
+            "TurnStarted", "DelegatedSurface",
+            "BlockStart", "TextDelta", "BlockStop", "Usage", "TurnComplete",
         ]
         # gapless per-session seq
         assert [e.seq for e in events] == list(range(1, len(events) + 1))
@@ -168,6 +226,11 @@ async def test_simple_text_turn() -> None:
         # version guard + resume handle captured
         assert loop.cli_version == "claude 2.0.0 (fake-fluid)"
         assert loop.cli_session_id == "cli-sess-123"
+        # ... and the tool surface the CLI announced in the same init frame
+        assert loop.cli_tools == ("Read", "Bash")
+        assert loop.cli_mcp_servers == ({"name": "fluid", "status": "connected"},)
+        surface = next(e for e in events if isinstance(e, DelegatedSurface))
+        assert surface.tools == ("Read", "Bash")
 
         # nodes persisted: user + assistant, reload-able
         path = await loop.store.load_path(sid)
@@ -187,9 +250,10 @@ async def test_store_persistence_reloadable() -> None:
         # events durably persisted, gapless, same objects the bus emitted
         persisted = await store.events_since(sid, 0)
         assert [type(e).__name__ for e in persisted] == [
-            "TurnStarted", "BlockStart", "TextDelta", "BlockStop", "Usage", "TurnComplete",
+            "TurnStarted", "DelegatedSurface",
+            "BlockStart", "TextDelta", "BlockStop", "Usage", "TurnComplete",
         ]
-        assert [e.seq for e in persisted] == [1, 2, 3, 4, 5, 6]
+        assert [e.seq for e in persisted] == [1, 2, 3, 4, 5, 6, 7]
     finally:
         await loop.aclose()
 
@@ -213,9 +277,11 @@ async def test_stale_between_turn_frames_discarded() -> None:
         assert [e.text for e in events if isinstance(e, TextDelta)] == [
             "Hello from fake.", "Hello from fake.",
         ]
+        turn = ["TurnStarted", "BlockStart", "TextDelta", "BlockStop", "Usage", "TurnComplete"]
+        # The init frame arrives once, inside the first turn — so does its event.
         assert [type(e).__name__ for e in events] == [
-            "TurnStarted", "BlockStart", "TextDelta", "BlockStop", "Usage", "TurnComplete",
-        ] * 2
+            "TurnStarted", "DelegatedSurface", *turn[1:], *turn,
+        ]
         assert [e.seq for e in events] == list(range(1, len(events) + 1))
 
         path = await loop.store.load_path(sid)

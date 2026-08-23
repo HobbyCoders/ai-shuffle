@@ -644,9 +644,12 @@ async def test_delegated_pump_yields_stdout_to_a_turn_that_starts_mid_wait() -> 
 
     assert usage == CONTEXT_USAGE_PAYLOAD  # delivered via the turn's reader
     # Both turns are intact — nothing the CLI emitted for turn 2 was discarded.
+    # DelegatedSurface rides the init frame, so it appears in turn 1 only.
     assert [type(e).__name__ for e in events] == [
+        "TurnStarted", "DelegatedSurface",
+        "BlockStart", "TextDelta", "BlockStop", "Usage", "TurnComplete",
         "TurnStarted", "BlockStart", "TextDelta", "BlockStop", "Usage", "TurnComplete",
-    ] * 2
+    ]
     assert not loop._pending_controls
 
 
@@ -675,8 +678,10 @@ async def test_control_round_trip_leaves_the_turn_stream_intact(scenario) -> Non
     finally:
         await loop.aclose()
     assert [type(e).__name__ for e in events] == [
+        "TurnStarted", "DelegatedSurface",
+        "BlockStart", "TextDelta", "BlockStop", "Usage", "TurnComplete",
         "TurnStarted", "BlockStart", "TextDelta", "BlockStop", "Usage", "TurnComplete",
-    ] * 2
+    ]
 
 
 # ─── Provider-measured totals ────────────────────────────────────────────────
@@ -854,7 +859,7 @@ async def test_delegated_usage_carries_the_clis_context_snapshot() -> None:
     finally:
         await loop.aclose()
     assert [type(e).__name__ for e in events] == [
-        "TurnStarted", "BlockStart", "TextDelta", "BlockStop",
+        "TurnStarted", "DelegatedSurface", "BlockStart", "TextDelta", "BlockStop",
         "Usage", "Usage", "TurnComplete",
     ]
     billed, snapshot = [e for e in events if isinstance(e, Usage)]
@@ -876,7 +881,8 @@ async def test_delegated_unanswered_snapshot_adds_no_event() -> None:
     finally:
         await loop.aclose()
     assert [type(e).__name__ for e in events] == [
-        "TurnStarted", "BlockStart", "TextDelta", "BlockStop", "Usage", "TurnComplete",
+        "TurnStarted", "DelegatedSurface",
+        "BlockStart", "TextDelta", "BlockStop", "Usage", "TurnComplete",
     ]
     assert [e.context_usage for e in events if isinstance(e, Usage)] == [None]
     assert not loop._pending_usage_snapshots

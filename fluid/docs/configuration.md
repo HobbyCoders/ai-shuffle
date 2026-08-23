@@ -223,6 +223,18 @@ login; `api_key_env` and `base_url` do not apply. The `openai_responses` client
 can also authenticate with Codex/ChatGPT subscription OAuth when an embedding
 host hands it an auth object; the CLI config path uses the API key.
 
+Because the child CLI resolves its own tool surface — from its settings files,
+its MCP config, and the tool flags Fluid passes it — the delegated engine does
+not know what that child can call until the CLI says so. It says so once, in the
+`init` frame it writes at process start. Fluid reads the announced `tools` and
+`mcp_servers` from that frame, keeps them on the loop as `cli_tools` and
+`cli_mcp_servers` (both `None` until an `init` frame carries a tool list), and
+publishes them on the event stream as a `DelegatedSurface` event with the same
+two tuples. It fires once per CLI process, not once per turn, and is purely
+informational: nothing in the turn depends on it, and it never reaches the
+model. Subscribers use it to show, log, or check the tools the child actually
+has.
+
 A working OpenRouter setup, end to end:
 
 ```toml

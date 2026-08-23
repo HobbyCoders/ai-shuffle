@@ -260,7 +260,8 @@ def main() -> int:
 
     session_id = resume or "cli-sess-123"
     emit({"type": "system", "subtype": "init", "session_id": session_id,
-          "model": "claude-fake", "tools": [], "mcp_servers": []})
+          "model": "claude-fake", "tools": ["Read", "Bash"],
+          "mcp_servers": [{"name": "fluid", "status": "connected"}]})
 
     wake_emitted = False
     deferred_control: str | None = None

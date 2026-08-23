@@ -245,6 +245,26 @@ class ProviderRetry(Event):
 
 
 @dataclass(frozen=True, kw_only=True)
+class DelegatedSurface(Event):
+    """The tool surface a delegated CLI announced in its ``init`` frame.
+
+    The delegated engine does not choose the child's tools — the CLI does, from
+    its own settings, flags and MCP config — so the only way to know what that
+    child can actually call is to read the list it announces at startup. This
+    event carries it verbatim: ``tools`` are the announced tool names,
+    ``mcp_servers`` the announced server entries (each a raw dict, typically
+    ``{"name": ..., "status": ...}``).
+
+    Emitted once per ``init`` frame, i.e. once per CLI process start, not per
+    turn. Purely informational — never terminal, never part of the model
+    conversation.
+    """
+
+    tools: tuple[str, ...]
+    mcp_servers: tuple[dict[str, Any], ...] = ()
+
+
+@dataclass(frozen=True, kw_only=True)
 class SubagentEvent(Event):
     task_id: str
     kind: str  # started | progress | completion_pending | finished | failed | cancelled
@@ -283,6 +303,7 @@ _EVENT_TYPES: dict[str, type[Event]] = {
         BlockStart, BlockStop, TextDelta, ThinkingDelta,
         ToolUse, ToolResult, PermissionRequest, QuestionRequest, HandoffCreated,
         ContextCompaction, Usage, RateLimit, ProviderRetry, SubagentEvent, HookEvent,
+        DelegatedSurface,
     )
 }
 
@@ -319,4 +340,10 @@ def event_from_dict(d: dict[str, Any]) -> Event:
         d["pending_task_ids"] = tuple(d["pending_task_ids"])
     elif cls is SessionWoken and isinstance(d.get("task_ids"), list):
         d["task_ids"] = tuple(d["task_ids"])
+    elif cls is DelegatedSurface:
+        # JSON round-trips both tuples back as lists.
+        if isinstance(d.get("tools"), list):
+            d["tools"] = tuple(d["tools"])
+        if isinstance(d.get("mcp_servers"), list):
+            d["mcp_servers"] = tuple(d["mcp_servers"])
     return cls(**d)
