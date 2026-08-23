@@ -104,6 +104,19 @@ async def test_start_appends_turn_started_then_message_user(mock_db):
     await rec.close()
 
 
+async def test_start_without_record_user_appends_only_turn_started(mock_db):
+    # A resumed turn re-runs the loop from the head node; it adds no message,
+    # so the transcript must gain turn.started and nothing else.
+    _mk_session()
+    rec = await _recorder(command_id="cmd-r")
+    await rec.start("", profile_id="prof-r", record_user=False)
+    rows = _rows()
+    assert [r["event_type"] for r in rows] == ["turn.started"]
+    assert rows[0]["payload"]["profile_id"] == "prof-r"
+    assert rows[0]["turn_id"] == rec.turn_id
+    await rec.close()
+
+
 async def test_start_stamps_profile_id_on_both_events(mock_db):
     # Per-message agent attribution: the live SSE path stamps the turn's
     # profile onto turn.started so the FE can pin streamed messages to it.

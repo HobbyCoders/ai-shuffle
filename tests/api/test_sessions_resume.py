@@ -1,0 +1,191 @@
+"""POST /api/v1/sessions/{session_id}/resume — re-run the last turn from the head.
+
+The Retry button on an exhausted provider-retry card posts here. The route adds
+no message: it enqueues a ``resume``-source turn whose prompt is empty, and the
+engine picks the loop back up from the user node the failed turn left at the
+head. It refuses when the session is busy (a resume would race a live turn) and
+when the session is not fluid (the Claude CLI owns its own transcript and has no
+head node to continue from).
+"""
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from app.api.auth import require_auth
+from app.api.sessions import router
+
+
+# =============================================================================
+# Fixtures — mirrors tests/api/test_sessions.py, which covers /clear and /archive
+# =============================================================================
+
+@pytest.fixture
+def mock_database():
+    with patch("app.api.sessions.database") as mock_db, \
+            patch("app.api.sessions_helpers.database", mock_db), \
+            patch("app.api.common.database", mock_db):
+        mock_db.get_session_tags.return_value = []
+        mock_db.session_has_forks.return_value = False
+        mock_db.get_installs_map.return_value = {}
+        mock_db.get_project.return_value = None
+        yield mock_db
+
+
+@pytest.fixture
+def mock_api_user():
+    with patch("app.api.sessions.get_api_user_from_request") as mock, \
+            patch("app.api.sessions_helpers.get_api_user_from_request", new=mock), \
+            patch("app.api.common.get_api_user_from_request", new=mock):
+        mock.return_value = None  # admin (no API user)
+        yield mock
+
+
+@pytest.fixture
+def app(mock_database, mock_api_user):
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[require_auth] = lambda: "test-session-token"
+    yield app
+
+
+@pytest.fixture
+def client(app):
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def fluid_session():
+    """A session the engine can resume: its sdk_session_id is a fluid id."""
+    return {
+        "id": "test-session-id",
+        "title": "Test Session",
+        "profile_id": "default",
+        "project_id": "proj-1",
+        "status": "active",
+        "is_active": False,
+        "sdk_session_id": "ses_abc123",
+        "created_at": "2024-01-15T10:30:00",
+        "updated_at": "2024-01-15T10:30:00",
+    }
+
+
+@pytest.fixture
+def turns_idle():
+    """No live turn, empty queue — the session is free to resume."""
+    with patch("app.db.turns.get_live_turn", return_value=None) as live, \
+            patch("app.db.turns.get_queued_turns", return_value=[]) as queued:
+        yield live, queued
+
+
+@pytest.fixture
+def submit_seam():
+    """The enqueue + NOTIFY pair the route drives."""
+    with patch("app.core.turn_manager.submit", return_value="turn-1") as submit, \
+            patch("app.core.turn_claim.notify_turns_changed") as notify:
+        yield submit, notify
+
+
+# =============================================================================
+# Tests
+# =============================================================================
+
+class TestResumeSession:
+
+    def test_unknown_session_is_404(self, client, mock_database, turns_idle, submit_seam):
+        mock_database.get_session.return_value = None
+
+        response = client.post("/api/v1/sessions/non-existent/resume")
+
+        assert response.status_code == 404
+        submit_seam[0].assert_not_called()
+
+    def test_live_turn_is_409(self, client, mock_database, fluid_session, submit_seam):
+        """A resume must never race the turn already in flight."""
+        mock_database.get_session.return_value = fluid_session
+
+        with patch("app.db.turns.get_live_turn", return_value={"id": "turn-live"}), \
+                patch("app.db.turns.get_queued_turns", return_value=[]):
+            response = client.post("/api/v1/sessions/test-session-id/resume")
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == "a turn is already running"
+        submit_seam[0].assert_not_called()
+
+    def test_queued_turn_is_409(self, client, mock_database, fluid_session, submit_seam):
+        mock_database.get_session.return_value = fluid_session
+
+        with patch("app.db.turns.get_live_turn", return_value=None), \
+                patch("app.db.turns.get_queued_turns", return_value=[{"id": "turn-q"}]):
+            response = client.post("/api/v1/sessions/test-session-id/resume")
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == "a turn is already running"
+        submit_seam[0].assert_not_called()
+
+    @pytest.mark.parametrize("sdk_session_id", ["sdk-123", "", None])
+    def test_non_fluid_session_is_409(
+        self, client, mock_database, fluid_session, turns_idle, submit_seam, sdk_session_id
+    ):
+        """Only fluid sessions have a head node to continue from."""
+        fluid_session["sdk_session_id"] = sdk_session_id
+        mock_database.get_session.return_value = fluid_session
+
+        response = client.post("/api/v1/sessions/test-session-id/resume")
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == "resume needs a fluid session"
+        submit_seam[0].assert_not_called()
+
+    def test_success_enqueues_a_resume_turn_and_notifies(
+        self, client, mock_database, fluid_session, turns_idle, submit_seam
+    ):
+        submit, notify = submit_seam
+        mock_database.get_session.return_value = fluid_session
+
+        response = client.post("/api/v1/sessions/test-session-id/resume")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "turn_id": "turn-1",
+            "session_id": "test-session-id",
+        }
+
+        submit.assert_called_once()
+        args, kwargs = submit.call_args
+        assert args == ("test-session-id", "resume")
+        assert kwargs["prompt"] == ""
+        assert kwargs["profile_id"] == "default"
+        assert kwargs["project_id"] == "proj-1"
+        # Placed-elsewhere sessions are handed off by the durable row + NOTIFY.
+        assert kwargs["no_kick"] is True
+        notify.assert_called_once_with("test-session-id")
+
+    def test_claude_code_profile_sentinel_is_dropped(
+        self, client, mock_database, fluid_session, turns_idle, submit_seam
+    ):
+        """The no-profile sentinel is install-local; it must not ride the turn."""
+        submit, _ = submit_seam
+        fluid_session["profile_id"] = "claude-code"
+        mock_database.get_session.return_value = fluid_session
+
+        response = client.post("/api/v1/sessions/test-session-id/resume")
+
+        assert response.status_code == 200
+        assert submit.call_args.kwargs["profile_id"] is None
+
+    def test_api_user_rides_the_payload(
+        self, client, mock_database, mock_api_user, fluid_session, turns_idle, submit_seam
+    ):
+        submit, _ = submit_seam
+        fluid_session["project_id"] = None
+        mock_api_user.return_value = {"id": "api-user-1", "project_id": None}
+        mock_database.get_session.return_value = fluid_session
+
+        response = client.post("/api/v1/sessions/test-session-id/resume")
+
+        assert response.status_code == 200
+        assert submit.call_args.kwargs["payload"] == {"api_user_id": "api-user-1"}

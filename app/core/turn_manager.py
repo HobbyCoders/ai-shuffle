@@ -120,7 +120,10 @@ def _kick(session_id: str) -> None:
 # Turn sources that count as "a person just spoke" and therefore cancel every
 # wakeup the session had armed. Server-originated sources (automation, unpark,
 # failover, auto_continue, wakeup itself) deliberately leave wakes alone.
-_WAKEUP_SUPERSEDING_SOURCES = ("user", "queue")
+# "resume" is a person pressing Retry on a failed turn — a newer instruction
+# than an armed wake for the same reason a typed message is, even though it
+# carries no prompt of its own.
+_WAKEUP_SUPERSEDING_SOURCES = ("user", "queue", "resume")
 
 # Sources whose ``overrides`` carry a PERSON's current pick of model / effort /
 # permission mode, so the session's stored binding (v79) follows them. An

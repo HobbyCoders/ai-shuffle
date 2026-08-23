@@ -557,17 +557,26 @@ class TurnRecorder:
         _last_turn_recorders[session_id] = recorder
         return recorder
 
-    async def start(self, user_message: str, profile_id: str | None = None) -> None:
-        """Append ``turn.started`` then ``message.user``."""
+    async def start(
+        self,
+        user_message: str,
+        profile_id: str | None = None,
+        record_user: bool = True,
+    ) -> None:
+        """Append ``turn.started`` then ``message.user``.
+
+        ``record_user=False`` appends only ``turn.started`` — a resumed turn
+        re-runs from the head node and adds no new user message.
+        """
         try:
-            await self._append([
-                self._event(contract.TurnStarted, profile_id=profile_id),
-                self._event(
+            events = [self._event(contract.TurnStarted, profile_id=profile_id)]
+            if record_user:
+                events.append(self._event(
                     contract.MessageUser,
                     content=user_message or "",
                     profile_id=profile_id,
-                ),
-            ])
+                ))
+            await self._append(events)
         except Exception:
             logger.warning(
                 "[TurnRecorder] start failed for %s", self.session_id,

@@ -230,6 +230,7 @@ from fluid.events.ops import (
     Interrupt,
     RespondPermission,
     RespondQuestion,
+    Resume,
     SetModel,
     SetPermissionMode,
     UserTurn,
@@ -896,6 +897,11 @@ class HarnessAdapter(ProviderAdapter):
         # so the cast bridges the vendor annotation without touching the value.
         await self._engine.submit(UserTurn(content=cast(Any, prompt)))
 
+    async def send_resume(self) -> None:
+        if self._engine is None:
+            raise RuntimeError("Adapter not connected")
+        await self._engine.submit(Resume())
+
     async def receive_events(self) -> AsyncIterator[ProviderEvent]:
         """Translate the fluid Event stream into ProviderEvents for one turn.
 
@@ -1492,6 +1498,21 @@ class HarnessAdapter(ProviderAdapter):
                     "content": event.message,
                     "hook_event": getattr(event, "hook_event", ""),
                     "tool_name": getattr(event, "tool_name", None),
+                },
+            )]
+
+        if cls == "ProviderRetry":
+            # The engine is about to re-send the same request after an empty
+            # provider response. Never terminal; the UI folds consecutive
+            # attempts into one card that counts up.
+            return [SystemMessage(
+                subtype="provider_retry",
+                data={
+                    "attempt": event.attempt,
+                    "max_attempts": event.max_attempts,
+                    "reason": event.reason,
+                    "delay_seconds": event.delay_seconds,
+                    "model": getattr(event, "model", None),
                 },
             )]
 

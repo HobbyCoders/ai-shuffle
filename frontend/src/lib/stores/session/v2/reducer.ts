@@ -268,6 +268,31 @@ function settleStaleBackgroundWork(state: V2SessionState): V2SessionState {
 	};
 }
 
+/**
+ * Close out open retry cards when the turn reaches a terminal state.
+ *
+ * A `provider_retry` card renders as live work — a spinner counting attempts —
+ * because the engine is mid-retry when the note arrives. Nothing else ever
+ * finishes it: the engine stops emitting notes on success, so without this the
+ * card spins forever after the turn is over. Stamping `settled` lets
+ * SystemMessage render it as a finished "Retried N times" row.
+ *
+ * An `exhausted` card is left alone: it records a failure and owns the Retry
+ * button, which the settled rendering does not offer. Already-settled cards are
+ * skipped so the array identity survives a replay folding the same log twice.
+ */
+function settleRetryCards(messages: ChatMessage[]): ChatMessage[] {
+	let touched = false;
+	const out = messages.map((m) => {
+		if (m.role !== 'system' || m.systemSubtype !== 'provider_retry') return m;
+		const data = m.systemData as Record<string, unknown> | undefined;
+		if (data?.exhausted || data?.settled) return m;
+		touched = true;
+		return { ...m, systemData: { ...(data ?? {}), settled: true } };
+	});
+	return touched ? out : messages;
+}
+
 function str(v: unknown): string {
 	return typeof v === 'string' ? v : '';
 }
@@ -529,15 +554,37 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 
 	switch (event.type) {
 		// ── Turn lifecycle ──────────────────────────────────────────────
-		case 'turn.started':
+		case 'turn.started': {
 			// Track the live turn id (#585) so a Stop can target THIS turn.
 			// Also reset liveModel/liveRequestedModel: the new turn's model is
 			// unknown until its own model_info note arrives; without this, a
 			// previous turn's reroute banner lingers even after the user aligns
 			// their selection. Replay order preserves correctness: a backfill
 			// replays turn.started then that turn's model_info.
+			//
+			// Any exhausted retry card has been acted on the moment a new turn
+			// starts — whether the user pressed Retry or just typed something
+			// else — so its Retry button retires. `resumed` is sticky, and a
+			// from_seq=0 replay reaches the same state.
+			let messages = state.messages;
+			if (
+				messages.some(
+					(m) =>
+						m.systemSubtype === 'provider_retry' &&
+						(m.systemData as Record<string, unknown> | undefined)?.exhausted &&
+						!(m.systemData as Record<string, unknown> | undefined)?.resumed
+				)
+			) {
+				messages = messages.map((m) => {
+					const d = m.systemData as Record<string, unknown> | undefined;
+					return m.systemSubtype === 'provider_retry' && d?.exhausted && !d.resumed
+						? { ...m, systemData: { ...d, resumed: true } }
+						: m;
+				});
+			}
 			return {
 				...state,
+				messages,
 				isStreaming: true,
 				parked: false,
 				liveTurnId: typeof event.turn_id === 'string' ? event.turn_id : state.liveTurnId,
@@ -549,6 +596,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				liveRequestedModel: null,
 				liveProvider: null,
 			};
+		}
 
 		case 'turn.parked': {
 			// A turn parked on background work: not "streaming" but still live.
@@ -599,7 +647,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// right after. Speculatively settle any still-'running' subagent card /
 			// task summary that missed its terminal event (#609 self-heal); a
 			// following turn.parked reverts that settle. See settleStaleBackgroundWork.
-			const completed = settleStaleBackgroundWork(
+			const drained = settleStaleBackgroundWork(
 				closeOpen({
 					...state,
 					isStreaming: false,
@@ -611,6 +659,11 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					usage: obj(event.usage) ?? state.usage,
 				})
 			);
+			// A retry card left mid-count is finished business now — the turn
+			// succeeded despite the empty responses. See settleRetryCards.
+			const retrySettled = settleRetryCards(drained.messages);
+			const completed =
+				retrySettled === drained.messages ? drained : { ...drained, messages: retrySettled };
 			// SDK 0.2.126: a turn that stopped because it hit the configured
 			// max-turns ceiling carries terminal_reason='max_turns'. Surface a
 			// neutral (non-error) informational system card so the user knows the
@@ -717,6 +770,36 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				const message = str(event.message);
 				if (message) {
 					const last = next.messages[next.messages.length - 1];
+					// A retry card that burned its last attempt IS this failure —
+					// the abort is the cap being reached. Fold the error into the
+					// card (which then offers Retry) rather than stacking a second
+					// error card underneath saying the same thing.
+					const retryData =
+						last?.role === 'system' && last.systemSubtype === 'provider_retry'
+							? (last.systemData as Record<string, unknown> | undefined)
+							: undefined;
+					const exhausted =
+						!!retryData &&
+						typeof retryData.attempt === 'number' &&
+						typeof retryData.max_attempts === 'number' &&
+						retryData.attempt >= retryData.max_attempts;
+					if (exhausted) {
+						const messages = next.messages.slice();
+						messages[messages.length - 1] = {
+							...last,
+							systemData: { ...retryData, exhausted: true, error: message },
+						};
+						return {
+							...next,
+							messages,
+							isStreaming: false,
+							parked: false,
+							liveTurnId: null,
+							liveTurnProfileId: null,
+							pendingPumpAck: null,
+							pumpAckBuffer: '',
+						};
+					}
 					const duplicate =
 						last?.role === 'system' &&
 						last.systemSubtype === 'error' &&
@@ -733,8 +816,13 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					}
 				}
 			}
+			// Every abort that did NOT fold into an exhausted card lands here —
+			// an interrupt, or an error that arrived without a retry card at the
+			// cap. Any retry note still counting is over either way, so settle it
+			// rather than leaving a spinner behind. See settleRetryCards.
 			return {
 				...next,
+				messages: settleRetryCards(next.messages),
 				isStreaming: false,
 				parked: false,
 				liveTurnId: null,
@@ -1418,6 +1506,39 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				};
 			}
 			const data = obj(event.data);
+			// `provider_retry` arrives once per attempt while the engine
+			// re-sends an empty completion — up to ten of them in a row. They
+			// must read as ONE card counting 1 → 2 → 3, not ten stacked
+			// cards, so when the newest message is already a retry note the
+			// new attempt replaces it in place. The id is reused so
+			// messageOriginSeq and transcript rewind keep lining up, and a
+			// retry that follows anything else still appends a fresh card.
+			// An EXHAUSTED card is finished business — it records a turn that
+			// already failed, and its Retry button is the only way back — so a
+			// retry note from the NEXT turn appends a fresh card beside it
+			// rather than overwriting the failure. A SETTLED card is finished
+			// the same way: it records a turn that already ended, so the next
+			// turn's retries append beside it instead of rewriting history.
+			if (str(event.subtype) === 'provider_retry') {
+				const last = state.messages[state.messages.length - 1];
+				const lastData = last?.systemData as Record<string, unknown> | undefined;
+				const lastFinished = !!(lastData?.exhausted || lastData?.settled);
+				if (
+					last &&
+					last.type === 'system' &&
+					last.systemSubtype === 'provider_retry' &&
+					!lastFinished
+				) {
+					const messages = state.messages.slice();
+					messages[messages.length - 1] = {
+						...last,
+						content: str(data?.content ?? data?.text),
+						...(data ? { systemData: data } : {}),
+						timestamp: stampTs(event, createdAt) || undefined,
+					};
+					return { ...state, messages };
+				}
+			}
 			const msg: ChatMessage = {
 				id: event.id,
 				role: 'system',

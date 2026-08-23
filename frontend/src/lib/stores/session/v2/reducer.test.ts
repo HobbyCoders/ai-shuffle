@@ -1475,6 +1475,222 @@ describe('system + unknown events', () => {
 		expect(s.activeTaskSummaries[0]).toMatchObject({ id: 'bg-1', status: 'running' });
 	});
 
+	it('consecutive provider_retry notes update one card in place', () => {
+		const s = fold([
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 1, max_attempts: 10, delay_seconds: 1, model: 'ox-alpha' },
+			}),
+			ev('system.note', {
+				id: 'pr2',
+				subtype: 'provider_retry',
+				data: { attempt: 2, max_attempts: 10, delay_seconds: 2, model: 'ox-alpha' },
+			}),
+		]);
+		expect(s.messages).toHaveLength(1);
+		expect(s.messages[0].id).toBe('pr1'); // same card, not a second one
+		expect(s.messages[0].systemData).toMatchObject({ attempt: 2, max_attempts: 10 });
+	});
+
+	it('a provider_retry after an unrelated message appends a new card', () => {
+		const s = fold([
+			ev('turn.started'),
+			ev('message.user', { content: 'go' }),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 1, max_attempts: 10 },
+			}),
+		]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries).toHaveLength(1);
+		expect(s.messages.length).toBeGreaterThan(1);
+	});
+
+	it('a provider_retry after an interruption starts a fresh card', () => {
+		const s = fold([
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 1, max_attempts: 10 },
+			}),
+			ev('system.note', { id: 'note1', subtype: 'informational', data: { content: 'hi' } }),
+			ev('system.note', {
+				id: 'pr2',
+				subtype: 'provider_retry',
+				data: { attempt: 1, max_attempts: 10 },
+			}),
+		]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries).toHaveLength(2);
+		expect(retries.map((m) => m.id)).toEqual(['pr1', 'pr2']);
+		// The earlier card was not mutated by the later one.
+		expect(retries[0].systemData).toMatchObject({ attempt: 1 });
+	});
+
+	it('a spent retry card absorbs the abort error instead of stacking a second card', () => {
+		// Attempt 10 of 10 then turn.aborted(error) — the abort IS the cap being
+		// reached, so it folds into the card that offers Retry.
+		const s = fold([
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 10, max_attempts: 10, model: 'ox-alpha' },
+			}),
+			ev('turn.aborted', { reason: 'error', message: 'empty response, giving up' }),
+		]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries).toHaveLength(1);
+		expect(retries[0].systemData).toMatchObject({
+			attempt: 10,
+			max_attempts: 10,
+			exhausted: true,
+			error: 'empty response, giving up',
+		});
+		expect(s.messages.filter((m) => m.systemSubtype === 'error')).toHaveLength(0);
+		expect(s.isStreaming).toBe(false);
+		expect(s.liveTurnId).toBeNull();
+	});
+
+	it('a retry card with attempts left leaves the error card alone', () => {
+		// Attempt 3 of 10 aborting is some OTHER failure, not the cap — today's
+		// behavior stands: the card is untouched and the error card appends.
+		const s = fold([
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 3, max_attempts: 10, model: 'ox-alpha' },
+			}),
+			ev('turn.aborted', { reason: 'error', message: 'stream died' }),
+		]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries).toHaveLength(1);
+		expect(retries[0].systemData).toMatchObject({ attempt: 3, max_attempts: 10 });
+		expect(retries[0].systemData).not.toHaveProperty('exhausted');
+		const errors = s.messages.filter((m) => m.systemSubtype === 'error');
+		expect(errors).toHaveLength(1);
+		expect(errors[0].content).toBe('stream died');
+	});
+
+	it('a new turn retires the Retry button on an exhausted card', () => {
+		const s = fold([
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 10, max_attempts: 10 },
+			}),
+			ev('turn.aborted', { reason: 'error', message: 'giving up' }),
+			ev('turn.started'),
+		]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries).toHaveLength(1);
+		expect(retries[0].systemData).toMatchObject({ exhausted: true, resumed: true });
+	});
+
+	it('a retry note after an exhausted card appends a fresh card', () => {
+		// The resumed turn hit empties too. The failure that is already on the
+		// record must not be overwritten by the new attempt.
+		const s = fold([
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 10, max_attempts: 10 },
+			}),
+			ev('turn.aborted', { reason: 'error', message: 'giving up' }),
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr2',
+				subtype: 'provider_retry',
+				data: { attempt: 1, max_attempts: 10 },
+			}),
+		]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries).toHaveLength(2);
+		expect(retries.map((m) => m.id)).toEqual(['pr1', 'pr2']);
+		expect(retries[0].systemData).toMatchObject({ exhausted: true, resumed: true });
+		expect(retries[1].systemData).toMatchObject({ attempt: 1 });
+	});
+
+	it('turn.completed settles a retry card that still had attempts left', () => {
+		// The retries worked: the turn finished. The card must stop reading as
+		// live work, or it spins forever with nothing left to move it.
+		const s = fold([
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 2, max_attempts: 10, model: 'ox-alpha' },
+			}),
+			ev('turn.completed', {}),
+		]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries).toHaveLength(1);
+		expect(retries[0].systemData).toMatchObject({ attempt: 2, settled: true });
+		expect(retries[0].systemData).not.toHaveProperty('exhausted');
+	});
+
+	it('a retry note after a settled card appends a fresh card', () => {
+		// The next turn hit empties too. The settled card records a turn that
+		// already finished, so it must survive intact beside the new one.
+		const s = fold([
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 2, max_attempts: 10 },
+			}),
+			ev('turn.completed', {}),
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr2',
+				subtype: 'provider_retry',
+				data: { attempt: 1, max_attempts: 10 },
+			}),
+		]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries).toHaveLength(2);
+		expect(retries.map((m) => m.id)).toEqual(['pr1', 'pr2']);
+		expect(retries[0].systemData).toMatchObject({ attempt: 2, settled: true });
+		expect(retries[1].systemData).toMatchObject({ attempt: 1 });
+		expect(retries[1].systemData).not.toHaveProperty('settled');
+	});
+
+	it('an exhausted card is never settled', () => {
+		const s = fold([
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 10, max_attempts: 10 },
+			}),
+			ev('turn.aborted', { reason: 'error', message: 'giving up' }),
+		]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries[0].systemData).toMatchObject({ exhausted: true });
+		expect(retries[0].systemData).not.toHaveProperty('settled');
+	});
+
+	it('an interrupt settles a retry card mid-count', () => {
+		const s = fold([
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 4, max_attempts: 10 },
+			}),
+			ev('turn.aborted', { reason: 'interrupt' }),
+		]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries[0].systemData).toMatchObject({ attempt: 4, settled: true });
+	});
+
 	it('compaction_boundary renders a system marker', () => {
 		const s = fold([ev('system.compaction_boundary', { id: 'cb1' })]);
 		expect(s.messages[0]).toMatchObject({ systemSubtype: 'compaction_boundary' });
