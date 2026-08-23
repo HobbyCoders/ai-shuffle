@@ -1,9 +1,9 @@
 """condition_image — the model-facing resize seam for tool images.
 
-Covers the oversized-image paths: a within-edge but bloated PNG re-encodes to
-JPEG when it saves bytes, an animated GIF/WebP flattens, and anything over the
-1568px vision cap downscales. Pillow is optional — without it conditioning is
-a pass-through no-op.
+Covers the oversized-image paths: a bloated PNG re-encodes to JPEG once it is
+past the megapixel gate but stays PNG below it, an animated GIF/WebP flattens,
+and anything over the 1568px vision cap downscales. Pillow is optional —
+without it conditioning is a pass-through no-op.
 """
 
 import base64
@@ -36,9 +36,11 @@ def test_small_image_passthrough() -> None:
     assert condition_image("image/png", original) == ("image/png", original)
 
 
-def test_bloated_within_edge_png_reencodes_smaller() -> None:
-    # A photographic-ish noise PNG at 800x600 is within the edge budget but
-    # far above the raw-byte threshold; JPEG must beat it.
+def test_bloated_within_edge_png_stays_png() -> None:
+    # 800x600 = 480k pixels, below the 1_150_000-pixel gate: however bloated
+    # the raw bytes are, condition_image never transcodes to JPEG down here.
+    # The gate exists to spare small crisp screenshots from JPEG artifacting.
+    # Conditioning may re-encode the PNG, but it must never grow the payload.
     import io as _io
     import random
 
@@ -50,8 +52,26 @@ def test_bloated_within_edge_png_reencodes_smaller() -> None:
     img.save(buf, format="PNG")
     original = base64.b64encode(buf.getvalue()).decode("ascii")
     mt, b64 = condition_image("image/png", original)
-    if len(b64) < len(original):  # only when JPEG actually won
-        assert mt == "image/jpeg"
+    assert mt == "image/png"
+    assert len(b64) <= len(original)
+
+
+def test_bloated_large_png_reencodes_to_jpeg() -> None:
+    # 1200x1000 = 1.2M pixels, past BOTH the raw-byte threshold (512_000) and
+    # the pixel gate. A photographic-noise PNG (~3.6MB) has to transcode to
+    # JPEG (~0.8MB) here — the margin is decisive, not encoder-dependent.
+    import io as _io
+    import random
+
+    rng = random.Random(7)
+    buf = _io.BytesIO()
+    # frombytes over putdata: same determinism, far cheaper at 1.2M pixels.
+    img = PILImage.frombytes("RGB", (1200, 1000), rng.randbytes(1200 * 1000 * 3))
+    img.save(buf, format="PNG")
+    original = base64.b64encode(buf.getvalue()).decode("ascii")
+    mt, b64 = condition_image("image/png", original)
+    assert mt == "image/jpeg"
+    assert len(b64) < len(original)
 
 
 def test_gif_flattens_to_jpeg() -> None:
