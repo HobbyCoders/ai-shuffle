@@ -24,6 +24,9 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "mcp>=2.0",
+    # tests/unit/test_images.py importorskips PIL; without Pillow here the
+    # whole module silently skips in CI.
+    "pillow>=10",
 ]
 
 [project.scripts]
