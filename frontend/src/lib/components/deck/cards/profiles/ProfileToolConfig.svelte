@@ -301,6 +301,10 @@
 	.ts-headtext {
 		min-width: 0;
 	}
+	/* The leading space inside the stamp collapses against the count text. */
+	.ts-headtext :global(.hint) {
+		margin-left: 5px;
+	}
 	.ts-headacts {
 		display: flex;
 		align-items: center;
