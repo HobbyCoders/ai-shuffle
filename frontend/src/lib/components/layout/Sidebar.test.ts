@@ -106,6 +106,7 @@ function session(
 }
 
 const sidebarProps = {
+	onSettledOpenSession: vi.fn(),
 	onNewSession: vi.fn(),
 	onOpenSession: vi.fn(),
 	onOpenFeature: vi.fn(),
@@ -135,6 +136,7 @@ describe('Sidebar session groups', () => {
 		render(Sidebar, {
 			props: {
 				onNewSession: vi.fn(),
+				onSettledOpenSession: vi.fn(),
 				onOpenSession: vi.fn(),
 				onOpenFeature: vi.fn(),
 			},
@@ -152,6 +154,7 @@ describe('Sidebar session groups', () => {
 		render(Sidebar, {
 			props: {
 				onNewSession: vi.fn(),
+				onSettledOpenSession: vi.fn(),
 				onOpenSession: vi.fn(),
 				onOpenFeature: vi.fn(),
 			},
