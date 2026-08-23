@@ -560,12 +560,15 @@
 		font-size: 10px;
 	}
 
-	/* Rail spans the full row height so the button's hit area does too. */
+	/* Rail fills the card's right side — full row height and the entire
+	   width the revealed padding reserves — so the button's hit area does
+	   too. */
 	.card-actions {
 		position: absolute;
 		top: 0;
-		right: 6px;
+		right: 0;
 		bottom: 0;
+		width: 38px;
 		display: flex;
 		align-items: stretch;
 		gap: 1px;
@@ -576,10 +579,9 @@
 	.card-actions > * {
 		transition: color 120ms ease, background-color 120ms ease;
 	}
-	/* Hit area is a touch wider than the glyph and the full row height, with
-	   the icon centered inside — easy to land on without moving the icon. */
 	.row-action {
-		width: 28px;
+		flex: 1;
+		min-width: 0;
 		padding: 0;
 		border: none;
 		border-radius: 6px;
