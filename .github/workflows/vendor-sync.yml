@@ -1,0 +1,115 @@
+name: Vendor sync (fluid)
+
+# Keeps vendor/fluid equal to fluid main with no human step. vendor/fluid is a
+# pristine archive of Quickkill0/fluid — no overlay, no three-way merge — so a
+# sync is: compare shas, re-extract, run fluid's own unit suite, commit.
+#
+# fluid pushes to main fire the repository_dispatch (see
+# docs/fluid-notify-ai-shuffle.yml, installed in the fluid repo); the daily
+# schedule is the fallback for a missed or unconfigured dispatch.
+#
+# Blacksmith runners are PAID per minute; every trigger below is deliberate.
+on:
+  repository_dispatch:
+    types: [fluid-main-updated]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * *'
+
+# Two dispatches (or a dispatch and the schedule) must never race: both would
+# push to main from different checkouts. Queue instead of cancelling — a
+# cancelled sync would silently skip a fluid commit.
+concurrency:
+  group: vendor-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Sync vendor/fluid to fluid main
+    timeout-minutes: 20
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Check out ai-shuffle main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          # GITHUB_TOKEN, with the contents: write permission above, is enough
+          # to push straight to main: HobbyCoders/ai-shuffle is private on a
+          # plan where branch protection is unavailable (the protection API
+          # returns 403 "Upgrade to GitHub Pro"), so there is no rule for the
+          # bot token to trip over. If main ever gains protection, replace this
+          # with secrets.AI_SHUFFLE_SYNC_TOKEN — a fine-grained PAT with
+          # contents: write, which can be granted a bypass.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check out fluid main
+        uses: actions/checkout@v4
+        with:
+          repository: Quickkill0/fluid
+          ref: main
+          path: .fluid-src
+          # Fine-grained PAT on the fluid repo, contents: read.
+          token: ${{ secrets.FLUID_READ_TOKEN }}
+
+      - name: Compare fluid main against VENDORED
+        id: compare
+        run: |
+          set -euo pipefail
+          upstream="$(git -C .fluid-src rev-parse HEAD)"
+          recorded="$(sed -n 's/^commit:[[:space:]]*//p' vendor/fluid/VENDORED | head -1 | tr -d '[:space:]')"
+          echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
+          echo "short=${upstream:0:7}" >> "$GITHUB_OUTPUT"
+          # VENDORED records a short sha; comparing it as a PREFIX of the full
+          # upstream sha is correct for both the short and the full form.
+          if [ -n "$recorded" ] && [ "${upstream#"$recorded"}" != "$upstream" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "vendor/fluid already at $recorded — nothing to do"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "fluid main is $upstream; vendored is ${recorded:-<none>}"
+          fi
+
+      - name: Replace vendor/fluid
+        if: steps.compare.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          find vendor/fluid -mindepth 1 -maxdepth 1 ! -name VENDORED -exec rm -rf {} +
+          git -C .fluid-src archive HEAD | tar -x -C vendor/fluid
+          printf 'source: https://github.com/Quickkill0/fluid\ncommit: %s\nsynced: %s\n' \
+            '${{ steps.compare.outputs.short }}' "$(date -u +%Y-%m-%d)" \
+            > vendor/fluid/VENDORED
+
+      - name: Set up Python 3.12
+        if: steps.compare.outputs.changed == 'true'
+        uses: actions/setup-python@v5
+        with:
+          # Matches production (the Docker image) and fluid's requires-python.
+          python-version: "3.12"
+
+      - name: Run fluid's unit suite against the new vendor
+        if: steps.compare.outputs.changed == 'true'
+        # A red fluid suite blocks the sync, which is the point: vendor/fluid
+        # is what the Docker image installs.
+        run: |
+          set -euo pipefail
+          pip install './vendor/fluid[dev]'
+          python -m pytest vendor/fluid/tests/unit -q -p no:cacheprovider
+
+      - name: Commit and push
+        if: steps.compare.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # Only vendor/fluid is staged, so the .fluid-src checkout (which sits
+          # inside the workspace) can never be committed.
+          git add vendor/fluid
+          if git diff --cached --quiet; then
+            echo "no tree change despite a new sha — nothing to commit"
+            exit 0
+          fi
+          git commit -m 'vendor(fluid): sync to ${{ steps.compare.outputs.short }}'
+          git push origin HEAD:main
