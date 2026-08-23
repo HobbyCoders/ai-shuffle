@@ -1061,20 +1061,25 @@ def create_builtin_tools_server(
             return _err("query is required.")
         max_results = int(args.get("max_results") or 5)
         try:
-            from app.api.system import BUILTIN_TOOLS, discover_tools_from_cli, get_tool_description, categorize_tool
-            catalog = {t["name"]: t for t in BUILTIN_TOOLS}
-            # Try to enrich from dynamic discovery if available
-            try:
-                discovered = (await discover_tools_from_cli()).get("tools") or []
-                for name in discovered:
-                    if name not in catalog:
-                        catalog[name] = {
-                            "name": name,
-                            "category": categorize_tool(name),
-                            "description": get_tool_description(name),
-                        }
-            except Exception:
-                pass
+            # The live surface (ruling T1): fluid's builtins plus the app's own
+            # bridge tools. Deliberately NOT the MCP groups — enumerating those
+            # spawns every configured server, which is far too much for a
+            # keyword lookup inside a turn.
+            from app.core.tool_catalog import app_tools, harness_tools
+
+            catalog = {
+                row["name"]: {
+                    "name": row["name"],
+                    "category": category,
+                    "description": row.get("description") or "",
+                    "risk": row.get("risk"),
+                }
+                for category, rows in (
+                    ("builtin", harness_tools()),
+                    ("app", app_tools()),
+                )
+                for row in rows
+            }
 
             if query.startswith("select:"):
                 names = [n.strip() for n in query[len("select:"):].split(",") if n.strip()]
