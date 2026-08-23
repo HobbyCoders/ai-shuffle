@@ -1506,13 +1506,18 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			if (!taskId) return state;
 			const status = mapTaskStatus(str(event.state));
 			const existing = state.activeTaskSummaries.find((t) => t.id === taskId);
+			// The backend stamps the registry kind ("agent" | "shell") onto
+			// task.updated frames; fall back to the existing summary's kind, then
+			// 'agent' (older logs carry no kind at all).
+			const kind: Task['kind'] =
+				event.kind === 'shell' || event.kind === 'agent'
+					? event.kind
+					: (existing?.kind ?? 'agent');
 			const summary: Task = {
 				id: taskId,
 				subject: typeof event.description === 'string' ? event.description : existing?.subject ?? '',
 				status,
-				// The contract carries no kind for task.updated; default 'agent'
-				// (these are Task-tool / background-work updates). See shape note.
-				kind: existing?.kind ?? 'agent',
+				kind,
 				summary: typeof event.summary === 'string' ? event.summary : existing?.summary ?? null,
 				toolUseId: typeof event.tool_use_id === 'string' ? event.tool_use_id : existing?.toolUseId ?? null,
 				startedAt: existing?.startedAt || createdAt,
