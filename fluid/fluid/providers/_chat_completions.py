@@ -65,26 +65,27 @@ def tool_result_text(block: ToolResultBlock) -> str:
     return "".join(parts)
 
 
-def tool_result_content(block: ToolResultBlock) -> str | list[dict[str, Any]]:
-    """Content for a role:"tool" message.
+def tool_result_content(block: ToolResultBlock) -> str:
+    """Content for a role:"tool" message — always a plain string.
 
-    Plain string when the result is text-only (maximum compatibility); a
-    multimodal content-part array — text plus image_url parts — when it
-    carries images. Providers that cannot take images in tool results will
-    reject or ignore the image parts but still see the text; the previous
-    behavior (json.dumps of the Image block) shipped hundreds of KB of
-    base64 as TEXT on every subsequent request.
+    The OpenAI chat/completions schema defines tool content as text. Sending
+    image_url parts inside a role:"tool" message is accepted by some proxies
+    and forwarded upstream, where it makes providers answer HTTP 200 with an
+    empty stream for the rest of the conversation. So each image leaves a
+    marker in its position here and rides a following role:"user" message
+    instead (see translate_message). Dumping the Image block as JSON is not an
+    option either — that shipped hundreds of KB of base64 as TEXT on every
+    subsequent request.
     """
-    has_image = any(isinstance(c, Image) for c in block.content)
-    if not has_image:
-        return tool_result_text(block)
-    out: list[dict[str, Any]] = []
+    parts: list[str] = []
     for c in block.content:
         if isinstance(c, Text):
-            out.append({"type": "text", "text": c.text})
+            parts.append(c.text)
         elif isinstance(c, Image):
-            out.append(image_part(c))
-    return out
+            parts.append("[image attached — see the user message that follows]")
+        else:
+            parts.append(json.dumps(c.to_dict(), separators=(",", ":"), ensure_ascii=False))
+    return "".join(parts)
 
 
 def image_part(block: Image) -> dict[str, Any]:
@@ -98,14 +99,16 @@ def translate_message(msg: Message) -> list[dict[str, Any]]:
     """One fluid ``Message`` → one or more chat/completions messages.
 
     Tool results become standalone ``role:"tool"`` messages (emitted first, in
-    order); text/image blocks coalesce into one user/assistant message; an
-    assistant's tool_use blocks attach as a ``tool_calls`` array. Reasoning and
-    thinking blocks are dropped.
+    order) whose content is always text; images carried by a tool result move
+    into the single user message that follows them. Text/image blocks coalesce
+    into that same one user/assistant message; an assistant's tool_use blocks
+    attach as a ``tool_calls`` array. Reasoning and thinking blocks are dropped.
     """
     out: list[dict[str, Any]] = []
     text_parts: list[str] = []
     images: list[Image] = []
     tool_calls: list[dict[str, Any]] = []
+    tool_result_images: list[tuple[str, list[Image]]] = []
 
     for block in msg.content:
         if isinstance(block, Text):
@@ -133,6 +136,9 @@ def translate_message(msg: Message) -> list[dict[str, Any]]:
                     "content": tool_result_content(block),
                 }
             )
+            found = [c for c in block.content if isinstance(c, Image)]
+            if found:
+                tool_result_images.append((block.tool_use_id, found))
         elif isinstance(block, (Reasoning, Thinking)):
             continue  # no verbatim reasoning round-trip on chat/completions
 
@@ -145,8 +151,17 @@ def translate_message(msg: Message) -> list[dict[str, Any]]:
         if message["content"] or tool_calls:
             out.append(message)
     else:
-        if images:
-            content: list[dict[str, Any]] = []
+        # Images pulled out of tool results lead the user message that follows
+        # them, each labelled with the tool call it answers.
+        lead_parts: list[dict[str, Any]] = []
+        for tool_use_id, tool_images in tool_result_images:
+            lead_parts.append(
+                {"type": "text", "text": f"Image from tool result {tool_use_id}:"}
+            )
+            lead_parts.extend(image_part(i) for i in tool_images)
+
+        if lead_parts or images:
+            content: list[dict[str, Any]] = list(lead_parts)
             if text_parts:
                 content.append({"type": "text", "text": "".join(text_parts)})
             content.extend(image_part(i) for i in images)
