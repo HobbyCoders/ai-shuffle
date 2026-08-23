@@ -362,7 +362,13 @@ async def test_retries_drop_the_sticky_routing_key() -> None:
     assert [len(r.messages) for r in provider.requests] == [1, 1, 1]
 
 
-async def test_stickiness_returns_after_a_call_that_produced_content() -> None:
+async def test_one_empty_completion_poisons_the_key_for_the_whole_turn() -> None:
+    """A recovered retry does not re-arm stickiness later in the same turn.
+
+    The replica the key pins to stays dead for far longer than one call, so a
+    turn that re-probed after every recovery paid a dud call and a backoff on
+    every model call it made. Once poisoned, the rest of the turn is keyless.
+    """
     registry = ToolRegistry()
     registry.register_inproc(_weather_server())
     provider = ScriptedProvider([
@@ -375,12 +381,45 @@ async def test_stickiness_returns_after_a_call_that_produced_content() -> None:
     )
 
     assert provider.calls == 3
-    # Call 2 is the retry (no key); call 3 follows a real answer, so the
-    # cache-locality hint comes back.
-    assert _session_ids(provider) == [sid, None, sid]
+    # Call 2 is the retry; call 3 is a NEW model call (the tool result came
+    # back) and still goes out without the key.
+    assert _session_ids(provider) == [sid, None, None]
+    assert "session_id" not in provider.requests[2].extra
     assert [r.attempt for r in _retries(loop.bus.log(sid))] == [1]
     nodes = await _assistant_nodes(store, sid)
     assert nodes[-1].message.text() == "It is sunny in Paris."
+
+
+async def test_a_clean_turn_keeps_the_key_on_every_call() -> None:
+    """No empty completion, no poisoning: every call keeps the routing key."""
+    registry = ToolRegistry()
+    registry.register_inproc(_weather_server())
+    provider = ScriptedProvider([
+        _tool_call("t1", "mcp__wx__get_weather", '{"city": "Paris"}'),
+        _text("It is sunny in Paris."),
+    ])
+    loop, store, sid = await _run(
+        provider, registry=registry, permissions=PermissionEngine("never_ask"),
+    )
+
+    assert provider.calls == 2
+    assert _session_ids(provider) == [sid, sid]
+    assert _retries(loop.bus.log(sid)) == []
+    nodes = await _assistant_nodes(store, sid)
+    assert nodes[-1].message.text() == "It is sunny in Paris."
+
+
+async def test_poisoning_does_not_outlive_the_turn() -> None:
+    """The flag is loop-local: the next turn probes stickiness once again."""
+    provider = ScriptedProvider([_empty(), _text("done"), _text("again")])
+    loop, store, sid = await _run(provider)
+
+    await loop.submit(UserTurn(content="and again"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=10)
+
+    assert provider.calls == 3
+    # Turn 1: sticky probe, keyless retry. Turn 2: sticky probe again.
+    assert _session_ids(provider) == [sid, None, sid]
 
 
 # ─── (i) the upstream verdict reaches the user ───────────────────────────────

@@ -1015,6 +1015,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         overflow_retries = 0
         result: _CallResult | None = None
         empty_retries = 0  # CONSECUTIVE empty completions; any real call resets it
+        # Turn-scoped: once a sticky call comes back empty, this turn stops
+        # sending the routing key at all. Local, so the next turn re-probes.
+        sticky_poisoned = False
         continuations = 0
 
         while True:
@@ -1029,8 +1032,9 @@ class NativeLoop(BackgroundLifecycleMixin):
             for promo in promotions:
                 await self._emit_compaction(sid, turn_id, promo)
             projected_prompt = self._estimate_request_input_tokens(history)
+            call_was_sticky = not sticky_poisoned and empty_retries == 0
             result = await self._stream_once(
-                sid, turn_id, history, sticky=(empty_retries == 0)
+                sid, turn_id, history, sticky=call_was_sticky
             )
             num_calls += 1
             if not _is_empty_completion(result):
@@ -1041,6 +1045,14 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # OpenRouter may pick a different upstream replica. Retrying
                 # byte-identically pins the retry to the replica that just
                 # failed, which is how ten retries in a row all come back empty.
+                #
+                # A key whose replica is dead stays dead for longer than one
+                # call: a turn that re-probed stickiness after every recovery
+                # paid a dud call plus a backoff on all 16 of its model calls.
+                # So if THIS call carried the key, drop it for the rest of the
+                # turn; a fresh turn starts unpoisoned and probes again once.
+                if call_was_sticky:
+                    sticky_poisoned = True
                 empty_retries += 1
                 # The dud call may still have billed something.
                 self._fold_call_usage(total_usage, result.usage)
