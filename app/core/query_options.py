@@ -157,25 +157,53 @@ def _append_system_block(prompt: Any, block: Optional[str]) -> Any:
     return f"{current}\n\n{block}" if current else block
 
 
-# Back-compat aliases for tool names that were renamed. Applied at config-read
-# time only (never migrated in the DB) so saved profiles keep working. The
-# builtin ``PushNotification`` leaf tool was renamed to ``NotifyDevices`` to
-# resolve a collision with a bare stub of the same name (issue #610).
-_LEGACY_TOOL_ALIASES = {
-    "PushNotification": "mcp__builtins__NotifyDevices",
-    "mcp__builtins__PushNotification": "mcp__builtins__NotifyDevices",
-}
+# Tool access (ruling T2). ``resolve_tool_access`` is the one seam both legs
+# read; it lives in ``app.core.tool_access`` (no app imports, so the v82
+# migration and the API layer can use it too) and is re-exported here because
+# the plan names this module as its home.
+from app.core.tool_access import (  # noqa: F401  (re-exports, see above)
+    DENY_ALL,
+    LEGACY_TOOL_ALIASES as _LEGACY_TOOL_ALIASES,
+    ToolAccess,
+    apply_legacy_tool_aliases as _apply_legacy_tool_aliases,
+    intersect_tool_surfaces,
+    resolve_tool_access,
+    tool_permitted,
+    tool_selection_mode,
+)
 
 
-def _apply_legacy_tool_aliases(tool_names: list) -> list:
-    """Translate legacy tool names to their current equivalents, in order,
-    without introducing duplicates."""
-    out: list = []
-    for name in tool_names:
-        mapped = _LEGACY_TOOL_ALIASES.get(name, name)
-        if mapped not in out:
-            out.append(mapped)
-    return out
+def _ai_tools_available() -> bool:
+    """Whether the AI-generation tools have a credential to run on.
+
+    Ruling T5 attaches the ai-tools server when at least one AI tool is both
+    AVAILABLE and permitted — every one of them runs on the same fal.ai key, so
+    without it the picker's selection would put non-functional tools on the
+    model's surface.
+    """
+    try:
+        from app.mcp.ai_tools_sdk import _get_fal_api_key
+
+        return bool(_get_fal_api_key())
+    except Exception:  # noqa: BLE001 — an unreadable key is an unavailable one
+        logger.debug("could not resolve the fal.ai key", exc_info=True)
+        return False
+
+
+def _app_config_permitted(config: Optional[Dict[str, Any]]) -> bool:
+    """Whether this agent's tool access permits ANY ``mcp__app-config__*`` tool.
+
+    Ruling T5 retired the standalone ``app_config_tools`` switch: the group is
+    permitted or not by the same picker every other tool goes through. Admin-ness
+    is a separate, unchanged gate the callers apply.
+    """
+    from app.mcp.app_config_sdk import get_app_config_tool_names
+
+    access = resolve_tool_access(config)
+    return any(
+        tool_permitted(name, access.allowed, access.disallowed)
+        for name in get_app_config_tool_names()
+    )
 
 
 class WorktreeUnavailableError(Exception):
@@ -851,8 +879,9 @@ def build_options_from_profile(
     # AgentDefinitions — the Task tool's own description tells the model how
     # to dispatch agents, and the agents themselves carry their prompts.
 
-    # Inject app-config system prompt instructions when tools are enabled (admin only)
-    if config.get("app_config_tools") and not api_user_id:
+    # Inject app-config system prompt instructions when the picker permits the
+    # app_config group and the session is an admin one (ruling T5).
+    if _app_config_permitted(config) and not api_user_id:
         from app.mcp.app_config_sdk import APP_CONFIG_SYSTEM_PROMPT
         if isinstance(final_system_prompt, dict):
             current_append = final_system_prompt.get("append", "")
@@ -1091,8 +1120,14 @@ def build_options_from_profile(
     # Priority: tools > tools_preset > allowed_tools (legacy)
     tools_config = config.get("tools")  # Explicit list of tools
     tools_preset = config.get("tools_preset")  # "claude_code" preset
-    allowed_tools = _apply_legacy_tool_aliases(config.get("allowed_tools") or [])
-    disallowed_tools = _apply_legacy_tool_aliases(config.get("disallowed_tools") or [])
+
+    # Ruling T2: ``tool_selection_mode`` decides, not list emptiness. ``access``
+    # carries the SURFACE (``allowed``) and the blocklist (``disallowed``);
+    # "Disable all tools" now really is ``disallowed=["*"]`` on both legs
+    # instead of an empty allow list every runtime path read as unrestricted.
+    access = resolve_tool_access(config)
+    allowed_tools = list(access.allowed or [])
+    disallowed_tools = list(access.disallowed or [])
 
     # Block the bundled ``claude-api`` skill on every non-Claude provider session
     # (see NON_CLAUDE_DISALLOWED_SKILL). This sits here — on the shared
@@ -1121,16 +1156,37 @@ def build_options_from_profile(
     # Collect MCP tool names that always need to be in allowed_tools
     # (MCP tools must be explicitly allowed regardless of the tools preset)
     mcp_allowed_tools: list = []
-    if ai_tools_config and any(ai_tools_config.values()):
-        from app.mcp.ai_tools_sdk import get_enabled_tool_names
-        mcp_allowed_tools = get_enabled_tool_names(ai_tools_config)
-        if mcp_allowed_tools:
-            logger.debug(f"AI MCP tools to allow: {mcp_allowed_tools}")
 
-    # Add app-config tool names when enabled (admin sessions only)
-    if config.get("app_config_tools") and not api_user_id:
-        from app.mcp.app_config_sdk import get_app_config_tool_names
-        mcp_allowed_tools.extend(get_app_config_tool_names())
+    # Ruling T5: ``ai_tools`` and ``app_config_tools`` are no longer independent
+    # switches. The picker decides, through the same T2 lists every other tool
+    # goes through; these two flags stay on the model for import compatibility
+    # and are ignored here. The ai-tools server is attached whenever at least
+    # one AI tool is permitted, and the app-config server whenever its group is
+    # permitted AND the caller is an admin (an API-key session never gets it,
+    # exactly as before).
+    from app.core.tool_catalog import (
+        ai_tool_names_for_config,
+        ai_tools_config_from_names,
+    )
+
+    ai_tool_names = [
+        name
+        for name in ai_tool_names_for_config(None, every=True)
+        if tool_permitted(name, access.allowed, access.disallowed)
+    ] if _ai_tools_available() else []
+    if ai_tool_names:
+        mcp_allowed_tools.extend(ai_tool_names)
+        logger.debug(f"AI MCP tools to allow: {ai_tool_names}")
+
+    from app.mcp.app_config_sdk import get_app_config_tool_names
+    app_config_names = [
+        name
+        for name in get_app_config_tool_names()
+        if tool_permitted(name, access.allowed, access.disallowed)
+    ]
+    app_config_enabled = bool(app_config_names) and not api_user_id
+    if app_config_enabled:
+        mcp_allowed_tools.extend(app_config_names)
         logger.debug("App-config MCP tools added to allowed_tools")
 
     # Always expose Claude Code builtin bridge tools (ScheduleWakeup, Monitor,
@@ -1236,16 +1292,21 @@ def build_options_from_profile(
 
     ai_tool_env = full_env if full_env else None
 
-    # Build MCP servers dict (pre-compute so we can add app-config server)
+    # Build MCP servers dict (pre-compute so we can add app-config server).
+    # T5: the ai-tools server rides the PERMITTED set, not ``config.ai_tools``.
+    # ``create_ai_tools_server`` still gates on the per-category booleans, so the
+    # picker's selection is projected back onto that shape. (The credential ENV
+    # above is deliberately still built from the raw config: which API keys a
+    # session carries is a credentials question, not a tool-access one.)
     mcp_servers_dict = _build_mcp_servers_dict_with_ai_tools(
         project_dir=Path(working_dir) if working_dir else None,
-        ai_tools_config=ai_tools_config,
+        ai_tools_config=ai_tools_config_from_names(ai_tool_names),
         tool_env=ai_tool_env,
         session_id=session_id,
     ) or {}
 
-    # Add app-config MCP server for admin sessions with the toggle enabled
-    if config.get("app_config_tools") and not api_user_id:
+    # Add app-config MCP server for admin sessions whose picker permits it (T5)
+    if app_config_enabled:
         try:
             from app.mcp.app_config_sdk import create_app_config_server
             app_config_srv = create_app_config_server(
@@ -1583,7 +1644,25 @@ def build_options_from_profile(
     # An all-blank list degrades to None rather than to an empty allowlist: [] on
     # the engine would mean "no tools at all", which is never what a malformed
     # ``tools:`` line asked for.
-    options.aih_tool_allowlist = _surface or None
+    _dispatch_surface = _surface or None
+
+    # Ruling T3: the AGENT's own ``allow`` list is a surface too, and the two
+    # compose — when both exist the session gets the INTERSECTION. This is what
+    # makes "Allow only selected" real on the native leg: fluid filters the
+    # request schemas, the ToolSearch catalog and dispatch, so an unselected
+    # tool is invisible, unloadable and uncallable, instead of merely being
+    # denied by ``can_use_tool`` after the model has already seen and called it.
+    options.aih_tool_allowlist = intersect_tool_surfaces(
+        access.allowed, _dispatch_surface
+    )
+    if options.aih_tool_allowlist == []:
+        # An empty intersection is a real answer ("the agent and the dispatch
+        # definition have no tool in common"), but an empty list on the engine
+        # degrades to unrestricted. Express it as a total deny instead — deny
+        # beats allow on both legs.
+        options.aih_tool_allowlist = None
+        if DENY_ALL not in (options.disallowed_tools or []):
+            options.disallowed_tools = [*(options.disallowed_tools or []), DENY_ALL]
 
     # DB agents in the caller's context use the exact same provider-scoped
     # roster as Task's schema and runtime admission. File/plugin definitions are

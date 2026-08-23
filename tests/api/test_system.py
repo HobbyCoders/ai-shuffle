@@ -49,26 +49,6 @@ class TestSystemModuleImports:
         from app.api.system import router
         assert router is not None
 
-    def test_tool_categories_defined(self):
-        """Tool categories should be defined."""
-        from app.api.system import TOOL_CATEGORIES
-        assert TOOL_CATEGORIES is not None
-        assert "read_only" in TOOL_CATEGORIES
-        assert "edit" in TOOL_CATEGORIES
-        assert "execution" in TOOL_CATEGORIES
-        assert "mcp" in TOOL_CATEGORIES
-        assert "other" in TOOL_CATEGORIES
-
-    def test_builtin_tools_defined(self):
-        """Builtin tools should be defined."""
-        from app.api.system import BUILTIN_TOOLS
-        assert BUILTIN_TOOLS is not None
-        assert len(BUILTIN_TOOLS) > 0
-        # Verify structure of first tool
-        first_tool = BUILTIN_TOOLS[0]
-        assert "name" in first_tool
-        assert "category" in first_tool
-        assert "description" in first_tool
 
 
 # =============================================================================
@@ -100,57 +80,6 @@ class TestSystemModels:
         request = WorkspaceConfigRequest(workspace_path="/new/path")
         assert request.workspace_path == "/new/path"
 
-    def test_tool_info_model(self):
-        """ToolInfo model should be valid."""
-        from app.api.system import ToolInfo
-        tool = ToolInfo(
-            name="TestTool",
-            category="read_only",
-            description="A test tool"
-        )
-        assert tool.name == "TestTool"
-        assert tool.category == "read_only"
-        assert tool.description == "A test tool"
-        assert tool.mcp_server is None
-
-    def test_tool_info_with_mcp_server(self):
-        """ToolInfo model should accept mcp_server."""
-        from app.api.system import ToolInfo
-        tool = ToolInfo(
-            name="McpTool",
-            category="mcp",
-            description="An MCP tool",
-            mcp_server="test-server"
-        )
-        assert tool.mcp_server == "test-server"
-
-    def test_tool_category_model(self):
-        """ToolCategory model should be valid."""
-        from app.api.system import ToolCategory, ToolInfo
-        category = ToolCategory(
-            id="read_only",
-            name="Read-only tools",
-            description="Tools that only read data",
-            tools=[
-                ToolInfo(name="Read", category="read_only", description="Read files")
-            ]
-        )
-        assert category.id == "read_only"
-        assert len(category.tools) == 1
-
-    def test_tools_response_model(self):
-        """ToolsResponse model should be valid."""
-        from app.api.system import ToolsResponse, ToolCategory, ToolInfo
-        tool = ToolInfo(name="Read", category="read_only", description="Read files")
-        category = ToolCategory(
-            id="read_only",
-            name="Read-only",
-            description="Read tools",
-            tools=[tool]
-        )
-        response = ToolsResponse(categories=[category], all_tools=[tool])
-        assert len(response.categories) == 1
-        assert len(response.all_tools) == 1
 
 
 # =============================================================================
@@ -701,187 +630,6 @@ class TestValidateWorkspaceAuth:
 
 
 # =============================================================================
-# Tools List Function Tests
-# =============================================================================
-
-class TestListAvailableToolsFunction:
-    """Test list_available_tools function directly."""
-
-    @pytest.mark.asyncio
-    async def test_list_tools_success(self):
-        """Should return all available tools organized by category."""
-        from app.api.system import list_available_tools
-
-        result = await list_available_tools(token="test-token")
-
-        assert hasattr(result, "categories")
-        assert hasattr(result, "all_tools")
-
-        # Should have multiple categories
-        assert len(result.categories) > 0
-
-        # Should have tools in all_tools
-        assert len(result.all_tools) > 0
-
-    @pytest.mark.asyncio
-    async def test_list_tools_categories_structure(self):
-        """Should have proper category structure."""
-        from app.api.system import list_available_tools
-
-        result = await list_available_tools(token="test-token")
-
-        for category in result.categories:
-            assert hasattr(category, "id")
-            assert hasattr(category, "name")
-            assert hasattr(category, "description")
-            assert hasattr(category, "tools")
-
-    @pytest.mark.asyncio
-    async def test_list_tools_tool_structure(self):
-        """Should have proper tool structure."""
-        from app.api.system import list_available_tools
-
-        result = await list_available_tools(token="test-token")
-
-        for tool in result.all_tools:
-            assert hasattr(tool, "name")
-            assert hasattr(tool, "category")
-            assert hasattr(tool, "description")
-
-    @pytest.mark.asyncio
-    async def test_list_tools_contains_builtin_tools(self):
-        """Should contain all builtin tools."""
-        from app.api.system import list_available_tools, BUILTIN_TOOLS
-
-        result = await list_available_tools(token="test-token")
-
-        tool_names = [t.name for t in result.all_tools]
-
-        for builtin_tool in BUILTIN_TOOLS:
-            assert builtin_tool["name"] in tool_names
-
-
-# =============================================================================
-# Builtin Tools Function Tests
-# =============================================================================
-
-class TestListBuiltinToolsFunction:
-    """Test list_builtin_tools function directly."""
-
-    @pytest.mark.asyncio
-    async def test_list_builtin_tools_success(self):
-        """Should return flat list of builtin tools."""
-        from app.api.system import list_builtin_tools
-
-        result = await list_builtin_tools(token="test-token")
-
-        assert isinstance(result, list)
-        assert len(result) > 0
-
-    @pytest.mark.asyncio
-    async def test_list_builtin_tools_structure(self):
-        """Should have proper tool structure."""
-        from app.api.system import list_builtin_tools
-
-        result = await list_builtin_tools(token="test-token")
-
-        for tool in result:
-            assert hasattr(tool, "name")
-            assert hasattr(tool, "category")
-            assert hasattr(tool, "description")
-
-    @pytest.mark.asyncio
-    async def test_list_builtin_tools_matches_constant(self):
-        """Should match BUILTIN_TOOLS constant."""
-        from app.api.system import list_builtin_tools, BUILTIN_TOOLS
-
-        result = await list_builtin_tools(token="test-token")
-
-        assert len(result) == len(BUILTIN_TOOLS)
-
-        response_names = {t.name for t in result}
-        builtin_names = {t["name"] for t in BUILTIN_TOOLS}
-
-        assert response_names == builtin_names
-
-    @pytest.mark.asyncio
-    async def test_list_builtin_tools_contains_expected_tools(self):
-        """Should contain known builtin tools."""
-        from app.api.system import list_builtin_tools
-
-        expected_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
-
-        result = await list_builtin_tools(token="test-token")
-
-        tool_names = [t.name for t in result]
-
-        for expected in expected_tools:
-            assert expected in tool_names
-
-
-# =============================================================================
-# Tool Categories Verification Tests
-# =============================================================================
-
-class TestToolCategories:
-    """Test tool category definitions."""
-
-    def test_all_tool_categories_defined(self):
-        """All expected categories should be defined."""
-        from app.api.system import TOOL_CATEGORIES
-
-        expected = ["read_only", "edit", "execution", "mcp", "other"]
-
-        for cat in expected:
-            assert cat in TOOL_CATEGORIES
-            assert "name" in TOOL_CATEGORIES[cat]
-            assert "description" in TOOL_CATEGORIES[cat]
-
-    def test_tools_have_valid_categories(self):
-        """All builtin tools should have valid categories."""
-        from app.api.system import BUILTIN_TOOLS, TOOL_CATEGORIES
-
-        valid_categories = set(TOOL_CATEGORIES.keys())
-
-        for tool in BUILTIN_TOOLS:
-            assert tool["category"] in valid_categories, \
-                f"Tool {tool['name']} has invalid category {tool['category']}"
-
-    def test_read_only_tools(self):
-        """Read-only category should contain expected tools."""
-        from app.api.system import BUILTIN_TOOLS
-
-        read_only_tools = [t["name"] for t in BUILTIN_TOOLS if t["category"] == "read_only"]
-
-        expected = ["Read", "Glob", "Grep"]
-        for tool in expected:
-            assert tool in read_only_tools
-
-    def test_edit_tools(self):
-        """Edit category should contain expected tools."""
-        from app.api.system import BUILTIN_TOOLS
-
-        edit_tools = [t["name"] for t in BUILTIN_TOOLS if t["category"] == "edit"]
-
-        expected = ["Edit", "Write"]
-        for tool in expected:
-            assert tool in edit_tools
-
-    def test_execution_tools(self):
-        """Execution category should contain expected tools."""
-        from app.api.system import BUILTIN_TOOLS
-
-        execution_tools = [t["name"] for t in BUILTIN_TOOLS if t["category"] == "execution"]
-
-        # The targeted Claude CLI launches subagents via "Task"; "Agent" is the
-        # newer alias used by other SDK versions and is categorized in
-        # TOOL_CATEGORY_RULES but not necessarily present in the live builtin set.
-        expected = ["Bash", "PowerShell", "Task"]
-        for tool in expected:
-            assert tool in execution_tools
-
-
-# =============================================================================
 # Edge Cases and Error Handling Tests
 # =============================================================================
 
@@ -978,22 +726,6 @@ class TestSystemIntegration:
             result = await set_workspace_config(request, token="test-token")
             assert result.is_configured is True
 
-    @pytest.mark.asyncio
-    async def test_tools_count_matches_builtin(self):
-        """Verify tools functions return consistent data."""
-        from app.api.system import list_available_tools, list_builtin_tools, BUILTIN_TOOLS
-
-        # Get from both functions
-        all_tools_result = await list_available_tools(token="test-token")
-        builtin_result = await list_builtin_tools(token="test-token")
-
-        # Compare only the built-in (non-MCP) tools — discovery may also surface
-        # MCP server tools depending on the environment, which list_builtin_tools
-        # never includes. The static BUILTIN_TOOLS fallback should mirror the
-        # live CLI's built-in tool set.
-        discovered_builtin = [t for t in all_tools_result.all_tools if not t.name.startswith("mcp__")]
-        assert len(discovered_builtin) == len(builtin_result)
-        assert len(discovered_builtin) == len(BUILTIN_TOOLS)
 
 
 # =============================================================================
@@ -1004,21 +736,6 @@ class TestPushNotificationRename:
     """The bare ``PushNotification`` catalog stub collided with the builtin MCP
     tool of the same name; the builtin was renamed to ``NotifyDevices`` and the
     bare stub removed (issue #610)."""
-
-    def test_catalog_has_no_bare_push_notification(self):
-        """BUILTIN_TOOLS must not advertise a bare ``PushNotification`` entry."""
-        from app.api.system import BUILTIN_TOOLS
-
-        names = {t["name"] for t in BUILTIN_TOOLS}
-        assert "PushNotification" not in names
-
-    def test_descriptions_and_rules_drop_bare_name(self):
-        """The bare name must be gone from descriptions and category rules too."""
-        from app.api.system import TOOL_DESCRIPTIONS, TOOL_CATEGORY_RULES
-
-        assert "PushNotification" not in TOOL_DESCRIPTIONS
-        for names in TOOL_CATEGORY_RULES.values():
-            assert "PushNotification" not in names
 
     def test_builtin_exposed_under_new_name(self):
         """The builtin leaf tool is now ``mcp__builtins__NotifyDevices``."""

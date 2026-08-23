@@ -590,32 +590,36 @@ async def list_mcp_tools(
     refresh: bool = False
 ):
     """
-    List all discovered MCP tools from the CLI cache.
+    List every MCP tool a session can be given.
+
+    Discovered live from the configured servers (ruling T1) rather than from
+    whatever the Claude CLI last reported: the same ``tools/list`` round-trip
+    the tool-surface endpoint runs, cached per server for 10 minutes.
 
     Query params:
-        refresh: If true, force refresh from Claude CLI
+        refresh: If true, bypass the per-server cache
     """
     async with api_error_handler("list MCP tools"):
-        # Import here to avoid circular imports
-        from app.api.system import discover_tools_from_cli
+        from app.core.tool_catalog import build_tool_surface
 
-        result = await discover_tools_from_cli(force_refresh=refresh)
-        tools = result.get("tools") or []
-
-        # Filter to just MCP tools
+        surface = await build_tool_surface(refresh=refresh)
         mcp_tools = []
-        for tool_name in tools:
-            if tool_name.startswith("mcp__"):
-                # Parse: mcp__server__tool
-                parts = tool_name.split("__")
-                if len(parts) >= 3:
-                    server = parts[1]
-                    tool = "__".join(parts[2:])  # Handle tools with __ in name
-                    mcp_tools.append(McpToolResponse(
-                        name=tool,
-                        server=server,
-                        description=None
-                    ))
+        for group in surface["groups"]:
+            # Only real MCP servers — the in-process bridge groups
+            # (computer-use, app-config, ai-tools) name a server too but are
+            # not MCP servers anyone configured.
+            if group["kind"] not in ("browser", "mcp"):
+                continue
+            for entry in group["tools"]:
+                # mcp__<server>__<tool>; tool names may themselves contain "__"
+                parts = entry["name"].split("__")
+                if len(parts) < 3:
+                    continue
+                mcp_tools.append(McpToolResponse(
+                    name="__".join(parts[2:]),
+                    server=parts[1],
+                    description=entry.get("description"),
+                ))
 
         return mcp_tools
 

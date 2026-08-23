@@ -4081,6 +4081,189 @@ def test_requires_reconnect_on_a_changed_tool_surface():
     assert adapter.requires_reconnect(_native_opts(disallowed_tools=[])) is True
 
 
+@pytest.mark.asyncio
+async def test_delegated_none_mode_denies_every_tool(recording_adapter):
+    """T4: ``tool_selection_mode: none`` resolves to ``disallowed=["*"]``, and
+    the pinned CLI glob-matches deny rules — so one entry walls the whole leg."""
+    adapter, made = recording_adapter
+    await adapter.connect(
+        SessionOptions(model="claude-sonnet-4-5", disallowed_tools=["*"])
+    )
+    assert "*" in made["delegated"]["disallowed_tools"]
+    assert made["delegated"]["allowed_tools"] is None
+
+
+@pytest.mark.asyncio
+async def test_delegated_allow_mode_subtracts_the_cached_cli_surface(
+    recording_adapter,
+):
+    """T4: with a known CLI surface, everything outside the allow list is passed
+    as ``--disallowed-tools``. The CLI reads --allowed-tools as a GRANT, so
+    without this subtraction the restriction would not exist on this leg."""
+    from app.core import cli_tool_surface
+
+    cli_tool_surface.reset_cli_tools()
+    cli_tool_surface.record_cli_tools(["Read", "Bash", "Write", "Glob"])
+    try:
+        adapter, made = recording_adapter
+        await adapter.connect(
+            SessionOptions(model="claude-sonnet-4-5", tool_allowlist=["Read", "Glob"])
+        )
+    finally:
+        cli_tool_surface.reset_cli_tools()
+
+    denied = made["delegated"]["disallowed_tools"]
+    assert "Bash" in denied and "Write" in denied
+    assert "Read" not in denied and "Glob" not in denied
+    assert made["delegated"]["allowed_tools"] == ["Read", "Glob"]
+
+
+@pytest.mark.asyncio
+async def test_delegated_allow_mode_degrades_without_a_cached_surface(
+    recording_adapter,
+):
+    """Cold cache: only the grant goes out (plus the A6 bans). A documented
+    degradation — the app's can_use_tool callback still gates every call."""
+    from app.core import cli_tool_surface
+    from app.core.provider.harness_adapter import DELEGATED_BANNED_TOOLS
+
+    cli_tool_surface.reset_cli_tools()
+    adapter, made = recording_adapter
+    await adapter.connect(
+        SessionOptions(model="claude-sonnet-4-5", tool_allowlist=["Read"])
+    )
+    assert made["delegated"]["disallowed_tools"] == sorted(DELEGATED_BANNED_TOOLS)
+    assert made["delegated"]["allowed_tools"] == ["Read"]
+
+
+def test_cached_cli_surface_ignores_an_empty_frame():
+    """A frame without a tool list must not blank a good cache — that would
+    silently turn the surface wall back off."""
+    from app.core import cli_tool_surface
+
+    cli_tool_surface.reset_cli_tools()
+    cli_tool_surface.record_cli_tools(["Read"])
+    cli_tool_surface.record_cli_tools([])
+    cli_tool_surface.record_cli_tools(None)
+    assert cli_tool_surface.cached_cli_tools() == ["Read"]
+    cli_tool_surface.reset_cli_tools()
+    assert cli_tool_surface.cached_cli_tools() is None
+
+
+def test_profile_surface_and_dispatch_surface_intersect(mock_db):
+    """T3: the agent's ``allow`` list and a file-agent worker's ``tools:`` list
+    compose — the session gets their intersection, and an empty intersection
+    becomes a total deny rather than an empty (= unrestricted) list."""
+    from app.core.query_options import build_options_from_profile
+
+    profile = {
+        "id": "p1",
+        "name": "p",
+        "config": {"tool_selection_mode": "allow", "allowed_tools": ["Read", "Bash"]},
+    }
+    options, _ = build_options_from_profile(
+        profile, overrides={"tool_allowlist": ["Read", "Grep"]}
+    )
+    assert options.aih_tool_allowlist == ["Read"]
+
+    options, _ = build_options_from_profile(
+        profile, overrides={"tool_allowlist": ["Grep"]}
+    )
+    assert options.aih_tool_allowlist is None
+    assert "*" in options.disallowed_tools
+
+
+def test_profile_surface_alone_becomes_the_session_surface(mock_db):
+    """No dispatch list: the agent's own allow list IS the surface (T3)."""
+    from app.core.query_options import build_options_from_profile
+
+    options, _ = build_options_from_profile(
+        {
+            "id": "p1",
+            "name": "p",
+            "config": {"tool_selection_mode": "allow", "allowed_tools": ["Read"]},
+        }
+    )
+    assert options.aih_tool_allowlist == ["Read"]
+
+    options, _ = build_options_from_profile(
+        {"id": "p2", "name": "p", "config": {"tool_selection_mode": "none"}}
+    )
+    assert options.aih_tool_allowlist is None
+    assert options.disallowed_tools == ["*"]
+
+
+# ─── T9: the prompt never describes a tool the session cannot call ───────────
+
+
+def test_permitted_tool_names_is_none_when_unrestricted():
+    from app.core.provider.harness_adapter import _permitted_tool_names
+
+    assert _permitted_tool_names(_native_opts(), None) is None
+
+
+def test_permitted_tool_names_filters_the_registry():
+    from app.core.provider.harness_adapter import _permitted_tool_names
+
+    permitted = _permitted_tool_names(
+        _native_opts(disallowed_tools=["Task", "Bash"]), None
+    )
+    assert permitted is not None
+    assert "Read" in permitted
+    assert "Task" not in permitted and "Bash" not in permitted
+
+
+def test_disallowing_task_drops_the_agents_index_from_the_prompt(monkeypatch):
+    """An agent with ``Task`` disallowed compiles a native prompt with no
+    "Available agent types" section."""
+    import app.core.provider.harness_adapter as ha
+
+    index = "## Available agent types" + chr(10) + "- x"
+    monkeypatch.setattr(ha, "_agent_context", lambda *a, **k: (index, []))
+
+    with_task = ha.HarnessAdapter._compile_prompt_sections("base", None, _native_opts())
+    assert any(s.kind == "agents" for s in with_task.sections)
+
+    without = ha.HarnessAdapter._compile_prompt_sections(
+        "base", None, _native_opts(disallowed_tools=["Task"])
+    )
+    assert not any(s.kind == "agents" for s in without.sections)
+    assert "Available agent types" not in (without.text or "")
+
+
+def test_code_mode_tool_sections_skip_a_filtered_tool():
+    """``Bash`` disallowed in code mode yields no Bash docs section."""
+    from types import SimpleNamespace
+
+    from app.core.provider.harness_adapter import (
+        _code_mode_tool_sections,
+        _tool_predicate,
+    )
+
+    class _Spec:
+        def __init__(self, name):
+            self.name = name
+            self.description = name + " does things."
+            self.input_schema = {"type": "object", "properties": {}}
+            self.code_mode_allowed = True
+
+    class _Projection:
+        def leaves(self):
+            return ["Read", "Bash"]
+
+        def spec_for(self, leaf):
+            return _Spec(leaf)
+
+    codemode = SimpleNamespace(_projection=lambda: _Projection())
+
+    unfiltered = [name for _, name in _code_mode_tool_sections(codemode)]
+    assert unfiltered == ["Read", "Bash"]
+
+    permit = _tool_predicate(_native_opts(disallowed_tools=["Bash"]))
+    filtered = [name for _, name in _code_mode_tool_sections(codemode, permit)]
+    assert filtered == ["Read"]
+
+
 def test_vendored_native_loop_accepts_the_restriction_kwargs():
     """Pins the vendored seam itself (fluid 020a1d6, ruling CE12)."""
     import inspect

@@ -894,6 +894,7 @@ async def export_profile(
         system_prompt_content=prompt_content or None,
         allowed_tools=config.get("allowed_tools"),
         disallowed_tools=config.get("disallowed_tools"),
+        tool_selection_mode=config.get("tool_selection_mode"),
         enabled_agents=config.get("enabled_agents"),
         agent_invoke_mode=config.get("agent_invoke_mode"),
         ai_tools=ai_tools,
@@ -1026,6 +1027,12 @@ async def import_profile(
         config["allowed_tools"] = agent_data.allowed_tools
     if agent_data.disallowed_tools:
         config["disallowed_tools"] = agent_data.disallowed_tools
+    # Ruling T2: an explicit mode in the file is authoritative. Absent, the
+    # runtime infers it from the lists exactly as the old editor did, so a
+    # pre-T2 export still imports with the intent its author saw.
+    from app.core.tool_access import TOOL_SELECTION_MODES
+    if agent_data.tool_selection_mode in TOOL_SELECTION_MODES:
+        config["tool_selection_mode"] = agent_data.tool_selection_mode
     # Invoke grants (A10). An explicit mode in the file is authoritative: under
     # "custom" the allowlist is exact, so it is written even when it filters to
     # empty ("may invoke no agents"). Files with no mode keep legacy behavior.

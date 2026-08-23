@@ -126,11 +126,13 @@ class ProfileConfig(BaseModel):
     tools_preset: Optional[str] = None  # "claude_code" to use preset (SDK 0.1.12+)
     allowed_tools: Optional[List[str]] = None
     disallowed_tools: Optional[List[str]] = None
-    # UI-only: which tool-access mode the profile editor is in ("all", "none",
-    # "allow", "disallow"). Persisted so the dropdown round-trips unambiguously
-    # (e.g. "Allow Only Selected" with no tools yet picked can't be inferred from
-    # allowed_tools alone). The runtime ignores this and reads allowed_tools /
-    # disallowed_tools directly.
+    # The RUNTIME AUTHORITY for tool access (ruling T2): "all", "none",
+    # "allow" or "disallow". Both legs resolve through
+    # ``app.core.tool_access.resolve_tool_access``, which reads this and only
+    # then the lists — it no longer infers intent from list emptiness, so
+    # "Disable all tools" is a real deny instead of an empty allow list every
+    # path read as unrestricted. Absent (a config the v82 migration never saw)
+    # falls back to the legacy inference.
     tool_selection_mode: Optional[str] = None
 
     # AI tools configuration - individual toggles for each AI tool
@@ -921,6 +923,10 @@ class AgentExportData(BaseModel):
     system_prompt_content: Optional[str] = None
     allowed_tools: Optional[List[str]] = None
     disallowed_tools: Optional[List[str]] = None
+    # The tool-access mode (ruling T2). Exported so an agent round-trips its
+    # intent rather than having it re-inferred from list emptiness on import;
+    # a file written before T2 carries None and imports by inference.
+    tool_selection_mode: Optional[str] = None
     enabled_agents: Optional[List[str]] = None
     agent_invoke_mode: Optional[str] = None  # None | "all" | "custom" (see ProfileConfig)
     ai_tools: Optional[AIToolsConfig] = None

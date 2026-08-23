@@ -499,38 +499,37 @@ def reset_worktree_fetch_cache():
 
 
 @pytest.fixture(autouse=True)
-def prevent_real_cli_tool_discovery():
+def prevent_real_mcp_tool_discovery():
     """
-    Guard against tests launching the real ``claude`` CLI for tool discovery.
+    Guard against tests spawning real MCP servers for tool discovery.
 
-    ``app.api.system.discover_tools_from_cli`` shells out to
-    ``claude --tools default -p exit``, which boots *every* configured MCP server
-    (pencil, Gmail, Drive, computer-use, browser, ...). Running that during the
-    test suite — especially across multiple parallel sessions — can exhaust
-    system memory and freeze the machine.
+    ``app.core.tool_catalog`` enumerates every configured MCP server by actually
+    connecting to it and calling ``tools/list`` (pencil, Gmail, Drive, browser,
+    ...). Running that during the test suite — especially across parallel
+    sessions — can exhaust system memory and freeze the machine.
 
-    Default every test to the deterministic built-in fallback (``tools=None``,
-    which makes ``list_available_tools`` use ``BUILTIN_TOOLS``). Tests that need
-    discovered-tool behaviour patch ``discover_tools_from_cli`` themselves
-    (e.g. tests/api/test_mcp.py); that inner patch transparently overrides this
-    guard.
+    Default every test to "no MCP server answers": the in-process groups
+    (harness / app / ai / computer_use / app_config) are still built for real,
+    which is what the surface tests assert on. Tests that need a specific MCP
+    catalog patch ``_list_mcp_tools`` themselves; the inner patch transparently
+    overrides this guard.
+
+    (This replaced a guard against ``app.api.system.discover_tools_from_cli``,
+    which ruling T1 deleted along with the rest of the CLI-shelling inventory.)
     """
     try:
-        import app.api.system as system_mod
+        import app.core.tool_catalog as catalog_mod
     except Exception:
-        # If the system module can't be imported, there's nothing to guard.
+        # If the module can't be imported, there's nothing to guard.
         yield
         return
 
-    # Discard anything a real discovery call may have cached before the guard.
-    system_mod._tools_cache = {"tools": None, "mcp_servers": None, "loaded": False}
-
+    catalog_mod.clear_mcp_cache()
     with patch.object(
-        system_mod,
-        "discover_tools_from_cli",
-        new=AsyncMock(return_value={"tools": None, "mcp_servers": None}),
+        catalog_mod, "_list_mcp_tools", new=AsyncMock(return_value=[])
     ):
         yield
+    catalog_mod.clear_mcp_cache()
 
 
 @pytest.fixture(autouse=True)

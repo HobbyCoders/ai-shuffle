@@ -333,12 +333,18 @@ async def test_boot_reap_requeues_dead_lease_turns_and_kicks(
 # Schema: version parity + parked_task_kind column
 # =============================================================================
 
-def test_schema_version_parity_v81():
+def test_schema_version_parity_v82():
     from app.db.database import SCHEMA_VERSION as db_version
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 81 for sessions.fast, the per-session fast-mode toggle that
+    # Bumped to 82 for the tool-access rulings T2/T5: _migrate_agent_tool_access
+    # stamps ``tool_selection_mode`` into every agents.config and folds the two
+    # retired switches (``ai_tools`` / ``app_config_tools``) into the tool
+    # lists, so the runtime never infers intent from list emptiness again. No
+    # DDL — a JSONB data migration in the always-run column-migration pass,
+    # idempotent because a config already carrying a valid mode is skipped.
+    # v81 was sessions.fast, the per-session fast-mode toggle that
     # rides alongside the rest of the run binding: TRUE asks the leg for its
     # expedited service (the Claude CLI's fastMode setting on the delegated
     # lane, service_tier: priority on the OpenAI Responses one), and NULL —
@@ -413,8 +419,8 @@ def test_schema_version_parity_v81():
     # the Phase-2 turns table; v58 was the Phase-1 deletion (v2_stream forced
     # TRUE + default flipped); v57 added the opt-in flag; v56 added the Phase-0
     # primitives.
-    assert db_version == 81
-    assert pg_version == 81
+    assert db_version == 82
+    assert pg_version == 82
     assert db_version == pg_version
 
 

@@ -27,7 +27,11 @@ logger = logging.getLogger(__name__)
 # (v79): an agent is the configuration, and the run binding belongs to the
 # session the user creates from it.
 DEFAULT_PROFILE_CONFIG: Dict[str, Any] = {
-    "allowed_tools": [],
+    # Ruling T2: the mode is the authority, and a new agent gets every tool.
+    # The old ``"allowed_tools": []`` here meant "unrestricted" only because
+    # every runtime path read an empty list as absent — the exact ambiguity T2
+    # removed, so the lists are simply not written.
+    "tool_selection_mode": "all",
     "system_prompt": {
         "type": "custom",
         "content": ""
@@ -61,7 +65,14 @@ STARTER_AGENT: Dict[str, Any] = {
             "type": "custom",
             "content": "",
         },
-        "allowed_tools": [],
+        # Ruling T2 vocabulary. Everything except the app-configuration tools:
+        # ``app_config_tools`` used to be its own switch, defaulting OFF, and
+        # T5 folded it into the tool lists — so the starter agent keeps the
+        # exact posture it always had (a fresh install's default agent cannot
+        # rewrite hooks, automations, MCP servers or agents until its owner
+        # ticks the group in the picker).
+        "tool_selection_mode": "disallow",
+        "disallowed_tools": ["mcp__app-config__*"],
         # Live streaming deltas ON: this is the agent a fresh install chats
         # with, and the app's streaming UX (typewriter, gap indicators,
         # stream_delta handling) requires partial messages. With this False a

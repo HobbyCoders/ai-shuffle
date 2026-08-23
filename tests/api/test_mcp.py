@@ -214,28 +214,46 @@ class TestMcpTools:
     """Tests for MCP tools discovery endpoints."""
 
     def test_list_tools_empty(self, client, mock_mcp_service):
-        """Test listing MCP tools when none are discovered."""
-        with patch("app.api.system.discover_tools_from_cli") as mock_discover:
-            mock_discover.return_value = {"tools": []}
+        """No MCP server answers ``tools/list`` -> an empty list, not an error."""
+        response = client.get("/api/v1/mcp/tools")
 
-            response = client.get("/api/v1/mcp/tools")
-
-            assert response.status_code == 200
-            data = response.json()
-            assert isinstance(data, list)
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, list)
+        # The in-process groups (harness/ai/...) carry no ``server``, so they
+        # must never leak into the MCP-tool listing.
+        assert all(entry["server"] for entry in data)
 
     def test_list_tools_with_tools(self, client, mock_mcp_service):
-        """Test listing MCP tools when tools are discovered."""
-        with patch("app.api.system.discover_tools_from_cli") as mock_discover:
-            mock_discover.return_value = {"tools": ["mcp__server__tool1"]}
+        """Tools come from the live surface (ruling T1), split back into
+        ``server`` + bare tool name."""
+        from unittest.mock import AsyncMock
 
+        import app.core.tool_catalog as catalog
+
+        catalog.clear_mcp_cache()
+        with patch.object(
+            catalog,
+            "_configured_mcp_servers",
+            new=lambda errors: (None, {"server": object()}),
+        ), patch.object(
+            catalog,
+            "mcp_server_tools",
+            new=AsyncMock(
+                return_value=(
+                    [{"name": "mcp__server__tool1", "description": "One.", "risk": "read"}],
+                    None,
+                )
+            ),
+        ):
             response = client.get("/api/v1/mcp/tools")
 
-            assert response.status_code == 200
-            data = response.json()
-            assert len(data) == 1
-            assert data[0]["name"] == "tool1"
-            assert data[0]["server"] == "server"
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["name"] == "tool1"
+        assert data[0]["server"] == "server"
+        assert data[0]["description"] == "One."
 
 
 # =============================================================================
