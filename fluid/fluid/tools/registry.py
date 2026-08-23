@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from fluid.tools.mcp.manager import McpManager
@@ -291,21 +291,47 @@ class ToolRegistry:
         prior ``input_required`` outcome's ``request_state`` together with the
         collected answers and the MCP server resumes the paused call. Only
         meaningful for MCP-sourced tools; ignored for in-proc handlers."""
+        from fluid.tools.hardening import (
+            coerce_args,
+            elision_notice,
+            fence_untrusted,
+            scrub_error_text,
+        )
+
         ctx = ctx or ToolCtx()
         entry = self._entries.get(name)
         if entry is None:
             return ToolOutcome(text=f"unknown tool: {name}", is_error=True)
         try:
+            input = coerce_args(input, entry.spec.input_schema)
             if entry.spec.source == "mcp":
                 _, server, tool = name.split("__", 2)
-                return await self._manager.dispatch(
+                outcome = await self._manager.dispatch(
                     server, tool, input,
                     input_responses=input_responses, request_state=request_state,
                 )
-            assert entry.handler is not None
-            return _normalize(await entry.handler(input, ctx))
+            else:
+                assert entry.handler is not None
+                outcome = _normalize(await entry.handler(input, ctx))
         except Exception as exc:  # keep tool errors in-context, never crash the loop
-            return ToolOutcome(text=f"{type(exc).__name__}: {exc}", is_error=True)
+            return ToolOutcome(
+                text=scrub_error_text(f"{type(exc).__name__}: {exc}"), is_error=True
+            )
+        # External-source hardening: MCP results are authored by whatever the
+        # server fetched, so their text is fenced as data (with any embedded
+        # elision markers flagged first, inside the fence, next to the data
+        # they describe). Errors are bounded and de-framed instead — a fence
+        # around an error would bury the reason the model must read.
+        if entry.spec.source == "mcp":
+            if outcome.is_error:
+                outcome = replace(outcome, text=scrub_error_text(outcome.text))
+            elif outcome.text:
+                text = outcome.text
+                notice = elision_notice(text)
+                if notice:
+                    text = f"{text}\n\n{notice}"
+                outcome = replace(outcome, text=fence_untrusted(text, name))
+        return outcome
 
     async def aclose(self) -> None:
         await self._manager.aclose()

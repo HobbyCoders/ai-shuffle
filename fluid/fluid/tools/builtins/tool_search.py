@@ -49,28 +49,62 @@ def _one_line(text: str) -> str:
 # The literal first line of every catalog block. Rendering and parsing share it
 # so a resumed session can recognise its own past announcements.
 DEFERRED_CATALOG_HEADER = "The following deferred tools are available."
-_CATALOG_NAME_RE = re.compile(r"^- ([^\s:]+):", re.MULTILINE)
+# Full-tier lines are ``- name: desc``; names-only tier lines are bare
+# ``- name`` — the parser accepts both. Server-summary lines use ``* `` so
+# they are never mistaken for tool names.
+_CATALOG_NAME_RE = re.compile(r"^- ([^\s:]+?):?(?:\s|$)", re.MULTILINE)
+
+# Catalog budget: the listing rides a user turn once per newly-known tool, so
+# an unbounded catalog from a large MCP server (thousands of tools) would eat
+# the window before work starts. Tiers degrade: full (name + one-liner) →
+# names only → one summary line per server.
+CATALOG_BUDGET_CHARS = 12_000
+
+_CATALOG_PREAMBLE = (
+    "{header} Their schemas are NOT loaded — calling one directly will fail; "
+    "load its schema first with the ToolSearch tool (query "
+    '"select:<name>[,<name>...]" or keywords). A tool listed here is '
+    "available: never claim it is unavailable, and never substitute another "
+    "route for it — load it instead."
+)
 
 
-def render_deferred_catalog(specs: Sequence[ToolSpec]) -> str | None:
+def _server_of(name: str) -> str:
+    parts = name.split("__", 2)
+    return parts[1] if len(parts) == 3 else "(local)"
+
+
+def render_deferred_catalog(
+    specs: Sequence[ToolSpec], *, budget_chars: int = CATALOG_BUDGET_CHARS
+) -> str | None:
     """System-reminder block announcing known-but-unloaded tools.
 
-    The deferred tier of progressive disclosure: names + truncated one-line
-    descriptions, so the model can ``select:`` exact names or pick search
-    keywords without any schema entering the prompt. Returns ``None`` when
-    there is nothing to announce.
+    The deferred tier of progressive disclosure, budgeted: the full listing
+    (name + truncated one-line description) is used while it fits
+    ``budget_chars``; past that it degrades to bare names, and past *that* to
+    one line per server — so a pathological catalog can never eat the window.
+    Returns ``None`` when there is nothing to announce.
     """
     if not specs:
         return None
-    lines = "\n".join(
-        f"- {s.name}: {_one_line(s.description)}" for s in sorted(specs, key=lambda s: s.name)
-    )
+    ordered = sorted(specs, key=lambda s: s.name)
+    full = "\n".join(f"- {s.name}: {_one_line(s.description)}" for s in ordered)
+    if len(full) > budget_chars:
+        names_only = "\n".join(f"- {s.name}" for s in ordered)
+        if len(names_only) <= budget_chars:
+            full = names_only
+        else:
+            by_server: dict[str, int] = {}
+            for s in ordered:
+                by_server[_server_of(s.name)] = by_server.get(_server_of(s.name), 0) + 1
+            full = "\n".join(
+                f"* {server}: {count} tools — find them with ToolSearch keywords"
+                for server, count in sorted(by_server.items())
+            )
     return (
-        f"<system-reminder>\n{DEFERRED_CATALOG_HEADER} Their "
-        "schemas are NOT loaded — calling them directly will fail. Load a "
-        "schema first with the ToolSearch tool (query "
-        '"select:<name>[,<name>...]" or keywords):\n'
-        f"{lines}\n</system-reminder>"
+        "<system-reminder>\n"
+        + _CATALOG_PREAMBLE.format(header=DEFERRED_CATALOG_HEADER)
+        + f"\n{full}\n</system-reminder>"
     )
 
 

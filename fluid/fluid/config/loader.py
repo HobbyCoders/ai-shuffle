@@ -88,6 +88,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
         "max_resident_span_digests": 20,
         "epoch_fold_spans": 10,
         "intake_stub_chars": 25_000,
+        "tool_result_stub_chars": 50_000,
         "keep_recent_tool_results": 5,
         "min_result_chars": 2_000,
     },
@@ -573,6 +574,7 @@ def build_engine(
         max_resident_span_digests=cc.max_resident_span_digests,
         epoch_fold_spans=cc.epoch_fold_spans,
         intake_stub_chars=cc.intake_stub_chars,
+        tool_result_stub_chars=cc.tool_result_stub_chars,
     )
 
     return NativeLoop(

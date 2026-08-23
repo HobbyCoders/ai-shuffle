@@ -20,7 +20,11 @@ SPEC = ToolSpec(
         "changes to an existing file (overwriting a large file to change a "
         "few lines wastes tokens and risks losing content). Overwriting is "
         "destructive: for a file you did not create this session, Read it "
-        "first so you know what you are replacing."
+        "first so you know what you are replacing.\n"
+        "\n"
+        "A successful Write is confirmed by its result — do NOT Read the "
+        "file back just to verify the write landed; a failure would have "
+        "returned an error instead."
     ),
     input_schema={
         "type": "object",

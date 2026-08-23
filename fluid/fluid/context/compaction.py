@@ -84,6 +84,13 @@ class CompactionConfig:
     # Intake: user Text blocks longer than this always render as a stub.
     intake_stub_chars: int = 25_000
     intake_preview_chars: int = 500
+    # Intake for tool results: a non-error tool-result Text block over this
+    # renders as a stub immediately — the batch trim ladder fires on a token
+    # trigger, so without this a single monster result (or several in one
+    # turn) could overflow the window before any trigger runs. Same stateless
+    # pure-function-of-size contract as the user-attachment stub; errors are
+    # never stubbed (losing an error message is how doom loops start).
+    tool_result_stub_chars: int = 50_000
     # Digest extraction caps.
     user_text_cap: int = 600
     assistant_text_cap: int = 400
@@ -256,6 +263,16 @@ def _intake_stub(node_id: str, text: str, config: CompactionConfig) -> Text:
     )
 
 
+def _tool_result_stub(node_id: str, text: str, config: CompactionConfig) -> Text:
+    preview = text[: config.intake_preview_chars]
+    return Text(
+        f"[large tool result: {len(text)} chars — preview: {preview}… "
+        f"The rest is NOT in context: do not reconstruct it from memory; "
+        f'recover it with HistoryExpand("{node_id}", offset=N) when any '
+        f"detail matters]"
+    )
+
+
 @dataclass
 class Compactor:
     """Owns the eviction ladder state and renders compacted history views."""
@@ -336,6 +353,29 @@ class Compactor:
             ):
                 blocks.append(
                     _intake_stub(node.node_id, block.text, self.config)
+                )
+                changed = True
+            elif (
+                isinstance(block, ToolResultBlock)
+                and not block.is_error
+                and any(
+                    isinstance(b, Text)
+                    and len(b.text) > self.config.tool_result_stub_chars
+                    for b in block.content
+                )
+            ):
+                blocks.append(
+                    ToolResultBlock(
+                        tool_use_id=block.tool_use_id,
+                        content=[
+                            _tool_result_stub(node.node_id, b.text, self.config)
+                            if isinstance(b, Text)
+                            and len(b.text) > self.config.tool_result_stub_chars
+                            else b
+                            for b in block.content
+                        ],
+                        is_error=block.is_error,
+                    )
                 )
                 changed = True
             else:

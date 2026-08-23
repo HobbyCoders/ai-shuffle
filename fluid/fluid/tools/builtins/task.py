@@ -56,7 +56,12 @@ SPEC = ToolSpec(
         "mode='sync' (default) waits for the subagent's report; "
         "mode='background' returns immediately with the worker session id "
         "and completion is pushed to you later — keep doing other useful "
-        "work instead of polling."
+        "work instead of polling.\n"
+        "\n"
+        "A subagent's report is a SELF-REPORT, not a verified fact: for any "
+        "external side effect it claims (a file written, a push, an upload), "
+        "verify the handle it returns — stat the path, fetch the URL, read "
+        "the content — before telling the user the operation succeeded."
     ),
     input_schema={
         "type": "object",

@@ -213,6 +213,7 @@ class ContextConfig:
     max_resident_span_digests: int = 20
     epoch_fold_spans: int = 10
     intake_stub_chars: int = 25_000
+    tool_result_stub_chars: int = 50_000
     # Tier-1 (tool-result trim) knobs.
     keep_recent_tool_results: int = 5
     min_result_chars: int = 2_000
@@ -228,6 +229,7 @@ class ContextConfig:
             max_resident_span_digests=int(d.get("max_resident_span_digests", 20)),
             epoch_fold_spans=int(d.get("epoch_fold_spans", 10)),
             intake_stub_chars=int(d.get("intake_stub_chars", 25_000)),
+            tool_result_stub_chars=int(d.get("tool_result_stub_chars", 50_000)),
             keep_recent_tool_results=int(d.get("keep_recent_tool_results", 5)),
             min_result_chars=int(d.get("min_result_chars", 2_000)),
         )
@@ -388,6 +390,7 @@ class HarnessConfig:
                 "max_resident_span_digests": self.context.max_resident_span_digests,
                 "epoch_fold_spans": self.context.epoch_fold_spans,
                 "intake_stub_chars": self.context.intake_stub_chars,
+                "tool_result_stub_chars": self.context.tool_result_stub_chars,
                 "keep_recent_tool_results": self.context.keep_recent_tool_results,
                 "min_result_chars": self.context.min_result_chars,
             },
