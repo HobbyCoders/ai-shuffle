@@ -128,8 +128,9 @@ The top-level object has `id`, `name`, `description`, `is_builtin`, `is_modified
 | `system_prompt` | object | `{type: "preset"\|"custom", preset, content, append, inject_env_details}` |
 | `thinking_mode` | string | `default`, `think`, `think_harder`, `ultra_think` |
 | `provider_models` | object | Model to run this agent on when another agent dispatches it as a subagent, keyed by provider (`__native__` for Claude). The one model binding an agent still owns |
-| `allowed_tools` | string[] | Tool whitelist (empty/null = all tools allowed) |
-| `disallowed_tools` | string[] | Tool blacklist |
+| `tool_selection_mode` | string | `all`, `none`, `allow`, or `disallow` — decides what the two lists below mean. `all` and `none` carry no list |
+| `allowed_tools` | string[] | The tool surface in `allow` mode. Exact names or `fnmatch` patterns (a whole MCP server saves as `mcp__<server>__*`) |
+| `disallowed_tools` | string[] | The block list in `disallow` mode. Same entry shapes |
 | `enabled_plugins` | string[] | Plugin paths to enable |
 | `enabled_agents` | string[] | IDs of the agents declared into this agent's context — they appear in the prompt's agents index as name + description. This is not an allowlist: the Task tool dispatches any agent that resolves. Read together with `agent_invoke_mode` |
 | `agent_invoke_mode` | string | Context-declaration mode: `all` (declare every agent), `custom` (declare exactly `enabled_agents` — an empty list declares none), or omitted/null (legacy: a non-empty `enabled_agents` declares those ids, an empty/absent one declares all) |
@@ -144,6 +145,18 @@ that still carries them uses them only as a fallback for sessions created before
 those settings moved onto the session row (a top-level `model` also still seeds
 the agent's native subagent binding). The model behind internal one-shot
 generation is a separate setting — see `GET/PUT /api/v1/settings/text-generation`.
+
+The tool names that may appear in `allowed_tools` / `disallowed_tools` are not a
+fixed set. `GET /api/v1/tools/surface` discovers them live from the running
+registries — harness builtins, the app's bridged servers, AI tools, browser,
+computer use, app configuration, and every configured MCP server — grouped, with
+a `discovered_at` stamp and an `errors` entry for any server that failed to
+answer. Add `?refresh=true` to bust the per-server enumeration cache. The agent
+editor's Tools tab is exactly that response; nothing anywhere hardcodes a list.
+
+`ai_tools` and `app_config_tools` are legacy: those tools are now granted through
+the same list as everything else. Both fields are still accepted so older exports
+import cleanly.
 
 
 ## Nested Agents (formerly "subagents")
@@ -202,7 +215,7 @@ Create a new nested agent and enable it for this agent.
 | `name` | string | Yes | Nested agent display name (also used to derive its id) |
 | `description` | string | Yes | When to use this nested agent (shown to Claude) |
 | `prompt` | string | Yes | System prompt for the nested agent |
-| `tools` | string[] | No | Allowed tools (null = inherit all from parent) |
+| `tools` | string[] | No | Allowed tools (null = inherit all from parent). Names come from `GET /api/v1/tools/surface` |
 | `model` | string | No | Model override, or null to inherit |
 
 ```bash

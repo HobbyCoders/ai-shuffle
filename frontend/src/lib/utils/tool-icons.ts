@@ -35,9 +35,12 @@ export const TOOL_ICON_MAP: Record<string, IconType> = {
 	// 3D generation
 	textTo3D: 'cube', imageTo3D: 'cube', retexture3D: 'cube', rig3D: 'cube', animate3D: 'cube', getTask3D: 'cube',
 	// File operations
-	Read: 'file', Write: 'pencil', Edit: 'pencil', NotebookEdit: 'pencil',
+	Read: 'file', Write: 'pencil', Edit: 'pencil', NotebookEdit: 'pencil', Note: 'pencil',
 	// Search
 	Glob: 'search', Grep: 'search', ToolSearch: 'search',
+	// Transcript / recall builtins (fluid)
+	HistorySearch: 'search', SessionSearch: 'search', HistoryExpand: 'clock',
+	Ledger: 'list', Memory: 'file', AskUser: 'bot',
 	// Terminal
 	Bash: 'terminal', KillShell: 'terminal', SlashCommand: 'terminal', LSP: 'terminal',
 	// Web
