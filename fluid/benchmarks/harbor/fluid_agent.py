@@ -157,6 +157,11 @@ class FluidAgent(BaseInstalledAgent):
         if not access.api_key:
             raise ValueError(f"No API key found for provider: {provider_prefix}")
         env = {**access.env, api_key_env: access.api_key}
+        # Output budget per model call. Claude Code's default is 32k; pass
+        # FLUID_MAX_TOKENS through so both legs can run with the same cap.
+        max_tokens = os.environ.get("FLUID_MAX_TOKENS")
+        if max_tokens:
+            env["FLUID_MAX_TOKENS"] = max_tokens
 
         cli_flags = self.build_cli_flags()
         extra_flags = f"{cli_flags} " if cli_flags else ""

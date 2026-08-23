@@ -106,6 +106,13 @@ _DOOM_LOOP_REASON = (
 )
 
 
+_CONTINUE_NUDGE = (
+    "Your previous reply was cut off by the output token limit. Continue "
+    "exactly where you stopped without repeating what you already said. "
+    "Use tools to act rather than narrating long plans."
+)
+
+
 @dataclass
 class _CallResult:
     """Outcome of one streamed model call."""
@@ -256,6 +263,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         plan_mode: bool = False,
         codemode: CodeModeSession | None = None,
         max_model_calls_per_turn: int = 50,
+        max_continuations_per_turn: int = 3,
         trim: TrimConfig | None = None,
         compaction: CompactionConfig | None = None,
         mcp_servers: dict[str, dict[str, Any]] | None = None,
@@ -319,6 +327,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         if codemode is not None and registry is not None:
             register_code_mode_tools(registry, codemode)
         self.max_model_calls_per_turn = max_model_calls_per_turn
+        self.max_continuations_per_turn = max_continuations_per_turn
         self._session: SessionMeta | None = None
         self._session_id = session_id
         self._interrupted = asyncio.Event()
@@ -833,6 +842,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         total_usage: dict[str, Any] = {}
         final_stop = "end_turn"
         overflow_retries = 0
+        continuations = 0
 
         while True:
             nodes = await self.store.load_path(sid, parent.node_id)
@@ -924,6 +934,23 @@ class NativeLoop(BackgroundLifecycleMixin):
                 and result.stop_reason == "tool_use"
                 and bool(result.tool_uses)
             )
+            if (
+                not dispatchable
+                and result.stop_reason == "max_tokens"
+                and continuations < self.max_continuations_per_turn
+                and num_calls < self.max_model_calls_per_turn
+            ):
+                # The model ran out of output budget mid-answer (reasoning-
+                # heavy models do this routinely). Ending the turn here would
+                # abandon the work, so ask it to pick up where it stopped.
+                continuations += 1
+                nudge = SessionNode(
+                    node_id=new_id("node"), parent_id=parent.node_id,
+                    message=Message(role="user", content=[Text(_CONTINUE_NUDGE)]),
+                )
+                await self.store.append(sid, nudge)
+                parent = nudge
+                continue
             if not dispatchable:
                 final_stop = result.stop_reason
                 break

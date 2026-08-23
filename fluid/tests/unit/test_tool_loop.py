@@ -462,3 +462,45 @@ def test_plan_mode_filters_write_tools() -> None:
     assert "Bash" not in names and "Edit" not in names and "Write" not in names
     # third cache breakpoint reserved once tool defs are present
     assert request.cache_breakpoints == 3
+
+
+def _cut_off(text: str) -> list[StreamChunk]:
+    chunks = _text(text)
+    chunks[4] = StreamChunk(
+        "usage", {"usage": {"output_tokens": 5}, "stop_reason": "max_tokens"}
+    )
+    return chunks
+
+
+async def test_max_tokens_stop_continues_the_turn() -> None:
+    provider = ScriptedProvider([_cut_off("half a plan"), _text("...and the rest.")])
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="claude-sonnet-5",
+        registry=ToolRegistry(), permissions=PermissionEngine("never_ask"),
+    )
+    await loop.submit(UserTurn(content="go"))
+    await loop.wait_turn()
+
+    done = next(e for e in loop.bus.log(loop.session_id) if isinstance(e, TurnComplete))
+    assert done.stop_reason == "end_turn"
+    assert done.num_model_calls == 2
+    # The second call sees the cut-off reply and a continuation nudge after it.
+    history = provider.requests[1].messages
+    assert history[-1].role == "user"
+    assert "cut off" in history[-1].content[0].text
+    assert history[-2].role == "assistant"
+
+
+async def test_max_tokens_continuations_are_bounded() -> None:
+    provider = ScriptedProvider([_cut_off("never ends")])
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="claude-sonnet-5",
+        registry=ToolRegistry(), permissions=PermissionEngine("never_ask"),
+        max_continuations_per_turn=2,
+    )
+    await loop.submit(UserTurn(content="go"))
+    await loop.wait_turn()
+
+    done = next(e for e in loop.bus.log(loop.session_id) if isinstance(e, TurnComplete))
+    assert done.stop_reason == "max_tokens"
+    assert done.num_model_calls == 3
