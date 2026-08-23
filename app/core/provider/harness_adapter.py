@@ -922,6 +922,30 @@ class HarnessAdapter(ProviderAdapter):
             raise RuntimeError("Adapter not connected")
         await self._engine.submit(Steer(text=text, id=id))
 
+    async def cancel_steer(self, id: str) -> bool:
+        """Ask fluid to drop the pending ``Steer`` submitted under ``id``.
+
+        True only when the steer was still queued and is now gone: no delivery,
+        no ``SteerDelivered`` receipt, nothing for the model to answer. The
+        native leg decides this on the event loop, atomically against the tool
+        boundary that would have delivered it, so there is no window where a
+        steer is both cancelled and delivered.
+
+        False whenever the text may already be in front of the model: an
+        unknown id, a steer the native leg already folded into a tool result,
+        and every delegated-leg call (writing to the CLI's stdin IS delivery,
+        so there is nothing to recall). A disconnected or non-fluid engine
+        answers False for the same reason — never claim an un-send that did
+        not happen.
+        """
+        engine = self._engine
+        if engine is None:
+            return False
+        cancel = getattr(engine, "cancel_steer", None)
+        if cancel is None:
+            return False
+        return bool(await cancel(id))
+
     async def receive_events(self) -> AsyncIterator[ProviderEvent]:
         """Translate the fluid Event stream into ProviderEvents for one turn.
 

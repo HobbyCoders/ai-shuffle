@@ -1814,6 +1814,27 @@ class ChatWebSocketHandler:
         if not message_id:
             return
 
+        # A pending message sent into a busy session is handed to the running
+        # turn as a fluid steer straight away, so × has to un-send that steer
+        # before it can remove the row — otherwise the model still reads the
+        # text at the next tool boundary and answers a message the user took
+        # back. Adjudicate first; the engine decides, atomically against its own
+        # delivery boundary.
+        verdict = "not_submitted"
+        if session_id:
+            from app.core.session_runtime import try_cancel_steer
+
+            verdict = await try_cancel_steer(session_id, message_id)
+        if verdict == "delivered":
+            # Too late: the model has the words, so this row is no longer a
+            # queue chip to remove — the delivery receipt records it as a user
+            # message and absorbs it (or is about to). Removing it here would
+            # abort a turn that is already part of the conversation. Just
+            # re-broadcast so the client converges on whatever the queue really
+            # holds now.
+            await self._v2_broadcast_queue(session_id)
+            return
+
         # v2 turns cutover: ``message_id`` is a turn id (the queue_updated frame
         # emits turn ids as ``id``). Settle it to aborted (kept as history) via
         # the guarded queued->aborted transition; NO scheduler kick fires

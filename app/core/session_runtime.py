@@ -147,6 +147,36 @@ async def try_steer_pending(session_id: str) -> int:
         return 0
 
 
+async def try_cancel_steer(session_id: str, turn_id: str) -> str:
+    """Adjudicate an attempt to un-send queued turn ``turn_id``.
+
+    Returns one of:
+
+    * ``"not_submitted"`` — the row was never handed to a live engine (no
+      runtime here, or this turn was never steered), so removing it is a
+      plain queue operation;
+    * ``"cancelled"`` — it was submitted as a steer and has now been recalled;
+      it will never reach the model, so it is safe to remove;
+    * ``"delivered"`` — the model already has the text. The row is no longer
+      the queue's to remove: the delivery receipt absorbs it into the
+      transcript.
+
+    Never raises — an adjudication failure falls back to ``"not_submitted"``,
+    which preserves the pre-steering behavior of simply removing the row.
+    """
+    runtime = _live_runtimes.get(session_id)
+    if runtime is None:
+        return "not_submitted"
+    try:
+        return await runtime.cancel_steer(turn_id)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "SessionRuntime: steer cancel adjudication failed for %s turn %s",
+            session_id, turn_id, exc_info=True,
+        )
+        return "not_submitted"
+
+
 def get_reader_lock(session_id: str) -> asyncio.Lock:
     """Return (creating on first use) the session's reader-token lock.
 
@@ -912,6 +942,30 @@ class SessionRuntime:
             submitted += 1
         return submitted
 
+    async def cancel_steer(self, turn_id: str) -> str:
+        """Try to recall the steer submitted for queued turn ``turn_id``.
+
+        Returns ``"not_submitted"``, ``"cancelled"`` or ``"delivered"`` — see
+        the module-level :func:`try_cancel_steer` for what each means to a
+        caller. A turn this runtime never steered is ``"not_submitted"``
+        without touching the engine.
+        """
+        if turn_id not in self._steer_attempted:
+            return "not_submitted"
+        adapter = self._live_adapter()
+        if adapter is None:
+            # Submitted, but the engine behind it is already gone — so is the
+            # receipt path that would have absorbed the row. Nothing can
+            # deliver it now; let the removal go through.
+            return "not_submitted"
+        if await adapter.cancel_steer(turn_id):
+            # Never delivered and never will be, so the row is free again — and
+            # it must leave the attempted set, or a later steer_pending() pass
+            # would skip a row that is genuinely still queued.
+            self._steer_attempted.discard(turn_id)
+            return "cancelled"
+        return "delivered"
+
     def _live_adapter(self) -> Optional[Any]:
         """The provider adapter behind this session's pooled client, or None."""
         try:
@@ -986,6 +1040,22 @@ class SessionRuntime:
                 logger.warning(
                     "SessionRuntime: steer receipt names unknown turn %s for "
                     "%s — skipping", row_id, self.session_id,
+                )
+                continue
+            if row.get("state") != "queued":
+                # A receipt for a row that already left the queue. The two
+                # states are supposed to be mutually exclusive: cancelling a
+                # steer is atomic against its delivery, so a cancelled steer
+                # can never reach the model and a delivered one can never be
+                # removed (``handle_remove_queued_message`` leaves a delivered
+                # row alone precisely so this path can absorb it). Reaching
+                # here means that invariant broke somewhere, and the safe side
+                # is silence: recording now would put a message the user
+                # removed back into the transcript.
+                logger.error(
+                    "SessionRuntime: steer receipt for turn %s in state %r "
+                    "(expected 'queued') on %s — not recording",
+                    row_id, row.get("state"), self.session_id,
                 )
                 continue
             content = row.get("prompt") or steer.get("text") or ""

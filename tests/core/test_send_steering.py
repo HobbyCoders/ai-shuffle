@@ -57,16 +57,27 @@ def _clean_module_state():
 # ---------------------------------------------------------------------------
 
 class _Adapter:
-    """Records every steer submitted; optionally refuses like fluid does."""
+    """Records every steer submitted; optionally refuses like fluid does.
 
-    def __init__(self, *, refuse=None):
+    ``recallable=False`` models the delegated leg (and a delivered native
+    steer): ``cancel_steer`` always answers False because the text is already
+    the CLI's / the model's.
+    """
+
+    def __init__(self, *, refuse=None, recallable=True):
         self.calls = []
+        self.cancels = []
         self._refuse = refuse
+        self._recallable = recallable
 
     async def steer(self, text, *, id=None):
         self.calls.append((text, id))
         if self._refuse is not None:
             raise self._refuse
+
+    async def cancel_steer(self, id):
+        self.cancels.append(id)
+        return self._recallable and id in [c[1] for c in self.calls]
 
 
 @contextmanager
@@ -447,7 +458,191 @@ async def test_an_ordinary_turn_does_not_re_record_its_message(mock_db):
 
 
 # ---------------------------------------------------------------------------
-# 3. The steering prompt block
+# 3. Un-sending a steered message (the × on a pending chip)
+# ---------------------------------------------------------------------------
+#
+# Steering submits the moment the message is sent, so × has a race to settle:
+# either the steer is still pending in the engine (recall it, then remove the
+# row) or the model already has the words (leave the row alone — the delivery
+# receipt owns it now). The engine adjudicates, atomically against its own
+# delivery boundary, so the two outcomes are mutually exclusive.
+
+
+async def test_cancel_is_not_submitted_without_a_live_runtime(mock_db):
+    _start_live("s1")
+    row = turns_db.enqueue_turn("s1", "user", prompt="hello")
+
+    assert await session_runtime.try_cancel_steer("s1", row["id"]) == "not_submitted"
+
+
+async def test_cancel_is_not_submitted_for_a_row_never_steered(mock_db):
+    """A chip sitting behind an ineligible row was never handed to the engine,
+    so there is nothing to recall and nothing to ask about."""
+    live = _start_live("s1")
+    _live_runtime("s1", live)
+    row = turns_db.enqueue_turn("s1", "user", prompt="never went out")
+
+    adapter = _Adapter()
+    with _pooled(adapter):
+        verdict = await session_runtime.try_cancel_steer("s1", row["id"])
+
+    assert verdict == "not_submitted"
+    assert adapter.cancels == []
+
+
+async def test_a_submitted_steer_is_recalled_before_delivery(mock_db):
+    live = _start_live("s1")
+    runtime = _live_runtime("s1", live)
+    row = turns_db.enqueue_turn("s1", "user", prompt="on second thought, no")
+
+    adapter = _Adapter()
+    with _pooled(adapter):
+        await session_runtime.try_steer_pending("s1")
+        assert row["id"] in runtime._steer_attempted
+        verdict = await session_runtime.try_cancel_steer("s1", row["id"])
+
+    assert verdict == "cancelled"
+    assert adapter.cancels == [row["id"]]
+    # Off the attempted list again: the row is genuinely un-submitted, so a
+    # later pass must be free to steer it (or the drain to run it).
+    assert row["id"] not in runtime._steer_attempted
+
+
+async def test_a_delivered_steer_cannot_be_recalled(mock_db):
+    """The engine says False once the text is in front of the model."""
+    live = _start_live("s1")
+    runtime = _live_runtime("s1", live)
+    row = turns_db.enqueue_turn("s1", "user", prompt="too late")
+
+    adapter = _Adapter(recallable=False)
+    with _pooled(adapter):
+        await session_runtime.try_steer_pending("s1")
+        verdict = await session_runtime.try_cancel_steer("s1", row["id"])
+
+    assert verdict == "delivered"
+    # Still attempted — it is on its way to the receipt, not back in the queue.
+    assert row["id"] in runtime._steer_attempted
+
+
+async def test_the_delegated_leg_always_reports_delivered(mock_db):
+    """Written-to-stdin IS delivery: DelegatedLoop.cancel_steer never recalls,
+    so × on a delegated session can only ever land on 'delivered'."""
+    from fluid.engine.delegated import DelegatedLoop
+    from fluid.store.base import MemoryStore
+
+    assert await DelegatedLoop(store=MemoryStore(), model="m").cancel_steer("x") is False
+
+    live = _start_live("s1")
+    _live_runtime("s1", live)
+    row = turns_db.enqueue_turn("s1", "user", prompt="already on stdin")
+
+    adapter = _Adapter(recallable=False)
+    with _pooled(adapter):
+        await session_runtime.try_steer_pending("s1")
+        assert await session_runtime.try_cancel_steer("s1", row["id"]) == "delivered"
+
+
+def _ws_handler():
+    """A ChatWebSocketHandler with only its WS-side collaborators stubbed —
+    turn_manager / turns stay real so removal is read off the durable row."""
+    import app.api.chat_ws_handler as cwh
+
+    handler = cwh.ChatWebSocketHandler(
+        websocket=MagicMock(), device_id="dev-1", user_id="admin", api_user_id=None,
+    )
+    handler.send_json = AsyncMock(return_value=True)
+    handler._v2_broadcast_queue = AsyncMock()
+    return handler
+
+
+async def test_removing_a_recalled_message_aborts_the_row(mock_db):
+    live = _start_live("s1")
+    _live_runtime("s1", live)
+    row = turns_db.enqueue_turn("s1", "user", prompt="unsend me")
+
+    adapter = _Adapter()
+    handler = _ws_handler()
+    with _pooled(adapter):
+        await session_runtime.try_steer_pending("s1")
+        await handler.handle_remove_queued_message(
+            {"session_id": "s1", "message_id": row["id"]}
+        )
+
+    assert adapter.cancels == [row["id"]]
+    assert turns_db.get_turn(row["id"])["state"] == "aborted"
+    assert turns_db.get_turn(row["id"])["stop_reason"] == "removed_from_queue"
+    handler._v2_broadcast_queue.assert_awaited_with("s1")
+
+
+async def test_removing_a_delivered_message_leaves_the_row_to_absorb(mock_db):
+    """Once the model has the words the chip is not the queue's to drop: the
+    row stays queued so the delivery receipt can record and absorb it."""
+    live = _start_live("s1")
+    _live_runtime("s1", live)
+    row = turns_db.enqueue_turn("s1", "user", prompt="already read")
+
+    adapter = _Adapter(recallable=False)
+    handler = _ws_handler()
+    with _pooled(adapter):
+        await session_runtime.try_steer_pending("s1")
+        await handler.handle_remove_queued_message(
+            {"session_id": "s1", "message_id": row["id"]}
+        )
+
+    assert turns_db.get_turn(row["id"])["state"] == "queued"
+    assert turns_db.get_turn(row["id"])["stop_reason"] is None
+    # The client still gets the truth about what the queue holds.
+    handler._v2_broadcast_queue.assert_awaited_with("s1")
+
+
+async def test_removing_a_never_steered_message_still_aborts_the_row(mock_db):
+    """The pre-steering path, unchanged: no live turn, no adjudication, remove."""
+    row = turns_db.enqueue_turn("s1", "user", prompt="plain removal")
+
+    handler = _ws_handler()
+    await handler.handle_remove_queued_message(
+        {"session_id": "s1", "message_id": row["id"]}
+    )
+
+    assert turns_db.get_turn(row["id"])["state"] == "aborted"
+
+
+async def test_a_receipt_for_a_row_that_left_the_queue_records_nothing(
+    mock_db, caplog,
+):
+    """Belt to the cancel's braces. Cancellation is atomic against delivery, so
+    a receipt naming a removed row is a protocol violation — and the safe
+    reading is silence: a message the user took back must never come back."""
+    import logging
+
+    _seed_session("s10")
+    live = turns_db.enqueue_turn("s10", "user", prompt="the live one")
+    ghost = turns_db.enqueue_turn("s10", "user", prompt="removed, yet receipted")
+    turns_db.remove_queued_turn(ghost["id"])
+    events = [
+        {"type": "steer_delivered", "steers": [
+            {"id": ghost["id"], "text": "removed, yet receipted"},
+        ]},
+        {"type": "done", "metadata": {}},
+    ]
+
+    with _pump_env(_pump(events)) as env:
+        with caplog.at_level(logging.ERROR):
+            outcome = await session_runtime.SessionRuntime(live).execute()
+
+    assert outcome == "completed"
+    assert _messages(mock_db, "s10") == []
+    env["recorder"].record_steered_user_message.assert_not_awaited()
+    # The removal stands — nothing re-opened or re-settled the row.
+    assert turns_db.get_turn(ghost["id"])["stop_reason"] == "removed_from_queue"
+    assert any(
+        "steer receipt for turn" in r.getMessage() and r.levelno == logging.ERROR
+        for r in caplog.records
+    )
+
+
+# ---------------------------------------------------------------------------
+# 4. The steering prompt block
 # ---------------------------------------------------------------------------
 
 def _compiled_text(*, native):
