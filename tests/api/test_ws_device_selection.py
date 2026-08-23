@@ -71,6 +71,7 @@ class _Patches:
             "broadcast_queue_updated",
             "broadcast_session_updated",
             "broadcast_user_session_created",
+            "broadcast_user_session_updated",
         ):
             setattr(self.sync, name, AsyncMock())
 

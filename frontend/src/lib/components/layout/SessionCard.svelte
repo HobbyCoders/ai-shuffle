@@ -49,9 +49,11 @@
 		/** Single-line dense row — used for the settled/archived groups. */
 		compact?: boolean;
 		onOpen: (sessionId: string) => void;
+		/** Fired after this card is settled while it is the open session, so the shell can move to a fresh chat. */
+		onSettled?: () => void;
 	}
 
-	let { session, status, projectLabel, active = false, now, compact = false, onOpen }: Props = $props();
+	let { session, status, projectLabel, active = false, now, compact = false, onOpen, onSettled }: Props = $props();
 
 	const live = $derived(isLiveStatus(status));
 	const elapsed = $derived(Math.max(0, now - sessionTimestamp(session)));
@@ -96,8 +98,12 @@
 
 	async function commitToggle() {
 		actionsOpen = false;
+		const settling = session.is_active;
 		try {
-			await appData.setSessionActive(session.id, !session.is_active);
+			await appData.setSessionActive(session.id, !settling);
+			// Settling the session that is on screen leaves the main panel pointing
+			// at a settled chat — hand the shell a fresh composer instead.
+			if (settling && active) onSettled?.();
 		} catch {
 			toast.push('Failed to update session', { tone: 'error' });
 		}

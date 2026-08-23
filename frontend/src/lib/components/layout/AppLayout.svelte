@@ -22,6 +22,7 @@
 	interface Props {
 		isAdmin?: boolean;
 		onNewSession: () => void;
+		onSettledOpenSession: () => void;
 		onNewSessionForProject?: (projectId: string) => void;
 		onOpenSession: (sessionId: string) => void;
 		onOpenFeature: (type: ViewType) => void;
@@ -32,6 +33,7 @@
 	let {
 		isAdmin = false,
 		onNewSession,
+		onSettledOpenSession,
 		onNewSessionForProject,
 		onOpenSession,
 		onOpenFeature,
@@ -120,6 +122,7 @@
 		<AppTopBar
 			{isAdmin}
 			{onNewSession}
+			{onSettledOpenSession}
 			{onOpenSession}
 			{onOpenFeature}
 			{onOpenSpotlight}
@@ -132,6 +135,7 @@
 				<Sidebar
 					{isAdmin}
 					{onNewSession}
+					{onSettledOpenSession}
 					{onOpenSession}
 					{onOpenFeature}
 					{onOpenSpotlight}

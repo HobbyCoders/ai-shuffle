@@ -545,6 +545,7 @@ def _handler_env():
             "broadcast_queue_updated",
             "broadcast_session_updated",
             "broadcast_user_session_created",
+            "broadcast_user_session_updated",
         ):
             setattr(sync, name, AsyncMock())
         stack.enter_context(

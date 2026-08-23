@@ -43,6 +43,7 @@ from app.core.provider.events import (
     UserMessage,
 )
 
+from fluid.context.trim import estimate_tokens_of_text
 from fluid.events import model as lm
 from fluid.events.ops import BackgroundTaskFinished, RespondPermission, UserTurn
 from fluid.providers.base import ProviderCaps, StreamChunk
@@ -1599,8 +1600,18 @@ def test_code_mode_tools_section_carries_full_tool_documentation(agent_workspace
     assert "Escape hatch the kernel may not reach." in system
     assert "Not callable from code mode — use it as a direct tool call." in system
     assert "- target (str, required): What to do it to" in system
-    # And it is a priced section like the rest, not a text-only append.
-    assert [s for s in compiled.sections if s.text.startswith("# Tools")]
+    # And it is priced like the rest, not a text-only append: ONE section per
+    # tool (the heading rides whichever sorts first), each naming the registry
+    # tool it documents.
+    tool_sections = [s for s in compiled.sections if s.kind == "tools"]
+    assert len(tool_sections) == 2
+    by_name = {s.tool_name: s for s in tool_sections}
+    assert set(by_name) == {"Grep", "mcp__acme__Danger"}
+    # The "# Tools" heading opens exactly one section — the catalog's first.
+    headed = [s for s in tool_sections if s.text.startswith("# Tools\n")]
+    assert len(headed) == 1
+    # The joined view never drifts: sections concatenated ARE the prompt.
+    assert compiled.text == "\n\n".join(s.text for s in compiled.sections)
 
 
 def test_code_mode_tools_section_skipped_without_a_projection(agent_workspace):
@@ -1614,6 +1625,42 @@ def test_code_mode_tools_section_skipped_without_a_projection(agent_workspace):
     )
     assert "# Code mode" in compiled.text
     assert _TOOLS_HEADING not in compiled.text
+
+
+@pytest.mark.asyncio
+async def test_tool_catalog_prices_under_tools_not_system_prompt(
+    monkeypatch, agent_workspace
+):
+    """The point of the per-tool sections: get_context_usage() puts each tool's
+    prompt-carried documentation under System/MCP tools — where the equivalent
+    JSON schema would sit on the direct-tool path — not under System prompt."""
+    from fluid.context.usage import build_context_usage
+
+    captured = await _connect_code_mode(monkeypatch, agent_workspace)
+    compiled = captured["system_sections"]
+
+    usage = build_context_usage(sections=compiled.sections, model="claude-opus-4-6")
+    cats = {c["name"]: c["tokens"] for c in usage["categories"]}
+
+    tool_sections = [s for s in compiled.sections if s.kind == "tools"]
+    assert tool_sections, "catalog sections must ride as kind='tools'"
+    expected_tools = sum(
+        estimate_tokens_of_text(s.text)
+        for s in tool_sections if not s.tool_name.startswith("mcp__")
+    )
+    expected_mcp = sum(
+        estimate_tokens_of_text(s.text)
+        for s in tool_sections if s.tool_name.startswith("mcp__")
+    )
+    assert cats.get("System tools", 0) == expected_tools
+    assert cats.get("MCP tools", 0) == expected_mcp
+    # None of the catalog text leaked into the System prompt row (which prices
+    # base + extra + agents + environment; memory/skills have their own rows).
+    assert cats["System prompt"] == sum(
+        estimate_tokens_of_text(s.text)
+        for s in compiled.sections
+        if s.kind in ("base", "environment", "extra", "agents")
+    )
 
 # ─── Native-leg context window (feeds get_context_usage) ─────────────────────
 
