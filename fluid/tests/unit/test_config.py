@@ -192,3 +192,10 @@ def test_provider_and_model_resolution() -> None:
     merged = deep_merge(BUILTIN_DEFAULTS, {"providers": {"anthropic": {"kind": "anthropic", "model": ""}}})
     cfg2 = HarnessConfig.from_dict(merged)
     assert cfg2.model_for("anthropic") == cfg2.default_model
+
+
+def test_max_model_calls_default_and_env_override() -> None:
+    assert env_overrides({}).get("max_model_calls") is None
+    assert env_overrides({"FLUID_MAX_CALLS": "500"})["max_model_calls"] == 500
+    assert "max_model_calls" not in env_overrides({"FLUID_MAX_CALLS": "lots"})
+    assert HarnessConfig.from_dict(dict(BUILTIN_DEFAULTS)).max_model_calls == 200

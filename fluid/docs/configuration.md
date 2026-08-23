@@ -44,6 +44,7 @@ upward search for a project file.
 | `skills_dir` | none (`~/.fluid/skills`) | Root directory for persistent code-mode skills. |
 | `cwd` | `"."` | Working directory for config discovery, instruction files, tools, and the prompt's environment block. |
 | `max_tokens` | `8192` | Maximum output tokens per model call. |
+| `max_model_calls` | `200` | Maximum model calls in one turn before the turn stops with `max_calls`. |
 | `context_window` | none | The model's context window in tokens. fluid does not guess this; set it so `/context` can show a percentage and free space. |
 | `system` | none | Your own base system prompt. When set it replaces the shipped default (`fluid/cli/prompt.py`) entirely; the instruction stack, skills index, and environment block are still appended after it. |
 | `base_prompt` | `true` | `false` runs the CLI with no base prompt at all (only instruction files, skills, agents, and the environment block). Ignored when `system` is set. |
@@ -275,6 +276,7 @@ Config overrides, applied as layer 5 (`env_overrides` in the loader):
 | `FLUID_CONTINUAL` | `continual` |
 | `FLUID_CONTINUAL_MODEL` | `continual_model` |
 | `FLUID_MAX_TOKENS` | `max_tokens` (ignored if not an integer) |
+| `FLUID_MAX_CALLS` | `max_model_calls` (ignored if not an integer) |
 | `FLUID_CONTEXT_WINDOW` | `context_window` (ignored if not an integer) |
 | `FLUID_APPROVAL_POLICY` | `permission.approval_policy` |
 | `FLUID_CONTEXT_ENABLED` | `context.enabled` |

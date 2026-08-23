@@ -244,6 +244,7 @@ class HarnessConfig:
     hooks: tuple[HookConfig, ...] = ()
     cwd: str = "."
     max_tokens: int = 8192
+    max_model_calls: int = 200
     # Model context window, when the host app knows it (model ids come and go
     # faster than any table fluid could ship, so nothing is inferred). Feeds
     # maxTokens/rawMaxTokens/percentage in the context-usage breakdown; None
@@ -283,6 +284,7 @@ class HarnessConfig:
             hooks=tuple(HookConfig.from_dict(h) for h in d.get("hooks") or ()),
             cwd=d.get("cwd", "."),
             max_tokens=int(d.get("max_tokens", 8192)),
+            max_model_calls=int(d.get("max_model_calls", 200)),
             context_window=(
                 int(d["context_window"]) if d.get("context_window") else None
             ),
@@ -319,6 +321,7 @@ class HarnessConfig:
             "continual_model": self.continual_model,
             "cwd": self.cwd,
             "max_tokens": self.max_tokens,
+            "max_model_calls": self.max_model_calls,
             "context_window": self.context_window,
             "system": self.system,
             "base_prompt": self.base_prompt,

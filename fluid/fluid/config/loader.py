@@ -43,6 +43,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "continual_model": None,
     "cwd": ".",
     "max_tokens": 8192,
+    "max_model_calls": 200,
     "context_window": None,
     # CLI prompt. ``system`` is your own base prompt: when set it REPLACES the
     # shipped default (fluid.cli.prompt.DEFAULT_BASE_PROMPT). ``base_prompt``
@@ -287,6 +288,11 @@ def env_overrides(env: dict[str, str] | None = None) -> dict[str, Any]:
     if "FLUID_MAX_TOKENS" in env:
         try:
             out["max_tokens"] = int(env["FLUID_MAX_TOKENS"])
+        except ValueError:
+            pass
+    if "FLUID_MAX_CALLS" in env:
+        try:
+            out["max_model_calls"] = int(env["FLUID_MAX_CALLS"])
         except ValueError:
             pass
     if "FLUID_CONTEXT_WINDOW" in env:
@@ -564,6 +570,7 @@ def build_engine(
         system_sections=system_sections,
         context_window=config.context_window,
         max_tokens=config.max_tokens,
+        max_model_calls_per_turn=config.max_model_calls,
         registry=registry,
         permissions=permissions,
         hooks=hooks,

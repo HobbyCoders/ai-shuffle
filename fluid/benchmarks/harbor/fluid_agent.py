@@ -162,6 +162,11 @@ class FluidAgent(BaseInstalledAgent):
         max_tokens = os.environ.get("FLUID_MAX_TOKENS")
         if max_tokens:
             env["FLUID_MAX_TOKENS"] = max_tokens
+        # Per-turn model-call cap. Claude Code runs unbounded under Harbor, so
+        # set FLUID_MAX_CALLS high (or to the same --max-turns) for parity.
+        max_calls = os.environ.get("FLUID_MAX_CALLS")
+        if max_calls:
+            env["FLUID_MAX_CALLS"] = max_calls
 
         cli_flags = self.build_cli_flags()
         extra_flags = f"{cli_flags} " if cli_flags else ""

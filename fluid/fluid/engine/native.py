@@ -262,7 +262,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         ctx: ToolCtx | None = None,
         plan_mode: bool = False,
         codemode: CodeModeSession | None = None,
-        max_model_calls_per_turn: int = 50,
+        max_model_calls_per_turn: int = 200,
         max_continuations_per_turn: int = 3,
         trim: TrimConfig | None = None,
         compaction: CompactionConfig | None = None,
