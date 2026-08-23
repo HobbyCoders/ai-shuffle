@@ -295,19 +295,51 @@ Get API and Claude Code versions.
 
 Get system usage statistics.
 
-### GET /api/v1/tools
+### GET /api/v1/tools/surface
 
-List available tools by category.
+Every tool a session can be given, grouped and discovered live from the running
+registries — the harness builtins, the app's bridge servers, and each configured
+MCP server. There is no hardcoded list.
 
 **Query Parameters:**
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `refresh` | boolean | Force refresh from Claude CLI |
+| `refresh` | boolean | Bust the per-server MCP tool-list cache (10 minutes otherwise) |
 
-### GET /api/v1/tools/builtin
+**Response:**
 
-List built-in Claude Code tools only.
+```json
+{
+  "groups": [
+    {
+      "id": "harness",
+      "label": "Harness tools",
+      "kind": "harness",
+      "server": null,
+      "available": true,
+      "admin_only": false,
+      "tools": [
+        { "name": "Read", "description": "Read a file.", "risk": "read" }
+      ]
+    }
+  ],
+  "discovered_at": "2026-08-23T12:00:00Z",
+  "errors": [],
+  "is_admin": true
+}
+```
+
+`kind` is one of `harness`, `app`, `ai`, `computer_use`, `browser`, `app_config`
+or `mcp`; `server` names the MCP server for `mcp` groups and is null otherwise.
+A group whose tools are unusable in this install (an AI tool with no API key,
+computer use turned off) reports `available: false`, and admin-only groups carry
+`admin_only: true` rather than being hidden. A server that fails to answer still
+appears — with an empty `tools` list plus an entry in `errors` — so a broken
+server is visible instead of silently missing.
+
+This route replaced `GET /api/v1/tools`, `/api/v1/tools/builtin` and
+`/api/v1/tools/discover`, which are gone.
 
 ## Documentation
 
