@@ -20,7 +20,7 @@ host-side) — so the escape hatch cannot be bypassed from inside the kernel.
 from __future__ import annotations
 
 import keyword
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 from fluid.tools.registry import ToolSpec
 
@@ -150,11 +150,24 @@ def stub_source(spec: ToolSpec, func: str) -> str:
 
 
 class Projection:
-    """A snapshot of the registry's work-tools, projected to VFS stubs."""
+    """A snapshot of the registry's work-tools, projected to VFS stubs.
 
-    def __init__(self, specs: Iterable[ToolSpec]) -> None:
+    ``tool_filter`` is the session's tool-surface predicate (ruling T9): a spec
+    it rejects is dropped here, before any leaf name exists for it, so nothing
+    downstream — stubs, catalog, search, docs, or a host rendering per-tool
+    documentation sections — can leak a tool the session cannot call.
+    """
+
+    def __init__(
+        self,
+        specs: Iterable[ToolSpec],
+        *,
+        tool_filter: Callable[[str], bool] | None = None,
+    ) -> None:
         self._by_leaf: dict[str, ToolSpec] = {}
         for spec in specs:
+            if tool_filter is not None and not tool_filter(spec.name):
+                continue
             leaf = _py_ident(func_name(spec.name))
             if leaf in self._by_leaf and self._by_leaf[leaf].name != spec.name:
                 leaf = _py_ident(_sanitize_full(spec.name))

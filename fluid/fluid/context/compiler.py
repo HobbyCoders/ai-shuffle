@@ -18,10 +18,13 @@ Everything else the compiler gathers itself:
 * instruction stack — Fluid-native AGENTS.md discovery
                       (``fluid.context.instructions.build_instruction_stack``);
 * skills index      — name+description only; bodies load on demand via the
-                      ``Skill`` builtin (progressive disclosure);
+                      ``Skill`` builtin (progressive disclosure). Omitted when
+                      ``PromptInputs.tools`` says the session has no ``Skill``;
 * agents index      — the native ``.agents/agents`` catalog, again
                       name+description only; the definitions themselves reach a
                       host dispatcher via ``ctx.extra["agent_registry"]``.
+                      Omitted when ``PromptInputs.tools`` says the session has
+                      no ``Task``.
 
 Layering order (stable — prompt-cache friendly):
     base → instruction stack → skills index → agents index → memory snapshot →
@@ -89,6 +92,12 @@ class PromptInputs:
     memory_char_limit: int = 3_000
     # Retained as a no-op compatibility argument. Provider homes are import-only.
     include_plugins: bool = False
+    # The session's tool surface, when the host restricts it (ruling T9).
+    # ``None`` means "no filter — describe everything". When a set is supplied,
+    # a section whose subject tool the session cannot call is omitted: the
+    # skills index needs ``Skill``, the agents index needs ``Task``. The
+    # ``include_*`` flags still apply on top — this only ever removes.
+    tools: frozenset[str] | None = None
 
 
 # Section kinds a compiled prompt can carry. ``memory`` sections additionally
@@ -120,6 +129,11 @@ class CompiledPrompt:
 
     def of_kind(self, *kinds: str) -> tuple[PromptSection, ...]:
         return tuple(s for s in self.sections if s.kind in kinds)
+
+
+def _tool_available(tools: frozenset[str] | None, name: str) -> bool:
+    """Can this session call ``name``? ``None`` (no filter) means yes."""
+    return tools is None or name in tools
 
 
 def skills_index(
@@ -188,14 +202,14 @@ def compile_prompt(inputs: PromptInputs) -> CompiledPrompt:
                         kind="memory", text=block, path=file.path, scope=file.scope
                     )
                 )
-    if inputs.include_skills:
+    if inputs.include_skills and _tool_available(inputs.tools, "Skill"):
         index = skills_index(
             inputs.cwd,
             include_global=inputs.include_global_instructions,
         )
         if index:
             sections.append(PromptSection(kind="skills", text=index))
-    if inputs.include_agents:
+    if inputs.include_agents and _tool_available(inputs.tools, "Task"):
         index = agents_index(
             inputs.cwd,
             include_global=inputs.include_global_instructions,

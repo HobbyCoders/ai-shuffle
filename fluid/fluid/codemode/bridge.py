@@ -12,9 +12,11 @@ same idea at different integration depths:
   hooks) with an injected ``on_permission`` callback — no engine required. Handy
   for embedding code-mode outside the native loop and for focused tests.
 
-Both enforce the same two hard refusals before dispatch: a tool with
-``code_mode_allowed=False`` (the auditable high-risk escape hatch — the model is
-told to use the JSON tool path) and a denied permission/hook. Refusals come back
+Both enforce the same hard refusals before dispatch: a tool outside the
+session's tool surface (``tool_filter``, ruling T9 — ``HostBridge`` checks it
+itself; ``HostCallBridge`` inherits the loop's own check inside ``_gated_call``),
+a tool with ``code_mode_allowed=False`` (the auditable high-risk escape hatch —
+the model is told to use the JSON tool path), and a denied permission/hook. Refusals come back
 as ``HostReply(denied=…)`` / ``HostReply(error=…)`` so the kernel *raises* in the
 model's code — the error stays in context rather than being silently dropped.
 """
@@ -111,6 +113,7 @@ class HostBridge:
         on_permission: OnPermission | None = None,
         ctx: ToolCtx | None = None,
         doom_loop: bool = True,
+        tool_filter: Callable[[str], bool] | None = None,
     ) -> None:
         self._registry = registry
         self._permissions = permissions
@@ -118,8 +121,17 @@ class HostBridge:
         self._on_permission = on_permission
         self._ctx = ctx or ToolCtx()
         self._doom_loop = doom_loop
+        self._tool_filter = tool_filter
 
     async def on_host_call(self, tool_name: str, kwargs: dict[str, Any]) -> HostReply:
+        # Session tool surface (ruling T9), ahead of the registry lookup so the
+        # answer does not depend on whether the filtered name happens to exist.
+        # The stub was never projected, so the model should not be able to reach
+        # this — but a hand-written ``__host_call__`` must not slip past either,
+        # and it must fail loudly rather than quietly doing nothing.
+        if self._tool_filter is not None and not self._tool_filter(tool_name):
+            return HostReply(error=f"tool not available in this session: {tool_name}")
+
         spec = self._registry.get(tool_name)
         if spec is None:
             return HostReply(error=f"unknown tool: {tool_name}")

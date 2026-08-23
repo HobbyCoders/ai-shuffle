@@ -262,3 +262,71 @@ def test_skills_index_progressive_disclosure(git_repo: Path):
         PromptInputs(base=None, cwd=git_repo, include_global_instructions=False)
     )
     assert out is not None and "demo: does demo things" in out
+# ─── tool-surface filtering (ruling T9) ──────────────────────────────────────
+
+
+def _skills_and_agents(git_repo: Path) -> None:
+    _skill(git_repo / ".agents" / "skills" / "deploy" / "SKILL.md", "deploy", "Ship it")
+    _agent(git_repo / ".agents" / "agents" / "reviewer.md", "reviewer", "Reviews code")
+
+
+def test_no_tool_filter_describes_both_indexes(git_repo: Path, tmp_path: Path, monkeypatch):
+    """``tools=None`` is "no filter" — the prompt describes everything."""
+    _empty_home(tmp_path, monkeypatch)
+    _skills_and_agents(git_repo)
+
+    compiled = compile_prompt(PromptInputs(base="B", cwd=git_repo, tools=None))
+    text = compiled.text or ""
+    assert "# Available skills" in text and "# Available agent types" in text
+
+
+def test_tool_filter_omits_indexes_the_session_cannot_act_on(
+    git_repo: Path, tmp_path: Path, monkeypatch
+):
+    """A session without ``Skill``/``Task`` is never told those catalogs exist."""
+    _empty_home(tmp_path, monkeypatch)
+    _skills_and_agents(git_repo)
+
+    compiled = compile_prompt(
+        PromptInputs(base="B", cwd=git_repo, tools=frozenset({"Read"}))
+    )
+    text = compiled.text or ""
+    assert compiled.of_kind("skills") == () and compiled.of_kind("agents") == ()
+    assert "# Available skills" not in text and "# Available agent types" not in text
+    assert "deploy" not in text and "reviewer" not in text
+
+
+def test_each_index_answers_to_its_own_tool(git_repo: Path, tmp_path: Path, monkeypatch):
+    """``Skill`` gates the skills index, ``Task`` the agents index — separately."""
+    _empty_home(tmp_path, monkeypatch)
+    _skills_and_agents(git_repo)
+
+    compiled = compile_prompt(
+        PromptInputs(base="B", cwd=git_repo, tools=frozenset({"Skill"}))
+    )
+    text = compiled.text or ""
+    assert "# Available skills" in text
+    assert "# Available agent types" not in text
+
+    compiled = compile_prompt(
+        PromptInputs(base="B", cwd=git_repo, tools=frozenset({"Task"}))
+    )
+    text = compiled.text or ""
+    assert "# Available skills" not in text
+    assert "# Available agent types" in text
+
+
+def test_include_flags_still_apply_on_top_of_the_tool_filter(
+    git_repo: Path, tmp_path: Path, monkeypatch
+):
+    _empty_home(tmp_path, monkeypatch)
+    _skills_and_agents(git_repo)
+
+    compiled = compile_prompt(
+        PromptInputs(
+            base="B", cwd=git_repo, tools=frozenset({"Skill", "Task"}),
+            include_skills=False,
+        )
+    )
+    assert compiled.of_kind("skills") == ()
+    assert compiled.of_kind("agents") != ()

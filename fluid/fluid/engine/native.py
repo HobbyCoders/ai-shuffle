@@ -407,7 +407,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         # host passing both gets the codemode path (never double-journaled).
         self._journal = journal if codemode is None else None
         if codemode is not None and registry is not None:
-            register_code_mode_tools(registry, codemode)
+            # Ruling T9: code-mode discovery, the projected kernel VFS, and the
+            # in-kernel host-call gate all see this session's tool surface, so
+            # a filtered tool is never described and never callable from code.
+            register_code_mode_tools(
+                registry, codemode, tool_filter=self._tool_permitted
+            )
         # ``None`` means unlimited: the provider stays the source of truth for
         # when a turn has to stop. Every comparison below guards that case.
         self.max_model_calls_per_turn = max_model_calls_per_turn
@@ -1286,10 +1291,11 @@ class NativeLoop(BackgroundLifecycleMixin):
     def _tool_permitted(self, name: str) -> bool:
         """Is ``name`` inside this session's tool surface? (ruling CE12)
 
-        Enforced at three points — the request schemas (:meth:`_tools_api`), the
-        deferred catalog + ToolSearch (via ``ctx.extra["tool_filter"]``), and
-        dispatch (:meth:`_gated_call`) — so a filtered tool is invisible,
-        unloadable, and uncallable rather than merely discouraged.
+        Enforced at four points — the request schemas (:meth:`_tools_api`), the
+        deferred catalog + ToolSearch (via ``ctx.extra["tool_filter"]``),
+        dispatch (:meth:`_gated_call`), and code mode (the ``CodeModeSession``
+        this predicate is stamped onto at construction) — so a filtered tool is
+        invisible, unloadable, and uncallable rather than merely discouraged.
         """
         if self.allowed_tools is not None and not _matches_tool_pattern(
             name, self.allowed_tools

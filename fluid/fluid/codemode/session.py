@@ -8,6 +8,10 @@ into the kernel VFS, and implements the four code-mode tools:
 - ``search_tools``  — keyword search over the same catalog;
 - ``read_tool_docs``— the generated typed stub (signature + docstring) for a tool.
 
+When the host restricts the session's tool surface it sets ``tool_filter``
+(ruling T9); every one of those four tools, the projected VFS, and the host-call
+gate then behave as though a filtered tool does not exist.
+
 With a :class:`~fluid.codemode.skills.SkillStore` attached, the session is also
 the driver of the *continual harness*: persistent skills mount into the kernel
 as ``skills.<name>``, ``save_skill``/``delete_skill`` are projected as gated
@@ -29,6 +33,7 @@ are as observable as JSON calls.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from fluid.codemode.bridge import HostBridge
@@ -78,6 +83,7 @@ class CodeModeSession:
         exec_timeout: float = 30.0,
         skills: SkillStore | None = None,
         synthesizer: Any | None = None,  # fluid.codemode.continual.Synthesizer
+        tool_filter: Callable[[str], bool] | None = None,
     ) -> None:
         self._registry = registry
         self._config = config or KernelConfig()
@@ -86,6 +92,12 @@ class CodeModeSession:
         self._vfs_signature: tuple | None = None
         self._skills = skills
         self._synthesizer = synthesizer
+        # The session's tool surface (ruling T9): a ``(name) -> bool`` predicate,
+        # ``None`` for "everything". Settable after construction — the engine
+        # wires its own predicate in when it registers the code-mode tools. The
+        # projection is rebuilt per call, so a later change takes effect at once
+        # (and the VFS signature shift re-mounts the kernel's ``tools`` package).
+        self.tool_filter: Callable[[str], bool] | None = tool_filter
 
     @property
     def skills(self) -> SkillStore | None:
@@ -97,7 +109,7 @@ class CodeModeSession:
             s for s in self._registry.list_tools(loaded_only=False)
             if s.source != CODE_MODE_SOURCE
         ]
-        return Projection(specs)
+        return Projection(specs, tool_filter=self.tool_filter)
 
     # ── the three discovery tools (tools + persistent skills) ──
     def render_list(self) -> str:
@@ -197,6 +209,7 @@ class CodeModeSession:
         bridge = HostBridge(
             self._registry, permissions,
             hooks=loop.hooks, on_permission=_on_permission, ctx=loop.ctx,
+            tool_filter=self.tool_filter,
         )
 
         called_tools: list[str] = []
@@ -324,8 +337,22 @@ class CodeModeSession:
 
 # ── registration ──────────────────────────────────────────────────────────
 
-def register_code_mode_tools(registry: ToolRegistry, session: CodeModeSession) -> None:
-    """Register the four code-mode tools as the model's entire schema surface."""
+def register_code_mode_tools(
+    registry: ToolRegistry,
+    session: CodeModeSession,
+    *,
+    tool_filter: Callable[[str], bool] | None = None,
+) -> None:
+    """Register the four code-mode tools as the model's entire schema surface.
+
+    ``tool_filter`` is the host's tool-surface predicate (ruling T9). When given
+    it is stamped onto the session, so discovery (``list_tools``,
+    ``search_tools``, ``read_tool_docs``), the projected kernel VFS, and the
+    host-call gate all describe and accept exactly the tools this session may
+    call. Passing ``None`` leaves whatever the session already carries.
+    """
+    if tool_filter is not None:
+        session.tool_filter = tool_filter
 
     async def _run_guard(_input: dict, _ctx: ToolCtx) -> ToolOutcome:
         # The engine intercepts run_python and drives the kernel directly; this
