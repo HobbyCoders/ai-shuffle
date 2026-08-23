@@ -5,6 +5,7 @@ import {
 	deriveUserTurnNavigationItems,
 	isNavigableUserTurn,
 	resolveCurrentTurnIndex,
+	resolveLiveTurnStartedAt,
 	resolveTurnNavigationIndex,
 	splitTurnPreview,
 	turnAnchorId,
@@ -79,5 +80,56 @@ describe('transcript navigation position', () => {
 		expect(resolveTurnNavigationIndex(0, 3, 1)).toBe(1);
 		expect(resolveTurnNavigationIndex(2, 3, 1)).toBe(2);
 		expect(resolveTurnNavigationIndex(0, 0, 1)).toBe(0);
+	});
+});
+
+describe('live turn anchor', () => {
+	// The live "Working for Ns" readout hangs off this. A prompt steered into a
+	// running turn lands in the transcript mid-turn and carries the running
+	// turn's id — anchoring on it restarted the clock (45s of work shown as 32s).
+
+	const started = '2026-08-23T12:00:00.000Z';
+	const steered = '2026-08-23T12:00:13.000Z';
+
+	it('stays on the prompt that opened the turn when a message is steered into it', () => {
+		const messages = [
+			message({ id: 'u1', role: 'user', content: 'go', turnId: 'turn-1', timestamp: started }),
+			message({ id: 'a1', content: 'working' }),
+			message({ id: 'u2', role: 'user', content: 'also this', turnId: 'turn-1', timestamp: steered })
+		];
+		expect(resolveLiveTurnStartedAt(messages, 'turn-1')).toBe(started);
+		// Same answer without the live turn id — the trailing prompt's own id groups it.
+		expect(resolveLiveTurnStartedAt(messages)).toBe(started);
+	});
+
+	it('moves to a genuinely new turn', () => {
+		const nextTurn = '2026-08-23T12:01:00.000Z';
+		const messages = [
+			message({ id: 'u1', role: 'user', content: 'go', turnId: 'turn-1', timestamp: started }),
+			message({ id: 'u2', role: 'user', content: 'also this', turnId: 'turn-1', timestamp: steered }),
+			message({ id: 'u3', role: 'user', content: 'next', turnId: 'turn-2', timestamp: nextTurn })
+		];
+		expect(resolveLiveTurnStartedAt(messages, 'turn-2')).toBe(nextTurn);
+	});
+
+	it('anchors on the newest prompt when it belongs to no turn yet', () => {
+		// Optimistic send, not yet reconciled onto its wire event.
+		const messages = [
+			message({ id: 'u1', role: 'user', content: 'go', turnId: 'turn-1', timestamp: started }),
+			message({ id: 'u2', role: 'user', content: 'optimistic', timestamp: steered })
+		];
+		expect(resolveLiveTurnStartedAt(messages)).toBe(steered);
+	});
+
+	it('anchors on the newest prompt when the live turn is not the one it belongs to', () => {
+		const messages = [
+			message({ id: 'u1', role: 'user', content: 'go', turnId: 'turn-1', timestamp: started })
+		];
+		expect(resolveLiveTurnStartedAt(messages, 'turn-2')).toBe(started);
+	});
+
+	it('falls back to the first message when there is no user prompt', () => {
+		expect(resolveLiveTurnStartedAt([message({ id: 'a1', timestamp: started })], 'turn-1')).toBe(started);
+		expect(resolveLiveTurnStartedAt([], 'turn-1')).toBeNull();
 	});
 });

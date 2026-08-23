@@ -162,7 +162,7 @@ async def test_handle_query_idle_submits_user_turn_no_queued_ack(mock_db):
 async def test_handle_query_busy_queues_behind_live_turn_and_acks(mock_db):
     """A query for a session with a live turn enqueues a source=user turn BEHIND
     the live turn (never cancels it) and sends the F5 query_queued ack + a
-    queue_updated frame carrying the new chip."""
+    queue_updated frame carrying the new pending message."""
     _make_session("sess-1")
     live = turns_db.enqueue_turn("sess-1", "user", prompt="live turn")["id"]
     turns_db.start_turn(live, run_id="run-1")
@@ -181,7 +181,7 @@ async def test_handle_query_busy_queues_behind_live_turn_and_acks(mock_db):
     # the follow-up is queued (not live)
     queued = turns_db.get_queued_turns("sess-1")
     assert [(t["source"], t["prompt"]) for t in queued] == [("user", "second while busy")]
-    # F5 ack + queue chip frame
+    # F5 ack + pending-message frame
     assert _sent(handler, "query_queued") == [
         {"type": "query_queued", "session_id": "sess-1"}
     ]
@@ -191,6 +191,96 @@ async def test_handle_query_busy_queues_behind_live_turn_and_acks(mock_db):
         "second while busy"
     ]
     p.sync.broadcast_queue_updated.assert_awaited()
+
+
+async def test_handle_query_busy_defers_the_transcript_record(mock_db):
+    """The model has not seen this prompt yet, so nothing is written to the
+    transcript at send time — it renders as a pending message instead, and the
+    turn row carries the marker that says who owes the record."""
+    _make_session("sess-1")
+    live = turns_db.enqueue_turn("sess-1", "user", prompt="live turn")["id"]
+    turns_db.start_turn(live, run_id="run-1")
+
+    with _Patches() as p:
+        handler = _make_handler()
+        await handler.handle_query({
+            "prompt": "second while busy",
+            "session_id": "sess-1",
+            "profile": "claude-code",
+            "project": None,
+        })
+
+    rows = mock_db.execute(
+        "SELECT role, content FROM session_messages WHERE session_id='sess-1'"
+    ).fetchall()
+    assert rows == []
+    p.sync.broadcast_message_added.assert_not_awaited()
+    queued = turns_db.get_queued_turns("sess-1")
+    assert queued[0]["payload"]["deferred_user_record"] is True
+
+
+async def test_handle_query_idle_still_records_immediately(mock_db):
+    """The idle path is unchanged: nothing is deferred when the model reads the
+    prompt right away."""
+    _make_session("sess-1")
+
+    with _Patches() as p:
+        handler = _make_handler()
+        await handler.handle_query({
+            "prompt": "nobody is busy",
+            "session_id": "sess-1",
+            "profile": "claude-code",
+            "project": None,
+        })
+
+    rows = mock_db.execute(
+        "SELECT role, content FROM session_messages WHERE session_id='sess-1'"
+    ).fetchall()
+    assert [(r["role"], r["content"]) for r in rows] == [("user", "nobody is busy")]
+    p.sync.broadcast_message_added.assert_awaited_once()
+    queued = turns_db.get_queued_turns("sess-1")
+    assert "deferred_user_record" not in queued[0]["payload"]
+
+
+async def test_handle_query_busy_tries_to_steer_the_running_turn(mock_db):
+    """After the ack, the handler asks the live turn to take the message NOW
+    rather than at the next turn."""
+    _make_session("sess-1")
+    live = turns_db.enqueue_turn("sess-1", "user", prompt="live turn")["id"]
+    turns_db.start_turn(live, run_id="run-1")
+
+    with _Patches():
+        with patch(
+            "app.core.session_runtime.try_steer_pending",
+            new=AsyncMock(return_value=1),
+        ) as steer:
+            handler = _make_handler()
+            await handler.handle_query({
+                "prompt": "second while busy",
+                "session_id": "sess-1",
+                "profile": "claude-code",
+                "project": None,
+            })
+
+    steer.assert_awaited_once_with("sess-1")
+
+
+async def test_handle_query_idle_never_steers(mock_db):
+    _make_session("sess-1")
+
+    with _Patches():
+        with patch(
+            "app.core.session_runtime.try_steer_pending", new=AsyncMock(),
+        ) as steer:
+            handler = _make_handler()
+            await handler.handle_query({
+                "prompt": "nobody is busy",
+                "session_id": "sess-1",
+                "profile": "claude-code",
+                "project": None,
+            })
+
+    steer.assert_not_awaited()
 
 
 async def test_handle_query_command_persisted_as_command_role(mock_db):

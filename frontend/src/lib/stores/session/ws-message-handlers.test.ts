@@ -39,19 +39,18 @@ vi.mock('./v2/feed-controller', () => ({
 import { notify } from '../notifications';
 import { startFixChat } from '$lib/services/fix-with-ai';
 import { feedController } from './v2/feed-controller';
+import { pendingQueue } from './pending-queue';
 
 // ─── Test Helpers ───────────────────────────────────────────────────────────
 
 function createMockInternal(): InternalMutableState {
 	return {
 		pendingTools: new Set(),
-		interruptPending: false,
 		awaitingNewSession: false,
 		pendingRequestId: null,
 		stopRequestedBeforeSession: false,
 		worktreeCreationGeneration: 0,
 		worktreeCreateAbort: null,
-		interruptConfirmResolve: null,
 	};
 }
 
@@ -379,29 +378,10 @@ describe('ws-message-handlers', () => {
 	});
 
 	describe('stopped handler', () => {
-		it('should suppress when interruptPending is true', () => {
-			const state = mockState();
-			state.isStreaming = true;
-			state.sessionId = 'session-1';
-
-			deps = createMockDeps({ getState: vi.fn(() => state) });
-			deps.internal.interruptPending = true;
-			handlers = createMessageHandlers(deps);
-
-			handlers.handleMessage({
-				type: 'stopped',
-				session_id: 'session-1',
-			});
-
-			// When interruptPending is true the handler returns early
-			expect(deps.internal.pendingTools.size).toBe(0);
-		});
-
 		it('clears any stale attention dot for the stopped session', () => {
 			const state = mockState();
 			state.sessionId = 'session-1';
 			deps = createMockDeps({ getState: vi.fn(() => state) });
-			deps.internal.interruptPending = false;
 			handlers = createMessageHandlers(deps);
 
 			handlers.handleMessage({ type: 'stopped', session_id: 'session-1' });
@@ -422,7 +402,6 @@ describe('ws-message-handlers', () => {
 			const state = mockState();
 			state.sessionId = 'session-active';
 			deps = createMockDeps({ getState: vi.fn(() => state) });
-			deps.internal.interruptPending = false;
 			deps.internal.pendingTools.add('tool-keep');
 			handlers = createMessageHandlers(deps);
 
@@ -438,7 +417,6 @@ describe('ws-message-handlers', () => {
 			const state = mockState();
 			state.sessionId = 'session-1';
 			deps = createMockDeps({ getState: vi.fn(() => state) });
-			deps.internal.interruptPending = false;
 			deps.internal.pendingTools.add('tool-x');
 			handlers = createMessageHandlers(deps);
 
@@ -454,7 +432,6 @@ describe('ws-message-handlers', () => {
 			const state = mockState();
 			state.sessionId = 'session-1';
 			deps = createMockDeps({ getState: vi.fn(() => state) });
-			deps.internal.interruptPending = false;
 			deps.internal.pendingTools.add('tool-y');
 			handlers = createMessageHandlers(deps);
 
@@ -742,13 +719,14 @@ describe('ws-message-handlers', () => {
 			expect(capturedError).toBe('Something went wrong');
 		});
 
-		it('clears interrupt state and resets streaming on its OWN error', () => {
+		it('resets streaming on its OWN error', () => {
 			const state = mockState();
 			state.sessionId = 'session-1';
-			deps = createMockDeps({ getState: vi.fn(() => state) });
-			deps.internal.interruptPending = true;
-			let rejected: unknown = '__unset__';
-			deps.internal.interruptConfirmResolve = (v: boolean) => { rejected = v; };
+			let applied: ActiveSessionState | undefined;
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { applied = fn(state); return applied; }),
+			});
 			handlers = createMessageHandlers(deps);
 
 			handlers.handleMessage({
@@ -757,26 +735,19 @@ describe('ws-message-handlers', () => {
 				message: 'boom',
 			});
 
-			// Active error: banner shown + isStreaming reset (so the user can send
-			// again), interrupt-and-query promise rejected and the flag cleared.
-			expect(deps.update).toHaveBeenCalled();
-			expect(deps.internal.interruptPending).toBe(false);
-			expect(rejected).toBe(false);
-			expect(deps.internal.interruptConfirmResolve).toBeNull();
+			// Active error: banner shown + isStreaming reset so the user can send again.
+			expect(applied?.error).toBe('boom');
+			expect(applied?.isStreaming).toBe(false);
 		});
 
 		it('does NOT clobber the active session when a BACKGROUND session errors', () => {
 			// Frontend U1: pre-fix, the error handler ignored data.session_id and
-			// always reset the ACTIVE session's isStreaming and rejected its
-			// interrupt-and-query promise — so a background session's stream error
-			// froze whatever was in view. Mirror handleDone / handleStoppedOrInterrupted:
-			// route by the event's session_id.
+			// always reset the ACTIVE session's isStreaming — so a background
+			// session's stream error froze whatever was in view. Mirror handleDone /
+			// handleStoppedOrInterrupted: route by the event's session_id.
 			const state = mockState();
 			state.sessionId = 'session-active';
 			deps = createMockDeps({ getState: vi.fn(() => state) });
-			deps.internal.interruptPending = true;
-			let resolverCalled = false;
-			deps.internal.interruptConfirmResolve = () => { resolverCalled = true; };
 			handlers = createMessageHandlers(deps);
 
 			handlers.handleMessage({
@@ -787,12 +758,9 @@ describe('ws-message-handlers', () => {
 
 			// The errored (background) session's streaming pill is dropped — cross-session safe.
 			expect(deps.streamingSessions.update).toHaveBeenCalled();
-			// The active session is untouched: no banner, no isStreaming reset, and the
-			// interrupt machinery is preserved (the whole active-only block is skipped).
+			// The active session is untouched: no banner and no isStreaming reset
+			// (the whole active-only block is skipped).
 			expect(deps.update).not.toHaveBeenCalled();
-			expect(deps.internal.interruptPending).toBe(true);
-			expect(resolverCalled).toBe(false);
-			expect(deps.internal.interruptConfirmResolve).not.toBeNull();
 		});
 
 		it('treats an error with no session_id as the active session', () => {
@@ -1527,59 +1495,132 @@ describe('ws-message-handlers', () => {
 
 	// Queue processing is now server-side — no frontend tests needed
 
-	describe('query_queued handler (send-now replacement routed to the queue)', () => {
-		// Finding F5: the user clicks "Send now" while a turn is streaming. The FE
-		// sends interrupt_for_query, latches internal.interruptPending, and sets
-		// optimistic isStreaming=true. The backend confirms, the FE sends the query
-		// — but the pooled client is still winding down the force-cancelled turn, so
-		// the backend routes the query to the queue and acks with `query_queued`
-		// (plus the usual queue_updated broadcast for the chip). Without a handler,
-		// interruptPending stays latched and isStreaming stays optimistically true →
-		// the spinner never clears. The handler clears interruptPending, drops the
-		// optimistic streaming state + streaming-session map entry; the SSE feed
-		// truth-ups the transcript.
+	describe('query_queued handler (a send that landed in the queue)', () => {
+		// Sending while a turn is live is a plain `query` now: the backend queues it
+		// and acks with `query_queued` while the turn keeps streaming. The handler
+		// must therefore leave isStreaming and the streaming map alone — the `turn.*`
+		// sync events own that state, and clearing it here killed the spinner
+		// mid-turn. The pending bubble itself rides on `queue_updated`.
 
-		function interruptedState() {
+		function streamingState() {
 			const state = mockState();
 			state.sessionId = 'session-1';
-			state.isStreaming = true; // optimistic streaming set by the interrupt path
+			state.isStreaming = true;
 			return state;
 		}
 
-		it('clears interruptPending, drops isStreaming, and cleans the streaming map', () => {
-			const state = interruptedState();
-			let applied: ActiveSessionState | undefined;
-			deps = createMockDeps({
-				getState: vi.fn(() => state),
-				update: vi.fn((fn) => { applied = fn(state); return applied; }),
-			});
-			deps.internal.interruptPending = true;
+		it('leaves the live turn streaming and the streaming map untouched', () => {
+			const state = streamingState();
+			deps = createMockDeps({ getState: vi.fn(() => state) });
 			handlers = createMessageHandlers(deps);
 
 			handlers.handleMessage({ type: 'query_queued', session_id: 'session-1' });
 
-			// The interrupt latch is released.
-			expect(deps.internal.interruptPending).toBe(false);
-			// Optimistic streaming state cleared so the feed's truth wins.
-			expect(applied?.isStreaming).toBe(false);
-			expect(applied?.streamStartTime).toBeNull();
-			// Streaming-session map entry removed (mirrors done/stopped terminal frames).
-			const fn = (deps.streamingSessions.update as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
-			expect(fn).toBeDefined();
-			expect(fn(new Map([['session-1', { projectId: null, worktreeId: null }]])).has('session-1')).toBe(false);
+			expect(deps.update).not.toHaveBeenCalled();
+			expect(deps.streamingSessions.update).not.toHaveBeenCalled();
+			expect(deps.clearStopTimeout).not.toHaveBeenCalled();
 		});
 
 		it('ignores a query_queued for a non-active session', () => {
-			const state = interruptedState();
+			const state = streamingState();
 			deps = createMockDeps({ getState: vi.fn(() => state) });
-			deps.internal.interruptPending = true;
 			handlers = createMessageHandlers(deps);
 
 			handlers.handleMessage({ type: 'query_queued', session_id: 'some-other-session' });
 
-			// Cross-session safety: the active session's latch/streaming/state untouched.
-			expect(deps.internal.interruptPending).toBe(true);
 			expect(deps.update).not.toHaveBeenCalled();
+		});
+	});
+});
+
+describe('queue_updated (the pending "not seen yet" bubbles)', () => {
+	// The snapshot is authoritative about what EXISTS, but the backend emits it
+	// from two unordered places (the socket that handled the frame, and the turn
+	// pump when a steer is absorbed), so a pre-absorption snapshot can land last.
+	// Replace-all alone then resurrects an answered bubble for good.
+
+	let state: ActiveSessionState;
+	let deps: MessageHandlerDeps;
+	let handlers: ReturnType<typeof createMessageHandlers>;
+
+	function frame(rows: Array<{ id: string; content: string }>): Record<string, unknown> {
+		return {
+			type: 'sync',
+			event_type: 'queue_updated',
+			session_id: 'session-1',
+			data: {
+				queued_messages: rows.map((r) => ({
+					...r,
+					created_at: '2026-08-23T12:00:00.000Z',
+				})),
+			},
+		};
+	}
+
+	function pendingIds(): string[] {
+		return state.queuedMessages.map((m) => m.id);
+	}
+
+	beforeEach(() => {
+		pendingQueue.reset('session-1');
+		state = mockState();
+		deps = createMockDeps({
+			update: vi.fn((fn) => { state = fn(state); }),
+			getState: vi.fn(() => state),
+		});
+		handlers = createMessageHandlers(deps);
+	});
+
+	it('renders the server snapshot', () => {
+		handlers.handleMessage(frame([{ id: 'turn-q', content: 'steer me' }]));
+		expect(pendingIds()).toEqual(['turn-q']);
+	});
+
+	it('ignores a snapshot for another session', () => {
+		handlers.handleMessage({
+			type: 'sync',
+			event_type: 'queue_updated',
+			session_id: 'other',
+			data: { queued_messages: [{ id: 'x', content: 'y', created_at: '2026-08-23T12:00:00.000Z' }] },
+		});
+		expect(pendingIds()).toEqual([]);
+	});
+
+	it('does not resurrect a bubble the transcript already answered', () => {
+		handlers.handleMessage(frame([{ id: 'turn-q', content: 'steer me' }]));
+		// The steer is absorbed: the SSE feed reports the user message on the LIVE
+		// turn's id, and the pump broadcasts the cleared queue.
+		pendingQueue.noteDelivered('session-1', 'steer me', 'turn-live');
+		handlers.handleMessage(frame([]));
+		expect(pendingIds()).toEqual([]);
+		// A snapshot taken BEFORE the absorb arrives last — this is the stuck bubble.
+		handlers.handleMessage(frame([{ id: 'turn-q', content: 'steer me' }]));
+		expect(pendingIds()).toEqual([]);
+	});
+
+	it('shows a row the server put back after an interrupt', () => {
+		handlers.handleMessage(frame([{ id: 'turn-q', content: 'steer me' }]));
+		pendingQueue.noteDelivered('session-1', 'steer me', 'turn-live');
+		handlers.handleMessage(frame([]));
+		// Re-queued as a fresh turn row because the turn that swallowed it was
+		// interrupted. Same text, new row — it must render.
+		handlers.handleMessage(frame([{ id: 'turn-q2', content: 'steer me' }]));
+		expect(pendingIds()).toEqual(['turn-q2']);
+	});
+
+	it('re-aims a deferred × at the server row once it appears', () => {
+		pendingQueue.noteOptimistic('session-1', 'queued-local-1');
+		pendingQueue.requestRemoval('session-1', {
+			id: 'queued-local-1', content: 'nope', queuedAt: 1,
+		});
+
+		handlers.handleMessage(frame([{ id: 'turn-q', content: 'nope' }]));
+
+		expect(pendingIds()).toEqual([]);
+		expect(deps.wsSend).toHaveBeenCalledWith({
+			type: 'remove_queued_message',
+			message_id: 'turn-q',
+			session_id: 'session-1',
 		});
 	});
 });

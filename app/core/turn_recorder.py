@@ -604,6 +604,48 @@ class TurnRecorder:
                 exc_info=True,
             )
 
+    async def record_steered_user_message(
+        self,
+        content: str,
+        *,
+        profile_id: str | None = None,
+        command_id: str | None = None,
+    ) -> bool:
+        """Append a ``message.user`` for a message steered into the LIVE turn.
+
+        A queued prompt handed to the running engine mid-stream belongs to THIS
+        turn from the moment fluid receipts it, and it belongs at the position
+        the model saw it — right after the tool result that carried it. So it is
+        appended here, mid-stream, rather than by the ``start`` of a turn the
+        row will now never have.
+
+        ``command_id`` overrides the recorder's own (the queued row's handle,
+        not the live turn's) so the frontend collapses its pending bubble onto
+        this message instead of rendering a second copy. Buffered deltas drain
+        first, exactly as any non-delta pump event would, so log order still
+        mirrors stream order. Returns True when the append was made.
+        """
+        if self._closed or self._superseded:
+            return False
+        try:
+            async with self._lock:
+                events = self._drain_buffered_events()
+                events.append(_build_event(
+                    contract.MessageUser, self.session_id,
+                    turn_id=self.turn_id,
+                    command_id=command_id or self.command_id,
+                    content=content or "",
+                    profile_id=profile_id,
+                ))
+                await self._append(events)
+            return True
+        except Exception:
+            logger.warning(
+                "[TurnRecorder] record_steered_user_message failed for %s",
+                self.session_id, exc_info=True,
+            )
+            return False
+
     async def on_event(self, event: Dict[str, Any]) -> None:
         """Translate one yielded pump event per §3. Never raises."""
         try:

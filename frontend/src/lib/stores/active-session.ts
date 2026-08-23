@@ -399,13 +399,11 @@ function stopFeedReconcile(): void {
 // Shared mutable state — passed by reference to ws-message-handlers and session-switcher.
 const internal: InternalMutableState = {
 	pendingTools: new Set(),
-	interruptPending: false,
 	awaitingNewSession: false,
 	pendingRequestId: null,
 	stopRequestedBeforeSession: false,
 	worktreeCreationGeneration: 0,
 	worktreeCreateAbort: null,
-	interruptConfirmResolve: null,
 };
 
 // ─── WebSocket Connection (extracted module) ─────────────────────────────────
@@ -530,12 +528,7 @@ function disconnect() {
 	stopFeedReconcile();
 
 	internal.pendingTools.clear();
-	internal.interruptPending = false;
 	internal.awaitingNewSession = false;
-	if (internal.interruptConfirmResolve) {
-		internal.interruptConfirmResolve(false);
-		internal.interruptConfirmResolve = null;
-	}
 
 	if (stopTimeout) { clearTimeout(stopTimeout); stopTimeout = null; }
 
@@ -870,11 +863,9 @@ export const activeSession = {
 	autoCreateWorktree: (prompt: string, pendingUploadPaths?: string[]) =>
 		messageSender.autoCreateWorktree(prompt, pendingUploadPaths),
 
-	// ── Queued Messages (delegated to message-sender) ──────────────
+	// ── Pending Messages (delegated to message-sender) ─────────────
 
-	queueMessage: (content: string): Promise<boolean> => messageSender.queueMessage(content),
 	removeQueuedMessage: (id: string) => messageSender.removeQueuedMessage(id),
-	clearQueuedMessages: () => messageSender.clearQueuedMessages(),
 
 	// ── System Messages & Error Handling (delegated to draft-manager) ──
 

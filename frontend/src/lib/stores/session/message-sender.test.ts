@@ -5,6 +5,7 @@ import type { InternalMutableState } from './ws-message-handlers';
 import { reopenWorktree } from '$lib/api/git';
 import { api } from '$lib/api/client';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
+import { pendingQueue } from './pending-queue';
 
 // message-sender pulls these from $lib/api/git at module load. Only reopenWorktree
 // is exercised here (the best-effort reopen for cleaned-up worktree sessions); the
@@ -47,6 +48,7 @@ function baseState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		project: 'proj-1',
 		projectV2Id: null,
 		messages: [],
+		queuedMessages: [],
 		isStreaming: false,
 		worktreeIntent: 'local',
 		worktreeId: null,
@@ -71,13 +73,11 @@ function makeDeps(initial: ActiveSessionState) {
 
 	const internal: InternalMutableState = {
 		pendingTools: new Set<string>(),
-		interruptPending: false,
 		awaitingNewSession: false,
 		pendingRequestId: null,
 		stopRequestedBeforeSession: false,
 		worktreeCreationGeneration: 0,
 		worktreeCreateAbort: null,
-		interruptConfirmResolve: null,
 	};
 
 	const wsConn = {
@@ -294,14 +294,13 @@ describe('message-sender new-session adoption token (hijack fix)', () => {
 });
 
 /**
- * "Send now" (interrupt-and-send): when the user submits while a stream is live,
- * the sender runs the two-phase interrupt_for_query handshake and then fires the
- * replacement query. That query MUST carry interrupt_followup so the backend
- * treats a start-frame send that fails on a socket dropped during the interrupt
- * drain as non-fatal (stream via sync_engine + polling) instead of dropping the
- * message — the same class of bug fixed for "Send later".
+ * Sending while a turn is live: there is no interrupt handshake any more. The
+ * prompt goes out as a plain `query` (the backend decides whether it steers the
+ * live turn or starts the next one), and the optimistic echo lands on
+ * `queuedMessages` — the pending bubble below the transcript — instead of on the
+ * transcript itself. A failed send rolls that echo back.
  */
-describe('message-sender "Send now" flags the interrupt follow-up query', () => {
+describe('message-sender send during a live turn', () => {
 	function streamingState() {
 		return baseState({
 			worktreeIntent: 'local',
@@ -312,32 +311,51 @@ describe('message-sender "Send now" flags the interrupt follow-up query', () => 
 		});
 	}
 
-	it('sets interrupt_followup on the query after the interrupt is confirmed', async () => {
+	it('sends a plain query with no interrupt handshake or follow-up flag', async () => {
 		const { deps, wsConn } = makeDeps(streamingState());
-		// Confirm the interrupt as soon as the handshake message goes out, exactly
-		// like the real interrupt_confirmed handler resolving the pending promise.
-		wsConn.send.mockImplementation((data: Record<string, unknown>) => {
-			if (data?.type === 'interrupt_for_query') {
-				deps.internal.interruptConfirmResolve?.(true);
-			}
-			return true;
-		});
 		const sender = createMessageSender(deps);
 
-		const result = await sender.sendMessage('answer this now');
+		const result = await sender.sendMessage('answer this too');
 
 		expect(result).toBe(true);
-		// The two-phase handshake ran...
 		const interruptSends = wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'interrupt_for_query');
-		expect(interruptSends).toHaveLength(1);
-		// ...and the replacement query is flagged as the interrupt follow-up.
+		expect(interruptSends).toHaveLength(0);
 		const querySends = wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'query');
 		expect(querySends).toHaveLength(1);
-		expect((querySends[0][0] as any).interrupt_followup).toBe(true);
+		expect((querySends[0][0] as any).interrupt_followup).toBeUndefined();
+		expect((querySends[0][0] as any).prompt).toBe('answer this too');
 	});
 
-	it('does not flag a normal (non-interrupting) send', async () => {
-		const { deps, wsConn } = makeDeps(baseState({
+	it('echoes the prompt onto queuedMessages, not the transcript', async () => {
+		const { deps, getState } = makeDeps(streamingState());
+		const sender = createMessageSender(deps);
+
+		await sender.sendMessage('answer this too');
+
+		const queued = getState().queuedMessages;
+		expect(queued).toHaveLength(1);
+		expect(queued[0].content).toBe('answer this too');
+		expect(queued[0].id).toMatch(/^queued-local-/);
+		// The transcript is untouched — the model hasn't seen the prompt yet.
+		expect(getState().messages).toHaveLength(1);
+	});
+
+	it('rolls the pending echo back when the query never goes out', async () => {
+		const { deps, wsConn, getState } = makeDeps(streamingState());
+		wsConn.send.mockImplementation((data: Record<string, unknown>) => data?.type !== 'query');
+		const sender = createMessageSender(deps);
+
+		const result = await sender.sendMessage('answer this too');
+
+		expect(result).toBe(false);
+		expect(getState().queuedMessages).toHaveLength(0);
+		// The live turn is NOT ours to end — only the send failed.
+		expect(getState().isStreaming).toBe(true);
+		expect(getState().error).toMatch(/connection lost/i);
+	});
+
+	it('appends to the transcript when nothing is streaming', async () => {
+		const { deps, wsConn, getState } = makeDeps(baseState({
 			worktreeIntent: 'local',
 			sessionId: 'ses-1',
 			isStreaming: false,
@@ -349,11 +367,10 @@ describe('message-sender "Send now" flags the interrupt follow-up query', () => 
 		const result = await sender.sendMessage('no rush');
 
 		expect(result).toBe(true);
-		const interruptSends = wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'interrupt_for_query');
-		expect(interruptSends).toHaveLength(0);
+		expect(getState().queuedMessages).toHaveLength(0);
+		expect(getState().messages).toHaveLength(2);
 		const querySends = wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'query');
 		expect(querySends).toHaveLength(1);
-		expect((querySends[0][0] as any).interrupt_followup).toBeUndefined();
 	});
 });
 
@@ -677,3 +694,90 @@ describe('sendMessage remote-only compose', () => {
 	});
 });
 
+
+/**
+ * The optimistic pending bubble and the × that unsends it. Both edges exist
+ * because the local `queued-local-*` id is private to this tab: the server has
+ * never heard of it, and its own replace-all `queue_updated` snapshots are the
+ * only thing that can retire it.
+ */
+describe('message-sender pending-bubble edges', () => {
+	function streamingState() {
+		return baseState({
+			worktreeIntent: 'local',
+			sessionId: 'ses-1',
+			isStreaming: true,
+			title: 'Existing chat',
+			messages: [{ id: 'u0', role: 'user', content: 'earlier' } as any],
+		});
+	}
+
+	beforeEach(() => {
+		pendingQueue.reset('ses-1');
+	});
+
+	it('skips the optimistic echo when the server already described the queue', async () => {
+		// The authoritative snapshot for this send lands BEFORE the local append
+		// gets to run — a local row added on top of it is a second copy that no
+		// later frame is guaranteed to replace.
+		const { deps, getState, wsConn } = makeDeps(streamingState());
+		pendingQueue.noteAuthoritative('ses-1', [
+			{ id: 'turn-q', content: 'answer this too', queuedAt: 1 },
+		]);
+		const sender = createMessageSender(deps);
+
+		const result = await sender.sendMessage('answer this too');
+
+		expect(result).toBe(true);
+		expect(getState().queuedMessages).toHaveLength(0);
+		// The send itself still goes out.
+		expect(wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'query')).toHaveLength(1);
+	});
+
+	it('unsends a server row by naming it', async () => {
+		const { deps, wsConn, getState } = makeDeps(streamingState());
+		deps.update((s) => ({
+			...s,
+			queuedMessages: [{ id: 'turn-q', content: 'nope', queuedAt: 1 }],
+		}));
+		const sender = createMessageSender(deps);
+
+		sender.removeQueuedMessage('turn-q');
+
+		expect(getState().queuedMessages).toHaveLength(0);
+		expect(wsConn.send).toHaveBeenCalledWith({
+			type: 'remove_queued_message',
+			message_id: 'turn-q',
+			session_id: 'ses-1',
+		});
+	});
+
+	it('drops a local echo on × instead of naming an id the server cannot know', async () => {
+		const { deps, wsConn, getState } = makeDeps(streamingState());
+		const sender = createMessageSender(deps);
+		await sender.sendMessage('take it back');
+		const localId = getState().queuedMessages[0].id;
+		wsConn.send.mockClear();
+
+		sender.removeQueuedMessage(localId);
+
+		// Gone from view, and no frame naming the local id (which would only make
+		// the server rebroadcast the row straight back).
+		expect(getState().queuedMessages).toHaveLength(0);
+		expect(wsConn.send).not.toHaveBeenCalled();
+		// The removal is re-aimed at the real row when the snapshot arrives.
+		const rows = [{ id: 'turn-q', content: 'take it back', queuedAt: 2 }];
+		pendingQueue.noteAuthoritative('ses-1', rows);
+		expect(pendingQueue.reconcile('ses-1', rows)).toEqual([]);
+		expect(pendingQueue.drainRemovalRequests()).toEqual(['turn-q']);
+	});
+
+	it('ignores an × for a message that is no longer pending', () => {
+		const { deps, wsConn } = makeDeps(streamingState());
+		const sender = createMessageSender(deps);
+
+		sender.removeQueuedMessage('turn-gone');
+
+		expect(wsConn.send).not.toHaveBeenCalled();
+	});
+});

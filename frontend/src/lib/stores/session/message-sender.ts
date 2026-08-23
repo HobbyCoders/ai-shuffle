@@ -1,6 +1,6 @@
 /**
- * Message Sender — Send message flow, interrupt-and-query, worktree creation,
- * stop generation, and message queue management.
+ * Message Sender — Send message flow, worktree creation, stop generation, and
+ * removal of messages the model hasn't seen yet.
  *
  * Plain .ts file — no $state/$derived/$effect runes (see KNOWN_ISSUES.md Root Cause 10).
  */
@@ -14,6 +14,8 @@ import { generateBranchName, generateBranchNameLocal } from '$lib/api/git';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
 // V2 Phase 1: SSE-fed reducer — the transcript authority for a session.
 import { feedController } from './v2/feed-controller';
+// Arbiter of which pending ("not seen yet") bubbles survive.
+import { pendingQueue, newLocalPendingId } from './pending-queue';
 import { contextWindowForChoice } from '$lib/constants/model-context';
 import { getDefaultModel } from '$lib/constants/models';
 
@@ -210,6 +212,11 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		async sendMessage(prompt: string, options?: SendMessageOptions): Promise<boolean> {
 			prompt = prompt.trim();
 
+			// When the send began. An optimistic pending bubble is only worth
+			// appending while the server has said nothing about the queue since this
+			// moment — see the guard on `optimisticQueuedId` below.
+			const dispatchedAt = Date.now();
+
 			// Restore-race guard: right after a page load, init() may have adopted
 			// a persisted sessionId whose history hasn't rendered yet — the UI
 			// looks like "New Chat" but a send here would silently continue the
@@ -285,47 +292,12 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				: _state.title;
 			const queryProfileId = _state.profile;
 
-			// Interrupting a live stream: use the two-phase interrupt_for_query
-			// path (backend interrupts, drains, sends 'interrupt_confirmed') so
-			// the new query only starts after the old one has fully released the
-			// SDK pipe. Gate poll updates via interruptPending so stale polls
-			// from the old query don't flip isStreaming false between interrupt
-			// and start, which caused a visible gap + user-msg flicker.
-			const mustInterrupt = !!(_state.isStreaming && _state.sessionId);
-			if (mustInterrupt) {
-				internal.interruptPending = true;
-				internal.pendingTools.clear();
-
-				const sessionIdForInterrupt = _state.sessionId!;
-				const confirmed = await new Promise<boolean>((resolve) => {
-					internal.interruptConfirmResolve = resolve;
-					const sent = wsConn.send({
-						type: 'interrupt_for_query',
-						session_id: sessionIdForInterrupt,
-					});
-					if (!sent) {
-						internal.interruptConfirmResolve = null;
-						resolve(false);
-						return;
-					}
-					// Safety timeout covers the backend's worst case: SDK
-					// interrupt timeout (5s) + drain budget (8s) + buffer.
-					setTimeout(() => {
-						if (internal.interruptConfirmResolve === resolve) {
-							internal.interruptConfirmResolve = null;
-							resolve(false);
-						}
-					}, 15000);
-				});
-
-				if (!confirmed) {
-					// Interrupt failed — abort the send and let the user retry.
-					// Clear interruptPending so subsequent polls work.
-					internal.interruptPending = false;
-					update(s => ({ ...s, error: 'Unable to interrupt the active generation. Please try again.' }));
-					return false;
-				}
-			}
+			// Sending during a live turn is a plain `query`: the turn keeps running
+			// and the backend decides when the model sees the new prompt (mid-turn
+			// steer, or the start of the next turn). Until it lands, the message
+			// shows as a pending bubble fed by `queuedMessages` — so the optimistic
+			// append below goes there instead of onto the transcript.
+			const sendWhileStreaming = !!(_state.isStreaming && _state.sessionId);
 
 			// Guard against the "stray new session" bug: a chat that was already
 			// OPENED (history/messages present) but whose sessionId went missing —
@@ -363,46 +335,47 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 				internal.pendingRequestId = requestId;
 			}
-			console.debug(`[ActiveSession] sendMessage: sessionId=${_state.sessionId}, awaitingNewSession=${internal.awaitingNewSession}, wsConnected=${wsConn.isConnected()}, mustInterrupt=${mustInterrupt}`);
+			console.debug(`[ActiveSession] sendMessage: sessionId=${_state.sessionId}, awaitingNewSession=${internal.awaitingNewSession}, wsConnected=${wsConn.isConnected()}, sendWhileStreaming=${sendWhileStreaming}`);
+
+			// Optimistic echo, in whichever place the message actually belongs.
+			// While a turn is live the prompt is NOT part of the transcript yet, so
+			// it goes onto `queuedMessages` and renders as a pending bubble; the
+			// server's `queue_updated` replaces this local row, and pendingQueue
+			// retires it once the transcript answers it.
+			//
+			// Skipped when an authoritative `queue_updated` for this session already
+			// landed since the send began: the server has described the queue for
+			// this window, so a local row added on top of it is a second copy that
+			// no later frame is guaranteed to replace.
+			const optimisticQueuedId = sendWhileStreaming && !options?.skipMessageAppend
+				&& !pendingQueue.authoritySpokeSince(_state.sessionId, dispatchedAt)
+				? newLocalPendingId()
+				: null;
 
 			// Single atomic update — avoids intermediate render where streaming
 			// is cleared but the new user message hasn't been appended yet.
-			// When mustInterrupt, also strip streaming artifacts from the old
-			// query (running tool_use → error, streaming text finalized, empty
-			// assistant placeholders dropped).
 			if (options?.skipMessageAppend) {
-				update(s => {
-					const messages = mustInterrupt
-						? s.messages
-							.map(m => {
-								if (m.type === 'tool_use' && m.toolStatus === 'running') {
-									return { ...m, streaming: false, toolStatus: 'error' as const };
-								}
-								return m.streaming ? { ...m, streaming: false } : m;
-							})
-							.filter(m => !(m.type === 'text' && m.role === 'assistant' && !m.content))
-						: s.messages;
-					return {
-						...s,
-						messages,
-						isStreaming: true,
-						error: null,
-						title: newTitle,
-						currentQueryProfileId: queryProfileId,
-					};
-				});
+				update(s => ({
+					...s,
+					isStreaming: true,
+					error: null,
+					title: newTitle,
+					currentQueryProfileId: queryProfileId,
+				}));
+			} else if (optimisticQueuedId) {
+				pendingQueue.noteOptimistic(_state.sessionId, optimisticQueuedId);
+				update(s => ({
+					...s,
+					queuedMessages: [...s.queuedMessages, {
+						id: optimisticQueuedId,
+						content: prompt,
+						queuedAt: Date.now(),
+					}],
+					error: null,
+				}));
 			} else {
 				update(s => {
-					const baseMessages = mustInterrupt
-						? s.messages
-							.map(m => {
-								if (m.type === 'tool_use' && m.toolStatus === 'running') {
-									return { ...m, streaming: false, toolStatus: 'error' as const };
-								}
-								return m.streaming ? { ...m, streaming: false } : m;
-							})
-							.filter(m => !(m.type === 'text' && m.role === 'assistant' && !m.content))
-						: s.messages;
+					const baseMessages = s.messages;
 					// eslint-disable-next-line no-console
 					if (STREAM_DEBUG) console.log(`[AS] optimistic append A id=${userMsgId} prevLen=${baseMessages.length} "${prompt.slice(0, 30)}"`);
 					return {
@@ -451,20 +424,16 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// The backend echoes it in session_created + the first start frame.
 				request_id: requestId || undefined,
 				overrides: buildOverrides(),
-				// "Send now": flag the replacement query so a start-frame send that
-				// fails on a socket dropped during the interrupt drain doesn't drop
-				// the message server-side (it streams via sync_engine + polling).
-				interrupt_followup: mustInterrupt || undefined,
 			});
-			// interruptPending cleared by 'start' handler (ws-message-handlers.ts:395)
-			// once the new query's stream_start event arrives.
 			if (!querySent) {
-				// WS dropped between the interrupt confirm and the query send.
-				// Surface an error so the caller can restore the input.
-				internal.interruptPending = false;
+				// WS dropped before the frame went out. Roll the optimistic echo back
+				// and surface an error so the caller can restore the input. A live
+				// turn keeps streaming — only a non-streaming send owns isStreaming.
 				update(s => ({
 					...s,
-					isStreaming: false,
+					...(optimisticQueuedId
+						? { queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticQueuedId) }
+						: { isStreaming: false }),
 					error: 'Connection lost before the message was sent. Please try again.',
 				}));
 				return false;
@@ -867,71 +836,23 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			}
 		},
 
-		// ── Queued Messages (server-side queue) ─────────────────────────
+		// ── Pending Messages (server-side queue) ────────────────────────
 
-		async queueMessage(content: string): Promise<boolean> {
-			const _state = getState();
-			if (!_state.sessionId) return false;
-
-			const optimisticId = `queued-local-${Date.now()}`;
-			update(s => ({
-				...s,
-				queuedMessages: [...s.queuedMessages, {
-					id: optimisticId,
-					content,
-					queuedAt: Date.now(),
-				}],
-			}));
-
-			// Mirror sendMessage's preamble: the socket may be closed (idle
-			// tab, backgrounded device) when the user hits Send later, and a
-			// bare send() on a dead socket silently drops the queue request.
-			if (!wsConn.isConnected()) {
-				wsConn.resetReconnectAttempts();
-				wsConn.connect();
-				const connected = await waitForConnection();
-				if (!connected) {
-					update(s => ({
-						...s,
-						queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticId),
-						error: 'Unable to connect. Please check your connection and try again.',
-					}));
-					return false;
-				}
-			}
-
-			const sent = wsConn.send({
-				type: 'queue_message',
-				session_id: _state.sessionId,
-				content,
-				profile: _state.currentQueryProfileId || _state.profile,
-				project: _state.project || undefined,
-			});
-
-			if (!sent) {
-				update(s => ({
-					...s,
-					queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticId),
-					error: 'Failed to queue message — connection lost. Please try again.',
-				}));
-				return false;
-			}
-			return true;
-		},
-
+		/** Unsend a message that hasn't reached the model yet. */
 		removeQueuedMessage(id: string) {
+			const _state = getState();
+			const entry = _state.queuedMessages.find(m => m.id === id);
+			if (!entry) return;
+			// An optimistic echo carries an id only this tab has ever seen, so the
+			// server cannot act on it — naming it in a remove frame just triggers a
+			// rebroadcast that puts the bubble back. Drop it here and let
+			// pendingQueue re-aim the removal at the real row when it arrives.
+			const serverId = pendingQueue.requestRemoval(_state.sessionId, entry);
+			update(s => ({ ...s, queuedMessages: s.queuedMessages.filter(m => m.id !== id) }));
+			if (!serverId) return;
 			wsConn.send({
 				type: 'remove_queued_message',
-				message_id: id,
-				session_id: getState().sessionId,
-			});
-		},
-
-		clearQueuedMessages() {
-			const _state = getState();
-			if (!_state.sessionId) return;
-			wsConn.send({
-				type: 'clear_queued_messages',
+				message_id: serverId,
 				session_id: _state.sessionId,
 			});
 		},

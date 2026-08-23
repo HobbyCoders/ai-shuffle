@@ -347,6 +347,16 @@ describe('message.user reconcile', () => {
 		expect(s.messages).toHaveLength(2);
 	});
 
+	it('stamps the owning turn id, so a steered prompt stays inside its turn', () => {
+		const s = fold([
+			ev('turn.started', { turn_id: 't-1' }),
+			ev('message.user', { id: 'srv-a', content: 'go', turn_id: 't-1' }),
+			// Handed to the running turn mid-stream: same turn, no turn.started.
+			ev('message.user', { id: 'srv-b', content: 'and the logs', turn_id: 't-1' }),
+		]);
+		expect(s.messages.map((m) => m.turnId)).toEqual(['t-1', 't-1']);
+	});
+
 	it('prefers the event profile_id over the live turn profile', () => {
 		const s = fold([
 			ev('turn.started', { turn_id: 't-1', profile_id: 'p-turn' }),

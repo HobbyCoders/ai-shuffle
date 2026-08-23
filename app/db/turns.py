@@ -12,6 +12,10 @@ through::
               running ---------------------------> requeued (back to queued)
                   (dead-lease crash recovery; interrupting/draining dead-lease
                    turns are aborted instead — see ``reap_expired``)
+    queued ------------------------------------> completed (stop_reason='steered')
+                  (absorb_queued_turn — the queued prompt was handed to the LIVE
+                   turn mid-stream as a fluid steer, so it never runs as a turn
+                   of its own; its user message is recorded at delivery instead)
 
 At most one turn per session may occupy a *live* state
 (``running``/``interrupting``/``draining``) at a time — enforced by the partial
@@ -398,6 +402,35 @@ def remove_queued_turn(turn_id: str) -> Optional[Dict[str, Any]]:
         )
         row = cursor.fetchone()
     return _row(row)
+
+
+def absorb_queued_turn(turn_id: str) -> bool:
+    """Retire a still-``queued`` turn whose prompt was delivered mid-stream.
+
+    A queued user message can reach the model without ever running as a turn:
+    the live turn's engine accepts it as a fluid ``Steer`` and folds the text
+    into the next tool result. Once fluid receipts that delivery the queued row
+    must never run again, so it settles ``completed`` with
+    ``stop_reason='steered'`` — the same terminal bookkeeping ``settle_turn``
+    writes (``ended_at=NOW()``), which keeps the row out of ``pop_ready`` and
+    out of the queue view while preserving it as history.
+
+    The ``state='queued'`` guard lives in the UPDATE, so a row that raced to
+    live (the drain started it before the receipt landed) is left alone and
+    ``False`` is returned. Idempotent by the same guard: a second call after a
+    successful absorb matches nothing. Returns True only on the transition that
+    actually absorbed the turn.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE turns SET state='completed', stop_reason='steered', "
+            "ended_at=NOW() "
+            "WHERE id=%s AND state='queued' "
+            "RETURNING id",
+            (turn_id,),
+        )
+        return cursor.fetchone() is not None
 
 
 def park_turn(

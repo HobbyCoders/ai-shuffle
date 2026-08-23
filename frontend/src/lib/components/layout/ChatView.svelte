@@ -23,7 +23,6 @@
 	import MessageArea from '$lib/components/chat/MessageArea.svelte';
 	import TeamStatusBar from '$lib/components/TeamStatusBar.svelte';
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
-	import QueuedMessages from '$lib/components/chat/QueuedMessages.svelte';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import WorkspaceSelector from './WorkspaceSelector.svelte';
@@ -263,11 +262,6 @@
 				     new session creation (sessionId: undefined → new ID). -->
 				<MessageArea />
 			</div>
-
-			<!-- Queued Messages Bar (Send Later) -->
-			{#if $activeSession.queuedMessages && $activeSession.queuedMessages.length > 0}
-				<QueuedMessages />
-			{/if}
 		</div>
 	{/if}
 

@@ -15,7 +15,6 @@
 	import { tick, onDestroy, onMount } from 'svelte';
 	import { get } from 'svelte/store';
 	import { activeSession } from '$lib/stores/active-session';
-	import { queuedMessageEdit } from '$lib/stores/queued-message-edit';
 	import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 	import { profiles } from '$lib/stores/app-data.svelte';
 	import { anyCredential } from '$lib/stores/auth.svelte';
@@ -293,55 +292,9 @@
 	// Get selected agent name for display in placeholder
 	const selectedProfileName = $derived($profiles.find(p => p.id === $activeSession.profile)?.name || 'agent');
 
-	// Modifier label for the send-later button title.
-	const metaLabel =
-		typeof navigator !== 'undefined' && navigator.platform?.includes('Mac') ? '⌘' : 'Ctrl';
-
-	// Handle queued message edit events from QueuedMessages component.
-	// The queued row is NOT removed up front — we only mark which queued message
-	// is loaded here, and drop the server-side copy once the edit is actually sent.
-	function handleQueuedMessageEdit(e: Event) {
-		const { id, content } = (e as CustomEvent<{ id: string; content: string }>).detail;
-		// Never silently clobber a draft the user is in the middle of writing.
-		const draft = plainTextValue.trim();
-		if (draft && draft !== content.trim()) {
-			const ok = window.confirm(
-				'Replace your current draft with this queued message? The queued copy stays in the queue until you send.'
-			);
-			if (!ok) return;
-		}
-		inputValue = content;
-		plainTextValue = content;
-		editorRef?.setContent(content);
-		// Focus the editor after setting content
-		tick().then(() => editorRef?.focus());
-		queuedMessageEdit.set({ id });
-	}
-
-	// Emptying the composer abandons the edit — drop the marker so the queued
-	// chip stops showing the "editing" badge and a later send can't remove it.
-	$effect(() => {
-		if ($queuedMessageEdit && plainTextValue.trim() === '') {
-			queuedMessageEdit.set(null);
-		}
-	});
-
-	// Switching sessions abandons the edit too. Tracked with a plain variable so
-	// unrelated reruns of this effect can't clear a live marker.
-	let queuedEditSessionId = $activeSession.sessionId;
-	$effect(() => {
-		const sessionId = $activeSession.sessionId;
-		if (sessionId !== queuedEditSessionId) {
-			queuedEditSessionId = sessionId;
-			queuedMessageEdit.set(null);
-		}
-	});
-
 	onMount(() => {
-		window.addEventListener('queued-message-edit', handleQueuedMessageEdit);
 		document.addEventListener('pointerdown', handleDocumentPointerDown);
 		return () => {
-			window.removeEventListener('queued-message-edit', handleQueuedMessageEdit);
 			document.removeEventListener('pointerdown', handleDocumentPointerDown);
 		};
 	});
@@ -389,7 +342,7 @@
 	}
 
 	// Handle form submission
-	async function handleSubmit(sendLater: boolean = false) {
+	async function handleSubmit() {
 		// Get serialized message from editor (includes inline @path references)
 		const finalPrompt = editorRef?.getMessage() ?? '';
 
@@ -418,20 +371,17 @@
 		}
 
 		// Send the message
-		sendMessage(messageToSend, sendLater);
+		sendMessage(messageToSend);
 	}
 
-	// Actually send the message (or queue it for later)
-	async function sendMessage(finalPrompt: string, sendLater: boolean = false) {
+	// Actually send the message. There is no send-later fork: a send during a live
+	// turn still goes out, and the backend decides when the model sees it (mid-turn
+	// steer, or the start of the next turn). Until then it renders as a pending
+	// bubble at the tail of the transcript.
+	async function sendMessage(finalPrompt: string) {
 		// Mark that we're sending - prevents onDestroy from overwriting the cleared draft
 		// This is critical for the first message when the component gets destroyed/recreated
 		messageSent = true;
-
-		// Capture (and clear) the queued-message edit marker BEFORE the composer is
-		// cleared below — clearing the editor empties plainTextValue, which trips the
-		// abandon-edit effect and would wipe the marker before we could use it.
-		const editingId = get(queuedMessageEdit)?.id ?? null;
-		queuedMessageEdit.set(null);
 
 		// Collect the staged upload paths this message references, BEFORE the
 		// composer state is cleared below. Two consumers, both server-side:
@@ -472,18 +422,6 @@
 			editorRef?.setContent(finalPrompt);
 			saveDraftImmediately(finalPrompt);
 			messageSent = false;
-			// The edit never landed — keep the marker so the chip still reads "editing".
-			if (editingId) queuedMessageEdit.set({ id: editingId });
-		};
-
-		// The edited copy has landed, so the original queued row is now a duplicate.
-		// Only drop it if it's STILL queued — it may have been dispatched (or removed)
-		// while the user was editing, in which case there's nothing to clean up.
-		const dropEditedOriginal = () => {
-			if (!editingId) return;
-			if (get(activeSession).queuedMessages?.some(m => m.id === editingId)) {
-				activeSession.removeQueuedMessage(editingId);
-			}
 		};
 
 		const collapseMobileComposer = () => {
@@ -505,26 +443,12 @@
 		};
 
 		try {
-			if (sendLater && $activeSession.isStreaming) {
-				// Queue for when current stream completes naturally
-				const queued = await activeSession.queueMessage(finalPrompt);
-				if (queued === false) restoreOnFailure();
-				else {
-					dropEditedOriginal();
-					collapseMobileComposer();
-				}
-			} else {
-				// Send immediately (interrupt → confirm → query if streaming, normal query if not)
-				const sent = await activeSession.sendMessage(
-					finalPrompt,
-					pendingPaths?.length ? { pendingUploadPaths: pendingPaths } : undefined,
-				);
-				if (sent === false) restoreOnFailure();
-				else {
-					dropEditedOriginal();
-					collapseMobileComposer();
-				}
-			}
+			const sent = await activeSession.sendMessage(
+				finalPrompt,
+				pendingPaths?.length ? { pendingUploadPaths: pendingPaths } : undefined,
+			);
+			if (sent === false) restoreOnFailure();
+			else collapseMobileComposer();
 		} catch (err) {
 			console.error('[ChatInput] sendMessage threw', err);
 			restoreOnFailure();
@@ -551,14 +475,9 @@
 		const isMobile = isTouchDevice || (hasNoFinePointer && ('ontouchstart' in window));
 
 		// On desktop, Enter sends; on mobile, let Enter create newlines
-		// Ctrl/Cmd+Enter during streaming = Send Later (queue for after completion)
 		if (e.key === 'Enter' && !e.shiftKey && !isMobile) {
 			e.preventDefault();
-			if ((e.ctrlKey || e.metaKey) && $activeSession.isStreaming) {
-				handleSubmit(true); // Send Later
-			} else {
-				handleSubmit(false); // Send Now
-			}
+			handleSubmit();
 		}
 	}
 
@@ -573,7 +492,7 @@
 		await tick();
 
 		if (andSubmit) {
-			handleSubmit(false);
+			handleSubmit();
 		} else {
 			editorRef?.focus();
 		}
@@ -880,31 +799,24 @@
 								</svg>
 							</button>
 						{:else if $activeSession.isStreaming}
+							<!-- Typing during a turn no longer replaces Stop: the send goes
+							     out as a pending message and the turn keeps running, so
+							     stopping it stays one click away. Send sits to the left of
+							     Stop, and only while there is something to send. -->
 							{#if plainTextValue.trim()}
-								<!-- Send Now: stops current response then sends -->
-								<button type="submit" class="send-btn" title="Send now (interrupts) — Enter">
+								<button type="submit" class="send-btn" title="Send — Enter">
 									<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.3" d="m5 12 7-7 7 7M12 19V5" />
 									</svg>
 								</button>
-								<!-- Send Later: queues for after completion -->
-								<button type="button" class="send-btn send-later-btn"
-									onclick={() => handleSubmit(true)}
-									title="Send later (after response) — {metaLabel}+Enter"
-								>
-									<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-									</svg>
-								</button>
-							{:else}
-								<!-- Stop is an informed choice when background agents are live:
-								     the SDK interrupt cancels the agents too, so StopButton
-								     confirms first. -->
-								<StopButton
-									activeTasks={$activeSession.activeTasks}
-									onStop={() => activeSession.stopGeneration()}
-								/>
 							{/if}
+							<!-- Stop is an informed choice when background agents are live:
+							     the SDK interrupt cancels the agents too, so StopButton
+							     confirms first. -->
+							<StopButton
+								activeTasks={$activeSession.activeTasks}
+								onStop={() => activeSession.stopGeneration()}
+							/>
 						{:else}
 							<button
 								type="submit"
@@ -1090,27 +1002,6 @@
 		color: var(--primary-foreground);
 	}
 
-	/* Send Later — secondary/muted so it reads as the alternative to Send Now */
-	.send-btn.send-later-btn {
-		background: color-mix(in oklch, var(--foreground) 8%, transparent);
-		border: 1px solid var(--border-strong);
-		box-shadow: none;
-	}
-
-	.send-btn.send-later-btn svg {
-		color: var(--foreground);
-	}
-
-	.send-btn.send-later-btn:hover:not(:disabled) {
-		filter: none;
-		background: color-mix(in oklch, var(--foreground) 10%, transparent);
-		box-shadow: none;
-	}
-
-	.send-btn.send-later-btn:hover:not(:disabled) svg {
-		color: var(--foreground);
-	}
-
 	@keyframes fadeIn {
 		from { opacity: 0; }
 		to { opacity: 1; }
@@ -1161,8 +1052,7 @@
 
 		.mobile-collapsed :global(.mobile-controls),
 		.mobile-collapsed :global(.controls-right > button:not(.send-btn):not(.stop-btn)),
-		.mobile-collapsed :global(.controls-right > .voice-btn-wrapper),
-		.mobile-collapsed :global(.controls-right > .send-later-btn) {
+		.mobile-collapsed :global(.controls-right > .voice-btn-wrapper) {
 			display: none;
 		}
 

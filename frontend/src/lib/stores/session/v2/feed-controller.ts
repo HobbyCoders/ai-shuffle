@@ -22,6 +22,7 @@ import type { ActiveSessionState } from '../../active-session';
 import type { SdkContextUsage } from '$lib/api/sessions';
 import type { QueuedMessage, Task } from '../../types';
 import { browserPanel } from '../../browser-panel.svelte';
+import { pendingQueue } from '../pending-queue';
 
 /** MCP browser-tool prefix — a live `tool.use` for one auto-opens the panel. */
 const BROWSER_TOOL_PREFIX = 'mcp__browser__';
@@ -49,24 +50,20 @@ let rafHandle: number | null = null;
 let timerHandle: ReturnType<typeof setTimeout> | null = null;
 
 /**
- * Turn ids of queued messages the server has since DELIVERED, harvested from the
- * SSE transcript (#588). A queued turn's `message.user` event carries the same
- * `turn_id` as the queue entry's id (app/api/chat_ws_handler.py::_v2_queue_view:
- * queue id ← turn id; app/api/events.py::_wire stamps turn_id on every frame), so
- * this set lets `fold()` drop a stale "Queued (N)" chip once its message actually
- * ran.
+ * Delivered user messages are reported to `pendingQueue`, which owns the whole
+ * question of which pending bubble survives (see that module's header).
  *
- * Why this is needed: the turn-scheduler drain path
- * (app/core/turn_scheduler.py::_on_turn_settled_impl → pop_ready → kick) runs a
- * queued turn WITHOUT broadcasting a clearing `queue_updated`, and watch_session
- * suppresses the empty-queue frame, so the queue chip is otherwise never told the
- * queue shrank. Reconciling against the delivered transcript self-heals it.
+ * Two facts travel from here:
  *
- * Session-scoped: cleared on start()/stop(). Non-queued turns' ids also land here
- * but never match a chip id (chips exist only for queued turns), so filtering is
- * exact — a chip is removed only when ITS turn produced a user message.
+ * - the `turn_id` (#588): a queued turn's `message.user` carries the same id the
+ *   queue entry has (app/api/chat_ws_handler.py::_v2_queue_view: queue id ← turn
+ *   id), which self-heals the drain path — it runs a queued turn WITHOUT
+ *   broadcasting a clearing `queue_updated`.
+ * - the content, but only for LIVE events: a message STEERED into a running turn
+ *   is recorded on that turn's id, not the queued row's, so the id match cannot
+ *   see it and text is the only remaining handle. Backfilled history is not an
+ *   answer to anything pending now, so it is reported as non-live.
  */
-const deliveredTurnIds = new Set<string>();
 
 // History/live boundary. While `false`, backfilled events are reduced WITHOUT
 // scheduling a fold, so the whole persisted transcript paints in ONE batch on
@@ -178,13 +175,12 @@ function deriveUsageFields(usage: Record<string, unknown> | null): Partial<Activ
 }
 
 /**
- * Drop queue chips whose turn has been delivered (#588). Preserves the array
+ * Drop pending messages the transcript has since answered. Preserves the array
  * identity when nothing changed so the fold stays a no-op for the common case.
  */
 function reconcileQueuedMessages(queued: QueuedMessage[]): QueuedMessage[] {
-	if (queued.length === 0 || deliveredTurnIds.size === 0) return queued;
-	const next = queued.filter((q) => !deliveredTurnIds.has(q.id));
-	return next.length === queued.length ? queued : next;
+	if (queued.length === 0) return queued;
+	return pendingQueue.reconcile(currentSessionId, queued);
 }
 
 function fold(): void {
@@ -289,7 +285,7 @@ export const feedController: FeedController = {
 		this.stop();
 		currentSessionId = sessionId;
 		reducerState = initialState();
-		deliveredTurnIds.clear();
+		pendingQueue.reset(sessionId);
 		caughtUp = false;
 		everCaughtUp = false;
 		feed = createSseFeed(sessionId, {
@@ -323,11 +319,17 @@ export const feedController: FeedController = {
 					return;
 				}
 				const ev = e as WireEvent;
-				// #588: a delivered queued turn arrives as its own user message; note
-				// its turn_id so fold() can clear the matching stale queue chip. Runs
-				// for real wire events in BOTH the backfill and live phases.
-				if (ev.type === 'message.user' && typeof ev.turn_id === 'string' && ev.turn_id) {
-					deliveredTurnIds.add(ev.turn_id);
+				// A user message on the transcript is the answer to a pending bubble —
+				// by turn id for a drained queue row (#588), by text for one steered
+				// into the running turn (whose event carries the LIVE turn's id).
+				// Reported in both phases; only live events count as a delivery.
+				if (ev.type === 'message.user') {
+					pendingQueue.noteDelivered(
+						currentSessionId,
+						typeof ev.content === 'string' ? ev.content : '',
+						typeof ev.turn_id === 'string' && ev.turn_id ? ev.turn_id : undefined,
+						caughtUp
+					);
 				}
 				seedOptimistic();
 				// A frame just arrived while still batching: the stream is alive,
@@ -404,7 +406,7 @@ export const feedController: FeedController = {
 		everCaughtUp = false;
 		currentSessionId = null;
 		reducerState = initialState();
-		deliveredTurnIds.clear();
+		pendingQueue.reset(null);
 	},
 
 	isFeeding(sessionId?: string) {

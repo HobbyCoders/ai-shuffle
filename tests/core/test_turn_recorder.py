@@ -788,6 +788,52 @@ async def test_deltas_flush_before_any_non_delta_event(mock_db):
     await rec.close()
 
 
+async def test_steered_user_message_lands_at_the_stream_position(mock_db):
+    """A message steered into the LIVE turn is recorded where the model read it
+    — after the tool result that carried it, on this turn, stamped with the
+    QUEUED row's handle so the frontend collapses its pending bubble onto it."""
+    _mk_session()
+    rec = await _recorder(command_id="live-turn-cmd")
+    await rec.on_event({"type": "stream_delta", "delta_type": "text", "content": "working"})
+    await rec.on_event({
+        "type": "tool_result", "tool_use_id": "tu_1", "content": "ok",
+    })
+
+    assert await rec.record_steered_user_message(
+        "also check staging", profile_id="coder", command_id="queued-row-cmd",
+    ) is True
+
+    rows = _rows()
+    assert [r["event_type"] for r in rows] == [
+        "assistant.text_delta", "tool.result", "message.user",
+    ]
+    steered = rows[-1]
+    assert steered["payload"]["content"] == "also check staging"
+    assert steered["payload"]["profile_id"] == "coder"
+    assert steered["turn_id"] == rec.turn_id
+    assert steered["command_id"] == "queued-row-cmd"
+    await rec.close()
+
+
+async def test_steered_user_message_flushes_buffered_deltas_first(mock_db):
+    """It is a non-delta event like any other: buffered text may not jump over
+    the user's words."""
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({"type": "stream_delta", "delta_type": "text", "content": "half a "})
+    await rec.record_steered_user_message("wait, stop")
+    assert _types() == ["assistant.text_delta", "message.user"]
+    await rec.close()
+
+
+async def test_steered_user_message_is_inert_after_close(mock_db):
+    """The turn is over — nothing more may be appended under its lease."""
+    _mk_session()
+    rec = await _recorder()
+    await rec.close()
+    assert await rec.record_steered_user_message("too late") is False
+
+
 async def test_size_threshold_flushes_immediately(mock_db):
     _mk_session()
     rec = await _recorder()

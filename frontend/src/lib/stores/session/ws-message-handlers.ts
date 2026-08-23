@@ -20,6 +20,8 @@ import { reportClientError } from '$lib/services/error-reporter';
 import { startFixChat } from '$lib/services/fix-with-ai';
 // The SSE-fed reducer store — the transcript authority for a session.
 import { feedController } from './v2/feed-controller';
+// Arbiter of which pending ("not seen yet") bubbles survive.
+import { pendingQueue } from './pending-queue';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -29,7 +31,6 @@ import { feedController } from './v2/feed-controller';
  */
 export interface InternalMutableState {
 	pendingTools: Set<string>;
-	interruptPending: boolean;
 	/** True when sendMessage() sent a query for a NEW session (no sessionId yet).
 	 *  Used by session_created/start to know whether to accept the sessionId. */
 	awaitingNewSession: boolean;
@@ -57,11 +58,6 @@ export interface InternalMutableState {
 	 *  so we don't leak orphan worktrees on the backend when the user navigates
 	 *  away mid-creation (e.g. phone lock). */
 	worktreeCreateAbort: AbortController | null;
-	/** Resolve callback for the interrupt_confirmed promise.
-	 *  Set by sendMessage's interrupt path, called by the interrupt_confirmed
-	 *  WS handler so the frontend waits for backend confirmation before
-	 *  sending the new query. */
-	interruptConfirmResolve: ((confirmed: boolean) => void) | null;
 }
 
 /**
@@ -175,20 +171,11 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 	// ── Handler: done ────────────────────────────────────────────────
 
 	function handleDone(data: Record<string, unknown>): void {
-		// During interrupt_for_query, the OLD query drains naturally and yields
-		// a 'done' event (SDK interrupt doesn't raise CancelledError, so the
-		// generator exits normally). If we process it, we'd clear interruptPending
-		// and fire a premature completion notification — both of which clobber the
-		// new query that's about to start. Skip entirely, like handleStoppedOrInterrupted.
-		if (internal.interruptPending) { internal.pendingTools.clear(); return; }
-
 		const metadata = data.metadata as Record<string, unknown>;
 		const sessionId = data.session_id as string;
 		// done event — the SSE feed folds the streaming→ended transition into
 		// the transcript; this handler only fires the completion notification
 		// and cleans cross-session bookkeeping.
-
-		internal.interruptPending = false;
 
 		const currentState = getState();
 		const isActiveSession = !sessionId || sessionId === currentState.sessionId;
@@ -239,8 +226,6 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 	// ── Handler: stopped / interrupted ───────────────────────────────
 
 	function handleStoppedOrInterrupted(data: Record<string, unknown>): void {
-		if (internal.interruptPending) { internal.pendingTools.clear(); return; }
-
 		// Route by the EVENT's session_id, not the active session — mirror
 		// handleDone. A stopped/interrupted event for a BACKGROUND session must
 		// not clobber the ACTIVE session's pendingTools. Pre-fix this handler
@@ -312,7 +297,20 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				(!eventSessionId || eventSessionId === state.sessionId)) {
 				const syncData = data.data as Record<string, unknown> | undefined;
 				const messages = (syncData?.queued_messages ?? []) as Array<{ id: string; content: string; created_at: string }>;
-				update(s => ({ ...s, queuedMessages: messages.map(m => ({ id: m.id, content: m.content, queuedAt: new Date(m.created_at).getTime() })) }));
+				const rows = messages.map(m => ({ id: m.id, content: m.content, queuedAt: new Date(m.created_at).getTime() }));
+				// The snapshot is authoritative about what EXISTS, but it is not
+				// ordered against the other producer of this frame (the turn pump's
+				// clearing broadcast), so a pre-absorption snapshot can land last and
+				// resurrect an answered bubble. pendingQueue is what remembers.
+				const sid = state.sessionId;
+				pendingQueue.noteAuthoritative(sid, rows);
+				const reconciled = pendingQueue.reconcile(sid, rows);
+				// An × on an optimistic id had no server row to name; now that the
+				// real one is here, aim the removal at it.
+				for (const removeId of pendingQueue.drainRemovalRequests()) {
+					wsSend({ type: 'remove_queued_message', message_id: removeId, session_id: sid });
+				}
+				update(s => ({ ...s, queuedMessages: reconciled }));
 			}
 
 			// session_updated carries metadata changes (e.g. a backfilled title
@@ -535,7 +533,6 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			case 'start': {
 				if (!data.session_id) break;
 				const sessionId = data.session_id as string;
-				internal.interruptPending = false;
 				const currentState = getState();
 				// Authenticate new-session adoption (see session_created): while
 				// awaiting, accept the `start` frame ONLY when it echoes our
@@ -548,7 +545,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const acceptStart = currentState.sessionId === sessionId || startAwaitingMatch;
 				// activeTasks is reset only when this frame actually adopts a NEW
 				// sessionId (mirrors PR #448) — a `start` for the already-open session
-				// (interrupt_for_query follow-up) must not wipe its live task strip.
+				// (e.g. a pending message becoming the next turn) must not wipe its
+				// live task strip.
 				const startAdoptsNewSession = currentState.sessionId !== sessionId;
 				if (acceptStart) {
 					internal.awaitingNewSession = false;
@@ -627,29 +625,11 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				handleDone(data);
 				break;
 
-			case 'interrupt_confirmed': {
-				// Backend confirmed the interrupt + drain completed.
-				// Resolve the promise so sendMessage can proceed with the query.
-				const confirmedSessionId = data.session_id as string | undefined;
-				const currentSt = getState();
-				if (confirmedSessionId && confirmedSessionId === currentSt.sessionId && internal.interruptConfirmResolve) {
-					internal.interruptConfirmResolve(true);
-					internal.interruptConfirmResolve = null;
-				}
+			// Acks of the retired two-phase interrupt-and-query handshake. A send
+			// during a live turn is a plain `query` now, so nothing waits on them.
+			case 'interrupt_confirmed':
+			case 'interrupt_failed':
 				break;
-			}
-
-			case 'interrupt_failed': {
-				// Backend failed to interrupt — resolve with false so sendMessage
-				// can restore the message to the input.
-				const failedSessionId = data.session_id as string | undefined;
-				const failedSt = getState();
-				if (failedSessionId && failedSessionId === failedSt.sessionId && internal.interruptConfirmResolve) {
-					internal.interruptConfirmResolve(false);
-					internal.interruptConfirmResolve = null;
-				}
-				break;
-			}
 
 			case 'stopped':
 			case 'interrupted':
@@ -676,8 +656,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			case 'error': {
 				// Route by the EVENT's session_id, not the active session — mirror
 				// handleDone / handleStoppedOrInterrupted. A BACKGROUND session's
-				// error must never reset the ACTIVE session's isStreaming or unwind
-				// its interrupt-and-query promise. The backend now stamps session_id
+				// error must never reset the ACTIVE session's isStreaming. The
+				// backend now stamps session_id
 				// on error events (interactive + headless paths); fall back to the
 				// active session only when the id is absent (e.g. a synchronous
 				// pre-stream command error like an empty prompt).
@@ -706,15 +686,9 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					session_id: erroredSessionId ?? undefined,
 				});
 
-				// Only the in-view session surfaces the banner, resets its streaming
-				// flag (so the user can send again), and rejects a pending
-				// interrupt-and-query promise.
+				// Only the in-view session surfaces the banner and resets its
+				// streaming flag (so the user can send again).
 				if (isActiveError) {
-					internal.interruptPending = false;
-					if (internal.interruptConfirmResolve) {
-						internal.interruptConfirmResolve(false);
-						internal.interruptConfirmResolve = null;
-					}
 					update(s => ({ ...s, error: errMessage, isStreaming: false, streamStartTime: null }));
 				}
 				break;
@@ -733,36 +707,13 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				break;
 			}
 
-			case 'query_queued': {
-				// Send-now replacement routed to the queue (Finding F5). The user
-				// clicked "Send now" mid-stream: sendMessage sent interrupt_for_query,
-				// latched internal.interruptPending, and set optimistic isStreaming=true.
-				// The backend confirmed the interrupt, we sent the query — but the pooled
-				// client was still winding down the force-cancelled turn, so the backend
-				// queued the query instead of starting a turn and acked with this frame
-				// (the queue chip is driven by the separate queue_updated broadcast).
-				//
-				// Without this handler interruptPending stays latched and isStreaming
-				// stays optimistically true → the spinner never clears. Release the
-				// latch, drop the optimistic streaming state, and clean the
-				// streaming-session map (mirrors the done/stopped terminal frames).
-				// The SSE feed truth-ups the transcript.
-				const queuedSessionId = data.session_id as string | undefined;
-				const queuedState = getState();
-				if (!queuedSessionId || queuedSessionId !== queuedState.sessionId) break;
-
-				internal.interruptPending = false;
-				internal.pendingTools.clear();
-				clearStopTimeout();
-				update(s => ({ ...s, isStreaming: false, streamStartTime: null }));
-				streamingSessions.update(map => {
-					if (!map.has(queuedSessionId)) return map;
-					const newMap = new Map(map);
-					newMap.delete(queuedSessionId);
-					return newMap;
-				});
+			case 'query_queued':
+				// Ack that a send landed in the queue instead of starting a turn —
+				// the ordinary outcome of sending while a turn is live. The live turn
+				// is untouched, so this frame must NOT clear isStreaming or prune the
+				// streaming map (`turn.*` sync events own that). The pending bubble
+				// itself is driven by the separate `queue_updated` broadcast.
 				break;
-			}
 
 			case 'message_queued':
 			case 'queued_message_processing':

@@ -32,6 +32,7 @@ from app.core.provider.events import (
     AssistantMessage,
     RateLimitEvent,
     ResultMessage,
+    SteerDeliveredEvent,
     StreamEvent,
     SystemMessage,
     TaskNotificationMessage,
@@ -46,7 +47,9 @@ from app.core.provider.events import (
 from fluid.context.trim import estimate_tokens_of_text
 from app.core.provider.legacy_events import SafetyWarning
 from fluid.events import model as lm
-from fluid.events.ops import BackgroundTaskFinished, RespondPermission, UserTurn
+from fluid.events.ops import (
+    BackgroundTaskFinished, RespondPermission, Steer, UserTurn,
+)
 from fluid.providers.base import ProviderCaps, StreamChunk
 from fluid.store.base import MemoryStore
 
@@ -266,6 +269,40 @@ async def test_provider_retry_translates_to_a_system_note():
         "delay_seconds": 4.0,
         "model": "ox-alpha",
     }
+
+
+@pytest.mark.asyncio
+async def test_steer_submits_the_op_and_its_receipt_reaches_the_stream():
+    """A queued message handed to the running turn goes out as a fluid Steer
+    carrying the queue row's id, and fluid's delivery receipt mirrors into the
+    stream — that receipt is what lets the host retire the row."""
+    events = [
+        lm.TurnStarted(session_id=SID, model="m", provider="fake"),
+        lm.SteerDelivered(session_id=SID, steers=[
+            {"id": "turn-9", "text": "check staging too"},
+        ]),
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=1),
+    ]
+    engine = FakeEngine(events)
+    adapter = _adapter_with(engine)
+
+    await adapter.steer("check staging too", id="turn-9")
+    steers = [op for op in engine.ops if isinstance(op, Steer)]
+    assert len(steers) == 1
+    assert steers[0].text == "check staging too" and steers[0].id == "turn-9"
+
+    got = await _collect(adapter)
+    receipts = [e for e in got if isinstance(e, SteerDeliveredEvent)]
+    assert len(receipts) == 1
+    assert receipts[0].steers == [{"id": "turn-9", "text": "check staging too"}]
+
+
+@pytest.mark.asyncio
+async def test_steer_without_an_engine_refuses():
+    """Nothing connected means nothing to steer into — the caller leaves the
+    message queued rather than believing it was delivered."""
+    with pytest.raises(RuntimeError):
+        await HarnessAdapter().steer("too early", id="turn-1")
 
 
 @pytest.mark.asyncio

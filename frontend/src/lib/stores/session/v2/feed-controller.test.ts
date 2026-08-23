@@ -58,6 +58,7 @@ vi.mock('./sse-feed', () => ({
 }));
 
 import { feedController } from './feed-controller';
+import { pendingQueue } from '../pending-queue';
 import { browserPanel } from '../../browser-panel.svelte';
 import type { ActiveSessionState } from '../../active-session';
 
@@ -429,6 +430,68 @@ describe('feedController queue reconciliation (#588)', () => {
 
 		const queued = deps.state.queuedMessages as Array<{ id: string }>;
 		expect(queued.map((q) => q.id)).toEqual(['turn-9']);
+	});
+
+	// A message STEERED into the running turn is recorded on THAT turn's id, not
+	// the queued row's, so the id match above cannot see it. Its text is the only
+	// remaining handle on the bubble it answers.
+	function seedServerQueue(
+		deps: ReturnType<typeof makeDeps>,
+		rows: Array<{ id: string; content: string; queuedAt: number }>,
+	): void {
+		pendingQueue.noteAuthoritative('s1', rows);
+		deps.update((s) => ({ ...s, queuedMessages: pendingQueue.reconcile('s1', rows) }));
+	}
+
+	it('drops a chip whose text is steered into the running turn', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+
+		seedServerQueue(deps, [{ id: 'turn-q', content: 'steer me', queuedAt: 1 }]);
+
+		hoisted.onEvent!(userMessage('evt-u1', 'turn-live', 'steer me'));
+		flushRaf();
+
+		expect(deps.state.queuedMessages).toEqual([]);
+	});
+
+	it('keeps a row the server put back after the interrupt that swallowed it', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+
+		seedServerQueue(deps, [{ id: 'turn-q', content: 'steer me', queuedAt: 1 }]);
+		hoisted.onEvent!(userMessage('evt-u1', 'turn-live', 'steer me'));
+		flushRaf();
+		expect(deps.state.queuedMessages).toEqual([]);
+
+		// The turn that swallowed it was interrupted, so the backend re-queues the
+		// message as a FRESH row. Its text is already in the transcript above and
+		// that is intended — the bubble must come back.
+		seedServerQueue(deps, [{ id: 'turn-q2', content: 'steer me', queuedAt: 2 }]);
+		flushRaf();
+
+		const queued = deps.state.queuedMessages as Array<{ id: string }>;
+		expect(queued.map((q) => q.id)).toEqual(['turn-q2']);
+	});
+
+	it('ignores backfilled history when matching by text', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+
+		// Replayed history (pre-catch-up): an old prompt with the same text.
+		hoisted.onEvent!(userMessage('evt-old', 'turn-old', 'continue'));
+		hoisted.onEvent!(caughtUp(0));
+
+		seedServerQueue(deps, [{ id: 'turn-q', content: 'continue', queuedAt: 1 }]);
+		flushRaf();
+
+		const queued = deps.state.queuedMessages as Array<{ id: string }>;
+		expect(queued.map((q) => q.id)).toEqual(['turn-q']);
 	});
 });
 

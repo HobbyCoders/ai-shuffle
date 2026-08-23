@@ -991,12 +991,18 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				(idx >= 0 ? state.messages[idx].profileId : '') ||
 				state.liveTurnProfileId ||
 				'';
+			// The owning turn, straight off the envelope. A message steered into a
+			// running turn (turn_recorder::record_steered_user_message) carries THAT
+			// turn's id rather than opening one of its own, which is how the
+			// transcript tells a mid-turn prompt from a turn-initiating one.
+			const turnId = str(event.turn_id);
 			const userMsg = (id: string): ChatMessage => ({
 				id,
 				role: 'user',
 				type: 'text',
 				content,
 				timestamp: stamp || undefined,
+				...(turnId ? { turnId } : {}),
 				...(commandId ? { commandId } : {}),
 				...(senderProfileId ? { profileId: senderProfileId } : {}),
 			});

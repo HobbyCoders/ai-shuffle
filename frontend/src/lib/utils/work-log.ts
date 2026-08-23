@@ -370,14 +370,32 @@ interface Positioned {
 	index: number;
 }
 
-/** Split a deduplicated list into turns, each beginning at a user message. */
+/**
+ * Split a deduplicated list into turns, each beginning at a user message.
+ *
+ * A prompt steered into a turn that is already running belongs to that turn: it
+ * carries the running turn's id instead of opening one of its own, and it sits
+ * wherever the model received it (right after the tool step that delivered it).
+ * Starting a new turn there would cut the turn in two and re-anchor its duration
+ * to the steer, so a user message only opens a turn when its id differs from the
+ * one the current turn started with. Messages with no turn id (optimistic sends,
+ * legacy transcripts) keep the plain one-turn-per-user-message rule.
+ */
 function splitTurns(messages: Positioned[]): Positioned[][] {
 	const turns: Positioned[][] = [];
 	let current: Positioned[] = [];
+	let currentTurnId: string | undefined;
 	for (const entry of messages) {
-		if (entry.message.role === 'user' && current.length > 0) {
-			turns.push(current);
-			current = [];
+		if (entry.message.role === 'user') {
+			const turnId = entry.message.turnId;
+			const steeredIntoCurrentTurn = !!turnId && turnId === currentTurnId && current.length > 0;
+			if (!steeredIntoCurrentTurn) {
+				if (current.length > 0) {
+					turns.push(current);
+					current = [];
+				}
+				currentTurnId = turnId;
+			}
 		}
 		current.push(entry);
 	}

@@ -65,6 +65,47 @@ export function deriveUserTurnNavigationItems(messages: ChatMessage[]): UserTurn
 	return result;
 }
 
+/**
+ * When the running turn actually began, for the live "Working for Ns" readout.
+ *
+ * The anchor is the user message that OPENED the turn, not the newest one in the
+ * transcript. A prompt steered into a turn that is already running is recorded
+ * where the model received it and carries the running turn's id, so treating the
+ * last user message as the start restarted the clock mid-turn (45s of work
+ * reported as 32s). Same rule the settled fold uses: only a different turn id
+ * moves the anchor.
+ *
+ * `liveTurnId` is preferred when known; otherwise the trailing user message's own
+ * turn id delimits the turn. Messages with no turn id (optimistic sends, legacy
+ * transcripts) keep the plain one-turn-per-user-message behaviour.
+ */
+export function resolveLiveTurnStartedAt(
+	messages: ChatMessage[],
+	liveTurnId?: string | null
+): string | null {
+	let lastUserIndex = -1;
+	for (let index = messages.length - 1; index >= 0; index--) {
+		if (isNavigableUserTurn(messages[index])) { lastUserIndex = index; break; }
+	}
+	if (lastUserIndex === -1) return messages[0]?.timestamp ?? null;
+
+	const turnId = liveTurnId || messages[lastUserIndex].turnId;
+	// No id to group by, or the trailing prompt belongs to some other turn than
+	// the live one: the newest prompt is the best anchor available.
+	if (!turnId || (messages[lastUserIndex].turnId && messages[lastUserIndex].turnId !== turnId)) {
+		return messages[lastUserIndex].timestamp ?? null;
+	}
+
+	let anchor = messages[lastUserIndex];
+	for (let index = lastUserIndex - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (!isNavigableUserTurn(message)) continue;
+		if (message.turnId !== turnId) break;
+		anchor = message;
+	}
+	return anchor.timestamp ?? null;
+}
+
 /** Last turn whose top has crossed the reading line; the first turn wins above it. */
 export function resolveCurrentTurnIndex(turnTops: number[], readingLine: number): number {
 	if (turnTops.length === 0) return 0;

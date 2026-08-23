@@ -57,13 +57,11 @@ function makeSwitcher() {
 	let state = minimalState();
 	const internal: InternalMutableState = {
 		pendingTools: new Set<string>(),
-		interruptPending: false,
 		awaitingNewSession: false,
 		pendingRequestId: null,
 		stopRequestedBeforeSession: false,
 		worktreeCreationGeneration: 0,
 		worktreeCreateAbort: null,
-		interruptConfirmResolve: null
 	};
 	const deps: SessionSwitcherDeps = {
 		update: (fn) => { state = fn(state); },
