@@ -653,12 +653,34 @@ class TestDeleteProfileEndpoint:
 
         with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile
+            mock_db.get_automations_for_profile.return_value = []
             mock_db.delete_profile.return_value = True
 
             result = await delete_profile("test-profile", token="test-token")
 
             assert result is None
             mock_db.delete_profile.assert_called_once_with("test-profile")
+
+    @pytest.mark.asyncio
+    async def test_delete_profile_blocked_by_automations(self):
+        """An agent still referenced by an automation must 409, not blow up on the FK."""
+        from app.api.agents import delete_profile
+        from fastapi import HTTPException
+
+        profile = sample_profile()
+
+        with patch("app.api.agents.database") as mock_db:
+            mock_db.get_profile.return_value = profile
+            mock_db.get_automations_for_profile.return_value = [
+                {"id": "auto-1", "name": "Nightly sync"}
+            ]
+
+            with pytest.raises(HTTPException) as exc_info:
+                await delete_profile("test-profile", token="test-token")
+
+            assert exc_info.value.status_code == 409
+            assert "Nightly sync" in exc_info.value.detail
+            mock_db.delete_profile.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_delete_profile_not_found(self):

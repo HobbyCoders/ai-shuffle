@@ -347,7 +347,7 @@
 			return;
 		}
 		if (!formProfileId) {
-			formError = 'Agent is required';
+			formError = profiles.length === 0 ? 'No agents yet — create one first' : 'Agent is required';
 			return;
 		}
 		formSaving = true;

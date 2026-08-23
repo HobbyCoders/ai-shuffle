@@ -22,6 +22,7 @@
 	} from 'lucide-svelte';
 	import AutomationTriggerConfig from './AutomationTriggerConfig.svelte';
 	import Banner from '$lib/components/Banner.svelte';
+	import { layout } from '$lib/stores/layout.svelte';
 
 	interface Props {
 		currentView: 'create' | 'edit';
@@ -407,12 +408,21 @@
 		<div class="set-row">
 			<div class="lab"><h4>Agent <span class="req">*</span></h4><p>The agent this automation runs under.</p></div>
 			<div class="ctl">
-				<select class="sel" value={formProfileId} onchange={(e) => onUpdateFormProfileId(e.currentTarget.value)}>
-					<option value="">Select an agent…</option>
-					{#each profiles as profile}
-						<option value={profile.id}>{profile.name}</option>
-					{/each}
-				</select>
+				{#if profiles.length === 0}
+					<!-- Nothing is seeded, so a fresh install reaches this required field with an
+					     empty picker and a save that can only fail. Name the missing piece here,
+					     where the user is already looking, instead of at submit time. -->
+					<button type="button" class="no-agents" onclick={() => layout.openFeaturePage('profile')}>
+						No agents yet — create one first
+					</button>
+				{:else}
+					<select class="sel" value={formProfileId} onchange={(e) => onUpdateFormProfileId(e.currentTarget.value)}>
+						<option value="">Select an agent…</option>
+						{#each profiles as profile}
+							<option value={profile.id}>{profile.name}</option>
+						{/each}
+					</select>
+				{/if}
 			</div>
 		</div>
 		<div class="set-row">
@@ -556,6 +566,22 @@
 	}
 	.head-toggle :global(.gh-chev.open) {
 		transform: rotate(0deg);
+	}
+
+	/* Stands in for the agent select when there is nothing to pick yet.
+	   No margin-top: `.ctl` centres its contents, so the link sits on the
+	   same baseline the select would have. */
+	.no-agents {
+		background: none;
+		border: none;
+		padding: 0;
+		color: var(--primary);
+		cursor: pointer;
+		font-size: 0.8125rem;
+	}
+
+	.no-agents:hover {
+		text-decoration: underline;
 	}
 
 	/* Narrow numeric inputs in budget rows */
