@@ -151,6 +151,10 @@ class _CallResult:
     interrupted: bool = False
     error_message: str | None = None  # set when stop_reason == "error"
     error_retriable: bool = False
+    # The provider's own verdict on the upstream call when it differs from the
+    # normalized stop reason (OpenRouter's native_finish_reason). "stop" with a
+    # native reason of "network_error" is how a dead upstream replica looks.
+    native_stop_reason: str | None = None
 
 
 # Provider error-message markers that mean "the prompt no longer fits" — the
@@ -215,6 +219,18 @@ def _empty_retry_delay(attempt: int) -> float:
     Module-level so tests can replace it with a zero-delay stub.
     """
     return min(1.0 * 2 ** (attempt - 1), 30.0)
+
+
+def _upstream_suffix(native_stop_reason: str | None) -> str:
+    """Name the upstream failure when the provider reported one.
+
+    OpenRouter normalizes a dead upstream replica to finish_reason "stop" and
+    keeps the real verdict in native_finish_reason. "stop" itself says nothing
+    a reader does not already know from "empty response", so it is dropped.
+    """
+    if not native_stop_reason or native_stop_reason == "stop":
+        return ""
+    return f" (upstream: {native_stop_reason})"
 
 
 def _is_empty_completion(result: _CallResult) -> bool:
@@ -1013,14 +1029,18 @@ class NativeLoop(BackgroundLifecycleMixin):
             for promo in promotions:
                 await self._emit_compaction(sid, turn_id, promo)
             projected_prompt = self._estimate_request_input_tokens(history)
-            result = await self._stream_once(sid, turn_id, history)
+            result = await self._stream_once(
+                sid, turn_id, history, sticky=(empty_retries == 0)
+            )
             num_calls += 1
             if not _is_empty_completion(result):
                 empty_retries = 0
             elif empty_retries < EMPTY_COMPLETION_MAX_RETRIES:
-                # Nothing came back. Re-send the SAME history: the transcript
-                # gains no node, so a retry is byte-identical to the call that
-                # failed (and stays cache-warm).
+                # Nothing came back. Re-send the SAME history — the transcript
+                # gains no node — but WITHOUT the sticky-routing key, so
+                # OpenRouter may pick a different upstream replica. Retrying
+                # byte-identically pins the retry to the replica that just
+                # failed, which is how ten retries in a row all come back empty.
                 empty_retries += 1
                 # The dud call may still have billed something.
                 self._fold_call_usage(total_usage, result.usage)
@@ -1029,7 +1049,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                     session_id=sid, turn_id=turn_id,
                     attempt=empty_retries,
                     max_attempts=EMPTY_COMPLETION_MAX_RETRIES,
-                    reason="empty response from provider",
+                    reason=(
+                        "empty response from provider"
+                        + _upstream_suffix(result.native_stop_reason)
+                    ),
                     delay_seconds=delay, model=self.model,
                 ))
                 try:
@@ -1058,8 +1081,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                     error_message=(
                         f"provider returned an empty response "
                         f"{empty_retries + 1} times in a row; giving up"
+                        + _upstream_suffix(result.native_stop_reason)
                     ),
                     error_retriable=False,
+                    native_stop_reason=result.native_stop_reason,
                 )
             if result.stop_reason == "error":
                 # A failed HTTP request can still be billable. Record and
@@ -1323,7 +1348,9 @@ class NativeLoop(BackgroundLifecycleMixin):
                 specs = plan_mode_tools(specs)
         return [s.to_api() for s in specs if self._tool_permitted(s.name)]
 
-    def _build_request(self, history: list[Message]) -> ProviderRequest:
+    def _build_request(
+        self, history: list[Message], *, sticky: bool = True
+    ) -> ProviderRequest:
         tools_api = self._tools_api()
         plan = plan_cache(self.provider.caps, has_tools=bool(tools_api))
         return ProviderRequest(
@@ -1336,25 +1363,28 @@ class NativeLoop(BackgroundLifecycleMixin):
             cache_breakpoints=plan.breakpoints,
             # OpenRouter documents session_id as the explicit sticky-routing
             # key for prompt-cache locality. Other providers receive no extra.
-            # The host passthrough lands on top, so its keys win.
+            # ``sticky=False`` drops the key so OpenRouter is free to pick a
+            # different upstream replica (see the empty-completion retry in
+            # _agent_loop). The host passthrough lands on top, so its keys win.
             extra={
                 **(
                     {"session_id": self.session_id}
-                    if self.provider.name == "openrouter" else {}
+                    if sticky and self.provider.name == "openrouter" else {}
                 ),
                 **self.request_extra,
             },
         )
 
     async def _stream_once(
-        self, sid: str, turn_id: str, history: list[Message]
+        self, sid: str, turn_id: str, history: list[Message], *, sticky: bool = True
     ) -> _CallResult:
-        request = self._build_request(history)
+        request = self._build_request(history, sticky=sticky)
 
         blocks: dict[int, dict[str, Any]] = {}
         usage_totals: dict[str, Any] = {}
         tool_uses: list[dict[str, Any]] = []
         stop_reason = "end_turn"
+        native_stop_reason: str | None = None
         interrupted = False
 
         async for chunk in self._provider_chunks_interruptible(request):
@@ -1362,6 +1392,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                 interrupted = True
                 break
             payload = chunk.payload
+            # The upstream verdict rides whichever terminal chunk the stream
+            # actually reaches — usage/message_stop normally, the synthesized
+            # error chunk when the stream dies before terminal usage.
+            if payload.get("native_stop_reason"):
+                native_stop_reason = payload["native_stop_reason"]
             if chunk.kind == "provider_request":
                 # A provider that reports its physical request/generation id in
                 # the response headers does so before terminal usage. Preserve
@@ -1449,6 +1484,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     stop_reason="error",
                     error_message=str(payload.get("message", payload)),
                     error_retriable=bool(payload.get("retriable")),
+                    native_stop_reason=native_stop_reason,
                 )
 
         if self._interrupted.is_set():
@@ -1489,6 +1525,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             usage=usage_totals,
             stop_reason=stop_reason,
             interrupted=interrupted,
+            native_stop_reason=native_stop_reason,
         )
 
     async def _provider_chunks_interruptible(

@@ -45,10 +45,12 @@ class ScriptedProvider:
     def __init__(self, scripts: list[list[StreamChunk]]) -> None:
         self.scripts = scripts
         self.calls = 0
+        self.requests: list[ProviderRequest] = []
 
     async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
         script = self.scripts[min(self.calls, len(self.scripts) - 1)]
         self.calls += 1
+        self.requests.append(request)
         for chunk in script:
             yield chunk
 
@@ -68,6 +70,20 @@ def _truncated() -> list[StreamChunk]:
     return [
         StreamChunk("message_start", {"usage": {"input_tokens": 0}}),
         StreamChunk("error", {"message": TRUNCATED_MESSAGE, "retriable": False}),
+    ]
+
+
+def _truncated_network_error() -> list[StreamChunk]:
+    """The live shape: finish_reason "stop", native_finish_reason "network_error".
+
+    OpenRouter answers 200 with one content-free chunk and never sends terminal
+    usage, so the client synthesizes the truncated-stream error and carries the
+    upstream verdict on it.
+    """
+    return [
+        StreamChunk("message_start", {"usage": {"input_tokens": 0}}),
+        StreamChunk("error", {"message": TRUNCATED_MESSAGE, "retriable": False,
+                              "native_stop_reason": "network_error"}),
     ]
 
 
@@ -319,3 +335,83 @@ async def test_counter_resets_after_a_successful_call() -> None:
     nodes = await _assistant_nodes(store, sid)
     assert len(nodes) == 2  # the tool call and the final answer
     assert nodes[-1].message.text() == "It is sunny in Paris."
+
+
+# ─── (h) retries drop OpenRouter's sticky-routing key ────────────────────────
+
+
+def _session_ids(provider: ScriptedProvider) -> list[str | None]:
+    return [r.extra.get("session_id") for r in provider.requests]
+
+
+async def test_retries_drop_the_sticky_routing_key() -> None:
+    """The first call is sticky; every retry of an empty call is not.
+
+    session_id pins the request to one OpenRouter upstream replica. When that
+    replica is the reason the completion came back empty, resending with the
+    same key just hits it again — so retries go out without it.
+    """
+    provider = ScriptedProvider([_empty(), _empty(), _text("done")])
+    _loop, _store, sid = await _run(provider)
+
+    assert provider.calls == 3
+    assert _session_ids(provider) == [sid, None, None]
+    assert "session_id" not in provider.requests[1].extra
+    assert "session_id" not in provider.requests[2].extra
+    # Only the routing key changes — the history the retry carries is identical.
+    assert [len(r.messages) for r in provider.requests] == [1, 1, 1]
+
+
+async def test_stickiness_returns_after_a_call_that_produced_content() -> None:
+    registry = ToolRegistry()
+    registry.register_inproc(_weather_server())
+    provider = ScriptedProvider([
+        _empty(),
+        _tool_call("t1", "mcp__wx__get_weather", '{"city": "Paris"}'),
+        _text("It is sunny in Paris."),
+    ])
+    loop, store, sid = await _run(
+        provider, registry=registry, permissions=PermissionEngine("never_ask"),
+    )
+
+    assert provider.calls == 3
+    # Call 2 is the retry (no key); call 3 follows a real answer, so the
+    # cache-locality hint comes back.
+    assert _session_ids(provider) == [sid, None, sid]
+    assert [r.attempt for r in _retries(loop.bus.log(sid))] == [1]
+    nodes = await _assistant_nodes(store, sid)
+    assert nodes[-1].message.text() == "It is sunny in Paris."
+
+
+# ─── (i) the upstream verdict reaches the user ───────────────────────────────
+
+
+async def test_native_finish_reason_is_surfaced_on_the_retry() -> None:
+    provider = ScriptedProvider([_truncated_network_error(), _text("recovered")])
+    loop, _store, sid = await _run(provider)
+
+    retries = _retries(loop.bus.log(sid))
+    assert len(retries) == 1
+    assert "network_error" in retries[0].reason
+    assert retries[0].reason == (
+        "empty response from provider (upstream: network_error)"
+    )
+
+
+async def test_giving_up_names_the_upstream_failure() -> None:
+    provider = ScriptedProvider([_truncated_network_error()])
+    loop, _store, sid = await _run(provider)
+
+    errors = [e for e in loop.bus.log(sid) if isinstance(e, ErrorEvent)]
+    assert len(errors) == 1
+    assert "giving up" in errors[0].message
+    assert "(upstream: network_error)" in errors[0].message
+
+
+async def test_plain_empty_completion_keeps_the_unadorned_reason() -> None:
+    """No native_finish_reason (or a bare "stop") adds no noise."""
+    provider = ScriptedProvider([_empty(), _text("done")])
+    loop, _store, sid = await _run(provider)
+
+    retries = _retries(loop.bus.log(sid))
+    assert [r.reason for r in retries] == ["empty response from provider"]

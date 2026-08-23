@@ -231,6 +231,10 @@ class ChatCompletionsNormalizer:
     def __init__(self) -> None:
         self.errored = False
         self.finished = False
+        # OpenRouter's own verdict on the upstream call, e.g. "network_error"
+        # behind a normalized finish_reason of "stop". The engine surfaces it
+        # when a completion comes back empty.
+        self.native_stop_reason: str | None = None
         self._started = False
         self._index_of: dict[str, int] = {}  # logical key → fluid block index
         self._order: list[str] = []
@@ -329,6 +333,8 @@ class ChatCompletionsNormalizer:
                     )
             if choice.get("finish_reason"):
                 self._stop_reason = map_stop_reason(choice["finish_reason"])
+            if choice.get("native_finish_reason"):
+                self.native_stop_reason = str(choice["native_finish_reason"])
 
         # The terminal chunk (include_usage) carries usage with empty choices —
         # close every open block, then emit usage + message_stop.
@@ -343,13 +349,20 @@ class ChatCompletionsNormalizer:
             if isinstance(cost, (int, float)) and not isinstance(cost, bool):
                 # Provider-reported cost (USD credits) wins over any estimate.
                 normalized["cost_usd"] = float(cost)
+            terminal: dict[str, Any] = {}
+            if self.native_stop_reason:
+                terminal["native_stop_reason"] = self.native_stop_reason
             out.append(
                 StreamChunk(
                     "usage",
-                    {"usage": normalized, "stop_reason": self._stop_reason},
+                    {
+                        "usage": normalized,
+                        "stop_reason": self._stop_reason,
+                        **terminal,
+                    },
                 )
             )
-            out.append(StreamChunk("message_stop", {}))
+            out.append(StreamChunk("message_stop", dict(terminal)))
             self.finished = True
         return out
 
@@ -458,15 +471,20 @@ async def stream_chat_completions(
                             yield chunk
                     if not normalizer.finished and not normalizer.errored:
                         # Stream closed before the usage/terminal chunk: the
-                        # provider dropped the connection or sent nothing.
-                        yield StreamChunk(
-                            "error",
-                            {
-                                "message": "stream ended before the provider sent "
-                                "a terminal usage chunk (empty or truncated response)",
-                                "retriable": False,
-                            },
-                        )
+                        # provider dropped the connection or sent nothing. This
+                        # is the shape that carries native_finish_reason without
+                        # ever reaching usage/message_stop, so the upstream
+                        # verdict rides the error chunk instead.
+                        truncated: dict[str, Any] = {
+                            "message": "stream ended before the provider sent "
+                            "a terminal usage chunk (empty or truncated response)",
+                            "retriable": False,
+                        }
+                        if normalizer.native_stop_reason:
+                            truncated["native_stop_reason"] = (
+                                normalizer.native_stop_reason
+                            )
+                        yield StreamChunk("error", truncated)
                     return
             except httpx.TransportError as exc:
                 # Pre-stream connection failures retry; mid-stream ones

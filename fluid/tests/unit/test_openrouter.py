@@ -122,6 +122,48 @@ def test_usage_without_cost_has_no_cost_key() -> None:
     assert "cost_usd" not in u
 
 
+def test_native_finish_reason_rides_the_terminal_chunks() -> None:
+    """OpenRouter hides upstream failures behind finish_reason "stop".
+
+    The real verdict lives in native_finish_reason, and the engine needs it to
+    explain an empty completion, so it travels on both terminal chunks.
+    """
+    norm = ChatCompletionsNormalizer()
+    norm.consume(
+        "message",
+        {"choices": [{"index": 0, "delta": {"content": ""},
+                      "finish_reason": "stop",
+                      "native_finish_reason": "network_error"}]},
+    )
+    assert norm.native_stop_reason == "network_error"
+    out = norm.consume(
+        "message",
+        {"choices": [], "usage": {"prompt_tokens": 0, "completion_tokens": 0}},
+    )
+    usage = next(c for c in out if c.kind == "usage")
+    assert usage.payload["stop_reason"] == "end_turn"
+    assert usage.payload["native_stop_reason"] == "network_error"
+    stop = next(c for c in out if c.kind == "message_stop")
+    assert stop.payload["native_stop_reason"] == "network_error"
+
+
+def test_no_native_finish_reason_leaves_the_terminal_chunks_bare() -> None:
+    norm = ChatCompletionsNormalizer()
+    norm.consume(
+        "message",
+        {"choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": "stop"}]},
+    )
+    out = norm.consume(
+        "message",
+        {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 1}},
+    )
+    assert norm.native_stop_reason is None
+    assert "native_stop_reason" not in next(
+        c for c in out if c.kind == "usage"
+    ).payload
+    assert next(c for c in out if c.kind == "message_stop").payload == {}
+
+
 def test_reasoning_delta_maps_to_thinking() -> None:
     norm = ChatCompletionsNormalizer()
     out = norm.consume(
