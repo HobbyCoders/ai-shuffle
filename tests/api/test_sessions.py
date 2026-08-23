@@ -1844,7 +1844,8 @@ class TestImportSession:
         assert "Missing" in response.json()["detail"]
 
     def test_import_session_no_profile_available(self, client, mock_database):
-        """Should handle case when no profiles exist."""
+        """An install with no agents refuses the import instead of inventing an
+        id — sessions.profile_id has a FK, so a made-up fallback is a 500."""
         mock_database.get_profile.return_value = None
         mock_database.get_all_profiles.return_value = []
 
@@ -1855,8 +1856,8 @@ class TestImportSession:
         files = {"file": ("export.json", json.dumps(import_data).encode(), "application/json")}
         response = client.post("/api/v1/sessions/import", files=files)
 
-        assert response.status_code == 400
-        assert "No profiles available" in response.json()["detail"]
+        assert response.status_code == 409
+        assert "No agents are configured" in response.json()["detail"]
 
 
 # =============================================================================

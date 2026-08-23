@@ -27,6 +27,26 @@ logger = logging.getLogger(__name__)
 export_router = APIRouter(tags=["Sessions"])
 
 
+async def _resolve_import_profile_id(requested: Optional[str]) -> str:
+    """The agent an imported session is filed under: requested, else the first.
+
+    An import names an agent from wherever it was exported, so the id often
+    matches nothing here. ``sessions.profile_id`` has a FK to ``agents``, and
+    the app seeds no agents — so both "that agent is gone" and "this install
+    has none yet" have to be answered before the INSERT rather than surfacing
+    as a foreign-key 500.
+    """
+    if requested and await run_sync(database.get_profile, requested):
+        return requested
+    profiles = await run_sync(database.get_all_profiles)
+    if not profiles:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No agents are configured; create an agent before importing a session.",
+        )
+    return profiles[0]["id"]
+
+
 async def _load_legacy_messages(session_id: str) -> list:
     db_messages = await run_sync(database.get_session_messages, session_id)
     messages = []
@@ -438,24 +458,10 @@ async def import_session(
     new_session_id = f"ses-{uuid.uuid4().hex[:16]}"
     new_sdk_session_id = str(uuid.uuid4())
 
-    # Get profile ID - use from import or default to 'default'
-    profile_id = session_data.get('profile_id') or 'default'
-
-    # Verify profile exists, fall back to default if not
-    profile = await run_sync(database.get_profile, profile_id)
-    if not profile:
-        profile_id = 'default'
-        profile = await run_sync(database.get_profile, profile_id)
-        if not profile:
-            # Create default profile if it doesn't exist
-            profiles = await run_sync(database.get_all_profiles)
-            if profiles:
-                profile_id = profiles[0]['id']
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="No profiles available. Please create a profile first."
-                )
+    # The agent the export names, else this install's first one. The app seeds
+    # no agents, so "none configured" is a real state and has to be refused
+    # here — sessions.profile_id has a FK to agents.
+    profile_id = await _resolve_import_profile_id(session_data.get('profile_id'))
 
     # Get API user if applicable
     api_user = get_api_user_from_request(request)
@@ -716,11 +722,9 @@ async def import_jsonl_session(
     if not title:
         title = f"Imported: {sdk_session_id[:8]}..."
 
-    # Get profile (default to 'default')
-    profile_id = body.profile_id or 'default'
-    profile = await run_sync(database.get_profile, profile_id)
-    if not profile:
-        profile_id = 'default'
+    # Same resolution as the full-export import: an id that names no agent
+    # cannot be handed to create_session, and an install may have none.
+    profile_id = await _resolve_import_profile_id(body.profile_id)
 
     # Validate project if specified
     project_id = body.project_id

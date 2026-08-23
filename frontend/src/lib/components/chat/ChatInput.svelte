@@ -290,8 +290,8 @@
 		if (mobileReconcileRaf !== null) cancelAnimationFrame(mobileReconcileRaf);
 	});
 
-	// Get selected profile name for display in placeholder
-	const selectedProfileName = $derived($profiles.find(p => p.id === $activeSession.profile)?.name || 'Profile');
+	// Get selected agent name for display in placeholder
+	const selectedProfileName = $derived($profiles.find(p => p.id === $activeSession.profile)?.name || 'agent');
 
 	// Modifier label for the send-later button title.
 	const metaLabel =
@@ -401,6 +401,7 @@
 			isUploading,
 			isCreatingWorktree: $activeSession.isCreatingWorktree,
 			hasProfile: !!$activeSession.profile,
+			hasAnyProfile: $profiles.length > 0,
 			hasProject: !!$activeSession.project || !!$activeSession.projectV2Id
 		});
 		if (block) {

@@ -2148,27 +2148,21 @@ class TestProfileConfigStrictMcpConfig:
         assert cfg.strict_mcp_config is False
 
 
-class TestSeededStarterAgentStreams:
-    """The starter agent is what a fresh install chats with. Live streaming
-    (typewriter, gap indicators, stream_delta handling) requires
-    ``include_partial_messages`` to be enabled — otherwise a fresh install shows
-    dead air for the whole turn and one chunk at turn end.
+class TestNewAgentsStreamByDefault:
+    """The app seeds no agents, so the first agent a user chats with is always
+    one they made. Live streaming (typewriter, gap indicators, stream_delta
+    handling) requires ``include_partial_messages`` — with it off the user sees
+    dead air for the whole turn and one chunk at turn end — so an agent that
+    never states a preference must still stream.
     """
 
-    def test_starter_agent_streams_partial_messages(self):
-        """Seed template must enable partial-message streaming for live chat."""
-        from app.core.profiles import STARTER_AGENT
+    def test_an_imported_agent_streams_unless_it_opted_out(self):
+        """An export file predating the field must still stream on import."""
+        from app.core.models import AgentExportData, AgentImportData
 
-        assert (
-            STARTER_AGENT["config"]["include_partial_messages"] is True
-        ), "seeded starter agent must stream partial messages for live chat UX"
-
-    def test_starter_agent_is_not_builtin(self):
-        """Nothing ships as a protected built-in any more: the starter agent is
-        the user's from the moment it is created, so it can be deleted."""
-        from app.core.profiles import STARTER_AGENT
-
-        assert "model" not in STARTER_AGENT["config"]
+        assert AgentImportData(name="Mine").include_partial_messages is True
+        # Same contract on the way out: absent means on, not off.
+        assert AgentExportData(name="Mine").include_partial_messages is True
 
 
 # =============================================================================

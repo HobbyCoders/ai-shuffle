@@ -18,6 +18,7 @@ function ready(over: Partial<SubmitGuardInput> = {}): SubmitGuardInput {
 		isUploading: false,
 		isCreatingWorktree: false,
 		hasProfile: true,
+		hasAnyProfile: true,
 		hasProject: true,
 		...over
 	};
@@ -48,9 +49,19 @@ describe('evaluateSubmitGuards', () => {
 		expect(block!.notice?.message).toMatch(/creating the worktree/i);
 	});
 
-	it('names the missing profile', () => {
+	it('names the missing agent when there is one to pick', () => {
 		const block = evaluateSubmitGuards(ready({ hasProfile: false }));
-		expect(block!.notice).toEqual({ message: 'Select a profile first.', tone: 'warning' });
+		expect(block!.notice).toEqual({ message: 'Select an agent first.', tone: 'warning' });
+	});
+
+	it('tells a fresh install to create an agent rather than pick one', () => {
+		// The app seeds no agents, so "select an agent" would be advice the user
+		// cannot act on — there is nothing in the picker.
+		const block = evaluateSubmitGuards(ready({ hasProfile: false, hasAnyProfile: false }));
+		expect(block!.notice).toEqual({
+			message: 'No agents yet — create one to start chatting.',
+			tone: 'warning'
+		});
 	});
 
 	it('names the missing project', () => {
@@ -74,8 +85,8 @@ describe('evaluateSubmitGuards', () => {
 		expect(block!.notice?.message).toMatch(/upload/i);
 	});
 
-	it('prefers the profile notice over the project notice', () => {
+	it('prefers the agent notice over the project notice', () => {
 		const block = evaluateSubmitGuards(ready({ hasProfile: false, hasProject: false }));
-		expect(block!.notice?.message).toMatch(/profile/i);
+		expect(block!.notice?.message).toMatch(/agent/i);
 	});
 });
