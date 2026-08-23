@@ -131,22 +131,43 @@ access (files go through permission-gated tools), and its memory limits hold on
 both Linux/macOS and Windows.
 
 **A harness that learns.** With the continual mode on, fluid keeps an episodic
-journal of what actually happened and runs a background pass that distills
-recurring workflows into persistent Python skills. Skills have to prove
-themselves: each one carries a self-test, verified in a throwaway kernel on save
-and whenever it changes — broken skills are unmounted and flagged, not silently
-trusted. Over time the harness gets genuinely better at *your* work. (Design
-rationale: [docs/agent-experience.md](docs/agent-experience.md).)
+journal of what actually happened — executed kernel cells under code mode, or
+per-tool-call entries in plain JSON sessions — and runs a background pass that
+distills recurring workflows into persistent Python skills. Skills have to
+prove themselves: each one carries a self-test, verified in a throwaway kernel
+on save and whenever it changes — broken skills are unmounted and flagged, not
+silently trusted. The synthesizer is explicitly told what *not* to learn
+(environment-dependent failures, negative tool claims that harden into
+standing refusals, unresolved failures written up as workflows), and a
+deterministic curation pass ages the library: stale after 30 days, archived —
+never deleted — after 90, pinned skills untouched. Over time the harness gets
+genuinely better at *your* work. (Design rationale:
+[docs/agent-experience.md](docs/agent-experience.md).)
 
-**A real base prompt.** The CLI ships a curated system prompt — a behavioral
-contract covering communication, scope, tool use, permissions, and context
-hygiene — the way Claude Code and Codex do, and layers your `AGENTS.md` stack,
-skills index, and environment block on top of it. Set `system` in `config.toml`
-to use your own base prompt instead, or `base_prompt = false` (or
-`FLUID_BASE_PROMPT=0`) to run with none. The environment block names the
-shell commands actually run through: Git Bash on Windows when it is installed
-(`FLUID_SHELL` overrides the choice), `cmd.exe` otherwise, `$SHELL` or
-`/bin/sh` elsewhere.
+**A real base prompt — composed, not pasted.** The CLI's system prompt is a
+behavioral contract covering communication, scope, tool use, permissions, and
+context hygiene, assembled from **gated blocks**: prose about a tool appears
+only when that tool is actually in the session's surface (a restricted session
+never reads about capabilities it doesn't have — and a test enforces it). An
+**identity layer** (`identity` in config, or `~/.fluid/IDENTITY.md`) carries
+your durable voice as the first block without touching the contract below it.
+**Model-family guidance** injects act-don't-narrate and execution-discipline
+blocks only for model families that need them (`model_guidance = "auto"`) —
+the same prompt that stays lean on Claude keeps a mid-tier OpenRouter model
+finishing jobs. The environment block ends with a workspace snapshot: branch
+and dirty state, detected manifests, and the project's actual verify commands
+(`pytest`, `npm run test`, make targets), so the model starts with its
+verification loop in hand. Set `system` to replace the whole contract, or
+`base_prompt = false` to run with none.
+
+**Web, questions, and memory.** `WebFetch` and `WebSearch` (keyless,
+SSRF-guarded, results fenced as untrusted data) close the network gap without
+an MCP server. `AskUser` asks the user structured questions mid-turn and
+parks until they answer. A bounded declarative memory (`~/.fluid/MEMORY.md`,
+capped, snapshot-frozen per session, curated by the model through the
+`Memory` tool) carries durable facts across sessions, and `SessionSearch`
+recalls past sessions' conversations so "like we did last week" is answered
+from the record.
 
 **Replayable by construction.** The engine consumes operations and emits a
 sequence-numbered event stream. Every UI, log, and integration is a subscriber
@@ -172,7 +193,15 @@ Early development, moving fast. Working today:
 - Background `Task` and `Monitor` workers hosted by the CLI, with park and
   wake.
 - MCP servers over stdio and HTTP (`mcp>=2.0`), tool images conditioned to
-  the vision budget, deferred tool schemas with `ToolSearch`.
+  the vision budget, deferred tool schemas with `ToolSearch` (budget-tiered
+  catalog: full listing → names only → per-server summary).
+- Dispatch-boundary hardening: MCP results fenced as untrusted data with
+  elision-marker notices, bounded and de-framed error text, schema-guided
+  argument coercion, and availability probes with a last-good grace window.
+- `WebFetch`/`WebSearch` (keyless, SSRF-guarded, fenced), `AskUser`
+  structured questions, bounded declarative `Memory`, cross-session
+  `SessionSearch`, and a mid-turn `Steer` op delivered on the next tool
+  result inside a trusted marker.
 - Code mode with `from tools import X`, a pure-stdlib allowlist, trimmed
   tracebacks, and the continual skill synthesizer.
 - The compaction ladder with head excerpts on trim stubs, `HistoryExpand` /

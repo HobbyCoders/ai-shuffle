@@ -39,7 +39,7 @@ upward search for a project file.
 | `default_model` | `"claude-sonnet-5"` | Model id used when the selected provider block has no `model` of its own. `FLUID_DEFAULT_MODEL` sets this key; a provider's `model` line takes precedence over it. |
 | `model_override` | `null` | Highest-precedence model choice: beats a provider's `model` line. Set by `--model` or `FLUID_MODEL`; not normally written in a file. |
 | `code_mode` | `false` | Expose tools through the sandboxed Python kernel (`run_python`) instead of as individual tool calls. Adds the code-mode addendum to the CLI prompt. |
-| `continual` | `false` | Code mode only. Journal kernel cells and synthesize reusable skills in the background. `--continual` turns this and `code_mode` on together. |
+| `continual` | `false` | Journal the session and synthesize reusable skills in the background. Under `code_mode` the journal records executed cells; without it, a per-tool-call journal is kept, so plain JSON sessions learn too. `--continual` turns this and `code_mode` on together. |
 | `continual_model` | none | Pin skill synthesis to one model id regardless of the session's model. |
 | `skills_dir` | none (`~/.fluid/skills`) | Root directory for persistent code-mode skills. |
 | `cwd` | `"."` | Working directory for config discovery, instruction files, tools, and the prompt's environment block. |
@@ -48,6 +48,9 @@ upward search for a project file.
 | `context_window` | none | The model's context window in tokens. fluid does not guess this; set it so `/context` can show a percentage and free space. |
 | `system` | none | Your own base system prompt. When set it replaces the shipped default (`fluid/cli/prompt.py`) entirely; the instruction stack, skills index, and environment block are still appended after it. |
 | `base_prompt` | `true` | `false` runs the CLI with no base prompt at all (only instruction files, skills, agents, and the environment block). Ignored when `system` is set. |
+| `identity` | none | Inline identity text — durable voice/persona injected as the base prompt's first block. Replaces only the identity block; the operating contract below it always applies (use `system` to replace everything). |
+| `identity_file` | `true` | When `identity` is unset, `~/.fluid/IDENTITY.md` fills the identity slot (screened and capped). `false` ignores the file. `FLUID_IDENTITY_FILE` overrides. |
+| `model_guidance` | `"auto"` | Model-family guidance blocks (act-don't-narrate; execution discipline). `auto` matches the shipped family tables (Claude-family models get none); `true` always injects both; `false` never; a list of model-id substrings replaces the tables. `FLUID_MODEL_GUIDANCE` overrides (comma-separated list allowed). |
 
 ### `[permission]`
 
@@ -126,13 +129,30 @@ Knobs for tool-result trimming and the compaction ladder
 | `keep_recent_turns` | `3` | Turns never folded into a digest. |
 | `max_resident_span_digests` | `20` | Span digests kept in the prompt before they fold into an epoch stub. |
 | `epoch_fold_spans` | `10` | How many span digests fold into one epoch stub. |
-| `intake_stub_chars` | `25000` | Tool results longer than this are stubbed on arrival. |
+| `intake_stub_chars` | `25000` | User text blocks longer than this render as a stub (preview + `HistoryExpand` pointer) from the very first request. |
+| `tool_result_stub_chars` | `50000` | Non-error tool results longer than this render as a stub immediately — a single monster result can never overflow the window before the batch trigger fires. Errors are never stubbed. |
 | `keep_recent_tool_results` | `5` | Most recent tool results that are never trimmed. |
 | `min_result_chars` | `2000` | Results shorter than this are left alone by the trimmer. |
 
 A trimmed result is replaced by a placeholder that states how many characters
 were removed, quotes the first 160 characters of the original, and carries a
 `node_...` ref that `HistoryExpand` or `HistorySearch` can recover.
+
+### `[memory]`
+
+Bounded declarative memory: a small, human-editable file of durable facts,
+injected into the compiled prompt as a frozen session-start snapshot with a
+visible fill percentage, and curated by the model through the `Memory` tool
+(batched atomic edits; the char cap is checked on the batch's final state, so
+one call can consolidate and add together). Mid-session saves land on disk
+immediately and appear in the prompt next session — the cached prefix never
+mutates. Entries are screened for prompt-injection patterns at snapshot build.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `true` | `false` removes the `Memory` tool and the prompt's memory section. |
+| `file` | none (`~/.fluid/MEMORY.md`) | The store. Entries are separated by `---` lines; edit it by hand freely. |
+| `char_limit` | `3000` | Hard cap on total content. Oversized batches are rejected with the current entries shown. |
 
 ### `[[hooks]]`
 
@@ -272,6 +292,8 @@ Config overrides, applied as layer 5 (`env_overrides` in the loader):
 | `FLUID_CWD` | `cwd` |
 | `FLUID_CODE_MODE` | `code_mode` (`1`, `true`, `yes`, `on` are true) |
 | `FLUID_BASE_PROMPT` | `base_prompt` (same boolean spellings) |
+| `FLUID_IDENTITY_FILE` | `identity_file` (same boolean spellings) |
+| `FLUID_MODEL_GUIDANCE` | `model_guidance` (`auto`/`true`/`false`, or a comma-separated substring list) |
 | `FLUID_SKILLS_DIR` | `skills_dir` |
 | `FLUID_CONTINUAL` | `continual` |
 | `FLUID_CONTINUAL_MODEL` | `continual_model` |

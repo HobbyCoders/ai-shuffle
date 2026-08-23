@@ -776,3 +776,26 @@ and 3.4 exist.
 Every Phase-1 item preserves fluid's core invariant — the compiled prompt is
 resolved once per session from frozen inputs, so nothing here introduces a
 mid-session prefix mutation.
+
+### Implementation status
+
+All four phases were implemented on this branch (see the commit series
+following this document):
+
+- **Phase 1** — gated base-prompt blocks + mentioned-tools invariant test,
+  identity layer (`identity` / `~/.fluid/IDENTITY.md`), model-family guidance
+  (`model_guidance`), workspace snapshot with verify commands, instruction
+  caps with Read-back markers, injection screening, coding-brief additions.
+- **Phase 2** — untrusted-result fencing + elision notices for MCP results,
+  error scrubbing/bounding, argument coercion, description craft pass,
+  budget-tiered deferred catalog, immediate tool-result intake stubs
+  (`context.tool_result_stub_chars`).
+- **Phase 3** — bounded declarative memory (`[memory]`, `Memory` tool,
+  frozen snapshot with fill percentage), `SessionSearch`, `AskUser` (riding
+  the input-required round-trip), JSON-mode learning loop (`ToolJournal`),
+  synthesizer do-not-capture list, deterministic skill curation
+  (stale 30d / archive 90d / never delete / pinned exempt).
+- **Phase 4** — `Steer` op + marker + prompt block, `WebFetch`/`WebSearch`
+  (keyless, SSRF-guarded, fenced), availability probes with a last-good
+  grace window, and the prompt/description regression harness
+  (`tests/unit/test_prompt_regression.py`).

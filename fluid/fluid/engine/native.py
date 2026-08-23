@@ -18,7 +18,7 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fnmatch import fnmatchcase
 from typing import Any
 
@@ -62,6 +62,7 @@ from fluid.events.ops import (
     Rewind,
     SetModel,
     SetPermissionMode,
+    Steer,
     UserTurn,
 )
 from fluid.hooks.bus import (
@@ -339,6 +340,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._turn_task: asyncio.Task | None = None
         self._pending_permissions: dict[str, asyncio.Future] = {}
         self._pending_questions: dict[str, asyncio.Future] = {}
+        # Mid-turn steers awaiting the next tool result (see the Steer op).
+        self._pending_steers: list[str] = []
         # Nested-instruction injection: instruction-file paths already injected
         # this session (each nested AGENTS-family file enters context once).
         self._nested_injected: set[str] = set()
@@ -456,6 +459,17 @@ class NativeLoop(BackgroundLifecycleMixin):
             self._turn_task = asyncio.create_task(self._run_turn(op))
         elif isinstance(op, Interrupt):
             self._interrupted.set()
+        elif isinstance(op, Steer):
+            # Mid-turn user text: queued here, appended to the NEXT tool
+            # result inside the steering marker (fluid.context.steering) —
+            # the one role-alternation-safe slot. Dropped with a warning if
+            # the turn ends first (the user can just send a message then).
+            if self._turn_task is not None and not self._turn_task.done():
+                self._pending_steers.append(op.text)
+            else:
+                raise RuntimeError(
+                    "no turn is running — send a normal message instead of a steer"
+                )
         elif isinstance(op, RespondPermission):
             fut = self._pending_permissions.get(op.request_id)
             if fut is not None and not fut.done():
@@ -998,6 +1012,14 @@ class NativeLoop(BackgroundLifecycleMixin):
                  "text": _plain_text(result.message.content)},
             )
             await self._report_hook_warnings(sid, turn_id, TURN_END, decision)
+        if self._pending_steers:
+            # No further tool result will carry them; the user should send a
+            # normal message. Dropping silently would lose user input, so log.
+            log.warning(
+                "dropping %d undelivered mid-turn steer(s) at turn end",
+                len(self._pending_steers),
+            )
+            self._pending_steers.clear()
         # Cost rides its own TurnComplete field; keep the usage dict token-shaped.
         cost_total = total_usage.pop("cost_usd", None)
         await self._emit_terminal_with_park(TurnComplete(
@@ -1567,6 +1589,12 @@ class NativeLoop(BackgroundLifecycleMixin):
             self._journal.record_tool(
                 name, input or {}, outcome.text, outcome.is_error
             )
+        if self._pending_steers:
+            from fluid.context.steering import format_steer
+
+            steers = "".join(format_steer(s) for s in self._pending_steers)
+            self._pending_steers.clear()
+            outcome = replace(outcome, text=outcome.text + steers)
         await self._emit(ToolResult(
             session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id, name=name,
             output=outcome.text, is_error=outcome.is_error, ui=outcome.ui,

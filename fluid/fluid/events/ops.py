@@ -38,6 +38,21 @@ class Interrupt(Op):
 
 
 @dataclass(kw_only=True)
+class Steer(Op):
+    """A mid-turn user message, delivered without interrupting the turn.
+
+    Role alternation means mid-turn user text can only ride a tool result;
+    the engine appends it to the NEXT tool result inside a bounded,
+    self-describing marker the base prompt teaches the model to trust (and to
+    treat as historical once an assistant message follows it). Steers queued
+    when the turn ends without another tool call are dropped with a warning —
+    the user can simply send a normal message then.
+    """
+
+    text: str
+
+
+@dataclass(kw_only=True)
 class BackgroundTaskFinished(Op):
     """Record a detached worker's terminal result and optionally wake its parent."""
 

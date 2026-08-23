@@ -19,6 +19,7 @@ from fluid.tools.builtins import (
     skill,
     task,
     tool_search,
+    web,
     write,
 )
 from fluid.tools.registry import ToolRegistry
@@ -26,14 +27,18 @@ from fluid.tools.registry import ToolRegistry
 _MODULES = (
     read, grep, glob, write, edit, bash, skill, note, task, monitor,
     tool_search, history_expand, history_search, ledger,
-    memory, session_search, ask_user,
+    memory, session_search, ask_user, web,
 )
 
 
 def register_builtins(registry: ToolRegistry) -> None:
     """Register all builtin tools on ``registry``."""
     for mod in _MODULES:
-        registry.register_builtin(mod.SPEC, mod.handler)
+        pairs = (
+            mod.SPECS if hasattr(mod, "SPECS") else ((mod.SPEC, mod.handler),)
+        )
+        for spec, handler in pairs:
+            registry.register_builtin(spec, handler)
 
 
 __all__ = ["register_builtins"]

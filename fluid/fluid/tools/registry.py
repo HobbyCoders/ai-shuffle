@@ -14,6 +14,7 @@ their bare names (``Read``, ``Edit``, ...).
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -60,6 +61,13 @@ class ToolSpec:
     # set of labels a session allow covers (Bash: the programs the command
     # runs). None → the allow covers every call to the tool.
     session_scope: Callable[[dict[str, Any]], frozenset[str] | None] | None = field(
+        default=None, compare=False, repr=False
+    )
+    # Optional availability probe for tools whose backing can be absent (a
+    # container runtime, a device, a binary). Consulted through the registry's
+    # TTL cache with a last-good grace window — one flaky probe must never
+    # strip a tool out from under a session mid-turn. None → always available.
+    check_available: Callable[[], bool] | None = field(
         default=None, compare=False, repr=False
     )
 
@@ -187,11 +195,45 @@ def _normalize(result: Any) -> ToolOutcome:
     return ToolOutcome(text=json.dumps(result, default=str))
 
 
+# Availability-probe caching: verdicts hold for the TTL; a failure within the
+# grace window of a prior success serves the last-good True instead — a
+# transient probe timeout must not strip a toolset out from under a session.
+PROBE_TTL_S = 30.0
+PROBE_GRACE_S = 60.0
+
+
 class ToolRegistry:
     def __init__(self, *, manager: McpManager | None = None) -> None:
         self._entries: dict[str, _Entry] = {}
         self._loaded: set[str] = set()
         self._manager = manager or McpManager()
+        # name -> (verdict, verdict_ts, last_true_ts)
+        self._probe_cache: dict[str, tuple[bool, float, float]] = {}
+        self._clock: Callable[[], float] = time.monotonic
+
+    def available(self, name: str) -> bool:
+        """The tool's probe verdict (cached; grace-windowed). True without one."""
+        entry = self._entries.get(name)
+        if entry is None:
+            return False
+        probe = entry.spec.check_available
+        if probe is None:
+            return True
+        now = self._clock()
+        cached = self._probe_cache.get(name)
+        if cached is not None and now - cached[1] < PROBE_TTL_S:
+            return cached[0]
+        last_true = cached[2] if cached is not None else 0.0
+        try:
+            verdict = bool(probe())
+        except Exception:
+            verdict = False
+        if verdict:
+            last_true = now
+        elif last_true and now - last_true < PROBE_GRACE_S:
+            verdict = True  # transient failure — serve the last-good verdict
+        self._probe_cache[name] = (verdict, now, last_true)
+        return verdict
 
     # ─── Registration ────────────────────────────────────────────────────
 
@@ -242,7 +284,8 @@ class ToolRegistry:
     def list_tools(self, *, loaded_only: bool = True) -> list[ToolSpec]:
         return [
             e.spec for name, e in self._entries.items()
-            if not loaded_only or name in self._loaded
+            if (not loaded_only or name in self._loaded)
+            and (e.spec.check_available is None or self.available(name))
         ]
 
     def deferred_tools(self) -> list[ToolSpec]:
@@ -302,6 +345,15 @@ class ToolRegistry:
         entry = self._entries.get(name)
         if entry is None:
             return ToolOutcome(text=f"unknown tool: {name}", is_error=True)
+        if entry.spec.check_available is not None and not self.available(name):
+            return ToolOutcome(
+                text=(
+                    f"tool {name} is temporarily unavailable (its backing "
+                    "service did not respond). Do not retry immediately; use "
+                    "another approach or tell the user."
+                ),
+                is_error=True,
+            )
         try:
             input = coerce_args(input, entry.spec.input_schema)
             if entry.spec.source == "mcp":
