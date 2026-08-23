@@ -84,13 +84,16 @@ class TestSettingsDefaults:
 
     def test_default_path_settings_are_none(self):
         """Path settings should default to None before model_post_init."""
-        # The deployment env exports POSTGRES_* values; clear them so the
-        # class-level defaults are what this test exercises rather than leaked
-        # values. _env_file=None also blocks pydantic-settings from re-reading a
-        # repo-root .env — popping the env vars alone is not hermetic.
+        # The deployment env exports POSTGRES_*/DATABASE_URL values; clear
+        # them so the class-level defaults are what this test exercises rather
+        # than leaked values (DATABASE_URL would be auto-imported into the
+        # POSTGRES_* fields at load). _env_file=None also blocks
+        # pydantic-settings from re-reading a repo-root .env — popping the env
+        # vars alone is not hermetic.
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("POSTGRES_HOST", None)
             os.environ.pop("POSTGRES_PASSWORD", None)
+            os.environ.pop("DATABASE_URL", None)
             with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
                 with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
                     from app.core.config import Settings
@@ -307,6 +310,7 @@ class TestDatabasePaths:
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("POSTGRES_PASSWORD", None)
             os.environ.pop("DATABASE_URL", None)
+            os.environ.pop("POSTGRES_HOST", None)
             with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
                 with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
                     from app.core.config import Settings
@@ -393,6 +397,9 @@ class TestDatabasePaths:
         """Host defaults to localhost in local mode and postgres in Docker."""
         with patch.dict(os.environ, {"POSTGRES_PASSWORD": "pw"}, clear=False):
             os.environ.pop("POSTGRES_HOST", None)
+            # A deployment-leaked DATABASE_URL would be auto-imported into
+            # POSTGRES_HOST at load, defeating the default-host assertion.
+            os.environ.pop("DATABASE_URL", None)
             with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
                 with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
                     from app.core.config import Settings
@@ -403,8 +410,82 @@ class TestDatabasePaths:
                     assert docker.effective_postgres_host == "postgres"
 
 
-class TestClaudeProjectsDir:
-    """Test Claude projects directory property."""
+class TestLegacyDatabaseUrlAutoImport:
+    """A legacy DATABASE_URL is auto-imported into the POSTGRES_* fields at
+    settings load, so a URL-only install (pre-split .env or Docker env) counts
+    as fully configured without re-running setup."""
+
+    def _make_settings(self, **env):
+        import app.core.config as config_mod
+
+        with patch.dict(os.environ, env, clear=False):
+            for key in ("POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER",
+                        "POSTGRES_PASSWORD", "POSTGRES_DB", "DATABASE_URL"):
+                if key not in env:
+                    os.environ.pop(key, None)
+            # Reset the module-global import flag so assertions on it don't
+            # see a True left over from an earlier test's URL-bearing env.
+            old_flag = config_mod.legacy_database_url_imported
+            config_mod.legacy_database_url_imported = False
+            try:
+                with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
+                    with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
+                        from app.core.config import Settings
+                        result = Settings(_env_file=None)
+            finally:
+                imported_now = config_mod.legacy_database_url_imported
+                config_mod.legacy_database_url_imported = old_flag
+        return result, imported_now
+
+    def test_url_only_install_becomes_fully_configured(self):
+        """The pre-split .env case: only DATABASE_URL set — every POSTGRES_*
+        piece is derived from it and get_database_url() works unchanged."""
+        settings, imported = self._make_settings(
+            DATABASE_URL="postgresql://REDACTED@10.0.0.9:5433/olddb",
+        )
+        assert imported is True
+        assert settings.postgres_host == "10.0.0.9"
+        assert settings.postgres_port == 5433
+        assert settings.postgres_user == "olduser"
+        assert settings.postgres_password == "oldpass"
+        assert settings.postgres_db == "olddb"
+        # The URL still wins at connect time, byte-for-byte.
+        assert settings.get_database_url() == (
+            "postgresql://REDACTED@10.0.0.9:5433/olddb"
+        )
+
+    def test_percent_encoded_and_literal_at_passwords_round_trip(self):
+        """The raw-DSN trap: passwords with % or @ survive the import."""
+        settings, _ = self._make_settings(
+            DATABASE_URL="postgresql://REDACTED@10.0.0.200:5432/appdb",
+        )
+        assert settings.postgres_password == "p@ss"
+
+        settings, _ = self._make_settings(
+            DATABASE_URL="postgresql://REDACTED@10.0.0.200:5432/appdb",
+        )
+        assert settings.postgres_password == "p@ssPwd"
+
+    def test_explicit_pieces_are_never_clobbered(self):
+        """An explicit POSTGRES_* value beats the URL's counterpart — a user
+        overriding one piece isn't silently reverted by the import."""
+        settings, _ = self._make_settings(
+            DATABASE_URL="postgresql://REDACTED@10.0.0.9:5433/olddb",
+            POSTGRES_PASSWORD="explicit-pw",
+        )
+        assert settings.postgres_password == "explicit-pw"
+        # Untouched pieces still come from the URL.
+        assert settings.postgres_host == "10.0.0.9"
+        assert settings.postgres_db == "olddb"
+
+    def test_no_url_leaves_defaults(self):
+        """No DATABASE_URL — nothing changes and the flag stays False."""
+        settings, imported = self._make_settings(POSTGRES_PASSWORD="pw")
+        assert imported is False
+        assert settings.postgres_host is None
+        assert settings.postgres_db == "ai_shuffle"
+
+
 
     def test_get_claude_projects_dir_default(self):
         """get_claude_projects_dir should return default path."""

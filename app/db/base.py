@@ -12,8 +12,6 @@ import logging
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 
-from urllib.parse import urlparse, unquote
-
 import psycopg2
 import psycopg2.pool
 import psycopg2.extras
@@ -92,22 +90,15 @@ def parse_database_url(db_url: str) -> Dict[str, Any]:
 
     psycopg2/libpq cannot reliably parse raw DSNs: percent-encoded passwords
     stay encoded, and a literal ``@`` in the password makes libpq treat part
-    of it as the hostname. ``urlparse`` splits userinfo at the LAST ``@`` and
-    credentials are unquoted, so both encodings work. Every direct PG
-    connection (pool or dedicated, e.g. the event-gateway LISTEN connection)
-    must connect through this instead of passing the raw URL.
-    Tolerates URLs missing the ``postgresql://`` scheme prefix.
+    of it as the hostname. Delegates to the canonical parser in
+    app.core.config (which needs it at settings-load time, before this module
+    can be imported). Every direct PG connection (pool or dedicated, e.g. the
+    event-gateway LISTEN connection) must connect through this instead of
+    passing the raw URL.
     """
-    if not db_url.startswith(("postgresql://", "postgres://")):
-        db_url = f"postgresql://{db_url}"
-    parsed = urlparse(db_url)
-    return {
-        "host": parsed.hostname,
-        "port": parsed.port or 5432,
-        "dbname": parsed.path.lstrip("/"),
-        "user": unquote(parsed.username or ""),
-        "password": unquote(parsed.password or ""),
-    }
+    from app.core.config import _parse_legacy_database_url
+
+    return _parse_legacy_database_url(db_url)
 
 
 def init_pool(min_conn: int = 2, max_conn: int = 10) -> None:
