@@ -370,13 +370,15 @@
 		display: block;
 		width: 100%;
 		text-align: left;
-		padding: 7px 8px 8px;
+		/* When the hover action reveals, grow the right padding so lines
+		   truncate short of the button instead of running underneath it. */
+		padding: 7px calc(8px + var(--ram-reveal) * 30px) 8px 8px;
 		border: none;
 		border-radius: 9px;
 		background: transparent;
 		color: inherit;
 		cursor: pointer;
-		transition: background-color 0.13s ease;
+		transition: background-color 0.13s ease, padding 0.13s ease;
 		position: relative;
 		z-index: 2;
 	}
@@ -401,8 +403,8 @@
 
 	/* Compact two-line row for settled/archived sessions: title + age, then a
 	   muted meta line (project · device · branch). Still denser than the
-	   three-line active cards. Hover reveals the quick action at the row's
-	   bottom-right edge; the mobile swipe strip is untouched. */
+	   three-line active cards. Hover reveals the quick action centered at the
+	   row's right edge; the mobile swipe strip is untouched. */
 	.scard.compact { padding: 6px 8px 7px; }
 	.l1.cline { display: flex; align-items: center; gap: 8px; }
 	.cproj {
@@ -560,9 +562,9 @@
 
 	.card-actions {
 		position: absolute;
-		top: auto;
+		top: 50%;
+		transform: translateY(-50%);
 		right: 6px;
-		bottom: 5px;
 		display: flex;
 		align-items: center;
 		gap: 1px;
@@ -602,6 +604,7 @@
 		}
 		.scard {
 			background: var(--sidebar);
+			padding: 7px 8px 8px;
 			transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1), background-color 130ms ease;
 			will-change: transform;
 		}
