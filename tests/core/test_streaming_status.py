@@ -173,12 +173,16 @@ async def test_broadcast_uses_exact_legacy_wire_shape(mock_db, monkeypatch):
     assert await _wait_until(lambda: len(sent) == 1)
     user_id, message = sent[0]
     assert user_id == "admin"
+    # worktree_branch joins the legacy shape (additive): v2 branch sessions
+    # carry their logical branch there so consumers can tell own-checkout
+    # streaming apart from main-checkout streaming.
     assert message == {
         "type": "user_streaming_changed",
         "session_id": "s1",
         "is_streaming": True,
         "project_id": "p1",
         "worktree_id": None,
+        "worktree_branch": None,
     }
 
 
@@ -330,13 +334,46 @@ def test_get_user_streaming_sessions_join(mock_db):
 
     # Admin sees only admin-owned (api_user_id NULL) lease-valid sessions.
     assert streaming_status.get_user_streaming_sessions("admin") == [
-        {"session_id": "s-admin", "project_id": "p1", "worktree_id": None}
+        {
+            "session_id": "s-admin",
+            "project_id": "p1",
+            "worktree_id": None,
+            "worktree_branch": None,
+        }
     ]
 
     # An API user sees only their own.
     assert streaming_status.get_user_streaming_sessions("u1") == [
-        {"session_id": "s-user", "project_id": None, "worktree_id": None}
+        {
+            "session_id": "s-user",
+            "project_id": None,
+            "worktree_id": None,
+            "worktree_branch": None,
+        }
     ]
 
     # Unknown user -> nothing.
     assert streaming_status.get_user_streaming_sessions("nobody") == []
+
+
+def test_get_user_streaming_sessions_reports_v2_branch(mock_db):
+    """A v2 branch-intake session has NO legacy worktree row — its logical
+    branch lives in sessions.branch. The snapshot must surface it as
+    ``worktree_branch`` so consumers can tell it apart from a main-checkout
+    session (it runs its own checkout and must not lock others' git actions)."""
+    mock_db.execute(
+        "INSERT INTO projects (id, name, path) VALUES ('p1', 'P', '/tmp/p')"
+    )
+    mock_db.commit()
+    database.create_session(session_id="s-v2", profile_id="default", project_id="p1")
+    database.set_session_branch("s-v2", "feat/login", None)
+    runs.claim_run("s-v2", "runnerA", 60)
+
+    assert streaming_status.get_user_streaming_sessions("admin") == [
+        {
+            "session_id": "s-v2",
+            "project_id": "p1",
+            "worktree_id": None,
+            "worktree_branch": "feat/login",
+        }
+    ]

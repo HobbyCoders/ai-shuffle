@@ -74,6 +74,22 @@ describe('computeGitControlsStreaming', () => {
 		).toBe(false);
 	});
 
+	it('project mode ignores a v2 BRANCH session streaming in the same project', () => {
+		// Regression: v2 branch-intake sessions have NO legacy worktree row
+		// (worktree_id NULL) — their checkout is identified by sessions.branch,
+		// carried on the streaming frame as worktree_branch. Before this test
+		// such a session wrongly locked every main-checkout session's controls.
+		expect(
+			computeGitControlsStreaming(
+				input({
+					crossDeviceStreaming: new Map([
+						['other', { projectId: 'proj-1', worktreeId: null, worktreeBranch: 'feat/login' }]
+					])
+				})
+			)
+		).toBe(false);
+	});
+
 	it('project mode ignores streaming in a *different* project', () => {
 		expect(
 			computeGitControlsStreaming(

@@ -71,8 +71,11 @@ function createMultiDerived<T>(
 /**
  * Whether git controls should be locked due to streaming.
  *
- * For worktree-mode: only locked if the active session's OWN session is streaming.
- * For project-mode: locked if ANY non-worktree session in the same project is streaming.
+ * For worktree/branch-mode: only locked if the active session's OWN session is
+ * streaming. For project-mode: locked if any OTHER MAIN-CHECKOUT session in the
+ * same project is streaming — a session with a worktree row or a logical branch
+ * (v2 branch sessions have worktree_id NULL) runs its own checkout and never
+ * locks main-checkout controls.
  */
 export const gitControlsStreaming = createMultiDerived(
 	[activeSession, streamingSessions],

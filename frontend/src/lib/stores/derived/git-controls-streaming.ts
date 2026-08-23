@@ -15,6 +15,10 @@
 export interface CrossDeviceStreamingInfo {
 	projectId: string | null;
 	worktreeId: string | null;
+	/** The session's logical branch (legacy worktree_branch, or the v2
+	 *  sessions.branch a branch-intake session records instead of a legacy
+	 *  worktree row). Presence means the session runs in its OWN checkout. */
+	worktreeBranch?: string | null;
 }
 
 export interface GitControlsStreamingInput {
@@ -35,10 +39,12 @@ export interface GitControlsStreamingInput {
  *
  * - The active session streaming always locks (any mode) — you can't run a git
  *   action while its own turn is mid-flight.
- * - Worktree-mode sessions have an independent working directory, so streaming
- *   in *other* sessions of the same project doesn't lock them.
+ * - A streaming session with its own checkout (a legacy worktree row OR a v2
+ *   logical branch — branch-intake sessions have worktree_id NULL by design)
+ *   never locks OTHER sessions' controls.
  * - Project-mode sessions share the project's main checkout, so any other
- *   non-worktree session streaming in the same project locks them.
+ *   main-checkout session (no worktree row, no branch) streaming in the same
+ *   project locks them.
  */
 export function computeGitControlsStreaming(input: GitControlsStreamingInput): boolean {
 	const {
@@ -55,11 +61,19 @@ export function computeGitControlsStreaming(input: GitControlsStreamingInput): b
 	// streaming in the same project can't touch it, so it doesn't lock controls.
 	if (activeIsWorktree) return false;
 
-	// Project-mode: any non-worktree session streaming in the same project locks
-	// the controls (they share the project's main checkout).
+	// Project-mode: any MAIN-CHECKOUT session streaming in the same project
+	// locks the controls (they share the project's main checkout). A streaming
+	// session with a worktree row OR a logical branch has its own checkout —
+	// v2 branch sessions carry only sessions.branch, worktree_id is NULL.
 	if (activeProject) {
 		for (const [, info] of crossDeviceStreaming) {
-			if (info.projectId === activeProject && !info.worktreeId) return true;
+			if (
+				info.projectId === activeProject &&
+				!info.worktreeId &&
+				!info.worktreeBranch
+			) {
+				return true;
+			}
 		}
 	}
 

@@ -60,6 +60,10 @@ import type {
 export interface StreamingSessionInfo {
 	projectId: string | null;
 	worktreeId: string | null;
+	/** The session's logical branch (legacy worktree_branch or the v2
+	 *  sessions.branch). A streaming session with a branch runs in its OWN
+	 *  checkout, so it must not lock main-checkout git controls. */
+	worktreeBranch?: string | null;
 }
 
 // ─── streamingSessions ───────────────────────────────────────────────────────

@@ -527,7 +527,7 @@
 			let message = userMessage;
 			if (!message) {
 				gitOperations.setStep('message', 'running');
-				const gen = await generateCommitMessage(projectId, { include_unstaged: includeUnstaged }, activeWorktreeId ?? undefined);
+				const gen = await generateCommitMessage(projectId, { include_unstaged: includeUnstaged }, activeWorktreeId ?? undefined, activeSessionId ?? undefined);
 				message = gen.message;
 				gitOperations.setStep('message', 'done');
 			}

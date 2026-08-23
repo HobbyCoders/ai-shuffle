@@ -157,7 +157,8 @@ def get_user_streaming_sessions(user_id: str) -> List[Dict[str, Any]]:
     """Lease-valid active runs joined to their owner's sessions (one query).
 
     Connect-time snapshot shape:
-    ``[{"session_id", "project_id", "worktree_id"}, ...]``.
+    ``[{"session_id", "project_id", "worktree_id", "worktree_branch"}, ...]``
+    (``worktree_branch`` = the legacy column, else the v2 ``sessions.branch``).
 
     Ownership follows the app's user model (see app/api/websocket.py):
     admin sessions have ``api_user_id`` NULL and broadcast under the constant
@@ -167,7 +168,8 @@ def get_user_streaming_sessions(user_id: str) -> List[Dict[str, Any]]:
     # Same lease-validity predicate as _LIVE_RUN_WHERE, columns qualified for
     # the join.
     base_sql = (
-        "SELECT r.session_id, s.project_id, s.worktree_id "
+        "SELECT r.session_id, s.project_id, s.worktree_id, "
+        "s.worktree_branch, s.branch "
         "FROM runs r JOIN sessions s ON s.id = r.session_id "
         "WHERE r.state='active' AND r.lease_expires_at >= NOW()"
     )
@@ -192,6 +194,11 @@ def get_user_streaming_sessions(user_id: str) -> List[Dict[str, Any]]:
             "session_id": row["session_id"],
             "project_id": row["project_id"],
             "worktree_id": row["worktree_id"],
+            # Logical branch: legacy column first, then the v2 ``sessions.branch``
+            # a branch-intake session records instead. Consumers use this to tell
+            # a branch/worktree session (own checkout — does NOT lock main-
+            # checkout git controls) apart from a true main-checkout session.
+            "worktree_branch": row["worktree_branch"] or row["branch"],
         }
         for row in rows
     ]
@@ -213,6 +220,9 @@ def _broadcast_info(session_id: str) -> Dict[str, Optional[str]]:
         "user_id": row.get("api_user_id") or "admin",
         "project_id": row.get("project_id"),
         "worktree_id": row.get("worktree_id"),
+        # Same fallback as get_user_streaming_sessions: v2 branch sessions have
+        # no legacy worktree row — their logical branch lives in sessions.branch.
+        "worktree_branch": row.get("worktree_branch") or row.get("branch"),
     }
 
 
@@ -324,6 +334,7 @@ async def _send_streaming_changed(
                 "is_streaming": is_streaming,
                 "project_id": info.get("project_id"),
                 "worktree_id": info.get("worktree_id"),
+                "worktree_branch": info.get("worktree_branch"),
             },
         )
     except Exception:

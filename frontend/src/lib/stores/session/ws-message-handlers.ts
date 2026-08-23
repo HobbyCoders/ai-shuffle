@@ -438,10 +438,11 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			const isStreamingFlag = data.is_streaming as boolean;
 			const projectId = (data.project_id as string | null) ?? null;
 			const worktreeId = (data.worktree_id as string | null) ?? null;
+			const worktreeBranch = ((data.worktree_branch as string | null) ?? null) || null;
 			streamingSessions.update(map => {
 				const newMap = new Map(map);
 				if (isStreamingFlag) {
-					newMap.set(ssId, { projectId, worktreeId });
+					newMap.set(ssId, { projectId, worktreeId, worktreeBranch });
 				} else {
 					newMap.delete(ssId);
 				}
@@ -451,12 +452,16 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		}
 
 		if (msgType === 'user_streaming_sessions') {
-			const sessions = data.sessions as Array<{ session_id: string; project_id: string | null; worktree_id?: string | null }> | undefined;
+			const sessions = data.sessions as Array<{ session_id: string; project_id: string | null; worktree_id?: string | null; worktree_branch?: string | null }> | undefined;
 			const sessionIds = data.session_ids as string[] | undefined;
 			const newMap = new Map<string, StreamingSessionInfo>();
 			if (sessions) {
 				for (const s of sessions) {
-					newMap.set(s.session_id, { projectId: s.project_id ?? null, worktreeId: s.worktree_id ?? null });
+					newMap.set(s.session_id, {
+						projectId: s.project_id ?? null,
+						worktreeId: s.worktree_id ?? null,
+						worktreeBranch: s.worktree_branch ?? null
+					});
 				}
 			} else if (sessionIds) {
 				for (const sid of sessionIds) {
