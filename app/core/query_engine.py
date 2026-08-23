@@ -2045,9 +2045,15 @@ async def _stream_to_websocket_impl(
     logger.debug(f"[WS] Permission mode for session {session_id}: {permission_mode} (session binding: {(session or {}).get('permission_mode')}, agent config: {config.get('permission_mode')}, override: {overrides.get('permission_mode') if overrides else None})")
     logger.debug(f"[WS] broadcast_func provided: {broadcast_func is not None}")
 
-    # Get tool restrictions for use in callback
-    allowed_tools = config.get("allowed_tools") or []
-    disallowed_tools = config.get("disallowed_tools") or []
+    # Get tool restrictions for use in callback. Ruling T2: the mode decides,
+    # not list emptiness — "Disable all tools" resolves to disallowed=["*"], so
+    # the permission callback below denies everything instead of reading an
+    # empty allow list as "unrestricted".
+    from app.core.tool_access import resolve_tool_access
+
+    _tool_access = resolve_tool_access(config)
+    allowed_tools = list(_tool_access.allowed or [])
+    disallowed_tools = list(_tool_access.disallowed or [])
 
     # --- Session Pool: Acquire or create SDK client ---
     pool = get_session_pool()
@@ -2291,11 +2297,16 @@ async def _stream_to_websocket_impl(
                 _ctx_display_name    = getattr(context, 'display_name', None)
                 _ctx_description     = getattr(context, 'description', None)
 
-                # Check profile-level tool restrictions FIRST
-                if _disallowed and tool_name in _disallowed:
+                # Check profile-level tool restrictions FIRST. Entries may be
+                # exact names or fnmatch patterns (``mcp__browser__*``, ``*``),
+                # so matching goes through the shared T2 helper rather than a
+                # bare ``in``.
+                from app.core.tool_access import matches_any
+
+                if _disallowed and matches_any(tool_name, _disallowed):
                     logger.debug(f"[WS] Tool {tool_name} blocked by profile disallowed_tools")
                     return PermissionResultDeny(message=f"Tool '{tool_name}' is disabled in this profile")
-                if _allowed and tool_name not in _allowed:
+                if _allowed and not matches_any(tool_name, _allowed):
                     logger.debug(f"[WS] Tool {tool_name} blocked by profile allowed_tools (not in whitelist)")
                     return PermissionResultDeny(message=f"Tool '{tool_name}' is not enabled in this profile")
 
