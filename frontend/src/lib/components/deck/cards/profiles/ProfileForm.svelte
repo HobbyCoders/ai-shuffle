@@ -6,7 +6,8 @@
 	 * The parent (ProfileCard) owns the StudioEditorShell chrome, rail, and footer.
 	 */
 	import type { Profile } from '$lib/api/client';
-	import { Users, Settings, SlidersHorizontal, Bot, Check, Plus, Trash2, FileText, Brain } from 'lucide-svelte';
+	import type { ToolSurface, ToolSurfaceGroup } from '$lib/api/toolSurface';
+	import { Users, Settings, SlidersHorizontal, Bot, Check, Plus, Trash2, FileText, Brain, Monitor } from 'lucide-svelte';
 	import ProfileToolConfig from './ProfileToolConfig.svelte';
 	import ProfileSystemPrompt from './ProfileSystemPrompt.svelte';
 	import ModelPicker from '$lib/components/settings/ModelPicker.svelte';
@@ -40,28 +41,6 @@
 		'env-disabled': 'Unavailable: disabled by the COMPUTER_USE_DISABLED environment variable.',
 		'screenshot-probe-failed': 'Unavailable: the screen-capture probe failed on this host.'
 	};
-
-	interface ToolCategory {
-		id: string;
-		name: string;
-		tools: { name: string; description: string; mcp_server?: string }[];
-	}
-
-	interface AITool {
-		id: string;
-		name: string;
-		description: string;
-		category: string;
-		available: boolean;
-		providers: string[];
-		active_provider: string | null;
-	}
-
-	interface AIToolCategory {
-		id: string;
-		name: string;
-		tools: AITool[];
-	}
 
 	interface Subagent {
 		id: string;
@@ -105,11 +84,9 @@
 		memory: string;
 		include_partial_messages: boolean;
 		system_prompt_content: string;
-		enabled_ai_tools: string[];
 		cwd: string;
 		add_dirs: string;
 		env_vars: { key: string; value: string }[];
-		app_config_tools: boolean;
 		computer_use_enabled: boolean;
 	}
 
@@ -124,20 +101,16 @@
 		customAgents: Subagent[];
 		/** Built-in system-prompt templates (GET /agents/templates), for new agents. */
 		templates: AgentTemplate[];
-		sdkToolCategories: ToolCategory[];
-		aiToolCategories: AIToolCategory[];
-		aiToolsLoading: boolean;
-		enabledSdkToolCount: number;
-		aiToolCount: number;
-		effectiveToolCount: number;
-		expandedSections: Record<string, boolean>;
+		/** Live tool surface (GET /tools/surface) driving the picker. */
+		toolSurface: ToolSurface;
+		toolsLoading: boolean;
+		toolsRefreshing: boolean;
+		isAdmin: boolean;
 		onFormChange: (field: string, value: any) => void;
 		onToolSelectionModeChange: (mode: 'all' | 'none' | 'allow' | 'disallow') => void;
-		onToggleTool: (toolName: string) => void;
-		onToggleCategory: (category: { name: string; tools: { name: string }[] }) => void;
-		onToggleAITool: (toolId: string) => void;
-		onToggleAIToolCategory: (category: AIToolCategory) => void;
-		onToggleSection: (id: string) => void;
+		onToggleTool: (group: ToolSurfaceGroup, toolName: string) => void;
+		onToggleGroup: (group: ToolSurfaceGroup) => void;
+		onRefreshTools: () => void;
 		onToggleAgent: (agentId: string) => void;
 		/** Apply a system-prompt template by id (fills prompt + optional tools). */
 		onApplyTemplate: (templateId: string) => void;
@@ -145,8 +118,6 @@
 		onRemoveFromGroup: (profileId: string) => void;
 		onCreateGroup: (category: string, name: string) => void;
 		onDeleteGroup: (category: string, name: string) => void;
-		getCategorySelectionState: (category: { name: string; tools: { name: string }[] }) => 'all' | 'some' | 'none';
-		getAICategorySelectionState: (category: AIToolCategory) => 'all' | 'some' | 'none';
 	}
 
 	let {
@@ -159,28 +130,21 @@
 		builtinAgentIds,
 		customAgents,
 		templates,
-		sdkToolCategories,
-		aiToolCategories,
-		aiToolsLoading,
-		enabledSdkToolCount,
-		aiToolCount,
-		effectiveToolCount,
-		expandedSections,
+		toolSurface,
+		toolsLoading,
+		toolsRefreshing,
+		isAdmin,
 		onFormChange,
 		onToolSelectionModeChange,
 		onToggleTool,
-		onToggleCategory,
-		onToggleAITool,
-		onToggleAIToolCategory,
-		onToggleSection,
+		onToggleGroup,
+		onRefreshTools,
 		onToggleAgent,
 		onApplyTemplate,
 		onAssignToGroup,
 		onRemoveFromGroup,
 		onCreateGroup,
-		onDeleteGroup,
-		getCategorySelectionState,
-		getAICategorySelectionState
+		onDeleteGroup
 	}: Props = $props();
 
 	// Group creation local state
@@ -319,15 +283,17 @@
 					<button type="button" class="switch" class:on={profileForm.include_partial_messages} role="switch" aria-checked={profileForm.include_partial_messages} aria-label="Toggle include partial messages" onclick={() => onFormChange('include_partial_messages', !profileForm.include_partial_messages)}><i></i></button>
 				</div>
 			</div>
-			<div class="set-row">
-				<div class="lab"><h4>App config via chat</h4><p>Allow AI to manage hooks, automations, MCP servers, and agents through conversation. Admin only.</p></div>
-				<div class="ctl">
-					<button type="button" class="switch" class:on={profileForm.app_config_tools} role="switch" aria-checked={profileForm.app_config_tools} aria-label="Toggle app configuration tools" onclick={() => onFormChange('app_config_tools', !profileForm.app_config_tools)}><i></i></button>
-				</div>
-			</div>
+		</div>
+
+	{:else if activeTab === 'tools'}
+		<!-- Computer use keeps its own section: it carries host hardware settings
+		     the picker has no place for, and the picker's computer-use group is
+		     greyed out until this switch is on. -->
+		<div class="set-group">
+			<div class="set-grouphead"><h3><Monitor />Computer use</h3><p>Host desktop control. Off by default; the tools below only appear once it is on.</p></div>
 			<div class="set-row" class:disabled={!computerUse.available}>
 				<div class="lab">
-					<h4>Computer use</h4>
+					<h4>Enable computer use</h4>
 					<p>
 						Let the agent control this machine's screen — screenshots, mouse, and keyboard,
 						like Claude Desktop. Shares one cursor with you. Native (non-Docker) hosts only.
@@ -342,27 +308,19 @@
 			</div>
 		</div>
 
-	{:else if activeTab === 'tools'}
 		<ProfileToolConfig
 			{toolSelectionMode}
 			allowedTools={profileForm.allowed_tools}
 			disallowedTools={profileForm.disallowed_tools}
-			enabledAITools={profileForm.enabled_ai_tools}
-			{sdkToolCategories}
-			{aiToolCategories}
-			{aiToolsLoading}
-			{enabledSdkToolCount}
-			{aiToolCount}
-			{effectiveToolCount}
-			{expandedSections}
+			surface={toolSurface}
+			loading={toolsLoading}
+			refreshing={toolsRefreshing}
+			computerUseEnabled={profileForm.computer_use_enabled}
+			{isAdmin}
 			{onToolSelectionModeChange}
 			{onToggleTool}
-			{onToggleCategory}
-			{onToggleAITool}
-			{onToggleAIToolCategory}
-			{onToggleSection}
-			{getCategorySelectionState}
-			{getAICategorySelectionState}
+			{onToggleGroup}
+			onRefresh={onRefreshTools}
 		/>
 
 	{:else if activeTab === 'agents'}
