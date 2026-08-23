@@ -658,7 +658,8 @@ def build_engine(
         system_sections=system_sections,
         context_window=config.context_window,
         max_tokens=config.max_tokens,
-        max_model_calls_per_turn=config.max_model_calls,
+        # 0 means unlimited; NativeLoop spells that None.
+        max_model_calls_per_turn=config.max_model_calls or None,
         registry=registry,
         permissions=permissions,
         hooks=hooks,

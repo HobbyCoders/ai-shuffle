@@ -37,6 +37,7 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from fnmatch import fnmatchcase
 from typing import Any
@@ -46,7 +47,11 @@ from fluid.context.cache_plan import plan_cache
 from fluid.context.compaction import CompactionConfig, Compactor, Promotion
 from fluid.context.compiler import CompiledPrompt
 from fluid.context.recall import HistoryRecall
-from fluid.context.trim import TrimConfig, estimate_tokens_of_text
+from fluid.context.trim import (
+    TrimConfig,
+    estimate_tokens_of_messages,
+    estimate_tokens_of_text,
+)
 from fluid.context.usage import MemoryFileUsage, build_context_usage, memory_file_usage
 from fluid.engine.background import BackgroundLifecycleMixin
 from fluid.engine.base import EngineCaps
@@ -321,6 +326,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         context_window: int | None = None,
         max_tokens: int = 8192,
         effort: str | None = None,
+        request_extra: dict[str, Any] | None = None,
         registry: ToolRegistry | None = None,
         permissions: PermissionEngine | None = None,
         hooks: HookBus | None = None,
@@ -328,7 +334,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         plan_mode: bool = False,
         codemode: CodeModeSession | None = None,
         journal: Any | None = None,
-        max_model_calls_per_turn: int = 200,
+        max_model_calls_per_turn: int | None = 200,
         max_continuations_per_turn: int = 3,
         trim: TrimConfig | None = None,
         compaction: CompactionConfig | None = None,
@@ -364,6 +370,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Reasoning-depth knob, provider-mapped by each serializer (Anthropic
         # output_config.effort; OpenAI-shaped reasoning.effort, clamped).
         self.effort = effort
+        # Host-supplied passthrough merged into every ProviderRequest.extra,
+        # which each serializer spreads onto the request body verbatim. For
+        # wire-level knobs fluid has no first-class field for (an OpenAI
+        # ``service_tier``, a provider-specific flag). The host owns the keys
+        # and their validity; fluid neither inspects nor maps them.
+        self.request_extra = dict(request_extra or {})
         self.registry = registry
         self.permissions = permissions
         self.hooks = hooks
@@ -396,6 +408,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._journal = journal if codemode is None else None
         if codemode is not None and registry is not None:
             register_code_mode_tools(registry, codemode)
+        # ``None`` means unlimited: the provider stays the source of truth for
+        # when a turn has to stop. Every comparison below guards that case.
         self.max_model_calls_per_turn = max_model_calls_per_turn
         self.max_continuations_per_turn = max_continuations_per_turn
         self._session: SessionMeta | None = None
@@ -420,9 +434,15 @@ class NativeLoop(BackgroundLifecycleMixin):
         # full fidelity). Sticky per engine lifetime; promotions are persisted
         # as ContextCompaction events and rehydrated on resume — see
         # context/compaction.py. A legacy ``trim=`` arg (tier-1 knobs only)
-        # folds into a default compaction config.
+        # folds into a compaction config that inherits its enabled flag, so
+        # ``trim=TrimConfig(enabled=False)`` turns context rewriting off
+        # instead of silently enabling the ladder above it.
         if compaction is None:
-            compaction = CompactionConfig(trim=trim or TrimConfig())
+            compaction = (
+                CompactionConfig(trim=trim, enabled=trim.enabled)
+                if trim is not None
+                else CompactionConfig()
+            )
         self._compactor = Compactor(config=compaction)
         # Compatibility seam: existing callers/tests reach the tier-1 trimmer.
         self._trimmer = self._compactor.trimmer
@@ -547,7 +567,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             self.model = op.model
         elif isinstance(op, SetPermissionMode):
             # Accept fluid's native policies directly, plus the Claude-Code-style
-            # mode names clients (AI-Shuffle, the CLI) already speak.
+            # mode names clients (the CLI, embedding apps) already speak.
             mode = op.mode
             policy = mode if mode in ("never_ask", "on_write", "always_ask") else {
                 "bypassPermissions": "never_ask",
@@ -691,7 +711,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         if sid is not None:
             nodes = await self.store.load_path(sid)
             history = repair_dangling_tool_calls(self._compactor.view(nodes))
-            compaction_stats = self._compactor.stats(nodes)
+            # ``stats`` prices the compacted render unconditionally (the intake
+            # stub is a stateless view policy inside ``Compactor._render``), so
+            # with context rewriting disabled it would report reclaimed tokens
+            # the request never actually saves. Report nothing instead.
+            if self._compactor.config.enabled:
+                compaction_stats = self._compactor.stats(nodes)
             recorded = self._last_call_usage.get(sid)
             if recorded is not None and any(n.node_id == recorded[0] for n in nodes):
                 measured = _measured_prompt_tokens(recorded[1])
@@ -967,6 +992,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         total_usage: dict[str, Any] = {}
         final_stop = "end_turn"
         overflow_retries = 0
+        result: _CallResult | None = None
         empty_retries = 0  # CONSECUTIVE empty completions; any real call resets it
         continuations = 0
 
@@ -981,6 +1007,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             history = repair_dangling_tool_calls(rendered)
             for promo in promotions:
                 await self._emit_compaction(sid, turn_id, promo)
+            projected_prompt = self._estimate_request_input_tokens(history)
             result = await self._stream_once(sid, turn_id, history)
             num_calls += 1
             if not _is_empty_completion(result):
@@ -1030,6 +1057,23 @@ class NativeLoop(BackgroundLifecycleMixin):
                     error_retriable=False,
                 )
             if result.stop_reason == "error":
+                # A failed HTTP request can still be billable. Record and
+                # publish it before deciding whether the context-overflow path
+                # is eligible for another escalation retry.
+                self._fold_call_usage(total_usage, result.usage)
+                usage_raw = dict(result.usage)
+                usage_raw["model_call_index"] = num_calls
+                usage_raw["projected_prompt_tokens"] = projected_prompt
+                await self._emit(Usage(
+                    session_id=sid, node_id=parent.node_id, turn_id=turn_id,
+                    input_tokens=result.usage.get("input_tokens", 0),
+                    output_tokens=result.usage.get("output_tokens", 0),
+                    cache_read_tokens=result.usage.get("cache_read_input_tokens", 0),
+                    cache_creation_tokens=result.usage.get(
+                        "cache_creation_input_tokens", 0
+                    ),
+                    raw=usage_raw,
+                ))
                 if (
                     overflow_retries < 3
                     and result.error_message
@@ -1046,9 +1090,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                         for promo in escalations:
                             await self._emit_compaction(sid, turn_id, promo)
                         continue
-                # The failed call still streamed (and billed) partial tokens —
-                # fold them in so the turn's spend is not lost with the error.
-                self._fold_call_usage(total_usage, result.usage)
+                # The failed call's usage was folded in above (before the
+                # escalation decision) — snapshot it, don't re-fold.
                 partial, partial_cost = self._partial_usage(total_usage)
                 await self._emit_terminal_with_park(ErrorEvent(
                     session_id=sid, turn_id=turn_id,
@@ -1063,6 +1106,12 @@ class NativeLoop(BackgroundLifecycleMixin):
                 node_id=new_id("node"), parent_id=parent.node_id, message=result.message
             )
             await self.store.append(sid, node)
+            # One durable Usage event per logical model call. The call index and
+            # provider-request attempt metadata in ``raw`` make retries and
+            # interrupted turns auditable without inferring from tool events.
+            usage_raw = dict(result.usage)
+            usage_raw["model_call_index"] = num_calls
+            usage_raw["projected_prompt_tokens"] = projected_prompt
             prompt_tokens = _measured_prompt_tokens(result.usage)
             if prompt_tokens > 0:
                 # A provider that reported nothing leaves the estimate in place
@@ -1074,7 +1123,14 @@ class NativeLoop(BackgroundLifecycleMixin):
                     # `history` is exactly what this call sent, so the measured
                     # prompt size and the category rows describe the same thing.
                     history=history,
-                    compaction=self._compactor.stats(nodes),
+                    # Same opt-in rule get_context_usage follows: with context
+                    # rewriting disabled, ``stats`` would price reclaimed tokens
+                    # the request never actually saved.
+                    compaction=(
+                        self._compactor.stats(nodes)
+                        if self._compactor.config.enabled
+                        else None
+                    ),
                     measured_prompt_tokens=prompt_tokens if prompt_tokens > 0 else None,
                 )
             except Exception:  # accounting is never worth failing a turn over
@@ -1085,7 +1141,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 output_tokens=result.usage.get("output_tokens", 0),
                 cache_read_tokens=result.usage.get("cache_read_input_tokens", 0),
                 cache_creation_tokens=result.usage.get("cache_creation_input_tokens", 0),
-                raw=dict(result.usage),
+                raw=usage_raw,
                 context_usage=snapshot,
             ))
             parent = node
@@ -1110,7 +1166,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                 not dispatchable
                 and result.stop_reason == "max_tokens"
                 and continuations < self.max_continuations_per_turn
-                and num_calls < self.max_model_calls_per_turn
+                and (
+                    self.max_model_calls_per_turn is None
+                    or num_calls < self.max_model_calls_per_turn
+                )
             ):
                 # The model ran out of output budget mid-answer (reasoning-
                 # heavy models do this routinely). Ending the turn here would
@@ -1126,19 +1185,44 @@ class NativeLoop(BackgroundLifecycleMixin):
             if not dispatchable:
                 final_stop = result.stop_reason
                 break
-            if num_calls >= self.max_model_calls_per_turn:
-                final_stop = "max_calls"
-                break
+            call_cap_reached = (
+                self.max_model_calls_per_turn is not None
+                and num_calls >= self.max_model_calls_per_turn
+            )
 
             blocks: list[Any] = []
-            for tu in result.tool_uses:
-                blocks.append(await self._dispatch_tool_interruptible(sid, turn_id, tu))
+            if call_cap_reached:
+                # ToolUse events were already emitted by _stream_once. Pair
+                # every one with a deterministic ToolResult before stopping, so
+                # the stream keeps its one-result-per-use invariant.
+                for tu in result.tool_uses:
+                    text = (
+                        "Tool not executed: the configured maximum number of "
+                        "model calls for this turn was reached."
+                    )
+                    await self._emit(ToolResult(
+                        session_id=sid, turn_id=turn_id,
+                        tool_use_id=tu["tool_use_id"], name=tu["name"],
+                        output=text, is_error=True,
+                    ))
+                    blocks.append(ToolResultBlock(
+                        tool_use_id=tu["tool_use_id"], content=[Text(text)],
+                        is_error=True,
+                    ))
+            else:
+                for tu in result.tool_uses:
+                    blocks.append(
+                        await self._dispatch_tool_interruptible(sid, turn_id, tu)
+                    )
             tr_node = SessionNode(
                 node_id=new_id("node"), parent_id=parent.node_id,
                 message=Message(role="user", content=blocks),
             )
             await self.store.append(sid, tr_node)
             parent = tr_node
+            if call_cap_reached:
+                final_stop = "max_calls"
+                break
             if self._interrupted.is_set():
                 # Interrupt landed during tool dispatch (e.g. while parked on a
                 # permission prompt) — stop before issuing another model call.
@@ -1149,11 +1233,17 @@ class NativeLoop(BackgroundLifecycleMixin):
                 ))
                 return
 
-        if self._codemode is not None:
-            # Episodic journal: the turn's final text (acceptance/feedback signal).
-            self._codemode.record_event("assistant", _plain_text(result.message.content))
-        elif self._journal is not None:
-            self._journal.record_event("assistant", _plain_text(result.message.content))
+        if result is not None:
+            if self._codemode is not None:
+                # Episodic journal: the turn's final text (the acceptance /
+                # feedback signal).
+                self._codemode.record_event(
+                    "assistant", _plain_text(result.message.content)
+                )
+            elif self._journal is not None:
+                self._journal.record_event(
+                    "assistant", _plain_text(result.message.content)
+                )
         if self.hooks is not None:
             decision = await self.hooks.emit(
                 TURN_END,
@@ -1176,6 +1266,22 @@ class NativeLoop(BackgroundLifecycleMixin):
             stop_reason=final_stop or "end_turn", num_model_calls=num_calls,
             usage=dict(total_usage), cost_usd=cost_total,
         ))
+
+    def _estimate_request_input_tokens(self, history: list[Message]) -> int:
+        """Cheap, conservative estimate of everything resent on the next call."""
+        tools = self._tools_api()
+        try:
+            tools_text = json.dumps(tools, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            tools_text = str(tools)
+        system_text = (
+            self.system if isinstance(self.system, str) else str(self.system or "")
+        )
+        return (
+            estimate_tokens_of_messages(history)
+            + estimate_tokens_of_text(system_text)
+            + estimate_tokens_of_text(tools_text)
+        )
 
     def _tool_permitted(self, name: str) -> bool:
         """Is ``name`` inside this session's tool surface? (ruling CE12)
@@ -1222,6 +1328,16 @@ class NativeLoop(BackgroundLifecycleMixin):
             max_tokens=self.max_tokens,
             effort=self.effort,
             cache_breakpoints=plan.breakpoints,
+            # OpenRouter documents session_id as the explicit sticky-routing
+            # key for prompt-cache locality. Other providers receive no extra.
+            # The host passthrough lands on top, so its keys win.
+            extra={
+                **(
+                    {"session_id": self.session_id}
+                    if self.provider.name == "openrouter" else {}
+                ),
+                **self.request_extra,
+            },
         )
 
     async def _stream_once(
@@ -1235,12 +1351,19 @@ class NativeLoop(BackgroundLifecycleMixin):
         stop_reason = "end_turn"
         interrupted = False
 
-        async for chunk in self.provider.stream(request):
+        async for chunk in self._provider_chunks_interruptible(request):
             if self._interrupted.is_set():
                 interrupted = True
                 break
             payload = chunk.payload
-            if chunk.kind == "message_start":
+            if chunk.kind == "provider_request":
+                # A provider that reports its physical request/generation id in
+                # the response headers does so before terminal usage. Preserve
+                # it now so an interrupt cannot erase the evidence of a
+                # potentially billed request.
+                if payload.get("provider_requests"):
+                    usage_totals["provider_requests"] = payload["provider_requests"]
+            elif chunk.kind == "message_start":
                 self._merge_usage(usage_totals, payload.get("usage", {}))
             elif chunk.kind == "block_start":
                 index = payload["index"]
@@ -1310,6 +1433,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                 if payload.get("stop_reason"):
                     stop_reason = payload["stop_reason"]
             elif chunk.kind == "error":
+                if payload.get("provider_requests"):
+                    usage_totals["provider_requests"] = payload["provider_requests"]
                 # No ErrorEvent here — _agent_loop decides whether this error
                 # is terminal or recoverable (context overflow → forced trim
                 # + one retry) before surfacing it.
@@ -1319,6 +1444,9 @@ class NativeLoop(BackgroundLifecycleMixin):
                     error_message=str(payload.get("message", payload)),
                     error_retriable=bool(payload.get("retriable")),
                 )
+
+        if self._interrupted.is_set():
+            interrupted = True
 
         # Reasoning-channel answer fallback (observed on GLM-4.5 via
         # OpenRouter): the model ends its final call with the entire answer in
@@ -1356,6 +1484,44 @@ class NativeLoop(BackgroundLifecycleMixin):
             stop_reason=stop_reason,
             interrupted=interrupted,
         )
+
+    async def _provider_chunks_interruptible(
+        self, request: ProviderRequest
+    ) -> AsyncIterator[Any]:
+        """Race every provider read against Interrupt and close it before return.
+
+        This guarantees a corrective/new turn cannot overlap a still-running
+        metered HTTP stream from the interrupted turn.
+        """
+        stream = self.provider.stream(request)
+        iterator = stream.__aiter__()
+        try:
+            while not self._interrupted.is_set():
+                next_chunk = asyncio.create_task(iterator.__anext__())
+                interrupted = asyncio.create_task(self._interrupted.wait())
+                try:
+                    done, _ = await asyncio.wait(
+                        {next_chunk, interrupted}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if interrupted in done:
+                        next_chunk.cancel()
+                        with suppress(asyncio.CancelledError, StopAsyncIteration):
+                            await next_chunk
+                        return
+                    try:
+                        chunk = next_chunk.result()
+                    except StopAsyncIteration:
+                        return
+                    yield chunk
+                finally:
+                    interrupted.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await interrupted
+        finally:
+            close = getattr(iterator, "aclose", None)
+            if close is not None:
+                with suppress(Exception):
+                    await close()
 
     # ─── Tool dispatch ───────────────────────────────────────────────────
 
@@ -1769,6 +1935,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         so token keys take max(); a provider-reported cost rides one terminal
         chunk and sums harmlessly."""
         for key, value in usage.items():
+            if key in {"provider_requests", "provider_response"}:
+                # Correlation/routing metadata is a snapshot, not a numeric
+                # counter. Keep it with the logical call's durable Usage event.
+                totals[key] = value
+                continue
             if key == "cost_usd":
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
                     totals[key] = totals.get(key, 0.0) + float(value)
@@ -1787,6 +1958,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 cost = est(self.model, usage)
                 if cost is not None:
                     usage["cost_usd"] = cost
+                    usage["cost_estimated"] = True
         self._accumulate_usage(totals, usage)
 
     @staticmethod

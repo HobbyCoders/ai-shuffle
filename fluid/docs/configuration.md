@@ -44,7 +44,7 @@ upward search for a project file.
 | `skills_dir` | none (`~/.fluid/skills`) | Root directory for persistent code-mode skills. |
 | `cwd` | `"."` | Working directory for config discovery, instruction files, tools, and the prompt's environment block. |
 | `max_tokens` | `8192` | Maximum output tokens per model call. |
-| `max_model_calls` | `200` | Maximum model calls in one turn before the turn stops with `max_calls`. |
+| `max_model_calls` | `200` | Maximum model calls in one turn before the turn stops with `max_calls`. Set it to `0` for no ceiling at all, leaving the provider the only authority on when a turn ends. |
 | `context_window` | none | The model's context window in tokens. fluid does not guess this; set it so `/context` can show a percentage and free space. |
 | `system` | none | Your own base system prompt. When set it replaces the shipped default (`fluid/cli/prompt.py`) entirely; the instruction stack, skills index, and environment block are still appended after it. |
 | `base_prompt` | `true` | `false` runs the CLI with no base prompt at all (only instruction files, skills, agents, and the environment block). Ignored when `system` is set. |

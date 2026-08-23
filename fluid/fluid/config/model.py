@@ -291,6 +291,9 @@ class HarnessConfig:
     hooks: tuple[HookConfig, ...] = ()
     cwd: str = "."
     max_tokens: int = 8192
+    # Model calls allowed in one turn before it stops with ``max_calls``.
+    # ``0`` means unlimited (normalized to None for NativeLoop), leaving the
+    # provider as the sole authority on when a turn has to stop.
     max_model_calls: int = 200
     # Model context window, when the host app knows it (model ids come and go
     # faster than any table fluid could ship, so nothing is inferred). Feeds

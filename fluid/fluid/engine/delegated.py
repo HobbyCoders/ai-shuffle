@@ -141,6 +141,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         allowed_tools: list[str] | None = None,
         disallowed_tools: list[str] | None = None,
         effort: str | None = None,
+        settings: str | None = None,
     ) -> None:
         self.store = store
         self.model = model
@@ -164,6 +165,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self.disallowed_tools = disallowed_tools
         # Reasoning-depth knob — forwarded verbatim as the CLI's --effort flag.
         self.effort = effort
+        # A settings JSON blob, forwarded verbatim as the CLI's --settings flag.
+        # The CLI accepts either a file path or inline JSON; the host decides
+        # which and what goes in it (``fastMode``, ``env``, hooks, …). None
+        # omits the flag entirely, leaving the CLI on its own settings files.
+        self.settings = settings
         self.cli_version: str | None = None
 
         self._session: SessionMeta | None = None
@@ -392,6 +398,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             argv += ["--disallowed-tools", ",".join(self.disallowed_tools)]
         if self.effort:
             argv += ["--effort", self.effort]
+        if self.settings:
+            argv += ["--settings", self.settings]
         if self.partial:
             argv += ["--include-partial-messages"]
         return argv
