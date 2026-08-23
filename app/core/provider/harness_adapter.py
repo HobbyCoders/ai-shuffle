@@ -1474,6 +1474,21 @@ class HarnessAdapter(ProviderAdapter):
                 uuid=self._uuid(event),
             )]
 
+        if cls == "DelegatedSurface":
+            # fluid >= 5248b2e: the claude CLI announced its own tool surface in
+            # its ``init`` frame and DelegatedLoop republished it. This is the
+            # ingest point ruling T4 documented but nothing used to call — feed
+            # the cache so the NEXT delegated connect can subtract the surface
+            # in allow mode (see ``_delegated_disallowed``). ``getattr`` because
+            # a stale vendor may carry a differently-shaped event; a surface we
+            # cannot read is simply not recorded.
+            from app.core.cli_tool_surface import record_cli_tools
+
+            record_cli_tools(getattr(event, "tools", None))
+            # Nothing user-visible: the CLI's startup inventory is plumbing,
+            # not conversation.
+            return []
+
         if cls == "SafetyWarning":
             # Legacy replay compatibility only; NativeLoop no longer emits
             # inferred safety warnings or stops.
@@ -2148,11 +2163,12 @@ def _delegated_disallowed(options: SessionOptions) -> list:
        selected tools while leaving every other one callable.
 
     Source 3 needs the CLI's surface, which the CLI announces only in its
-    ``init`` frame — after connect, and fluid's mapper drops it. Rather than
-    reconnect (which would kill the CLI session and re-prime its prompt cache)
-    the subtraction reads the last-seen surface from a module-level cache; on a
-    cold cache it is skipped and only ``--allowed-tools`` goes out for that
-    connect. The app's ``can_use_tool`` permission callback runs on this leg
+    ``init`` frame — i.e. after this connect already went out. (fluid >= 5248b2e
+    republishes that frame as ``DelegatedSurface``; ``_translate`` feeds it to
+    the cache.) Rather than reconnect, which would kill the CLI session and
+    re-prime its prompt cache, the subtraction reads the last-seen surface from
+    that module-level cache; on a cold cache it is skipped and only
+    ``--allowed-tools`` goes out for that connect. The app's ``can_use_tool`` permission callback runs on this leg
     either way, so a cold cache degrades the surface wall, never the gate.
     """
     from app.core.cli_tool_surface import cached_cli_tools

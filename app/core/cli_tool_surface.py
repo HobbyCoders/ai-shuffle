@@ -12,19 +12,19 @@ not select. That requires knowing the CLI's surface at argv-build time.
 Where the surface comes from
 ----------------------------
 The CLI announces it in the ``{"type":"system","subtype":"init"}`` frame — but
-only AFTER the first user message of a session, and fluid's ``DelegatedMapper``
-reads nothing but ``session_id`` out of that frame and emits no event carrying
-the tool list (verified against the vendored ``fluid/engine/delegated_proto.py``;
-vendor is not ours to edit). So there is no live feed to subscribe to, and the
-list is not knowable at spawn time on a cold process.
+only AFTER the first user message of a session, so the list is never knowable at
+spawn time on a cold process. Since fluid 5248b2e the vendored ``DelegatedMapper``
+does read the tool list out of that frame and ``DelegatedLoop`` republishes it as
+a ``DelegatedSurface`` event, so there IS a live feed; it just arrives too late
+to shape the argv of the connect that produced it.
 
 Reconnecting mid-session to apply a subtraction learned from the init frame is
 NOT acceptable — it would drop the CLI's session and re-prime its prompt cache.
 So this module is a plain module-level cache with an explicit ingest point:
 
-* ``record_cli_tools(names)`` — call whenever the app observes a CLI init frame
-  (the SDK query engine's init handling does; a future fluid release that
-  surfaces the frame can call it too). Refreshes the cache in place.
+* ``record_cli_tools(names)`` — called from the adapter's ``DelegatedSurface``
+  translation branch, i.e. once per CLI process start. Refreshes the cache in
+  place.
 * ``cached_cli_tools()`` — what the adapter reads at argv-build time.
 
 Cold-cache behaviour is stated in the ruling: pass only ``--allowed-tools``

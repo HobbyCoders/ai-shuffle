@@ -4150,6 +4150,74 @@ def test_cached_cli_surface_ignores_an_empty_frame():
     assert cli_tool_surface.cached_cli_tools() is None
 
 
+@pytest.mark.asyncio
+async def test_delegated_surface_event_feeds_the_cache_and_shows_nothing():
+    """T4 ingest: fluid's ``DelegatedSurface`` (the CLI's ``init`` frame,
+    republished by DelegatedLoop) is what finally CALLS ``record_cli_tools``.
+    It is plumbing, so it must produce no user-visible message."""
+    from app.core import cli_tool_surface
+
+    events = [
+        lm.TurnStarted(session_id=SID, model="m", provider="fake"),
+        lm.DelegatedSurface(
+            session_id=SID,
+            tools=("Read", "Bash", "Write", "Glob"),
+            mcp_servers=({"name": "ai-tools", "status": "connected"},),
+        ),
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=1),
+    ]
+    cli_tool_surface.reset_cli_tools()
+    try:
+        got = await _collect(_adapter_with(FakeEngine(events)))
+        assert cli_tool_surface.cached_cli_tools() == [
+            "Read", "Bash", "Write", "Glob",
+        ]
+    finally:
+        cli_tool_surface.reset_cli_tools()
+
+    # No SystemMessage / assistant text was minted for the surface frame: the
+    # only messages are the turn's own start/end bookkeeping.
+    assert not [
+        e for e in got
+        if isinstance(e, SystemMessage) and "surface" in (e.subtype or "")
+    ]
+    assert not [e for e in got if isinstance(e, (UserMessage, StreamEvent))]
+
+
+@pytest.mark.asyncio
+async def test_delegated_surface_warms_the_allow_mode_subtraction(recording_adapter):
+    """End to end for ruling T4: the CLI announces its surface, the adapter
+    records it, and the NEXT delegated connect of an allow-mode agent walls off
+    every announced tool the agent did not select."""
+    from app.core import cli_tool_surface
+
+    cli_tool_surface.reset_cli_tools()
+    try:
+        # 1. The CLI's init frame arrives on a live delegated leg.
+        await _collect(_adapter_with(FakeEngine([
+            lm.TurnStarted(session_id=SID, model="m", provider="fake"),
+            lm.DelegatedSurface(
+                session_id=SID, tools=("Read", "Bash", "Write", "Glob"),
+            ),
+            lm.TurnComplete(
+                session_id=SID, stop_reason="end_turn", num_model_calls=1,
+            ),
+        ])))
+
+        # 2. A later connect builds argv against the now-warm cache.
+        adapter, made = recording_adapter
+        await adapter.connect(
+            SessionOptions(model="claude-sonnet-4-5", tool_allowlist=["Read", "Glob"])
+        )
+    finally:
+        cli_tool_surface.reset_cli_tools()
+
+    denied = made["delegated"]["disallowed_tools"]
+    assert "Bash" in denied and "Write" in denied
+    assert "Read" not in denied and "Glob" not in denied
+    assert made["delegated"]["allowed_tools"] == ["Read", "Glob"]
+
+
 def test_profile_surface_and_dispatch_surface_intersect(mock_db):
     """T3: the agent's ``allow`` list and a file-agent worker's ``tools:`` list
     compose — the session gets their intersection, and an empty intersection
