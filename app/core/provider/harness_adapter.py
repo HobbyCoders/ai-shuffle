@@ -1720,26 +1720,16 @@ class HarnessAdapter(ProviderAdapter):
             # ``Task`` is. None = no restriction, and the kwarg is then omitted
             # entirely so nothing changes for an unrestricted agent.
             permitted = _permitted_tool_names(options, registry)
-            prompt_kwargs = dict(
-                base=system,
-                extra_blocks=[append_system] if append_system else [],
-                cwd=options.cwd or ".",
-                include_env=not has_app_env,
-                include_agents=False,
+            compiled = compile_prompt(
+                PromptInputs(
+                    base=system,
+                    extra_blocks=[append_system] if append_system else [],
+                    cwd=options.cwd or ".",
+                    include_env=not has_app_env,
+                    include_agents=False,
+                    tools=permitted,
+                )
             )
-            if permitted is not None:
-                prompt_kwargs["tools"] = permitted
-            try:
-                compiled = compile_prompt(PromptInputs(**prompt_kwargs))
-            except TypeError:
-                # TEMPORARY: ``PromptInputs.tools`` lands with the fluid half of
-                # T9 (Quickkill0/fluid) and reaches this tree through the vendor
-                # sync. Until then the kwarg is unknown and the compiler would
-                # raise; degrade to the unfiltered compile rather than losing
-                # the prompt. REMOVE this guard once the vendored fluid carries
-                # the field.
-                prompt_kwargs.pop("tools", None)
-                compiled = compile_prompt(PromptInputs(**prompt_kwargs))
             permit = _tool_predicate(options)
             index, _ = _agent_context(options, code_mode=code_mode)
             if index and permitted is not None and "Task" not in permitted:
@@ -2527,11 +2517,12 @@ def _code_mode_tool_sections(codemode: Any, permit=None) -> List[Tuple[str, str]
     double, a future refactor) returns [] and the section is simply skipped
     rather than failing the prompt.
 
-    ``permit`` is this session's tool predicate (ruling T9). fluid's projection
-    is already filtered once the code-mode session carries a ``tool_filter``,
-    so this is belt and braces: a leaf the agent cannot call never gets a docs
-    section here either, whichever side of the vendor boundary the filter lands
-    on.
+    ``permit`` is this session's tool predicate (ruling T9), and it is load
+    bearing here rather than merely belt-and-braces: ``NativeLoop.__init__``
+    installs the session's ``tool_filter`` onto the code-mode session, but the
+    prompt is compiled BEFORE the engine is constructed (the code-mode rewrites
+    depend on whether the session actually came up), so the projection this
+    reads is still unfiltered at that moment.
     """
     try:
         from fluid.codemode.projection import _annotation, _param_doc, _py_ident
