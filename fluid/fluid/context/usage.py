@@ -21,6 +21,9 @@ Categories — the same labels Claude Code's ``/context`` uses
 ``System prompt``   base prompt + environment block + app "extra" blocks + the
                     agent-types index (CE7 — the index is prompt text; the
                     definitions behind it price under "Custom agents").
+                    Host-contributed ``tools`` sections WITHOUT a ``tool_name``
+                    also ride here — an unattributable block of prose stays
+                    honest instead of being priced as some tool's schema.
 ``Memory files``    the native AGENTS.md instruction stack, summed.
                     The category row carries only the total, exactly like the
                     CLI's; per-file detail rides alongside in the top-level
@@ -31,6 +34,11 @@ Categories — the same labels Claude Code's ``/context`` uses
                     rather than with the agent's configuration.
 ``System tools``    serialized JSON schemas of the loaded bare-named builtins
                     (``Read``, ``Edit``, …). Per-tool detail: ``systemTools``.
+                    Under code mode the schemas are not sent — their place in
+                    the prompt is taken by host-contributed ``tools`` sections
+                    (one per tool, carrying ``tool_name``); each prices here or
+                    under "MCP tools" by the same naming convention, so a
+                    code-mode session's tool rows match a direct-tool session's.
 ``MCP tools``       loaded ``mcp__<server>__<tool>`` schemas (MCP + in-proc
                     servers — the naming convention IS the classifier, same as
                     Claude Code's). Per-tool detail: ``mcpTools``.
@@ -105,6 +113,10 @@ from fluid.context.trim import estimate_tokens_of_messages, estimate_tokens_of_t
 from fluid.messages import Message
 
 SYSTEM_PROMPT = "System prompt"
+# PromptSection.kind marking host-contributed tool documentation. One section
+# per tool, with ``tool_name`` set to the full registry name; the breakdown
+# classifies it exactly like a schema in ``tools_api`` would be.
+TOOLS_SECTION_KIND = "tools"
 MEMORY_FILES = "Memory files"
 SKILLS = "Skills"
 SYSTEM_TOOLS = "System tools"
@@ -132,6 +144,9 @@ CATEGORY_COLORS: dict[str, str] = {
 # own). The ``agents`` index rides here per ruling CE7: it is a compiled
 # section of the prompt, while the "Custom agents" category prices the agent
 # DEFINITIONS a session carries — counting the index there would double-count.
+# A ``tools`` section is NOT here: attributed ones price as tools, and an
+# unattributed one is folded back into system_tokens below rather than being
+# dropped from the accounting.
 _SYSTEM_KINDS = ("base", "environment", "extra", "agents")
 
 # Discovery scope → the CLI's ``memoryFiles[].type`` vocabulary. Claude Code
@@ -181,6 +196,38 @@ def _server_name(tool_name: str) -> str:
     # mcp__<server>__<tool> → <server>; malformed names degrade to "".
     parts = tool_name.split("__", 2)
     return parts[1] if len(parts) >= 3 else ""
+
+
+def tool_section_rows(sections: Sequence[PromptSection]) -> tuple[list[dict[str, Any]], int]:
+    """Per-tool rows + unattributed-token count for host ``tools`` sections.
+
+    One section per tool, ``tool_name`` naming the registry entry: the row shape
+    matches the schema-derived detail exactly (``systemTools`` /
+    ``mcpTools`` entries), so a UI cannot tell them apart and needn't. Sections
+    without a usable ``tool_name`` are NOT rows — their tokens are returned as
+    the second element for the caller to fold into "System prompt", keeping the
+    invariant that every token of the prompt lands in exactly one row.
+    """
+    rows: list[dict[str, Any]] = []
+    unattributed = 0
+    for s in sections:
+        if s.kind != TOOLS_SECTION_KIND:
+            continue
+        name = getattr(s, "tool_name", None)
+        if not name:
+            unattributed += estimate_tokens_of_text(s.text)
+            continue
+        tokens = estimate_tokens_of_text(s.text)
+        if _is_mcp(name):
+            rows.append({
+                "name": name,
+                "serverName": _server_name(name),
+                "tokens": tokens,
+                "isLoaded": True,
+            })
+        else:
+            rows.append({"name": name, "tokens": tokens})
+    return rows, unattributed
 
 
 def memory_file_usage(sections: Sequence[PromptSection]) -> list[MemoryFileUsage]:
@@ -250,9 +297,12 @@ def build_context_usage(
     floored at 0. Free space and ``percentage`` then follow from the real total.
     The response says which it was in ``measured``.
     """
+    section_rows, unattributed = tool_section_rows(sections)
+    system_tools_rows = [r for r in section_rows if "serverName" not in r]
+    mcp_section_rows = [r for r in section_rows if "serverName" in r]
     system_tokens = sum(
         estimate_tokens_of_text(s.text) for s in sections if s.kind in _SYSTEM_KINDS
-    )
+    ) + unattributed
     if not sections and system_text:
         system_tokens = estimate_tokens_of_text(system_text)
     memory = memory_file_usage(sections)
@@ -261,12 +311,14 @@ def build_context_usage(
         estimate_tokens_of_text(s.text) for s in sections if s.kind == "skills"
     )
 
-    # Loaded tools, split by the naming convention; per-tool detail kept.
+    # Loaded tools, split by the naming convention; per-tool detail kept. A
+    # code-mode session sends no schemas — its prompt-carried documentation
+    # arrives as ``tools`` sections instead, and those rows join the same lists.
     system_tools = [
         {"name": t.get("name", ""), "tokens": tool_schema_tokens(t)}
         for t in tools_api
         if not _is_mcp(t.get("name", ""))
-    ]
+    ] + system_tools_rows
     mcp_tools = [
         {
             "name": t.get("name", ""),
@@ -276,7 +328,7 @@ def build_context_usage(
         }
         for t in tools_api
         if _is_mcp(t.get("name", ""))
-    ]
+    ] + mcp_section_rows
     deferred_builtin = [
         {"name": t.get("name", ""), "tokens": tool_schema_tokens(t)}
         for t in deferred_tools_api

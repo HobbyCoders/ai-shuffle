@@ -212,6 +212,54 @@ def test_loaded_tools_split_into_system_and_mcp_with_per_tool_detail() -> None:
     ]
 
 
+def test_host_tool_sections_price_as_tools_not_system_prompt() -> None:
+    """Code mode: the prompt-carried ``# Tools`` documentation rides as
+    ``tools`` sections with ``tool_name`` set. Each prices under the SAME
+    category the equivalent JSON schema would — never "System prompt"."""
+    read_text = "# Tools\n\n## Read\n`Read(file_path: str)`"
+    slack_text = "## Slack\n`slack(text: str)`"
+    usage = build_context_usage(
+        sections=(
+            PromptSection(kind="base", text="base"),
+            PromptSection(kind="tools", text=read_text, tool_name="Read"),
+            PromptSection(kind="tools", text=slack_text,
+                          tool_name="mcp__slack__send"),
+        ),
+        model="m",
+    )
+    cats = _by_name(usage)
+    assert cats[SYSTEM_TOOLS]["tokens"] == estimate_tokens_of_text(read_text)
+    assert cats[MCP_TOOLS]["tokens"] == estimate_tokens_of_text(slack_text)
+    assert cats[SYSTEM_PROMPT]["tokens"] == estimate_tokens_of_text("base")
+    assert usage["systemTools"] == [
+        {"name": "Read", "tokens": estimate_tokens_of_text(read_text)},
+    ]
+    assert usage["mcpTools"] == [
+        {"name": "mcp__slack__send", "serverName": "slack",
+         "tokens": estimate_tokens_of_text(slack_text), "isLoaded": True},
+    ]
+
+
+def test_unattributed_tool_sections_fall_back_to_system_prompt() -> None:
+    """A ``tools`` section without a ``tool_name`` is prose the breakdown
+    cannot attribute — it stays in the accounting, under System prompt, rather
+    than being mispriced as a tool or silently dropped."""
+    orphan = "# Tools\nsome unattributed catalog text"
+    usage = build_context_usage(
+        sections=(
+            PromptSection(kind="base", text="base"),
+            PromptSection(kind="tools", text=orphan),
+        ),
+        model="m",
+    )
+    cats = _by_name(usage)
+    assert SYSTEM_TOOLS not in cats and MCP_TOOLS not in cats
+    assert cats[SYSTEM_PROMPT]["tokens"] == (
+        estimate_tokens_of_text("base") + estimate_tokens_of_text(orphan)
+    )
+    assert usage["systemTools"] == [] and usage["mcpTools"] == []
+
+
 def test_agents_are_priced_as_custom_agents() -> None:
     """Host-declared agent definitions become the "Custom agents" row, counted
     in the total (they represent text the host injected into the context)."""

@@ -85,10 +85,11 @@ class PromptInputs:
 
 
 # Section kinds a compiled prompt can carry. ``memory`` sections additionally
-# carry the instruction file's ``path`` and ``scope``.
-SECTION_KINDS = ("base", "memory", "skills", "agents", "environment", "extra")
-
-
+# carry the instruction file's ``path`` and ``scope``; a ``tools`` section is
+# host-contributed tool documentation priced under the tool categories by the
+# usage breakdown (see :mod:`fluid.context.usage`).
+SECTION_KINDS = ("base", "memory", "skills", "agents", "environment", "extra",
+                 "tools")
 @dataclass(frozen=True, kw_only=True)
 class PromptSection:
     """One labeled slice of the compiled system prompt."""
@@ -97,6 +98,10 @@ class PromptSection:
     text: str
     path: str | None = None  # memory sections: the instruction file it came from
     scope: str | None = None  # memory sections: "global" | "project" | "nested"
+    # tools sections: the full registry tool name this block documents. Absent
+    # (None) on any other kind; a tools section without one prices as system
+    # prompt rather than being misattributed.
+    tool_name: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
