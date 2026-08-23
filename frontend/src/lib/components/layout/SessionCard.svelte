@@ -401,8 +401,8 @@
 
 	/* Compact two-line row for settled/archived sessions: title + age, then a
 	   muted meta line (project · device · branch). Still denser than the
-	   three-line active cards. The timer still swaps to the quick action on
-	   hover, and the mobile swipe strip is untouched. */
+	   three-line active cards. Hover reveals the quick action at the row's
+	   bottom-right edge; the mobile swipe strip is untouched. */
 	.scard.compact { padding: 6px 8px 7px; }
 	.l1.cline { display: flex; align-items: center; gap: 8px; }
 	.cproj {
@@ -492,12 +492,6 @@
 	}
 	.timer.live { color: var(--primary); }
 
-	/* Desktop swap: the timer yields its slot to the settle/move action on
-	   hover, so the quick action appears in place instead of over line 1. */
-	.scard-frame:hover .timer,
-	.scard-frame:focus-within .timer,
-	.scard-frame.actions-open .timer { opacity: 0; }
-
 	/* Receded rows dim their project + title + meta but keep the colored status
 	   and timer lit; hover (desktop) restores the whole row. */
 	.scard.receded .proj,
@@ -561,9 +555,9 @@
 
 	.card-actions {
 		position: absolute;
-		top: 4px;
+		top: auto;
 		right: 6px;
-		bottom: auto;
+		bottom: 5px;
 		display: flex;
 		align-items: center;
 		gap: 1px;
@@ -601,11 +595,6 @@
 			touch-action: pan-y;
 			background: color-mix(in oklch, var(--sidebar-accent-active) 84%, var(--sidebar));
 		}
-		/* No hover on touch: keep the timer lit (the swipe strip is the action
-		   affordance here, not the in-slot desktop swap). */
-		.scard-frame:hover .timer,
-		.scard-frame:focus-within .timer,
-		.scard-frame.actions-open .timer { opacity: 1; }
 		.scard {
 			background: var(--sidebar);
 			transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1), background-color 130ms ease;
