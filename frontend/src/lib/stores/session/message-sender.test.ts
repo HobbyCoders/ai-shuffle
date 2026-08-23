@@ -5,6 +5,7 @@ import type { InternalMutableState } from './ws-message-handlers';
 import { reopenWorktree } from '$lib/api/git';
 import { api } from '$lib/api/client';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
+import { pendingQueue } from './pending-queue';
 
 // message-sender pulls these from $lib/api/git at module load. Only reopenWorktree
 // is exercised here (the best-effort reopen for cleaned-up worktree sessions); the
@@ -693,3 +694,90 @@ describe('sendMessage remote-only compose', () => {
 	});
 });
 
+
+/**
+ * The optimistic pending bubble and the × that unsends it. Both edges exist
+ * because the local `queued-local-*` id is private to this tab: the server has
+ * never heard of it, and its own replace-all `queue_updated` snapshots are the
+ * only thing that can retire it.
+ */
+describe('message-sender pending-bubble edges', () => {
+	function streamingState() {
+		return baseState({
+			worktreeIntent: 'local',
+			sessionId: 'ses-1',
+			isStreaming: true,
+			title: 'Existing chat',
+			messages: [{ id: 'u0', role: 'user', content: 'earlier' } as any],
+		});
+	}
+
+	beforeEach(() => {
+		pendingQueue.reset('ses-1');
+	});
+
+	it('skips the optimistic echo when the server already described the queue', async () => {
+		// The authoritative snapshot for this send lands BEFORE the local append
+		// gets to run — a local row added on top of it is a second copy that no
+		// later frame is guaranteed to replace.
+		const { deps, getState, wsConn } = makeDeps(streamingState());
+		pendingQueue.noteAuthoritative('ses-1', [
+			{ id: 'turn-q', content: 'answer this too', queuedAt: 1 },
+		]);
+		const sender = createMessageSender(deps);
+
+		const result = await sender.sendMessage('answer this too');
+
+		expect(result).toBe(true);
+		expect(getState().queuedMessages).toHaveLength(0);
+		// The send itself still goes out.
+		expect(wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'query')).toHaveLength(1);
+	});
+
+	it('unsends a server row by naming it', async () => {
+		const { deps, wsConn, getState } = makeDeps(streamingState());
+		deps.update((s) => ({
+			...s,
+			queuedMessages: [{ id: 'turn-q', content: 'nope', queuedAt: 1 }],
+		}));
+		const sender = createMessageSender(deps);
+
+		sender.removeQueuedMessage('turn-q');
+
+		expect(getState().queuedMessages).toHaveLength(0);
+		expect(wsConn.send).toHaveBeenCalledWith({
+			type: 'remove_queued_message',
+			message_id: 'turn-q',
+			session_id: 'ses-1',
+		});
+	});
+
+	it('drops a local echo on × instead of naming an id the server cannot know', async () => {
+		const { deps, wsConn, getState } = makeDeps(streamingState());
+		const sender = createMessageSender(deps);
+		await sender.sendMessage('take it back');
+		const localId = getState().queuedMessages[0].id;
+		wsConn.send.mockClear();
+
+		sender.removeQueuedMessage(localId);
+
+		// Gone from view, and no frame naming the local id (which would only make
+		// the server rebroadcast the row straight back).
+		expect(getState().queuedMessages).toHaveLength(0);
+		expect(wsConn.send).not.toHaveBeenCalled();
+		// The removal is re-aimed at the real row when the snapshot arrives.
+		const rows = [{ id: 'turn-q', content: 'take it back', queuedAt: 2 }];
+		pendingQueue.noteAuthoritative('ses-1', rows);
+		expect(pendingQueue.reconcile('ses-1', rows)).toEqual([]);
+		expect(pendingQueue.drainRemovalRequests()).toEqual(['turn-q']);
+	});
+
+	it('ignores an × for a message that is no longer pending', () => {
+		const { deps, wsConn } = makeDeps(streamingState());
+		const sender = createMessageSender(deps);
+
+		sender.removeQueuedMessage('turn-gone');
+
+		expect(wsConn.send).not.toHaveBeenCalled();
+	});
+});

@@ -14,6 +14,8 @@ import { generateBranchName, generateBranchNameLocal } from '$lib/api/git';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
 // V2 Phase 1: SSE-fed reducer — the transcript authority for a session.
 import { feedController } from './v2/feed-controller';
+// Arbiter of which pending ("not seen yet") bubbles survive.
+import { pendingQueue, newLocalPendingId } from './pending-queue';
 import { contextWindowForChoice } from '$lib/constants/model-context';
 import { getDefaultModel } from '$lib/constants/models';
 
@@ -210,6 +212,11 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		async sendMessage(prompt: string, options?: SendMessageOptions): Promise<boolean> {
 			prompt = prompt.trim();
 
+			// When the send began. An optimistic pending bubble is only worth
+			// appending while the server has said nothing about the queue since this
+			// moment — see the guard on `optimisticQueuedId` below.
+			const dispatchedAt = Date.now();
+
 			// Restore-race guard: right after a page load, init() may have adopted
 			// a persisted sessionId whose history hasn't rendered yet — the UI
 			// looks like "New Chat" but a send here would silently continue the
@@ -333,10 +340,16 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// Optimistic echo, in whichever place the message actually belongs.
 			// While a turn is live the prompt is NOT part of the transcript yet, so
 			// it goes onto `queuedMessages` and renders as a pending bubble; the
-			// server's `queue_updated` replaces this local row, and the SSE feed
-			// drops it once the turn it became is delivered (#588).
+			// server's `queue_updated` replaces this local row, and pendingQueue
+			// retires it once the transcript answers it.
+			//
+			// Skipped when an authoritative `queue_updated` for this session already
+			// landed since the send began: the server has described the queue for
+			// this window, so a local row added on top of it is a second copy that
+			// no later frame is guaranteed to replace.
 			const optimisticQueuedId = sendWhileStreaming && !options?.skipMessageAppend
-				? `queued-local-${Date.now()}`
+				&& !pendingQueue.authoritySpokeSince(_state.sessionId, dispatchedAt)
+				? newLocalPendingId()
 				: null;
 
 			// Single atomic update — avoids intermediate render where streaming
@@ -350,6 +363,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					currentQueryProfileId: queryProfileId,
 				}));
 			} else if (optimisticQueuedId) {
+				pendingQueue.noteOptimistic(_state.sessionId, optimisticQueuedId);
 				update(s => ({
 					...s,
 					queuedMessages: [...s.queuedMessages, {
@@ -826,10 +840,20 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 		/** Unsend a message that hasn't reached the model yet. */
 		removeQueuedMessage(id: string) {
+			const _state = getState();
+			const entry = _state.queuedMessages.find(m => m.id === id);
+			if (!entry) return;
+			// An optimistic echo carries an id only this tab has ever seen, so the
+			// server cannot act on it — naming it in a remove frame just triggers a
+			// rebroadcast that puts the bubble back. Drop it here and let
+			// pendingQueue re-aim the removal at the real row when it arrives.
+			const serverId = pendingQueue.requestRemoval(_state.sessionId, entry);
+			update(s => ({ ...s, queuedMessages: s.queuedMessages.filter(m => m.id !== id) }));
+			if (!serverId) return;
 			wsConn.send({
 				type: 'remove_queued_message',
-				message_id: id,
-				session_id: getState().sessionId,
+				message_id: serverId,
+				session_id: _state.sessionId,
 			});
 		},
 	};

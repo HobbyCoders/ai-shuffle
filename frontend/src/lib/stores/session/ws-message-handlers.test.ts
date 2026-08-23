@@ -39,6 +39,7 @@ vi.mock('./v2/feed-controller', () => ({
 import { notify } from '../notifications';
 import { startFixChat } from '$lib/services/fix-with-ai';
 import { feedController } from './v2/feed-controller';
+import { pendingQueue } from './pending-queue';
 
 // ─── Test Helpers ───────────────────────────────────────────────────────────
 
@@ -1528,6 +1529,98 @@ describe('ws-message-handlers', () => {
 			handlers.handleMessage({ type: 'query_queued', session_id: 'some-other-session' });
 
 			expect(deps.update).not.toHaveBeenCalled();
+		});
+	});
+});
+
+describe('queue_updated (the pending "not seen yet" bubbles)', () => {
+	// The snapshot is authoritative about what EXISTS, but the backend emits it
+	// from two unordered places (the socket that handled the frame, and the turn
+	// pump when a steer is absorbed), so a pre-absorption snapshot can land last.
+	// Replace-all alone then resurrects an answered bubble for good.
+
+	let state: ActiveSessionState;
+	let deps: MessageHandlerDeps;
+	let handlers: ReturnType<typeof createMessageHandlers>;
+
+	function frame(rows: Array<{ id: string; content: string }>): Record<string, unknown> {
+		return {
+			type: 'sync',
+			event_type: 'queue_updated',
+			session_id: 'session-1',
+			data: {
+				queued_messages: rows.map((r) => ({
+					...r,
+					created_at: '2026-08-23T12:00:00.000Z',
+				})),
+			},
+		};
+	}
+
+	function pendingIds(): string[] {
+		return state.queuedMessages.map((m) => m.id);
+	}
+
+	beforeEach(() => {
+		pendingQueue.reset('session-1');
+		state = mockState();
+		deps = createMockDeps({
+			update: vi.fn((fn) => { state = fn(state); }),
+			getState: vi.fn(() => state),
+		});
+		handlers = createMessageHandlers(deps);
+	});
+
+	it('renders the server snapshot', () => {
+		handlers.handleMessage(frame([{ id: 'turn-q', content: 'steer me' }]));
+		expect(pendingIds()).toEqual(['turn-q']);
+	});
+
+	it('ignores a snapshot for another session', () => {
+		handlers.handleMessage({
+			type: 'sync',
+			event_type: 'queue_updated',
+			session_id: 'other',
+			data: { queued_messages: [{ id: 'x', content: 'y', created_at: '2026-08-23T12:00:00.000Z' }] },
+		});
+		expect(pendingIds()).toEqual([]);
+	});
+
+	it('does not resurrect a bubble the transcript already answered', () => {
+		handlers.handleMessage(frame([{ id: 'turn-q', content: 'steer me' }]));
+		// The steer is absorbed: the SSE feed reports the user message on the LIVE
+		// turn's id, and the pump broadcasts the cleared queue.
+		pendingQueue.noteDelivered('session-1', 'steer me', 'turn-live');
+		handlers.handleMessage(frame([]));
+		expect(pendingIds()).toEqual([]);
+		// A snapshot taken BEFORE the absorb arrives last — this is the stuck bubble.
+		handlers.handleMessage(frame([{ id: 'turn-q', content: 'steer me' }]));
+		expect(pendingIds()).toEqual([]);
+	});
+
+	it('shows a row the server put back after an interrupt', () => {
+		handlers.handleMessage(frame([{ id: 'turn-q', content: 'steer me' }]));
+		pendingQueue.noteDelivered('session-1', 'steer me', 'turn-live');
+		handlers.handleMessage(frame([]));
+		// Re-queued as a fresh turn row because the turn that swallowed it was
+		// interrupted. Same text, new row — it must render.
+		handlers.handleMessage(frame([{ id: 'turn-q2', content: 'steer me' }]));
+		expect(pendingIds()).toEqual(['turn-q2']);
+	});
+
+	it('re-aims a deferred × at the server row once it appears', () => {
+		pendingQueue.noteOptimistic('session-1', 'queued-local-1');
+		pendingQueue.requestRemoval('session-1', {
+			id: 'queued-local-1', content: 'nope', queuedAt: 1,
+		});
+
+		handlers.handleMessage(frame([{ id: 'turn-q', content: 'nope' }]));
+
+		expect(pendingIds()).toEqual([]);
+		expect(deps.wsSend).toHaveBeenCalledWith({
+			type: 'remove_queued_message',
+			message_id: 'turn-q',
+			session_id: 'session-1',
 		});
 	});
 });

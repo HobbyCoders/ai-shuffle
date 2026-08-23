@@ -43,6 +43,7 @@
 		deriveUserTurnNavigationItems,
 		isNavigableUserTurn,
 		resolveCurrentTurnIndex,
+		resolveLiveTurnStartedAt,
 		turnAnchorId
 	} from '$lib/utils/transcript-navigation';
 	import { getModelLabel } from '$lib/constants/models.svelte';
@@ -388,11 +389,11 @@
 	let currentTurnIndex = $state(0);
 	let manualNavigationReleaseUntil = 0;
 
+	// Anchored to the prompt that OPENED the live turn: a message steered into a
+	// turn already running must not restart its clock.
 	const liveTurnStartedAt = $derived.by(() => {
 		if (!$activeSession.isStreaming) return null;
-		const messages = $activeSession.messages;
-		const userStart = messages.findLast((message) => isNavigableUserTurn(message));
-		return userStart?.timestamp ?? messages[0]?.timestamp ?? null;
+		return resolveLiveTurnStartedAt($activeSession.messages, $activeSession.liveTurnId);
 	});
 
 	function updateCurrentTurnIndex() {

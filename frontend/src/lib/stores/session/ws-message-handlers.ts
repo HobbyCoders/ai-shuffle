@@ -20,6 +20,8 @@ import { reportClientError } from '$lib/services/error-reporter';
 import { startFixChat } from '$lib/services/fix-with-ai';
 // The SSE-fed reducer store — the transcript authority for a session.
 import { feedController } from './v2/feed-controller';
+// Arbiter of which pending ("not seen yet") bubbles survive.
+import { pendingQueue } from './pending-queue';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -295,7 +297,20 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				(!eventSessionId || eventSessionId === state.sessionId)) {
 				const syncData = data.data as Record<string, unknown> | undefined;
 				const messages = (syncData?.queued_messages ?? []) as Array<{ id: string; content: string; created_at: string }>;
-				update(s => ({ ...s, queuedMessages: messages.map(m => ({ id: m.id, content: m.content, queuedAt: new Date(m.created_at).getTime() })) }));
+				const rows = messages.map(m => ({ id: m.id, content: m.content, queuedAt: new Date(m.created_at).getTime() }));
+				// The snapshot is authoritative about what EXISTS, but it is not
+				// ordered against the other producer of this frame (the turn pump's
+				// clearing broadcast), so a pre-absorption snapshot can land last and
+				// resurrect an answered bubble. pendingQueue is what remembers.
+				const sid = state.sessionId;
+				pendingQueue.noteAuthoritative(sid, rows);
+				const reconciled = pendingQueue.reconcile(sid, rows);
+				// An × on an optimistic id had no server row to name; now that the
+				// real one is here, aim the removal at it.
+				for (const removeId of pendingQueue.drainRemovalRequests()) {
+					wsSend({ type: 'remove_queued_message', message_id: removeId, session_id: sid });
+				}
+				update(s => ({ ...s, queuedMessages: reconciled }));
 			}
 
 			// session_updated carries metadata changes (e.g. a backfilled title
