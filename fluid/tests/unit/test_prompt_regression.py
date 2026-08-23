@@ -104,6 +104,7 @@ def test_prompt_structure_invariants() -> None:
 def test_compiled_prompt_section_order(tmp_path, monkeypatch) -> None:
     # base → instructions → skills/agents → memory → environment → extras.
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     (tmp_path / "home" / ".fluid").mkdir(parents=True)
     (tmp_path / "home" / ".fluid" / "MEMORY.md").write_text(
         "durable fact\n", encoding="utf-8"
