@@ -24,8 +24,8 @@ function msg(over: Partial<ChatMessage>): ChatMessage {
 	} as ChatMessage;
 }
 
-function user(content: string, timestamp?: string): ChatMessage {
-	return msg({ role: 'user', content, timestamp });
+function user(content: string, timestamp?: string, turnId?: string): ChatMessage {
+	return msg({ role: 'user', content, timestamp, turnId });
 }
 
 function tool(over: Partial<ChatMessage> = {}): ChatMessage {
@@ -201,6 +201,55 @@ describe('buildDisplayItems — settled turns', () => {
 		fold = buildDisplayItems(messages, SETTLED).find((item) => item.kind === 'work_log');
 		if (fold?.kind !== 'work_log') throw new Error('expected a work_log');
 		expect(fold.durationLabel).toBe('Worked for 9s');
+	});
+
+	it('anchors the duration at the turn start when a prompt is steered mid-turn', () => {
+		// A message handed to a running turn carries THAT turn's id and lands
+		// wherever the model received it — it must not re-anchor the fold.
+		const messages = [
+			user('go', '2026-08-19T10:00:00.000Z', 't1'),
+			tool({ timestamp: '2026-08-19T10:00:30.000Z' }),
+			user('also check the logs', '2026-08-19T10:02:46.000Z', 't1'),
+			tool({ timestamp: '2026-08-19T10:02:48.000Z' }),
+			text('done', '2026-08-19T10:02:52.000Z')
+		];
+		const folds = buildDisplayItems(messages, SETTLED).filter((item) => item.kind === 'work_log');
+
+		expect(folds).toHaveLength(1);
+		if (folds[0].kind !== 'work_log') throw new Error('expected a work_log');
+		expect(folds[0].durationLabel).toBe('Worked for 2m 52s');
+		expect(folds[0].summary).toBe('Ran 2 commands');
+		// The steered prompt still shows: it is the user talking, not folded work.
+		const visible = collapsedVisibleMessages(buildDisplayItems(messages, SETTLED));
+		expect(visible.filter((message) => message.role === 'user')).toHaveLength(2);
+	});
+
+	it('keeps the true span of an interrupted turn that received a steer', () => {
+		const messages = [
+			user('go', '2026-08-19T10:00:00.000Z', 't1'),
+			tool({ timestamp: '2026-08-19T10:00:30.000Z' }),
+			user('stop and summarize', '2026-08-19T10:02:46.000Z', 't1'),
+			text('half an answer\n\n[Stopped]', '2026-08-19T10:02:52.000Z')
+		];
+		const fold = buildDisplayItems(messages, SETTLED).find((item) => item.kind === 'work_log');
+		if (fold?.kind !== 'work_log') throw new Error('expected a work_log');
+
+		expect(fold.durationLabel).toBe('You stopped after 2m 52s');
+	});
+
+	it('still opens a turn for a user message belonging to a different turn', () => {
+		const messages = [
+			user('first', '2026-08-19T10:00:00.000Z', 't1'),
+			text('one', '2026-08-19T10:00:09.000Z'),
+			user('second', '2026-08-19T10:01:00.000Z', 't2'),
+			tool({ timestamp: '2026-08-19T10:01:02.000Z' }),
+			text('two', '2026-08-19T10:01:39.000Z')
+		];
+		const folds = buildDisplayItems(messages, SETTLED).filter((item) => item.kind === 'work_log');
+
+		expect(folds).toHaveLength(1);
+		if (folds[0].kind !== 'work_log') throw new Error('expected a work_log');
+		expect(folds[0].durationLabel).toBe('Worked for 39s');
 	});
 
 	it('uses explicit interruption wording and a quiet fallback', () => {
