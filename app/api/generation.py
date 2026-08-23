@@ -584,6 +584,7 @@ async def _generate_profile_internal(
         system_prompt_content=prompt_content,
         allowed_tools=generated.get("allowed_tools"),
         disallowed_tools=generated.get("disallowed_tools"),
+        tool_selection_mode=generated.get("tool_selection_mode"),
         enabled_agents=generated.get("enabled_agents"),
         ai_tools=ai_tools_config,
         memory=generated.get("memory"),
