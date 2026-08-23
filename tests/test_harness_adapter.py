@@ -3223,16 +3223,19 @@ async def test_max_turns_becomes_model_call_budget(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_no_max_turns_adds_no_automatic_limits(monkeypatch, tmp_path):
-    """Only an explicitly configured profile may cap a native turn."""
-    captured = await _connect_capturing_native(monkeypatch, tmp_path)
-    assert "max_model_calls_per_turn" not in captured
-    assert "safety_limits" not in captured
-    assert "trim" not in captured
+    """Only an explicitly configured profile may cap a native turn.
 
-    captured = await _connect_capturing_native(monkeypatch, tmp_path, max_turns=0)
-    assert "max_model_calls_per_turn" not in captured
-    assert "safety_limits" not in captured
-    assert "trim" not in captured
+    fluid's own defaults are a 200-call ceiling and compaction ON, so the
+    absence of a cap has to be stated: ``max_model_calls_per_turn=None`` and a
+    disabled CompactionConfig are passed EXPLICITLY, never omitted.
+    """
+    for kwargs in ({}, {"max_turns": 0}):
+        captured = await _connect_capturing_native(monkeypatch, tmp_path, **kwargs)
+        assert captured["max_model_calls_per_turn"] is None
+        assert captured["compaction"].enabled is False
+        assert captured["compaction"].trim.enabled is False
+        assert "safety_limits" not in captured
+        assert "trim" not in captured
 
 
 @pytest.mark.asyncio
