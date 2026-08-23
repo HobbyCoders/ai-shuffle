@@ -74,6 +74,21 @@ describe('live tool labels and state', () => {
 		expect(liveToolLabel('WebFetch')).toBe('Fetching page');
 	});
 
+	it('names long-running media and capture work for the whole wait', () => {
+		expect(liveToolLabel('mcp__builtins__generateVideo')).toBe('Generating video');
+		expect(liveToolLabel('imageToVideo')).toBe('Generating video');
+		expect(liveToolLabel('generateImage')).toBe('Generating image');
+		expect(liveToolLabel('generateAudio')).toBe('Generating audio');
+		expect(liveToolLabel('textTo3D')).toBe('Building 3D model');
+		expect(liveToolLabel('browser_screenshot')).toBe('Taking screenshot');
+		expect(liveToolLabel('ScheduleWakeup')).toBe('Scheduling');
+	});
+
+	it('gives the streaming code-mode cell a verb, not a bare name', () => {
+		expect(liveToolLabel('Python')).toBe('Writing Python');
+		expect(liveToolLabel('run_python')).toBe('Writing Python');
+	});
+
 	it('maps completed, live, failure, and neutral dismissal text exactly', () => {
 		expect(toolStateLabel('running')).toBe('Running');
 		expect(toolStateLabel('complete')).toBe('Complete');
