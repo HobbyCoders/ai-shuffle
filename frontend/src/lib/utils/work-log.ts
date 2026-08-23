@@ -263,67 +263,23 @@ const COMPACT_ACTION_LABELS: Record<ToolAction, (count: number) => string> = {
 	other: (n) => `Tools ${n}`
 };
 
-interface CodeModePartition {
-	/** Tool rows made by the model itself (JSON-surface calls and subagents). */
-	outer: WorkLogEntry[];
-	/** Tool rows made from inside a run_python cell; they cost no model call. */
-	inner: WorkLogEntry[];
-	cells: number;
-	failedCells: number;
-}
-
-/**
- * Separate a turn's tool rows into the model's own calls and the calls a
- * code-mode cell made on its behalf. The transcript carries no marker for an
- * inner call; the fluid transcript builder splices them directly after their
- * `run_python` row and before the next non-tool row, so position is the
- * signal: every tool row that follows a cell without an intervening thought,
- * prose, or subagent row belongs to that cell. Counting them as plain
- * "commands" misread a 212-call cleanup session as 212 model round trips.
- */
-function partitionCodeMode(rows: WorkLogEntry[]): CodeModePartition {
-	const outer: WorkLogEntry[] = [];
-	const inner: WorkLogEntry[] = [];
-	let cells = 0;
-	let failedCells = 0;
-	let inCell = false;
-	for (const entry of rows) {
-		const message = entry.message;
-		if (message.type === 'tool_use' && message.toolName === 'run_python') {
-			cells++;
-			if (message.toolStatus === 'error') failedCells++;
-			inCell = true;
-			continue;
-		}
-		if (message.type === 'tool_use') {
-			(inCell ? inner : outer).push(entry);
-			continue;
-		}
-		if (message.type === 'tool_result') continue;
-		inCell = false;
-		if (message.type === 'subagent') outer.push(entry);
-	}
-	return { outer, inner, cells, failedCells };
-}
-
-function cellLabel(cells: number, innerCalls: number): string {
-	const noun = cells === 1 ? 'python cell' : 'python cells';
-	const calls = innerCalls === 1 ? '1 call inside' : `${innerCalls} calls inside`;
-	return `Ran ${cells} ${noun} (${calls})`;
-}
-
 /**
  * The same tally as `summarizeWork`, condensed to fit a phone's fold row:
  * "Read 2 · Edit 1 · Ran 4 · Search 3 · 1 failed". Every token still carries
  * its count, so no information is lost — only the words around it.
  */
 export function summarizeWorkCompact(rows: WorkLogEntry[]): string | null {
-	const { outer: tools, inner, cells, failedCells } = partitionCodeMode(rows);
-	const thoughtCount = rows.filter((entry) => entry.message.type === 'thinking').length;
-	if (tools.length === 0 && cells === 0 && thoughtCount === 0) return null;
+	const entries = rows.filter((entry) => !isHiddenCodeModeCell(entry.message));
+	const tools = entries.filter(
+		(entry) => entry.message.type === 'tool_use' || entry.message.type === 'subagent'
+	);
+	const thoughtCount = entries.filter(
+		(entry) => entry.message.type === 'thinking'
+	).length;
+	if (tools.length === 0 && thoughtCount === 0) return null;
 
 	const counts = new Map<ToolAction, number>();
-	let failed = failedCells;
+	let failed = 0;
 	for (const entry of tools) {
 		const action = toolAction(entry.message);
 		counts.set(action, (counts.get(action) ?? 0) + 1);
@@ -332,7 +288,6 @@ export function summarizeWorkCompact(rows: WorkLogEntry[]): string | null {
 	const tokens = [...counts.entries()].map(([action, count]) =>
 		COMPACT_ACTION_LABELS[action](count)
 	);
-	if (cells > 0) tokens.push(`Cells ${cells} (${inner.length})`);
 	if (thoughtCount > 0) tokens.push(`Thought ${thoughtCount}`);
 	if (failed > 0) tokens.push(`${failed} failed`);
 	return tokens.length > 0 ? tokens.join(' · ') : null;
@@ -351,14 +306,17 @@ function isHiddenCodeModeCell(message: ChatMessage): boolean {
 
 /** Provider-neutral, action-specific summary for a folded tool run. */
 export function summarizeWork(rows: WorkLogEntry[]): string | null {
-	const { outer: tools, inner, cells, failedCells } = partitionCodeMode(rows);
-	if (tools.length === 0 && cells === 0) {
-		if (rows.some((entry) => entry.message.type === 'thinking')) return 'Reasoning and interim work';
-		return rows.length > 0 ? 'Interim work' : null;
+	const entries = rows.filter((entry) => !isHiddenCodeModeCell(entry.message));
+	const tools = entries.filter(
+		(entry) => entry.message.type === 'tool_use' || entry.message.type === 'subagent'
+	);
+	if (tools.length === 0) {
+		if (entries.some((entry) => entry.message.type === 'thinking')) return 'Reasoning and interim work';
+		return entries.length > 0 ? 'Interim work' : null;
 	}
 
 	const counts = new Map<ToolAction, number>();
-	let failed = failedCells;
+	let failed = 0;
 	for (const entry of tools) {
 		const action = toolAction(entry.message);
 		counts.set(action, (counts.get(action) ?? 0) + 1);
@@ -371,9 +329,8 @@ export function summarizeWork(rows: WorkLogEntry[]): string | null {
 	);
 	// Thinking folds too; without a mention the reader has no way to know it
 	// happened without expanding the fold.
-	const thoughtCount = rows.filter((entry) => entry.message.type === 'thinking').length;
+	const thoughtCount = entries.filter((entry) => entry.message.type === 'thinking').length;
 	const labels = ordered.map(([action, count]) => actionLabel(action, count));
-	if (cells > 0) labels.push(cellLabel(cells, inner.length));
 	if (thoughtCount > 0) {
 		labels.push(`thought ${thoughtCount} ${thoughtCount === 1 ? 'time' : 'times'}`);
 	}

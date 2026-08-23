@@ -350,41 +350,24 @@ describe('work action summaries', () => {
 		expect(summarizeWork(oneFailure)).toBe('Ran 1 command, 1 failed');
 	});
 
-	it('counts code-mode cells and the calls made inside them separately', () => {
+	it('leaves hidden code-mode cells out of the tally', () => {
 		const withCell = workEntries([
 			tool({ toolName: 'run_python', toolStatus: 'complete' }),
 			tool({ toolName: 'Bash', toolStatus: 'complete' })
 		]);
-		expect(summarizeWork(withCell)).toBe('Ran 1 python cell (1 call inside)');
+		expect(summarizeWork(withCell)).toBe('Ran 1 command');
 
 		const runningCell = workEntries([
 			tool({ toolName: 'run_python', toolStatus: 'running' }),
 			tool({ toolName: 'Bash', toolStatus: 'complete' })
 		]);
-		expect(summarizeWork(runningCell)).toBe('Ran 1 python cell (1 call inside)');
+		expect(summarizeWork(runningCell)).toBe('Ran 1 command');
 
 		const failedCell = workEntries([
 			tool({ toolName: 'run_python', toolStatus: 'error' }),
 			tool({ toolName: 'Bash', toolStatus: 'complete' })
 		]);
-		expect(summarizeWork(failedCell)).toBe('Ran 1 python cell (1 call inside), 1 failed');
-	});
-
-	it('attributes inner calls to their cell by position, not to the model', () => {
-		const entries = workEntries([
-			tool({ toolName: 'Read' }),
-			tool({ toolName: 'run_python', toolStatus: 'complete' }),
-			...Array.from({ length: 50 }, () => tool({ toolName: 'Bash' })),
-			msg({ type: 'thinking', content: 'next' }),
-			tool({ toolName: 'Bash' }),
-			tool({ toolName: 'run_python', toolStatus: 'complete' }),
-			tool({ toolName: 'Bash' }),
-			tool({ toolName: 'Bash' })
-		]);
-		expect(summarizeWork(entries)).toBe(
-			'Read 1 file, ran 1 command, ran 2 python cells (52 calls inside), and thought 1 time'
-		);
-		expect(summarizeWorkCompact(entries)).toBe('Read 1 · Ran 1 · Cells 2 (52) · Thought 1');
+		expect(summarizeWork(failedCell)).toBe('Used 1 tool and ran 1 command, 1 failed');
 	});
 
 	it('names media generation instead of lumping it into used-tools', () => {
@@ -453,12 +436,12 @@ describe('compact work summaries', () => {
 		expect(summarizeWorkCompact(entries)).toBe('Read 2 · Delegated 1 · 1 failed');
 	});
 
-	it('counts code-mode cells like the prose summary', () => {
+	it('excludes hidden code-mode cells like the prose summary', () => {
 		const entries = workEntries([
 			tool({ toolName: 'run_python', toolStatus: 'complete' }),
 			tool({ toolName: 'Bash', toolStatus: 'complete' })
 		]);
-		expect(summarizeWorkCompact(entries)).toBe('Cells 1 (1)');
+		expect(summarizeWorkCompact(entries)).toBe('Ran 1');
 	});
 
 	it('reports a thinking-only fold instead of hiding it, and null otherwise', () => {
