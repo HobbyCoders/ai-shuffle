@@ -13,6 +13,7 @@ Three seams are covered here:
 The turns table is real (pg_shim SQLite); the engine and the pump are stubbed.
 """
 
+import time
 from contextlib import ExitStack, contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -642,7 +643,255 @@ async def test_a_receipt_for_a_row_that_left_the_queue_records_nothing(
 
 
 # ---------------------------------------------------------------------------
-# 4. The steering prompt block
+# 4. A steer racing the stop button
+# ---------------------------------------------------------------------------
+#
+# Send and Interrupt can land in the same breath. The steer is then written into
+# a turn that is already dying: the engine takes the text, receipts it (so the
+# row retires and the message joins the transcript) and then aborts without
+# answering — the one outcome this feature promises cannot happen. Two layers
+# here: don't aim at a dying turn, and put back anything it swallowed anyway.
+
+
+async def test_an_interrupting_turn_is_never_steered_into(mock_db):
+    """The durable flip happens at the command layer before the runtime hears
+    about it, so the row's own state is what the walk has to read."""
+    live = _start_live("s1")
+    _live_runtime("s1", live)
+    turns_db.enqueue_turn("s1", "user", prompt="hello?")
+    turns_db.interrupt_turn("s1", "stop")
+
+    adapter = _Adapter()
+    with _pooled(adapter):
+        assert await session_runtime.try_steer_pending("s1") == 0
+
+    assert adapter.calls == []
+    # Untouched — the abort-drain runs it as a turn of its own.
+    assert [t["prompt"] for t in turns_db.get_queued_turns("s1")] == ["hello?"]
+
+
+async def test_a_draining_turn_is_never_steered_into(mock_db):
+    live = _start_live("s1")
+    _live_runtime("s1", live)
+    turns_db.enqueue_turn("s1", "user", prompt="hello?")
+    turns_db.interrupt_turn("s1", "stop")
+    turns_db.escalate_to_draining(live["id"])
+
+    adapter = _Adapter()
+    with _pooled(adapter):
+        assert await session_runtime.try_steer_pending("s1") == 0
+
+    assert adapter.calls == []
+
+
+async def test_the_in_process_interrupt_latch_stops_the_walk(mock_db):
+    """Once THIS runtime is driving the kill, no DB read is needed to know the
+    turn will not answer anything else."""
+    live = _start_live("s1")
+    runtime = _live_runtime("s1", live)
+    turns_db.enqueue_turn("s1", "user", prompt="hello?")
+    runtime._interrupt_driving = True
+
+    adapter = _Adapter()
+    with _pooled(adapter):
+        assert await session_runtime.try_steer_pending("s1") == 0
+
+    assert adapter.calls == []
+
+
+async def test_interrupt_stamps_when_the_kill_was_asked_for(mock_db):
+    """``_interrupt_requested_at`` is the line the re-queue decision is drawn
+    against, so ``interrupt()`` must set it before it does anything else."""
+    live = _start_live("s1")
+    runtime = _live_runtime("s1", live)
+    assert runtime._interrupt_requested_at is None
+    turns_db.interrupt_turn("s1", "stop")
+    turns_db.settle_turn(live["id"], "aborted", "interrupted")
+
+    with ExitStack() as stack:
+        stack.enter_context(patch(
+            "app.core.session_runtime.record_interrupting", new=AsyncMock(),
+        ))
+        stack.enter_context(patch(
+            "app.core.query_session_lifecycle.interrupt_session", new=AsyncMock(),
+        ))
+        stack.enter_context(patch.object(
+            session_runtime.permission_handler, "cancel_all_requests",
+            new=AsyncMock(),
+        ))
+        assert await runtime.interrupt("stop") == "aborted"
+
+    assert runtime._interrupt_requested_at is not None
+
+
+def _pump_interrupted_around_a_steer(queued_id, *, interrupt_first, box):
+    """A turn that takes a delivery receipt and then dies from an interrupt.
+
+    ``interrupt_first`` decides which side of the interrupt REQUEST the receipt
+    lands on — the whole question the re-queue turns on. The stamp is written
+    here directly; ``interrupt()`` is what writes it in production, covered by
+    ``test_interrupt_stamps_when_the_kill_was_asked_for``.
+    """
+    async def _impl(**kwargs):
+        runtime = box["runtime"]
+        if interrupt_first:
+            runtime._interrupt_requested_at = time.perf_counter()
+        yield {"type": "steer_delivered", "steers": [
+            {"id": queued_id, "text": "wait, also check the logs"},
+        ]}
+        if not interrupt_first:
+            runtime._interrupt_requested_at = time.perf_counter()
+        yield {"type": "interrupted", "metadata": {}}
+    return _impl
+
+
+async def test_a_steer_swallowed_after_the_stop_goes_back_on_the_queue(mock_db):
+    """The live bug: the message reached the transcript and nothing ever
+    answered it. It runs as its own turn instead, first in line."""
+    _seed_session("s11")
+    live = turns_db.enqueue_turn("s11", "user", prompt="the live one")
+    queued = turns_db.enqueue_turn(
+        "s11", "user", prompt="wait, also check the logs",
+        command_id="req-9", payload={"deferred_user_record": True},
+    )
+    turns_db.enqueue_turn("s11", "user", prompt="typed while it was dying")
+
+    box = {}
+    pump = _pump_interrupted_around_a_steer(
+        queued["id"], interrupt_first=True, box=box,
+    )
+    with _pump_env(pump) as env:
+        box["runtime"] = session_runtime.SessionRuntime(live)
+        outcome = await box["runtime"].execute()
+
+    assert outcome == "aborted"
+    # The original row stays absorbed — its message really is in the transcript.
+    assert turns_db.get_turn(queued["id"])["stop_reason"] == "steered"
+
+    rows = turns_db.get_queued_turns("s11")
+    assert [r["prompt"] for r in rows] == [
+        "wait, also check the logs", "typed while it was dying",
+    ]
+    replacement = rows[0]
+    assert replacement["id"] != queued["id"]
+    assert replacement["command_id"] == "req-9"
+    # Recording is suppressed on the re-run and the deferred marker is gone —
+    # between them they would have written the message a second time.
+    assert replacement["payload"]["user_message_already_recorded"] is True
+    assert replacement["payload"]["requeued_from_turn_id"] == queued["id"]
+    assert "deferred_user_record" not in replacement["payload"]
+    # The pending bubble comes back on every watching device.
+    env["sync"].broadcast_queue_updated.assert_awaited()
+
+
+async def test_several_swallowed_steers_come_back_in_the_order_they_were_sent(
+    mock_db,
+):
+    """Front-of-queue placement must not reverse them — a later message may not
+    overtake an earlier one just because both were rescued."""
+    _seed_session("s16")
+    live = turns_db.enqueue_turn("s16", "user", prompt="the live one")
+    first = turns_db.enqueue_turn("s16", "user", prompt="one")
+    second = turns_db.enqueue_turn("s16", "user", prompt="two")
+    turns_db.enqueue_turn("s16", "user", prompt="three")
+
+    box = {}
+
+    async def _impl(**kwargs):
+        box["runtime"]._interrupt_requested_at = time.perf_counter()
+        yield {"type": "steer_delivered", "steers": [
+            {"id": first["id"], "text": "one"},
+        ]}
+        yield {"type": "steer_delivered", "steers": [
+            {"id": second["id"], "text": "two"},
+        ]}
+        yield {"type": "interrupted", "metadata": {}}
+
+    with _pump_env(_impl):
+        box["runtime"] = session_runtime.SessionRuntime(live)
+        assert await box["runtime"].execute() == "aborted"
+
+    assert [r["prompt"] for r in turns_db.get_queued_turns("s16")] == [
+        "one", "two", "three",
+    ]
+
+
+async def test_a_steer_the_model_already_had_is_not_re_run(mock_db):
+    """The user watched the model start on it and chose to stop — re-running it
+    would answer a question they withdrew."""
+    _seed_session("s12")
+    live = turns_db.enqueue_turn("s12", "user", prompt="the live one")
+    queued = turns_db.enqueue_turn(
+        "s12", "user", prompt="wait, also check the logs",
+    )
+
+    box = {}
+    pump = _pump_interrupted_around_a_steer(
+        queued["id"], interrupt_first=False, box=box,
+    )
+    with _pump_env(pump):
+        box["runtime"] = session_runtime.SessionRuntime(live)
+        outcome = await box["runtime"].execute()
+
+    assert outcome == "aborted"
+    assert turns_db.get_queued_turns("s12") == []
+
+
+async def test_an_abort_with_no_interrupt_behind_it_re_queues_nothing(mock_db):
+    """A crashed or errored turn is not someone pressing stop — there is no
+    request time to compare against, so nothing comes back."""
+    _seed_session("s13")
+    live = turns_db.enqueue_turn("s13", "user", prompt="the live one")
+    queued = turns_db.enqueue_turn("s13", "user", prompt="also check the logs")
+    events = [
+        {"type": "steer_delivered", "steers": [
+            {"id": queued["id"], "text": "also check the logs"},
+        ]},
+        {"type": "error", "error": "boom"},
+    ]
+
+    with _pump_env(_pump(events)):
+        assert await session_runtime.SessionRuntime(live).execute() == "aborted"
+
+    assert turns_db.get_queued_turns("s13") == []
+
+
+async def test_a_plain_run_does_log_its_message_user(mock_db):
+    """Why the suppress marker has to be explicit: only the LEGACY store write
+    is conditional — an ordinary run always appends ``message.user`` to the
+    event log, which is the transcript authority."""
+    _seed_session("s14")
+    turn = turns_db.enqueue_turn("s14", "user", prompt="sent while idle")
+
+    with _pump_env(_pump([{"type": "done", "metadata": {}}])) as env:
+        await session_runtime.SessionRuntime(turn).execute()
+
+    env["recorder"].start.assert_awaited_once_with(
+        "sent while idle", profile_id=None, record_user=True,
+    )
+
+
+async def test_a_requeued_steer_records_nothing_when_it_runs(mock_db):
+    """Its message is already in both stores, so the re-run contributes only
+    ``turn.started`` and the answer that was missing."""
+    _seed_session("s15")
+    turn = turns_db.enqueue_turn(
+        "s15", "user", prompt="wait, also check the logs",
+        payload={"user_message_already_recorded": True},
+    )
+
+    with _pump_env(_pump([{"type": "done", "metadata": {}}])) as env:
+        assert await session_runtime.SessionRuntime(turn).execute() == "completed"
+
+    env["recorder"].start.assert_awaited_once_with(
+        "wait, also check the logs", profile_id=None, record_user=False,
+    )
+    assert _messages(mock_db, "s15") == []
+    env["sync"].broadcast_message_added.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# 5. The steering prompt block
 # ---------------------------------------------------------------------------
 
 def _compiled_text(*, native):

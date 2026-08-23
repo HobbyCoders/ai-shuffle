@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
@@ -455,6 +456,17 @@ class SessionRuntime:
         # ``_finalize`` so an undelivered steer is free to be tried again by
         # whatever turn comes next.
         self._steer_attempted: set = set()
+        # Queued rows this turn actually SWALLOWED: row id → (perf_counter absorb
+        # time, the row as it was). Populated by ``_on_steer_delivered`` on the
+        # transition that retires the row, read once by ``_finalize`` to decide
+        # whether an absorbed message died unanswered inside an interrupt.
+        # Per-turn by construction, like ``_steer_attempted``.
+        self._steer_absorbed: Dict[str, tuple] = {}
+        # When THIS runtime was told to kill the turn — ``interrupt()``'s first
+        # instruction, on the same high-resolution clock as the absorb stamps above.
+        # ``None`` means no interrupt was ever driven here (a plain error/crash
+        # abort), in which case nothing gets re-queued.
+        self._interrupt_requested_at: Optional[float] = None
         # Idempotency guard for the interrupt-observe pass (V2 Phase 4, O4):
         # once interrupt() has been driven for THIS turn, later observers
         # (claim-loop pass, duplicate executor fire) are no-ops. Per-turn by
@@ -793,14 +805,26 @@ class SessionRuntime:
         # A message the composer deferred (sent while a turn was live) was never
         # written to the legacy ``session_messages`` store at send time — the
         # transcript must show it where the model actually receives it, which is
-        # here. The event-log side is unchanged: ``recorder.start`` appends the
-        # ``message.user`` for every non-resume turn either way.
-        if not resume and (self.turn.get("payload") or {}).get("deferred_user_record"):
+        # here. The event log gets its ``message.user`` from ``recorder.start``
+        # below, as it does for any non-resume turn.
+        #
+        # The exception is a row re-queued after its steer was swallowed by an
+        # interrupted turn: the delivery receipt already wrote the message to
+        # BOTH stores before that turn died, so this run must add neither, or
+        # the same sentence shows up twice.
+        already_recorded = bool(
+            (self.turn.get("payload") or {}).get("user_message_already_recorded")
+        )
+        if (
+            not resume
+            and not already_recorded
+            and (self.turn.get("payload") or {}).get("deferred_user_record")
+        ):
             await self._persist_user_message(prompt)
         await recorder.start(
             prompt,
             profile_id=self.turn.get("profile_id"),
-            record_user=not resume,
+            record_user=not resume and not already_recorded,
         )
         try:
             async for event in _stream_to_websocket_impl(
@@ -890,6 +914,16 @@ class SessionRuntime:
         adapter = self._live_adapter()
         if adapter is None:
             return 0
+        if await self._turn_is_dying():
+            # Steering into a turn the user is already killing is how a message
+            # gets swallowed and never answered: the engine takes the text,
+            # receipts it, and then dies before saying anything back. Leave the
+            # rows queued — the abort-drain runs them as turns of their own.
+            logger.info(
+                "SessionRuntime: %s is being interrupted — leaving the queue to "
+                "the drain instead of steering", self.session_id,
+            )
+            return 0
         try:
             rows = await asyncio.to_thread(turns_db.get_queued_turns, self.session_id)
         except Exception:
@@ -965,6 +999,35 @@ class SessionRuntime:
             self._steer_attempted.discard(turn_id)
             return "cancelled"
         return "delivered"
+
+    async def _turn_is_dying(self) -> bool:
+        """Whether this turn has stopped being a safe place to put a message.
+
+        Two signals, cheapest first:
+
+        * ``_interrupt_driving`` — THIS process is already driving the kill, so
+          no DB round-trip is needed;
+        * the row's own state — the durable ``interrupting`` flip
+          (``turns.interrupt_turn``) happens at the command layer BEFORE the
+          runtime is told, and that gap is exactly where the observed race
+          lived, so the in-process latch alone is not enough. Anything other
+          than ``running`` (interrupting, draining, or already settled) cannot
+          take a steer.
+
+        Fails OPEN (False) on a read error: a transient DB hiccup must not turn
+        every send into a queued turn.
+        """
+        if self._interrupt_driving:
+            return True
+        try:
+            row = await asyncio.to_thread(turns_db.get_turn, self.turn_id)
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "SessionRuntime: could not re-read turn %s before steering",
+                self.turn_id, exc_info=True,
+            )
+            return False
+        return row is not None and row.get("state") != "running"
 
     def _live_adapter(self) -> Optional[Any]:
         """The provider adapter behind this session's pooled client, or None."""
@@ -1069,6 +1132,12 @@ class SessionRuntime:
             try:
                 if await asyncio.to_thread(turns_db.absorb_queued_turn, row_id):
                     absorbed = True
+                    # Remember WHEN this turn swallowed the row, and the row
+                    # itself: if the turn then dies from an interrupt the user
+                    # asked for BEFORE this moment, ``_finalize`` puts the
+                    # message back on the queue rather than leaving it in the
+                    # transcript with no answer under it.
+                    self._steer_absorbed[row_id] = (time.perf_counter(), row)
             except Exception:
                 logger.warning(
                     "SessionRuntime: absorb failed for steered turn %s", row_id,
@@ -1230,6 +1299,10 @@ class SessionRuntime:
                 )
             except Exception:
                 logger.warning("SessionRuntime: settle_turn(aborted) failed for %s", tid, exc_info=True)
+            # A message this dying turn swallowed on its way out goes back on
+            # the queue — BEFORE the scheduler seam fires, so it runs as the
+            # very next turn.
+            await self._requeue_steers_killed_by_interrupt(sid)
             # Working-set snapshot (V2 Phase 4, Q6): a turn that ended (even
             # aborted) may leave in-progress edits the next runner needs. NEVER
             # on the parked arm above (the session is still working here).
@@ -1243,6 +1316,88 @@ class SessionRuntime:
             logger.warning("SessionRuntime: settle_turn(completed) failed for %s", tid, exc_info=True)
         await self._snapshot_working_set(sid)
         return "completed", settled is not None
+
+    async def _requeue_steers_killed_by_interrupt(self, sid: str) -> None:
+        """Put back every steered message this turn swallowed but never answered.
+
+        The race this repairs: the user sends a message mid-turn and hits stop a
+        heartbeat later. The steer is already on its way to the engine, so the
+        dying turn receipts it, records the ``message.user``, and retires the
+        queue row — then aborts without a word in reply. The message ends up in
+        the transcript permanently unanswered, which is precisely what the send
+        flow promises cannot happen.
+
+        The line is the interrupt REQUEST time (``_interrupt_requested_at``,
+        stamped as ``interrupt()`` starts). A row absorbed BEFORE it was one the
+        model was genuinely working on when the user chose to stop — re-running
+        it would answer a question they withdrew. A row absorbed at-or-after it
+        was swallowed by a turn that was already dying, and re-runs.
+
+        The re-run carries ``user_message_already_recorded`` so it adds nothing
+        to the transcript: the ``message.user`` is up there already, written by
+        the receipt. It goes to the FRONT of the queue (the failover-retry
+        placement) so it is the next thing the session does. Order among several
+        re-queued rows is preserved by inserting them newest-first.
+
+        Never raises — a turn that is already over must still settle.
+        """
+        requested = self._interrupt_requested_at
+        absorbed = self._steer_absorbed
+        self._steer_absorbed = {}
+        if requested is None or not absorbed:
+            return
+        stranded = sorted(
+            (
+                (stamp, row_id, row)
+                for row_id, (stamp, row) in absorbed.items()
+                if stamp >= requested
+            ),
+            key=lambda item: item[0],
+        )
+        if not stranded:
+            return
+
+        requeued = 0
+        # ``at_front`` puts each new row before every queued one, so inserting
+        # newest-first leaves the queue in the original order.
+        for _stamp, row_id, row in reversed(stranded):
+            payload = dict(row.get("payload") or {})
+            # The message is already in both stores — the receipt wrote it. The
+            # deferred-record marker would make the re-run write it a SECOND
+            # time, so it goes and the suppress marker takes its place.
+            payload.pop("deferred_user_record", None)
+            payload["user_message_already_recorded"] = True
+            payload["requeued_from_turn_id"] = row_id
+            try:
+                fresh = await asyncio.to_thread(
+                    turns_db.enqueue_turn,
+                    sid,
+                    row.get("source") or "user",
+                    prompt=row.get("prompt") or "",
+                    profile_id=row.get("profile_id"),
+                    project_id=row.get("project_id"),
+                    worktree_id=row.get("worktree_id"),
+                    overrides=row.get("overrides") or None,
+                    payload=payload,
+                    command_id=row.get("command_id"),
+                    instance_id=row.get("instance_id"),
+                    at_front=True,
+                )
+            except Exception:
+                logger.warning(
+                    "SessionRuntime: could not re-queue stranded steer %s on %s",
+                    row_id, sid, exc_info=True,
+                )
+                continue
+            requeued += 1
+            logger.info(
+                "SessionRuntime: steer %s was absorbed into %s after the "
+                "interrupt was requested and never answered — re-queued as %s",
+                row_id, self.turn_id, fresh["id"],
+            )
+        if requeued:
+            # The rows are pending again; every watching device should see that.
+            await _broadcast_queue_after_start(sid)
 
     # ------------------------------------------------------------------
     # interrupt / escalation
@@ -1288,6 +1443,12 @@ class SessionRuntime:
         if self._interrupt_driving:
             return "interrupting"
         self._interrupt_driving = True
+        # The moment the kill was asked for. Stamped BEFORE the first await, and
+        # read against the stamps ``_on_steer_delivered`` writes: it separates a
+        # message the model was already answering (absorbed earlier — the user
+        # chose to stop it) from one this turn swallowed on its way out
+        # (absorbed at-or-after — never answered, so it must run again).
+        self._interrupt_requested_at = time.perf_counter()
 
         try:
             await record_interrupting(sid, mode)  # turn.interrupting event
