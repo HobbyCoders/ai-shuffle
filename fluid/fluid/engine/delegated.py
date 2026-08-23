@@ -59,6 +59,7 @@ from fluid.events.model import (
     ErrorEvent,
     Event,
     Interrupted,
+    SteerDelivered,
     TurnComplete,
     TurnStarted,
     Usage,
@@ -71,6 +72,7 @@ from fluid.events.ops import (
     Resume,
     SetModel,
     SetPermissionMode,
+    Steer,
     UserTurn,
 )
 from fluid.messages import Image, Message, Text
@@ -248,6 +250,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # The CLI owns its own transcript; fluid cannot hand it a head node
             # to continue from. Say so plainly rather than dropping the op.
             raise NotImplementedError("Resume is not supported by the delegated engine")
+        elif isinstance(op, Steer):
+            await self._deliver_steer(op)
         elif isinstance(op, Interrupt):
             self._interrupted.set()
             await self._send_interrupt()
@@ -486,6 +490,65 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if mapper.cli_session_id and mapper.cli_session_id != self.cli_session_id:
                 self.cli_session_id = mapper.cli_session_id
                 self._persist_cli_session_id(sid, mapper.cli_session_id)
+
+    # ─── mid-turn steering ───────────────────────────────────────────────
+
+    async def _deliver_steer(self, op: Steer) -> None:
+        """Hand mid-turn user text to the running CLI as a second ``user`` frame.
+
+        Where NativeLoop queues a steer and folds it into the next tool result
+        itself, the delegated leg has nothing to fold into — the CLI owns the
+        conversation. Writing a second
+        ``{"type": "user", "message": {"role": "user", "content": [...]}}`` frame
+        to its stdin mid-turn is the supported way in (validated against claude
+        CLI 2.1.239: no crash, nothing on stderr; the CLI injects the text at the
+        next boundary — observed right after a tool result, before the final
+        assistant text — and still emits a single ``result`` with ``num_turns``
+        incremented). One frame per Steer, written in submission order; there is
+        no batching and no per-frame acknowledgement to wait for, since the loop
+        does not run with ``--replay-user-messages``.
+
+        Written-to-stdin *is* delivery here: from that byte on the CLI owns the
+        message and folds it into the turn, so ``SteerDelivered`` is receipted as
+        soon as the write drains. The event is published straight from ``submit``
+        rather than from the turn's frame reader; that is safe because ``_emit``
+        (bus ``publish`` + store ``append_event``) never suspends between
+        assigning a seq and recording the event, so it cannot interleave with the
+        reader task's own emits.
+
+        Known narrow race: if the CLI's ``result`` for this turn was already in
+        flight when the frame landed, the CLI holds the frame and processes it as
+        a self-initiated follow-up cycle *after* the result. The text is never
+        lost and the receipt still stands, but the assistant response to it
+        arrives outside the turn — where the between-turn drain
+        (``_discard_stale_stdout``) or the next turn's reader picks it up.
+
+        Raises ``RuntimeError`` when there is nothing live to steer into: no
+        running turn (send a ``UserTurn`` instead), an interrupt already
+        requested for the running turn, or no live CLI process behind it. The
+        caller is expected to fall back to queueing the message.
+        """
+        if self._turn_task is None or self._turn_task.done():
+            raise RuntimeError("no turn is running; submit a UserTurn instead")
+        if self._interrupted.is_set():
+            raise RuntimeError(
+                "the running turn is being interrupted; queue the message instead"
+            )
+        if (
+            self._proc is None
+            or self._proc.returncode is not None
+            or self._active_turn_id is None
+        ):
+            # The turn task exists but its CLI process has not come up (or has
+            # died): there is no stdin to fold the text into.
+            raise RuntimeError("no live CLI turn to steer; queue the message instead")
+        await self._write_frame({"type": "user", "message": {
+            "role": "user", "content": [{"type": "text", "text": op.text}],
+        }})
+        await self._emit(SteerDelivered(
+            session_id=self.session_id, turn_id=self._active_turn_id,
+            steers=[{"id": op.id, "text": op.text}],
+        ))
 
     def _persist_cli_session_id(self, session_id: str, cli_session_id: str) -> None:
         """Write the refreshed ``--resume`` handle back to the store.
@@ -884,6 +947,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 pass
 
     async def _write_frame(self, frame: dict[str, Any]) -> None:
+        """Write one JSON line to the CLI's stdin.
+
+        No lock: the whole line goes into the transport in a single ``write``
+        with no await inside it, so two writers (a turn, a mid-turn steer, a
+        control frame) cannot interleave bytes — only ``drain`` suspends, and by
+        then the line is already queued whole and in order.
+        """
         assert self._proc is not None and self._proc.stdin is not None
         self._proc.stdin.write((json.dumps(frame) + "\n").encode())
         await self._proc.stdin.drain()

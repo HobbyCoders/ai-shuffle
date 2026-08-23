@@ -3,8 +3,9 @@
 No real ``claude`` binary exists here, so every test runs the fake (which honors
 the stream-json contract). Covers: pure frame→Event mapping (golden fixture),
 capability matrix, simple text turn (event-shape + gapless seq parity with
-NativeLoop), the permission control-frame round-trip (allow + deny), ``--resume``,
-partial-streaming dedupe, store persistence, and the bundled MCP server bridge.
+NativeLoop), the permission control-frame round-trip (allow + deny), mid-turn
+steering, ``--resume``, partial-streaming dedupe, store persistence, and the
+bundled MCP server bridge.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from fluid.events import (
     ErrorEvent,
     PermissionRequest,
     RespondPermission,
+    SteerDelivered,
     TextDelta,
     ToolResult,
     ToolUse,
@@ -38,6 +40,7 @@ from fluid.events import (
     UserTurn,
 )
 from fluid.events.model import event_from_dict, event_to_dict
+from fluid.events.ops import Interrupt, Steer
 from fluid.store.base import MemoryStore
 from fluid.store.jsonl import JsonlStore
 from fluid.tools.inproc import create_inproc_server, tool
@@ -334,6 +337,133 @@ async def test_permission_deny() -> None:
     assert result.is_error
     assert "denied" in result.output
     assert any(isinstance(e, TurnComplete) for e in events)
+
+
+# ─── Mid-turn steering ───────────────────────────────────────────────────────
+
+
+def _spy_on_frames(loop: DelegatedLoop) -> list[dict]:
+    """Record every frame the loop writes to the CLI's stdin (still writing it)."""
+    frames: list[dict] = []
+    original = loop._write_frame
+
+    async def spy(frame: dict) -> None:
+        frames.append(frame)
+        await original(frame)
+
+    loop._write_frame = spy  # type: ignore[method-assign]
+    return frames
+
+
+def _user_frames(frames: list[dict]) -> list[dict]:
+    return [f for f in frames if f.get("type") == "user"]
+
+
+async def test_steer_mid_turn_writes_one_user_frame_and_receipts_it() -> None:
+    """A live turn is steered by writing a second ``user`` frame to the CLI's
+    stdin; the write is the delivery, so it is receipted immediately."""
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _make_loop("b", store=store, session_id=sid)
+    frames = _spy_on_frames(loop)
+
+    async def responder() -> None:
+        async for e in loop.bus.subscribe(sid):
+            if isinstance(e, PermissionRequest):
+                # The turn is parked on a permission here — mid-flight, exactly
+                # the window a steer is for.
+                await loop.submit(Steer(text="use the staging config", id="q1"))
+                await loop.submit(
+                    RespondPermission(request_id=e.request_id, decision="allow")
+                )
+                return
+
+    watcher = asyncio.create_task(responder())
+    try:
+        await loop.submit(UserTurn(content="weather in Paris?"))
+        await loop.wait_turn()
+        await asyncio.wait_for(watcher, timeout=10)
+
+        # The turn's own user frame, then exactly one steer frame — no batching,
+        # no duplicate, and the steer text is the whole content.
+        assert len(_user_frames(frames)) == 2
+        assert _user_frames(frames)[1] == {"type": "user", "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": "use the staging config"}],
+        }}
+
+        events = loop.bus.log(sid)
+        receipt = next(e for e in events if isinstance(e, SteerDelivered))
+        assert receipt.steers == [{"id": "q1", "text": "use the staging config"}]
+        started = next(e for e in events if isinstance(e, TurnStarted))
+        assert receipt.turn_id == started.turn_id
+        assert not any(isinstance(e, ErrorEvent) for e in events)
+        # The turn still runs to completion around the injected frame.
+        assert any(isinstance(e, TurnComplete) for e in events)
+    finally:
+        await loop.aclose()
+
+
+async def test_steer_without_a_running_turn_is_refused() -> None:
+    """No live turn means nothing to fold the text into: the caller must send a
+    UserTurn instead, and nothing reaches the CLI."""
+    loop = _make_loop("a")
+    frames = _spy_on_frames(loop)
+    with pytest.raises(RuntimeError, match="no turn is running"):
+        await loop.submit(Steer(text="too late", id="q1"))
+    assert frames == []
+
+
+async def test_steer_after_an_interrupt_is_refused() -> None:
+    """A turn on its way out must not be steered into — the host queues the
+    message instead, so nothing is written and nothing is receipted."""
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _make_loop("b", store=store, session_id=sid)
+    frames = _spy_on_frames(loop)
+    refused: list[BaseException] = []
+
+    async def responder() -> None:
+        async for e in loop.bus.subscribe(sid):
+            if isinstance(e, PermissionRequest):
+                await loop.submit(Interrupt())
+                try:
+                    await loop.submit(Steer(text="too late", id="q1"))
+                except RuntimeError as exc:
+                    refused.append(exc)
+                # Let the fake finish so the turn does not hang on its parked
+                # permission (the fake has no interrupt handling of its own).
+                await loop.submit(
+                    RespondPermission(request_id=e.request_id, decision="deny")
+                )
+                return
+
+    watcher = asyncio.create_task(responder())
+    try:
+        await loop.submit(UserTurn(content="weather in Paris?"))
+        await loop.wait_turn()
+        await asyncio.wait_for(watcher, timeout=10)
+
+        assert len(refused) == 1 and "interrupt" in str(refused[0])
+        assert len(_user_frames(frames)) == 1  # only the turn's own frame
+        assert not [e for e in loop.bus.log(sid) if isinstance(e, SteerDelivered)]
+    finally:
+        await loop.aclose()
+
+
+async def test_steer_is_no_longer_an_unsupported_op() -> None:
+    """Steer left the NotImplementedError set — it now fails (when it fails) as
+    a RuntimeError about turn state, while Resume/Fork stay unsupported."""
+    from fluid.events.ops import Fork, Resume
+
+    loop = _make_loop("a")
+    with pytest.raises(NotImplementedError):
+        await loop.submit(Resume())
+    with pytest.raises(NotImplementedError):
+        await loop.submit(Fork(from_node_id="node_1"))
+    with pytest.raises(RuntimeError) as caught:
+        await loop.submit(Steer(text="hi"))
+    assert not isinstance(caught.value, NotImplementedError)
 
 
 # ─── Resume ──────────────────────────────────────────────────────────────────
