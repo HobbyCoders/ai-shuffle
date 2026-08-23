@@ -286,9 +286,34 @@ def session_scope(input: dict[str, Any]) -> frozenset[str] | None:
     return program_names(command) if isinstance(command, str) else None
 
 
+def _touches_sensitive_path(command: str) -> bool:
+    """True when any argument names a credential file (``cat .env`` etc.).
+
+    A read-only command is still an exfiltration read when its target is a
+    credential file, so it must not sail under the on_write policy. Best-effort
+    shlex tokenization; a command we cannot tokenize was already rejected by
+    the read-only classifier.
+    """
+    import shlex
+
+    from fluid.tools.hardening import is_sensitive_path
+
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    return any(
+        not token.startswith("-") and is_sensitive_path(token)
+        for token in tokens[1:]
+    )
+
+
 def classify(input: dict[str, Any]) -> str:
     """Effective risk of one Bash tool input: ``safe`` or ``write``."""
     command = input.get("command")
     if not isinstance(command, str):
         return WRITE
-    return SAFE if is_read_only(command) else WRITE
+    if not is_read_only(command):
+        return WRITE
+    # Read-only, but targeting a credential file → keep the prompt.
+    return WRITE if _touches_sensitive_path(command) else SAFE

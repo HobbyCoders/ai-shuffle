@@ -82,11 +82,24 @@ class MemoryStore:
         contains ``old_text``; an ambiguous or missing match fails the whole
         batch (nothing is written). Returns ``(ok, message)``.
         """
+        from fluid.context.screening import looks_like_secret
+
         entries = self.entries()
         for i, op in enumerate(operations):
             action = str(op.get("action", "")).strip().lower()
+            content_field = str(op.get("content", "")).strip()
+            if action in ("add", "replace") and content_field:
+                secret_kind = looks_like_secret(content_field)
+                if secret_kind is not None:
+                    return False, (
+                        f"operation {i}: the entry looks like it contains a "
+                        f"credential ({secret_kind}). Memory is injected into "
+                        "every future session's prompt — never store secrets "
+                        "in it. Store WHERE the credential lives (the env var "
+                        "name, the file) instead of its value."
+                    )
             if action == "add":
-                content = str(op.get("content", "")).strip()
+                content = content_field
                 if not content:
                     return False, f"operation {i}: add needs non-empty content"
                 if _SEPARATOR_RE.search(content):

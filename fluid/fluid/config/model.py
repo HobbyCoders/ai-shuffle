@@ -87,6 +87,11 @@ class RuleConfig:
 class PermissionConfig:
     approval_policy: str = "on_write"
     rules: tuple[RuleConfig, ...] = ()
+    # Default ask-before-touching rules for credential files (.env, key files,
+    # .netrc, …), prepended BEFORE user rules so a later user rule overrides
+    # them (last match wins). Skipped entirely under never_ask — that policy
+    # is an explicit opt-out of gates. See fluid.tools.hardening.
+    protect_sensitive_files: bool = True
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> PermissionConfig:
@@ -96,7 +101,11 @@ class PermissionConfig:
                 f"invalid approval_policy: {policy!r} (expected one of {APPROVAL_POLICIES})"
             )
         rules = tuple(RuleConfig.from_dict(r) for r in d.get("rules", []))
-        return cls(approval_policy=policy, rules=rules)
+        return cls(
+            approval_policy=policy,
+            rules=rules,
+            protect_sensitive_files=bool(d.get("protect_sensitive_files", True)),
+        )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -387,6 +396,7 @@ class HarnessConfig:
             ),
             "permission": {
                 "approval_policy": self.permission.approval_policy,
+                "protect_sensitive_files": self.permission.protect_sensitive_files,
                 "rules": [
                     {"tool": r.tool, "decision": r.decision, "input_globs": dict(r.input_globs)}
                     for r in self.permission.rules

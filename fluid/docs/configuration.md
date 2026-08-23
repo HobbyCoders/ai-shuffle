@@ -58,6 +58,7 @@ upward search for a project file.
 |---|---|---|
 | `approval_policy` | `"on_write"` | `never_ask` runs everything; `on_write` asks before `write` and `destructive` tool calls; `always_ask` asks before every call. Read-only `Bash` commands count as safe under `on_write` (see [cli.md](cli.md#permission-prompts)). |
 | `rules` | `[]` | Explicit per-tool decisions, evaluated in order with the last match winning. A matching rule overrides the policy and any session-scoped "allow always". |
+| `protect_sensitive_files` | `true` | Default ask-before-touching rules for credential files (`.env`, key files, `.netrc`, …), prepended before your rules so yours override. Skipped under `never_ask`. See [security.md](security.md). |
 
 Each `[[permission.rules]]` entry:
 

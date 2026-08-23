@@ -1576,6 +1576,18 @@ class NativeLoop(BackgroundLifecycleMixin):
         self, sid: str, turn_id: str, name: str, tool_use_id: str, outcome: ToolOutcome,
         input: dict[str, Any] | None = None,
     ) -> ToolOutcome:
+        if outcome.text:
+            # Spoofing defense: neutralize fluid's own control markers
+            # (system-reminders, steering markers) inside result text from ANY
+            # source — a file the model Read, kernel stdout, an MCP payload.
+            # Genuine instances are appended AFTER this point (steers below,
+            # nested-instruction reminders in _dispatch_tool), so they are
+            # never touched.
+            from fluid.tools.hardening import defang_harness_markers
+
+            defanged = defang_harness_markers(outcome.text)
+            if defanged is not outcome.text:
+                outcome = replace(outcome, text=defanged)
         if self.hooks is not None:
             decision = await self.hooks.emit(
                 POST_TOOL_USE,

@@ -39,6 +39,9 @@ setting the matching key; `fluid config` prints what a run will use.
   workers, and how the CLI hosts them.
 - [docs/local-models.md](docs/local-models.md) — llama.cpp, Ollama, and the
   text tool-call protocol.
+- [docs/security.md](docs/security.md) — harness protection: injection
+  fencing, control-marker spoofing defense, credential guards, exfiltration
+  gating, and how to override each layer.
 
 ## Why fluid
 

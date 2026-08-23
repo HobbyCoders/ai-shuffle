@@ -58,7 +58,11 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     # Model-family guidance blocks: "auto" (shipped family tables) | true |
     # false | list of model-id substrings. See fluid.cli.prompt.
     "model_guidance": "auto",
-    "permission": {"approval_policy": "on_write", "rules": []},
+    "permission": {
+        "approval_policy": "on_write",
+        "protect_sensitive_files": True,
+        "rules": [],
+    },
     "instruction_files": {
         "enabled": True,
         "global": True,
@@ -391,14 +395,47 @@ def load_config(
 # ─── engine factory ──────────────────────────────────────────────────────────
 
 
+def _sensitive_file_rules():
+    """Default ask-rules for credential files, per file-taking builtin.
+
+    Prepended BEFORE user rules — last match wins, so one user rule allows a
+    path through. Bash gets the same protection through its risk classifier
+    (a read-only command targeting a credential file classifies as write).
+    """
+    from fluid.permissions.rules import Rule
+    from fluid.tools.hardening import SENSITIVE_BASENAME_GLOBS, SENSITIVE_PATH_SUFFIXES
+
+    # "*" prefixes make basename globs match directory-qualified inputs too
+    # ("src/.env"); fnmatch "*" crosses "/" so this is a suffix match.
+    globs = [
+        pattern if pattern.startswith("*") else f"*{pattern}"
+        for pattern in (*SENSITIVE_BASENAME_GLOBS, *SENSITIVE_PATH_SUFFIXES)
+    ]
+    field_by_tool = {
+        "Read": "file_path", "Edit": "file_path", "Write": "file_path",
+        "Grep": "path", "Glob": "path",
+    }
+    return [
+        Rule(tool=tool, decision="ask", input_globs={field: glob})
+        for tool, field in field_by_tool.items()
+        for glob in globs
+    ]
+
+
 def _build_permissions(config: HarnessConfig):
     from fluid.permissions.engine import PermissionEngine
     from fluid.permissions.rules import Rule
 
-    rules = [
+    rules = []
+    if (
+        config.permission.protect_sensitive_files
+        and config.permission.approval_policy != "never_ask"
+    ):
+        rules.extend(_sensitive_file_rules())
+    rules.extend(
         Rule(tool=r.tool, decision=r.decision, input_globs=dict(r.input_globs))
         for r in config.permission.rules
-    ]
+    )
     return PermissionEngine(config.permission.approval_policy, rules=rules)
 
 

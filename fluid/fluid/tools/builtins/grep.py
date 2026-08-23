@@ -108,6 +108,39 @@ def _header(engine: str, root: Path) -> str:
     return f"searched via {engine} under {root}"
 
 
+_MATCH_LINE_RE = re.compile(r"^(.*?):\d+:")
+
+
+def _drop_sensitive_matches(lines: list[str]) -> tuple[list[str], int]:
+    """Filter out match lines from credential files (.env, key files, …).
+
+    A tree-wide Grep for "TOKEN" must not print .env contents into context.
+    The files are named in a note instead of silently hidden — the model (and
+    user) can still target one explicitly, which routes through the sensitive-
+    file permission rule.
+    """
+    from fluid.tools.hardening import is_sensitive_path
+
+    kept: list[str] = []
+    dropped = 0
+    for line in lines:
+        match = _MATCH_LINE_RE.match(line)
+        if match is not None and is_sensitive_path(match.group(1)):
+            dropped += 1
+        else:
+            kept.append(line)
+    return kept, dropped
+
+
+def _sensitive_note(dropped: int) -> list[str]:
+    if not dropped:
+        return []
+    return [
+        "[hits in credential-pattern files (.env, keys, …) were withheld "
+        "from this search — Read a file explicitly if it is genuinely needed]"
+    ]
+
+
 async def _ripgrep(
     rg: str, pattern: str, root: Path, glob: str | None, no_ignore: bool, limit: int
 ) -> ToolOutcome:
@@ -149,8 +182,9 @@ async def _ripgrep(
     lines = stdout.decode(errors="replace").split("\n")
     while lines and not lines[-1]:
         lines.pop()
+    lines, dropped = _drop_sensitive_matches(lines)
     total = len(lines)
-    notes: list[str] = []
+    notes: list[str] = _sensitive_note(dropped)
     if total > limit:
         lines = lines[:limit]
         notes.append(
@@ -171,11 +205,17 @@ def _pure_python_grep(
     except re.error as exc:
         return ToolOutcome(text=f"{head}\ninvalid pattern: {exc}", is_error=True)
 
+    from fluid.tools.hardening import is_sensitive_path
+
     state = WalkState(deadline=time.monotonic() + FALLBACK_DEADLINE_S)
     out: list[str] = []
     capped = False
+    dropped = 0
     for path in walk_files(root, state):
         if glob and not fnmatch.fnmatch(path.name, glob):
+            continue
+        if is_sensitive_path(str(path)):
+            dropped += 1
             continue
         for hit in _search_file(path, rx, limit - len(out)):
             out.append(hit)
@@ -183,7 +223,7 @@ def _pure_python_grep(
             capped = True
             break
 
-    notes: list[str] = []
+    notes: list[str] = _sensitive_note(dropped)
     if capped:
         notes.append(
             f"[search truncated: match cap {limit} reached — "

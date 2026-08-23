@@ -65,6 +65,68 @@ def fence_untrusted(text: str, source: str) -> str:
     )
 
 
+# ─── harness-marker defanging ────────────────────────────────────────────────
+
+# fluid's own trusted control channels. Genuine instances are appended by the
+# ENGINE after dispatch (nested-instruction reminders, delivered steers), so
+# any occurrence inside a tool result's own text — a README the model Read, a
+# kernel cell's stdout, an MCP payload — is spoofing: content trying to borrow
+# the authority the base prompt grants these exact markers. Defanged, not
+# blocked: the surrounding result is still legitimate data.
+_SYSTEM_REMINDER_RE = re.compile(r"<(\s*/?\s*)system-reminder(\s*)>", re.IGNORECASE)
+_STEER_MARKER_RE = re.compile(r"\[(/?)user interjection", re.IGNORECASE)
+
+
+def defang_harness_markers(text: str) -> str:
+    """Neutralize spoofed fluid control markers inside tool-result text."""
+    if not text:
+        return text
+    lowered = text.lower()
+    if "system-reminder" in lowered:
+        text = _SYSTEM_REMINDER_RE.sub(r"<\1system•reminder\2>", text)
+    if "user interjection" in lowered:
+        text = _STEER_MARKER_RE.sub(r"[\1user•interjection", text)
+    return text
+
+
+# ─── sensitive-path detection ────────────────────────────────────────────────
+
+# Files that exist to hold credentials. Matched against the basename (and two
+# suffix forms for directory-qualified names). Deliberately conservative:
+# every entry should be indefensible to read by default — ambiguous names
+# ("*.key", "secrets.md") stay out, and the user can always allow a path with
+# a permission rule or answer the prompt.
+SENSITIVE_BASENAME_GLOBS: tuple[str, ...] = (
+    ".env", ".env.*", "*.pem", "*.p12", "*.pfx",
+    "id_rsa", "id_rsa.*", "id_ed25519", "id_ed25519.*", "id_ecdsa", "id_ecdsa.*",
+    ".netrc", "_netrc", ".npmrc", ".pypirc", ".htpasswd", ".git-credentials",
+)
+SENSITIVE_PATH_SUFFIXES: tuple[str, ...] = (
+    "/.aws/credentials", "/.ssh/config",
+)
+
+
+# Template/sample variants are meant to be read; they carry no real values.
+_SENSITIVE_EXCEPTIONS = frozenset({".env.example", ".env.sample", ".env.template"})
+
+
+def is_sensitive_path(path: str) -> bool:
+    """True when ``path`` names a file that exists to hold credentials."""
+    from fnmatch import fnmatch
+
+    normalized = str(path).replace("\\", "/").rstrip("/")
+    basename = normalized.rsplit("/", 1)[-1]
+    if basename.lower() in _SENSITIVE_EXCEPTIONS:
+        return False
+    if any(fnmatch(basename, pattern) for pattern in SENSITIVE_BASENAME_GLOBS):
+        return True
+    lowered = normalized.lower()
+    return any(
+        lowered.endswith(suffix) or lowered == suffix.lstrip("/")
+        for suffix in SENSITIVE_PATH_SUFFIXES
+    )
+
+
 # ─── provider-side elision detection ─────────────────────────────────────────
 
 # Conservative markers some MCP servers embed when they elide data server-side.
