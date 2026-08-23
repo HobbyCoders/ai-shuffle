@@ -127,7 +127,12 @@
 	const sidebarSessions = $derived($sessions.filter((s) => isVisibleSidebarSession(s, liveKeys)));
 
 	function isStreaming(id: string): boolean {
-		if ($activeSession.sessionId === id) return $activeSession.isStreaming;
+		// On switch-in, $activeSession.isStreaming is reset to false until the SSE
+		// replay re-derives it — trusting it alone flashes the card to Done while
+		// the transcript loads. The cross-device map carries the durable busy
+		// signal (backend runs table), so OR it in for the open session too.
+		if ($activeSession.sessionId === id)
+			return $activeSession.isStreaming || $streamingSessions.has(id);
 		return $streamingSessions.has(id);
 	}
 

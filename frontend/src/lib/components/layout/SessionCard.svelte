@@ -361,8 +361,12 @@
 		width: 100%;
 		border-radius: 9px;
 	}
+	/* :has(:focus-visible), not :focus-within: a mouse click focuses the card
+	   (tabindex=0) and that focus persists, which used to stick the highlight +
+	   revealed action until the user clicked elsewhere. Keyboard focus still
+	   reveals everything. */
 	.scard-frame:hover,
-	.scard-frame:focus-within,
+	.scard-frame:has(:focus-visible),
 	.scard-frame.actions-open {
 		--ram-reveal: 1;
 	}
@@ -383,7 +387,7 @@
 		z-index: 2;
 	}
 	.scard-frame:hover .scard,
-	.scard-frame:focus-within .scard,
+	.scard-frame:has(:focus-visible) .scard,
 	.scard-frame.actions-open .scard {
 		background: var(--sidebar-accent);
 	}
@@ -502,9 +506,9 @@
 	.scard-frame:hover .scard.receded .proj,
 	.scard-frame:hover .scard.receded .l2,
 	.scard-frame:hover .scard.receded .l3,
-	.scard-frame:focus-within .scard.receded .proj,
-	.scard-frame:focus-within .scard.receded .l2,
-	.scard-frame:focus-within .scard.receded .l3 { opacity: 1; }
+	.scard-frame:has(:focus-visible) .scard.receded .proj,
+	.scard-frame:has(:focus-visible) .scard.receded .l2,
+	.scard-frame:has(:focus-visible) .scard.receded .l3 { opacity: 1; }
 
 	.l2 {
 		display: block;

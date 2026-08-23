@@ -234,6 +234,20 @@ describe('Sidebar session groups', () => {
 		expect(screen.queryByRole('menuitem', { name: /Unknown device/ })).toBeNull();
 	});
 
+	it('keeps a switched-in streaming session Working until its turn settles', async () => {
+		// Regression: switchSession resets $activeSession.isStreaming=false before
+		// the SSE replay re-derives it, which flashed an open working session's
+		// card to Done. The cross-device streaming map carries the durable busy
+		// signal and must keep the card Working through the load window.
+		mocks.activeSession.set({ sessionId: 'active', isStreaming: false });
+		mocks.streamingSessions.set(new Set(['active']));
+
+		render(Sidebar, { props: sidebarProps });
+
+		const card = screen.getByText('Active chat').closest('.scard');
+		expect(card?.querySelector('.status')?.textContent).toContain('Working');
+	});
+
 	it('marks the project ghost row active once a project filter is applied', async () => {
 		render(Sidebar, { props: sidebarProps });
 
