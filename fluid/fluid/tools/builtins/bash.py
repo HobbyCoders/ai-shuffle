@@ -41,10 +41,6 @@ SPEC = ToolSpec(
         "tested in Python (git merge-base, grep -q, test).\n"
         "- Quote file paths that contain spaces. Under Git Bash, write Windows "
         "paths with forward slashes or inside quotes so backslashes survive.\n"
-        "\n"
-        "Git discipline: never commit, push, or open a PR unless the user "
-        "asks. When they do, write commit messages that explain the why, and "
-        "never skip hooks or force-push unless explicitly told to."
     ),
     input_schema={
         "type": "object",
