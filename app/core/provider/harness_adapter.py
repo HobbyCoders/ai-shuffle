@@ -191,6 +191,11 @@ from app.core.provider.fluid_credentials import (
     resolve_provider_credentials,
 )
 from app.core.provider.protocol import ProviderAdapter
+# Registers the app-owned SafetyWarning shape with fluid's event codec. The
+# translation branch below matches on the class NAME, so it needs no symbol
+# from here — but a session replayed through this adapter must be decodable,
+# and only this import teaches the codec that class.
+from app.core.provider import legacy_events as _legacy_events  # noqa: F401
 from app.core.provider.types import (
     PermissionRequestEvent,
     ProviderEvent,
@@ -223,6 +228,8 @@ from app.core.provider.events import (
 from fluid.codemode.continual import Synthesizer
 from fluid.codemode.session import CodeModeSession
 from fluid.codemode.skills import SkillStore
+from fluid.context.compaction import CompactionConfig
+from fluid.context.trim import TrimConfig
 from fluid.engine.native import NativeLoop
 from fluid.engine.delegated import DelegatedLoop
 from fluid.events.ops import (
@@ -500,11 +507,13 @@ class HarnessAdapter(ProviderAdapter):
             # Only explicit user configuration may limit a native turn. There
             # is deliberately no install-wide model/token/cost/loop ceiling and
             # no automatic context trimming: provider usage remains telemetry,
-            # never a reason for AI Shuffle to stop or rewrite a turn.
+            # never a reason for AI Shuffle to stop or rewrite a turn. Both are
+            # now passed EXPLICITLY — fluid's own defaults are a 200-call
+            # ceiling and compaction ON, so omitting either knob would quietly
+            # reintroduce exactly what this paragraph rules out.
             native_caps: Dict[str, Any] = {}
             requested_calls = _positive_int(getattr(options, "max_turns", None))
-            if requested_calls is not None:
-                native_caps["max_model_calls_per_turn"] = requested_calls
+            native_caps["max_model_calls_per_turn"] = requested_calls
             max_tokens = _native_max_output_tokens(options)
             if max_tokens is not None:
                 native_caps["max_tokens"] = max_tokens
@@ -602,6 +611,13 @@ class HarnessAdapter(ProviderAdapter):
                     else None
                 ),
                 **native_caps,
+                # Context rewriting OFF, explicitly (see the ceiling note
+                # above). fluid's default is compaction ON; AI Shuffle never
+                # rewrites or digests a turn's history behind the user's back,
+                # so both tiers are disabled at construction.
+                compaction=CompactionConfig(
+                    enabled=False, trim=TrimConfig(enabled=False)
+                ),
                 # Native legs have no Claude Code preset — they always run the
                 # fluid-compiled prompt: the profile's configured prompt as the
                 # base (a preset-shaped profile has none) with the append text

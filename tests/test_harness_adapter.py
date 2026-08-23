@@ -44,6 +44,7 @@ from app.core.provider.events import (
 )
 
 from fluid.context.trim import estimate_tokens_of_text
+from app.core.provider.legacy_events import SafetyWarning
 from fluid.events import model as lm
 from fluid.events.ops import BackgroundTaskFinished, RespondPermission, UserTurn
 from fluid.providers.base import ProviderCaps, StreamChunk
@@ -2720,11 +2721,11 @@ def test_openrouter_pricing_is_sanitized_from_bound_provider_only(monkeypatch):
 @pytest.mark.asyncio
 async def test_legacy_safety_events_remain_replayable():
     events = [
-        lm.SafetyWarning(
+        SafetyWarning(
             session_id=SID, code="spend_budget", message="Spend warning",
             hard=False, counters={"model_calls": 7},
         ),
-        lm.SafetyWarning(
+        SafetyWarning(
             session_id=SID, code="spend_budget", message="Spend halted",
             hard=True, counters={"model_calls": 8},
         ),

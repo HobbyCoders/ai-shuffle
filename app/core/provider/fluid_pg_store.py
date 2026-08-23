@@ -29,6 +29,11 @@ from psycopg2.extras import Json
 from app.db.async_database import run_sync
 from app.db.base import get_db
 
+# Side-effect import: registers AI Shuffle's legacy ``SafetyWarning`` shape
+# with fluid's event codec. Must precede any ``event_from_dict`` call, or
+# sessions persisted before fluid stopped emitting that event fail to decode.
+from app.core.provider import legacy_events as _legacy_events  # noqa: F401
+
 from fluid.events.model import Event, event_from_dict, event_to_dict
 from fluid.messages import Message
 from fluid.store.base import SessionMeta, SessionNode, new_id
