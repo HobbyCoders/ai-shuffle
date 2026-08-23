@@ -7,9 +7,10 @@
 	 * Uses GroupedSelector for group-aware project selection.
 	 */
 	import { ChevronDown, FolderClosed } from 'lucide-svelte';
-	import { appData, clusterProjects, projects } from '$lib/stores/app-data.svelte';
+	import { appData, clusterProjects, profiles, projects } from '$lib/stores/app-data.svelte';
 	import AddProjectModal from '$lib/components/AddProjectModal.svelte';
 	import GroupedSelector from '$lib/components/GroupedSelector.svelte';
+	import { layout } from '$lib/stores/layout.svelte';
 	import {
 		buildWorkspacePickerItems,
 		pickerItemName,
@@ -119,6 +120,15 @@
 			</div>
 		{/if}
 	</div>
+
+	{#if $profiles.length === 0}
+		<!-- Nothing is seeded, so a fresh install lands here with an empty agent
+		     picker and a send that can only fail. Say what is missing where the
+		     user is already looking, rather than at submit time. -->
+		<button type="button" class="no-agents" onclick={() => layout.openFeaturePage('profile')}>
+			No agents yet — create one to start chatting
+		</button>
+	{/if}
 </div>
 
 <!-- Add Project Modal -->
@@ -158,6 +168,20 @@
 	/* Workspace picker trigger */
 	.picker-container {
 		position: relative;
+	}
+
+	.no-agents {
+		margin-top: 4px;
+		background: none;
+		border: none;
+		padding: 0;
+		color: var(--primary);
+		cursor: pointer;
+		font-size: 0.8125rem;
+	}
+
+	.no-agents:hover {
+		text-decoration: underline;
 	}
 
 	.picker-trigger {

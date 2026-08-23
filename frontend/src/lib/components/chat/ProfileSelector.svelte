@@ -8,6 +8,7 @@
 	import { profiles } from '$lib/stores/app-data.svelte';
 	import GroupedSelector from '$lib/components/GroupedSelector.svelte';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
+	import { layout } from '$lib/stores/layout.svelte';
 
 	interface Props {
 		sheetMode?: boolean;
@@ -24,7 +25,18 @@
 	const dropdownId = $derived(sheetMode ? 'sheet-profile' as const : 'profile' as const);
 	const showProfileDropdown = $derived($openHeaderDropdown === dropdownId);
 
-	const selectedProfileName = $derived($profiles.find(p => p.id === $activeSession.profile)?.name || 'Agent');
+	// "No agents" and "none picked yet" look identical on the pill otherwise,
+	// and only one of them is something the user can fix by opening the menu.
+	const hasNoAgents = $derived($profiles.length === 0);
+	const selectedProfileName = $derived(
+		$profiles.find(p => p.id === $activeSession.profile)?.name
+			|| (hasNoAgents ? 'No agents' : 'Agent')
+	);
+
+	function createAgent() {
+		closeProfileDropdown();
+		layout.openFeaturePage('profile');
+	}
 
 	function handleProfileClick(e: MouseEvent) {
 		e.stopPropagation();
@@ -96,7 +108,9 @@
 				entityType="profiles"
 				selectedId={$activeSession.profile}
 				onSelect={selectProfile}
-				emptyMessage="No agents available"
+				addLabel="Create agent"
+				onAdd={createAgent}
+				emptyMessage="No agents yet — create one to start chatting"
 			/>
 		</div>
 	{/if}

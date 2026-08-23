@@ -824,6 +824,26 @@ class ChatWebSocketHandler:
                 # this turn hands off exactly like any remotely-placed one.
                 placed_remote = True
 
+            # Refuse BEFORE creating anything when the composer's agent does
+            # not exist. sessions.profile_id has a FK to agents, so an id that
+            # names nothing — a stale selection, the 'claude-code' no-profile
+            # sentinel, or a fresh install with no agents at all — would
+            # otherwise surface as a foreign-key error out of the INSERT. The
+            # only thing the connection loop can do with that is log it and
+            # drop the socket, leaving the user with no message and no send.
+            if not await run_sync(database.get_profile, profile_id):
+                has_any = bool(await run_sync(database.get_all_profiles))
+                await self.send_json({
+                    "type": "error",
+                    "message": (
+                        "That agent no longer exists — pick another one."
+                        if has_any else
+                        "No agents are configured; create an agent before "
+                        "starting a chat."
+                    ),
+                })
+                return
+
             # Create new session
             session_id = str(uuid.uuid4())
             is_new_session = True

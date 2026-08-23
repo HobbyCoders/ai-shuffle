@@ -91,6 +91,11 @@ def _resolve_default_profile_id(project: Optional[dict], body_profile_id: Option
 
     No legacy project dict (remote-only compose by ``project_v2_id``) skips
     project settings and uses the first profile.
+
+    An install with no agents refuses here rather than handing a literal id
+    downstream: ``sessions.profile_id`` has a FK to ``agents``, so a made-up
+    fallback would surface as a 500 from the INSERT instead of telling the
+    user the one thing they need to do.
     """
     if body_profile_id:
         return body_profile_id
@@ -100,7 +105,12 @@ def _resolve_default_profile_id(project: Optional[dict], body_profile_id: Option
         if profile_id:
             return profile_id
     profiles = database.get_all_profiles()
-    return profiles[0]["id"] if profiles else "claude-code"
+    if not profiles:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No agents are configured; create an agent before starting a session.",
+        )
+    return profiles[0]["id"]
 
 
 async def _persist_and_broadcast_first_message(

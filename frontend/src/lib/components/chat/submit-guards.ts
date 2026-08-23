@@ -7,7 +7,7 @@
  * toast instead of silently swallowing the click (which read as a dead app).
  *
  * The order matters and is preserved exactly from the original inline guards:
- *   empty composer → upload in flight → worktree being created → no profile → no project.
+ *   empty composer → upload in flight → worktree being created → no agent → no project.
  */
 import type { NotificationSeverity } from '$lib/stores/notifications';
 
@@ -30,6 +30,12 @@ export interface SubmitGuardInput {
 	isCreatingWorktree: boolean;
 	/** A profile is selected. */
 	hasProfile: boolean;
+	/**
+	 * Any agent exists to select. The app seeds none, so "pick an agent" is
+	 * advice the user cannot follow on a fresh install — they have to make one
+	 * first, and the toast has to say so.
+	 */
+	hasAnyProfile: boolean;
 	/** A project is selected. */
 	hasProject: boolean;
 }
@@ -56,7 +62,9 @@ export function evaluateSubmitGuards(s: SubmitGuardInput): SubmitBlock | null {
 	}
 
 	if (!s.hasProfile) {
-		return { notice: { message: 'Select a profile first.', tone: 'warning' } };
+		return s.hasAnyProfile
+			? { notice: { message: 'Select an agent first.', tone: 'warning' } }
+			: { notice: { message: 'No agents yet — create one to start chatting.', tone: 'warning' } };
 	}
 	if (!s.hasProject) {
 		return { notice: { message: 'Select a project first.', tone: 'warning' } };

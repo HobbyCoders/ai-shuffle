@@ -1,10 +1,11 @@
 """
 Profile and subagent utilities
 
-Seeds one ordinary starter agent when an install has none, so the composer
-always has something to chat with. No agent is built-in or protected any more:
-the old "Default AI" agent existed to configure internal AI generation, and
-that binding is now a setting (Settings -> Providers -> Generated text).
+The app ships no agents at all: a fresh install starts empty and the first
+thing its owner does is create the agent they actually want. No agent is
+built-in or protected either — the old "Default AI" agent existed to configure
+internal AI generation, and that binding is now a setting (Settings ->
+Providers -> Generated text).
 """
 
 import logging
@@ -40,70 +41,6 @@ DEFAULT_PROFILE_CONFIG: Dict[str, Any] = {
 }
 
 
-# ============================================================================
-# Starter agent
-# ============================================================================
-# A fresh install seeds ONE ordinary agent so the composer has something to
-# chat with — sending is blocked without a selected agent. It is not built-in:
-# rename it, edit it, or delete it once you have made your own.
-#
-# It replaces the old built-in "Default AI" agent, which existed to configure
-# internal AI generation. That binding is now a setting (Settings -> Providers
-# -> Generated text, ``generation_options.text_generation_config``), because
-# generation runs one-shot outside any session and so has no agent whose
-# configuration would sensibly apply.
-
-STARTER_AGENT_ID = "default"
-
-STARTER_AGENT: Dict[str, Any] = {
-    "id": STARTER_AGENT_ID,
-    "name": "Default",
-    "description": "Starter agent. Edit its prompt, tools, memory and subagents; "
-                   "pick the model when you start a chat.",
-    "config": {
-        "system_prompt": {
-            "type": "custom",
-            "content": "",
-        },
-        # Ruling T2 vocabulary. Everything except the app-configuration tools:
-        # ``app_config_tools`` used to be its own switch, defaulting OFF, and
-        # T5 folded it into the tool lists — so the starter agent keeps the
-        # exact posture it always had (a fresh install's default agent cannot
-        # rewrite hooks, automations, MCP servers or agents until its owner
-        # ticks the group in the picker).
-        "tool_selection_mode": "disallow",
-        "disallowed_tools": ["mcp__app-config__*"],
-        # Live streaming deltas ON: this is the agent a fresh install chats
-        # with, and the app's streaming UX (typewriter, gap indicators,
-        # stream_delta handling) requires partial messages. With this False a
-        # fresh install saw dead air for the whole turn and then one chunk at
-        # turn end. Matches the True default every other code path uses
-        # (query_options, profiles API, new-profile UI).
-        "include_partial_messages": True,
-        "continue_conversation": False,
-        "fork_session": False,
-        "enabled_agents": [
-            "chat-history-summarizer",
-            "Explore",
-            "frontend-designer",
-            "general-purpose",
-            "Plan",
-        ],
-        "ai_tools": {
-            "image_generation": True,
-            "image_editing": True,
-            "image_reference": True,
-            "video_generation": True,
-            "image_to_video": True,
-            "video_extend": True,
-            "text_to_3d": True,
-            "image_to_3d": True,
-            "tts": True,
-            "stt": True,
-        },
-    },
-}
-
 # The retired built-in. Nothing creates or protects it any more; the migration
 # below only unlocks the row an existing install still has, so its owner can
 # delete it like any other agent.
@@ -117,12 +54,9 @@ def run_migrations():
     """
     _migrate_instance_id()
 
-    # Retire the old built-in before seeding, so an install that still has it
-    # is not handed a second agent it never asked for.
+    # Unlock the old built-in on an install that still has one, so its owner
+    # can delete it like any other agent.
     _retire_default_ai_agent()
-
-    # Make sure there is at least one agent to chat with
-    _seed_starter_agent()
 
     # Seed default templates if none exist
     _seed_default_templates()
@@ -198,30 +132,6 @@ def _migrate_instance_id():
         if not column_exists(cursor, "projects", "instance_id"):
             cursor.execute("ALTER TABLE projects ADD COLUMN instance_id TEXT")
             logger.info("Added instance_id column to projects table")
-
-
-def _seed_starter_agent():
-    """Create the starter agent when the install has no agents at all.
-
-    Gated on the table being EMPTY, not on a particular id: an install that
-    already has agents (including one upgrading from the old built-in) is left
-    exactly as it is, and deleting the starter sticks as long as another agent
-    remains. Reaching zero agents makes chat impossible, so seeding one back is
-    the useful behaviour rather than a resurrection.
-    """
-    try:
-        if database.get_all_profiles():
-            return
-        database.create_profile(
-            profile_id=STARTER_AGENT["id"],
-            name=STARTER_AGENT["name"],
-            description=STARTER_AGENT["description"],
-            config=STARTER_AGENT["config"],
-            is_builtin=False,
-        )
-        logger.info("Seeded the starter agent (no agents existed)")
-    except Exception:  # noqa: BLE001 - never block boot on the convenience seed
-        logger.warning("Could not seed the starter agent", exc_info=True)
 
 
 # Default templates to seed on first run

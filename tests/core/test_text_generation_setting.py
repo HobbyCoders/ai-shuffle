@@ -13,8 +13,8 @@ Covers:
 - ``_retire_default_ai_agent`` carries an existing install's Default AI model
   (and effort) onto the setting exactly once and unlocks the row for deletion,
   without deleting it or touching its config;
-- ``_seed_starter_agent`` gives an install with no agents something to chat
-  with, and leaves an install that has any alone.
+- startup seeds NO agent: a fresh install has an empty agent list and its
+  owner creates the first one.
 """
 
 from app.core.generation_options import (
@@ -25,9 +25,8 @@ from app.core.generation_options import (
 from app.core.model_registry import DEFAULT_MODEL
 from app.core.profiles import (
     RETIRED_DEFAULT_AI_ID,
-    STARTER_AGENT_ID,
     _retire_default_ai_agent,
-    _seed_starter_agent,
+    run_migrations,
 )
 from app.db import database as db
 
@@ -135,32 +134,29 @@ def _clear_agents():
         db.delete_profile(row["id"])
 
 
-class TestSeedStarterAgent:
-    def test_seeds_when_there_are_no_agents(self, mock_db):
+class TestNoStarterAgentIsSeeded:
+    """The app ships no agents. Startup must leave an empty install empty --
+    the first agent is one the user creates, not one we guessed at."""
+
+    def test_startup_leaves_a_fresh_install_with_no_agents(self, mock_db):
         _clear_agents()
-        _seed_starter_agent()
+        run_migrations()
 
-        row = db.get_profile(STARTER_AGENT_ID) or {}
-        assert row.get("name") == "Default"
-        # Ordinary from birth: deletable, with no run binding of its own.
-        assert row.get("is_builtin") in (False, 0)
-        assert "model" not in (row.get("config") or {})
+        assert db.get_all_profiles() == []
 
-    def test_leaves_an_install_that_has_agents_alone(self, mock_db):
+    def test_startup_leaves_an_install_that_has_agents_alone(self, mock_db):
         _clear_agents()
         db.create_profile(
             profile_id="mine", name="Mine", description=None, config={}
         )
-        _seed_starter_agent()
+        run_migrations()
 
         assert {p["id"] for p in db.get_all_profiles()} == {"mine"}
 
-    def test_does_not_resurrect_alongside_the_retired_builtin(self, mock_db):
-        """An upgrading install already has an agent, so it is not handed a
-        second one it never asked for."""
+    def test_retiring_the_old_builtin_does_not_add_a_replacement(self, mock_db):
+        """An upgrading install keeps exactly the agent it already had."""
         _clear_agents()
         _mk_default_ai({"model": "opus"})
-        _retire_default_ai_agent()
-        _seed_starter_agent()
+        run_migrations()
 
         assert {p["id"] for p in db.get_all_profiles()} == {RETIRED_DEFAULT_AI_ID}
