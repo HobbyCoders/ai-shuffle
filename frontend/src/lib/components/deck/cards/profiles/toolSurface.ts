@@ -115,7 +115,13 @@ export function toolBlockedReason(
 ): string | null {
 	const groupReason = groupBlockedReason(group, ctx);
 	if (groupReason) return groupReason;
-	if (tool.available === false) return 'No API key configured for this tool.';
+	if (tool.available === false) {
+		// The backend explains the shadowed builtins and the remotely-pinned
+		// connector gateways; AI rows carry no reason, so the key line stands.
+		const reason = tool.unavailable_reason;
+		if (typeof reason === 'string' && reason.trim()) return reason;
+		return 'No API key configured for this tool.';
+	}
 	return null;
 }
 

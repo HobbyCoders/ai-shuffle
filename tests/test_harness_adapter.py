@@ -1849,6 +1849,10 @@ class _CapturingLoop:
 
     def __init__(self, **kwargs):
         type(self).captured = dict(kwargs)
+        # Mirror NativeLoop: the priced "Custom agents" list lives on the
+        # instance, so ``connect``'s post-construction clear has something real
+        # to act on.
+        self.agents = list(kwargs.get("agents") or ())
 
     async def _ensure_session(self):
         class _Meta:
@@ -4482,7 +4486,7 @@ def agent_workspace(tmp_path, monkeypatch):
     return project
 
 
-def _agents_options(cwd, declared=None):
+def _agents_options(cwd, declared=None, disallowed_tools=None):
     extra = {"fluid_provider": "openai_responses"}
     if declared is not None:
         extra["declared_agents"] = declared
@@ -4491,6 +4495,7 @@ def _agents_options(cwd, declared=None):
         system_prompt="BASE PROMPT",
         cwd=str(cwd),
         extra=extra,
+        disallowed_tools=disallowed_tools,
     )
 
 
@@ -4535,7 +4540,8 @@ async def test_declared_db_agents_reach_native_loop_as_descriptors(
     monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
     monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
 
-    await ha.HarnessAdapter().connect(
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(
         _agents_options(
             agent_workspace,
             declared=[{"name": "Helper", "description": "Helps out"}],
@@ -4549,6 +4555,37 @@ async def test_declared_db_agents_reach_native_loop_as_descriptors(
     # The discovered definitions ride along too — passing ``agents=`` at all
     # suppresses fluid's own auto-fill, so the usage row must not lose them.
     assert {a["agentType"] for a in agents} == {"Helper", "researcher"}
+    # Control side of the T9 clear in ``connect``: a regression that cleared the
+    # priced list unconditionally would still pass the suppressed-index test.
+    assert adapter._engine.agents
+
+
+@pytest.mark.asyncio
+async def test_suppressed_agents_index_zeroes_the_usage_descriptors(
+    monkeypatch, agent_workspace
+):
+    """Task disallowed (T9) drops the index from the prompt — the "Custom
+    agents" row's descriptors must drop with it."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(
+        _agents_options(
+            agent_workspace,
+            declared=[{"name": "Helper", "description": "Helps out"}],
+            disallowed_tools=["Task"],
+        )
+    )
+
+    assert "Available agent types" not in (_CapturingLoop.captured["system"] or "")
+    # The constructor still received the descriptors — an empty list there
+    # reads as None and would auto-fill from disk — and the priced list is
+    # cleared afterwards instead.
+    assert _CapturingLoop.captured["agents"]
+    assert adapter._engine.agents == []
 
 
 @pytest.mark.asyncio

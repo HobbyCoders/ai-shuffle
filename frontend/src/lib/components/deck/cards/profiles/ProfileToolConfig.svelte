@@ -203,7 +203,7 @@
 								class:mixed={state === 'some'}
 								role="checkbox"
 								aria-checked={state === 'all' ? 'true' : state === 'some' ? 'mixed' : 'false'}
-								aria-label={`Toggle all ${group.label} tools`}
+								aria-label={`Toggle all ${group.label}${/tools$/i.test(group.label) ? '' : ' tools'}`}
 								disabled={!editing || !!blocked}
 								onclick={() => onToggleGroup(group)}
 							>

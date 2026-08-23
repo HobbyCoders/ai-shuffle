@@ -97,6 +97,76 @@ def test_app_and_app_config_groups(client):
     assert "mcp__app-config__listHooks" in {t["name"] for t in cfg["tools"]}
 
 
+def test_shadowed_builtins_are_greyed_not_dropped(client):
+    """Native legs run fluid's own Task/Monitor/ToolSearch, so the bridged
+    ``mcp__builtins__`` copies can never be attached — the picker must show
+    them as unavailable with a reason rather than silently omit them."""
+    from app.core.provider.fluid_tool_bridge import NATIVE_SHADOWED_BUILTINS
+
+    rows = {t["name"]: t for t in _group(_surface(client), "app")["tools"]}
+    for bare in NATIVE_SHADOWED_BUILTINS:
+        row = rows[f"mcp__builtins__{bare}"]
+        assert row["available"] is False, bare
+        assert row["unavailable_reason"], bare
+        assert bare in row["unavailable_reason"], bare
+
+    # A control row from the same group is untouched.
+    assert rows["mcp__builtins__Memory"].get("available") is not False
+
+
+def test_gateway_reasons_name_only_the_types_pinned_elsewhere(monkeypatch):
+    """A connector type whose every active row runs on another install cannot
+    be reached from here; one that is ours or unclaimed still can."""
+    import app.db.database as database
+    from app.core.config import Settings, settings
+    from app.mcp import connector_gateway_sdk
+
+    monkeypatch.setattr(
+        connector_gateway_sdk,
+        "get_gateway_tool_names",
+        lambda: [
+            "mcp__builtins__discord_actions",
+            "mcp__builtins__discord_invoke",
+            "mcp__builtins__homeassistant_actions",
+            "mcp__builtins__homeassistant_invoke",
+            "mcp__builtins__gmail_actions",
+            "mcp__builtins__gmail_invoke",
+        ],
+    )
+    monkeypatch.setattr(
+        database,
+        "get_active_connectors",
+        lambda: [
+            {"id": "1", "type": "discord", "runner_id": "other-install"},
+            {"id": "2", "type": "homeassistant", "runner_id": None},
+            {"id": "3", "type": "gmail", "runner_id": "this-install"},
+        ],
+    )
+    monkeypatch.setattr(
+        Settings, "effective_instance_id", property(lambda self: "this-install")
+    )
+    assert settings.effective_instance_id == "this-install"
+
+    reasons = tool_catalog._gateway_unavailable_reasons()
+    assert set(reasons) == {
+        "mcp__builtins__discord_actions",
+        "mcp__builtins__discord_invoke",
+    }
+    assert all(r == "The discord connector runs on another install." for r in reasons.values())
+
+
+def test_gateway_reasons_are_empty_when_the_lookup_fails(monkeypatch):
+    """Availability marking is best-effort: a broken DB must not break
+    discovery."""
+    import app.db.database as database
+
+    def _boom():
+        raise RuntimeError("no database")
+
+    monkeypatch.setattr(database, "get_active_connectors", _boom)
+    assert tool_catalog._gateway_unavailable_reasons() == {}
+
+
 def test_ai_group_carries_availability(client):
     ai = _group(_surface(client), "ai")
     assert ai["kind"] == "ai"

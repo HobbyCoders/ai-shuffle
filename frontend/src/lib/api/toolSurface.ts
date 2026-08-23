@@ -25,8 +25,14 @@ export interface ToolSurfaceTool {
 	name: string;
 	description: string;
 	risk?: ToolRisk;
-	/** AI tools carry this: false = no API key configured for it. */
+	/**
+	 * False when no session on this install can actually receive the tool:
+	 * an AI tool with no API key, a builtin the harness shadows on every
+	 * native leg, or a connector gateway pair pinned to another install.
+	 */
 	available?: boolean;
+	/** Why the row cannot be granted, when the backend knows — shown as the tooltip. */
+	unavailable_reason?: string | null;
 }
 
 export interface ToolSurfaceGroup {

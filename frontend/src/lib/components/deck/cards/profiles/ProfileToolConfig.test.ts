@@ -129,7 +129,9 @@ function setup(overrides: Overrides = {}) {
 }
 
 const groupBox = (getByRole: any, label: string) =>
-	getByRole('checkbox', { name: `Toggle all ${label} tools` }) as HTMLButtonElement;
+	getByRole('checkbox', {
+		name: `Toggle all ${label}${/tools$/i.test(label) ? '' : ' tools'}`
+	}) as HTMLButtonElement;
 
 /** Only the harness group starts open, so anything else has to be unfolded. */
 const expand = (getByRole: any, label: string) =>
@@ -172,6 +174,14 @@ describe('tri-state group checkbox', () => {
 		// generateVideo has no API key, so generateImage alone IS the whole group.
 		const { getByRole } = setup({ allowedTools: ['mcp__ai-tools__generateImage'] });
 		expect(groupBox(getByRole, 'AI tools').getAttribute('aria-checked')).toBe('true');
+	});
+
+	it('never doubles the word in a group label that already ends in "tools"', () => {
+		const { getByRole } = setup({ allowedTools: [] });
+		expect(groupBox(getByRole, 'AI tools').getAttribute('aria-label')).toBe('Toggle all AI tools');
+		expect(groupBox(getByRole, 'Harness builtins').getAttribute('aria-label')).toBe(
+			'Toggle all Harness builtins tools'
+		);
 	});
 
 	it('selects the whole group on click and clears it on the next click', async () => {

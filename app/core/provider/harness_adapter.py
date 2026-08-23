@@ -651,6 +651,21 @@ class HarnessAdapter(ProviderAdapter):
                 # own rules keep the final say) and ``env`` rides as a
                 # child-process overlay, never an os.environ mutation.
             )
+            # Ruling T9 again, on the pricing side: when the compiled prompt
+            # carries no agents index (``Task`` not permitted, or a compiler
+            # failure that fell back to the raw prompt parts), the "Custom
+            # agents" usage row must price ZERO — there is no section to pay
+            # for. This cannot be expressed by passing ``agents=[]`` above:
+            # NativeLoop's constructor treats an empty list and None
+            # identically ("auto-fill from disk discovery"), so the priced list
+            # is cleared AFTER construction instead — get_context_usage() reads
+            # ``self.agents`` at call time. Dispatch is untouched: the agent
+            # registry rides ``ctx.extra["agent_registry"]``, not this list.
+            prompt_has_agents_index = compiled_prompt is not None and any(
+                section.kind == "agents" for section in compiled_prompt.sections
+            )
+            if not prompt_has_agents_index:
+                self._engine.agents = []
             # An enabled plugin may declare an MCP server under a name the app
             # also configures. fluid's own host-wins check only sees servers
             # passed as ``NativeLoop(mcp_servers=...)``, and the app connects
@@ -1899,6 +1914,7 @@ class HarnessAdapter(ProviderAdapter):
         # tools on fluid's registry with the bridge's risk maps.
         from app.core.provider.fluid_tool_bridge import (
             DEFERRED_SDK_SERVERS,
+            NATIVE_SHADOWED_BUILTINS,
             register_recorded_sdk_servers,
         )
         # Native legs run fluid's bare-named Task and Monitor builtins
@@ -1915,7 +1931,7 @@ class HarnessAdapter(ProviderAdapter):
         recorded = register_recorded_sdk_servers(
             registry,
             options.mcp_servers,
-            skip_tools={"builtins": {"Task", "Monitor", "ToolSearch"}} if native else None,
+            skip_tools={"builtins": set(NATIVE_SHADOWED_BUILTINS)} if native else None,
             defer_servers=DEFERRED_SDK_SERVERS if native else None,
         )
         if recorded:

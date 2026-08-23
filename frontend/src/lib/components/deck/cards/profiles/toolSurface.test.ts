@@ -135,6 +135,33 @@ describe('availability', () => {
 		]);
 	});
 
+	it('prefers the backend reason when a row carries one', () => {
+		const appGroup: ToolSurfaceGroup = {
+			id: 'app',
+			label: 'App tools',
+			kind: 'app',
+			server: null,
+			tools: [
+				{
+					name: 'mcp__builtins__Task',
+					description: 'Delegate.',
+					available: false,
+					unavailable_reason: "Native sessions run the harness's own Task tool."
+				}
+			]
+		};
+		expect(toolBlockedReason(appGroup, appGroup.tools[0], OPEN)).toBe(
+			"Native sessions run the harness's own Task tool."
+		);
+	});
+
+	it('falls back to the API-key line when no reason is given', () => {
+		expect(toolBlockedReason(aiTools, { ...aiTools.tools[1] }, OPEN)).toMatch(/no api key/i);
+		expect(
+			toolBlockedReason(aiTools, { ...aiTools.tools[1], unavailable_reason: '  ' }, OPEN)
+		).toMatch(/no api key/i);
+	});
+
 	it('offers nothing at all from a blocked group', () => {
 		expect(selectableTools(computerUse, LOCKED)).toEqual([]);
 		expect(selectableTools(appConfig, LOCKED)).toEqual([]);

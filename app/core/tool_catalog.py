@@ -122,13 +122,67 @@ def _sdk_server_tools(server_cfg: Any) -> List[Any]:
     return list(recorded_sdk_server_tools(server_cfg) or [])
 
 
+def _gateway_unavailable_reasons() -> Dict[str, str]:
+    """``{gateway tool name: reason}`` for connector types pinned elsewhere.
+
+    A connector row carries a ``runner_id``: ours, NULL (claimable here), or
+    another install's (see ``app/core/connectors/manager.py``). When every
+    active row of a type is pinned to another install, no session on THIS
+    install can ever reach its ``{type}_actions`` / ``{type}_invoke`` pair, so
+    the picker should grey those two rows rather than pretend they are
+    grantable. A type with no active connector rows at all is left alone —
+    nothing is decided about a connector nobody has configured yet.
+
+    Best-effort by design: any failure returns ``{}`` so the marking is simply
+    skipped and discovery still answers.
+    """
+    try:
+        from app.core.config import settings
+        from app.db import database
+        from app.mcp.connector_gateway_sdk import get_gateway_tool_names
+
+        me = settings.effective_instance_id
+        runners_by_type: Dict[str, List[Any]] = {}
+        for row in database.get_active_connectors() or ():
+            ctype = row.get("type")
+            if not ctype:
+                continue
+            runners_by_type.setdefault(str(ctype), []).append(row.get("runner_id"))
+
+        reasons: Dict[str, str] = {}
+        for name in get_gateway_tool_names():
+            bare = name[len("mcp__builtins__"):] if name.startswith("mcp__builtins__") else name
+            for suffix in ("_actions", "_invoke"):
+                if bare.endswith(suffix):
+                    ctype = bare[: -len(suffix)]
+                    break
+            else:
+                continue
+            runners = runners_by_type.get(ctype)
+            if not runners:
+                continue
+            if any(r in (None, me) for r in runners):
+                continue
+            reasons[name] = f"The {ctype} connector runs on another install."
+        return reasons
+    except Exception:  # noqa: BLE001 — availability marking must never break discovery
+        logger.debug("could not decide gateway tool availability", exc_info=True)
+        return {}
+
+
 def app_tools() -> List[Dict[str, Any]]:
     """``mcp__builtins__*`` — the app's bridge tools.
 
     Built with no session/project context: the factory only closes over those
     ids, so the definitions (name + description) it produces are the same ones
     a real session gets.
+
+    Two classes of row are marked ``available: False`` with an
+    ``unavailable_reason`` rather than dropped, so the picker greys them and
+    can say why: the builtins that fluid shadows on every native leg, and the
+    connector gateway pairs whose connector runs on another install.
     """
+    from app.core.provider.fluid_tool_bridge import NATIVE_SHADOWED_BUILTINS
     from app.mcp.builtin_tools import create_builtin_tools_server, get_builtin_tool_names
 
     described: Dict[str, Any] = {}
@@ -142,6 +196,21 @@ def app_tools() -> List[Dict[str, Any]]:
 
     names = list(dict.fromkeys(list(described) + get_builtin_tool_names()))
     rows = [_tool_row(name, described.get(name)) for name in names]
+
+    unavailable: Dict[str, str] = {
+        f"mcp__builtins__{bare}": (
+            f"Native sessions run the harness's own {bare} tool; this bridged "
+            "copy is never attached."
+        )
+        for bare in NATIVE_SHADOWED_BUILTINS
+    }
+    unavailable.update(_gateway_unavailable_reasons())
+    for row in rows:
+        reason = unavailable.get(row["name"])
+        if reason:
+            row["available"] = False
+            row["unavailable_reason"] = reason
+
     rows.sort(key=lambda r: r["name"])
     return rows
 

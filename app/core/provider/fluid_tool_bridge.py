@@ -245,6 +245,13 @@ DEFERRED_SDK_SERVERS: frozenset[str] = frozenset({
     "provider-agent",
 })
 
+# Builtins whose ``mcp__builtins__`` copies are skipped on EVERY native leg:
+# fluid registers its own bare-named versions there (ruling A13), so bridging
+# the copy would show the model two of each. One set, two readers — the harness
+# adapter's ``skip_tools`` (what actually drops them) and the tool catalog's
+# availability marking (what tells the picker why the row is greyed).
+NATIVE_SHADOWED_BUILTINS: frozenset[str] = frozenset({"Task", "Monitor", "ToolSearch"})
+
 
 def register_recorded_sdk_servers(
     registry: ToolRegistry,
