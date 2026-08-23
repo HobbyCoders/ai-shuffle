@@ -55,6 +55,14 @@ _cache_lock = threading.Lock()
 # Only mutated on the event loop (single-threaded between awaits).
 _last_broadcast: Dict[str, Dict[str, Optional[str]]] = {}
 
+# Per-session recheck chains: session_id -> the most recently spawned recheck
+# task. Each recheck awaits its predecessor so two transitions (turn N's
+# release, turn N+1's claim) can never interleave their read→send windows and
+# land on the wire out of order — an OFF frame sent AFTER a newer ON leaves
+# the board dark with no recovery: the sweep only revisits sessions it still
+# believes are busy, and plain gateway-tick rechecks are diff-suppressed.
+_chains: Dict[str, "asyncio.Task"] = {}
+
 # Event loop captured at startup so notify() can be called from any thread
 # (the event gateway's LISTEN loop runs in a daemon thread).
 _loop: Optional[asyncio.AbstractEventLoop] = None
@@ -246,7 +254,7 @@ def notify(session_id: str, force: bool = False) -> None:
                 return
             loop.call_soon_threadsafe(_schedule_recheck, session_id, force)
             return
-        loop.create_task(_recheck(session_id, force))
+        _spawn_recheck(session_id, force)
     except Exception:
         logger.debug(
             "[streaming_status] notify scheduling failed for %s",
@@ -257,7 +265,7 @@ def notify(session_id: str, force: bool = False) -> None:
 def _schedule_recheck(session_id: str, force: bool = False) -> None:
     """Loop-thread trampoline for cross-thread notify()."""
     try:
-        asyncio.get_running_loop().create_task(_recheck(session_id, force))
+        _spawn_recheck(session_id, force)
     except Exception:
         logger.debug(
             "[streaming_status] recheck scheduling failed for %s",
@@ -265,44 +273,79 @@ def _schedule_recheck(session_id: str, force: bool = False) -> None:
         )
 
 
-async def _recheck(session_id: str, force: bool = False) -> None:
-    """Uncached busy re-check; broadcast the diff if the state flipped."""
+def _spawn_recheck(session_id: str, force: bool) -> "asyncio.Task":
+    """Spawn a recheck chained behind any pending one for this session."""
+    prev = _chains.get(session_id)
+    task = asyncio.create_task(_recheck(session_id, force, prev))
+    _chains[session_id] = task
+    return task
+
+
+async def _recheck(
+    session_id: str,
+    force: bool = False,
+    prev: Optional["asyncio.Task"] = None,
+) -> bool:
+    """Uncached busy re-check; broadcast the diff if the state flipped.
+
+    Awaits ``prev`` (this session's prior recheck) BEFORE reading, so
+    evaluations run strictly in notify order and their frames hit the wire in
+    that order too. Returns True iff a frame was broadcast.
+    """
     try:
-        busy = await asyncio.to_thread(_has_active_run_db, session_id)
-    except Exception:
-        logger.warning(
-            "[streaming_status] recheck read failed for %s",
-            session_id, exc_info=True,
-        )
-        return
-    await _apply_busy_state(session_id, busy, force=force)
+        if prev is not None:
+            try:
+                await prev
+            except asyncio.CancelledError:
+                if asyncio.current_task().cancelling() > 0:
+                    raise
+                return False
+            except Exception:
+                pass  # predecessor failed — evaluate against current state
+        try:
+            busy = await asyncio.to_thread(_has_active_run_db, session_id)
+        except Exception:
+            logger.warning(
+                "[streaming_status] recheck read failed for %s",
+                session_id, exc_info=True,
+            )
+            return False
+        return await _apply_busy_state(session_id, busy, force=force)
+    finally:
+        if _chains.get(session_id) is asyncio.current_task():
+            _chains.pop(session_id, None)
 
 
-async def _apply_busy_state(session_id: str, busy: bool, force: bool = False) -> None:
+async def _apply_busy_state(session_id: str, busy: bool, force: bool = False) -> bool:
     """Diff ``busy`` against the last-broadcast state; broadcast on change.
 
-    Dict mutations happen between awaits on the event loop, so concurrent
-    rechecks resolve to at most one broadcast per transition. ``force=True``
+    Dict mutations happen between awaits on the event loop; per-session
+    serialization (``_chains``) keeps evaluations ordered. ``force=True``
     (a run claim) re-sends the ON frame even when the last-broadcast map says
     already-busy — the map can hold a stale entry from a PREVIOUS turn whose
     spinner-off the frontend already consumed via the done frame.
+    Returns True iff a frame was broadcast.
     """
     if busy:
         existing = _last_broadcast.get(session_id)
         if existing is not None:
             if not force:
-                return  # unchanged — no broadcast
+                return False  # unchanged — no broadcast
             info = existing
         else:
             info = await asyncio.to_thread(_broadcast_info, session_id)
             if session_id in _last_broadcast and not force:
-                return  # lost a benign race to a concurrent recheck
+                return False  # lost a benign race to a concurrent recheck
         _last_broadcast[session_id] = info
     else:
         info = _last_broadcast.pop(session_id, None)
         if info is None:
-            return  # unchanged — no broadcast
+            return False  # unchanged — no broadcast
+        # The OFF transition also invalidates any cached guard read.
+        with _cache_lock:
+            _cache.pop(session_id, None)
     await _send_streaming_changed(session_id, busy, info)
+    return True
 
 
 async def _send_streaming_changed(
@@ -352,17 +395,16 @@ async def sweep_once() -> int:
     cleared = 0
     for session_id in list(_last_broadcast):
         try:
-            busy = await asyncio.to_thread(_has_active_run_db, session_id)
+            # Through the per-session chain so the sweep's evaluation cannot
+            # interleave with (and land after) a newer claim's forced ON.
+            sent_off = await _spawn_recheck(session_id, False)
         except Exception:
             logger.warning(
                 "[streaming_status] sweep read failed for %s",
                 session_id, exc_info=True,
             )
             continue
-        if not busy:
-            with _cache_lock:
-                _cache.pop(session_id, None)
-            await _apply_busy_state(session_id, False)
+        if sent_off:
             cleared += 1
     return cleared
 
@@ -430,9 +472,10 @@ def install_gateway_listener() -> None:
 
 
 def _reset_state() -> None:
-    """Test helper — drop the cache, last-broadcast map and captured loop."""
+    """Test helper — drop the cache, last-broadcast map, chains and loop."""
     global _loop
     with _cache_lock:
         _cache.clear()
     _last_broadcast.clear()
+    _chains.clear()
     _loop = None
