@@ -95,6 +95,29 @@ function isSettledSubagent(msg: ChatMessage): boolean {
 	return msg.type === 'subagent' && (msg.agentStatus === 'completed' || msg.agentStatus === 'error');
 }
 
+/**
+ * A `provider_retry` card that has nothing left to say or offer.
+ *
+ * Transient retries are routine: a turn can rack up a dozen of them, and once
+ * they are over they carry no more signal than a finished tool call, so they
+ * belong inside the turn's fold rather than scattered down the transcript. A
+ * card is finished when the reducer stamped `settled` (the retries recovered or
+ * the turn ended), or when an `exhausted` card has since been `recovered` or
+ * `superseded` and no longer owns a Retry button.
+ *
+ * Anything else — a live attempt counter, an exhausted card still offering the
+ * button, a resume in flight — is active or actionable and keeps its own row.
+ * A card with no `systemData` yet is a first attempt: active.
+ */
+export function isFoldableRetryCard(msg: ChatMessage): boolean {
+	if (msg.systemSubtype !== 'provider_retry') return false;
+	if (msg.type !== 'system' && msg.role !== 'system') return false;
+	const data = msg.systemData as Record<string, unknown> | undefined;
+	if (!data) return false;
+	if (data.settled === true) return true;
+	return data.exhausted === true && (data.recovered === true || data.superseded === true);
+}
+
 function isAssistantText(msg: ChatMessage): boolean {
 	return msg.role === 'assistant' && (msg.type === 'text' || !msg.type) && !!msg.content?.trim();
 }
@@ -107,6 +130,9 @@ function isAssistantPhantom(msg: ChatMessage): boolean {
 function isCompletedRoutineWork(msg: ChatMessage): boolean {
 	if (msg.type === 'thinking') return !msg.streaming;
 	if (msg.type === 'subagent') return isSettledSubagent(msg);
+	// A finished retry note is routine work: it folds with the run instead of
+	// stacking a dozen standalone cards down a turn that recovered on its own.
+	if (isFoldableRetryCard(msg)) return true;
 	// A hidden code-mode cell draws nothing at all. Folding it keeps a live run
 	// contiguous instead of splitting the chip around an invisible row.
 	if (isHiddenCodeModeCell(msg)) return true;

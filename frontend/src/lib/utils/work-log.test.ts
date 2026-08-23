@@ -46,6 +46,16 @@ function subagent(over: Partial<ChatMessage> = {}): ChatMessage {
 	return msg({ type: 'subagent', agentName: 'Explore', agentStatus: 'completed', ...over });
 }
 
+function retryCard(systemData: Record<string, unknown> | undefined = undefined): ChatMessage {
+	return msg({
+		role: 'system',
+		type: 'system',
+		systemSubtype: 'provider_retry',
+		content: 'Retrying…',
+		...(systemData ? { systemData } : {})
+	});
+}
+
 function workEntries(messages: ChatMessage[]): WorkLogEntry[] {
 	return messages.map((message, index) => ({ message, index }));
 }
@@ -218,6 +228,46 @@ describe('buildDisplayItems — settled turns', () => {
 		if (fold?.kind !== 'work_log') throw new Error('expected a work_log');
 		expect(fold.durationLabel).toBe('Worked');
 	});
+
+	it('folds a settled retry card instead of stranding it beside the turn', () => {
+		const settledRetry = retryCard({ settled: true, attempt: 3 });
+		const items = buildDisplayItems([user('go'), tool(), settledRetry, text('done')], SETTLED);
+		const fold = items.find((item) => item.kind === 'work_log');
+		if (fold?.kind !== 'work_log') throw new Error('expected a work_log');
+
+		expect(fold.folded.map((entry) => entry.message.id)).toContain(settledRetry.id);
+		expect(fold.sequence.find((entry) => entry.message.id === settledRetry.id)?.hiddenWhenCollapsed)
+			.toBe(true);
+		expect(collapsedVisibleMessages(items).some((message) => message.id === settledRetry.id))
+			.toBe(false);
+		expect(items.some((item) => item.kind === 'message' && item.message.id === settledRetry.id))
+			.toBe(false);
+	});
+
+	it('keeps an exhausted retry card visible while it still owns the Retry button', () => {
+		const exhausted = retryCard({ exhausted: true, attempt: 10 });
+		const items = buildDisplayItems([user('go'), tool(), exhausted, text('done')], SETTLED);
+		const fold = items.find((item) => item.kind === 'work_log');
+		if (fold?.kind !== 'work_log') throw new Error('expected a work_log');
+
+		expect(fold.folded.map((entry) => entry.message.id)).not.toContain(exhausted.id);
+		expect(fold.sequence.find((entry) => entry.message.id === exhausted.id)?.hiddenWhenCollapsed)
+			.toBe(false);
+		expect(collapsedVisibleMessages(items).some((message) => message.id === exhausted.id)).toBe(true);
+	});
+
+	it('folds an exhausted retry card once it is superseded or recovered', () => {
+		for (const outcome of [{ superseded: true }, { recovered: true }]) {
+			const retired = retryCard({ exhausted: true, ...outcome });
+			const items = buildDisplayItems([user('go'), tool(), retired, text('done')], SETTLED);
+			const fold = items.find((item) => item.kind === 'work_log');
+			if (fold?.kind !== 'work_log') throw new Error('expected a work_log');
+
+			expect(fold.folded.map((entry) => entry.message.id)).toContain(retired.id);
+			expect(collapsedVisibleMessages(items).some((message) => message.id === retired.id))
+				.toBe(false);
+		}
+	});
 });
 
 describe('buildDisplayItems — live turn', () => {
@@ -345,6 +395,35 @@ describe('buildDisplayItems — live turn', () => {
 		});
 		expect(items.some((item) => item.kind === 'work_log' && item.mode === 'settled')).toBe(false);
 		expect(items.some((item) => item.kind === 'message' && item.message.content === 'waiting on background work')).toBe(true);
+	});
+
+	it('keeps one live chip across a settled retry card', () => {
+		const settledRetry = retryCard({ settled: true, attempt: 2 });
+		const items = buildDisplayItems(
+			[user('go'), tool(), settledRetry, tool({ toolStatus: 'running', streaming: true })],
+			LIVE
+		);
+		const folds = items.filter((item) => item.kind === 'work_log');
+		expect(folds).toHaveLength(1);
+		if (folds[0].kind !== 'work_log') throw new Error('expected a work_log');
+		expect(folds[0].mode).toBe('live');
+		expect(folds[0].folded.map((entry) => entry.message.id)).toContain(settledRetry.id);
+		expect(folds[0].tail).toHaveLength(1);
+		expect(items.some((item) => item.kind === 'message' && item.message.id === settledRetry.id))
+			.toBe(false);
+	});
+
+	it('keeps an active retry card out of the live run', () => {
+		const activeRetry = retryCard();
+		const items = buildDisplayItems([user('go'), tool(), activeRetry, tool()], LIVE);
+
+		expect(items.some((item) => item.kind === 'message' && item.message.id === activeRetry.id))
+			.toBe(true);
+		for (const item of items) {
+			if (item.kind !== 'work_log') continue;
+			expect([...item.folded, ...item.tail].map((entry) => entry.message.id))
+				.not.toContain(activeRetry.id);
+		}
 	});
 });
 
