@@ -6,7 +6,6 @@
 		ChevronRight,
 		Cpu,
 		Gauge,
-		Monitor,
 		ShieldCheck,
 		SlidersHorizontal
 	} from 'lucide-svelte';
@@ -51,11 +50,6 @@
 		permissionOptions: ControlOption[];
 		permissionValue: string | null;
 		onPermissionSelect: (value: string) => void;
-		computerUseEnabled: boolean;
-		computerUseStopped: boolean;
-		computerUseActive: boolean;
-		computerUseBusy: boolean;
-		onToggleComputerUse: () => void;
 	}
 
 	let {
@@ -77,12 +71,7 @@
 		onToggleFast,
 		permissionOptions,
 		permissionValue,
-		onPermissionSelect,
-		computerUseEnabled,
-		computerUseStopped,
-		computerUseActive,
-		computerUseBusy,
-		onToggleComputerUse
+		onPermissionSelect
 	}: Props = $props();
 
 	type SheetPage = 'overview' | 'models';
@@ -320,29 +309,6 @@
 						</div>
 					</section>
 
-					{#if computerUseEnabled}
-						<section class="control-section">
-							<div class="section-label"><SlidersHorizontal size={15} strokeWidth={1.8} /><span>Tools</span></div>
-							<div class="option-card">
-								<button
-									type="button"
-									class="tool-row"
-									class:active-tool={!computerUseStopped}
-									disabled={computerUseBusy}
-									role="switch"
-									aria-checked={!computerUseStopped}
-									onclick={onToggleComputerUse}
-								>
-									<span class="tool-icon"><Monitor size={18} strokeWidth={1.8} /></span>
-									<span class="tool-copy">
-										<strong>Computer control</strong>
-										<small>{computerUseActive && !computerUseStopped ? 'Agent is controlling the screen' : computerUseStopped ? 'Paused' : 'Allowed when needed'}</small>
-									</span>
-									<span class="switch" class:on={!computerUseStopped}><span></span></span>
-								</button>
-							</div>
-						</section>
-					{/if}
 				</div>
 			{/if}
 		</div>
@@ -515,7 +481,6 @@
 	}
 
 	.disclosure-copy,
-	.tool-copy,
 	.choice-copy {
 		min-width: 0;
 		flex: 1;
@@ -524,8 +489,7 @@
 		gap: 2px;
 	}
 
-	.disclosure-copy strong,
-	.tool-copy strong {
+	.disclosure-copy strong {
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -534,7 +498,6 @@
 	}
 
 	.disclosure-copy small,
-	.tool-copy small,
 	.choice-description {
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -547,8 +510,7 @@
 		overflow: hidden;
 	}
 
-	.choice-row,
-	.tool-row {
+	.choice-row {
 		width: 100%;
 		min-height: 58px;
 		display: flex;
@@ -563,8 +525,7 @@
 		cursor: pointer;
 	}
 
-	.choice-row:last-child,
-	.tool-row:last-child {
+	.choice-row:last-child {
 		border-bottom: 0;
 	}
 
@@ -583,55 +544,6 @@
 		color: var(--foreground);
 	}
 
-	.tool-icon {
-		width: 36px;
-		height: 36px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		flex-shrink: 0;
-		border-radius: 11px;
-		background: var(--card);
-		color: var(--muted-foreground);
-	}
-
-	.tool-row.active-tool .tool-icon {
-		background: color-mix(in oklch, var(--primary) 12%, transparent);
-		color: var(--primary);
-	}
-
-	.tool-row:disabled {
-		opacity: 0.45;
-		cursor: default;
-	}
-
-	.switch {
-		width: 42px;
-		height: 24px;
-		padding: 3px;
-		border-radius: 999px;
-		background: color-mix(in oklch, var(--muted-foreground) 28%, transparent);
-		transition: background 160ms ease;
-	}
-
-	.switch span {
-		display: block;
-		width: 18px;
-		height: 18px;
-		border-radius: 50%;
-		background: white;
-		box-shadow: 0 1px 4px #0003;
-		transition: transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
-	}
-
-	.switch.on {
-		background: var(--primary);
-	}
-
-	.switch.on span {
-		transform: translateX(18px);
-	}
-
 	/* The exact shared picker used by desktop fills the model subpage. Its own
 	   list scrolls while search, provider rail, and context selector stay fixed. */
 	.mobile-model-picker {
@@ -643,7 +555,6 @@
 	}
 
 	.choice-row:active,
-	.tool-row:active,
 	.disclosure-row:active,
 	.header-button:active {
 		transform: scale(0.985);

@@ -3,10 +3,13 @@
 	 * ControlsDock — the composer island's foot row (mockup `.footrow`).
 	 *
 	 * Left: the model / effort / permission override pills followed by the
-	 * context-usage ring. Right: the computer-use toggle (when enabled) and the
-	 * attach button, then whatever the parent passes in the `actions` snippet —
-	 * ChatInput uses it for the dictate / voice-call / send cluster so the whole
-	 * right-hand group shares one flex row.
+	 * context-usage ring. Right: the attach button, then whatever the parent
+	 * passes in the `actions` snippet — ChatInput uses it for the dictate /
+	 * voice-call / send cluster so the whole right-hand group shares one flex row.
+	 *
+	 * Computer use is agent configuration, not a composer control: both the
+	 * capability switch and the emergency stop live in the agent editor's
+	 * Computer use section, so the dock neither shows a toggle nor polls status.
 	 */
 	import type { Snippet } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
@@ -18,14 +21,13 @@
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
 	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
 	import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
-	import { Gauge, Monitor, SlidersHorizontal } from 'lucide-svelte';
+	import { Gauge, SlidersHorizontal } from 'lucide-svelte';
 	import {
 		getModelLabel,
 		getDefaultModel,
 		isFastModeCapable,
 		isReroute
 	} from '$lib/constants/models';
-	import { computerUse } from '$lib/stores/computerUse.svelte';
 	import { getUsageLimits } from '$lib/api/client';
 	import {
 		rateLimit,
@@ -53,22 +55,6 @@
 		onSheetOpenChange?.(open);
 	}
 
-	// Computer-use toolbar toggle. A single monitor icon: lit when the agent is
-	// allowed to control the screen, dimmed when paused (the process-global
-	// emergency stop halts all synthetic input immediately). Polling starts only
-	// while the active profile enables the capability.
-	let cuBusy = $state(false);
-
-	async function toggleComputerUse() {
-		if (cuBusy) return;
-		cuBusy = true;
-		try {
-			await computerUse.toggleStopped();
-		} finally {
-			cuBusy = false;
-		}
-	}
-
 	// Only one override dropdown may be open at a time — opening one closes the others.
 	let openDropdown = $state<'model' | 'effort' | 'permission' | null>(null);
 
@@ -80,7 +66,6 @@
 	const activeProfile = $derived($profiles.find((p) => p.id === $activeSession.profile));
 	const effortValue = $derived($activeSession.effortLevelOverride);
 	const permissionValue = $derived($activeSession.permissionModeOverride ?? 'default');
-	const computerUseEnabled = $derived(!!activeProfile?.config?.computer_use?.enabled);
 	const attachDisabled = $derived(
 		!$anyCredential || isUploading || isRemoteOnlyCompose($activeSession.project, $activeSession.projectV2Id)
 	);
@@ -207,14 +192,6 @@
 		if (firstRun || !bucket || !bucket.available || isStale || providerStale) {
 			refreshUsageLimits();
 		}
-	});
-
-	// Poll computer-use status (shared store) only while the active profile
-	// enables the capability; stop when it doesn't, to avoid idle polling.
-	$effect(() => {
-		if (!computerUseEnabled) return;
-		computerUse.start();
-		return () => computerUse.stop();
 	});
 
 	const permissionModes = [
@@ -353,32 +330,8 @@
 		<ContextUsageBar onOpenChange={(o) => { if (o) void refreshUsageLimits(true); }} />
 	</div>
 
-	<!-- Right: computer-use, attach, then the parent's action cluster -->
+	<!-- Right: attach, then the parent's action cluster -->
 	<div class="controls-right">
-		<!-- Computer Use toggle (only when the profile enables it). A single
-		     monitor icon: lit = the agent may control the screen; dimmed =
-		     paused. Clicking toggles control on/off. -->
-		{#if computerUseEnabled}
-			<button
-				type="button"
-				onclick={toggleComputerUse}
-				disabled={cuBusy}
-				class="dock-action-btn dock-action-btn--cu desktop-controls"
-				class:cu-on={!computerUse.stopped}
-				class:cu-active={computerUse.active && !computerUse.stopped}
-				role="switch"
-				aria-checked={!computerUse.stopped}
-				title={computerUse.stopped
-					? 'Computer control paused — click to allow the agent to control the screen'
-					: computerUse.active
-						? `Agent is controlling ${computerUse.displayLabel ?? 'your screen'} — click to pause`
-						: 'Computer control enabled — click to pause'}
-				aria-label={computerUse.stopped ? 'Enable computer control' : 'Pause computer control'}
-			>
-				<Monitor size={18} strokeWidth={1.75} />
-			</button>
-		{/if}
-
 		<!-- Attach stays in the primary action cluster on every viewport. -->
 		<button
 			type="button"
@@ -427,11 +380,6 @@
 	permissionOptions={permissionModes}
 	permissionValue={permissionValue}
 	onPermissionSelect={(value) => activeSession.setPermissionModeOverride(value)}
-	{computerUseEnabled}
-	computerUseStopped={computerUse.stopped}
-	computerUseActive={computerUse.active}
-	computerUseBusy={cuBusy}
-	onToggleComputerUse={toggleComputerUse}
 />
 
 <style>
@@ -532,31 +480,6 @@
 	.dock-action-btn:disabled {
 		opacity: 0.3;
 		cursor: not-allowed;
-	}
-
-	/* Computer-use toggle: dimmed when paused, lit (primary) when control is
-	   allowed, and gently pulsing while the agent is actively driving a screen. */
-	.dock-action-btn--cu {
-		color: var(--muted-foreground);
-	}
-
-	.dock-action-btn--cu.cu-on {
-		color: var(--primary);
-	}
-
-	.dock-action-btn--cu:hover:not(:disabled) {
-		background: var(--scrim);
-		color: var(--primary);
-	}
-
-	.dock-action-btn--cu.cu-active {
-		color: var(--primary);
-		animation: cu-pulse 1.4s ease-in-out infinite;
-	}
-
-	@keyframes cu-pulse {
-		0%, 100% { opacity: 1; }
-		50% { opacity: 0.45; }
 	}
 
 	@media (max-width: 639px) {

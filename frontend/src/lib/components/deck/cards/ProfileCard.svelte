@@ -15,6 +15,13 @@
 	import { profiles as profilesStore, appData as tabsStore } from '$lib/stores/app-data.svelte';
 	import { groups as groupsStore } from '$lib/stores/groups.svelte';
 	import { layout } from '$lib/stores/layout.svelte';
+	import { isAdmin as isAdminStore } from '$lib/stores/auth.svelte';
+	import {
+		EMPTY_TOOL_SURFACE,
+		fetchToolSurface,
+		type ToolSurface,
+		type ToolSurfaceGroup
+	} from '$lib/api/toolSurface';
 	import {
 		getDefaultModel,
 		normalizeModel,
@@ -25,45 +32,20 @@
 	// Sub-components
 	import ProfileForm from './profiles/ProfileForm.svelte';
 	import BuildProfileGrid from '$lib/components/layout/build/BuildProfileGrid.svelte';
-	import { computeAiToolCount, computeEffectiveAiTools } from './profiles/toolAccess';
+	import {
+		type SelectabilityContext,
+		type ToolSelectionMode,
+		countAllowedTools,
+		profileToolCount,
+		resolveToolMode,
+		toggleGroupSelection,
+		toggleToolSelection
+	} from './profiles/toolSurface';
 
 	// Icon map for tabs
 	const tabIcons = { general: Settings, tools: Wrench, agents: Bot, prompt: FileText, advanced: SlidersHorizontal } as const;
 
 	// Types
-	interface AITool {
-		id: string;
-		name: string;
-		description: string;
-		category: string;
-		available: boolean;
-		providers: string[];
-		active_provider: string | null;
-	}
-
-	interface AIToolCategory {
-		id: string;
-		name: string;
-		tools: AITool[];
-	}
-
-	interface ToolInfo {
-		name: string;
-		description: string;
-		mcp_server?: string;
-	}
-
-	interface ToolCategory {
-		id: string;
-		name: string;
-		tools: ToolInfo[];
-	}
-
-	interface ToolsResponse {
-		all_tools: ToolInfo[];
-		categories: ToolCategory[];
-	}
-
 	interface Subagent {
 		id: string;
 		name: string;
@@ -123,7 +105,11 @@
 
 	// Internal data state - loaded from stores/API
 	let allSubagents = $state<Subagent[]>([]);
-	let availableTools = $state<ToolsResponse>({ all_tools: [], categories: [] });
+	// The live tool surface (T1). One inventory for the picker and the card
+	// badges — never a hardcoded list, never split across two cards.
+	let toolSurface = $state<ToolSurface>(EMPTY_TOOL_SURFACE);
+	let toolsLoading = $state(true);
+	let toolsRefreshing = $state(false);
 	// Built-in system-prompt templates (GET /agents/templates) — offered when
 	// creating a new agent so the prompt can start from a curated preset.
 	let templates = $state<AgentTemplate[]>([]);
@@ -141,14 +127,14 @@
 	async function loadData() {
 		loading = true;
 		try {
-			const [subagentsResult, toolsResult, templatesResult] = await Promise.all([
+			const [subagentsResult, surfaceResult, templatesResult] = await Promise.all([
 				api.get<Subagent[]>('/agents').catch((err) => {
 					console.warn('Failed to load agents:', err);
 					return [];
 				}),
-				api.get<ToolsResponse>('/tools?refresh=true').catch((err) => {
-					console.warn('Failed to load tools:', err);
-					return { all_tools: [], categories: [] };
+				fetchToolSurface().catch((err) => {
+					console.warn('Failed to load tool surface:', err);
+					return EMPTY_TOOL_SURFACE;
 				}),
 				api.get<AgentTemplate[]>('/agents/templates').catch((err) => {
 					console.warn('Failed to load agent templates:', err);
@@ -156,12 +142,28 @@
 				})
 			]);
 			allSubagents = subagentsResult;
-			availableTools = toolsResult;
+			toolSurface = surfaceResult;
 			templates = templatesResult;
 		} catch (e) {
 			console.error('Failed to load profile card data:', e);
 		} finally {
 			loading = false;
+			toolsLoading = false;
+		}
+	}
+
+	/** Header Refresh: re-discover the surface, busting the MCP enumeration cache. */
+	async function refreshToolSurface() {
+		if (toolsRefreshing) return;
+		toolsRefreshing = true;
+		try {
+			toolSurface = await fetchToolSurface(true);
+		} catch (e: any) {
+			toast.push('Failed to refresh tools: ' + (e?.detail || e?.message || 'Unknown error'), {
+				tone: 'error'
+			});
+		} finally {
+			toolsRefreshing = false;
 		}
 	}
 
@@ -193,36 +195,15 @@
 		memory: '',
 		include_partial_messages: true,
 		system_prompt_content: '',
-		enabled_ai_tools: [] as string[],
 		cwd: '',
 		add_dirs: '',
 		env_vars: [] as { key: string; value: string }[],
-		app_config_tools: false,
 		computer_use_enabled: false
 	});
 
-	// Tool selection mode. The single visible dropdown drives both built-in and
-	// AI tool behavior — there is no separate AI-tool mode (see ./profiles/toolAccess).
-	let toolSelectionMode = $state<'all' | 'none' | 'allow' | 'disallow'>('all');
-
-	// Collapsible tool source sections
-	let expandedSections = $state<Record<string, boolean>>({
-		sdk: true,
-		ai: true
-	});
-
-	function toggleSection(id: string) {
-		expandedSections = { ...expandedSections, [id]: !expandedSections[id] };
-	}
-
-	// SDK-only categories (exclude MCP-sourced tools)
-	const sdkToolCategories = $derived(
-		availableTools.categories.filter((c: ToolCategory) => c.id !== 'mcp' && c.id !== 'browser')
-	);
-
-	// AI Tools
-	let aiToolCategories = $state<AIToolCategory[]>([]);
-	let aiToolsLoading = $state(false);
+	// Tool selection mode (T2) — the runtime authority for what the saved list
+	// means. 'all'/'none' carry no list at all; 'allow'/'disallow' each own one.
+	let toolSelectionMode = $state<ToolSelectionMode>('all');
 
 	// Import handling
 	let profileImportInput: HTMLInputElement | undefined = $state();
@@ -241,69 +222,32 @@
 		{ id: 'advanced', label: 'Advanced', icon: 'cog' }
 	];
 
-	// Tool counts
-	const sdkToolTotal = $derived(sdkToolCategories.reduce((sum, c) => sum + c.tools.length, 0));
-
-	const enabledSdkToolCount = $derived.by(() => {
-		if (toolSelectionMode === 'none') return 0;
-		if (toolSelectionMode === 'allow') {
-			const sdkToolNames = new Set(sdkToolCategories.flatMap(c => c.tools.map(t => t.name)));
-			return profileForm.allowed_tools.filter(t => sdkToolNames.has(t)).length;
-		}
-		if (toolSelectionMode === 'disallow') {
-			return sdkToolTotal - profileForm.disallowed_tools.length;
-		}
-		return sdkToolTotal;
+	// Which rows the editor may actually write into a list: computer use follows
+	// the profile's own switch, admin-only groups follow the signed-in user.
+	const selectability = $derived<SelectabilityContext>({
+		computerUseEnabled: profileForm.computer_use_enabled,
+		isAdmin: $isAdminStore
 	});
 
-	const aiToolCount = $derived(
-		computeAiToolCount(toolSelectionMode, getAllAIToolIds(), profileForm.enabled_ai_tools)
+	const activeToolList = $derived(
+		toolSelectionMode === 'allow'
+			? profileForm.allowed_tools
+			: toolSelectionMode === 'disallow'
+				? profileForm.disallowed_tools
+				: []
 	);
 
-	const effectiveToolCount = $derived(enabledSdkToolCount + aiToolCount);
+	const effectiveToolCount = $derived(
+		countAllowedTools(toolSelectionMode, toolSurface.groups, activeToolList, selectability)
+	);
 
 	/**
-	 * Compute the effective tool count for a profile based on its selection mode.
+	 * The count badge on an agent card. Reads the saved mode and its list against
+	 * the live surface (T6) — pre-migration rows without a mode fall back to the
+	 * legacy reading T2 spells out, so they count as what they actually were.
 	 */
 	function getProfileToolCount(profile: Profile): number {
-		const total = availableTools.all_tools.length;
-		const allowed = profile.config?.allowed_tools;
-		const disallowed = profile.config?.disallowed_tools;
-
-		if (Array.isArray(allowed) && allowed.length === 0) {
-			return 0;
-		}
-		if (allowed && allowed.length > 0) {
-			return allowed.length;
-		} else if (disallowed && disallowed.length > 0) {
-			return Math.max(0, total - disallowed.length);
-		}
-		return total;
-	}
-
-	// Load AI tools when form opens
-	$effect(() => {
-		if (viewMode === 'form') {
-			loadAvailableAITools();
-		}
-	});
-
-	async function loadAvailableAITools() {
-		aiToolsLoading = true;
-		try {
-			const response = await api.get<{ categories: AIToolCategory[] }>(
-				'/settings/ai-tools/available'
-			);
-			aiToolCategories = response.categories;
-		} catch (e) {
-			console.error('Failed to load AI tools:', e);
-			aiToolCategories = [];
-		}
-		aiToolsLoading = false;
-	}
-
-	function getAllAIToolIds(): string[] {
-		return aiToolCategories.flatMap((cat) => cat.tools.map((t) => t.id));
+		return profileToolCount(profile.config, toolSurface, $isAdminStore);
 	}
 
 	function resetForm() {
@@ -320,11 +264,9 @@
 			memory: '',
 			include_partial_messages: true,
 			system_prompt_content: '',
-			enabled_ai_tools: [],
 			cwd: '',
 			add_dirs: '',
 			env_vars: [],
-			app_config_tools: false,
 			computer_use_enabled: false
 		};
 		toolSelectionMode = 'all';
@@ -347,31 +289,13 @@
 			content?: string;
 			inject_env_details?: boolean;
 		};
-		const aiTools = config.ai_tools;
-		const hasExplicitAIToolConfig = aiTools !== undefined && aiTools !== null && Object.keys(aiTools).length > 0;
-
 		const allowedTools = config.allowed_tools || [];
 		const disallowedTools = config.disallowed_tools || [];
 
-		const enabledAITools: string[] = hasExplicitAIToolConfig
-			? Object.entries(aiTools).filter(([_, enabled]) => enabled).map(([key]) => key)
-			: [];
-
-		// Prefer the explicitly persisted mode when present (round-trips even when
-		// the tool list is empty, e.g. "Allow Only Selected" with nothing picked).
-		// Fall back to inference for profiles saved before tool_selection_mode existed.
-		const savedMode = config.tool_selection_mode;
-		if (savedMode === 'all' || savedMode === 'none' || savedMode === 'allow' || savedMode === 'disallow') {
-			toolSelectionMode = savedMode;
-		} else if (Array.isArray(config.allowed_tools) && config.allowed_tools.length === 0) {
-			toolSelectionMode = 'none';
-		} else if (allowedTools.length > 0) {
-			toolSelectionMode = 'allow';
-		} else if (disallowedTools.length > 0) {
-			toolSelectionMode = 'disallow';
-		} else {
-			toolSelectionMode = 'all';
-		}
+		// The persisted mode wins outright so the dropdown round-trips even when
+		// its list is empty ("Allow Only Selected" with nothing picked). Rows saved
+		// before tool_selection_mode existed fall back to T2's legacy reading.
+		toolSelectionMode = resolveToolMode(config);
 
 		const providerModels = { ...((config as any).provider_models || {}) } as Record<string, string>;
 		const legacyProviderKey = config.provider || NATIVE_PROVIDER_KEY;
@@ -410,18 +334,14 @@
 			// append text as the prompt — per ruling A12 the configured prompt IS
 			// the base, so saving converts them to the custom shape.
 			system_prompt_content: sp.content || sp.append || '',
-			enabled_ai_tools: enabledAITools,
 			cwd: (config as any).cwd || '',
 			add_dirs: ((config as any).add_dirs || []).join(', '),
 			env_vars: Object.entries((config as any).env || {}).map(([key, value]) => ({ key, value: value as string })),
-			app_config_tools: (config as any).app_config_tools || false,
 			computer_use_enabled: !!(config as any).computer_use?.enabled
 		};
 
 		viewMode = 'form';
 		activeTab = 'general';
-
-		loadAvailableAITools();
 	}
 
 	function backToList() {
@@ -429,95 +349,21 @@
 		resetForm();
 	}
 
-	// Tool helpers
-	function toggleTool(toolName: string) {
-		if (toolSelectionMode === 'allow') {
-			if (profileForm.allowed_tools.includes(toolName)) {
-				profileForm.allowed_tools = profileForm.allowed_tools.filter((t) => t !== toolName);
-			} else {
-				profileForm.allowed_tools = [...profileForm.allowed_tools, toolName];
-			}
-		} else if (toolSelectionMode === 'disallow') {
-			if (profileForm.disallowed_tools.includes(toolName)) {
-				profileForm.disallowed_tools = profileForm.disallowed_tools.filter((t) => t !== toolName);
-			} else {
-				profileForm.disallowed_tools = [...profileForm.disallowed_tools, toolName];
-			}
-		}
+	// Tool helpers. Both write into whichever list the current mode owns; in
+	// 'all'/'none' the picker is read-only and never calls them.
+	function setActiveToolList(next: string[]) {
+		if (toolSelectionMode === 'allow') profileForm.allowed_tools = next;
+		else if (toolSelectionMode === 'disallow') profileForm.disallowed_tools = next;
 	}
 
-	function toggleCategory(category: { name: string; tools: { name: string }[] }) {
-		const categoryToolNames = category.tools.map((t) => t.name);
-		if (toolSelectionMode === 'allow') {
-			const allSelected = categoryToolNames.every((name) =>
-				profileForm.allowed_tools.includes(name)
-			);
-			if (allSelected) {
-				profileForm.allowed_tools = profileForm.allowed_tools.filter(
-					(t) => !categoryToolNames.includes(t)
-				);
-			} else {
-				const newTools = categoryToolNames.filter(
-					(name) => !profileForm.allowed_tools.includes(name)
-				);
-				profileForm.allowed_tools = [...profileForm.allowed_tools, ...newTools];
-			}
-		} else if (toolSelectionMode === 'disallow') {
-			const allDisabled = categoryToolNames.every((name) =>
-				profileForm.disallowed_tools.includes(name)
-			);
-			if (allDisabled) {
-				profileForm.disallowed_tools = profileForm.disallowed_tools.filter(
-					(t) => !categoryToolNames.includes(t)
-				);
-			} else {
-				const newTools = categoryToolNames.filter(
-					(name) => !profileForm.disallowed_tools.includes(name)
-				);
-				profileForm.disallowed_tools = [...profileForm.disallowed_tools, ...newTools];
-			}
-		}
+	function toggleTool(group: ToolSurfaceGroup, toolName: string) {
+		setActiveToolList(
+			toggleToolSelection(activeToolList, group, toolName, selectability)
+		);
 	}
 
-	function getCategorySelectionState(category: {
-		name: string;
-		tools: { name: string }[];
-	}): 'all' | 'some' | 'none' {
-		const categoryToolNames = category.tools.map((t) => t.name);
-		const list =
-			toolSelectionMode === 'allow' ? profileForm.allowed_tools : profileForm.disallowed_tools;
-		const selectedCount = categoryToolNames.filter((name) => list.includes(name)).length;
-		if (selectedCount === 0) return 'none';
-		if (selectedCount === categoryToolNames.length) return 'all';
-		return 'some';
-	}
-
-	// AI Tool helpers
-	function toggleAITool(toolId: string) {
-		if (profileForm.enabled_ai_tools.includes(toolId)) {
-			profileForm.enabled_ai_tools = profileForm.enabled_ai_tools.filter((t) => t !== toolId);
-		} else {
-			profileForm.enabled_ai_tools = [...profileForm.enabled_ai_tools, toolId];
-		}
-	}
-
-	function toggleAIToolCategory(category: AIToolCategory) {
-		const ids = category.tools.map((t) => t.id);
-		const allSelected = ids.every((id) => profileForm.enabled_ai_tools.includes(id));
-		if (allSelected) {
-			profileForm.enabled_ai_tools = profileForm.enabled_ai_tools.filter((t) => !ids.includes(t));
-		} else {
-			const newTools = ids.filter((id) => !profileForm.enabled_ai_tools.includes(id));
-			profileForm.enabled_ai_tools = [...profileForm.enabled_ai_tools, ...newTools];
-		}
-	}
-
-	function getAICategorySelectionState(category: AIToolCategory): 'all' | 'some' | 'none' {
-		const ids = category.tools.map((t) => t.id);
-		const selectedCount = ids.filter((id) => profileForm.enabled_ai_tools.includes(id)).length;
-		if (selectedCount === 0) return 'none';
-		if (selectedCount === ids.length) return 'all';
-		return 'some';
+	function toggleGroup(group: ToolSurfaceGroup) {
+		setActiveToolList(toggleGroupSelection(activeToolList, group, selectability));
 	}
 
 	// Agent helpers
@@ -538,7 +384,7 @@
 	}
 
 	// Handle tool selection mode changes from sub-component
-	function handleToolSelectionModeChange(mode: 'all' | 'none' | 'allow' | 'disallow') {
+	function handleToolSelectionModeChange(mode: ToolSelectionMode) {
 		toolSelectionMode = mode;
 		if (mode === 'all') {
 			profileForm.allowed_tools = [];
@@ -571,9 +417,10 @@
 	async function saveProfile() {
 		if (!profileForm.name) return;
 
+		// `PUT /agents/{id}` replaces the whole config column, so a key left out
+		// here is genuinely cleared — that is how 'all'/'none' drop a stale list.
 		const config: any = {
-			include_partial_messages: profileForm.include_partial_messages,
-			app_config_tools: profileForm.app_config_tools
+			include_partial_messages: profileForm.include_partial_messages
 		};
 		// An agent carries no model, provider, permission mode or effort: a chat
 		// picks those when it starts, and internal one-shot generation reads the
@@ -593,13 +440,12 @@
 		// Per-turn model-call cap (native legs).
 		if (profileForm.max_turns) config.max_turns = profileForm.max_turns;
 
-		// Persist the dropdown mode explicitly so it round-trips even when the tool
-		// list is empty (e.g. "Allow Only Selected" before any tool is picked).
-		// The runtime still derives behavior from allowed_tools/disallowed_tools.
+		// Tool access (T2): the mode IS the authority, so 'all' and 'none' write no
+		// list at all — the full-replace PUT clears whatever was there. 'allow' and
+		// 'disallow' each write only their own list. Entries may be exact names or
+		// the `mcp__<server>__*` pattern a whole-server selection saves.
 		config.tool_selection_mode = toolSelectionMode;
-		if (toolSelectionMode === 'none') {
-			config.allowed_tools = [];
-		} else if (toolSelectionMode === 'allow') {
+		if (toolSelectionMode === 'allow') {
 			config.allowed_tools = profileForm.allowed_tools;
 		} else if (toolSelectionMode === 'disallow') {
 			config.disallowed_tools = profileForm.disallowed_tools;
@@ -631,15 +477,10 @@
 			}, {} as Record<string, string>);
 		}
 
-		const effectiveAITools = computeEffectiveAiTools(
-			toolSelectionMode,
-			getAllAIToolIds(),
-			profileForm.enabled_ai_tools
-		);
-		config.ai_tools = effectiveAITools.length > 0
-			? Object.fromEntries(effectiveAITools.map((id) => [id, true]))
-			: {};
-
+		// `ai_tools` and `app_config_tools` are no longer independent switches (T5):
+		// the AI-tools and app-config groups are permitted through the one picker,
+		// so the editor stops writing either field. Computer use keeps its own
+		// section because it carries host hardware settings.
 		config.computer_use = { enabled: profileForm.computer_use_enabled };
 
 		// The configured prompt IS the base (ruling A12) — always the custom
@@ -739,20 +580,9 @@
 		const allowedTools = agent.allowed_tools || [];
 		const disallowedTools = agent.disallowed_tools || [];
 
-		if (Array.isArray(agent.allowed_tools) && agent.allowed_tools.length === 0) {
-			toolSelectionMode = 'none';
-		} else if (allowedTools.length > 0) {
-			toolSelectionMode = 'allow';
-		} else if (disallowedTools.length > 0) {
-			toolSelectionMode = 'disallow';
-		} else {
-			toolSelectionMode = 'all';
-		}
-
-		const aiTools = agent.ai_tools || {};
-		const enabledAITools: string[] = Object.entries(aiTools)
-			.filter(([_, enabled]) => enabled)
-			.map(([key]) => key);
+		// Export/generated payloads carry the fields flat (no `.config`); a stored
+		// mode wins, older ones fall back to T2's legacy reading of the lists.
+		toolSelectionMode = resolveToolMode(agent as any);
 
 		// Legacy exports may carry a preset-shaped prompt — its append text
 		// becomes the configured prompt (ruling A12). SDK-era fields in the
@@ -791,11 +621,9 @@
 			memory: agent.memory || '',
 			include_partial_messages: agent.include_partial_messages !== false,
 			system_prompt_content: spContent,
-			enabled_ai_tools: enabledAITools,
 			cwd: '',
 			add_dirs: '',
 			env_vars: agent.env ? Object.entries(agent.env).map(([key, value]) => ({ key, value: value as string })) : [],
-			app_config_tools: false,
 			computer_use_enabled: false
 		};
 
@@ -839,7 +667,13 @@
 			subtitle={editingProfile ? 'Agent configuration' : 'Create a new agent'}
 			backLabel="Agents"
 			onBack={backToList}
-			sections={tabs.map((t) => ({ id: t.id, label: t.label, icon: tabIcons[t.id as keyof typeof tabIcons] }))}
+			sections={tabs.map((t) => ({
+				id: t.id,
+				label: t.label,
+				icon: tabIcons[t.id as keyof typeof tabIcons],
+				// How many tools this agent actually ends up with, live from the surface.
+				count: t.id === 'tools' ? effectiveToolCount : undefined
+			}))}
 			active={activeTab}
 			onSelect={(id) => (activeTab = id)}
 			railLabel="Agent sections"
@@ -855,28 +689,21 @@
 				{builtinAgentIds}
 				{customAgents}
 				{templates}
-				{sdkToolCategories}
-				{aiToolCategories}
-				{aiToolsLoading}
-				{enabledSdkToolCount}
-				{aiToolCount}
-				{effectiveToolCount}
-				{expandedSections}
+				{toolSurface}
+				{toolsLoading}
+				{toolsRefreshing}
+				isAdmin={$isAdminStore}
 				onFormChange={handleFormChange}
 				onToolSelectionModeChange={handleToolSelectionModeChange}
 				onToggleTool={toggleTool}
-				onToggleCategory={toggleCategory}
-				onToggleAITool={toggleAITool}
-				onToggleAIToolCategory={toggleAIToolCategory}
-				onToggleSection={toggleSection}
+				onToggleGroup={toggleGroup}
+				onRefreshTools={refreshToolSurface}
 				onToggleAgent={toggleAgent}
 				onApplyTemplate={applyTemplate}
 				onAssignToGroup={assignToGroup}
 				onRemoveFromGroup={removeFromGroup}
 				onCreateGroup={createGroup}
 				onDeleteGroup={deleteGroup}
-				{getCategorySelectionState}
-				{getAICategorySelectionState}
 			/>
 
 			{#snippet actions()}

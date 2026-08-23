@@ -97,12 +97,38 @@ Pick it per session from the composer:
 
 ### Tool Configuration
 
-| Field              | Type          | Description                                      |
-|--------------------|---------------|--------------------------------------------------|
-| `allowed_tools`    | list[string]  | Only allow these tools (whitelist)                |
-| `disallowed_tools` | list[string]  | Block these tools (blacklist)                     |
-| `tools`            | list[string]  | Explicit tool list (SDK 0.1.12+)                  |
-| `tools_preset`     | string        | Use `"claude_code"` preset for standard tools      |
+| Field                 | Type          | Description                                                          |
+|-----------------------|---------------|----------------------------------------------------------------------|
+| `tool_selection_mode` | string        | `all`, `none`, `allow`, or `disallow` — decides what the lists mean   |
+| `allowed_tools`       | list[string]  | The surface in `allow` mode; ignored in every other mode              |
+| `disallowed_tools`    | list[string]  | The block list in `disallow` mode; ignored in every other mode        |
+| `tools`               | list[string]  | LEGACY (SDK-era), no longer written                                   |
+| `tools_preset`        | string        | LEGACY (SDK-era), no longer written                                   |
+
+`tool_selection_mode` is the authority, not the shape of the lists:
+
+| Mode       | What the agent gets                                        |
+|------------|------------------------------------------------------------|
+| `all`      | Every tool. No list is stored.                              |
+| `none`     | No tools at all. No list is stored.                         |
+| `allow`    | Only `allowed_tools`. An empty list means no tools.         |
+| `disallow` | Everything except `disallowed_tools`.                       |
+
+**The tool list is discovered live, never hardcoded.** `GET /api/v1/tools/surface`
+enumerates every tool a session can be given, straight from the running
+registries: the harness builtins, the app's bridged servers, the AI tools, the
+browser, computer use, app configuration, and each configured MCP server. The
+agent editor's Tools tab is that inventory — a builtin added to the harness
+shows up there on the next refresh, with no list to update anywhere.
+
+Entries in either list are exact tool names (`Read`, `mcp__github__create_issue`)
+or `fnmatch` patterns. Selecting a whole MCP server in the editor saves
+`mcp__<server>__*`, so tools added to that server later are covered too;
+unchecking one of its tools expands the pattern back to explicit names.
+
+`ai_tools` and `app_config_tools` are no longer separate switches. The AI tools
+and app-configuration tools are permitted through the same list as everything
+else; both fields survive only so older exports still import.
 
 ### System Prompt
 
@@ -175,7 +201,7 @@ Controls which Claude Code configuration files are loaded. By default, all sourc
 |-----------------------------|------|-----------------------------------------------|
 | `max_buffer_size`           | int  | Maximum bytes when buffering CLI stdout        |
 | `enable_file_checkpointing` | bool | Enable file snapshots for rewind (SDK 0.1.15+) |
-| `app_config_tools`          | bool | Let the agent manage hooks, automations, MCP servers, and profiles through conversation (admin sessions only) |
+| `app_config_tools`          | bool | LEGACY. The app-configuration tools are now granted through the tool list like any others (admin sessions only); kept so older exports still import |
 | `strict_mcp_config`         | bool | Lock the MCP server set for the session; reject mid-session changes (SDK 0.1.74+) |
 
 ## API Reference
@@ -210,6 +236,7 @@ curl -X POST http://localhost:8000/api/v1/agents \
         "type": "custom",
         "content": "You are a senior code reviewer. Analyze code for bugs, security issues, performance problems, and style violations. Provide specific, actionable feedback."
       },
+      "tool_selection_mode": "allow",
       "allowed_tools": ["Read", "Grep", "Glob"],
       "enabled_agents": ["code-reviewer"]
     }
@@ -268,6 +295,7 @@ The exported JSON has this structure:
     "permission_mode": "plan",
     "system_prompt_type": "custom",
     "system_prompt_content": "You are a senior code reviewer...",
+    "tool_selection_mode": "allow",
     "allowed_tools": ["Read", "Grep", "Glob"],
     "enabled_agents": ["code-reviewer"]
   }
@@ -340,6 +368,7 @@ A review-focused profile that cannot modify files:
       "type": "custom",
       "content": "You are a thorough code reviewer. Analyze code for correctness, security, performance, and style. Never make changes directly -- only provide feedback and suggestions."
     },
+    "tool_selection_mode": "allow",
     "allowed_tools": ["Read", "Grep", "Glob"],
     "enabled_agents": ["code-reviewer"]
   }
@@ -361,7 +390,7 @@ A conversational profile with no tool access:
       "type": "custom",
       "content": "You are a helpful conversational assistant. Answer questions clearly and concisely."
     },
-    "allowed_tools": []
+    "tool_selection_mode": "none"
   }
 }
 ```
