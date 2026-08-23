@@ -18,10 +18,15 @@ from fluid.events import (
     PermissionRequest,
     RespondPermission,
     ToolResult,
+    ToolUse,
     TurnComplete,
+    Usage,
     UserTurn,
 )
+from fluid.context.compaction import CompactionConfig
+from fluid.context.trim import TrimConfig
 from fluid.hooks.bus import PRE_TOOL_USE, HookBus, HookDecision
+from fluid.messages import ToolResultBlock
 from fluid.permissions.engine import PermissionEngine
 from fluid.permissions.rules import Rule
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
@@ -118,6 +123,212 @@ async def test_tool_round_trip() -> None:
     assert done.num_model_calls == 2
     assert done.stop_reason == "end_turn"
     assert provider.calls == 2
+
+
+async def test_explicit_model_call_cap_halts_with_ordered_tool_pairs() -> None:
+    registry = ToolRegistry()
+    registry.register_inproc(_weather_server())
+    provider = ScriptedProvider([
+        _tool("t1", "mcp__wx__get_weather", '{"city":"Paris"}'),
+        _tool("t2", "mcp__wx__get_weather", '{"city":"London"}'),
+        _text("must not be called"),
+    ])
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="m", registry=registry,
+        permissions=PermissionEngine("never_ask"),
+        max_model_calls_per_turn=2,
+    )
+    await loop.submit(UserTurn(content="weather"))
+    await loop.wait_turn()
+
+    events = loop.bus.log(loop.session_id)
+    assert provider.calls == 2
+    uses = [event for event in events if isinstance(event, ToolUse)]
+    results = [event for event in events if isinstance(event, ToolResult)]
+    assert [event.tool_use_id for event in uses] == ["t1", "t2"]
+    assert [event.tool_use_id for event in results] == ["t1", "t2"]
+    assert all(
+        next(i for i, event in enumerate(events) if event is use)
+        < next(i for i, event in enumerate(events) if event is result)
+        for use, result in zip(uses, results)
+    )
+    done = next(event for event in events if isinstance(event, TurnComplete))
+    assert done.stop_reason == "max_calls"
+
+
+async def test_large_existing_context_does_not_trigger_an_automatic_limit() -> None:
+    # This history alone would trip any cumulative-prompt ceiling an embedder
+    # might once have imposed. Without an explicitly supplied policy the
+    # provider remains the source of truth and the corrective turn is sent.
+    provider = ScriptedProvider([_text("x" * 700_000), _text("continued")])
+    store = MemoryStore()
+    loop = NativeLoop(provider=provider, store=store, model="m")
+    await loop.submit(UserTurn(content="same prompt"))
+    await loop.wait_turn()
+    assert provider.calls == 1
+
+    await loop.submit(UserTurn(content="corrective message"))
+    await loop.wait_turn()
+    assert provider.calls == 2
+    completed = [
+        event for event in loop.bus.log(loop.session_id)
+        if isinstance(event, TurnComplete)
+    ]
+    assert completed[-1].num_model_calls == 1
+    assert completed[-1].stop_reason == "end_turn"
+
+
+async def test_turn_has_no_ceiling_below_the_configured_call_cap() -> None:
+    registry = ToolRegistry()
+    registry.register_inproc(_weather_server())
+    provider = ScriptedProvider([
+        *[
+            _tool(f"t{i}", "mcp__wx__get_weather", '{"city":"Paris"}')
+            for i in range(51)
+        ],
+        _text("finished after the provider chose to stop"),
+    ])
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="m", registry=registry,
+        permissions=PermissionEngine("never_ask"),
+    )
+    await loop.submit(UserTurn(content="keep going until you are done"))
+    await loop.wait_turn()
+
+    events = loop.bus.log(loop.session_id)
+    assert provider.calls == 52
+    assert len([event for event in events if isinstance(event, ToolResult)]) == 51
+    done = next(event for event in events if isinstance(event, TurnComplete))
+    assert done.num_model_calls == 52
+    assert done.stop_reason == "end_turn"
+
+
+async def test_disabled_compaction_resends_large_tool_results_verbatim() -> None:
+    """An embedder that owns its own context policy turns rewriting off and
+    gets the stored history back byte-for-byte."""
+    large_result = "x" * 500_000
+
+    @tool("blob", "Return a large result", {"type": "object", "properties": {}})
+    async def blob(args: dict) -> dict:
+        return {"content": [{"type": "text", "text": large_result}]}
+
+    registry = ToolRegistry()
+    registry.register_inproc(create_inproc_server("large", [blob]))
+    provider = ScriptedProvider([
+        _tool("t-large", "mcp__large__blob", "{}"),
+        _text("finished"),
+    ])
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="m", registry=registry,
+        permissions=PermissionEngine("never_ask"),
+        compaction=CompactionConfig(enabled=False, trim=TrimConfig(enabled=False)),
+    )
+    await loop.submit(UserTurn(content="get the full result"))
+    await loop.wait_turn()
+
+    resent_results = [
+        block
+        for message in provider.requests[1].messages
+        for block in message.content
+        if isinstance(block, ToolResultBlock)
+    ]
+    assert len(resent_results) == 1
+    assert resent_results[0].content[0].text == large_result
+
+
+def _text_and_tool(text: str, tuid: str, name: str, args_json: str) -> list[StreamChunk]:
+    return [
+        StreamChunk("message_start", {"usage": {"input_tokens": 10}}),
+        StreamChunk("block_start", {"index": 0, "block_type": "text"}),
+        StreamChunk("text_delta", {"index": 0, "text": text}),
+        StreamChunk("block_stop", {"index": 0}),
+        StreamChunk("block_start", {
+            "index": 1, "block_type": "tool_use", "tool_name": name,
+            "tool_use_id": tuid,
+        }),
+        StreamChunk("tool_args_delta", {"index": 1, "partial_json": args_json}),
+        StreamChunk("block_stop", {"index": 1}),
+        StreamChunk("usage", {"usage": {"output_tokens": 5}, "stop_reason": "tool_use"}),
+        StreamChunk("message_stop", {}),
+    ]
+
+
+async def test_interrupted_stream_closes_request_and_keeps_request_id_usage() -> None:
+    started = asyncio.Event()
+    closed = asyncio.Event()
+
+    class HangingProvider:
+        name = "openrouter"
+        caps = ProviderCaps()
+        calls = 0
+
+        async def stream(self, request):
+            self.calls += 1
+            try:
+                yield StreamChunk("provider_request", {
+                    "provider_requests": {
+                        "logical_call_id": "logical-1",
+                        "attempts": [{
+                            "attempt": 1, "status": 200,
+                            "generation_id": "gen-physical-1",
+                        }],
+                    }
+                })
+                yield StreamChunk("message_start", {"usage": {}})
+                started.set()
+                await asyncio.Event().wait()
+            finally:
+                closed.set()
+
+    provider = HangingProvider()
+    loop = NativeLoop(provider=provider, store=MemoryStore(), model="m")
+    await loop.submit(UserTurn(content="perform the requested interrupted provider operation"))
+    await asyncio.wait_for(started.wait(), timeout=5)
+    await loop.submit(Interrupt())
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+
+    assert closed.is_set()
+    assert provider.calls == 1
+    events = loop.bus.log(loop.session_id)
+    usage = next(event for event in events if isinstance(event, Usage))
+    assert usage.raw["model_call_index"] == 1
+    assert usage.raw["projected_prompt_tokens"] > 0
+    assert usage.raw["provider_requests"]["attempts"][0]["generation_id"] == (
+        "gen-physical-1"
+    )
+    assert any(isinstance(event, Interrupted) for event in events)
+
+
+async def test_shell_file_write_is_not_blocked_by_model_prose_heuristics(tmp_path) -> None:
+    from fluid.tools.builtins import register_builtins
+
+    marker = tmp_path / "must-not-exist.txt"
+    registry = ToolRegistry()
+    register_builtins(registry)
+    command = f'echo bad > "{marker}"'
+    provider = ScriptedProvider([
+        _text_and_tool(
+            "I will now write the file.", "t-shell", "Bash",
+            json.dumps({"command": command}),
+        ),
+        _text("I am continuing with another inspection."),
+    ])
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="m", registry=registry,
+        permissions=PermissionEngine("never_ask"),
+    )
+    await loop.submit(UserTurn(content="create the file"))
+    await loop.wait_turn()
+
+    assert marker.read_text().strip() == "bad"
+    events = loop.bus.log(loop.session_id)
+    result = next(
+        event for event in events
+        if isinstance(event, ToolResult) and event.tool_use_id == "t-shell"
+    )
+    assert not result.is_error
+    done = next(event for event in events if isinstance(event, TurnComplete))
+    assert done.stop_reason == "end_turn"
 
 
 async def test_interrupt_cancels_in_flight_tool_dispatch() -> None:

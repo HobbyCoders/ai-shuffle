@@ -15,6 +15,7 @@ from fluid.messages import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from fluid.providers._retry import RetryPolicy
 from fluid.providers._sse import sse_events
 from fluid.providers.base import ProviderRequest, StreamChunk
 from fluid.providers.openrouter.client import OpenRouterClient
@@ -79,6 +80,21 @@ async def test_usage_cached_tokens() -> None:
     assert u["input_tokens"] == 148  # 180 prompt - 32 cached
     assert u["cache_read_input_tokens"] == 32
     assert u["output_tokens"] == 24
+
+
+def test_usage_cache_write_tokens_are_accounted_separately() -> None:
+    u = _terminal_usage_payload({
+        "prompt_tokens": 180,
+        "completion_tokens": 20,
+        "total_tokens": 200,
+        "prompt_tokens_details": {
+            "cached_tokens": 30,
+            "cache_write_tokens": 40,
+        },
+    })
+    assert u["input_tokens"] == 110
+    assert u["cache_read_input_tokens"] == 30
+    assert u["cache_creation_input_tokens"] == 40
 
 
 def _terminal_usage_payload(usage: dict) -> dict:
@@ -152,6 +168,7 @@ def test_request_body_message_mapping() -> None:
     assert body["stream"] is True
     assert body["stream_options"] == {"include_usage": True}
     assert body["usage"] == {"include": True}
+    assert body["provider"] == {"allow_fallbacks": False}
     assert body["messages"] == [
         {"role": "system", "content": "be terse"},
         {"role": "user", "content": "weather?"},
@@ -305,9 +322,86 @@ async def test_client_end_to_end() -> None:
     )
     chunks = [c async for c in client.stream(request)]
     await http.aclose()
-    assert chunks[0].kind == "message_start"
+    assert chunks[0].kind == "provider_request"
+    assert chunks[1].kind == "message_start"
     assert chunks[-1].kind == "message_stop"
     assert any(c.kind == "tool_args_delta" for c in chunks)
+    usage = next(c.payload["usage"] for c in chunks if c.kind == "usage")
+    assert len(usage["provider_requests"]["attempts"]) == 1
+
+
+async def test_client_retry_is_bounded_visible_and_correlated() -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(503, json={"error": {"message": "busy"}})
+        return httpx.Response(
+            200,
+            content=GOLDEN.read_text().encode(),
+            headers={
+                "content-type": "text/event-stream",
+                "x-generation-id": "gen_header_2",
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OpenRouterClient(
+        api_key="or-test", http_client=http,
+        retry=RetryPolicy(max_retries=1, base_delay=0),
+    )
+    request = ProviderRequest(
+        model="openai/gpt-4o",
+        messages=[Message(role="user", content=[Text("hi")])],
+    )
+    chunks = [c async for c in client.stream(request)]
+    await http.aclose()
+
+    assert len(calls) == 2
+    call_ids = [request.headers["x-fluid-call-id"] for request in calls]
+    assert call_ids[0] == call_ids[1]
+    usage = next(c.payload["usage"] for c in chunks if c.kind == "usage")
+    attempts = usage["provider_requests"]["attempts"]
+    assert attempts == [
+        {"attempt": 1, "status": 503},
+        {"attempt": 2, "status": 200, "generation_id": "gen_header_2"},
+    ]
+
+
+async def test_default_openrouter_transport_failure_does_not_retry() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("ambiguous timeout", request=request)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OpenRouterClient(api_key="or-test", http_client=http)
+    request = ProviderRequest(
+        model="openai/gpt-4o",
+        messages=[Message(role="user", content=[Text("hi")])],
+    )
+    chunks = [c async for c in client.stream(request)]
+    await http.aclose()
+
+    assert calls == 1
+    error = next(c for c in chunks if c.kind == "error")
+    assert error.payload["provider_requests"]["attempts"] == [
+        {"attempt": 1, "transport_error": "ReadTimeout"}
+    ]
+
+
+def test_request_body_keeps_session_and_disables_provider_fallback() -> None:
+    request = ProviderRequest(
+        model="x-ai/grok-4.6",
+        messages=[Message(role="user", content=[Text("hi")])],
+        extra={"session_id": "ses-sticky"},
+    )
+    body = build_request_body(request)
+    assert body["session_id"] == "ses-sticky"
+    assert body["provider"] == {"allow_fallbacks": False}
 
 
 async def _stream_with(sse_text: str) -> list:
@@ -333,7 +427,8 @@ async def test_in_stream_error_chunk_surfaces_as_error() -> None:
         "data: [DONE]\n\n"
     )
     chunks = await _stream_with(sse)
-    kinds = [c.kind for c in chunks]
+    # The vendored stream contract leads with a provider_request evidence chunk.
+    kinds = [c.kind for c in chunks if c.kind != "provider_request"]
     assert kinds == ["message_start", "error"]
     assert chunks[-1].payload["status"] == 502
     assert "Provider returned error" in chunks[-1].payload["message"]

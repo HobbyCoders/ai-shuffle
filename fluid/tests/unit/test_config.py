@@ -199,3 +199,21 @@ def test_max_model_calls_default_and_env_override() -> None:
     assert env_overrides({"FLUID_MAX_CALLS": "500"})["max_model_calls"] == 500
     assert "max_model_calls" not in env_overrides({"FLUID_MAX_CALLS": "lots"})
     assert HarnessConfig.from_dict(dict(BUILTIN_DEFAULTS)).max_model_calls == 200
+
+
+def test_max_model_calls_zero_means_unlimited() -> None:
+    """``0`` is the config spelling of "no ceiling"; NativeLoop spells it None."""
+    config = HarnessConfig.from_dict(
+        deep_merge(BUILTIN_DEFAULTS, {"max_model_calls": 0})
+    )
+    assert config.max_model_calls == 0
+    engine = build_engine(config, MemoryStore(), provider=FakeProvider())
+    assert isinstance(engine, NativeLoop)
+    assert engine.max_model_calls_per_turn is None
+
+    default_engine = build_engine(
+        HarnessConfig.from_dict(dict(BUILTIN_DEFAULTS)),
+        MemoryStore(),
+        provider=FakeProvider(),
+    )
+    assert default_engine.max_model_calls_per_turn == 200

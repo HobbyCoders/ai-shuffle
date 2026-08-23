@@ -1,8 +1,12 @@
 """EventBus replay/ordering + Anthropic request-serialization tests."""
 
 import asyncio
+from dataclasses import dataclass
 
-from fluid.events import EventBus, TextDelta
+import pytest
+
+from fluid.events import Event, EventBus, TextDelta, register_event_type
+from fluid.events.model import event_from_dict, event_to_dict
 from fluid.messages import Message, Reasoning, Text
 from fluid.providers.anthropic.serialize import build_request_body
 from fluid.providers.base import ProviderRequest
@@ -113,3 +117,44 @@ def test_no_effort_no_output_config() -> None:
     )
     body = build_request_body(request)
     assert "output_config" not in body
+
+
+# --- Codec registration hook -------------------------------------------------
+
+
+def test_register_event_type_round_trips_a_foreign_event() -> None:
+    """An embedder's own Event subclass survives the durable codec."""
+
+    @dataclass(frozen=True, kw_only=True)
+    class HostAlert(Event):
+        code: str
+        detail: str = ""
+
+    assert register_event_type(HostAlert) is HostAlert
+    event = HostAlert(session_id="s1", turn_id="t1", code="quota", detail="soft")
+    revived = event_from_dict(event_to_dict(event))
+    assert isinstance(revived, HostAlert)
+    assert revived == event
+
+
+def test_register_event_type_is_idempotent() -> None:
+    @dataclass(frozen=True, kw_only=True)
+    class Reregistered(Event):
+        pass
+
+    register_event_type(Reregistered)
+    register_event_type(Reregistered)
+    assert event_from_dict(event_to_dict(Reregistered(session_id="s"))) == (
+        Reregistered(session_id="s")
+    )
+
+
+def test_register_event_type_refuses_to_shadow_a_builtin_name() -> None:
+    """Taking over ``Usage`` would decode fluid's own events into the impostor."""
+
+    @dataclass(frozen=True, kw_only=True)
+    class Usage(Event):
+        pass
+
+    with pytest.raises(ValueError):
+        register_event_type(Usage)

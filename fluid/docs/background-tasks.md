@@ -93,9 +93,9 @@ attaches a `fluid.cli.host.CliHost` to every engine it builds, which injects bot
   `/cancel <task_id>`. Closing the host cancels whatever still runs and
   reports it as `cancelled`.
 
-## AI Shuffle integration requirements
+## Host-app integration requirements
 
-The AI Shuffle task manager should keep worker records in its session/task store,
+The host's task manager should keep worker records in its session/task store,
 not in the turn runner's cancellation scope. Its worker completion callback must
 load or recreate the parent Fluid engine by session id and submit
 `BackgroundTaskFinished`. It should retain the completion until Fluid has

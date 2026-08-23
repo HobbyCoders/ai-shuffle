@@ -287,6 +287,8 @@ async def test_client_account_id_header_present() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         captured["account"] = request.headers.get("chatgpt-account-id")
         captured["auth"] = request.headers.get("authorization")
+        captured["originator"] = request.headers.get("originator")
+        captured["beta"] = request.headers.get("openai-beta")
         return httpx.Response(
             200,
             content=GOLDEN.read_text().encode(),
@@ -307,6 +309,29 @@ async def test_client_account_id_header_present() -> None:
     await http.aclose()
     assert captured["account"] == "acct_42"
     assert captured["auth"] == "Bearer tok"
+    assert captured["originator"] == "codex_cli_rs"
+    assert captured["beta"] == "responses=experimental"
+
+
+async def test_xai_auth_does_not_send_codex_headers() -> None:
+    class FakeAuth:
+        account_id = "should-not-leak"
+
+        async def get_access_token(self) -> str:
+            return "xai-tok"
+
+        async def on_401(self) -> None:  # pragma: no cover - not hit here
+            pass
+
+    client = OpenAIResponsesClient(
+        auth=FakeAuth(),
+        base_url="https://api.x.ai/v1/responses",
+    )
+    headers = await client._headers()
+    assert headers["Authorization"] == "Bearer xai-tok"
+    assert "originator" not in headers
+    assert "OpenAI-Beta" not in headers
+    assert "chatgpt-account-id" not in headers
 
 
 def test_effort_overrides_thinking_and_clamps() -> None:

@@ -210,12 +210,14 @@ def test_usage_degrades_to_zero() -> None:
         "input_tokens": 0,
         "output_tokens": 0,
         "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
         "total_tokens": 0,
     }
     assert normalize_usage({"prompt_tokens": None, "completion_tokens": None}) == {
         "input_tokens": 0,
         "output_tokens": 0,
         "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
         "total_tokens": 0,
     }
 

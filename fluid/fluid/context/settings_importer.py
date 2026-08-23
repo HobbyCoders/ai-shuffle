@@ -386,7 +386,7 @@ def _claude(items: list[SettingsImportItem], home: Path, fluid: Path,
         if managed_link and persisted_config.is_file() and not _path_has_symlink(persisted_config):
             config_path = persisted_config
     elif not config_path.exists() and persisted_config.is_file():
-        # Older AI Shuffle containers persisted the root registry inside the
+        # Older managed containers persisted the root registry inside the
         # ~/.claude volume even when the ephemeral home link is absent.
         config_path = persisted_config
     if not (config_path.exists() or _is_symlink(config_path)):

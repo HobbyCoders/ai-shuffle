@@ -440,6 +440,24 @@ HAS_AF_UNIX = hasattr(socket, "AF_UNIX")
 TRANSPORTS = ["tcp"] + (["unix"] if HAS_AF_UNIX else [])
 
 
+def _mcp_registers_handlers_by_kwarg() -> bool:
+    """True on mcp 2.0, whose low-level ``Server`` takes handler kwargs and
+    exposes ``get_request_handler``. An embedder pinned to mcp<2 through its own
+    CLI/SDK dependency gets 1.x, so ``build_child_server`` supports both
+    generations and the 2.0-only probes below skip on 1.x (the subprocess tests
+    still cover it)."""
+    import inspect
+
+    from mcp.server import Server
+
+    return "on_list_tools" in inspect.signature(Server.__init__).parameters
+
+
+requires_mcp2 = pytest.mark.skipif(
+    not _mcp_registers_handlers_by_kwarg(), reason="needs mcp>=2.0 Server API"
+)
+
+
 @asynccontextmanager
 async def _bridge(reg: ToolRegistry, transport: str, tmp_path):
     """Start the parent bridge; yield the *resolved* address a child would dial."""
@@ -557,7 +575,7 @@ async def test_bundled_child_subprocess_speaks_mcp(transport, tmp_path) -> None:
                 assert [t.name for t in listed.tools] == ["mcp__wx__get_weather"]
                 called = await session.call_tool("mcp__wx__get_weather", {"city": "Paris"})
                 assert [c.text for c in called.content] == ["Paris: sunny"]
-                assert called.is_error is False
+                assert _declared(called, "isError", "is_error") is False
 
 
 @pytest.mark.parametrize("transport", TRANSPORTS)
@@ -667,6 +685,7 @@ def test_field_name_prefers_declared_spelling() -> None:
     assert _field_name(object(), "inputSchema", "input_schema") == "inputSchema"
 
 
+@requires_mcp2
 def test_server_registers_handlers_via_constructor_kwargs() -> None:
     """Pins the API this file targets: mcp 2.0's low-level ``Server`` takes
     ``on_list_tools`` / ``on_call_tool`` constructor kwargs and exposes them by
@@ -687,6 +706,7 @@ def test_server_registers_handlers_via_constructor_kwargs() -> None:
     assert bundled.get_request_handler("tools/call") is not None
 
 
+@requires_mcp2
 @pytest.mark.parametrize("transport", TRANSPORTS)
 async def test_child_server_handlers_answer_over_bridge(transport, tmp_path) -> None:
     """The child's registered handlers, invoked as the SDK would invoke them,
@@ -716,6 +736,7 @@ async def test_child_server_handlers_answer_over_bridge(transport, tmp_path) -> 
         assert result.is_error is False
 
 
+@requires_mcp2
 @pytest.mark.parametrize("transport", TRANSPORTS)
 async def test_child_server_propagates_tool_errors(transport, tmp_path) -> None:
     """A failing in-process tool must reach the CLI as isError, not as success."""

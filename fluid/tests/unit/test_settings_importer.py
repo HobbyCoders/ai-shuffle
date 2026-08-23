@@ -230,7 +230,7 @@ def test_project_inventory_and_native_codex_project_items(tmp_path: Path) -> Non
     assert any(item.kind == "project_native_skill" and item.status == "duplicate" for item in codex.items)
 
 
-def test_managed_ai_shuffle_claude_registry_symlink_is_allowed(tmp_path: Path) -> None:
+def test_managed_container_claude_registry_symlink_is_allowed(tmp_path: Path) -> None:
     source, destination, project = tmp_path / "source", tmp_path / "destination", tmp_path / "project"
     project.mkdir()
     persisted = write(

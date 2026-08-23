@@ -20,6 +20,7 @@ from fluid.events import (
     RespondPermission,
     ToolResult,
     TurnComplete,
+    Usage,
     UserTurn,
 )
 from fluid.messages import Message, Reasoning, Text, ToolUseBlock
@@ -368,6 +369,10 @@ async def test_context_overflow_force_trims_and_retries_once() -> None:
     done = next(e for e in events if isinstance(e, TurnComplete))
     assert done.stop_reason == "end_turn"
     assert provider.calls == 3
+    # The overflow response is a distinct logical/provider call even though it
+    # is retried internally.  Its durable Usage record prevents hidden billing.
+    usages = [event for event in events if isinstance(event, Usage)]
+    assert [event.raw["model_call_index"] for event in usages] == [1, 2, 3]
     # The retried request saw the trimmed view.
     from fluid.messages import ToolResultBlock
     retry_texts = [

@@ -3,7 +3,6 @@
 import asyncio
 
 import pytest
-
 from fluid.tools.builtins import register_builtins
 from fluid.tools.builtins.task import SPEC, handler
 from fluid.tools.registry import (
@@ -133,6 +132,7 @@ def test_delegated_disallowed_tools_argv():
     loop.allowed_tools = None
     loop.disallowed_tools = ["Task", "Agent", "Workflow"]
     loop.partial = False
+    loop.settings = None
     loop.effort = None
     argv = loop._build_argv()
     i = argv.index("--disallowed-tools")
@@ -154,6 +154,7 @@ def test_delegated_effort_argv():
     loop.allowed_tools = None
     loop.disallowed_tools = None
     loop.partial = False
+    loop.settings = None
     loop.effort = "xhigh"
     argv = loop._build_argv()
     i = argv.index("--effort")

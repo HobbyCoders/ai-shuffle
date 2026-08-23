@@ -2,10 +2,13 @@
 
 from collections.abc import AsyncIterator
 
-from fluid.context.trim import ToolResultTrimmer, TrimConfig
+from fluid.context.compaction import CompactionConfig, Compactor
+from fluid.context.trim import (
+    ToolResultTrimmer, TrimConfig, estimate_tokens_of_messages,
+)
 from fluid.engine.native import NativeLoop
 from fluid.events import Handoff, HandoffCreated, UserTurn
-from fluid.messages import Image, Message, Text, ToolResultBlock
+from fluid.messages import Image, Message, Text, ToolResultBlock, ToolUseBlock
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import MemoryStore, SessionNode
 from fluid.tools.builtins.note import handler as note_handler
@@ -80,7 +83,14 @@ def test_trim_is_sticky_and_batchy() -> None:
 
 
 def test_browser_screenshot_is_available_once_then_compacted() -> None:
-    """Regression: a 531k PNG once made every Grok follow-up ~450k tokens."""
+    """A screenshot rides ONE request, then is compacted by the next.
+
+    The estimator prices images at a flat ~1500 tokens (providers bill by
+    pixels, and dispatch conditions images to a 1568px edge), so the historic
+    base64-length blowup (a 531k PNG once made every Grok follow-up ~450k
+    tokens) is structurally gone: the estimate stays small no matter how many
+    bytes the image carries.
+    """
     image_result = _node("image-result", "user", [
         ToolResultBlock(
             tool_use_id="shot-1",
@@ -99,6 +109,8 @@ def test_browser_screenshot_is_available_once_then_compacted() -> None:
         for block in first[0].content
         for inner in getattr(block, "content", [])
     )
+    # ~1500 tokens for the image + the caption, regardless of base64 length.
+    assert estimate_tokens_of_messages(first) < 5_000
 
     # A later assistant node proves the image was already delivered to one
     # model call. It is compacted even though the ordinary text trigger is far
@@ -125,6 +137,71 @@ def test_consumed_screenshot_view_is_read_only_but_matches_next_request() -> Non
     rendered = trimmer.view([image_result, assistant])
     assert "trimmed to save context" in _tool_result_texts(rendered)[0]
     assert trimmer._trimmed == set()
+
+
+def _screenshot_path() -> list[SessionNode]:
+    """user → assistant(tool_use) → image result → assistant. The trailing
+    assistant node is the evidence the image already reached one model call."""
+    return [
+        _node("u0", "user", [Text("look at this")]),
+        _node("a0", "assistant", [
+            Text("taking screenshot"),
+            ToolUseBlock(id="call0", name="Screenshot", input={}),
+        ]),
+        _node("r0", "user", [
+            ToolResultBlock(
+                tool_use_id="call0",
+                content=[Image(media_type="image/png", data="a" * 20_000)],
+                is_error=False,
+            )
+        ]),
+        _node("a1", "assistant", [Text("I see it")]),
+    ]
+
+
+def _has_image(message: Message) -> bool:
+    return any(
+        isinstance(inner, Image)
+        for block in message.content
+        for inner in getattr(block, "content", None) or []
+    )
+
+
+def test_compactor_trims_consumed_image_results() -> None:
+    """Regression: Compactor._render_live rendered node-by-node, so the
+    later-assistant evidence was invisible and consume-once never fired."""
+    nodes = _screenshot_path()
+    compactor = Compactor(config=CompactionConfig())
+
+    viewed = compactor.view(nodes)
+    assert not _has_image(viewed[2])
+    assert "trimmed to save context" in _tool_result_texts([viewed[2]])[0]
+    assert compactor.trimmer._trimmed == set()  # view stays read-only
+
+    rendered, promotions = compactor.apply(nodes)
+    assert not _has_image(rendered[2])
+    assert "trimmed to save context" in _tool_result_texts([rendered[2]])[0]
+    assert promotions == []  # nothing near the digest/epoch triggers
+    assert ("r0", "call0") in compactor.trimmer._trimmed
+
+
+def test_compactor_keeps_images_when_trim_disabled() -> None:
+    nodes = _screenshot_path()
+    compactor = Compactor(
+        config=CompactionConfig(trim=TrimConfig(enabled=False))
+    )
+
+    assert _has_image(compactor.view(nodes)[2])
+    rendered, _promotions = compactor.apply(nodes)
+    assert _has_image(rendered[2])
+    assert compactor.trimmer._trimmed == set()
+
+
+def test_compactor_keeps_unconsumed_image() -> None:
+    """No later assistant node → the image has not been delivered yet."""
+    nodes = _screenshot_path()[:-1]
+    compactor = Compactor(config=CompactionConfig())
+    assert _has_image(compactor.view(nodes)[2])
 
 
 # ─── Note builtin ────────────────────────────────────────────────────────────

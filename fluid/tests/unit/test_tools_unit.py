@@ -1,5 +1,6 @@
 """M2 unit tests — registry/inproc, Edit discipline, permissions, hooks."""
 
+import sys
 from pathlib import Path
 
 from fluid.hooks.bus import PRE_TOOL_USE, HookBus, HookDecision
@@ -493,3 +494,130 @@ async def test_grep_and_glob_limits_are_clamped(tmp_path) -> None:
     )
     assert len([ln for ln in out.text.splitlines() if ln.endswith(".txt")]) == 1
     assert "[showing newest 1 of 2 matched files — " in out.text
+
+
+async def test_edit_tolerates_uniform_extra_indent(tmp_path) -> None:
+    f = tmp_path / "tabbed.py"
+    f.write_text("def f():\n\ta = 1\n\tb = 2\n")
+    registry = ToolRegistry()
+    register_builtins(registry)
+    ctx = ToolCtx(cwd=str(tmp_path))
+    await registry.dispatch("Read", {"file_path": str(f)}, ctx)
+
+    # Every old_string line carries one tab too many (Read's lineno separator).
+    out = await registry.dispatch(
+        "Edit",
+        {
+            "file_path": str(f),
+            "old_string": "\t\ta = 1\n\t\tb = 2",
+            "new_string": "\t\ta = 9\n\t\tb = 8",
+        },
+        ctx,
+    )
+    assert not out.is_error, out.text
+    assert "note:" in out.text
+    assert f.read_text() == "def f():\n\ta = 9\n\tb = 8\n"
+
+
+async def test_edit_tolerates_copied_line_prefix(tmp_path) -> None:
+    f = tmp_path / "code.py"
+    f.write_text("x = 1\ny = 1\nz = 2\nw = 3\n")
+    registry = ToolRegistry()
+    register_builtins(registry)
+    ctx = ToolCtx(cwd=str(tmp_path))
+    await registry.dispatch("Read", {"file_path": str(f)}, ctx)
+
+    out = await registry.dispatch(
+        "Edit",
+        {"file_path": str(f), "old_string": "3\tz = 2\n4\tw = 3", "new_string": "z = 5\nw = 6"},
+        ctx,
+    )
+    assert not out.is_error, out.text
+    assert "note:" in out.text
+    assert f.read_text() == "x = 1\ny = 1\nz = 5\nw = 6\n"
+
+
+async def test_edit_indent_mismatch_error_explains(tmp_path) -> None:
+    f = tmp_path / "tabbed.py"
+    f.write_text("\ta = 1\n\tb = 2\n")
+    registry = ToolRegistry()
+    register_builtins(registry)
+    ctx = ToolCtx(cwd=str(tmp_path))
+    await registry.dispatch("Read", {"file_path": str(f)}, ctx)
+
+    # Inconsistent drift: first line gains a tab, second does not.
+    out = await registry.dispatch(
+        "Edit",
+        {"file_path": str(f), "old_string": "\t\ta = 1\n\tb = 2", "new_string": "\t\ta = 9\n\tb = 8"},
+        ctx,
+    )
+    assert out.is_error
+    assert "leading whitespace differs" in out.text
+    assert "Re-Read" in out.text
+    assert f.read_text() == "\ta = 1\n\tb = 2\n"
+
+
+async def test_edit_content_mismatch_error_names_line(tmp_path) -> None:
+    f = tmp_path / "words.txt"
+    f.write_text("alpha\nbeta\ngamma\n")
+    registry = ToolRegistry()
+    register_builtins(registry)
+    ctx = ToolCtx(cwd=str(tmp_path))
+    await registry.dispatch("Read", {"file_path": str(f)}, ctx)
+
+    out = await registry.dispatch(
+        "Edit",
+        {"file_path": str(f), "old_string": "alpha\nbetaX", "new_string": "alpha\nbetaY"},
+        ctx,
+    )
+    assert out.is_error
+    assert "line 2 differs" in out.text
+    assert "betaX" in out.text
+
+
+async def test_edit_preserves_crlf(tmp_path) -> None:
+    f = tmp_path / "crlf.py"
+    f.write_bytes(b"def f():\r\n\ta = 1\r\n\tb = 2\r\n")
+    registry = ToolRegistry()
+    register_builtins(registry)
+    ctx = ToolCtx(cwd=str(tmp_path))
+    await registry.dispatch("Read", {"file_path": str(f)}, ctx)
+
+    out = await registry.dispatch(
+        "Edit",
+        {
+            "file_path": str(f),
+            "old_string": "\t\ta = 1\n\t\tb = 2",
+            "new_string": "\t\ta = 9\n\t\tb = 8",
+        },
+        ctx,
+    )
+    assert not out.is_error, out.text
+    assert f.read_bytes() == b"def f():\r\n\ta = 9\r\n\tb = 8\r\n"
+
+
+async def test_edit_identical_strings_rejected(tmp_path) -> None:
+    f = tmp_path / "code.py"
+    f.write_text("x = 1\n")
+    registry = ToolRegistry()
+    register_builtins(registry)
+    ctx = ToolCtx(cwd=str(tmp_path))
+    await registry.dispatch("Read", {"file_path": str(f)}, ctx)
+
+    out = await registry.dispatch(
+        "Edit", {"file_path": str(f), "old_string": "x = 1", "new_string": "x = 1"}, ctx
+    )
+    assert out.is_error and "identical" in out.text
+    assert f.read_text() == "x = 1\n"
+
+
+async def test_bash_strips_ansi(tmp_path) -> None:
+    registry = ToolRegistry()
+    register_builtins(registry)
+    code = "import sys; sys.stdout.write('\x1b[31mred\x1b[0m plain')"
+    out = await registry.dispatch(
+        "Bash", {"command": f'"{sys.executable}" -c "{code}"'}, ToolCtx(cwd=str(tmp_path))
+    )
+    assert not out.is_error, out.text
+    assert "\x1b" not in out.text
+    assert out.text.strip() == "red plain"

@@ -17,7 +17,7 @@ Context sources for this plan:
 
 - CE1 — Discovery lives in fluid, filesystem-native. No host-app injection
   required for any of this to work; host apps can only *disable* pieces via
-  config toggles. Rationale: seamless-switch goal; ai-shuffle's native leg
+  config toggles. Rationale: seamless-switch goal; the host app's native leg
   gets everything for free on vendor sync.
 - CE2 — @-import expansion: `@path` tokens at line start or preceded by
   whitespace, OUTSIDE fenced code blocks and inline code spans, expand to the
@@ -67,7 +67,7 @@ Context sources for this plan:
   Surfacing: new compiler section kind `"agents"` (index like skills_index,
   header explains Task-tool usage) AND definitions injected to
   `ctx.extra["agent_registry"]` + `NativeLoop(agents=...)` for usage rows.
-  Dispatch stays host-app territory (task.py doctrine unchanged); ai-shuffle
+  Dispatch stays host-app territory (task.py doctrine unchanged); the host
   wires its dispatcher in W5.
 - CE7 — Cache stability: all new indexes sorted by name (deterministic).
   Section order becomes base → memory → skills → agents → environment →
@@ -120,7 +120,7 @@ Context sources for this plan:
 - W4: agents (CE6, CE7): AgentDefinition + discover_agents + frontmatter
   list support + compiler "agents" section + usage.py mapping +
   ctx.extra["agent_registry"] + NativeLoop(agents=...) auto-population.
-- W5 (ai-shuffle repo): rsync vendor sync, app-side: task_dispatch accepts
+- W5 (host-app repo): rsync vendor sync, app-side: task_dispatch accepts
   file/plugin agent definitions from the registry seam; dedupe app-injected
   MCP servers vs fluid-discovered plugin servers (name-keyed, app wins);
   drop harness_adapter's silent-discard docstring lines that no longer hold;

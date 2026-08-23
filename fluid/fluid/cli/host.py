@@ -2,7 +2,8 @@
 
 The ``Task`` and ``Monitor`` builtins only own their shape; running the work is
 the embedding application's job, injected through ``ToolCtx.extra`` as
-``task_dispatch`` and ``monitor_spawn``. AI Shuffle has its own task manager.
+``task_dispatch`` and ``monitor_spawn``. An embedding app has its own
+task manager.
 This module is the equivalent for ``fluid chat`` / ``fluid run``, so both tools
 work out of the box the way Claude Code's Agent and Monitor tools do.
 
