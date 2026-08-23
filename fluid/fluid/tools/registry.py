@@ -312,7 +312,13 @@ class ToolRegistry:
                 )
             else:
                 assert entry.handler is not None
-                outcome = _normalize(await entry.handler(input, ctx))
+                call_input = input
+                if input_responses is not None:
+                    # The builtin leg of the input-required round-trip
+                    # (AskUser): collected answers ride a reserved key so the
+                    # handler's second dispatch can read them.
+                    call_input = {**input, "__input_responses__": dict(input_responses)}
+                outcome = _normalize(await entry.handler(call_input, ctx))
         except Exception as exc:  # keep tool errors in-context, never crash the loop
             return ToolOutcome(
                 text=scrub_error_text(f"{type(exc).__name__}: {exc}"), is_error=True

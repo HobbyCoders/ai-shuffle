@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fluid.tools.builtins import (
+    ask_user,
     bash,
     edit,
     glob,
@@ -10,9 +11,11 @@ from fluid.tools.builtins import (
     history_expand,
     history_search,
     ledger,
+    memory,
     monitor,
     note,
     read,
+    session_search,
     skill,
     task,
     tool_search,
@@ -23,6 +26,7 @@ from fluid.tools.registry import ToolRegistry
 _MODULES = (
     read, grep, glob, write, edit, bash, skill, note, task, monitor,
     tool_search, history_expand, history_search, ledger,
+    memory, session_search, ask_user,
 )
 
 

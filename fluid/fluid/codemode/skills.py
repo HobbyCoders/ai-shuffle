@@ -208,9 +208,11 @@ class SkillStore:
             return
         meta = self._load_meta()
         skills = meta.setdefault("skills", {})
+        now = time.time()
         for name in hits:
             skills.setdefault(name, {"uses": 0, "updated_at": 0.0})
             skills[name]["uses"] = int(skills[name].get("uses", 0)) + 1
+            skills[name]["last_used_at"] = now
         self._save_meta(meta)
 
     # ─── journal ─────────────────────────────────────────────────────────
@@ -244,6 +246,71 @@ class SkillStore:
         except OSError:
             pass
         return out
+
+    # ─── lifecycle curation ──────────────────────────────────────────────
+    #
+    # Deterministic, no LLM, and touching ONLY store-managed skills (the ones
+    # with a meta entry — synthesized or saved through save_skill). Archive is
+    # the maximum action: the file moves to ``.archive/`` and comes back by
+    # moving it back; nothing is ever deleted. Pinned skills
+    # (``meta["skills"][name]["pinned"] = true``) are exempt from every
+    # transition. Interval-gated so per-engine construction stays cheap.
+
+    CURATE_INTERVAL_DAYS = 7.0
+    STALE_AFTER_DAYS = 30.0
+    ARCHIVE_AFTER_DAYS = 90.0
+
+    def curate(self, *, now: float | None = None, force: bool = False) -> list[str]:
+        """Run one lifecycle pass when due. Returns action lines (may be [])."""
+        now = time.time() if now is None else now
+        meta = self._load_meta()
+        last = float(meta.get("last_curated_at", 0.0))
+        if not force and now - last < self.CURATE_INTERVAL_DAYS * 86_400:
+            return []
+        meta["last_curated_at"] = now
+        actions: list[str] = []
+        archive_dir = self.root / ".archive"
+        for name, info in sorted((meta.get("skills") or {}).items()):
+            if not isinstance(info, dict) or info.get("pinned"):
+                continue
+            path = self._path(name)
+            if not path.is_file():
+                continue
+            last_activity = max(
+                float(info.get("last_used_at", 0.0)),
+                float(info.get("updated_at", 0.0)),
+            )
+            if last_activity <= 0:
+                continue  # no evidence either way — leave it alone
+            idle_days = (now - last_activity) / 86_400
+            if idle_days > self.ARCHIVE_AFTER_DAYS:
+                try:
+                    archive_dir.mkdir(exist_ok=True)
+                    path.rename(archive_dir / path.name)
+                except OSError:
+                    continue
+                info["state"] = "archived"
+                actions.append(
+                    f"archived {name} (unused {idle_days:.0f}d) -> "
+                    f"{archive_dir / path.name} — move it back to restore"
+                )
+            elif idle_days > self.STALE_AFTER_DAYS:
+                if info.get("state") != "stale":
+                    info["state"] = "stale"
+                    actions.append(f"marked {name} stale (unused {idle_days:.0f}d)")
+            elif info.get("state") == "stale":
+                info.pop("state", None)
+                actions.append(f"{name} active again")
+        self._save_meta(meta)
+        if actions:
+            try:
+                with (self.root / ".curation-log.jsonl").open(
+                    "a", encoding="utf-8"
+                ) as fh:
+                    fh.write(json.dumps({"ts": now, "actions": actions}) + "\n")
+            except OSError:
+                pass
+        return actions
 
     # ─── synthesis cursor ────────────────────────────────────────────────
     def synth_cursor(self) -> int:

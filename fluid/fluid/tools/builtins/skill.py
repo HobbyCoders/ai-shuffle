@@ -8,11 +8,36 @@ this tool, keeping the prefix small and cache-stable.
 
 from __future__ import annotations
 
+import json
+import time
 from pathlib import Path
 from typing import Any
 
 from fluid.context.instructions import discover_skills, parse_frontmatter
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
+
+
+def _note_usage(skill_path: str) -> None:
+    """Stamp load count + last-used time in a sidecar next to the skill.
+
+    Best-effort telemetry for curation and the user (`.usage.json` beside the
+    global skills root) — kept out of SKILL.md frontmatter so user-authored
+    files never accrue merge noise.
+    """
+    try:
+        root = Path.home() / ".fluid" / "skills"
+        root.mkdir(parents=True, exist_ok=True)
+        sidecar = root / ".usage.json"
+        try:
+            usage = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            usage = {}
+        entry = usage.setdefault(skill_path, {"loads": 0})
+        entry["loads"] = int(entry.get("loads", 0)) + 1
+        entry["last_used_at"] = time.time()
+        sidecar.write_text(json.dumps(usage, indent=2), encoding="utf-8")
+    except OSError:
+        pass
 
 SPEC = ToolSpec(
     name="Skill",
@@ -52,6 +77,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     except OSError as exc:
         return ToolOutcome(text=f"failed to read skill: {exc}", is_error=True)
     _, body = parse_frontmatter(raw)
+    _note_usage(match.path)
     return ToolOutcome(
         text=f"# Skill: {match.name}\n# From: {match.path}\n\n{body.strip()}"
     )

@@ -29,6 +29,7 @@ from fluid.events.model import (
     HookEvent,
     Interrupted,
     PermissionRequest,
+    QuestionRequest,
     SessionParked,
     SessionWoken,
     SubagentEvent,
@@ -39,13 +40,36 @@ from fluid.events.model import (
     TurnComplete,
     Usage,
 )
-from fluid.events.ops import Fork, RespondPermission, Rewind, SetModel, UserTurn
+from fluid.events.ops import (
+    Fork,
+    RespondPermission,
+    RespondQuestion,
+    Rewind,
+    SetModel,
+    UserTurn,
+)
 from fluid.permissions.engine import PROMPT_DENIAL, non_interactive_denial
 
 # A permission responder: given the request event, return a decision string.
 # A responder returns either a bare decision ("allow" | "deny" | "allow_always")
 # or a full RespondPermission when it wants to attach a reason.
 PermissionResponder = Callable[[PermissionRequest], Awaitable["str | RespondPermission"]]
+
+# A question responder: given a QuestionRequest (AskUser, or an MCP server's
+# input_required round-trip), return the user's answer text.
+QuestionResponder = Callable[[QuestionRequest], Awaitable[str]]
+
+# What a parked question receives when no human is attached (one-shot ``run``
+# without a tty). Worded for the model: proceed rather than wedge.
+NO_USER_ANSWER = (
+    "(no interactive user is attached to this session — proceed with your "
+    "best judgment and state the assumption you made)"
+)
+
+
+async def auto_answer(event: QuestionRequest) -> str:
+    """Non-interactive question responder: unblock the turn, never guess."""
+    return NO_USER_ANSWER
 
 _TERMINAL = (TurnComplete, Interrupted, ErrorEvent)
 
@@ -99,6 +123,9 @@ def render_event(event: Event, out: TextIO) -> None:
         out.write(f"  [{tag}] {event.output}\n")
     elif isinstance(event, PermissionRequest):
         out.write(f"\n  [permission] {event.name} (risk={event.risk}) {event.input}\n")
+    elif isinstance(event, QuestionRequest):
+        _switch_mode(out, "text")
+        out.write(f"\n  [question] {event.message}\n")
     elif isinstance(event, Usage):
         out.write(
             f"\n  [usage] in={event.input_tokens} out={event.output_tokens} "
@@ -236,6 +263,18 @@ def tty_permission_responder() -> PermissionResponder:
     return _ask
 
 
+def tty_question_responder() -> QuestionResponder | None:
+    """Interactive question responder for one-shot runs, or ``None`` off-tty."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+
+    async def _ask(event: QuestionRequest) -> str:
+        answer = await asyncio.to_thread(input, "  answer> ")
+        return answer.strip()
+
+    return _ask
+
+
 async def auto_deny(event: PermissionRequest) -> RespondPermission:
     """Non-interactive default responder (the one-shot ``fluid run`` path).
 
@@ -265,6 +304,7 @@ async def stream_turn(
     *,
     out: TextIO,
     on_permission: PermissionResponder = auto_deny,
+    on_question: QuestionResponder = auto_answer,
     parent_node_id: str | None = None,
     wait_background: bool = False,
     on_event: Callable[[Event], None] | None = None,
@@ -292,6 +332,13 @@ async def stream_turn(
             on_event(event)
         if isinstance(event, PermissionRequest):
             await engine.submit(_to_response(event, await on_permission(event)))
+            continue
+        if isinstance(event, QuestionRequest):
+            await engine.submit(
+                RespondQuestion(
+                    request_id=event.request_id, answer=await on_question(event)
+                )
+            )
             continue
         if isinstance(event, TurnComplete):
             result = event.stop_reason
@@ -350,12 +397,18 @@ class Repl:
     async def handle_permission(self, event: PermissionRequest) -> str:
         return await ask_permission(event, self._read_line)
 
+    async def handle_question(self, event: QuestionRequest) -> str:
+        # The question text (with any numbered options) was already rendered
+        # by render_event; just collect the answer line.
+        return (await self._read_line("  answer> ")).strip()
+
     async def run_turn(self, text: str | list[Any]) -> str:
         self._foreground = True
         try:
             return await stream_turn(
                 self.engine, self.session_id, text,
                 out=self.out, on_permission=self.handle_permission,
+                on_question=self.handle_question,
                 on_event=self._note_rendered,
             )
         finally:
@@ -377,6 +430,13 @@ class Repl:
                 decision = await self.handle_permission(event)
                 await self.engine.submit(
                     RespondPermission(request_id=event.request_id, decision=decision)
+                )
+            elif isinstance(event, QuestionRequest):
+                await self.engine.submit(
+                    RespondQuestion(
+                        request_id=event.request_id,
+                        answer=await self.handle_question(event),
+                    )
                 )
 
     def _start_watcher(self) -> None:

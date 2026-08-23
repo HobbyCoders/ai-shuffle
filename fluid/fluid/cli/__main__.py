@@ -74,6 +74,7 @@ async def run_once(
     provider_name: str | None = None,
     out=None,
     on_permission=auto_deny,
+    on_question=None,
     session_id: str | None = None,
 ) -> int:
     """Run a single turn and stream it to ``out``. Returns a process exit code.
@@ -93,8 +94,11 @@ async def run_once(
         # Background work (Task/Monitor) parks the session instead of ending
         # it; the one-shot run keeps streaming through park and wake until
         # nothing is in flight, so it never exits with workers running.
+        from fluid.cli.repl import auto_answer, tty_question_responder
+
         stop = await stream_turn(
             engine, meta.session_id, prompt, out=out, on_permission=on_permission,
+            on_question=on_question or tty_question_responder() or auto_answer,
             wait_background=True,
         )
     finally:

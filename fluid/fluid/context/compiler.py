@@ -24,8 +24,8 @@ Everything else the compiler gathers itself:
                       host dispatcher via ``ctx.extra["agent_registry"]``.
 
 Layering order (stable — prompt-cache friendly):
-    base → instruction stack → skills index → agents index → environment →
-    extra blocks
+    base → instruction stack → skills index → agents index → memory snapshot →
+    environment → extra blocks
 
 Two views of the same compilation:
 
@@ -80,6 +80,13 @@ class PromptInputs:
     include_skills: bool = True
     # Native ``.agents/agents`` catalog advertised for Task delegation.
     include_agents: bool = True
+    # Bounded declarative memory (fluid.context.memory): a frozen snapshot of
+    # ~/.fluid/MEMORY.md (or ``memory_file``), rendered after the indexes and
+    # before the environment block — the most cross-session-mutable section
+    # sits nearest the volatile tail.
+    include_memory: bool = True
+    memory_file: str | os.PathLike[str] | None = None
+    memory_char_limit: int = 3_000
     # Retained as a no-op compatibility argument. Provider homes are import-only.
     include_plugins: bool = False
 
@@ -195,6 +202,17 @@ def compile_prompt(inputs: PromptInputs) -> CompiledPrompt:
         )
         if index:
             sections.append(PromptSection(kind="agents", text=index))
+    if inputs.include_memory:
+        from fluid.context.memory import MemoryStore
+
+        store = MemoryStore(inputs.memory_file, char_limit=inputs.memory_char_limit)
+        section = store.render_section()
+        if section:
+            sections.append(
+                PromptSection(
+                    kind="memory", text=section, path=str(store.path), scope="global"
+                )
+            )
     if inputs.include_env:
         sections.append(
             PromptSection(kind="environment", text=environment_block(inputs.cwd))

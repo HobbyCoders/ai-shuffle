@@ -49,6 +49,19 @@ improvements:
   to fix or delete, not to enshrine;
 - most journals need NO new skill — that is the correct common outcome.
 
+Do NOT capture (these become persistent self-imposed constraints that bite
+later, when the environment has changed):
+- environment-dependent failures (missing binaries, install errors) — the
+  user can fix those; they are not durable rules;
+- negative claims about tools or capabilities ("X tool is broken", "Y does
+  not work") — these harden into standing refusals cited long after the
+  problem was fixed;
+- transient errors that resolved within the session — if retrying worked,
+  the lesson is the retry pattern, not the failure;
+- unresolved failures — a session that never found a working method must not
+  be written up as a validated workflow;
+- one-off task narratives.
+
 Skill module rules: module docstring required (first line = one-sentence
 description); define a function named exactly like the skill; include a pure
 `_selftest()` that exercises the skill on inline fixture data and raises on
@@ -177,6 +190,14 @@ class Synthesizer:
             kind = e.get("kind", "cell")
             if kind in ("user", "assistant"):
                 lines.append(f"[{kind}] {str(e.get('text', '')).strip()}")
+                continue
+            if kind == "tool":
+                # JSON-surface call (ToolJournal): one compact line.
+                outcome = "error" if e.get("error") else str(e.get("output", "")).strip()
+                lines.append(
+                    f"[tool] {e.get('name')}({str(e.get('input', '')).strip()}) "
+                    f"-> {outcome}"
+                )
                 continue
             cell_no += 1
             lines.append(f"### cell {cell_no}")

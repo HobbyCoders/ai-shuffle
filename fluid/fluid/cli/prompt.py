@@ -209,6 +209,8 @@ def profile_for(
 ) -> PromptProfile:
     """Derive the prompt profile from a resolved config (once per session)."""
     tools = effective_builtin_tools(config.tools.allowed, config.tools.disallowed)
+    if not config.memory.enabled:
+        tools -= {"Memory"}
     inst = config.instruction_files
     identity = (config.identity or "").strip() or None
     if identity is None and config.identity_file:

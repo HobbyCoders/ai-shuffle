@@ -77,6 +77,13 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     # Shell-command hooks ([[hooks]] entries; see docs/hooks.md). Lists from
     # every layer are concatenated, not replaced.
     "hooks": [],
+    # Bounded declarative memory (context/memory.py): durable facts injected
+    # as a frozen snapshot each session; curated via the Memory tool.
+    "memory": {
+        "enabled": True,
+        "file": None,
+        "char_limit": 3_000,
+    },
     # The mechanical eviction ladder (context/compaction.py): trigger,
     # headroom reserve, digest/epoch shape, intake stub size, tier-1 knobs.
     "context": {
@@ -490,6 +497,8 @@ def build_engine(
         allowed_tools = config.tools.allowed
     if disallowed_tools is None:
         disallowed_tools = config.tools.disallowed
+    if not config.memory.enabled and "Memory" not in (disallowed_tools or ()):
+        disallowed_tools = (*tuple(disallowed_tools or ()), "Memory")
 
     provider_name = provider_name or config.default_provider
     pc = config.provider(provider_name)
@@ -503,6 +512,15 @@ def build_engine(
             register_builtins(registry)
     if ctx is None:
         ctx = ToolCtx(cwd=config.cwd, session_id=session_id)
+    # Builtin wiring that rides the tool context: the Memory tool writes the
+    # same file the compiled prompt snapshots, and SessionSearch scans the
+    # session store's directory (when the store has one).
+    if config.memory.enabled:
+        ctx.extra.setdefault("memory_file", config.memory.file)
+        ctx.extra.setdefault("memory_char_limit", config.memory.char_limit)
+    store_dir = getattr(store, "_dir", None)
+    if store_dir is not None:
+        ctx.extra.setdefault("session_store_dir", str(store_dir))
 
     if pc.kind == "delegated_claude":
         from fluid.engine.delegated import DelegatedLoop
@@ -540,11 +558,18 @@ def build_engine(
         permissions = _build_permissions(config)
 
     codemode = None
-    if config.code_mode:
-        from fluid.codemode.session import CodeModeSession
+    journal = None
+    if config.code_mode or config.continual:
         from fluid.codemode.skills import SkillStore
 
         skills = SkillStore(config.skills_dir)  # None → ~/.fluid/skills
+        try:
+            # Opportunistic lifecycle pass (interval-gated, deterministic,
+            # archive-not-delete). Best-effort: curation must never block an
+            # engine build.
+            skills.curate()
+        except Exception:
+            pass
         synthesizer = None
         if config.continual:
             from fluid.codemode.continual import Synthesizer
@@ -553,7 +578,16 @@ def build_engine(
             # skill quality doesn't drift with the session's provider choice.
             # Passes are background and best-effort (see continual.py).
             synthesizer = Synthesizer(client, config.continual_model or model, skills)
-        codemode = CodeModeSession(registry, skills=skills, synthesizer=synthesizer)
+        if config.code_mode:
+            from fluid.codemode.session import CodeModeSession
+
+            codemode = CodeModeSession(registry, skills=skills, synthesizer=synthesizer)
+        elif config.continual:
+            # JSON-mode leg of the learning loop: same journal file, same
+            # synthesizer, fed from the engine's turn/tool seams.
+            from fluid.codemode.journal import ToolJournal
+
+            journal = ToolJournal(skills, synthesizer)
 
     from fluid.context.compaction import CompactionConfig
     from fluid.context.trim import TrimConfig
@@ -594,6 +628,7 @@ def build_engine(
         ctx=ctx,
         plan_mode=plan_mode,
         codemode=codemode,
+        journal=journal,
         mcp_servers=config.mcp,
         allowed_tools=allowed_tools,
         disallowed_tools=disallowed_tools,

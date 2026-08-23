@@ -85,6 +85,9 @@ def resolved_prompt(
             include_project_instructions=enabled and config.instruction_files.discover_project,
             include_skills=enabled and config.instruction_files.discover_skills,
             include_agents=enabled,
+            include_memory=config.memory.enabled,
+            memory_file=config.memory.file,
+            memory_char_limit=config.memory.char_limit,
         )
     )
 

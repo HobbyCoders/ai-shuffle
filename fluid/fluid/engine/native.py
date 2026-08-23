@@ -262,6 +262,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         ctx: ToolCtx | None = None,
         plan_mode: bool = False,
         codemode: CodeModeSession | None = None,
+        journal: Any | None = None,
         max_model_calls_per_turn: int = 200,
         max_continuations_per_turn: int = 3,
         trim: TrimConfig | None = None,
@@ -324,6 +325,10 @@ class NativeLoop(BackgroundLifecycleMixin):
             self.ctx.extra["tool_filter"] = self._tool_permitted
         self.plan_mode = plan_mode
         self._codemode = codemode
+        # JSON-mode episodic journal (fluid.codemode.journal.ToolJournal).
+        # Code-mode sessions journal through the CodeModeSession instead; a
+        # host passing both gets the codemode path (never double-journaled).
+        self._journal = journal if codemode is None else None
         if codemode is not None and registry is not None:
             register_code_mode_tools(registry, codemode)
         self.max_model_calls_per_turn = max_model_calls_per_turn
@@ -567,6 +572,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                 pass
         if self._codemode is not None:
             await self._codemode.aclose()
+        if self._journal is not None:
+            await self._journal.aclose()
         await self.bus.close()
 
     # ─── Context-usage snapshot ──────────────────────────────────────────
@@ -680,6 +687,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         if self._codemode is not None:
             # Episodic half of the continual journal: the intent behind the turn.
             self._codemode.record_event("user", _plain_text(content))
+        elif self._journal is not None:
+            self._journal.record_event("user", _plain_text(content))
         await self._emit(
             TurnStarted(
                 session_id=sid, node_id=user_node.node_id, turn_id=turn_id,
@@ -980,6 +989,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         if self._codemode is not None:
             # Episodic journal: the turn's final text (acceptance/feedback signal).
             self._codemode.record_event("assistant", _plain_text(result.message.content))
+        elif self._journal is not None:
+            self._journal.record_event("assistant", _plain_text(result.message.content))
         if self.hooks is not None:
             decision = await self.hooks.emit(
                 TURN_END,
@@ -1551,6 +1562,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                  "session_id": sid},
             )
             await self._report_hook_warnings(sid, turn_id, POST_TOOL_USE, decision, name)
+        if self._journal is not None:
+            # Continual journal, JSON-mode leg: one compact entry per call.
+            self._journal.record_tool(
+                name, input or {}, outcome.text, outcome.is_error
+            )
         await self._emit(ToolResult(
             session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id, name=name,
             output=outcome.text, is_error=outcome.is_error, ui=outcome.ui,
