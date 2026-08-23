@@ -32,7 +32,7 @@ curl -X POST http://localhost:8000/api/v1/query \
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `prompt` | string | Yes | The message to send to Claude |
-| `profile` | string | No | Profile to use (defaults to API user's profile, else `claude-code`) |
+| `profile` | string | No | Profile to use. Optional — uses the API user's configured profile when omitted; rejected with 400 if neither supplies one |
 | `project` | string | No | Project context |
 | `overrides` | object | No | Optional per-query overrides (see below) |
 
@@ -125,7 +125,7 @@ curl -X POST http://localhost:8000/api/v1/conversation \
 |-------|------|----------|-------------|
 | `prompt` | string | Yes | The message to send to Claude |
 | `session_id` | string | No | If provided, continues that session |
-| `profile` | string | No | Profile for a new session (defaults to `claude-code`) |
+| `profile` | string | No | Profile for a new session. Optional — uses the API user's configured profile when omitted; rejected with 400 if neither supplies one |
 | `project` | string | No | Project context for a new session |
 | `overrides` | object | No | Optional per-query overrides (see One-Shot Query) |
 
@@ -210,7 +210,7 @@ curl http://localhost:8000/api/v1/streaming/active \
 ## Usage Notes
 
 ### Profile Selection
-- If `profile` is not specified, the API user's configured profile is used (falling back to `claude-code`)
+- If `profile` is not specified, the API user's configured profile is used; if neither the request nor the API user supplies one, the request is rejected with a 400
 - API users may be restricted to specific profiles
 
 ### Project Context

@@ -173,11 +173,11 @@ class TestOneShotQuery:
         from app.api.query import one_shot_query
         from app.core.models import QueryRequest
 
-        # Create request - profile defaults to "claude-code" but API user has none
-        # and we need to override that default to None in our mock scenario
+        # Create request - the profile comes from the request because the
+        # API user has none
         request = QueryRequest(
             prompt="Hello!",
-            profile="claude-code"  # Default profile
+            profile="claude-code"  # supplied explicitly; no longer a model default
         )
         # API user has no profile and request profile should be ignored
         # We need to ensure neither api_user nor request has a valid profile
@@ -191,6 +191,23 @@ class TestOneShotQuery:
 
         assert exc_info.value.status_code == 400
         assert "No profile configured" in str(exc_info.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_query_omitted_profile_returns_400(self, mock_dependencies):
+        """Should return 400, not 500, when profile is omitted entirely and
+        the API user has none configured (regression: the "claude-code"
+        sentinel default used to make request.profile always truthy)."""
+        from fastapi import HTTPException
+        from app.api.query import one_shot_query
+        from app.core.models import QueryRequest
+
+        request = QueryRequest(prompt="Hello!")
+        api_user = {"id": "user1", "profile_id": None}
+
+        with pytest.raises(HTTPException) as exc_info:
+            await one_shot_query(request, api_user)
+
+        assert exc_info.value.status_code == 400
 
     @pytest.mark.asyncio
     async def test_one_shot_query_with_overrides(self, mock_dependencies):
@@ -311,8 +328,6 @@ class TestStreamOneShotQuery:
         from app.core.models import QueryRequest
 
         request = QueryRequest(prompt="Hello!")
-        # Set profile to None after creation (bypassing default)
-        request.profile = None
         api_user = {"id": "user1", "profile_id": None}
 
         with pytest.raises(HTTPException) as exc_info:
@@ -415,6 +430,24 @@ class TestConversation:
             session_id="invalid-session"
         )
         api_user = {"id": None, "profile_id": "default"}
+
+        with pytest.raises(HTTPException) as exc_info:
+            await conversation(request, api_user)
+
+        assert exc_info.value.status_code == 400
+        mock_conv_dependencies["submit"].assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_conversation_omitted_profile_returns_400(self, mock_conv_dependencies):
+        """Should return 400, not 500, when profile is omitted entirely and
+        the API user has none configured (regression: the "claude-code"
+        sentinel default used to make request.profile always truthy)."""
+        from fastapi import HTTPException
+        from app.api.query import conversation
+        from app.core.models import ConversationRequest
+
+        request = ConversationRequest(prompt="Hello!")
+        api_user = {"id": "user1", "profile_id": None}
 
         with pytest.raises(HTTPException) as exc_info:
             await conversation(request, api_user)

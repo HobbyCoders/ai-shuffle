@@ -552,7 +552,7 @@ class QueryOverrides(BaseModel):
 class QueryRequest(BaseModel):
     """Query request"""
     prompt: str = Field(..., min_length=1)
-    profile: str = "claude-code"
+    profile: Optional[str] = None
     project: Optional[str] = None
     overrides: Optional[QueryOverrides] = None
 
@@ -561,7 +561,7 @@ class ConversationRequest(BaseModel):
     """Continue or start a conversation"""
     prompt: str = Field(..., min_length=1)
     session_id: Optional[str] = None  # If provided, continues existing session
-    profile: Optional[str] = "claude-code"  # Used only for new sessions
+    profile: Optional[str] = None  # Used only for new sessions
     project: Optional[str] = None  # Used only for new sessions
     overrides: Optional[QueryOverrides] = None
     device_id: Optional[str] = None  # Device identifier for cross-device sync

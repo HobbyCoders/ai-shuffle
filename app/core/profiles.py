@@ -15,32 +15,6 @@ from app.db import database
 logger = logging.getLogger(__name__)
 
 
-# Default profile configuration template (for reference when creating new profiles)
-# Supported models are enumerated in app.core.model_registry.MODELS — edit that
-# module to add or remove a model; it's the single source of truth across
-# backend and frontend (frontend/src/lib/constants/models.ts mirrors it).
-#
-# The configured system prompt IS the agent's base prompt (ruling A12): new
-# agents start empty and the fluid compiler wraps whatever is configured with
-# environment, instruction files, and security context at runtime. SDK-era
-# keys (thinking_mode, setting_sources, enable_file_checkpointing, …) are
-# gone — the fluid harness ignores them. No model / permission_mode either
-# (v79): an agent is the configuration, and the run binding belongs to the
-# session the user creates from it.
-DEFAULT_PROFILE_CONFIG: Dict[str, Any] = {
-    # Ruling T2: the mode is the authority, and a new agent gets every tool.
-    # The old ``"allowed_tools": []`` here meant "unrestricted" only because
-    # every runtime path read an empty list as absent — the exact ambiguity T2
-    # removed, so the lists are simply not written.
-    "tool_selection_mode": "all",
-    "system_prompt": {
-        "type": "custom",
-        "content": ""
-    },
-    "enabled_agents": []
-}
-
-
 # The retired built-in. Nothing creates or protects it any more; the migration
 # below only unlocks the row an existing install still has, so its owner can
 # delete it like any other agent.
