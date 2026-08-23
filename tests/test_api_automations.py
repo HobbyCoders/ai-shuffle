@@ -251,6 +251,39 @@ class TestAutomationCRUD:
 
 
 # =============================================================================
+# Referenced-Agent Guard
+# =============================================================================
+
+
+class TestReferencedAgentGuard:
+    def test_delete_agent_blocked_while_automation_references_it(
+        self, authenticated_client, mock_encryption
+    ):
+        """Deleting an agent an automation still points at must 409, not 500 on the FK."""
+        profile_id = _create_profile(authenticated_client)
+        create_resp = authenticated_client.post(
+            "/api/v1/automations",
+            json={
+                "name": "Nightly sync",
+                "trigger_type": "webhook",
+                "trigger_config": {},
+                "prompt": "test",
+                "profile_id": profile_id,
+            },
+        )
+        assert create_resp.status_code == 201
+        aid = create_resp.json()["id"]
+
+        response = authenticated_client.delete(f"/api/v1/agents/{profile_id}")
+        assert response.status_code == 409
+        assert "Nightly sync" in response.json()["detail"]
+
+        # Once the automation is gone the agent deletes cleanly.
+        assert authenticated_client.delete(f"/api/v1/automations/{aid}").status_code == 204
+        assert authenticated_client.delete(f"/api/v1/agents/{profile_id}").status_code == 204
+
+
+# =============================================================================
 # Lifecycle Actions
 # =============================================================================
 

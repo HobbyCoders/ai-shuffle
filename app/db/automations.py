@@ -197,6 +197,18 @@ def get_all_automations() -> List[AutomationRow]:
         return [_parse_automation_row(r) for r in rows]
 
 
+def get_automations_for_profile(profile_id: str) -> List[AutomationRow]:
+    """Get all automations that reference a profile."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM automations WHERE profile_id = %s ORDER BY created_at DESC",
+            (profile_id,)
+        )
+        rows = rows_to_list(cursor.fetchall())
+        return [_parse_automation_row(r) for r in rows]
+
+
 def get_enabled_automations() -> List[AutomationRow]:
     """Get all enabled automations."""
     with get_db() as conn:

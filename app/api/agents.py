@@ -666,6 +666,14 @@ async def delete_profile(profile_id: str, token: str = Depends(require_admin)):
             detail="Built-in profiles cannot be deleted"
         )
 
+    blocking = database.get_automations_for_profile(profile_id)
+    if blocking:
+        names = ", ".join(a["name"] for a in blocking)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Agent is used by {len(blocking)} automation(s): {names} — delete or reassign them first"
+        )
+
     database.delete_profile(profile_id)
 
 
