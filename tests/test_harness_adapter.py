@@ -925,6 +925,34 @@ async def test_native_loop_text_turn():
     await adapter.disconnect()
 
 
+@pytest.mark.asyncio
+async def test_send_resume_submits_a_resume_op():
+    """Retry-from-here submits fluid's Resume op — no UserTurn, no prompt."""
+    from fluid.events.ops import Resume, UserTurn
+
+    submitted: list = []
+
+    class _RecordingEngine:
+        async def submit(self, op):
+            submitted.append(op)
+
+    adapter = HarnessAdapter()
+    adapter._engine = _RecordingEngine()
+
+    await adapter.send_resume()
+
+    assert len(submitted) == 1
+    assert isinstance(submitted[0], Resume)
+    assert not any(isinstance(op, UserTurn) for op in submitted)
+
+
+@pytest.mark.asyncio
+async def test_send_resume_without_an_engine_raises():
+    adapter = HarnessAdapter()
+    with pytest.raises(RuntimeError, match="Adapter not connected"):
+        await adapter.send_resume()
+
+
 # ─── 4. Provider-kind decision ───────────────────────────────────────────────
 
 

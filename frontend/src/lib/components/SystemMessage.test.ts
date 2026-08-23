@@ -4,10 +4,26 @@
  * tool-card convention: three-way status icon -> bot icon -> "Task" label ->
  * status chip -> description summary.
  */
-import { describe, it, expect, afterEach } from 'vitest';
-import { render, screen, cleanup } from '@testing-library/svelte';
+import { describe, it, expect, afterEach, vi, beforeEach } from 'vitest';
+import { render, screen, cleanup, fireEvent } from '@testing-library/svelte';
 import SystemMessage from './SystemMessage.svelte';
 import type { ChatMessage } from '$lib/stores/types';
+
+// The Retry button on a spent retry card posts to the resume route with the
+// session the chat is currently on.
+const resumeSession = vi.hoisted(() => vi.fn());
+const notifyError = vi.hoisted(() => vi.fn());
+
+vi.mock('$lib/api/sessions', () => ({ resumeSession }));
+vi.mock('$lib/stores/notifications', () => ({ notify: { error: notifyError } }));
+vi.mock('$lib/stores/active-session', () => ({
+	activeSession: {
+		subscribe: (run: (v: { sessionId: string }) => void) => {
+			run({ sessionId: 'sess-active' });
+			return () => {};
+		}
+	}
+}));
 
 function makeMessage(over: Partial<ChatMessage> = {}): ChatMessage {
 	return {
@@ -141,6 +157,79 @@ describe('SystemMessage — provider_retry', () => {
 		});
 
 		expect(container.textContent).toContain('attempt ? of ?');
+	});
+});
+
+describe('SystemMessage — provider_retry exhausted', () => {
+	beforeEach(() => {
+		resumeSession.mockReset();
+		notifyError.mockReset();
+	});
+
+	function exhausted(over: Record<string, unknown> = {}) {
+		return makeMessage({
+			systemSubtype: 'provider_retry',
+			systemData: {
+				attempt: 10,
+				max_attempts: 10,
+				model: 'ox-alpha',
+				exhausted: true,
+				error: 'empty response, giving up',
+				...over
+			}
+		});
+	}
+
+	it('reads as a settled failure with a Retry button', () => {
+		const { container } = render(SystemMessage, { props: { message: exhausted() } });
+
+		expect(screen.getByText('Retry failed')).toBeTruthy();
+		expect(container.textContent).toContain('10 times in a row');
+		expect(container.textContent).toContain('ox-alpha');
+		// Settled, not in flight: the cross replaces the spinner.
+		expect(container.querySelector('.animate-spin')).toBeNull();
+		expect(container.querySelector('.text-red-500')).not.toBeNull();
+		expect(container.querySelector('[data-testid="provider-retry-button"]')).not.toBeNull();
+	});
+
+	it('drops the button once the card has been resumed', () => {
+		const { container } = render(SystemMessage, {
+			props: { message: exhausted({ resumed: true }) }
+		});
+
+		expect(screen.getByText('Retry failed')).toBeTruthy();
+		expect(container.textContent).toContain('resumed');
+		expect(container.querySelector('[data-testid="provider-retry-button"]')).toBeNull();
+	});
+
+	it('resumes the active session and shows progress while the call is in flight', async () => {
+		let release: (v: unknown) => void = () => {};
+		resumeSession.mockReturnValue(new Promise((r) => { release = r; }));
+
+		render(SystemMessage, { props: { message: exhausted() } });
+		const button = screen.getByTestId('provider-retry-button') as HTMLButtonElement;
+
+		await fireEvent.click(button);
+
+		expect(resumeSession).toHaveBeenCalledWith('sess-active');
+		expect(button.textContent?.trim()).toBe('Retrying…');
+		expect(button.disabled).toBe(true);
+
+		release({ turn_id: 't1', session_id: 'sess-active' });
+	});
+
+	it('re-enables and reports when the resume is refused', async () => {
+		resumeSession.mockRejectedValue(new Error('a turn is already running'));
+
+		render(SystemMessage, { props: { message: exhausted() } });
+		const button = screen.getByTestId('provider-retry-button') as HTMLButtonElement;
+
+		await fireEvent.click(button);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(notifyError).toHaveBeenCalled();
+		expect(notifyError.mock.calls[0][0]).toContain('a turn is already running');
 	});
 });
 

@@ -3,6 +3,9 @@
 	import { Marked } from 'marked';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { Webhook, ChevronDown } from 'lucide-svelte';
+	import { activeSession } from '$lib/stores/active-session';
+	import { notify } from '$lib/stores/notifications';
+	import { resumeSession } from '$lib/api/sessions';
 
 	// Create a local marked instance to avoid mutating global config
 	const localMarked = new Marked({ breaks: true, gfm: true });
@@ -643,6 +646,21 @@
 				const attempt = data.attempt ?? '?';
 				const maxAttempts = data.max_attempts ?? '?';
 				const retryModel = typeof data.model === 'string' ? data.model : '';
+				if (data.exhausted) {
+					// The cap was reached and the turn died. The card stops
+					// counting and becomes the failure notice — plus the way
+					// back, via the Retry button on the row.
+					let spent = `Empty response from the provider ${maxAttempts} times in a row. Fix the issue, then retry from here.`;
+					if (retryModel) spent += ` · ${retryModel}`;
+					if (data.resumed) spent += ' · resumed';
+					return {
+						title: 'Retry failed',
+						content: spent,
+						badge: 'failed',
+						badgeColor: 'red',
+						compact: true
+					};
+				}
 				const base = `Empty response from the provider — retrying (attempt ${attempt} of ${maxAttempts})`;
 				return {
 					title: 'Retrying',
@@ -735,8 +753,40 @@
 	);
 
 	// A retry row is work in flight, not a settled outcome: it takes the
-	// spinner the running-task rows use instead of a check or a cross.
-	const isProviderRetry = $derived(message.systemSubtype === 'provider_retry');
+	// spinner the running-task rows use instead of a check or a cross. Once
+	// the attempts are spent the turn is over, so the spinner gives way to the
+	// settled cross and the row offers a way back.
+	const retryExhausted = $derived(
+		message.systemSubtype === 'provider_retry' &&
+			!!(message.systemData as Record<string, unknown> | undefined)?.exhausted
+	);
+	const retryResumed = $derived(
+		!!(message.systemData as Record<string, unknown> | undefined)?.resumed
+	);
+	const isProviderRetry = $derived(
+		message.systemSubtype === 'provider_retry' && !retryExhausted
+	);
+	// The button retires the moment any new turn starts (the reducer stamps
+	// `resumed`), so a card can never launch two resumes.
+	const canRetry = $derived(retryExhausted && !retryResumed);
+
+	let retrying = $state(false);
+
+	async function handleRetry() {
+		const sessionId = $activeSession.sessionId;
+		if (!sessionId || retrying) return;
+		retrying = true;
+		try {
+			await resumeSession(sessionId);
+			// Leave the button disabled: turn.started marks the card resumed and
+			// the row re-renders without it.
+		} catch (e) {
+			retrying = false;
+			notify.error(
+				`Couldn't retry — ${e instanceof Error ? e.message : 'please try again'}.`
+			);
+		}
+	}
 
 	// Badge color classes
 	function getBadgeClasses(color: string): string {
@@ -968,6 +1018,22 @@
 					<span class="text-muted-foreground flex-shrink-0">&bull;</span>
 					<span class="text-sm text-muted-foreground truncate min-w-0" title={formatted.content}>{formatted.content}</span>
 				{/if}
+				<!--
+					Retry — resume the loop from the same head node, no new
+					message. Only on a spent card that has not already been
+					resumed; a new turn of any kind retires it.
+				-->
+				{#if canRetry}
+					<button
+						type="button"
+						class="retry-chip ml-auto flex-shrink-0"
+						data-testid="provider-retry-button"
+						disabled={retrying}
+						onclick={handleRetry}
+					>
+						{retrying ? 'Retrying…' : 'Retry'}
+					</button>
+				{/if}
 			</div>
 		</div>
 	{:else}
@@ -1032,6 +1098,32 @@
 		margin: 2px 0 4px 14px;
 		padding-left: 12px;
 		border-left: 1px solid var(--border);
+	}
+
+	/* Retry chip on a spent provider-retry row. Outlined like the rest of the
+	   transcript's small controls — a hover scrim, never an opaque fill. */
+	.retry-chip {
+		min-height: 44px;
+		padding: 0 12px;
+		font-size: 0.75rem;
+		font-weight: 500;
+		color: var(--foreground);
+		background: transparent;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		cursor: pointer;
+		transition: background-color 130ms ease;
+	}
+	.retry-chip:hover:not(:disabled) {
+		background: var(--scrim);
+	}
+	.retry-chip:disabled {
+		opacity: 0.6;
+		cursor: default;
+	}
+	.retry-chip:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: -2px;
 	}
 
 	/* Generic system row: same tap target as the hook row. */

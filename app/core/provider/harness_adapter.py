@@ -230,6 +230,7 @@ from fluid.events.ops import (
     Interrupt,
     RespondPermission,
     RespondQuestion,
+    Resume,
     SetModel,
     SetPermissionMode,
     UserTurn,
@@ -895,6 +896,11 @@ class HarnessAdapter(ProviderAdapter):
         # tests pass the prompt string straight through (the loops normalize it),
         # so the cast bridges the vendor annotation without touching the value.
         await self._engine.submit(UserTurn(content=cast(Any, prompt)))
+
+    async def send_resume(self) -> None:
+        if self._engine is None:
+            raise RuntimeError("Adapter not connected")
+        await self._engine.submit(Resume())
 
     async def receive_events(self) -> AsyncIterator[ProviderEvent]:
         """Translate the fluid Event stream into ProviderEvents for one turn.

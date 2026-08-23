@@ -1689,6 +1689,68 @@ async def clear_session(
     return {"status": "ok", "session_id": session_id}
 
 
+@router.post("/{session_id}/resume", status_code=status.HTTP_200_OK)
+async def resume_session(
+    request: Request,
+    session_id: str,
+    token: str = Depends(require_auth),
+):
+    """Re-run the last turn from the session head without adding a message.
+
+    This backs the Retry button on an exhausted provider-retry card. The failed
+    turn left the head on a user node the model never answered — the prompt, or
+    the tool results it was about to read — so the engine picks the loop back up
+    from exactly that node. Nothing is appended: no ``message.user`` row, and
+    the request the provider sees is the one that failed, so the prefix cache
+    survives.
+
+    Only fluid sessions can do this. The Claude CLI owns its own transcript and
+    has no head node to hand back, so a non-fluid session is refused outright.
+    """
+    existing = await require_session(request, session_id)
+
+    from app.core import turn_manager, turn_claim
+    from app.db import turns as turns_db
+
+    live = await run_sync(turns_db.get_live_turn, session_id)
+    queued = await run_sync(turns_db.get_queued_turns, session_id)
+    if live or queued:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="a turn is already running",
+        )
+
+    sdk_session_id = existing.get("sdk_session_id") or ""
+    if not sdk_session_id.startswith("ses_"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="resume needs a fluid session",
+        )
+
+    payload: dict = {}
+    api_user = get_api_user_from_request(request)
+    if api_user:
+        payload["api_user_id"] = api_user["id"]
+
+    profile_id = existing.get("profile_id")
+    turn_id = turn_manager.submit(
+        session_id,
+        "resume",
+        prompt="",
+        # The 'claude-code' no-profile sentinel is install-local and must never
+        # ride a turn another install executes.
+        profile_id=None if profile_id == "claude-code" else profile_id,
+        project_id=existing.get("project_id"),
+        payload=payload or None,
+        no_kick=True,
+    )
+    # The session may be placed on the worker; the durable row plus this NOTIFY
+    # is the whole hand-off, exactly as the worktree submit seam does it.
+    await run_sync(turn_claim.notify_turns_changed, session_id)
+
+    return {"turn_id": turn_id, "session_id": session_id}
+
+
 @router.post("/batch-delete", status_code=status.HTTP_200_OK)
 async def batch_delete_sessions(
     request: Request,

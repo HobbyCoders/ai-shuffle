@@ -712,10 +712,19 @@ class SessionRuntime:
             # Carry the claimed completions to HarnessAdapter so Fluid can clear
             # its durable pending-task state without starting a second wake turn.
             turn_overrides["background_task_completions"] = completion_frames
-        await recorder.start(prompt, profile_id=self.turn.get("profile_id"))
+        # A resumed turn re-runs the engine loop from the session head: no new
+        # prompt is sent and no message.user is recorded, so the transcript
+        # gains only the answer the failed turn never produced.
+        resume = self.source == "resume"
+        await recorder.start(
+            prompt,
+            profile_id=self.turn.get("profile_id"),
+            record_user=not resume,
+        )
         try:
             async for event in _stream_to_websocket_impl(
                 prompt=prompt,
+                resume=resume,
                 session_id=self.session_id,
                 profile_id=self.turn.get("profile_id"),
                 # The LEGACY project id deliberately stays live here — it still

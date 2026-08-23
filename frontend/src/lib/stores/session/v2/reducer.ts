@@ -529,15 +529,37 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 
 	switch (event.type) {
 		// ── Turn lifecycle ──────────────────────────────────────────────
-		case 'turn.started':
+		case 'turn.started': {
 			// Track the live turn id (#585) so a Stop can target THIS turn.
 			// Also reset liveModel/liveRequestedModel: the new turn's model is
 			// unknown until its own model_info note arrives; without this, a
 			// previous turn's reroute banner lingers even after the user aligns
 			// their selection. Replay order preserves correctness: a backfill
 			// replays turn.started then that turn's model_info.
+			//
+			// Any exhausted retry card has been acted on the moment a new turn
+			// starts — whether the user pressed Retry or just typed something
+			// else — so its Retry button retires. `resumed` is sticky, and a
+			// from_seq=0 replay reaches the same state.
+			let messages = state.messages;
+			if (
+				messages.some(
+					(m) =>
+						m.systemSubtype === 'provider_retry' &&
+						(m.systemData as Record<string, unknown> | undefined)?.exhausted &&
+						!(m.systemData as Record<string, unknown> | undefined)?.resumed
+				)
+			) {
+				messages = messages.map((m) => {
+					const d = m.systemData as Record<string, unknown> | undefined;
+					return m.systemSubtype === 'provider_retry' && d?.exhausted && !d.resumed
+						? { ...m, systemData: { ...d, resumed: true } }
+						: m;
+				});
+			}
 			return {
 				...state,
+				messages,
 				isStreaming: true,
 				parked: false,
 				liveTurnId: typeof event.turn_id === 'string' ? event.turn_id : state.liveTurnId,
@@ -549,6 +571,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				liveRequestedModel: null,
 				liveProvider: null,
 			};
+		}
 
 		case 'turn.parked': {
 			// A turn parked on background work: not "streaming" but still live.
@@ -717,6 +740,36 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				const message = str(event.message);
 				if (message) {
 					const last = next.messages[next.messages.length - 1];
+					// A retry card that burned its last attempt IS this failure —
+					// the abort is the cap being reached. Fold the error into the
+					// card (which then offers Retry) rather than stacking a second
+					// error card underneath saying the same thing.
+					const retryData =
+						last?.role === 'system' && last.systemSubtype === 'provider_retry'
+							? (last.systemData as Record<string, unknown> | undefined)
+							: undefined;
+					const exhausted =
+						!!retryData &&
+						typeof retryData.attempt === 'number' &&
+						typeof retryData.max_attempts === 'number' &&
+						retryData.attempt >= retryData.max_attempts;
+					if (exhausted) {
+						const messages = next.messages.slice();
+						messages[messages.length - 1] = {
+							...last,
+							systemData: { ...retryData, exhausted: true, error: message },
+						};
+						return {
+							...next,
+							messages,
+							isStreaming: false,
+							parked: false,
+							liveTurnId: null,
+							liveTurnProfileId: null,
+							pendingPumpAck: null,
+							pumpAckBuffer: '',
+						};
+					}
 					const duplicate =
 						last?.role === 'system' &&
 						last.systemSubtype === 'error' &&
@@ -1425,9 +1478,20 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// new attempt replaces it in place. The id is reused so
 			// messageOriginSeq and transcript rewind keep lining up, and a
 			// retry that follows anything else still appends a fresh card.
+			// An EXHAUSTED card is finished business — it records a turn that
+			// already failed, and its Retry button is the only way back — so a
+			// retry note from the NEXT turn appends a fresh card beside it
+			// rather than overwriting the failure.
 			if (str(event.subtype) === 'provider_retry') {
 				const last = state.messages[state.messages.length - 1];
-				if (last && last.type === 'system' && last.systemSubtype === 'provider_retry') {
+				const lastExhausted = !!(last?.systemData as Record<string, unknown> | undefined)
+					?.exhausted;
+				if (
+					last &&
+					last.type === 'system' &&
+					last.systemSubtype === 'provider_retry' &&
+					!lastExhausted
+				) {
 					const messages = state.messages.slice();
 					messages[messages.length - 1] = {
 						...last,

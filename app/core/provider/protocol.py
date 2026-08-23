@@ -78,6 +78,15 @@ class ProviderAdapter(ABC):
         response starts flowing.
         """
 
+    async def send_resume(self) -> None:
+        """Re-run the loop from the session head without appending a prompt.
+
+        Only the fluid engines can do this: the head node is the prompt, so the
+        retry re-sends exactly the history the failed call saw. Providers that
+        own their own transcript (the Claude CLI) cannot, and say so.
+        """
+        raise NotImplementedError("resume is only supported on fluid sessions")
+
     @abstractmethod
     def receive_events(self) -> AsyncIterator[ProviderEvent]:
         """Yield provider events for the current query.

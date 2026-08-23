@@ -1969,6 +1969,7 @@ async def _stream_to_websocket_impl(
     api_user_id: Optional[str] = None,
     user_id: Optional[str] = None,
     upload_blob_ids: Optional[List[str]] = None,
+    resume: bool = False,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Stream Claude response directly to WebSocket.
@@ -1999,6 +2000,9 @@ async def _stream_to_websocket_impl(
             materialized into this session's working dir (once the cwd is
             resolved, below) and the prompt's uploader-absolute paths are
             rewritten to the local ones before anything reaches the engine.
+        resume: Re-run the engine loop from the session head instead of sending
+            a prompt. ``prompt`` is empty and nothing derived from it applies,
+            so every step that reads or rewrites it is skipped.
     """
     # Get profile. Log at ERROR: consumers may have no surface for this yield
     # (headless path has no 'error' dispatch handler and force-cleans the live
@@ -2102,7 +2106,7 @@ async def _stream_to_websocket_impl(
     # reaches any engine — so there is exactly one resolved cwd in play. A
     # failure REFUSES the turn the same way an unavailable worktree does:
     # running with dead attachment paths is the silent loss D8 prevents.
-    if upload_blob_ids:
+    if upload_blob_ids and not resume:
         from app.core import upload_transfer
 
         try:
@@ -2727,7 +2731,7 @@ async def _stream_to_websocket_impl(
 
         include_partial = options.include_partial_messages  # Track if streaming events are enabled
         has_visible_content = False  # Track if any content was yielded to the frontend
-        is_slash_command = prompt.strip().startswith("/")
+        is_slash_command = not resume and prompt.strip().startswith("/")
         _current_thinking = []  # Accumulate thinking deltas into blocks
         _current_text_parts: list = []  # Accumulate asst text between blocks for ordered persistence
 
@@ -2751,8 +2755,11 @@ async def _stream_to_websocket_impl(
         raise
 
     try:
-        # Resolve virtual @Notes/note-id references to actual content
-        prompt = resolve_note_references(prompt)
+        # Resolve virtual @Notes/note-id references to actual content. A resumed
+        # turn has no prompt to resolve — the head node already carries whatever
+        # the failed call was sent.
+        if not resume:
+            prompt = resolve_note_references(prompt)
 
         _query_send_start = time.monotonic()
         prepare_completions = getattr(
@@ -2764,7 +2771,10 @@ async def _stream_to_websocket_impl(
             )
             if asyncio.iscoroutine(prepared):
                 await prepared
-        await state.adapter.send_query(prompt)
+        if resume:
+            await state.adapter.send_resume()
+        else:
+            await state.adapter.send_query(prompt)
         _query_send_elapsed = time.monotonic() - _query_send_start
         if _query_send_elapsed > 1.0:
             logger.warning(f"[WS] client.query() took {_query_send_elapsed:.1f}s for session {session_id}")

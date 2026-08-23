@@ -360,3 +360,19 @@ export async function stopSessionTask(sessionId: string, taskId: string): Promis
 		`/sessions/${sessionId}/tasks/${encodeURIComponent(taskId)}/stop`
 	);
 }
+
+export interface ResumeSessionResponse {
+	turn_id: string;
+	session_id: string;
+}
+
+/**
+ * Re-run the last turn from the session head without adding a message.
+ * Backs the Retry button on an exhausted provider-retry card: the failed turn
+ * left the head on a user node the model never answered, so the engine picks
+ * the loop back up from exactly that node and the transcript gains only the
+ * answer. Fluid sessions only — the backend refuses anything else with a 409.
+ */
+export async function resumeSession(sessionId: string): Promise<ResumeSessionResponse> {
+	return api.post<ResumeSessionResponse>(`/sessions/${sessionId}/resume`);
+}
