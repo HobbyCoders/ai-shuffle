@@ -655,6 +655,7 @@ export interface TaskUpdated {
   created_at: CreatedAt20;
   description?: Description2;
   id: Id20;
+  kind?: string | null;
   run_id?: RunId20;
   seq: Seq20;
   session_id: SessionId20;

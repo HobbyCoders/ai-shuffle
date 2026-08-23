@@ -1187,6 +1187,35 @@ describe('task.updated summaries', () => {
 		expect(t.summary).toBe('ok');
 	});
 
+	it('a task.updated with kind=shell keeps the shell badge on the summary', () => {
+		// The backend stamps the registry kind onto the frame (shell badge fix);
+		// without it the reducer would default this Monitor shell to 'agent'.
+		const s = fold([
+			ev('task.updated', {
+				task_id: 'sh-1',
+				state: 'running',
+				description: 'tail -f app.log',
+				kind: 'shell',
+			}),
+		]);
+		expect(s.activeTaskSummaries[0].kind).toBe('shell');
+	});
+
+	it('a later frame with no kind preserves an earlier shell kind', () => {
+		const s = fold([
+			ev('task.updated', { task_id: 'sh-1', state: 'running', kind: 'shell' }),
+			ev('task.updated', { task_id: 'sh-1', state: 'running' }),
+		]);
+		expect(s.activeTaskSummaries[0].kind).toBe('shell');
+	});
+
+	it('an unknown kind value falls back to agent', () => {
+		const s = fold([
+			ev('task.updated', { task_id: 'x-1', state: 'running', kind: 'workflow' }),
+		]);
+		expect(s.activeTaskSummaries[0].kind).toBe('agent');
+	});
+
 	it('terminal task.updated settles the joined subagent card via tool_use_id', () => {
 		// A background subagent's completion crossing a turn boundary arrives
 		// ONLY as a task.updated chip (no subagent.completed is dispatched —

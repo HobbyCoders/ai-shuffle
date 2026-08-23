@@ -188,6 +188,10 @@ class TaskUpdated(EventBase):
     description: str | None = None
     summary: str | None = None
     tool_use_id: str | None = None
+    # Registry kind ("agent" | "shell") — stamped from the task_registry at
+    # translation time so the FE tail line shows the right badge instead of
+    # defaulting every task to 'agent'. Optional/additive: older logs omit it.
+    kind: str | None = None
 
 
 class SystemNote(EventBase):

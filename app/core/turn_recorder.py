@@ -212,6 +212,25 @@ def _build_event(
     }
 
 
+def _registry_kind(session_id: str, task_id: Any) -> Dict[str, Any]:
+    """Registry kind ("agent" | "shell") for a TaskUpdated frame, best-effort.
+
+    The wire frames carry no kind of their own; without this stamp the FE
+    reducer defaults every task to 'agent' and the tail line badges a shell as
+    an agent. Returns {} when unknown (older logs / unregistered ids) so the
+    additive field is simply absent.
+    """
+    if not task_id:
+        return {}
+    try:
+        from app.core.task_registry import task_registry
+        record = task_registry.get_task(session_id, str(task_id))
+        kind = (record or {}).get("kind")
+        return {"kind": kind} if kind else {}
+    except Exception:  # noqa: BLE001 — a badge must never break recording
+        return {}
+
+
 def _translate_shared(
     event: Dict[str, Any],
     session_id: str,
@@ -313,6 +332,7 @@ def _translate_shared(
             description=event.get("description"),
             summary=event.get("summary"),
             tool_use_id=event.get("tool_use_id"),
+            **_registry_kind(session_id, event.get("task_id")),
             **kw,
         )]
 
@@ -347,6 +367,7 @@ def _translate_shared(
                     description=data.get("description"),
                     summary=data.get("summary"),
                     tool_use_id=tool_use_id,
+                    **_registry_kind(session_id, str(task_id)),
                     **kw,
                 )]
         if subtype in _COMPACTION_SUBTYPES:
