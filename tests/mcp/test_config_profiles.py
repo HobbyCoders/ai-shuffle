@@ -537,6 +537,7 @@ class TestDeleteProfile:
         )
         tool = _get_tool(admin_tools, "deleteProfile")
         with patch("app.db.database.get_profile", return_value=profile), \
+             patch("app.db.database.get_automations_for_profile", return_value=[]), \
              patch("app.db.database.delete_profile", return_value=True):
             result = await tool.handler({
                 "profile_id": "del-success",
@@ -545,6 +546,22 @@ class TestDeleteProfile:
         body = _decode(result)
         assert body["success"] is True
         assert body["profile_id"] == "del-success"
+
+    @pytest.mark.asyncio
+    async def test_delete_profile_blocked_by_automation(self, admin_tools):
+        profile = _make_profile(id="del-blocked", name="Del Blocked")
+        automations = [{"name": "Nightly Sync"}, {"name": "Weekly Report"}]
+        tool = _get_tool(admin_tools, "deleteProfile")
+        with patch("app.db.database.get_profile", return_value=profile), \
+             patch("app.db.database.get_automations_for_profile", return_value=automations), \
+             patch("app.db.database.delete_profile") as mock_delete:
+            result = await tool.handler({"profile_id": "del-blocked", "confirm": True})
+        body = _decode(result)
+        assert body["success"] is False
+        assert "2 automation(s)" in body["error"]
+        assert "Nightly Sync" in body["error"]
+        assert "Weekly Report" in body["error"]
+        mock_delete.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_delete_profile_requires_admin(self, non_admin_tools):

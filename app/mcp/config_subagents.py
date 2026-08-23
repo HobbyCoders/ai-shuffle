@@ -262,6 +262,13 @@ def _create_subagent_tools(is_admin: bool) -> list:
                 f"Cannot delete built-in subagent: {args['subagent_id']}."
             )
 
+        blocking = database.get_automations_for_profile(args["subagent_id"])
+        if blocking:
+            names = ", ".join(a["name"] for a in blocking)
+            return _error(
+                f"Agent is used by {len(blocking)} automation(s): {names} — delete or reassign them first"
+            )
+
         if not database.delete_subagent(args["subagent_id"]):
             return _error("Failed to delete subagent.")
 

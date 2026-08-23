@@ -2487,6 +2487,7 @@ from app.db.automations import (  # noqa: F401
     create_automation,
     get_automation,
     get_all_automations,
+    get_automations_for_profile,
     get_enabled_automations,
     get_automations_for_event,
     update_automation,

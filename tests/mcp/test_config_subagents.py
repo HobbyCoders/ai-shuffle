@@ -468,11 +468,28 @@ class TestDeleteSubagent:
         subagent = _make_subagent(id="del-agent", name="Delete Me")
         tool = _get_tool(admin_tools, "deleteSubagent")
         with patch("app.db.database.get_subagent", return_value=subagent), \
+             patch("app.db.database.get_automations_for_profile", return_value=[]), \
              patch("app.db.database.delete_subagent", return_value=True):
             result = await tool.handler({"subagent_id": "del-agent", "confirm": True})
         data = _parse_result(result)
         assert data["success"] is True
         assert data["subagent_id"] == "del-agent"
+
+    @pytest.mark.asyncio
+    async def test_delete_subagent_blocked_by_automation(self, admin_tools):
+        """Subagent referenced by automations → error, no delete."""
+        subagent = _make_subagent(id="blocked-agent", name="Blocked Agent")
+        automations = [{"name": "Nightly Sync"}]
+        tool = _get_tool(admin_tools, "deleteSubagent")
+        with patch("app.db.database.get_subagent", return_value=subagent), \
+             patch("app.db.database.get_automations_for_profile", return_value=automations), \
+             patch("app.db.database.delete_subagent") as mock_delete:
+            result = await tool.handler({"subagent_id": "blocked-agent", "confirm": True})
+        data = _parse_result(result)
+        assert data["success"] is False
+        assert "1 automation(s)" in data["error"]
+        assert "Nightly Sync" in data["error"]
+        mock_delete.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_delete_subagent_requires_admin(self, non_admin_tools):

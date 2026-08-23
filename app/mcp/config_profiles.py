@@ -315,6 +315,13 @@ def _create_profile_tools(is_admin: bool) -> list:
         if profile.get("is_builtin"):
             return _error(f"Cannot delete built-in profile: {args['profile_id']}")
 
+        blocking = database.get_automations_for_profile(args["profile_id"])
+        if blocking:
+            names = ", ".join(a["name"] for a in blocking)
+            return _error(
+                f"Agent is used by {len(blocking)} automation(s): {names} — delete or reassign them first"
+            )
+
         deleted = database.delete_profile(args["profile_id"])
         if not deleted:
             return _error("Failed to delete profile.")
