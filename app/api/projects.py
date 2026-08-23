@@ -400,10 +400,61 @@ async def list_project_files(
     project_id: str,
     path: str = "",
     show_hidden: bool = False,
+    session_id: Optional[str] = Query(None, description="Session ID — resolves a v2 branch session's own checkout"),
     token: str = Depends(require_auth)
 ):
     """List files in a project directory. API users can only access their assigned project."""
     check_project_access(request, project_id)
+
+    # A v2 branch session's own checkout takes priority over the base project dir
+    # (pure-read resolution — an unmaterialized checkout falls back to the project).
+    session_cwd: Optional[Path] = None
+    if session_id:
+        from app.core.project_resolver import resolve_existing_cwd
+
+        session = database.get_session(session_id)
+        if session:
+            cwd = resolve_existing_cwd(session)
+            if cwd:
+                session_cwd = Path(cwd)
+
+    if session_cwd is not None:
+        base_path = session_cwd
+        full_path = base_path / path if path else base_path
+
+        if not full_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Directory not found"
+            )
+        if not full_path.is_dir():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Path is not a directory"
+            )
+
+        files = []
+        for item in full_path.iterdir():
+            if item.name.startswith('.') and not show_hidden:
+                continue
+            try:
+                stat_info = item.stat()
+                is_dir = item.is_dir()
+                files.append({
+                    "name": item.name,
+                    "type": "directory" if is_dir else "file",
+                    "size": stat_info.st_size if not is_dir else None,
+                    "sizeFormatted": format_file_size(stat_info.st_size) if not is_dir else None,
+                    "path": str(item.relative_to(base_path)),
+                    "extension": get_file_extension(item.name) if not is_dir else None,
+                    "modifiedAt": datetime.fromtimestamp(stat_info.st_mtime).isoformat(),
+                    "createdAt": datetime.fromtimestamp(stat_info.st_ctime).isoformat(),
+                })
+            except (OSError, PermissionError):
+                continue
+        files.sort(key=lambda x: (x["type"] != "directory", x["name"].lower()))
+        return {"files": files, "path": path, "projectId": project_id}
+
     project = database.get_project(project_id)
     if not project:
         raise HTTPException(
@@ -825,6 +876,7 @@ async def list_chat_history(
     search: str = Query("", description="Search query for filtering sessions"),
     limit: int = Query(50, ge=1, le=100, description="Maximum sessions to return"),
     worktree_id: Optional[str] = Query(None, description="Worktree ID (overrides project path when in worktree mode)"),
+    session_id: Optional[str] = Query(None, description="Session ID — resolves a v2 branch session's own checkout"),
     token: str = Depends(require_auth)
 ):
     """
@@ -836,6 +888,24 @@ async def list_chat_history(
     from app.core.jsonl_parser import list_chat_history_sessions
 
     check_project_access(request, project_id)
+
+    # Resolve working directory: session checkout > worktree > project.
+    # A v2 branch session's JSONL history lives under ITS checkout dir.
+    if not worktree_id and session_id:
+        from app.core.project_resolver import resolve_existing_cwd
+
+        session = database.get_session(session_id)
+        if session:
+            cwd = resolve_existing_cwd(session)
+            if cwd:
+                return ChatHistoryResponse(
+                    sessions=[
+                        ChatHistoryItem(**s)
+                        for s in list_chat_history_sessions(
+                            working_dir=cwd, search=search, limit=limit
+                        )
+                    ]
+                )
 
     # Resolve working directory: worktree takes priority over project
     working_dir: str

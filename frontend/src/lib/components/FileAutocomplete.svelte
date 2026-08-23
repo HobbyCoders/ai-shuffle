@@ -37,12 +37,13 @@
     projectId?: string;
     profileId?: string;
     worktreeId?: string;
+    sessionId?: string;
     onSelect: (file: FileItem) => void;
     onClose: () => void;
     visible: boolean;
   }
 
-  let { inputValue, projectId, profileId, worktreeId, onSelect, onClose, visible }: Props = $props();
+  let { inputValue, projectId, profileId, worktreeId, sessionId, onSelect, onClose, visible }: Props = $props();
 
   let files = $state<FileItem[]>([]);
   let filteredFiles = $state<FileItem[]>([]);
@@ -277,6 +278,9 @@
         if (path) {
           params.set('path', path);
         }
+        if (sessionId) {
+          params.set('session_id', sessionId);
+        }
 
         const response = await fetch(`/api/v1/projects/${projectId}/files?${params}`, {
           credentials: 'include'
@@ -336,6 +340,9 @@
       params.set('limit', '30');
       if (worktreeId) {
         params.set('worktree_id', worktreeId);
+      }
+      if (sessionId) {
+        params.set('session_id', sessionId);
       }
 
       const response = await fetch(`/api/v1/projects/${projectId}/chat-history?${params}`, {

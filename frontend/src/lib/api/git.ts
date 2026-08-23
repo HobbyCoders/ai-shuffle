@@ -533,10 +533,10 @@ export async function getFileDiff(
     projectId: string,
     filePath: string,
     staged: boolean = false,
-    worktreeId?: string
+    worktreeId?: string,
+    sessionId?: string
 ): Promise<FileDiffResponse> {
-    const params = worktreeId ? `?worktree_id=${encodeURIComponent(worktreeId)}` : '';
-    return api.post<FileDiffResponse>(`${BASE}/${projectId}/git/file-diff${params}`, {
+    return api.post<FileDiffResponse>(`${BASE}/${projectId}/git/file-diff${scopeQs(worktreeId, sessionId)}`, {
         file_path: filePath,
         staged,
     });
@@ -768,11 +768,11 @@ export async function generateCommitMessage(
 export async function generatePRDescription(
     projectId: string,
     request: GeneratePRDescriptionRequest = {},
-    worktreeId?: string
+    worktreeId?: string,
+    sessionId?: string
 ): Promise<GeneratePRDescriptionResponse> {
-    const params = worktreeId ? `?worktree_id=${encodeURIComponent(worktreeId)}` : '';
     return api.post<GeneratePRDescriptionResponse>(
-        `${BASE}/${projectId}/git/generate-pr-description${params}`, request
+        `${BASE}/${projectId}/git/generate-pr-description${scopeQs(worktreeId, sessionId)}`, request
     );
 }
 

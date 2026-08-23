@@ -105,11 +105,25 @@ class ExecuteCommandResponse(BaseModel):
     is_interactive: bool = False
 
 
-def get_working_dir_for_project(project_id: Optional[str], worktree_id: Optional[str] = None) -> str:
-    """Get the working directory for a project, or its worktree if specified.
+def get_working_dir_for_project(
+    project_id: Optional[str],
+    worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> str:
+    """Get the working directory for a project, its worktree, or a v2 branch
+    session's own checkout (sessions.branch + project_v2_id).
 
     .. deprecated:: Use :func:`app.api.common.resolve_project_path` instead.
     """
+    if not worktree_id and session_id:
+        from app.core.project_resolver import resolve_existing_cwd
+        from app.db import database
+
+        session = database.get_session(session_id)
+        if session:
+            cwd = resolve_existing_cwd(session)
+            if cwd:
+                return cwd
     result = resolve_project_path(
         project_id,
         check_access=False,
@@ -122,7 +136,8 @@ def get_working_dir_for_project(project_id: Optional[str], worktree_id: Optional
 @router.get("/", response_model=CommandListResponse)
 async def list_commands(
     project_id: Optional[str] = Query(None, description="Project ID to get commands for"),
-    worktree_id: Optional[str] = Query(None, description="Worktree ID (overrides project path when in worktree mode)")
+    worktree_id: Optional[str] = Query(None, description="Worktree ID (overrides project path when in worktree mode)"),
+    session_id: Optional[str] = Query(None, description="Session ID — resolves a v2 branch session's own checkout"),
 ):
     """
     List all available slash commands.
@@ -130,7 +145,7 @@ async def list_commands(
     Returns both custom commands from the project's .claude/commands/
     directory and built-in interactive commands like /rewind.
     """
-    working_dir = get_working_dir_for_project(project_id, worktree_id)
+    working_dir = get_working_dir_for_project(project_id, worktree_id, session_id)
     commands = get_all_commands(working_dir)
 
     return CommandListResponse(
@@ -143,7 +158,8 @@ async def list_commands(
 async def get_command(
     command_name: str,
     project_id: Optional[str] = Query(None, description="Project ID"),
-    worktree_id: Optional[str] = Query(None, description="Worktree ID (overrides project path when in worktree mode)")
+    worktree_id: Optional[str] = Query(None, description="Worktree ID (overrides project path when in worktree mode)"),
+    session_id: Optional[str] = Query(None, description="Session ID — resolves a v2 branch session's own checkout"),
 ):
     """
     Get detailed information about a specific command.
@@ -164,7 +180,7 @@ async def get_command(
             )
 
     # Look for custom command
-    working_dir = get_working_dir_for_project(project_id, worktree_id)
+    working_dir = get_working_dir_for_project(project_id, worktree_id, session_id)
     cmd = get_command_by_name(working_dir, command_name)
 
     if not cmd:

@@ -803,6 +803,7 @@
 							inputValue={inputValue}
 							projectId={$activeSession.project}
 							worktreeId={$activeSession.worktreeIntent === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined}
+							sessionId={$activeSession.sessionId ?? undefined}
 							visible={showCommandAutocomplete}
 							onSelect={handleCommandSelect}
 							onClose={() => showCommandAutocomplete = false}
@@ -814,6 +815,7 @@
 							projectId={$activeSession.project}
 							profileId={$activeSession.profile}
 							worktreeId={$activeSession.worktreeIntent === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined}
+							sessionId={$activeSession.sessionId ?? undefined}
 							visible={showFileAutocomplete}
 							onSelect={handleFileSelect}
 							onClose={() => showFileAutocomplete = false}

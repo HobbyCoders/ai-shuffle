@@ -130,8 +130,9 @@
 		sideBySidePairs = [];
 
 		const worktreeId = git.current.worktreeId ?? undefined;
+		const sessionId = git.current.sessionId ?? undefined;
 
-		gitApi.getFileDiff(projectId, f.file, f.category === 'staged', worktreeId)
+		gitApi.getFileDiff(projectId, f.file, f.category === 'staged', worktreeId, sessionId)
 			.then(resp => {
 				diffResponse = resp;
 				if (!resp.is_binary && resp.diff) {

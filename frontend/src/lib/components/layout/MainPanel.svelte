@@ -489,13 +489,14 @@
 	async function runCreatePR(opts: CreatePROptions): Promise<{ url: string; number: number }> {
 		const projectId = activeProject!;
 		const worktreeId = activeWorktreeId ?? undefined;
+		const sessionId = activeSessionId ?? undefined;
 		const base = opts.base ?? $githubRepoInfo?.default_branch ?? 'main';
 		const head = $gitStatus?.current_branch;
 		if (!head) throw new Error('No current branch to open a pull request from');
 		let title = opts.title?.trim();
 		let body = opts.body;
 		if (!title) {
-			const gen = await generatePRDescription(projectId, { base_branch: base }, worktreeId);
+			const gen = await generatePRDescription(projectId, { base_branch: base }, worktreeId, sessionId);
 			title = gen.title;
 			body = body ?? gen.body;
 		}
