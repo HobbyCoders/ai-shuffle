@@ -1717,8 +1717,8 @@ class HarnessAdapter(ProviderAdapter):
             # Ruling T9: the prompt never describes a tool the session cannot
             # call. ``tools`` is the permitted name set; fluid drops its skills
             # index when ``Skill`` is missing from it and its agents index when
-            # ``Task`` is. None = no restriction, and the kwarg is then omitted
-            # entirely so nothing changes for an unrestricted agent.
+            # ``Task`` is. None is fluid's own "no filter" value, so an
+            # unrestricted agent compiles exactly as it did before.
             permitted = _permitted_tool_names(options, registry)
             compiled = compile_prompt(
                 PromptInputs(
