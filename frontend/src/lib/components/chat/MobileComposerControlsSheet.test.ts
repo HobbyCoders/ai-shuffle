@@ -49,11 +49,6 @@ function props(overrides: Record<string, unknown> = {}) {
 		permissionDefaultValue: 'default',
 		permissionOverridden: false,
 		onPermissionSelect: vi.fn(),
-		computerUseEnabled: true,
-		computerUseStopped: true,
-		computerUseActive: false,
-		computerUseBusy: false,
-		onToggleComputerUse: vi.fn(),
 		...overrides
 	};
 }
@@ -66,7 +61,8 @@ describe('MobileComposerControlsSheet', () => {
 		expect(dialog.parentElement).toBe(document.body.querySelector('.sheet-layer'));
 		expect(screen.getByText('Reasoning effort')).toBeTruthy();
 		expect(screen.getByText('Tool access')).toBeTruthy();
-		expect(screen.getByRole('switch', { name: /computer control/i })).toBeTruthy();
+		// Computer use is agent configuration now: no control for it here.
+		expect(screen.queryByRole('switch', { name: /computer control/i })).toBeNull();
 	});
 
 	it('opens the model subpage, filters models, and applies a selection', async () => {
@@ -110,23 +106,20 @@ describe('MobileComposerControlsSheet', () => {
 		expect(onContextChoiceSelect).toHaveBeenCalledWith('standard');
 	});
 
-	it('applies effort, access, and computer-control changes without closing the sheet', async () => {
+	it('applies effort and access changes without closing the sheet', async () => {
 		const onEffortSelect = vi.fn();
 		const onPermissionSelect = vi.fn();
-		const onToggleComputerUse = vi.fn();
 		render(MobileComposerControlsSheet, {
-			props: props({ onEffortSelect, onPermissionSelect, onToggleComputerUse })
+			props: props({ onEffortSelect, onPermissionSelect })
 		});
 
 		await fireEvent.input(screen.getByRole('slider', { name: /reasoning effort/i }), {
 			target: { value: '1' }
 		});
 		await fireEvent.click(screen.getByRole('button', { name: /auto.*model decides/i }));
-		await fireEvent.click(screen.getByRole('switch', { name: /computer control/i }));
 
 		expect(onEffortSelect).toHaveBeenCalledWith('high');
 		expect(onPermissionSelect).toHaveBeenCalledWith('auto');
-		expect(onToggleComputerUse).toHaveBeenCalledTimes(1);
 		expect(screen.getByRole('dialog')).toBeTruthy();
 	});
 

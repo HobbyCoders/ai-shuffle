@@ -6,8 +6,8 @@
 	 *   1. pill row   — ContextPillBar (agent pill + execution-mode/branch pills)
 	 *   2. input area — Tiptap editor + the @/slash autocomplete panels
 	 *   3. foot row   — ControlsDock (model / effort / permission pills, context
-	 *      ring, computer-use + attach buttons) with the dictate / voice-call /
-	 *      send cluster passed in as its `actions` snippet.
+	 *      ring, attach button) with the dictate / voice-call / send cluster
+	 *      passed in as its `actions` snippet.
 	 *
 	 * Delegates voice recording to VoiceRecorder, controls dock to ControlsDock,
 	 * and drag-and-drop to DragDropOverlay.
@@ -843,7 +843,7 @@
 				</div>
 
 				<!-- Row 3: foot row. ControlsDock owns the model / effort / permission
-				     pills, the context ring and the attach + computer-use buttons; the
+				     pills, the context ring and the attach button; the
 				     dictate / voice-call / send cluster is handed to it as a snippet so
 				     the whole right-hand cluster of the mockup's footrow lines up in one
 				     flex row. The snippet renders inside the form, so the submit
