@@ -33,13 +33,11 @@ function makeInit(persisted: PersistedSession | null) {
 
 	const internal: InternalMutableState = {
 		pendingTools: new Set<string>(),
-		interruptPending: false,
 		awaitingNewSession: false,
 		pendingRequestId: null,
 		stopRequestedBeforeSession: false,
 		worktreeCreationGeneration: 0,
 		worktreeCreateAbort: null,
-		interruptConfirmResolve: null,
 	};
 
 	const deps: SessionInitDeps = {

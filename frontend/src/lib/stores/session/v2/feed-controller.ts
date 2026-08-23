@@ -53,18 +53,18 @@ let timerHandle: ReturnType<typeof setTimeout> | null = null;
  * SSE transcript (#588). A queued turn's `message.user` event carries the same
  * `turn_id` as the queue entry's id (app/api/chat_ws_handler.py::_v2_queue_view:
  * queue id ← turn id; app/api/events.py::_wire stamps turn_id on every frame), so
- * this set lets `fold()` drop a stale "Queued (N)" chip once its message actually
+ * this set lets `fold()` drop a stale pending bubble once its message actually
  * ran.
  *
  * Why this is needed: the turn-scheduler drain path
  * (app/core/turn_scheduler.py::_on_turn_settled_impl → pop_ready → kick) runs a
  * queued turn WITHOUT broadcasting a clearing `queue_updated`, and watch_session
- * suppresses the empty-queue frame, so the queue chip is otherwise never told the
- * queue shrank. Reconciling against the delivered transcript self-heals it.
+ * suppresses the empty-queue frame, so the pending bubble is otherwise never told
+ * the queue shrank. Reconciling against the delivered transcript self-heals it.
  *
  * Session-scoped: cleared on start()/stop(). Non-queued turns' ids also land here
- * but never match a chip id (chips exist only for queued turns), so filtering is
- * exact — a chip is removed only when ITS turn produced a user message.
+ * but never match a pending id (only queued turns get one), so filtering is
+ * exact — a bubble is removed only when ITS turn produced a user message.
  */
 const deliveredTurnIds = new Set<string>();
 
@@ -178,8 +178,9 @@ function deriveUsageFields(usage: Record<string, unknown> | null): Partial<Activ
 }
 
 /**
- * Drop queue chips whose turn has been delivered (#588). Preserves the array
- * identity when nothing changed so the fold stays a no-op for the common case.
+ * Drop pending messages whose turn has been delivered (#588). Preserves the
+ * array identity when nothing changed so the fold stays a no-op for the common
+ * case.
  */
 function reconcileQueuedMessages(queued: QueuedMessage[]): QueuedMessage[] {
 	if (queued.length === 0 || deliveredTurnIds.size === 0) return queued;
@@ -324,7 +325,7 @@ export const feedController: FeedController = {
 				}
 				const ev = e as WireEvent;
 				// #588: a delivered queued turn arrives as its own user message; note
-				// its turn_id so fold() can clear the matching stale queue chip. Runs
+				// its turn_id so fold() can clear the matching stale pending bubble. Runs
 				// for real wire events in BOTH the backfill and live phases.
 				if (ev.type === 'message.user' && typeof ev.turn_id === 'string' && ev.turn_id) {
 					deliveredTurnIds.add(ev.turn_id);

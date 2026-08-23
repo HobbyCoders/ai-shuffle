@@ -107,8 +107,9 @@ describe('ChatInput mobile collapsed surface', () => {
 		expect(mobileStyles).toContain(
 			'.mobile-collapsed :global(.controls-right > .voice-btn-wrapper)'
 		);
-		expect(mobileStyles).toContain(
-			'.mobile-collapsed :global(.controls-right > .send-later-btn)'
-		);
+	});
+
+	it('no longer carries a send-later button to hide', () => {
+		expect(chatInput).not.toContain('send-later-btn');
 	});
 });

@@ -72,7 +72,8 @@ export interface TodoItem {
 	activeForm: string; // Present continuous form shown when in_progress
 }
 
-// Queued message for "Send Later" feature
+// A message the user has sent that the model has not seen yet — rendered as a
+// pending bubble at the tail of the transcript.
 export interface QueuedMessage {
 	id: string;
 	content: string;

@@ -390,7 +390,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		// Reset cross-session internal state
 		internal.pendingTools.clear();
-		internal.interruptPending = false;
 		internal.awaitingNewSession = false;
 		internal.worktreeCreationGeneration++;
 		// NOTE: do NOT abort an in-flight autoCreateWorktree POST on nav —
@@ -399,10 +398,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// intended work. The generation counter still prevents stale
 		// responses from mutating the now-current session.
 		internal.worktreeCreateAbort = null;
-		if (internal.interruptConfirmResolve) {
-			internal.interruptConfirmResolve(false);
-			internal.interruptConfirmResolve = null;
-		}
 
 		// Save ephemeral for session we're leaving
 		const leavingKey = state.sessionId || '__new_chat__';
@@ -624,7 +619,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		// Reset all internal state
 		internal.pendingTools.clear();
-		internal.interruptPending = false;
 		internal.awaitingNewSession = false;
 		internal.worktreeCreationGeneration++;
 		// NOTE: do NOT abort an in-flight autoCreateWorktree POST on nav —
@@ -633,10 +627,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// intended work. The generation counter still prevents stale
 		// responses from mutating the now-current session.
 		internal.worktreeCreateAbort = null;
-		if (internal.interruptConfirmResolve) {
-			internal.interruptConfirmResolve(false);
-			internal.interruptConfirmResolve = null;
-		}
 
 		// Restore new chat draft if one was saved earlier
 		const newChatEphemeral = sessionEphemeralCache.restore('__new_chat__');

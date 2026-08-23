@@ -57,6 +57,7 @@
 	import TeamStatusBar from '$lib/components/TeamStatusBar.svelte';
 	import TodoList from '$lib/components/TodoList.svelte';
 	import MediaLightbox from './MediaLightbox.svelte';
+	import PendingMessages from './PendingMessages.svelte';
 	import ActiveTasks from './ActiveTasks.svelte';
 	import { stopSessionTask } from '$lib/api/sessions';
 	import { notify } from '$lib/stores/notifications';
@@ -1138,6 +1139,30 @@
 		});
 	});
 
+	// Prompts sent but not yet handed to the model — rendered as bubbles below the
+	// transcript (see PendingMessages).
+	const pendingMessages = $derived($activeSession.queuedMessages ?? []);
+
+	// Keep a freshly-sent pending bubble in view. The content effect below tracks
+	// `messages` only, so appending to `queuedMessages` grows the column without
+	// scheduling any scroll. Mirrors the gap-indicator effect: respect the current
+	// turn anchor when one is live, and never yank a user who scrolled up to read.
+	$effect(() => {
+		if (pendingMessages.length === 0 || !containerRef || !isMounted) return;
+		if (!shouldAutoScroll) return;
+		if (currentTurnAnchorId) {
+			tick().then(() => scheduleCurrentTurnAnchorMaintenance());
+			return;
+		}
+		tick().then(() => {
+			if (!shouldAutoScroll || !containerRef) return;
+			scrollToBottom();
+			requestAnimationFrame(() => {
+				if (shouldAutoScroll) scrollToBottom();
+			});
+		});
+	});
+
 	// Track previous values to detect actual content changes (not just re-renders)
 	let prevMessagesLength = $state(0);
 	let prevLastContent = $state('');
@@ -1382,6 +1407,17 @@
 				{/if}
 			</div>
 			{/each}
+
+			<!-- Prompts already sent but not yet delivered to the model. They sit
+			     below the transcript, above the activity indicator, until the
+			     backend hands them over (mid-turn steer or next-turn start). -->
+			{#if pendingMessages.length > 0}
+				<PendingMessages
+					messages={pendingMessages}
+					onRemove={(id) => activeSession.removeQueuedMessage(id)}
+					onInterrupt={() => activeSession.stopGeneration()}
+				/>
+			{/if}
 
 			<!-- The gap predicate guarantees this does not duplicate a prose cursor,
 			     running-tool spinner, visible thinking state, or active subagent row. -->
