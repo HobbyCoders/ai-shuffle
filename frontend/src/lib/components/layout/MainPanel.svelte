@@ -223,7 +223,7 @@
 		// Track session ID so the effect re-fires on every tab switch,
 		// even when two sessions share the same project/worktree.
 		// This ensures git state is always fresh after a session change.
-		const _sessionId = activeSessionId;
+		const sessionId = activeSessionId ?? undefined;
 
 		if (_projectDebounceTimer) {
 			clearTimeout(_projectDebounceTimer);
@@ -231,17 +231,19 @@
 		}
 
 		if (project && authenticated && !isRemote) {
-			// IMMEDIATE: restore cached state so UI updates within the same frame
+			// IMMEDIATE: restore cached state so UI updates within the same frame.
+			// sessionId scopes v2 branch sessions to their own checkout — without it
+			// a branch session with no legacy worktree row would poll the base checkout.
 			const mode = worktreeId ? 'worktree' : 'project';
-			git.restoreCacheImmediate(project, worktreeId, mode);
+			git.restoreCacheImmediate(project, worktreeId, mode, sessionId);
 
 			// DEBOUNCED: network fetch for fresh data
 			_projectDebounceTimer = setTimeout(() => {
 				_projectDebounceTimer = null;
 				if (worktreeId) {
-					git.loadForWorktree(project, worktreeId);
+					git.loadForWorktree(project, worktreeId, false, sessionId);
 				} else {
-					git.loadRepository(project);
+					git.loadRepository(project, false, sessionId);
 				}
 			}, 150);
 		} else {

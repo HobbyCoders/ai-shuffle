@@ -119,14 +119,14 @@ def test_branch_lazy_create_deterministic_path(project, base_checkout, workspace
     assert p.is_dir()
     assert (p / ".git").exists()
 
-    # Deterministic path: {workspace}/checkouts/{slug}/feature-x — NOT an md5-hash dir.
-    assert "checkouts" in p.parts
+    # Deterministic path: {base_checkout}/.fluid/worktrees/feature-x — nested
+    # inside the project's own clone, NOT an md5-hash dir.
+    assert ".fluid" in p.parts and "worktrees" in p.parts
     assert p.name == "feature-x"
     # The old scheme suffixed a 4-hex md5 (e.g. "feature-x-a7b3"); assert absent.
     assert not re.search(r"-[0-9a-f]{4}$", p.name)
-    # Parent slug is name-derived + id-suffixed (collision guard), not a path hash.
-    assert p.parent.name == checkout_manager._project_slug(project)
-    assert p.parent.name.startswith("my-cool-repo-")
+    # Lives under the base checkout dir.
+    assert p.parents[2] == Path(base_checkout)
 
 
 def test_branch_idempotent_same_path_no_duplicate_rows(project, base_checkout, workspace_root):
@@ -161,7 +161,7 @@ def test_branch_sanitizes_slashes_in_dir_name(project, base_checkout, workspace_
 
 def test_existing_dir_not_a_worktree_returns_none(project, base_checkout, workspace_root):
     # Pre-create the deterministic dest as a plain dir (no .git) → refuse, don't destroy.
-    dest = checkout_manager._branch_checkout_path(project, "feature-y")
+    dest = checkout_manager._branch_checkout_path(str(base_checkout), "feature-y")
     dest.mkdir(parents=True)
     (dest / "sentinel.txt").write_text("keep me\n", encoding="utf-8")
 
@@ -192,7 +192,8 @@ def test_per_runner_divergence_same_branch(project, base_checkout, tmp_path, wor
     )
     assert path_b is not None
     assert path_b != path_a
-    assert "workspace_b" in path_b
+    # B's checkout nests under ITS OWN base clone (repo_b), not A's.
+    assert str(repo_b) in path_b
 
 
 # ---------------------------------------------------------------------------
@@ -395,7 +396,7 @@ def test_adopts_legacy_worktree_dir_as_branch_checkout(
     assert len(branch_rows) == 1
     assert branch_rows[0]["path"] == str(legacy_dir)
     # The deterministic dir was NEVER created.
-    assert not checkout_manager._branch_checkout_path(project, branch).exists()
+    assert not checkout_manager._branch_checkout_path(str(base_checkout), branch).exists()
 
 
 def test_adopted_legacy_worktree_second_call_uses_row_fast_path(
@@ -749,9 +750,9 @@ def test_seed_refuses_non_worktree_at_base_path(seedable, workspace_root, monkey
     assert checkouts_db.list_checkouts(proj["id"]) == []
 
 
-def test_branch_checkout_path_collision_guard_for_reserved_name(project, workspace_root):
+def test_branch_checkout_path_collision_guard_for_reserved_name(project, base_checkout, workspace_root):
     # A logical branch literally named "__base__" must NOT resolve onto the base dir.
-    p = checkout_manager._branch_checkout_path(project, checkout_manager._BASE_DIR_NAME)
+    p = checkout_manager._branch_checkout_path(str(base_checkout), checkout_manager._BASE_DIR_NAME)
     assert p.name != checkout_manager._BASE_DIR_NAME
     assert p.name == f"{checkout_manager._BASE_DIR_NAME}-branch"
 

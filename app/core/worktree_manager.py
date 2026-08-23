@@ -12,8 +12,8 @@ Key design principles:
 - Worktree validity is determined by checking if the folder exists on disk
 
 Path pattern:
-  All projects: {project_dir}/.claude/worktrees/{branch_sanitized}-{short_hash}
-  (Worktrees live inside the project's own .claude folder, git-ignored via
+  All projects: {project_dir}/.fluid/worktrees/{branch_sanitized}
+  (Worktrees live inside the project's own .fluid folder, git-ignored via
   .git/info/exclude. The absolute path is stored in the DB.)
 """
 
@@ -190,8 +190,8 @@ class WorktreeManager:
     - get_available_worktrees(): Gets worktrees available for new sessions
     - is_worktree_valid(): Checks if worktree folder exists on disk
 
-    Path pattern: {project_dir}/.claude/worktrees/{branch_sanitized}-{short_hash}
-    (Worktrees are nested inside the project's .claude folder, git-ignored)
+    Path pattern: {project_dir}/.fluid/worktrees/{branch_sanitized}
+    (Worktrees are nested inside the project's .fluid folder, git-ignored)
     """
 
     def __init__(self):
@@ -205,59 +205,40 @@ class WorktreeManager:
     def _get_worktree_path(self, project_path: str, branch: str) -> Path:
         """
         Get full path for a worktree - nested inside the project's own
-        ``.claude/worktrees/`` directory, mirroring where Claude Code keeps
-        its agent worktrees.
+        ``.fluid/worktrees/`` directory.
 
-        Uses a short hash of the project path to ensure uniqueness, plus a
-        kebab-case sanitized branch name (the same naming convention used
-        before). The ``.claude/worktrees/`` directory is created if needed and
-        the nested location is added to the repo's ``.git/info/exclude`` so it
+        The path is deterministic in the sanitized branch name; a branch can
+        only be checked out once per repository, so no uniqueness hash or
+        collision counter is needed. The ``.fluid/worktrees/`` directory is
+        created if needed and added to the repo's ``.git/info/exclude`` so it
         never pollutes the user's git status.
 
         Example:
-            {project_dir}/.claude/worktrees/feature-auth-a7b3
+            {project_dir}/.fluid/worktrees/feature-auth
         """
         sanitized = self._sanitize_branch_name(branch)
 
-        # Generate a short hash from the project path for uniqueness
-        path_hash = hashlib.md5(project_path.encode()).hexdigest()[:4]
-        base_name = f"{sanitized}-{path_hash}"
-
-        # Place worktrees inside the project's own .claude/worktrees/ folder.
+        # Place worktrees inside the project's own .fluid/worktrees/ folder.
         main_dir = get_project_working_dir(project_path)
-        worktrees_dir = Path(main_dir) / ".claude" / "worktrees"
+        worktrees_dir = Path(main_dir) / ".fluid" / "worktrees"
         worktrees_dir.mkdir(parents=True, exist_ok=True)
 
         # Ensure the nested worktree dir is ignored by the main repo so the
         # git worktrees we create here don't show up as untracked files.
         self._ensure_worktrees_ignored(main_dir)
 
-        base_path = worktrees_dir / base_name
-
-        # If base path doesn't exist, use it
-        if not base_path.exists():
-            return base_path
-
-        # Otherwise, find a unique suffix
-        counter = 2
-        while True:
-            candidate = worktrees_dir / f"{base_name}-{counter}"
-            if not candidate.exists():
-                return candidate
-            counter += 1
-            if counter > 100:
-                raise WorktreeError(f"Too many worktrees for branch '{branch}'")
+        return worktrees_dir / sanitized
 
     def _ensure_worktrees_ignored(self, main_dir: str) -> None:
         """
-        Make sure ``.claude/worktrees/`` is git-ignored within the project's
+        Make sure ``.fluid/worktrees/`` is git-ignored within the project's
         repository via ``.git/info/exclude``.
 
         We deliberately use ``.git/info/exclude`` (a local, untracked ignore
         file) rather than the tracked ``.gitignore`` so we never modify files
         the user has committed. Idempotent: the entry is only appended once.
         """
-        ignore_entry = ".claude/worktrees/"
+        ignore_entry = ".fluid/worktrees/"
         try:
             git_dir = Path(main_dir) / ".git"
             if git_dir.is_dir():
@@ -294,8 +275,10 @@ class WorktreeManager:
             existing = ""
             if exclude_file.exists():
                 existing = exclude_file.read_text(encoding="utf-8", errors="ignore")
-            # Already present (match the bare entry on its own line)
-            if any(line.strip() == ignore_entry for line in existing.splitlines()):
+            # Already present (match either the new .fluid entry or a legacy
+            # .claude one — both keep their respective dirs out of git status)
+            existing_entries = {line.strip() for line in existing.splitlines()}
+            if ignore_entry in existing_entries:
                 return
 
             prefix = "" if (not existing or existing.endswith("\n")) else "\n"
@@ -310,7 +293,7 @@ class WorktreeManager:
         """
         Get the worktree path to store in the database.
 
-        New worktrees live under the project's ``.claude/worktrees/`` folder,
+        New worktrees live under the project's ``.fluid/worktrees/`` folder,
         which is not relative to ``workspace_dir``, so we store the full
         absolute path. ``get_worktree_working_dir()`` resolves absolute paths
         directly while remaining backward compatible with older rows that
@@ -468,6 +451,7 @@ class WorktreeManager:
             v2_checkout_root = os.path.normpath(
                 str(Path(settings.effective_workspace_dir) / "checkouts")
             )
+            fluid_marker = os.path.join(".fluid", "worktrees")
             for git_wt in git_worktrees:
                 if git_wt.get("is_main"):
                     continue
@@ -486,13 +470,14 @@ class WorktreeManager:
                     normalized_git_path in v2_paths
                     or normalized_git_path == v2_checkout_root
                     or normalized_git_path.startswith(v2_checkout_root + os.sep)
+                    or fluid_marker in normalized_git_path + os.sep
                 ):
                     continue
                 if normalized_git_path not in db_paths:
                     try:
                         # Store the absolute path so it resolves consistently
                         # regardless of where the worktree lives on disk (e.g.
-                        # nested under .claude/worktrees/, not workspace_dir).
+                        # nested under .fluid/worktrees/, not workspace_dir).
                         stored_path = os.path.abspath(git_path)
                         branch_name = _external_worktree_branch_name(git_wt)
                         worktree_id = f"wt-{uuid.uuid4().hex[:12]}"
@@ -1248,6 +1233,7 @@ class WorktreeManager:
         v2_checkout_root = os.path.normpath(
             str(Path(settings.effective_workspace_dir) / "checkouts")
         )
+        fluid_marker = os.path.join(".fluid", "worktrees")
         for git_wt in git_worktrees:
             if git_wt.get("is_main"):
                 continue  # Skip main worktree
@@ -1267,6 +1253,7 @@ class WorktreeManager:
                 normalized_git_path in v2_paths
                 or normalized_git_path == v2_checkout_root
                 or normalized_git_path.startswith(v2_checkout_root + os.sep)
+                or fluid_marker in normalized_git_path + os.sep
             ):
                 continue
             if (
@@ -1277,7 +1264,7 @@ class WorktreeManager:
                 try:
                     # Store the absolute path so it resolves consistently
                     # regardless of where the worktree lives on disk (e.g.
-                    # nested under .claude/worktrees/, not workspace_dir). A
+                    # nested under .fluid/worktrees/, not workspace_dir). A
                     # bare folder name would resolve against workspace_dir and
                     # never match the real git path, causing duplicate
                     # re-imports and false ORPHANED markings. Mirrors the import

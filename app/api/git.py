@@ -141,6 +141,7 @@ async def get_git_status(
     request: Request,
     project_id: str,
     worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
     token: str = Depends(require_auth)
 ):
     """
@@ -155,7 +156,7 @@ async def get_git_status(
     # frontend polling and project creation).  Return an empty status
     # instead of 404 so the poller can retry silently.
     if worktree_id:
-        working_dir = get_working_dir(project_id, worktree_id)
+        working_dir = get_working_dir(project_id, worktree_id, session_id)
     else:
         working_dir = get_project_path(project_id, allow_missing=True)
         if working_dir is None:
@@ -403,6 +404,7 @@ async def list_branches(
     project_id: str,
     include_remote: bool = True,
     worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
     token: str = Depends(require_auth)
 ):
     """
@@ -414,7 +416,7 @@ async def list_branches(
         worktree_id: Optional worktree ID - marks the worktree's branch as current
     """
     check_project_access(request, project_id)
-    working_dir = get_working_dir(project_id, worktree_id)
+    working_dir = get_working_dir(project_id, worktree_id, session_id)
 
     if not await run_git(git_service.is_git_repo, working_dir):
         raise HTTPException(
@@ -561,6 +563,7 @@ async def checkout_branch(
     project_id: str,
     body: CheckoutRequest,
     worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
     token: str = Depends(require_auth)
 ):
     """
@@ -702,6 +705,7 @@ async def fetch_from_remote(
     project_id: str,
     remote: str = "origin",
     worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
     token: str = Depends(require_auth)
 ):
     """
@@ -713,7 +717,7 @@ async def fetch_from_remote(
         worktree_id: Optional worktree ID (fetch works from any worktree)
     """
     check_project_access(request, project_id)
-    working_dir = get_working_dir(project_id, worktree_id)
+    working_dir = get_working_dir(project_id, worktree_id, session_id)
 
     if not await run_git(git_service.is_git_repo, working_dir):
         raise HTTPException(
@@ -763,6 +767,7 @@ async def get_diff_stats(
     project_id: str,
     include_unstaged: bool = True,
     worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
     token: str = Depends(require_auth)
 ):
     """
@@ -776,8 +781,8 @@ async def get_diff_stats(
     check_project_access(request, project_id)
 
     # Gracefully handle missing project during startup race
-    if worktree_id:
-        working_dir = get_working_dir(project_id, worktree_id)
+    if worktree_id or session_id:
+        working_dir = get_working_dir(project_id, worktree_id, session_id)
     else:
         working_dir = get_project_path(project_id, allow_missing=True)
         if working_dir is None:
@@ -807,6 +812,7 @@ async def get_changed_files(
     request: Request,
     project_id: str,
     worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
     token: str = Depends(require_auth),
 ):
     """
@@ -816,7 +822,7 @@ async def get_changed_files(
     with per-file addition/deletion counts for display in the changed files panel.
     """
     check_project_access(request, project_id)
-    working_dir = get_working_dir(project_id, worktree_id)
+    working_dir = get_working_dir(project_id, worktree_id, session_id)
 
     # Fetch status and per-file stats in parallel via the thread pool
     git_status, per_file_stats = await asyncio.gather(
@@ -916,6 +922,7 @@ async def get_file_diff(
     project_id: str,
     body: FileDiffRequest,
     worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
     token: str = Depends(require_auth),
 ):
     """
@@ -925,7 +932,7 @@ async def get_file_diff(
     Fetches lazily (on user click), not pre-loaded.
     """
     check_project_access(request, project_id)
-    working_dir = get_working_dir(project_id, worktree_id)
+    working_dir = get_working_dir(project_id, worktree_id, session_id)
 
     result = await run_git(
         git_service.get_file_diff,
@@ -946,11 +953,12 @@ async def stage_files(
     project_id: str,
     body: StageRequest,
     worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
     token: str = Depends(require_auth),
 ):
     """Stage specific files for commit."""
     check_project_access(request, project_id)
-    working_dir = get_working_dir(project_id, worktree_id)
+    working_dir = get_working_dir(project_id, worktree_id, session_id)
 
     success = await run_git(git_service.stage_files, working_dir, body.files)
 
@@ -978,11 +986,12 @@ async def unstage_files(
     project_id: str,
     body: UnstageRequest,
     worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
     token: str = Depends(require_auth),
 ):
     """Unstage specific files (remove from index, keep working tree changes)."""
     check_project_access(request, project_id)
-    working_dir = get_working_dir(project_id, worktree_id)
+    working_dir = get_working_dir(project_id, worktree_id, session_id)
 
     success = await run_git(git_service.unstage_files, working_dir, body.files)
 
@@ -1009,6 +1018,7 @@ async def discard_changes(
     project_id: str,
     body: DiscardRequest,
     worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
     token: str = Depends(require_auth),
 ):
     """
@@ -1020,7 +1030,7 @@ async def discard_changes(
     - untracked: delete from disk
     """
     check_project_access(request, project_id)
-    working_dir = get_working_dir(project_id, worktree_id)
+    working_dir = get_working_dir(project_id, worktree_id, session_id)
 
     success, failed = await run_git(
         git_service.discard_changes,
@@ -1049,6 +1059,7 @@ async def create_commit(
     project_id: str,
     body: CommitRequest,
     worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
     token: str = Depends(require_auth)
 ):
     """
@@ -1059,7 +1070,7 @@ async def create_commit(
     """
     t_start = time.perf_counter()
     check_project_access(request, project_id)
-    working_dir = get_working_dir(project_id, worktree_id)
+    working_dir = get_working_dir(project_id, worktree_id, session_id)
 
     if not await run_git(git_service.is_git_repo, working_dir):
         raise HTTPException(
@@ -1114,6 +1125,7 @@ async def push_commits(
     project_id: str,
     body: PushRequest,
     worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
     token: str = Depends(require_auth)
 ):
     """
@@ -1123,7 +1135,7 @@ async def push_commits(
     """
     t_start = time.perf_counter()
     check_project_access(request, project_id)
-    working_dir = get_working_dir(project_id, worktree_id)
+    working_dir = get_working_dir(project_id, worktree_id, session_id)
 
     if not await run_git(git_service.is_git_repo, working_dir):
         raise HTTPException(
@@ -1187,6 +1199,7 @@ async def pull_from_remote(
     project_id: str,
     body: PullRequest,
     worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
     token: str = Depends(require_auth)
 ):
     """
@@ -1201,7 +1214,7 @@ async def pull_from_remote(
         worktree_id: Optional worktree ID
     """
     check_project_access(request, project_id)
-    working_dir = get_working_dir(project_id, worktree_id)
+    working_dir = get_working_dir(project_id, worktree_id, session_id)
 
     if not await run_git(git_service.is_git_repo, working_dir):
         raise HTTPException(

@@ -10,10 +10,12 @@ This module owns the ONE lazy-materialization entrypoint, ``ensure_checkout``,
 which the send/resume cwd seam (P4) will call on every send. It is idempotent and
 safe to call repeatedly. Design commitments (Phase 3):
 
-- **Deterministic per-runner path** — ``{workspace_root}/checkouts/{project_slug}/
-  {sanitized_branch}`` — replacing ``worktree_manager._get_worktree_path``'s
-  ``md5(project_path)[:4]`` hashing. A materialization, never identity, so the same
-  branch resolves per-machine without cross-host orphaning.
+- **Deterministic per-runner path** — ``{base_checkout_dir}/.fluid/worktrees/
+  {sanitized_branch}`` — nested inside the project's own clone on this runner,
+  replacing both the legacy ``md5(project_path)[:4]`` scheme and the earlier
+  workspace-root ``checkouts/{project_slug}/{branch}`` layout. A materialization,
+  never identity, so the same branch resolves per-machine without cross-host
+  orphaning.
 - **Phase 3 NEVER clones from a remote.** A project with no local base checkout on
   this runner is simply not materializable here (adopt surfaces a 409). Remote
   placement is Phase 4. So ``ensure_checkout`` returns ``None`` — honestly
@@ -111,12 +113,16 @@ def _project_slug(project_v2_row: Dict[str, Any]) -> str:
     return f"{base}-{id_suffix}"
 
 
-def _branch_checkout_path(project_v2_row: Dict[str, Any], branch: str) -> Path:
+_WORKTREES_DIRNAME = ".fluid"
+
+
+def _branch_checkout_path(base_dir: str, branch: str) -> Path:
     """Deterministic materialization path for a (project, branch) checkout.
 
-    ``{workspace_root}/checkouts/{project_slug}/{sanitized_branch}``. Uses
-    ``pathlib`` joins (never string concat with separators) so it is correct on
-    Windows and POSIX alike.
+    ``{base_checkout_dir}/.fluid/worktrees/{sanitized_branch}`` — nested inside
+    the project's own clone so per-branch checkouts travel with the project dir.
+    Uses ``pathlib`` joins (never string concat with separators) so it is correct
+    on Windows and POSIX alike.
     """
     sanitized = worktree_manager._sanitize_branch_name(branch)
     if sanitized == _BASE_DIR_NAME:
@@ -124,7 +130,7 @@ def _branch_checkout_path(project_v2_row: Dict[str, Any], branch: str) -> Path:
         # ``__base__``. A logical branch whose name sanitizes to that exact literal
         # is renamed so it can never resolve onto — and overwrite — the base dir.
         sanitized = f"{sanitized}-branch"
-    return _checkout_root() / _project_slug(project_v2_row) / sanitized
+    return Path(base_dir) / _WORKTREES_DIRNAME / "worktrees" / sanitized
 
 
 def _dir_is_worktree(path: str) -> bool:
@@ -487,6 +493,7 @@ def _ensure_branch_checkout(
     if not base_path:
         return None
 
+
     # Fast path: an existing branch checkout row whose dir is a live worktree.
     row = checkouts_db.get_checkout(project_id, runner_id, branch=branch)
     if row:
@@ -513,7 +520,7 @@ def _ensure_branch_checkout(
         # Row exists but its dir is gone → fall through and re-materialize below
         # (at the same deterministic path, so the upsert reuses the same row).
 
-    dest = _branch_checkout_path(project_v2_row, branch)
+    dest = _branch_checkout_path(base_path, branch)
     dest_str = str(dest)
 
     # Adopt an already-materialized dir at the deterministic path (idempotent).

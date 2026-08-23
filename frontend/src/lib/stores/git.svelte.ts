@@ -35,6 +35,9 @@ type GitMode = 'project' | 'worktree';
 interface GitState {
 	projectId: string | null;
 	worktreeId: string | null;
+	/** Active session id — scopes git calls to a v2 branch session's own checkout
+	 *  when there is no legacy worktree row (worktreeId null). */
+	sessionId: string | null;
 	mode: GitMode;
 	status: gitApi.GitStatus | null;
 	branches: gitApi.Branch[];
@@ -60,6 +63,7 @@ interface CachedState {
 const EMPTY_STATE: GitState = {
 	projectId: null,
 	worktreeId: null,
+	sessionId: null,
 	mode: 'project',
 	status: null,
 	branches: [],
@@ -198,8 +202,10 @@ function _isServerError(e: unknown): boolean {
 
 const _cache = new Map<string, CachedState>();
 
-function _makeKey(projectId: string, worktreeId?: string | null): string {
-	return worktreeId ? `${projectId}:${worktreeId}` : projectId;
+function _makeKey(projectId: string, worktreeId?: string | null, sessionId?: string | null): string {
+	if (worktreeId) return `${projectId}:${worktreeId}`;
+	if (sessionId) return `${projectId}:ses:${sessionId}`;
+	return projectId;
 }
 
 function _saveToCache(key: string, state: CachedState) {
@@ -263,7 +269,8 @@ async function _loadCore(
 	key: string,
 	projectId: string,
 	worktreeId: string | undefined,
-	mode: GitMode
+	mode: GitMode,
+	sessionId?: string | undefined
 ) {
 	_worktreeGone = false; // Reset on context switch
 	_clearServerBackoff(); // Reset backoff on context switch
@@ -272,6 +279,7 @@ async function _loadCore(
 		...s,
 		projectId,
 		worktreeId: worktreeId ?? null,
+		sessionId: sessionId ?? null,
 		mode,
 		...cached,
 		loading: true,
@@ -279,16 +287,16 @@ async function _loadCore(
 	}));
 
 	try {
-		const status = await gitApi.getGitStatus(projectId, worktreeId);
+		const status = await gitApi.getGitStatus(projectId, worktreeId, undefined, sessionId);
 		if (_loadInFlight !== key) return;
 
 		if (status.is_git_repo) {
 			const [branches, graphResponse, worktrees, diffStats, changedFilesResp] = await Promise.all([
-				gitApi.getBranches(projectId, true, worktreeId),
+				gitApi.getBranches(projectId, true, worktreeId, undefined, sessionId),
 				gitApi.getCommitGraph(projectId, 50),
 				gitApi.getWorktrees(projectId),
-				gitApi.getDiffStats(projectId, true, worktreeId).catch(() => null),
-				gitApi.getChangedFiles(projectId, worktreeId).catch(() => null)
+				gitApi.getDiffStats(projectId, true, worktreeId, undefined, sessionId).catch(() => null),
+				gitApi.getChangedFiles(projectId, worktreeId, sessionId).catch(() => null)
 			]);
 			if (_loadInFlight !== key) return;
 
@@ -310,7 +318,7 @@ async function _loadCore(
 			_loadedKey = key;
 			_saveToCache(key, newState);
 
-			_backgroundFetch(key, projectId, worktreeId);
+			_backgroundFetch(key, projectId, worktreeId, sessionId);
 		} else {
 			// Not a git repo — clear ALL git state so stale cached values
 			// (diffStats, branches, etc.) from a previous load don't persist.
@@ -354,19 +362,19 @@ async function _loadCore(
 /**
  * Background fetch from remote + silent refresh of status/branches.
  */
-function _backgroundFetch(key: string, projectId: string, worktreeId?: string) {
+function _backgroundFetch(key: string, projectId: string, worktreeId?: string, sessionId?: string) {
 	if (_bgFetchRunning) return;
 	_bgFetchRunning = true;
 
 	(async () => {
 		try {
-			await gitApi.fetchRemote(projectId, worktreeId);
+			await gitApi.fetchRemote(projectId, worktreeId, sessionId);
 
 			if (_loadedKey !== key) return;
 
 			const [status, branches] = await Promise.all([
-				gitApi.getGitStatus(projectId, worktreeId),
-				gitApi.getBranches(projectId, true, worktreeId)
+				gitApi.getGitStatus(projectId, worktreeId, undefined, sessionId),
+				gitApi.getBranches(projectId, true, worktreeId, undefined, sessionId)
 			]);
 
 			const cached = _cache.get(key);
@@ -397,46 +405,47 @@ export const git = {
 
 	subscribe,
 
-	async loadRepository(projectId: string, _forceReload = false) {
-		const key = _makeKey(projectId);
+	async loadRepository(projectId: string, _forceReload = false, sessionId?: string) {
+		const key = _makeKey(projectId, undefined, sessionId);
 		if (_loadInFlight === key) return;
 		_loadInFlight = key;
-		await _loadCore(key, projectId, undefined, 'project');
+		await _loadCore(key, projectId, undefined, 'project', sessionId);
 	},
 
-	async loadForWorktree(projectId: string, worktreeId: string, _forceReload = false) {
+	async loadForWorktree(projectId: string, worktreeId: string, _forceReload = false, sessionId?: string) {
 		const key = _makeKey(projectId, worktreeId);
 		if (_loadInFlight === key) return;
 		_loadInFlight = key;
-		await _loadCore(key, projectId, worktreeId, 'worktree');
+		await _loadCore(key, projectId, worktreeId, 'worktree', sessionId);
 	},
 
 	restoreCacheImmediate(
 		projectId: string,
 		worktreeId?: string | null,
-		mode: GitMode = 'project'
+		mode: GitMode = 'project',
+		sessionId?: string | null
 	) {
-		const key = _makeKey(projectId, worktreeId ?? undefined);
+		const key = _makeKey(projectId, worktreeId ?? undefined, sessionId ?? undefined);
 		_loadedKey = key;
 		const cached = _cache.get(key);
+		const base = {
+			projectId,
+			worktreeId: worktreeId ?? null,
+			sessionId: sessionId ?? null,
+			mode,
+			loading: true,
+			error: null
+		};
 		if (cached) {
 			_set({
-				projectId,
-				worktreeId: worktreeId ?? null,
-				mode,
+				...base,
 				...cached,
-				changedFilesLoading: false,
-				loading: true,
-				error: null
+				changedFilesLoading: false
 			});
 		} else {
 			_set({
 				...EMPTY_STATE,
-				projectId,
-				worktreeId: worktreeId ?? null,
-				mode,
-				loading: true,
-				error: null
+				...base
 			});
 		}
 	},
@@ -453,7 +462,7 @@ export const git = {
 		if (_statusInFlight) return; // Prevent overlapping requests
 		if (_worktreeGone) return; // Worktree deleted — stop polling
 		if (_isBackingOff()) return; // Server error backoff — skip this cycle
-		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined);
+		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined, _state.sessionId);
 
 		_statusAbort?.abort();
 		const controller = new AbortController();
@@ -465,7 +474,8 @@ export const git = {
 			const status = await gitApi.getGitStatus(
 				_state.projectId,
 				_state.worktreeId ?? undefined,
-				{ signal: controller.signal }
+				{ signal: controller.signal },
+				_state.sessionId ?? undefined
 			);
 			if (_loadedKey !== key) return;
 			_clearServerBackoff();
@@ -492,7 +502,7 @@ export const git = {
 		if (!_state.projectId) return;
 		if (_branchesInFlight) return; // Prevent overlapping requests
 		if (_worktreeGone) return; // Worktree deleted — stop polling
-		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined);
+		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined, _state.sessionId);
 
 		_branchesAbort?.abort();
 		const controller = new AbortController();
@@ -505,7 +515,8 @@ export const git = {
 				_state.projectId,
 				true,
 				_state.worktreeId ?? undefined,
-				{ signal: controller.signal }
+				{ signal: controller.signal },
+				_state.sessionId ?? undefined
 			);
 			if (_loadedKey !== key) return;
 			_update((s) => ({ ...s, branches }));
@@ -525,7 +536,7 @@ export const git = {
 
 	async loadGraph(limit?: number) {
 		if (!_state.projectId) return;
-		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined);
+		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined, _state.sessionId);
 
 		try {
 			const graphResponse = await gitApi.getCommitGraph(_state.projectId, limit);
@@ -541,7 +552,7 @@ export const git = {
 
 	async loadWorktrees() {
 		if (!_state.projectId) return;
-		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined);
+		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined, _state.sessionId);
 
 		try {
 			const worktrees = await gitApi.getWorktrees(_state.projectId);
@@ -608,6 +619,8 @@ export const git = {
 				_state.worktreeId ?? undefined,
 				autoStash
 			);
+			// checkout has no session scoping: a v2 branch session's checkout dir IS
+			// the branch, so a plain ref checkout inside it needs no session_id.
 			// Abort any in-flight poll requests so the post-checkout refreshes
 			// below aren't blocked by stale _branchesInFlight / _statusInFlight guards.
 			// The poller can fire during the checkout API call, setting these flags
@@ -640,7 +653,7 @@ export const git = {
 		_update((s) => ({ ...s, loading: true, error: null }));
 
 		try {
-			await gitApi.fetchRemote(_state.projectId, _state.worktreeId ?? undefined);
+			await gitApi.fetchRemote(_state.projectId, _state.worktreeId ?? undefined, _state.sessionId ?? undefined);
 			await git.loadBranches();
 			await git.loadGraph();
 			_update((s) => ({ ...s, loading: false }));
@@ -665,7 +678,8 @@ export const git = {
 			const response = await gitApi.pullFromRemote(
 				_state.projectId,
 				{ strategy, auto_stash: autoStash },
-				_state.worktreeId ?? undefined
+				_state.worktreeId ?? undefined,
+				_state.sessionId ?? undefined
 			);
 
 			await Promise.all([
@@ -712,7 +726,7 @@ export const git = {
 		if (_diffStatsInFlight) return; // Prevent overlapping requests
 		if (_worktreeGone) return; // Worktree deleted — stop polling
 		if (_isBackingOff()) return; // Server error backoff — skip this cycle
-		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined);
+		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined, _state.sessionId);
 
 		_diffStatsAbort?.abort();
 		const controller = new AbortController();
@@ -725,7 +739,8 @@ export const git = {
 				_state.projectId,
 				true,
 				_state.worktreeId ?? undefined,
-				{ signal: controller.signal }
+				{ signal: controller.signal },
+				_state.sessionId ?? undefined
 			);
 			if (_loadedKey !== key) return;
 			_clearServerBackoff();
@@ -759,7 +774,8 @@ export const git = {
 					message,
 					include_unstaged: includeUnstaged
 				},
-				_state.worktreeId ?? undefined
+				_state.worktreeId ?? undefined,
+				_state.sessionId ?? undefined
 			);
 
 			await Promise.all([
@@ -794,7 +810,8 @@ export const git = {
 					set_upstream: setUpstream,
 					force
 				},
-				_state.worktreeId ?? undefined
+				_state.worktreeId ?? undefined,
+				_state.sessionId ?? undefined
 			);
 
 			// Refresh both status and branches so the Push badge
@@ -820,14 +837,15 @@ export const git = {
 		if (_changedFilesInFlight) return;
 		if (_worktreeGone) return; // Worktree deleted — stop polling
 		if (_isBackingOff()) return; // Server error backoff — skip this cycle
-		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined);
+		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined, _state.sessionId);
 
 		_changedFilesInFlight = true;
 		_update((s) => ({ ...s, changedFilesLoading: true }));
 		try {
 			const response = await gitApi.getChangedFiles(
 				_state.projectId,
-				_state.worktreeId ?? undefined
+				_state.worktreeId ?? undefined,
+				_state.sessionId ?? undefined
 			);
 			if (_loadedKey !== key) return;
 			_clearServerBackoff();
@@ -854,7 +872,8 @@ export const git = {
 			await gitApi.stageFiles(
 				_state.projectId,
 				files,
-				_state.worktreeId ?? undefined
+				_state.worktreeId ?? undefined,
+				_state.sessionId ?? undefined
 			);
 			// Refresh all related state in parallel
 			await Promise.all([
@@ -876,7 +895,8 @@ export const git = {
 			await gitApi.unstageFiles(
 				_state.projectId,
 				files,
-				_state.worktreeId ?? undefined
+				_state.worktreeId ?? undefined,
+				_state.sessionId ?? undefined
 			);
 			await Promise.all([
 				git.refreshChangedFiles(),
@@ -898,7 +918,8 @@ export const git = {
 				_state.projectId,
 				files,
 				fileStatuses,
-				_state.worktreeId ?? undefined
+				_state.worktreeId ?? undefined,
+				_state.sessionId ?? undefined
 			);
 			await Promise.all([
 				git.refreshChangedFiles(),
