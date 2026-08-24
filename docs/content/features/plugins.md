@@ -20,6 +20,8 @@ The plugin system allows you to:
 Key concepts:
 
 - **Marketplace-based distribution:** Plugins live in git repositories called marketplaces
+- **User-global install path:** Installed plugins and enablement live in `~/.fluid/plugins` and `~/.fluid/settings.json`
+- **Project scopes:** LOCAL installs go to `<project>/.fluid/plugins` (enablement in `.fluid/settings.local.json`). PROJECT installs go to `<project>/plugins` (enablement in `.fluid/settings.json`)
 - **Per-profile enablement:** Plugins are enabled through the `enabled_plugins` list in profile configuration
 - **Admin-only management:** Installing, uninstalling, and enabling/disabling plugins requires admin privileges
 - **Read-only hooks:** Plugin-contributed hooks are discoverable but not editable through the hooks UI
