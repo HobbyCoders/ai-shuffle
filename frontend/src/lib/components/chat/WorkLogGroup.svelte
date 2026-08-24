@@ -53,22 +53,48 @@
 	// transcript below it up and down for the length of the turn. Hold the
 	// tallest height seen while live as a min-height; the reservation releases
 	// when the turn settles.
+	//
+	// Measure an inner wrapper, not the section. The section carries the
+	// min-height, so observing it can never see a shrink — collapse would
+	// leave a hole. Skip the open fold: inspecting history is not a tool
+	// swap, and that taller height must not become the floor. If the same
+	// tail row shrinks (the user collapsed a tool or worker), drop the
+	// floor to the new content height. A shorter successor with a new id
+	// still keeps the peak, which is the swap-jitter case.
 	let sectionEl = $state<HTMLElement | null>(null);
+	let contentEl = $state<HTMLElement | null>(null);
 	let reservedPx = $state(0);
+	let reservedTailKey = '';
+
+	function tailIdentity(entries: WorkLogEntry[]): string {
+		return entries.map((entry) => entry.message.id ?? String(entry.index)).join('\0') || '∅';
+	}
 
 	$effect(() => {
-		if (!sectionEl || typeof ResizeObserver === 'undefined') return;
-		const observer = new ResizeObserver(() => {
-			if (mode !== 'live') return;
-			const height = sectionEl?.getBoundingClientRect().height ?? 0;
-			if (height > reservedPx) reservedPx = height;
-		});
-		observer.observe(sectionEl);
+		if (!contentEl || typeof ResizeObserver === 'undefined') return;
+		const el = contentEl;
+		const apply = () => {
+			if (mode !== 'live' || open) return;
+			const height = el.getBoundingClientRect().height;
+			const key = tailIdentity(tail);
+			if (height > reservedPx) {
+				reservedPx = height;
+				reservedTailKey = key;
+			} else if (key === reservedTailKey && height < reservedPx) {
+				reservedPx = height;
+			}
+		};
+		const observer = new ResizeObserver(apply);
+		observer.observe(el);
+		apply();
 		return () => observer.disconnect();
 	});
 
 	$effect(() => {
-		if (mode !== 'live') reservedPx = 0;
+		if (mode !== 'live') {
+			reservedPx = 0;
+			reservedTailKey = '';
+		}
 	});
 
 	// A live run may be open while the user inspects it. Once the turn settles,
@@ -101,6 +127,7 @@
 	aria-label="Work log"
 	data-work-log-mode={mode}
 >
+	<div class="worklog-measure" bind:this={contentEl}>
 	{#if open}
 		<div class="wlhead">Work log{#if summary}<span> · {summary}</span>{/if}</div>
 		{#if mode === 'settled' && sequence.length > 0}
@@ -165,14 +192,19 @@
 			{/each}
 		{/if}
 	{/if}
+	</div>
 </section>
 
 <style>
 	.worklog {
+		margin: 0;
+		min-width: 0;
+	}
+
+	.worklog-measure {
 		display: flex;
 		flex-direction: column;
 		gap: 1px;
-		margin: 0;
 		min-width: 0;
 	}
 
