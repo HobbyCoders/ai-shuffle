@@ -304,6 +304,23 @@
 		};
 	});
 
+	// Click-to-focus: the input area is taller than one text line, and clicks
+	// landing on its padding (or the textarea wrapper) used to be dead. Any
+	// click not already consumed by a real control focuses the editor, so the
+	// whole upper half of an empty composer behaves like the text field.
+	// Autocomplete panels render upward OUTSIDE .input-area, so their rows never
+	// pass through here; selection inside them keeps working untouched.
+	function handleEditorAreaClick(event: MouseEvent) {
+		if (event.defaultPrevented) return;
+		if (!(event.target instanceof Element)) return;
+		// Buttons/inputs handle themselves (e.g. the inline file-chip remove).
+		if (event.target.closest('button, a, input, select, textarea')) return;
+		// A chip's own click positions the caret — only bare padding forwards.
+		if (event.target.closest('[data-file-chip], .file-chip')) return;
+		event.preventDefault();
+		editorRef?.focus();
+	}
+
 	// Handle input changes for autocomplete
 	function handleInputChange() {
 		// Slash command autocomplete
@@ -726,8 +743,15 @@
 					<div class="context-pill-row"><ContextPillBar /></div>
 				{/if}
 
-				<!-- Row 2: the editor -->
-				<div class="input-area">
+				<!-- Row 2: the editor. The whole area forwards pointer events to
+				     the Tiptap editor so the padding above/below the text line is
+				     clickable too — an empty composer reads as one target, not a
+				     thin strip between two dead zones. The autocomplete panels
+				     (positioned upward OUTSIDE this element) are unaffected: they are
+				     never inside this element's event path. -->
+				<!-- svelte-ignore a11y_click_events_have_key_events -->
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<div class="input-area" onclick={handleEditorAreaClick}>
 					<!-- Textarea with autocomplete -->
 					<div class="textarea-wrapper">
 						<CommandAutocomplete
@@ -948,6 +972,19 @@
 		min-height: 62px;
 		display: flex;
 		align-items: flex-start;
+	}
+
+	/* Desktop: the empty editor stretches to the island's full upper region, so
+	   the caret lands where the user clicked instead of snapping to a one-line
+	   strip. Once typing grows past that the natural height takes over. Mobile
+	   keeps its compact metrics — there the composer collapses/focuses as one
+	   surface already. (.tiptap-editor is TiptapEditor's scoped root; its inner
+	   ProseMirror div inherits the stretch from the flex column.) */
+	@media (min-width: 640px) {
+		.textarea-wrapper :global(.tiptap-editor),
+		.textarea-wrapper :global(.tiptap-editor .ProseMirror) {
+			min-height: 3.4em;
+		}
 	}
 
 	/* Textarea wrapper — the autocomplete panels anchor to this. */
