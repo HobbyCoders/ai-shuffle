@@ -349,3 +349,76 @@ def notify_session(session_id: str) -> None:
         logger.debug(
             "notify_session on %s failed (non-fatal)", NOTIFY_CHANNEL, exc_info=True
         )
+
+
+def copy_session_events(
+    source_session_id: str,
+    dest_session_id: str,
+) -> int:
+    """Copy the app event log onto a new session (fork).
+
+    The V2 chat renders from ``session_events``, not from the fluid node tree
+    or ``fluid_session_events``. A fork that only copies those leaves the dest
+    log empty, so ``history_backfill`` reconstructs a single-turn approximation
+    (``turn_id='backfill'``) and the chat collapses every work group into one.
+
+    Rewrites ``session_id``, allocates fresh event ids, preserves ``seq`` /
+    ``turn_id`` / ``event_type`` / ``payload`` / ``command_id`` / ``created_at``.
+    ``run_id`` is dropped — runs belong to the parent. The dest counter is
+    created at ``N`` so later live appends continue after the copied prefix.
+
+    Exclusive-create on the dest counter: if dest already has events, return 0.
+    Empty source also returns 0 (no counter is created, so backfill can still
+    run).
+    """
+    if source_session_id == dest_session_id:
+        raise ValueError("source and dest session ids must differ")
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT seq, turn_id, event_type, payload, command_id, created_at "
+            "FROM session_events WHERE session_id = %s ORDER BY seq",
+            (source_session_id,),
+        )
+        rows = rows_to_list(cursor.fetchall())
+        if not rows:
+            return 0
+
+        n = len(rows)
+        cursor.execute(
+            "INSERT INTO session_event_counters (session_id, next_seq) "
+            "VALUES (%s, %s) "
+            "ON CONFLICT (session_id) DO NOTHING "
+            "RETURNING next_seq",
+            (dest_session_id, n),
+        )
+        if cursor.fetchone() is None:
+            return 0
+
+        params = []
+        for i, row in enumerate(rows, start=1):
+            payload = dict(_parse_payload(row.get("payload")))
+            if payload.get("session_id") == source_session_id:
+                payload["session_id"] = dest_session_id
+            params.append(
+                (
+                    str(uuid.uuid4()),
+                    dest_session_id,
+                    i,
+                    None,
+                    row.get("turn_id"),
+                    row["event_type"],
+                    json.dumps(_scrub_pg_illegal(payload)),
+                    row.get("command_id"),
+                    row.get("created_at"),
+                )
+            )
+        cursor.executemany(
+            "INSERT INTO session_events "
+            "(id, session_id, seq, run_id, turn_id, event_type, payload, "
+            "command_id, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            params,
+        )
+    return n

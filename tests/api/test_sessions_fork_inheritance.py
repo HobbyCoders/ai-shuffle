@@ -123,3 +123,45 @@ def test_fork_inherits_worktree_and_run_binding(fork_client):
 
     msgs, _ = fluid_live_messages(row["sdk_session_id"], "/workspace")
     assert [m.get("content") for m in msgs] == ["hello", "hi"]
+
+
+def test_fork_copies_app_event_log_with_turn_ids(fork_client):
+    """Whole-session fork must replay the live session_events, not backfill.
+
+    The V2 chat groups work by turn_id. Reconstructing from the node tree
+    stamps every event turn_id='backfill' and collapses every work group
+    into one.
+    """
+    from app.db import session_events as se
+
+    _seed_parent()
+    se.append_events(PARENT_SID, [
+        {"type": "turn.started", "turn_id": "turn-1", "payload": {"profile_id": "p"}},
+        {"type": "message.user", "turn_id": "turn-1", "payload": {"content": "hello"}},
+        {"type": "tool.use", "turn_id": "turn-1", "payload": {"name": "Read"}},
+        {"type": "tool.result", "turn_id": "turn-1", "payload": {"is_error": False}},
+        {"type": "message.assistant", "turn_id": "turn-1", "payload": {"content": "hi"}},
+        {"type": "turn.completed", "turn_id": "turn-1", "payload": {}},
+        {"type": "turn.started", "turn_id": "turn-2", "payload": {"profile_id": "p"}},
+        {"type": "message.user", "turn_id": "turn-2", "payload": {"content": "more"}},
+        {"type": "turn.completed", "turn_id": "turn-2", "payload": {}},
+    ])
+
+    resp = fork_client.post(f"/{PARENT_SID}/fork", json={})
+    assert resp.status_code == 200, resp.text
+    fork_sid = resp.json()["session_id"]
+
+    copied = se.get_events(fork_sid)
+    assert [e["event_type"] for e in copied] == [
+        "turn.started", "message.user", "tool.use", "tool.result",
+        "message.assistant", "turn.completed",
+        "turn.started", "message.user", "turn.completed",
+    ]
+    assert [e["turn_id"] for e in copied] == [
+        "turn-1", "turn-1", "turn-1", "turn-1", "turn-1", "turn-1",
+        "turn-2", "turn-2", "turn-2",
+    ]
+    assert "backfill" not in {e["turn_id"] for e in copied}
+    # Parent log stays put.
+    assert se.get_max_seq(PARENT_SID) == 9
+    assert se.get_max_seq(fork_sid) == 9

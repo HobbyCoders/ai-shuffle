@@ -70,6 +70,30 @@ def _restore_fork_branch(new_session_id: str, branch: str) -> None:
         )
 
 
+def _copy_app_event_log(source_session_id: str, dest_session_id: str, *, at_head: bool) -> None:
+    """Copy the V2 chat event log onto the fork when the fork is the whole session.
+
+    Mid-session forks keep the existing backfill reconstruction (the live log
+    has no node uuids to cut on). A failed copy is non-fatal: the fork stays
+    driveable and backfill will seed a lossy single-turn log instead.
+    """
+    if not at_head:
+        return
+    try:
+        from app.db import session_events as session_events_db
+
+        copied = session_events_db.copy_session_events(source_session_id, dest_session_id)
+        logger.debug(
+            "Copied %d session_events from %s to fork %s",
+            copied, source_session_id, dest_session_id,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to copy session_events from %s to fork %s",
+            source_session_id, dest_session_id,
+        )
+
+
 async def _fork_fluid_session(
     *,
     request: Request,
@@ -171,6 +195,13 @@ async def _fork_fluid_session(
         database.update_session,
         session_id=new_session_id,
         sdk_session_id=new_sdk_session_id,
+    )
+
+    await run_sync(
+        _copy_app_event_log,
+        session_id,
+        new_session_id,
+        at_head=(fork_message_index == len(entries) - 1),
     )
 
     logger.debug(
@@ -381,6 +412,13 @@ async def fork_session(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create forked session"
         )
+
+    await run_sync(
+        _copy_app_event_log,
+        session_id,
+        new_session_id,
+        at_head=(fork_message_index == len(display_entries) - 1),
+    )
 
     logger.debug(f"Forked session {session_id} to {new_session_id} at message index {fork_message_index}")
 
