@@ -1,7 +1,7 @@
 /**
  * Plugin Management API Client
  *
- * Provides functions for managing Claude Code plugins:
+ * Provides functions for managing Fluid plugins (~/.fluid/plugins):
  * - Marketplaces (add, remove, sync)
  * - Plugin installation/uninstallation
  * - Plugin enable/disable

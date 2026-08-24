@@ -132,7 +132,7 @@ SUPPLIED BY FLUID ITSELF, WITH NO WIRING HERE (Claude-ecosystem compat, CE1):
   the user's existing Claude Code setup up for free. Nothing below is passed by
   this adapter — the only lever it would have is turning a piece OFF:
   * ``plugins`` — enabled plugins (``enabledPlugins`` in the settings stack) are
-    resolved from ``~/.claude/plugins``; their skills and commands join the
+    resolved from ``~/.fluid/plugins``; their skills and commands join the
     compiled prompt namespaced ``<plugin>:<name>``, their agents join the agent
     registry, and their MCP servers join ``NativeLoop``'s lazy-connect set
     (``fluid.context.plugins``, ruling CE5). App-configured servers of the same

@@ -35,6 +35,18 @@ def _get_claude_dir() -> Path:
     return get_claude_credentials_dir()
 
 
+def _get_fluid_dir() -> Path:
+    """Fluid home — user-global plugins and enabledPlugins live here.
+
+    Matches fluid.context.plugins.plugins_home() / the settings stack:
+        - Docker: /home/appuser/.fluid
+        - Local: ~/.fluid
+    """
+    if is_docker_mode():
+        return Path("/home/appuser/.fluid")
+    return Path.home() / ".fluid"
+
+
 class DictMixin:
     """Mixin providing generic to_dict() for dataclasses.
 
@@ -51,8 +63,8 @@ class DictMixin:
 
 
 class PluginScope(str, Enum):
-    USER = "user"       # ~/.claude/plugins/
-    LOCAL = "local"     # <project>/.claude/plugins/
+    USER = "user"       # ~/.fluid/plugins/
+    LOCAL = "local"     # <project>/.fluid/plugins/
     PROJECT = "project" # <project>/plugins/
 
 

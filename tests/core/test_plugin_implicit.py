@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from app.core.plugin_models import PluginScope
 from app.core.plugin_service import PluginService
 from app.core.plugin_updates import check_for_updates
 
@@ -44,11 +45,39 @@ _requires_symlinks = pytest.mark.skipif(
 
 @pytest.fixture
 def svc(tmp_path, monkeypatch):
-    """A PluginService whose CLAUDE dir is an isolated temp directory."""
-    claude_dir = tmp_path / "claude"
-    claude_dir.mkdir()
-    monkeypatch.setattr("app.core.plugin_service._get_claude_dir", lambda: claude_dir)
+    """A PluginService whose Fluid dir is an isolated temp directory."""
+    fluid_dir = tmp_path / "fluid"
+    fluid_dir.mkdir()
+    monkeypatch.setattr("app.core.plugin_service._get_fluid_dir", lambda: fluid_dir)
     return PluginService()
+
+
+def test_user_scope_points_at_fluid_home(svc, tmp_path):
+    """USER-scope installs and enablement write under ~/.fluid, not ~/.claude."""
+    assert svc.PLUGINS_DIR == tmp_path / "fluid" / "plugins"
+    assert svc.SETTINGS_FILE == tmp_path / "fluid" / "settings.json"
+    assert svc.FLUID_DIR == tmp_path / "fluid"
+
+
+def test_local_and_project_scopes_use_fluid_paths(tmp_path, monkeypatch):
+    """LOCAL installs under .fluid/plugins; enablement never touches .claude."""
+    fluid_dir = tmp_path / "fluid"
+    fluid_dir.mkdir()
+    monkeypatch.setattr("app.core.plugin_service._get_fluid_dir", lambda: fluid_dir)
+    project = tmp_path / "proj"
+    project.mkdir()
+    svc = PluginService(project_dir=project)
+
+    assert svc.LOCAL_PLUGINS_DIR == project / ".fluid" / "plugins"
+    assert svc.PROJECT_PLUGINS_DIR == project / "plugins"
+    assert svc._get_project_settings_file(PluginScope.LOCAL) == project / ".fluid" / "settings.local.json"
+    assert svc._get_project_settings_file(PluginScope.PROJECT) == project / ".fluid" / "settings.json"
+
+    svc.enable_project_plugin("foo@project-local")
+    svc.enable_project_plugin("bar@project-project")
+    assert (project / ".fluid" / "settings.local.json").is_file()
+    assert (project / ".fluid" / "settings.json").is_file()
+    assert not (project / ".claude" / "settings.json").exists()
 
 
 def _register_marketplace(service: PluginService, name: str) -> Path:
