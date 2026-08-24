@@ -119,6 +119,29 @@ def test_deferred_servers_land_in_the_deferred_tier_and_stay_loadable():
     assert "mcp__app-config__listHooks" in loaded_after
 
 
+def test_skip_tools_excludes_named_tools_from_one_server():
+    """``skip_tools`` is how the adapter drops a bridged copy. Memory is the
+    live case: a native session with a project memory dir must not get the
+    ``mcp__builtins__Memory`` tool (the dir replaces it)."""
+    builtins_cfg = {"type": "sdk", "name": "builtins", "instance": _Instance()}
+    other_cfg = {"type": "sdk", "name": "ai-tools", "instance": _Instance()}
+    record_sdk_server_tools(builtins_cfg, [_tool("Memory"), _tool("Ledger")])
+    record_sdk_server_tools(other_cfg, [_tool("Memory")])
+
+    registry = ToolRegistry()
+    register_recorded_sdk_servers(
+        registry,
+        {"builtins": builtins_cfg, "ai-tools": other_cfg},
+        skip_tools={"builtins": {"Memory"}},
+    )
+
+    names = {spec.name for spec in registry.list_tools(loaded_only=False)}
+    assert "mcp__builtins__Memory" not in names
+    # Same-named tool on another server is untouched — the map is per server.
+    assert "mcp__ai-tools__Memory" in names
+    assert "mcp__builtins__Ledger" in names
+
+
 def test_unrecorded_sdk_server_is_skipped():
     registry = ToolRegistry()
     cfg = {"type": "sdk", "name": "mystery", "instance": _Instance()}

@@ -20,7 +20,23 @@
 		memoryError
 	} from '$lib/stores/projectMemory.svelte';
 	import type { MemoryFile, MemoryLocation } from '$lib/api/projectMemory';
-	import { FileText, Plus, Trash2, Save, RotateCcw, FolderOpen, Lock } from 'lucide-svelte';
+	import {
+		applyMemoryImport,
+		previewMemoryImport,
+		type MemoryImportPreview,
+		type MemoryImportProvider,
+		type MemoryImportResult
+	} from '$lib/api/projectMemory';
+	import {
+		FileText,
+		Plus,
+		Trash2,
+		Save,
+		RotateCcw,
+		FolderOpen,
+		Lock,
+		Download
+	} from 'lucide-svelte';
 	import Banner from '$lib/components/Banner.svelte';
 	import './project-tabs.css';
 
@@ -42,6 +58,17 @@
 	// Creating state (for files that don't exist yet)
 	let creatingLocation = $state<MemoryLocation | null>(null);
 
+	// Agent-memory import (provider dir -> this project's memory dir)
+	const IMPORT_PROVIDERS: { value: MemoryImportProvider; label: string }[] = [
+		{ value: 'claude', label: 'Claude' },
+		{ value: 'codex', label: 'Codex' }
+	];
+	let importProvider = $state<MemoryImportProvider>('claude');
+	let importPreview = $state<MemoryImportPreview | null>(null);
+	let importResult = $state<MemoryImportResult | null>(null);
+	let importBusy = $state(false);
+	let importError = $state<string | null>(null);
+
 	// Load files when project changes
 	$effect(() => {
 		if (projectId) {
@@ -50,6 +77,9 @@
 			editingLocation = null;
 			creatingLocation = null;
 			deletingLocation = null;
+			importPreview = null;
+			importResult = null;
+			importError = null;
 		}
 	});
 
@@ -123,6 +153,45 @@
 		} finally {
 			deleteLoading = false;
 		}
+	}
+
+	function errorMessage(e: unknown): string {
+		return e instanceof Error ? e.message : String(e);
+	}
+
+	async function handleImportPreview() {
+		importBusy = true;
+		importError = null;
+		importResult = null;
+		try {
+			importPreview = await previewMemoryImport(projectId, importProvider);
+		} catch (e) {
+			importPreview = null;
+			importError = errorMessage(e);
+		} finally {
+			importBusy = false;
+		}
+	}
+
+	async function handleImportApply() {
+		importBusy = true;
+		importError = null;
+		try {
+			importResult = await applyMemoryImport(projectId, importProvider);
+			// Re-preview so every remaining item reads as a conflict, not a
+			// stale "ready" the button would happily press again.
+			importPreview = await previewMemoryImport(projectId, importProvider);
+		} catch (e) {
+			importError = errorMessage(e);
+		} finally {
+			importBusy = false;
+		}
+	}
+
+	function onProviderChange() {
+		importPreview = null;
+		importResult = null;
+		importError = null;
 	}
 
 	function formatDate(dateStr: string | null): string {
@@ -231,6 +300,83 @@
 				{/if}
 			</div>
 		{/each}
+
+		<!-- Import agent memory from a provider's own per-project memory dir -->
+		<div class="set-group">
+			<div class="set-grouphead grouphead-row">
+				<div>
+					<h3><Download />Import agent memory</h3>
+					<p class="mpath">
+						Copy an agent provider's saved memory for this project into the project's
+						memory dir. Existing files are never overwritten.
+					</p>
+				</div>
+				<div class="head-acts imp-acts">
+					<select
+						class="imp-select"
+						bind:value={importProvider}
+						onchange={onProviderChange}
+						disabled={importBusy}
+						aria-label="Memory provider"
+					>
+						{#each IMPORT_PROVIDERS as p (p.value)}
+							<option value={p.value}>{p.label}</option>
+						{/each}
+					</select>
+					<button class="ed-btn sm" onclick={handleImportPreview} disabled={importBusy}>
+						{importBusy ? 'Working…' : 'Preview'}
+					</button>
+					<button
+						class="ed-btn sm primary"
+						onclick={handleImportApply}
+						disabled={importBusy || !importPreview || importPreview.ready_count === 0}
+					>
+						<Download size={12} /> Import {importPreview?.ready_count ?? 0}
+					</button>
+				</div>
+			</div>
+
+			<div class="imp-body">
+				{#if importError}
+					<Banner severity="error" message={importError} dismissible onDismiss={() => (importError = null)} />
+				{/if}
+
+				{#if importResult}
+					<p class="imp-note">
+						Imported {importResult.imported.length}
+						{importResult.imported.length === 1 ? 'file' : 'files'}{importResult.skipped
+							.length
+							? `, skipped ${importResult.skipped.length}`
+							: ''}.
+					</p>
+				{/if}
+
+				{#if importPreview}
+					<p class="imp-note">
+						<span class="badge success">{importPreview.ready_count} ready</span>
+						<span class="badge muted">{importPreview.conflict_count} conflict</span>
+					</p>
+					<p class="mpath">{importPreview.source_dir ?? 'no source directory'}</p>
+					{#if importPreview.items.length === 0}
+						<p class="imp-empty">Nothing found for this provider.</p>
+					{:else}
+						<ul class="imp-list">
+							{#each importPreview.items as item (item.relative_path)}
+								<li>
+									<span class="imp-file">{item.relative_path}</span>
+									<span class="imp-size">{formatSize(item.size)}</span>
+									<span class="badge {item.status === 'ready' ? 'success' : 'muted'}">
+										{item.status === 'ready' ? 'Ready' : 'Already exists'}
+									</span>
+								</li>
+							{/each}
+						</ul>
+					{/if}
+				{:else if !importError}
+					<p class="imp-empty">Preview to see what would be copied.</p>
+				{/if}
+			</div>
+		</div>
 
 		<!-- No files at all -->
 		{#if $allMemoryFiles.length === 0 && !$memoryLoading}
@@ -343,6 +489,60 @@
 		padding-top: 10px;
 		border-top: 1px solid var(--border);
 		font-size: 11px;
+		color: var(--muted-foreground);
+	}
+
+	/* Import agent memory */
+	.imp-acts {
+		flex-wrap: wrap;
+	}
+	.imp-select {
+		height: 26px;
+		padding: 0 6px;
+		font-size: 12px;
+		color: var(--foreground);
+		background: var(--background);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+	}
+	.imp-body {
+		padding: 13px 18px;
+	}
+	.imp-note {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin: 0 0 8px;
+		font-size: 12.5px;
+		color: var(--muted-foreground);
+	}
+	.imp-empty {
+		margin: 0;
+		font-size: 12.5px;
+		font-style: italic;
+		color: var(--muted-foreground);
+	}
+	.imp-list {
+		list-style: none;
+		margin: 10px 0 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+	.imp-list li {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		font-size: 12px;
+	}
+	.imp-file {
+		flex: 1;
+		font-family: var(--font-mono, monospace);
+		color: var(--foreground);
+		word-break: break-all;
+	}
+	.imp-size {
 		color: var(--muted-foreground);
 	}
 

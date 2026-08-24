@@ -4842,7 +4842,11 @@ async def test_native_prompt_carries_the_project_memory_section(
     # Code mode stays LAST: it is the operating rule for everything above it,
     # this section included.
     assert system.index("# Project memory") < system.index("# Code mode")
-    assert ha.CODE_MODE_SECTION in system
+    # …and it does not advertise a Memory tool this session no longer has:
+    # the memory dir replaced it (see _build_registry).
+    assert ha.CODE_MODE_SECTION_WITHOUT_MEMORY in system
+    assert ha.CODE_MODE_SECTION not in system
+    assert "Skill, Task, Memory, Ledger" not in system
 
 
 @pytest.mark.asyncio
@@ -4914,6 +4918,97 @@ async def test_no_memory_dir_means_no_project_memory_section(
         s for s in captured["system_sections"].sections
         if s.text.startswith("# Project memory")
     ]
+
+
+@pytest.mark.asyncio
+async def test_no_memory_dir_means_no_fluid_global_memory_section(
+    monkeypatch, agent_workspace
+):
+    """Without a project dir, fluid's own ~/.fluid/MEMORY.md section is still
+    the compiler's business — the app does not turn it off."""
+    captured_inputs = {}
+    from fluid.context import compiler as fluid_compiler
+
+    real_compile = fluid_compiler.compile_prompt
+
+    def _spy(inputs):
+        captured_inputs["include_memory"] = inputs.include_memory
+        return real_compile(inputs)
+
+    monkeypatch.setattr(fluid_compiler, "compile_prompt", _spy)
+    await _connect_with_memory_dir(monkeypatch, agent_workspace, None)
+    assert captured_inputs["include_memory"] is True
+
+    await _connect_with_memory_dir(
+        monkeypatch, agent_workspace, agent_workspace / "memory"
+    )
+    # …but a project memory dir replaces it: one MEMORY.md, not two.
+    assert captured_inputs["include_memory"] is False
+
+
+# ─── Memory tool exclusion when a project memory dir is connected ────────────
+#
+# The dir IS the memory. A Memory tool alongside it is a second store the
+# session neither syncs nor shows, so it is dropped from the native registry —
+# both fluid's bare ``Memory`` builtin and the bridged ``mcp__builtins__Memory``.
+
+
+def _memory_registry_options(tmp_path, memory_dir):
+    from app.core.provider.sdk_tool_records import record_sdk_server_tools
+    from types import SimpleNamespace
+
+    async def handler(args: dict) -> dict:
+        return {"content": [{"type": "text", "text": "memory"}]}
+
+    class _Instance:
+        def call_tool(self):
+            return lambda fn: fn
+
+    cfg = {"type": "sdk", "name": "builtins", "instance": _Instance()}
+    record_sdk_server_tools(cfg, [
+        SimpleNamespace(name="Memory", description="Memory tool",
+                        input_schema={"type": "object"}, handler=handler),
+        SimpleNamespace(name="Ledger", description="Ledger tool",
+                        input_schema={"type": "object"}, handler=handler),
+    ])
+    extra = {"fluid_provider": "openai_responses"}
+    if memory_dir is not None:
+        extra["memory_dir"] = str(memory_dir)
+    return SessionOptions(
+        model="gpt-4o",
+        cwd=str(tmp_path),
+        extra=extra,
+        mcp_servers={"builtins": cfg},
+    )
+
+
+@pytest.mark.asyncio
+async def test_memory_dir_drops_the_memory_tool_from_the_native_registry(tmp_path):
+    import app.core.provider.harness_adapter as ha
+
+    registry = await ha.HarnessAdapter()._build_registry(
+        _memory_registry_options(tmp_path, tmp_path / "mem"), native=True
+    )
+
+    names = {spec.name for spec in registry.list_tools(loaded_only=False)}
+    assert "Memory" not in names            # fluid's bare builtin
+    assert "mcp__builtins__Memory" not in names  # the bridged app copy
+    # Everything else is untouched — this is a surgical exclusion, not a purge.
+    assert "Read" in names and "mcp__builtins__Ledger" in names
+    assert registry.get("Memory") is None
+
+
+@pytest.mark.asyncio
+async def test_without_a_memory_dir_the_memory_tool_stays(tmp_path):
+    import app.core.provider.harness_adapter as ha
+
+    registry = await ha.HarnessAdapter()._build_registry(
+        _memory_registry_options(tmp_path, None), native=True
+    )
+
+    names = {spec.name for spec in registry.list_tools(loaded_only=False)}
+    assert "Memory" in names
+    assert "mcp__builtins__Memory" in names
 
 
 def test_oversized_memory_index_is_truncated(tmp_path):

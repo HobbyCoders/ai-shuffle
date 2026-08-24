@@ -1,30 +1,37 @@
-"""Cross-install agent-memory sync.
+"""Cross-install agent-memory sync — NATIVE sessions only.
 
 Mirrors a per-project memory directory (``MEMORY.md`` plus per-fact ``*.md``
 files) to and from the shared database so installs that share a git remote
 share one logical memory.
 
-WHICH directory depends on the session's LEG (ruling MEM2, 2026-08-21):
+Only the NATIVE leg participates. A fluid NativeLoop session has no CLI behind
+it, so the app owns ``<fluid_projects>/<slug>/memory/`` (ruling MEM1,
+~/.fluid/projects by default) and the native system prompt points the model at
+it (ruling MEM3, see ``_compile_prompt_sections`` in
+app/core/provider/harness_adapter.py). That fluid dir is the one and only
+synced mirror.
 
-* ``leg="delegated"`` — the claude CLI owns ``<claude_projects>/<slug>/memory/``
-  and writes it itself; sync only mirrors it.
-* ``leg="native"`` — a fluid NativeLoop session has no CLI behind it, so the app
-  owns ``<fluid_projects>/<slug>/memory/`` (ruling MEM1, ~/.fluid/projects by
-  default) and the native system prompt points the model at it (ruling MEM3,
-  see ``_compile_prompt_sections`` in app/core/provider/harness_adapter.py).
+The DELEGATED leg does not sync at all. ``<claude_projects>/<slug>/memory/``
+belongs to the claude CLI: the CLI writes it, the CLI reads it, and it stays
+local to this machine. Nothing pushes it to the shared DB and nothing writes
+into it. That is why ``reconcile_memory_sync``/``push_memory_sync`` return
+immediately unless ``leg == "native"`` — and why the leg decision degrading to
+"delegated" whenever it cannot be made (see ``memory_leg_for_options``) is
+safe: an undecidable session simply does not sync.
 
-Both legs slug the SAME project path and share the SAME ``memory_key``, so the
-two dirs are two local mirrors of one logical memory: a project that has been
-running on the CLI gets its existing memory materialized into the fluid dir by
-the first native reconcile. That IS the migration — nothing is ever copied
-directly between the two dirs.
+``memory_dir_for_working_dir`` stays leg-aware regardless, because locating the
+claude dir is still needed — not for sync, but for the explicit per-project
+import (see app/core/memory_import_service.py). Copying existing claude memory
+into the fluid dir is now a deliberate, admin-triggered action, not something a
+first reconcile does behind the user's back.
 
-Two operations drive it from the session lifecycle (see app/core/query_engine.py):
+Two operations drive the native leg from the session lifecycle (see
+app/core/query_engine.py):
 
-* **reconcile** — runs before a fresh CLI subprocess spawns. Brings the local
-  memory dir up to date with the DB (and pushes any local-only files up), so
-  the agent reads the latest shared memory.
-* **push** — runs after each turn, once the CLI has flushed memory to disk.
+* **reconcile** — runs before a session starts. Brings the local memory dir up
+  to date with the DB (and pushes any local-only files up), so the agent reads
+  the latest shared memory.
+* **push** — runs after each turn, once memory has been flushed to disk.
   Upserts changed/new local files and tombstones files *genuinely* deleted
   locally — those that were in this process's reconcile baseline and have since
   disappeared. A DB row that was never in our baseline (a topic file a peer
@@ -34,16 +41,15 @@ Two operations drive it from the session lifecycle (see app/core/query_engine.py
 Conflict resolution is last-write-wins by timestamp (DB ``updated_at`` vs local
 mtime). This assumes cluster clocks are roughly NTP-synced; simultaneous edits
 to the *same* memory file from overlapping sessions on different installs are
-rare in practice (memory writes are sparse and the nightly consolidation is the
-main rewriter). Everything here is best-effort and must never break a turn.
+rare in practice — memory writes are sparse. Everything here is best-effort and
+must never break a turn.
 
 Deletes are propagated non-destructively: like the notes sync worker, an install
 never tombstones a shared file merely because its own local dir lacks it — only
 a file it demonstrably HELD and then dropped. This is what stops two installs
 that share a memory_key (git link group) but keep separate on-disk memory dirs
 (different project slugs / worktrees) from mirror-deleting each other's files.
-The same guard is what makes the two LEGS safe to run side by side: they share a
-memory_key but not a dir, so the gate and the baseline are keyed per dir.
+The gate and the baseline are therefore keyed per dir, not per memory_key.
 """
 
 from __future__ import annotations
@@ -67,9 +73,9 @@ logger = logging.getLogger(__name__)
 # (memory_key, memory_dir) pairs reconciled at least once in THIS process. push()
 # only tombstones (propagates deletes) for a pair once reconcile has established
 # THAT dir as authoritative — otherwise a stale/empty local dir could wrongly
-# wipe the DB. Keyed by dir, not by key alone: the delegated and native legs
-# share a memory_key but keep separate mirrors (ruling MEM2), so a reconcile of
-# one leg's dir must never authorize deletes against the other's.
+# wipe the DB. Keyed by dir, not by key alone: installs (and worktrees) that
+# share a memory_key keep separate mirrors, so a reconcile of one dir must
+# never authorize deletes against another's.
 _reconciled_keys: set = set()
 
 # Per-(memory_key, memory_dir) baseline: the set of relative_paths this process has confirmed
@@ -378,6 +384,12 @@ def push(memory_key: str, memory_dir: Path, instance_id: Optional[str],
 
 def reconcile_memory_sync(project_id: Optional[str], working_dir: Optional[str],
                           leg: str = "delegated") -> None:
+    # Native only. The delegated claude CLI keeps its own memory to itself, and
+    # every undecidable leg degrades to "delegated" — so this one check is also
+    # what makes an unrecognized session fail closed (no sync) instead of
+    # writing into a dir the app does not own.
+    if leg != "native":
+        return
     if not settings.agent_memory_sync or not project_id or not working_dir:
         return
     memory_key, memory_dir = _resolve_target(project_id, working_dir, leg)
@@ -388,6 +400,9 @@ def reconcile_memory_sync(project_id: Optional[str], working_dir: Optional[str],
 
 def push_memory_sync(project_id: Optional[str], working_dir: Optional[str],
                      leg: str = "delegated") -> None:
+    # Native only — see reconcile_memory_sync.
+    if leg != "native":
+        return
     if not settings.agent_memory_sync or not project_id or not working_dir:
         return
     memory_key, memory_dir = _resolve_target(project_id, working_dir, leg)

@@ -1811,6 +1811,7 @@ class HarnessAdapter(ProviderAdapter):
             # ``Task`` is. None is fluid's own "no filter" value, so an
             # unrestricted agent compiles exactly as it did before.
             permitted = _permitted_tool_names(options, registry)
+            memory_dir = (options.extra or {}).get("memory_dir") if native else None
             compiled = compile_prompt(
                 PromptInputs(
                     base=system,
@@ -1818,6 +1819,13 @@ class HarnessAdapter(ProviderAdapter):
                     cwd=options.cwd or ".",
                     include_env=not has_app_env,
                     include_agents=False,
+                    # fluid's own memory section is a snapshot of the global
+                    # ~/.fluid/MEMORY.md, written by ITS Memory tool. When the
+                    # project has a memory dir that tool is gone (see
+                    # _build_registry) and the project memory section below is
+                    # the session's memory — two "MEMORY.md" blocks naming
+                    # different files would only make the model pick wrong.
+                    include_memory=not memory_dir,
                     tools=permitted,
                 )
             )
@@ -1866,7 +1874,6 @@ class HarnessAdapter(ProviderAdapter):
                 sections.append(
                     PromptSection(kind="extra", text=STEERING_BLOCK)
                 )
-            memory_dir = (options.extra or {}).get("memory_dir") if native else None
             if memory_dir:
                 # Ruling MEM3. Before the code-mode section, which must stay
                 # last: it is the operating rule for everything above it, this
@@ -1893,7 +1900,10 @@ class HarnessAdapter(ProviderAdapter):
                 # Carried as a real section (not a text-only append) so the
                 # leg's get_context_usage() prices it like the rest.
                 sections.append(
-                    PromptSection(kind="extra", text=CODE_MODE_SECTION)
+                    PromptSection(
+                        kind="extra",
+                        text=_code_mode_section(memory_tool=not memory_dir),
+                    )
                 )
                 # ... and the catalog it points at. ONE section per tool
                 # (kind "tools", tool_name set) so the usage breakdown prices
@@ -1978,13 +1988,31 @@ class HarnessAdapter(ProviderAdapter):
         # NOT get them: the claude CLI supplies its own copies. Conversely the
         # CLI must never be relied on for tools outside the Claude-subscription
         # case, which is exactly why the native leg registers its own here.
+        #
+        # ...except Memory, when the project has its own memory dir. Ruling
+        # MEM3 already hands the native session that dir and the file
+        # convention for it, and the model reaches it with the ordinary file
+        # tools. A Memory tool alongside that is a SECOND, differently-shaped
+        # store the model would have to choose between — and the one the app
+        # neither syncs nor shows. One project memory, one way in.
+        drop_memory_tool = bool(native and (options.extra or {}).get("memory_dir"))
+
         builtins_registered = False
         if native:
             from fluid.tools.builtins import register_builtins
 
             register_builtins(registry)
             builtins_registered = True
-            logger.info("[HarnessAdapter] registered fluid builtin tools for native leg")
+            if drop_memory_tool:
+                # fluid registers its own bare-named ``Memory`` builtin (see
+                # fluid/tools/builtins/__init__.py). The registry has no
+                # deregister API, so drop the entry — the least invasive
+                # mechanism it offers short of reimplementing register_builtins.
+                _deregister_tool(registry, "Memory")
+            logger.info(
+                "[HarnessAdapter] registered fluid builtin tools for native leg%s",
+                " (Memory excluded: project memory dir)" if drop_memory_tool else "",
+            )
             _amend_native_task_spec(registry, options)
 
         # The app's own in-proc SDK servers (builtins, app-config, ai-tools,
@@ -2007,10 +2035,16 @@ class HarnessAdapter(ProviderAdapter):
         # Deferral is native-only too: fluid's ToolSearch is what makes a
         # deferred schema reachable, and the delegated leg's bundled socket
         # server must keep serving every spec to the CLI.
+        skipped_builtins = set(NATIVE_SHADOWED_BUILTINS)
+        if drop_memory_tool:
+            # Same reasoning as the fluid builtin above: the bridged
+            # mcp__builtins__Memory copy is the app's own memory tool and is
+            # equally redundant next to the project memory dir.
+            skipped_builtins.add("Memory")
         recorded = register_recorded_sdk_servers(
             registry,
             options.mcp_servers,
-            skip_tools={"builtins": set(NATIVE_SHADOWED_BUILTINS)} if native else None,
+            skip_tools={"builtins": skipped_builtins} if native else None,
             defer_servers=DEFERRED_SDK_SERVERS if native else None,
         )
         if recorded:
@@ -2474,11 +2508,10 @@ _CODE_MODE_TASK_SUFFIX = (
     "(`from tools.Task import Task`)."
 )
 
-CODE_MODE_SECTION = """# Code mode
+_CODE_MODE_SECTION_TEMPLATE = """# Code mode
 Your tool schema contains only run_python, list_tools, search_tools and \
-read_tool_docs. Every other tool named in these instructions — file, shell, \
-search, Skill, Task, Memory, Ledger, Note, app-config, computer-use, media \
-and MCP tools — is called from Python inside run_python. The "# Tools" \
+read_tool_docs. Every other tool named in these instructions — @REACHABLE@ \
+— is called from Python inside run_python. The "# Tools" \
 section below lists every tool with its Python signature and full \
 documentation; it is the same documentation those tools carry as direct tool \
 calls, so do not guess names or parameters.
@@ -2547,6 +2580,31 @@ instruction files, loaded through the Skill tool. The "Saved skills" that \
 list_tools reports are Python modules from your continual skill store, \
 imported with `from skills.<name> import <name>`. Once you have repeated a \
 workflow, save it as a skill."""
+
+# The list of reachable tool families in the opening sentence. A session whose
+# project has a memory dir has no Memory tool at all (see ``_build_registry``),
+# and naming a tool the schema cannot reach is exactly the gap this section
+# exists to close — so that session gets the list without it.
+_CODE_MODE_REACHABLE = (
+    "file, shell, search, Skill, Task, Memory, Ledger, Note, app-config, "
+    "computer-use, media and MCP tools"
+)
+_CODE_MODE_REACHABLE_NO_MEMORY = (
+    "file, shell, search, Skill, Task, Ledger, Note, app-config, "
+    "computer-use, media and MCP tools"
+)
+
+CODE_MODE_SECTION = _CODE_MODE_SECTION_TEMPLATE.replace(
+    "@REACHABLE@", _CODE_MODE_REACHABLE
+)
+CODE_MODE_SECTION_WITHOUT_MEMORY = _CODE_MODE_SECTION_TEMPLATE.replace(
+    "@REACHABLE@", _CODE_MODE_REACHABLE_NO_MEMORY
+)
+
+
+def _code_mode_section(*, memory_tool: bool) -> str:
+    """The code-mode block, naming Memory only when the session can call it."""
+    return CODE_MODE_SECTION if memory_tool else CODE_MODE_SECTION_WITHOUT_MEMORY
 
 
 # The four code-mode tools plus the skill-store pair describe themselves in the
@@ -2929,6 +2987,20 @@ def _native_context_window(kind: str, options: SessionOptions) -> Optional[int]:
     if get_model(options.model) is not None:
         return get_context_window(options.model)
     return None
+
+
+def _deregister_tool(registry: ToolRegistry, name: str) -> None:
+    """Remove an already-registered tool from ``registry``.
+
+    ``ToolRegistry`` exposes registration but no removal, so this reaches into
+    its two entry maps. Best-effort: a fluid version that renames or restructures
+    them must not break session connect — worst case the tool stays registered.
+    """
+    try:
+        registry._entries.pop(name, None)
+        registry._loaded.discard(name)
+    except Exception:  # noqa: BLE001
+        logger.debug("[HarnessAdapter] could not deregister %s", name, exc_info=True)
 
 
 def _amend_native_task_spec(registry: ToolRegistry, options: SessionOptions) -> None:

@@ -15,8 +15,12 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 from pydantic import BaseModel, Field
 
-from app.api.auth import require_auth
+from app.api.auth import require_auth, require_admin
 from app.api.common import validate_project_access, get_project_path_from_dict
+from app.core.memory_import_service import (
+    apply_memory_import,
+    preview_memory_import,
+)
 from app.core.project_memory_service import (
     get_project_memory_service,
     MEMORY_LOCATIONS,
@@ -42,6 +46,21 @@ class MemoryFileResponse(BaseModel):
 class MemoryFileSave(BaseModel):
     """Request body for creating/updating a memory file"""
     content: str = Field(..., description="Markdown content for the memory file (AGENTS.md)")
+
+
+class MemoryImportPreviewRequest(BaseModel):
+    """Which provider's agent-memory dir to look at."""
+    provider: str = Field(..., description="Agent memory provider: 'claude' or 'codex'")
+
+
+class MemoryImportApplyRequest(BaseModel):
+    """Which provider, and which of its files to copy across."""
+    provider: str = Field(..., description="Agent memory provider: 'claude' or 'codex'")
+    relative_paths: Optional[List[str]] = Field(
+        default=None,
+        description="Files to import. Omit to import every file that is ready "
+                    "(i.e. has no existing file at the destination).",
+    )
 
 
 # ============================================================================
@@ -188,5 +207,61 @@ async def delete_memory_file(
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+
+
+# ============================================================================
+# Agent-memory import (provider dir -> the project's fluid memory dir)
+#
+# Admin-gated, unlike the AGENTS.md routes above: the import reads the running
+# user's provider home (~/.claude, ~/.codex), which is the same reach the
+# settings import has and the same gate it uses.
+# ============================================================================
+
+@router.post("/{project_id}/memory-import/preview")
+async def preview_project_memory_import(
+    project_id: str,
+    data: MemoryImportPreviewRequest,
+    request: Request,
+    _: str = Depends(require_admin),
+):
+    """List what an import from the provider's memory dir would copy.
+
+    Each item is "ready" (nothing at the destination yet) or "conflict" (a file
+    is already there and will be left alone). A provider dir that does not
+    exist is not an error — it previews as empty.
+    """
+    project = validate_project_access(request, project_id)
+
+    try:
+        return preview_memory_import(project, data.provider)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+@router.post("/{project_id}/memory-import/apply")
+async def apply_project_memory_import(
+    project_id: str,
+    data: MemoryImportApplyRequest,
+    request: Request,
+    _: str = Depends(require_admin),
+):
+    """Copy the selected provider memory files into the project's memory dir.
+
+    Non-destructive: an existing destination file is skipped, never overwritten,
+    and the provider's own dir is never modified. Omit ``relative_paths`` to
+    import everything that is ready.
+    """
+    project = validate_project_access(request, project_id)
+
+    try:
+        return apply_memory_import(project, data.provider, data.relative_paths)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )

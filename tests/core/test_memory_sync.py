@@ -13,7 +13,8 @@ Coverage:
     push       — upload new file, tombstone local deletion (gated),
                  empty-dir guard blocks tombstoning, LWW skips newer remote,
                  revive a tombstone
-    entry pts  — flag disable no-ops; key resolves via link_group_id
+    entry pts  — native-only gate (a delegated leg is a no-op); flag disable
+                 no-ops; key resolves via link_group_id
 """
 
 import os
@@ -315,7 +316,7 @@ def test_push_unchanged_file_is_not_rewritten(memdb, memdir):
 def test_entrypoints_noop_when_disabled(memdb, memdir):
     write_file(memdir, "fact.md", "local", T0)
     with patch.object(memory_sync.settings, "agent_memory_sync", False):
-        memory_sync.push_memory_sync("p1", "/work/x")
+        memory_sync.push_memory_sync("p1", "/work/x", "native")
     assert memdb.get_memory_files(KEY) == []
 
 
@@ -325,8 +326,8 @@ def test_entrypoint_keys_by_link_group_id(memdb, memdir):
     with patch.object(memory_sync.settings, "agent_memory_sync", True), \
          patch.object(memory_sync.database, "get_project", return_value=project), \
          patch.object(memory_sync, "memory_dir_for_working_dir", return_value=memdir):
-        memory_sync.reconcile_memory_sync("p1", "/work/x")
-        memory_sync.push_memory_sync("p1", "/work/x")
+        memory_sync.reconcile_memory_sync("p1", "/work/x", "native")
+        memory_sync.push_memory_sync("p1", "/work/x", "native")
 
     # Pushed under the link_group_id key, not the project id.
     assert memdb.get_memory_file(KEY, "fact.md")["content"] == "local"
@@ -339,7 +340,7 @@ def test_entrypoint_falls_back_to_project_id_when_unlinked(memdb, memdir):
     with patch.object(memory_sync.settings, "agent_memory_sync", True), \
          patch.object(memory_sync.database, "get_project", return_value=project), \
          patch.object(memory_sync, "memory_dir_for_working_dir", return_value=memdir):
-        memory_sync.push_memory_sync("p1", "/work/x")
+        memory_sync.push_memory_sync("p1", "/work/x", "native")
 
     assert memdb.get_memory_file("p1", "fact.md")["content"] == "local"
 
@@ -380,9 +381,9 @@ def test_memory_dir_for_worktree_cwd_matches_main_checkout(tmp_path):
 
 
 def test_worktree_session_syncs_to_main_project_memory_dir(memdb, tmp_path):
-    # End to end: a worktree session's cwd is <repo>/.claude/worktrees/<name>,
-    # but the CLI wrote native memory to the MAIN checkout's slug dir. push must
-    # operate on that main dir — proof is that the file the CLI left there gets
+    # End to end: a worktree session's cwd is <repo>/.fluid/worktrees/<name>,
+    # but the memory dir is anchored on the MAIN checkout's slug. push must
+    # operate on that main dir — proof is that the file left there gets
     # uploaded, rather than a scan of an empty/absent worktree slug dir no-op'ing.
     main_repo = "/workspace/ai-shuffle"
     worktree_cwd = "/workspace/ai-shuffle/.claude/worktrees/fix-thing-bb7d"
@@ -394,9 +395,9 @@ def test_worktree_session_syncs_to_main_project_memory_dir(memdb, tmp_path):
 
     project = {"id": "p1", "link_group_id": KEY, "path": main_repo}
     with patch.object(memory_sync.settings, "agent_memory_sync", True), \
-         patch.object(memory_sync.settings, "claude_projects_dir", projects), \
+         patch.object(memory_sync.settings, "fluid_projects_dir", str(projects)), \
          patch.object(memory_sync.database, "get_project", return_value=project):
-        memory_sync.push_memory_sync("p1", worktree_cwd)
+        memory_sync.push_memory_sync("p1", worktree_cwd, "native")
 
     assert memdb.get_memory_file(KEY, "MEMORY.md")["content"] == "worktree turn wrote this"
 
@@ -412,9 +413,9 @@ def test_target_anchors_on_project_path_over_session_cwd(memdb, tmp_path):
     memdb.seed_live("MEMORY.md", "shared index", T0)
     project = {"id": "p1", "link_group_id": KEY, "path": main_repo}
     with patch.object(memory_sync.settings, "agent_memory_sync", True), \
-         patch.object(memory_sync.settings, "claude_projects_dir", projects), \
+         patch.object(memory_sync.settings, "fluid_projects_dir", str(projects)), \
          patch.object(memory_sync.database, "get_project", return_value=project):
-        memory_sync.reconcile_memory_sync("p1", worktree_cwd)
+        memory_sync.reconcile_memory_sync("p1", worktree_cwd, "native")
 
     assert (main_mem / "MEMORY.md").read_text(encoding="utf-8") == "shared index"
 
@@ -427,13 +428,13 @@ def test_push_entrypoint_delete_gate_requires_prior_reconcile(memdb, memdir):
     with patch.object(memory_sync.settings, "agent_memory_sync", True), \
          patch.object(memory_sync.database, "get_project", return_value=project), \
          patch.object(memory_sync, "memory_dir_for_working_dir", return_value=memdir):
-        memory_sync.push_memory_sync("p1", "/work/x")  # no reconcile first
+        memory_sync.push_memory_sync("p1", "/work/x", "native")  # no reconcile first
         assert memdb.get_memory_file(KEY, "keep.md")["deleted"] is False
 
         # After a reconcile establishes the dir as authoritative, deletes flow.
-        memory_sync.reconcile_memory_sync("p1", "/work/x")
+        memory_sync.reconcile_memory_sync("p1", "/work/x", "native")
         os.remove(memdir / "keep.md")  # reconcile pulled it down; user removes it
-        memory_sync.push_memory_sync("p1", "/work/x")
+        memory_sync.push_memory_sync("p1", "/work/x", "native")
         assert memdb.get_memory_file(KEY, "keep.md")["deleted"] is True
 
 
@@ -477,8 +478,8 @@ def test_worktree_fold_applies_on_both_legs(tmp_path):
 
 
 def test_resolve_target_shares_the_key_across_legs(tmp_path):
-    # MEM2: one memory_key, two mirrors — that is what makes the existing CLI
-    # memory materialize into the fluid dir on the first native reconcile.
+    # One memory_key, two dirs. Only the native dir is ever synced; the claude
+    # dir is resolvable purely so the explicit import can find it.
     project = {"id": "p1", "link_group_id": KEY, "path": "/workspace/ai-shuffle"}
     with patch.object(memory_sync.settings, "claude_projects_dir", tmp_path / "c"), \
          patch.object(memory_sync.settings, "fluid_projects_dir", str(tmp_path / "f")), \
@@ -491,8 +492,9 @@ def test_resolve_target_shares_the_key_across_legs(tmp_path):
 
 
 def test_native_reconcile_materializes_existing_shared_memory(memdb, tmp_path):
-    # The migration (MEM2): memory the CLI leg already shared comes down into
-    # the fluid dir on the first native reconcile. Nothing is copied dir-to-dir.
+    # Rows already in the shared DB (put there by a peer install's native
+    # session) come down into THIS install's fluid dir on reconcile. Nothing is
+    # copied dir-to-dir; migrating claude-side memory is the explicit import.
     memdb.seed_live("MEMORY.md", "shared index", T0)
     fluid_root = tmp_path / "fluid-projects"
     project = {"id": "p1", "link_group_id": KEY, "path": "/workspace/ai-shuffle"}
@@ -508,28 +510,61 @@ def test_native_reconcile_materializes_existing_shared_memory(memdb, tmp_path):
     ) == "shared index"
 
 
-def test_delete_authorization_does_not_leak_across_legs(memdb, tmp_path):
-    # Reconciling the NATIVE dir must not authorize deletes against the
-    # DELEGATED dir: the two share a memory_key but not a mirror, so an empty
-    # (or merely stale) sibling dir would otherwise tombstone live files.
-    memdb.seed_live("keep.md", "precious", T0)
+def test_delegated_leg_sync_is_a_noop(memdb, tmp_path):
+    # The claude CLI's memory dir is its own business: neither entry point
+    # touches the DB or the filesystem for a delegated leg.
     claude_root = tmp_path / "claude-projects"
     fluid_root = tmp_path / "fluid-projects"
-    project = {"id": "p1", "link_group_id": KEY, "path": "/workspace/ai-shuffle"}
     slug = memory_sync.get_project_dir_name("/workspace/ai-shuffle")
-    (claude_root / slug / "memory").mkdir(parents=True)  # exists, but empty
+    claude_mem = claude_root / slug / "memory"
+    claude_mem.mkdir(parents=True)
+    write_file(claude_mem, "cli-fact.md", "the CLI wrote this", T0)
+    project = {"id": "p1", "link_group_id": KEY, "path": "/workspace/ai-shuffle"}
 
     with patch.object(memory_sync.settings, "agent_memory_sync", True), \
          patch.object(memory_sync.settings, "claude_projects_dir", claude_root), \
          patch.object(memory_sync.settings, "fluid_projects_dir", str(fluid_root)), \
          patch.object(memory_sync.database, "get_project", return_value=project):
-        memory_sync.reconcile_memory_sync("p1", "/work/x", "native")
+        memory_sync.reconcile_memory_sync("p1", "/work/x", "delegated")
         memory_sync.push_memory_sync("p1", "/work/x", "delegated")
+        # The default leg is "delegated" too — an undecidable session must be
+        # just as inert as an explicitly delegated one.
+        memory_sync.reconcile_memory_sync("p1", "/work/x")
+        memory_sync.push_memory_sync("p1", "/work/x")
+
+    # Nothing uploaded, no reconcile bookkeeping, and no dir conjured anywhere.
+    assert memdb.get_memory_files(KEY) == []
+    assert memory_sync._reconciled_keys == set()
+    assert not fluid_root.exists()
+    # The CLI's own file is left exactly as it was.
+    assert read_file(claude_mem, "cli-fact.md") == "the CLI wrote this"
+
+
+def test_delete_authorization_does_not_leak_across_native_dirs(memdb, tmp_path):
+    # Two checkouts share a memory_key (git link group) but keep separate
+    # native mirrors. Reconciling one must not authorize deletes against the
+    # other: an empty (or merely stale) sibling dir would otherwise tombstone
+    # live files. The gate is keyed per (memory_key, dir).
+    memdb.seed_live("keep.md", "precious", T0)
+    fluid_root = tmp_path / "fluid-projects"
+    here = {"id": "p1", "link_group_id": KEY, "path": "/workspace/ai-shuffle"}
+    peer = {"id": "p2", "link_group_id": KEY, "path": "/workspace/ai-shuffle-clone"}
+    projects = {"p1": here, "p2": peer}
+    here_mem = fluid_root / memory_sync.get_project_dir_name(here["path"]) / "memory"
+    peer_mem = fluid_root / memory_sync.get_project_dir_name(peer["path"]) / "memory"
+    peer_mem.mkdir(parents=True)  # exists, but empty
+
+    with patch.object(memory_sync.settings, "agent_memory_sync", True), \
+         patch.object(memory_sync.settings, "fluid_projects_dir", str(fluid_root)), \
+         patch.object(memory_sync.database, "get_project",
+                      side_effect=lambda pid: projects[pid]):
+        memory_sync.reconcile_memory_sync("p1", "/work/x", "native")
+        memory_sync.push_memory_sync("p2", "/work/y", "native")
         assert memdb.get_memory_file(KEY, "keep.md")["deleted"] is False
 
-        # The native dir's own reconcile DID authorize deletes for the native
-        # mirror, so removing the file there still propagates.
-        os.remove(fluid_root / slug / "memory" / "keep.md")
+        # Our own dir's reconcile DID authorize deletes for that mirror, so
+        # removing the file there still propagates.
+        os.remove(here_mem / "keep.md")
         memory_sync.push_memory_sync("p1", "/work/x", "native")
         assert memdb.get_memory_file(KEY, "keep.md")["deleted"] is True
 
