@@ -4,8 +4,9 @@
 	 *
 	 * A 256px black plane: brand header + new session, ghost rows (search and the
 	 * project / device filters), a scrollable list of three-line session cards
-	 * grouped Active / Settled, the archived shelf, and a footer icon rail that
-	 * switches the MainPanel deck views.
+	 * grouped Active / Settled, the archived shelf, and a collapsible
+	 * Workspace section of labeled nav rows that switches the MainPanel
+	 * deck views.
 	 *
 	 * Desktop hosts it beside the main panel; at ≤1080px the same component is
 	 * rendered inside AppTopBar's slide-in drawer, so every navigation path is
@@ -239,9 +240,27 @@
 		retick(activeRows.some((row) => row.status === 'working' || row.status === 'await'));
 	});
 
-	// --- footer rail -------------------------------------------------------
+	// --- workspace nav ------------------------------------------------------
 	const BUILD_MEMBERS: ViewType[] = ['build', 'profile', 'mcp', 'plugins', 'hooks'];
 	const currentType = $derived($activeView?.type ?? null);
+
+	const WORKSPACE_OPEN_KEY = 'ai-shuffle.sidebar.workspaceOpen';
+	function readWorkspaceOpen(): boolean {
+		try {
+			return localStorage.getItem(WORKSPACE_OPEN_KEY) !== '0';
+		} catch {
+			return true;
+		}
+	}
+	let workspaceOpen = $state(readWorkspaceOpen());
+	function toggleWorkspace() {
+		workspaceOpen = !workspaceOpen;
+		try {
+			localStorage.setItem(WORKSPACE_OPEN_KEY, workspaceOpen ? '1' : '0');
+		} catch {
+			/* private mode: collapse state just won't persist */
+		}
+	}
 
 	const railItems = $derived([
 		{ label: 'Files', icon: Files, type: 'file-browser' as ViewType, on: currentType === 'file-browser' },
@@ -373,6 +392,23 @@
 			{/if}
 		</div>
 	</div>
+	<div class="sb-rows workspace">
+		<button class="grouplabel ws-head" onclick={toggleWorkspace} aria-expanded={workspaceOpen}>
+			Workspace
+			<span class="rule" aria-hidden="true"></span>
+			<span class="group-chev" class:is-collapsed={!workspaceOpen}>
+				<ChevronDown size={13} strokeWidth={2} />
+			</span>
+		</button>
+		{#if workspaceOpen}
+			{#each railItems as item (item.label)}
+				<button class="ghostrow wsrow" class:active={item.on} onclick={() => pickFeature(item.type)}>
+					<item.icon size={16} strokeWidth={1.85} />
+					<span class="label">{item.label}</span>
+				</button>
+			{/each}
+		{/if}
+	</div>
 
 	<div class="sb-scroll">
 		{#if activeRows.length > 0}
@@ -472,14 +508,6 @@
 		{/if}
 	</div>
 
-	<footer class="sb-foot">
-		{#each railItems as item (item.label)}
-			<button class="railbtn" class:on={item.on} aria-label={item.label} onclick={() => pickFeature(item.type)}>
-				<span class="tip">{item.label}</span>
-				<item.icon size={16} strokeWidth={1.85} />
-			</button>
-		{/each}
-	</footer>
 </aside>
 
 <style>
@@ -715,65 +743,27 @@
 	.shelf .rule { flex: 1 1 auto; height: 1px; background: var(--sidebar-border); }
 	.shelf :global(svg) { flex: none; }
 
-	/* Footer icon rail */
-	.sb-foot {
-		flex: none;
-		border-top: 1px solid var(--sidebar-border);
-		padding: 8px;
-		display: flex;
-		align-items: center;
-		gap: 0;
-	}
-	.railbtn {
-		position: relative;
-		width: 30px;
-		height: 30px;
-		border: none;
-		background: transparent;
-		border-radius: 8px;
-		display: grid;
-		place-items: center;
-		color: var(--subtle-foreground);
-		cursor: pointer;
-		transition: background-color 0.13s ease, color 0.13s ease;
-	}
-	.railbtn:hover { background: var(--sidebar-accent); color: var(--foreground); }
-	.railbtn.on { color: var(--foreground); background: var(--sidebar-accent); }
-	.tip {
-		position: absolute;
-		bottom: calc(100% + 8px);
-		left: 50%;
-		transform: translateX(-50%);
-		padding: 4px 8px;
-		border-radius: 7px;
-		font-size: 11.5px;
-		line-height: 1.35;
-		white-space: nowrap;
-		color: var(--popover-foreground);
-		background: var(--glass);
-		backdrop-filter: blur(14px) saturate(150%);
-		-webkit-backdrop-filter: blur(14px) saturate(150%);
-		border: 1px solid var(--border);
-		box-shadow: inset 0 1px 0 0 var(--glass-highlight);
-		opacity: 0;
-		pointer-events: none;
-		transition: opacity 0.12s ease;
-		z-index: 30;
-	}
-	.railbtn:hover .tip { opacity: 1; }
+	/* Workspace nav — labeled rows reusing the ghost-row language, so the
+	   sidebar reads as one list of named destinations on desktop and touch
+	   alike (no hover-only tooltips). */
+	.workspace { padding-top: 2px; }
+	.ws-head { padding-top: 8px; padding-bottom: 4px; }
+	.wsrow { height: 30px; }
+	.wsrow.active,
+	.wsrow.active:hover { background: var(--sidebar-accent-active); color: var(--foreground); }
+	.wsrow.active :global(svg) { color: var(--primary); }
 
 	:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 
-	/* The same rail serves the desktop sidebar and the mobile drawer; on
-	   handheld widths enlarge its controls to clear the 44px touch minimum. */
+	/* The same workspace rows serve the desktop sidebar and the mobile drawer;
+	   on handheld widths enlarge the controls to clear the 44px touch minimum. */
 	@media (hover: none), (max-width: 1080px) {
 		.iconbtn { width: 40px; height: 40px; }
 		.ghostrow { height: 44px; }
-		.sb-foot { gap: 2px; flex-wrap: wrap; justify-content: space-between; }
-		.railbtn { width: 44px; height: 44px; }
+		.wsrow { height: 40px; }
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.iconbtn, .ghostrow, .shelf, .railbtn, .tip { transition: none; }
+		.iconbtn, .ghostrow, .shelf, .ws-head, .group-chev { transition: none; }
 	}
 </style>
