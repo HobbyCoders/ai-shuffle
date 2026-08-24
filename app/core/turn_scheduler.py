@@ -171,28 +171,35 @@ def _auto_continued_since_last_user(session_id: str) -> bool:
 
 
 def _latest_context_turn(session_id: str) -> Optional[Dict[str, Any]]:
-    """The turn whose context an unpark wake inherits: the most recent
-    ``parked`` turn (the one whose background work just came to rest), falling
-    back to the most recent settled turn. ``None`` when the session has no
-    terminal turns at all."""
+    """The turn whose context an unpark wake inherits, in preference order:
+
+    1. the most recent ``parked`` turn — the one whose background work just
+       came to rest;
+    2. the session's live/settling turn (``running``/``draining``/
+       ``interrupting``) — a background task can go terminal while its parent
+       turn is still settling, and a wake enqueued inside that window must
+       inherit that still-settling turn's context rather than none at all;
+    3. the most recent settled turn.
+
+    ``None`` when the session has no usable turns at all.
+    """
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM turns WHERE session_id=%s AND state='parked' "
-            "ORDER BY ended_at DESC, position DESC, created_at DESC, id DESC "
-            "LIMIT 1",
-            (session_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:
+        row = None
+        for state_clause in (
+            "state='parked'",
+            "state IN ('running','draining','interrupting')",
+            "state IN ('completed','aborted')",
+        ):
             cursor.execute(
-                "SELECT * FROM turns "
-                "WHERE session_id=%s AND state IN ('completed','aborted') "
+                "SELECT * FROM turns WHERE session_id=%s AND " + state_clause + " "
                 "ORDER BY ended_at DESC, position DESC, created_at DESC, id DESC "
                 "LIMIT 1",
                 (session_id,),
             )
             row = cursor.fetchone()
+            if row is not None:
+                break
     return turns_db._row(row)
 
 
@@ -550,12 +557,28 @@ async def _enqueue_context_wake(
     payload = _context_payload(context)
     payload["pending_frames"] = list(frames)
     payload["task_ids"] = list(task_ids)
+    profile_id = context.get("profile_id")
+    if not profile_id:
+        # Belt and braces: a profile-less wake is refused downstream ("Profile
+        # not found: None") and the task notification is lost for good — the
+        # mark_woken latch never lets it be enqueued again. Whenever the
+        # context turn cannot supply a profile, fall back to the session's own.
+        from app.db import sessions as sessions_db
+        session_row = await asyncio.to_thread(
+            sessions_db.get_session, session_id,
+        ) or {}
+        profile_id = session_row.get("profile_id")
+        logger.warning(
+            "turn_scheduler: %s wake for session %s inherited no profile from "
+            "its context turn — falling back to the session profile %s",
+            source, session_id, profile_id,
+        )
     return await asyncio.to_thread(
         _enqueue,
         session_id,
         source,
         prompt=prompt,
-        profile_id=context.get("profile_id"),
+        profile_id=profile_id,
         project_id=context.get("project_id"),
         worktree_id=context.get("worktree_id"),
         payload=payload,

@@ -15,6 +15,7 @@ resolves lazily at call time (``session_runtime.execute``,
 """
 
 import asyncio
+import logging
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, patch
 
@@ -1269,6 +1270,98 @@ async def test_resumed_agent_can_wake_again(mock_db):
 
     (wake2,) = _by_source("ra1", "unpark")
     assert wake2["id"] != wake1["id"]  # a fresh wake after the resume
+
+
+# ---------------------------------------------------------------------------
+# (4b) UNPARK — context inheritance across the settlement window
+# ---------------------------------------------------------------------------
+
+def test_context_turn_prefers_parked_over_live_and_settled(mock_db):
+    _settled_turn("ctxa", prompt="settled", profile_id="p-settled")
+
+    parked = turns_db.enqueue_turn(
+        "ctxa", "user", prompt="parked", profile_id="p-parked",
+    )
+    turns_db.start_turn(parked["id"], None, "runner")
+    turns_db.park_turn(parked["id"], ["task-1"])
+
+    live = turns_db.enqueue_turn(
+        "ctxa", "user", prompt="live", profile_id="p-live",
+    )
+    turns_db.start_turn(live["id"], None, "runner")
+
+    context = turn_scheduler._latest_context_turn("ctxa")
+    assert context["id"] == parked["id"]
+    assert context["profile_id"] == "p-parked"
+
+
+def test_context_turn_prefers_live_over_settled(mock_db):
+    _settled_turn("ctxb", prompt="settled", profile_id="p-settled")
+
+    live = turns_db.enqueue_turn(
+        "ctxb", "user", prompt="live", profile_id="p-live",
+    )
+    turns_db.start_turn(live["id"], None, "runner")
+
+    context = turn_scheduler._latest_context_turn("ctxb")
+    assert context["id"] == live["id"]
+    assert context["profile_id"] == "p-live"
+
+
+async def test_wake_during_settlement_inherits_live_turn_context(mock_db):
+    # Regression: a background task goes terminal while its parent turn is
+    # still settling, and it is the session's FIRST turn — so there is neither a
+    # parked nor a settled turn to inherit from. The wake used to enqueue with
+    # profile_id=None, be refused downstream ("Profile not found: None") and
+    # lose the notification for good (the mark_woken latch blocks a re-enqueue).
+    live = turns_db.enqueue_turn(
+        "race1", "user", prompt="working",
+        profile_id="p-live", project_id="proj-live", worktree_id="wt-live",
+        payload={"api_user_id": "u-live"},
+    )
+    turns_db.start_turn(live["id"], None, "runner")
+
+    task_registry.start_task("race1", "task-r", "agent", "bg", tool_use_id="tu-r")
+    task_registry.mark_background_launch("race1", "tu-r")
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("race1", _terminal_frame("task-r", "done"))
+        await _drain_kicks()
+
+    (wake,) = _by_source("race1", "unpark")
+    assert wake["profile_id"] == "p-live"
+    assert wake["project_id"] == "proj-live"
+    assert wake["worktree_id"] == "wt-live"
+    assert wake["parent_turn_id"] == live["id"]
+    assert wake["payload"]["api_user_id"] == "u-live"
+
+
+async def test_wake_without_context_falls_back_to_session_profile(mock_db, caplog):
+    # Belt and braces: no usable turn at all, but the session row carries a
+    # profile — the wake inherits it (and says so in the log) rather than
+    # enqueueing profile-less.
+    mock_db.execute(
+        "INSERT INTO agents (id, name, config) VALUES (?, ?, ?)",
+        ("p-sess", "Test", "{}"),
+    )
+    mock_db.execute(
+        "INSERT INTO sessions (id, profile_id) VALUES (?, ?)", ("nc1", "p-sess"),
+    )
+    mock_db.commit()
+
+    frame = _terminal_frame("task-n", "done")
+    with caplog.at_level(logging.WARNING, logger="app.core.turn_scheduler"):
+        wake = await turn_scheduler._enqueue_context_wake(
+            "nc1", "unpark", [frame], ["task-n"], "<task-notification/>",
+        )
+
+    assert wake["profile_id"] == "p-sess"
+    assert "nc1" in caplog.text
+    assert "no profile" in caplog.text
 
 
 # ---------------------------------------------------------------------------
