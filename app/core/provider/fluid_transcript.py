@@ -1070,6 +1070,11 @@ def fork_fluid_session(
     from app.db.base import get_cursor, get_db
     from app.db.compat import ph
 
+    # Same Postgres-illegal code-point scrub the SDK session store applies at
+    # its own jsonb boundary — see the comment block above ``_PG_ILLEGAL_RE``
+    # there for why NUL and lone surrogates have to go before an INSERT.
+    from app.core.pg_session_store import _scrub_pg_illegal
+
     _ph = ph()
     with get_db() as conn:
         cursor = get_cursor(conn)
@@ -1101,7 +1106,7 @@ def fork_fluid_session(
                 f"INSERT INTO fluid_session_events (session_id, seq, event) "
                 f"VALUES ({_ph}, {_ph}, {_ph}) "
                 f"ON CONFLICT (session_id, seq) DO NOTHING",
-                (new_id, seq, Json(event)),
+                (new_id, seq, Json(_scrub_pg_illegal(event))),
             )
 
     # Best-effort: the node/event copy is the source of truth. A failed CLI

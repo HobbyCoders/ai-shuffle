@@ -29,6 +29,11 @@ from psycopg2.extras import Json
 from app.db.async_database import run_sync
 from app.db.base import get_db
 
+# Same Postgres-illegal code-point scrub the SDK session store applies at its
+# own jsonb boundary — see the comment block above ``_PG_ILLEGAL_RE`` there for
+# why NUL and lone surrogates have to go before an INSERT sees them.
+from app.core.pg_session_store import _scrub_pg_illegal
+
 # Side-effect import: registers AI Shuffle's legacy ``SafetyWarning`` shape
 # with fluid's event codec. Must precede any ``event_from_dict`` call, or
 # sessions persisted before fluid stopped emitting that event fail to decode.
@@ -99,7 +104,7 @@ def _append_node_sync(session_id: str, node: SessionNode) -> None:
             "VALUES (%s, %s, %s, %s, %s) "
             "ON CONFLICT (session_id, node_id) DO NOTHING",
             (session_id, node.node_id, node.parent_id, node.ts,
-             Json(node.message.to_dict())),
+             Json(_scrub_pg_illegal(node.message.to_dict()))),
         )
         cur.execute(
             "UPDATE fluid_sessions SET head_node_id = %s WHERE session_id = %s",
@@ -129,7 +134,7 @@ def _append_event_sync(session_id: str, event_dict: Dict[str, Any], seq: int) ->
         cur.execute(
             "INSERT INTO fluid_session_events (session_id, seq, event) "
             "VALUES (%s, %s, %s) ON CONFLICT (session_id, seq) DO NOTHING",
-            (session_id, seq, Json(event_dict)),
+            (session_id, seq, Json(_scrub_pg_illegal(event_dict))),
         )
         # The conflict clause is there for legitimate bus replays, but it also
         # hides real loss: an engine whose in-memory log restarted at seq 1 for

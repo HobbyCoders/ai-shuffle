@@ -26,6 +26,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.db.base import get_db, rows_to_list
 
+# Same Postgres-illegal code-point scrub the SDK session store applies at its
+# own JSON boundary — see the comment block above ``_PG_ILLEGAL_RE`` there for
+# why NUL and lone surrogates have to go before an INSERT sees them.
+from app.core.pg_session_store import _scrub_pg_illegal
+
 logger = logging.getLogger(__name__)
 
 NOTIFY_CHANNEL = "session_events"
@@ -106,7 +111,7 @@ def append_events(
                 run_id,
                 event.get("turn_id"),
                 event["type"],
-                json.dumps(event.get("payload", {})),
+                json.dumps(_scrub_pg_illegal(event.get("payload", {}))),
                 event.get("command_id"),
             )
             for i, event in enumerate(events)
@@ -187,7 +192,7 @@ def append_backfill_events(
                 None,
                 event.get("turn_id"),
                 event["type"],
-                json.dumps(event.get("payload", {})),
+                json.dumps(_scrub_pg_illegal(event.get("payload", {}))),
                 event.get("command_id"),
             )
             for i, event in enumerate(events)

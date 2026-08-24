@@ -167,3 +167,55 @@ async def test_cli_session_id_round_trip(mock_db):
     reloaded = await PgFluidStore().get_session("ses_pg6")
     assert reloaded.head_node_id == "n1"
     assert reloaded.cli_session_id == "cli-uuid-def"
+
+
+@pytest.mark.asyncio
+async def test_illegal_code_points_are_scrubbed_at_the_jsonb_boundary(mock_db):
+    """A model that puts NUL (or a lone surrogate) in its output must not be
+    able to kill the turn.
+
+    Postgres json/jsonb cannot hold U+0000 or an unpaired UTF-16 surrogate, and
+    the event append raises straight back into the engine, so an unscrubbed
+    write took the whole run down with it. Both writers sanitize to U+FFFD.
+    """
+    dirty = "a\x00b\ud800c"
+    clean = "a�b�c"
+
+    store = PgFluidStore()
+    await store.create_session("ses_nul")
+    await store.append("ses_nul", _node("n1", None, dirty))
+    await store.append_event(
+        "ses_nul", TextDelta(session_id="ses_nul", index=0, text=dirty, seq=1)
+    )
+
+    node_json = mock_db.execute(
+        "SELECT message FROM fluid_session_nodes WHERE session_id = ?",
+        ("ses_nul",),
+    ).fetchone()[0]
+    event_json = mock_db.execute(
+        "SELECT event FROM fluid_session_events WHERE session_id = ?",
+        ("ses_nul",),
+    ).fetchone()[0]
+
+    for stored in (node_json, event_json):
+        assert "\\u0000" not in stored
+        assert "\\ud800" not in stored
+        assert "\\ufffd" in stored
+
+    # ...and the scrubbed content is what reads back out of the store.
+    reloaded = PgFluidStore()
+    path = await reloaded.load_path("ses_nul")
+    assert path[0].message.text() == clean
+    events = await reloaded.events_since("ses_nul", 0)
+    assert events[0].text == clean
+
+
+@pytest.mark.asyncio
+async def test_legal_content_survives_the_scrub_untouched(mock_db):
+    store = PgFluidStore()
+    await store.create_session("ses_ok")
+    await store.append("ses_ok", _node("n1", None, "plain unicode ✓"))
+    reloaded = PgFluidStore()
+    assert (await reloaded.load_path("ses_ok"))[0].message.text() == (
+        "plain unicode ✓"
+    )

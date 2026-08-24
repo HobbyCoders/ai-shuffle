@@ -110,3 +110,41 @@ def test_payload_roundtrips_as_dict(mock_db):
 
 def test_get_max_seq_absent_is_zero(mock_db):
     assert se.get_max_seq("never-seen") == 0
+
+
+def _stored_payload(conn, session_id):
+    return conn.execute(
+        "SELECT payload FROM session_events WHERE session_id = ? ORDER BY seq",
+        (session_id,),
+    ).fetchone()[0]
+
+
+def test_illegal_code_points_are_scrubbed_from_payloads(mock_db):
+    """Postgres text/json columns reject U+0000 and lone UTF-16 surrogates, so
+    an event carrying either (a model writing '\\u0000' into tool input, say)
+    used to abort the INSERT and drop the event. Both writers sanitize to
+    U+FFFD first."""
+    dirty = "a\x00b\ud800c"
+    clean = "a�b�c"
+
+    se.append_events("s1", [{"type": "a", "payload": {"text": dirty, dirty: 1}}])
+    assert se.append_backfill_events(
+        "s2", [{"type": "b", "payload": {"nested": [{"text": dirty}]}}]
+    ) == (1, 1)
+
+    for session_id in ("s1", "s2"):
+        raw = _stored_payload(mock_db, session_id)
+        assert "\\u0000" not in raw
+        assert "\\ud800" not in raw
+        assert "\\ufffd" in raw
+
+    live = se.get_events("s1")[0]["payload"]
+    assert live["text"] == clean
+    # Dict keys are scrubbed too — a NUL in a key breaks the INSERT just as hard.
+    assert list(live) == ["text", clean]
+    assert se.get_events("s2")[0]["payload"]["nested"][0]["text"] == clean
+
+
+def test_legal_payload_content_is_untouched(mock_db):
+    se.append_events("s1", [{"type": "a", "payload": {"text": "plain ✓", "n": 1}}])
+    assert se.get_events("s1")[0]["payload"] == {"text": "plain ✓", "n": 1}

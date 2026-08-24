@@ -784,3 +784,35 @@ def test_fork_reseeds_cli_when_parent_was_delegated(mock_db, tmp_path):
     lines = _read_jsonl(path)
     assert {line["sessionId"] for line in lines} == {fork_handle}
     assert lines[0]["message"]["content"] == "first prompt"
+
+
+def test_fork_scrubs_postgres_illegal_code_points_from_copied_events(mock_db):
+    """The fork re-INSERTs every kept event under the new session id, so it is
+    a Postgres JSON boundary of its own: U+0000 and lone surrogates have to be
+    sanitized to U+FFFD there too, or the copy aborts the transaction."""
+    import json
+
+    from app.db.base import get_cursor, get_db
+
+    session_id = _seed()
+    dirty = "a\x00b\ud800c"
+    clean = "a�b�c"
+    _insert_events(session_id, [_evt("TextDelta", node_id="n1", text=dirty)])
+
+    new_id, _ = fork_fluid_session(session_id, "n7")
+
+    copied = _load_events(new_id)
+    assert len(copied) == 1
+    assert copied[0]["text"] == clean
+
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            "SELECT event FROM fluid_session_events WHERE session_id = %s",
+            (new_id,),
+        )
+        stored = cursor.fetchone()["event"]
+    raw = stored if isinstance(stored, str) else json.dumps(stored)
+    assert "\\u0000" not in raw
+    assert "\\ud800" not in raw
+    assert "\\ufffd" in raw
