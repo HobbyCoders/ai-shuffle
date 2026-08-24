@@ -75,6 +75,11 @@ describe('transcript navigation position', () => {
 		expect(resolveCurrentTurnIndex([-400, -200, -10], 100)).toBe(2);
 	});
 
+	it('skips unmeasured ticks instead of freezing on the first turn', () => {
+		expect(resolveCurrentTurnIndex([Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, 40], 100)).toBe(2);
+		expect(resolveCurrentTurnIndex([-400, Number.POSITIVE_INFINITY, 20], 100)).toBe(2);
+	});
+
 	it('clamps previous and next navigation to available turns', () => {
 		expect(resolveTurnNavigationIndex(0, 3, -1)).toBe(0);
 		expect(resolveTurnNavigationIndex(0, 3, 1)).toBe(1);

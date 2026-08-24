@@ -33,6 +33,7 @@
 		resolveAnchoredTailReserve,
 		resolveCurrentTurnAnchorScrollTop,
 		shouldAutoScrollOnChange,
+		shouldPinLatestTurnOnSettle,
 		shouldShowJumpToLatest,
 		type ScrollMetrics
 	} from '$lib/stores/session/auto-scroll';
@@ -388,6 +389,8 @@
 	);
 	let currentTurnIndex = $state(0);
 	let manualNavigationReleaseUntil = 0;
+	let settleSessionId: string | null | undefined = undefined;
+	let wasLatestTurnUnsettled = false;
 
 	// Anchored to the prompt that OPENED the live turn: a message steered into a
 	// turn already running must not restart its clock.
@@ -397,6 +400,7 @@
 	});
 
 	function updateCurrentTurnIndex() {
+		if (Date.now() < manualNavigationReleaseUntil) return;
 		if (!containerRef || turnNavigationItems.length === 0) {
 			currentTurnIndex = 0;
 			return;
@@ -588,6 +592,7 @@
 			requestAnimationFrame(() => {
 				programmaticScrollDepth = Math.max(0, programmaticScrollDepth - 1);
 				updateJumpToLatestVisibility();
+				updateCurrentTurnIndex();
 			});
 		});
 	}
@@ -647,6 +652,7 @@
 			if (delta > 0) setProgrammaticScrollTop(containerRef.scrollTop + delta);
 		}
 		updateJumpToLatestVisibility();
+		updateCurrentTurnIndex();
 	}
 
 	function scheduleCurrentTurnAnchorMaintenance(initial = false) {
@@ -736,6 +742,7 @@
 				requestAnimationFrame(() => {
 					programmaticScrollDepth = Math.max(0, programmaticScrollDepth - 1);
 					updateJumpToLatestVisibility();
+					updateCurrentTurnIndex();
 				});
 			});
 		}
@@ -1326,6 +1333,50 @@
 		prevMessagesLength = currentLength;
 		prevLastContent = currentContent;
 		prevLastMetadata = currentMetadata;
+	});
+
+	// When a followed turn settles, the work log collapses and the live
+	// anchor will not scroll back up. Recompute the tail and pin the latest
+	// user prompt the same way a remount does. A reader who left the live
+	// edge is left alone; we still refresh the timeline so it does not stay
+	// stuck on the first tick.
+	$effect(() => {
+		const sessionId = $activeSession.sessionId;
+		const unsettled = latestTurnUnsettled;
+		if (sessionId !== settleSessionId) {
+			settleSessionId = sessionId;
+			wasLatestTurnUnsettled = unsettled;
+			return;
+		}
+		const wasUnsettled = wasLatestTurnUnsettled;
+		wasLatestTurnUnsettled = unsettled;
+		if (!isMounted || !wasUnsettled || unsettled) return;
+		const following = untrack(() => shouldAutoScroll);
+		if (!shouldPinLatestTurnOnSettle(wasUnsettled, unsettled, following)) {
+			scheduleLatestTurnTailRefresh();
+			void tick().then(() => updateCurrentTurnIndex());
+			return;
+		}
+		cancelCurrentTurnAnchor(true);
+		void tick().then(async () => {
+			if (!containerRef || !untrack(() => shouldAutoScroll)) return;
+			refreshLatestTurnTailReserve();
+			await tick();
+			if (!containerRef || !untrack(() => shouldAutoScroll)) return;
+			const latestTurn = $activeSession.messages.findLast(
+				(message) => isNavigableUserTurn(message) && message.id
+			);
+			const anchor = latestTurn?.id ? document.getElementById(turnAnchorId(latestTurn.id)) : null;
+			if (!anchor || !containerRef.contains(anchor)) {
+				scrollToBottom();
+				updateCurrentTurnIndex();
+				return;
+			}
+			const containerBox = containerRef.getBoundingClientRect();
+			const anchorTop = containerRef.scrollTop + anchor.getBoundingClientRect().top - containerBox.top;
+			setProgrammaticScrollTop(resolveCurrentTurnAnchorScrollTop(anchorTop));
+			updateCurrentTurnIndex();
+		});
 	});
 </script>
 

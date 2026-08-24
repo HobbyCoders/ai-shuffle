@@ -28,6 +28,7 @@ import {
 	resolveAnchoredTailReserve,
 	resolveCurrentTurnAnchorScrollTop,
 	shouldAutoScrollOnChange,
+	shouldPinLatestTurnOnSettle,
 	shouldShowJumpToLatest
 } from './auto-scroll';
 
@@ -233,5 +234,12 @@ describe('current-turn anchor geometry', () => {
 		expect(resolveAnchoredRevealDelta(400, 600, 980)).toBe(4);
 		expect(resolveAnchoredRevealDelta(400, 600, 1200)).toBe(224);
 		expect(resolveAnchoredRevealDelta(400, 600, 900)).toBe(0);
+	});
+
+	it('pins the latest prompt when a followed turn settles', () => {
+		expect(shouldPinLatestTurnOnSettle(true, false, true)).toBe(true);
+		expect(shouldPinLatestTurnOnSettle(true, false, false)).toBe(false);
+		expect(shouldPinLatestTurnOnSettle(true, true, true)).toBe(false);
+		expect(shouldPinLatestTurnOnSettle(false, false, true)).toBe(false);
 	});
 });

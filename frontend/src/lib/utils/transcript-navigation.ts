@@ -110,9 +110,18 @@ export function resolveLiveTurnStartedAt(
 export function resolveCurrentTurnIndex(turnTops: number[], readingLine: number): number {
 	if (turnTops.length === 0) return 0;
 	let current = 0;
+	let seen = false;
 	for (let index = 0; index < turnTops.length; index++) {
-		if (turnTops[index] <= readingLine) current = index;
-		else break;
+		const top = turnTops[index];
+		// Missing anchors (virtualized / not yet laid out) must not freeze the
+		// rail on turn 0: skip them and keep scanning later measurable ticks.
+		if (!Number.isFinite(top)) continue;
+		if (top <= readingLine) {
+			current = index;
+			seen = true;
+		} else if (seen) {
+			break;
+		}
 	}
 	return current;
 }

@@ -244,3 +244,18 @@ export function resolveAnchoredRevealDelta(
 	const visibleEnd = scrollTop + clientHeight - Math.max(0, bottomInset);
 	return Math.max(0, Math.ceil(contentEnd - visibleEnd));
 }
+
+/**
+ * When a live turn settles, pin the latest user prompt back to the top if
+ * the reader was following. Work-log collapse shrinks the column, but the
+ * live anchor only ever scrolls down to reveal overflow, so a finished
+ * session would sit on the last token until a remount recomputed the tail.
+ * A reader who scrolled up is left alone.
+ */
+export function shouldPinLatestTurnOnSettle(
+	wasUnsettled: boolean,
+	isUnsettled: boolean,
+	stickToBottom: boolean
+): boolean {
+	return wasUnsettled && !isUnsettled && stickToBottom;
+}
