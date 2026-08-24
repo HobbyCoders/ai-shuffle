@@ -573,6 +573,39 @@ def _set_head(session_id: str, node_id: Optional[str]) -> None:
         )
 
 
+# ─── Deletion ────────────────────────────────────────────────────────────────
+
+def delete_fluid_session_data(sdk_session_id: str) -> int:
+    """Purge a fluid session's transcript rows; returns the rows removed.
+
+    The fluid analogue of the session-store purge in
+    ``_cleanup_session_artifacts``: ``sessions`` has no foreign key into the
+    ``fluid_*`` tables, so without this a deleted session's full transcript
+    stays orphaned forever. A caller that still needs the delegated-CLI handle
+    must read :func:`get_cli_session_id` BEFORE calling this — the handle lives
+    on the ``fluid_sessions`` row this drops.
+
+    Prefix-gated like every other entry point here, so a legacy session never
+    reaches the database.
+    """
+    if not looks_like_fluid_session_id(sdk_session_id):
+        return 0
+
+    from app.db.base import get_cursor, get_db
+    from app.db.compat import ph
+
+    removed = 0
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        for table in ("fluid_session_nodes", "fluid_session_events", "fluid_sessions"):
+            cursor.execute(
+                f"DELETE FROM {table} WHERE session_id = {ph()}",
+                (sdk_session_id,),
+            )
+            removed += cursor.rowcount or 0
+    return removed
+
+
 # ─── Delegated-CLI re-seed (ruling R5) ───────────────────────────────────────
 #
 # The rewind above moves fluid's head, which is the whole truth for a NATIVE

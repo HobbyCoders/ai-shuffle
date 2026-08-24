@@ -1580,7 +1580,40 @@ async def _cleanup_session_artifacts(session_id: str, sdk_sid: Optional[str], pr
             # delete retries, so make the leak visible.
             logger.warning(f"Failed to delete session store rows for {sdk_sid}: {e}")
 
-    if sdk_sid and sdk_delete_session:
+    from app.core.provider.fluid_transcript import (
+        delete_fluid_session_data,
+        get_cli_session_id,
+        looks_like_fluid_session_id,
+    )
+
+    if sdk_sid and looks_like_fluid_session_id(sdk_sid):
+        # A fluid-native transcript is NOT a ~/.claude JSONL: it lives in the
+        # fluid_* tables, plus — for a session that ever ran a delegated turn or
+        # was re-seeded — a real CLI JSONL named by fluid_sessions.cli_session_id.
+        # The SDK delete validates a UUID, so it may only ever be handed cli_sid;
+        # the ses_ id stays a SQL bind parameter and never builds a path.
+        try:
+            # Read the handle first — it lives on the row the purge drops.
+            cli_sid = await run_sync(get_cli_session_id, sdk_sid)
+            removed = await run_sync(delete_fluid_session_data, sdk_sid)
+            if removed:
+                logger.debug(f"Deleted {removed} fluid transcript rows for {sdk_sid}")
+
+            if cli_sid and sdk_delete_session:
+                try:
+                    project = await run_sync(database.get_project, project_id) if project_id else None
+                    working_dir = get_project_working_dir(project) if project else None
+                    await run_sync(sdk_delete_session, session_id=cli_sid, directory=working_dir)
+                    logger.debug(f"Deleted delegated CLI JSONL {cli_sid} for {sdk_sid}")
+                except FileNotFoundError:
+                    pass  # already gone — nothing to clean up
+                except Exception as e:
+                    logger.warning(f"Failed to delete delegated CLI JSONL {cli_sid}: {e}")
+        except Exception as e:
+            # Non-fatal — but the transcript rows stay orphaned until a future
+            # delete retries, so make the leak visible.
+            logger.warning(f"Failed to delete fluid transcript for {sdk_sid}: {e}")
+    elif sdk_sid and sdk_delete_session:
         try:
             project = await run_sync(database.get_project, project_id) if project_id else None
             working_dir = get_project_working_dir(project) if project else None
