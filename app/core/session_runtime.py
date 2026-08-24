@@ -1302,7 +1302,7 @@ class SessionRuntime:
             # A message this dying turn swallowed on its way out goes back on
             # the queue — BEFORE the scheduler seam fires, so it runs as the
             # very next turn.
-            await self._requeue_steers_killed_by_interrupt(sid)
+            await self._requeue_stranded_steers(sid)
             # Working-set snapshot (V2 Phase 4, Q6): a turn that ended (even
             # aborted) may leave in-progress edits the next runner needs. NEVER
             # on the parked arm above (the session is still working here).
@@ -1317,7 +1317,7 @@ class SessionRuntime:
         await self._snapshot_working_set(sid)
         return "completed", settled is not None
 
-    async def _requeue_steers_killed_by_interrupt(self, sid: str) -> None:
+    async def _requeue_stranded_steers(self, sid: str) -> None:
         """Put back every steered message this turn swallowed but never answered.
 
         The race this repairs: the user sends a message mid-turn and hits stop a
@@ -1327,11 +1327,20 @@ class SessionRuntime:
         the transcript permanently unanswered, which is precisely what the send
         flow promises cannot happen.
 
-        The line is the interrupt REQUEST time (``_interrupt_requested_at``,
-        stamped as ``interrupt()`` starts). A row absorbed BEFORE it was one the
-        model was genuinely working on when the user chose to stop — re-running
-        it would answer a question they withdrew. A row absorbed at-or-after it
-        was swallowed by a turn that was already dying, and re-runs.
+        Two ways a turn gets here, and they draw the line differently.
+
+        The user pressed stop: the line is the interrupt REQUEST time
+        (``_interrupt_requested_at``, stamped as ``interrupt()`` starts). A row
+        absorbed BEFORE it was one the model was genuinely working on when the
+        user chose to stop — re-running it would answer a question they
+        withdrew. A row absorbed at-or-after it was swallowed by a turn that was
+        already dying, and re-runs.
+
+        The turn died on its own — a provider error, a crash. Nobody withdrew
+        anything and there is no request time to compare against, so EVERY
+        absorbed-and-unanswered row re-runs. Steering must never be worse than
+        queueing: had the message stayed in the queue it would simply have run
+        after the abort.
 
         The re-run carries ``user_message_already_recorded`` so it adds nothing
         to the transcript: the ``message.user`` is up there already, written by
@@ -1344,13 +1353,14 @@ class SessionRuntime:
         requested = self._interrupt_requested_at
         absorbed = self._steer_absorbed
         self._steer_absorbed = {}
-        if requested is None or not absorbed:
+        if not absorbed:
             return
+        cutoff = requested if requested is not None else float("-inf")
         stranded = sorted(
             (
                 (stamp, row_id, row)
                 for row_id, (stamp, row) in absorbed.items()
-                if stamp >= requested
+                if stamp >= cutoff
             ),
             key=lambda item: item[0],
         )
@@ -1391,8 +1401,8 @@ class SessionRuntime:
                 continue
             requeued += 1
             logger.info(
-                "SessionRuntime: steer %s was absorbed into %s after the "
-                "interrupt was requested and never answered — re-queued as %s",
+                "SessionRuntime: steer %s was absorbed into %s but the turn "
+                "aborted before answering — re-queued as %s",
                 row_id, self.turn_id, fresh["id"],
             )
         if requeued:

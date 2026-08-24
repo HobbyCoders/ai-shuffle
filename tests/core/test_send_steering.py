@@ -837,12 +837,19 @@ async def test_a_steer_the_model_already_had_is_not_re_run(mock_db):
     assert turns_db.get_queued_turns("s12") == []
 
 
-async def test_an_abort_with_no_interrupt_behind_it_re_queues_nothing(mock_db):
-    """A crashed or errored turn is not someone pressing stop — there is no
-    request time to compare against, so nothing comes back."""
+async def test_a_steer_swallowed_by_an_errored_turn_goes_back_on_the_queue(
+    mock_db,
+):
+    """The live bug: a provider 429 killed a turn that had already absorbed a
+    steer. Nobody pressed stop, so nothing was withdrawn — and had the message
+    stayed queued the drain would simply have run it after the abort. Steering
+    must not be worse than queueing, so it comes back."""
     _seed_session("s13")
     live = turns_db.enqueue_turn("s13", "user", prompt="the live one")
-    queued = turns_db.enqueue_turn("s13", "user", prompt="also check the logs")
+    queued = turns_db.enqueue_turn(
+        "s13", "user", prompt="also check the logs",
+        command_id="req-13", payload={"deferred_user_record": True},
+    )
     events = [
         {"type": "steer_delivered", "steers": [
             {"id": queued["id"], "text": "also check the logs"},
@@ -850,10 +857,46 @@ async def test_an_abort_with_no_interrupt_behind_it_re_queues_nothing(mock_db):
         {"type": "error", "error": "boom"},
     ]
 
+    box = {}
+    with _pump_env(_pump(events)) as env:
+        box["runtime"] = session_runtime.SessionRuntime(live)
+        assert await box["runtime"].execute() == "aborted"
+
+    # No stop was ever asked for — this is the state the old gate bailed on.
+    assert box["runtime"]._interrupt_requested_at is None
+    assert turns_db.get_turn(queued["id"])["stop_reason"] == "steered"
+
+    rows = turns_db.get_queued_turns("s13")
+    assert [r["prompt"] for r in rows] == ["also check the logs"]
+    replacement = rows[0]
+    assert replacement["id"] != queued["id"]
+    assert replacement["command_id"] == "req-13"
+    assert replacement["payload"]["user_message_already_recorded"] is True
+    assert replacement["payload"]["requeued_from_turn_id"] == queued["id"]
+    assert "deferred_user_record" not in replacement["payload"]
+    env["sync"].broadcast_queue_updated.assert_awaited()
+
+
+async def test_an_errored_turn_re_queues_every_steer_it_swallowed(mock_db):
+    """No request time means no line to draw: an error abort strands them all,
+    and front-of-queue placement still preserves the order they were sent."""
+    _seed_session("s17")
+    live = turns_db.enqueue_turn("s17", "user", prompt="the live one")
+    first = turns_db.enqueue_turn("s17", "user", prompt="one")
+    second = turns_db.enqueue_turn("s17", "user", prompt="two")
+    turns_db.enqueue_turn("s17", "user", prompt="three")
+    events = [
+        {"type": "steer_delivered", "steers": [{"id": first["id"], "text": "one"}]},
+        {"type": "steer_delivered", "steers": [{"id": second["id"], "text": "two"}]},
+        {"type": "error", "error": "boom"},
+    ]
+
     with _pump_env(_pump(events)):
         assert await session_runtime.SessionRuntime(live).execute() == "aborted"
 
-    assert turns_db.get_queued_turns("s13") == []
+    assert [r["prompt"] for r in turns_db.get_queued_turns("s17")] == [
+        "one", "two", "three",
+    ]
 
 
 async def test_a_plain_run_does_log_its_message_user(mock_db):
