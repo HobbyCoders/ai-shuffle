@@ -403,15 +403,16 @@ class Settings(BaseSettings):
     task_tool_max_depth: int = 5
     task_tool_max_workers: int = 8
 
-    # Staged flip for the compiled system prompt on the delegated (claude CLI)
-    # leg (agents-program ruling A3). False (default): the CLI keeps its own
-    # Claude Code preset and receives the agent's configured prompt + app
-    # blocks via --append-system-prompt (byte-identical to pre-compiler
-    # behavior). True: the fluid compiler's full output (base + instruction
-    # files + skills + env + blocks) replaces the CLI preset via
-    # --system-prompt. Native legs always run the compiled prompt; this flag
-    # only affects the delegated leg. Set via PROMPT_FULL_REPLACE.
-    prompt_full_replace: bool = False
+    # Compiled system prompt on the delegated (claude CLI) leg (agents-program
+    # ruling A3). True (default since the 2026-08 prompt overhaul): the fluid
+    # compiler's full output (base + instruction files + skills + env +
+    # blocks) replaces the CLI preset via --system-prompt, so both legs run
+    # the same prompt stack. False: the CLI keeps its own Claude Code preset
+    # and receives the agent's configured prompt + app blocks via
+    # --append-system-prompt (pre-overhaul behavior). Native legs always run
+    # the compiled prompt; this flag only affects the delegated leg. Set via
+    # PROMPT_FULL_REPLACE.
+    prompt_full_replace: bool = True
 
     # Auto-continue an autonomous turn cut at the autocompact boundary. The
     # bundled CLI ends the agentic loop when the NEXT turn would cross the

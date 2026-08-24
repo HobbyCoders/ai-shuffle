@@ -2148,8 +2148,9 @@ async def test_set_model_canonicalizes_on_the_anthropic_leg(monkeypatch, tmp_pat
 
 @pytest.mark.asyncio
 async def test_delegated_append_mode_bypasses_compiler(monkeypatch, tmp_path):
-    """Flag off (default): the delegated leg's system/append are NOT compiled —
-    the CLI gathers its own env and instruction files.
+    """Flag off (opt-out; default is full replace since the 2026-08 prompt
+    overhaul): the delegated leg's system/append are NOT compiled — the CLI
+    gathers its own env and instruction files.
 
     The one thing the app does add here is the agents index (the CLI cannot
     know about DB agents), so the assertion is "the app's text, then at most
@@ -2157,9 +2158,11 @@ async def test_delegated_append_mode_bypasses_compiler(monkeypatch, tmp_path):
     test_delegated_append_mode_advertises_agents.
     """
     import app.core.provider.harness_adapter as ha
+    from app.core.config import settings
     from fluid.tools.registry import ToolRegistry
 
     monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+    monkeypatch.setattr(settings, "prompt_full_replace", False)
 
     await ha.HarnessAdapter().connect(
         SessionOptions(
@@ -3940,7 +3943,7 @@ def test_native_mutation_tool_guidance_requires_write_or_edit_but_keeps_bash():
     assert "invoke Edit immediately" in edit
     assert "git, builds" in bash
     assert "Shell line" in bash
-    assert "Write/Edit" in bash
+    assert "Edit/Write" in bash
 
 
 def test_native_environment_declares_the_actual_windows_shell(tmp_path, monkeypatch):
@@ -4702,10 +4705,12 @@ def _delegated_agents_options(cwd, declared=None):
 
 @pytest.mark.asyncio
 async def test_delegated_append_mode_advertises_agents(monkeypatch, agent_workspace):
-    """Default append mode advertises native file and database agents."""
+    """Append mode (opt-out) advertises native file and database agents."""
     import app.core.provider.harness_adapter as ha
+    from app.core.config import settings
 
     monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+    monkeypatch.setattr(settings, "prompt_full_replace", False)
 
     await ha.HarnessAdapter().connect(
         _delegated_agents_options(

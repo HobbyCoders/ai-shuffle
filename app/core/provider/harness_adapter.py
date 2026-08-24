@@ -2028,6 +2028,19 @@ class HarnessAdapter(ProviderAdapter):
                 "[HarnessAdapter] registered fluid builtin tools for native leg%s",
                 " (Memory excluded: project memory dir)" if drop_memory_tool else "",
             )
+            # Specialize builtin descriptions to this session's permitted
+            # surface (fluid's cross-tool routing clauses collapse to the
+            # tools that actually exist — ruling T9 for descriptions).
+            try:
+                from fluid.tools.builtins import refine_builtin_descriptions
+
+                refine_builtin_descriptions(
+                    registry,
+                    allowed=_tool_allowlist(options),
+                    disallowed=list(options.disallowed_tools or ()),
+                )
+            except ImportError:
+                pass  # older vendored fluid without the refinement seam
             _amend_native_task_spec(registry, options)
 
         # The app's own in-proc SDK servers (builtins, app-config, ai-tools,

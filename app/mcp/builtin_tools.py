@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
@@ -218,11 +219,24 @@ async def _spawn_background(
 ) -> _BackgroundTask:
     task_id = str(uuid.uuid4())[:8]
     task = _BackgroundTask(task_id=task_id, command=command, cwd=cwd, session_id=session_id)
-    proc = await asyncio.create_subprocess_shell(
+    # Run through the SAME shell fluid's Bash resolves (Git Bash on Windows,
+    # sh/bash on POSIX) — create_subprocess_shell would use cmd.exe on
+    # Windows, breaking every POSIX-syntax command the model writes for the
+    # shell the environment block declares. stdin is closed so a command
+    # that prompts exits instead of inheriting the server's stdin.
+    from fluid.tools.shell import resolve_shell
+
+    spawn_kwargs: Dict[str, Any] = {}
+    if sys.platform != "win32":
+        spawn_kwargs["start_new_session"] = True  # own process group for stop
+    proc = await asyncio.create_subprocess_exec(
+        *resolve_shell().argv_prefix,
         command,
         cwd=cwd,
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        **spawn_kwargs,
     )
     task.process = proc
 

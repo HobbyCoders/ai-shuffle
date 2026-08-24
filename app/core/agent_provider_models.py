@@ -382,6 +382,10 @@ def parent_subagent_guidance(
     caller_profile_id: str | None, provider_id: str | None
 ) -> str:
     """Compact system-prompt guidance aligned with the dynamic Task schema."""
+    # The park doctrine is fluid's canonical fragment (spliced verbatim into
+    # Task's and Monitor's own descriptions) so the copies cannot drift.
+    from fluid.tools.fragments import END_TURN_ON_BACKGROUND
+
     return (
         "# Subagent delegation\n"
         "Configured agents are exposed to you as subagents through Task. "
@@ -391,6 +395,7 @@ def parent_subagent_guidance(
         "A subagent receives an isolated session, not this conversation, so give "
         "it a self-contained brief with relevant context and expected output. "
         "Delegate independent or context-heavy work; handle quick direct work "
-        "yourself. Background completion is push-based: continue useful work and "
-        "do not poll in a loop. Never invent a subagent ID, model, or provider."
+        "yourself. Background completion is push-based: continue useful work "
+        f"and do not poll in a loop. {END_TURN_ON_BACKGROUND} "
+        "Never invent a subagent ID, model, or provider."
     )
