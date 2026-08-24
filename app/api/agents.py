@@ -918,6 +918,9 @@ async def export_profile(
         include_partial_messages=config.get("include_partial_messages", True),
         app_config_tools=config.get("app_config_tools", False),
         env=config.get("env"),  # Environment variables are exported
+        # Setting sources (fluid scope filter) round-trip: an explicit list
+        # (including []) is portable intent, not a system-specific path.
+        setting_sources=config.get("setting_sources"),
         # Note: We intentionally exclude some data:
         # - cwd (working directory path - system-specific)
         # - add_dirs (additional directory paths - system-specific)
@@ -925,7 +928,7 @@ async def export_profile(
         # - extra_args (may contain sensitive data)
         # - enabled_plugins (plugin paths are system-specific)
         # SDK-era fields the fluid harness ignores (thinking_mode, preset
-        # prompts, setting_sources, max_buffer_size, …) are not exported.
+        # prompts, max_buffer_size, …) are not exported.
     )
 
     export_data = AgentExport(
@@ -1006,8 +1009,9 @@ async def import_profile(
 
     # Build config from agent data — fluid-honored fields only. Legacy SDK-era
     # fields in old export files (thinking_mode, max_buffer_size,
-    # setting_sources, enable_file_checkpointing, continue_conversation,
-    # fork_session) are accepted but ignored.
+    # enable_file_checkpointing, continue_conversation, fork_session) are
+    # accepted but ignored; setting_sources is honored again (fluid scope
+    # filter).
     config = {
         "include_partial_messages": agent_data.include_partial_messages if agent_data.include_partial_messages is not None else True,
     }
@@ -1027,6 +1031,14 @@ async def import_profile(
         config["effort"] = agent_data.effort
     if isinstance(agent_data.max_turns, int) and agent_data.max_turns > 0:
         config["max_turns"] = agent_data.max_turns
+    # Setting sources: an explicit list is authoritative, [] included
+    # ("filesystem-isolated"). Unknown names are filtered; a NON-empty legacy
+    # list that filters to nothing (old SDK vocab like "env"/"file") is dropped
+    # entirely rather than silently isolating the imported agent.
+    if isinstance(agent_data.setting_sources, list):
+        valid = [s for s in agent_data.setting_sources if s in ("user", "project", "local")]
+        if valid or not agent_data.setting_sources:
+            config["setting_sources"] = valid
 
     # System prompt — custom content only (ruling A12). Legacy preset-shaped
     # exports map their append text onto the custom content.

@@ -1520,7 +1520,9 @@ class TestExportProfileEndpoint:
                 # SDK-era fields are no longer part of the export wire shape
                 assert "system_prompt_type" not in body["agent"]
                 assert "thinking_mode" not in body["agent"]
-                assert "setting_sources" not in body["agent"]
+                # setting_sources IS exported again (fluid honors it); null
+                # when the profile never set one.
+                assert body["agent"]["setting_sources"] is None
 
     @pytest.mark.asyncio
     async def test_export_profile_not_found(self):
@@ -2042,6 +2044,8 @@ class TestEdgeCases:
                     effort="xhigh",
                     max_turns=20,
                     # Legacy SDK-era fields — tolerated on import, but ignored
+                    # (setting_sources with only old SDK vocab filters to
+                    # nothing and is dropped rather than isolating the agent)
                     thinking_mode="think_harder",
                     max_buffer_size=50000,
                     setting_sources=["env", "file"],

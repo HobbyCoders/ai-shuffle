@@ -89,6 +89,8 @@
 		add_dirs: string;
 		env_vars: { key: string; value: string }[];
 		computer_use_enabled: boolean;
+		/** Setting sources (fluid scope filter). null = all scopes (default). */
+		setting_sources: string[] | null;
 	}
 
 	interface Props {
@@ -200,6 +202,25 @@
 		allSubagents.filter((a) => a.id !== editingProfile?.id)
 	);
 	const invokeAll = $derived(profileForm.agent_invoke_mode !== 'custom');
+
+	// Setting sources (fluid scope filter). Stored as null when every scope is
+	// on (the default — the config key is omitted); an explicit list otherwise,
+	// including [] for a fully filesystem-isolated agent.
+	const ALL_SETTING_SOURCES = ['user', 'project', 'local'];
+	const SETTING_SOURCE_ROWS = [
+		{ id: 'user', label: 'User (global)', hint: 'The ~/.fluid tree: global instructions, skills, agents, commands, and installed plugins.' },
+		{ id: 'project', label: 'Project', hint: 'The project walk: AGENTS.md files plus .fluid / .agents trees from the git root down to the working directory.' },
+		{ id: 'local', label: 'Local', hint: 'Gitignored per-checkout overrides: .fluid/settings.local.json.' }
+	];
+	const settingSourcesSelected = $derived(profileForm.setting_sources ?? ALL_SETTING_SOURCES);
+
+	function toggleSettingSource(id: string) {
+		const next = settingSourcesSelected.includes(id)
+			? settingSourcesSelected.filter((s) => s !== id)
+			: [...settingSourcesSelected, id];
+		// All three on = the default; store null so the config key is omitted.
+		onFormChange('setting_sources', next.length === ALL_SETTING_SOURCES.length ? null : next);
+	}
 	const allInvocableSelected = $derived(
 		invocableAgents.length > 0 &&
 			invocableAgents.every((a) => profileForm.enabled_agents.includes(a.id))
@@ -540,6 +561,22 @@
 				<div class="lab"><h4>Additional directories</h4><p>Extra directories the agent may access, comma-separated.</p></div>
 				<div class="ctl"><input class="inp mono" value={profileForm.add_dirs} oninput={(e) => onFormChange('add_dirs', (e.target as HTMLInputElement).value)} placeholder="/home/user/notes, /home/user/docs" /></div>
 			</div>
+		</div>
+
+		<div class="set-group">
+			<div class="set-grouphead"><h3>Setting sources</h3><p>Which filesystem scopes load into the agent's context: instruction files, skills, agents, and plugins. All on by default; unchecking a scope removes what it contributes.</p></div>
+			{#each SETTING_SOURCE_ROWS as row}
+				<div class="set-row">
+					<div class="lab"><h4>{row.label}</h4><p>{row.hint}</p></div>
+					<div class="ctl">
+						<input
+							type="checkbox"
+							checked={settingSourcesSelected.includes(row.id)}
+							onchange={() => toggleSettingSource(row.id)}
+						/>
+					</div>
+				</div>
+			{/each}
 		</div>
 	{/if}
 </div>

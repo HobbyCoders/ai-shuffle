@@ -594,7 +594,9 @@ class TestGenerateProfileEndpoint:
         assert "thinking_mode" not in agent
         assert "system_prompt_preset" not in agent
         assert "system_prompt_type" not in agent
-        assert "setting_sources" not in agent
+        # setting_sources is a live field again (fluid honors it as its scope
+        # filter); the generator didn't set one, so it exports as null.
+        assert agent["setting_sources"] is None
 
     def test_generate_profile_with_model_param(self, authenticated_client):
         """Should accept optional model parameter."""

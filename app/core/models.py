@@ -905,7 +905,8 @@ class AgentExportData(BaseModel):
     models, max_turns, custom system-prompt content, tool allow/deny lists,
     enabled_agents, ai_tools, memory, include_partial_messages,
     app_config_tools, env. SDK-era fields (thinking_mode, preset prompts,
-    setting_sources, …) are no longer exported; legacy files are still
+    …) are no longer exported (setting_sources IS again — the fluid harness
+    honors it as its scope filter); legacy files are still
     importable via AgentImportData.
 
     ``model`` / ``permission_mode`` / ``effort`` are no longer part of an
@@ -935,6 +936,9 @@ class AgentExportData(BaseModel):
     app_config_tools: Optional[bool] = False
     # Environment variables (exported with profile)
     env: Optional[Dict[str, str]] = None
+    # Setting sources (fluid scope filter: user/project/local). None = default
+    # (all scopes); an explicit list — [] included — is portable intent.
+    setting_sources: Optional[List[str]] = None
 
 
 class AgentImportData(AgentExportData):
@@ -953,7 +957,6 @@ class AgentImportData(AgentExportData):
     max_buffer_size: Optional[int] = None
     continue_conversation: Optional[bool] = False
     fork_session: Optional[bool] = False
-    setting_sources: Optional[List[str]] = None
     enable_file_checkpointing: Optional[bool] = False
 
 

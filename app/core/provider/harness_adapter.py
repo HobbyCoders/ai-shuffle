@@ -109,7 +109,10 @@ HONORED:
 DEGRADED / NOT YET HONORED (documented gaps — mechanical follow-up):
   * ``thinking`` — fluid manages thinking via provider caps, not passed through.
   * ``hooks`` / ``include_hook_events`` — fluid has its own HookBus; app SDK hooks not wired.
-  * ``extra_args`` / ``setting_sources`` — SDK/CLI-specific, ignored.
+  * ``extra_args`` — SDK/CLI-specific, ignored. (``setting_sources`` is now
+    HONORED on native legs: it maps onto fluid's own scope filter — see
+    ``_fluid_setting_sources`` — gating instruction files, skills, agents, and
+    plugin discovery; None keeps every scope on, the historical behavior.)
   * ``task_budget`` / ``session_store`` / ``session_store_flush`` — SDK session-store
     concepts; fluid persistence is the Pg/Memory store chosen above.
   * ``enable_file_checkpointing`` / ``stderr`` / ``max_buffer_size`` / ``user`` — ignored.
@@ -636,6 +639,10 @@ class HarnessAdapter(ProviderAdapter):
                 ctx=native_ctx,
                 plan_mode=plan_mode,
                 session_id=fluid_session_id,
+                # Same scope filter the prompt compiled under, so fluid's
+                # native-agent discovery (the Task registry) sees the same
+                # sources the agents index advertised.
+                setting_sources=_fluid_setting_sources(options),
                 # Tool restriction, ENFORCED (ruling CE12): fluid filters the
                 # request schemas, the deferred/ToolSearch catalog AND dispatch,
                 # so a filtered tool is invisible, unloadable and uncallable.
@@ -766,6 +773,10 @@ class HarnessAdapter(ProviderAdapter):
             # Per-session fast mode (v81), stamped by query_options as
             # ``aih_fast`` (override for this turn, else the session row).
             fast=getattr(sdk_options, "aih_fast", None),
+            # Profile scope filter (user/project/local). Native legs map it
+            # onto fluid's setting_sources (see _fluid_setting_sources); the
+            # delegated leg already carries it to the CLI. None = every scope.
+            setting_sources=getattr(sdk_options, "setting_sources", None),
         )
         # The session's bound model provider (``sessions.provider_id``) rides on
         # the SDK options object as ``aih_provider_id`` (stamped by
@@ -1827,6 +1838,10 @@ class HarnessAdapter(ProviderAdapter):
                     # different files would only make the model pick wrong.
                     include_memory=not memory_dir,
                     tools=permitted,
+                    # Profile scope filter (user/project/local) — gates fluid's
+                    # instruction files, skills, agents, and plugin discovery.
+                    # None = every scope, the leg's historical behavior.
+                    setting_sources=_fluid_setting_sources(options),
                 )
             )
             permit = _tool_predicate(options)
@@ -2243,6 +2258,29 @@ def _normalize_mcp_config_for_fluid(name: str, config: Any) -> Optional[Dict[str
 
 
 _EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
+
+
+def _fluid_setting_sources(options: Any) -> Optional[tuple]:
+    """Profile ``setting_sources`` → fluid's scope filter (user/project/local).
+
+    ``None`` (unset) keeps fluid's default — every scope loads — which is this
+    leg's historical behavior. An explicit list is filtered down to the scope
+    names fluid knows; an explicit empty list runs the leg
+    filesystem-isolated (no instruction files, skills, agents, or plugins from
+    disk). Unknown names are dropped with a warning rather than forwarded —
+    fluid raises on them, and a typo must not take the session build down.
+    """
+    raw = getattr(options, "setting_sources", None)
+    if raw is None:
+        return None
+    valid = tuple(
+        s for s in (str(v).strip() for v in raw) if s in ("user", "project", "local")
+    )
+    if len(valid) != len(list(raw)):
+        logger.warning(
+            "[HarnessAdapter] dropping unknown setting_sources entries from %r", raw
+        )
+    return valid
 
 
 def _valid_effort(value: Any) -> Optional[str]:

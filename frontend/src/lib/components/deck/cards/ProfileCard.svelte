@@ -179,8 +179,9 @@
 	});
 
 	// Profile form state — fluid harness options only (ruling R3). SDK-era
-	// fields (thinking mode, setting sources, checkpointing, …) are gone: the
-	// fluid harness ignores them. effort and max_turns are harness-honored.
+	// fields (thinking mode, checkpointing, …) are gone: the fluid harness
+	// ignores them. effort, max_turns, and setting_sources are harness-honored
+	// (setting_sources maps onto fluid's user/project/local scope filter).
 	let profileForm = $state({
 		id: '',
 		name: '',
@@ -198,7 +199,9 @@
 		cwd: '',
 		add_dirs: '',
 		env_vars: [] as { key: string; value: string }[],
-		computer_use_enabled: false
+		computer_use_enabled: false,
+		// null = all scopes (default, key omitted); [] = filesystem-isolated.
+		setting_sources: null as string[] | null
 	});
 
 	// Tool selection mode (T2) — the runtime authority for what the saved list
@@ -267,7 +270,8 @@
 			cwd: '',
 			add_dirs: '',
 			env_vars: [],
-			computer_use_enabled: false
+			computer_use_enabled: false,
+			setting_sources: null
 		};
 		toolSelectionMode = 'all';
 		activeTab = 'general';
@@ -337,7 +341,10 @@
 			cwd: (config as any).cwd || '',
 			add_dirs: ((config as any).add_dirs || []).join(', '),
 			env_vars: Object.entries((config as any).env || {}).map(([key, value]) => ({ key, value: value as string })),
-			computer_use_enabled: !!(config as any).computer_use?.enabled
+			computer_use_enabled: !!(config as any).computer_use?.enabled,
+			setting_sources: Array.isArray((config as any).setting_sources)
+				? ((config as any).setting_sources as string[])
+				: null
 		};
 
 		viewMode = 'form';
@@ -439,6 +446,9 @@
 		config.provider_models = providerModels;
 		// Per-turn model-call cap (native legs).
 		if (profileForm.max_turns) config.max_turns = profileForm.max_turns;
+		// Setting sources (fluid scope filter). null = default (all scopes, key
+		// omitted); an explicit list — including [] — round-trips as-is.
+		if (profileForm.setting_sources !== null) config.setting_sources = profileForm.setting_sources;
 
 		// Tool access (T2): the mode IS the authority, so 'all' and 'none' write no
 		// list at all — the full-replace PUT clears whatever was there. 'allow' and
@@ -585,8 +595,9 @@
 		toolSelectionMode = resolveToolMode(agent as any);
 
 		// Legacy exports may carry a preset-shaped prompt — its append text
-		// becomes the configured prompt (ruling A12). SDK-era fields in the
-		// export (thinking_mode, setting_sources, …) are ignored.
+		// becomes the configured prompt (ruling A12). Remaining SDK-era fields
+		// in the export (thinking_mode, …) are ignored; setting_sources is
+		// honored again now that the fluid harness maps it.
 		const spContent =
 			agent.system_prompt_type === 'custom'
 				? agent.system_prompt_content || ''
@@ -624,7 +635,10 @@
 			cwd: '',
 			add_dirs: '',
 			env_vars: agent.env ? Object.entries(agent.env).map(([key, value]) => ({ key, value: value as string })) : [],
-			computer_use_enabled: false
+			computer_use_enabled: false,
+			setting_sources: Array.isArray((agent as any).setting_sources)
+				? ((agent as any).setting_sources as string[])
+				: null
 		};
 
 		viewMode = 'form';
