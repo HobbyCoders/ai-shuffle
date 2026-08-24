@@ -84,8 +84,9 @@ async def _fork_fluid_session(
     transcript is the original's history up to the chosen message — expressed
     in fluid's model: the new fluid session's head is set to the fork node and the
     ancestry prefix is copied verbatim (same node ids, same parents, same
-    messages), so the shared prefix stays byte-identical and prompt caching
-    survives the fork.
+    messages, same event-log prefix), so the shared prefix stays byte-identical
+    and prompt caching survives the fork. The event copy is what keeps
+    compaction promotions and code-mode inner calls in the forked context.
 
     ``message_index`` keeps its existing meaning: an index into the session's
     display entries, which for fluid is exactly the on-path node list (the node
@@ -127,9 +128,17 @@ async def _fork_fluid_session(
 
     # Copy the ancestry FIRST: if it fails there is no orphan session row to
     # clean up (the JSONL fork below has to delete the row it already created).
+    # working_dir lets a delegated parent mint a fresh CLI transcript from the
+    # copied path so the fork's next --resume is not an empty conversation.
+    from app.core.message_resolver import resolve_working_dir
+
+    working_dir = resolve_working_dir(original_session)
     try:
         new_sdk_session_id, node_count = await run_sync(
-            fork_fluid_session, sdk_session_id, fork_node_id
+            fork_fluid_session,
+            sdk_session_id,
+            fork_node_id,
+            working_dir=working_dir,
         )
     except Exception:
         logger.exception("Failed to fork fluid node tree for session %s", session_id)
@@ -351,12 +360,16 @@ async def fork_session(
 
         new_jsonl_path = project_dir / f"{new_sdk_session_id}.jsonl"
 
-        # Write entries up to and including fork point
+        # Write entries up to and including fork point. Stamp sessionId to the
+        # NEW sdk id — the CLI keys resume on the filename and cross-checks the
+        # field, so leaving the parent's id makes --resume reject the file.
         with open(new_jsonl_path, 'w', encoding='utf-8') as f:
             for i, entry in enumerate(original_entries):
                 if i > fork_entry_index:
                     break
-                f.write(json.dumps(entry) + '\n')
+                payload = dict(entry)
+                payload["sessionId"] = new_sdk_session_id
+                f.write(json.dumps(payload) + '\n')
 
         logger.debug(f"Created forked JSONL file: {new_jsonl_path} with {fork_entry_index + 1} entries")
 

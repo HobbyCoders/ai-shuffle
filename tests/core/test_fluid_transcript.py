@@ -293,6 +293,92 @@ def test_fork_accepts_an_explicit_new_id(mock_db):
     assert new_id == wanted
 
 
+def _insert_events(session_id, events):
+    from psycopg2.extras import Json
+
+    from app.db.base import get_cursor, get_db
+
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        for seq, event in enumerate(events, start=1):
+            payload = dict(event)
+            payload.setdefault("session_id", session_id)
+            payload.setdefault("seq", seq)
+            cursor.execute(
+                "INSERT INTO fluid_session_events (session_id, seq, event) "
+                "VALUES (%s, %s, %s)",
+                (session_id, seq, Json(payload)),
+            )
+
+
+def _load_events(session_id):
+    from app.core.provider.fluid_transcript import _as_dict, _event_rows
+
+    return [_as_dict(row["event"]) for row in _event_rows(session_id)]
+
+
+def _evt(cls, **fields):
+    event = {"_cls": cls, "node_id": None, "turn_id": "t1"}
+    event.update(fields)
+    return event
+
+
+def test_fork_copies_events_and_rewrites_them_onto_the_new_session(mock_db):
+    session_id = _seed()
+    _insert_events(session_id, [
+        _evt("TurnStarted", node_id="n1", model="x", provider="y"),
+        _evt("ContextCompaction", tier=2, reason="trigger",
+             trimmed=[], spans=[["n1", "n5", "digest"]], reclaimed_chars=12),
+        _evt("ToolUse", node_id=None, tool_use_id="c1", name="Grep",
+             input={"pattern": "x"}),
+        _evt("TurnComplete", node_id="n7", stop_reason="end", num_model_calls=1),
+    ])
+
+    new_id, _ = fork_fluid_session(session_id, "n7")
+    copied = _load_events(new_id)
+
+    assert [e["_cls"] for e in copied] == [
+        "TurnStarted", "ContextCompaction", "ToolUse", "TurnComplete",
+    ]
+    assert [e["seq"] for e in copied] == [1, 2, 3, 4]
+    assert {e["session_id"] for e in copied} == {new_id}
+    # Source events stay put — a fork is a copy, not a move.
+    assert len(_load_events(session_id)) == 4
+
+
+def test_fork_at_midpoint_drops_later_node_events(mock_db):
+    session_id = _seed()
+    _insert_events(session_id, [
+        _evt("TurnStarted", node_id="n1"),
+        _evt("ContextCompaction", tier=1, reason="trigger",
+             trimmed=[["n2", "t1"]], spans=[], reclaimed_chars=4),
+        _evt("TextDelta", node_id="n6", text="later"),
+        _evt("TurnComplete", node_id="n7"),
+    ])
+
+    new_id, _ = fork_fluid_session(session_id, "n5")
+    copied = _load_events(new_id)
+
+    assert [e["_cls"] for e in copied] == ["TurnStarted", "ContextCompaction"]
+    assert copied[1]["trimmed"] == [["n2", "t1"]]
+
+
+def test_fork_keeps_compaction_whose_nodes_sit_on_the_prefix(mock_db):
+    session_id = _seed()
+    _insert_events(session_id, [
+        _evt("ContextCompaction", tier=2, reason="trigger",
+             trimmed=[], spans=[["n1", "n5", "digest"]], reclaimed_chars=8),
+        _evt("ContextCompaction", tier=2, reason="trigger",
+             trimmed=[], spans=[["n6", "n7", "digest"]], reclaimed_chars=3),
+    ])
+
+    new_id, _ = fork_fluid_session(session_id, "n5")
+    copied = _load_events(new_id)
+
+    assert len(copied) == 1
+    assert copied[0]["spans"] == [["n1", "n5", "digest"]]
+
+
 # ─── live transcript ─────────────────────────────────────────────────────────
 
 def test_live_messages_render_through_the_shared_transform(mock_db):
@@ -659,3 +745,42 @@ def test_reseed_failure_leaves_the_old_handle_in_place(mock_db, tmp_path, monkey
     assert result.context_is_authoritative is False
     assert "disk full" in result.error
     assert fluid_transcript.get_cli_session_id(session_id) == "stale-cli-uuid"
+
+
+def test_reseed_force_writes_without_an_existing_handle(mock_db, tmp_path):
+    from app.core.provider.fluid_transcript import (
+        get_cli_session_id,
+        reseed_delegated_cli_session,
+    )
+
+    session_id = _seed()
+    result = reseed_delegated_cli_session(
+        session_id, "/workspace", tmp_path, force=True
+    )
+
+    assert result.status == "reseeded"
+    assert get_cli_session_id(session_id) == result.cli_session_id
+    assert result.entries_written > 0
+
+
+def test_fork_reseeds_cli_when_parent_was_delegated(mock_db, tmp_path):
+    from app.core.jsonl_parser import get_project_dir_name
+    from app.core.provider.fluid_transcript import get_cli_session_id
+
+    session_id = _seed()
+    _set_cli(session_id, "parent-cli-uuid")
+
+    new_id, _ = fork_fluid_session(
+        session_id, "n7", working_dir="/workspace", projects_dir=tmp_path
+    )
+
+    # Parent keeps its own handle; the fork minted a distinct CLI conversation
+    # from the copied path, so the next --resume is not empty and not shared.
+    assert get_cli_session_id(session_id) == "parent-cli-uuid"
+    fork_handle = get_cli_session_id(new_id)
+    assert fork_handle and fork_handle != "parent-cli-uuid"
+    path = tmp_path / get_project_dir_name("/workspace") / f"{fork_handle}.jsonl"
+    assert path.exists()
+    lines = _read_jsonl(path)
+    assert {line["sessionId"] for line in lines} == {fork_handle}
+    assert lines[0]["message"]["content"] == "first prompt"

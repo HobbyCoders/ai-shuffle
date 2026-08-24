@@ -1900,11 +1900,26 @@ class TestForkSession:
                         json={"message_index": 0}
                     )
 
+                    written = list(
+                        (temp_dir / ".claude" / "projects").rglob("*.jsonl")
+                    )
+
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "success"
         assert data["parent_session_id"] == "test-session-id"
         assert data["fork_point_message_index"] == 0
+        # CLI resume keys on the filename and cross-checks sessionId; leaving
+        # the parent's id would make --resume reject the copied transcript.
+        assert len(written) == 1
+        new_sdk = written[0].stem
+        copied = [
+            json.loads(line)
+            for line in written[0].read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        assert copied
+        assert {row.get("sessionId") for row in copied} == {new_sdk}
 
     def test_fork_session_not_found(self, client, mock_database):
         """Should return 404 for non-existent session."""

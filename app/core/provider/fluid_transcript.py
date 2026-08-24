@@ -865,11 +865,18 @@ def reseed_delegated_cli_session(
     sdk_session_id: str,
     working_dir: str,
     projects_dir: Optional[Path] = None,
+    *,
+    force: bool = False,
 ) -> ReseedResult:
     """Re-seed the delegated CLI from fluid's (already rewound) context.
 
     Call AFTER :func:`rewind_fluid_session` has moved the head — the transcript
     this materializes is whatever ``load_path`` returns now.
+
+    ``force=True`` writes even when this session has no stored CLI handle.
+    Fork uses that: the new fluid session is empty of a handle, but the parent
+    was delegated, so the fork must mint its own CLI conversation from the
+    copied path or the next turn starts with empty model context.
 
     Never raises: a failed re-seed is a degraded rewind (the store is still
     correct, only the CLI's own history is stale), and the caller reports that
@@ -887,7 +894,7 @@ def reseed_delegated_cli_session(
         )
         return ReseedResult(status="failed", error=str(exc))
 
-    if not previous:
+    if not previous and not force:
         # Native engine, or a delegated session whose CLI never spawned: there
         # is no CLI-side history, so nothing can diverge.
         return ReseedResult(status="skipped")
@@ -953,10 +960,69 @@ def reseed_delegated_cli_session(
 
 # ─── Fork ────────────────────────────────────────────────────────────────────
 
+def _compaction_node_ids(event: Dict[str, Any]) -> set:
+    """Node ids a ContextCompaction promotion names (trim pairs + span bounds)."""
+    refs: set = set()
+    for pair in event.get("trimmed") or []:
+        if isinstance(pair, (list, tuple)) and pair:
+            refs.add(pair[0])
+    for span in event.get("spans") or []:
+        if isinstance(span, (list, tuple)) and span:
+            refs.add(span[0])
+            if len(span) > 1:
+                refs.add(span[1])
+    return refs
+
+
+def _events_for_prefix(
+    events: Sequence[Dict[str, Any]],
+    prefix_ids: set,
+    *,
+    at_head: bool,
+) -> List[Dict[str, Any]]:
+    """Events the fork must carry so the next turn rebuilds the same view.
+
+    ContextCompaction promotions live only in the event log; without them the
+    fork re-sends the uncompacted tree and the model sees a different context.
+    Code-mode inner ToolUse/ToolResult pairs are also event-only.
+
+    A whole-session fork (at the current head) copies every event. A mid-session
+    fork keeps events that belong to the prefix path — plus ContextCompaction
+    whose named nodes all sit on that prefix — and drops ones tagged with a
+    later node.
+    """
+    if at_head:
+        return list(events)
+
+    kept: List[Dict[str, Any]] = []
+    include_untagged = True
+    for row in events:
+        event = _as_dict(row.get("event"))
+        cls = event.get("_cls")
+        nid = event.get("node_id")
+        if cls == "ContextCompaction":
+            refs = _compaction_node_ids(event)
+            if not refs or refs <= prefix_ids:
+                kept.append(row)
+            continue
+        if nid:
+            if nid in prefix_ids:
+                include_untagged = True
+                kept.append(row)
+            else:
+                include_untagged = False
+        elif include_untagged:
+            kept.append(row)
+    return kept
+
+
 def fork_fluid_session(
     source_sdk_session_id: str,
     fork_node_id: str,
     new_sdk_session_id: Optional[str] = None,
+    *,
+    working_dir: Optional[str] = None,
+    projects_dir: Optional[Path] = None,
 ) -> Tuple[str, int]:
     """Create a new fluid session whose transcript is the source's ancestry up
     to (and including) ``fork_node_id``. Returns ``(new_session_id, node_count)``.
@@ -971,9 +1037,14 @@ def fork_fluid_session(
     to the original's (which is what keeps provider prompt caching warm) and
     node handles stay comparable across the two sessions.
 
-    The durable event log (``fluid_session_events``) is deliberately NOT copied:
-    it is a replay bus for live subscribers keyed to the run that produced it,
-    not transcript state, and the fork starts its own run at seq 0.
+    The durable event log is copied too (rewritten onto the new session id,
+    seqs renumbered 1..N so the EventBus seed stays contiguous). Compaction
+    promotions and code-mode inner calls live only there; dropping them made
+    the fork's next prompt a different context from the parent's.
+
+    When ``working_dir`` is set and the source has a delegated CLI handle, the
+    copied path is also materialized as a fresh CLI transcript (ruling R5)
+    so the next ``--resume`` does not start empty.
 
     Raises ``ValueError`` when the fork point is not on the source's path.
     """
@@ -987,6 +1058,12 @@ def fork_fluid_session(
         )
     prefix = path[: index + 1]
     new_id = new_sdk_session_id or new_fluid_session_id()
+    prefix_ids = {node["node_id"] for node in prefix}
+    at_head = index == len(path) - 1
+    kept_events = _events_for_prefix(
+        _event_rows(source_sdk_session_id), prefix_ids, at_head=at_head
+    )
+    source_had_cli = bool(get_cli_session_id(source_sdk_session_id))
 
     from psycopg2.extras import Json
 
@@ -1016,6 +1093,31 @@ def fork_fluid_session(
                     Json(_as_dict(node.get("message"))),
                 ),
             )
+        for seq, row in enumerate(kept_events, start=1):
+            event = json.loads(json.dumps(_as_dict(row.get("event"))))
+            event["session_id"] = new_id
+            event["seq"] = seq
+            cursor.execute(
+                f"INSERT INTO fluid_session_events (session_id, seq, event) "
+                f"VALUES ({_ph}, {_ph}, {_ph}) "
+                f"ON CONFLICT (session_id, seq) DO NOTHING",
+                (new_id, seq, Json(event)),
+            )
+
+    # Best-effort: the node/event copy is the source of truth. A failed CLI
+    # re-seed leaves the fork driveable on the native path; the next delegated
+    # turn would just start a fresh CLI conversation (same degraded case as a
+    # failed rewind re-seed).
+    if working_dir and source_had_cli:
+        reseed = reseed_delegated_cli_session(
+            new_id, working_dir, projects_dir, force=True
+        )
+        if reseed.status == "failed":
+            logger.warning(
+                "fork CLI re-seed failed for %s (parent %s): %s",
+                new_id, source_sdk_session_id, reseed.error,
+            )
+
     return new_id, len(prefix)
 
 

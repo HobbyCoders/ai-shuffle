@@ -401,3 +401,19 @@ def test_event_fixture_matches_real_fluid_serialization():
         session_id="ses_code", turn_id="turn_1", tool_use_id="c1",
         name="Grep", output="app/main.py:12", is_error=False,
     )) == _tool_result("c1", "Grep", "app/main.py:12")
+
+
+def test_fork_at_head_preserves_inner_calls(mock_db):
+    # Inner Grep/Read cards live only in the event log. A fork that copied
+    # nodes and dropped events would render a bare run_python card.
+    from app.core.provider.fluid_transcript import fork_fluid_session
+
+    session_id = _seed_cell()
+    new_id, _ = fork_fluid_session(session_id, "n4")
+
+    parent = fluid_transcript_entries(session_id, include_inner_calls=True)
+    forked = fluid_transcript_entries(new_id, include_inner_calls=True)
+    assert [e["uuid"] for e in forked] == [e["uuid"] for e in parent]
+    assert [e["type"] for e in forked] == [e["type"] for e in parent]
+    assert _blocks(forked[2])[0]["name"] == "Grep"
+    assert _blocks(forked[4])[0]["name"] == "Read"
