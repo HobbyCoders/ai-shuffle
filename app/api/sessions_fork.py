@@ -26,6 +26,50 @@ logger = logging.getLogger(__name__)
 fork_router = APIRouter(tags=["Sessions"])
 
 
+def _fork_inherited_fields(original_session: dict) -> dict:
+    """The parent-session fields a fork must carry over.
+
+    A fork is a second driver for the SAME working context, so it inherits the
+    worktree binding (worktree_id / legacy columns / logical v2 branch) and the
+    run binding (model / effort / permission_mode / context_window / fast /
+    provider). Without this the fork row resolves its cwd to the project's BASE
+    checkout — sending a message in it then runs against the main checkout's
+    branch instead of the parent's worktree — and the composer shows registry
+    defaults instead of what the parent was running.
+    """
+    return {
+        "project_v2_id": original_session.get("project_v2_id"),
+        "provider_id": original_session.get("provider_id"),
+        "derive_provider_from_profile": False,
+        "model": original_session.get("model"),
+        "effort": original_session.get("effort"),
+        "permission_mode": original_session.get("permission_mode"),
+        "context_window": original_session.get("context_window"),
+        "fast": original_session.get("fast"),
+        "worktree_id": original_session.get("worktree_id"),
+        "worktree_branch": original_session.get("worktree_branch"),
+        "worktree_path": original_session.get("worktree_path"),
+    }
+
+
+def _restore_fork_branch(new_session_id: str, branch: str) -> None:
+    """Re-apply the fork's logical ``sessions.branch`` after create_session.
+
+    ``create_session`` has no ``branch`` parameter and stamps NULL; without
+    this a fork of a v2 branch session would resolve to the base checkout. Same
+    targeted write ``set_session_project``-style helpers use.
+    """
+    from app.db.base import get_cursor, get_db
+    from app.db.compat import ph
+
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"UPDATE sessions SET branch = {ph()} WHERE id = {ph()}",
+            (branch, new_session_id),
+        )
+
+
 async def _fork_fluid_session(
     *,
     request: Request,
@@ -104,7 +148,16 @@ async def _fork_fluid_session(
         parent_session_id=session_id,
         fork_point_message_index=fork_message_index,
         is_active=True,
+        **_fork_inherited_fields(original_session),
     )
+
+    # create_session cannot carry the logical v2 branch (no parameter) — a
+    # branch-bound parent must hand it to the fork or the fork resolves its cwd
+    # to the base checkout.
+    parent_branch = (original_session.get("branch") or "").strip()
+    if parent_branch:
+        await run_sync(_restore_fork_branch, new_session_id, parent_branch)
+
     await run_sync(
         database.update_session,
         session_id=new_session_id,
@@ -267,7 +320,13 @@ async def fork_session(
         parent_session_id=session_id,
         fork_point_message_index=fork_message_index,
         is_active=True,
+        **_fork_inherited_fields(original_session),
     )
+
+    # Same branch hand-off as the fluid path above.
+    parent_branch = (original_session.get("branch") or "").strip()
+    if parent_branch:
+        await run_sync(_restore_fork_branch, new_session_id, parent_branch)
 
     # Update with SDK session ID
     await run_sync(
