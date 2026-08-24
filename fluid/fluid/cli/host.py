@@ -337,7 +337,9 @@ class CliHost:
             return registry[name]
         from fluid.context.agents import discover_agents
 
-        for definition in discover_agents(ctx.cwd or self.config.cwd or "."):
+        for definition in discover_agents(
+            ctx.cwd or self.config.cwd or ".", include_plugins=True
+        ):
             if definition.name == name:
                 return definition
         return None
@@ -360,6 +362,8 @@ class CliHost:
             include_project_instructions=self.config.instruction_files.enabled,
             include_skills=False,
             include_agents=False,
+            include_plugins=False,
+            setting_sources=self.config.setting_sources,
         ))
 
         registry = ToolRegistry()

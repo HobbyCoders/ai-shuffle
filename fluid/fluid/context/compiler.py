@@ -90,8 +90,17 @@ class PromptInputs:
     include_memory: bool = True
     memory_file: str | os.PathLike[str] | None = None
     memory_char_limit: int = 3_000
-    # Retained as a no-op compatibility argument. Provider homes are import-only.
-    include_plugins: bool = False
+    # Enabled plugins (~/.fluid/plugins, gated by the settings stack's
+    # enabledPlugins map) contribute their skills and agents to the indexes,
+    # namespaced <plugin>:<name> and just as deferred — descriptions only.
+    include_plugins: bool = True
+    # Which filesystem scopes discovery may draw from — the Agent SDK's
+    # ``setting_sources`` vocabulary: any subset of ("user", "project",
+    # "local"). ``None`` means no restriction. "user" gates the ~/.fluid
+    # tree (global instructions/skills/agents and plugins), "project" the
+    # git-root→cwd walk. The ``include_*`` flags still apply on top — a
+    # source restriction only ever removes.
+    setting_sources: tuple[str, ...] | None = None
     # The session's tool surface, when the host restricts it (ruling T9).
     # ``None`` means "no filter — describe everything". When a set is supplied,
     # a section whose subject tool the session cannot call is omitted: the
@@ -140,14 +149,22 @@ def skills_index(
     cwd: str | os.PathLike[str],
     *,
     include_global: bool = True,
+    include_project: bool = True,
     include_plugins: bool = False,
+    plugins: list | None = None,
 ) -> str | None:
     """Progressive-disclosure skills listing (name + description only).
 
     Sorted by name: the index feeds the cached prompt prefix, so its order must
     not depend on filesystem walk order.
     """
-    skills = discover_skills(cwd, include_global=include_global)
+    skills = discover_skills(
+        cwd,
+        include_global=include_global,
+        include_project=include_project,
+        include_plugins=include_plugins,
+        plugins=plugins,
+    )
     if not skills:
         return None
     lines = "\n".join(
@@ -160,7 +177,9 @@ def agents_index(
     cwd: str | os.PathLike[str],
     *,
     include_global: bool = True,
+    include_project: bool = True,
     include_plugins: bool = False,
+    plugins: list | None = None,
 ) -> str | None:
     """Delegation catalog: the discovered agent types (name + description).
 
@@ -170,7 +189,13 @@ def agents_index(
     definitions themselves reach a host dispatcher through
     ``ctx.extra["agent_registry"]``, not through this text.
     """
-    agents = discover_agents(cwd, include_global=include_global)
+    agents = discover_agents(
+        cwd,
+        include_global=include_global,
+        include_project=include_project,
+        include_plugins=include_plugins,
+        plugins=plugins,
+    )
     if not agents:
         return None
     lines = "\n".join(
@@ -188,13 +213,31 @@ def compile_prompt(inputs: PromptInputs) -> CompiledPrompt:
     exact string :func:`compile_system_prompt` has always returned.
     """
     sections: list[PromptSection] = []
+    # Source gating (setting_sources): "user" turns the ~/.fluid tree and
+    # plugins on or off, "project" the git-root→cwd walk. None = no restriction.
+    sources = inputs.setting_sources
+    user_on = sources is None or "user" in sources
+    project_on = sources is None or "project" in sources
+    include_global = inputs.include_global_instructions and user_on
+    include_project = inputs.include_project_instructions and project_on
+
+    want_skills = inputs.include_skills and _tool_available(inputs.tools, "Skill")
+    want_agents = inputs.include_agents and _tool_available(inputs.tools, "Task")
+    plugins: list | None = None
+    if inputs.include_plugins and user_on and (want_skills or want_agents):
+        from fluid.context.plugins import discover_plugins
+
+        plugins = discover_plugins(
+            inputs.cwd, sources=sources if sources is not None else ("user", "project", "local")
+        )
+
     if inputs.base and inputs.base.strip():
         sections.append(PromptSection(kind="base", text=inputs.base.rstrip()))
-    if inputs.include_global_instructions or inputs.include_project_instructions:
+    if include_global or include_project:
         for file, block in build_instruction_blocks(
             inputs.cwd,
-            include_global=inputs.include_global_instructions,
-            include_project=inputs.include_project_instructions,
+            include_global=include_global,
+            include_project=include_project,
         ):
             if block.strip():
                 sections.append(
@@ -202,17 +245,23 @@ def compile_prompt(inputs: PromptInputs) -> CompiledPrompt:
                         kind="memory", text=block, path=file.path, scope=file.scope
                     )
                 )
-    if inputs.include_skills and _tool_available(inputs.tools, "Skill"):
+    if want_skills:
         index = skills_index(
             inputs.cwd,
-            include_global=inputs.include_global_instructions,
+            include_global=include_global,
+            include_project=project_on,
+            include_plugins=plugins is not None,
+            plugins=plugins,
         )
         if index:
             sections.append(PromptSection(kind="skills", text=index))
-    if inputs.include_agents and _tool_available(inputs.tools, "Task"):
+    if want_agents:
         index = agents_index(
             inputs.cwd,
-            include_global=inputs.include_global_instructions,
+            include_global=include_global,
+            include_project=project_on,
+            include_plugins=plugins is not None,
+            plugins=plugins,
         )
         if index:
             sections.append(PromptSection(kind="agents", text=index))

@@ -1,15 +1,17 @@
 """Fluid-native agent definition discovery.
 
 Definitions live in ``~/.fluid/agents/**/*.md`` globally and
-``<directory>/.agents/agents/**/*.md`` at every project scope from git root to
-cwd. The nearest project definition wins a name collision; every project
-definition wins over the global one. Files use the existing
-:class:`AgentDefinition` parser and precedence semantics.
+``<directory>/.fluid/agents/**/*.md`` (or the codex-native
+``.agents/agents`` tree) at every project scope from git root to cwd. The
+nearest project definition wins a name collision (``.fluid`` beats ``.agents``
+in the same directory); every project definition wins over the global one, and
+plugin agents — namespaced ``<plugin>:<name>`` — never shadow either. Files
+use the existing :class:`AgentDefinition` parser and precedence semantics.
 
 Unlike skills, definitions are loaded eagerly because a Task host needs the
-worker's complete system prompt when it dispatches. Claude and plugin agent
-files are never read by normal Fluid discovery; use the explicit Claude import
-API to copy definitions into these native locations.
+worker's complete system prompt when it dispatches. Provider homes
+(``~/.claude``) are never read; use the explicit settings import to copy
+definitions into these native locations.
 """
 
 from __future__ import annotations
@@ -132,6 +134,7 @@ def discover_agents(
     cwd: str | os.PathLike[str],
     *,
     include_global: bool = True,
+    include_project: bool = True,
     include_plugins: bool = False,
     plugins: Sequence[Any] | None = None,
 ) -> list[AgentDefinition]:
@@ -139,18 +142,35 @@ def discover_agents(
 
     A project definition beats a global one of the same name, and among project
     directories the one NEAREST the cwd wins — the walk runs outermost → cwd, so
-    a later (inner) directory overwrites an outer one's entry. ``include_plugins``
-    and ``plugins`` are accepted for API compatibility but intentionally ignored.
+    a later (inner) directory overwrites an outer one's entry. In one directory
+    ``.fluid/agents`` beats ``.agents/agents``. ``include_plugins`` appends
+    enabled plugins' agents (namespaced ``<plugin>:<name>``, so they never
+    shadow a native definition); ``plugins`` reuses an already-discovered list.
     """
     by_name: dict[str, AgentDefinition] = {}
-    for directory in _walk_up_dirs(Path(cwd)):
-        # Nearest-wins: the walk is outermost → cwd, so the inner directory's
-        # entry replaces the outer one's under the same key.
-        by_name.update(_agents_in(directory / ".agents" / "agents", "project"))
+    if include_project:
+        for directory in _walk_up_dirs(Path(cwd)):
+            # Nearest-wins: the walk is outermost → cwd, so the inner
+            # directory's entry replaces the outer one's under the same key —
+            # and ``.fluid`` is applied after ``.agents`` so it wins in-place.
+            by_name.update(_agents_in(directory / ".agents" / "agents", "project"))
+            by_name.update(_agents_in(directory / ".fluid" / "agents", "project"))
     if include_global:
         for name, definition in _agents_in(
             Path.home() / ".fluid" / "agents", "global"
         ).items():
             by_name.setdefault(name, definition)
+    if include_plugins:
+        if plugins is None:
+            from fluid.context.plugins import discover_plugins
+
+            plugins = discover_plugins(cwd)
+        for plugin in plugins:
+            for stub in getattr(plugin, "agents", ()):
+                definition = load_agent_definition(
+                    stub.path, scope="plugin", name=stub.name
+                )
+                if definition is not None:
+                    by_name.setdefault(definition.name, definition)
 
     return sorted(by_name.values(), key=lambda d: d.name)

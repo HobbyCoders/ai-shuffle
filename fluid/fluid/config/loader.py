@@ -70,7 +70,14 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
         "skills": True,
         "commands": True,
         "nested": True,
+        "plugins": True,
     },
+    # Which filesystem scopes feed context/settings discovery (instructions,
+    # skills, agents, commands, plugins, settings.json, mcp.json, hooks.json).
+    # Agent SDK vocabulary: any subset of ["user", "project", "local"]; an
+    # empty list runs filesystem-isolated. config.toml layers are NOT gated —
+    # they are harness configuration and where this key itself can live.
+    "setting_sources": ["user", "project", "local"],
     # Session tool restriction (ruling CE12). ``allowed = None`` → every
     # registered tool; a list makes the surface exactly that set, and
     # ``disallowed`` subtracts from it. Names or fnmatch patterns.
@@ -308,6 +315,11 @@ def env_overrides(env: dict[str, str] | None = None) -> dict[str, Any]:
         )
     if "FLUID_SKILLS_DIR" in env:
         out["skills_dir"] = env["FLUID_SKILLS_DIR"]
+    if "FLUID_SETTING_SOURCES" in env:
+        # Comma list of user/project/local; an empty value means "none".
+        out["setting_sources"] = [
+            p.strip() for p in env["FLUID_SETTING_SOURCES"].split(",") if p.strip()
+        ]
     if "FLUID_CONTINUAL" in env:
         out["continual"] = _coerce_bool(env["FLUID_CONTINUAL"])
     if "FLUID_CONTINUAL_MODEL" in env:
@@ -363,29 +375,47 @@ def load_config(
     cwd_path = Path(cwd) if cwd is not None else Path.cwd()
     merged: dict[str, Any] = deep_merge(BUILTIN_DEFAULTS, {"cwd": str(cwd_path)})
 
-    if include_system and SYSTEM_CONFIG.is_file():
-        merged = deep_merge(merged, _load_toml(SYSTEM_CONFIG))
-    if include_user:
-        user_mcp_path = _user_mcp_path()
-        if user_mcp_path.is_file():
-            merged = deep_merge(merged, _load_mcp_json(user_mcp_path))
-        user_hooks_path = _user_hooks_path()
-        if user_hooks_path.is_file():
-            merged = deep_merge(merged, _load_hooks_json(user_hooks_path))
-        user_path = _user_config_path()
-        if user_path.is_file():
-            merged = deep_merge(merged, _load_toml(user_path))
-    project_mcp_path = _project_mcp_path(cwd_path)
-    if project_mcp_path.is_file():
-        merged = deep_merge(merged, _load_mcp_json(project_mcp_path))
-    project_hooks_path = _project_hooks_path(cwd_path)
-    if project_hooks_path.is_file():
-        merged = deep_merge(merged, _load_hooks_json(project_hooks_path))
+    # Parse the TOML layers up front: they are always applied (harness config
+    # is never source-gated — it is where ``setting_sources`` itself can live),
+    # and together with env + overrides they resolve which sources gate the
+    # mcp.json / hooks.json context layers below.
+    system_toml = (
+        _load_toml(SYSTEM_CONFIG) if include_system and SYSTEM_CONFIG.is_file() else {}
+    )
+    user_path = _user_config_path()
+    user_toml = _load_toml(user_path) if include_user and user_path.is_file() else {}
     project_path = _project_config_path(cwd_path)
-    if project_path is not None:
-        merged = deep_merge(merged, _load_toml(project_path))
+    project_toml = _load_toml(project_path) if project_path is not None else {}
+    env_layer = env_overrides(env)
 
-    merged = deep_merge(merged, env_overrides(env))
+    from fluid.config.model import _setting_sources_from
+
+    raw_sources: Any = None
+    for layer in (system_toml, user_toml, project_toml, env_layer, overrides or {}):
+        if "setting_sources" in layer:
+            raw_sources = layer["setting_sources"]
+    sources = set(_setting_sources_from(raw_sources))
+
+    merged = deep_merge(merged, system_toml)
+    if include_user:
+        if "user" in sources:
+            user_mcp_path = _user_mcp_path()
+            if user_mcp_path.is_file():
+                merged = deep_merge(merged, _load_mcp_json(user_mcp_path))
+            user_hooks_path = _user_hooks_path()
+            if user_hooks_path.is_file():
+                merged = deep_merge(merged, _load_hooks_json(user_hooks_path))
+        merged = deep_merge(merged, user_toml)
+    if "project" in sources:
+        project_mcp_path = _project_mcp_path(cwd_path)
+        if project_mcp_path.is_file():
+            merged = deep_merge(merged, _load_mcp_json(project_mcp_path))
+        project_hooks_path = _project_hooks_path(cwd_path)
+        if project_hooks_path.is_file():
+            merged = deep_merge(merged, _load_hooks_json(project_hooks_path))
+    merged = deep_merge(merged, project_toml)
+
+    merged = deep_merge(merged, env_layer)
     if overrides:
         merged = deep_merge(merged, overrides)
 
@@ -626,6 +656,21 @@ def build_engine(
 
             journal = ToolJournal(skills, synthesizer)
 
+    # Plugin MCP servers join the lazy-connect set; a config-declared server of
+    # the same name always wins. Gated like every other plugin component: the
+    # "user" source must be enabled and plugin discovery on.
+    mcp_servers = dict(config.mcp)
+    if "user" in config.setting_sources and config.instruction_files.discover_plugins:
+        from fluid.context.plugins import discover_plugins, plugin_mcp_servers
+
+        try:
+            for name, server in plugin_mcp_servers(
+                discover_plugins(config.cwd, sources=config.setting_sources)
+            ).items():
+                mcp_servers.setdefault(name, server)
+        except Exception:  # noqa: BLE001 — CE11: a broken plugin never blocks the build
+            pass
+
     from fluid.context.compaction import CompactionConfig
     from fluid.context.trim import TrimConfig
 
@@ -667,8 +712,9 @@ def build_engine(
         plan_mode=plan_mode,
         codemode=codemode,
         journal=journal,
-        mcp_servers=config.mcp,
+        mcp_servers=mcp_servers,
         allowed_tools=allowed_tools,
         disallowed_tools=disallowed_tools,
         compaction=compaction,
+        setting_sources=config.setting_sources,
     )

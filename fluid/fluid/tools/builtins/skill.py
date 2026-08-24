@@ -65,7 +65,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     name = str(input.get("name", "")).strip()
     if not name:
         return ToolOutcome(text="missing skill name", is_error=True)
-    skills = discover_skills(ctx.cwd)
+    skills = discover_skills(ctx.cwd, include_plugins=True)
     match = next((s for s in skills if s.name == name), None)
     if match is None:
         known = ", ".join(sorted(s.name for s in skills)) or "(none discovered)"

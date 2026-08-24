@@ -1,20 +1,21 @@
-"""Claude Code plugin loading — skills, commands, agents, MCP servers.
+"""Fluid plugin loading — skills, commands, agents, MCP servers.
 
-Ruling CE5. A plugin the user already installed through Claude Code
-(``/plugin install``) is picked up by fluid straight off disk: the enabled set
-comes from the merged ``enabledPlugins`` map (CE4's settings reader), the
-plugin's root is resolved from Claude Code's own install layout, and its
-components are surfaced through the discovery functions fluid already has.
+Ruling CE5. Plugins live in fluid's own home (``~/.fluid/plugins``) using the
+Claude Code plugin package format, so an installed Claude plugin can be copied
+in wholesale by the settings importer and just works. The enabled set comes
+from the merged ``enabledPlugins`` map in the fluid settings stack
+(:mod:`fluid.context.settings_stack`); provider homes (``~/.claude``) are never
+read at runtime.
 
 On-disk layout, in resolution order:
 
-  1. ``~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`` — the
+  1. ``~/.fluid/plugins/cache/<marketplace>/<plugin>/<version>/`` — the
      installed copy; the highest version wins (numeric-aware, so ``1.10.0``
      beats ``1.2.0``; non-numeric directory names like ``unknown`` sort below
      every numeric one and are compared lexicographically among themselves).
-  2. ``~/.claude/plugins/marketplaces/<marketplace>/<plugin>/`` — a marketplace
+  2. ``~/.fluid/plugins/marketplaces/<marketplace>/<plugin>/`` — a marketplace
      git clone with the plugin in a subdirectory.
-  3. ``~/.claude/plugins/marketplaces/<marketplace>/`` — the clone root itself,
+  3. ``~/.fluid/plugins/marketplaces/<marketplace>/`` — the clone root itself,
      when the marketplace *is* the plugin (its manifest names it).
 
 Manifest: ``.claude-plugin/plugin.json``, else ``plugin.json`` at the root. A
@@ -50,9 +51,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from fluid.context.claude_settings import (
+from fluid.context.settings_stack import (
+    SETTING_SOURCES,
     enabled_plugins,
-    load_claude_settings,
+    load_settings_stack,
     mcp_toggles,
 )
 from fluid.context.instructions import Command, Skill, parse_frontmatter
@@ -116,8 +118,8 @@ class Plugin:
 
 
 def plugins_home() -> Path:
-    """``~/.claude/plugins`` — Claude Code's install root."""
-    return Path.home() / ".claude" / "plugins"
+    """``~/.fluid/plugins`` — fluid's plugin install root (Claude package layout)."""
+    return Path.home() / ".fluid" / "plugins"
 
 
 def split_plugin_ref(ref: str) -> tuple[str, str]:
@@ -449,7 +451,7 @@ def load_plugin(
     name: str,
     marketplace: str,
     *,
-    cwd: Path | str = ".",
+    cwd: Path | str | os.PathLike[str] = ".",
     disabled_mcp: set[str] | None = None,
 ) -> Plugin | None:
     """Resolve and read one plugin. ``None`` when it is not installed."""
@@ -483,18 +485,23 @@ def load_plugin(
 
 
 def discover_plugins(
-    cwd: str | os.PathLike[str], *, settings: dict[str, Any] | None = None
+    cwd: str | os.PathLike[str],
+    *,
+    settings: dict[str, Any] | None = None,
+    sources: tuple[str, ...] | list[str] = SETTING_SOURCES,
 ) -> list[Plugin]:
-    """Every enabled, installed Claude Code plugin visible from ``cwd``.
+    """Every enabled, installed plugin visible from ``cwd``.
 
-    ``settings`` defaults to the merged Claude settings stack for ``cwd``; pass
-    an already-loaded one to avoid re-reading it. Results are sorted by
-    ``name@marketplace`` so the skills/commands indexes they feed stay
-    byte-stable across runs (CE7).
+    ``settings`` defaults to the merged fluid settings stack for ``cwd``
+    restricted to ``sources``; pass an already-loaded one to avoid re-reading
+    it. Results are sorted by ``name@marketplace`` so the skills/commands
+    indexes they feed stay byte-stable across runs (CE7).
 
     Never raises: one unreadable plugin is skipped, the rest still load (CE11).
     """
-    resolved_settings = load_claude_settings(cwd) if settings is None else settings
+    resolved_settings = (
+        load_settings_stack(cwd, sources=tuple(sources)) if settings is None else settings
+    )
     enabled = [ref for ref, on in enabled_plugins(resolved_settings).items() if on]
     if not enabled:
         return []

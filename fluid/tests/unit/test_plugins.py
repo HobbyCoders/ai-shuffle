@@ -1,8 +1,8 @@
-"""CE5 — Claude Code plugin loading: resolution, components, MCP servers.
+"""CE5 — fluid plugin loading (Claude package layout under ~/.fluid/plugins): resolution, components, MCP servers.
 
 HOME (and USERPROFILE, which is what ``Path.expanduser`` reads on Windows) is
-redirected to a tmp dir so the developer's real ~/.claude never leaks into an
-assertion, same convention as test_claude_settings.py.
+redirected to a tmp dir so the developer's real ~/.fluid never leaks into an
+assertion, same convention as test_settings_stack.py.
 """
 
 import json
@@ -73,12 +73,12 @@ def _setup(tmp_path, monkeypatch, *, enabled=True, settings=None, versions=("1.2
     home = tmp_path / "home"
     _set_home(monkeypatch, home)
     for version in versions:
-        _plugin_tree(home / ".claude" / "plugins" / "cache" / "testmp" / "myplug" / version, **kw)
+        _plugin_tree(home / ".fluid" / "plugins" / "cache" / "testmp" / "myplug" / version, **kw)
 
     data = {"enabledPlugins": {"myplug@testmp": bool(enabled)}}
     if settings:
         data.update(settings)
-    _write(home / ".claude" / "settings.json", json.dumps(data))
+    _write(home / ".fluid" / "settings.json", json.dumps(data))
 
     proj = tmp_path / "proj"
     (proj / ".git").mkdir(parents=True, exist_ok=True)
@@ -128,7 +128,7 @@ def test_project_scope_can_enable_a_plugin(tmp_path, monkeypatch) -> None:
     """enabledPlugins merges across scopes like every other settings key."""
     proj = _setup(tmp_path, monkeypatch, enabled=False)
     _write(
-        proj / ".claude" / "settings.local.json",
+        proj / ".fluid" / "settings.local.json",
         json.dumps({"enabledPlugins": {"myplug@testmp": True}}),
     )
     assert [p.name for p in discover_plugins(proj)] == ["myplug"]
@@ -151,7 +151,7 @@ def test_non_numeric_version_dir_is_the_fallback(tmp_path, monkeypatch) -> None:
     assert version == "unknown"
 
     _plugin_tree(
-        Path.home() / ".claude" / "plugins" / "cache" / "testmp" / "myplug" / "0.1.0"
+        Path.home() / ".fluid" / "plugins" / "cache" / "testmp" / "myplug" / "0.1.0"
     )
     root, version = resolve_plugin_root("myplug", "testmp")
     assert version == "0.1.0"
@@ -160,16 +160,16 @@ def test_non_numeric_version_dir_is_the_fallback(tmp_path, monkeypatch) -> None:
 def test_marketplace_clone_subdir_fallback(tmp_path, monkeypatch) -> None:
     home = tmp_path / "home"
     _set_home(monkeypatch, home)
-    _plugin_tree(home / ".claude" / "plugins" / "marketplaces" / "testmp" / "myplug")
+    _plugin_tree(home / ".fluid" / "plugins" / "marketplaces" / "testmp" / "myplug")
     _write(
-        home / ".claude" / "settings.json",
+        home / ".fluid" / "settings.json",
         json.dumps({"enabledPlugins": {"myplug@testmp": True}}),
     )
     proj = tmp_path / "proj"
     (proj / ".git").mkdir(parents=True)
 
     plugin = discover_plugins(proj)[0]
-    assert plugin.root == home / ".claude" / "plugins" / "marketplaces" / "testmp" / "myplug"
+    assert plugin.root == home / ".fluid" / "plugins" / "marketplaces" / "testmp" / "myplug"
     assert plugin.version == "1.2.0"  # from the manifest, no version dir in this layout
     assert [s.name for s in plugin.skills] == ["myplug:hello"]
 
@@ -177,9 +177,9 @@ def test_marketplace_clone_subdir_fallback(tmp_path, monkeypatch) -> None:
 def test_marketplace_root_is_the_plugin(tmp_path, monkeypatch) -> None:
     home = tmp_path / "home"
     _set_home(monkeypatch, home)
-    _plugin_tree(home / ".claude" / "plugins" / "marketplaces" / "myplug")
+    _plugin_tree(home / ".fluid" / "plugins" / "marketplaces" / "myplug")
     _write(
-        home / ".claude" / "settings.json",
+        home / ".fluid" / "settings.json",
         json.dumps({"enabledPlugins": {"myplug@myplug": True}}),
     )
     proj = tmp_path / "proj"
@@ -190,14 +190,14 @@ def test_marketplace_root_is_the_plugin(tmp_path, monkeypatch) -> None:
 def test_marketplace_root_with_a_different_name_is_not_adopted(tmp_path, monkeypatch) -> None:
     home = tmp_path / "home"
     _set_home(monkeypatch, home)
-    _plugin_tree(home / ".claude" / "plugins" / "marketplaces" / "testmp")
+    _plugin_tree(home / ".fluid" / "plugins" / "marketplaces" / "testmp")
     assert resolve_plugin_root("other", "testmp") is None
 
 
 def test_uninstalled_plugin_is_skipped_with_a_warning(tmp_path, monkeypatch, caplog) -> None:
     proj = _setup(tmp_path, monkeypatch, enabled=False)
     _write(
-        proj / ".claude" / "settings.json",
+        proj / ".fluid" / "settings.json",
         json.dumps({"enabledPlugins": {"ghost@testmp": True}}),
     )
     with caplog.at_level(logging.WARNING):
@@ -233,7 +233,7 @@ def test_malformed_manifest_soft_fails_to_directory_conventions(
 def test_missing_manifest_still_loads(tmp_path, monkeypatch) -> None:
     proj = _setup(tmp_path, monkeypatch)
     (
-        Path.home() / ".claude" / "plugins" / "cache" / "testmp" / "myplug" / "1.2.0"
+        Path.home() / ".fluid" / "plugins" / "cache" / "testmp" / "myplug" / "1.2.0"
         / ".claude-plugin" / "plugin.json"
     ).unlink()
     plugin = discover_plugins(proj)[0]
@@ -253,7 +253,7 @@ def test_manifest_path_overrides(tmp_path, monkeypatch) -> None:
             "agents": ["./crew/lead.md"],
         },
     )
-    root = Path.home() / ".claude" / "plugins" / "cache" / "testmp" / "myplug" / "1.2.0"
+    root = Path.home() / ".fluid" / "plugins" / "cache" / "testmp" / "myplug" / "1.2.0"
     _write(
         root / "extra-skills" / "bonus" / "SKILL.md",
         "---\nname: bonus\ndescription: extra\n---\nBODY",
@@ -269,7 +269,7 @@ def test_manifest_path_overrides(tmp_path, monkeypatch) -> None:
 
 def test_agents_scan_is_recursive(tmp_path, monkeypatch) -> None:
     proj = _setup(tmp_path, monkeypatch)
-    root = Path.home() / ".claude" / "plugins" / "cache" / "testmp" / "myplug" / "1.2.0"
+    root = Path.home() / ".fluid" / "plugins" / "cache" / "testmp" / "myplug" / "1.2.0"
     _write(root / "agents" / "nested" / "deep.md", "---\ndescription: deep\n---\nP")
     names = [a.name for a in discover_plugins(proj)[0].agents]
     assert sorted(names) == ["myplug:deep", "myplug:reviewer"]  # name falls back to the stem
@@ -330,7 +330,7 @@ def test_manifest_mcp_servers_path(tmp_path, monkeypatch) -> None:
     proj = _setup(
         tmp_path, monkeypatch, manifest={"name": "myplug", "mcpServers": "./config/servers.json"}
     )
-    root = Path.home() / ".claude" / "plugins" / "cache" / "testmp" / "myplug" / "1.2.0"
+    root = Path.home() / ".fluid" / "plugins" / "cache" / "testmp" / "myplug" / "1.2.0"
     _write(
         root / "config" / "servers.json",
         json.dumps({"mcpServers": {"fromfile": {"command": "srv"}}}),
@@ -340,7 +340,7 @@ def test_manifest_mcp_servers_path(tmp_path, monkeypatch) -> None:
 
 def test_malformed_mcp_json_soft_fails(tmp_path, monkeypatch, caplog) -> None:
     proj = _setup(tmp_path, monkeypatch)
-    root = Path.home() / ".claude" / "plugins" / "cache" / "testmp" / "myplug" / "1.2.0"
+    root = Path.home() / ".fluid" / "plugins" / "cache" / "testmp" / "myplug" / "1.2.0"
     (root / ".mcp.json").write_text("{oops", encoding="utf-8")
     with caplog.at_level(logging.WARNING):
         plugin = discover_plugins(proj)[0]
@@ -389,20 +389,27 @@ def test_plugin_skills_and_commands_join_discovery(tmp_path, monkeypatch) -> Non
 
     assert [skill.name for skill in discover_skills(proj)] == ["hello"]
     assert [command.name for command in discover_commands(proj)] == ["deploy"]
-    # The deprecated compatibility argument cannot add provider plugin content.
-    assert [skill.name for skill in discover_skills(proj, include_plugins=True)] == ["hello"]
-    assert [command.name for command in discover_commands(proj, include_plugins=True)] == ["deploy"]
+    # Opting in appends the enabled plugin's components, namespaced, after the
+    # native ones — a plugin can never shadow a project skill or command.
+    assert [skill.name for skill in discover_skills(proj, include_plugins=True)] == [
+        "hello",
+        "myplug:hello",
+    ]
+    assert [command.name for command in discover_commands(proj, include_plugins=True)] == [
+        "deploy",
+        "myplug:deploy",
+    ]
 
 
-async def test_skill_builtin_does_not_load_a_provider_plugin_skill(tmp_path, monkeypatch) -> None:
-    """Provider plugin content is inert until explicitly imported."""
+async def test_skill_builtin_loads_an_enabled_plugin_skill(tmp_path, monkeypatch) -> None:
+    """Deferred disclosure: the plugin skill's body loads on demand by name."""
     from fluid.tools.builtins.skill import handler
     from fluid.tools.registry import ToolCtx
 
     proj = _setup(tmp_path, monkeypatch)
     outcome = await handler({"name": "myplug:hello"}, ToolCtx(cwd=str(proj)))
-    assert outcome.is_error
-    assert "unknown skill" in outcome.text
+    assert not outcome.is_error
+    assert "SKILL BODY NEVER LOADED" in outcome.text
 
 
 # ─── NativeLoop seam ─────────────────────────────────────────────────────────
@@ -446,7 +453,7 @@ def test_host_supplied_server_wins_a_name_collision(tmp_path, monkeypatch, caplo
     with caplog.at_level(logging.WARNING):
         loop = _loop(proj, mcp_servers={"myplug-local": host})
     assert loop._mcp_servers == {"myplug-local": host}
-    assert not caplog.records
+    assert not [r for r in caplog.records if "duplicate" in r.getMessage()]
 
 
 def test_native_loop_plugins_toggle_off(tmp_path, monkeypatch) -> None:
@@ -485,7 +492,7 @@ def test_legacy_settings_keyword_cannot_enable_provider_plugins(tmp_path, monkey
     assert loop.claude_plugins == []
 
 
-def test_build_engine_ignores_removed_plugin_settings(tmp_path, monkeypatch) -> None:
+def test_build_engine_merges_plugin_mcp_servers(tmp_path, monkeypatch) -> None:
     from fluid.config.loader import BUILTIN_DEFAULTS, build_engine, deep_merge
     from fluid.config.model import HarnessConfig
     from fluid.providers.base import ProviderCaps
@@ -504,18 +511,27 @@ def test_build_engine_ignores_removed_plugin_settings(tmp_path, monkeypatch) -> 
     native = HarnessConfig.from_dict(deep_merge(BUILTIN_DEFAULTS, {"cwd": str(proj)}))
     engine = build_engine(native, MemoryStore(), provider=_Provider())
     assert engine.claude_plugins == []
-    assert engine._mcp_servers == {}
+    # Enabled plugin servers join the lazy-connect set (sse is skipped).
+    assert set(engine._mcp_servers) == {"myplug-local", "myplug-http"}
 
-    stale = HarnessConfig.from_dict(
-        deep_merge(BUILTIN_DEFAULTS, {"cwd": str(proj), "claude_ecosystem": {"plugins": True}})
-    )
-    engine = build_engine(stale, MemoryStore(), provider=_Provider())
-    assert engine.claude_plugins == []
+    # A config-declared server of the same name always wins the collision, and
+    # dropping the "user" source turns plugin discovery off entirely.
+    host = {"transport": "stdio", "command": "host-binary"}
+    pinned = HarnessConfig.from_dict(deep_merge(
+        BUILTIN_DEFAULTS, {"cwd": str(proj), "mcp": {"myplug-local": host}}
+    ))
+    engine = build_engine(pinned, MemoryStore(), provider=_Provider())
+    assert engine._mcp_servers["myplug-local"] == host
+
+    isolated = HarnessConfig.from_dict(deep_merge(
+        BUILTIN_DEFAULTS, {"cwd": str(proj), "setting_sources": ["project", "local"]}
+    ))
+    engine = build_engine(isolated, MemoryStore(), provider=_Provider())
     assert engine._mcp_servers == {}
 
 
 @pytest.mark.parametrize("bad", ["", "@mp"])
 def test_blank_plugin_refs_are_ignored(tmp_path, monkeypatch, bad) -> None:
     proj = _setup(tmp_path, monkeypatch, enabled=False)
-    _write(proj / ".claude" / "settings.json", json.dumps({"enabledPlugins": {bad: True}}))
+    _write(proj / ".fluid" / "settings.json", json.dumps({"enabledPlugins": {bad: True}}))
     assert discover_plugins(proj) == []

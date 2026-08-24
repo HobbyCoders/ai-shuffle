@@ -10,13 +10,15 @@ Global (per user):
   ~/.fluid/AGENTS.md
 
 Project (walk up from cwd to the git root, else the filesystem root):
-  AGENTS.md, AGENT.md, AGENTS.override.md, .agents/AGENTS.md
+  AGENTS.md, AGENT.md, AGENTS.override.md, .fluid/AGENTS.md, .agents/AGENTS.md
   AGENTS.override.md replaces root-level AGENTS.md in the same directory.
 
 Skills use ``~/.fluid/skills/<name>/SKILL.md`` globally and
-``<directory>/.agents/skills/<name>/SKILL.md`` at each project scope. They are
-separate from code-mode's Python ``SkillStore`` files, even though both use the
-same default global root.
+``<directory>/.fluid/skills/<name>/SKILL.md`` (or the codex-native
+``.agents/skills`` tree) at each project scope. They are separate from
+code-mode's Python ``SkillStore`` files, even though both use the same default
+global root. Plugin skills/commands join discovery namespaced
+``<plugin>:<name>`` when the caller opts in (``include_plugins``).
 
 Every instruction block carries a ``# From: <path>`` provenance header. Global
 entries come first, followed by project entries from git root to cwd.
@@ -33,7 +35,7 @@ from typing import Any
 
 # Ordered per-directory candidates. Order fixes the order blocks appear within
 # a scope. ``AGENTS.override.md`` replaces only the root AGENTS.md slot.
-_AGENTS_NAMES = ("AGENTS.md", "AGENT.md", ".agents/AGENTS.md")
+_AGENTS_NAMES = ("AGENTS.md", "AGENT.md", ".fluid/AGENTS.md", ".agents/AGENTS.md")
 _AGENTS_OVERRIDE = "AGENTS.override.md"
 
 # Per-file size caps. Instruction files enter the cached prompt prefix, so an
@@ -450,18 +452,40 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     return fields, body
 
 
-def _skill_dirs(cwd: str | os.PathLike[str], include_global: bool) -> list[tuple[Path, str]]:
+def _plugins_for(
+    cwd: str | os.PathLike[str], plugins: list[Any] | None
+) -> list[Any]:
+    """Resolve the plugin list for a discovery call.
+
+    ``None`` means "discover them" (lazy import — :mod:`fluid.context.plugins`
+    imports this module, so the dependency must stay one-way at import time);
+    a caller that already discovered plugins passes them to avoid re-reading
+    the settings stack per index.
+    """
+    if plugins is not None:
+        return list(plugins)
+    from fluid.context.plugins import discover_plugins
+
+    return discover_plugins(cwd)
+
+
+def _skill_dirs(
+    cwd: str | os.PathLike[str], include_global: bool, include_project: bool = True
+) -> list[tuple[Path, str]]:
     """Native markdown skill roots, deliberately distinct from ``SkillStore``.
 
     ``SkillStore`` may place Python modules directly in ``~/.fluid/skills``;
     this scan matches only ``<name>/SKILL.md`` and will never treat those modules
-    as prompt skills.
+    as prompt skills. Project scope reads ``.fluid/skills`` first, then the
+    codex-native ``.agents/skills`` tree.
     """
     dirs: list[tuple[Path, str]] = []
     if include_global:
         dirs.append((Path.home() / ".fluid" / "skills", "global"))
-    for directory in _walk_up_dirs(Path(cwd)):
-        dirs.append((directory / ".agents" / "skills", "project"))
+    if include_project:
+        for directory in _walk_up_dirs(Path(cwd)):
+            dirs.append((directory / ".fluid" / "skills", "project"))
+            dirs.append((directory / ".agents" / "skills", "project"))
     return dirs
 
 
@@ -469,17 +493,20 @@ def discover_skills(
     cwd: str | os.PathLike[str],
     *,
     include_global: bool = True,
+    include_project: bool = True,
     include_plugins: bool = False,
+    plugins: list[Any] | None = None,
 ) -> list[Skill]:
     """Discover ``<skills-dir>/*/SKILL.md`` and parse name+description only.
 
     Bodies are left unread (``body_loaded=False``) — progressive disclosure:
-    the ``Skill`` builtin loads a body on demand. ``include_plugins`` is retained
-    as an ignored compatibility argument; provider plugin homes are never read.
+    the ``Skill`` builtin loads a body on demand. ``include_plugins`` appends
+    enabled plugins' skills, namespaced ``<plugin>:<name>`` (pass ``plugins``
+    to reuse an already-discovered list). Provider homes are never read.
     """
     out: list[Skill] = []
     seen: set[str] = set()
-    for base, scope in _skill_dirs(cwd, include_global):
+    for base, scope in _skill_dirs(cwd, include_global, include_project):
         if not base.is_dir():
             continue
         for skill_md in sorted(base.glob("*/SKILL.md")):
@@ -498,6 +525,13 @@ def discover_skills(
                     body_loaded=False,
                 )
             )
+    if include_plugins:
+        from fluid.context.plugins import plugin_skills
+
+        taken = {s.name for s in out}
+        out.extend(
+            s for s in plugin_skills(_plugins_for(cwd, plugins)) if s.name not in taken
+        )
     return out
 
 
@@ -505,20 +539,24 @@ def discover_commands(
     cwd: str | os.PathLike[str],
     *,
     include_global: bool = True,
+    include_project: bool = True,
     include_plugins: bool = False,
+    plugins: list[Any] | None = None,
 ) -> list[Command]:
     """Discover native slash-command files from ``.fluid`` / ``.agents``.
 
-    The REPL executes these via :func:`render_command`. ``include_plugins`` is
-    retained as an ignored compatibility argument.
+    The REPL executes these via :func:`render_command`. ``include_plugins``
+    appends enabled plugins' commands, namespaced ``<plugin>:<name>``.
     """
     out: list[Command] = []
     seen: set[str] = set()
     bases: list[tuple[Path, str]] = []
     if include_global:
         bases.append((Path.home() / ".fluid" / "commands", "global"))
-    for directory in _walk_up_dirs(Path(cwd)):
-        bases.append((directory / ".agents" / "commands", "project"))
+    if include_project:
+        for directory in _walk_up_dirs(Path(cwd)):
+            bases.append((directory / ".fluid" / "commands", "project"))
+            bases.append((directory / ".agents" / "commands", "project"))
     for base, scope in bases:
         if not base.is_dir():
             continue
@@ -528,6 +566,13 @@ def discover_commands(
                 continue
             seen.add(resolved)
             out.append(Command(name=cmd.stem, path=str(cmd), scope=scope))
+    if include_plugins:
+        from fluid.context.plugins import plugin_commands
+
+        taken = {c.name for c in out}
+        out.extend(
+            c for c in plugin_commands(_plugins_for(cwd, plugins)) if c.name not in taken
+        )
     return out
 
 

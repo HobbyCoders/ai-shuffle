@@ -1,19 +1,19 @@
-"""CE4 — Claude Code settings.json: three-scope merge, permissions, env.
+"""Fluid settings.json stack — three-scope merge, permissions, env, sources.
 
 The project walk is bounded by a ``.git`` marker (same convention as
 test_instructions.py) and HOME is redirected to a tmp dir so the developer's
-real ~/.claude never leaks into an assertion.
+real ~/.fluid never leaks into an assertion.
 """
 
 import json
 import logging
 from pathlib import Path
 
-from fluid.context.claude_settings import (
+from fluid.context.settings_stack import (
     default_permission_mode,
     enabled_plugins,
     layered_env,
-    load_claude_settings,
+    load_settings_stack,
     mcp_toggles,
     parse_permission_entry,
     permission_rules,
@@ -41,15 +41,15 @@ def _scoped(tmp_path, monkeypatch, *, user=None, project=None, local=None):
     home.mkdir(parents=True, exist_ok=True)
     _set_home(monkeypatch, home)
     if user is not None:
-        _write_settings(home / ".claude", "settings.json", user)
+        _write_settings(home / ".fluid", "settings.json", user)
 
     proj = tmp_path / "proj"
     proj.mkdir(parents=True, exist_ok=True)
     (proj / ".git").mkdir(exist_ok=True)
     if project is not None:
-        _write_settings(proj / ".claude", "settings.json", project)
+        _write_settings(proj / ".fluid", "settings.json", project)
     if local is not None:
-        _write_settings(proj / ".claude", "settings.local.json", local)
+        _write_settings(proj / ".fluid", "settings.local.json", local)
     return proj
 
 
@@ -76,7 +76,7 @@ def test_three_scope_merge_lists_accumulate_scalars_override(tmp_path, monkeypat
         },
     )
 
-    settings = load_claude_settings(proj)
+    settings = load_settings_stack(proj)
     # Scalars: highest scope that sets them wins.
     assert settings["model"] == "project-model"
     # Lists accumulate in scope order.
@@ -96,41 +96,41 @@ def test_local_scope_outranks_project(tmp_path, monkeypatch) -> None:
         project={"model": "project-model"},
         local={"model": "local-model"},
     )
-    assert load_claude_settings(proj)["model"] == "local-model"
+    assert load_settings_stack(proj)["model"] == "local-model"
 
 
 def test_inner_project_dir_outranks_outer(tmp_path, monkeypatch) -> None:
     proj = _scoped(tmp_path, monkeypatch, project={"model": "outer", "env": {"A": "outer"}})
     inner = proj / "pkg"
     inner.mkdir()
-    _write_settings(inner / ".claude", "settings.json", {"model": "inner"})
+    _write_settings(inner / ".fluid", "settings.json", {"model": "inner"})
 
-    settings = load_claude_settings(inner)
+    settings = load_settings_stack(inner)
     assert settings["model"] == "inner"
     assert settings["env"] == {"A": "outer"}  # outer keys survive
 
 
-def test_no_claude_setup_yields_empty(tmp_path, monkeypatch) -> None:
+def test_no_fluid_setup_yields_empty(tmp_path, monkeypatch) -> None:
     proj = _scoped(tmp_path, monkeypatch)
-    assert load_claude_settings(proj) == {}
+    assert load_settings_stack(proj) == {}
 
 
 def test_malformed_json_is_skipped_with_a_warning(tmp_path, monkeypatch, caplog) -> None:
     proj = _scoped(tmp_path, monkeypatch, user={"model": "user-model"})
-    (proj / ".claude").mkdir(parents=True, exist_ok=True)
-    (proj / ".claude" / "settings.json").write_text("{not json", encoding="utf-8")
+    (proj / ".fluid").mkdir(parents=True, exist_ok=True)
+    (proj / ".fluid" / "settings.json").write_text("{not json", encoding="utf-8")
 
     with caplog.at_level(logging.WARNING):
-        settings = load_claude_settings(proj)
+        settings = load_settings_stack(proj)
     assert settings == {"model": "user-model"}  # the good scope still loads
     assert any("malformed" in r.getMessage() for r in caplog.records)
 
 
 def test_non_object_json_is_skipped(tmp_path, monkeypatch) -> None:
     proj = _scoped(tmp_path, monkeypatch, user={"model": "user-model"})
-    _write_settings(proj / ".claude", "settings.json", {})
-    (proj / ".claude" / "settings.json").write_text("[1, 2, 3]", encoding="utf-8")
-    assert load_claude_settings(proj) == {"model": "user-model"}
+    _write_settings(proj / ".fluid", "settings.json", {})
+    (proj / ".fluid" / "settings.json").write_text("[1, 2, 3]", encoding="utf-8")
+    assert load_settings_stack(proj) == {"model": "user-model"}
 
 
 # ─── permissions ─────────────────────────────────────────────────────────────
@@ -165,7 +165,7 @@ def test_permission_rules_emit_allow_then_ask_then_deny(tmp_path, monkeypatch) -
             }
         },
     )
-    rules = permission_rules(load_claude_settings(proj))
+    rules = permission_rules(load_settings_stack(proj))
     assert [r.decision for r in rules] == ["allow", "ask", "deny"]
 
 
@@ -180,7 +180,7 @@ def test_deny_beats_ask_beats_allow_under_last_match_wins(tmp_path, monkeypatch)
             }
         },
     )
-    rules = permission_rules(load_claude_settings(proj))
+    rules = permission_rules(load_settings_stack(proj))
 
     assert evaluate_rules(rules, "Bash", {"command": "git status"}) == "allow"
     assert evaluate_rules(rules, "Bash", {"command": "git push origin"}) == "ask"
@@ -198,7 +198,7 @@ def test_no_permissions_key_yields_no_rules() -> None:
 
 def test_settings_env_accessor(tmp_path, monkeypatch) -> None:
     proj = _scoped(tmp_path, monkeypatch, project={"env": {"FOO": "bar", "N": 3}})
-    assert settings_env(load_claude_settings(proj)) == {"FOO": "bar", "N": "3"}
+    assert settings_env(load_settings_stack(proj)) == {"FOO": "bar", "N": "3"}
     assert settings_env({}) == {}
     assert settings_env({"env": "nonsense"}) == {}
 
@@ -209,7 +209,7 @@ def test_enabled_plugins_accessor(tmp_path, monkeypatch) -> None:
         user={"enabledPlugins": {"a@mp": True, "b@mp": True}},
         project={"enabledPlugins": {"b@mp": False}},
     )
-    assert enabled_plugins(load_claude_settings(proj)) == {"a@mp": True, "b@mp": False}
+    assert enabled_plugins(load_settings_stack(proj)) == {"a@mp": True, "b@mp": False}
     assert enabled_plugins({}) == {}
 
 
@@ -218,7 +218,7 @@ def test_default_permission_mode_maps_known_values(tmp_path, monkeypatch) -> Non
         proj = _scoped(
             tmp_path / mode, monkeypatch, project={"permissions": {"defaultMode": mode}}
         )
-        assert default_permission_mode(load_claude_settings(proj)) == mode
+        assert default_permission_mode(load_settings_stack(proj)) == mode
 
 
 def test_default_permission_mode_refuses_unknown_values(caplog) -> None:
@@ -234,7 +234,7 @@ def test_default_permission_mode_refuses_unknown_values(caplog) -> None:
 
 def test_default_permission_mode_is_not_applied_to_a_session(tmp_path, monkeypatch) -> None:
     proj = _scoped(tmp_path, monkeypatch, project={"permissions": {"defaultMode": "plan"}})
-    assert default_permission_mode(load_claude_settings(proj)) == "plan"
+    assert default_permission_mode(load_settings_stack(proj)) == "plan"
 
     loop = _loop(proj)
     assert loop.claude_settings == {}
@@ -248,7 +248,7 @@ def test_mcp_toggles_accessor(tmp_path, monkeypatch) -> None:
         user={"enabledMcpjsonServers": ["alpha"], "disabledMcpServers": ["beta"]},
         project={"enabledMcpjsonServers": ["gamma"]},
     )
-    enabled, disabled = mcp_toggles(load_claude_settings(proj))
+    enabled, disabled = mcp_toggles(load_settings_stack(proj))
     assert enabled == ["alpha", "gamma"]
     assert disabled == ["beta"]
     assert mcp_toggles({}) == ([], [])
@@ -362,3 +362,21 @@ def test_layered_env_never_mutates_os_environ() -> None:
     assert os.environ == before
     # An explicit base replaces the inherited environment.
     assert layered_env({"B": "2"}, base={"A": "1"}) == {"A": "1", "B": "2"}
+
+
+# ─── setting_sources gating ──────────────────────────────────────────────────
+
+
+def test_setting_sources_gate_scopes(tmp_path, monkeypatch) -> None:
+    proj = _scoped(
+        tmp_path, monkeypatch,
+        user={"model": "user-model", "env": {"U": "1"}},
+        project={"model": "project-model"},
+        local={"model": "local-model"},
+    )
+    assert load_settings_stack(proj, sources=("user",))["model"] == "user-model"
+    assert load_settings_stack(proj, sources=("user", "project"))["model"] == "project-model"
+    assert load_settings_stack(proj, sources=("local",))["model"] == "local-model"
+    assert load_settings_stack(proj, sources=()) == {}
+    # Default: all three scopes, local wins.
+    assert load_settings_stack(proj)["model"] == "local-model"

@@ -161,6 +161,7 @@ class InstructionFilesConfig:
     discover_skills: bool = True
     discover_commands: bool = True
     discover_nested: bool = True
+    discover_plugins: bool = True
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> InstructionFilesConfig:
@@ -179,6 +180,7 @@ class InstructionFilesConfig:
             discover_skills=pick("discover_skills", "skills", default=True),
             discover_commands=pick("discover_commands", "commands", default=True),
             discover_nested=pick("discover_nested", "nested", default=True),
+            discover_plugins=pick("discover_plugins", "plugins", default=True),
         )
 
 
@@ -265,6 +267,34 @@ class ContextConfig:
         )
 
 
+# The filesystem scopes context/settings discovery can draw from, mirroring the
+# Agent SDK's ``setting_sources`` vocabulary. ``user`` is ~/.fluid, ``project``
+# is the git-root→cwd walk's ``.fluid``/``.agents`` trees plus AGENTS-family
+# files, ``local`` is ``.fluid/settings.local.json``.
+SETTING_SOURCES = ("user", "project", "local")
+
+
+def _setting_sources_from(raw: Any) -> tuple[str, ...]:
+    """Normalize a ``setting_sources`` config value.
+
+    Accepts a list or a comma-separated string. Unknown source names raise —
+    a typo that silently loaded everything (or nothing) would be exactly the
+    permission-widening surprise this knob exists to prevent. An explicit empty
+    list means "load no filesystem sources".
+    """
+    if raw is None:
+        return SETTING_SOURCES
+    items = raw.split(",") if isinstance(raw, str) else list(raw)
+    cleaned = tuple(dict.fromkeys(s.strip() for s in (str(i) for i in items) if s.strip()))
+    unknown = set(cleaned) - set(SETTING_SOURCES)
+    if unknown:
+        raise ValueError(
+            f"unknown setting_sources value(s): {', '.join(sorted(unknown))} "
+            f"(valid: {', '.join(SETTING_SOURCES)})"
+        )
+    return cleaned
+
+
 @dataclass(frozen=True, kw_only=True)
 class HarnessConfig:
     default_provider: str = "anthropic"
@@ -283,6 +313,13 @@ class HarnessConfig:
     continual: bool = False
     continual_model: str | None = None
     instruction_files: InstructionFilesConfig = field(default_factory=InstructionFilesConfig)
+    # Which filesystem scopes feed context and settings discovery (instruction
+    # files, skills, agents, commands, plugins, settings.json, mcp.json,
+    # hooks.json). The Agent SDK's ``setting_sources`` vocabulary: any subset of
+    # ``("user", "project", "local")``; empty = filesystem-isolated. config.toml
+    # layers are NOT gated by this — they are harness configuration (and where
+    # this very key can live), not imported context.
+    setting_sources: tuple[str, ...] = SETTING_SOURCES
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
@@ -340,6 +377,7 @@ class HarnessConfig:
             continual=bool(d.get("continual", False)),
             continual_model=d.get("continual_model"),
             instruction_files=InstructionFilesConfig.from_dict(d.get("instruction_files", {})),
+            setting_sources=_setting_sources_from(d.get("setting_sources")),
             tools=ToolsConfig.from_dict(d.get("tools", {})),
             context=ContextConfig.from_dict(d.get("context", {})),
             memory=MemoryConfig.from_dict(d.get("memory", {})),
@@ -412,7 +450,9 @@ class HarnessConfig:
                 "skills": self.instruction_files.discover_skills,
                 "commands": self.instruction_files.discover_commands,
                 "nested": self.instruction_files.discover_nested,
+                "plugins": self.instruction_files.discover_plugins,
             },
+            "setting_sources": list(self.setting_sources),
             "tools": {
                 "allowed": list(self.tools.allowed) if self.tools.allowed is not None else None,
                 "disallowed": list(self.tools.disallowed),

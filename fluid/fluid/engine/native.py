@@ -372,6 +372,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         allowed_tools: Sequence[str] | None = None,
         disallowed_tools: Sequence[str] | None = None,
         native_agents: bool = True,
+        setting_sources: Sequence[str] | None = None,
         claude_settings: bool = False,
         claude_plugins: bool = False,
         claude_agents: bool = False,
@@ -494,6 +495,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         # constructor is sync; connecting needs the event loop).
         self._mcp_servers = dict(mcp_servers or {})
         self._mcp_connected = False
+        # Which filesystem scopes native-agent discovery may draw from (the
+        # Agent SDK's setting_sources vocabulary). None = no restriction.
+        self._setting_sources = (
+            tuple(setting_sources) if setting_sources is not None else None
+        )
         # Deprecated Claude ecosystem keywords and observability attributes are
         # inert compatibility seams. Provider homes are never read by NativeLoop.
         self.claude_settings: dict[str, Any] = {}
@@ -505,7 +511,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._init_background_lifecycle()
 
     # Discovery scope → the ``source`` label carried on a usage agent row.
-    _AGENT_SOURCES = {"project": "project", "global": "user"}
+    _AGENT_SOURCES = {"project": "project", "global": "user", "plugin": "plugin"}
 
     def _apply_native_agents(self) -> None:
         """Discover native agent definitions and publish them to the session.
@@ -523,7 +529,16 @@ class NativeLoop(BackgroundLifecycleMixin):
         """
         from fluid.context.agents import discover_agents
 
-        self.native_agents = discover_agents(self.ctx.cwd or ".")
+        sources = self._setting_sources
+        user_on = sources is None or "user" in sources
+        project_on = sources is None or "project" in sources
+        self.native_agents = discover_agents(
+            self.ctx.cwd or ".",
+            include_global=user_on,
+            include_project=project_on,
+            # Plugins live in the user scope (~/.fluid/plugins).
+            include_plugins=user_on,
+        )
         if not self.native_agents:
             return
         registry = self.ctx.extra.get("agent_registry")

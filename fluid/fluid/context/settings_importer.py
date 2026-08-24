@@ -190,6 +190,56 @@ def _tree_digest(path: Path) -> str | None:
     return digest.hexdigest()
 
 
+def _stat_signature_digest(path: Path) -> str | None:
+    """A fast directory signature: names, types, sizes, mtimes — no content.
+
+    Plugin installs can hold tens of thousands of files (node_modules, .git),
+    so the content tree digest is unusable there; this stat-only walk keeps the
+    same staleness guarantee the importer needs (did the source change between
+    preview and apply?) at listing cost. Symlinks anywhere reject the tree,
+    matching :func:`_tree_digest`.
+    """
+    info = _lstat(path)
+    if info is None or not stat.S_ISDIR(info.st_mode):
+        return None
+    digest = hashlib.sha256()
+    try:
+        for root, dirs, files in os.walk(path, followlinks=False):
+            root_path = Path(root)
+            dirs.sort()
+            files.sort()
+            for name in [*dirs, *files]:
+                child = root_path / name
+                child_info = child.lstat()
+                if stat.S_ISLNK(child_info.st_mode):
+                    return None
+                relative = child.relative_to(path).as_posix().encode()
+                kind = b"D" if stat.S_ISDIR(child_info.st_mode) else b"F"
+                digest.update(
+                    kind + b"\0" + relative + b"\0"
+                    + str(child_info.st_size).encode() + b"\0"
+                    + str(child_info.st_mtime_ns).encode() + b"\0"
+                )
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def _tree_is_symlink_free(path: Path) -> bool:
+    """lstat-only walk: True when no symlink exists anywhere under ``path``."""
+    if _is_symlink(path):
+        return False
+    try:
+        for root, dirs, files in os.walk(path, followlinks=False):
+            root_path = Path(root)
+            for name in [*dirs, *files]:
+                if stat.S_ISLNK((root_path / name).lstat().st_mode):
+                    return False
+    except OSError:
+        return False
+    return True
+
+
 def _path_has_symlink(path: Path) -> bool:
     """Reject a final symlink and symlinked ancestors, which can escape a root."""
     candidate = path
@@ -313,7 +363,7 @@ def _instruction_destination(project: Path, source: Path, dot_claude: bool = Fal
     native_name = "AGENTS" + name[len("CLAUDE"):]
     if name == "CLAUDE.local.md":
         native_name = "AGENTS.override.md"
-    return (project / ".agents" / native_name) if dot_claude else project / native_name
+    return (project / ".fluid" / native_name) if dot_claude else project / native_name
 
 
 def _add_claude_project(items: list[SettingsImportItem], project: Path, system_home: Path,
@@ -323,8 +373,8 @@ def _add_claude_project(items: list[SettingsImportItem], project: Path, system_h
     dot = project / ".claude"
     for source in sorted(dot.glob("CLAUDE*.md")) if dot.is_dir() else []:
         _add_file(items, "claude", "project_instruction", source, _instruction_destination(project, source, True))
-    _add_skills(items, "claude", dot / "skills", project / ".agents" / "skills", "project_skill")
-    _add_agents(items, "claude", dot / "agents", project / ".agents" / "agents", "project_agent")
+    _add_skills(items, "claude", dot / "skills", project / ".fluid" / "skills", "project_skill")
+    _add_agents(items, "claude", dot / "agents", project / ".fluid" / "agents", "project_agent")
     for setting in (dot / "settings.json", dot / "settings.local.json"):
         if setting.exists() or _is_symlink(setting):
             items.append(_diagnostic("claude", "project_settings", setting,
@@ -357,6 +407,114 @@ def _project_registration(
     return replace(item, id=f"{item.id}-{suffix}")
 
 
+def _plugin_version_key(name: str) -> tuple[int, tuple[int, ...], str]:
+    parts = name.split(".")
+    if parts and all(p.isdigit() for p in parts):
+        return (1, tuple(int(p) for p in parts), "")
+    return (0, (), name)
+
+
+def _claude_plugin_root(plugins: Path, name: str, marketplace: str) -> Path | None:
+    """Resolve one enabled plugin's on-disk root inside the SOURCE home.
+
+    Mirrors fluid's runtime resolution order (cache → marketplace subdir →
+    marketplace root), but against the Claude install being imported — the
+    importer never reads the destination's ``~/.fluid/plugins``.
+    """
+    cache = plugins / "cache" / marketplace / name
+    if cache.is_dir() and not _is_symlink(cache):
+        try:
+            versions = [d for d in cache.iterdir() if d.is_dir()]
+        except OSError:
+            versions = []
+        if versions:
+            return max(versions, key=lambda d: _plugin_version_key(d.name))
+    clone = plugins / "marketplaces" / marketplace / name
+    if clone.is_dir():
+        return clone
+    mp_root = plugins / "marketplaces" / marketplace
+    if mp_root.is_dir():
+        for rel in (Path(".claude-plugin") / "plugin.json", Path("plugin.json")):
+            if (mp_root / rel).is_file():
+                return mp_root
+    return None
+
+
+def _claude_plugins(items: list[SettingsImportItem], root: Path, fluid: Path) -> None:
+    """Enabled plugins as directory-copy items into ``~/.fluid/plugins``.
+
+    Fluid activates plugins from its own install root using the same package
+    layout, so copying each enabled plugin's resolved root (at its original
+    relative path) plus an ``enabledPlugins`` translation into
+    ``~/.fluid/settings.json`` makes the import land ready to run. Disabled or
+    uninstalled plugins are inventoried, never copied.
+    """
+    plugins = root / "plugins"
+    if not (plugins.exists() or _is_symlink(plugins)):
+        return
+    if _is_symlink(plugins) or not plugins.is_dir():
+        items.append(_diagnostic("claude", "plugins", plugins,
+                                 "plugins root is a symlink or not a directory; rejected",
+                                 is_directory=True))
+        return
+    settings_path = root / "settings.json"
+    raw, _error = _read_json(settings_path) if settings_path.is_file() else (None, None)
+    enabled_map = (raw or {}).get("enabledPlugins")
+    enabled = (
+        sorted(str(ref) for ref, on in enabled_map.items() if on)
+        if isinstance(enabled_map, dict)
+        else []
+    )
+    if not enabled:
+        items.append(_diagnostic("claude", "plugins", plugins,
+                                 "inventoried only; no enabled plugins found in settings.json",
+                                 is_directory=True))
+        return
+    imported_refs: list[str] = []
+    for ref in enabled:
+        name, sep, marketplace = str(ref).partition("@")
+        name = name.strip()
+        marketplace = (marketplace.strip() if sep else "") or "claude-plugins-official"
+        source = _claude_plugin_root(plugins, name, marketplace) if name else None
+        if source is None:
+            items.append(_diagnostic("claude", "plugin", plugins / marketplace / (name or "?"),
+                                     f"enabled plugin {ref!r} is not installed; skipped"))
+            continue
+        destination = fluid / "plugins" / source.relative_to(plugins)
+        # Plugin installs can be huge (node_modules, marketplace .git clones),
+        # so their staleness digest is the stat signature, not file content —
+        # see _stat_signature_digest. ``digest_kind`` routes _source_unchanged
+        # and the post-copy validation onto the matching cheap checks.
+        signature = _stat_signature_digest(source)
+        if signature is None:
+            items.append(_diagnostic("claude", "plugin", source,
+                                     "plugin tree is unreadable or contains a symlink; rejected",
+                                     is_directory=True))
+            continue
+        provenance = {
+            "plugin_ref": ref,
+            "digest_kind": "tree_signature",
+            "source_digests": {str(source): signature},
+        }
+        items.append(SettingsImportItem(
+            id=_stable_id("claude", "plugin", (source,), destination, {"plugin_ref": ref}),
+            source_system="claude", kind="plugin", source_paths=(str(source),),
+            destination=str(destination), source_digest=signature, status="ready",
+            is_directory=True, provenance=provenance,
+        ))
+        imported_refs.append(ref)
+    if imported_refs:
+        payload = json.dumps(
+            {"enabledPlugins": {ref: True for ref in imported_refs}},
+            sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ).encode() + b"\n"
+        items.append(_item(
+            "claude", "plugin_enablement", (settings_path,), fluid / "settings.json",
+            content=payload,
+            provenance={"translation": "enabledPlugins only; no other settings are imported"},
+        ))
+
+
 def _claude(items: list[SettingsImportItem], home: Path, fluid: Path,
             mcp_inputs: dict[Path | None, list[tuple[Path, dict[str, Any]]]]) -> None:
     root = home / ".claude"
@@ -367,15 +525,7 @@ def _claude(items: list[SettingsImportItem], home: Path, fluid: Path,
     if setting.exists() or _is_symlink(setting):
         items.append(_diagnostic("claude", "settings", setting,
                                  "inventoried only; Fluid has no safe native translation"))
-    plugins = root / "plugins"
-    if plugins.exists() or _is_symlink(plugins):
-        items.append(_diagnostic(
-            "claude",
-            "plugins",
-            plugins,
-            "inventoried only; Fluid does not activate Claude plugins",
-            is_directory=True,
-        ))
+    _claude_plugins(items, root, fluid)
     config_path = home / ".claude.json"
     persisted_config = root / ".claude.json"
     if _is_symlink(config_path):
@@ -741,9 +891,14 @@ def _source_unchanged(item: SettingsImportItem) -> bool:
     expected = item.provenance.get("source_digests", {})
     if not isinstance(expected, dict):
         return False
+    signature = item.provenance.get("digest_kind") == "tree_signature"
     for raw_path, digest in expected.items():
         path = Path(str(raw_path))
-        current = _digest(path, item.is_directory if len(item.source_paths) == 1 else path.is_dir())
+        current = (
+            _stat_signature_digest(path)
+            if signature
+            else _digest(path, item.is_directory if len(item.source_paths) == 1 else path.is_dir())
+        )
         if current != digest:
             return False
     return True
@@ -838,7 +993,12 @@ def apply_settings_import(preview: SettingsImportPreview, *, selected_ids: Itera
                 # copytree creates the target itself and refuses an existing target.
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copytree(source, destination, symlinks=True)
-                if _tree_digest(destination) is None:
+                if item.provenance.get("digest_kind") == "tree_signature":
+                    # Plugin trees: content hashing is unaffordable; the
+                    # lstat-only walk still enforces the no-symlink guarantee.
+                    if not _tree_is_symlink_free(destination):
+                        raise OSError("copied tree contains a symlink; removed")
+                elif _tree_digest(destination) is None:
                     raise OSError("copied tree contains a symlink; removed")
             else:
                 source = Path(item.source_paths[0])

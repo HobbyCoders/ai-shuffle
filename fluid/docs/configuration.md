@@ -51,6 +51,7 @@ upward search for a project file.
 | `identity` | none | Inline identity text — durable voice/persona injected as the base prompt's first block. Replaces only the identity block; the operating contract below it always applies (use `system` to replace everything). |
 | `identity_file` | `true` | When `identity` is unset, `~/.fluid/IDENTITY.md` fills the identity slot (screened and capped). `false` ignores the file. `FLUID_IDENTITY_FILE` overrides. |
 | `model_guidance` | `"auto"` | Model-family guidance blocks (act-don't-narrate; execution discipline). `auto` matches the shipped family tables (Claude-family models get none); `true` always injects both; `false` never; a list of model-id substrings replaces the tables. `FLUID_MODEL_GUIDANCE` overrides (comma-separated list allowed). |
+| `setting_sources` | `["user", "project", "local"]` | Which filesystem scopes feed context and settings discovery — the Agent SDK's vocabulary. `user` is the `~/.fluid` tree (global `AGENTS.md`, skills, agents, commands, plugins, `settings.json`, `mcp.json`, `hooks.json`); `project` is the git-root→cwd walk (`AGENTS.md` files, `.fluid`/`.agents` trees, project `mcp.json`/`hooks.json`); `local` is `.fluid/settings.local.json`. An empty list runs filesystem-isolated. `config.toml` layers are never gated — they are harness configuration, and where this key itself can live. `FLUID_SETTING_SOURCES` overrides (comma list; empty = none). |
 
 ### `[permission]`
 
@@ -96,13 +97,34 @@ commands). All default to `true`.
 |---|---|
 | `enabled` | Master switch. `false` disables every discovery below. |
 | `global` | `~/.fluid/AGENTS.md`. |
-| `project` | Root `AGENTS.md` / `AGENT.md` / `AGENTS.override.md` and `.agents/`. |
-| `skills` | `SKILL.md` discovery under `~/.fluid/skills` and `.agents/skills`. |
-| `commands` | User slash commands under `~/.fluid/commands` and `.agents/commands`. |
+| `project` | Root `AGENTS.md` / `AGENT.md` / `AGENTS.override.md`, plus `.fluid/` and `.agents/`. |
+| `skills` | `SKILL.md` discovery under `~/.fluid/skills` and each project dir's `.fluid/skills` / `.agents/skills`. |
+| `commands` | User slash commands under `~/.fluid/commands` and each project dir's `.fluid/commands` / `.agents/commands`. |
 | `nested` | `AGENTS.md` files in subdirectories, surfaced when a tool touches that directory. |
+| `plugins` | Enabled plugins from `~/.fluid/plugins` (see below) contribute skills, commands, agents, and MCP servers, namespaced `<plugin>:<name>`. |
 
 The long spellings `discover_global`, `discover_project`, `discover_skills`,
-`discover_commands`, `discover_nested` are accepted too.
+`discover_commands`, `discover_nested`, `discover_plugins` are accepted too.
+On top of these toggles, `setting_sources` decides which scopes are read at
+all: dropping `"user"` removes the global tree and plugins, dropping
+`"project"` removes the project walk.
+
+### settings.json and plugins
+
+fluid also reads a Claude-Code-schema `settings.json` stack from its own paths
+(`fluid/context/settings_stack.py`): `~/.fluid/settings.json` (user), each
+project dir's `.fluid/settings.json` (project), and `.fluid/settings.local.json`
+(local), merged lowest-to-highest. Consumed keys: `enabledPlugins`,
+`permissions.{allow,ask,deny}`, `env`, `enabledMcpjsonServers` /
+`disabledMcpServers`. Provider homes (`~/.claude`, `~/.codex`) are never read
+at runtime — the explicit settings import copies from them, non-destructively.
+
+Plugins use the Claude Code package layout under `~/.fluid/plugins`
+(`cache/<marketplace>/<plugin>/<version>` or `marketplaces/...`), enabled via
+the settings stack's `enabledPlugins` map. Their skills and agents enter the
+system prompt deferred — name + description only; bodies load on demand via
+the `Skill` tool or at Task dispatch. The settings import can copy an enabled
+Claude plugin (and its enablement entry) straight into these paths.
 
 ### `[tools]`
 
@@ -308,6 +330,7 @@ Config overrides, applied as layer 5 (`env_overrides` in the loader):
 | `FLUID_IDENTITY_FILE` | `identity_file` (same boolean spellings) |
 | `FLUID_MODEL_GUIDANCE` | `model_guidance` (`auto`/`true`/`false`, or a comma-separated substring list) |
 | `FLUID_SKILLS_DIR` | `skills_dir` |
+| `FLUID_SETTING_SOURCES` | `setting_sources` (comma list of `user`/`project`/`local`; empty = none) |
 | `FLUID_CONTINUAL` | `continual` |
 | `FLUID_CONTINUAL_MODEL` | `continual_model` |
 | `FLUID_MAX_TOKENS` | `max_tokens` (ignored if not an integer) |

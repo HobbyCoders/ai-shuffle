@@ -1,15 +1,21 @@
-"""Claude Code ``settings.json`` reader — permissions, env, plugin enablement.
+"""Fluid-native ``settings.json`` stack — permissions, env, plugin enablement.
 
-Ruling CE4. A user who already configured Claude Code keeps that configuration
-when they run fluid: the same three scopes are read from disk, merged with the
-same precedence, and mapped onto fluid's own primitives.
+Fluid reads only its own ``.fluid`` trees during normal operation; provider
+homes (``~/.claude``, ``~/.codex``) stay inert until explicitly imported via
+:mod:`fluid.context.settings_importer`. The file FORMAT is Claude Code's
+``settings.json`` schema, so an imported file works verbatim — only the paths
+are fluid's own.
 
-Scopes, lowest → highest precedence:
+Scopes, lowest → highest precedence, named with the Agent SDK's
+``setting_sources`` vocabulary:
 
-  1. user     ``~/.claude/settings.json``
-  2. project  ``<dir>/.claude/settings.json`` for every dir from the git root
+  1. user     ``~/.fluid/settings.json``
+  2. project  ``<dir>/.fluid/settings.json`` for every dir from the git root
               down to the cwd (outer → inner, inner wins)
-  3. local    ``<dir>/.claude/settings.local.json`` (same walk, gitignored)
+  3. local    ``<dir>/.fluid/settings.local.json`` (same walk, gitignored)
+
+Callers pass the session's enabled sources (``HarnessConfig.setting_sources``)
+to load only those scopes.
 
 Merge rules: lists accumulate in scope order, dicts merge shallowly per key
 with the higher scope winning a scalar conflict, scalars override outright.
@@ -37,6 +43,9 @@ from fluid.context.instructions import _walk_up_dirs
 from fluid.permissions.rules import Rule
 
 log = logging.getLogger(__name__)
+
+# The valid scope names, in precedence order (mirrors config.model.SETTING_SOURCES).
+SETTING_SOURCES = ("user", "project", "local")
 
 # Claude Code's permission entries: ``Tool(pattern)`` or a bare ``Tool``.
 _RULE_RE = re.compile(r"^\s*(?P<tool>[^()\s]+)\s*(?:\((?P<pattern>.*)\)\s*)?$", re.DOTALL)
@@ -72,24 +81,33 @@ def _load_json(path: Path) -> dict[str, Any] | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        log.warning("skipping malformed Claude settings file %s: %s", path, exc)
+        log.warning("skipping malformed settings file %s: %s", path, exc)
         return None
     if not isinstance(data, dict):
-        log.warning("skipping Claude settings file %s: expected a JSON object", path)
+        log.warning("skipping settings file %s: expected a JSON object", path)
         return None
     return data
 
 
-def settings_paths(cwd: Path | str) -> list[Path]:
-    """Every candidate settings file, lowest precedence first.
+def settings_paths(
+    cwd: Path | str | os.PathLike[str], *, sources: tuple[str, ...] | list[str] = SETTING_SOURCES
+) -> list[Path]:
+    """Every candidate settings file for the enabled ``sources``, lowest
+    precedence first.
 
     User scope, then the project walk (git root → cwd), then the local walk, so
-    ``.claude/settings.local.json`` anywhere outranks every ``settings.json``.
+    ``.fluid/settings.local.json`` anywhere outranks every ``settings.json``.
     """
-    dirs = _walk_up_dirs(Path(cwd))
-    paths = [Path.home() / ".claude" / "settings.json"]
-    paths += [d / ".claude" / "settings.json" for d in dirs]
-    paths += [d / ".claude" / "settings.local.json" for d in dirs]
+    enabled = set(sources)
+    paths: list[Path] = []
+    if "user" in enabled:
+        paths.append(Path.home() / ".fluid" / "settings.json")
+    if "project" in enabled or "local" in enabled:
+        dirs = _walk_up_dirs(Path(cwd))
+        if "project" in enabled:
+            paths += [d / ".fluid" / "settings.json" for d in dirs]
+        if "local" in enabled:
+            paths += [d / ".fluid" / "settings.local.json" for d in dirs]
     return paths
 
 
@@ -112,13 +130,19 @@ def merge_settings(layers: list[dict[str, Any]]) -> dict[str, Any]:
     return merged
 
 
-def load_claude_settings(cwd: Path | str) -> dict[str, Any]:
-    """The merged Claude Code settings visible from ``cwd``.
+def load_settings_stack(
+    cwd: Path | str | os.PathLike[str], *, sources: tuple[str, ...] | list[str] = SETTING_SOURCES
+) -> dict[str, Any]:
+    """The merged fluid settings visible from ``cwd`` for the enabled sources.
 
-    Returns ``{}`` when the user has no Claude Code setup at all — every
-    discovery here soft-fails (CE8).
+    Returns ``{}`` when no settings files exist — every discovery here
+    soft-fails (CE8).
     """
-    layers = [d for d in (_load_json(p) for p in settings_paths(cwd)) if d is not None]
+    layers = [
+        d
+        for d in (_load_json(p) for p in settings_paths(cwd, sources=tuple(sources)))
+        if d is not None
+    ]
     return merge_settings(layers)
 
 
@@ -128,8 +152,8 @@ def load_claude_settings(cwd: Path | str) -> dict[str, Any]:
 def enabled_plugins(settings: dict[str, Any]) -> dict[str, bool]:
     """The merged ``enabledPlugins`` map (``"<plugin>@<marketplace>" → bool``).
 
-    Consumed by plugin discovery in W3; exposed now so the settings reader owns
-    the whole on-disk shape in one place.
+    Consumed by plugin discovery; exposed here so the settings reader owns the
+    whole on-disk shape in one place.
     """
     raw = settings.get("enabledPlugins")
     if not isinstance(raw, dict):
@@ -209,7 +233,7 @@ def parse_permission_entry(entry: str, decision: str) -> Rule | None:
         return None
     match = _RULE_RE.match(entry)
     if match is None:
-        log.warning("skipping unparseable Claude permission entry: %r", entry)
+        log.warning("skipping unparseable permission entry: %r", entry)
         return None
     tool = match.group("tool")
     pattern = match.group("pattern")

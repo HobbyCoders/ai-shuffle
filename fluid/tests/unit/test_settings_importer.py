@@ -217,7 +217,7 @@ def test_project_inventory_and_native_codex_project_items(tmp_path: Path) -> Non
         for item in preview.items
     )
     assert any(item.destination == str(project / "AGENTS.md") and item.status == "ready" for item in preview.items)
-    assert any(item.destination == str(project / ".agents/skills/p") for item in preview.items)
+    assert any(item.destination == str(project / ".fluid/skills/p") for item in preview.items)
     assert any(item.destination == str(project / ".fluid/mcp.json") for item in preview.items)
 
     write(project / "AGENTS.override.md", "native")
@@ -293,3 +293,37 @@ def test_each_configured_project_has_a_distinct_item_id(tmp_path: Path) -> None:
     assert {item.provenance["project_path"] for item in registrations} == {
         str(project) for project in projects
     }
+
+
+def test_enabled_claude_plugins_are_importable(tmp_path: Path) -> None:
+    source, destination = tmp_path / "source", tmp_path / "target"
+    root = source / ".claude/plugins/cache/mp/myplug/1.2.0"
+    write(root / ".claude-plugin/plugin.json", '{"name": "myplug"}')
+    write(root / "skills/hello/SKILL.md", "---\nname: hello\n---\nbody")
+    write(source / ".claude/settings.json", json.dumps(
+        {"enabledPlugins": {"myplug@mp": True, "ghost@mp": True, "off@mp": False}}
+    ))
+
+    preview = preview_settings_import(sources=("claude",), source_home=source, destination_home=destination)
+    plugin = next(item for item in preview.items if item.kind == "plugin" and item.status == "ready")
+    assert plugin.destination == str(destination / ".fluid/plugins/cache/mp/myplug/1.2.0")
+    assert plugin.provenance["plugin_ref"] == "myplug@mp"
+    enablement = next(item for item in preview.items if item.kind == "plugin_enablement")
+    assert enablement.status == "ready"
+    assert enablement.destination == str(destination / ".fluid/settings.json")
+    # An enabled-but-uninstalled plugin is inventoried, never invented.
+    assert any(item.status == "diagnostic" and "'ghost@mp'" in item.message for item in preview.items)
+
+    result = apply_settings_import(preview)
+    assert (destination / ".fluid/plugins/cache/mp/myplug/1.2.0/skills/hello/SKILL.md").exists()
+    data = json.loads((destination / ".fluid/settings.json").read_text(encoding="utf-8"))
+    assert data == {"enabledPlugins": {"myplug@mp": True}}
+    assert all(item.status != "ready" for item in result.items)
+
+
+def test_plugins_without_enablement_stay_inventory_only(tmp_path: Path) -> None:
+    source, destination = tmp_path / "source", tmp_path / "target"
+    write(source / ".claude/plugins/cache/mp/myplug/1.0.0/plugin.json", '{"name": "myplug"}')
+    preview = preview_settings_import(sources=("claude",), source_home=source, destination_home=destination)
+    plugin_items = [item for item in preview.items if item.kind in ("plugin", "plugins")]
+    assert plugin_items and all(item.status == "diagnostic" for item in plugin_items)
