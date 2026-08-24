@@ -2,12 +2,13 @@
 	/**
 	 * ChatInput - the Studio Noir glass composer island.
 	 *
-	 * One rounded glass container holds three rows:
-	 *   1. pill row   — ContextPillBar (agent pill + execution-mode/branch pills)
-	 *   2. input area — Tiptap editor + the @/slash autocomplete panels
-	 *   3. foot row   — ControlsDock (model / effort / permission pills, context
-	 *      ring, attach button) with the dictate / voice-call / send cluster
-	 *      passed in as its `actions` snippet.
+	 * One rounded glass container holds two rows:
+	 *   1. input area — Tiptap editor + the @/slash autocomplete panels. In the
+	 *      new-chat empty state a ContextPillBar row sits above it so execution
+	 *      mode / branch can be chosen before the first send.
+	 *   2. foot row   — ControlsDock (summary chip + context ring + attach)
+	 *      with the dictate / voice-call / send cluster passed in as its
+	 *      `actions` snippet.
 	 *
 	 * Delegates voice recording to VoiceRecorder, controls dock to ControlsDock,
 	 * and drag-and-drop to DragDropOverlay.
@@ -291,6 +292,10 @@
 
 	// Get selected agent name for display in placeholder
 	const selectedProfileName = $derived($profiles.find(p => p.id === $activeSession.profile)?.name || 'agent');
+
+	// New-chat state: the only place the context pill row (execution mode /
+	// branch / agent) still renders inside the island — see the markup note.
+	const isEmptyState = $derived($activeSession.messages.length === 0);
 
 	onMount(() => {
 		document.addEventListener('pointerdown', handleDocumentPointerDown);
@@ -709,10 +714,17 @@
 			onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}
 			onpointerdown={keepMobileComposerExpanded}
 		>
-			<!-- Main Island: one glass container, three rows -->
+			<!-- Main Island: one glass container -->
 			<div class="chat-island" bind:this={islandRef}>
-				<!-- Row 1: context pills (agent + execution mode / branch) -->
-				<div class="context-pill-row"><ContextPillBar /></div>
+				<!-- Context pills (agent + execution mode / branch) render ONLY in
+				     the new-chat empty state: execution mode must be chosen before
+				     the first send. Once a chat is active they move into the
+				     ControlsDock's controls popover — the island stays a pure
+				     composer. Mobile hides this row entirely; the mobile sheet's
+				     Chat-setup section carries the same selectors there. -->
+				{#if isEmptyState}
+					<div class="context-pill-row"><ContextPillBar /></div>
+				{/if}
 
 				<!-- Row 2: the editor -->
 				<div class="input-area">
@@ -897,11 +909,11 @@
 	}
 
 	/* ===== THE GLASS ISLAND =====
-	   One container for all three rows. `overflow` stays VISIBLE (unlike the
+	   One container for the composer rows. `overflow` stays VISIBLE (unlike the
 	   mockup, which has no live dropdowns): every popover in the composer — the
-	   @/slash autocomplete panels, the agent/branch/mode menus, the override
-	   dropdowns and the context-usage popover — opens upward and out of these
-	   bounds, and clipping them would make them unreachable. */
+	   @/slash autocomplete panels, the empty-state agent/branch/mode menus, the
+	   controls popover and the context-usage popover — opens upward and out of
+	   these bounds, and clipping them would make them unreachable. */
 	.chat-island {
 		position: relative;
 		display: flex;
@@ -922,13 +934,13 @@
 			0 0 32px -12px var(--glow);
 	}
 
-	/* ===== ROW 2 — the editor =====
+	/* ===== ROW 1.5 — the editor =====
 	   The island's `backdrop-filter` establishes a stacking context, so the rows
-	   are ordered explicitly inside it. Same relative order the old markup had:
-	   the pill row (z-index 10, set in ContextPillBar) sits below the input area,
-	   whose @/slash panels must stay on top of it, and the foot row (z-index 30,
-	   set in ControlsDock) is above both so its upward override dropdowns and the
-	   context-usage popover paint over the message box. */
+	   are ordered explicitly inside it: the (empty-state-only) pill row
+	   (z-index 10, set in ContextPillBar) sits below the input area, whose
+	   @/slash panels must stay on top of it, and the foot row (z-index 30, set
+	   in ControlsDock) is above both so its upward popovers paint over the
+	   message box. */
 	.input-area {
 		position: relative;
 		z-index: 20;

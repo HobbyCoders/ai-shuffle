@@ -1,11 +1,17 @@
 <script lang="ts">
 	/**
-	 * ControlsDock — the composer island's foot row (mockup `.footrow`).
+	 * ControlsDock — the composer island's foot row.
 	 *
-	 * Left: the model / effort / permission override pills followed by the
-	 * context-usage ring. Right: the attach button, then whatever the parent
-	 * passes in the `actions` snippet — ChatInput uses it for the dictate /
-	 * voice-call / send cluster so the whole right-hand group shares one flex row.
+	 * Left: ONE summary chip ("Model · Effort · Access") that opens the desktop
+	 * controls popover — chat-setup pills (agent / execution mode / branch),
+	 * the model picker, the effort slider with the Fast tier, and tool access —
+	 * followed by the context-usage ring with its own detail popover. Right:
+	 * the attach button, then whatever the parent passes in the `actions`
+	 * snippet — ChatInput uses it for the dictate / voice-call / send cluster
+	 * so the whole right-hand group shares one flex row.
+	 *
+	 * Mobile keeps its primary actions inline and moves the configuration
+	 * matrix into MobileComposerControlsSheet (the sliders trigger below).
 	 *
 	 * Computer use is agent configuration, not a composer control: both the
 	 * capability switch and the emergency stop live in the agent editor's
@@ -16,12 +22,12 @@
 	import { anyCredential } from '$lib/stores/auth.svelte';
 	import { profiles } from '$lib/stores/app-data.svelte';
 	import ContextUsageBar from './ContextUsageBar.svelte';
-	import OverrideDropdown from './OverrideDropdown.svelte';
 	import EffortSliderCard from './EffortSliderCard.svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
 	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
 	import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
-	import { Gauge, SlidersHorizontal } from 'lucide-svelte';
+	import ContextPillBar from './ContextPillBar.svelte';
+	import { SlidersHorizontal } from 'lucide-svelte';
 	import {
 		getModelLabel,
 		getDefaultModel,
@@ -49,14 +55,46 @@
 
 	let { isUploading, onAttachClick, actions, onSheetOpenChange }: Props = $props();
 
+	// Desktop: one popover hosts every run-binding control. Opening it closes the
+	// context-usage popover implicitly — they are separate components, but only
+	// one summary surface should be open at a time.
+	let controlsPopoverOpen = $state(false);
+	let summaryWrapRef = $state<HTMLDivElement | null>(null);
+	function setControlsPopoverOpen(open: boolean) {
+		controlsPopoverOpen = open;
+	}
+	function toggleControlsPopover() {
+		controlsPopoverOpen = !controlsPopoverOpen;
+	}
+
+	function handlePopoverOutsideClick(e: MouseEvent) {
+		if (!controlsPopoverOpen || !summaryWrapRef) return;
+		if (!(e.target instanceof Node)) return;
+		if (summaryWrapRef.contains(e.target)) return;
+		controlsPopoverOpen = false;
+	}
+
+	function handlePopoverWindowKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape' && controlsPopoverOpen) {
+			e.stopPropagation();
+			setControlsPopoverOpen(false);
+		}
+	}
+
+	$effect(() => {
+		document.addEventListener('click', handlePopoverOutsideClick);
+		window.addEventListener('keydown', handlePopoverWindowKeydown);
+		return () => {
+			document.removeEventListener('click', handlePopoverOutsideClick);
+			window.removeEventListener('keydown', handlePopoverWindowKeydown);
+		};
+	});
+
 	let mobileSheetOpen = $state(false);
 	function setMobileSheetOpen(open: boolean) {
 		mobileSheetOpen = open;
 		onSheetOpenChange?.(open);
 	}
-
-	// Only one override dropdown may be open at a time — opening one closes the others.
-	let openDropdown = $state<'model' | 'effort' | 'permission' | null>(null);
 
 	// Model / effort / permission are the SESSION's run binding, not an override
 	// of the agent's: an agent is the configuration (prompt, tools, memory) and
@@ -210,104 +248,121 @@
 		{ value: 'max', label: 'Max', description: 'Maximum reasoning depth' }
 	];
 
-	// Desktop pill labels — the selected value's human label, with a neutral
-	// fallback when nothing is picked (effort defaults to the provider's own).
-	const effortButtonLabel = $derived(
-		effortLevels.find((m) => m.value === effortValue)?.label ?? 'Effort'
+	// The summary chip reads "Model · Effort · Access". Effort shows its
+	// overridden level when one is set; access always names the effective mode
+	// (it defaults to 'default' → Ask, never blank).
+	const chipEffortLabel = $derived(
+		effortValue ? (effortLevels.find((m) => m.value === effortValue)?.label ?? 'Effort') : 'Auto'
 	);
-	const permissionButtonLabel = $derived(
-		permissionModes.find((m) => m.value === permissionValue)?.label ?? 'Access'
+	const chipPermissionLabel = $derived(
+		permissionModes.find((m) => m.value === permissionValue)?.label ?? 'Ask'
 	);
+	function handleChipKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape' && controlsPopoverOpen) {
+			e.stopPropagation();
+			setControlsPopoverOpen(false);
+		}
+	}
 </script>
 
 <div class="controls-dock">
-	<!-- Left: model / effort / permission pills, then the context ring -->
+	<!-- Left: ONE summary chip, then the context ring -->
 	<div class="controls-left desktop-controls">
-		<!-- Model Override -->
-		<OverrideDropdown
-			modes={modelOptions}
-			currentValue={modelValue}
-			isOverridden={false}
-			isOpen={openDropdown === 'model'}
-			onOpenChange={(open) => (openDropdown = open ? 'model' : null)}
-			onSelect={(v) => activeSession.setModelOverride(v)}
-			title="Model"
-			buttonLabel={modelButtonLabel}
-			buttonSubLabel={modelSubLabel}
-			warn={rerouted}
-			warnTitle={modelWarnTitle}
-			notice={modelNotice}
-		>
-			{#snippet content()}
-				<ModelPickerPanel
-					groups={modelCatalog.groups}
-					options={modelCatalog.options}
-					value={modelValue}
-					notice={modelNotice}
-					contextChoice={$activeSession.contextWindowChoice}
-					onContextChoiceSelect={(choice) => activeSession.setContextWindowChoice(choice)}
-					onSelect={(v) => {
-						activeSession.setModelOverride(v);
-						openDropdown = null;
-					}}
-					onRequestClose={() => (openDropdown = null)}
-				/>
-			{/snippet}
-			{#snippet icon()}
-				<svg class="w-[16px] h-[16px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<rect x="4" y="4" width="16" height="16" rx="2" stroke-width="1.75" />
-					<rect x="9" y="9" width="6" height="6" stroke-width="1.75" />
-					<path stroke-linecap="round" stroke-width="1.75" d="M9 1.5v2.5M15 1.5v2.5M9 20v2.5M15 20v2.5M20 9h2.5M20 14h2.5M1.5 9H4M1.5 14H4" />
-				</svg>
-			{/snippet}
-		</OverrideDropdown>
+		<div class="controls-summary-wrap" bind:this={summaryWrapRef}>
+			<button
+				type="button"
+				class="controls-summary-chip"
+				class:open={controlsPopoverOpen}
+				class:warn={rerouted}
+				onclick={toggleControlsPopover}
+				onkeydown={handleChipKeydown}
+				title={rerouted && modelWarnTitle
+					? modelWarnTitle
+					: `Model ${modelButtonLabel} · effort ${chipEffortLabel} · access ${chipPermissionLabel}`}
+				aria-haspopup="dialog"
+				aria-expanded={controlsPopoverOpen}
+				aria-label={`Chat controls — model ${modelButtonLabel}, effort ${chipEffortLabel}, access ${chipPermissionLabel}`}
+			>
+				<span class="chip-label">{modelButtonLabel}</span>
+				<span class="chip-sep">·</span>
+				<span class="chip-label muted">{chipEffortLabel}</span>
+				<span class="chip-sep">·</span>
+				<span class="chip-label muted">{chipPermissionLabel}</span>
+			</button>
 
-		<!-- Effort Level Override — the popover body is the same slider card the
-		     mobile sheet shows, Fast toggle included in its top-right corner. -->
-		<OverrideDropdown
-			modes={effortLevels}
-			currentValue={effortValue}
-			isOverridden={$activeSession.effortLevelOverride !== null}
-			isOpen={openDropdown === 'effort'}
-			onOpenChange={(open) => (openDropdown = open ? 'effort' : null)}
-			onSelect={(v) => activeSession.setEffortLevelOverride(v)}
-			title="Effort Level"
-			buttonLabel={effortButtonLabel}
-			wide
-		>
-			{#snippet content()}
-				<EffortSliderCard
-					frameless
-					options={effortLevels}
-					value={effortValue}
-					onSelect={(v) => activeSession.setEffortLevelOverride(v)}
-					{fastSupported}
-					fastEnabled={fastMode}
-					onToggleFast={() => activeSession.setFastMode(!fastMode)}
-				/>
-			{/snippet}
-			{#snippet icon()}
-				<Gauge size={16} strokeWidth={1.75} aria-hidden="true" />
-			{/snippet}
-		</OverrideDropdown>
+			{#if controlsPopoverOpen}
+				<!-- The desktop counterpart of the mobile sheet: every run-binding
+				     control in one panel. Chat-setup pills first (agent / execution
+				     mode / branch), then model, effort + Fast, and tool access. -->
+				<div
+					class="controls-popover"
+					role="dialog"
+					aria-label="Chat controls"
+					data-composer-owned-overlay="true"
+				>
+					<section class="popover-section">
+						<div class="section-label"><SlidersHorizontal size={14} strokeWidth={1.8} /><span>Chat setup</span></div>
+						<div class="setup-pills"><ContextPillBar /></div>
+					</section>
 
-		<!-- Permission Mode Override -->
-		<OverrideDropdown
-			modes={permissionModes}
-			currentValue={permissionValue}
-			isOverridden={$activeSession.permissionModeOverride !== null}
-			isOpen={openDropdown === 'permission'}
-			onOpenChange={(open) => (openDropdown = open ? 'permission' : null)}
-			onSelect={(v) => activeSession.setPermissionModeOverride(v)}
-			title="Permission Mode"
-			buttonLabel={permissionButtonLabel}
-		>
-			{#snippet icon()}
-				<svg class="w-[16px] h-[16px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-				</svg>
-			{/snippet}
-		</OverrideDropdown>
+					<section class="popover-section">
+						<div class="section-label"><span>Model</span></div>
+						<ModelPickerPanel
+							groups={modelCatalog.groups}
+							options={modelCatalog.options}
+							value={modelValue}
+							notice={modelNotice}
+							contextChoice={$activeSession.contextWindowChoice}
+							onContextChoiceSelect={(choice) => activeSession.setContextWindowChoice(choice)}
+							onSelect={(v) => {
+								activeSession.setModelOverride(v);
+								setControlsPopoverOpen(false);
+							}}
+							onRequestClose={() => setControlsPopoverOpen(false)}
+						/>
+					</section>
+
+					<section class="popover-section">
+						<div class="section-label"><span>Reasoning effort</span></div>
+						<EffortSliderCard
+							options={effortLevels}
+							value={effortValue}
+							onSelect={(v) => activeSession.setEffortLevelOverride(v)}
+							{fastSupported}
+							fastEnabled={fastMode}
+							onToggleFast={() => activeSession.setFastMode(!fastMode)}
+						/>
+					</section>
+
+					<section class="popover-section">
+						<div class="section-label"><span>Tool access</span></div>
+						<div class="access-list">
+							{#each permissionModes as mode (mode.value)}
+								<button
+									type="button"
+									class="access-row"
+									class:selected={mode.value === permissionValue}
+									onclick={() => activeSession.setPermissionModeOverride(mode.value)}
+									role="menuitemradio"
+									aria-checked={mode.value === permissionValue}
+									title={mode.description}
+								>
+									<span class="access-copy">
+										<strong>{mode.label}</strong>
+										<small>{mode.description}</small>
+									</span>
+									{#if mode.value === permissionValue}
+										<svg class="w-3.5 h-3.5 access-check" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+										</svg>
+									{/if}
+								</button>
+							{/each}
+						</div>
+					</section>
+				</div>
+			{/if}
+		</div>
 
 		<!-- Context-usage ring (16px SVG arc + its popover) -->
 		<ContextUsageBar onOpenChange={(o) => { if (o) void refreshUsageLimits(true); }} />
@@ -406,6 +461,215 @@
 		align-items: center;
 		gap: 6px;
 		min-width: 0;
+	}
+
+	/* ===== SUMMARY CHIP + CONTROLS POPOVER =====
+	   The desktop counterpart of the mobile sheet's overview page: one pill
+	   summarizing the session's run binding (model · effort · access), opening
+	   a single panel that hosts every binding control. */
+	.controls-summary-wrap {
+		position: relative;
+		min-width: 0;
+	}
+
+	.controls-summary-chip {
+		display: flex;
+		align-items: center;
+		gap: 5px;
+		height: 26px;
+		max-width: 100%;
+		min-width: 0;
+		padding: 0 10px;
+		background: var(--scrim);
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		color: var(--foreground);
+		font-size: 12px;
+		cursor: pointer;
+		white-space: nowrap;
+		transition: border-color 0.13s ease, color 0.13s ease, background-color 0.13s ease;
+	}
+
+	.controls-summary-chip:hover,
+	.controls-summary-chip.open {
+		border-color: var(--border-strong);
+		background: color-mix(in oklch, var(--scrim) 70%, var(--popover));
+	}
+
+	.controls-summary-chip:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
+	}
+
+	/* Reroute: amber chip — the same treatment the old model pill carried, so the
+	   "running something else" signal keeps its established look. */
+	.controls-summary-chip.warn,
+	.controls-summary-chip.warn:hover {
+		background: color-mix(in oklch, var(--warning) 10%, transparent);
+		border-color: color-mix(in oklch, var(--warning) 50%, var(--border));
+		color: var(--warning);
+	}
+
+	.chip-label {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		line-height: 1;
+		font-weight: 600;
+		letter-spacing: 0.01em;
+	}
+
+	.chip-label.muted {
+		color: var(--muted-foreground);
+		font-weight: 400;
+	}
+
+	.controls-summary-chip.warn .chip-label.muted {
+		color: color-mix(in oklch, var(--warning) 75%, transparent);
+	}
+
+	.chip-sep {
+		color: var(--muted-foreground);
+		opacity: 0.45;
+		flex-shrink: 0;
+	}
+
+	/* Opens UPWARD from the foot row — same anchor convention as the override
+	   dropdowns it replaces and the context-usage popover beside it. */
+	.controls-popover {
+		position: absolute;
+		bottom: calc(100% + 8px);
+		left: 0;
+		width: min(380px, calc(100vw - 24px));
+		max-height: min(640px, calc(100dvh - 140px));
+		overflow-y: auto;
+		overscroll-behavior: contain;
+		background: var(--popover);
+		border: 1px solid var(--border);
+		border-radius: calc(var(--radius, 0.75rem) * 1.3);
+		box-shadow: var(--shadow-l);
+		padding: 12px;
+		z-index: 60;
+		animation: controls-popover-in 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+		display: flex;
+		flex-direction: column;
+		gap: 14px;
+	}
+
+	@keyframes controls-popover-in {
+		from {
+			opacity: 0;
+			transform: translateY(4px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
+	}
+
+	.popover-section {
+		display: flex;
+		flex-direction: column;
+		gap: 7px;
+		min-width: 0;
+	}
+
+	.popover-section .section-label {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		margin: 0 2px;
+		color: var(--muted-foreground);
+		font-size: 10px;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+	}
+
+	.popover-section .section-label :global(svg) {
+		width: 14px;
+		height: 14px;
+		flex-shrink: 0;
+	}
+
+	/* Chat-setup pills reuse ContextPillBar verbatim; the wrapper just keeps its
+	   upward dropdowns inside the popover's scroll bounds visually. */
+	.setup-pills :global(.context-pill-bar) {
+		padding: 0;
+		z-index: auto;
+	}
+
+	.setup-pills :global(.selector-dropdown),
+	.setup-pills :global(.branch-dropdown),
+	.setup-pills :global(.runner-dropdown) {
+		position: static;
+		width: 100%;
+		min-width: 0;
+		max-width: none;
+		margin-top: 6px;
+		box-shadow: none;
+	}
+
+	.access-list {
+		display: flex;
+		flex-direction: column;
+		background: color-mix(in oklch, var(--muted) 40%, var(--card));
+		border: 1px solid var(--border-subtle);
+		border-radius: calc(var(--radius, 0.75rem) * 0.9);
+		overflow: hidden;
+	}
+
+	.access-row {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		width: 100%;
+		padding: 8px 12px;
+		border: 0;
+		border-bottom: 1px solid var(--border-subtle);
+		background: transparent;
+		color: var(--foreground);
+		text-align: left;
+		cursor: pointer;
+		transition: background-color 0.13s ease;
+	}
+
+	.access-row:last-child {
+		border-bottom: 0;
+	}
+
+	.access-row:hover {
+		background: var(--hover-overlay);
+	}
+
+	.access-row.selected {
+		background: color-mix(in oklch, var(--primary) 7%, transparent);
+	}
+
+	.access-row.selected strong {
+		color: var(--primary);
+	}
+
+	.access-copy {
+		min-width: 0;
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+	}
+
+	.access-copy strong {
+		font-size: 13px;
+		font-weight: 600;
+	}
+
+	.access-copy small {
+		font-size: 11px;
+		color: var(--muted-foreground);
+	}
+
+	.access-check {
+		flex-shrink: 0;
+		color: var(--primary);
 	}
 
 	/* `margin-left: auto` (not a second flex:1 half) so the pills on the left keep
