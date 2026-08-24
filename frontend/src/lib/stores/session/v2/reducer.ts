@@ -213,6 +213,10 @@ function closeOpen(state: V2SessionState): V2SessionState {
  * turn.completed lands has MISSED its terminal `subagent.completed` / terminal
  * `task.updated` event (the #543 wake-turn delivery gap) and is stale.
  *
+ * The one exception is the background-SHELL lane, which the park gate skips: a
+ * `kind === 'shell'` summary outliving turn.completed is live, not stale. See
+ * the guard in the summaries pass below.
+ *
  * Reconcile it against that authoritative signal: finalize such cards/summaries
  * to 'completed'. This heals both live and on reload/replay with no /live fetch
  * (so it stays inside the pure reducer and replay determinism is preserved —
@@ -242,6 +246,15 @@ function settleStaleBackgroundWork(state: V2SessionState): V2SessionState {
 	let summariesTouched = false;
 	const settledTaskIds: string[] = [];
 	const activeTaskSummaries = state.activeTaskSummaries.map((t) => {
+		// Background SHELLS are exempt. A `Bash(run_in_background)` shell
+		// legitimately outlives a COMPLETED turn — the park gate deliberately
+		// excludes the monitor-shell lane, so the turn completes while the shell
+		// keeps running and wakes the session later via the completion watcher.
+		// Shells always receive their terminal task.updated (registry watcher +
+		// boot reconcile), so this heal — built for AGENT cards whose
+		// subagent.completed frame can be lost — has nothing to fix here.
+		// Settling them hid live background shells from the tasks strip.
+		if (t.kind === 'shell') return t;
 		if (t.status === 'running') {
 			summariesTouched = true;
 			settledTaskIds.push(t.id);

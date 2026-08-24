@@ -1374,6 +1374,34 @@ describe('turn.completed settles stale background work (#609)', () => {
 		expect(s.activeTaskSummaries[0].status).toBe('completed');
 	});
 
+	it('leaves a running background-SHELL summary alone', () => {
+		// A `Bash(run_in_background)` shell outlives a completed turn by design
+		// (the park gate skips the monitor-shell lane), so the heal must not
+		// settle it — doing so made the live task card vanish from the strip.
+		const s = fold([
+			ev('task.updated', {
+				task_id: 'sh-1',
+				state: 'running',
+				description: 'sleep 90',
+				kind: 'shell',
+			}),
+			ev('turn.completed', {}),
+		]);
+		expect(s.activeTaskSummaries[0].status).toBe('running');
+		expect(s.activeTaskSummaries[0].kind).toBe('shell');
+	});
+
+	it('still settles a running AGENT summary alongside an exempt shell', () => {
+		const s = fold([
+			ev('task.updated', { task_id: 'ag-1', state: 'running', kind: 'agent' }),
+			ev('task.updated', { task_id: 'sh-1', state: 'running', kind: 'shell' }),
+			ev('turn.completed', {}),
+		]);
+		const byId = Object.fromEntries(s.activeTaskSummaries.map((t) => [t.id, t.status]));
+		expect(byId['ag-1']).toBe('completed');
+		expect(byId['sh-1']).toBe('running');
+	});
+
 	it('does not resurrect or downgrade an already-settled card', () => {
 		const s = fold([
 			ev('subagent.started', { task_id: 'toolu-1', description: 'bg work' }),
