@@ -3,8 +3,10 @@
 Notes live OUTSIDE the model context in a per-session file under
 ``<cwd>/.fluid/notes/``; every mutation returns the complete current notes so
 the plan is recited back into recent context (the part attention actually
-reads) instead of fading out mid-window. Nothing here touches the prompt
-prefix, so notes never invalidate the provider cache.
+reads) instead of fading out mid-window. The engine also recites non-empty
+notes onto each new user turn (see :func:`read_notes` and the native loop's
+reminder plumbing), so a plan written once stays visible all session. Nothing
+here touches the prompt prefix, so notes never invalidate the provider cache.
 """
 
 from __future__ import annotations
@@ -17,10 +19,12 @@ from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 SPEC = ToolSpec(
     name="Note",
     description=(
-        "Session notes for plans and durable working state. Actions: 'add' "
-        "appends a note (requires text), 'list' returns all notes, 'clear' "
-        "empties them. add/clear return the full notes afterward — use notes "
-        "to keep multi-step plans on track."
+        "Working notes for plans and task progress — your todo list through "
+        "a session. Actions: 'add' appends a note (requires text), 'list' "
+        "returns all notes, 'clear' empties them. Notes live outside the "
+        "context window; calling Note is what brings them back into view. "
+        "Before multi-step work, add the steps as notes and check them off "
+        "(add a done marker or restate remaining work) as you go."
     ),
     input_schema={
         "type": "object",
@@ -44,6 +48,24 @@ def _read_notes(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except OSError:
         return ""
+
+
+def read_notes(ctx: ToolCtx, session_id: str | None = None) -> str:
+    """The current notes text, or "" when empty/absent. ``session_id``
+    overrides the ctx's (the engine knows the session before ctx does)."""
+    path = _notes_path(
+        ToolCtx(cwd=ctx.cwd, session_id=session_id or ctx.session_id)
+    )
+    return _read_notes(path).strip()
+
+
+def render_notes_reminder(text: str) -> str:
+    return (
+        "<system-reminder>\n"
+        "Session notes (working plan and progress — keep current with the "
+        "Note tool):\n"
+        f"{text}\n</system-reminder>"
+    )
 
 
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:

@@ -902,6 +902,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         ledger = self._ledger_reminder()
         if ledger is not None:
             content.append(Text(ledger))
+        notes = self._notes_reminder()
+        if notes is not None:
+            content.append(Text(notes))
         plan_reminder = self._plan_mode_reminder()
         if plan_reminder is not None:
             content.append(Text(plan_reminder))
@@ -1079,6 +1082,21 @@ class NativeLoop(BackgroundLifecycleMixin):
         if not text:
             return None
         return render_ledger_reminder(text)
+
+    def _notes_reminder(self) -> str | None:
+        """Recite the session notes (the model's working plan) onto the new
+        user turn — same recitation contract as the ledger: the newest copy
+        rides the recent window while older copies are stripped when their
+        turns digest. Only fires when the model has actually written notes,
+        so an untouched tool costs nothing."""
+        try:
+            from fluid.tools.builtins.note import read_notes, render_notes_reminder
+        except ImportError:
+            return None
+        text = read_notes(self.ctx, self._session.session_id if self._session else None)
+        if not text:
+            return None
+        return render_notes_reminder(text)
 
     def _set_plan_mode(self, active: bool) -> None:
         """Plan/StopPlanning's switch: the next request's schemas follow."""

@@ -472,20 +472,21 @@ def _instructions_section(p: PromptProfile) -> str | None:
         )
     if "Note" in t and "Ledger" in t:
         bullets.append(
-            "- Use Note to keep a multi-step plan on the record. Use Ledger "
-            "for constraints, decisions, and open threads that must survive "
-            "the whole session. Keep both terse; they cost context every turn."
+            "- Track multi-step work with Note: add the steps before "
+            "starting, mark them done as you go. Notes cost nothing until "
+            "called; Ledger is for constraints that must survive the "
+            "session."
         )
     elif "Note" in t:
         bullets.append(
-            "- Use Note to keep a multi-step plan on the record. Keep it "
-            "terse; it costs context every turn."
+            "- Track multi-step work with Note: add the steps before "
+            "starting, mark them done as you go. Notes cost nothing until "
+            "called."
         )
     elif "Ledger" in t:
         bullets.append(
             "- Use Ledger for constraints, decisions, and open threads that "
-            "must survive the whole session. Keep it terse; it costs context "
-            "every turn."
+            "must survive the whole session. Keep entries terse."
         )
     if "Memory" in t:
         bullets.append(
@@ -523,7 +524,7 @@ def _context_section(p: PromptProfile) -> str | None:
             "can no longer see in context is a value you do not know until "
             "you recover it. When a task spans more results than will fit, "
             "record each result's key facts as you go"
-            + (" (Note or Ledger)" if "Note" in t and "Ledger" in t else "")
+            + (" with Note" if "Note" in t else "")
             + " rather than relying on recall at the end."
         )
     else:
