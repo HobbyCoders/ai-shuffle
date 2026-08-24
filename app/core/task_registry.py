@@ -216,6 +216,14 @@ class TaskRegistry:
         # pinning (the launching sub-agent's own kind=="agent" running record
         # already pins) or chip eligibility. Cleared with the session.
         self._subagent_background_tasks: Dict[str, set] = {}
+        # session_id -> {task_id, ...} for APP-spawned Monitor shells (the MCP
+        # Monitor tool and the fluid monitor_spawn spawner both land here). The
+        # third lane of ``is_own_background_task``: these shells are the parent's
+        # own background work — their completion must drive the unpark wake —
+        # but they are independent OS processes, NOT SDK tasks, so they stay out
+        # of ``_sdk_background_tasks`` and deliberately do NOT pin the session in
+        # the pool (``get_active_background_work`` keeps excluding them).
+        self._monitor_shell_tasks: Dict[str, set] = {}
         # session_id -> {task_id -> {"task": <wire dict>, "recorded_at": <epoch>}}
         # for tasks that reached a FAILURE terminal status ("error"/"killed").
         # This is the retention store that fixes the "background task vanished
@@ -316,6 +324,24 @@ class TaskRegistry:
             return
         self._sdk_background_tasks.setdefault(session_id, set()).add(task_id)
 
+    def mark_monitor_shell_task(self, session_id: Optional[str], task_id: str) -> None:
+        """Record that ``task_id`` is an APP-spawned Monitor shell of ``session_id``.
+
+        Admits the shell to the OWN lane of the unpark gate so its terminal frame
+        wakes the parked parent (bdf60782 wired the spawner's handoff; the gate
+        still dropped every such frame as not-own work). Defensive: a missing
+        id is a no-op (a module-level spawn has no parent to wake).
+        """
+        if not session_id or not task_id:
+            return
+        self._monitor_shell_tasks.setdefault(session_id, set()).add(task_id)
+
+    def is_monitor_shell_task(self, session_id: str, task_id: str) -> bool:
+        """True iff ``task_id`` was recorded as an app-spawned Monitor shell."""
+        if not session_id or not task_id:
+            return False
+        return task_id in self._monitor_shell_tasks.get(session_id, set())
+
     def is_sdk_background_task(self, session_id: str, task_id: str) -> bool:
         """True iff ``task_id`` was recorded as an SDK-managed background task.
 
@@ -394,7 +420,10 @@ class TaskRegistry:
         """
         if not session_id or not task_id:
             return False
-        if self.is_sdk_background_task(session_id, task_id):
+        if (
+            self.is_sdk_background_task(session_id, task_id)
+            or self.is_monitor_shell_task(session_id, task_id)
+        ):
             return True
         record = self._tasks.get(session_id, {}).get(task_id)
         tool_use_id = record.get("tool_use_id") if record else None
@@ -1140,6 +1169,7 @@ class TaskRegistry:
         self._unpark_pending.discard(session_id)
         self._unpark_pending_since.pop(session_id, None)
         self._sdk_background_tasks.pop(session_id, None)
+        self._monitor_shell_tasks.pop(session_id, None)
         self._subagent_background_launches.pop(session_id, None)
         self._subagent_background_tasks.pop(session_id, None)
         self._chipped.pop(session_id, None)
@@ -1159,6 +1189,7 @@ class TaskRegistry:
         self._unpark_pending.clear()
         self._unpark_pending_since.clear()
         self._sdk_background_tasks.clear()
+        self._monitor_shell_tasks.clear()
         self._subagent_background_launches.clear()
         self._subagent_background_tasks.clear()
         self._chipped.clear()

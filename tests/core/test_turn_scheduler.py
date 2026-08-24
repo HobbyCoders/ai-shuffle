@@ -1073,6 +1073,44 @@ async def test_own_shell_completion_still_enqueues_unpark(mock_db):
     assert "<task-id>shell-1</task-id>" in wake["prompt"]
 
 
+async def test_app_monitor_shell_completion_enqueues_unpark(mock_db):
+    # Regression (live E2E 2026-08-24): an APP-spawned Monitor shell — the MCP
+    # Monitor tool or the fluid monitor_spawn spawner — registers with NO
+    # tool_use_id and is never mark_sdk_background_task'ed, so the ownership
+    # gate dropped its terminal frame as not-own work (#690 suppression) and a
+    # parked parent stranded forever. The monitor-shell lane admits it.
+    parked = turns_db.enqueue_turn("ms1", "user", prompt="monitor a build")
+    turns_db.start_turn(parked["id"], None, "runner")
+    turns_db.park_turn(parked["id"], ["shell-ms"])
+    task_registry.start_task("ms1", "shell-ms", "shell", "make build")
+    task_registry.mark_monitor_shell_task("ms1", "shell-ms")
+    frame = {"task_id": "shell-ms", "status": "completed",
+             "summary": "build ok", "output_file": "", "usage": {}}
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("ms1", frame)
+        await _drain_kicks()
+
+    (wake,) = _by_source("ms1", "unpark")
+    assert "<task-id>shell-ms</task-id>" in wake["prompt"]
+    assert "<summary>build ok</summary>" in wake["prompt"]
+
+
+async def test_monitor_shell_is_not_pool_pinning_background_work(mock_db):
+    # The new lane feeds ONLY ownership (wake + kill-surface admission) — it
+    # must NOT put the shell into get_active_background_work: app Monitor shells
+    # are independent of the pooled SDK client and deliberately do not pin.
+    task_registry.start_task("mp1", "shell-mp", "shell", "tail -f x")
+    task_registry.mark_monitor_shell_task("mp1", "shell-mp")
+    assert task_registry.is_own_background_task("mp1", "shell-mp")
+    assert task_registry.get_active_background_work("mp1") == []
+    assert not task_registry.has_active_background_work("mp1")
+
+
 async def test_completed_agent_not_parked_still_enqueues_unpark(mock_db):
     # A-1 fires ONLY when the parent is parked (the CLI's rich follow-up exists
     # only in the parked state). A completed own agent with NO parked turn keeps

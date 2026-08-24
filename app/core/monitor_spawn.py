@@ -78,6 +78,13 @@ def make_fluid_monitor_spawner(
 
         task = await _spawn_background(command, cwd, caller_session_id)
 
+        if caller_session_id:
+            from app.core.task_registry import task_registry
+            # OWN-lane admission: without this the watcher's terminal frame is
+            # dropped by on_task_terminal's ownership gate as not-own work and a
+            # parked parent never wakes.
+            task_registry.mark_monitor_shell_task(caller_session_id, task.task_id)
+
         # Completion watcher: fold the output tail into the registry record and
         # fire the scheduler's terminal seam so a parked parent wakes with the
         # result. Detached — it must outlive this tool call by construction.

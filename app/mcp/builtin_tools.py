@@ -826,6 +826,11 @@ def create_builtin_tools_server(
             return _err("command is required.")
         try:
             task = await _spawn_background(command, args.get("cwd"), session_id)
+            if session_id:
+                from app.core.task_registry import task_registry
+                # OWN-lane admission: without this the shell's terminal frame is
+                # dropped as not-own work and a parked parent never wakes.
+                task_registry.mark_monitor_shell_task(session_id, task.task_id)
             return _ok({
                 "task_id": task.task_id,
                 "pid": task.process.pid if task.process else None,
