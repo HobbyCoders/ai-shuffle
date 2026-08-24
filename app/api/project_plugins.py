@@ -2,7 +2,7 @@
 Project plugins API routes - manages project-scoped plugins.
 
 Plugins can be installed to:
-- LOCAL scope: <project>/.claude/plugins/ (gitignored)
+- LOCAL scope: <project>/.fluid/plugins/ (gitignored)
 - PROJECT scope: <project>/plugins/ (committed to git)
 """
 
@@ -74,7 +74,7 @@ class InstallPluginRequest(BaseModel):
     plugin_id: str = Field(..., description="Plugin ID in format 'name@marketplace'")
     scope: str = Field(
         "local",
-        description="Installation scope: 'local' (.claude/plugins/) or 'project' (plugins/)"
+        description="Installation scope: 'local' (.fluid/plugins/) or 'project' (plugins/)"
     )
 
 
@@ -152,7 +152,7 @@ async def list_project_plugins(
     """
     List all plugins installed in the project.
 
-    Returns plugins from both LOCAL (.claude/plugins/) and PROJECT (plugins/) scopes.
+    Returns plugins from both LOCAL (.fluid/plugins/) and PROJECT (plugins/) scopes.
     """
     project = validate_project_access(request, project_id)
     service = _get_project_plugin_service(project)
@@ -199,7 +199,7 @@ async def install_project_plugin(
     Install a plugin to the project.
 
     The plugin is copied from the marketplace to the project directory.
-    Use scope "local" for .claude/plugins/ (gitignored) or "project" for plugins/ (committed).
+    Use scope "local" for .fluid/plugins/ (gitignored) or "project" for plugins/ (committed).
     """
     project = validate_project_access(request, project_id)
     service = _get_project_plugin_service(project)

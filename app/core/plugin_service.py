@@ -1,14 +1,15 @@
 """
-Plugin Service - Core business logic for Claude Code plugin management.
+Plugin Service - Core business logic for plugin management.
 
-This service reads and writes to Claude's native plugin configuration files.
+User-global plugins live in Fluid's home so native legs pick them up
+(fluid.context.plugins, ruling CE5). Package format is still Claude's.
 
 Plugin Scopes:
-- USER: ~/.claude/plugins/ (user-global plugins)
-- LOCAL: <project>/.claude/plugins/ (project-local, gitignored)
+- USER: ~/.fluid/plugins/ (user-global plugins)
+- LOCAL: <project>/.fluid/plugins/ (project-local, gitignored)
 - PROJECT: <project>/plugins/ (project plugins, committed to git)
 
-Docker mode uses /home/appuser/.claude/ for user scope.
+Docker mode uses /home/appuser/.fluid/ for user scope.
 
 It provides a Python API for managing marketplaces, installing/uninstalling plugins,
 and enabling/disabling plugins.
@@ -38,6 +39,7 @@ from app.core.plugin_models import (  # noqa: F401
     AutoUpdateSettings,
     AvailablePlugin,
     _get_claude_dir,
+    _get_fluid_dir,
     _force_rmtree,
 )
 
@@ -52,14 +54,14 @@ logger = logging.getLogger(__name__)
 
 class PluginService:
     """
-    Service for managing Claude Code plugins.
+    Service for managing plugins.
 
-    Reads and writes to Claude's native configuration files to maintain
-    compatibility with the Claude CLI.
+    User-global installs and enablement write to Fluid's home
+    (~/.fluid/plugins, ~/.fluid/settings.json).
 
     Plugin Scopes:
-        - USER: ~/.claude/plugins/ - User-global plugins
-        - LOCAL: <project>/.claude/plugins/ - Project-local (gitignored)
+        - USER: ~/.fluid/plugins/ - User-global plugins
+        - LOCAL: <project>/.fluid/plugins/ - Project-local (gitignored)
         - PROJECT: <project>/plugins/ - Project plugins (committed)
     """
 
@@ -71,10 +73,10 @@ class PluginService:
             project_dir: Optional project directory for LOCAL/PROJECT scope plugins.
                         If not provided, only USER scope is available.
         """
-        # User scope paths (always available)
-        self.CLAUDE_DIR = _get_claude_dir()
-        self.PLUGINS_DIR = self.CLAUDE_DIR / "plugins"
-        self.SETTINGS_FILE = self.CLAUDE_DIR / "settings.json"
+        # User scope paths (always available) — Fluid home, not ~/.claude
+        self.FLUID_DIR = _get_fluid_dir()
+        self.PLUGINS_DIR = self.FLUID_DIR / "plugins"
+        self.SETTINGS_FILE = self.FLUID_DIR / "settings.json"
         self.MARKETPLACES_FILE = self.PLUGINS_DIR / "known_marketplaces.json"
         self.INSTALLED_FILE = self.PLUGINS_DIR / "installed_plugins.json"
         self.CACHE_DIR = self.PLUGINS_DIR / "cache"
@@ -84,7 +86,7 @@ class PluginService:
         # Project scope paths (optional)
         self.project_dir = project_dir
         if project_dir:
-            self.LOCAL_PLUGINS_DIR = project_dir / ".claude" / "plugins"
+            self.LOCAL_PLUGINS_DIR = project_dir / ".fluid" / "plugins"
             self.PROJECT_PLUGINS_DIR = project_dir / "plugins"
         else:
             self.LOCAL_PLUGINS_DIR = None
@@ -811,22 +813,41 @@ class PluginService:
     # Project-Scoped Plugins
     # =========================================================================
 
-    def _get_project_settings_file(self) -> Optional[Path]:
-        """Get the project-local settings file path"""
-        if self.project_dir:
-            return self.project_dir / ".claude" / "settings.json"
-        return None
+    def _scope_from_project_plugin_id(self, plugin_id: str) -> PluginScope:
+        """Map name@project-local / name@project-project onto a PluginScope."""
+        marker = plugin_id.rsplit("@", 1)[-1]
+        if marker == "project-local":
+            return PluginScope.LOCAL
+        return PluginScope.PROJECT
 
-    def _read_project_settings(self) -> Dict[str, Any]:
-        """Read project-local settings"""
-        settings_file = self._get_project_settings_file()
+    def _get_project_settings_file(self, scope: PluginScope = PluginScope.PROJECT) -> Optional[Path]:
+        """Fluid settings file for a project plugin scope.
+
+        LOCAL (gitignored) → <project>/.fluid/settings.local.json
+        PROJECT (committed) → <project>/.fluid/settings.json
+        """
+        if not self.project_dir:
+            return None
+        if scope == PluginScope.LOCAL:
+            return self.project_dir / ".fluid" / "settings.local.json"
+        return self.project_dir / ".fluid" / "settings.json"
+
+    def _read_project_settings(self, scope: Optional[PluginScope] = None) -> Dict[str, Any]:
+        """Read project Fluid settings. No scope merges both enabledPlugins maps."""
+        if scope is None:
+            enabled: Dict[str, Any] = {}
+            for layer_scope in (PluginScope.PROJECT, PluginScope.LOCAL):
+                layer = self._read_project_settings(layer_scope)
+                enabled.update(layer.get("enabledPlugins", {}))
+            return {"enabledPlugins": enabled}
+        settings_file = self._get_project_settings_file(scope)
         if settings_file:
             return self._read_json_file(settings_file, {})
         return {}
 
-    def _write_project_settings(self, data: Dict[str, Any]) -> bool:
-        """Write project-local settings"""
-        settings_file = self._get_project_settings_file()
+    def _write_project_settings(self, data: Dict[str, Any], scope: PluginScope = PluginScope.PROJECT) -> bool:
+        """Write one Fluid project-scope settings file."""
+        settings_file = self._get_project_settings_file(scope)
         if settings_file:
             settings_file.parent.mkdir(parents=True, exist_ok=True)
             return self._write_json_file(settings_file, data)
@@ -951,7 +972,7 @@ class PluginService:
 
         Args:
             plugin_id: Plugin ID in format "name@marketplace"
-            scope: LOCAL (.claude/plugins/) or PROJECT (plugins/)
+            scope: LOCAL (.fluid/plugins/) or PROJECT (plugins/)
 
         Returns:
             PluginInfo for the installed plugin
@@ -971,20 +992,22 @@ class PluginService:
         return _inst_mod.uninstall_project_plugin(self, plugin_id)
 
     def enable_project_plugin(self, plugin_id: str) -> bool:
-        """Enable a plugin in project scope"""
-        settings = self._read_project_settings()
+        """Enable a plugin in its Fluid project/local settings file."""
+        scope = self._scope_from_project_plugin_id(plugin_id)
+        settings = self._read_project_settings(scope)
         if "enabledPlugins" not in settings:
             settings["enabledPlugins"] = {}
         settings["enabledPlugins"][plugin_id] = True
-        return self._write_project_settings(settings)
+        return self._write_project_settings(settings, scope)
 
     def disable_project_plugin(self, plugin_id: str) -> bool:
-        """Disable a plugin in project scope"""
-        settings = self._read_project_settings()
+        """Disable a plugin in its Fluid project/local settings file."""
+        scope = self._scope_from_project_plugin_id(plugin_id)
+        settings = self._read_project_settings(scope)
         if "enabledPlugins" not in settings:
             settings["enabledPlugins"] = {}
         settings["enabledPlugins"][plugin_id] = False
-        return self._write_project_settings(settings)
+        return self._write_project_settings(settings, scope)
 
     def get_project_enabled_plugins(self) -> Dict[str, bool]:
         """Get all project plugin enable/disable states"""

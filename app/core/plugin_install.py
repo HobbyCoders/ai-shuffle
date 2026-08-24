@@ -576,7 +576,7 @@ def install_plugin_to_project(svc, plugin_id: str, scope: PluginScope = PluginSc
     Args:
         svc: PluginService instance
         plugin_id: Plugin ID in format "name@marketplace"
-        scope: LOCAL (.claude/plugins/) or PROJECT (plugins/)
+        scope: LOCAL (.fluid/plugins/) or PROJECT (plugins/)
 
     Returns:
         PluginInfo for the installed plugin
@@ -714,11 +714,11 @@ def uninstall_project_plugin(svc, plugin_id: str) -> bool:
     # Remove plugin directory
     shutil.rmtree(plugin_path)
 
-    # Remove from enabled plugins in project settings
-    settings = svc._read_project_settings()
+    # Remove from enabled plugins in the matching Fluid settings file
+    settings = svc._read_project_settings(scope)
     enabled = settings.get("enabledPlugins", {})
     enabled.pop(plugin_id, None)
     settings["enabledPlugins"] = enabled
-    svc._write_project_settings(settings)
+    svc._write_project_settings(settings, scope)
 
     return True

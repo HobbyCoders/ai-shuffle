@@ -4,7 +4,7 @@ Plugin Auto-Update Background Task
 Periodically syncs marketplaces and updates installed plugins.
 Runs as an asyncio background task, similar to session cleanup and DB maintenance.
 
-Settings are stored in ~/.claude/plugins/auto_update_settings.json and can be
+Settings are stored in ~/.fluid/plugins/auto_update_settings.json and can be
 modified via the /api/v1/plugins/auto-update/settings endpoint.
 """
 

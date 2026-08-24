@@ -165,8 +165,8 @@ def _build_mcp_servers_dict(
                 mcp_servers[server.name] = config
 
     # NOTE: Plugin MCP servers (e.g. Context7) are NOT added here.
-    # The SDK loads installed plugins automatically from ~/.claude/plugins/,
-    # just like the CLI does. Manually adding them would create duplicates
+    # Native legs load enabled plugins from ~/.fluid/plugins. Manually adding
+    # them here would create duplicates
     # (e.g. mcp__context7__* AND mcp__plugin_context7_context7__*).
 
     if mcp_servers:
