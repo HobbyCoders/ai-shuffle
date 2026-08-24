@@ -253,6 +253,7 @@ from fluid.providers.openai_responses.client import (
     OpenAIResponsesClient,
 )
 from fluid.providers.openrouter.client import OpenRouterClient
+from fluid.providers._retry import RetryPolicy
 from fluid.store.base import MemoryStore
 from fluid.tools.registry import ToolCtx, ToolRegistry
 
@@ -3352,6 +3353,12 @@ async def _build_provider_client(
         # api_dialect='openai': xAI-direct / Groq / vLLM). For openrouter-type
         # rows the stored base ("https://openrouter.ai/api") composes to the
         # client's own default URL, so honoring it is behavior-preserving.
+        #
+        # The OpenRouter client ships with retries OFF (RetryPolicy(max_retries=0))
+        # out of billing-idempotency caution; we opt in explicitly so this leg
+        # rides out transient 429/5xx the way the anthropic and openai_responses
+        # legs already do by default. fluid only retries before the first chunk,
+        # so an opted-in retry can never double-stream a partial message.
         pricing = _openrouter_pricing(options)
         if creds is not None:
             if creds.base_url:
@@ -3360,12 +3367,18 @@ async def _build_provider_client(
                         api_key=creds.api_key,
                         base_url=_chat_completions_url(creds.base_url),
                         pricing=pricing,
+                        retry=RetryPolicy(),
                     ),
                     None,
                 )
-            return OpenRouterClient(api_key=creds.api_key, pricing=pricing), None
+            return (
+                OpenRouterClient(
+                    api_key=creds.api_key, pricing=pricing, retry=RetryPolicy()
+                ),
+                None,
+            )
         _require_env_credential("OPENROUTER_API_KEY", kind)
-        return OpenRouterClient(pricing=pricing), None
+        return OpenRouterClient(pricing=pricing, retry=RetryPolicy()), None
     # anthropic — API-key rows only. A Claude Pro/Max SUBSCRIPTION OAuth token is
     # never routed here (that path stays delegated-CLI only); resolve_provider_
     # credentials refuses such a row outright. A row-level ``base_url`` (every

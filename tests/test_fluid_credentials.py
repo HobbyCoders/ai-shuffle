@@ -145,6 +145,32 @@ async def test_plaintext_auth_token_still_works(monkeypatch):
     assert FakeOpenRouter.last["api_key"] == "plain-key"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("base_url", [None, "https://api.x.ai/v1"])
+async def test_openrouter_leg_retries_transient_failures(monkeypatch, base_url):
+    """The openrouter lane opts into fluid's shared RetryPolicy.
+
+    fluid's OpenRouterClient defaults to ``max_retries=0``; without an explicit
+    opt-in a single pre-stream 429 or 5xx killed the whole turn. Construct the
+    REAL client here (the autouse fake is undone) so the assertion is about the
+    retry policy the client actually ends up holding.
+    """
+    from fluid.providers.openrouter.client import OpenRouterClient
+
+    monkeypatch.setattr(harness_adapter, "OpenRouterClient", OpenRouterClient)
+    fake_provider_rows(
+        monkeypatch,
+        {"id": PID, "name": "Row", "provider_type": "openrouter", "enabled": True,
+         "auth_token": "enc:sk-secret", "base_url": base_url},
+    )
+    client, http_client = await harness_adapter._build_provider_client(
+        "openrouter", _opts()
+    )
+    if http_client is not None:
+        await http_client.aclose()
+    assert client._retry.max_retries == 3
+
+
 # ─── 2. Codex (ChatGPT-subscription) OAuth ───────────────────────────────────
 
 
