@@ -80,6 +80,7 @@ def _recorder_mock():
     rec.start = AsyncMock()
     rec.on_event = AsyncMock()
     rec.close = AsyncMock()
+    rec.record_task_terminal = AsyncMock(return_value=0)
     return rec
 
 
@@ -738,3 +739,60 @@ async def test_unpark_turn_threads_completion_frames_to_provider_overrides(mock_
 
     assert outcome == "completed"
     assert captured["overrides"]["background_task_completions"] == frames
+
+
+async def test_unpark_turn_records_terminal_task_events_after_start(mock_db):
+    """The wake turn is the delivery point for a completion that happened
+    between turns, so it must write the terminal task.updated to the event log —
+    right after turn.started, before the pump runs (the FE no longer
+    force-settles background shells at turn end, #991)."""
+    frames = [
+        {"task_id": "shell-1", "status": "completed", "kind": "shell"},
+        {"task_id": "shell-2", "status": "failed", "kind": "shell"},
+    ]
+    turn = turns_db.enqueue_turn(
+        "s12t",
+        "unpark",
+        prompt="background task completed",
+        payload={"pending_frames": frames, "task_ids": ["shell-1", "shell-2"]},
+    )
+    order = []
+
+    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])) as env:
+        rec = env["recorder"]
+        rec.start.side_effect = lambda *a, **k: order.append("start")
+        rec.record_task_terminal.side_effect = lambda *a, **k: order.append("terminal")
+        outcome = await session_runtime.SessionRuntime(turn).execute()
+
+    assert outcome == "completed"
+    rec.record_task_terminal.assert_awaited_once_with(frames)
+    assert order == ["start", "terminal"]
+
+
+async def test_plain_turn_records_no_terminal_task_events(mock_db):
+    """No claimed completions on the payload → nothing to settle."""
+    turn = turns_db.enqueue_turn("s12u", "user", prompt="hi")
+
+    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])) as env:
+        outcome = await session_runtime.SessionRuntime(turn).execute()
+
+    assert outcome == "completed"
+    env["recorder"].record_task_terminal.assert_not_awaited()
+
+
+async def test_terminal_task_event_failure_never_kills_the_wake_turn(mock_db):
+    """Best-effort: a recorder that blows up on the terminal append still lets
+    the wake turn run and settle."""
+    frames = [{"task_id": "shell-9", "status": "completed"}]
+    turn = turns_db.enqueue_turn(
+        "s12v",
+        "unpark",
+        prompt="background task completed",
+        payload={"pending_frames": frames, "task_ids": ["shell-9"]},
+    )
+
+    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])) as env:
+        env["recorder"].record_task_terminal.side_effect = RuntimeError("boom")
+        outcome = await session_runtime.SessionRuntime(turn).execute()
+
+    assert outcome == "completed"

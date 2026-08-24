@@ -826,6 +826,21 @@ class SessionRuntime:
             profile_id=self.turn.get("profile_id"),
             record_user=not resume and not already_recorded,
         )
+        if completion_frames:
+            # The wake turn is the claimed completions' delivery point, so this
+            # is where the event log — and with it the frontend card — learns
+            # the task is done. A task that finished BETWEEN turns produces no
+            # terminal frame inside this turn's stream, and the frontend no
+            # longer force-settles background shells at turn end (#991), so
+            # without this append the card runs forever.
+            try:
+                await recorder.record_task_terminal(completion_frames)
+            except Exception:  # noqa: BLE001 — a card badge never kills a turn
+                logger.warning(
+                    "SessionRuntime: recording terminal task events failed for "
+                    "%s (%d frame(s))",
+                    self.session_id, len(completion_frames), exc_info=True,
+                )
         try:
             async for event in _stream_to_websocket_impl(
                 prompt=prompt,

@@ -212,6 +212,12 @@ def _build_event(
     }
 
 
+# Terminal statuses a claimed completion frame may carry. Anything else (an
+# unknown string, or no status at all) settles the card as "completed" — a
+# finished task must never be left running on the strip.
+_TERMINAL_FRAME_STATES = ("completed", "failed", "cancelled")
+
+
 def _registry_kind(session_id: str, task_id: Any) -> Dict[str, Any]:
     """Registry kind ("agent" | "shell") for a TaskUpdated frame, best-effort.
 
@@ -645,6 +651,68 @@ class TurnRecorder:
                 self.session_id, exc_info=True,
             )
             return False
+
+    async def record_task_terminal(self, frames: List[Dict[str, Any]]) -> int:
+        """Append one ``task.updated`` per claimed background-task completion.
+
+        A background task that finishes BETWEEN turns is delivered by the wake
+        turn the scheduler enqueues for it (``payload.pending_frames``). That
+        wake IS the delivery point for those frames, so it is also where the
+        event log — and with it the frontend card — has to learn the task is
+        done: nothing in the wake turn's own stream repeats a completion that
+        happened before it started, and the frontend no longer force-settles
+        background shells at turn end (#991). Without this append the card runs
+        forever, its elapsed timer counting past the real completion.
+
+        Mirrors the in-stream ``task_updated`` translation: registry ``kind`` so
+        the badge survives, registry ``tool_use_id`` so a subagent card can
+        settle. Best-effort like every other append — never raises. Returns the
+        number of events appended.
+        """
+        if self._closed or self._superseded or not frames:
+            return 0
+        try:
+            events: List[Dict[str, Any]] = []
+            for frame in frames:
+                if not isinstance(frame, dict):
+                    continue
+                task_id = frame.get("task_id")
+                if not task_id:
+                    continue
+                task_id = str(task_id)
+                status = frame.get("status")
+                state = (
+                    str(status) if status in _TERMINAL_FRAME_STATES else "completed"
+                )
+                kind = _registry_kind(self.session_id, task_id)
+                if not kind and frame.get("kind"):
+                    kind = {"kind": str(frame["kind"])}
+                tool_use_id = frame.get("tool_use_id")
+                if not tool_use_id:
+                    from app.core.task_registry import task_registry
+                    tool_use_id = task_registry.get_task_tool_use_id(
+                        self.session_id, task_id
+                    )
+                events.append(self._event(
+                    contract.TaskUpdated,
+                    task_id=task_id,
+                    state=state,
+                    description=frame.get("description"),
+                    summary=frame.get("summary"),
+                    tool_use_id=tool_use_id,
+                    **kind,
+                ))
+            if not events:
+                return 0
+            async with self._lock:
+                await self._append(self._drain_buffered_events() + events)
+            return len(events)
+        except Exception:
+            logger.warning(
+                "[TurnRecorder] record_task_terminal failed for %s (%d frame(s))",
+                self.session_id, len(frames), exc_info=True,
+            )
+            return 0
 
     async def on_event(self, event: Dict[str, Any]) -> None:
         """Translate one yielded pump event per §3. Never raises."""

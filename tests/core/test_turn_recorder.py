@@ -12,6 +12,7 @@ in-memory SQLite shim.
 """
 
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -377,6 +378,108 @@ async def test_system_task_updated_without_task_id_falls_back_to_note(mock_db):
     row = _rows()[-1]
     assert row["event_type"] == "system.note"
     assert row["payload"]["subtype"] == "task_updated"
+    await rec.close()
+
+
+# ---------------------------------------------------------------------------
+# record_task_terminal — the wake turn's claimed completions
+# ---------------------------------------------------------------------------
+
+async def test_record_task_terminal_settles_a_shell_frame(mock_db):
+    # A background shell that finished BETWEEN turns is delivered by the wake
+    # turn's pending_frames. That wake is the only place the log learns the task
+    # is done, so the terminal task.updated must land here — with the registry
+    # kind, or the frontend badges the shell as an agent.
+    from app.core.task_registry import task_registry
+    task_registry.reset_all()
+    task_registry.start_task(SID, "task-X", "shell", "npm test", tool_use_id="tu_x")
+    _mk_session()
+    rec = await _recorder()
+    await rec.start("background task completed")
+
+    appended = await rec.record_task_terminal([
+        {"task_id": "task-X", "status": "completed", "summary": "exit 0"},
+    ])
+
+    assert appended == 1
+    row = _rows()[-1]
+    assert row["event_type"] == "task.updated"
+    assert row["payload"]["task_id"] == "task-X"
+    assert row["payload"]["state"] == "completed"
+    assert row["payload"]["kind"] == "shell"
+    assert row["payload"]["summary"] == "exit 0"
+    assert row["payload"]["tool_use_id"] == "tu_x"
+    assert row["turn_id"] == rec.turn_id
+    await rec.close()
+    task_registry.reset_all()
+
+
+@pytest.mark.parametrize("status,state", [
+    ("completed", "completed"),
+    ("failed", "failed"),
+    ("cancelled", "cancelled"),
+    # Unknown / missing status still settles the card rather than leaving it
+    # running forever.
+    ("weird", "completed"),
+    (None, "completed"),
+])
+async def test_record_task_terminal_maps_frame_status(mock_db, status, state):
+    _mk_session()
+    rec = await _recorder()
+    frame = {"task_id": "t1"}
+    if status is not None:
+        frame["status"] = status
+
+    assert await rec.record_task_terminal([frame]) == 1
+
+    row = _rows()[-1]
+    assert row["event_type"] == "task.updated"
+    assert row["payload"]["state"] == state
+    await rec.close()
+
+
+async def test_record_task_terminal_takes_kind_from_the_frame(mock_db):
+    # An unregistered task (older log, or a registry entry already reaped) still
+    # gets its badge when the frame carries the kind itself.
+    from app.core.task_registry import task_registry
+    task_registry.reset_all()
+    _mk_session()
+    rec = await _recorder()
+
+    await rec.record_task_terminal([
+        {"task_id": "t-unreg", "status": "failed", "kind": "shell"},
+    ])
+
+    row = _rows()[-1]
+    assert row["payload"]["kind"] == "shell"
+    assert row["payload"]["state"] == "failed"
+    await rec.close()
+
+
+async def test_record_task_terminal_ignores_junk_frames(mock_db):
+    # No frames, non-dict frames and frames without a task_id append nothing —
+    # an empty task_id makes the frontend reducer bail anyway.
+    _mk_session()
+    rec = await _recorder()
+    await rec.start("hi")
+    before = len(_rows())
+
+    assert await rec.record_task_terminal([]) == 0
+    assert await rec.record_task_terminal(["nope", {"status": "completed"}]) == 0
+
+    assert len(_rows()) == before
+    await rec.close()
+
+
+async def test_record_task_terminal_never_raises(mock_db):
+    # Best-effort: a broken append must not kill the wake turn.
+    _mk_session()
+    rec = await _recorder()
+    rec._append = AsyncMock(side_effect=RuntimeError("boom"))
+
+    assert await rec.record_task_terminal([
+        {"task_id": "t1", "status": "completed"},
+    ]) == 0
     await rec.close()
 
 
