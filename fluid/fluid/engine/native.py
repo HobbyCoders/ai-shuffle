@@ -431,6 +431,18 @@ class NativeLoop(BackgroundLifecycleMixin):
             # share one registry across sessions with different restrictions.
             self.ctx.extra["tool_filter"] = self._tool_permitted
         self.plan_mode = plan_mode
+        # The Plan/StopPlanning builtins flip the same flag the request build
+        # reads, so plan mode can start and (approval-gated) end mid-session.
+        # setdefault: a host wiring its own controller wins.
+        from fluid.tools.builtins.plan import PlanModeControl
+
+        self.ctx.extra.setdefault(
+            "plan_mode_control",
+            PlanModeControl(
+                is_active=lambda: self.plan_mode,
+                set_active=self._set_plan_mode,
+            ),
+        )
         self._codemode = codemode
         # JSON-mode episodic journal (fluid.codemode.journal.ToolJournal).
         # Code-mode sessions journal through the CodeModeSession instead; a
@@ -890,6 +902,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         ledger = self._ledger_reminder()
         if ledger is not None:
             content.append(Text(ledger))
+        plan_reminder = self._plan_mode_reminder()
+        if plan_reminder is not None:
+            content.append(Text(plan_reminder))
         user_node = SessionNode(
             node_id=new_id("node"),
             parent_id=op.parent_node_id or meta.head_node_id,
@@ -1064,6 +1079,37 @@ class NativeLoop(BackgroundLifecycleMixin):
         if not text:
             return None
         return render_ledger_reminder(text)
+
+    def _set_plan_mode(self, active: bool) -> None:
+        """Plan/StopPlanning's switch: the next request's schemas follow."""
+        self.plan_mode = bool(active)
+
+    def _plan_mode_reminder(self) -> str | None:
+        """Recite the plan-mode contract onto each user turn while active —
+        the mode's rules must survive long exploration stretches, the same
+        way Claude Code re-reminds every turn."""
+        if not self.plan_mode:
+            return None
+        registered = (
+            self.registry.get("StopPlanning") is not None
+            if self.registry is not None
+            else False
+        )
+        exit_clause = (
+            "When the plan is ready, present it with StopPlanning for "
+            "approval; only the user's approval ends plan mode."
+            if registered and self._tool_permitted("StopPlanning")
+            else "Only the user can end plan mode."
+        )
+        return (
+            "<system-reminder>\n"
+            "Plan mode is active: a read-only exploration and planning "
+            "phase. Do not write or edit files, run state-changing "
+            "commands, or describe edits as if you had made them. Explore "
+            "the codebase, weigh approaches and their trade-offs, and "
+            f"design a concrete implementation strategy. {exit_clause}\n"
+            "</system-reminder>"
+        )
 
     # ─── Agent loop (model call → tool dispatch → repeat) ────────────────
 
@@ -1423,7 +1469,21 @@ class NativeLoop(BackgroundLifecycleMixin):
             specs = self.registry.list_tools(loaded_only=True)
             if self.plan_mode:
                 specs = plan_mode_tools(specs)
-        return [s.to_api() for s in specs if self._tool_permitted(s.name)]
+        return [
+            s.to_api()
+            for s in specs
+            if self._tool_permitted(s.name) and self._capability_present(s)
+        ]
+
+    def _capability_present(self, spec: Any) -> bool:
+        """Every ``requires_extra`` key the spec names is wired on the ctx.
+
+        A tool whose host injection is missing (no task dispatcher, no monitor
+        spawner, no recall store) is dropped from the request schemas — absent
+        capability must be invisible, not a schema that errors on call.
+        """
+        required = getattr(spec, "requires_extra", ()) or ()
+        return all(key in self.ctx.extra for key in required)
 
     def _build_request(
         self, history: list[Message], *, sticky: bool = True

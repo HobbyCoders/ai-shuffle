@@ -13,14 +13,24 @@ from typing import Any
 from fluid.context.recall import DEFAULT_SEARCH_RESULTS, render_hits, search_path
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
-SPEC = ToolSpec(
-    name="HistorySearch",
-    description=(
+def describe(tools: frozenset[str] | None = None) -> str:
+    """HistorySearch's description, specialized to the session's surface."""
+    has = (lambda name: tools is None or name in tools)
+    expand_route = (
+        "; re-read any hit verbatim with HistoryExpand"
+        if has("HistoryExpand")
+        else ""
+    )
+    return (
         "Keyword-search the FULL stored history of this session — including "
         "turns that were compacted into digests or epoch stubs. Returns "
-        "matching nodes with snippets and refs; re-read any hit verbatim "
-        "with HistoryExpand."
-    ),
+        f"matching nodes with snippets and refs{expand_route}."
+    )
+
+
+SPEC = ToolSpec(
+    name="HistorySearch",
+    description=describe(),
     input_schema={
         "type": "object",
         "properties": {
@@ -36,6 +46,9 @@ SPEC = ToolSpec(
         "required": ["query"],
     },
     risk="safe",
+    # Engine-injected recall handle; absent (no session store) the engine
+    # drops the tool from the request schemas.
+    requires_extra=("history_recall",),
 )
 
 

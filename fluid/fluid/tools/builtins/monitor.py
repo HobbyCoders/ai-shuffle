@@ -30,6 +30,14 @@ import asyncio
 import inspect
 from typing import Any
 
+from fluid.tools.builtins.bash_risk import classify as classify_bash_risk
+from fluid.tools.builtins.bash_risk import session_scope as bash_session_scope
+from fluid.tools.fragments import (
+    CWD_PARAM,
+    DONT_PREDICT_PENDING,
+    END_TURN_ON_BACKGROUND,
+    FRESH_PROCESS,
+)
 from fluid.tools.registry import (
     BackgroundTaskReceipt,
     ToolCtx,
@@ -37,25 +45,38 @@ from fluid.tools.registry import (
     ToolSpec,
 )
 
-SPEC = ToolSpec(
-    name="Monitor",
-    description=(
-        "Spawn a long-running shell command in the background and stream its "
-        "stdout/stderr into a buffer. Returns immediately with a task_id; when "
-        "the command finishes you are woken with its output summary — no "
-        "polling. Use for anything slow you want to overlap with other work: "
-        "CI runs, frontend or release builds, long test suites, dev servers, "
-        "log watchers.\n"
-        "\n"
-        "Each call is a fresh process: environment variables and `cd` do NOT "
-        "persist between calls. Pass `cwd` instead of prefixing the command "
-        "with cd. Output is capped — the completion summary keeps head+tail, "
-        "dropping the middle.\n"
-        "\n"
+
+def describe(tools: frozenset[str] | None = None) -> str:
+    """Monitor's description, specialized to the session's tool surface."""
+    has = (lambda name: tools is None or name in tools)
+    closing = (
         "Prefer Monitor over a blocking Bash call whenever the wait is longer "
         "than a few seconds: start it, keep doing useful work, and incorporate "
         "the result when the completion arrives."
-    ),
+        if has("Bash")
+        else "Start it, keep doing useful work, and incorporate the result "
+        "when the completion arrives."
+    ) + f" {END_TURN_ON_BACKGROUND}"
+    return (
+        "Spawn a long-running shell command in the background and stream its "
+        "stdout/stderr into a buffer. Returns immediately with a task_id; when "
+        "the command finishes you are woken with its output summary — no "
+        f"polling. {DONT_PREDICT_PENDING} Use "
+        "for anything slow you want to overlap with other work: CI runs, "
+        "frontend or release builds, long test suites, dev servers, log "
+        "watchers.\n"
+        "\n"
+        f"{FRESH_PROCESS} "
+        "Output is capped — the completion summary keeps head+tail, "
+        "dropping the middle.\n"
+        "\n"
+        + closing
+    )
+
+
+SPEC = ToolSpec(
+    name="Monitor",
+    description=describe(),
     input_schema={
         "type": "object",
         "properties": {
@@ -65,15 +86,21 @@ SPEC = ToolSpec(
             },
             "cwd": {
                 "type": "string",
-                "description": (
-                    "Working directory for this command (default: the session "
-                    "cwd). Set it instead of prefixing the command with cd."
-                ),
+                "description": CWD_PARAM,
             },
         },
         "required": ["command"],
     },
     risk="write",
+    # Monitored commands are shell commands: the same read-only proof that
+    # lets Bash skip a prompt applies (a background `ls` is as safe as a
+    # foreground one), and an always-allow scopes to the programs run.
+    classify_risk=classify_bash_risk,
+    session_scope=bash_session_scope,
+    # Host-injected spawner (see module docstring). Without it the engine
+    # drops Monitor from the request schemas rather than advertising a tool
+    # that can only error.
+    requires_extra=("monitor_spawn",),
 )
 
 

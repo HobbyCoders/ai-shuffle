@@ -70,6 +70,14 @@ class ToolSpec:
     check_available: Callable[[], bool] | None = field(
         default=None, compare=False, repr=False
     )
+    # ``ctx.extra`` keys this tool needs before it can do anything (a host
+    # injection: a dispatcher, a spawner, a store handle). The engine drops a
+    # tool whose keys are missing from the request schemas, so a capability the
+    # host never wired is invisible rather than a schema that errors on call
+    # (the handler's own guard stays as the dispatch backstop). Hosts wire
+    # capabilities at attach time, before the first turn — the surface is
+    # stable for the whole session.
+    requires_extra: tuple[str, ...] = ()
 
     def scope_of(self, input: dict[str, Any]) -> frozenset[str] | None:
         """Labels an ``allow_always`` for this call would cover (None = all)."""
@@ -318,6 +326,17 @@ class ToolRegistry:
     def get(self, name: str) -> ToolSpec | None:
         entry = self._entries.get(name)
         return entry.spec if entry else None
+
+    def amend_spec(self, name: str, **changes: Any) -> None:
+        """Replace fields on a registered spec (description refinement seam).
+
+        Used once at session build to specialize prompt-facing text to the
+        session — the permitted tool surface, config-dependent limits — before
+        the first request is serialized. Amending an unknown name is a no-op.
+        """
+        entry = self._entries.get(name)
+        if entry is not None:
+            entry.spec = replace(entry.spec, **changes)
 
     # ─── Dispatch ────────────────────────────────────────────────────────
 

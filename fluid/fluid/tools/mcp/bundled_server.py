@@ -117,6 +117,10 @@ async def _answer(registry: ToolRegistry, ctx: ToolCtx, req: dict[str, Any]) -> 
         specs = [
             s for s in registry.list_tools(loaded_only=True)
             if s.source in ("inproc", "builtin")
+            # Same rule as the native request schemas: a tool whose host
+            # capability is not wired on this ctx is invisible, not
+            # advertised-and-erroring.
+            and all(key in ctx.extra for key in (s.requires_extra or ()))
         ]
         return {"tools": [
             {"name": s.name, "description": s.description, "input_schema": s.input_schema}

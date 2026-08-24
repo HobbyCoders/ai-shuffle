@@ -22,9 +22,16 @@ _MAX_MATCHES_PER_SESSION = 3
 _OUTPUT_CAP = 16_000
 _MAX_SESSIONS_SCANNED = 500
 
-SPEC = ToolSpec(
-    name="SessionSearch",
-    description=(
+def describe(tools: frozenset[str] | None = None) -> str:
+    """SessionSearch's description, specialized to the session's surface."""
+    has = (lambda name: tools is None or name in tools)
+    recall_route = (
+        " This searches OTHER sessions; for content trimmed from THIS "
+        "session use HistorySearch/HistoryExpand."
+        if has("HistorySearch") and has("HistoryExpand")
+        else " This searches OTHER sessions, not the current one."
+    )
+    return (
         "Search past sessions' stored conversations for keywords and return "
         "matching snippets, newest sessions first. Use when the user "
         "references earlier work you cannot see (\"like we did last time\", "
@@ -34,9 +41,13 @@ SPEC = ToolSpec(
         "Matches are scored by how many query terms a message contains. "
         "Results name the session id and a snippet around the match; they "
         "are recall, not live state — verify anything you act on against "
-        "the current files. This searches OTHER sessions; for content "
-        "trimmed from THIS session use HistorySearch/HistoryExpand."
-    ),
+        "the current files." + recall_route
+    )
+
+
+SPEC = ToolSpec(
+    name="SessionSearch",
+    description=describe(),
     input_schema={
         "type": "object",
         "properties": {
@@ -52,6 +63,9 @@ SPEC = ToolSpec(
         "required": ["query"],
     },
     risk="safe",
+    # Host-wired store directory; absent (in-memory store) the engine drops
+    # the tool from the request schemas.
+    requires_extra=("session_store_dir",),
 )
 
 

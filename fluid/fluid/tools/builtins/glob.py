@@ -19,19 +19,31 @@ MAX_RESULTS = 200
 MAX_LIMIT = 5000
 DEADLINE_S = 10.0
 
+def describe(tools: frozenset[str] | None = None) -> str:
+    """Glob's description, specialized to the session's tool surface."""
+    has = (lambda name: tools is None or name in tools)
+    opening = "Find files by glob pattern (e.g. **/*.py, src/**/*.ts)." + (
+        " Prefer this over find/ls via Bash for locating files by name or "
+        "extension."
+        if has("Bash")
+        else ""
+    )
+    return (
+        opening + "\n"
+        "\n"
+        "Returns matching paths (relative to the searched root) sorted by "
+        "modification time, newest first — so the files most likely to "
+        f"matter come first. Results are capped at {MAX_RESULTS} by default "
+        f"(a note tells you when the cap was hit; raise `limit` up to "
+        f"{MAX_LIMIT} or narrow the pattern). Heavy directories "
+        "(node_modules, .git, build output, virtualenvs) are pruned from "
+        "the walk."
+    )
+
+
 SPEC = ToolSpec(
     name="Glob",
-    description=(
-        "Find files by glob pattern (e.g. **/*.py, src/**/*.ts). Prefer this "
-        "over find/ls via Bash for locating files by name or extension.\n"
-        "\n"
-        "Returns matching paths sorted by modification time, newest first — "
-        "so the files most likely to matter come first. Results are capped "
-        f"at {MAX_RESULTS} by default (a note tells you when the cap was "
-        f"hit; raise `limit` up to {MAX_LIMIT} or narrow the pattern). Heavy "
-        "directories (node_modules, .git, build output, virtualenvs) are "
-        "pruned from the walk."
-    ),
+    description=describe(),
     input_schema={
         "type": "object",
         "properties": {

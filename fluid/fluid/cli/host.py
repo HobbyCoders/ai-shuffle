@@ -347,7 +347,10 @@ class CliHost:
     async def _build_child(self, definition: Any | None, worker: Worker) -> Any:
         from fluid.config.loader import build_engine
         from fluid.context.compiler import PromptInputs, compile_prompt
-        from fluid.tools.builtins import register_builtins
+        from fluid.tools.builtins import (
+            refine_builtin_descriptions,
+            register_builtins,
+        )
         from fluid.tools.registry import ToolRegistry
 
         meta = await self.store.create_session()
@@ -371,7 +374,20 @@ class CliHost:
         allowed = None
         if definition is not None and definition.tools:
             allowed = list(definition.tools)
-        disallowed = ["Task", *self.config.tools.disallowed]
+        # No recursive fan-out, and no plan mode inside a worker — a subagent
+        # asking the user to approve a plan inverts the delegation contract
+        # (Claude Code bans its plan tools in subagents the same way).
+        disallowed = ["Task", "Plan", "StopPlanning", *self.config.tools.disallowed]
+        refine_builtin_descriptions(
+            registry,
+            allowed=allowed,
+            disallowed=disallowed,
+            memory_char_limit=(
+                self.config.memory.char_limit
+                if self.config.memory.enabled
+                else None
+            ),
+        )
 
         permissions = None
         parent_perms = getattr(self.engine, "permissions", None)

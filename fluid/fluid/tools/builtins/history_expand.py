@@ -42,6 +42,9 @@ SPEC = ToolSpec(
         "required": ["ref"],
     },
     risk="safe",
+    # Engine-injected recall handle; absent (no session store) the engine
+    # drops the tool from the request schemas.
+    requires_extra=("history_recall",),
 )
 
 

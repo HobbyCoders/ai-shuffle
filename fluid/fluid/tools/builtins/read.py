@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from fluid.tools.builtins._util import is_binary, resolve
+from fluid.tools.fragments import READ_BEFORE_EDIT
 from fluid.tools.registry import ToolCtx, ToolImage, ToolOutcome, ToolSpec
 
 # Media types the Anthropic/OpenAI vision APIs accept as base64 images.
@@ -40,23 +41,42 @@ MAX_IMAGE_BYTES = 3_750_000
 DEFAULT_LINE_LIMIT = 2_000  # lines returned when no explicit limit is given
 MAX_LINE_CHARS = 2_000  # longer lines are cut with a marker
 
-SPEC = ToolSpec(
-    name="Read",
-    description=(
-        "Read a file from the filesystem. Text is returned with `lineno<TAB>` "
-        "prefixes (display formatting only — never copy it into Edit "
-        "old_string). Images (png/jpg/gif/webp) are returned visually so you "
-        "can see them.\n"
+def describe(tools: frozenset[str] | None = None) -> str:
+    """Read's description, specialized to the session's tool surface."""
+    has = (lambda name: tools is None or name in tools)
+    line_prefix = "Text is returned with `lineno<TAB>` prefixes" + (
+        " (display formatting only — never copy it into Edit old_string)"
+        if has("Edit")
+        else " (display formatting only, not file content)"
+    )
+    edit_license = f"- {READ_BEFORE_EDIT}" if has("Edit") else ""
+    bash_route = " Prefer Read over cat/head/tail via Bash." if has("Bash") else ""
+    if edit_license:
+        closing = edit_license + bash_route
+    elif bash_route:
+        closing = "-" + bash_route
+    else:
+        closing = ""
+    return (
+        f"Read a file from the filesystem. {line_prefix}. Images "
+        "(png/jpg/gif/webp) are returned visually so you can see them; an "
+        f"image over {MAX_IMAGE_BYTES:,} bytes is refused — downscale or "
+        "crop it first.\n"
         "\n"
         "Usage notes:\n"
-        "- Reads up to 2000 lines from the start by default. When you only "
-        "need part of a large file, pass offset/limit — a truncation marker "
-        "tells you the offset to continue from.\n"
-        "- Lines longer than 2000 characters are cut with a marker. Other "
-        "binary files are refused with a diagnostic rather than dumped.\n"
-        "- Reading a file is what licenses a later Edit of it, so Read a "
-        "file before modifying it. Prefer Read over cat/head/tail via Bash."
-    ),
+        f"- Reads up to {DEFAULT_LINE_LIMIT} lines from the start by default. "
+        "When you only need part of a large file, pass offset/limit — a "
+        "truncation marker tells you the offset to continue from.\n"
+        f"- Lines longer than {MAX_LINE_CHARS} characters are cut with a "
+        "marker. A missing path or a non-image binary file returns a short "
+        "diagnostic rather than content.\n"
+        + (f"{closing}\n" if closing else "")
+    ).rstrip("\n")
+
+
+SPEC = ToolSpec(
+    name="Read",
+    description=describe(),
     input_schema={
         "type": "object",
         "properties": {
@@ -67,7 +87,7 @@ SPEC = ToolSpec(
             },
             "limit": {
                 "type": "integer",
-                "description": "Maximum lines to return (default 2000).",
+                "description": f"Maximum lines to return (default {DEFAULT_LINE_LIMIT}).",
             },
         },
         "required": ["file_path"],

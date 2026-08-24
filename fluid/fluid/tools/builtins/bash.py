@@ -6,15 +6,58 @@ import asyncio
 import os
 from typing import Any
 
-from fluid.tools.builtins._util import strip_ansi, truncate
+from fluid.tools.builtins._util import _TRUNCATE_LIMIT, strip_ansi, truncate
 from fluid.tools.builtins.bash_risk import classify as classify_bash_risk
 from fluid.tools.builtins.bash_risk import session_scope as bash_session_scope
+from fluid.tools.fragments import CWD_PARAM, FRESH_PROCESS
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 from fluid.tools.shell import resolve_shell
 
-SPEC = ToolSpec(
-    name="Bash",
-    description=(
+DEFAULT_TIMEOUT_S = 120.0
+
+
+def describe(tools: frozenset[str] | None = None) -> str:
+    """Bash's description, specialized to the session's tool surface.
+
+    ``tools=None`` means the full builtin surface (the module-constant SPEC).
+    Cross-tool routing clauses are emitted only when the named tool exists in
+    the surface — prose about an absent tool is hallucinated-call bait.
+    """
+    has = (lambda name: tools is None or name in tools)
+    alternatives = []
+    if has("Read"):
+        alternatives.append("Read instead of cat/head/tail")
+    if has("Grep"):
+        alternatives.append("Grep instead of grep/rg")
+    if has("Glob"):
+        alternatives.append("Glob instead of find/ls")
+    if has("Edit") and has("Write"):
+        alternatives.append("Edit/Write instead of sed or echo redirection")
+    elif has("Edit"):
+        alternatives.append("Edit instead of sed")
+    elif has("Write"):
+        alternatives.append("Write instead of echo redirection")
+    prefer_bullet = (
+        "- Prefer the dedicated tools over their shell equivalents: "
+        + ", ".join(alternatives)
+        + ". They are bounded, their results integrate with the permission "
+        "gates, and they stay referenceable later in the session.\n"
+        if alternatives
+        else ""
+    )
+    background_bullet = (
+        "- Never start background work with a trailing `&`, nohup, or "
+        "setsid — the process outlives the call untracked."
+        + (
+            " Use the Monitor tool so completion wakes the session.\n"
+            if has("Monitor")
+            else "\n"
+        )
+    )
+    read_windows = "Redirect to a file" + (
+        " and Read it in windows" if has("Read") else ""
+    )
+    return (
         "Execute a shell command and return its combined stdout+stderr.\n"
         "\n"
         "The command runs through a POSIX shell (sh/bash on POSIX, Git Bash "
@@ -24,34 +67,37 @@ SPEC = ToolSpec(
         "package managers, and other command-line programs.\n"
         "\n"
         "Usage notes:\n"
-        "- Each call is a fresh process: environment variables, shell "
-        "functions, and `cd` do NOT persist between calls. Pass `cwd` or use "
-        "absolute paths instead of relying on an earlier `cd`.\n"
-        "- Prefer the dedicated tools over their shell equivalents: Read "
-        "instead of cat/head/tail, Grep instead of grep/rg, Glob instead of "
-        "find, and Write/Edit instead of echo/sed redirection. They are "
-        "bounded, faster, and their results integrate with the session.\n"
+        f"- {FRESH_PROCESS}\n"
+        + prefer_bullet +
+        "- Provably read-only commands (file listings, git status/log/diff, "
+        "plain searches) run without a permission prompt; a command that "
+        "writes, redirects, substitutes (`$(...)`), or touches credential "
+        "files may ask the user first. An \"always allow\" answer covers the "
+        "programs that command ran, not every future command.\n"
         "- There is no stdin: commands that prompt for input will hang until "
         "the timeout. Pass non-interactive flags (e.g. --yes) where needed; "
         "interactive git flags (e.g. `git rebase -i`) are not supported.\n"
-        "- Output is capped at ~30KB (head and tail kept, middle dropped). "
-        "Redirect to a file and Read it in windows when you expect more. "
+        f"- Output is capped at ~{_TRUNCATE_LIMIT // 1000}KB (head and tail "
+        f"kept, middle dropped). {read_windows} when you expect more. "
         "NEVER pipe a build or test command through tail/head/cat to shorten "
         "output (e.g. `cargo build | tail -20`): the cap already handles "
         "size, and the pipe makes the exit code report the LAST pipeline "
         "command's status (tail's 0), masking real failures — run the "
         "command bare. `cmd || echo failed` masks the exit code the same "
         "way.\n"
-        "- Never start background work with a trailing `&`, nohup, or "
-        "setsid — the process outlives the call untracked. Use the Monitor "
-        "tool (when available) so completion wakes the session.\n"
+        + background_bullet +
         "- A non-zero exit code appends an [exit code N] line to the output and "
         "is flagged as an error — read the output before retrying. In code mode "
         "Bash() returns that text instead of raising, so exit codes can be "
         "tested in Python (git merge-base, grep -q, test).\n"
         "- Quote file paths that contain spaces. Under Git Bash, write Windows "
         "paths with forward slashes or inside quotes so backslashes survive.\n"
-    ),
+    )
+
+
+SPEC = ToolSpec(
+    name="Bash",
+    description=describe(),
     input_schema={
         "type": "object",
         "properties": {
@@ -60,15 +106,12 @@ SPEC = ToolSpec(
                 "type": "number",
                 "description": (
                     "Seconds before the command is killed and reported as a "
-                    "timeout error (default 120)."
+                    f"timeout error (default {DEFAULT_TIMEOUT_S:g})."
                 ),
             },
             "cwd": {
                 "type": "string",
-                "description": (
-                    "Working directory for this command (default: the session "
-                    "cwd). Set it instead of prefixing the command with cd."
-                ),
+                "description": CWD_PARAM,
             },
         },
         "required": ["command"],
@@ -83,7 +126,7 @@ SPEC = ToolSpec(
 
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     command = input["command"]
-    timeout = float(input.get("timeout", 120))
+    timeout = float(input.get("timeout", DEFAULT_TIMEOUT_S))
     cwd = input.get("cwd") or ctx.cwd
     proc = await asyncio.create_subprocess_exec(
         *resolve_shell().argv_prefix,

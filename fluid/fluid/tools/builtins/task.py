@@ -32,6 +32,7 @@ import asyncio
 import inspect
 from typing import Any
 
+from fluid.tools.fragments import DONT_PREDICT_PENDING, END_TURN_ON_BACKGROUND
 from fluid.tools.registry import (
     BackgroundTaskReceipt,
     ToolCtx,
@@ -42,21 +43,26 @@ from fluid.tools.registry import (
 SPEC = ToolSpec(
     name="Task",
     description=(
-        "Delegate a self-contained task to a configured subagent. The "
-        "subagent runs in an isolated session with its own configuration, "
-        "memory, and tools — it does not see this conversation, so give it a "
-        "complete brief: objective, relevant paths and context, constraints, "
-        "and the report you expect back.\n"
+        "Delegate a self-contained task to a configured subagent. Available "
+        "agent types are listed under '# Available agent types' in your "
+        "system prompt — use only names listed there; when no such section "
+        "exists, do not call Task. The subagent runs in an isolated session "
+        "with its own configuration, memory, and tools — it does not see "
+        "this conversation, so give it a complete brief: objective, relevant "
+        "paths and context, constraints, and the report you expect back.\n"
         "\n"
         "Delegate independent or context-heavy work (broad searches, "
         "multi-file investigations, parallelizable changes); handle a quick "
-        "lookup or single edit yourself. Do not duplicate delegated work by "
-        "also starting it yourself.\n"
+        "lookup or single edit yourself. To run several independent "
+        "subagents concurrently, send their Task calls together in one "
+        "reply. Do not duplicate delegated work by also starting it "
+        "yourself.\n"
         "\n"
         "mode='sync' (default) waits for the subagent's report; "
         "mode='background' returns immediately with the worker session id "
         "and completion is pushed to you later — keep doing other useful "
-        "work instead of polling.\n"
+        f"work instead of polling. {DONT_PREDICT_PENDING} "
+        f"{END_TURN_ON_BACKGROUND}\n"
         "\n"
         "A subagent's report is a SELF-REPORT, not a verified fact: for any "
         "external side effect it claims (a file written, a push, an upload), "
@@ -88,6 +94,10 @@ SPEC = ToolSpec(
         "required": ["agent", "prompt"],
     },
     risk="write",
+    # Host-injected dispatcher (see module docstring). Without it the engine
+    # drops Task from the request schemas — an undeliverable delegation tool
+    # must be invisible, not advertised.
+    requires_extra=("task_dispatch",),
 )
 
 

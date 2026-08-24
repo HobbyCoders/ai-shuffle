@@ -34,30 +34,46 @@ RG_TIMEOUT_S = 30.0
 FALLBACK_DEADLINE_S = 10.0
 _MAX_FILESIZE = "2M"
 
-SPEC = ToolSpec(
-    name="Grep",
-    description=(
-        "Search file contents by regular expression. Always prefer this over "
-        "running grep/rg through Bash — it is bounded, labels its output, and "
-        "cannot hang the session.\n"
+def describe(tools: frozenset[str] | None = None) -> str:
+    """Grep's description, specialized to the session's tool surface."""
+    has = (lambda name: tools is None or name in tools)
+    opening = "Search file contents by regular expression." + (
+        " Always prefer this over running grep/rg through Bash — it is "
+        "bounded, labels its output, and cannot hang the session."
+        if has("Bash")
+        else " Bounded: it labels its output and cannot hang the session."
+    )
+    read_route = " Read the file explicitly" if has("Read") else " Open the file explicitly"
+    return (
+        opening + "\n"
         "\n"
         "Results come back as `path:line:content` under a header naming the "
         "search engine (ripgrep when installed, otherwise a bounded Python "
         f"fallback). Matches are capped at {MAX_MATCHES} by default — a note "
         "tells you when the cap was hit; raise `limit` (up to "
         f"{MAX_LIMIT}) or narrow the pattern to see more. Ignored and hidden "
-        "files are skipped unless no_ignore is set. An empty result means no "
-        "matches in the searched scope, not an error.\n"
+        "files are skipped unless no_ignore is set. Matches inside "
+        "credential-pattern files (.env, keys) are withheld and flagged with "
+        f"a note;{read_route} when its content is genuinely needed. An empty "
+        "result means no matches in the searched scope, not an error.\n"
         "\n"
         "Patterns use ripgrep/Rust regex syntax when ripgrep is installed "
         "(escape literal braces, e.g. interface\\{\\}) and Python re syntax "
         "in the fallback; stick to the shared core (alternation, classes, "
         "quantifiers) for portable patterns."
-    ),
+    )
+
+
+SPEC = ToolSpec(
+    name="Grep",
+    description=describe(),
     input_schema={
         "type": "object",
         "properties": {
-            "pattern": {"type": "string"},
+            "pattern": {
+                "type": "string",
+                "description": "The regular expression to search for.",
+            },
             "path": {"type": "string", "description": "File or directory (default cwd)."},
             "glob": {"type": "string", "description": "Filename glob filter, e.g. *.py."},
             "no_ignore": {

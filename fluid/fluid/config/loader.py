@@ -574,9 +574,20 @@ def build_engine(
     if registry is None:
         registry = ToolRegistry()
         if with_builtins:
-            from fluid.tools.builtins import register_builtins
+            from fluid.tools.builtins import (
+                refine_builtin_descriptions,
+                register_builtins,
+            )
 
             register_builtins(registry)
+            refine_builtin_descriptions(
+                registry,
+                allowed=allowed_tools,
+                disallowed=disallowed_tools,
+                memory_char_limit=(
+                    config.memory.char_limit if config.memory.enabled else None
+                ),
+            )
     if ctx is None:
         ctx = ToolCtx(cwd=config.cwd, session_id=session_id)
     # Builtin wiring that rides the tool context: the Memory tool writes the

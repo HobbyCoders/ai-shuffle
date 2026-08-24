@@ -20,15 +20,25 @@ from fluid.tools.registry import InputRequired, ToolCtx, ToolOutcome, ToolSpec
 MAX_QUESTIONS = 4
 MAX_OPTIONS = 4
 
-SPEC = ToolSpec(
-    name="AskUser",
-    description=(
+def describe(tools: frozenset[str] | None = None) -> str:
+    """AskUser's description, specialized to the session's tool surface."""
+    has = (lambda name: tools is None or name in tools)
+    plan_note = (
+        " To propose or approve an implementation approach use plan mode "
+        "instead (Plan / StopPlanning) — never ask \"should I proceed with "
+        "this plan?\" here.\n"
+        if has("Plan") and has("StopPlanning")
+        else "\n"
+    )
+    return (
         "Ask the user one to four questions and wait for their answers. Use "
         "this ONLY when blocked on a decision that is genuinely the user's to "
         "make: materially different readings of the request, an "
         "expensive-to-reverse choice, a missing credential or approval — "
         "never for facts a tool could establish, and never for permission "
-        "the harness already handles.\n"
+        "the harness already handles. Reserve it for answers that change "
+        "what you do next; when a choice has an obvious conventional "
+        "default, take it, say so, and proceed." + plan_note +
         "\n"
         "Rules:\n"
         "- Put each choice ONLY in the options array — never enumerate "
@@ -41,7 +51,12 @@ SPEC = ToolSpec(
         "- The user can always answer with their own text instead of an "
         "option; treat a free-text answer as overriding the options.\n"
         "- Omit options entirely for an open-ended question."
-    ),
+    )
+
+
+SPEC = ToolSpec(
+    name="AskUser",
+    description=describe(),
     input_schema={
         "type": "object",
         "properties": {

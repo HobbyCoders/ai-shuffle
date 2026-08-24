@@ -19,31 +19,53 @@ from pathlib import Path
 from typing import Any
 
 from fluid.tools.builtins._util import read_text_preserving, resolve, write_text_with_newline
+from fluid.tools.fragments import NO_VERIFY_READBACK, READ_BEFORE_EDIT
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
-SPEC = ToolSpec(
-    name="Edit",
-    description=(
+def describe(tools: frozenset[str] | None = None) -> str:
+    """Edit's description, specialized to the session's tool surface."""
+    has = (lambda name: tools is None or name in tools)
+    read_gate = (
+        f"- {READ_BEFORE_EDIT} Without that Read the call fails.\n"
+        if has("Read")
+        else ""
+    )
+    prefix_clause = (
+        " Do not include Read's line-number prefix (the leading number and "
+        "tab) — that is display formatting, not file content.\n"
+        if has("Read")
+        else "\n"
+    )
+    verify_clause = (
+        f"- After a successful Edit, {NO_VERIFY_READBACK}"
+        if has("Read")
+        else "- A successful Edit is confirmed by its result; a failed match "
+        "would have returned an error instead."
+    )
+    return (
         "Perform an exact string replacement in an existing file. When you "
         "say you will edit or update file content, invoke Edit immediately.\n"
         "\n"
         "Rules:\n"
-        "- The file must have been Read earlier in this session, or the call "
-        "fails.\n"
+        + read_gate +
         "- old_string must match the file byte-for-byte, including "
-        "indentation and line breaks. Do not include Read's line-number "
-        "prefix (the leading number and tab) — that is display formatting, "
-        "not file content.\n"
+        "indentation and line breaks."
+        + prefix_clause +
         "- old_string must be unique in the file; if it matches more than "
-        "once the edit fails. Add surrounding lines to make it unique, or "
-        "pass replace_all=true to change every occurrence (useful for "
-        "renames).\n"
+        "once the edit fails. Keep it minimal — the changed lines plus just "
+        "enough surrounding context to be unique; excess context wastes "
+        "tokens and multiplies mismatch risk. Pass replace_all=true to "
+        "change every occurrence instead (useful for renames).\n"
         "- If old_string differs only by a uniform indentation offset or a "
         "copied line-number prefix, Edit corrects it and tells you; any "
         "other mismatch fails with a diagnostic.\n"
-        "- After a successful Edit, do not Read the file back just to "
-        "verify — a failed match would have returned an error instead."
-    ),
+        + verify_clause
+    )
+
+
+SPEC = ToolSpec(
+    name="Edit",
+    description=describe(),
     input_schema={
         "type": "object",
         "properties": {

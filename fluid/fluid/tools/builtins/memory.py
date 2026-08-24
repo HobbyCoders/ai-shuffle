@@ -7,12 +7,18 @@ from typing import Any
 from fluid.context.memory import DEFAULT_CHAR_LIMIT, MemoryStore
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
-SPEC = ToolSpec(
-    name="Memory",
-    description=(
+
+def describe(char_limit: int = DEFAULT_CHAR_LIMIT) -> str:
+    """Memory's description with the session's actual capacity stated.
+
+    ``char_limit`` is config-dependent; the loader re-amends the registered
+    spec when the configured limit differs from the default.
+    """
+    return (
         "Save durable facts to persistent memory that survives across "
-        "sessions. Memory is injected into every future session's prompt, so "
-        "keep entries compact and high-signal.\n"
+        "sessions. Memory is injected into every future session's prompt "
+        f"(capacity {char_limit:,} chars), so keep entries compact and "
+        "high-signal.\n"
         "\n"
         "HOW: make ALL your changes in ONE call via the `operations` array "
         "(each item: {action: add|remove|replace, content?, old_text?}). The "
@@ -37,7 +43,12 @@ SPEC = ToolSpec(
         "reissue as ONE batch that consolidates old entries and adds the new "
         "one together. A success reply is terminal: the update is complete, "
         "do not repeat or double-check it."
-    ),
+    )
+
+
+SPEC = ToolSpec(
+    name="Memory",
+    description=describe(),
     input_schema={
         "type": "object",
         "properties": {

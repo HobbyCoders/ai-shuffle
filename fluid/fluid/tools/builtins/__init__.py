@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+from fnmatch import fnmatch
+
 from fluid.tools.builtins import (
     ask_user,
     bash,
@@ -14,6 +17,7 @@ from fluid.tools.builtins import (
     memory,
     monitor,
     note,
+    plan,
     read,
     session_search,
     skill,
@@ -27,8 +31,27 @@ from fluid.tools.registry import ToolRegistry
 _MODULES = (
     read, grep, glob, write, edit, bash, skill, note, task, monitor,
     tool_search, history_expand, history_search, ledger,
-    memory, session_search, ask_user, web,
+    memory, session_search, ask_user, web, plan,
 )
+
+# Tools whose descriptions specialize to the session's permitted surface —
+# cross-tool routing clauses ("Prefer Read over cat", "use Monitor") are
+# emitted only when the named tool exists, mirroring the base prompt's gated
+# bullets (a description naming an absent tool is hallucinated-call bait).
+_DESCRIBERS = {
+    "Read": read.describe,
+    "Grep": grep.describe,
+    "Glob": glob.describe,
+    "Write": write.describe,
+    "Edit": edit.describe,
+    "Bash": bash.describe,
+    "Monitor": monitor.describe,
+    "AskUser": ask_user.describe,
+    "HistorySearch": history_search.describe,
+    "SessionSearch": session_search.describe,
+    "WebFetch": web.describe_fetch,
+    "WebSearch": web.describe_search,
+}
 
 
 def register_builtins(registry: ToolRegistry) -> None:
@@ -41,4 +64,53 @@ def register_builtins(registry: ToolRegistry) -> None:
             registry.register_builtin(spec, handler)
 
 
-__all__ = ["register_builtins"]
+def effective_surface(
+    names: Iterable[str],
+    allowed: Iterable[str] | None,
+    disallowed: Iterable[str] | None = (),
+) -> frozenset[str]:
+    """The names surviving the session's allow/deny fnmatch patterns (CE12)."""
+    out = set(names)
+    if allowed is not None:
+        patterns = list(allowed)
+        out = {n for n in out if any(fnmatch(n, p) for p in patterns)}
+    deny = list(disallowed or ())
+    out -= {n for n in out if any(fnmatch(n, p) for p in deny)}
+    return frozenset(out)
+
+
+def refine_builtin_descriptions(
+    registry: ToolRegistry,
+    *,
+    allowed: Iterable[str] | None = None,
+    disallowed: Iterable[str] | None = (),
+    memory_char_limit: int | None = None,
+) -> None:
+    """Specialize registered builtin descriptions to this session.
+
+    Run once at session build, after :func:`register_builtins` and after the
+    tool restriction is known: cross-tool clauses collapse to the permitted
+    surface, and config-dependent limits (Memory capacity) replace the
+    defaults. Idempotent — amending with the full surface reproduces the
+    module-constant text.
+    """
+    builtin_names = {
+        s.name
+        for s in registry.list_tools(loaded_only=False)
+        if s.source == "builtin"
+    }
+    surface = effective_surface(builtin_names, allowed, disallowed)
+    for name, describe in _DESCRIBERS.items():
+        if name in builtin_names:
+            registry.amend_spec(name, description=describe(surface))
+    if memory_char_limit is not None and "Memory" in builtin_names:
+        registry.amend_spec(
+            "Memory", description=memory.describe(memory_char_limit)
+        )
+
+
+__all__ = [
+    "effective_surface",
+    "refine_builtin_descriptions",
+    "register_builtins",
+]

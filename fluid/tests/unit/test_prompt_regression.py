@@ -76,6 +76,103 @@ def test_gated_profiles_never_leak_absent_tools() -> None:
             assert not leaked, f"surface {sorted(surface)} leaked {sorted(leaked)}"
 
 
+def test_gated_descriptions_never_leak_absent_tools() -> None:
+    # The description refinement pass mirrors the base prompt's invariant:
+    # a tool's description may reference another tool only when that tool is
+    # in the session's permitted surface.
+    from fluid.tools.builtins import _DESCRIBERS, refine_builtin_descriptions
+
+    surfaces = [
+        frozenset({"Read"}),
+        frozenset({"Bash"}),
+        frozenset({"Bash", "Read", "Grep"}),
+        frozenset({"Edit", "Write"}),
+        frozenset({"Grep", "Glob"}),
+        frozenset({"WebSearch"}),
+        frozenset({"WebFetch"}),
+        frozenset({"HistorySearch"}),
+        frozenset({"SessionSearch"}),
+        frozenset({"Monitor"}),
+        frozenset(BUILTIN_TOOL_NAMES) - {"Read"},
+        frozenset(BUILTIN_TOOL_NAMES) - {"Bash", "Monitor"},
+        frozenset(BUILTIN_TOOL_NAMES),
+    ]
+    for surface in surfaces:
+        registry = ToolRegistry()
+        register_builtins(registry)
+        refine_builtin_descriptions(registry, allowed=sorted(surface))
+        for spec in registry.list_tools(loaded_only=False):
+            if spec.name not in _DESCRIBERS or spec.name not in surface:
+                continue
+            leaked = mentioned_tool_names(spec.description) - surface
+            assert not leaked, (
+                f"{spec.name} with surface {sorted(surface)} "
+                f"leaked {sorted(leaked)}"
+            )
+
+
+def test_refined_full_surface_matches_module_constants() -> None:
+    # Refining with the full surface must reproduce the shipped SPEC text —
+    # the describers and the constants may not drift apart.
+    from fluid.tools.builtins import refine_builtin_descriptions
+
+    baseline = ToolRegistry()
+    register_builtins(baseline)
+    before = {s.name: s.description for s in baseline.list_tools(loaded_only=False)}
+
+    refined = ToolRegistry()
+    register_builtins(refined)
+    refine_builtin_descriptions(refined)
+    after = {s.name: s.description for s in refined.list_tools(loaded_only=False)}
+    assert before == after
+
+
+def test_shared_fragments_appear_verbatim() -> None:
+    # Cross-tool rules live once in fluid.tools.fragments and are spliced
+    # byte-identical into every carrier (the Claude Code shared-fragment
+    # pattern) — a reworded copy is exactly the drift this file guards.
+    from fluid.tools import fragments as fr
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    descs = {s.name: s.description for s in registry.list_tools(loaded_only=False)}
+    carriers = {
+        "READ_BEFORE_EDIT": (fr.READ_BEFORE_EDIT, ("Read", "Edit", "Write")),
+        "NO_VERIFY_READBACK": (fr.NO_VERIFY_READBACK, ("Edit", "Write")),
+        "FRESH_PROCESS": (fr.FRESH_PROCESS, ("Bash", "Monitor")),
+        "DONT_PREDICT_PENDING": (fr.DONT_PREDICT_PENDING, ("Task", "Monitor")),
+        "END_TURN_ON_BACKGROUND": (
+            fr.END_TURN_ON_BACKGROUND,
+            ("Task", "Monitor"),
+        ),
+        "WEB_UNTRUSTED": (fr.WEB_UNTRUSTED, ("WebFetch", "WebSearch")),
+    }
+    for label, (fragment, names) in carriers.items():
+        for name in names:
+            assert fragment in descs[name], f"{label} missing from {name}"
+    # The base prompt's ending section splices the same park doctrine.
+    from fluid.tools.fragments import END_TURN_ON_BACKGROUND
+
+    assert END_TURN_ON_BACKGROUND in DEFAULT_BASE_PROMPT
+    # Bash and Monitor share one cwd parameter description.
+    for name in ("Bash", "Monitor"):
+        spec = registry.get(name)
+        assert spec is not None
+        assert (
+            spec.input_schema["properties"]["cwd"]["description"] == fr.CWD_PARAM
+        )
+
+
+def test_memory_description_states_configured_capacity() -> None:
+    from fluid.tools.builtins import refine_builtin_descriptions
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    refine_builtin_descriptions(registry, memory_char_limit=12_345)
+    spec = registry.get("Memory")
+    assert spec is not None and "12,345" in spec.description
+
+
 def test_prompt_structure_invariants() -> None:
     config = HarnessConfig.from_dict(deep_merge(BUILTIN_DEFAULTS, {}))
     from fluid.cli.prompt import default_base_prompt

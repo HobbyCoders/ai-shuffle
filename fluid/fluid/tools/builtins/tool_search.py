@@ -156,6 +156,9 @@ SPEC = ToolSpec(
         "required": ["query"],
     },
     risk="safe",
+    # Engine-injected registry handle; absent the engine drops the tool from
+    # the request schemas (nothing to search without a registry).
+    requires_extra=("tool_registry",),
 )
 
 

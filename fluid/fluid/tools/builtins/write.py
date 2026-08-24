@@ -6,27 +6,50 @@ from pathlib import Path
 from typing import Any
 
 from fluid.tools.builtins._util import detect_newline, read_text_preserving, resolve, write_text_with_newline
+from fluid.tools.fragments import NO_VERIFY_READBACK, READ_BEFORE_EDIT
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
-SPEC = ToolSpec(
-    name="Write",
-    description=(
+def describe(tools: frozenset[str] | None = None) -> str:
+    """Write's description, specialized to the session's tool surface."""
+    has = (lambda name: tools is None or name in tools)
+    edit_routing = (
+        "Use Write for new files or complete rewrites; use Edit for partial "
+        "changes to an existing file (overwriting a large file to change a "
+        "few lines wastes tokens and risks losing content)."
+        + (f" {READ_BEFORE_EDIT}" if has("Read") else "")
+        if has("Edit")
+        else "Use Write for new files or complete rewrites."
+    )
+    overwrite_clause = (
+        " Overwriting is destructive: for a file you did not create this "
+        "session, Read it first so you know what you are replacing.\n"
+        if has("Read")
+        else " Overwriting is destructive: be sure you know what you are "
+        "replacing.\n"
+    )
+    verify_clause = (
+        f"A successful Write is confirmed by its result: {NO_VERIFY_READBACK}"
+        if has("Read")
+        else "A successful Write is confirmed by its result; a failure would "
+        "have returned an error instead."
+    )
+    return (
         "Create a new file or fully overwrite an existing one; parent "
         "directories are created as needed. When you say you will create or "
         "write file content, invoke Write immediately — do not draft the "
         "content only in reasoning or route it through shell redirection.\n"
         "\n"
-        "Use Write for new files or complete rewrites; use Edit for partial "
-        "changes to an existing file (overwriting a large file to change a "
-        "few lines wastes tokens and risks losing content). A file must "
-        "have been Read earlier in this session before Edit can modify it. "
-        "Overwriting is destructive: for a file you did not create this "
-        "session, Read it first so you know what you are replacing.\n"
+        + edit_routing + overwrite_clause +
         "\n"
-        "A successful Write is confirmed by its result — do NOT Read the "
-        "file back just to verify the write landed; a failure would have "
-        "returned an error instead."
-    ),
+        + verify_clause +
+        " Never create documentation files (*.md, README) unless the user "
+        "explicitly asked for one."
+    )
+
+
+SPEC = ToolSpec(
+    name="Write",
+    description=describe(),
     input_schema={
         "type": "object",
         "properties": {

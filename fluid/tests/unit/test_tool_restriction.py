@@ -176,9 +176,34 @@ async def test_unrestricted_session_sends_every_loaded_schema() -> None:
     await loop.submit(UserTurn(content="go"))
     await loop.wait_turn()
 
+    # Every loaded schema goes out EXCEPT tools whose host capability is not
+    # wired (requires_extra): with no dispatcher/spawner/store-dir injected,
+    # Task, Monitor, and SessionSearch must be invisible rather than
+    # advertised-and-erroring.
     sent = {t["name"] for t in provider.requests[0].tools}
-    assert sent == {s.name for s in registry.list_tools(loaded_only=True)}
+    expected = {
+        s.name
+        for s in registry.list_tools(loaded_only=True)
+        if all(key in loop.ctx.extra for key in s.requires_extra)
+    }
+    assert sent == expected
     assert {"Read", "Write", "Bash"} <= sent
+    assert {"Task", "Monitor", "SessionSearch"}.isdisjoint(sent)
+    await loop.aclose()
+
+
+async def test_capability_wired_tools_are_sent() -> None:
+    registry = ToolRegistry()
+    register_builtins(registry)
+    provider = ScriptedProvider([_text("hi")])
+    loop = _loop(provider, registry=registry)
+    loop.ctx.extra["task_dispatch"] = lambda input, ctx: "ok"
+    loop.ctx.extra["monitor_spawn"] = lambda input, ctx: "ok"
+    await loop.submit(UserTurn(content="go"))
+    await loop.wait_turn()
+
+    sent = {t["name"] for t in provider.requests[0].tools}
+    assert {"Task", "Monitor"} <= sent
     await loop.aclose()
 
 
