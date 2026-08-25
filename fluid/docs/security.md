@@ -56,11 +56,11 @@ model *reads* framing tokens even when they can't structurally escape.
 
 **6. Credential protection.**
 
-- The `Memory` store rejects any entry that looks like a credential (key
-  blocks, vendor token prefixes, `password = …` assignments) — memory is
-  injected into every future session's prompt, so a leaked token there would
-  persist indefinitely. The model is told to store *where* the secret lives
-  instead.
+- The continual store's memory list rejects any entry that looks like a
+  credential (key blocks, vendor token prefixes, `password = …` assignments) —
+  memories are injected into every future session's prompt, so a leaked token
+  there would persist indefinitely. The synthesizer is told to store *where*
+  the secret lives instead.
 - **Sensitive-file rules**: under any policy except `never_ask`, default
   ask-before-touching rules cover credential files (`.env` and variants, SSH
   keys, `*.pem`/`*.p12`/`*.pfx`, `.netrc`, `.npmrc`, `.pypirc`,
@@ -120,6 +120,6 @@ can't know (path allowlists, secret scanners, audit logging).
 | --- | --- |
 | `permission.protect_sensitive_files = false` | Drop the default credential-file ask-rules. |
 | `[[permission.rules]]` allow for a path | Override a default rule for that path (user rules come after defaults; last match wins). |
-| `approval_policy = "never_ask"` | Opts out of all prompting, including the default sensitive-file rules. Fences, screening, defanging, and the Memory secret guard still apply. |
+| `approval_policy = "never_ask"` | Opts out of all prompting, including the default sensitive-file rules. Fences, screening, defanging, and the memory secret guard still apply. |
 | `tools.disallowed = ["WebFetch", "WebSearch"]` | Remove the web surface entirely. |
 | `identity_file = false` / editing a blocked file | Screening blocks are recoverable by editing the file; nothing is deleted. |

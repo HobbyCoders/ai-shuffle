@@ -16,6 +16,13 @@ Alongside the skills the store keeps:
   ``skills.<name>``) and the synthesis cursor (how far into the journal the
   synthesizer has already looked). Usage counts exist so curation can favor
   skills that earn their keep and prune ones that never get imported.
+- ``memories.json`` — the learner's declarative half: short remembered facts
+  (stated preferences, environment conventions, corrections) written ONLY by
+  the synthesizer and rendered into every session's prompt as a frozen
+  snapshot (``render_memory_section``). No model-facing tool writes them, so
+  there is no file for the agent to curate — the learner adds, rewrites, and
+  retires entries itself as evidence accumulates, and the store caps the
+  count, archiving the oldest instead of growing without bound.
 
 Everything is stdlib-only and synchronous; callers are the code-mode session
 (host side) and the synthesizer.
@@ -33,8 +40,20 @@ from pathlib import Path
 
 _NAME_RE = re.compile(r"^[a-z_][a-z0-9_]{0,63}$")
 MAX_SKILL_BYTES = 65536
+MAX_MEMORIES = 40
+MAX_MEMORY_CHARS = 500  # one memory is a fact, not an essay
 
 DEFAULT_SKILLS_ROOT = Path.home() / ".fluid" / "skills"
+
+
+@dataclass(frozen=True)
+class MemoryEntry:
+    """One remembered fact — the declarative half of the continual store."""
+
+    id: str  # "m<n>", monotonically assigned, stable across rewrites
+    text: str
+    created_at: float = 0.0
+    updated_at: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -246,6 +265,144 @@ class SkillStore:
         except OSError:
             pass
         return out
+
+    # ─── memories (the declarative half — synthesizer-written only) ──────
+    @property
+    def memories_path(self) -> Path:
+        return self.root / "memories.json"
+
+    def _load_memories(self) -> dict:
+        try:
+            doc = json.loads(self.memories_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"next_id": 1, "entries": []}
+        if not isinstance(doc, dict):
+            return {"next_id": 1, "entries": []}
+        doc.setdefault("next_id", 1)
+        entries = doc.get("entries")
+        doc["entries"] = entries if isinstance(entries, list) else []
+        return doc
+
+    def _save_memories(self, doc: dict) -> None:
+        self.memories_path.write_text(
+            json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def memories(self) -> list[MemoryEntry]:
+        out: list[MemoryEntry] = []
+        for e in self._load_memories()["entries"]:
+            if isinstance(e, dict) and e.get("id") and str(e.get("text", "")).strip():
+                out.append(MemoryEntry(
+                    id=str(e["id"]),
+                    text=str(e["text"]).strip(),
+                    created_at=float(e.get("created_at", 0.0)),
+                    updated_at=float(e.get("updated_at", 0.0)),
+                ))
+        return out
+
+    def save_memory(self, text: str, memory_id: str | None = None) -> MemoryEntry:
+        """Add (``memory_id=None``) or rewrite one remembered fact.
+
+        Raises ``ValueError`` for empty/oversized text and for anything that
+        looks like a credential — memories land in every future session's
+        prompt, so a secret here would leak forever.
+        """
+        text = " ".join(str(text or "").split())
+        if not text:
+            raise ValueError("memory text is empty")
+        if len(text) > MAX_MEMORY_CHARS:
+            raise ValueError(f"memory text exceeds {MAX_MEMORY_CHARS} chars")
+        from fluid.context.screening import looks_like_secret
+
+        secret_kind = looks_like_secret(text)
+        if secret_kind is not None:
+            raise ValueError(
+                f"memory looks like it contains a credential ({secret_kind}); "
+                "store where the credential lives, never its value"
+            )
+        doc = self._load_memories()
+        now = time.time()
+        if memory_id is not None:
+            for e in doc["entries"]:
+                if isinstance(e, dict) and e.get("id") == memory_id:
+                    e["text"] = text
+                    e["updated_at"] = now
+                    self._save_memories(doc)
+                    return MemoryEntry(
+                        id=str(memory_id), text=text,
+                        created_at=float(e.get("created_at", now)), updated_at=now,
+                    )
+        entry = {
+            "id": f"m{int(doc.get('next_id', 1))}", "text": text,
+            "created_at": now, "updated_at": now,
+        }
+        doc["next_id"] = int(doc.get("next_id", 1)) + 1
+        doc["entries"].append(entry)
+        # Bounded: past the cap the least-recently-touched entries move to the
+        # archive (never deleted), the same posture as skill curation.
+        if len(doc["entries"]) > MAX_MEMORIES:
+            doc["entries"].sort(
+                key=lambda e: float(e.get("updated_at", 0.0)) if isinstance(e, dict) else 0.0
+            )
+            overflow = doc["entries"][: len(doc["entries"]) - MAX_MEMORIES]
+            doc["entries"] = doc["entries"][len(overflow):]
+            try:
+                archive = self.root / ".archive"
+                archive.mkdir(exist_ok=True)
+                with (archive / "memories-archive.jsonl").open(
+                    "a", encoding="utf-8"
+                ) as fh:
+                    for old in overflow:
+                        fh.write(json.dumps({"archived_at": now, **old},
+                                            ensure_ascii=False) + "\n")
+            except OSError:
+                pass
+        self._save_memories(doc)
+        return MemoryEntry(id=str(entry["id"]), text=text, created_at=now, updated_at=now)
+
+    def delete_memory(self, memory_id: str) -> bool:
+        doc = self._load_memories()
+        before = len(doc["entries"])
+        doc["entries"] = [
+            e for e in doc["entries"]
+            if not (isinstance(e, dict) and e.get("id") == memory_id)
+        ]
+        if len(doc["entries"]) == before:
+            return False
+        self._save_memories(doc)
+        return True
+
+    def render_memory_section(self) -> str | None:
+        """The compiled prompt's ``# Memory`` section (frozen snapshot).
+
+        ``None`` when there are no memories, so empty installs pay nothing.
+        Entries pass the injection screen; a finding replaces that entry with
+        a note naming the file, never silently deleting it.
+        """
+        entries = self.memories()
+        if not entries:
+            return None
+        from fluid.context.screening import screen_findings
+
+        shown: list[str] = []
+        for entry in entries:
+            findings = screen_findings(entry.text)
+            if findings:
+                shown.append(
+                    f"- [an entry was withheld — suspected injection "
+                    f"pattern(s): {', '.join(findings)}. It is still in "
+                    f"{self.memories_path}.]"
+                )
+            else:
+                shown.append(f"- {entry.text}")
+        return (
+            "# Memory\n"
+            "Facts your continual learner distilled from earlier sessions. "
+            "Trust them, and correct course when the user contradicts one — "
+            "the learner curates this list itself from what happens in "
+            "sessions; you never manage it.\n\n"
+            + "\n".join(shown)
+        )
 
     # ─── lifecycle curation ──────────────────────────────────────────────
     #

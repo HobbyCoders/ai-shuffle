@@ -58,7 +58,7 @@ if TYPE_CHECKING:  # pragma: no cover
 BUILTIN_TOOL_NAMES: tuple[str, ...] = (
     "Read", "Grep", "Glob", "Write", "Edit", "Bash", "Skill", "Note", "Task",
     "Monitor", "ToolSearch", "HistoryExpand", "HistorySearch", "Ledger",
-    "AskUser", "Memory", "SessionSearch", "WebFetch", "WebSearch",
+    "AskUser", "SessionSearch", "SessionView", "WebFetch", "WebSearch",
     "Plan", "StopPlanning",
 )
 
@@ -196,6 +196,7 @@ class PromptProfile:
 
     tools: frozenset[str] = _FULL_TOOLSET
     code_mode: bool = False
+    continual: bool = False  # the learner's # Memory section may appear
     instructions: bool = True  # the instruction stack may appear
     nested: bool = True  # nested AGENTS.md reminders may appear
     skills: bool = True  # a skills index may appear
@@ -210,8 +211,6 @@ def profile_for(
 ) -> PromptProfile:
     """Derive the prompt profile from a resolved config (once per session)."""
     tools = effective_builtin_tools(config.tools.allowed, config.tools.disallowed)
-    if not config.memory.enabled:
-        tools -= {"Memory"}
     inst = config.instruction_files
     identity = (config.identity or "").strip() or None
     if identity is None and config.identity_file:
@@ -223,6 +222,7 @@ def profile_for(
     return PromptProfile(
         tools=tools,
         code_mode=config.code_mode,
+        continual=config.continual,
         instructions=inst.enabled and (inst.discover_global or inst.discover_project),
         nested=inst.enabled and inst.discover_nested,
         skills=inst.enabled and inst.discover_skills,
@@ -490,19 +490,23 @@ def _instructions_section(p: PromptProfile) -> str | None:
             "- Use Ledger for constraints, decisions, and open threads that "
             "must survive the whole session. Keep entries terse."
         )
-    if "Memory" in t:
+    if p.continual:
         bullets.append(
-            "- A `# Memory` section below carries durable facts saved in "
-            "earlier sessions; trust it, and curate it with the Memory tool. "
-            "Save declarative facts that will still matter in a month — a "
-            "preference the user stated, a convention of this environment — "
-            "never task progress, and never instructions to yourself "
-            "(\"user prefers X\" ages well; \"always do X\" replays as a "
-            "directive and causes repeated work). Reusable procedures belong "
-            "in skills, not memory. The best entry is the one that stops the "
-            "user repeating themselves."
+            "- A `# Memory` section below carries facts your continual "
+            "learner distilled from earlier sessions. Trust it, and never "
+            "manage it — it updates itself from what happens in sessions, so "
+            "a user saying \"remember this\" needs no action beyond "
+            "acknowledging it."
         )
-    if "SessionSearch" in t:
+    if "SessionSearch" in t and "SessionView" in t:
+        bullets.append(
+            "- Past sessions are your long-term memory, reached with "
+            "SessionSearch and SessionView. When the user references earlier "
+            "work you cannot see (\"what were we working on?\", \"like last "
+            "time\"), list or search sessions and open the relevant one "
+            "before asking them to repeat themselves."
+        )
+    elif "SessionSearch" in t:
         bullets.append(
             "- When the user references earlier work you cannot see, search "
             "past sessions with SessionSearch before asking them to repeat "

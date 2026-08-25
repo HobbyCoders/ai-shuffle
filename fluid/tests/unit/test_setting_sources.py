@@ -150,7 +150,7 @@ def _kinds_and_text(compiled):
 def test_compiler_user_source_off_drops_global_context(tmp_path, monkeypatch) -> None:
     proj = _layout(tmp_path, monkeypatch)
     compiled = compile_prompt(PromptInputs(
-        cwd=proj, include_env=False, include_memory=False,
+        cwd=proj, include_env=False,
         setting_sources=("project", "local"),
     ))
     text, _ = _kinds_and_text(compiled)
@@ -163,7 +163,7 @@ def test_compiler_user_source_off_drops_global_context(tmp_path, monkeypatch) ->
 def test_compiler_project_source_off_drops_project_context(tmp_path, monkeypatch) -> None:
     proj = _layout(tmp_path, monkeypatch)
     compiled = compile_prompt(PromptInputs(
-        cwd=proj, include_env=False, include_memory=False,
+        cwd=proj, include_env=False,
         setting_sources=("user",),
     ))
     text, _ = _kinds_and_text(compiled)
@@ -176,7 +176,7 @@ def test_compiler_project_source_off_drops_project_context(tmp_path, monkeypatch
 def test_compiler_no_sources_is_filesystem_isolated(tmp_path, monkeypatch) -> None:
     proj = _layout(tmp_path, monkeypatch)
     compiled = compile_prompt(PromptInputs(
-        base="BASE", cwd=proj, include_env=False, include_memory=False,
+        base="BASE", cwd=proj, include_env=False,
         setting_sources=(),
     ))
     text, kinds = _kinds_and_text(compiled)
@@ -187,7 +187,7 @@ def test_compiler_no_sources_is_filesystem_isolated(tmp_path, monkeypatch) -> No
 def test_compiler_default_none_loads_everything(tmp_path, monkeypatch) -> None:
     proj = _layout(tmp_path, monkeypatch)
     compiled = compile_prompt(PromptInputs(
-        cwd=proj, include_env=False, include_memory=False,
+        cwd=proj, include_env=False,
     ))
     text, _ = _kinds_and_text(compiled)
     for expected in ("global instructions", "project instructions", "gskill", "pskill", "gagent", "pagent"):
@@ -203,13 +203,13 @@ def test_compiler_lists_enabled_plugin_skills_deferred(tmp_path, monkeypatch) ->
            "---\nname: extra\ndescription: plugin skill\n---\nPLUGIN BODY")
     _write(home / ".fluid" / "settings.json", json.dumps({"enabledPlugins": {"plug@mp": True}}))
 
-    compiled = compile_prompt(PromptInputs(cwd=proj, include_env=False, include_memory=False))
+    compiled = compile_prompt(PromptInputs(cwd=proj, include_env=False))
     text = compiled.text or ""
     assert "plug:extra: plugin skill" in text
     assert "PLUGIN BODY" not in text  # deferred: description only
 
     # Dropping the user source drops the plugin listing with it.
     gated = compile_prompt(PromptInputs(
-        cwd=proj, include_env=False, include_memory=False, setting_sources=("project",),
+        cwd=proj, include_env=False, setting_sources=("project",),
     ))
     assert "plug:extra" not in (gated.text or "")

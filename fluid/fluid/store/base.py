@@ -54,6 +54,91 @@ class SessionSearchHit:
     score: int  # total query-term hits summed over the session's matched texts
     last_ts: float = 0.0  # newest matched node's epoch timestamp (0.0 if unknown)
     texts: list[tuple[str, str]] = field(default_factory=list)
+    title: str | None = None  # human-meaningful session name, when the backend has one
+
+
+@dataclass
+class SessionSummary:
+    """One row of the recent-sessions listing — see ``recent_sessions`` below."""
+
+    session_id: str
+    title: str | None = None
+    last_ts: float = 0.0  # newest message's epoch timestamp (0.0 if unknown)
+    preview: str = ""  # the session's last assistant text, however the backend trims it
+    message_count: int = 0  # 0 = unknown
+
+
+@dataclass
+class RecallMessage:
+    """One message of a recalled session, normalized for display.
+
+    ``text`` is the message's joined text blocks; ``tools`` is one compact
+    line per tool interaction ("Name(input…) -> result…"), so a viewer can
+    show what a session *did* without replaying full tool payloads.
+    """
+
+    role: str
+    text: str = ""
+    tools: list[str] = field(default_factory=list)
+    ts: float = 0.0
+
+
+@dataclass
+class SessionSlice:
+    """A window of one stored session — see ``session_slice`` below."""
+
+    session_id: str
+    total: int  # messages on the session's active path
+    start: int  # 0-based index of ``messages[0]`` on that path
+    messages: list[RecallMessage] = field(default_factory=list)
+    title: str | None = None
+    last_ts: float = 0.0
+
+
+_TOOL_LINE_CAP = 200
+
+
+def _compact(text: str, cap: int) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= cap else flat[: cap - 1] + "…"
+
+
+def recall_message(message: dict[str, Any], ts: float = 0.0) -> RecallMessage:
+    """Normalize one serialized ``Message`` dict into a :class:`RecallMessage`.
+
+    Tool interactions become compact one-liners: a ``tooluseblock`` renders as
+    ``Name({input json})``, a ``toolresultblock`` as ``-> preview`` (or
+    ``ERROR preview``). Backends whose messages already look like fluid's
+    serialized form get session viewing for free; others build
+    :class:`RecallMessage` themselves.
+    """
+    import json
+
+    texts: list[str] = []
+    tools: list[str] = []
+    for block in message.get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("kind")
+        if kind == "text" and block.get("text"):
+            texts.append(str(block["text"]))
+        elif kind == "tooluseblock":
+            try:
+                arg = json.dumps(block.get("input") or {}, ensure_ascii=False)
+            except (TypeError, ValueError):
+                arg = "…"
+            tools.append(_compact(f"{block.get('name', '?')}({arg})", _TOOL_LINE_CAP))
+        elif kind == "toolresultblock":
+            inner = " ".join(
+                str(c.get("text", ""))
+                for c in (block.get("content") or [])
+                if isinstance(c, dict) and c.get("kind") == "text" and c.get("text")
+            )
+            marker = "ERROR" if block.get("is_error") else "->"
+            tools.append(_compact(f"{marker} {inner or '(no text)'}", _TOOL_LINE_CAP))
+    return RecallMessage(
+        role=str(message.get("role", "?")), text="\n".join(texts), tools=tools, ts=ts
+    )
 
 
 def message_texts(message: dict[str, Any]) -> list[str]:
@@ -101,18 +186,43 @@ class SessionStore(Protocol):
     #         exclude_session_id: str | None = None,
     #     ) -> list[SessionSearchHit]: ...
     #
-    # Deliberately NOT part of the protocol above — a store that keeps no
-    # durable record (MemoryStore) cannot answer it, and requiring it would
-    # make that store fail the protocol. A store that CAN answer just defines
-    # the method; the loader detects it and injects the bound method as the
-    # SessionSearch builtin's backend, so any backing (directory scan, SQL,
-    # a vector index) serves the same tool.
+    #     async def recent_sessions(
+    #         self,
+    #         *,
+    #         limit: int = 10,
+    #         exclude_session_id: str | None = None,
+    #     ) -> list[SessionSummary]: ...
     #
-    # Contract: ``terms`` arrive already lowercased and are matched as
-    # case-insensitive substrings; a text matches if it contains ANY term.
+    #     async def session_slice(
+    #         self,
+    #         session_id: str,
+    #         *,
+    #         start: int = -10,
+    #         count: int = 10,
+    #     ) -> SessionSlice | None: ...
+    #
+    # Deliberately NOT part of the protocol above — a store that keeps no
+    # durable record (MemoryStore) cannot answer them, and requiring them
+    # would make that store fail the protocol. A store that CAN answer just
+    # defines the methods; the loader detects each and injects the bound
+    # method as the matching builtin's backend (``search`` +
+    # ``recent_sessions`` → SessionSearch, ``session_slice`` → SessionView),
+    # so any backing (directory scan, SQL, a vector index) serves the same
+    # tools. Together they are the model's episodic memory: search or list to
+    # find a session, then open a slice of it.
+    #
+    # ``search`` contract: ``terms`` arrive already lowercased and are matched
+    # as case-insensitive substrings; a text matches if it contains ANY term.
     # ``exclude_session_id`` is the caller's own session — its history belongs
     # to HistorySearch, so skip it. ``limit`` is a hint, not a promise:
     # over-returning is fine, because the tool sorts and trims.
+    #
+    # ``recent_sessions`` contract: newest first by last activity, own session
+    # excluded, ``limit`` a hint like above.
+    #
+    # ``session_slice`` contract: messages are the session's ACTIVE path
+    # (root→head), 0-indexed; ``start`` may be negative to count from the end
+    # (clamped, python-slice style); return None for an unknown session.
 
 
 class MemoryStore:

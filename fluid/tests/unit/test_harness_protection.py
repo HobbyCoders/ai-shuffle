@@ -6,7 +6,7 @@ import httpx
 
 from fluid.config.loader import BUILTIN_DEFAULTS, _build_permissions, deep_merge
 from fluid.config.model import HarnessConfig
-from fluid.context.memory import MemoryStore
+from fluid.codemode.skills import SkillStore
 from fluid.context.screening import screen, screen_findings, strip_invisible
 from fluid.context.steering import STEER_OPEN
 from fluid.engine.native import NativeLoop
@@ -85,16 +85,15 @@ def test_strip_invisible_removes_bidi_controls() -> None:
 
 
 def test_memory_rejects_credentials(tmp_path) -> None:
-    store = MemoryStore(tmp_path / "MEMORY.md")
-    ok, msg = store.apply([
-        {"action": "add", "content": "deploy key is sk-ant-abc123def456ghi789"},
-    ])
-    assert not ok and "credential" in msg and "never store secrets" in msg
-    assert store.entries() == []
-    ok, _ = store.apply([
-        {"action": "add", "content": "The deploy key lives in DEPLOY_KEY in .env"},
-    ])
-    assert ok  # pointers to where a secret lives are fine
+    import pytest
+
+    store = SkillStore(tmp_path)
+    with pytest.raises(ValueError, match="credential"):
+        store.save_memory("deploy key is sk-ant-abc123def456ghi789")
+    assert store.memories() == []
+    # Pointers to where a secret lives are fine.
+    store.save_memory("The deploy key lives in DEPLOY_KEY in .env")
+    assert len(store.memories()) == 1
 
 
 # ─── sensitive files ─────────────────────────────────────────────────────────

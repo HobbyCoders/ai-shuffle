@@ -382,11 +382,6 @@ class CliHost:
             registry,
             allowed=allowed,
             disallowed=disallowed,
-            memory_char_limit=(
-                self.config.memory.char_limit
-                if self.config.memory.enabled
-                else None
-            ),
         )
 
         permissions = None

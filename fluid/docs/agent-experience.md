@@ -63,6 +63,14 @@ explicitly told that pruning and merging beat accumulation — with "no new
 skill" as the expected common outcome, because a memory system's failure mode
 is hoarding.
 
+The same argument eventually removed fluid's model-curated `MEMORY.md`: a
+memory file the agent must file into and prune is diligence-bound in exactly
+the way (a)–(c) describe. Declarative memory now rides the continual loop
+too — the synthesizer distills remembered facts from the journal into a
+bounded, machine-curated list (`memories.json`) injected each session, and
+episodic recall is simply the session store, reached through `SessionSearch`
+(list/search) and `SessionView` (open a session's tail).
+
 These observations became features (v2): the journal is now **episodic** —
 user prompts and final assistant replies are recorded alongside executed
 cells, so synthesis sees *why* a workflow ran and whether the user accepted

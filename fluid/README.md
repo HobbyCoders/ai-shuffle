@@ -166,11 +166,11 @@ verification loop in hand. Set `system` to replace the whole contract, or
 **Web, questions, and memory.** `WebFetch` and `WebSearch` (keyless,
 SSRF-guarded, results fenced as untrusted data) close the network gap without
 an MCP server. `AskUser` asks the user structured questions mid-turn and
-parks until they answer. A bounded declarative memory (`~/.fluid/MEMORY.md`,
-capped, snapshot-frozen per session, curated by the model through the
-`Memory` tool) carries durable facts across sessions, and `SessionSearch`
-recalls past sessions' conversations so "like we did last week" is answered
-from the record.
+parks until they answer. Memory is two-sided: the continual learner distills
+remembered facts (alongside its skills) into a bounded, machine-curated list
+injected each session, and the session store itself is episodic memory —
+`SessionSearch` lists and searches past sessions, `SessionView` opens one, so
+"like we did last week" is answered from the record.
 
 **Replayable by construction.** The engine consumes operations and emits a
 sequence-numbered event stream. Every UI, log, and integration is a subscriber
@@ -202,9 +202,9 @@ Early development, moving fast. Working today:
   elision-marker notices, bounded and de-framed error text, schema-guided
   argument coercion, and availability probes with a last-good grace window.
 - `WebFetch`/`WebSearch` (keyless, SSRF-guarded, fenced), `AskUser`
-  structured questions, bounded declarative `Memory`, cross-session
-  `SessionSearch`, and a mid-turn `Steer` op delivered on the next tool
-  result inside a trusted marker.
+  structured questions, cross-session recall with `SessionSearch` /
+  `SessionView`, synthesizer-curated memories, and a mid-turn `Steer` op
+  delivered on the next tool result inside a trusted marker.
 - Code mode with `from tools import X`, a pure-stdlib allowlist, trimmed
   tracebacks, and the continual skill synthesizer.
 - The compaction ladder with head excerpts on trim stubs, `HistoryExpand` /

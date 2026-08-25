@@ -161,21 +161,17 @@ A trimmed result is replaced by a placeholder that states how many characters
 were removed, quotes the first 160 characters of the original, and carries a
 `node_...` ref that `HistoryExpand` or `HistorySearch` can recover.
 
-### `[memory]`
+### Memory
 
-Bounded declarative memory: a small, human-editable file of durable facts,
-injected into the compiled prompt as a frozen session-start snapshot with a
-visible fill percentage, and curated by the model through the `Memory` tool
-(batched atomic edits; the char cap is checked on the batch's final state, so
-one call can consolidate and add together). Mid-session saves land on disk
-immediately and appear in the prompt next session — the cached prefix never
-mutates. Entries are screened for prompt-injection patterns at snapshot build.
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `enabled` | `true` | `false` removes the `Memory` tool and the prompt's memory section. |
-| `file` | none (`~/.fluid/MEMORY.md`) | The store. Entries are separated by `---` lines; edit it by hand freely. |
-| `char_limit` | `3000` | Hard cap on total content. Oversized batches are rejected with the current entries shown. |
+There is no `[memory]` table and no model-curated memory file. Declarative
+memory belongs to the continual learner (`continual = true`): its synthesizer
+distills remembered facts from session journals into
+`<skills_dir>/memories.json` alongside the skills, and each session's prompt
+carries a frozen `# Memory` snapshot of that list. The store is bounded
+(oldest entries archive past the cap), synthesizer-curated, and screened for
+prompt-injection patterns and credentials — the model never files or prunes
+entries itself. Episodic recall is the session store: `SessionSearch` lists
+and searches past sessions, `SessionView` opens one.
 
 ### `[[hooks]]`
 

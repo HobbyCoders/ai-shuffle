@@ -219,27 +219,6 @@ class ToolsConfig:
 
 
 @dataclass(frozen=True, kw_only=True)
-class MemoryConfig:
-    """The bounded declarative memory store, from ``[memory]``.
-
-    ``file = None`` → ``~/.fluid/MEMORY.md``. Disabling removes both the
-    Memory tool and the prompt's memory section.
-    """
-
-    enabled: bool = True
-    file: str | None = None
-    char_limit: int = 3_000
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> MemoryConfig:
-        return cls(
-            enabled=bool(d.get("enabled", True)),
-            file=d.get("file"),
-            char_limit=int(d.get("char_limit", 3_000)),
-        )
-
-
-@dataclass(frozen=True, kw_only=True)
 class ContextConfig:
     """The mechanical eviction ladder + recall, from ``[context]``.
 
@@ -334,7 +313,6 @@ class HarnessConfig:
     setting_sources: tuple[str, ...] = SETTING_SOURCES
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
-    memory: MemoryConfig = field(default_factory=MemoryConfig)
     # Shell-command hooks, user layer first then project layer (the loader
     # concatenates ``hooks`` lists instead of replacing them).
     hooks: tuple[HookConfig, ...] = ()
@@ -393,7 +371,6 @@ class HarnessConfig:
             setting_sources=_setting_sources_from(d.get("setting_sources")),
             tools=ToolsConfig.from_dict(d.get("tools", {})),
             context=ContextConfig.from_dict(d.get("context", {})),
-            memory=MemoryConfig.from_dict(d.get("memory", {})),
             hooks=tuple(HookConfig.from_dict(h) for h in d.get("hooks") or ()),
             cwd=d.get("cwd", "."),
             max_tokens=_optional_int(d.get("max_tokens")),
@@ -482,11 +459,6 @@ class HarnessConfig:
                 "tool_result_stub_chars": self.context.tool_result_stub_chars,
                 "keep_recent_tool_results": self.context.keep_recent_tool_results,
                 "min_result_chars": self.context.min_result_chars,
-            },
-            "memory": {
-                "enabled": self.memory.enabled,
-                "file": self.memory.file,
-                "char_limit": self.memory.char_limit,
             },
             "hooks": [h.to_dict() for h in self.hooks],
             "providers": {

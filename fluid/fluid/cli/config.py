@@ -66,6 +66,7 @@ def resolved_prompt(
     sections); :func:`resolved_system` is its ``.text``.
     """
     from fluid.cli.prompt import code_mode_addendum, default_base_prompt
+    from fluid.codemode.skills import DEFAULT_SKILLS_ROOT
     from fluid.context.compiler import PromptInputs, compile_prompt
 
     if config.system:
@@ -86,9 +87,11 @@ def resolved_prompt(
             include_skills=enabled and config.instruction_files.discover_skills,
             include_agents=enabled,
             include_plugins=enabled and config.instruction_files.discover_plugins,
-            include_memory=config.memory.enabled,
-            memory_file=config.memory.file,
-            memory_char_limit=config.memory.char_limit,
+            memories_dir=(
+                (config.skills_dir or str(DEFAULT_SKILLS_ROOT))
+                if config.continual
+                else None
+            ),
             setting_sources=config.setting_sources,
         )
     )

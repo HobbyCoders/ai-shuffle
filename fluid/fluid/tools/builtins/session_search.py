@@ -1,13 +1,16 @@
-"""SessionSearch — keyword recall across ALL stored sessions.
+"""SessionSearch — recall across ALL stored sessions: search or list them.
 
 HistorySearch covers the current session's path; this tool sweeps the whole
 session store, so "the thing we did last week" is answered from the record
-instead of asked again. The search itself belongs to the backend: the host
-injects a ``search(terms, *, limit, exclude_session_id)`` callable through the
-tool context, and this module only ranks and formats what comes back. The
-stock implementation is ``JsonlStore.search`` — a bounded, line-oriented sweep
-of the store's directory, no index and no dependencies — but a store backed by
-SQL or a vector index serves the same tool by offering the same callable.
+instead of asked again. With a query it is keyword search; without one it
+lists recent sessions — the entry point for "what were we last working on?".
+The lookups belong to the backend: the host injects ``search(terms, *, limit,
+exclude_session_id)`` and ``recent_sessions(*, limit, exclude_session_id)``
+callables through the tool context, and this module only ranks and formats
+what comes back. The stock implementations live on ``JsonlStore`` — bounded,
+line-oriented sweeps of the store's directory, no index and no dependencies —
+but a store backed by SQL or a vector index serves the same tool by offering
+the same callables.
 """
 
 from __future__ import annotations
@@ -22,27 +25,37 @@ from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 _SNIPPET_RADIUS = 160
 _MAX_MATCHES_PER_SESSION = 3
 _OUTPUT_CAP = 16_000
+_DEFAULT_RECENT = 10
+
 
 def describe(tools: frozenset[str] | None = None) -> str:
     """SessionSearch's description, specialized to the session's surface."""
     has = (lambda name: tools is None or name in tools)
+    open_route = (
+        " Open a matched session with SessionView to see what was actually "
+        "done there."
+        if has("SessionView")
+        else ""
+    )
     recall_route = (
-        " This searches OTHER sessions; for content trimmed from THIS "
+        " This covers OTHER sessions; for content trimmed from THIS "
         "session use HistorySearch/HistoryExpand."
         if has("HistorySearch") and has("HistoryExpand")
-        else " This searches OTHER sessions, not the current one."
+        else " This covers OTHER sessions, not the current one."
     )
     return (
-        "Search past sessions' stored conversations for keywords and return "
-        "matching snippets, newest sessions first. Use when the user "
-        "references earlier work you cannot see (\"like we did last time\", "
-        "\"the script from yesterday\") — search before asking them to "
-        "repeat themselves.\n"
+        "Your recall over past sessions. With a query: keyword-search every "
+        "stored conversation and return matching snippets, best sessions "
+        "first. WITHOUT a query: list recent sessions, newest first, with "
+        "titles and a last-reply preview — start there for \"what were we "
+        "working on?\". Use it whenever earlier work is referenced (\"like "
+        "we did last time\", \"the script from yesterday\") — search before "
+        "asking the user to repeat themselves.\n"
         "\n"
         "Matches are scored by how many query terms a message contains. "
-        "Results name the session id and a snippet around the match; they "
-        "are recall, not live state — verify anything you act on against "
-        "the current files." + recall_route
+        "Results name the session id, its title, and a snippet around the "
+        "match; they are recall, not live state — verify anything you act "
+        "on against the current files." + open_route + recall_route
     )
 
 
@@ -54,20 +67,31 @@ SPEC = ToolSpec(
         "properties": {
             "query": {
                 "type": "string",
-                "description": "Keywords (matched case-insensitively, best matches first).",
+                "description": (
+                    "Keywords (matched case-insensitively, best matches "
+                    "first). Omit to list recent sessions instead."
+                ),
             },
             "limit": {
                 "type": "integer",
-                "description": "Maximum sessions to report (default 5).",
+                "description": "Maximum sessions to report (default 5; 10 when listing).",
             },
         },
-        "required": ["query"],
+        "required": [],
     },
     risk="safe",
     # Host- or loader-wired search callable; absent (in-memory store, no host
     # injection) the engine drops the tool from the request schemas.
     requires_extra=("session_search",),
 )
+
+
+def _stamp(ts: float) -> str:
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d") if ts else "unknown date"
+
+
+def _label(session_id: str, title: str | None) -> str:
+    return f"session {session_id} {title!r}" if title else f"session {session_id}"
 
 
 def _snippet(text: str, term: str) -> str:
@@ -80,6 +104,34 @@ def _snippet(text: str, term: str) -> str:
     return f"{prefix}{flat}{suffix}"
 
 
+async def _list_recent(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
+    recent = (ctx.extra or {}).get("session_recent")
+    if recent is None:
+        return ToolOutcome(
+            text=(
+                "this backend cannot list sessions — provide a query to "
+                "search instead."
+            ),
+            is_error=True,
+        )
+    limit = max(1, int(input.get("limit") or _DEFAULT_RECENT))
+    rows = recent(limit=limit, exclude_session_id=ctx.session_id)
+    if inspect.isawaitable(rows):
+        rows = await rows
+    if not rows:
+        return ToolOutcome(text="no stored sessions yet.")
+    lines = [f"{len(rows[:limit])} recent session(s), newest first:"]
+    for row in rows[:limit]:
+        count = f", {row.message_count} messages" if row.message_count else ""
+        lines.append(f"{_label(row.session_id, row.title)} ({_stamp(row.last_ts)}{count})")
+        if row.preview:
+            lines.append(f"  last: {row.preview}")
+    text = "\n".join(lines)
+    if len(text) > _OUTPUT_CAP:
+        text = text[:_OUTPUT_CAP] + "\n[output capped — lower the limit]"
+    return ToolOutcome(text=text)
+
+
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     search = (ctx.extra or {}).get("session_search")
     if search is None:
@@ -87,10 +139,10 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             text="SessionSearch unavailable: no session search backend injected.",
             is_error=True,
         )
-    query = str(input.get("query", "")).strip()
+    query = str(input.get("query", "") or "").strip()
     terms = [t.lower() for t in re.split(r"\s+", query) if t]
     if not terms:
-        return ToolOutcome(text="empty query", is_error=True)
+        return await _list_recent(input, ctx)
     limit = max(1, int(input.get("limit") or 5))
 
     hits = search(terms, limit=limit, exclude_session_id=ctx.session_id)
@@ -107,11 +159,10 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     hits = sorted(hits, key=lambda h: (-h.score, -h.last_ts))
     lines: list[str] = [f"{len(hits)} session(s) matched; best first:"]
     for hit in hits[:limit]:
-        stamp = (
-            datetime.fromtimestamp(hit.last_ts).strftime("%Y-%m-%d")
-            if hit.last_ts else "unknown date"
+        lines.append(
+            f"{_label(hit.session_id, hit.title)} "
+            f"({_stamp(hit.last_ts)}, score {hit.score}):"
         )
-        lines.append(f"session {hit.session_id} ({stamp}, score {hit.score}):")
         for role, text in hit.texts[:_MAX_MATCHES_PER_SESSION]:
             term = next((t for t in terms if t in text.lower()), "")
             lines.append(f"  [{role}] {_snippet(text, term)}")

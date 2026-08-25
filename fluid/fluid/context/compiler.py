@@ -27,8 +27,8 @@ Everything else the compiler gathers itself:
                       no ``Task``.
 
 Layering order (stable — prompt-cache friendly):
-    base → instruction stack → skills index → agents index → memory snapshot →
-    environment → extra blocks
+    base → instruction stack → skills index → agents index → learned-memory
+    snapshot → environment → extra blocks
 
 Two views of the same compilation:
 
@@ -83,13 +83,13 @@ class PromptInputs:
     include_skills: bool = True
     # Native ``.agents/agents`` catalog advertised for Task delegation.
     include_agents: bool = True
-    # Bounded declarative memory (fluid.context.memory): a frozen snapshot of
-    # ~/.fluid/MEMORY.md (or ``memory_file``), rendered after the indexes and
-    # before the environment block — the most cross-session-mutable section
-    # sits nearest the volatile tail.
-    include_memory: bool = True
-    memory_file: str | os.PathLike[str] | None = None
-    memory_char_limit: int = 3_000
+    # Continual-learner memory (fluid.codemode.skills): the facts the
+    # synthesizer distilled from past sessions' journals, rendered as a frozen
+    # snapshot after the indexes and before the environment block — the most
+    # cross-session-mutable section sits nearest the volatile tail. The value
+    # is the skills root (the continual store's home); ``None`` omits the
+    # section (continual learning off).
+    memories_dir: str | os.PathLike[str] | None = None
     # Enabled plugins (~/.fluid/plugins, gated by the settings stack's
     # enabledPlugins map) contribute their skills and agents to the indexes,
     # namespaced <plugin>:<name> and just as deferred — descriptions only.
@@ -265,15 +265,18 @@ def compile_prompt(inputs: PromptInputs) -> CompiledPrompt:
         )
         if index:
             sections.append(PromptSection(kind="agents", text=index))
-    if inputs.include_memory:
-        from fluid.context.memory import MemoryStore
+    if inputs.memories_dir is not None:
+        from fluid.codemode.skills import SkillStore
 
-        store = MemoryStore(inputs.memory_file, char_limit=inputs.memory_char_limit)
-        section = store.render_section()
+        store = SkillStore(inputs.memories_dir)
+        section = store.render_memory_section()
         if section:
             sections.append(
                 PromptSection(
-                    kind="memory", text=section, path=str(store.path), scope="global"
+                    kind="memory",
+                    text=section,
+                    path=str(store.memories_path),
+                    scope="global",
                 )
             )
     if inputs.include_env:

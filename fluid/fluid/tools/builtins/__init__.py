@@ -14,12 +14,12 @@ from fluid.tools.builtins import (
     history_expand,
     history_search,
     ledger,
-    memory,
     monitor,
     note,
     plan,
     read,
     session_search,
+    session_view,
     skill,
     task,
     tool_search,
@@ -31,7 +31,7 @@ from fluid.tools.registry import ToolRegistry
 _MODULES = (
     read, grep, glob, write, edit, bash, skill, note, task, monitor,
     tool_search, history_expand, history_search, ledger,
-    memory, session_search, ask_user, web, plan,
+    session_search, session_view, ask_user, web, plan,
 )
 
 # Tools whose descriptions specialize to the session's permitted surface —
@@ -49,6 +49,7 @@ _DESCRIBERS = {
     "AskUser": ask_user.describe,
     "HistorySearch": history_search.describe,
     "SessionSearch": session_search.describe,
+    "SessionView": session_view.describe,
     "WebFetch": web.describe_fetch,
     "WebSearch": web.describe_search,
 }
@@ -84,14 +85,12 @@ def refine_builtin_descriptions(
     *,
     allowed: Iterable[str] | None = None,
     disallowed: Iterable[str] | None = (),
-    memory_char_limit: int | None = None,
 ) -> None:
     """Specialize registered builtin descriptions to this session.
 
     Run once at session build, after :func:`register_builtins` and after the
     tool restriction is known: cross-tool clauses collapse to the permitted
-    surface, and config-dependent limits (Memory capacity) replace the
-    defaults. Idempotent — amending with the full surface reproduces the
+    surface. Idempotent — amending with the full surface reproduces the
     module-constant text.
     """
     builtin_names = {
@@ -103,10 +102,6 @@ def refine_builtin_descriptions(
     for name, describe in _DESCRIBERS.items():
         if name in builtin_names:
             registry.amend_spec(name, description=describe(surface))
-    if memory_char_limit is not None and "Memory" in builtin_names:
-        registry.amend_spec(
-            "Memory", description=memory.describe(memory_char_limit)
-        )
 
 
 __all__ = [

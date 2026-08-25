@@ -24,15 +24,26 @@ from pathlib import Path
 from fluid.events.model import Event, event_from_dict, event_to_dict
 from fluid.messages import Message
 from fluid.store.base import (
+    RecallMessage,
     SessionMeta,
     SessionNode,
     SessionSearchHit,
+    SessionSlice,
+    SessionSummary,
     message_texts,
     new_id,
+    recall_message,
 )
 
 _MAX_SESSIONS_SCANNED = 500
 _MAX_MATCHES_PER_SESSION = 3
+_TITLE_CAP = 80
+_PREVIEW_CAP = 120
+
+
+def _clip(text: str, cap: int) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= cap else flat[: cap - 1] + "…"
 
 
 class JsonlStore:
@@ -76,7 +87,7 @@ class JsonlStore:
             kind = rec["t"]
             if kind == "meta":
                 meta = SessionMeta(
-                    session_id=rec["session_id"],
+                    session_id=rec.get("session_id") or session_id,
                     head_node_id=rec.get("head_node_id"),
                     created_at=rec.get("created_at", 0.0),
                     cli_session_id=rec.get("cli_session_id"),
@@ -85,7 +96,7 @@ class JsonlStore:
                 n = rec["node"]
                 nodes[n["node_id"]] = SessionNode(
                     node_id=n["node_id"],
-                    parent_id=n["parent_id"],
+                    parent_id=n.get("parent_id"),
                     message=Message.from_dict(n["message"]),
                     ts=n.get("ts", 0.0),
                 )
@@ -219,7 +230,97 @@ class JsonlStore:
             if hit.score:
                 hits.append(hit)
         hits.sort(key=lambda h: (-h.score, -h.last_ts))
+        for hit in hits[:limit]:  # titles only for what the tool will show
+            hit.title = self._session_title(hit.session_id)
         return hits
+
+    async def recent_sessions(
+        self,
+        *,
+        limit: int = 10,
+        exclude_session_id: str | None = None,
+    ) -> list[SessionSummary]:
+        """Newest sessions first — the SessionSearch no-query listing's backend.
+
+        Loads at most ``limit`` sessions (newest logs by mtime), so the cost
+        tracks what the caller will actually show.
+        """
+        limit = max(1, limit)
+        logs = [
+            p for p in sorted(
+                self._dir.glob("*.jsonl"),
+                key=lambda p: p.stat().st_mtime if p.exists() else 0,
+                reverse=True,
+            )
+            if not p.name.endswith(".events.jsonl")
+        ][:_MAX_SESSIONS_SCANNED]
+        out: list[SessionSummary] = []
+        for log in logs:
+            if len(out) >= limit:
+                break
+            session_id = log.name[: -len(".jsonl")]
+            if session_id == exclude_session_id or not self._ensure_loaded(session_id):
+                continue
+            path = await self.load_path(session_id)
+            preview = ""
+            for node in reversed(path):
+                if node.message.role == "assistant" and node.message.text().strip():
+                    preview = _clip(node.message.text(), _PREVIEW_CAP)
+                    break
+            out.append(SessionSummary(
+                session_id=session_id,
+                title=self._session_title(session_id),
+                last_ts=path[-1].ts if path else 0.0,
+                preview=preview,
+                message_count=len(path),
+            ))
+        return out
+
+    async def session_slice(
+        self,
+        session_id: str,
+        *,
+        start: int = -10,
+        count: int = 10,
+    ) -> SessionSlice | None:
+        """A message window of one session — the SessionView builtin's backend."""
+        if not self._ensure_loaded(session_id):
+            return None
+        path = await self.load_path(session_id)
+        total = len(path)
+        count = max(1, count)
+        first = max(0, total + start) if start < 0 else min(start, total)
+        window = path[first:first + count]
+        messages: list[RecallMessage] = [
+            recall_message(n.message.to_dict(), ts=n.ts) for n in window
+        ]
+        return SessionSlice(
+            session_id=session_id,
+            total=total,
+            start=first,
+            messages=messages,
+            title=self._session_title(session_id),
+            last_ts=path[-1].ts if path else 0.0,
+        )
+
+    def _session_title(self, session_id: str) -> str | None:
+        """First user text on the active path, clipped — the session's de facto name."""
+        if not self._ensure_loaded(session_id):
+            return None
+        meta = self._sessions[session_id]
+        nodes = self._nodes[session_id]
+        chain: list[SessionNode] = []
+        cursor = meta.head_node_id
+        while cursor is not None:
+            node = nodes.get(cursor)
+            if node is None:
+                break
+            chain.append(node)
+            cursor = node.parent_id
+        for node in reversed(chain):
+            if node.message.role == "user" and node.message.text().strip():
+                return _clip(node.message.text(), _TITLE_CAP)
+        return None
 
     def _scan_log(self, path: Path, session_id: str, terms: list[str]) -> SessionSearchHit:
         hit = SessionSearchHit(session_id=session_id, score=0)

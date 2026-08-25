@@ -163,16 +163,6 @@ def test_shared_fragments_appear_verbatim() -> None:
         )
 
 
-def test_memory_description_states_configured_capacity() -> None:
-    from fluid.tools.builtins import refine_builtin_descriptions
-
-    registry = ToolRegistry()
-    register_builtins(registry)
-    refine_builtin_descriptions(registry, memory_char_limit=12_345)
-    spec = registry.get("Memory")
-    assert spec is not None and "12,345" in spec.description
-
-
 def test_prompt_structure_invariants() -> None:
     config = HarnessConfig.from_dict(deep_merge(BUILTIN_DEFAULTS, {}))
     from fluid.cli.prompt import default_base_prompt
@@ -203,21 +193,26 @@ def test_compiled_prompt_section_order(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     (tmp_path / "home" / ".fluid").mkdir(parents=True)
-    (tmp_path / "home" / ".fluid" / "MEMORY.md").write_text(
-        "durable fact\n", encoding="utf-8"
-    )
+    from fluid.codemode.skills import SkillStore
+
+    skills_dir = tmp_path / "home" / ".fluid" / "skills"
+    SkillStore(skills_dir).save_memory("durable fact")
     (tmp_path / "AGENTS.md").write_text("project rules", encoding="utf-8")
     from fluid.cli.config import resolved_prompt
 
     config = HarnessConfig.from_dict(
-        deep_merge(BUILTIN_DEFAULTS, {"cwd": str(tmp_path)})
+        deep_merge(BUILTIN_DEFAULTS, {
+            "cwd": str(tmp_path),
+            "continual": True,
+            "skills_dir": str(skills_dir),
+        })
     )
     compiled = resolved_prompt(config)
     kinds = [s.kind for s in compiled.sections]
     assert kinds[0] == "base"
     assert kinds[-1] == "environment"
-    # The memory-store snapshot (path = MEMORY.md) sits after the instruction
-    # stack and right before the environment block.
+    # The learner-memory snapshot (path = memories.json) sits after the
+    # instruction stack and right before the environment block.
     indexes = {
         "instructions": next(
             i for i, s in enumerate(compiled.sections)
@@ -225,7 +220,7 @@ def test_compiled_prompt_section_order(tmp_path, monkeypatch) -> None:
         ),
         "memory_store": next(
             i for i, s in enumerate(compiled.sections)
-            if s.kind == "memory" and (s.path or "").endswith("MEMORY.md")
+            if s.kind == "memory" and (s.path or "").endswith("memories.json")
         ),
         "environment": kinds.index("environment"),
     }

@@ -176,11 +176,15 @@ def test_build_engine_wires_session_search_from_the_store(tmp_path) -> None:
     store = JsonlStore(tmp_path / "sessions")
     engine = build_engine(config, store, provider=FakeProvider())
     assert engine.ctx.extra["session_search"] == store.search
+    assert engine.ctx.extra["session_recent"] == store.recent_sessions
+    assert engine.ctx.extra["session_view"] == store.session_slice
 
-    # MemoryStore keeps no durable record, so the capability stays unwired and
-    # the tool never reaches the request schemas.
+    # MemoryStore keeps no durable record, so the capabilities stay unwired
+    # and the tools never reach the request schemas.
     plain = build_engine(config, MemoryStore(), provider=FakeProvider())
     assert "session_search" not in plain.ctx.extra
+    assert "session_recent" not in plain.ctx.extra
+    assert "session_view" not in plain.ctx.extra
 
 
 def test_build_engine_code_mode_wires_session(tmp_path) -> None:

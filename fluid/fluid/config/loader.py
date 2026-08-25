@@ -88,13 +88,6 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     # Shell-command hooks ([[hooks]] entries; see docs/hooks.md). Lists from
     # every layer are concatenated, not replaced.
     "hooks": [],
-    # Bounded declarative memory (context/memory.py): durable facts injected
-    # as a frozen snapshot each session; curated via the Memory tool.
-    "memory": {
-        "enabled": True,
-        "file": None,
-        "char_limit": 3_000,
-    },
     # The mechanical eviction ladder (context/compaction.py): trigger,
     # headroom reserve, digest/epoch shape, intake stub size, tier-1 knobs.
     "context": {
@@ -564,8 +557,6 @@ def build_engine(
         allowed_tools = config.tools.allowed
     if disallowed_tools is None:
         disallowed_tools = config.tools.disallowed
-    if not config.memory.enabled and "Memory" not in (disallowed_tools or ()):
-        disallowed_tools = (*tuple(disallowed_tools or ()), "Memory")
 
     provider_name = provider_name or config.default_provider
     pc = config.provider(provider_name)
@@ -584,21 +575,20 @@ def build_engine(
                 registry,
                 allowed=allowed_tools,
                 disallowed=disallowed_tools,
-                memory_char_limit=(
-                    config.memory.char_limit if config.memory.enabled else None
-                ),
             )
     if ctx is None:
         ctx = ToolCtx(cwd=config.cwd, session_id=session_id)
-    # Builtin wiring that rides the tool context: the Memory tool writes the
-    # same file the compiled prompt snapshots, and SessionSearch borrows the
-    # store's own ``search`` when it has one (a store with no durable record,
-    # like MemoryStore, simply leaves the tool unwired and invisible).
-    if config.memory.enabled:
-        ctx.extra.setdefault("memory_file", config.memory.file)
-        ctx.extra.setdefault("memory_char_limit", config.memory.char_limit)
+    # Builtin wiring that rides the tool context: the recall builtins borrow
+    # the store's own optional hooks when it has them (a store with no durable
+    # record, like MemoryStore, simply leaves the tools unwired and invisible).
+    # ``recent_sessions`` backs SessionSearch's no-query listing;
+    # ``session_slice`` backs SessionView.
     if callable(getattr(store, "search", None)):
         ctx.extra.setdefault("session_search", store.search)
+    if callable(getattr(store, "recent_sessions", None)):
+        ctx.extra.setdefault("session_recent", store.recent_sessions)
+    if callable(getattr(store, "session_slice", None)):
+        ctx.extra.setdefault("session_view", store.session_slice)
 
     if pc.kind == "delegated_claude":
         from fluid.engine.delegated import DelegatedLoop

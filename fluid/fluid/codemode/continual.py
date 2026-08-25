@@ -36,11 +36,16 @@ harness. Skills are small modules mounted into the agent's Python kernel as
 `skills.<name>`; the agent imports them instead of re-deriving the same
 helper code session after session.
 
-You will see the current skill library and a journal of the recent session:
-conversation events ([user] prompts and [assistant] replies — these carry the
-intent behind the work and whether the user accepted it) interleaved with the
-cells that were executed. Distill only *genuinely reusable* workflow
-improvements:
+You also maintain the agent's remembered FACTS — a short declarative memory
+list shown to the agent at the start of every future session. Skills capture
+HOW (procedures); memories capture WHAT IS TRUE (preferences, conventions,
+corrections).
+
+You will see the current skill library, the current memory list, and a journal
+of the recent session: conversation events ([user] prompts and [assistant]
+replies — these carry the intent behind the work and whether the user accepted
+it) interleaved with the cells that were executed. Distill only *genuinely
+reusable* workflow improvements:
 - recurring multi-step patterns worth naming (not one-off task logic);
 - generalize: parameters instead of hard-coded values from the journal;
 - prefer updating/merging an existing skill over adding a near-duplicate;
@@ -48,6 +53,16 @@ improvements:
 - weight user feedback: a workflow the user corrected or rejected is a signal
   to fix or delete, not to enshrine;
 - most journals need NO new skill — that is the correct common outcome.
+
+Memory rules — add a memory for a durable declarative fact: a preference the
+user stated, a convention of their environment, a correction that should never
+need repeating, or anything the user explicitly asked to remember ("remember
+that…" is a direct order to add one). Rewrite a memory the evidence shows is
+wrong or stale (emit it with its id); delete one the user contradicted or that
+no longer applies. A memory is one or two sentences of fact ("user prefers X",
+"staging deploys go through Y") — never task progress, never instructions to
+yourself ("always do X" replays as a directive and causes repeated work), and
+never secrets. Most journals need NO memory change either.
 
 Do NOT capture (these become persistent self-imposed constraints that bite
 later, when the environment has changed):
@@ -76,11 +91,16 @@ Output format — nothing else:
   ...full module source...
   </skill>
 - to remove a skill: <delete-skill name="snake_case_name"/>
+- for each new memory: <memory>the fact</memory>
+- to rewrite a memory: <memory id="m3">the corrected fact</memory>
+- to remove a memory: <delete-memory id="m3"/>
 - if nothing is worth keeping: NO_CHANGES
 """
 
 _SKILL_RE = re.compile(r'<skill name="([a-z0-9_]+)">\n?(.*?)</skill>', re.DOTALL)
 _DELETE_RE = re.compile(r'<delete-skill name="([a-z0-9_]+)"\s*/>')
+_MEMORY_RE = re.compile(r'<memory(?:\s+id="(m\d+)")?\s*>\n?(.*?)</memory>', re.DOTALL)
+_DELETE_MEMORY_RE = re.compile(r'<delete-memory id="(m\d+)"\s*/>')
 
 # Journal previews are already trimmed at write time; cap the slice we show.
 MAX_ENTRIES_PER_PASS = 40
@@ -184,6 +204,13 @@ class Synthesizer:
             lines.append(s.source.rstrip("\n"))
             lines.append("```")
         lines.append("")
+        lines.append("## Current memory")
+        memories = self._store.memories()
+        if not memories:
+            lines.append("(empty)")
+        for m in memories:
+            lines.append(f"[{m.id}] {m.text}")
+        lines.append("")
         lines.append("## Session journal (conversation + executed cells, in order)")
         cell_no = 0
         for e in entries:
@@ -265,5 +292,16 @@ class Synthesizer:
         for match in _DELETE_RE.finditer(text or ""):
             if self._store.delete(match.group(1)):
                 changed.append(f"-{match.group(1)}")
+        for match in _MEMORY_RE.finditer(text or ""):
+            memory_id, memory_text = match.group(1), match.group(2).strip()
+            try:
+                saved = self._store.save_memory(memory_text, memory_id=memory_id)
+            except ValueError as exc:
+                errors.append(f"memory: {exc}")
+                continue
+            changed.append(f"memory:{saved.id}")
+        for match in _DELETE_MEMORY_RE.finditer(text or ""):
+            if self._store.delete_memory(match.group(1)):
+                changed.append(f"-memory:{match.group(1)}")
         self.last_error = "; ".join(errors) if errors else None
         return changed
