@@ -336,6 +336,45 @@ def repair_dangling_tool_calls(history: list[Message]) -> list[Message]:
     return out if repaired else history
 
 
+# Arguments long enough to be worth previewing back to the model, short enough
+# not to re-send a whole truncated cell.
+_ARG_PREVIEW_CHARS = 300
+
+
+def _parse_tool_args(raw_args: str) -> tuple[dict[str, Any], str | None]:
+    """Decode a tool call's accumulated argument JSON.
+
+    Truncation here is routine, not exceptional: a model that runs out of
+    output budget mid-``arguments`` — or a provider that drops the tail of a
+    stream — leaves a prefix like ``{"code":"...`` behind. The bare
+    ``json.loads`` this replaces raised out of the stream consumer and killed
+    the whole turn with an opaque ``JSONDecodeError``, losing every completed
+    step with it. Returning the failure instead lets the loop hand the model a
+    tool error it can act on.
+    """
+    if not raw_args:
+        return {}, None
+    try:
+        decoded = json.loads(raw_args)
+    except (json.JSONDecodeError, ValueError) as exc:
+        preview = raw_args[:_ARG_PREVIEW_CHARS]
+        if len(raw_args) > _ARG_PREVIEW_CHARS:
+            preview += "…"
+        return {}, (
+            f"Tool arguments were not valid JSON ({exc}) and the call was not "
+            "run. The arguments almost certainly got cut off mid-value — this "
+            "happens when a call carries a very large payload. Reissue it with "
+            "a smaller one (split a long edit into several calls, or Write a "
+            f"long body to a file first).\nReceived: {preview}"
+        )
+    if not isinstance(decoded, dict):
+        return {}, (
+            "Tool arguments must be a JSON object, got "
+            f"{type(decoded).__name__}. Reissue the call with named parameters."
+        )
+    return decoded, None
+
+
 class NativeLoop(BackgroundLifecycleMixin):
     caps = EngineCaps(
         inproc_tools=True, schema_plan_mode=True,
@@ -1628,12 +1667,13 @@ class NativeLoop(BackgroundLifecycleMixin):
                         fallback = (block.get("done_item") or {}).get("arguments")
                         if isinstance(fallback, str):
                             raw_args = fallback
-                    args = json.loads(raw_args) if raw_args else {}
+                    args, arg_error = _parse_tool_args(raw_args)
                     block["input"] = args
                     tool_uses.append({
                         "tool_use_id": block["tool_use_id"] or "",
                         "name": block["tool_name"] or "",
                         "input": args,
+                        "arg_error": arg_error,
                     })
                     await self._emit(
                         ToolUse(session_id=sid, turn_id=turn_id,
@@ -1808,6 +1848,18 @@ class NativeLoop(BackgroundLifecycleMixin):
         self, sid: str, turn_id: str, tu: dict[str, Any]
     ) -> ToolResultBlock:
         tool_use_id = tu["tool_use_id"]
+        arg_error = tu.get("arg_error")
+        if arg_error:
+            # Arguments that never parsed: fail this call, not the turn. The
+            # model reissues the call; the transcript keeps its
+            # one-result-per-use invariant either way.
+            await self._emit(ToolResult(
+                session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id,
+                name=tu["name"], output=arg_error, is_error=True,
+            ))
+            return ToolResultBlock(
+                tool_use_id=tool_use_id, content=[Text(arg_error)], is_error=True,
+            )
         # Expose the call's id to handlers for the duration of the dispatch
         # (dispatches are sequential): host tools that spawn UI-joined work
         # (the Task dispatcher) need it to correlate their cards with this

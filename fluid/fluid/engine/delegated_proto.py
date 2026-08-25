@@ -457,7 +457,12 @@ class StreamJsonMapper:
             events.append(self._block_stop(index))
             block = self._se_tool.get(index)
             if block is not None:
-                args = json.loads(block["args"]) if block["args"] else {}
+                # Same truncation risk as the native loop: a cut-off
+                # arguments blob must not raise out of the stream consumer.
+                try:
+                    args = json.loads(block["args"]) if block["args"] else {}
+                except (json.JSONDecodeError, ValueError):
+                    args = {}
                 events.append(self._tool_use(block["tool_use_id"] or "", block["name"] or "", args))
         # usage(message_delta) / message_stop from the partial stream are
         # ignored: Usage is emitted once from the assistant frame.
