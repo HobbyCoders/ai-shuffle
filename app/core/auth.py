@@ -9,6 +9,7 @@ import secrets
 import logging
 import subprocess
 import json
+import time
 import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -1055,3 +1056,41 @@ class AuthService:
 
 # Global auth service instance
 auth_service = AuthService()
+
+
+# ─── Cached gh-connectivity signal ───────────────────────────────────────────
+#
+# ``is_github_authenticated()`` shells out to ``gh auth status`` with a 10s
+# timeout. That is fine for the settings screen, which asks once, but the prompt
+# builder asks on EVERY turn — an uncached subprocess there would put a process
+# spawn (and, when gh is wedged, ten seconds) in front of each one. gh being
+# signed in is a machine-level fact that changes rarely, so a short TTL is all
+# the freshness the prompt needs: a fresh login shows up in the next section
+# within five minutes, and a logout stops advertising just as quickly.
+_GITHUB_AUTH_TTL_SECONDS = 300.0
+_github_auth_cache: Optional[tuple] = None  # (value, monotonic timestamp)
+
+
+def is_github_authenticated_cached() -> bool:
+    """``AuthService.is_github_authenticated()`` behind a 300s TTL cache.
+
+    Callers on a hot path (the per-turn prompt builder) want the signal, not a
+    subprocess. Errors are already swallowed by the underlying check, which
+    returns False, so a cached False is a real answer rather than a masked
+    failure.
+    """
+    global _github_auth_cache
+
+    now = time.monotonic()
+    cached = _github_auth_cache
+    if cached is not None and (now - cached[1]) < _GITHUB_AUTH_TTL_SECONDS:
+        return cached[0]
+    value = auth_service.is_github_authenticated()
+    _github_auth_cache = (value, now)
+    return value
+
+
+def reset_github_auth_cache() -> None:
+    """Drop the cached gh signal (tests; a login/logout that wants it now)."""
+    global _github_auth_cache
+    _github_auth_cache = None

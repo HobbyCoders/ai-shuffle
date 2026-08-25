@@ -835,6 +835,13 @@ class HarnessAdapter(ProviderAdapter):
         memory_dir = getattr(sdk_options, "aih_memory_dir", None)
         if memory_dir:
             opts.extra["memory_dir"] = str(memory_dir)
+        # Whether the install's gh CLI is present and signed in (stamped by
+        # query_options as ``aih_github_connected``, behind a TTL cache). Only
+        # forwarded when true — the prompt's "# GitHub" section exists solely to
+        # say the tool is there, so "not connected" has nothing to carry.
+        github_connected = getattr(sdk_options, "aih_github_connected", None)
+        if github_connected:
+            opts.extra["github_connected"] = True
         # The DB agents the profile declares into its model's context (2026-08-17
         # ruling, superseding A10) — ``[{"name", "description"}]`` resolved by
         # query_options from agent_invoke_mode/enabled_agents. Merged into the
@@ -2014,6 +2021,18 @@ class HarnessAdapter(ProviderAdapter):
                 sections.append(
                     PromptSection(kind="extra", text=STEERING_BLOCK)
                 )
+            if (options.extra or {}).get("github_connected") and (
+                permitted is None or "Bash" in permitted
+            ):
+                # The install's gh CLI is signed in, so say so once instead of
+                # letting the model rebuild PR/CI state from git plumbing or ask
+                # the user. Gated on Bash for the same reason the agents index is
+                # gated on Task (ruling T9): a block about a command-line tool is
+                # a description of something a Bash-less agent cannot call.
+                # Before the code-mode section, which stays last.
+                sections.append(
+                    PromptSection(kind="extra", text=GITHUB_BLOCK)
+                )
             if memory_dir:
                 # Ruling MEM3. Before the code-mode section, which must stay
                 # last: it is the operating rule for everything above it, this
@@ -3034,6 +3053,19 @@ def _code_mode_tool_sections(codemode: Any, permit=None) -> List[Tuple[str, str]
     blocks[0] = ("# Tools\n" + blocks[0][0], blocks[0][1])
     return blocks
 
+
+
+# Appended (native leg, Bash permitted) when the install's gh CLI is signed in,
+# alongside fluid's own STEERING_BLOCK. Short by design: the model already knows
+# how to drive gh, it just has no way to know the binary is there and
+# authenticated, and without that it falls back to raw git or to asking.
+GITHUB_BLOCK = """# GitHub
+The gh CLI is installed and authenticated on this machine. Reach GitHub \
+through it in Bash — pull requests (gh pr create/view/checks), issues (gh \
+issue), CI runs (gh run list / gh run watch), and API reads (gh api) — rather \
+than reconstructing that state from raw git or asking the user. Plain git \
+remains the tool for local version control: status, diff, commit, branch, \
+push."""
 
 
 # Ruling MEM3: the native leg had no memory surface at all — no CLI behind it

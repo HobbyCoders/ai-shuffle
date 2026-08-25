@@ -1627,6 +1627,22 @@ def build_options_from_profile(
     except Exception:  # noqa: BLE001 — a memory dir is context, never a blocker
         logger.warning("could not resolve native project-memory dir", exc_info=True)
         options.aih_memory_dir = None
+
+    # Whether THIS machine can reach GitHub through the gh CLI (installed AND
+    # signed in). The adapter projects it onto SessionOptions.extra
+    # ["github_connected"], where a native/fluid leg turns it into the prompt's
+    # "# GitHub" section — without it the model reconstructs PR/CI state from
+    # raw git plumbing or asks the user for something gh would just answer.
+    # Cached behind a TTL: the underlying check runs `gh auth status`, and a
+    # subprocess per turn is not a price the prompt builder should pay. Inert
+    # on the delegated leg, whose CLI already knows its own environment.
+    try:
+        from app.core.auth import is_github_authenticated_cached
+
+        options.aih_github_connected = is_github_authenticated_cached()
+    except Exception:  # noqa: BLE001 — a prompt section is never a blocker
+        logger.warning("could not resolve gh connectivity", exc_info=True)
+        options.aih_github_connected = False
     _completion_frames = overrides.get("background_task_completions")
     options.aih_background_task_completions = (
         [dict(frame) for frame in _completion_frames if isinstance(frame, dict)]

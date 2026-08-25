@@ -5197,6 +5197,103 @@ async def test_no_memory_dir_means_no_fluid_global_memory_section(
     assert captured_inputs["include_memory"] is False
 
 
+# ─── The "# GitHub" section (gh installed AND signed in) ─────────────────────
+#
+# ``extra["github_connected"]`` (stamped by query_options as
+# ``aih_github_connected``, behind a TTL cache over ``gh auth status``) tells the
+# model the binary is there and authenticated. Nothing else in the prompt could:
+# without it a native leg rebuilds PR/CI state from raw git or asks the user.
+
+
+async def _connect_with_github(
+    monkeypatch, workspace, connected, disallowed_tools=None
+):
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+    options = _agents_options(workspace, disallowed_tools=disallowed_tools)
+    if connected:
+        options.extra["github_connected"] = True
+    await ha.HarnessAdapter().connect(options)
+    return _CapturingLoop.captured
+
+
+@pytest.mark.asyncio
+async def test_native_prompt_carries_the_github_section(monkeypatch, agent_workspace):
+    import app.core.provider.harness_adapter as ha
+
+    captured = await _connect_with_github(monkeypatch, agent_workspace, True)
+    system = captured["system"]
+
+    assert ha.GITHUB_BLOCK in system
+    # Code mode stays LAST: it is the operating rule for everything above it,
+    # including "reach GitHub through gh in Bash".
+    assert system.index("# GitHub") < system.index("# Code mode")
+
+    sections = [
+        s for s in captured["system_sections"].sections
+        if s.text.startswith("# GitHub")
+    ]
+    assert len(sections) == 1
+    assert sections[0].kind == "extra"
+    # The two views never drift: joined sections ARE the prompt.
+    assert captured["system_sections"].text == system
+
+
+@pytest.mark.asyncio
+async def test_no_github_connection_means_no_github_section(
+    monkeypatch, agent_workspace
+):
+    captured = await _connect_with_github(monkeypatch, agent_workspace, False)
+    assert "# GitHub" not in captured["system"]
+    assert not [
+        s for s in captured["system_sections"].sections
+        if s.text.startswith("# GitHub")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_github_section_is_dropped_when_bash_is_not_permitted(
+    monkeypatch, agent_workspace
+):
+    """Ruling T9, same gate the agents index gets from Task: a block about a
+    command-line tool describes something a Bash-less agent cannot call."""
+    captured = await _connect_with_github(
+        monkeypatch, agent_workspace, True, disallowed_tools=["Bash"]
+    )
+    assert "# GitHub" not in captured["system"]
+
+
+def test_github_auth_check_is_cached_within_the_ttl(monkeypatch):
+    """The prompt builder asks every turn; ``gh auth status`` is a subprocess
+    with a 10s timeout. One probe per TTL window, not one per turn."""
+    from app.core import auth as auth_mod
+
+    calls = []
+
+    def _probe():
+        calls.append(1)
+        return True
+
+    monkeypatch.setattr(auth_mod.auth_service, "is_github_authenticated", _probe)
+    auth_mod.reset_github_auth_cache()
+    try:
+        assert auth_mod.is_github_authenticated_cached() is True
+        assert auth_mod.is_github_authenticated_cached() is True
+        assert len(calls) == 1
+
+        # …and an entry older than the TTL probes again.
+        value, stamped = auth_mod._github_auth_cache
+        auth_mod._github_auth_cache = (
+            value, stamped - auth_mod._GITHUB_AUTH_TTL_SECONDS - 1
+        )
+        assert auth_mod.is_github_authenticated_cached() is True
+        assert len(calls) == 2
+    finally:
+        auth_mod.reset_github_auth_cache()
+
+
 # ─── Memory tool exclusion when a project memory dir is connected ────────────
 #
 # The dir IS the memory. A Memory tool alongside it is a second store the
