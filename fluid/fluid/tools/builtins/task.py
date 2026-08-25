@@ -40,35 +40,75 @@ from fluid.tools.registry import (
     ToolSpec,
 )
 
+def describe(tools: frozenset[str] | None = None) -> str:
+    """Task's description, specialized to the session's tool surface."""
+    has = (lambda name: tools is None or name in tools)
+    monitor_bullet = (
+        "- A long-running shell command — that is Monitor's job, not a "
+        "subagent's.\n"
+        if has("Monitor")
+        else ""
+    )
+    return (
+        "Delegate a self-contained task to a configured subagent. The subagent "
+        "runs in an isolated session with its own configuration, memory, and "
+        "tools — it does not see this conversation and cannot ask you a "
+        "follow-up question, so the prompt you send is the entire brief it "
+        "will ever get.\n"
+        "\n"
+        "Available agent types are listed under '# Available agent types' in "
+        "your system prompt. Use only names listed there; when no such section "
+        "exists, do not call Task.\n"
+        "\n"
+        "## When to Use This Tool\n"
+        "\n"
+        "- Broad searches — \"where is X handled\", \"which files reference "
+        "Y\" — where the hunt costs many tool calls but the answer is a "
+        "paragraph\n"
+        "- Multi-file investigations whose intermediate reading you do not "
+        "need to keep\n"
+        "- Independent work that can run in parallel: send several Task calls "
+        "together in ONE reply and they run concurrently\n"
+        "- Context-heavy work you want kept out of this conversation\n"
+        "\n"
+        "## When NOT to Use This Tool\n"
+        "\n"
+        "- A single file read, a single edit, or a lookup whose location you "
+        "already know — you are better off just doing it directly\n"
+        "- Work that turns on context the subagent cannot see and you cannot "
+        "economically write down\n"
+        + monitor_bullet +
+        "- Anything you have already started yourself. Never duplicate "
+        "delegated work by also doing it.\n"
+        "\n"
+        "## Fields\n"
+        "\n"
+        "- **agent**: the subagent id or unambiguous name, from the roster in "
+        "your system prompt\n"
+        "- **prompt**: the complete brief — objective, relevant paths and "
+        "context, constraints, and the report you expect back\n"
+        "- **mode**: `sync` (default) blocks and returns the subagent's "
+        "report; `background` returns the worker session id at once and the "
+        "completion is pushed to you in a later turn\n"
+        "- **label**: short display label for the progress UI\n"
+        "\n"
+        "## Tips\n"
+        "\n"
+        "- In background mode, keep doing other useful work instead of "
+        f"polling. {DONT_PREDICT_PENDING} {END_TURN_ON_BACKGROUND}\n"
+        "- A subagent's report is a SELF-REPORT, not a verified fact. For any "
+        "external side effect it claims (a file written, a push, an upload), "
+        "verify the handle it returns — stat the path, fetch the URL, read the "
+        "content — before telling the user the operation succeeded.\n"
+        "- Only the report comes back; the subagent's intermediate work never "
+        "enters your context. Ask for the specific findings you need rather "
+        "than \"investigate X\"."
+    )
+
+
 SPEC = ToolSpec(
     name="Task",
-    description=(
-        "Delegate a self-contained task to a configured subagent. Available "
-        "agent types are listed under '# Available agent types' in your "
-        "system prompt — use only names listed there; when no such section "
-        "exists, do not call Task. The subagent runs in an isolated session "
-        "with its own configuration, memory, and tools — it does not see "
-        "this conversation, so give it a complete brief: objective, relevant "
-        "paths and context, constraints, and the report you expect back.\n"
-        "\n"
-        "Delegate independent or context-heavy work (broad searches, "
-        "multi-file investigations, parallelizable changes); handle a quick "
-        "lookup or single edit yourself. To run several independent "
-        "subagents concurrently, send their Task calls together in one "
-        "reply. Do not duplicate delegated work by also starting it "
-        "yourself.\n"
-        "\n"
-        "mode='sync' (default) waits for the subagent's report; "
-        "mode='background' returns immediately with the worker session id "
-        "and completion is pushed to you later — keep doing other useful "
-        f"work instead of polling. {DONT_PREDICT_PENDING} "
-        f"{END_TURN_ON_BACKGROUND}\n"
-        "\n"
-        "A subagent's report is a SELF-REPORT, not a verified fact: for any "
-        "external side effect it claims (a file written, a push, an upload), "
-        "verify the handle it returns — stat the path, fetch the URL, read "
-        "the content — before telling the user the operation succeeded."
-    ),
+    description=describe(),
     input_schema={
         "type": "object",
         "properties": {

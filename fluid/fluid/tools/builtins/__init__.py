@@ -46,6 +46,7 @@ _DESCRIBERS = {
     "Edit": edit.describe,
     "Bash": bash.describe,
     "Monitor": monitor.describe,
+    "Task": task.describe,
     "AskUser": ask_user.describe,
     "HistorySearch": history_search.describe,
     "SessionSearch": session_search.describe,
