@@ -2378,6 +2378,15 @@ async def _stream_to_websocket_impl(
                     if not questions:
                         return PermissionResultAllow(updated_input=tool_input)
 
+                    # Live chip mode, refreshed every turn via callback_refs.
+                    # ExitPlanMode already auto-allows in bypass; StopPlanning
+                    # must match. AskUser still prompts.
+                    if tool_name == "StopPlanning" and _perm_mode == "bypassPermissions":
+                        logger.debug("[WS] StopPlanning auto-approved in bypassPermissions")
+                        return PermissionResultAllow(
+                            updated_input={**tool_input, FLUID_ANSWER_KEY: "approve"}
+                        )
+
                     request_id = f"question-{_sid}-{uuid.uuid4().hex[:8]}"
                     logger.debug(f"[WS] {tool_name} canUseTool triggered: {request_id} with {len(questions)} questions (tool_use_id={_ctx_tool_use_id}, agent_id={_ctx_agent_id})")
 

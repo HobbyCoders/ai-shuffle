@@ -1180,13 +1180,6 @@ class HarnessAdapter(ProviderAdapter):
 
         from app.core.user_question_handler import FLUID_ANSWER_KEY
 
-        # Bypass users opted out of prompts. ExitPlanMode already auto-allows
-        # on the SDK path; StopPlanning must match. Detect the mode they had
-        # BEFORE Plan flipped the chip, not the in-plan binding.
-        if ev.name == "StopPlanning" and self._came_from_bypass():
-            await self._submit_question_answer(ev, "approve")
-            return
-
         answer = ""
         try:
             can_use_tool = cast(Any, self._can_use_tool)
@@ -1315,6 +1308,10 @@ class HarnessAdapter(ProviderAdapter):
                 perms.approval_policy = policy
             if hasattr(self._engine, "plan_mode"):
                 self._engine.plan_mode = mode == "plan"
+        if self._options is not None:
+            self._options.permission_mode = mode
+        if mode != "plan":
+            self._pre_plan_permission_mode = mode
 
     async def get_context_usage(self) -> Optional[Dict[str, Any]]:
         """Context-window usage by category, or None when unavailable.

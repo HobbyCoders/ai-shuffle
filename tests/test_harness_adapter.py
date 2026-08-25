@@ -987,25 +987,27 @@ async def test_fluid_question_dismiss_submits_empty_answer():
 
 
 @pytest.mark.asyncio
-async def test_stop_planning_auto_approves_in_bypass():
-    """Bypass users must not see a StopPlanning modal — same as ExitPlanMode."""
+async def test_stop_planning_does_not_skip_modal_on_stale_bypass_flag():
+    """A leftover pre-plan bypass flag must not hide the modal after the chip
+    switched to ask-permission. Live mode is can_use_tool's job."""
     called = []
 
     async def can_use_tool(tool_name, tool_input, context):
         called.append(tool_name)
-        return _FakeDeny("should not run")
+        return _FakeAllow({**tool_input, "_fluid_answer": "Approve"})
 
     engine = FakeEngine(_fluid_question_request(name="StopPlanning"))
     adapter = _adapter_with(engine)
     adapter._can_use_tool = can_use_tool
     adapter._pre_plan_permission_mode = "bypassPermissions"
+    adapter._options.permission_mode = "default"
     await _collect(adapter)
     await _drain_bridge(engine)
 
-    assert called == []
+    assert called == ["StopPlanning"]
     op = engine.ops[0]
     assert isinstance(op, RespondQuestion)
-    assert op.answer == "approve"
+    assert op.answer == "Approve"
 
 
 @pytest.mark.asyncio
