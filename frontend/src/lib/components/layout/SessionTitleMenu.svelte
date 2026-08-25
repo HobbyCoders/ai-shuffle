@@ -285,6 +285,9 @@
 		opacity: 0.85;
 	}
 	.crumb button.title-trigger {
+		/* The negative inline margins preserve breadcrumb spacing, so include
+		   their 12px overhang in the button width instead of clipping every title. */
+		max-width: calc(100% + 12px);
 		padding: 3px 6px;
 		margin: -3px -6px;
 	}
