@@ -1475,6 +1475,23 @@ class SessionRuntime:
         # (absorbed at-or-after — never answered, so it must run again).
         self._interrupt_requested_at = time.perf_counter()
 
+        # The WebSocket that wrote the durable interrupt may live on another
+        # install, where its in-memory task registry cannot reach this runtime's
+        # workers. Honor the shared stop_background bit on the owning runner too.
+        # The local WebSocket path also calls this eagerly for latency; stop-all is
+        # deliberately idempotent, so the second call sees no active tasks.
+        try:
+            interrupted_row = await asyncio.to_thread(turns_db.get_turn, tid)
+            if interrupted_row and interrupted_row.get("stop_background"):
+                from app.core.query_session_lifecycle import stop_all_background_tasks
+
+                await stop_all_background_tasks(sid)
+        except Exception:
+            logger.warning(
+                "SessionRuntime: background-task stop failed for %s", sid,
+                exc_info=True,
+            )
+
         try:
             await record_interrupting(sid, mode)  # turn.interrupting event
         except Exception:

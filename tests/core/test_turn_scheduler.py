@@ -557,6 +557,70 @@ async def test_two_terminal_frames_batch_into_one_unpark(mock_db):
     assert wake["payload"]["pending_frames"] == [f1, f2]
 
 
+async def test_user_canceled_task_terminal_never_enqueues_wake(mock_db):
+    session_id = "cancel-wake"
+    task_id = "task-canceled"
+    task_registry.start_task(
+        session_id, task_id, "agent", "bg", tool_use_id="tu-canceled",
+    )
+    task_registry.mark_background_launch(session_id, "tu-canceled")
+    task_registry.suppress_wake(session_id, task_id)
+
+    try:
+        with _patch_execute() as execute:
+            await turn_scheduler.on_task_terminal(
+                session_id, _terminal_frame(task_id, "too late"),
+            )
+            await _drain_kicks()
+
+        assert _by_source(session_id, "unpark") == []
+        execute.assert_not_awaited()
+    finally:
+        task_registry.clear_session(session_id)
+
+
+def test_discard_queued_task_wakes_aborts_canceled_only_turn(mock_db):
+    frame = _terminal_frame("task-canceled", "done")
+    wake = turns_db.enqueue_turn(
+        "cancel-only", "unpark", prompt="wake",
+        payload={"task_ids": ["task-canceled"], "pending_frames": [frame]},
+    )
+
+    changed = turn_scheduler.discard_queued_task_wakes(
+        "cancel-only", ["task-canceled"],
+    )
+
+    assert changed == 1
+    assert turns_db.get_turn(wake["id"])["state"] == "aborted"
+    assert _by_source("cancel-only", "unpark") == []
+
+
+def test_discard_queued_task_wakes_preserves_unrelated_results(mock_db):
+    canceled = _terminal_frame("task-canceled", "cancel me")
+    completed = _terminal_frame("task-completed", "keep me")
+    wake = turns_db.enqueue_turn(
+        "cancel-mixed", "unpark", prompt="old wake",
+        payload={
+            "task_ids": ["task-canceled", "task-completed"],
+            "pending_frames": [canceled, completed],
+        },
+    )
+
+    with patch("app.core.query_engine._read_task_output_file", return_value=""):
+        changed = turn_scheduler.discard_queued_task_wakes(
+            "cancel-mixed", ["task-canceled"],
+        )
+
+    assert changed == 1
+    updated = turns_db.get_turn(wake["id"])
+    assert updated["state"] == "queued"
+    assert updated["payload"]["task_ids"] == ["task-completed"]
+    assert updated["payload"]["pending_frames"] == [completed]
+    assert "task-canceled" not in updated["prompt"]
+    assert "task-completed" in updated["prompt"]
+    assert "keep me" in updated["prompt"]
+
+
 async def test_duplicate_terminal_frame_is_complete_noop(mock_db):
     # A live turn keeps the unpark queued between calls; a duplicate frame for a
     # task already folded in is a COMPLETE no-op — one queued turn, prompt +

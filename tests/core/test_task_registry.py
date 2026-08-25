@@ -575,6 +575,36 @@ class TestMarkWoken:
         assert reg.mark_woken("s1", "t1") is False
 
 
+class TestWakeSuppressed:
+    """Explicit cancellation blocks wakes without overloading duplicate dedupe."""
+
+    def test_independent_per_task_and_session(self, reg):
+        assert reg.suppress_wake("s1", "t1") is True
+        assert reg.suppress_wake("s1", "t1") is False
+        assert reg.is_wake_suppressed("s1", "t1") is True
+        assert reg.is_wake_suppressed("s1", "t2") is False
+        assert reg.is_wake_suppressed("s2", "t1") is False
+
+    def test_blank_ids_never_latch(self, reg):
+        assert reg.suppress_wake("", "t1") is False
+        assert reg.suppress_wake("s1", "") is False
+
+    def test_cleared_by_session_and_reset(self, reg):
+        reg.suppress_wake("s1", "t1")
+        reg.clear_session("s1")
+        assert reg.is_wake_suppressed("s1", "t1") is False
+        reg.suppress_wake("s1", "t1")
+        reg.reset_all()
+        assert reg.is_wake_suppressed("s1", "t1") is False
+
+    def test_genuine_completed_task_revival_rearms_wake(self, reg):
+        reg.start_task("s1", "t1", "agent", "bg", tool_use_id="tu-1")
+        reg.suppress_wake("s1", "t1")
+        reg.complete_task("s1", "t1", "completed")
+        reg.start_task("s1", "t1", "agent", "bg", tool_use_id="tu-1")
+        assert reg.is_wake_suppressed("s1", "t1") is False
+
+
 class TestChildOwnerLinkage:
     """B-1: resolve a terminal grandchild task to its running owner sub-agent."""
 

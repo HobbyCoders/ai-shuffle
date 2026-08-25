@@ -253,6 +253,12 @@ class TaskRegistry:
         # own-lane fresh-enqueue fall-through. Cleared with the session AND flipped
         # OFF on a resume (``start_task`` revival) so a re-run agent can wake again.
         self._woken: Dict[str, set] = {}
+        # session_id -> set of task_ids explicitly canceled by the user. Unlike
+        # ``_woken`` this is not a duplicate-delivery latch: it is checked BEFORE
+        # every wake ownership path so a completion racing Stop cannot enqueue an
+        # autonomous follow-up turn. Cleared with the session and on a genuine
+        # completed-task revival under the same id.
+        self._wake_suppressed: Dict[str, set] = {}
         # session_id -> {child_launch_tuid -> owner_launch_tuid} (B-1). A grand-
         # child background task's launch tool_use_id mapped to the launch
         # tool_use_id of the SUB-AGENT that spawned it (its owner). Recorded when
@@ -500,6 +506,28 @@ class TaskRegistry:
         if not session_id or not task_id:
             return False
         return task_id in self._woken.get(session_id, set())
+
+    def suppress_wake(self, session_id: str, task_id: str) -> bool:
+        """Prevent a user-canceled task from waking its parent.
+
+        Returns ``True`` only for the first suppression. The separate latch lets
+        normal completion frames still use ``_woken`` for rich-frame upgrades and
+        duplicate detection while Stop can reject every racing terminal frame at
+        the scheduler's entry point.
+        """
+        if not session_id or not task_id:
+            return False
+        suppressed = self._wake_suppressed.setdefault(session_id, set())
+        if task_id in suppressed:
+            return False
+        suppressed.add(task_id)
+        return True
+
+    def is_wake_suppressed(self, session_id: str, task_id: str) -> bool:
+        """True iff an explicit user cancellation suppressed this task's wake."""
+        if not session_id or not task_id:
+            return False
+        return task_id in self._wake_suppressed.get(session_id, set())
 
     def link_child_to_owner(
         self, session_id: str, child_launch_tuid: str, owner_launch_tuid: str
@@ -765,6 +793,7 @@ class TaskRegistry:
                 # run may come to rest again and must be able to drive a fresh
                 # unpark/pump wake (A-3 clear-on-revival).
                 self._woken.get(session_id, set()).discard(task_id)
+                self._wake_suppressed.get(session_id, set()).discard(task_id)
             existing["updated_at"] = now
             self._persist_task_state(session_id, task_id)
             return
@@ -1174,6 +1203,7 @@ class TaskRegistry:
         self._subagent_background_tasks.pop(session_id, None)
         self._chipped.pop(session_id, None)
         self._woken.pop(session_id, None)
+        self._wake_suppressed.pop(session_id, None)
         self._child_owner.pop(session_id, None)
         self._owner_activity_ts.pop(session_id, None)
         self._terminal_notified.pop(session_id, None)
@@ -1194,6 +1224,7 @@ class TaskRegistry:
         self._subagent_background_tasks.clear()
         self._chipped.clear()
         self._woken.clear()
+        self._wake_suppressed.clear()
         self._child_owner.clear()
         self._owner_activity_ts.clear()
         self._terminal_notified.clear()

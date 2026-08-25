@@ -1169,11 +1169,10 @@ class ChatWebSocketHandler:
             # running->interrupting flip below is visible to whichever runner
             # executes the turn (its turn_claim observe pass drives the live
             # runtime), so stop needs no HTTP hop.
-            # The CLI's interrupt is query-scoped: a plain interrupt already
-            # tears down in-flight background sub-agents, so no per-task stop
-            # loop is needed. (The old PRESERVE_BACKGROUND_ON_INTERRUPT
-            # binary-patch opt-in that made one meaningful was removed with
-            # the Agent SDK.)
+            # Stop now means STOP, not "interrupt so I can send another message":
+            # mid-stream messages have their own steering path. Cancel every task
+            # owned by the interrupted session and suppress canceled completions
+            # from scheduling a later wake.
 
             # v2 turns cutover: the ONE interrupt implementation. Flip the live
             # turn running->interrupting (durable intent) and fire the executor,
@@ -1182,8 +1181,8 @@ class ChatWebSocketHandler:
             # SessionRuntime, not here). A user stop settles the turn ``aborted``;
             # the settle path then drains queued turns like any other outcome (F4
             # preserve-on-stop retired, PR #694) — no _stopped_sessions latch.
-            # The ``stop_background`` opt-in still tears down surviving background
-            # tasks transport-side (the runtime interrupt does not carry it).
+            # ``stop_background`` records the user intent durably; the explicit
+            # lifecycle call below performs the transport-specific task teardown.
             # #585: bind the stop to the turn the FE believed was live (optional
             # — older clients omit it). turn_manager threads it to the DB flip
             # (id=turn_id guard) and the runtime signal so a stop that arrives
@@ -1193,10 +1192,16 @@ class ChatWebSocketHandler:
             flipped = turn_manager.interrupt(
                 session_id,
                 "stop",
-                stop_background=False,
+                stop_background=True,
                 turn_id=target_turn_id,
             )
             if flipped is not None:
+                # Mark canceled-task wakes suppressed and stop all owned tasks.
+                # The stale-turn guard is load-bearing: a delayed Stop packet that
+                # matched no live turn must not cancel a successor's work.
+                from app.core.query_session_lifecycle import stop_all_background_tasks
+
+                await stop_all_background_tasks(session_id)
                 # Cross-runner wake: if the executing runtime lives on another
                 # install, its turn_claim observe pass reacts on this NOTIFY
                 # tick instead of its next 5s poll. Locally the executor

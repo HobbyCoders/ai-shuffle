@@ -576,6 +576,26 @@ async def test_interrupt_escalation_keep_drains_without_deadlock(mock_db):
     assert runs_db.get_active_run("s9") is None
 
 
+async def test_interrupt_honors_durable_stop_background_on_owning_runner(mock_db):
+    """A foreign-runner Stop reaches workers through the shared turn-row flag."""
+    turn = turns_db.enqueue_turn("s9-bg", "user", prompt="hi")
+    turns_db.start_turn(turn["id"], None, "runner")
+    turns_db.interrupt_turn("s9-bg", "stop", stop_background=True)
+    turns_db.settle_turn(turn["id"], "aborted", "racer")
+
+    stop_all = AsyncMock()
+    with _interrupt_env(evict=False), patch(
+        "app.core.query_session_lifecycle.stop_all_background_tasks",
+        new=stop_all,
+    ):
+        state = await session_runtime.SessionRuntime(turn).interrupt(
+            escalation_timeout=0.02,
+        )
+
+    assert state == "aborted"
+    stop_all.assert_awaited_once_with("s9-bg")
+
+
 async def test_interrupt_cancels_pending_prompts_before_signalling_the_sdk(mock_db):
     """Stop must also release whatever is blocked ON THE USER.
 

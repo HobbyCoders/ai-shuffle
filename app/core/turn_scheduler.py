@@ -453,6 +453,53 @@ def _queued_unpark_turn(session_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def discard_queued_task_wakes(session_id: str, task_ids: List[str]) -> int:
+    """Remove canceled tasks from queued ``source=unpark`` turns.
+
+    Stop marks each task wake-suppressed before calling this function, closing the
+    late-frame race. This handles the other side of that race: a terminal frame
+    may already have queued a wake immediately before suppression. An all-canceled
+    wake is aborted; a mixed wake is rebuilt with only unrelated results.
+
+    Returns the number of queued turns changed. Guarded DB operations make this
+    safe when a wake concurrently leaves the queue.
+    """
+    canceled = {task_id for task_id in task_ids if task_id}
+    if not session_id or not canceled:
+        return 0
+
+    changed = 0
+    for turn in turns_db.get_queued_turns(session_id):
+        if turn.get("source") != "unpark":
+            continue
+        payload = dict(turn.get("payload") or {})
+        pending = list(payload.get("pending_frames") or [])
+        recorded_ids = list(payload.get("task_ids") or [])
+        if not (
+            canceled.intersection(recorded_ids)
+            or any(frame.get("task_id") in canceled for frame in pending)
+        ):
+            continue
+
+        remaining = [
+            frame for frame in pending if frame.get("task_id") not in canceled
+        ]
+        if not remaining:
+            if turns_db.remove_queued_turn(turn["id"]) is not None:
+                changed += 1
+            continue
+
+        remaining_ids = [
+            task_id for task_id in recorded_ids if task_id not in canceled
+        ]
+        payload["pending_frames"] = remaining
+        payload["task_ids"] = remaining_ids
+        prompt = _build_task_notification_prompt(remaining)
+        if turns_db.update_queued_turn_prompt(turn["id"], prompt, payload) is not None:
+            changed += 1
+    return changed
+
+
 def _session_has_parked_turn(session_id: str) -> bool:
     """True iff the session currently has a ``parked`` turn.
 
@@ -632,6 +679,17 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Optional[s
     empty notification is never enqueued (#690)."""
     try:
         task_id = frame.get("task_id")
+        from app.core.task_registry import task_registry
+
+        # An explicit Stop suppresses the canceled task before issuing provider
+        # cancellation. Check at the entry point — ahead of both CLI-owned and
+        # app-owned wake paths — so every terminal-frame race is a no-op.
+        if task_id and task_registry.is_wake_suppressed(session_id, task_id):
+            logger.info(
+                "turn_scheduler: wake suppressed for user-canceled task %s/%s",
+                session_id, task_id,
+            )
+            return
         # Content-empty guard (#690): the single enqueue choke point. A frame that
         # carries nothing renderable can only produce an empty <task-notification>
         # turn — drop it (DEBUG) before any lane decides to enqueue.
@@ -641,8 +699,6 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Optional[s
                 session_id, frame,
             )
             return
-        from app.core.task_registry import task_registry
-
         if task_registry.is_own_background_task(session_id, task_id):
             # ── OWN lane — rich consolidated source=unpark wake ──
             # A-1 (bug 1): if the CLI owns this completion's at-rest wake (a

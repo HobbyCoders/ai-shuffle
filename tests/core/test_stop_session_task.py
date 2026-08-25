@@ -18,7 +18,10 @@ import pytest
 
 import app.mcp.builtin_tools as bt
 from app.mcp.builtin_tools import stop_background_shell_task
-from app.core.query_session_lifecycle import stop_session_task
+from app.core.query_session_lifecycle import (
+    stop_all_background_tasks,
+    stop_session_task,
+)
 from app.core.task_registry import task_registry
 
 
@@ -469,3 +472,49 @@ class TestStopSessionTaskDurableFallback:
         assert second["ok"] is True
         assert second["detail"] == "already settled"
         assert len(calls) == 1
+
+
+class TestStopAllBackgroundTasks:
+    async def test_suppresses_every_wake_before_first_cancellation(self):
+        session_id = "stop-all-race"
+        for task_id in ("agent-1", "shell-1"):
+            task_registry.start_task(
+                session_id, task_id,
+                "shell" if task_id.startswith("shell") else "agent",
+                task_id,
+            )
+
+        seen = []
+
+        async def _stop(sid, task_id):
+            # The whole snapshot must be suppressed before cancellation begins,
+            # not one-at-a-time across awaits.
+            seen.append((
+                task_id,
+                task_registry.is_wake_suppressed(sid, "agent-1"),
+                task_registry.is_wake_suppressed(sid, "shell-1"),
+            ))
+            return {"ok": True, "task_id": task_id}
+
+        try:
+            with patch(
+                "app.core.turn_scheduler.discard_queued_task_wakes",
+                return_value=0,
+            ) as discard, patch(
+                "app.core.query_session_lifecycle.stop_session_task",
+                new=AsyncMock(side_effect=_stop),
+            ) as stop_one:
+                result = await stop_all_background_tasks(session_id)
+
+            assert {row[0] for row in seen} == {"agent-1", "shell-1"}
+            assert all(
+                agent_suppressed and shell_suppressed
+                for _, agent_suppressed, shell_suppressed in seen
+            )
+            discard.assert_called_once()
+            assert discard.call_args.args[0] == session_id
+            assert set(discard.call_args.args[1]) == {"agent-1", "shell-1"}
+            assert stop_one.await_count == 2
+            assert {row["task_id"] for row in result} == {"agent-1", "shell-1"}
+        finally:
+            task_registry.clear_session(session_id)

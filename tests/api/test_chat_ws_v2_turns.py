@@ -9,8 +9,8 @@ They delegate to the durable ``turns`` table via ``turn_manager``:
 * ``handle_queue_message``    -> ``turn_manager.submit(source='queue')``;
 * ``handle_remove_queued``    -> ``turn_manager.remove_queued`` (queued->aborted);
 * ``handle_clear_queued``     -> ``remove_queued`` for every user/queue chip;
-* ``handle_stop``             -> ``turn_manager.interrupt(mode='stop')`` (+ the
-                                 ``stop_background`` opt-in gate);
+* ``handle_stop``             -> ``turn_manager.interrupt(mode='stop')`` +
+                                 all-background-task teardown;
 * ``handle_interrupt_for_query`` -> ``turn_manager.interrupt(mode='send_now')``
                                  then ``interrupt_confirmed``;
 * ``handle_load_session``     -> ``queuedMessages`` sourced from the turns view.
@@ -435,25 +435,26 @@ async def test_handle_clear_queued_messages_aborts_only_user_chips(mock_db):
 # ═══ handle_stop — interrupt(stop) ════════════════════════════════════════════
 
 
-async def test_handle_stop_interrupts_live_turn(mock_db):
-    """A stop flips the live turn running->interrupting (durable intent). The
-    query-scoped interrupt already tears down background tasks, so no per-task
-    teardown is invoked."""
+async def test_handle_stop_interrupts_live_turn_and_stops_background(mock_db):
+    """Stop interrupts the live turn and explicitly tears down all owned tasks."""
     _make_session("sess-1")
     live = turns_db.enqueue_turn("sess-1", "user", prompt="p")["id"]
     turns_db.start_turn(live, run_id="run-1")
 
     with _Patches():
         with patch(
-            "app.core.query_engine.stop_all_background_tasks", new=AsyncMock()
+            "app.core.query_session_lifecycle.stop_all_background_tasks",
+            new=AsyncMock(),
         ) as stop_bg:
             handler = _make_handler()
             await handler.handle_stop(
                 {"session_id": "sess-1", "stop_background": True}
             )
 
-    assert turns_db.get_turn(live)["state"] == "interrupting"
-    stop_bg.assert_not_awaited()
+    row = turns_db.get_turn(live)
+    assert row["state"] == "interrupting"
+    assert row["stop_background"] in (True, 1)
+    stop_bg.assert_awaited_once_with("sess-1")
 
 
 async def test_handle_stop_with_current_turn_id_interrupts(mock_db):
@@ -485,12 +486,16 @@ async def test_handle_stop_stale_turn_id_spares_successor(mock_db):
     turns_db.start_turn(n1, run_id="run-2")
     assert turns_db.get_live_turn("sess-1")["id"] == n1
 
-    with _Patches():
+    with _Patches(), patch(
+        "app.core.query_session_lifecycle.stop_all_background_tasks",
+        new=AsyncMock(),
+    ) as stop_bg:
         handler = _make_handler()
         await handler.handle_stop(
             {"session_id": "sess-1", "turn_id": n}
         )
 
+    stop_bg.assert_not_awaited()
     # Successor untouched (still running); the stale target stays completed.
     assert turns_db.get_turn(n1)["state"] == "running"
     assert turns_db.get_turn(n)["state"] == "completed"

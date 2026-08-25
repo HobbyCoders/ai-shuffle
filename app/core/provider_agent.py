@@ -98,10 +98,11 @@ WORKER_TURN_SOURCE = "provider_agent"
 #: ``"active"``.
 WORKER_FAILED_STATUS = "failed"
 
-#: Cap on the report handed back to the PARENT's context (plan §2 C.5). The
-#: full transcript lives in the worker session; only this much rides the tool
-#: result, so uncapped fan-out cannot dominate the parent's context window.
-MAX_REPORT_CHARS = 2000
+#: Cap on the report handed back to the PARENT's context. Match the native
+#: task-notification result budget: detailed worker reports should normally arrive
+#: intact, while pathological output remains bounded so it cannot dominate the
+#: parent's context window.
+MAX_REPORT_CHARS = 60_000
 
 #: How often :func:`dispatch_worker` re-checks the provider's circuit breaker
 #: while waiting for a worker to go idle. Short enough that a rate-limited
@@ -472,16 +473,30 @@ class WorkerOutcome:
 
 
 def bound_report(text: Optional[str]) -> Tuple[str, bool]:
-    """Clip a worker report to :data:`MAX_REPORT_CHARS`, keeping the TAIL.
+    """Bound a worker report without discarding either half of its answer.
 
-    The TAIL, not the head: a report's conclusion is the part the parent needs,
-    and head-truncation cutting it is exactly what the plan (§2 C.5) rejected.
+    Normal detailed reports fit under :data:`MAX_REPORT_CHARS` and pass through
+    intact. For pathological output, keep both the findings at the beginning and
+    the conclusion at the end with an explicit omission marker. The old 2,000-char
+    tail-only cap returned reports beginning mid-sentence and routinely discarded
+    the load-bearing file/symbol findings.
+
     Returns ``(text, truncated)``.
     """
     body = (text or "").strip()
     if len(body) <= MAX_REPORT_CHARS:
         return body, False
-    return body[-MAX_REPORT_CHARS:].lstrip(), True
+
+    marker = "\n\n[... worker report truncated ...]\n\n"
+    remaining = MAX_REPORT_CHARS - len(marker)
+    head_chars = remaining // 2
+    tail_chars = remaining - head_chars
+    bounded = (
+        body[:head_chars].rstrip()
+        + marker
+        + body[-tail_chars:].lstrip()
+    )
+    return bounded, True
 
 
 def _load_session_events(session_id: str) -> List[Dict[str, Any]]:

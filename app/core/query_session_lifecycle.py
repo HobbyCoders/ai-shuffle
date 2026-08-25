@@ -386,8 +386,8 @@ async def stop_session_task(session_id: str, task_id: str) -> dict:
 async def stop_all_background_tasks(session_id: str) -> list[dict]:
     """Stop EVERY in-flight background task in a session, one at a time.
 
-    Used by the "Stop, and also stop background agents" path: after the main
-    turn is interrupted, iterate the running-tasks view and drive each through
+    Used by the normal Stop path: after the main turn is interrupted, iterate
+    the running-tasks view and drive each through
     the existing per-task ``stop_session_task`` (sub-agents via the SDK client's
     ``stop_task``, Monitor shells via their tracked subprocess). Reuses that path
     verbatim — no re-implementation of client stop logic — so ghost-reaping and
@@ -399,11 +399,21 @@ async def stop_all_background_tasks(session_id: str) -> list[dict]:
     """
     from app.core.task_registry import task_registry
 
+    active = task_registry.get_active(session_id)
+    task_ids = [task.get("id") for task in active if task.get("id")]
+
+    # Close completion-vs-Stop races BEFORE the first await: every later terminal
+    # frame is dropped at the scheduler entry point, and a wake queued a moment
+    # before these latches is removed (or rebuilt without the canceled tasks).
+    for task_id in task_ids:
+        task_registry.suppress_wake(session_id, task_id)
+    if task_ids:
+        from app.core import turn_scheduler
+
+        turn_scheduler.discard_queued_task_wakes(session_id, task_ids)
+
     results: list[dict] = []
-    for task in task_registry.get_active(session_id):
-        task_id = task.get("id")
-        if not task_id:
-            continue
+    for task_id in task_ids:
         results.append(await stop_session_task(session_id, task_id))
     return results
 

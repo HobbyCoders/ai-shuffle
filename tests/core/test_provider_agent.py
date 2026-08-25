@@ -318,14 +318,25 @@ class TestHelpers:
         assert outcome.session_id == ""
         assert "explicit model" in outcome.error
 
-    def test_bound_report_keeps_the_tail(self):
-        """Truncation keeps the END — the conclusion is the part the parent needs."""
-        text = "x" * (pa.MAX_REPORT_CHARS + 500) + "CONCLUSION"
+    def test_bound_report_keeps_findings_and_conclusion(self):
+        """Pathological reports retain both load-bearing halves, with a marker."""
+        text = "FINDINGS\n" + "x" * (pa.MAX_REPORT_CHARS + 500) + "\nCONCLUSION"
         body, truncated = pa.bound_report(text)
 
         assert truncated is True
         assert len(body) <= pa.MAX_REPORT_CHARS
+        assert body.startswith("FINDINGS")
+        assert "worker report truncated" in body
         assert body.endswith("CONCLUSION")
+
+    def test_detailed_report_above_old_2k_limit_is_untouched(self):
+        text = "FINDINGS\n" + "detail\n" * 600 + "CONCLUSION"
+
+        body, truncated = pa.bound_report(text)
+
+        assert len(text) > 2_000
+        assert body == text
+        assert truncated is False
 
     def test_bound_report_short_text_untouched(self):
         body, truncated = pa.bound_report("  hello  ")
