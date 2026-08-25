@@ -180,7 +180,7 @@
 	 *  tool-wide "always" — profile-scoped and pattern-less. Plan approvals
 	 *  never remember. */
 	function currentRemember(): 'none' | 'profile' {
-		return !isExitPlanMode && alwaysForTool ? 'profile' : 'none';
+		return !isPlanApproval && alwaysForTool ? 'profile' : 'none';
 	}
 
 	function handleAllow() {
@@ -234,17 +234,21 @@
 		return { visible, needsTruncate };
 	});
 
-	// ExitPlanMode detection
-	const isExitPlanMode = $derived(request.tool_name === 'ExitPlanMode');
+	// ExitPlanMode (SDK) and StopPlanning (fluid) share one approval panel.
+	const isPlanApproval = $derived(
+		request.tool_name === 'ExitPlanMode' || request.tool_name === 'StopPlanning'
+	);
 	const allowedPrompts = $derived(
-		isExitPlanMode && Array.isArray(request.tool_input?.allowedPrompts)
+		isPlanApproval && Array.isArray(request.tool_input?.allowedPrompts)
 			? (request.tool_input.allowedPrompts as Array<{ tool: string; prompt: string }>)
 			: []
 	);
 
 	// Extract plan content from recent assistant messages (current turn, after last user message)
 	const planContent = $derived.by(() => {
-		if (!isExitPlanMode) return '';
+		if (!isPlanApproval) return '';
+		const directPlan = request.tool_input?.plan;
+		if (typeof directPlan === 'string' && directPlan.trim()) return directPlan.trim();
 		const messages = $activeSession.messages;
 		if (!messages || messages.length === 0) return '';
 
@@ -277,7 +281,7 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-{#if isExitPlanMode}
+{#if isPlanApproval}
 <!-- Plan Approval Panel -->
 <div
 	class="card-system permission-panel plan-approval-panel rounded-2xl border shadow-lg overflow-hidden backdrop-blur-sm"
@@ -321,7 +325,7 @@
 					Plan
 				</span>
 			</h3>
-			<p class="text-xs text-muted-foreground truncate">ExitPlanMode</p>
+			<p class="text-xs text-muted-foreground truncate">{request.tool_name}</p>
 		</div>
 
 		<!-- Queue Badge -->

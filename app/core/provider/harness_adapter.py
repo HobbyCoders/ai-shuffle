@@ -1187,10 +1187,11 @@ class HarnessAdapter(ProviderAdapter):
         """Route one fluid QuestionRequest through the app's question modal.
 
         AskUser / StopPlanning park on RespondQuestion, not RespondPermission.
-        can_use_tool still drives the UserQuestion UI (fanout, attention,
-        durable pending_interactions); we take ``_fluid_answer`` off an allow
-        and submit it as the question answer. A deny or dismiss is an empty
-        answer — fluid has no deny-question op.
+        ``can_use_tool`` drives the app interaction: AskUser uses UserQuestion;
+        StopPlanning uses the plan-approval PermissionRequest panel. We take
+        ``_fluid_answer`` off its allow result and submit that string as the
+        question answer. Fluid has no deny-question op, so rejection is encoded
+        as an allowed bridge result carrying ``keep planning``.
         """
         from types import SimpleNamespace
 
@@ -1638,13 +1639,27 @@ class HarnessAdapter(ProviderAdapter):
             # MRTR input_required round-trip (AskUser / StopPlanning). Record
             # the id and surface as a permission-shaped event with
             # risk="question" so receive_events routes it through
-            # _bridge_question → UserQuestion modal → RespondQuestion.
+            # _bridge_question → app interaction UI → RespondQuestion.
             self._pending_question_id = event.request_id
+            question_input = {"question": event.message, "schema": event.schema}
+            if event.name == "StopPlanning":
+                # StopPlanning's QuestionRequest message contains the complete
+                # plan followed by fluid's synthetic approval question. Carry
+                # only the markdown plan so the permission panel does not have
+                # to scrape transcript text or show the question twice.
+                suffix = (
+                    "\n\nApprove this plan and leave plan mode? "
+                    "(1 = Approve, anything else = feedback)"
+                )
+                plan_text = event.message
+                if plan_text.endswith(suffix):
+                    plan_text = plan_text[: -len(suffix)]
+                question_input["plan"] = plan_text
             return [
                 PermissionRequestEvent(
                     tool_use_id=event.tool_use_id,
                     name=event.name,
-                    input={"question": event.message, "schema": event.schema},
+                    input=question_input,
                     risk="question",
                     request_id=event.request_id,
                 )

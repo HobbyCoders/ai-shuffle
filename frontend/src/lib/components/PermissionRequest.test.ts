@@ -110,4 +110,20 @@ describe('PermissionRequest — approve/deny + always-remember', () => {
 		expect(screen.getByRole('button', { name: 'Reject Plan' })).toBeTruthy();
 		expect(screen.queryByRole('checkbox')).toBeNull();
 	});
+
+	it('StopPlanning uses the plan approval panel and renders its plan input', () => {
+		render(PermissionRequest, {
+			props: {
+				request: makeRequest({
+					tool_name: 'StopPlanning',
+					tool_input: { plan: '# Native plan\n\nDo the work.' }
+				})
+			}
+		});
+
+		expect(screen.getByRole('button', { name: 'Approve Plan' })).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'Reject Plan' })).toBeTruthy();
+		expect(screen.getByText(/# Native plan/)).toBeTruthy();
+		expect(screen.queryByRole('checkbox')).toBeNull();
+	});
 });

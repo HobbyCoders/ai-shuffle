@@ -2391,13 +2391,42 @@ async def _stream_to_websocket_impl(
                     if not questions:
                         return PermissionResultAllow(updated_input=tool_input)
 
-                    # Live chip mode, refreshed every turn via callback_refs.
-                    # ExitPlanMode already auto-allows in bypass; StopPlanning
-                    # must match. AskUser still prompts.
-                    if tool_name == "StopPlanning" and _perm_mode == "bypassPermissions":
-                        logger.debug("[WS] StopPlanning auto-approved in bypassPermissions")
+                    # StopPlanning is an approval, not a general question. Match
+                    # the SDK ExitPlanMode contract: bypass auto-approves; every
+                    # other live chip mode uses the durable permission queue and
+                    # purple Plan Approval panel. RespondQuestion still needs a
+                    # string, so translate allow/deny into approve/keep-planning.
+                    if tool_name == "StopPlanning":
+                        if _perm_mode == "bypassPermissions":
+                            logger.debug("[WS] StopPlanning auto-approved in bypassPermissions")
+                            return PermissionResultAllow(
+                                updated_input={**tool_input, FLUID_ANSWER_KEY: "approve"}
+                            )
+                        request_id = f"perm-{_sid}-{uuid.uuid4().hex[:8]}"
+                        logger.debug(
+                            f"[WS] StopPlanning requires approval in {_perm_mode} mode: {request_id}"
+                        )
+                        result = await _request_permission(
+                            request_id=request_id,
+                            session_id=_sid,
+                            profile_id=_profile_id,
+                            tool_name=tool_name,
+                            tool_input=tool_input,
+                            broadcast_func=_broadcast,
+                            tool_use_id=_ctx_tool_use_id,
+                            agent_id=_ctx_agent_id,
+                            title="Plan Approval",
+                            display_name="Approve Plan",
+                            description="Review the plan before leaving plan mode.",
+                        )
+                        approved = not isinstance(result, _DeferSentinel) and getattr(
+                            result, "behavior", None
+                        ) != "deny"
                         return PermissionResultAllow(
-                            updated_input={**tool_input, FLUID_ANSWER_KEY: "approve"}
+                            updated_input={
+                                **tool_input,
+                                FLUID_ANSWER_KEY: "approve" if approved else "keep planning",
+                            }
                         )
 
                     request_id = f"question-{_sid}-{uuid.uuid4().hex[:8]}"

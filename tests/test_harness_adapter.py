@@ -984,8 +984,8 @@ async def test_fluid_question_submits_respond_question_with_label():
 
 @pytest.mark.asyncio
 async def test_fluid_question_dismiss_submits_empty_answer():
-    """A dismissed AskUser/StopPlanning is an empty RespondQuestion, not a deny."""
-    engine = FakeEngine(_fluid_question_request(name="StopPlanning"))
+    """A dismissed AskUser is an empty RespondQuestion, not a permission deny."""
+    engine = FakeEngine(_fluid_question_request(name="AskUser"))
     adapter = _adapter_with(engine)
 
     async def can_use_tool(tool_name, tool_input, context):
@@ -1009,9 +1009,14 @@ async def test_stop_planning_does_not_skip_modal_on_stale_bypass_flag():
 
     async def can_use_tool(tool_name, tool_input, context):
         called.append(tool_name)
+        assert tool_input["plan"] == "# Plan"
         return _FakeAllow({**tool_input, "_fluid_answer": "Approve"})
 
-    engine = FakeEngine(_fluid_question_request(name="StopPlanning"))
+    message = (
+        "# Plan\n\nApprove this plan and leave plan mode? "
+        "(1 = Approve, anything else = feedback)"
+    )
+    engine = FakeEngine(_fluid_question_request(name="StopPlanning", message=message))
     adapter = _adapter_with(engine)
     adapter._can_use_tool = can_use_tool
     adapter._pre_plan_permission_mode = "bypassPermissions"
