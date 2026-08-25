@@ -650,14 +650,27 @@ def _cli_turn_events_from_message(
                         or tool_input.get("description")
                         or "Agent"
                     )
-                    events.append({
-                        "type": "subagent_start",
-                        "tool_id": tool_id,
-                        "agent_type": agent_type,
-                        "description": tool_input.get("description", ""),
-                        "prompt": tool_input.get("prompt", ""),
-                        "agent_id": tool_id,
-                    })
+                    # Same shape gate as the streaming loop: fluid's bare-named
+                    # "Task" dispatch builtin ({agent, prompt, mode, label}) is
+                    # app-dispatched and announced canonically by WorkerFeed, so
+                    # a generic subagent_start here would duplicate it. The
+                    # condition cannot be true on today's CLI-wake path (the CLI's
+                    # Task/Agent tools carry subagent_type, never "agent") — the
+                    # gate is here for consistency with the streaming loop.
+                    is_app_dispatch = (
+                        isinstance(tool_input, dict)
+                        and "agent" in tool_input
+                        and "subagent_type" not in tool_input
+                    )
+                    if not is_app_dispatch:
+                        events.append({
+                            "type": "subagent_start",
+                            "tool_id": tool_id,
+                            "agent_type": agent_type,
+                            "description": tool_input.get("description", ""),
+                            "prompt": tool_input.get("prompt", ""),
+                            "agent_id": tool_id,
+                        })
                 else:
                     events.append({
                         "type": "tool_use",
@@ -2690,6 +2703,12 @@ async def _stream_to_websocket_impl(
         # top-level rows (they'd be orphaned without their parent context).
         subagent_children: Dict[str, List[Dict[str, Any]]] = {}
         task_tool_uses = {}  # Track Task (subagent) tool uses by tool_id
+        # Turn-local set of Task/Agent tool_use ids whose spawn is APP-DISPATCHED
+        # (fluid's bare-named "Task" builtin, routed through the host dispatcher).
+        # For those, WorkerFeed emits the canonical subagent_start/subagent_done
+        # keyed on the worker session id, so this loop must NOT emit its own
+        # generic pair — see the `block.name in ("Task", "Agent")` branch below.
+        app_dispatch_tool_ids: set = set()
         # #660 defer-don't-terminate gate. A launch ToolResult with no evidence
         # of being background OR foreground is PARKED here instead of firing a
         # (possibly premature) subagent_done: tool_use_id -> {output, is_error,
@@ -3345,6 +3364,23 @@ async def _stream_to_websocket_impl(
                                 or tool_input.get("description")
                                 or "Agent"
                             )
+                            # Shape gate: fluid's bare-named "Task" dispatch
+                            # builtin always carries an "agent" key and never a
+                            # "subagent_type" (vendor/fluid/.../builtins/task.py:
+                            # {agent, prompt, mode, label}); the CLI's genuine
+                            # Task/Agent subagent tools carry subagent_type /
+                            # description / prompt and never "agent". An
+                            # app-dispatched spawn is announced by
+                            # WorkerFeed.started() with the REAL agent name and
+                            # the worker session id as task_id (joined back here
+                            # via launch_tool_use_id) — that row is canonical, so
+                            # the generic pair emitted below would duplicate it
+                            # in session_events.
+                            is_app_dispatch = (
+                                isinstance(tool_input, dict)
+                                and "agent" in tool_input
+                                and "subagent_type" not in tool_input
+                            )
 
                             # Track this Task tool use
                             task_tool_uses[tool_id] = {
@@ -3366,15 +3402,19 @@ async def _stream_to_websocket_impl(
                             # Record subagent in ordered turn events for persistence
                             turn_events.append({"kind": "subagent", "payload": tool_entry})
 
-                            # Yield subagent_start event
-                            yield {
-                                "type": "subagent_start",
-                                "tool_id": tool_id,
-                                "agent_type": agent_type,
-                                "description": tool_input.get("description", ""),
-                                "prompt": tool_input.get("prompt", ""),
-                                "agent_id": tool_id
-                            }
+                            if is_app_dispatch:
+                                # WorkerFeed owns the announcement for this spawn.
+                                app_dispatch_tool_ids.add(tool_id)
+                            else:
+                                # Yield subagent_start event
+                                yield {
+                                    "type": "subagent_start",
+                                    "tool_id": tool_id,
+                                    "agent_type": agent_type,
+                                    "description": tool_input.get("description", ""),
+                                    "prompt": tool_input.get("prompt", ""),
+                                    "agent_id": tool_id
+                                }
                         # Check if this tool use is from a subagent. A missing live
                         # subagent node just drops the child card (acceptable degrade).
                         elif is_subagent_lane:
@@ -3523,14 +3563,19 @@ async def _stream_to_websocket_impl(
                                 )
                             )
                             if _decision == "emit":
-                                yield {
-                                    "type": "subagent_done",
-                                    "tool_id": tool_use_id,
-                                    "agent_id": tool_use_id,  # Use tool_id as agent_id
-                                    "agent_type": task_info.get("agent_type", "unknown"),
-                                    "result": _launch_error if _launch_error is not None else output,
-                                    "is_error": True if _launch_error is not None else getattr(block, 'is_error', False)
-                                }
+                                if tool_use_id not in app_dispatch_tool_ids:
+                                    # App-dispatched spawns settle via WorkerFeed's
+                                    # canonical subagent_done (keyed on the worker
+                                    # session id) — a generic terminal here would
+                                    # duplicate it in session_events.
+                                    yield {
+                                        "type": "subagent_done",
+                                        "tool_id": tool_use_id,
+                                        "agent_id": tool_use_id,  # Use tool_id as agent_id
+                                        "agent_type": task_info.get("agent_type", "unknown"),
+                                        "result": _launch_error if _launch_error is not None else output,
+                                        "is_error": True if _launch_error is not None else getattr(block, 'is_error', False)
+                                    }
                                 # Clean up tracking
                                 del task_tool_uses[tool_use_id]
                             elif _decision == "defer":
@@ -3850,14 +3895,18 @@ async def _stream_to_websocket_impl(
                                 )
                             )
                             if _decision == "emit":
-                                yield {
-                                    "type": "subagent_done",
-                                    "tool_id": tool_use_id,
-                                    "agent_id": tool_use_id,  # Use tool_id as agent_id
-                                    "agent_type": task_info.get("agent_type", "unknown"),
-                                    "result": _launch_error if _launch_error is not None else output,
-                                    "is_error": True if _launch_error is not None else block.is_error
-                                }
+                                if tool_use_id not in app_dispatch_tool_ids:
+                                    # See the AssistantMessage-lane sibling: an
+                                    # app-dispatched spawn settles via WorkerFeed's
+                                    # canonical subagent_done, never here.
+                                    yield {
+                                        "type": "subagent_done",
+                                        "tool_id": tool_use_id,
+                                        "agent_id": tool_use_id,  # Use tool_id as agent_id
+                                        "agent_type": task_info.get("agent_type", "unknown"),
+                                        "result": _launch_error if _launch_error is not None else output,
+                                        "is_error": True if _launch_error is not None else block.is_error
+                                    }
                                 # Clean up tracking
                                 del task_tool_uses[tool_use_id]
                             elif _decision == "defer":
@@ -3998,14 +4047,17 @@ async def _stream_to_websocket_impl(
                     or task_registry.running_background_task_for_tool_use(session_id, _tuid)
                 ):
                     continue
-                yield {
-                    "type": "subagent_done",
-                    "tool_id": _tuid,
-                    "agent_id": _tuid,
-                    "agent_type": _parked.get("agent_type", "unknown"),
-                    "result": _parked.get("output"),
-                    "is_error": _parked.get("is_error", False),
-                }
+                if _tuid not in app_dispatch_tool_ids:
+                    # App-dispatched spawn: WorkerFeed already emitted (or will
+                    # emit) the canonical terminal keyed on the worker session id.
+                    yield {
+                        "type": "subagent_done",
+                        "tool_id": _tuid,
+                        "agent_id": _tuid,
+                        "agent_type": _parked.get("agent_type", "unknown"),
+                        "result": _parked.get("output"),
+                        "is_error": _parked.get("is_error", False),
+                    }
                 task_tool_uses.pop(_tuid, None)
         deferred_subagent_done.clear()
 

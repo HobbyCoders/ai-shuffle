@@ -188,6 +188,39 @@ class TestCliTurnEventsFromMessage:
             "agent_id": "t2",
         }]
 
+    def test_app_dispatch_shaped_task_emits_no_subagent_start(self):
+        # fluid's bare-named "Task" dispatch builtin: {agent, prompt, mode,
+        # label} — always an "agent" key, never "subagent_type". WorkerFeed
+        # announces those spawns canonically, so the generic row must not fire.
+        msg = AssistantMessage(
+            content=[ToolUseBlock(
+                id="t2a", name="Task",
+                input={"agent": "explore", "prompt": "go"},
+            )],
+            model="m",
+        )
+        assert _cli_turn_events_from_message("sess-1", msg, {}) == []
+
+    def test_agent_without_subagent_type_still_emits_subagent_start(self):
+        # A CLI-shaped Agent launch that only has description+prompt (no
+        # subagent_type AND no "agent" key) is NOT app-dispatched.
+        msg = AssistantMessage(
+            content=[ToolUseBlock(
+                id="t2b", name="Agent",
+                input={"description": "probe", "prompt": "go"},
+            )],
+            model="m",
+        )
+        events = _cli_turn_events_from_message("sess-1", msg, {})
+        assert events == [{
+            "type": "subagent_start",
+            "tool_id": "t2b",
+            "agent_type": "probe",
+            "description": "probe",
+            "prompt": "go",
+            "agent_id": "t2b",
+        }]
+
     def test_run_in_background_input_arms_launch_gate(self):
         msg = AssistantMessage(
             content=[ToolUseBlock(
