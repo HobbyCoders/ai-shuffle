@@ -60,11 +60,12 @@ def build_request_body(
     body: dict[str, Any] = {
         "model": request.model,
         "messages": messages,
-        "max_tokens": request.max_tokens,
         "stream": True,
         # Ask for a usage object on the terminal chunk (finalize hook).
         "stream_options": {"include_usage": True},
     }
+    if request.max_tokens is not None:
+        body["max_tokens"] = request.max_tokens
     if request.tools:
         body["tools"] = translate_tools(request.tools)
     # Escape hatch for server-specific knobs (llama.cpp cache_prompt, samplers,

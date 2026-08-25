@@ -45,7 +45,10 @@ class ProviderRequest:
     system: str | list[dict[str, Any]] | None = None
     tools: list[dict[str, Any]] = field(default_factory=list)
     cache_breakpoints: int = 0  # how many trailing breakpoints the serializer may place
-    max_tokens: int = 8192
+    # None = no explicit ceiling: the model's own maximum. Every dialect
+    # but Anthropic expresses that by omitting the field; Anthropic
+    # requires a number, which its serializer resolves per model.
+    max_tokens: int | None = None
     thinking: dict[str, Any] | None = None
     # Reasoning-depth knob ("low" | "medium" | "high" | "xhigh" | "max").
     # Each serializer maps it to its provider's shape: Anthropic

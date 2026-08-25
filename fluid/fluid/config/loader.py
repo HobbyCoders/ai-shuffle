@@ -42,7 +42,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "continual": False,
     "continual_model": None,
     "cwd": ".",
-    "max_tokens": 8192,
+    "max_tokens": None,
     "max_model_calls": 200,
     "context_window": None,
     # CLI prompt. ``system`` is your own base prompt: when set it REPLACES the

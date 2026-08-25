@@ -36,6 +36,18 @@ def _model_guidance_from(raw: Any) -> bool | str | tuple[str, ...]:
     return "auto"
 
 
+
+def _optional_int(value: object) -> int | None:
+    """``None``/absent stays uncapped; anything numeric becomes an int cap."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 @dataclass(frozen=True, kw_only=True)
 class ProviderConfig:
     kind: str  # one of PROVIDER_KINDS
@@ -327,7 +339,8 @@ class HarnessConfig:
     # concatenates ``hooks`` lists instead of replacing them).
     hooks: tuple[HookConfig, ...] = ()
     cwd: str = "."
-    max_tokens: int = 8192
+    # None = uncapped: each request gets the model's own output maximum.
+    max_tokens: int | None = None
     # Model calls allowed in one turn before it stops with ``max_calls``.
     # ``0`` means unlimited (normalized to None for NativeLoop), leaving the
     # provider as the sole authority on when a turn has to stop.
@@ -383,7 +396,7 @@ class HarnessConfig:
             memory=MemoryConfig.from_dict(d.get("memory", {})),
             hooks=tuple(HookConfig.from_dict(h) for h in d.get("hooks") or ()),
             cwd=d.get("cwd", "."),
-            max_tokens=int(d.get("max_tokens", 8192)),
+            max_tokens=_optional_int(d.get("max_tokens")),
             max_model_calls=int(d.get("max_model_calls", 200)),
             context_window=(
                 int(d["context_window"]) if d.get("context_window") else None

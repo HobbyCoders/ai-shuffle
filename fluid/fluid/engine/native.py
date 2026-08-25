@@ -72,6 +72,7 @@ from fluid.events.model import (
     TextDelta,
     ThinkingDelta,
     ToolResult,
+    ToolArgsDelta,
     ToolUse,
     TurnComplete,
     TurnStarted,
@@ -336,9 +337,38 @@ def repair_dangling_tool_calls(history: list[Message]) -> list[Message]:
     return out if repaired else history
 
 
+# How much of the context window to hold back for the response when the session
+# sets no explicit output cap. Only used for compaction arithmetic — it is never
+# put on the wire, so an uncapped request still gets the model's full output
+# allowance; this just stops the reserve from collapsing to zero.
+_DEFAULT_OUTPUT_RESERVE = 32_000
+
+
 # Arguments long enough to be worth previewing back to the model, short enough
 # not to re-send a whole truncated cell.
 _ARG_PREVIEW_CHARS = 300
+
+
+_OUTPUT_BUDGET_CAUSE = (
+    " The response hit its output-token limit mid-call, which is what "
+    "truncated them — the payload itself is not the problem. Raise the "
+    "session's max_tokens (leaving it unset gives the model its own maximum), "
+    "or reissue the call carrying less text."
+)
+
+
+def _explain_truncation(arg_error: str, stop_reason: str | None) -> str:
+    """Fold the stream's own verdict into the argument-decode failure.
+
+    Truncated arguments have exactly two causes and they call for opposite
+    responses: an exhausted output budget (raise the ceiling) or a dropped
+    connection (just reissue). The stream knows which; the decoder does not, so
+    the cause is attached once the terminal chunk has landed.
+    """
+    if stop_reason != "max_tokens":
+        return arg_error
+    head, _, tail = arg_error.partition("\nReceived: ")
+    return f"{head}{_OUTPUT_BUDGET_CAUSE}" + (f"\nReceived: {tail}" if tail else "")
 
 
 def _parse_tool_args(raw_args: str) -> tuple[dict[str, Any], str | None]:
@@ -362,10 +392,8 @@ def _parse_tool_args(raw_args: str) -> tuple[dict[str, Any], str | None]:
             preview += "…"
         return {}, (
             f"Tool arguments were not valid JSON ({exc}) and the call was not "
-            "run. The arguments almost certainly got cut off mid-value — this "
-            "happens when a call carries a very large payload. Reissue it with "
-            "a smaller one (split a long edit into several calls, or Write a "
-            f"long body to a file first).\nReceived: {preview}"
+            "run — they were cut off mid-value. Reissue the call.\n"
+            f"Received: {preview}"
         )
     if not isinstance(decoded, dict):
         return {}, (
@@ -392,7 +420,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         system: str | None = None,
         system_sections: CompiledPrompt | None = None,
         context_window: int | None = None,
-        max_tokens: int = 8192,
+        max_tokens: int | None = None,
         effort: str | None = None,
         request_extra: dict[str, Any] | None = None,
         registry: ToolRegistry | None = None,
@@ -1186,7 +1214,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 nodes,
                 overhead_tokens=self._context_overhead_tokens(),
                 context_window=self.context_window,
-                output_reserve_tokens=self.max_tokens,
+                output_reserve_tokens=self.max_tokens or _DEFAULT_OUTPUT_RESERVE,
             )
             history = repair_dangling_tool_calls(rendered)
             for promo in promotions:
@@ -1364,8 +1392,16 @@ class NativeLoop(BackgroundLifecycleMixin):
             # a registry a tool_use stop is terminal (M0 behavior).
             dispatchable = (
                 self.registry is not None
-                and result.stop_reason == "tool_use"
                 and bool(result.tool_uses)
+                and (
+                    result.stop_reason == "tool_use"
+                    # A stream that ran out of output budget mid-call still
+                    # emitted ToolUse events for the blocks that closed. Those
+                    # calls have to be answered — continuing without a result
+                    # leaves the transcript malformed and the UI showing a tool
+                    # that never finishes.
+                    or any(tu.get("arg_error") for tu in result.tool_uses)
+                )
             )
             if (
                 not dispatchable
@@ -1416,6 +1452,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                     ))
             else:
                 for tu in result.tool_uses:
+                    if tu.get("arg_error"):
+                        tu["arg_error"] = _explain_truncation(
+                            tu["arg_error"], result.stop_reason
+                        )
                     blocks.append(
                         await self._dispatch_tool_interruptible(sid, turn_id, tu)
                     )
@@ -1647,7 +1687,16 @@ class NativeLoop(BackgroundLifecycleMixin):
                                   index=payload["index"], text=payload["text"])
                 )
             elif chunk.kind == "tool_args_delta":
-                blocks[payload["index"]]["args"] += payload["partial_json"]
+                index = payload["index"]
+                fragment = payload["partial_json"]
+                block = blocks[index]
+                block["args"] += fragment
+                await self._emit(ToolArgsDelta(
+                    session_id=sid, turn_id=turn_id, index=index,
+                    tool_use_id=block["tool_use_id"] or "",
+                    name=block["tool_name"] or "",
+                    partial_json=fragment,
+                ))
             elif chunk.kind == "signature_delta":
                 blocks[payload["index"]]["signature"] += payload["signature"]
             elif chunk.kind == "block_stop":

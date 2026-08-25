@@ -23,6 +23,7 @@ from fluid.messages import (
     ToolUseBlock,
 )
 from fluid.providers.base import ProviderRequest, StreamChunk
+from fluid.providers.anthropic.limits import resolve_max_tokens
 
 
 def _block_to_api(block: Any) -> dict[str, Any] | None:
@@ -63,7 +64,7 @@ def build_request_body(request: ProviderRequest) -> dict[str, Any]:
 
     body: dict[str, Any] = {
         "model": request.model,
-        "max_tokens": request.max_tokens,
+        "max_tokens": resolve_max_tokens(request.model, request.max_tokens),
         "messages": messages,
         "stream": True,
     }

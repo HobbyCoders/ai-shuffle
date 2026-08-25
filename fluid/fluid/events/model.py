@@ -132,6 +132,23 @@ class ToolUse(Event):
 
 
 @dataclass(frozen=True, kw_only=True)
+class ToolArgsDelta(Event):
+    """One fragment of a tool call's arguments, as the model writes them.
+
+    The counterpart to :class:`TextDelta` for tool_use blocks. ``partial_json``
+    is raw JSON *text*, not a parsed value — fragments only become valid JSON
+    once concatenated, and the final parsed form arrives with :class:`ToolUse`.
+    Consumers render progress from these and never depend on them for the
+    call's actual arguments.
+    """
+
+    index: int
+    tool_use_id: str
+    name: str
+    partial_json: str
+
+
+@dataclass(frozen=True, kw_only=True)
 class ToolResult(Event):
     tool_use_id: str
     name: str
@@ -319,7 +336,7 @@ _EVENT_TYPES: dict[str, type[Event]] = {
     for cls in (
         TurnStarted, TurnComplete, SessionParked, SessionWoken,
         Interrupted, ErrorEvent,
-        BlockStart, BlockStop, TextDelta, ThinkingDelta,
+        BlockStart, BlockStop, TextDelta, ThinkingDelta, ToolArgsDelta,
         ToolUse, ToolResult, SteerDelivered,
         PermissionRequest, QuestionRequest, HandoffCreated,
         ContextCompaction, Usage, RateLimit, ProviderRetry, SubagentEvent, HookEvent,

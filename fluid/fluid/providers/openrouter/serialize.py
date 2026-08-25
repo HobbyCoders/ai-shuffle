@@ -97,7 +97,6 @@ def build_request_body(
     body: dict[str, Any] = {
         "model": request.model,
         "messages": messages,
-        "max_tokens": request.max_tokens,
         "stream": True,
         # Ask for a usage object on the terminal chunk (finalize hook).
         "stream_options": {"include_usage": True},
@@ -110,6 +109,12 @@ def build_request_body(
         # would rather have the silent failover set allow_fallbacks on the client.
         "provider": {"allow_fallbacks": allow_fallbacks},
     }
+    # Omitted when uncapped: OpenRouter then applies the model's own output
+    # maximum. Sending a fixed ceiling truncated any tool call whose arguments
+    # carried a large payload — a Write of a file bigger than the cap lost its
+    # content mid-JSON and the call could not be run.
+    if request.max_tokens is not None:
+        body["max_tokens"] = request.max_tokens
     if request.tools:
         body["tools"] = translate_tools(request.tools)
     if request.effort:
