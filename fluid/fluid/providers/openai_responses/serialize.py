@@ -110,12 +110,14 @@ def _tool_result_output(block: ToolResultBlock) -> str | list[dict[str, Any]]:
     return out
 
 
-def _message_items(msg: Message) -> Iterator[dict[str, Any]]:
+def _message_items(msg: Message, model: str) -> Iterator[dict[str, Any]]:
     """Flatten one fluid ``Message`` into Responses input items, in block order.
 
     Text/Image blocks coalesce into a single ``message`` item; a tool_use,
     tool_result or reasoning block flushes any open message item and emits its
     own item, so ordering (reasoning → text → function_call) is preserved.
+    ``model`` is the request's model: reasoning envelopes another model
+    produced are dropped, not resent.
     """
     # System/developer messages are remapped to "developer" (the Codex backend
     # 400s role:"system" input items but accepts "developer").
@@ -140,6 +142,13 @@ def _message_items(msg: Message) -> Iterator[dict[str, Any]]:
             yield from flush()
             if block.origin != "openai_responses":
                 continue  # foreign reasoning is dropped for Responses calls
+            if block.model is not None and block.model != model:
+                # Encrypted content is bound to the model that produced it;
+                # xAI and OpenAI share this dialect, so after a model swap the
+                # blob 400s the WHOLE request (invalid_encrypted_content).
+                # Untagged legacy envelopes (model=None) still resend — the
+                # engine's self-heal retry covers a stale one.
+                continue
             if block.raw is not None:
                 yield _strip_for_resend(block.raw)  # verbatim resend (id/status stripped)
             elif block.encrypted_content is not None:
@@ -227,7 +236,7 @@ def _reasoning_config(
 def build_request_body(request: ProviderRequest) -> dict[str, Any]:
     input_items: list[dict[str, Any]] = []
     for msg in request.messages:
-        input_items.extend(_message_items(msg))
+        input_items.extend(_message_items(msg, request.model))
 
     body: dict[str, Any] = {
         "model": request.model,

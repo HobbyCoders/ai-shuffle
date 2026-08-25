@@ -64,6 +64,11 @@ class Reasoning(ContentBlock):
     signature: str | None = None  # Anthropic signed thinking
     encrypted_content: str | None = None  # OpenAI encrypted reasoning item
     raw: dict[str, Any] | None = None  # exact item for verbatim resend
+    # Model that produced the envelope. Blobs and signatures are model-bound,
+    # not just provider-bound: xAI and OpenAI share the openai_responses
+    # dialect, and a blob resent to a model that cannot decrypt it 400s the
+    # whole request. None on histories written before this field existed.
+    model: str | None = None
 
 
 _KINDS = {

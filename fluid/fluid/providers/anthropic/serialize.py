@@ -26,7 +26,7 @@ from fluid.providers.base import ProviderRequest, StreamChunk
 from fluid.providers.anthropic.limits import resolve_max_tokens
 
 
-def _block_to_api(block: Any) -> dict[str, Any] | None:
+def _block_to_api(block: Any, model: str | None = None) -> dict[str, Any] | None:
     if isinstance(block, Text):
         return {"type": "text", "text": block.text}
     if isinstance(block, Thinking):
@@ -34,13 +34,18 @@ def _block_to_api(block: Any) -> dict[str, Any] | None:
     if isinstance(block, Reasoning):
         if block.origin != "anthropic":
             return None  # foreign reasoning is dropped for Anthropic calls
+        if block.model is not None and model is not None and block.model != model:
+            # Thinking signatures are model-bound: a signature another model
+            # produced fails verification. Untagged legacy envelopes
+            # (model=None) still resend as before.
+            return None
         if block.raw is not None:
             return block.raw  # verbatim resend (signed thinking block)
         return None
     if isinstance(block, ToolUseBlock):
         return {"type": "tool_use", "id": block.id, "name": block.name, "input": block.input}
     if isinstance(block, ToolResultBlock):
-        content = [b for b in (_block_to_api(c) for c in block.content) if b]
+        content = [b for b in (_block_to_api(c, model) for c in block.content) if b]
         return {
             "type": "tool_result",
             "tool_use_id": block.tool_use_id,
@@ -58,7 +63,9 @@ def _block_to_api(block: Any) -> dict[str, Any] | None:
 def build_request_body(request: ProviderRequest) -> dict[str, Any]:
     messages: list[dict[str, Any]] = []
     for msg in request.messages:
-        content = [b for b in (_block_to_api(blk) for blk in msg.content) if b]
+        content = [
+            b for b in (_block_to_api(blk, request.model) for blk in msg.content) if b
+        ]
         if content:
             messages.append({"role": msg.role, "content": content})
 

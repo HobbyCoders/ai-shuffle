@@ -337,6 +337,42 @@ def repair_dangling_tool_calls(history: list[Message]) -> list[Message]:
     return out if repaired else history
 
 
+def strip_opaque_reasoning(history: list[Message]) -> list[Message]:
+    """Drop every Reasoning block carrying opaque provider state (an encrypted
+    blob or a verbatim-resend item).
+
+    The recovery half of the invalid_encrypted_content self-heal (see
+    _agent_loop): a history can hold blobs the current model+account cannot
+    decrypt — legacy envelopes with no model tag, written before a model or
+    account switch on the same provider — and one such blob 400s every request
+    that carries it, permanently. Resending with the items omitted is accepted;
+    only the model's memory of its prior reasoning is lost. Summary-text-only
+    envelopes carry nothing opaque and stay.
+
+    Like repair_dangling_tool_calls: request-build time, Message level, pure —
+    affected messages are rebuilt, stored nodes are never mutated, and the
+    same list object comes back when nothing was stripped.
+    """
+    out: list[Message] = []
+    stripped = False
+    for message in history:
+        kept = [
+            block for block in message.content
+            if not (
+                isinstance(block, Reasoning)
+                and (block.encrypted_content is not None or block.raw is not None)
+            )
+        ]
+        if len(kept) == len(message.content):
+            out.append(message)
+            continue
+        stripped = True
+        out.append(Message(
+            role=message.role, content=kept, provider_meta=message.provider_meta,
+        ))
+    return out if stripped else history
+
+
 # How much of the context window to hold back for the response when the session
 # sets no explicit output cap. Only used for compaction arithmetic — it is never
 # put on the wire, so an uncapped request still gets the model's full output
@@ -537,6 +573,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Set once a sticky-routed call comes back empty: this loop instance
         # never sends the routing key again (see _agent_loop).
         self._sticky_poisoned = False
+        # Set once a call 400s with invalid_encrypted_content: this loop
+        # instance strips opaque reasoning from every later request instead of
+        # paying a doomed call per turn (see _agent_loop; the strip itself is
+        # strip_opaque_reasoning).
+        self._encrypted_reasoning_poisoned = False
         # Nested-instruction injection: instruction-file paths already injected
         # this session (each nested AGENTS-family file enters context once).
         self._nested_injected: set[str] = set()
@@ -1217,6 +1258,12 @@ class NativeLoop(BackgroundLifecycleMixin):
                 output_reserve_tokens=self.max_tokens or _DEFAULT_OUTPUT_RESERVE,
             )
             history = repair_dangling_tool_calls(rendered)
+            if self._encrypted_reasoning_poisoned:
+                # A prior call proved the history holds reasoning blobs the
+                # current model+account cannot decrypt; render without them
+                # rather than pay another rejected request (the stored tree
+                # keeps them — a switch back could decrypt them again).
+                history = strip_opaque_reasoning(history)
             for promo in promotions:
                 await self._emit_compaction(sid, turn_id, promo)
             projected_prompt = self._estimate_request_input_tokens(history)
@@ -1307,6 +1354,32 @@ class NativeLoop(BackgroundLifecycleMixin):
                     ),
                     raw=usage_raw,
                 ))
+                if (
+                    not self._encrypted_reasoning_poisoned
+                    and result.error_message
+                    and "invalid_encrypted_content" in result.error_message
+                ):
+                    # The history carries an encrypted reasoning blob the
+                    # current model+account cannot decrypt — the session
+                    # switched model or account on the same provider dialect
+                    # (e.g. Grok → GPT, both openai_responses) and a legacy
+                    # untagged envelope kept resending. Every replay of this
+                    # history fails identically, so retry once with opaque
+                    # reasoning stripped (the flag above pre-strips the
+                    # re-render, and every later turn). One retry only: if
+                    # the stripped request still fails, the flag is already
+                    # set and the error surfaces below.
+                    self._encrypted_reasoning_poisoned = True
+                    await self._emit(ProviderRetry(
+                        session_id=sid, turn_id=turn_id,
+                        attempt=1, max_attempts=1,
+                        reason=(
+                            "history contains encrypted reasoning this model "
+                            "cannot decrypt; retrying without it"
+                        ),
+                        delay_seconds=0.0, model=self.model,
+                    ))
+                    continue
                 if (
                     overflow_retries < 3
                     and result.error_message
@@ -1740,7 +1813,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # is terminal or recoverable (context overflow → forced trim
                 # + one retry) before surfacing it.
                 return _CallResult(
-                    message=self._assemble_message(blocks), usage=usage_totals,
+                    message=self._assemble_message(blocks, request.model),
+                    usage=usage_totals,
                     stop_reason="error",
                     error_message=str(payload.get("message", payload)),
                     error_retriable=bool(payload.get("retriable")),
@@ -1780,7 +1854,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 }
 
         return _CallResult(
-            message=self._assemble_message(blocks),
+            message=self._assemble_message(blocks, request.model),
             tool_uses=tool_uses,
             usage=usage_totals,
             stop_reason=stop_reason,
@@ -2302,7 +2376,9 @@ class NativeLoop(BackgroundLifecycleMixin):
                 continue
             totals[key] = totals.get(key, 0) + value
 
-    def _assemble_message(self, blocks: dict[int, dict[str, Any]]) -> Message:
+    def _assemble_message(
+        self, blocks: dict[int, dict[str, Any]], model: str
+    ) -> Message:
         content: list[Any] = []
         for index in sorted(blocks):
             block = blocks[index]
@@ -2310,7 +2386,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 content.append(Text(block["text"]))
             elif block["type"] == "thinking":
                 content.append(Thinking(block["text"]))
-                content.append(self._reasoning_envelope(block))
+                content.append(self._reasoning_envelope(block, model))
             elif block["type"] == "tool_use":
                 content.append(
                     ToolUseBlock(id=block["tool_use_id"] or "",
@@ -2319,7 +2395,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 )
         return Message(role="assistant", content=content)
 
-    def _reasoning_envelope(self, block: dict[str, Any]) -> Reasoning:
+    def _reasoning_envelope(self, block: dict[str, Any], model: str) -> Reasoning:
         """Build the provider-tagged Reasoning envelope for one thinking block.
 
         The origin MUST be the provider that produced the reasoning — each
@@ -2327,6 +2403,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         OpenAI Responses the authoritative reasoning item (encrypted_content)
         arrives as the block's done item; for Anthropic it's the accumulated
         thinking text + signature.
+
+        ``model`` is the request's model, not ``self.model`` at assembly time:
+        a hot-swap can land mid-stream, and the envelope must name the model
+        that actually produced the blob — serializers drop mismatched ones
+        (encrypted content and signatures are model-bound, see content.py).
         """
         origin = self.provider.name
         done = block.get("done_item")
@@ -2336,6 +2417,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 summary_text=block["text"] or None,
                 encrypted_content=(done or {}).get("encrypted_content"),
                 raw=done,
+                model=model,
             )
         if origin == "anthropic":
             return Reasoning(
@@ -2344,7 +2426,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                 signature=block["signature"] or None,
                 raw={"type": "thinking", "thinking": block["text"],
                      "signature": block["signature"]},
+                model=model,
             )
         # Other providers (openrouter, ...): no verbatim round-trip contract —
         # keep the summary text; serializers drop what they can't resend.
-        return Reasoning(origin=origin, summary_text=block["text"] or None, raw=done)
+        return Reasoning(
+            origin=origin, summary_text=block["text"] or None, raw=done,
+            model=model,
+        )
