@@ -58,6 +58,8 @@
 	import TeamMemberMessage from '$lib/components/TeamMemberMessage.svelte';
 	import TeamStatusBar from '$lib/components/TeamStatusBar.svelte';
 	import TodoList from '$lib/components/TodoList.svelte';
+	import NotesList from '$lib/components/NotesList.svelte';
+	import { notesFromToolMessage } from '$lib/utils/note-tool';
 	import MediaLightbox from './MediaLightbox.svelte';
 	import PendingMessages from './PendingMessages.svelte';
 	import ActiveTasks from './ActiveTasks.svelte';
@@ -521,36 +523,6 @@
 		return null;
 	}
 
-	/**
-	 * Map a fluid Note tool call onto the todo progress row. Notes have no
-	 * per-step status — every mutation returns the full list — so earlier notes
-	 * read as done and the newest one as the current step. A cleared or empty
-	 * list renders nothing.
-	 */
-	function extractNotesFromMessage(message: ChatMessage): TodoItem[] | null {
-		const lines: string[] = [];
-		const result = typeof message.toolResult === 'string' ? message.toolResult : '';
-		if (result && !result.includes('(empty)')) {
-			for (const raw of result.split('\n')) {
-				const line = raw.trim();
-				if (line.startsWith('- ')) lines.push(line.slice(2).trim());
-			}
-		}
-		// No result yet (still running): show the note being added, if any.
-		if (lines.length === 0) {
-			const text =
-				typeof message.toolInput?.text === 'string'
-					? message.toolInput.text
-					: (message.partialToolInput?.match(/"text"\s*:\s*"([^"]*)/)?.[1] ?? '');
-			if (text.trim()) lines.push(text.trim());
-		}
-		if (lines.length === 0) return null;
-		return lines.map((content, i) => ({
-			content,
-			status: i < lines.length - 1 ? 'completed' : 'in_progress',
-			activeForm: content
-		}));
-	}
 
 	// Read the current scroll geometry as plain metrics for the pure decision
 	// helpers in auto-scroll.ts.
@@ -1591,12 +1563,12 @@
 			</div>
 		{/if}
 	{:else if message.type === 'tool_use' && message.toolName === 'Note'}
-		<!-- Fluid Note tool - the todo-style progress row (notes are fluid's plan tool) -->
-		{@const notes = extractNotesFromMessage(message)}
+		<!-- Fluid Note tool — scratchpad of current thoughts, not a todo bar. -->
+		{@const notes = notesFromToolMessage(message)}
 		{#if notes && notes.length > 0}
 			<div class="w-full">
 				<div class="min-w-0">
-					<TodoList todos={notes} />
+					<NotesList {notes} />
 				</div>
 			</div>
 		{/if}

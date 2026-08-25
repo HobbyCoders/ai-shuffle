@@ -49,6 +49,7 @@ const TOOL_FIELDS: Record<string, string[]> = {
 	Skill: ['skill', 'name'],
 	SlashCommand: ['command'],
 	TodoWrite: [],
+	Note: ['text'],
 	AskUserQuestion: [],
 	AskUser: [],
 	StopPlanning: ['plan']
