@@ -967,6 +967,61 @@ async def test_tool_input_deltas_carry_open_block_tool_use_id(mock_db):
     await rec.close()
 
 
+async def test_tool_input_deltas_carry_the_tool_name(mock_db):
+    """A card opened by the first fragment needs a label, not an anonymous box.
+
+    The native leg puts the name on each delta; the delegated CLI leaves it out
+    and the open block is the fallback. Both paths have to end up naming it.
+    """
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": "stream_block_start", "block_type": "tool_use",
+        "content_block": {"type": "tool_use", "id": "tu_open", "name": "Write"},
+    })
+    await rec.on_event({
+        "type": "stream_delta", "delta_type": "tool_input",
+        "content": '{"a":', "tool_name": "Write",
+    })
+    await rec.on_event({"type": "stream_block_stop", "index": 0})
+    rows = _rows()
+    assert rows[0]["payload"]["name"] == "Write"
+    await rec.close()
+
+
+async def test_tool_input_delta_name_falls_back_to_the_open_block(mock_db):
+    """The delegated CLI sends no name on the delta itself."""
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": "stream_block_start", "block_type": "tool_use",
+        "content_block": {"type": "tool_use", "id": "tu_open", "name": "Edit"},
+    })
+    await rec.on_event({
+        "type": "stream_delta", "delta_type": "tool_input", "content": '{"a":1}',
+    })
+    await rec.on_event({"type": "stream_block_stop", "index": 0})
+    rows = _rows()
+    assert rows[0]["payload"]["name"] == "Edit"
+    await rec.close()
+
+
+async def test_tool_input_delta_name_is_absent_when_nothing_knows_it(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": "stream_block_start", "block_type": "tool_use",
+        "content_block": {"type": "tool_use", "id": "tu_open"},
+    })
+    await rec.on_event({
+        "type": "stream_delta", "delta_type": "tool_input", "content": '{"a":1}',
+    })
+    await rec.on_event({"type": "stream_block_stop", "index": 0})
+    rows = _rows()
+    assert rows[0]["payload"]["name"] is None
+    await rec.close()
+
+
 async def test_close_flushes_buffered_deltas(mock_db):
     _mk_session()
     rec = await _recorder()

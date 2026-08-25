@@ -109,6 +109,10 @@ class ToolInputDelta(EventBase):
     type: Literal["tool.input_delta"] = "tool.input_delta"
     tool_use_id: str
     partial_json: str  # batched by the runner
+    # Known from the block's first frame, so the card that opens on the first
+    # delta can label itself instead of rendering an anonymous box. Optional:
+    # a producer that does not know the name still emits valid deltas.
+    name: str | None = None
 
 
 class ToolResult(EventBase):

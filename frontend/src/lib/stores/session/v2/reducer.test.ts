@@ -812,6 +812,38 @@ describe('tool cards', () => {
 		expect(cards[0].toolName).toBe('Bash');
 	});
 
+	it('a named input_delta labels its placeholder immediately', () => {
+		// Otherwise the user watches an anonymous box fill with file content
+		// for as long as the call takes to generate.
+		const s = fold([
+			ev('tool.input_delta', { tool_use_id: 't3', partial_json: '{"file_path":', name: 'Write' }),
+		]);
+		const card = s.messages.find((m) => m.toolId === 't3')!;
+		expect(card.toolName).toBe('Write');
+		expect(card.toolStatus).toBe('running');
+		expect(card.streaming).toBe(true);
+	});
+
+	it('a later named delta labels a placeholder opened without one', () => {
+		const s = fold([
+			ev('tool.input_delta', { tool_use_id: 't4', partial_json: '{"a":' }),
+			ev('tool.input_delta', { tool_use_id: 't4', partial_json: '1}', name: 'Edit' }),
+		]);
+		const card = s.messages.find((m) => m.toolId === 't4')!;
+		expect(card.toolName).toBe('Edit');
+		expect(card.partialToolInput).toBe('{"a":1}');
+	});
+
+	it('a delta never renames a card tool.use already named', () => {
+		// tool.use is authoritative; a delta arriving after it must not win.
+		const s = fold([
+			ev('tool.use', { tool_use_id: 't5', name: 'Bash' }),
+			ev('tool.input_delta', { tool_use_id: 't5', partial_json: '{}', name: 'Write' }),
+		]);
+		const card = s.messages.find((m) => m.toolId === 't5')!;
+		expect(card.toolName).toBe('Bash');
+	});
+
 	it('tool.result for an unknown tool is ignored (no phantom card)', () => {
 		const s = fold([ev('tool.result', { tool_use_id: 'ghost', content_preview: 'x' })]);
 		expect(s.messages).toHaveLength(0);

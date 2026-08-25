@@ -1436,6 +1436,31 @@ class HarnessAdapter(ProviderAdapter):
                 )
             ]
 
+        if cls == "ToolArgsDelta":
+            # A tool call's arguments as the model writes them. The pipeline
+            # from here on already exists for the delegated CLI leg — the pump
+            # turns input_json_delta into a tool_input stream_delta and the
+            # recorder coalesces those into ToolInputDelta contract events — so
+            # the native leg only had to start speaking the same shape. Not
+            # buffered here: BlockStop reads _block_buffers for the assistant
+            # message, and the authoritative arguments arrive with ToolUse.
+            if not partial:
+                return []
+            return [
+                self._stream_event(
+                    event,
+                    {
+                        "type": "content_block_delta",
+                        "index": event.index,
+                        "delta": {
+                            "type": "input_json_delta",
+                            "partial_json": event.partial_json,
+                            "name": event.name,
+                        },
+                    },
+                )
+            ]
+
         if cls == "BlockStop":
             block_type = self._block_types.pop(event.index, "text")
             text = "".join(self._block_buffers.pop(event.index, []))

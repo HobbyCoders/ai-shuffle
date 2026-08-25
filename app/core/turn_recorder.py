@@ -447,7 +447,9 @@ class TurnRecorder:
         # Delta batching state. Insertion-ordered: kind -> list[str] chunks.
         self._delta_buffers: Dict[str, List[str]] = {}
         self._tool_input_tool_id: str = ""
+        self._tool_input_tool_name: str = ""
         self._open_tool_use_id: str = ""  # from the last stream_block_start
+        self._open_tool_use_name: str = ""
         self._flush_task: Optional[asyncio.Task] = None
 
         # turn.usage coalescing.
@@ -853,6 +855,7 @@ class TurnRecorder:
             content_block = event.get("content_block") or {}
             if content_block.get("type") == "tool_use" and content_block.get("id"):
                 self._open_tool_use_id = content_block["id"]
+                self._open_tool_use_name = str(content_block.get("name") or "")
         elif etype == "turn_usage":
             events.extend(self._coalesce_usage(_as_dict(event.get("usage"))))
         elif etype == "stream_start":
@@ -1006,6 +1009,12 @@ class TurnRecorder:
             # Stamp the open block's id at first buffer; a new tool block's
             # stream_block_start flushes this buffer before re-stamping.
             self._tool_input_tool_id = self._open_tool_use_id
+            # The name rides the delta on the native leg and comes from the
+            # open block on the delegated one; either way the first fragment
+            # is what a card needs to label itself.
+            self._tool_input_tool_name = (
+                str(event.get("tool_name") or "") or self._open_tool_use_name
+            )
         buf = self._delta_buffers.setdefault(delta_type, [])
         buf.append(content)
         if sum(len(c) for c in buf) >= FLUSH_MAX_BUFFER_CHARS:
@@ -1047,6 +1056,7 @@ class TurnRecorder:
                     contract.ToolInputDelta,
                     tool_use_id=self._tool_input_tool_id,
                     partial_json=text,
+                    name=self._tool_input_tool_name or None,
                 ))
         self._delta_buffers.clear()
         self._cancel_task(self._flush_task)

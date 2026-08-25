@@ -3058,7 +3058,11 @@ async def _stream_to_websocket_impl(
                             "type": "stream_delta",
                             "delta_type": "tool_input",
                             "content": delta["partial_json"],
-                            "index": event.get("index", 0)
+                            "index": event.get("index", 0),
+                            # Present on native-leg deltas; the delegated CLI
+                            # leaves it out and the recorder falls back to the
+                            # name it saw on the open block.
+                            "tool_name": delta.get("name"),
                         }
 
                 elif event_type == "message_start":

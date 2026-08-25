@@ -1201,6 +1201,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 		case 'tool.input_delta': {
 			const toolUseId = str(event.tool_use_id);
 			const partial = str(event.partial_json);
+			const deltaToolName = str(event.name);
 			if (!toolUseId) return state;
 			const existing = findByToolId(state.messages, toolUseId);
 			if (existing) {
@@ -1208,6 +1209,12 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					...state,
 					messages: replaceById(state.messages, existing.id, {
 						partialToolInput: (existing.partialToolInput ?? '') + partial,
+						// A placeholder opened by an earlier nameless delta gets
+						// its label as soon as one arrives. Never overwrites a
+						// name already set — tool.use is authoritative.
+						...(deltaToolName && !existing.toolName
+							? { toolName: deltaToolName }
+							: {}),
 					}),
 				};
 			}
@@ -1223,7 +1230,10 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				role: 'assistant',
 				type: 'tool_use',
 				content: '',
-				toolName: '',
+				// Named from the first fragment when the producer knows it, so
+				// the card reads "Write" while the file content streams in
+				// rather than sitting anonymous until the call completes.
+				toolName: deltaToolName,
 				toolId: toolUseId,
 				toolStatus: 'running',
 				streaming: true,
