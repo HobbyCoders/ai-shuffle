@@ -2363,14 +2363,23 @@ async def _stream_to_websocket_impl(
                     finally:
                         await _bump_attention(-1, "permission")
 
-                # Handle AskUserQuestion specially
-                if tool_name == "AskUserQuestion":
-                    questions = tool_input.get("questions", [])
+                # Handle AskUserQuestion (SDK) and AskUser / StopPlanning (fluid)
+                # specially — all three park the turn on the UserQuestion modal.
+                from app.core.user_question_handler import (
+                    FLUID_ANSWER_KEY,
+                    FLUID_QUESTION_TOOLS,
+                    QUESTION_TOOLS,
+                    fluid_answer_from_envelope,
+                    questions_from_tool_input,
+                )
+
+                if tool_name in QUESTION_TOOLS:
+                    questions = questions_from_tool_input(tool_input)
                     if not questions:
                         return PermissionResultAllow(updated_input=tool_input)
 
                     request_id = f"question-{_sid}-{uuid.uuid4().hex[:8]}"
-                    logger.debug(f"[WS] AskUserQuestion canUseTool triggered: {request_id} with {len(questions)} questions (tool_use_id={_ctx_tool_use_id}, agent_id={_ctx_agent_id})")
+                    logger.debug(f"[WS] {tool_name} canUseTool triggered: {request_id} with {len(questions)} questions (tool_use_id={_ctx_tool_use_id}, agent_id={_ctx_agent_id})")
 
                     # Fan the question to every device watching this session, not
                     # just the origin socket. The origin _broadcast reaches only the
@@ -2404,8 +2413,12 @@ async def _stream_to_websocket_impl(
                     # AskUserQuestion tool accepts, so resolve the pending tool
                     # call by denying it — the SDK turns the deny message into
                     # the tool_result, which is exactly the outcome we want the
-                    # model to read. (Per-question SKIPS are not this: they come
-                    # back as ordinary answer strings and flow through below.)
+                    # model to read. Fluid AskUser / StopPlanning have no deny
+                    # path: they wait on RespondQuestion, so a dismiss is an
+                    # empty answer (AskUser records "(no answer)"; StopPlanning
+                    # treats it as a reject and stays in plan mode).
+                    # (Per-question SKIPS are not this: they come back as
+                    # ordinary answer strings and flow through below.)
                     from app.core.user_question_handler import (
                         DISMISSED_KEY,
                         DISMISS_MESSAGE,
@@ -2413,10 +2426,17 @@ async def _stream_to_websocket_impl(
 
                     if isinstance(answers, dict) and answers.get(DISMISSED_KEY):
                         logger.debug(f"[WS] Question {request_id} dismissed by user")
+                        if tool_name in FLUID_QUESTION_TOOLS:
+                            return PermissionResultAllow(
+                                updated_input={**tool_input, FLUID_ANSWER_KEY: ""}
+                            )
                         return PermissionResultDeny(message=DISMISS_MESSAGE)
 
                     logger.debug(f"[WS] Got answers for {request_id}: {list(answers.keys())}")
-                    return PermissionResultAllow(updated_input={**tool_input, "answers": answers})
+                    updated = {**tool_input, "answers": answers}
+                    if tool_name in FLUID_QUESTION_TOOLS:
+                        updated[FLUID_ANSWER_KEY] = fluid_answer_from_envelope(answers)
+                    return PermissionResultAllow(updated_input=updated)
 
                 # ExitPlanMode handling — show approval modal in default mode
                 # only. In bypass mode, auto-approve so fire-and-forget

@@ -187,12 +187,13 @@ describe('buildDisplayItems — settled turns', () => {
 			tool({ toolName: 'Task' }),
 			tool({ toolName: 'Agent' }),
 			tool({ toolName: 'AskUserQuestion' }),
+			tool({ toolName: 'AskUser' }),
 			text('done')
 		];
 		const visibleMessages = collapsedVisibleMessages(buildDisplayItems(messages, SETTLED));
 
 		expect(visibleMessages.some((message) => message.type === 'subagent')).toBe(true);
-		for (const name of ['TodoWrite', 'Note', 'Task', 'Agent', 'AskUserQuestion']) {
+		for (const name of ['TodoWrite', 'Note', 'Task', 'Agent', 'AskUserQuestion', 'AskUser']) {
 			expect(visibleMessages.some((message) => message.toolName === name)).toBe(true);
 		}
 	});

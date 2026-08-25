@@ -49,7 +49,9 @@ const TOOL_FIELDS: Record<string, string[]> = {
 	Skill: ['skill', 'name'],
 	SlashCommand: ['command'],
 	TodoWrite: [],
-	AskUserQuestion: []
+	AskUserQuestion: [],
+	AskUser: [],
+	StopPlanning: ['plan']
 };
 
 /** Tools whose result carries a match count worth appending to the preview. */

@@ -88,6 +88,7 @@ describe('ToolUseMessage — dismissed AskUserQuestion', () => {
 describe('isDismissedQuestion', () => {
 	it('requires the tool, the error outcome, and the exact text', () => {
 		expect(isDismissedQuestion('AskUserQuestion', 'error', QUESTION_DISMISS_MESSAGE)).toBe(true);
+		expect(isDismissedQuestion('AskUser', 'error', QUESTION_DISMISS_MESSAGE)).toBe(true);
 		expect(isDismissedQuestion('AskUserQuestion', 'complete', QUESTION_DISMISS_MESSAGE)).toBe(false);
 		expect(isDismissedQuestion('Bash', 'error', QUESTION_DISMISS_MESSAGE)).toBe(false);
 		expect(isDismissedQuestion('AskUserQuestion', 'error', 'permission denied')).toBe(false);

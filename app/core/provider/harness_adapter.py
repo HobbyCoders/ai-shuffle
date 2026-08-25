@@ -302,9 +302,15 @@ class HarnessAdapter(ProviderAdapter):
         self._event_cursor: int = 0
         # app tool_use_id -> fluid permission request_id (respond_to_permission map)
         self._perm_requests: Dict[str, str] = {}
-        # last pending user-question request_id (fluid core does not yet emit a
-        # question event; kept for forward-compat with RespondQuestion).
+        # last pending fluid QuestionRequest id (AskUser / StopPlanning).
         self._pending_question_id: Optional[str] = None
+        # Mode to restore when StopPlanning is approved. Set when PlanModeControl
+        # first enters plan mode (or, if the session connected already in plan,
+        # default).
+        self._pre_plan_permission_mode: str = "default"
+        # SystemMessage(status, permissionMode=...) queued by PlanModeControl so
+        # receive_events can yield them on the next engine tick.
+        self._pending_plan_mode_events: list = []
         self._is_delegated: bool = False
         self._provider_kind: Optional[str] = None
         # ─ translation state (see _translate) ─
@@ -686,6 +692,7 @@ class HarnessAdapter(ProviderAdapter):
             _prune_duplicate_plugin_mcp_servers(
                 self._engine, _external_mcp_servers(options.mcp_servers)
             )
+            self._wire_plan_mode_control(options)
 
         # Prime the session so ``session_id`` and ``events()`` are usable
         # immediately (both engines lazily create it inside the first turn task,
@@ -990,13 +997,23 @@ class HarnessAdapter(ProviderAdapter):
             if getattr(event, "seq", -1) >= 0:
                 self._event_cursor = event.seq
 
+            # Plan/StopPlanning flip the engine flag mid-dispatch; drain any
+            # status notes they queued before translating this event so the
+            # chip update lands next to the tool result that caused it.
+            for pending in self._take_plan_mode_events():
+                yield pending
+
             for translated in self._translate(event):
                 if isinstance(translated, PermissionRequestEvent) and self._can_use_tool:
-                    # SDK parity: permission prompts run out-of-band through the
-                    # app's can_use_tool callback, not in the message stream.
-                    # Spawned as a task — the callback blocks on the user while
-                    # other stream events keep flowing.
-                    task = asyncio.ensure_future(self._bridge_permission(translated))
+                    # SDK parity: permission prompts (and fluid QuestionRequest
+                    # events, which we translate as risk="question") run
+                    # out-of-band through the app's can_use_tool callback, not
+                    # in the message stream. Spawned as a task — the callback
+                    # blocks on the user while other stream events keep flowing.
+                    if getattr(translated, "risk", None) == "question":
+                        task = asyncio.ensure_future(self._bridge_question(translated))
+                    else:
+                        task = asyncio.ensure_future(self._bridge_permission(translated))
                     self._perm_bridge_tasks.add(task)
                     task.add_done_callback(self._perm_bridge_tasks.discard)
                     continue
@@ -1150,6 +1167,57 @@ class HarnessAdapter(ProviderAdapter):
                 ev.tool_use_id, exc_info=True,
             )
 
+    async def _bridge_question(self, ev: PermissionRequestEvent) -> None:
+        """Route one fluid QuestionRequest through the app's question modal.
+
+        AskUser / StopPlanning park on RespondQuestion, not RespondPermission.
+        can_use_tool still drives the UserQuestion UI (fanout, attention,
+        durable pending_interactions); we take ``_fluid_answer`` off an allow
+        and submit it as the question answer. A deny or dismiss is an empty
+        answer — fluid has no deny-question op.
+        """
+        from types import SimpleNamespace
+
+        from app.core.user_question_handler import FLUID_ANSWER_KEY
+
+        answer = ""
+        try:
+            can_use_tool = cast(Any, self._can_use_tool)
+            result = await can_use_tool(
+                ev.name,
+                ev.input,
+                SimpleNamespace(tool_use_id=ev.tool_use_id, agent_id=None),
+            )
+            if type(result).__name__ == "PermissionResultAllow":
+                candidate = getattr(result, "updated_input", None)
+                if isinstance(candidate, dict):
+                    raw = candidate.get(FLUID_ANSWER_KEY, "")
+                    if isinstance(raw, list):
+                        answer = ", ".join(str(item) for item in raw)
+                    else:
+                        answer = str(raw or "")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "[HarnessAdapter] can_use_tool question bridge failed for %s — empty answer",
+                ev.name, exc_info=True,
+            )
+        try:
+            request_id = ev.request_id or self._pending_question_id
+            if self._engine is None or not request_id:
+                return
+            if self._pending_question_id == request_id:
+                self._pending_question_id = None
+            await self._engine.submit(
+                RespondQuestion(request_id=request_id, answer=answer)
+            )
+        except Exception:
+            logger.warning(
+                "[HarnessAdapter] failed to submit question answer for %s",
+                ev.tool_use_id, exc_info=True,
+            )
+
     async def interrupt(self) -> None:
         if self._engine is not None:
             await self._engine.submit(Interrupt())
@@ -1185,9 +1253,8 @@ class HarnessAdapter(ProviderAdapter):
         )
 
     async def respond_to_user_question(self, answer: str) -> None:
-        # fluid's core Event model does not yet emit a user-question event, so
-        # there is normally no request_id to answer. This is wired for
-        # forward-compat: if a question id was recorded, respond to it.
+        # Live AskUser / StopPlanning answers go through _bridge_question.
+        # This remains as a fallback if a caller has the pending id.
         if self._engine is None or self._pending_question_id is None:
             return
         request_id = self._pending_question_id
@@ -1529,10 +1596,10 @@ class HarnessAdapter(ProviderAdapter):
             ]
 
         if cls == "QuestionRequest":
-            # MRTR input_required round-trip (fluid engine). Record the id so
-            # respond_to_user_question routes the answer back; surface the
-            # prompt through the permission-event channel (name/input carry the
-            # question text + schema) until a dedicated question UI lands.
+            # MRTR input_required round-trip (AskUser / StopPlanning). Record
+            # the id and surface as a permission-shaped event with
+            # risk="question" so receive_events routes it through
+            # _bridge_question → UserQuestion modal → RespondQuestion.
             self._pending_question_id = event.request_id
             return [
                 PermissionRequestEvent(
@@ -2138,6 +2205,91 @@ class HarnessAdapter(ProviderAdapter):
         policy = _PERMISSION_POLICY.get(mode, "on_write")
         plan_mode = mode == "plan"
         return PermissionEngine(approval_policy=policy), plan_mode
+
+    def _wire_plan_mode_control(self, options: SessionOptions) -> None:
+        """Wrap NativeLoop's PlanModeControl so Plan/StopPlanning persist + notify.
+
+        NativeLoop already injects a controller that flips ``engine.plan_mode``.
+        We wrap ``set_active`` so entering/leaving also:
+          * remembers the pre-plan permission mode for restore
+          * persists ``sessions.permission_mode`` (so the next send does not
+            call ``set_permission_mode(default)`` and exit plan mode)
+          * queues a SystemMessage the stream yields for the composer chip
+        """
+        engine = self._engine
+        if engine is None:
+            return
+        ctx = getattr(engine, "ctx", None)
+        extra = getattr(ctx, "extra", None)
+        if not isinstance(extra, dict):
+            return
+        from fluid.tools.builtins.plan import PlanModeControl
+
+        original = extra.get("plan_mode_control")
+        if not isinstance(original, PlanModeControl):
+            return
+        current = options.permission_mode or "default"
+        self._pre_plan_permission_mode = current if current != "plan" else "default"
+
+        def set_active(active: bool) -> None:
+            was = bool(original.is_active())
+            original.set_active(active)
+            if was == bool(active):
+                return
+            self._on_plan_mode_changed(bool(active))
+
+        extra["plan_mode_control"] = PlanModeControl(
+            is_active=original.is_active,
+            set_active=set_active,
+        )
+
+    def _on_plan_mode_changed(self, active: bool) -> None:
+        """Keep engine policy, session binding, and the UI chip on the same mode.
+
+        Linger bug: Plan flips ``engine.plan_mode`` but the composer chip still
+        says ``default``. The next send therefore skips ``set_permission_mode``
+        (old == new) and plan mode never ends — even after StopPlanning ran,
+        if its QuestionRequest was never answered. Restoring the approval
+        policy here means the rest of THIS turn is not stuck on always_ask
+        after a chip-initiated plan, and persisting the binding makes the
+        next send actually call set_permission_mode.
+        """
+        mode = "plan" if active else (self._pre_plan_permission_mode or "default")
+        label = "plan" if active else mode
+        engine = self._engine
+        if engine is not None:
+            perms = getattr(engine, "permissions", None)
+            if perms is not None:
+                perms.approval_policy = _PERMISSION_POLICY.get(mode, "on_write")
+            if hasattr(engine, "plan_mode"):
+                engine.plan_mode = bool(active)
+        self._pending_plan_mode_events.append(
+            SystemMessage(
+                subtype="status",
+                data={
+                    "permissionMode": mode,
+                    "content": f"Switched to {label} mode.",
+                },
+            )
+        )
+        extras = (self._options.extra if self._options is not None else None) or {}
+        app_session_id = extras.get("app_session_id")
+        if not app_session_id:
+            return
+        try:
+            from app.db.sessions import set_session_run_binding
+
+            set_session_run_binding(str(app_session_id), permission_mode=mode)
+        except Exception:
+            logger.debug(
+                "[HarnessAdapter] could not persist plan-mode binding",
+                exc_info=True,
+            )
+
+    def _take_plan_mode_events(self) -> list:
+        events = list(self._pending_plan_mode_events)
+        self._pending_plan_mode_events.clear()
+        return events
 
 
 # ─── Module-level helpers ─────────────────────────────────────────────────────

@@ -38,7 +38,7 @@ export function isDismissedQuestion(
 	status: string | undefined,
 	result: string | undefined
 ): boolean {
-	if (toolName !== 'AskUserQuestion') return false;
+	if (toolName !== 'AskUserQuestion' && toolName !== 'AskUser') return false;
 	if (status !== 'error') return false;
 	if (!result) return false;
 	return result.includes(QUESTION_DISMISS_MESSAGE);

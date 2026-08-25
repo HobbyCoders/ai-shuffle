@@ -48,7 +48,7 @@ from fluid.context.trim import estimate_tokens_of_text
 from app.core.provider.legacy_events import SafetyWarning
 from fluid.events import model as lm
 from fluid.events.ops import (
-    BackgroundTaskFinished, RespondPermission, Steer, UserTurn,
+    BackgroundTaskFinished, RespondPermission, RespondQuestion, Steer, UserTurn,
 )
 from fluid.providers.base import ProviderCaps, StreamChunk
 from fluid.store.base import MemoryStore
@@ -920,6 +920,141 @@ async def test_delegated_loop_allow_uses_updated_input():
     assert frames[0]["response"]["response"]["updatedInput"] == {
         "questions": [], "answers": {"Pick one": "A"},
     }
+
+
+# ─── 3c. Fluid QuestionRequest (AskUser / StopPlanning) → RespondQuestion ─────
+#
+# Native AskUser and StopPlanning park on QuestionRequest, not PermissionRequest.
+# The adapter must NOT submit RespondPermission for those — NativeLoop is waiting
+# on RespondQuestion and a permission op would hang the turn.
+
+
+def _fluid_question_request(*, name="AskUser", message="Pick one?", schema=None):
+    return [
+        lm.QuestionRequest(
+            session_id=SID, request_id="q-fluid-1", tool_use_id="tu-ask",
+            name=name, message=message, schema=schema or {
+                "question": "Pick one?",
+                "header": "Choice",
+                "options": [{"label": "Approve", "description": "yes"}],
+            },
+        ),
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=1),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fluid_question_submits_respond_question_with_label():
+    """An answered AskUser lands as RespondQuestion(answer=label), not permission."""
+    from app.core.user_question_handler import FLUID_ANSWER_KEY
+
+    engine = FakeEngine(_fluid_question_request())
+    adapter = _adapter_with(engine)
+
+    async def can_use_tool(tool_name, tool_input, context):
+        assert tool_name == "AskUser"
+        assert tool_input["schema"]["question"] == "Pick one?"
+        return _FakeAllow({**tool_input, FLUID_ANSWER_KEY: "Approve"})
+
+    adapter._can_use_tool = can_use_tool
+    await _collect(adapter)
+    await _drain_bridge(engine)
+
+    assert len(engine.ops) == 1
+    op = engine.ops[0]
+    assert isinstance(op, RespondQuestion)
+    assert op.request_id == "q-fluid-1"
+    assert op.answer == "Approve"
+
+
+@pytest.mark.asyncio
+async def test_fluid_question_dismiss_submits_empty_answer():
+    """A dismissed AskUser/StopPlanning is an empty RespondQuestion, not a deny."""
+    engine = FakeEngine(_fluid_question_request(name="StopPlanning"))
+    adapter = _adapter_with(engine)
+
+    async def can_use_tool(tool_name, tool_input, context):
+        return _FakeDeny("User dismissed the question dialog without answering.")
+
+    adapter._can_use_tool = can_use_tool
+    await _collect(adapter)
+    await _drain_bridge(engine)
+
+    op = engine.ops[0]
+    assert isinstance(op, RespondQuestion)
+    assert op.answer == ""
+    assert not any(isinstance(o, RespondPermission) for o in engine.ops)
+
+
+@pytest.mark.asyncio
+async def test_fluid_question_does_not_yield_permission_event():
+    """QuestionRequest is bridged out-of-band; the stream must not see it."""
+    engine = FakeEngine(_fluid_question_request())
+    adapter = _adapter_with(engine)
+
+    async def can_use_tool(tool_name, tool_input, context):
+        return _FakeAllow({**tool_input, "_fluid_answer": "Approve"})
+
+    adapter._can_use_tool = can_use_tool
+    events = await _collect(adapter)
+    await _drain_bridge(engine)
+    assert not any(isinstance(ev, PermissionRequestEvent) for ev in events)
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_change_is_yielded_as_status_system_message():
+    """PlanModeControl.set_active queues a status note receive_events drains."""
+    engine = FakeEngine([
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=1),
+    ])
+    adapter = _adapter_with(engine)
+    adapter._on_plan_mode_changed(True)
+    events = await _collect(adapter)
+    notes = [e for e in events if isinstance(e, SystemMessage) and e.subtype == "status"]
+    assert notes
+    assert notes[0].data["permissionMode"] == "plan"
+
+
+def test_wire_plan_mode_control_wraps_set_active():
+    """Wrapping PlanModeControl makes set_active queue the status note."""
+    from fluid.tools.builtins.plan import PlanModeControl
+    from fluid.tools.registry import ToolCtx
+
+    flag = {"on": False}
+    engine = FakeEngine([])
+    engine.ctx = ToolCtx()
+    engine.ctx.extra["plan_mode_control"] = PlanModeControl(
+        is_active=lambda: flag["on"],
+        set_active=lambda v: flag.__setitem__("on", bool(v)),
+    )
+    engine.plan_mode = False
+    engine.permissions = type("P", (), {"approval_policy": "on_write"})()
+    adapter = _adapter_with(engine)
+    adapter._engine = engine
+    adapter._wire_plan_mode_control(SessionOptions(model="fake-model", permission_mode="default"))
+    extra = engine.ctx.extra["plan_mode_control"]
+    extra.set_active(True)
+    assert flag["on"] is True
+    assert adapter._pending_plan_mode_events
+    assert adapter._pending_plan_mode_events[0].data["permissionMode"] == "plan"
+
+
+def test_plan_mode_exit_restores_policy_and_flag():
+    """Leaving plan mode must flip the engine flag AND the approval policy.
+
+    Otherwise a chip-initiated plan (always_ask) that StopPlanning approved
+    would keep prompting every write for the rest of the turn, and a
+    Plan-tool entry whose QuestionRequest was dropped would linger forever
+    because the next send still says permission_mode=default.
+    """
+    engine = FakeEngine([])
+    engine.plan_mode = True
+    engine.permissions = type("P", (), {"approval_policy": "always_ask"})()
+    adapter = _adapter_with(engine)
+    adapter._pre_plan_permission_mode = "acceptEdits"
+    adapter._on_plan_mode_changed(False)
+    assert engine.plan_mode is False
+    assert engine.permissions.approval_policy == "on_write"
 
 
 # ─── 3. End-to-end over a real NativeLoop + fake provider ────────────────────

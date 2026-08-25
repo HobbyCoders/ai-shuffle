@@ -1169,3 +1169,49 @@ class TestDismissAndSkipEnvelope:
             "Which db?": "Postgres",
             "Which cache?": SKIP_ANSWER_TEXT,
         }
+
+
+class TestFluidQuestionShape:
+    """SDK vs fluid QuestionRequest input → UserQuestion payload + answer string."""
+
+    def test_sdk_questions_pass_through(self):
+        from app.core.user_question_handler import questions_from_tool_input
+
+        qs = [{"question": "Pick?", "header": "H", "options": []}]
+        assert questions_from_tool_input({"questions": qs}) == qs
+
+    def test_fluid_schema_becomes_one_question(self):
+        from app.core.user_question_handler import questions_from_tool_input
+
+        schema = {
+            "question": "Approve this plan?",
+            "header": "Plan",
+            "options": [{"label": "Approve"}],
+        }
+        out = questions_from_tool_input({"question": "Approve this plan?", "schema": schema})
+        assert len(out) == 1
+        assert out[0]["header"] == "Plan"
+        assert out[0]["question"] == "Approve this plan?"
+
+    def test_stop_planning_message_replaces_short_schema_question(self):
+        from app.core.user_question_handler import questions_from_tool_input
+
+        schema = {"question": "Approve this plan and leave plan mode?", "header": "Plan"}
+        message = "# Do the thing\n\nApprove this plan and leave plan mode?"
+        out = questions_from_tool_input({"question": message, "schema": schema})
+        assert out[0]["question"] == message
+
+    def test_fluid_answer_takes_first_label(self):
+        from app.core.user_question_handler import fluid_answer_from_envelope
+
+        assert fluid_answer_from_envelope({"Approve this?": "Approve"}) == "Approve"
+
+    def test_fluid_answer_joins_multiselect(self):
+        from app.core.user_question_handler import fluid_answer_from_envelope
+
+        assert fluid_answer_from_envelope({"Pick": ["A", "B"]}) == "A, B"
+
+    def test_fluid_answer_dismiss_is_empty(self):
+        from app.core.user_question_handler import DISMISSED_KEY, fluid_answer_from_envelope
+
+        assert fluid_answer_from_envelope({DISMISSED_KEY: True}) == ""

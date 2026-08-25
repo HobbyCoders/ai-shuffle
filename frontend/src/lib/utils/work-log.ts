@@ -75,7 +75,8 @@ function isSpecialTool(msg: ChatMessage): boolean {
 		msg.toolName === 'Note' ||
 		msg.toolName === 'Task' ||
 		msg.toolName === 'Agent' ||
-		msg.toolName === 'AskUserQuestion'
+		msg.toolName === 'AskUserQuestion' ||
+		msg.toolName === 'AskUser'
 	);
 }
 

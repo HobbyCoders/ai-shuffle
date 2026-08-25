@@ -69,7 +69,9 @@ def test_worker_cannot_ask_user_questions():
     so the tool is stripped from worker sessions at every depth."""
     pa.register_worker_session("worker-1")
     opts = _build(session_id="worker-1")
-    assert qo.WORKER_DISALLOWED_TOOL in (opts.disallowed_tools or [])
+    denied = opts.disallowed_tools or []
+    for name in qo.WORKER_DISALLOWED_TOOLS:
+        assert name in denied
 
 
 def test_non_worker_session_keeps_ask_user_question():

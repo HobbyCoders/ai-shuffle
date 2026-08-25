@@ -626,6 +626,7 @@ feedController.attach({
 	// avoiding a circular import). Lazy ref: activeSession is defined just below and
 	// this only runs at feed-event time.
 	resolveInteractionByRequestId: (requestId: string) => activeSession.resolveInteractionByRequestId(requestId),
+	setPermissionMode: (mode: string) => activeSession.setPermissionModeOverride(mode),
 });
 
 // ─── Exported Store ──────────────────────────────────────────────────────────

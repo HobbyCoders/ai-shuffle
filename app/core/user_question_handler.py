@@ -78,6 +78,65 @@ def resolve_answer_envelope(envelope: Any) -> Dict[str, Any]:
     return resolved
 
 
+# Fluid's AskUser / StopPlanning ride QuestionRequest events, not the SDK's
+# AskUserQuestion permission gate. The adapter translates each event into the
+# same {question, schema} shape and expects a single string back on
+# RespondQuestion. These helpers normalize that shape onto the existing
+# UserQuestion modal payload and extract the answer the engine wants.
+FLUID_ANSWER_KEY = "_fluid_answer"
+FLUID_QUESTION_TOOLS = frozenset({"AskUser", "StopPlanning"})
+QUESTION_TOOLS = frozenset({"AskUserQuestion"}) | FLUID_QUESTION_TOOLS
+
+
+def questions_from_tool_input(tool_input: Any) -> List[Dict[str, Any]]:
+    """Build the UserQuestion payload from either SDK or fluid tool input.
+
+    SDK AskUserQuestion already carries questions: [...]. Fluid
+    QuestionRequest arrives as {question: <message>, schema: <q dict>};
+    the schema is the structured question, and question is the plain-text
+    rendering (StopPlanning prepends the plan body there).
+    """
+    if not isinstance(tool_input, dict):
+        return []
+    questions = tool_input.get("questions")
+    if isinstance(questions, list) and questions:
+        return [q for q in questions if isinstance(q, dict)]
+    schema = tool_input.get("schema")
+    if isinstance(schema, dict) and str(schema.get("question") or "").strip():
+        q = dict(schema)
+        message = str(tool_input.get("question") or "").strip()
+        if message and message != str(q.get("question") or "").strip():
+            # Fluid StopPlanning (and any host that puts extra context in the
+            # message) — show the longer rendering so the plan body is visible.
+            q["question"] = message
+        return [q]
+    message = str(tool_input.get("question") or "").strip()
+    if message:
+        return [{"question": message, "header": "", "options": []}]
+    return []
+
+
+def fluid_answer_from_envelope(answers: Any) -> str:
+    """The single string fluid RespondQuestion wants from a modal envelope.
+
+    Option labels (and free text) pass through as-is — fluid AskUser maps
+    numeric picks to labels, and a label is already the choice. Multi-select
+    joins with a comma. Dismiss / empty becomes "" (AskUser records
+    (no answer); StopPlanning treats it as a reject and stays in plan mode).
+    """
+    if not isinstance(answers, dict) or answers.get(DISMISSED_KEY):
+        return ""
+    for key, value in answers.items():
+        if key in (DISMISSED_KEY, SKIPPED_KEY, FLUID_ANSWER_KEY):
+            continue
+        if isinstance(value, list):
+            return ", ".join(str(item) for item in value if str(item).strip())
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
 def _question_ttl_seconds() -> int:
     return int(getattr(settings, "user_question_timeout_seconds", 3600))
 

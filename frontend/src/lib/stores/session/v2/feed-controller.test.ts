@@ -529,6 +529,41 @@ describe('feedController cross-device interaction settle (#606 item 4)', () => {
 		expect(qs).toHaveLength(0);
 	});
 
+	it('live system.note with permissionMode updates the composer chip', () => {
+		const setPermissionMode = vi.fn();
+		const deps = makeDeps();
+		feedController.attach({ ...deps, setPermissionMode });
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+
+		hoisted.onEvent!({
+			type: 'system.note',
+			id: 'n1',
+			seq: 1,
+			subtype: 'status',
+			data: { permissionMode: 'plan', content: 'Switched to plan mode.' },
+		});
+
+		expect(setPermissionMode).toHaveBeenCalledWith('plan');
+	});
+
+	it('backfilled system.note with permissionMode does not rewind the chip', () => {
+		const setPermissionMode = vi.fn();
+		const deps = makeDeps();
+		feedController.attach({ ...deps, setPermissionMode });
+		feedController.start('s1');
+
+		hoisted.onEvent!({
+			type: 'system.note',
+			id: 'n1',
+			seq: 1,
+			subtype: 'status',
+			data: { permissionMode: 'plan' },
+		});
+
+		expect(setPermissionMode).not.toHaveBeenCalled();
+	});
+
 	it('does nothing when the interaction event carries no request_id', () => {
 		const deps = makeDeps({
 			pendingPermissions: [{ request_id: 'perm-1' }],
