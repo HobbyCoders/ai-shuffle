@@ -496,6 +496,15 @@ class HarnessAdapter(ProviderAdapter):
                     "unavailable on this native leg",
                     fluid_session_id, options.cwd, exc_info=True,
                 )
+            # Cross-session recall, wired exactly the way fluid's own
+            # config/loader.py does it: the store's search() backs the
+            # SessionSearch builtin (PgFluidStore sweeps fluid_session_nodes +
+            # session_store_entries). MemoryStore — the DB-less unit-test store
+            # — offers none, and the tool's requires_extra gate then keeps
+            # SessionSearch invisible on every surface. No try/except: getattr
+            # on a store object cannot throw here.
+            if callable(getattr(store, "search", None)):
+                native_ctx.extra["session_search"] = store.search
             # Only explicit user configuration may limit a native turn. There
             # is deliberately no install-wide model/token/cost/loop ceiling and
             # no automatic context trimming: provider usage remains telemetry,

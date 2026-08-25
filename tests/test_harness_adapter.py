@@ -548,6 +548,21 @@ def test_vendored_engines_expose_get_context_usage():
     assert callable(getattr(DelegatedLoop, "get_context_usage", None))
 
 
+def test_vendored_session_search_api_is_stable():
+    """SessionSearch is host-backed: fluid ships the tool, the app's store ships
+    the search. Two things have to hold for that seam to work — the tool gates
+    on the ``session_search`` extra the adapter injects, and ``SessionSearchHit``
+    (the shape PgFluidStore returns) lives where the store imports it from.
+
+    This is the tripwire if a future vendor sync renames either.
+    """
+    from fluid.store.base import SessionSearchHit
+    from fluid.tools.builtins.session_search import SPEC
+
+    assert SPEC.requires_extra == ("session_search",)
+    assert SessionSearchHit.__module__ == "fluid.store.base"
+
+
 @pytest.mark.asyncio
 async def test_get_context_usage_forwards_real_native_breakdown():
     """Over a REAL NativeLoop the adapter returns fluid's category breakdown,
@@ -3845,6 +3860,49 @@ async def test_native_leg_skips_the_bridged_mcp_monitor(monkeypatch, tmp_path):
     assert (captured.get("skip") or {}).get("builtins") is None or (
         "Monitor" in (captured.get("skip") or {}).get("builtins", set())
     )
+
+
+# ─── SessionSearch injection on native legs ─────────────────────────────────
+#
+# Cross-session recall is host-backed: fluid's builtin only ranks and formats,
+# the store does the searching. The adapter hands the store's ``search`` to the
+# engine ctx when the store has one — PgFluidStore does, MemoryStore does not,
+# and the tool's requires_extra gate turns that absence into "tool not offered"
+# rather than "tool that errors".
+
+
+class _SearchableStore(MemoryStore):
+    """A store that CAN answer recall — stands in for PgFluidStore here."""
+
+    async def search(self, terms, *, limit=5, exclude_session_id=None):
+        return []
+
+
+@pytest.mark.asyncio
+async def test_native_leg_injects_the_stores_search(monkeypatch, tmp_path):
+    import app.core.provider.harness_adapter as ha
+
+    store = _SearchableStore()
+    monkeypatch.setattr(
+        ha.HarnessAdapter, "_build_store", staticmethod(lambda _o: store)
+    )
+    await _connect_native_leg(monkeypatch, tmp_path)
+    assert _CapturingLoop.captured["ctx"].extra.get("session_search") == store.search
+
+
+@pytest.mark.asyncio
+async def test_native_leg_omits_session_search_for_a_store_without_one(
+    monkeypatch, tmp_path
+):
+    """MemoryStore keeps no durable record, so it offers no search — the extra
+    must stay absent and let fluid drop the tool from the request schemas."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(
+        ha.HarnessAdapter, "_build_store", staticmethod(lambda _o: MemoryStore())
+    )
+    await _connect_native_leg(monkeypatch, tmp_path)
+    assert "session_search" not in _CapturingLoop.captured["ctx"].extra
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,7 @@ copying, and the event log replays idempotently by (session_id, seq).
 
 from __future__ import annotations
 
+import json
 import logging
 
 import pytest
@@ -17,7 +18,7 @@ from app.core.provider.fluid_pg_store import PgFluidStore
 
 from fluid.events.model import TextDelta
 from fluid.messages.content import Message, Text
-from fluid.store.base import SessionNode
+from fluid.store.base import SessionNode, SessionSearchHit
 
 
 def _node(node_id: str, parent_id, text: str) -> SessionNode:
@@ -219,3 +220,157 @@ async def test_legal_content_survives_the_scrub_untouched(mock_db):
     assert (await reloaded.load_path("ses_ok"))[0].message.text() == (
         "plain unicode ✓"
     )
+
+
+# ─── Cross-session search (fluid's optional SessionStore.search hook) ────────
+#
+# The store backs the SessionSearch builtin over BOTH places a session's text
+# can live: the native node tree it owns, and the SDK transcript mirror in
+# session_store_entries. These tests seed one of each and pin the contract the
+# tool relies on — scoring, exclusion of the caller's own session, and the
+# meta/sidechain skips that mirror the sse_entry_text SQL function.
+
+
+def _sse_row(mock_db, session_id, entry_json, subpath=None, created_at="2026-08-20 10:00:00"):
+    mock_db.execute(
+        "INSERT INTO session_store_entries "
+        "(project_key, session_id, subpath, entry, created_at) VALUES (?, ?, ?, ?, ?)",
+        ("proj", session_id, subpath, entry_json, created_at),
+    )
+    mock_db.commit()
+
+
+async def _seed_searchable(mock_db):
+    """Two past native sessions, one 'current' native session, and four SDK
+    transcript rows (two searchable, two that must stay invisible)."""
+    store = PgFluidStore()
+
+    # Native arm: A matches two terms, B only one — A must outrank B.
+    await store.create_session("ses_hit_a")
+    await store.append(
+        "ses_hit_a", _node("a1", None, "we tuned the zebrafish quokka pipeline")
+    )
+    await store.create_session("ses_hit_b")
+    await store.append("ses_hit_b", _node("b1", None, "only the zebrafish part here"))
+
+    # The caller's own session — SessionSearch excludes it (HistorySearch owns it).
+    await store.create_session("ses_current")
+    await store.append(
+        "ses_current", _node("c1", None, "zebrafish quokka again, right here")
+    )
+
+    # SDK arm: a user entry with content blocks, an assistant entry with a
+    # plain string body.
+    _sse_row(
+        mock_db,
+        "ses_sdk_user",
+        json.dumps({
+            "type": "user",
+            "message": {"content": [
+                {"type": "text", "text": "remind me about the zebrafish run"},
+                {"type": "image", "source": "ignored"},
+            ]},
+        }),
+    )
+    _sse_row(
+        mock_db,
+        "ses_sdk_assistant",
+        json.dumps({
+            "type": "assistant",
+            "message": {"content": "the quokka zebrafish notes are in docs/"},
+        }),
+    )
+    # Invisible: a meta entry, and a sidechain row stored under a subpath.
+    _sse_row(
+        mock_db,
+        "ses_sdk_meta",
+        json.dumps({
+            "type": "user",
+            "isMeta": True,
+            "message": {"content": "zebrafish quokka meta noise"},
+        }),
+    )
+    _sse_row(
+        mock_db,
+        "ses_sdk_subpath",
+        json.dumps({
+            "type": "assistant",
+            "message": {"content": "zebrafish quokka sidechain noise"},
+        }),
+        subpath="subagent-1.jsonl",
+    )
+    return store
+
+
+@pytest.mark.asyncio
+async def test_search_spans_both_arms_and_ranks_by_score(mock_db):
+    store = await _seed_searchable(mock_db)
+
+    hits = await store.search(["zebrafish", "quokka"])
+    by_id = {h.session_id: h for h in hits}
+
+    # Both storage arms answer the same query.
+    assert "ses_hit_a" in by_id and "ses_hit_b" in by_id
+    assert "ses_sdk_user" in by_id and "ses_sdk_assistant" in by_id
+
+    # Two terms in one text beats one.
+    assert by_id["ses_hit_a"].score == 2
+    assert by_id["ses_hit_b"].score == 1
+    assert hits.index(by_id["ses_hit_a"]) < hits.index(by_id["ses_hit_b"])
+    assert [h.score for h in hits] == sorted((h.score for h in hits), reverse=True)
+
+
+@pytest.mark.asyncio
+async def test_search_returns_search_hits_with_capped_texts(mock_db):
+    store = await _seed_searchable(mock_db)
+    # Four more matching nodes on one session — texts must cap at 3.
+    for i in range(4):
+        await store.append(
+            "ses_hit_b", _node(f"extra{i}", None, f"zebrafish note {i}")
+        )
+
+    hit = next(h for h in await store.search(["zebrafish"]) if h.session_id == "ses_hit_b")
+    assert isinstance(hit, SessionSearchHit)
+    assert 0 < len(hit.texts) <= 3
+    assert all(isinstance(role, str) and "zebrafish" in text.lower()
+               for role, text in hit.texts)
+    assert hit.last_ts > 0
+
+    # The SDK arm carries a usable timestamp too (created_at, not the node ts).
+    sdk = next(h for h in await store.search(["zebrafish"])
+               if h.session_id == "ses_sdk_user")
+    assert sdk.last_ts > 0
+    assert sdk.texts[0][0] == "user"
+
+
+@pytest.mark.asyncio
+async def test_search_excludes_the_calling_session(mock_db):
+    store = await _seed_searchable(mock_db)
+
+    assert any(h.session_id == "ses_current" for h in await store.search(["zebrafish"]))
+    excluded = await store.search(["zebrafish"], exclude_session_id="ses_current")
+    assert not any(h.session_id == "ses_current" for h in excluded)
+    # Everything else still comes back.
+    assert {"ses_hit_a", "ses_hit_b"} <= {h.session_id for h in excluded}
+
+
+@pytest.mark.asyncio
+async def test_search_skips_meta_and_sidechain_transcript_rows(mock_db):
+    store = await _seed_searchable(mock_db)
+    found = {h.session_id for h in await store.search(["zebrafish", "quokka"])}
+    assert "ses_sdk_meta" not in found
+    assert "ses_sdk_subpath" not in found
+
+
+@pytest.mark.asyncio
+async def test_search_unknown_term_returns_nothing(mock_db):
+    store = await _seed_searchable(mock_db)
+    assert await store.search(["capybara"]) == []
+
+
+@pytest.mark.asyncio
+async def test_search_sql_wildcards_in_a_term_are_inert(mock_db):
+    """The SQL LIKE is only a prefilter — the Python substring test is the real
+    match, so a '%' a user typed cannot widen the result set."""
+    store = await _seed_searchable(mock_db)
+    assert await store.search(["zebra%fish"]) == []

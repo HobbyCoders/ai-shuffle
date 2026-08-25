@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from psycopg2.extras import Json
@@ -42,6 +43,7 @@ from app.core.provider import legacy_events as _legacy_events  # noqa: F401
 from fluid.events.model import Event, event_from_dict, event_to_dict
 from fluid.messages import Message
 from fluid.store.base import SessionMeta, SessionNode, new_id
+from fluid.store.base import SessionSearchHit, message_texts
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +148,148 @@ def _append_event_sync(session_id: str, event_dict: Dict[str, Any], seq: int) ->
                 "type=%s (a row with that seq already exists)",
                 session_id, seq, event_dict.get("_cls"),
             )
+
+
+# ─── Cross-session search ────────────────────────────────────────────────────
+#
+# Two arms, because a session's text lives in one of two places depending on
+# which leg wrote it: ``fluid_session_nodes`` holds the native node tree this
+# store owns, ``session_store_entries`` holds the SDK/delegated transcript
+# mirror. Both are swept in one connection and merged into one per-session
+# accumulator.
+#
+# The SQL is only a PREFILTER — cheap ILIKE over the raw JSON to cut the rows
+# the Python side has to parse. The substring test in ``_accumulate`` is the
+# real match, which also makes ``%``/``_`` inside a user's term harmless: an
+# over-wide LIKE just hands us rows that then fail the Python check.
+
+_SEARCH_ROW_CAP = 2000        # rows pulled per arm before Python scoring
+_SEARCH_TEXTS_PER_SESSION = 3  # matched texts kept per session (tool trims too)
+_SEARCH_SESSION_CAP = 25       # sessions returned (``limit`` is a hint, not a promise)
+
+
+def _sse_entry_texts(entry: Dict[str, Any]) -> List[str]:
+    """The Python twin of the ``sse_entry_text`` SQL function (app/db/database.py).
+
+    Same rules, same skips — user/assistant only, no meta and no sidechain rows
+    — so a search hit means the same thing whichever arm found it.
+    """
+    if entry.get("type") not in ("user", "assistant"):
+        return []
+    if entry.get("isMeta") or entry.get("isSidechain"):
+        return []
+    content = (entry.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return [content]
+    if isinstance(content, list):
+        return [
+            str(block["text"])
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text" and block.get("text")
+        ]
+    return []
+
+
+def _entry_ts(value: Any) -> float:
+    """``created_at`` is a datetime under psycopg2 and a string under the shim."""
+    if isinstance(value, datetime):
+        return value.timestamp()
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return datetime.fromisoformat(str(value)).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _accumulate(
+    acc: Dict[str, Dict[str, Any]],
+    session_id: str,
+    role: str,
+    texts: List[str],
+    ts: float,
+    terms: List[str],
+) -> None:
+    """Score one row's texts into the per-session accumulator (fluid's contract:
+    score = total term hits, last_ts = newest matched row)."""
+    for text in texts:
+        lowered = text.lower()
+        n_hit = sum(1 for t in terms if t in lowered)
+        if not n_hit:
+            continue
+        slot = acc.setdefault(session_id, {"score": 0, "last_ts": 0.0, "texts": []})
+        slot["score"] += n_hit
+        slot["last_ts"] = max(slot["last_ts"], ts)
+        if len(slot["texts"]) < _SEARCH_TEXTS_PER_SESSION:
+            slot["texts"].append((role, text))
+
+
+def _search_sync(
+    terms: List[str], limit: int, exclude_session_id: Optional[str]
+) -> List[SessionSearchHit]:
+    patterns = [f"%{t}%" for t in terms]
+    acc: Dict[str, Dict[str, Any]] = {}
+
+    with get_db() as conn:
+        cur = conn.cursor()
+
+        # Arm A — this store's own native session node tree.
+        where = " OR ".join(["message::text ILIKE %s"] * len(patterns))
+        params: List[Any] = list(patterns)
+        sql = (
+            f"SELECT session_id, ts, message FROM fluid_session_nodes "
+            f"WHERE ({where})"
+        )
+        if exclude_session_id:
+            sql += " AND session_id != %s"
+            params.append(exclude_session_id)
+        cur.execute(sql + f" ORDER BY ts DESC LIMIT {_SEARCH_ROW_CAP}", params)
+        for row in cur.fetchall():
+            message = _as_dict(row["message"])
+            _accumulate(
+                acc,
+                row["session_id"],
+                str(message.get("role") or "?"),
+                message_texts(message),
+                float(row["ts"] or 0.0),
+                terms,
+            )
+
+        # Arm B — the SDK transcript mirror (subpath IS NULL = the main
+        # transcript; sidechain files live under a subpath and are not recall).
+        where = " OR ".join(["entry::text ILIKE %s"] * len(patterns))
+        params = list(patterns)
+        sql = (
+            f"SELECT session_id, created_at, entry FROM session_store_entries "
+            f"WHERE subpath IS NULL AND ({where})"
+        )
+        if exclude_session_id:
+            sql += " AND session_id != %s"
+            params.append(exclude_session_id)
+        cur.execute(sql + f" ORDER BY id DESC LIMIT {_SEARCH_ROW_CAP}", params)
+        for row in cur.fetchall():
+            entry = _as_dict(row["entry"])
+            _accumulate(
+                acc,
+                row["session_id"],
+                str(entry.get("type") or "?"),
+                _sse_entry_texts(entry),
+                _entry_ts(row["created_at"]),
+                terms,
+            )
+
+    hits = [
+        SessionSearchHit(
+            session_id=sid,
+            score=slot["score"],
+            last_ts=slot["last_ts"],
+            texts=slot["texts"],
+        )
+        for sid, slot in acc.items()
+        if slot["score"] > 0
+    ]
+    hits.sort(key=lambda h: (-h.score, -h.last_ts))
+    return hits[:_SEARCH_SESSION_CAP]
 
 
 # ─── Async SessionStore ──────────────────────────────────────────────────────
@@ -265,3 +409,16 @@ class PgFluidStore:
     async def events_since(self, session_id: str, seq: int) -> List[Event]:
         await self._ensure_loaded(session_id)
         return [e for e in self._events.get(session_id, []) if e.seq > seq]
+
+    async def search(
+        self,
+        terms: List[str],
+        *,
+        limit: int = 5,
+        exclude_session_id: Optional[str] = None,
+    ) -> List[SessionSearchHit]:
+        """fluid's optional SessionStore recall hook (see
+        ``vendor/fluid/fluid/store/base.py``) — backs the SessionSearch builtin
+        over both the native fluid node tree and the SDK transcript mirror.
+        """
+        return await run_sync(_search_sync, list(terms), int(limit), exclude_session_id)
