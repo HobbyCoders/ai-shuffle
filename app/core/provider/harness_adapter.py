@@ -1180,6 +1180,13 @@ class HarnessAdapter(ProviderAdapter):
 
         from app.core.user_question_handler import FLUID_ANSWER_KEY
 
+        # Bypass users opted out of prompts. ExitPlanMode already auto-allows
+        # on the SDK path; StopPlanning must match. Detect the mode they had
+        # BEFORE Plan flipped the chip, not the in-plan binding.
+        if ev.name == "StopPlanning" and self._came_from_bypass():
+            await self._submit_question_answer(ev, "approve")
+            return
+
         answer = ""
         try:
             can_use_tool = cast(Any, self._can_use_tool)
@@ -1203,6 +1210,11 @@ class HarnessAdapter(ProviderAdapter):
                 "[HarnessAdapter] can_use_tool question bridge failed for %s — empty answer",
                 ev.name, exc_info=True,
             )
+        await self._submit_question_answer(ev, answer)
+
+    async def _submit_question_answer(
+        self, ev: PermissionRequestEvent, answer: str
+    ) -> None:
         try:
             request_id = ev.request_id or self._pending_question_id
             if self._engine is None or not request_id:
@@ -1217,6 +1229,20 @@ class HarnessAdapter(ProviderAdapter):
                 "[HarnessAdapter] failed to submit question answer for %s",
                 ev.tool_use_id, exc_info=True,
             )
+
+    def _came_from_bypass(self) -> bool:
+        """True when this session's human opted into bypassPermissions.
+
+        Plan persists the chip as ``plan``, so the *current* binding is the
+        wrong signal. Use the mode captured at connect / before Plan flipped
+        it. A turn that still *is* bypass (Plan + StopPlanning in one turn)
+        also counts.
+        """
+        pre = (self._pre_plan_permission_mode or "").strip()
+        current = ""
+        if self._options is not None:
+            current = (self._options.permission_mode or "").strip()
+        return "bypassPermissions" in (pre, current)
 
     async def interrupt(self) -> None:
         if self._engine is not None:
@@ -2254,7 +2280,18 @@ class HarnessAdapter(ProviderAdapter):
         after a chip-initiated plan, and persisting the binding makes the
         next send actually call set_permission_mode.
         """
-        mode = "plan" if active else (self._pre_plan_permission_mode or "default")
+        pre = self._pre_plan_permission_mode or "default"
+        # Bypass users keep never_ask and their chip. Moving them to plan
+        # would make the next send look like a chip-initiated plan and
+        # StopPlanning would prompt — the opposite of bypass. Engine plan_mode
+        # still drops write schemas; only the approval UI is skipped.
+        if pre == "bypassPermissions":
+            engine = self._engine
+            if engine is not None and hasattr(engine, "plan_mode"):
+                engine.plan_mode = bool(active)
+            return
+
+        mode = "plan" if active else pre
         label = "plan" if active else mode
         engine = self._engine
         if engine is not None:

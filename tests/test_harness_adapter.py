@@ -987,6 +987,57 @@ async def test_fluid_question_dismiss_submits_empty_answer():
 
 
 @pytest.mark.asyncio
+async def test_stop_planning_auto_approves_in_bypass():
+    """Bypass users must not see a StopPlanning modal — same as ExitPlanMode."""
+    called = []
+
+    async def can_use_tool(tool_name, tool_input, context):
+        called.append(tool_name)
+        return _FakeDeny("should not run")
+
+    engine = FakeEngine(_fluid_question_request(name="StopPlanning"))
+    adapter = _adapter_with(engine)
+    adapter._can_use_tool = can_use_tool
+    adapter._pre_plan_permission_mode = "bypassPermissions"
+    await _collect(adapter)
+    await _drain_bridge(engine)
+
+    assert called == []
+    op = engine.ops[0]
+    assert isinstance(op, RespondQuestion)
+    assert op.answer == "approve"
+
+
+@pytest.mark.asyncio
+async def test_ask_user_still_prompts_in_bypass():
+    """Bypass auto-accept is StopPlanning-only — AskUser still goes to the modal."""
+    engine = FakeEngine(_fluid_question_request(name="AskUser"))
+    adapter = _adapter_with(engine)
+    adapter._pre_plan_permission_mode = "bypassPermissions"
+
+    async def can_use_tool(tool_name, tool_input, context):
+        return _FakeAllow({**tool_input, "_fluid_answer": "Yes"})
+
+    adapter._can_use_tool = can_use_tool
+    await _collect(adapter)
+    await _drain_bridge(engine)
+    assert engine.ops[0].answer == "Yes"
+
+
+def test_plan_from_bypass_does_not_move_the_chip():
+    """Entering plan from bypass must not persist permission_mode=plan."""
+    engine = FakeEngine([])
+    engine.plan_mode = False
+    engine.permissions = type("P", (), {"approval_policy": "never_ask"})()
+    adapter = _adapter_with(engine)
+    adapter._pre_plan_permission_mode = "bypassPermissions"
+    adapter._on_plan_mode_changed(True)
+    assert engine.plan_mode is True
+    assert engine.permissions.approval_policy == "never_ask"
+    assert adapter._pending_plan_mode_events == []
+
+
+@pytest.mark.asyncio
 async def test_fluid_question_does_not_yield_permission_event():
     """QuestionRequest is bridged out-of-band; the stream must not see it."""
     engine = FakeEngine(_fluid_question_request())
