@@ -371,7 +371,7 @@ describe('ws-message-handlers', () => {
 			// stays lit until the user opens the session.
 			const fn = (deps.backgroundPermissions.update as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
 			expect(fn).toBeDefined();
-			expect(fn(new Map([['session-bg', 1]])).has('session-bg')).toBe(false);
+			expect(fn(new Map([['session-bg', { count: 1, kind: 'question' as const }]])).has('session-bg')).toBe(false);
 		});
 
 		// Queue processing is now handled server-side — no frontend trigger to test
@@ -390,7 +390,7 @@ describe('ws-message-handlers', () => {
 			// awaiting input, so any leftover attention dot is cleared.
 			const fn = (deps.backgroundPermissions.update as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
 			expect(fn).toBeDefined();
-			expect(fn(new Map([['session-1', 1]])).has('session-1')).toBe(false);
+			expect(fn(new Map([['session-1', { count: 1, kind: 'permission' as const }]])).has('session-1')).toBe(false);
 		});
 
 		it('does NOT clobber the active session when a BACKGROUND session stops', () => {
@@ -1311,8 +1311,10 @@ describe('ws-message-handlers', () => {
 
 	describe('session_attention handler', () => {
 		// Applies the function passed to backgroundPermissions.update against a
-		// starting Map so we can assert the resulting attention state.
-		function applyAttention(start: Map<string, number>): Map<string, number> {
+		// starting Map so we can assert the resulting attention state. Values are
+		// {count, kind} records — the kind drives the sidebar card's label.
+		type Attention = { count: number; kind: 'permission' | 'question' };
+		function applyAttention(start: Map<string, Attention>): Map<string, Attention> {
 			const fn = (deps.backgroundPermissions.update as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
 			return fn(start);
 		}
@@ -1326,7 +1328,39 @@ describe('ws-message-handlers', () => {
 			handlers.handleMessage({ type: 'session_attention', session_id: 'session-bg', count: 2 });
 
 			expect(deps.backgroundPermissions.update).toHaveBeenCalled();
-			expect(applyAttention(new Map()).get('session-bg')).toBe(2);
+			expect(applyAttention(new Map()).get('session-bg')).toEqual({ count: 2, kind: 'permission' });
+		});
+
+		it('carries the question kind through to the attention entry', () => {
+			const state = mockState();
+			state.sessionId = 'session-active';
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'session_attention',
+				session_id: 'session-bg',
+				count: 1,
+				kind: 'question',
+			});
+
+			expect(applyAttention(new Map()).get('session-bg')).toEqual({ count: 1, kind: 'question' });
+		});
+
+		it('keeps an existing count when a different-kind prompt arrives', () => {
+			// A session blocked on a permission AND a question holds TWO prompts;
+			// the broadcast carries the total count with the latest kind — it must
+			// replace (not increment) so the count stays server-authoritative.
+			const state = mockState();
+			state.sessionId = 'session-active';
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'user_question', session_id: 'session-bg', request_id: 'q-1', tool_use_id: 't-1', questions: [{ question: '?', header: 'H' }] });
+			handlers.handleMessage({ type: 'session_attention', session_id: 'session-bg', count: 2, kind: 'question' });
+
+			expect(applyAttention(new Map([['session-bg', { count: 1, kind: 'permission' } as Attention]])).get('session-bg'))
+				.toEqual({ count: 2, kind: 'question' });
 		});
 
 		it('resyncs pending queues for the active session instead of raising a dot', () => {
@@ -1392,7 +1426,7 @@ describe('ws-message-handlers', () => {
 			handlers.handleMessage({ type: 'session_attention', session_id: 'session-1', count: 0 });
 
 			expect(deps.backgroundPermissions.update).toHaveBeenCalled();
-			expect(applyAttention(new Map([['session-1', 1]])).has('session-1')).toBe(false);
+			expect(applyAttention(new Map([['session-1', { count: 1, kind: 'permission' }]])).has('session-1')).toBe(false);
 		});
 	});
 

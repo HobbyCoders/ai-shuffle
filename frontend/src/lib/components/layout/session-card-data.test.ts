@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { Session } from '$lib/api/client';
 import {
+	deriveStatus,
+	isLiveStatus,
 	isRemovedDeviceSession,
 	isRemovedProjectSession,
 	isVisibleSidebarSession,
 	liveProjectKeys,
+	STATUS_LABELS,
 } from './session-card-data';
 
 function session(over: Partial<Session> = {}): Session {
@@ -95,6 +98,58 @@ describe('isRemovedDeviceSession', () => {
 		}))).toBe(true);
 	});
 });
+
+describe('deriveStatus', () => {
+	const base = { streaming: false, attention: null as { count: number; kind: 'permission' | 'question' } | null, isActive: true };
+
+	it('shows Working while streaming', () => {
+		expect(deriveStatus({ ...base, streaming: true })).toBe('working');
+	});
+
+	it('shows Needs Permission for a pending permission prompt', () => {
+		expect(deriveStatus({ ...base, attention: { count: 1, kind: 'permission' } })).toBe('needs_permission');
+	});
+
+	it('shows Has Question for a pending user question', () => {
+		expect(deriveStatus({ ...base, attention: { count: 2, kind: 'question' } })).toBe('has_question');
+	});
+
+	it('lets a parked prompt outrank an in-flight turn', () => {
+		// The SDK can hold the stream open while blocked on a prompt — a session
+		// parked on you is more urgent than one merely busy.
+		expect(deriveStatus({ streaming: true, attention: { count: 1, kind: 'permission' }, isActive: true })).toBe('needs_permission');
+	});
+
+	it('shows PR Opened when an open PR exists for a settled session', () => {
+		expect(deriveStatus({ ...base, openPr: true })).toBe('pr');
+	});
+
+	it('keeps Working over PR while the turn is still in flight', () => {
+		expect(deriveStatus({ ...base, streaming: true, openPr: true })).toBe('working');
+	});
+
+	it('falls through to Done and Idle', () => {
+		expect(deriveStatus({ ...base })).toBe('done');
+		expect(deriveStatus({ ...base, isActive: false })).toBe('idle');
+	});
+});
+
+describe('status labels', () => {
+	it('labels the dynamic states', () => {
+		expect(STATUS_LABELS.working).toBe('Working');
+		expect(STATUS_LABELS.needs_permission).toBe('Needs Permission');
+		expect(STATUS_LABELS.has_question).toBe('Has Question');
+		expect(STATUS_LABELS.pr).toBe('PR Opened');
+	});
+
+	it('ticks the live-timer statuses', () => {
+		for (const s of ['working', 'needs_permission', 'has_question'] as const) {
+			expect(isLiveStatus(s)).toBe(true);
+		}
+		expect(isLiveStatus('done')).toBe(false);
+	});
+});
+
 
 describe('isVisibleSidebarSession', () => {
 	const live = liveProjectKeys([{ id: 'local-1' }], []);

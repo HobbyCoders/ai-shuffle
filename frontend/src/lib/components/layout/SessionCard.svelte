@@ -17,6 +17,9 @@
 	import {
 		Loader2,
 		AlertCircle,
+		CircleHelp,
+		GitPullRequest,
+		ShieldQuestionMark,
 		Check,
 		Monitor,
 		Cloud,
@@ -63,7 +66,7 @@
 	const branch = $derived(branchLabel(session));
 	const statusLabel = $derived(STATUS_LABELS[status]);
 	// In-flight (working) rows that aren't the open session recede so the list
-	// triages at a glance; awaiting/done rows stay prominent because they need you.
+	// triages at a glance; prompt-parked / PR / done rows stay prominent.
 	const receded = $derived(status === 'working' && !active);
 
 	let cardRef = $state<HTMLElement | null>(null);
@@ -264,6 +267,12 @@
 		{#if compact}
 			<span class="l1 cline">
 				<span class="ctitle">{title}</span>
+				{#if status === 'pr'}
+					<span class="status pr" title="Open pull request for this branch">
+						<GitPullRequest size={11} strokeWidth={2.2} />
+						{statusLabel}
+					</span>
+				{/if}
 				<span class="timer" class:live>{timer}</span>
 			</span>
 			<span class="l3">
@@ -292,8 +301,12 @@
 				<span class="status {status}">
 					{#if status === 'working'}
 						<Loader2 size={11} strokeWidth={2.6} class="spin" />
-					{:else if status === 'await'}
-						<AlertCircle size={11} strokeWidth={2.2} />
+					{:else if status === 'needs_permission'}
+						<ShieldQuestionMark size={11} strokeWidth={2.2} />
+					{:else if status === 'has_question' || status === 'await'}
+						<CircleHelp size={11} strokeWidth={2.2} />
+					{:else if status === 'pr'}
+						<GitPullRequest size={11} strokeWidth={2.2} />
 					{:else if status === 'done'}
 						<Check size={11} strokeWidth={2.6} />
 					{/if}
@@ -464,7 +477,10 @@
 		flex: none;
 	}
 	.status.working { color: var(--primary); }
+	.status.needs_permission { color: var(--warning); }
+	.status.has_question,
 	.status.await { color: var(--amber); }
+	.status.pr { color: var(--success); }
 	.status.done { color: var(--muted-foreground); }
 	.status.idle { color: var(--subtle-foreground); }
 	.status :global(svg) { flex: none; }
@@ -476,6 +492,8 @@
 	.status.working :global(svg:not(.spin)) {
 		animation: card-pulse 2.4s ease-in-out infinite;
 	}
+	.status.needs_permission :global(svg),
+	.status.has_question :global(svg),
 	.status.await :global(svg) { animation: card-pulse 2.4s ease-in-out infinite; }
 	.status :global(.spin) { animation: card-spin 1.4s linear infinite; }
 

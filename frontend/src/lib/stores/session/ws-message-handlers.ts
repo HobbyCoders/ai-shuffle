@@ -60,6 +60,15 @@ export interface InternalMutableState {
 	worktreeCreateAbort: AbortController | null;
 }
 
+
+/** Per-session outstanding-prompt state behind the sidebar attention indicator. */
+export interface SessionAttention {
+	/** Outstanding prompts (permissions + questions) for the session. */
+	count: number;
+	/** Which kind arrived most recently — drives the sidebar card's label. */
+	kind: 'permission' | 'question';
+}
+
 /**
  * Dependencies injected from the active-session store factory.
  */
@@ -77,7 +86,7 @@ export interface MessageHandlerDeps {
 		set: (m: Map<string, StreamingSessionInfo>) => void;
 	};
 	backgroundPermissions: {
-		update: (fn: (m: Map<string, number>) => Map<string, number>) => void;
+		update: (fn: (m: Map<string, SessionAttention>) => Map<string, SessionAttention>) => void;
 	};
 
 	// Callbacks for git
@@ -149,21 +158,26 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		}));
 	}
 
-	function setNeedsAttention(sessionId: string | null | undefined, count: number): void {
+	function setNeedsAttention(
+		sessionId: string | null | undefined,
+		count: number,
+		kind: SessionAttention['kind'] = 'permission'
+	): void {
 		if (!sessionId) return;
 		backgroundPermissions.update(map => {
 			const next = new Map(map);
-			if (count > 0) next.set(sessionId, count);
+			if (count > 0) next.set(sessionId, { count, kind });
 			else next.delete(sessionId);
 			return next;
 		});
 	}
 
-	function bumpNeedsAttention(sessionId: string | undefined): void {
+	function bumpNeedsAttention(sessionId: string | undefined, kind: SessionAttention['kind']): void {
 		if (!sessionId) return;
 		backgroundPermissions.update(map => {
 			const next = new Map(map);
-			next.set(sessionId, (next.get(sessionId) ?? 0) + 1);
+			const prev = next.get(sessionId);
+			next.set(sessionId, { count: (prev?.count ?? 0) + 1, kind });
 			return next;
 		});
 	}
@@ -817,7 +831,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const requestSessionId = data.session_id as string | undefined;
 				const currentSessionId = getState().sessionId;
 				if (requestSessionId && requestSessionId !== currentSessionId) {
-					bumpNeedsAttention(requestSessionId);
+					bumpNeedsAttention(requestSessionId, 'permission');
 					break;
 				}
 				const request = {
@@ -911,7 +925,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const deferred = mapPermissionRequests(deferredRaw, pendingSessionId);
 
 				if (pendingSessionId && pendingSessionId !== getState().sessionId) {
-					setNeedsAttention(pendingSessionId, requests.length);
+					setNeedsAttention(pendingSessionId, requests.length, 'permission');
 					break;
 				}
 				setNeedsAttention(pendingSessionId, 0);
@@ -927,7 +941,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const questionSessionId = data.session_id as string | undefined;
 				const currentSessionId = getState().sessionId;
 				if (questionSessionId && questionSessionId !== currentSessionId) {
-					bumpNeedsAttention(questionSessionId);
+					bumpNeedsAttention(questionSessionId, 'question');
 					break;
 				}
 				const rawQuestions = data.questions as Array<Record<string, unknown>>;
@@ -1008,7 +1022,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					pendingSessionId
 				);
 				if (pendingSessionId && pendingSessionId !== getState().sessionId) {
-					setNeedsAttention(pendingSessionId, questions.length);
+					setNeedsAttention(pendingSessionId, questions.length, 'question');
 					break;
 				}
 				setNeedsAttention(pendingSessionId, 0);
@@ -1028,6 +1042,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// sessions board lights up regardless of which tab owns the query.
 				const attnSessionId = data.session_id as string | undefined;
 				const count = (data.count as number | undefined) ?? 0;
+				const kindRaw = data.kind as string | undefined;
+				const kind: SessionAttention['kind'] = kindRaw === 'question' ? 'question' : 'permission';
 				// The active session surfaces the prompt through its own modal, not a
 				// background dot. But session_attention is the ONE signal that always
 				// reaches us: the per-socket user_question/permission_request event is
@@ -1047,7 +1063,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					}
 					break;
 				}
-				setNeedsAttention(attnSessionId, count);
+				setNeedsAttention(attnSessionId, count, kind);
 				break;
 			}
 

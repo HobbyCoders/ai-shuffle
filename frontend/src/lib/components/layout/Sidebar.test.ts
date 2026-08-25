@@ -25,8 +25,9 @@ const mocks = vi.hoisted(() => {
 		clusterProjects: store<unknown[]>([]),
 		activeSession: store({ sessionId: null as string | null, isStreaming: false }),
 		streamingSessions: store(new Set<string>()),
-		backgroundPermissions: store(new Set<string>()),
+		backgroundPermissions: store(new Map<string, { count: number; kind: 'permission' | 'question' }>()),
 		activeView: store<unknown>(null),
+		getPullRequests: vi.fn(),
 	};
 });
 
@@ -61,6 +62,10 @@ vi.mock('$lib/api/client', () => ({
 
 vi.mock('$lib/stores/toast', () => ({
 	toast: { push: vi.fn() },
+}));
+
+vi.mock('$lib/api/github', () => ({
+	getPullRequests: mocks.getPullRequests,
 }));
 
 import Sidebar from './Sidebar.svelte';
@@ -116,7 +121,8 @@ beforeEach(() => {
 	localStorage.clear();
 	mocks.activeSession.set({ sessionId: null, isStreaming: false });
 	mocks.streamingSessions.set(new Set());
-	mocks.backgroundPermissions.set(new Set());
+	mocks.backgroundPermissions.set(new Map());
+	mocks.getPullRequests.mockResolvedValue([]);
 	mocks.clusterProjects.set([]);
 	mocks.projects.set([
 		{ id: 'visible-project', name: 'Visible Project' },
@@ -234,7 +240,49 @@ describe('Sidebar session groups', () => {
 		expect(screen.queryByRole('menuitem', { name: /Unknown device/ })).toBeNull();
 	});
 
-	it('keeps a switched-in streaming session Working until its turn settles', async () => {
+	it('shows Needs Permission while a permission prompt is pending', async () => {
+		mocks.backgroundPermissions.set(new Map([['active', { count: 1, kind: 'permission' }]]));
+
+		render(Sidebar, { props: sidebarProps });
+
+		const card = screen.getByText('Active chat').closest('.scard');
+		expect(card?.querySelector('.status')?.textContent).toContain('Needs Permission');
+	});
+
+	it('shows Has Question while a user question is pending', async () => {
+		mocks.backgroundPermissions.set(new Map([['active', { count: 3, kind: 'question' }]]));
+
+		render(Sidebar, { props: sidebarProps });
+
+		const card = screen.getByText('Active chat').closest('.scard');
+		expect(card?.querySelector('.status')?.textContent).toContain('Has Question');
+	});
+
+	it('shows PR Opened when the session branch has an open PR', async () => {
+		mocks.getPullRequests.mockImplementation(async (_projectId: string, state: string) =>
+			state === 'open'
+				? [{ number: 7, title: 'Add thing', head_branch: 'wt/active', url: 'https://x/pull/7' }]
+				: []
+		);
+		mocks.sessions.set([
+			session('prsession', 'PR chat', 'visible-project', true, false, { worktree_branch: 'wt/active' }),
+		]);
+
+		render(Sidebar, { props: sidebarProps });
+
+		// The fetch is async — wait for the badge to appear.
+		await vi.waitFor(() => {
+			const card = screen.getByText('PR chat').closest('.scard');
+			expect(card?.querySelector('.status')?.textContent).toContain('PR Opened');
+		});
+		expect(mocks.getPullRequests).toHaveBeenCalledWith(
+			'visible-project',
+			'open',
+			100,
+		);
+	});
+
+	it('marks the project ghost row active once a project filter is applied', async () => {
 		// Regression: switchSession resets $activeSession.isStreaming=false before
 		// the SSE replay re-derives it, which flashed an open working session's
 		// card to Done. The cross-device streaming map carries the durable busy

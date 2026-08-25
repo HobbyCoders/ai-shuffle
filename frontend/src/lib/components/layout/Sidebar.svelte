@@ -36,12 +36,14 @@
 		BookOpen
 	} from 'lucide-svelte';
 	import type { Session } from '$lib/api/client';
+	import { getPullRequests, type PullRequest } from '$lib/api/github';
 	import { sessions, projects, clusterProjects } from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
 	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import SessionCard from './SessionCard.svelte';
 	import {
+		branchLabel,
 		deriveStatus,
 		sessionTimestamp,
 		sessionDeviceId,
@@ -74,6 +76,14 @@
 		onOpenSpotlight,
 		headerAction
 	}: Props = $props();
+
+	// Statuses whose elapsed timer ticks live (1s) rather than showing a coarse age.
+	const LIVE_TICK_STATUSES: ReadonlySet<string> = new Set([
+		'working',
+		'needs_permission',
+		'has_question',
+		'await'
+	]);
 
 	// The list starts capped; "All sessions" grows it in place (the board is gone).
 	const SETTLED_LIMIT = 30;
@@ -143,6 +153,49 @@
 		return 'Ungrouped';
 	}
 
+	// --- open-PR detection ---------------------------------------------------
+	// A session whose logical branch has an open PR shows "PR Opened" instead of
+	// Done. Open PRs are fetched per project and cached until the session list
+	// changes; a failed fetch just means no PR badge (never an error surface).
+	let openPrBranches = $state<Map<string, Set<string>>>(new Map());
+	let prFetchToken = 0;
+
+	const prProjects = $derived.by((): { projectId: string; branches: Set<string> }[] => {
+		const wanted = new Map<string, Set<string>>();
+		for (const s of sidebarSessions) {
+			const branch = branchLabel(s);
+			if (!branch || !s.project_id) continue;
+			let set = wanted.get(s.project_id);
+			if (!set) wanted.set(s.project_id, (set = new Set()));
+			set.add(branch);
+		}
+		return [...wanted.entries()].map(([projectId, branches]) => ({ projectId, branches }));
+	});
+
+	async function refreshOpenPrs() {
+		const token = ++prFetchToken;
+		const next = new Map<string, Set<string>>();
+		await Promise.all(
+			prProjects.map(async ({ projectId }) => {
+				try {
+					const prs: PullRequest[] = await getPullRequests(projectId, 'open', 100);
+					if (token !== prFetchToken) return;
+					next.set(projectId, new Set(prs.map((pr) => pr.head_branch)));
+				} catch {
+					// No GitHub auth / no repo → no PR badge for this project.
+				}
+			})
+		);
+		if (token !== prFetchToken) return;
+		openPrBranches = next;
+	}
+
+	// Refetch only when the set of (project, branch) pairs actually changes.
+	$effect(() => {
+		const key = JSON.stringify(prProjects.map((p) => [p.projectId, [...p.branches].sort()]));
+		void refreshOpenPrs();
+	});
+
 	// --- filters -----------------------------------------------------------
 	let projectFilter = $state<string | null>(null);
 	let deviceFilter = $state<string | null>(null);
@@ -207,14 +260,19 @@
 	const rows = $derived.by((): CardRow[] =>
 		visibleSessions
 			.filter((s) => !isArchived(s))
-			.map((s) => ({
-				session: s,
-				status: deriveStatus({
-					streaming: isStreaming(s.id),
-					awaiting: $backgroundPermissions.has(s.id),
-					isActive: !!s.is_active
-				})
-			}))
+			.map((s) => {
+				const branch = branchLabel(s);
+				const prSet = branch && s.project_id ? openPrBranches.get(s.project_id) : undefined;
+				return {
+					session: s,
+					status: deriveStatus({
+						streaming: isStreaming(s.id),
+						attention: $backgroundPermissions.get(s.id) ?? null,
+						openPr: !!(branch && prSet?.has(branch)),
+						isActive: !!s.is_active
+					})
+				};
+			})
 			.sort((a, b) => sessionTimestamp(b.session) - sessionTimestamp(a.session))
 	);
 
@@ -235,9 +293,10 @@
 	const archivedCount = $derived(visibleSessions.filter(isArchived).length);
 	let archivedOpen = $state(false);
 
-	// Keep the ticker in step with what's actually on screen.
+	// Keep the ticker in step with what's actually on screen. The prompt-parked
+	// states keep their live timer too — a session blocked on you is still live.
 	$effect(() => {
-		retick(activeRows.some((row) => row.status === 'working' || row.status === 'await'));
+		retick(activeRows.some((row) => LIVE_TICK_STATUSES.has(row.status)));
 	});
 
 	// --- workspace nav ------------------------------------------------------

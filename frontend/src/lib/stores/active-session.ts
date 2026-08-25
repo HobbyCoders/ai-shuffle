@@ -17,6 +17,7 @@
  */
 
 import type { PermissionRequest as PermissionRequestType, UserQuestionRequest, Profile } from '$lib/api/client';
+import type { SessionAttention } from './session/ws-message-handlers';
 import type { SdkContextUsage } from '$lib/api/sessions';
 import { notifySessionComplete, notifyWaitingForResponse } from '$lib/services/notifications';
 
@@ -80,9 +81,11 @@ export const streamingSessions = {
 
 // ─── backgroundPermissions ────────────────────────────────────────────────────
 
-const _bpStore = createStore<Map<string, number>>(new Map());
+const _bpStore = createStore<Map<string, SessionAttention>>(new Map());
 
-/** Track pending permissions for non-active sessions ("needs attention" indicator) */
+/** Track pending prompts (permissions + questions) for non-active sessions.
+ *  The value carries the outstanding count AND which kind arrived last, so the
+ *  sidebar can distinguish "Needs Permission" from "Has Question". */
 export const backgroundPermissions = {
 	get current() { return _bpStore.current; },
 	subscribe: _bpStore.subscribe,

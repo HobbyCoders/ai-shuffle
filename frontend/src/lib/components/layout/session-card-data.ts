@@ -10,33 +10,59 @@ import type { Session } from '$lib/api/client';
 import { parseUTC } from '$lib/utils/dateFormatting';
 
 /** Status shown on a card's first line. */
-export type SessionCardStatus = 'working' | 'await' | 'done' | 'idle';
+export type SessionCardStatus =
+	| 'working'
+	| 'needs_permission'
+	| 'has_question'
+	| 'await'
+	| 'pr'
+	| 'done'
+	| 'idle';
 
 export const STATUS_LABELS: Record<SessionCardStatus, string> = {
 	working: 'Working',
+	needs_permission: 'Needs Permission',
+	has_question: 'Has Question',
 	await: 'Awaiting input',
+	pr: 'PR Opened',
 	done: 'Done',
 	idle: 'Idle'
 };
 
-/** The two states that get a live-ticking timer. */
+/** The states that get a live-ticking timer — in-flight, including a session
+ *  parked on a permission/question prompt (its turn hasn't finished). */
 export function isLiveStatus(status: SessionCardStatus): boolean {
-	return status === 'working' || status === 'await';
+	return (
+		status === 'working' ||
+		status === 'needs_permission' ||
+		status === 'has_question' ||
+		status === 'await'
+	);
 }
 
 /**
  * Resolve a card status from the signals the app already tracks:
  * - streaming (activeSession.isStreaming / streamingSessions map)
- * - awaiting  (backgroundPermissions map — a session parked on a question)
+ * - attention (backgroundPermissions map entry — the session is parked on one
+ *   or more permission/question prompts; `kind` drives WHICH prompt label shows)
+ * - openPr    (an open pull request exists with the session's branch as head)
  * - is_active (the session is in the working set but its last turn finished)
+ *
+ * Precedence follows what needs the user most: a parked prompt outranks an
+ * in-flight turn (a blocked session can still hold an open stream), and an
+ * open PR outranks plain done.
  */
 export function deriveStatus(input: {
 	streaming: boolean;
-	awaiting: boolean;
+	attention: { count: number; kind: 'permission' | 'question' } | null;
+	openPr?: boolean;
 	isActive: boolean;
 }): SessionCardStatus {
-	if (input.awaiting) return 'await';
+	if (input.attention && input.attention.count > 0) {
+		return input.attention.kind === 'question' ? 'has_question' : 'needs_permission';
+	}
 	if (input.streaming) return 'working';
+	if (input.openPr) return 'pr';
 	if (input.isActive) return 'done';
 	return 'idle';
 }
