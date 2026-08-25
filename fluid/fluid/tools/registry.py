@@ -34,11 +34,22 @@ class ToolCtx:
 
     ``read_files`` is the read-before-write registry: builtins record the files
     they Read here so Edit/Write can enforce read-before-write within a session.
+
+    ``read_seen`` and ``grep_seen`` are the repeat-work registries. Read records
+    ``(path, offset, limit) -> (mtime_ns, size)`` for every successful text read
+    and Grep records the search-relevant half of its input; a call that lands on
+    an entry already there returns its full result with a short note saying so.
+    Nothing is invalidated by hand — an Edit or a Write bumps the file's mtime,
+    which drops the match on its own.
     """
 
     cwd: str = "."
     session_id: str | None = None
     read_files: set[str] = field(default_factory=set)
+    read_seen: dict[tuple[str, int | None, int | None], tuple[int, int]] = field(
+        default_factory=dict
+    )
+    grep_seen: set[tuple[Any, ...]] = field(default_factory=set)
     extra: dict[str, Any] = field(default_factory=dict)
 
 

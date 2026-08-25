@@ -15,6 +15,7 @@ import re
 import shutil
 import time
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ from fluid.tools.builtins._util import (
     glob_to_regex,
     is_binary,
     missing_path_note,
+    repeat_search_note,
     truncate,
     walk_files,
 )
@@ -129,8 +131,19 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
 
     rg = shutil.which("rg")
     if rg:
-        return await _ripgrep(rg, pattern, root, glob, no_ignore, limit)
-    return await asyncio.to_thread(_pure_python_grep, pattern, root, glob, limit)
+        outcome = await _ripgrep(rg, pattern, root, glob, no_ignore, limit)
+    else:
+        outcome = await asyncio.to_thread(_pure_python_grep, pattern, root, glob, limit)
+
+    # One choke point for the repeat-search note, so neither engine has to know
+    # about it. The search still ran — the note only says its answer is already
+    # in the conversation.
+    if outcome.is_error:
+        return outcome
+    key = (pattern, str(root), glob, no_ignore, limit)
+    note = repeat_search_note(key in ctx.grep_seen)
+    ctx.grep_seen.add(key)
+    return replace(outcome, text=outcome.text + note) if note else outcome
 
 
 def _header(engine: str, root: Path) -> str:

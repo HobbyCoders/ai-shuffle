@@ -671,7 +671,10 @@ def compose_code_mode_addendum(tools: frozenset[str] | None = None) -> str:
 In this session tools are reached through run_python, not as individual tool \
 calls. Compose one cell that carries the several calls a step needs — discover \
 with list_tools/search_tools, import with `from tools.<name> import <name>`, \
-loop and filter in Python — rather than one cell per call. Keep data in the \
+loop and filter in Python — rather than one cell per call. Iterate scratch \
+logic inside the cell instead of rewriting a script file on disk between runs, \
+and hold intermediate results in kernel variables rather than fetching them a \
+second time. Keep data in the \
 kernel: variables persist between cells, large results come back as refs you \
 can slice later, and only what you print or return enters the conversation. \
 Print what the user needs, not whole results. Every in-kernel call passes the \

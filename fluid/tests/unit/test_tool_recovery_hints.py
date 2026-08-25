@@ -4,6 +4,10 @@ Three recoveries used to cost an extra round-trip each: a failed Edit sent the
 model back to re-Read the file, a mistyped path sent it to Glob, and a Grep at
 a directory that does not exist surfaced ripgrep's error under a "searched
 via rg under ..." header that reads like a result. Each one now answers itself.
+
+The same seam carries the repeat-work notes: a Read of a file nothing has
+touched since the last one, and a search whose inputs were already searched,
+still return in full but say so.
 """
 
 from __future__ import annotations
@@ -126,6 +130,120 @@ async def test_read_says_when_the_parent_is_missing_too(tmp_path) -> None:
     )
     assert out.is_error
     assert "parent directory" in out.text
+
+
+# ── Read: the unchanged-file note ────────────────────────────────────────
+
+_UNCHANGED = "unchanged since your earlier read this session"
+
+
+async def test_second_read_of_an_untouched_file_says_so(tmp_path) -> None:
+    f = tmp_path / "app.py"
+    f.write_text("a = 1\nb = 2\n")
+    registry, ctx = _registry(), ToolCtx(cwd=str(tmp_path))
+
+    first = await registry.dispatch("Read", {"file_path": str(f)}, ctx)
+    assert _UNCHANGED not in first.text
+
+    second = await registry.dispatch("Read", {"file_path": str(f)}, ctx)
+    assert not second.is_error
+    assert _UNCHANGED in second.text
+    # The note is additive: the content is still all there.
+    assert "1\ta = 1" in second.text and "2\tb = 2" in second.text
+
+
+async def test_a_changed_file_reads_clean(tmp_path) -> None:
+    f = tmp_path / "app.py"
+    f.write_text("a = 1\n")
+    registry, ctx = _registry(), ToolCtx(cwd=str(tmp_path))
+
+    await registry.dispatch("Read", {"file_path": str(f)}, ctx)
+    f.write_text("a = 1\nb = 2\nc = 3\n")  # an edit anywhere moves mtime/size
+    out = await registry.dispatch("Read", {"file_path": str(f)}, ctx)
+    assert _UNCHANGED not in out.text
+
+
+async def test_a_different_window_is_not_a_repeat(tmp_path) -> None:
+    f = tmp_path / "app.py"
+    f.write_text("".join(f"line {i}\n" for i in range(1, 21)))
+    registry, ctx = _registry(), ToolCtx(cwd=str(tmp_path))
+
+    await registry.dispatch("Read", {"file_path": str(f), "offset": 1, "limit": 5}, ctx)
+    shifted = await registry.dispatch(
+        "Read", {"file_path": str(f), "offset": 6, "limit": 5}, ctx
+    )
+    assert _UNCHANGED not in shifted.text
+    widened = await registry.dispatch(
+        "Read", {"file_path": str(f), "offset": 1, "limit": 10}, ctx
+    )
+    assert _UNCHANGED not in widened.text
+    # The original window is still remembered as its own entry.
+    again = await registry.dispatch(
+        "Read", {"file_path": str(f), "offset": 1, "limit": 5}, ctx
+    )
+    assert _UNCHANGED in again.text
+
+
+async def test_a_failed_read_records_nothing(tmp_path) -> None:
+    f = tmp_path / "app.py"
+    registry, ctx = _registry(), ToolCtx(cwd=str(tmp_path))
+
+    missing = await registry.dispatch("Read", {"file_path": str(f)}, ctx)
+    assert missing.is_error
+    assert _UNCHANGED not in missing.text
+    assert not ctx.read_seen
+
+    f.write_text("a = 1\n")
+    first = await registry.dispatch("Read", {"file_path": str(f)}, ctx)
+    assert not first.is_error
+    assert _UNCHANGED not in first.text
+
+
+# ── Grep: the repeat-search note ─────────────────────────────────────────
+
+_REPEAT_SEARCH = "identical search already run this session"
+
+
+async def test_the_same_search_twice_says_so(tmp_path) -> None:
+    (tmp_path / "a.py").write_text("needle\n")
+    registry, ctx = _registry(), ToolCtx(cwd=str(tmp_path))
+    call = {"pattern": "needle", "path": str(tmp_path)}
+
+    first = await registry.dispatch("Grep", dict(call), ctx)
+    assert not first.is_error
+    assert _REPEAT_SEARCH not in first.text
+
+    second = await registry.dispatch("Grep", dict(call), ctx)
+    assert not second.is_error
+    assert _REPEAT_SEARCH in second.text
+    assert "a.py" in second.text  # results still returned in full
+
+
+async def test_a_changed_search_input_is_not_a_repeat(tmp_path) -> None:
+    (tmp_path / "a.py").write_text("needle\n")
+    registry, ctx = _registry(), ToolCtx(cwd=str(tmp_path))
+    call = {"pattern": "needle", "path": str(tmp_path)}
+
+    await registry.dispatch("Grep", dict(call), ctx)
+    for changed in (
+        {**call, "pattern": "haystack"},
+        {**call, "glob": "*.py"},
+        {**call, "no_ignore": True},
+        {**call, "limit": 10},
+    ):
+        out = await registry.dispatch("Grep", changed, ctx)
+        assert _REPEAT_SEARCH not in out.text, changed
+
+
+async def test_a_failed_search_records_nothing(tmp_path) -> None:
+    registry, ctx = _registry(), ToolCtx(cwd=str(tmp_path))
+    call = {"pattern": "x", "path": str(tmp_path / "nope")}
+
+    first = await registry.dispatch("Grep", dict(call), ctx)
+    assert first.is_error
+    assert not ctx.grep_seen
+    second = await registry.dispatch("Grep", dict(call), ctx)
+    assert _REPEAT_SEARCH not in second.text
 
 
 # ── Grep ─────────────────────────────────────────────────────────────────

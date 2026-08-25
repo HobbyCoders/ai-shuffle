@@ -22,7 +22,12 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-from fluid.tools.builtins._util import is_binary, missing_path_note, resolve
+from fluid.tools.builtins._util import (
+    is_binary,
+    missing_path_note,
+    resolve,
+    unchanged_read_note,
+)
 from fluid.tools.fragments import READ_BEFORE_EDIT
 from fluid.tools.registry import ToolCtx, ToolImage, ToolOutcome, ToolSpec
 
@@ -158,6 +163,27 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         )
 
     offset = max(1, int(input.get("offset", 1)))
-    numbered = _read_text(path, offset, input.get("limit"))
+    limit = input.get("limit")
+    numbered = _read_text(path, offset, limit)
     ctx.read_files.add(str(path))
-    return ToolOutcome(text=numbered or "(empty file)")
+
+    # Same path, same window, same bytes on disk → the content is already in
+    # the conversation. A write elsewhere moves mtime_ns, so the entry stops
+    # matching without any explicit invalidation.
+    key = (str(path), offset, int(limit) if limit else None)
+    stamp = _stamp(path)
+    repeat = stamp is not None and ctx.read_seen.get(key) == stamp
+    if stamp is not None:
+        ctx.read_seen[key] = stamp
+    return ToolOutcome(
+        text=(numbered or "(empty file)") + unchanged_read_note(repeat)
+    )
+
+
+def _stamp(path: Path) -> tuple[int, int] | None:
+    """``(mtime_ns, size)`` — the cheap identity of a file's current bytes."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)

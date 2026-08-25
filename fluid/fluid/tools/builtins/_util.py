@@ -257,3 +257,32 @@ def missing_path_note(raw: str, path: Path) -> str:
         if note:
             return f" — {note}"
     return ""
+
+
+# ── repeat-work notes ────────────────────────────────────────────────────────
+#
+# Re-reading a file nothing has touched, and re-running a search already run,
+# are the two cheapest calls to make and the two most common ones to waste a
+# turn on. The result still comes back in full — the note only says the content
+# is already in the conversation, so the next step can use it instead of asking
+# for it again.
+
+
+def unchanged_read_note(repeat: bool) -> str:
+    """The trailing note for a Read that returns already-seen content."""
+    if not repeat:
+        return ""
+    return (
+        "\n\n[note: unchanged since your earlier read this session — reuse "
+        "what you already learned instead of re-reading]"
+    )
+
+
+def repeat_search_note(repeat: bool) -> str:
+    """The trailing note for a search whose inputs were already searched."""
+    if not repeat:
+        return ""
+    return (
+        "\n[note: identical search already run this session — its results are "
+        "above in the conversation]"
+    )
