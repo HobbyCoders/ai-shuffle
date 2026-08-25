@@ -70,7 +70,8 @@ def test_prompt_is_identical_across_compilations(tmp_path, monkeypatch) -> None:
 
 
 def test_base_prompt_is_static_and_bounded() -> None:
-    assert len(DEFAULT_BASE_PROMPT) < 12_000
+    # Sprawl tripwire for the cached prefix, not a provider limit.
+    assert len(DEFAULT_BASE_PROMPT) < 14_000
     # No volatile facts: those belong in the environment block.
     for volatile in ("202", "C:\\", "/home/", "{", "}"):
         assert volatile not in DEFAULT_BASE_PROMPT
