@@ -42,6 +42,35 @@ async def test_add_requires_text(tmp_path) -> None:
     assert out.is_error
 
 
+async def test_add_batches_lines_and_texts(tmp_path) -> None:
+    ctx = ToolCtx(cwd=str(tmp_path), session_id="s1")
+    out = await note_handler(
+        {"action": "add", "text": "clone the repo\nrun the tests"}, ctx
+    )
+    assert "clone the repo" in out.text and "run the tests" in out.text
+    out = await note_handler(
+        {"action": "add", "texts": ["open the PR", "- ship it"]}, ctx
+    )
+    assert all(
+        item in out.text
+        for item in ("clone the repo", "run the tests", "open the PR", "ship it")
+    )
+
+
+async def test_remove_drops_matching_notes(tmp_path) -> None:
+    ctx = ToolCtx(cwd=str(tmp_path), session_id="s1")
+    await note_handler(
+        {"action": "add", "texts": ["clone the repo", "run the tests", "open the PR"]},
+        ctx,
+    )
+    out = await note_handler({"action": "remove", "text": "tests"}, ctx)
+    assert not out.is_error
+    assert "run the tests" not in out.text
+    assert "clone the repo" in out.text and "open the PR" in out.text
+    missing = await note_handler({"action": "remove", "text": "not a note"}, ctx)
+    assert missing.is_error
+
+
 async def test_read_notes_survives_resume(tmp_path) -> None:
     ctx = ToolCtx(cwd=str(tmp_path), session_id="s1")
     await note_handler({"action": "add", "text": "check CI before merge"}, ctx)

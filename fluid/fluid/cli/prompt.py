@@ -472,16 +472,18 @@ def _instructions_section(p: PromptProfile) -> str | None:
         )
     if "Note" in t and "Ledger" in t:
         bullets.append(
-            "- Track multi-step work with Note: add the steps before "
-            "starting, mark them done as you go. Notes cost nothing until "
-            "called; Ledger is for constraints that must survive the "
-            "session."
+            "- Track multi-step work with Note: add every current step in "
+            "one call before starting (one note per line, or pass texts). "
+            "Remove a note when that step is done — notes are a scratchpad, "
+            "not a checklist. Notes cost nothing until called; Ledger is "
+            "for constraints that must survive the session."
         )
     elif "Note" in t:
         bullets.append(
-            "- Track multi-step work with Note: add the steps before "
-            "starting, mark them done as you go. Notes cost nothing until "
-            "called."
+            "- Track multi-step work with Note: add every current step in "
+            "one call before starting (one note per line, or pass texts). "
+            "Remove a note when that step is done — notes are a scratchpad, "
+            "not a checklist. Notes cost nothing until called."
         )
     elif "Ledger" in t:
         bullets.append(
