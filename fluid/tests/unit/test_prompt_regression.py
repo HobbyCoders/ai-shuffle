@@ -230,3 +230,32 @@ def test_compiled_prompt_section_order(tmp_path, monkeypatch) -> None:
         "environment": kinds.index("environment"),
     }
     assert indexes["instructions"] < indexes["memory_store"] < indexes["environment"]
+
+
+def test_code_mode_addendum_never_leaks_absent_tools() -> None:
+    """The addendum names concrete tools now, so it is gated like every other
+    prompt section — a name only appears when the session can call it."""
+    from fluid.cli.prompt import CODE_MODE_TOOL_NAMES, compose_code_mode_addendum
+
+    code_mode_surface = set(CODE_MODE_TOOL_NAMES)
+    surfaces = [
+        frozenset(),
+        frozenset({"Read"}),
+        frozenset({"Bash", "Read", "Grep"}),
+        frozenset({"Edit", "Write", "Read"}),
+        frozenset({"Glob"}),
+        frozenset(BUILTIN_TOOL_NAMES),
+    ]
+    for surface in surfaces:
+        text = compose_code_mode_addendum(surface)
+        leaked = mentioned_tool_names(text) - surface - code_mode_surface
+        assert not leaked, f"surface {sorted(surface)} leaked {sorted(leaked)}"
+
+
+def test_code_mode_addendum_carries_the_cell_authoring_rules() -> None:
+    """The two mistakes that account for most unparseable cells are named."""
+    from fluid.cli.prompt import CODE_MODE_ADDENDUM
+
+    assert 'Grep(pattern=r"def foo|bar", glob="*.py")' in CODE_MODE_ADDENDUM
+    assert "heredoc" in CODE_MODE_ADDENDUM
+    assert "Read then Edit the same file in a single cell" in CODE_MODE_ADDENDUM

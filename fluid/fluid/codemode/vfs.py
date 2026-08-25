@@ -142,6 +142,51 @@ class _VfsPackage(types.ModuleType):
         return sorted(self._leaves())
 
 
+# What to reach for instead, per blocked module. A bare allowlist dump tells the
+# model what it may not do; these tell it what to do — the difference between a
+# wasted cell and a corrected one.
+BLOCKED_IMPORT_HINTS = {
+    "os": (
+        "use the Bash tool for shell/env work and Glob/Grep/Read for the "
+        "filesystem; `pathlib` is allowed for pure path manipulation "
+        "(PurePath.joinpath, .name, .suffix)"
+    ),
+    "sys": "there is no interpreter state to inspect here; Bash covers process work",
+    "subprocess": "use the Bash tool — it is permission-gated and captures output",
+    "shutil": "use the Bash tool for copy/move/remove, Glob to enumerate paths",
+    "glob": "use the Glob tool",
+    "tempfile": (
+        "keep intermediates in kernel variables (they persist across cells); "
+        "if a real file is required, Write one to an explicit path"
+    ),
+    "socket": "network access is blocked in the kernel",
+    "requests": "network access is blocked in the kernel; use the WebFetch tool",
+    "urllib": "network access is blocked in the kernel; use the WebFetch tool",
+    "httpx": "network access is blocked in the kernel; use the WebFetch tool",
+    "aiohttp": "network access is blocked in the kernel; use the WebFetch tool",
+    "sqlite3": "run queries through the Bash tool instead",
+    "asyncio": "tools are synchronous functions — call them directly, no event loop",
+    "multiprocessing": "the kernel is single-process; loop in plain Python",
+    "threading": "the kernel is single-threaded; loop in plain Python",
+    "ctypes": "native code is blocked in the kernel",
+    "importlib": "only the `tools` and `skills` packages are importable here",
+    "pickle": "the kernel namespace already persists values across cells",
+    "yaml": "third-party packages are not installed; parse with `re`, or shell out via Bash",
+    "numpy": "third-party packages are not installed; use plain Python or shell out via Bash",
+    "pandas": "third-party packages are not installed; use `csv`, or shell out via Bash",
+}
+
+
+def blocked_import_message(top: str, allowlist: set[str]) -> str:
+    """The ImportError text for a blocked module — hint first, allowlist last."""
+    hint = BLOCKED_IMPORT_HINTS.get(top)
+    lead = f"import of {top!r} is blocked in the code-mode kernel"
+    if hint:
+        lead += f" — {hint}"
+    allowed = ", ".join(sorted(allowlist))
+    return f"{lead}.\nAllowed: {allowed} (plus the `tools` and `skills` packages)."
+
+
 def make_guarded_import(allowlist: set[str]) -> Callable[..., Any]:
     """Return an ``__import__`` permitting only ``allowlist`` + ``tools``/``skills``."""
     real_import = builtins.__import__
@@ -150,11 +195,7 @@ def make_guarded_import(allowlist: set[str]) -> Callable[..., Any]:
         top = name.split(".", 1)[0] if name else name
         if top in ("tools", "skills") or top in allowlist:
             return real_import(name, globals, locals, fromlist, level)
-        allowed = ", ".join(sorted(allowlist))
-        raise ImportError(
-            f"import of {top!r} is blocked in the code-mode kernel. "
-            f"Allowed: {allowed} (plus the `tools` and `skills` packages)."
-        )
+        raise ImportError(blocked_import_message(top, allowlist))
 
     return guarded
 
@@ -249,6 +290,29 @@ def install_finder(
     return finder
 
 
+# Pre-bound in every cell so the modules models reach for reflexively never cost
+# a NameError round-trip. All are on the allowlist already — this only saves the
+# import line. A cell that assigns one of these names simply shadows it.
+PRELUDE_MODULES = ("json", "re", "math", "itertools", "collections", "textwrap")
+
+
+def _prelude(allowlist: set[str]) -> dict[str, Any]:
+    ns: dict[str, Any] = {}
+    for name in PRELUDE_MODULES:
+        if name not in allowlist:
+            continue
+        try:
+            ns[name] = importlib.import_module(name)
+        except ImportError:  # pragma: no cover - stdlib is always present
+            continue
+    if "pathlib" in allowlist:
+        try:
+            ns["Path"] = importlib.import_module("pathlib").Path
+        except (ImportError, AttributeError):  # pragma: no cover
+            pass
+    return ns
+
+
 def make_namespace(*, allowlist: set[str], host_call: Callable[..., Any]) -> dict[str, Any]:
     """Build the persistent exec namespace with a guarded ``__import__``."""
     guarded_builtins = dict(vars(builtins))
@@ -260,4 +324,5 @@ def make_namespace(*, allowlist: set[str], host_call: Callable[..., Any]) -> dic
         "ResultRef": ResultRef,
         "ToolError": ToolError,
         "HostCallDenied": HostCallDenied,
+        **_prelude(allowlist),
     }

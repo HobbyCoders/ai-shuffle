@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import difflib
 import os
 import re
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 
 from fluid.tools.registry import ToolCtx
@@ -130,9 +132,12 @@ def is_binary(path: Path) -> bool:
 def glob_to_regex(pattern: str, *, case_sensitive: bool | None = None) -> re.Pattern[str]:
     """Compile a glob into a regex matched against a POSIX relative path.
 
-    Supports ``**`` (any depth), ``*``/``?`` (within one segment) and ``[...]``
-    classes. A pattern with no ``/`` matches the file *name* at any depth, so a
-    bare ``*.py`` behaves the way models tend to expect.
+    Supports ``**`` (any depth), ``*``/``?`` (within one segment), ``[...]``
+    classes and ``{a,b}`` alternation — the last because ripgrep accepts it, so
+    a ``*.{py,ts}`` that worked through Grep's rg branch must not silently match
+    nothing through the Python one. A pattern with no ``/`` matches the file
+    *name* at any depth, so a bare ``*.py`` behaves the way models tend to
+    expect.
     """
     pat = pattern.replace("\\", "/")
     out: list[str] = []
@@ -162,6 +167,13 @@ def glob_to_regex(pattern: str, *, case_sensitive: bool | None = None) -> re.Pat
                 if body.startswith(("!", "^")):
                     body = "^" + body[1:]
                 out.append(f"[{body}]")
+                i = close + 1
+                continue
+        if ch == "{":
+            close = pat.find("}", i + 1)
+            if close != -1 and "/" not in pat[i + 1:close]:
+                alts = pat[i + 1:close].split(",")
+                out.append("(?:" + "|".join(re.escape(a) for a in alts) + ")")
                 i = close + 1
                 continue
         out.append(re.escape(ch))
@@ -196,3 +208,52 @@ def write_text_with_newline(path: Path, text: str, newline: str) -> None:
         normalized = normalized.replace("\n", newline)
     with path.open("w", encoding="utf-8", newline="") as fh:
         fh.write(normalized)
+
+
+# ── missing-path diagnostics ─────────────────────────────────────────────────
+#
+# A bad path is one of the most common tool failures and the most wasteful: the
+# bare "file not found: X" costs a Glob or a Grep to recover from. Two shapes
+# dominate, and both are recognisable from the string itself — a `path:line:`
+# match line pasted straight out of Grep output, and a near-miss spelling in a
+# directory that does exist. Naming the fix inline turns a two-call recovery
+# into a zero-call one.
+
+_GREP_MATCH_SUFFIX = re.compile(r"^(?P<path>.+?):\d+:")
+
+
+def _grep_line_note(raw: str) -> str | None:
+    """Recognise a Grep result line handed back as if it were a path."""
+    match = _GREP_MATCH_SUFFIX.match(raw)
+    if match is None:
+        return None
+    candidate = match.group("path")
+    if not candidate or not Path(candidate).exists():
+        return None
+    return (
+        f'this looks like a Grep result line ("path:line:content"); the path '
+        f'part is "{candidate}" — pass just that'
+    )
+
+
+def _nearby_note(path: Path) -> str | None:
+    """Closest existing names in the parent directory, when there are any."""
+    parent = path.parent
+    try:
+        if not parent.is_dir():
+            return f"its parent directory {parent} does not exist either"
+        names = [entry.name for entry in islice(parent.iterdir(), 2000)]
+    except OSError:
+        return None
+    close = difflib.get_close_matches(path.name, names, n=3, cutoff=0.6)
+    if not close:
+        return None
+    return "did you mean: " + ", ".join(str(parent / name) for name in close)
+
+
+def missing_path_note(raw: str, path: Path) -> str:
+    """The trailing clause for a not-found diagnostic ("" when nothing helps)."""
+    for note in (_grep_line_note(raw), _nearby_note(path)):
+        if note:
+            return f" — {note}"
+    return ""

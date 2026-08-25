@@ -22,7 +22,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-from fluid.tools.builtins._util import is_binary, resolve
+from fluid.tools.builtins._util import is_binary, missing_path_note, resolve
 from fluid.tools.fragments import READ_BEFORE_EDIT
 from fluid.tools.registry import ToolCtx, ToolImage, ToolOutcome, ToolSpec
 
@@ -138,7 +138,8 @@ def _read_text(path: Path, offset: int, limit: int | None) -> str:
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     path: Path = resolve(input["file_path"], ctx)
     if not path.exists() or not path.is_file():
-        return ToolOutcome(text=f"file not found: {path}", is_error=True)
+        note = missing_path_note(str(input["file_path"]), path)
+        return ToolOutcome(text=f"file not found: {path}{note}", is_error=True)
 
     media_type = IMAGE_MEDIA_TYPES.get(path.suffix.lower())
     if media_type is not None:

@@ -213,8 +213,44 @@ def _find_runs(file_lines: list[str], old_lines: list[str]) -> list[tuple[int, s
     return runs
 
 
+# The failed-match diagnostic quotes the file back verbatim so the retry needs
+# no second Read. Bounded so a huge old_string cannot drag the whole file along.
+_QUOTE_MAX_LINES = 40
+_QUOTE_MAX_CHARS = 4_000
+
+
+def _quote_span(file_lines: list[str], start: int, span: int) -> str:
+    """The file's own text for the closest-match window, ready to copy.
+
+    Rendered raw — no ``lineno<TAB>`` prefixes — precisely because that prefix
+    is what models keep copying into ``old_string`` by mistake. Line numbers
+    ride in the surrounding prose instead.
+    """
+    shown = min(span, _QUOTE_MAX_LINES)
+    end = min(len(file_lines), start + shown)
+    body = "\n".join(line.rstrip("\r") for line in file_lines[start:end])
+    if len(body) > _QUOTE_MAX_CHARS:
+        body = body[:_QUOTE_MAX_CHARS] + "\n… [truncated]"
+    if span > _QUOTE_MAX_LINES:
+        body += f"\n… [{span - _QUOTE_MAX_LINES} more lines]"
+    return (
+        f"The file's own text at lines {start + 1}-{end} is below — copy it "
+        "verbatim into old_string (no line-number prefixes; no re-Read "
+        f"needed):\n<<<FILE\n{body}\n>>>"
+    )
+
+
 def _diagnose(file_lines: list[str], old_lines: list[str]) -> str:
-    """Explain, in the model's terms, why ``old_string`` did not match."""
+    """Explain, in the model's terms, why ``old_string`` did not match.
+
+    Two things matter more than naming the first differing character. One: the
+    *first* difference is often whitespace while the real blocker is a content
+    mismatch further down — reporting only the whitespace sends the model back
+    for a re-Read that then fails the same way. So the whole window is scanned
+    and a content difference wins the report. Two: whatever the cause, the
+    correction is the file's actual text, so it is quoted inline and the retry
+    costs no extra call.
+    """
     first_idx = next((i for i, line in enumerate(old_lines) if _body(line)), None)
     if first_idx is None:
         return (
@@ -226,9 +262,13 @@ def _diagnose(file_lines: list[str], old_lines: list[str]) -> str:
     if hit is None:
         return (
             "old_string not found in file (no line matches the first line of "
-            "old_string). Re-Read the file and copy the text exactly."
+            "old_string). Re-Read the file and copy the text exactly, or Grep "
+            "for the text first to confirm it is in this file at all."
         )
     start = max(0, hit - first_idx)
+    quote = _quote_span(file_lines, start, len(old_lines))
+
+    ws_only: str | None = None
     for i, old_line in enumerate(old_lines):
         pos = start + i
         file_line = file_lines[pos].rstrip("\r") if pos < len(file_lines) else None
@@ -236,23 +276,35 @@ def _diagnose(file_lines: list[str], old_lines: list[str]) -> str:
         if file_line == old_line:
             continue
         if file_line is not None and _body(file_line) == _body(old_line):
-            return (
-                f"old_string not found in file. Closest match starts at line "
-                f"{start + 1} but the leading whitespace differs: the file line "
-                f"starts with {_describe_ws(_indent(file_line))}, your old_string "
-                f"line starts with {_describe_ws(_indent(old_line))}. Read returns "
-                '"lineno<TAB>content" — the tab after the line number is display '
-                "formatting, not file content. Re-Read the file and copy the text "
-                "exactly."
-            )
+            if ws_only is None:
+                ws_only = (
+                    f"line {pos + 1} indentation: the file has "
+                    f"{_describe_ws(_indent(file_line))}, your old_string has "
+                    f"{_describe_ws(_indent(old_line))}"
+                )
+            continue
         shown = "<end of file>" if file_line is None else _body(file_line)[:80]
+        detail = (
+            f'line {pos + 1} content: the file has "{shown}", your old_string '
+            f'has "{_body(old_line)[:80]}"'
+        )
+        if ws_only is not None:
+            detail += f" (indentation also differs — {ws_only})"
         return (
-            f"old_string not found in file. Closest match starts at line "
-            f"{start + 1}; line {pos + 1} differs: file has \"{shown}\", "
-            f"old_string has \"{_body(old_line)[:80]}\""
+            "old_string not found in file. Closest match starts at line "
+            f"{start + 1}; {detail}.\n{quote}"
+        )
+    if ws_only is not None:
+        return (
+            "old_string not found in file. Closest match starts at line "
+            f"{start + 1}; every line matches except indentation, and the drift "
+            "is not uniform so it could not be corrected automatically "
+            f"({ws_only}). Read renders text as \"lineno<TAB>content\" — that "
+            f"tab is display formatting, not file content.\n{quote}"
         )
     return (
-        "old_string not found in file. Re-Read the file and copy the text exactly."
+        "old_string not found in file — line endings or trailing whitespace "
+        f"differ. {quote}"
     )
 
 
@@ -266,7 +318,12 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     path: Path = resolve(input["file_path"], ctx)
     if str(path) not in ctx.read_files:
         return ToolOutcome(
-            text=f"must Read {path} before editing it", is_error=True
+            text=(
+                f"must Read {path} before editing it — call "
+                f'Read(file_path="{path}") first. In code mode both calls fit '
+                "in one cell, so this costs no extra turn."
+            ),
+            is_error=True,
         )
     if not path.exists():
         return ToolOutcome(text=f"file not found: {path}", is_error=True)
@@ -275,7 +332,13 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     new = input["new_string"]
     if old == new:
         return ToolOutcome(
-            text="old_string and new_string are identical", is_error=True
+            text=(
+                "old_string and new_string are identical — this edit would "
+                "change nothing. If you meant to re-apply an earlier edit it "
+                "has almost certainly already landed; Read the file to confirm "
+                "before retrying."
+            ),
+            is_error=True,
         )
     replace_all = bool(input.get("replace_all", False))
     # Match on LF-normalized text so a model quoting CRLF or LF both work,

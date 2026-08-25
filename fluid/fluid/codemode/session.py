@@ -59,9 +59,19 @@ _RUN_PYTHON_DESC = (
     "across sessions) import via `from skills import <name>`; persist a new one "
     "with the save_skill tool when you notice a reusable pattern. Network and "
     "direct file I/O are disabled (use the file tools); only a stdlib-safe "
-    "import allowlist is available. The last expression's repr is returned "
-    "(REPL-style); large tool results come back as a ResultRef you can slice "
-    "in a later call."
+    "import allowlist is available — json, re, math, itertools, collections "
+    "and textwrap are already bound in the namespace, along with pathlib.Path. "
+    "The last expression's repr is returned (REPL-style); large tool results "
+    "come back as a ResultRef you can slice in a later call.\n"
+    "\n"
+    "The cell must be valid Python, so:\n"
+    "- Quote every argument. `Grep(pattern=r\"def foo|bar\", glob=\"*.py\")`, "
+    "never `pattern=def foo|bar`. Raw strings for regexes and Windows paths.\n"
+    "- Never nest a shell heredoc or a long multi-line body inside a command "
+    "string. Put the text in a triple-quoted variable, or Write it to a file "
+    "and point the command at that file (e.g. `--body-file`).\n"
+    "- Tools return text, not dicts; parse with json.loads when a tool emits "
+    "JSON."
 )
 
 # Journal previews are bounded so journal.jsonl (synthesis input) stays small.

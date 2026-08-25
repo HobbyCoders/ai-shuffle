@@ -173,3 +173,69 @@ def test_native_loop_hands_code_mode_its_tool_surface() -> None:
     assert session.tool_filter("Bash") is False
     assert "Bash" not in session.render_list()
     assert session.render_docs("Bash").startswith("No such tool:")
+
+
+def test_code_mode_hides_a_tool_whose_capability_is_not_wired() -> None:
+    """``requires_extra`` gates code mode too, not just the JSON schemas.
+
+    The request surface has always dropped a tool whose host injection is
+    missing, but the projection did not — so a cell could import SessionSearch
+    and get "unavailable: no session store directory injected" back as a tool
+    error. Absent capability has to be invisible on both surfaces.
+    """
+    registry = _registry()
+
+    async def _ran(_input: dict, _ctx: ToolCtx) -> ToolOutcome:
+        return ToolOutcome(text="ran")
+
+    registry.register_builtin(
+        ToolSpec(
+            name="SessionSearch",
+            description="Search stored sessions.",
+            input_schema={"type": "object", "properties": {}},
+            source="builtin",
+            requires_extra=("session_store_dir",),
+        ),
+        _ran,
+    )
+    session = CodeModeSession(registry)
+    NativeLoop(
+        provider=_IdleProvider(), store=MemoryStore(), model="claude-sonnet-5",
+        registry=registry, codemode=session,
+    )
+
+    assert session.tool_filter is not None
+    assert session.tool_filter("SessionSearch") is False
+    assert "SessionSearch" not in session.render_list()
+    assert session.render_docs("SessionSearch").startswith("No such tool:")
+    # Wire the capability and the same tool becomes visible again.
+    assert session.tool_filter("Read") is True
+
+
+def test_code_mode_shows_a_tool_once_its_capability_is_wired() -> None:
+    registry = _registry()
+
+    async def _ran(_input: dict, _ctx: ToolCtx) -> ToolOutcome:
+        return ToolOutcome(text="ran")
+
+    registry.register_builtin(
+        ToolSpec(
+            name="SessionSearch",
+            description="Search stored sessions.",
+            input_schema={"type": "object", "properties": {}},
+            source="builtin",
+            requires_extra=("session_store_dir",),
+        ),
+        _ran,
+    )
+    session = CodeModeSession(registry)
+    ctx = ToolCtx()
+    ctx.extra["session_store_dir"] = "/tmp/sessions"
+    NativeLoop(
+        provider=_IdleProvider(), store=MemoryStore(), model="claude-sonnet-5",
+        registry=registry, codemode=session, ctx=ctx,
+    )
+
+    assert session.tool_filter is not None
+    assert session.tool_filter("SessionSearch") is True
+    assert "SessionSearch" in session.render_list()

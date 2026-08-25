@@ -143,7 +143,17 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     except TimeoutError:
         proc.kill()
         await proc.wait()
-        return ToolOutcome(text=f"command timed out after {timeout}s", is_error=True)
+        # Killed, so nothing partial survives — say what the retry should
+        # change rather than leaving the model to re-run the same command.
+        return ToolOutcome(
+            text=(
+                f"command timed out after {timeout:g}s and was killed. Raise "
+                "the timeout parameter for a genuinely long command, narrow "
+                "the command's scope, or run it detached (append ' &' and "
+                "poll its log) if it is meant to keep running."
+            ),
+            is_error=True,
+        )
     text = truncate(strip_ansi(stdout.decode(errors="replace"))) or "(no output)"
     if proc.returncode:
         return ToolOutcome(

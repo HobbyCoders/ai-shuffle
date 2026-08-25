@@ -453,7 +453,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             # in-kernel host-call gate all see this session's tool surface, so
             # a filtered tool is never described and never callable from code.
             register_code_mode_tools(
-                registry, codemode, tool_filter=self._tool_permitted
+                registry, codemode, tool_filter=self._tool_available
             )
         # ``None`` means unlimited: the provider stays the source of truth for
         # when a turn has to stop. Every comparison below guards that case.
@@ -1468,6 +1468,22 @@ class NativeLoop(BackgroundLifecycleMixin):
         ):
             return False
         return not _matches_tool_pattern(name, self.disallowed_tools)
+
+    def _tool_available(self, name: str) -> bool:
+        """Permitted *and* backed by a wired host capability.
+
+        The JSON surface drops a ``requires_extra`` tool whose injection is
+        missing (:meth:`_capability_present`), but code mode projected it
+        anyway — so a kernel cell could import ``SessionSearch`` and get
+        "unavailable: no session store directory injected" back as a tool
+        error. Absent capability must be invisible on both surfaces.
+        """
+        if not self._tool_permitted(name):
+            return False
+        if self.registry is None:
+            return True
+        spec = self.registry.get(name)
+        return spec is None or self._capability_present(spec)
 
     def _tools_api(self) -> list[dict[str, Any]]:
         """The tool schemas the next request would carry (code-mode surface or

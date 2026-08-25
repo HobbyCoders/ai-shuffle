@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import fnmatch
 import re
 import shutil
 import time
@@ -22,7 +21,9 @@ from typing import Any
 from fluid.tools.builtins._util import (
     MAX_FILE_BYTES,
     WalkState,
+    glob_to_regex,
     is_binary,
+    missing_path_note,
     truncate,
     walk_files,
 )
@@ -56,6 +57,9 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "credential-pattern files (.env, keys) are withheld and flagged with "
         f"a note;{read_route} when its content is genuinely needed. An empty "
         "result means no matches in the searched scope, not an error.\n"
+        "\n"
+        "The `glob` filter accepts `**`, `?`, character classes and `{a,b}` "
+        "alternation (e.g. *.{py,ts}) whichever engine runs.\n"
         "\n"
         "Patterns use ripgrep/Rust regex syntax when ripgrep is installed "
         "(escape literal braces, e.g. interface\\{\\}) and Python re syntax "
@@ -113,6 +117,15 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     glob = input.get("glob")
     no_ignore = bool(input.get("no_ignore"))
     limit = _clamp_limit(input.get("limit"))
+
+    # Check the root before shelling out: ripgrep reports a missing directory as
+    # a generic "rg error" under the "searched via rg under ..." header, which
+    # reads like a search result and has been pasted back as a path.
+    if not root.exists():
+        note = missing_path_note(str(input.get("path") or ""), root)
+        return ToolOutcome(
+            text=f"path does not exist: {root}{note}", is_error=True
+        )
 
     rg = shutil.which("rg")
     if rg:
@@ -224,11 +237,14 @@ def _pure_python_grep(
     from fluid.tools.hardening import is_sensitive_path
 
     state = WalkState(deadline=time.monotonic() + FALLBACK_DEADLINE_S)
+    # The same compiler Glob uses, so `*.{py,ts}` and `src/**/*.ts` mean the
+    # same thing here as they do under ripgrep.
+    glob_rx = glob_to_regex(glob) if glob else None
     out: list[str] = []
     capped = False
     dropped = 0
     for path in walk_files(root, state):
-        if glob and not fnmatch.fnmatch(path.name, glob):
+        if glob_rx is not None and not _glob_hit(glob_rx, path, root):
             continue
         if is_sensitive_path(str(path)):
             dropped += 1
@@ -251,6 +267,15 @@ def _pure_python_grep(
         )
     body = truncate("\n".join(out)) or "(no matches)"
     return ToolOutcome(text="\n".join([head, body, *notes]))
+
+
+def _glob_hit(rx: re.Pattern[str], path: Path, root: Path) -> bool:
+    """Does ``path`` match the glob, as a root-relative POSIX path?"""
+    try:
+        rel = path.relative_to(root).as_posix()
+    except ValueError:
+        rel = path.name
+    return rx.match(rel) is not None
 
 
 def _search_file(path: Path, rx: re.Pattern[str], remaining: int) -> Iterator[str]:

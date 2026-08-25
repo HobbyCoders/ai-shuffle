@@ -619,20 +619,74 @@ DEFAULT_BASE_PROMPT = compose_base_prompt(
     PromptProfile(tools=_FULL_TOOLSET, model="claude")
 )
 
-CODE_MODE_ADDENDUM = """\
+def compose_code_mode_addendum(tools: frozenset[str] | None = None) -> str:
+    """The code-mode block, specialized to the session's tool surface.
+
+    Gated like every other prompt section: the authoring rules below are worth
+    naming concrete tools for (they are what stop a cell from failing to
+    parse), and a name only earns its place when the session can actually call
+    it. ``None`` means the full surface.
+    """
+    has = (lambda name: tools is None or name in tools)
+    shell = " Bash covers shell and process work." if has("Bash") else ""
+    exit_owner = "Bash returns" if has("Bash") else "it returns"
+    search = ""
+    if has("Grep") and has("Glob"):
+        search = " Glob and Grep cover the filesystem."
+    elif has("Grep"):
+        search = " Grep searches the filesystem."
+    elif has("Glob"):
+        search = " Glob enumerates the filesystem."
+
+    grep_example = (
+        'Quote every argument you pass a tool: `Grep(pattern=r"def foo|bar", '
+        'glob="*.py")`, never `pattern=def foo|bar`; use raw strings for '
+        "regexes and Windows paths."
+        if has("Grep")
+        else "Quote every argument you pass a tool — a bare token where a "
+        "string belongs is a SyntaxError; use raw strings for regexes and "
+        "Windows paths."
+    )
+    body_route = (
+        " — assign the text to a triple-quoted variable, or Write it to a file "
+        "and point the command at that file with `--body-file`/`-F`"
+        if has("Write")
+        else " — assign the text to a triple-quoted variable and pass that"
+    )
+    sequencing = ""
+    if has("Read") and has("Edit"):
+        sequencing = (
+            "\n\nSequence dependent calls inside one cell rather than across "
+            "turns: Read then Edit the same file in a single cell satisfies "
+            "the read-before-edit rule without a second round-trip, and a "
+            "failed Edit quotes the file's real text back to you, so copy from "
+            "that instead of re-Reading."
+        )
+
+    return f"""\
 # Code mode
 
 In this session tools are reached through run_python, not as individual tool \
-calls. Write one cell that composes the several calls a step needs — discover \
+calls. Compose one cell that carries the several calls a step needs — discover \
 with list_tools/search_tools, import with `from tools.<name> import <name>`, \
 loop and filter in Python — rather than one cell per call. Keep data in the \
 kernel: variables persist between cells, large results come back as refs you \
 can slice later, and only what you print or return enters the conversation. \
 Print what the user needs, not whole results. Every in-kernel call passes the \
 same permission gate; a denied or failed call raises (a command's non-zero exit \
-code does not: Bash returns its output with an [exit code N] line), and the rule above still holds — \
+code does not: {exit_owner} its output with an [exit code N] line), and the rule above still holds — \
 do not route around it. The file tools are the only way to touch the \
-filesystem; `open()` and the network are disabled."""
+filesystem; `open()`, `os`, `subprocess` and the network are disabled.\
+{shell}{search}
+
+A cell that does not parse costs a whole turn, so watch the two mistakes that \
+cause nearly all of them. {grep_example} And never nest a shell heredoc or a \
+long multi-line body (a commit message, a PR description) inside a command \
+string{body_route}.{sequencing}"""
+
+
+# The full-surface rendering — what a stock code-mode session ships.
+CODE_MODE_ADDENDUM = compose_code_mode_addendum()
 
 
 # ─── the mentioned-tools invariant ───────────────────────────────────────────
@@ -673,7 +727,7 @@ def default_base_prompt(
 
 
 def code_mode_addendum(config: HarnessConfig | None = None) -> str | None:
-    """The code-mode block, or ``None`` when code mode is off."""
-    if config is not None and config.code_mode:
-        return CODE_MODE_ADDENDUM
-    return None
+    """The code-mode block for this config, or ``None`` when code mode is off."""
+    if config is None or not config.code_mode:
+        return None
+    return compose_code_mode_addendum(profile_for(config).tools)

@@ -22,6 +22,7 @@ import ast
 import io
 import json
 import os
+import re
 import struct
 import sys
 import traceback
@@ -97,18 +98,96 @@ def _host_call(tool_name: str, kwargs: dict):
 
 _AWAIT_HINT = "Hint: tools are synchronous functions — call them without await."
 
+# A tool argument written as a bare token instead of a string —
+# ``Grep(pattern=def foo|bar, glob=*.py)``. The regex only has to recognise the
+# shape on the SyntaxError's own source line, so it stays deliberately loose.
+_BARE_ARG_RE = re.compile(
+    r"\b(pattern|glob|path|file_path|command|query|old_string|new_string|"
+    r"content|description|prompt|url)\s*=\s*([^\s'\"),][^,)]*)"
+)
+
+_QUOTED_START_RE = re.compile(r"^[rbfu]{0,2}['\"]")
+
+_UNQUOTED_HINT = (
+    "Hint: tool arguments are Python values — quote every string. Write "
+    'Grep(pattern=r"def foo|bar", glob="*.py"), not pattern=def foo|bar. '
+    "Use a raw string (r\"...\") for regexes and Windows paths."
+)
+
+_UNTERMINATED_HINT = (
+    "Hint: the string literal never closes. Do not nest a shell heredoc "
+    "(<<'EOF') or a long multi-line body inside a Python string — assign the "
+    "text to a triple-quoted variable, or Write it to a file and point the "
+    "command at that file (e.g. gh pr create --body-file), then pass the "
+    "command as one ordinary string."
+)
+
+_IMPORT_SPELLING_HINT = (
+    "Hint: import a tool as `from tools.Grep import Grep`, `from tools import "
+    "Grep`, or `import tools` then `tools.Grep(...)`. `from tools.X as Y` is "
+    "not valid Python."
+)
+
+_STR_RESULT_HINT = (
+    "Hint: a tool call returns text (str / ResultRef), never a dict — parse it "
+    "with json.loads(...) when the tool emits JSON, or slice it as a string."
+)
+
+
+def _stub_signature(name: str) -> str:
+    """The projected stub's ``def`` line, so a bad call self-corrects.
+
+    Sending the real signature back beats telling the model to spend another
+    turn on ``read_tool_docs``.
+    """
+    source = _SOURCES.get(name)
+    if not source:
+        return ""
+    for line in source.splitlines():
+        if line.startswith("def "):
+            return line[len("def "):].rstrip(":").strip()
+    return ""
+
+
+def _signature_hint(name: str) -> str:
+    sig = _stub_signature(name)
+    if sig:
+        return f"Hint: the signature is {sig} — pass only those parameters."
+    return (
+        "Hint: pass only the parameters in the tool's signature; run "
+        f'read_tool_docs("{name}") to see it.'
+    )
+
+
+def _syntax_hint(exc: SyntaxError) -> str:
+    message = str(exc)
+    if "'await' outside function" in message:
+        return _AWAIT_HINT
+    text = (getattr(exc, "text", None) or "")
+    match = _BARE_ARG_RE.search(text)
+    if match is not None and not _QUOTED_START_RE.match(match.group(2).strip()):
+        return _UNQUOTED_HINT
+    if "unterminated" in message or "was never closed" in message:
+        return _UNTERMINATED_HINT
+    if "tools." in text and " as " in text and text.lstrip().startswith("from "):
+        return _IMPORT_SPELLING_HINT
+    return ""
+
 
 def _error_hint(exc: BaseException) -> str:
     """A one-line nudge for the mistakes the projected stubs invite.
 
     Cells run at module level, so ``await tool(...)`` is a SyntaxError with no
     clue that the stubs are plain functions; a wrong kwarg is a bare TypeError
-    with no pointer at the signature. Both are appended to the traceback so the
-    correction rides back in the model's context.
+    with no pointer at the signature. Unquoted tool arguments and shell
+    heredocs nested inside Python strings are the two authoring mistakes that
+    dominate real transcripts, and both surface as an opaque SyntaxError. Every
+    hint is appended to the traceback so the correction rides back in the
+    model's context instead of costing another turn.
     """
     message = str(exc)
-    if isinstance(exc, SyntaxError) and "'await' outside function" in message:
-        return _AWAIT_HINT
+    if isinstance(exc, SyntaxError):
+        return _syntax_hint(exc)
     if isinstance(exc, ImportError) and message.startswith("cannot import name "):
         pkg = getattr(exc, "name", None) or ""
         if pkg in ("tools", "skills"):
@@ -118,10 +197,12 @@ def _error_hint(exc: BaseException) -> str:
             )
     if isinstance(exc, TypeError) and "got an unexpected keyword argument" in message:
         name = message.split("(", 1)[0].strip().rsplit(".", 1)[-1] or "the tool"
-        return (
-            "Hint: pass only the parameters in the tool's signature; run "
-            f'read_tool_docs("{name}") to see it.'
-        )
+        return _signature_hint(name)
+    if isinstance(exc, TypeError) and "required positional argument" in message:
+        name = message.split("(", 1)[0].strip().rsplit(".", 1)[-1] or "the tool"
+        return _signature_hint(name)
+    if isinstance(exc, AttributeError) and "'str' object has no attribute" in message:
+        return _STR_RESULT_HINT
     return ""
 
 
@@ -180,17 +261,22 @@ def _run_cell(code: str):
 # module, which won't exist in a fresh kernel — they are dropped (documented);
 # data (strings, numbers, containers, ResultRefs) survives.
 
-_CKPT_SKIP = ("ResultRef", "ToolError", "HostCallDenied")
+_CKPT_SKIP = ("ResultRef", "ToolError", "HostCallDenied", "Path", *vfs.PRELUDE_MODULES)
 
 
 def _checkpoint() -> dict:
     import base64
     import pickle
+    import types
 
     vars_map: dict = {}
     dropped: list = []
     for key, value in _NS.items():
         if key.startswith("__") or key in _CKPT_SKIP:
+            continue
+        # Module objects never pickle and are rebuilt by the fresh kernel's
+        # prelude anyway; listing them as "dropped" would be pure noise.
+        if isinstance(value, types.ModuleType):
             continue
         try:
             blob = pickle.dumps(value)
@@ -273,11 +359,23 @@ def _guard_filesystem() -> None:
     import builtins as _builtins
     import io as _io
 
-    def _blocked_open(*a, **k):
+    _WRITE_MODES = ("w", "a", "x", "+")
+
+    def _blocked_open(file=None, mode="r", *a, **k):
+        """Refuse, and name the tool that does the job the call was reaching for.
+
+        The old message said "use the projected file tools" and left the model
+        to guess which one; naming Read/Write (and the path it already passed)
+        turns the refusal into a call it can make straight away.
+        """
+        want = "Write" if any(m in str(mode) for m in _WRITE_MODES) else "Read"
+        target = f"({file!r})" if isinstance(file, (str, bytes)) else "(...)"
         raise PermissionError(
             "direct file I/O is blocked in the code-mode kernel; use the "
-            "projected file tools (see list_tools) so the host permission "
-            "gate applies — large results stay in-kernel as a ResultRef"
+            f"projected file tools so the host permission gate applies — "
+            f"`from tools.{want} import {want}` then {want}{target}. "
+            "Glob lists paths, Grep searches contents, Bash runs commands. "
+            "A large result stays in-kernel as a ResultRef you can slice."
         )
 
     _builtins.open = _blocked_open  # type: ignore[assignment]

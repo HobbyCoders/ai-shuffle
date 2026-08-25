@@ -552,8 +552,11 @@ async def test_edit_indent_mismatch_error_explains(tmp_path) -> None:
         ctx,
     )
     assert out.is_error
-    assert "leading whitespace differs" in out.text
-    assert "Re-Read" in out.text
+    # Names the indentation difference in the model's terms, and quotes the
+    # file's own text back so the retry needs no second Read.
+    assert "indentation" in out.text
+    assert "the file has 1 tab, your old_string has 2 tabs" in out.text
+    assert "<<<FILE\n\ta = 1\n\tb = 2\n>>>" in out.text
     assert f.read_text() == "\ta = 1\n\tb = 2\n"
 
 
@@ -571,8 +574,10 @@ async def test_edit_content_mismatch_error_names_line(tmp_path) -> None:
         ctx,
     )
     assert out.is_error
-    assert "line 2 differs" in out.text
+    assert "line 2 content" in out.text
     assert "betaX" in out.text
+    # The correction rides back with the diagnostic.
+    assert "<<<FILE\nalpha\nbeta\n>>>" in out.text
 
 
 async def test_edit_preserves_crlf(tmp_path) -> None:
