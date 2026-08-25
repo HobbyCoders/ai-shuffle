@@ -10,6 +10,8 @@ from fluid.codemode.journal import ToolJournal
 from fluid.codemode.skills import SkillStore
 from fluid.context.compiler import PromptInputs, compile_prompt
 from fluid.context.memory import MemoryStore
+from fluid.store.base import SessionSearchHit
+from fluid.store.jsonl import JsonlStore
 from fluid.tools.builtins import register_builtins
 from fluid.tools.builtins.ask_user import handler as ask_handler
 from fluid.tools.registry import ToolCtx, ToolRegistry
@@ -131,7 +133,7 @@ async def test_session_search_finds_past_work(tmp_path) -> None:
     _write_session(tmp_path, "sess_cur", ["terraform in the current session"])
     registry = ToolRegistry()
     register_builtins(registry)
-    ctx = ToolCtx(session_id="sess_cur", extra={"session_store_dir": str(tmp_path)})
+    ctx = ToolCtx(session_id="sess_cur", extra={"session_search": JsonlStore(tmp_path).search})
     outcome = await registry.dispatch(
         "SessionSearch", {"query": "terraform billing"}, ctx
     )
@@ -140,6 +142,49 @@ async def test_session_search_finds_past_work(tmp_path) -> None:
     assert "sess_cur" not in outcome.text  # own history is HistorySearch's job
     outcome = await registry.dispatch("SessionSearch", {"query": "zzznope"}, ctx)
     assert "no stored session matched" in outcome.text
+
+
+async def test_session_search_formats_host_injected_hits() -> None:
+    """The tool is backend-agnostic: any callable returning hits is enough."""
+    def fake_search(terms, *, limit=5, exclude_session_id=None):
+        assert terms == ["terraform"] and exclude_session_id == "sess_cur"
+        return [SessionSearchHit(
+            session_id="ses_from_sql",
+            score=3,
+            last_ts=1_700_000_000.0,
+            texts=[("assistant", "the terraform plan is clean")],
+        )]
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    ctx = ToolCtx(session_id="sess_cur", extra={"session_search": fake_search})
+    outcome = await registry.dispatch("SessionSearch", {"query": "terraform"}, ctx)
+    assert not outcome.is_error
+    assert "1 session(s) matched" in outcome.text
+    assert "session ses_from_sql (" in outcome.text and "score 3)" in outcome.text
+    assert "[assistant] the terraform plan is clean" in outcome.text
+
+
+async def test_session_search_without_a_backend_is_an_error() -> None:
+    registry = ToolRegistry()
+    register_builtins(registry)
+    outcome = await registry.dispatch("SessionSearch", {"query": "x"}, ToolCtx())
+    assert outcome.is_error
+    assert "no session search backend injected" in outcome.text
+
+
+async def test_jsonl_store_search_ranks_excludes_and_misses(tmp_path) -> None:
+    _write_session(tmp_path, "sess_one", ["terraform once"])
+    _write_session(tmp_path, "sess_two", ["terraform billing terraform again"])
+    _write_session(tmp_path, "sess_cur", ["terraform in the current session"])
+    store = JsonlStore(tmp_path)
+
+    hits = await store.search(["terraform", "billing"], exclude_session_id="sess_cur")
+    assert [h.session_id for h in hits] == ["sess_two", "sess_one"]  # score orders
+    assert hits[0].score == 2 and hits[1].score == 1  # distinct terms per text
+    assert hits[0].last_ts > 0 and hits[0].texts[0][0] == "user"
+
+    assert await store.search(["zzznope"]) == []
 
 
 # ─── AskUser ─────────────────────────────────────────────────────────────────

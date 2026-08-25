@@ -180,7 +180,7 @@ def test_code_mode_hides_a_tool_whose_capability_is_not_wired() -> None:
 
     The request surface has always dropped a tool whose host injection is
     missing, but the projection did not — so a cell could import SessionSearch
-    and get "unavailable: no session store directory injected" back as a tool
+    and get "unavailable: no session search backend injected" back as a tool
     error. Absent capability has to be invisible on both surfaces.
     """
     registry = _registry()
@@ -194,7 +194,7 @@ def test_code_mode_hides_a_tool_whose_capability_is_not_wired() -> None:
             description="Search stored sessions.",
             input_schema={"type": "object", "properties": {}},
             source="builtin",
-            requires_extra=("session_store_dir",),
+            requires_extra=("session_search",),
         ),
         _ran,
     )
@@ -224,13 +224,13 @@ def test_code_mode_shows_a_tool_once_its_capability_is_wired() -> None:
             description="Search stored sessions.",
             input_schema={"type": "object", "properties": {}},
             source="builtin",
-            requires_extra=("session_store_dir",),
+            requires_extra=("session_search",),
         ),
         _ran,
     )
     session = CodeModeSession(registry)
     ctx = ToolCtx()
-    ctx.extra["session_store_dir"] = "/tmp/sessions"
+    ctx.extra["session_search"] = lambda *a, **k: []
     NativeLoop(
         provider=_IdleProvider(), store=MemoryStore(), model="claude-sonnet-5",
         registry=registry, codemode=session, ctx=ctx,

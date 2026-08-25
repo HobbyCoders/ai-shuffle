@@ -591,14 +591,14 @@ def build_engine(
     if ctx is None:
         ctx = ToolCtx(cwd=config.cwd, session_id=session_id)
     # Builtin wiring that rides the tool context: the Memory tool writes the
-    # same file the compiled prompt snapshots, and SessionSearch scans the
-    # session store's directory (when the store has one).
+    # same file the compiled prompt snapshots, and SessionSearch borrows the
+    # store's own ``search`` when it has one (a store with no durable record,
+    # like MemoryStore, simply leaves the tool unwired and invisible).
     if config.memory.enabled:
         ctx.extra.setdefault("memory_file", config.memory.file)
         ctx.extra.setdefault("memory_char_limit", config.memory.char_limit)
-    store_dir = getattr(store, "_dir", None)
-    if store_dir is not None:
-        ctx.extra.setdefault("session_store_dir", str(store_dir))
+    if callable(getattr(store, "search", None)):
+        ctx.extra.setdefault("session_search", store.search)
 
     if pc.kind == "delegated_claude":
         from fluid.engine.delegated import DelegatedLoop

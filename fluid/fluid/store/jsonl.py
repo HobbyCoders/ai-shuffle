@@ -23,7 +23,16 @@ from pathlib import Path
 
 from fluid.events.model import Event, event_from_dict, event_to_dict
 from fluid.messages import Message
-from fluid.store.base import SessionMeta, SessionNode, new_id
+from fluid.store.base import (
+    SessionMeta,
+    SessionNode,
+    SessionSearchHit,
+    message_texts,
+    new_id,
+)
+
+_MAX_SESSIONS_SCANNED = 500
+_MAX_MATCHES_PER_SESSION = 3
 
 
 class JsonlStore:
@@ -174,3 +183,68 @@ class JsonlStore:
     async def events_since(self, session_id: str, seq: int) -> list[Event]:
         self._ensure_loaded(session_id)
         return [e for e in self._events.get(session_id, []) if e.seq > seq]
+
+    # ─── Optional: cross-session recall ──────────────────────────────────
+
+    async def search(
+        self,
+        terms: list[str],
+        *,
+        limit: int = 5,
+        exclude_session_id: str | None = None,
+    ) -> list[SessionSearchHit]:
+        """Keyword sweep over every stored session log — SessionSearch's backend.
+
+        Line-oriented over the JSONL — no index, no dependencies — and bounded
+        to the newest ``_MAX_SESSIONS_SCANNED`` logs, which is plenty for a
+        personal store of hundreds of sessions. ``limit`` is a hint only: the
+        full sorted hit list comes back and the caller trims it. The file IO is
+        synchronous, matching the rest of this store.
+        """
+        logs = [
+            p for p in sorted(
+                self._dir.glob("*.jsonl"),
+                key=lambda p: p.stat().st_mtime if p.exists() else 0,
+                reverse=True,
+            )
+            if not p.name.endswith(".events.jsonl")
+        ][:_MAX_SESSIONS_SCANNED]
+
+        hits: list[SessionSearchHit] = []
+        for log in logs:
+            session_id = log.name[: -len(".jsonl")]
+            if session_id == exclude_session_id:
+                continue
+            hit = self._scan_log(log, session_id, terms)
+            if hit.score:
+                hits.append(hit)
+        hits.sort(key=lambda h: (-h.score, -h.last_ts))
+        return hits
+
+    def _scan_log(self, path: Path, session_id: str, terms: list[str]) -> SessionSearchHit:
+        hit = SessionSearchHit(session_id=session_id, score=0)
+        try:
+            with path.open(encoding="utf-8") as fh:
+                for line in fh:
+                    if not any(t in line.lower() for t in terms):
+                        continue  # cheap line-level prefilter before JSON parsing
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    if rec.get("t") != "node":
+                        continue
+                    node = rec.get("node") or {}
+                    hit.last_ts = max(hit.last_ts, float(node.get("ts") or 0.0))
+                    message = node.get("message") or {}
+                    for text in message_texts(message):
+                        lowered = text.lower()
+                        n_hit = sum(1 for t in terms if t in lowered)
+                        if not n_hit:
+                            continue
+                        hit.score += n_hit
+                        if len(hit.texts) < _MAX_MATCHES_PER_SESSION:
+                            hit.texts.append((message.get("role", "?"), text))
+        except OSError:
+            return SessionSearchHit(session_id=session_id, score=0)
+        return hit

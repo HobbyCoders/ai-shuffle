@@ -12,7 +12,7 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from fluid.events.model import Event
 from fluid.messages import Message
@@ -42,6 +42,36 @@ class SessionMeta:
     cli_session_id: str | None = None
 
 
+@dataclass
+class SessionSearchHit:
+    """One session's answer to a keyword search — see ``SessionStore.search``.
+
+    ``texts`` carries the matched texts in full (role, text); the caller cuts
+    them down to snippets, so a backend never has to guess the presentation.
+    """
+
+    session_id: str
+    score: int  # total query-term hits summed over the session's matched texts
+    last_ts: float = 0.0  # newest matched node's epoch timestamp (0.0 if unknown)
+    texts: list[tuple[str, str]] = field(default_factory=list)
+
+
+def message_texts(message: dict[str, Any]) -> list[str]:
+    """Every searchable text in a serialized message (assistant text + tool results)."""
+    out: list[str] = []
+    for block in message.get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("kind")
+        if kind == "text" and block.get("text"):
+            out.append(str(block["text"]))
+        elif kind == "toolresultblock":
+            for inner in block.get("content") or []:
+                if isinstance(inner, dict) and inner.get("kind") == "text" and inner.get("text"):
+                    out.append(str(inner["text"]))
+    return out
+
+
 class SessionStore(Protocol):
     async def create_session(self, session_id: str | None = None) -> SessionMeta: ...
     async def get_session(self, session_id: str) -> SessionMeta | None: ...
@@ -60,6 +90,29 @@ class SessionStore(Protocol):
     async def events_since(self, session_id: str, seq: int) -> list[Event]:
         """Return persisted events with ``seq`` strictly greater than the cursor."""
         ...
+
+    # ─── Optional: cross-session recall ──────────────────────────────────
+    #
+    #     async def search(
+    #         self,
+    #         terms: list[str],
+    #         *,
+    #         limit: int = 5,
+    #         exclude_session_id: str | None = None,
+    #     ) -> list[SessionSearchHit]: ...
+    #
+    # Deliberately NOT part of the protocol above — a store that keeps no
+    # durable record (MemoryStore) cannot answer it, and requiring it would
+    # make that store fail the protocol. A store that CAN answer just defines
+    # the method; the loader detects it and injects the bound method as the
+    # SessionSearch builtin's backend, so any backing (directory scan, SQL,
+    # a vector index) serves the same tool.
+    #
+    # Contract: ``terms`` arrive already lowercased and are matched as
+    # case-insensitive substrings; a text matches if it contains ANY term.
+    # ``exclude_session_id`` is the caller's own session — its history belongs
+    # to HistorySearch, so skip it. ``limit`` is a hint, not a promise:
+    # over-returning is fine, because the tool sorts and trims.
 
 
 class MemoryStore:

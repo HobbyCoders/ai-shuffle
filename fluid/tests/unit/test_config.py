@@ -168,6 +168,21 @@ def test_build_engine_native_for_anthropic(tmp_path) -> None:
     assert engine.permissions is not None
 
 
+def test_build_engine_wires_session_search_from_the_store(tmp_path) -> None:
+    """SessionSearch's backend is whatever the store offers — or nothing."""
+    from fluid.store.jsonl import JsonlStore
+
+    config = HarnessConfig.from_dict(BUILTIN_DEFAULTS)
+    store = JsonlStore(tmp_path / "sessions")
+    engine = build_engine(config, store, provider=FakeProvider())
+    assert engine.ctx.extra["session_search"] == store.search
+
+    # MemoryStore keeps no durable record, so the capability stays unwired and
+    # the tool never reaches the request schemas.
+    plain = build_engine(config, MemoryStore(), provider=FakeProvider())
+    assert "session_search" not in plain.ctx.extra
+
+
 def test_build_engine_code_mode_wires_session(tmp_path) -> None:
     config = HarnessConfig.from_dict(deep_merge(BUILTIN_DEFAULTS, {"code_mode": True}))
     engine = build_engine(config, MemoryStore(), provider=FakeProvider())
