@@ -2313,8 +2313,11 @@ class HarnessAdapter(ProviderAdapter):
             set_active=set_active,
         )
 
-    def _on_plan_mode_changed(self, active: bool) -> None:
+    def _on_plan_mode_changed(self, active: bool) -> Optional[str]:
         """Keep engine policy, session binding, and the UI chip on the same mode.
+
+        Returns the mode the session ended up bound to when a restore happened
+        ("bypassPermissions" for the bypass-exit fall-through), else None.
 
         Linger bug: Plan flips ``engine.plan_mode`` but the composer chip still
         says ``default``. The next send therefore skips ``set_permission_mode``
@@ -2329,11 +2332,22 @@ class HarnessAdapter(ProviderAdapter):
         # would make the next send look like a chip-initiated plan and
         # StopPlanning would prompt — the opposite of bypass. Engine plan_mode
         # still drops write schemas; only the approval UI is skipped.
-        if pre == "bypassPermissions":
+        #
+        # EXCEPT on exit: if the session's own binding is ``plan`` (the user
+        # picked Plan Only from the composer, then the model entered plan mode),
+        # an approved exit must still restore the persisted binding + chip, or
+        # the session stays bound to plan forever (the stickiness bug). The
+        # fall-through below restores the binding to ``default``; the approval
+        # policy is re-set to never_ask right after so bypass semantics hold.
+        if pre == "bypassPermissions" and not (
+            not active
+            and self._options is not None
+            and (self._options.permission_mode or "") == "plan"
+        ):
             engine = self._engine
             if engine is not None and hasattr(engine, "plan_mode"):
                 engine.plan_mode = bool(active)
-            return
+            return None
 
         mode = "plan" if active else pre
         label = "plan" if active else mode
@@ -2341,9 +2355,16 @@ class HarnessAdapter(ProviderAdapter):
         if engine is not None:
             perms = getattr(engine, "permissions", None)
             if perms is not None:
-                perms.approval_policy = _PERMISSION_POLICY.get(mode, "on_write")
+                # A bypass user exiting a chip-initiated plan restores their
+                # binding to ``default`` above; the approval policy itself goes
+                # straight back to never_ask — the whole point of bypass.
+                if pre == "bypassPermissions" and not active:
+                    perms.approval_policy = "never_ask"
+                else:
+                    perms.approval_policy = _PERMISSION_POLICY.get(mode, "on_write")
             if hasattr(engine, "plan_mode"):
                 engine.plan_mode = bool(active)
+        restored = "bypassPermissions" if (pre == "bypassPermissions" and not active) else None
         self._pending_plan_mode_events.append(
             SystemMessage(
                 subtype="status",
@@ -2353,10 +2374,11 @@ class HarnessAdapter(ProviderAdapter):
                 },
             )
         )
+        restored = restored or (mode if not active else None)
         extras = (self._options.extra if self._options is not None else None) or {}
         app_session_id = extras.get("app_session_id")
         if not app_session_id:
-            return
+            return restored
         try:
             from app.db.sessions import set_session_run_binding
 
@@ -2366,11 +2388,45 @@ class HarnessAdapter(ProviderAdapter):
                 "[HarnessAdapter] could not persist plan-mode binding",
                 exc_info=True,
             )
+        return restored
 
     def _take_plan_mode_events(self) -> list:
         events = list(self._pending_plan_mode_events)
         self._pending_plan_mode_events.clear()
         return events
+
+    def notify_plan_mode_exited(self) -> Optional[str]:
+        """Sync app state after an approved plan exit (ExitPlanMode / StopPlanning).
+
+        The native leg flips its own flag through PlanModeControl; the delegated
+        CLI leg has no such callback, so an approved ExitPlanMode panel left the
+        session's persisted ``plan`` binding, the composer chip and the turn's
+        permission refs pointing at plan forever — every later send re-resolved
+        plan mode and the session looked stuck. Callers invoke this once the
+        user APPROVES leaving plan mode.
+
+        Returns the restored permission mode when a sync actually happened
+        (``None`` when this adapter was never in plan — nothing to undo).
+        """
+        opts = self._options
+        current = ((opts.permission_mode or "") if opts is not None else "") or ""
+        if current != "plan":
+            return None
+        restored = self._on_plan_mode_changed(False)
+        # Keep the options snapshot in step so requires_reconnect / hot-swap
+        # comparisons see the post-exit mode, not the stale plan one. Mirrors
+        # what set_permission_mode would have written.
+        if opts is not None and restored and restored != "plan":
+            opts.permission_mode = restored
+            if restored != "bypassPermissions":
+                self._pre_plan_permission_mode = restored
+        # The delegated CLI leg has no PlanModeControl callback: drop its write
+        # schemas right here (the native leg's set_active wrapper is a no-op —
+        # the flag was already flipped before this call).
+        engine = self._engine
+        if engine is not None and hasattr(engine, "plan_mode"):
+            engine.plan_mode = False
+        return restored or "default"
 
 
 # ─── Module-level helpers ─────────────────────────────────────────────────────

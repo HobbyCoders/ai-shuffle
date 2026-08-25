@@ -220,6 +220,38 @@ def _task_update_terminal_status(message: Any) -> Optional[str]:
     return raw if raw in _TASK_UPDATE_TERMINAL_STATUS_MAP else None
 
 
+def _sync_plan_mode_exited(refs: Dict[str, Any]) -> Optional[str]:
+    """Sync app state after an APPROVED plan exit (ExitPlanMode / StopPlanning).
+
+    The delegated (claude CLI) leg flips its own internal plan flag but has no
+    callback that reaches app state, so approving the plan panel used to leave
+    ``sessions.permission_mode`` still bound to ``plan`` and
+    ``callback_refs["permission_mode"]`` reading ``plan`` for every later turn —
+    each send re-resolved plan mode and the session looked permanently stuck.
+    The native leg's PlanModeControl wrapper handles its own sync; this is a
+    no-op there (the adapter sees a non-``plan`` options mode or already-restored
+    state) and does the full restore on the delegated leg.
+
+    Updates ``refs["permission_mode"]`` so THIS turn's remaining tool calls are
+    gated by the restored mode, not by the stale plan one, and returns the
+    restored mode (``None`` when there was nothing to restore).
+    """
+    adapter = refs.get("adapter")
+    notify = getattr(adapter, "notify_plan_mode_exited", None)
+    if not callable(notify):
+        return None
+    try:
+        restored = notify()
+    except Exception:
+        logger.warning(
+            "[WS] plan-mode exit sync failed", exc_info=True,
+        )
+        return None
+    if restored:
+        refs["permission_mode"] = restored
+    return restored
+
+
 def _record_task_message(session_id: Optional[str], message: Any) -> None:
     """Feed an SDK task message into the in-memory ``task_registry``.
 
@@ -2194,6 +2226,9 @@ async def _stream_to_websocket_impl(
                     "config": config,
                     "session_id": session_id,
                     "user_id": user_id,
+                    # Always the LIVE pooled adapter — an approved plan exit must
+                    # sync through it even when this turn reused the client.
+                    "adapter": state.adapter,
                     # Reset the outstanding-prompt counter at the start of each turn so a
                     # prior turn that was hard-cancelled mid-prompt (its finally clear
                     # interrupted) can't leave a leaked count that pins the indicator on.
@@ -2276,6 +2311,10 @@ async def _stream_to_websocket_impl(
             "config": config,
             "session_id": session_id,
             "user_id": user_id,
+            # Filled in with the live adapter after connect() below; the
+            # can_use_tool closure reads it for approved plan-exit sync
+            # (_sync_plan_mode_exited).
+            "adapter": None,
             # Reference count of prompts (questions + permissions) this session is
             # currently blocked on. Drives the user-level "awaiting input" indicator.
             "attention_count": 0,
@@ -2399,6 +2438,7 @@ async def _stream_to_websocket_impl(
                     if tool_name == "StopPlanning":
                         if _perm_mode == "bypassPermissions":
                             logger.debug("[WS] StopPlanning auto-approved in bypassPermissions")
+                            _sync_plan_mode_exited(refs)
                             return PermissionResultAllow(
                                 updated_input={**tool_input, FLUID_ANSWER_KEY: "approve"}
                             )
@@ -2422,6 +2462,11 @@ async def _stream_to_websocket_impl(
                         approved = not isinstance(result, _DeferSentinel) and getattr(
                             result, "behavior", None
                         ) != "deny"
+                        if approved:
+                            # The MRTR second leg flips the ENGINE flag via the
+                            # PlanModeControl wrapper; this syncs the APP side
+                            # (persisted binding, chip note, permission refs).
+                            _sync_plan_mode_exited(refs)
                         return PermissionResultAllow(
                             updated_input={
                                 **tool_input,
@@ -2519,6 +2564,7 @@ async def _stream_to_websocket_impl(
                         if result.behavior == "deny":
                             return result
 
+                    _sync_plan_mode_exited(refs)
                     return PermissionResultAllow()
 
                 # Computer use: request_access is the single approval gate (keyed to
@@ -2684,6 +2730,10 @@ async def _stream_to_websocket_impl(
             connect_options=options,
             cli_stderr_lines=cli_stderr_lines,
         )
+        # The adapter only exists now (built + connected above) — hand it to the
+        # can_use_tool closure so an approved plan exit can sync app state
+        # through it (_sync_plan_mode_exited).
+        callback_refs["adapter"] = adapter
         pool.put(session_id, state)
 
     # Mark as streaming (both reuse and create paths)

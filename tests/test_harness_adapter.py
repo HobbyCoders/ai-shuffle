@@ -1130,6 +1130,59 @@ def test_plan_mode_exit_restores_policy_and_flag():
     assert engine.permissions.approval_policy == "on_write"
 
 
+def test_bypass_exit_from_chip_initiated_plan_restores_binding():
+    """A bypass user who picked Plan Only, then approved the plan exit, must
+    get their session binding restored — not stay bound to ``plan`` forever.
+
+    Regression: the bypass early-return in _on_plan_mode_changed skipped the
+    restore entirely whenever pre was bypassPermissions, so an exit never
+    cleared the persisted ``plan`` binding on this path either."""
+    engine = FakeEngine([])
+    engine.plan_mode = True
+    engine.permissions = type("P", (), {"approval_policy": "never_ask"})()
+    adapter = _adapter_with(engine)
+    adapter._pre_plan_permission_mode = "bypassPermissions"
+    # The chip-initiated plan left the session binding at plan.
+    adapter._options.permission_mode = "plan"
+    restored = adapter._on_plan_mode_changed(False)
+    assert restored == "bypassPermissions"
+    assert engine.plan_mode is False
+    # Bypass semantics hold: straight back to never_ask.
+    assert engine.permissions.approval_policy == "never_ask"
+    # The status note is queued so the chip follows.
+    assert adapter._pending_plan_mode_events
+
+
+def test_notify_plan_mode_exited_noop_when_not_in_plan():
+    """An exit sync on an adapter that was never plan-bound does nothing."""
+    engine = FakeEngine([])
+    engine.plan_mode = False
+    adapter = _adapter_with(engine)
+    assert adapter.notify_plan_mode_exited() is None
+    assert not adapter._pending_plan_mode_events
+    assert engine.plan_mode is False
+
+
+def test_notify_plan_mode_exited_syncs_options_and_engine():
+    """The delegated-leg exit path: notify restores binding + options + flag."""
+    engine = FakeEngine([])
+    engine.plan_mode = True
+    engine.permissions = type("P", (), {"approval_policy": "always_ask"})()
+    adapter = _adapter_with(engine)
+    adapter._options.permission_mode = "plan"  # session bound to plan
+    adapter._pre_plan_permission_mode = "default"
+
+    restored = adapter.notify_plan_mode_exited()
+
+    assert restored == "default"
+    assert adapter._options.permission_mode == "default"
+    assert adapter._pre_plan_permission_mode == "default"
+    assert engine.plan_mode is False
+    assert engine.permissions.approval_policy == "on_write"
+    notes = [n for n in adapter._pending_plan_mode_events if n.subtype == "status"]
+    assert notes and notes[0].data["permissionMode"] == "default"
+
+
 # ─── 3. End-to-end over a real NativeLoop + fake provider ────────────────────
 
 
