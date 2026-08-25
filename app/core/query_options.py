@@ -862,25 +862,6 @@ def build_options_from_profile(
     # never gated by it.
     agents_dict = None
 
-    # Per-agent memory (ruling A11): the profile's durable memory text rides
-    # into the prompt on every leg — as append text on the preset shape (so the
-    # delegated CLI sees it) and as part of the string prompt otherwise (the
-    # fluid compiler folds it into the compiled output on native legs). The
-    # Memory builtin tool is the write path.
-    agent_memory = (config.get("memory") or "").strip()
-    if agent_memory:
-        memory_block = (
-            "# Agent memory\n"
-            "Yours, persistent across sessions. Update it with the Memory tool "
-            "when you learn something durable about the user or your work.\n\n"
-            + agent_memory
-        )
-        if isinstance(final_system_prompt, dict):
-            current_append = final_system_prompt.get("append", "")
-            final_system_prompt["append"] = current_append + "\n\n" + memory_block
-        else:
-            final_system_prompt += "\n\n" + memory_block
-
     # (P2c) The old built-in-subagent prompt instructions died with SDK
     # AgentDefinitions — the Task tool's own description tells the model how
     # to dispatch agents, and the agents themselves carry their prompts.

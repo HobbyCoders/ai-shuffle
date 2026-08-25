@@ -3882,9 +3882,15 @@ class _SearchableStore(MemoryStore):
     async def search(self, terms, *, limit=5, exclude_session_id=None):
         return []
 
+    async def recent_sessions(self, *, limit=10, exclude_session_id=None):
+        return []
+
+    async def session_slice(self, session_id, *, start=-10, count=10):
+        return None
+
 
 @pytest.mark.asyncio
-async def test_native_leg_injects_the_stores_search(monkeypatch, tmp_path):
+async def test_native_leg_injects_the_stores_recall_hooks(monkeypatch, tmp_path):
     import app.core.provider.harness_adapter as ha
 
     store = _SearchableStore()
@@ -3892,22 +3898,28 @@ async def test_native_leg_injects_the_stores_search(monkeypatch, tmp_path):
         ha.HarnessAdapter, "_build_store", staticmethod(lambda _o: store)
     )
     await _connect_native_leg(monkeypatch, tmp_path)
-    assert _CapturingLoop.captured["ctx"].extra.get("session_search") == store.search
+    extra = _CapturingLoop.captured["ctx"].extra
+    assert extra.get("session_search") == store.search
+    assert extra.get("session_recent") == store.recent_sessions
+    assert extra.get("session_view") == store.session_slice
 
 
 @pytest.mark.asyncio
-async def test_native_leg_omits_session_search_for_a_store_without_one(
+async def test_native_leg_omits_recall_hooks_for_a_store_without_them(
     monkeypatch, tmp_path
 ):
-    """MemoryStore keeps no durable record, so it offers no search — the extra
-    must stay absent and let fluid drop the tool from the request schemas."""
+    """MemoryStore keeps no durable record, so it offers no recall — the extras
+    must stay absent and let fluid drop the tools from the request schemas."""
     import app.core.provider.harness_adapter as ha
 
     monkeypatch.setattr(
         ha.HarnessAdapter, "_build_store", staticmethod(lambda _o: MemoryStore())
     )
     await _connect_native_leg(monkeypatch, tmp_path)
-    assert "session_search" not in _CapturingLoop.captured["ctx"].extra
+    extra = _CapturingLoop.captured["ctx"].extra
+    assert "session_search" not in extra
+    assert "session_recent" not in extra
+    assert "session_view" not in extra
 
 
 @pytest.mark.asyncio
@@ -5098,10 +5110,9 @@ async def test_native_prompt_carries_the_project_memory_section(
     # Code mode stays LAST: it is the operating rule for everything above it,
     # this section included.
     assert system.index("# Project memory") < system.index("# Code mode")
-    # …and it does not advertise a Memory tool this session no longer has:
-    # the memory dir replaced it (see _build_registry).
-    assert ha.CODE_MODE_SECTION_WITHOUT_MEMORY in system
-    assert ha.CODE_MODE_SECTION not in system
+    assert ha.CODE_MODE_SECTION in system
+    # There is no Memory tool anywhere anymore, so the reachable list never
+    # names one.
     assert "Skill, Task, Memory, Ledger" not in system
 
 
@@ -5177,29 +5188,31 @@ async def test_no_memory_dir_means_no_project_memory_section(
 
 
 @pytest.mark.asyncio
-async def test_no_memory_dir_means_no_fluid_global_memory_section(
+async def test_compile_passes_the_learner_memories_dir(
     monkeypatch, agent_workspace
 ):
-    """Without a project dir, fluid's own ~/.fluid/MEMORY.md section is still
-    the compiler's business — the app does not turn it off."""
+    """The continual learner's memory snapshot rides the compiler: with
+    continual learning on (the default) the skills root is handed over as
+    ``memories_dir``; switched off, no learner section can appear."""
+    import app.core.provider.harness_adapter as ha
+    from app.core.config import settings
+
     captured_inputs = {}
     from fluid.context import compiler as fluid_compiler
 
     real_compile = fluid_compiler.compile_prompt
 
     def _spy(inputs):
-        captured_inputs["include_memory"] = inputs.include_memory
+        captured_inputs["memories_dir"] = inputs.memories_dir
         return real_compile(inputs)
 
     monkeypatch.setattr(fluid_compiler, "compile_prompt", _spy)
     await _connect_with_memory_dir(monkeypatch, agent_workspace, None)
-    assert captured_inputs["include_memory"] is True
+    assert captured_inputs["memories_dir"] == str(ha._fluid_skills_root())
 
-    await _connect_with_memory_dir(
-        monkeypatch, agent_workspace, agent_workspace / "memory"
-    )
-    # …but a project memory dir replaces it: one MEMORY.md, not two.
-    assert captured_inputs["include_memory"] is False
+    monkeypatch.setattr(settings, "fluid_continual", False)
+    await _connect_with_memory_dir(monkeypatch, agent_workspace, None)
+    assert captured_inputs["memories_dir"] is None
 
 
 # ─── The "# GitHub" section (gh installed AND signed in) ─────────────────────
@@ -5270,6 +5283,53 @@ async def test_github_section_is_dropped_when_bash_is_not_permitted(
     assert "# GitHub" not in captured["system"]
 
 
+# ─── The "# Past sessions are your memory" recall block ──────────────────────
+#
+# Agent profiles replace fluid's base prompt wholesale (ruling A12), so fluid's
+# own recall bullets never reach an AI Shuffle session. The harness appends its
+# own guidance instead — gated exactly like the tools: a DB behind the store,
+# and SessionSearch/SessionView on the permitted surface.
+
+
+@pytest.mark.asyncio
+async def test_native_prompt_carries_the_recall_block_with_a_db(
+    monkeypatch, agent_workspace
+):
+    import app.core.provider.harness_adapter as ha
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "database_url", "postgresql://stub/db")
+    captured = await _connect_with_github(monkeypatch, agent_workspace, False)
+    system = captured["system"]
+    assert ha.RECALL_BLOCK in system
+    # Code mode stays LAST — the recall tools are reached from run_python.
+    assert system.index("# Past sessions are your memory") < system.index("# Code mode")
+
+
+@pytest.mark.asyncio
+async def test_recall_block_is_absent_without_a_db_backend(
+    monkeypatch, agent_workspace
+):
+    """Unit-test deployments run MemoryStore, which offers no recall — the
+    tools are gated off, so nothing may describe them (ruling T9)."""
+    captured = await _connect_with_github(monkeypatch, agent_workspace, False)
+    assert "# Past sessions are your memory" not in captured["system"]
+
+
+@pytest.mark.asyncio
+async def test_recall_block_is_dropped_when_the_tools_are_not_permitted(
+    monkeypatch, agent_workspace
+):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "database_url", "postgresql://stub/db")
+    captured = await _connect_with_github(
+        monkeypatch, agent_workspace, False,
+        disallowed_tools=["SessionSearch", "SessionView"],
+    )
+    assert "# Past sessions are your memory" not in captured["system"]
+
+
 def test_github_auth_check_is_cached_within_the_ttl(monkeypatch):
     """The prompt builder asks every turn; ``gh auth status`` is a subprocess
     with a 10s timeout. One probe per TTL window, not one per turn."""
@@ -5299,11 +5359,12 @@ def test_github_auth_check_is_cached_within_the_ttl(monkeypatch):
         auth_mod.reset_github_auth_cache()
 
 
-# ─── Memory tool exclusion when a project memory dir is connected ────────────
+# ─── No Memory tool anywhere (memory = continual learner + session recall) ──
 #
-# The dir IS the memory. A Memory tool alongside it is a second store the
-# session neither syncs nor shows, so it is dropped from the native registry —
-# both fluid's bare ``Memory`` builtin and the bridged ``mcp__builtins__Memory``.
+# Declarative memory belongs to the continual learner and episodic recall to
+# the session store, so no leg carries a Memory tool: fluid no longer ships
+# one, and the app's per-agent ``mcp__builtins__Memory`` is gone with the
+# feature. The native registry instead carries the recall builtins.
 
 
 def _memory_registry_options(tmp_path, memory_dir):
@@ -5311,7 +5372,7 @@ def _memory_registry_options(tmp_path, memory_dir):
     from types import SimpleNamespace
 
     async def handler(args: dict) -> dict:
-        return {"content": [{"type": "text", "text": "memory"}]}
+        return {"content": [{"type": "text", "text": "ledger"}]}
 
     class _Instance:
         def call_tool(self):
@@ -5319,8 +5380,6 @@ def _memory_registry_options(tmp_path, memory_dir):
 
     cfg = {"type": "sdk", "name": "builtins", "instance": _Instance()}
     record_sdk_server_tools(cfg, [
-        SimpleNamespace(name="Memory", description="Memory tool",
-                        input_schema={"type": "object"}, handler=handler),
         SimpleNamespace(name="Ledger", description="Ledger tool",
                         input_schema={"type": "object"}, handler=handler),
     ])
@@ -5336,7 +5395,7 @@ def _memory_registry_options(tmp_path, memory_dir):
 
 
 @pytest.mark.asyncio
-async def test_memory_dir_drops_the_memory_tool_from_the_native_registry(tmp_path):
+async def test_native_registry_has_recall_builtins_and_no_memory_tool(tmp_path):
     import app.core.provider.harness_adapter as ha
 
     registry = await ha.HarnessAdapter()._build_registry(
@@ -5344,24 +5403,11 @@ async def test_memory_dir_drops_the_memory_tool_from_the_native_registry(tmp_pat
     )
 
     names = {spec.name for spec in registry.list_tools(loaded_only=False)}
-    assert "Memory" not in names            # fluid's bare builtin
-    assert "mcp__builtins__Memory" not in names  # the bridged app copy
-    # Everything else is untouched — this is a surgical exclusion, not a purge.
+    assert "SessionSearch" in names and "SessionView" in names
+    assert "Memory" not in names
+    assert "mcp__builtins__Memory" not in names
     assert "Read" in names and "mcp__builtins__Ledger" in names
     assert registry.get("Memory") is None
-
-
-@pytest.mark.asyncio
-async def test_without_a_memory_dir_the_memory_tool_stays(tmp_path):
-    import app.core.provider.harness_adapter as ha
-
-    registry = await ha.HarnessAdapter()._build_registry(
-        _memory_registry_options(tmp_path, None), native=True
-    )
-
-    names = {spec.name for spec in registry.list_tools(loaded_only=False)}
-    assert "Memory" in names
-    assert "mcp__builtins__Memory" in names
 
 
 def test_oversized_memory_index_is_truncated(tmp_path):

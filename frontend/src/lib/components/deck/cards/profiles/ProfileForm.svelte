@@ -7,7 +7,7 @@
 	 */
 	import type { Profile } from '$lib/api/client';
 	import type { ToolSurface, ToolSurfaceGroup } from '$lib/api/toolSurface';
-	import { Users, Settings, SlidersHorizontal, Bot, Check, Plus, Trash2, FileText, Brain, Monitor, OctagonX } from 'lucide-svelte';
+	import { Users, Settings, SlidersHorizontal, Bot, Check, Plus, Trash2, FileText, Monitor, OctagonX } from 'lucide-svelte';
 	import ProfileToolConfig from './ProfileToolConfig.svelte';
 	import ProfileSystemPrompt from './ProfileSystemPrompt.svelte';
 	import ModelPicker from '$lib/components/settings/ModelPicker.svelte';
@@ -82,7 +82,6 @@
 		enabled_agents: string[];
 		/** 'all' = may invoke any agent; 'custom' = enabled_agents is the exact allowlist (empty = none). */
 		agent_invoke_mode: 'all' | 'custom';
-		memory: string;
 		include_partial_messages: boolean;
 		system_prompt_content: string;
 		cwd: string;
@@ -521,23 +520,6 @@
 			onSystemPromptContentChange={(v) => onFormChange('system_prompt_content', v)}
 		/>
 
-		<div class="set-group">
-			<div class="set-grouphead"><h3><Brain />Memory</h3><p>Persistent notes the agent maintains itself via its Memory tool at runtime. This text is injected into the agent's system prompt.</p></div>
-			<div class="set-row stack">
-				<div class="lab lab-row">
-					<h4>Agent memory</h4>
-					<span class="count">{profileForm.memory.length.toLocaleString()} chars</span>
-				</div>
-				<div class="ctl">
-					<textarea
-						class="fld code memory-area"
-						value={profileForm.memory}
-						oninput={(e) => onFormChange('memory', (e.target as HTMLTextAreaElement).value)}
-						placeholder="Empty by default. The agent writes here itself using its Memory tool; you can also seed or edit it manually."
-					></textarea>
-				</div>
-			</div>
-		</div>
 
 	{:else if activeTab === 'advanced'}
 		<!-- ADVANCED TAB -->
@@ -685,20 +667,4 @@
 		opacity: 0.6;
 	}
 
-	/* Memory section (prompt tab) */
-	.lab-row {
-		display: flex;
-		align-items: baseline;
-		justify-content: space-between;
-		gap: 12px;
-	}
-	.count {
-		font-family: var(--font-mono, monospace);
-		font-size: 11px;
-		color: var(--muted-foreground);
-		flex-shrink: 0;
-	}
-	textarea.memory-area {
-		min-height: 180px;
-	}
 </style>

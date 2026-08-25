@@ -414,70 +414,6 @@ def create_builtin_tools_server(
     all_tools.append(schedule_wakeup)
 
     # ------------------------------------------------------------------
-    # Memory — per-agent durable memory (agents-program ruling A11)
-    # ------------------------------------------------------------------
-    MEMORY_MAX_CHARS = 8000
-
-    @tool(
-        "Memory",
-        "Your persistent memory: durable facts about the user and your work, "
-        "injected into your system prompt every session. Actions: 'view' shows "
-        "current memory, 'add' appends a paragraph, 'replace' rewrites the "
-        "whole memory (use to condense), 'clear' empties it. Save what stays "
-        "true across sessions, not conversation state.",
-        {
-            "type": "object",
-            "properties": {
-                "action": {"type": "string", "enum": ["view", "add", "replace", "clear"]},
-                "text": {"type": "string", "description": "Memory text (action=add/replace)."},
-            },
-            "required": ["action"],
-        },
-    )
-    async def agent_memory(args: dict) -> dict:
-        if not profile_id:
-            return _err("Memory requires an active agent (profile) context.")
-        from app.db import database
-
-        profile = database.get_profile(profile_id)
-        if not profile:
-            return _err(f"Agent '{profile_id}' not found.")
-        config = dict(profile.get("config") or {})
-        current = (config.get("memory") or "").strip()
-
-        action = (args.get("action") or "").strip()
-        if action == "view":
-            return _ok({"memory": current or "(empty)", "chars": len(current)})
-
-        if action == "clear":
-            new_memory = ""
-        elif action in ("add", "replace"):
-            text = (args.get("text") or "").strip()
-            if not text:
-                return _err(f"action={action} requires text.")
-            new_memory = f"{current}\n\n{text}".strip() if action == "add" and current else text
-        else:
-            return _err(f"Unknown action: {action}")
-
-        if len(new_memory) > MEMORY_MAX_CHARS:
-            return _err(
-                f"Memory would be {len(new_memory)} chars (cap {MEMORY_MAX_CHARS}). "
-                "Use action=replace with a condensed version instead.",
-                chars=len(new_memory),
-            )
-        config["memory"] = new_memory
-        # Memory is the agent's own data, not structural config — builtin
-        # agents are allowed to learn too.
-        database.update_profile(profile_id, config=config, allow_builtin=True)
-        return _ok({
-            "saved": True,
-            "chars": len(new_memory),
-            "note": "Injected into your system prompt from the next session/turn.",
-        })
-
-    all_tools.append(agent_memory)
-
-    # ------------------------------------------------------------------
     # Task — dispatch work to a subagent (P2c, rulings A6/A8/A9/A10).
     # Delegated-leg surface (mcp__builtins__Task); native legs get fluid's
     # bare-named Task builtin instead (the bridge filters this copy out).
@@ -1200,7 +1136,6 @@ def get_builtin_tool_names() -> List[str]:
     """Return MCP tool names so they can be added to ``allowed_tools``."""
     names = [
         "mcp__builtins__ScheduleWakeup",
-        "mcp__builtins__Memory",
         "mcp__builtins__Task",
         "mcp__builtins__NotifyDevices",
         "mcp__builtins__EnterWorktree",

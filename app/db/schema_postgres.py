@@ -897,6 +897,22 @@ def create_postgres_schema(cursor) -> None:
         )
     """)
 
+    # Cross-session recall trigram index (the session_store_entries twin is
+    # created after that table, below). Serves SessionSearch's substring-ILIKE
+    # prefilter; savepoint-fenced because CREATE EXTENSION needs privileges
+    # some managed databases refuse — recall then stays unindexed (correct,
+    # just slower) instead of aborting the bootstrap transaction.
+    cursor.execute("SAVEPOINT recall_trgm")
+    try:
+        cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_fluid_nodes_trgm "
+            "ON fluid_session_nodes USING gin ((message::text) gin_trgm_ops)"
+        )
+        cursor.execute("RELEASE SAVEPOINT recall_trgm")
+    except Exception:  # noqa: BLE001 — degraded recall beats a dead bootstrap
+        cursor.execute("ROLLBACK TO SAVEPOINT recall_trgm")
+
     # ------------------------------------------------------------------
     # 36d. Background tasks (v55). Durable per-task lifecycle snapshots.
     #      task_registry mirrors start/update/complete/unpark transitions here
@@ -1524,6 +1540,20 @@ def create_postgres_schema(cursor) -> None:
         "ON session_store_entries USING gin (to_tsvector('english', sse_entry_text(entry))) "
         "WHERE subpath IS NULL"
     )
+    # The session_store_entries twin of idx_fluid_nodes_trgm (see the fluid
+    # tables above) — SessionSearch's substring-ILIKE prefilter over the SDK
+    # transcript mirror. Same savepoint fence, same graceful degradation.
+    cursor.execute("SAVEPOINT recall_trgm_sse")
+    try:
+        cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sse_entry_trgm "
+            "ON session_store_entries USING gin ((entry::text) gin_trgm_ops) "
+            "WHERE subpath IS NULL"
+        )
+        cursor.execute("RELEASE SAVEPOINT recall_trgm_sse")
+    except Exception:  # noqa: BLE001 — degraded recall beats a dead bootstrap
+        cursor.execute("ROLLBACK TO SAVEPOINT recall_trgm_sse")
 
     # Summary sidecar written inside append() via fold_session_summary().
     # Scoped to main transcripts only (subagent appends must not mutate).

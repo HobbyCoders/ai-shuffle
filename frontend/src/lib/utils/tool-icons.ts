@@ -39,8 +39,9 @@ export const TOOL_ICON_MAP: Record<string, IconType> = {
 	// Search
 	Glob: 'search', Grep: 'search', ToolSearch: 'search',
 	// Transcript / recall builtins (fluid)
-	HistorySearch: 'search', SessionSearch: 'search', HistoryExpand: 'clock',
-	Ledger: 'list', Memory: 'file', AskUser: 'bot',
+	HistorySearch: 'search', SessionSearch: 'search', SessionView: 'clock',
+	HistoryExpand: 'clock',
+	Ledger: 'list', AskUser: 'bot',
 	// Terminal
 	Bash: 'terminal', KillShell: 'terminal', SlashCommand: 'terminal', LSP: 'terminal',
 	// Web

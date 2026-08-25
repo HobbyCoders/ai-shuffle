@@ -1191,6 +1191,34 @@ def _run_column_migrations(cursor):
         cursor.execute("ALTER TABLE fluid_sessions ADD COLUMN cli_session_id TEXT")
         migrations_applied.append("fluid_sessions.cli_session_id")
 
+    # Cross-session recall trigram indexes. SessionSearch's SQL prefilter is a
+    # substring ILIKE over the raw JSON of both transcript stores; without an
+    # index that is a sequential scan of every message row in the install, per
+    # call. pg_trgm GIN expression indexes serve exactly that ILIKE shape.
+    # Fenced by a savepoint because CREATE EXTENSION needs privileges some
+    # managed databases refuse — recall then simply stays unindexed (correct,
+    # just slower) instead of aborting the whole migration transaction.
+    # Idempotent, no version gate (same defensive pattern as the FTS block).
+    if table_exists(cursor, "fluid_session_nodes"):
+        cursor.execute("SAVEPOINT recall_trgm")
+        try:
+            cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_fluid_nodes_trgm "
+                "ON fluid_session_nodes USING gin ((message::text) gin_trgm_ops)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sse_entry_trgm "
+                "ON session_store_entries USING gin ((entry::text) gin_trgm_ops) "
+                "WHERE subpath IS NULL"
+            )
+            cursor.execute("RELEASE SAVEPOINT recall_trgm")
+        except Exception:  # noqa: BLE001 — degraded recall beats a dead boot
+            cursor.execute("ROLLBACK TO SAVEPOINT recall_trgm")
+            logger.info(
+                "pg_trgm unavailable — SessionSearch's prefilter stays unindexed"
+            )
+
     # background_tasks (v55). Durable per-task lifecycle snapshots — WRITE-ONLY
     # in Phase 1 (no reader flips): task_registry mirrors its transitions here
     # via app.core.task_persistence so a restart/crash leaves a durable trail,

@@ -193,7 +193,6 @@
 		enabled_agents: [] as string[],
 		// 'all' = unrestricted; 'custom' = enabled_agents is the exact allowlist.
 		agent_invoke_mode: 'all' as 'all' | 'custom',
-		memory: '',
 		include_partial_messages: true,
 		system_prompt_content: '',
 		cwd: '',
@@ -264,7 +263,6 @@
 			disallowed_tools: [],
 			enabled_agents: [],
 			agent_invoke_mode: 'all',
-			memory: '',
 			include_partial_messages: true,
 			system_prompt_content: '',
 			cwd: '',
@@ -332,7 +330,6 @@
 						: ((config as any).enabled_agents?.length ?? 0) > 0
 							? 'custom'
 							: 'all',
-			memory: (config as any).memory || '',
 			include_partial_messages: config.include_partial_messages !== false,
 			// Legacy preset-shaped prompts (`{type:'preset', append}`) surface their
 			// append text as the prompt — per ruling A12 the configured prompt IS
@@ -469,8 +466,6 @@
 		// Persist the invoke-grant mode explicitly so "custom with nothing selected"
 		// (= may invoke no agents) round-trips instead of reading as unrestricted.
 		config.agent_invoke_mode = profileForm.agent_invoke_mode;
-		// Per-agent memory (plain text). Omit when empty so clearing it persists.
-		if (profileForm.memory.trim()) config.memory = profileForm.memory;
 		if (profileForm.cwd.trim()) config.cwd = profileForm.cwd;
 		if (profileForm.add_dirs.trim()) {
 			config.add_dirs = profileForm.add_dirs
@@ -629,7 +624,6 @@
 						: (agent.enabled_agents?.length ?? 0) > 0
 							? 'custom'
 							: 'all',
-			memory: agent.memory || '',
 			include_partial_messages: agent.include_partial_messages !== false,
 			system_prompt_content: spContent,
 			cwd: '',

@@ -150,7 +150,6 @@ BUILTINS_RISK_MAP: Mapping[str, str] = {
     "GetAppErrors": "safe",
     "ToolSearch": "safe",
     "RemoteTrigger": "write",
-    "Memory": "safe",
     # Dispatching an agent spawns a session that can act — gated like a write.
     "Task": "write",
 }

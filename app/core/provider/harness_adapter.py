@@ -497,14 +497,20 @@ class HarnessAdapter(ProviderAdapter):
                     fluid_session_id, options.cwd, exc_info=True,
                 )
             # Cross-session recall, wired exactly the way fluid's own
-            # config/loader.py does it: the store's search() backs the
-            # SessionSearch builtin (PgFluidStore sweeps fluid_session_nodes +
-            # session_store_entries). MemoryStore — the DB-less unit-test store
-            # — offers none, and the tool's requires_extra gate then keeps
-            # SessionSearch invisible on every surface. No try/except: getattr
-            # on a store object cannot throw here.
+            # config/loader.py does it: the store's optional hooks back the
+            # recall builtins (PgFluidStore sweeps fluid_session_nodes +
+            # session_store_entries and reads titles off the sessions table).
+            # search()/recent_sessions() serve SessionSearch (keyword search /
+            # the no-query recent listing), session_slice() serves SessionView.
+            # MemoryStore — the DB-less unit-test store — offers none, and the
+            # tools' requires_extra gates then keep them invisible on every
+            # surface. No try/except: getattr on a store object cannot throw.
             if callable(getattr(store, "search", None)):
                 native_ctx.extra["session_search"] = store.search
+            if callable(getattr(store, "recent_sessions", None)):
+                native_ctx.extra["session_recent"] = store.recent_sessions
+            if callable(getattr(store, "session_slice", None)):
+                native_ctx.extra["session_view"] = store.session_slice
             # Only explicit user configuration may limit a native turn. There
             # is deliberately no install-wide model/token/cost/loop ceiling and
             # no automatic context trimming: provider usage remains telemetry,
@@ -541,12 +547,15 @@ class HarnessAdapter(ProviderAdapter):
                 from app.core.config import settings
 
                 if settings.fluid_code_mode and self._registry is not None:
-                    skills_root = (
-                        Path(settings.fluid_skills_dir)
-                        if settings.fluid_skills_dir
-                        else settings.effective_data_dir / "fluid" / "skills"
-                    )
-                    skills = SkillStore(skills_root)
+                    skills = SkillStore(_fluid_skills_root())
+                    try:
+                        # Opportunistic lifecycle pass, mirroring fluid's own
+                        # loader (interval-gated, deterministic, archive-not-
+                        # delete — see SkillStore.curate). Best-effort: curation
+                        # must never block an engine build.
+                        skills.curate()
+                    except Exception:  # noqa: BLE001
+                        pass
                     synthesizer = None
                     if settings.fluid_continual:
                         # Session provider; fluid_continual_model pins synthesis
@@ -1970,6 +1979,17 @@ class HarnessAdapter(ProviderAdapter):
             # unrestricted agent compiles exactly as it did before.
             permitted = _permitted_tool_names(options, registry)
             memory_dir = (options.extra or {}).get("memory_dir") if native else None
+            # The continual learner's ``# Memory`` snapshot (facts the
+            # synthesizer distilled from past sessions' journals) — native legs
+            # only, and only when continual learning is on. The delegated
+            # claude CLI owns its own memory and would double up.
+            from app.core.config import settings as _settings
+
+            memories_dir = (
+                str(_fluid_skills_root())
+                if native and _settings.fluid_continual
+                else None
+            )
             compiled = compile_prompt(
                 PromptInputs(
                     base=system,
@@ -1977,13 +1997,7 @@ class HarnessAdapter(ProviderAdapter):
                     cwd=options.cwd or ".",
                     include_env=not has_app_env,
                     include_agents=False,
-                    # fluid's own memory section is a snapshot of the global
-                    # ~/.fluid/MEMORY.md, written by ITS Memory tool. When the
-                    # project has a memory dir that tool is gone (see
-                    # _build_registry) and the project memory section below is
-                    # the session's memory — two "MEMORY.md" blocks naming
-                    # different files would only make the model pick wrong.
-                    include_memory=not memory_dir,
+                    memories_dir=memories_dir,
                     tools=permitted,
                     # Profile scope filter (user/project/local) — gates fluid's
                     # instruction files, skills, agents, and plugin discovery.
@@ -2036,6 +2050,17 @@ class HarnessAdapter(ProviderAdapter):
                 sections.append(
                     PromptSection(kind="extra", text=STEERING_BLOCK)
                 )
+            if native and _recall_backend_available() and (
+                permitted is None
+                or {"SessionSearch", "SessionView"} <= permitted
+            ):
+                # Harness-owned "when to recall" guidance (see RECALL_BLOCK).
+                # Gated the same way the tools themselves are: a DB-less build
+                # has no recall backend, and a restricted surface without the
+                # tools must not be told to call them (ruling T9).
+                sections.append(
+                    PromptSection(kind="extra", text=RECALL_BLOCK)
+                )
             if (options.extra or {}).get("github_connected") and (
                 permitted is None or "Bash" in permitted
             ):
@@ -2076,7 +2101,7 @@ class HarnessAdapter(ProviderAdapter):
                 sections.append(
                     PromptSection(
                         kind="extra",
-                        text=_code_mode_section(memory_tool=not memory_dir),
+                        text=_code_mode_section(),
                     )
                 )
                 # ... and the catalog it points at. ONE section per tool
@@ -2162,30 +2187,14 @@ class HarnessAdapter(ProviderAdapter):
         # NOT get them: the claude CLI supplies its own copies. Conversely the
         # CLI must never be relied on for tools outside the Claude-subscription
         # case, which is exactly why the native leg registers its own here.
-        #
-        # ...except Memory, when the project has its own memory dir. Ruling
-        # MEM3 already hands the native session that dir and the file
-        # convention for it, and the model reaches it with the ordinary file
-        # tools. A Memory tool alongside that is a SECOND, differently-shaped
-        # store the model would have to choose between — and the one the app
-        # neither syncs nor shows. One project memory, one way in.
-        drop_memory_tool = bool(native and (options.extra or {}).get("memory_dir"))
-
         builtins_registered = False
         if native:
             from fluid.tools.builtins import register_builtins
 
             register_builtins(registry)
             builtins_registered = True
-            if drop_memory_tool:
-                # fluid registers its own bare-named ``Memory`` builtin (see
-                # fluid/tools/builtins/__init__.py). The registry has no
-                # deregister API, so drop the entry — the least invasive
-                # mechanism it offers short of reimplementing register_builtins.
-                _deregister_tool(registry, "Memory")
             logger.info(
-                "[HarnessAdapter] registered fluid builtin tools for native leg%s",
-                " (Memory excluded: project memory dir)" if drop_memory_tool else "",
+                "[HarnessAdapter] registered fluid builtin tools for native leg",
             )
             # Specialize builtin descriptions to this session's permitted
             # surface (fluid's cross-tool routing clauses collapse to the
@@ -2223,11 +2232,6 @@ class HarnessAdapter(ProviderAdapter):
         # deferred schema reachable, and the delegated leg's bundled socket
         # server must keep serving every spec to the CLI.
         skipped_builtins = set(NATIVE_SHADOWED_BUILTINS)
-        if drop_memory_tool:
-            # Same reasoning as the fluid builtin above: the bridged
-            # mcp__builtins__Memory copy is the app's own memory tool and is
-            # equally redundant next to the project memory dir.
-            skipped_builtins.add("Memory")
         recorded = register_recorded_sdk_servers(
             registry,
             options.mcp_servers,
@@ -2887,15 +2891,8 @@ list_tools reports are Python modules from your continual skill store, \
 imported with `from skills.<name> import <name>`. Once you have repeated a \
 workflow, save it as a skill."""
 
-# The list of reachable tool families in the opening sentence. A session whose
-# project has a memory dir has no Memory tool at all (see ``_build_registry``),
-# and naming a tool the schema cannot reach is exactly the gap this section
-# exists to close — so that session gets the list without it.
+# The list of reachable tool families in the opening sentence.
 _CODE_MODE_REACHABLE = (
-    "file, shell, search, Skill, Task, Memory, Ledger, Note, app-config, "
-    "computer-use, media and MCP tools"
-)
-_CODE_MODE_REACHABLE_NO_MEMORY = (
     "file, shell, search, Skill, Task, Ledger, Note, app-config, "
     "computer-use, media and MCP tools"
 )
@@ -2903,14 +2900,11 @@ _CODE_MODE_REACHABLE_NO_MEMORY = (
 CODE_MODE_SECTION = _CODE_MODE_SECTION_TEMPLATE.replace(
     "@REACHABLE@", _CODE_MODE_REACHABLE
 )
-CODE_MODE_SECTION_WITHOUT_MEMORY = _CODE_MODE_SECTION_TEMPLATE.replace(
-    "@REACHABLE@", _CODE_MODE_REACHABLE_NO_MEMORY
-)
 
 
-def _code_mode_section(*, memory_tool: bool) -> str:
-    """The code-mode block, naming Memory only when the session can call it."""
-    return CODE_MODE_SECTION if memory_tool else CODE_MODE_SECTION_WITHOUT_MEMORY
+def _code_mode_section() -> str:
+    """The code-mode block naming this session's reachable tool families."""
+    return CODE_MODE_SECTION
 
 
 # The four code-mode tools plus the skill-store pair describe themselves in the
@@ -2919,6 +2913,29 @@ _CODE_MODE_CATALOG_SKIP = frozenset({
     "run_python", "list_tools", "search_tools", "read_tool_docs",
     "save_skill", "delete_skill",
 })
+
+
+def _recall_backend_available() -> bool:
+    """Whether this deployment's store can answer the recall builtins.
+
+    Mirrors ``_build_store``: with a database the store is PgFluidStore, which
+    offers every recall hook; without one (unit tests) it is MemoryStore and
+    the tools are gated off — so no prompt block should describe them.
+    """
+    from app.core.config import settings
+
+    return bool(settings.database_url or settings.postgres_password)
+
+
+def _fluid_skills_root() -> Path:
+    """The continual store's home: saved skills, the journal, memories.json."""
+    from app.core.config import settings
+
+    return (
+        Path(settings.fluid_skills_dir)
+        if settings.fluid_skills_dir
+        else settings.effective_data_dir / "fluid" / "skills"
+    )
 
 
 def _tool_predicate(options: SessionOptions):
@@ -3074,6 +3091,24 @@ def _code_mode_tool_sections(codemode: Any, permit=None) -> List[Tuple[str, str]
 # alongside fluid's own STEERING_BLOCK. Short by design: the model already knows
 # how to drive gh, it just has no way to know the binary is there and
 # authenticated, and without that it falls back to raw git or to asking.
+# Harness-owned recall guidance. Agent profiles replace fluid's base prompt
+# wholesale (ruling A12), so fluid's own "search past sessions" bullets never
+# reach an AI Shuffle session — and recall is a harness capability the user
+# should never have to explain in an agent prompt. Appended to every native
+# compilation whose surface carries the recall tools; the tool descriptions
+# teach the mechanics, this block teaches WHEN.
+RECALL_BLOCK = """# Past sessions are your memory
+Every session in this app is stored and searchable — earlier work is never \
+lost, only out of context. SessionSearch with no query lists recent sessions \
+(titles, dates, last reply): start there for "what were we working on?". \
+SessionSearch with keywords finds older work by content. SessionView opens a \
+session — by default its tail, where what was delivered and what was left \
+open live. Reach for them whenever the user references work you cannot see \
+("last time", "that script we wrote", "continue where we left off") — a \
+couple of quick lookups beat asking the user to repeat themselves. Recalled \
+content is history, not live state: verify against the current files before \
+acting on it."""
+
 GITHUB_BLOCK = """# GitHub
 The gh CLI is installed and authenticated on this machine. Reach GitHub \
 through it in Bash — pull requests (gh pr create/view/checks), issues (gh \
@@ -3306,20 +3341,6 @@ def _native_context_window(kind: str, options: SessionOptions) -> Optional[int]:
     if get_model(options.model) is not None:
         return get_context_window(options.model)
     return None
-
-
-def _deregister_tool(registry: ToolRegistry, name: str) -> None:
-    """Remove an already-registered tool from ``registry``.
-
-    ``ToolRegistry`` exposes registration but no removal, so this reaches into
-    its two entry maps. Best-effort: a fluid version that renames or restructures
-    them must not break session connect — worst case the tool stays registered.
-    """
-    try:
-        registry._entries.pop(name, None)
-        registry._loaded.discard(name)
-    except Exception:  # noqa: BLE001
-        logger.debug("[HarnessAdapter] could not deregister %s", name, exc_info=True)
 
 
 def _amend_native_task_spec(registry: ToolRegistry, options: SessionOptions) -> None:

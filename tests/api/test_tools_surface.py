@@ -111,7 +111,7 @@ def test_shadowed_builtins_are_greyed_not_dropped(client):
         assert bare in row["unavailable_reason"], bare
 
     # A control row from the same group is untouched.
-    assert rows["mcp__builtins__Memory"].get("available") is not False
+    assert rows["mcp__builtins__ScheduleWakeup"].get("available") is not False
 
 
 def test_gateway_reasons_name_only_the_types_pinned_elsewhere(monkeypatch):

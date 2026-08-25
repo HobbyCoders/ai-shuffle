@@ -120,9 +120,10 @@ def test_deferred_servers_land_in_the_deferred_tier_and_stay_loadable():
 
 
 def test_skip_tools_excludes_named_tools_from_one_server():
-    """``skip_tools`` is how the adapter drops a bridged copy. Memory is the
-    live case: a native session with a project memory dir must not get the
-    ``mcp__builtins__Memory`` tool (the dir replaces it)."""
+    """``skip_tools`` is how the adapter drops a bridged copy — the live case
+    is NATIVE_SHADOWED_BUILTINS (Task/Monitor/ToolSearch), whose fluid
+    bare-named builtins replace the bridged mcp__builtins__ copies. The tool
+    names here are arbitrary; the map is per server."""
     builtins_cfg = {"type": "sdk", "name": "builtins", "instance": _Instance()}
     other_cfg = {"type": "sdk", "name": "ai-tools", "instance": _Instance()}
     record_sdk_server_tools(builtins_cfg, [_tool("Memory"), _tool("Ledger")])

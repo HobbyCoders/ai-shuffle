@@ -374,3 +374,157 @@ async def test_search_sql_wildcards_in_a_term_are_inert(mock_db):
     match, so a '%' a user typed cannot widen the result set."""
     store = await _seed_searchable(mock_db)
     assert await store.search(["zebra%fish"]) == []
+
+
+# ─── Titles, recent listing, and session slices (recall hooks) ───────────────
+#
+# ``sessions.sdk_session_id`` carries the store-side id for both legs, so the
+# app's own titles decorate search hits and listings; ``recent_sessions`` backs
+# SessionSearch's no-query listing and ``session_slice`` backs SessionView.
+
+from fluid.messages.content import ToolResultBlock, ToolUseBlock  # noqa: E402
+from fluid.store.base import SessionSlice, SessionSummary  # noqa: E402
+
+
+def _session_row(
+    mock_db, app_id, sdk_id, title,
+    updated_at="2026-08-20 10:00:00", hidden=None, status="active",
+):
+    mock_db.execute(
+        "INSERT INTO sessions (id, sdk_session_id, title, status, hidden, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (app_id, sdk_id, title, status, hidden, updated_at),
+    )
+    mock_db.commit()
+
+
+def _assistant_node(node_id, parent_id, text):
+    return SessionNode(
+        node_id=node_id,
+        parent_id=parent_id,
+        message=Message(role="assistant", content=[Text(text=text)]),
+    )
+
+
+@pytest.mark.asyncio
+async def test_search_hits_carry_the_apps_session_titles(mock_db):
+    store = await _seed_searchable(mock_db)
+    _session_row(mock_db, "app-a", "ses_hit_a", "Zebrafish pipeline tuning")
+
+    hits = await store.search(["zebrafish"])
+    by_id = {h.session_id: h for h in hits}
+    assert by_id["ses_hit_a"].title == "Zebrafish pipeline tuning"
+    # A session without an app row (or without a title) stays untitled.
+    assert by_id["ses_hit_b"].title is None
+
+
+@pytest.mark.asyncio
+async def test_recent_sessions_lists_newest_first_with_previews(mock_db):
+    store = PgFluidStore()
+    await store.create_session("ses_r1")
+    await store.append("ses_r1", _node("u1", None, "fix the login redirect"))
+    await store.append("ses_r1", _assistant_node("a1", "u1", "Fixed — lands on /home now."))
+    _session_row(mock_db, "app-1", "ses_r1", "Login redirect fix",
+                 updated_at="2026-08-20 10:00:00")
+
+    _sse_row(mock_db, "ses_r2", json.dumps({
+        "type": "user", "message": {"content": "polish the readme"},
+    }))
+    _sse_row(mock_db, "ses_r2", json.dumps({
+        "type": "assistant", "message": {"content": "Readme polished and pushed."},
+    }))
+    _session_row(mock_db, "app-2", "ses_r2", "Readme polish",
+                 updated_at="2026-08-21 10:00:00")
+
+    # Hidden and archived sessions never surface in the listing.
+    _session_row(mock_db, "app-3", "ses_hidden", "Hidden one",
+                 updated_at="2026-08-22 10:00:00", hidden=1)
+    _session_row(mock_db, "app-4", "ses_archived", "Archived one",
+                 updated_at="2026-08-23 10:00:00", status="archived")
+
+    rows = await store.recent_sessions(limit=10)
+    assert [r.session_id for r in rows] == ["ses_r2", "ses_r1"]
+    assert all(isinstance(r, SessionSummary) for r in rows)
+    assert rows[0].title == "Readme polish"
+    assert rows[0].preview == "Readme polished and pushed."
+    assert rows[0].message_count == 2
+    assert rows[1].title == "Login redirect fix"
+    assert rows[1].preview == "Fixed — lands on /home now."
+    assert rows[1].message_count == 2
+    assert rows[0].last_ts > rows[1].last_ts > 0
+
+    # The caller's own session is excluded, like search.
+    excluded = await store.recent_sessions(limit=10, exclude_session_id="ses_r2")
+    assert [r.session_id for r in excluded] == ["ses_r1"]
+
+
+@pytest.mark.asyncio
+async def test_session_slice_fluid_arm_renders_tool_lines(mock_db):
+    store = PgFluidStore()
+    await store.create_session("ses_v1")
+    await store.append("ses_v1", _node("n1", None, "run the tests"))
+    await store.append("ses_v1", SessionNode(
+        node_id="n2", parent_id="n1",
+        message=Message(role="assistant", content=[
+            Text(text="Running them now."),
+            ToolUseBlock(id="t1", name="Bash", input={"command": "pytest -q"}),
+        ]),
+    ))
+    await store.append("ses_v1", SessionNode(
+        node_id="n3", parent_id="n2",
+        message=Message(role="user", content=[
+            ToolResultBlock(tool_use_id="t1", content=[Text(text="2 passed")]),
+        ]),
+    ))
+    _session_row(mock_db, "app-v1", "ses_v1", "Test run")
+
+    window = await store.session_slice("ses_v1")
+    assert isinstance(window, SessionSlice)
+    assert window.total == 3 and window.start == 0
+    assert window.title == "Test run"
+    assert window.messages[0].text == "run the tests"
+    assert any("Bash(" in line for line in window.messages[1].tools)
+    assert any("-> 2 passed" in line for line in window.messages[2].tools)
+
+    # Paging: an explicit window keeps python-slice semantics.
+    paged = await store.session_slice("ses_v1", start=1, count=1)
+    assert paged.start == 1 and len(paged.messages) == 1
+    assert paged.messages[0].text == "Running them now."
+    tail = await store.session_slice("ses_v1", start=-1, count=5)
+    assert tail.start == 2 and len(tail.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_session_slice_sdk_arm_skips_meta_and_renders_tools(mock_db):
+    _sse_row(mock_db, "ses_v2", json.dumps({
+        "type": "user", "message": {"content": "check the deploy"},
+    }))
+    _sse_row(mock_db, "ses_v2", json.dumps({
+        "type": "assistant",
+        "message": {"content": [
+            {"type": "text", "text": "Checking."},
+            {"type": "tool_use", "name": "Bash", "input": {"command": "gh run list"}},
+        ]},
+    }))
+    _sse_row(mock_db, "ses_v2", json.dumps({
+        "type": "user",
+        "message": {"content": [
+            {"type": "tool_result", "content": [{"type": "text", "text": "all green"}]},
+        ]},
+    }))
+    _sse_row(mock_db, "ses_v2", json.dumps({
+        "type": "user", "isMeta": True, "message": {"content": "meta noise"},
+    }))
+
+    window = await PgFluidStore().session_slice("ses_v2")
+    assert window is not None
+    assert window.total == 3  # the meta row is invisible
+    assert window.messages[0].text == "check the deploy"
+    assert any("Bash(" in line for line in window.messages[1].tools)
+    assert any("-> all green" in line for line in window.messages[2].tools)
+    assert "meta noise" not in " ".join(m.text for m in window.messages)
+
+
+@pytest.mark.asyncio
+async def test_session_slice_unknown_session_is_none(mock_db):
+    assert await PgFluidStore().session_slice("ses_nope") is None
