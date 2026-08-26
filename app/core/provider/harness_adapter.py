@@ -230,6 +230,7 @@ from app.core.provider.events import (
 from fluid.codemode.continual import Synthesizer
 from fluid.codemode.session import CodeModeSession
 from fluid.codemode.skills import SkillStore
+from fluid.codemode.subprocess_kernel import KernelConfig
 from fluid.context.compaction import CompactionConfig
 from fluid.context.trim import TrimConfig
 from fluid.engine.native import NativeLoop
@@ -568,7 +569,8 @@ class HarnessAdapter(ProviderAdapter):
                             skills,
                         )
                     codemode = CodeModeSession(
-                        self._registry, skills=skills, synthesizer=synthesizer
+                        self._registry, config=_codemode_kernel_config(),
+                        skills=skills, synthesizer=synthesizer,
                     )
             except Exception:  # noqa: BLE001 — degrade to JSON tool calling
                 logger.warning(
@@ -2685,6 +2687,23 @@ def _delegated_disallowed(options: SessionOptions) -> list:
                 "for this connect"
             )
     return sorted(banned)
+
+
+def _codemode_kernel_config() -> KernelConfig:
+    """Kernel limits tuned for this app's session shapes.
+
+    The one deliberate change from fluid's defaults is ``stdout_cap`` — the
+    per-cell ceiling on what a ``run_python`` print surfaces to the model. A
+    parent reads a subagent's report by printing its Task call's result, and
+    ``provider_agent`` hands back reports up to ``MAX_REPORT_CHARS``. At the
+    16,384-char default the model sees a fraction of a long report and burns a
+    provider round trip per extra slice it prints out of the kernel namespace.
+    Sized so a maximum-length report plus its JSON envelope fits in one cell;
+    the cap still bounds pathological prints (a cell dumping a whole file).
+    """
+    from app.core.provider_agent import MAX_REPORT_CHARS
+
+    return KernelConfig(stdout_cap=max(16_384, MAX_REPORT_CHARS * 2))
 
 
 def _tool_allowlist(options: SessionOptions) -> Optional[list]:

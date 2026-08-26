@@ -5639,3 +5639,26 @@ async def test_fast_mode_absent_matches_off_for_reconnect(monkeypatch):
     assert adapter.requires_reconnect(_delegated_fast_options(False)) is False
     assert adapter.requires_reconnect(_delegated_fast_options(None)) is False
     assert adapter.requires_reconnect(_delegated_fast_options(True)) is True
+
+
+# ── code-mode kernel config ───────────────────────────────────────────────
+
+
+def test_codemode_kernel_stdout_cap_fits_a_full_worker_report():
+    """A parent reads a subagent's report by PRINTING its Task result, so the
+    kernel's per-cell stdout cap must fit a maximum-length report plus its JSON
+    envelope. At fluid's 16,384-char default the model saw a fraction of a long
+    report and spent a provider round trip per extra slice it printed."""
+    import app.core.provider.harness_adapter as ha
+    from app.core.provider_agent import MAX_REPORT_CHARS
+
+    config = ha._codemode_kernel_config()
+
+    assert config.stdout_cap >= MAX_REPORT_CHARS * 2
+    # Everything else stays at fluid's defaults — the cap is the one deliberate
+    # divergence, not a fork of the whole kernel policy.
+    default = ha.KernelConfig()
+    assert config.ref_threshold == default.ref_threshold
+    assert config.checkpoint == default.checkpoint
+    assert config.allow_network == default.allow_network
+    assert config.allow_fs == default.allow_fs
