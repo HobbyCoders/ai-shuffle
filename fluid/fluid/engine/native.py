@@ -42,7 +42,11 @@ from dataclasses import dataclass, field, replace
 from fnmatch import fnmatchcase
 from typing import Any
 
-from fluid.codemode.session import CodeModeSession, register_code_mode_tools
+from fluid.codemode.session import (
+    CODE_MODE_SOURCE,
+    CodeModeSession,
+    register_code_mode_tools,
+)
 from fluid.context.cache_plan import plan_cache
 from fluid.context.compaction import CompactionConfig, Compactor, Promotion
 from fluid.context.compiler import CompiledPrompt
@@ -1614,7 +1618,23 @@ class NativeLoop(BackgroundLifecycleMixin):
         dispatch (:meth:`_gated_call`), and code mode (the ``CodeModeSession``
         this predicate is stamped onto at construction) — so a filtered tool is
         invisible, unloadable, and uncallable rather than merely discouraged.
+
+        Under code mode the four surface tools (``source == "codemode"``) are
+        exempt from the ALLOWLIST: the list names work tools, which the kernel
+        filters through the stamped predicate. ``disallowed_tools`` still
+        removes them.
         """
+        if self._codemode is not None and self.registry is not None:
+            spec = self.registry.get(name)
+            if spec is not None and spec.source == CODE_MODE_SOURCE:
+                # Code mode's four tools ARE the schema surface
+                # (``register_code_mode_tools``): the CE12 allowlist names
+                # WORK tools, and the kernel enforces it through the stamped
+                # ``tool_filter``. An allowlist of work tools must not strip
+                # the surface that reaches them — with every schema filtered
+                # the model can only narrate its calls as text. Deny still
+                # beats everything.
+                return not _matches_tool_pattern(name, self.disallowed_tools)
         if self.allowed_tools is not None and not _matches_tool_pattern(
             name, self.allowed_tools
         ):

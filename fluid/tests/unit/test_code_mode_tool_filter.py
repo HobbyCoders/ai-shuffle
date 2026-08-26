@@ -160,6 +160,49 @@ async def test_run_python_call_to_a_filtered_tool_errors_in_the_cell() -> None:
 # ── the engine wires its own surface in ───────────────────────────────────
 
 
+_CODE_MODE_SURFACE = {"run_python", "list_tools", "search_tools", "read_tool_docs"}
+
+
+def test_work_tool_allowlist_keeps_the_code_mode_surface() -> None:
+    """Regression: an agent restricted to work tools (``tools: Read, Grep``)
+    under code mode sent a request with NO tool schemas at all — the allowlist
+    filtered ``run_python`` itself, so the model could only narrate its calls
+    as text and the turn ended after one response."""
+    registry = _registry()
+    session = CodeModeSession(registry)
+    loop = NativeLoop(
+        provider=_IdleProvider(), store=MemoryStore(), model="claude-sonnet-5",
+        registry=registry, codemode=session, allowed_tools=["Read"],
+    )
+
+    assert {t["name"] for t in loop._tools_api()} == _CODE_MODE_SURFACE
+    # Dispatch admits the surface too — the schema fix alone would still have
+    # ``_gated_call`` refuse the call the model was just invited to make.
+    for name in _CODE_MODE_SURFACE:
+        assert loop._tool_permitted(name) is True
+
+    # The allowlist still governs the kernel's work tools.
+    assert session.tool_filter is not None
+    assert session.tool_filter("Read") is True
+    assert session.tool_filter("Bash") is False
+    assert "Bash" not in session.render_list()
+
+
+def test_explicit_deny_still_removes_a_code_mode_tool() -> None:
+    registry = _registry()
+    session = CodeModeSession(registry)
+    loop = NativeLoop(
+        provider=_IdleProvider(), store=MemoryStore(), model="claude-sonnet-5",
+        registry=registry, codemode=session,
+        allowed_tools=["Read"], disallowed_tools=["read_tool_docs"],
+    )
+
+    names = {t["name"] for t in loop._tools_api()}
+    assert "read_tool_docs" not in names
+    assert names == _CODE_MODE_SURFACE - {"read_tool_docs"}
+    assert loop._tool_permitted("read_tool_docs") is False
+
+
 def test_native_loop_hands_code_mode_its_tool_surface() -> None:
     registry = _registry()
     session = CodeModeSession(registry)
