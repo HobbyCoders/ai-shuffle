@@ -472,6 +472,42 @@ class WorkerOutcome:
     usage: Dict[str, Any] = field(default_factory=dict)
 
 
+#: Shapes a tool call takes when a model emits it as PROSE instead of a
+#: structured call — the provider stack failed to parse its calling syntax
+#: (or the request carried no tool schemas at all), so the "call" lands in
+#: the content stream. Seen in the wild as OpenAI-harmony recipient headers
+#: (`` to=run_python  code:``); the XML-ish wrappers cover the other serving
+#: stacks known to leak. Matched only on a single-response worker (see
+#: ``leaked_tool_call_marker``), where the surrounding text is the model's
+#: OWN final answer, never quoted tool output.
+_LEAKED_TOOL_CALL_PATTERNS: Tuple[re.Pattern, ...] = (
+    re.compile(r"(?:^|\s)(?:commentary\s+)?to=(?:functions\.)?\w+", re.MULTILINE),
+    re.compile(r"<\|?tool_call\|?>", re.IGNORECASE),
+    re.compile(r"<function(?:_call)?[=\s>]", re.IGNORECASE),
+    re.compile(r"<\|python_tag\|>"),
+    re.compile(r"<invoke name="),
+)
+
+
+def leaked_tool_call_marker(text: Optional[str]) -> Optional[str]:
+    """The fragment of ``text`` that reads as a tool call emitted as prose.
+
+    A worker whose model's tool calls never reach the tool layer "completes"
+    in one turn with its opening narration as the whole report — the call
+    itself leaks into the text (``to=run_python  code: ...``). Returning that
+    narration as a successful report is worse than failing: the parent trusts
+    it, retries against the same broken wiring, or silently drops the task.
+    The caller gates this check on ``num_turns <= 1`` so a real multi-turn
+    report that merely QUOTES such syntax is never flagged.
+    """
+    body = text or ""
+    for pattern in _LEAKED_TOOL_CALL_PATTERNS:
+        match = pattern.search(body)
+        if match:
+            return match.group(0).strip()
+    return None
+
+
 def bound_report(text: Optional[str]) -> Tuple[str, bool]:
     """Bound a worker report without discarding either half of its answer.
 
@@ -1312,7 +1348,36 @@ async def dispatch_worker(
                 usage=outcome["usage"],
             )
 
-        report, truncated = bound_report(final_assistant_text(worker_session_id))
+        final_text = final_assistant_text(worker_session_id)
+        num_turns = usage_seen.get("num_turns")
+        marker = (
+            leaked_tool_call_marker(final_text)
+            if isinstance(num_turns, int) and num_turns <= 1
+            else None
+        )
+        if marker:
+            # One response, zero tool executions, and the text carries the
+            # call the model TRIED to make. That is a tool-wiring failure
+            # dressed up as a report — fail it so the parent knows to retry
+            # differently instead of trusting narration.
+            error = (
+                "The worker ended after a single response without executing "
+                f"any tool call, and its reply contains what looks like a "
+                f"tool call emitted as plain text ({marker!r}). Its model's "
+                "tool calls are not reaching the tool layer, so this is "
+                "narration, not a report. Retry on a different model or "
+                "provider; the partial transcript is in session "
+                f"{worker_session_id}."
+            )
+            preview = error
+            return WorkerOutcome(
+                ok=False,
+                session_id=worker_session_id,
+                error=error,
+                usage=outcome["usage"],
+            )
+
+        report, truncated = bound_report(final_text)
         status = "completed"
         preview = report
         return WorkerOutcome(

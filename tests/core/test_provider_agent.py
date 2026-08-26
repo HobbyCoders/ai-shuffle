@@ -342,6 +342,28 @@ class TestHelpers:
         body, truncated = pa.bound_report("  hello  ")
         assert (body, truncated) == ("hello", False)
 
+    def test_leaked_tool_call_marker_catches_harmony_recipient(self):
+        """The shape observed in the wild: an OpenAI-harmony recipient header
+        leaking into the content stream after the model's opening narration."""
+        text = (
+            "I'll perform a repository-wide sweep across backend and vendored "
+            "code.\n\n to=run_python  code:\nfrom tools.Grep import Grep\n"
+        )
+        assert pa.leaked_tool_call_marker(text) == "to=run_python"
+
+    def test_leaked_tool_call_marker_catches_xml_wrappers(self):
+        assert pa.leaked_tool_call_marker("x <tool_call> y") is not None
+        assert pa.leaked_tool_call_marker("x <|tool_call|> y") is not None
+        assert pa.leaked_tool_call_marker('x <invoke name="Read"> y') is not None
+        assert pa.leaked_tool_call_marker("x <|python_tag|>import os") is not None
+
+    def test_leaked_tool_call_marker_ignores_ordinary_prose(self):
+        assert pa.leaked_tool_call_marker("Found 3 defs in app/core.") is None
+        assert pa.leaked_tool_call_marker("Set the field to a new value.") is None
+        assert pa.leaked_tool_call_marker("see https://x.test/?to=main") is None
+        assert pa.leaked_tool_call_marker("") is None
+        assert pa.leaked_tool_call_marker(None) is None
+
     def test_worker_session_registry_roundtrip(self):
         assert not pa.is_worker_session("s1")
         pa.register_worker_session("s1")
@@ -620,6 +642,74 @@ class TestDispatchWorker:
         assert outcome.report.endswith("END")
 
     # -- failure modes ----------------------------------------------------
+
+    def test_single_turn_leaked_tool_call_fails_instead_of_reporting(
+        self, dispatch_env, monkeypatch
+    ):
+        """A worker whose model emitted its tool call as plain text 'completes'
+        in one turn with narration as the whole report. That is a tool-wiring
+        failure, not a report — the parent must see ok=False with a diagnosis,
+        never the narration as a trusted result."""
+        monkeypatch.setattr(
+            pa, "final_turn_outcome",
+            lambda sid: {
+                "usage": {"num_turns": 1}, "error": None, "interrupted": False,
+                "terminal_found": True,
+            },
+        )
+        monkeypatch.setattr(
+            pa, "final_assistant_text",
+            lambda sid: "I'll sweep the repo.\n\n to=run_python  code:\nprint(1)",
+        )
+
+        outcome = _dispatch()
+
+        assert not outcome.ok
+        assert outcome.report == ""
+        assert "to=run_python" in outcome.error
+        assert "not reaching the tool layer" in outcome.error
+        assert outcome.session_id in outcome.error
+
+    def test_multi_turn_report_quoting_call_syntax_still_succeeds(
+        self, dispatch_env, monkeypatch
+    ):
+        """A worker that actually ran tools may legitimately QUOTE leaked-call
+        syntax in its findings; only the single-response shape is flagged."""
+        monkeypatch.setattr(
+            pa, "final_turn_outcome",
+            lambda sid: {
+                "usage": {"num_turns": 7}, "error": None, "interrupted": False,
+                "terminal_found": True,
+            },
+        )
+        monkeypatch.setattr(
+            pa, "final_assistant_text",
+            lambda sid: "The bug: the model emits ' to=run_python code:' as text.",
+        )
+
+        outcome = _dispatch()
+
+        assert outcome.ok
+        assert "to=run_python" in outcome.report
+
+    def test_single_turn_plain_answer_still_succeeds(self, dispatch_env, monkeypatch):
+        """One turn with no tool calls is fine when the text is a real answer."""
+        monkeypatch.setattr(
+            pa, "final_turn_outcome",
+            lambda sid: {
+                "usage": {"num_turns": 1}, "error": None, "interrupted": False,
+                "terminal_found": True,
+            },
+        )
+        monkeypatch.setattr(
+            pa, "final_assistant_text",
+            lambda sid: "The answer is 42; no exploration was needed.",
+        )
+
+        outcome = _dispatch()
+
+        assert outcome.ok
+        assert outcome.report.startswith("The answer is 42")
 
     def test_worker_turn_error_fails(self, dispatch_env, monkeypatch):
         monkeypatch.setattr(
