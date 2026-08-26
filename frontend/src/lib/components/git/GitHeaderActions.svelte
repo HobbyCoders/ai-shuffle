@@ -10,12 +10,13 @@
 	 * direct git actions. Branch selector is locked during streaming.
 	 */
 	import { onDestroy } from 'svelte';
-	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket } from 'lucide-svelte';
+	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, ExternalLink, TriangleAlert } from 'lucide-svelte';
 	import { git, diffStats, gitStatus, branches as branchStore, gitMode, changedFiles } from '$lib/stores/git.svelte';
 	import { checkoutBranchWithToast } from '$lib/stores/gitCheckoutAction';
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import { computeShowShipIt } from '$lib/stores/derived/ship-it-visibility';
+	import { computePrimaryAction, finishBlockedByMergeability } from '$lib/stores/derived/git-primary-action';
 	import GitActionOptionsDropdown from './GitActionOptionsDropdown.svelte';
 	import type {
 		CommitOptions,
@@ -43,7 +44,7 @@
 		 *  This ensures the correct branch shows immediately without waiting for the store to load. */
 		worktreeBranch?: string | null;
 		/** When set, shows the "Finish" button instead of Commit/Create PR */
-		openPR?: { number: number; title: string; url: string } | null;
+		openPR?: { number: number; title: string; url: string; mergeable?: boolean | null } | null;
 		/** Mutating actions. A bare main-button click passes no options (falling
 		 *  back to the gitActionPreferences defaults); the option popover passes an
 		 *  explicit bag. Pass the MainPanel handlers directly so both paths flow
@@ -117,6 +118,21 @@
 	const needsPull = $derived(commitsBehindUpstream > 0 && hasUpstream);
 	const canPush = $derived(!hasChanges && commitsAheadUpstream > 0 && hasUpstream && !needsPull);
 	const canCreatePR = $derived(!hasChanges && commitsAhead > 0 && !isOnDefaultBranch && !needsPull);
+
+	// Primary action decision (Commit / Finish / Create PR / clean placeholder)
+	// extracted into a pure, unit-tested helper — the template renders its result.
+	const primaryAction = $derived(
+		computePrimaryAction({
+			hasChanges,
+			hasOpenPr: !!openPR,
+			isMergeable: openPR?.mergeable ?? null,
+			commitsAhead,
+			differsFromBase: branchDiffersFromBase,
+			isOnDefaultBranch,
+			needsPull
+		})
+	);
+	const finishBlocked = $derived(finishBlockedByMergeability(openPR?.mergeable ?? null));
 
 	// Whether this folder is a *confirmed* git repo. Strict `=== true` (not the
 	// optimistic `!== false` used for the header gate): for a reused/cleaned-up
@@ -438,8 +454,9 @@
 		</div>
 	{/if}
 
-	<!-- Commit / Create PR / Finish split button -->
-	{#if hasChanges}
+	<!-- Commit / Create PR / Finish split button — primary action decided by
+	     computePrimaryAction (unit-tested pure helper) -->
+	{#if primaryAction === 'commit'}
 		<div class="split-btn-group">
 			<button
 				class="git-btn split-main"
@@ -477,15 +494,23 @@
 				/>
 			{/if}
 		</div>
-	{:else if openPR}
+	{:else if primaryAction === 'finish'}
 		<div class="split-btn-group">
 			<button
 				class="git-btn split-main"
 				onclick={() => onClickFinish()}
-				disabled={actionsBusy}
-				title={isStreaming ? 'Cannot finish during streaming' : `Quick merge PR #${openPR.number} with saved settings`}
+				disabled={actionsBusy || finishBlocked}
+				title={isStreaming
+					? 'Cannot finish during streaming'
+					: finishBlocked
+						? `PR #${openPR!.number} is not mergeable yet — resolve conflicts on GitHub or wait for GitHub to compute mergeability`
+						: `Quick merge PR #${openPR!.number} with saved settings`}
 			>
-				<CheckCircle2 size={14} strokeWidth={1.5} />
+				{#if finishBlocked}
+					<TriangleAlert size={14} strokeWidth={1.5} />
+				{:else}
+					<CheckCircle2 size={14} strokeWidth={1.5} />
+				{/if}
 				<span class="btn-label">Finish</span>
 			</button>
 			<button
@@ -515,7 +540,7 @@
 				/>
 			{/if}
 		</div>
-	{:else if canCreatePR}
+	{:else if primaryAction === 'create-pr'}
 		<div class="split-btn-group">
 			<button
 				class="git-btn split-main"
@@ -608,6 +633,23 @@
 		</div>
 	{/if}
 
+	<!-- Open-PR chip: informational link to the PR on GitHub whenever one
+	     exists for this branch — distinct from the Finish button (which is the
+	     action). Lets the user peek at CI status / discussion without leaving. -->
+	{#if openPR}
+		<a
+			class="git-btn pr-chip"
+			href={openPR.url}
+			target="_blank"
+			rel="noopener noreferrer"
+			title={`Open PR #${openPR.number}: ${openPR.title}`}
+		>
+			<GitPullRequest size={13} strokeWidth={1.5} />
+			<span class="btn-label">PR #{openPR.number}</span>
+			<ExternalLink size={10} strokeWidth={1.5} />
+		</a>
+	{/if}
+
 	<!-- Diff stats (clickable to open review panel) -->
 	{#if hasChanges}
 		<button
@@ -649,6 +691,18 @@
 		display: flex;
 		align-items: center;
 		gap: 4px;
+	}
+
+	.pr-chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		text-decoration: none;
+		color: inherit;
+	}
+
+	.pr-chip:hover {
+		text-decoration: underline;
 	}
 
 	.branch-selector {

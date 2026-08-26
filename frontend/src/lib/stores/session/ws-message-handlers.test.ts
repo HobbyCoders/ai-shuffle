@@ -68,6 +68,7 @@ function createMockDeps(overrides?: Partial<MessageHandlerDeps>): MessageHandler
 		},
 		gitRefreshStatus: vi.fn(),
 		gitRefreshDiffStats: vi.fn(),
+		gitRefreshPrState: vi.fn(),
 		gitGetProjectId: vi.fn(() => null),
 		gitGetLoading: vi.fn(() => false),
 		appLoadSessions: vi.fn(),
@@ -230,6 +231,38 @@ describe('ws-message-handlers', () => {
 			expect(() => {
 				handlers.handleMessage({});
 			}).not.toThrow();
+		});
+
+		it('user_branch_changed refreshes status, diff stats, and PR state', () => {
+			deps = createMockDeps({
+				gitGetProjectId: vi.fn(() => 'project-1'),
+				gitGetLoading: vi.fn(() => false),
+				gitRefreshStatus: vi.fn(),
+				gitRefreshDiffStats: vi.fn(),
+				gitRefreshPrState: vi.fn(),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'user_branch_changed', project_id: 'project-1' });
+
+			expect(deps.gitRefreshStatus).toHaveBeenCalled();
+			expect(deps.gitRefreshDiffStats).toHaveBeenCalled();
+			expect(deps.gitRefreshPrState).toHaveBeenCalled();
+		});
+
+		it('user_branch_changed skips a different project entirely', () => {
+			deps = createMockDeps({
+				gitGetProjectId: vi.fn(() => 'other-project'),
+				gitRefreshStatus: vi.fn(),
+				gitRefreshDiffStats: vi.fn(),
+				gitRefreshPrState: vi.fn(),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'user_branch_changed', project_id: 'project-1' });
+
+			expect(deps.gitRefreshStatus).not.toHaveBeenCalled();
+			expect(deps.gitRefreshPrState).not.toHaveBeenCalled();
 		});
 	});
 

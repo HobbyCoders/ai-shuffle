@@ -128,6 +128,25 @@ class DiffStatsResponse(BaseModel):
     files_changed: int
 
 
+class OpenPrInfo(BaseModel):
+    """The open pull request whose head is the current branch."""
+    number: int
+    title: str
+    url: str
+    draft: bool = False
+    state: Optional[str] = None
+    # GitHub computes this lazily; None means "unknown yet" — the UI must NOT
+    # treat an unknown-mergeability PR as unmergeable.
+    mergeable: Optional[bool] = None
+
+
+class PrStateResponse(BaseModel):
+    """Response for the pr-state endpoint (PR lifecycle for the current branch)."""
+    current_branch: Optional[str] = None
+    has_github: bool = False
+    open_pr: Optional[OpenPrInfo] = None
+
+
 class CommitRequest(BaseModel):
     """Request to create a commit"""
     message: str = Field(..., min_length=1, max_length=5000)

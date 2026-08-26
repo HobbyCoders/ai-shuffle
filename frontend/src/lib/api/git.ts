@@ -674,6 +674,34 @@ export async function pullFromRemote(
 }
 
 // ============================================================================
+// PR State API
+// ============================================================================
+
+export interface OpenPrInfo {
+    number: number;
+    title: string;
+    url: string;
+    draft: boolean;
+    state: string | null;
+    /** GitHub computes this lazily; null = unknown yet — NOT unmergeable. */
+    mergeable: boolean | null;
+}
+
+export interface PrState {
+    current_branch: string | null;
+    has_github: boolean;
+    open_pr: OpenPrInfo | null;
+}
+
+/**
+ * PR lifecycle for the current branch of the resolved checkout
+ * (session-scoped like every other git call).
+ */
+export async function getPrState(projectId: string, worktreeId?: string, sessionId?: string, options?: RequestOptions): Promise<PrState> {
+    return api.get<PrState>(`${BASE}/${projectId}/git/pr-state${scopeQs(worktreeId, sessionId)}`, options);
+}
+
+// ============================================================================
 // Init Repo API
 // ============================================================================
 

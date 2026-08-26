@@ -38,6 +38,7 @@ from app.core.worktree_manager import worktree_manager
 from app.api.auth import require_auth
 from app.api.common import check_project_access
 from app.api.git_helpers import run_git, get_working_dir, stage_and_commit
+from app.api.schemas.git import PrStateResponse
 from app.api.git_ai import (
     generate_commit_message_for_dir,
     generate_pr_description_for_dir,
@@ -189,13 +190,22 @@ def _is_already_merged(error: Optional[str]) -> bool:
     return "already merged" in low or "already been merged" in low
 
 
+# Unique sentinel returned by _find_open_pr_for_branch when the gh lookup fails,
+# so callers can tell "no PR exists" apart from "couldn't ask GitHub".
+_find_open_pr_failed = object()
+
+
 def _find_open_pr_for_branch(repo: str, branch: str):
-    """Return the open PullRequest whose head is *branch*, or None."""
+    """Return the open PullRequest whose head is *branch*.
+
+    Returns None when the lookup genuinely finds no match; returns
+    ``_find_open_pr_failed`` (a unique sentinel) when the gh call itself fails.
+    """
     try:
         pulls = github_service.list_pulls(repo, state="open", limit=100)
     except Exception:
         logger.exception("Failed to list pull requests for %s", repo)
-        return None
+        return _find_open_pr_failed
     for pr in pulls:
         if pr.head_branch == branch:
             return pr
@@ -713,3 +723,87 @@ async def get_operation(
     if not op or op.project_id != project_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Operation not found")
     return op.snapshot()
+
+
+# =============================================================================
+# PR state (lifecycle for the current branch)
+# =============================================================================
+
+_PR_STATE_TTL_SECONDS = 15.0
+_pr_state_cache: Dict[str, tuple] = {}  # key -> (expires_monotonic, response_dict)
+
+
+def _invalidate_pr_state_cache(working_dir: Optional[str] = None) -> None:
+    """Drop cached PR state — after a PR create/merge, or for tests.
+
+    With *working_dir*, only that entry is dropped; without it, everything.
+    """
+    if working_dir is None:
+        _pr_state_cache.clear()
+    else:
+        _pr_state_cache.pop(working_dir, None)
+
+
+@router.get("/pr-state", response_model=PrStateResponse)
+async def get_pr_state(
+    request: Request,
+    project_id: str,
+    worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    token: str = Depends(require_auth),
+):
+    """Pull-request lifecycle for the session's current branch.
+
+    Scoped exactly like every other git route: *worktree_id* wins over
+    *session_id*; with neither, the main project checkout is used. Returns the
+    open PR whose head is the current branch (with GitHub's lazy ``mergeable``
+    verdict — None means still computing) so the UI can decide between
+    Create-PR / Finish("Merge PR #N") / clean states. Degrades gracefully:
+    no git repo or no GitHub remote just yields ``has_github=False``.
+    """
+    check_project_access(request, project_id)
+
+    working_dir = get_working_dir(project_id, worktree_id, session_id)
+
+    st = await run_git(git_service.get_status, working_dir)
+    branch = (st or {}).get("current_branch") if st else None
+    if not branch or not (st or {}).get("is_git_repo", False):
+        return PrStateResponse(current_branch=None, has_github=False, open_pr=None)
+
+    cache_key = f"{working_dir}:{branch}"
+    now = time.monotonic()
+    cached = _pr_state_cache.get(cache_key)
+    if cached and cached[0] > now:
+        return PrStateResponse(**cached[1])
+
+    # Base shape when there's nothing to say about GitHub.
+    result = {"current_branch": branch, "has_github": False, "open_pr": None}
+
+    lookup_ok = True
+    try:
+        repo = await asyncio.to_thread(github_service.get_repo_from_remote, working_dir)
+        if repo and github_service.is_authenticated():
+            result["has_github"] = True
+            pr = await asyncio.to_thread(_find_open_pr_for_branch, repo, branch)
+            if pr is _find_open_pr_failed:
+                # Couldn't ask gh — PR state is unknown for this cycle. DON'T
+                # cache (a cached failure would hide a just-created PR for the
+                # whole TTL); has_github stays True because the repo IS known.
+                lookup_ok = False
+            elif pr is not None:
+                result["open_pr"] = {
+                    "number": pr.number,
+                    "title": pr.title,
+                    "url": pr.url,
+                    "draft": bool(getattr(pr, "draft", False)),
+                    "state": getattr(pr, "state", None),
+                    "mergeable": getattr(pr, "mergeable", None),
+                }
+    except Exception as e:  # noqa: BLE001
+        logger.warning("pr-state lookup failed for %s (%s): %s", project_id, branch, e)
+        result["has_github"] = False
+        lookup_ok = False
+
+    if lookup_ok and result["has_github"]:
+        _pr_state_cache[cache_key] = (now + _PR_STATE_TTL_SECONDS, dict(result))
+    return PrStateResponse(**result)

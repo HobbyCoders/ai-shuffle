@@ -10,11 +10,11 @@
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { projects, sessions } from '$lib/stores/app-data.svelte';
 	import { activeSession } from '$lib/stores/active-session';
-	import { git, gitStatus, branches as branchStore } from '$lib/stores/git.svelte';
+	import { git, gitStatus, gitPrState, branches as branchStore } from '$lib/stores/git.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
 	import { gitControlsStreaming } from '$lib/stores/derived/active-streaming.svelte';
-	import { getPullRequests, createPullRequest } from '$lib/api/github';
+	import { createPullRequest } from '$lib/api/github';
 	import {
 		generateCommitMessage,
 		generatePRDescription,
@@ -188,8 +188,13 @@
 	let reviewMode = $state(false);
 	let selectedDiffFile = $state<import('$lib/api/git').FileChangeInfo | null>(null);
 
-	// PR detection for current branch (drives Finish button visibility — read-only)
-	let branchPR = $state<{ number: number; title: string; url: string; head_branch: string } | null>(null);
+	// PR lifecycle for the active session's branch. Fetched by the git store's
+	// session-scoped /git/pr-state call and refreshed after every PR-relevant
+	// event (streaming end, pull, commit-with-PR, Create PR, Finish, Ship It,
+	// cross-device branch_changed WS nudge). The old local checkPullRequests()
+	// went stale whenever a PR was created/merged without a branch change —
+	// this derivation can't.
+	const openPrForBranch = $derived($gitPrState?.open_pr ?? null);
 
 	// Load git repository when active tab's project changes (only when GitHub CLI is authenticated).
 	// Extract the project and worktree strings OUTSIDE the effect to avoid tracking the entire
@@ -332,31 +337,6 @@
 		_gitPollProject = null;
 	}
 
-	/**
-	 * Check for open PRs matching the current branch.
-	 * Only called when the branch changes (event-driven), not on a timer.
-	 */
-	async function checkPullRequests(projectId: string, branch: string | null) {
-		// Don't look for PRs to finish when on the default branch — PRs with the default
-		// branch as head are fork PRs, not feature branches you'd "finish" locally.
-		const defaultBranch = $githubRepoInfo?.default_branch ?? 'main';
-		if (branch && branch === defaultBranch) {
-			branchPR = null;
-			return;
-		}
-		if (branch && $githubAuthenticated) {
-			try {
-				const prs = await getPullRequests(projectId, 'open', 10);
-				const match = prs.find(pr => pr.head_branch === branch);
-				branchPR = match ? { number: match.number, title: match.title, url: match.url, head_branch: match.head_branch } : null;
-			} catch {
-				branchPR = null;
-			}
-		} else {
-			branchPR = null;
-		}
-	}
-
 	// Pause/resume git poll when tab visibility changes.
 	function handleVisibilityChange() {
 		if (document.hidden) {
@@ -376,9 +356,6 @@
 		const authenticated = $githubAuthenticated;
 		const isRemote = activeIsRemote;
 
-		// Clear stale PR state immediately when any dependency changes.
-		branchPR = null;
-
 		stopGitPoll();
 
 		// Never poll local git for a remote-placed session — the repo lives on the
@@ -396,24 +373,6 @@
 		};
 	});
 
-	// PR detection: runs when the branch changes (event-driven via WebSocket state updates).
-	// Tracks previous branch to avoid redundant GitHub API calls.
-	let _lastCheckedPRKey: string | null = null;
-	$effect(() => {
-		const branch = $gitStatus?.current_branch ?? null;
-		const project = activeProject;
-		const authenticated = $githubAuthenticated;
-		const prKey = (project && branch) ? `${project}:${branch}` : null;
-
-		if (prKey !== _lastCheckedPRKey && project && authenticated && branch) {
-			_lastCheckedPRKey = prKey;
-			untrack(() => checkPullRequests(project, branch));
-		} else if (!project || !authenticated) {
-			_lastCheckedPRKey = null;
-			branchPR = null;
-		}
-	});
-
 	// When streaming ends, do an immediate refresh so buttons update promptly.
 	// Uses forceRefresh() to abort any in-flight poll requests whose responses
 	// may predate the session's final git operations.
@@ -428,6 +387,7 @@
 				untrack(() => {
 					_gitLastActivity = Date.now();
 					git.forceRefresh();
+					git.refreshPrState(true).catch(() => {});
 					scheduleGitPoll(); // Reset to active interval for post-streaming cool-down
 				});
 			}
@@ -548,7 +508,7 @@
 				gitOperations.setStep('pr', 'running');
 				prInfo = await runCreatePR({});
 				gitOperations.setStep('pr', 'done', { detail: `#${prInfo.number}` });
-				checkPullRequests(projectId, $gitStatus?.current_branch ?? null);
+				git.refreshPrState(true).catch(() => {});
 			}
 
 			gitOperations.succeed();
@@ -590,6 +550,7 @@
 		gitOperations.begin('Pull', []);
 		try {
 			const res = await git.pull(strategy, autoStash);
+			git.refreshPrState(true).catch(() => {});
 			gitOperations.clear();
 			if (res.has_conflicts) {
 				const files = res.conflicts.length ? res.conflicts.join(', ') : 'some files';
@@ -627,7 +588,7 @@
 			const prInfo = await runCreatePR(opts);
 			gitOperations.setStep('pr', 'done', { detail: `#${prInfo.number}` });
 
-			checkPullRequests(projectId, $gitStatus?.current_branch ?? null);
+			git.refreshPrState(true).catch(() => {});
 			gitOperations.succeed();
 			const url = prInfo.url;
 			toast.push(`Opened pull request #${prInfo.number}`, { tone: 'success', action: { label: 'View PR', onClick: () => openPRUrl(url) } });
@@ -726,7 +687,7 @@
 		}
 		if (effects.refreshGit) {
 			git.forceRefresh();
-			checkPullRequests(origin.projectId!, $gitStatus?.current_branch ?? null);
+			git.refreshPrState(true).catch(() => {});
 		}
 		if (effects.toast.prUrl) {
 			const url = effects.toast.prUrl;
@@ -801,7 +762,7 @@
 				showBranchSelector={false}
 				projectName={headerProjectName}
 				worktreeBranch={activeWorktreeBranch}
-				openPR={branchPR}
+				openPR={openPrForBranch}
 				onClickCommit={handleCommit}
 				onClickCreatePR={handleCreatePR}
 				onClickFinish={handleFinish}

@@ -149,6 +149,28 @@ def run_to_response(run: WorkflowRun) -> WorkflowRunResponse:
 # Status Endpoint
 # =============================================================================
 
+
+async def _broadcast_pr_changed(request: Request, project_id: str, branch_name: str) -> None:
+    """Nudge every device that a PR lifecycle event happened on *branch_name*.
+
+    Reuses the branch-changed channel (frontend already refreshes git state on
+    it) so other tabs/devices re-query pr-state without a dedicated contract
+    addition. Failures are logged, never raised — the HTTP response already
+    succeeded.
+    """
+    try:
+        from app.api.auth import get_api_user_from_request
+        from app.core.sync_engine import sync_engine
+
+        api_user = get_api_user_from_request(request)
+        user_id = api_user["id"] if api_user else "admin"
+        await sync_engine.broadcast_branch_changed(
+            user_id=user_id, project_id=project_id, branch_name=branch_name
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Failed to broadcast PR change: {e}")
+
+
 @router.get("/status", response_model=GitHubStatusResponse)
 async def get_github_status(
     request: Request,
@@ -293,6 +315,8 @@ async def create_pull_request(
         f"head={body.head} total={t_total_ms:.0f}ms gh_cli={t_gh_ms:.0f}ms"
     )
 
+    await _broadcast_pr_changed(request, project_id, body.head)
+
     return pr_to_response(pr)
 
 
@@ -342,6 +366,8 @@ async def merge_pull_request(
         f"[ship-it-timing] merge-pr project={project_id} repo={repo} "
         f"pr=#{number} method={method} total={t_total_ms:.0f}ms gh_cli={t_gh_ms:.0f}ms"
     )
+
+    await _broadcast_pr_changed(request, project_id, f"pr-#{number}-merged")
 
     return {"status": "ok", "message": f"Pull request #{number} merged successfully"}
 

@@ -92,6 +92,8 @@ export interface MessageHandlerDeps {
 	// Callbacks for git
 	gitRefreshStatus: () => void;
 	gitRefreshDiffStats: () => void;
+	/** Optional: refresh session-scoped PR state (merges the git store's throttle). */
+	gitRefreshPrState?: () => void;
 	gitGetProjectId: () => string | null;
 	gitGetLoading: () => boolean;
 	// Callbacks for app-level side effects
@@ -130,7 +132,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 	const {
 		update, getState, wsSend,
 		streamingSessions, backgroundPermissions,
-		gitRefreshStatus, gitRefreshDiffStats, gitGetProjectId, gitGetLoading,
+		gitRefreshStatus, gitRefreshDiffStats, gitRefreshPrState, gitGetProjectId, gitGetLoading,
 		appLoadSessions, appLoadApiUserSessions,
 		internal,
 		onNewChat, onPersistSession,
@@ -490,6 +492,9 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			if (gitProjectId === projectId && !gitGetLoading()) {
 				gitRefreshStatus();
 				gitRefreshDiffStats();
+				// Also fired after PR create/merge (backend reuses this channel),
+				// so re-query PR lifecycle to keep Finish/Create-PR fresh everywhere.
+				gitRefreshPrState?.();
 			}
 			return;
 		}

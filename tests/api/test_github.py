@@ -902,6 +902,33 @@ class TestCreatePullRequestEndpoint:
                         )
 
     @pytest.mark.asyncio
+    async def test_create_broadcasts_pr_changed(self, sample_pull_request):
+        """A successful PR create broadcasts branch_changed so other
+        tabs/devices re-query pr-state (cross-device freshness)."""
+        import asyncio as _asyncio
+        from unittest.mock import AsyncMock
+        from app.api.github import create_pull_request, CreatePullRequest
+
+        mock_request = MagicMock(spec=Request)
+        body = CreatePullRequest(title="T", body="B", head="feature-branch", base="main")
+
+        with patch("app.api.github.check_project_access"):
+            with patch("app.api.github.check_github_auth"):
+                with patch("app.api.github.get_repo_for_project", return_value="owner/repo"):
+                    with patch("app.api.github.github_service") as mock_github:
+                        mock_github.create_pull.return_value = (sample_pull_request, None)
+                        with patch(
+                            "app.api.github._broadcast_pr_changed", new_callable=AsyncMock
+                        ) as mock_bc:
+                            await create_pull_request(
+                                request=mock_request,
+                                project_id="test-project-id",
+                                body=body,
+                                token="test-token"
+                            )
+        mock_bc.assert_awaited_once_with(mock_request, "test-project-id", "feature-branch")
+
+    @pytest.mark.asyncio
     async def test_raises_400_when_creation_fails(self):
         """Test create PR raises 400 when creation fails."""
         from app.api.github import create_pull_request, CreatePullRequest

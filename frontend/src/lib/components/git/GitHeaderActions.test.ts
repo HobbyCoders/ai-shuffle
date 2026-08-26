@@ -206,6 +206,59 @@ describe('GitHeaderActions button visibility', () => {
 		expect(screen.getByText('Pull')).toBeTruthy();
 		expect(screen.getByRole('button', { name: 'Pull options' })).toBeTruthy();
 	});
+
+	it('disables Finish when the open PR is explicitly not mergeable', () => {
+		cleanAheadBranch();
+		renderHeader({
+			openPR: { number: 42, title: 'x', url: 'http://x', mergeable: false }
+		});
+		const finishBtn = screen.getByText('Finish').closest('button') as HTMLButtonElement;
+		expect(finishBtn.disabled).toBe(true);
+		// Warning icon: title explains the mergeability block.
+		expect(finishBtn.title).toContain('not mergeable');
+	});
+
+	it('keeps Finish enabled when mergeability is unknown (null)', () => {
+		cleanAheadBranch();
+		renderHeader({
+			openPR: { number: 42, title: 'x', url: 'http://x', mergeable: null }
+		});
+		const finishBtn = screen.getByText('Finish').closest('button') as HTMLButtonElement;
+		expect(finishBtn.disabled).toBe(false);
+	});
+
+	it('shows an informational PR chip linking to the PR', () => {
+		cleanAheadBranch();
+		renderHeader({ openPR: { number: 42, title: 'My PR', url: 'http://x/pr/42' } });
+		const chip = screen.getByRole('link', { name: /PR #42/ }) as HTMLAnchorElement;
+		expect(chip.getAttribute('href')).toBe('http://x/pr/42');
+		expect(chip.getAttribute('target')).toBe('_blank');
+	});
+
+	it('no PR chip when there is no open PR', () => {
+		cleanAheadBranch();
+		renderHeader();
+		expect(screen.queryByRole('link', { name: /PR #/ })).toBeNull();
+	});
+
+	it('shows Create PR when differsFromBase even with zero commits ahead', () => {
+		// The matrix gap the helper now closes: content differs from base but
+		// commit count ahead (vs default branch) is 0.
+		mocks.gitStatus.set({
+			current_branch: 'feature/x',
+			ahead: 0,
+			differs_from_base: true,
+			is_git_repo: true
+		});
+		mocks.diffStats.set({ additions: 0, deletions: 0, files_changed: 0 });
+		mocks.changedFiles.set([]);
+		mocks.branches.set([
+			{ name: 'feature/x', current: true, remote: false, upstream: 'origin/feature/x', ahead: 0, behind: 0 }
+		]);
+		mocks.githubRepoInfo.set({ default_branch: 'main' });
+		renderHeader();
+		expect(screen.getByText('Create PR')).toBeTruthy();
+	});
 });
 
 // ── Open / close coordination ───────────────────────────────────────────────

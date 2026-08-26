@@ -549,6 +549,7 @@ const { handleMessage } = createMessageHandlers({
 	backgroundPermissions,
 	gitRefreshStatus: () => git.refreshStatus(),
 	gitRefreshDiffStats: () => git.refreshDiffStats(),
+	gitRefreshPrState: () => { git.refreshPrState(true).catch(() => {}); },
 	gitGetProjectId: () => git.current.projectId,
 	gitGetLoading: () => git.current.loading,
 	appLoadSessions: () => appData.loadSessions(),

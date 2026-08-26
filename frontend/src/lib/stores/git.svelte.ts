@@ -23,7 +23,9 @@ export type {
 	FileChangeInfo,
 	ChangedFilesResponse,
 	FileDiffResponse,
-	OperationResponse
+	OperationResponse,
+	PrState,
+	OpenPrInfo
 } from '$lib/api/git';
 
 // ============================================================================
@@ -44,6 +46,7 @@ interface GitState {
 	commits: gitApi.CommitNode[];
 	worktrees: gitApi.Worktree[];
 	diffStats: gitApi.DiffStats | null;
+	prState: gitApi.PrState | null;
 	changedFiles: gitApi.FileChangeInfo[] | null;
 	changedFilesLoading: boolean;
 	loading: boolean;
@@ -57,6 +60,7 @@ interface CachedState {
 	commits: gitApi.CommitNode[];
 	worktrees: gitApi.Worktree[];
 	diffStats: gitApi.DiffStats | null;
+	prState: gitApi.PrState | null;
 	changedFiles: gitApi.FileChangeInfo[] | null;
 }
 
@@ -70,6 +74,7 @@ const EMPTY_STATE: GitState = {
 	commits: [],
 	worktrees: [],
 	diffStats: null,
+	prState: null,
 	changedFiles: null,
 	changedFilesLoading: false,
 	loading: false,
@@ -145,6 +150,12 @@ let _statusInFlight = false;
 let _diffStatsInFlight = false;
 let _branchesInFlight = false;
 let _changedFilesInFlight = false;
+
+// PR state refreshes at a slower cadence than status (gh CLI cost) — track the
+// last fetch so poll cycles can throttle it.
+const PR_STATE_MIN_INTERVAL_MS = 30_000;
+let _prStateInFlight = false;
+let _lastPrStateFetch = 0;
 
 // AbortControllers for poll-triggered fetches so they can be cancelled when
 // an operation starts or the component unmounts, freeing browser connections.
@@ -253,6 +264,7 @@ function _checkWorktreeGone(e: unknown): boolean {
 			commits: [],
 			worktrees: [],
 			diffStats: null,
+			prState: null,
 			changedFiles: null,
 			loading: false
 		}));
@@ -291,14 +303,16 @@ async function _loadCore(
 		if (_loadInFlight !== key) return;
 
 		if (status.is_git_repo) {
-			const [branches, graphResponse, worktrees, diffStats, changedFilesResp] = await Promise.all([
+			const [branches, graphResponse, worktrees, diffStats, changedFilesResp, prState] = await Promise.all([
 				gitApi.getBranches(projectId, true, worktreeId, undefined, sessionId),
 				gitApi.getCommitGraph(projectId, 50),
 				gitApi.getWorktrees(projectId),
 				gitApi.getDiffStats(projectId, true, worktreeId, undefined, sessionId).catch(() => null),
-				gitApi.getChangedFiles(projectId, worktreeId, sessionId).catch(() => null)
+				gitApi.getChangedFiles(projectId, worktreeId, sessionId).catch(() => null),
+				gitApi.getPrState(projectId, worktreeId ?? undefined, sessionId ?? undefined).catch(() => null)
 			]);
 			if (_loadInFlight !== key) return;
+			if (prState) _lastPrStateFetch = Date.now();
 
 			const newState: CachedState = {
 				status,
@@ -306,6 +320,7 @@ async function _loadCore(
 				commits: graphResponse.commits,
 				worktrees,
 				diffStats: diffStats ?? null,
+				prState: prState ?? null,
 				changedFiles: changedFilesResp?.files ?? null
 			};
 
@@ -321,7 +336,7 @@ async function _loadCore(
 			_backgroundFetch(key, projectId, worktreeId, sessionId);
 		} else {
 			// Not a git repo — clear ALL git state so stale cached values
-			// (diffStats, branches, etc.) from a previous load don't persist.
+			// (diffStats, prState, branches, etc.) from a previous load don't persist.
 			_update((s) => ({
 				...s,
 				status,
@@ -329,6 +344,7 @@ async function _loadCore(
 				commits: [],
 				worktrees: [],
 				diffStats: null,
+				prState: null,
 				changedFiles: null,
 				loading: false
 			}));
@@ -686,7 +702,8 @@ export const git = {
 				git.refreshStatus(),
 				git.loadBranches(),
 				git.refreshDiffStats(),
-				git.loadGraph()
+				git.loadGraph(),
+				git.refreshPrState(true).catch(() => {})
 			]);
 
 			return response;
@@ -761,6 +778,42 @@ export const git = {
 		}
 	},
 
+	/**
+	 * Refresh the PR-lifecycle state (open PR for the current branch) for the
+	 * active context. Throttled to PR_STATE_MIN_INTERVAL_MS when triggered by
+	 * polling; explicit callers (after commit-with-PR, Create PR, Finish,
+	 * Ship It, pull, streaming-end) can force past the throttle with `force`.
+	 */
+	async refreshPrState(force: boolean = false) {
+		if (!_state.projectId) return;
+		if (_prStateInFlight) return;
+		if (_worktreeGone) return; // Worktree deleted — stop polling
+		if (_isBackingOff()) return;
+		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined, _state.sessionId);
+		const now = Date.now();
+		if (!force && now - _lastPrStateFetch < PR_STATE_MIN_INTERVAL_MS) return;
+
+		_prStateInFlight = true;
+		try {
+			const prState = await gitApi.getPrState(
+				_state.projectId,
+				_state.worktreeId ?? undefined,
+				_state.sessionId ?? undefined
+			);
+			if (_loadedKey !== key) return; // context switched mid-flight
+			_lastPrStateFetch = Date.now();
+			if (_shallowEqual(prState as unknown as Record<string, unknown>, _state.prState as unknown as Record<string, unknown>)) return;
+			_update((s) => ({ ...s, prState }));
+			_syncToCache({ prState });
+		} catch {
+			// PR state is advisory — a failure just leaves the previous value.
+			// Deliberately not recorded as a server error: gh hiccups shouldn't
+			// trip the status poller's backoff.
+		} finally {
+			_prStateInFlight = false;
+		}
+	},
+
 	async commitChanges(
 		message: string,
 		includeUnstaged: boolean = true
@@ -815,10 +868,12 @@ export const git = {
 			);
 
 			// Refresh both status and branches so the Push badge
-			// (which reads branch.ahead) reflects the new state.
+			// (which reads branch.ahead) reflects the new state. Push can also
+			// change GitHub's mergeable verdict on an open PR.
 			await Promise.all([
 				git.refreshStatus(),
-				git.loadBranches()
+				git.loadBranches(),
+				git.refreshPrState(true).catch(() => {})
 			]);
 
 			return response;
@@ -989,6 +1044,7 @@ export const git = {
 			_statusInFlight = false;
 			_diffStatsInFlight = false;
 			_branchesInFlight = false;
+			_prStateInFlight = false;
 		}
 	},
 
@@ -1013,6 +1069,7 @@ export const git = {
 		git.refreshStatus();
 		git.refreshDiffStats();
 		git.loadBranches();
+		git.refreshPrState(true).catch(() => {});
 	}
 };
 
@@ -1032,3 +1089,4 @@ export const currentBranch = createDerived(
 
 export const changedFiles = createDerived(() => _state.changedFiles);
 export const changedFilesLoading = createDerived(() => _state.changedFilesLoading);
+export const gitPrState = createDerived(() => _state.prState);
