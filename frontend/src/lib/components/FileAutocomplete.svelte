@@ -870,7 +870,7 @@
   }
 
   /* Mobile: break out of textarea-wrapper to span full chat island width */
-  @media (max-width: 640px) {
+  @media (max-width: 1080px) {
     .file-autocomplete-panel {
       left: -15px; /* -(island .input-area padding 14px + island border 1px) */
       right: auto;

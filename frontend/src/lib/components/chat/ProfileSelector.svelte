@@ -226,7 +226,7 @@
 	}
 
 	/* Desktop: allow wider name */
-	@media (min-width: 640px) {
+	@media (min-width: 1081px) {
 		.selector-text {
 			max-width: 140px;
 		}
@@ -292,7 +292,7 @@
 	}
 
 	/* Responsive: mobile layout adjustments */
-	@media (max-width: 639px) {
+	@media (max-width: 1080px) {
 		/* On mobile the pill bar wraps onto multiple lines, so the profile pill is
 		   free to grow — show the full profile name instead of truncating it.
 		   Bound to the viewport (minus the bar's padding) so a pathologically long

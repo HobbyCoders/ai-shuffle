@@ -13,7 +13,7 @@ const chatInput = readFileSync(
 	'utf8'
 );
 const mobileStyles = chatInput.slice(
-	chatInput.indexOf('@media (max-width: 639px)'),
+	chatInput.indexOf('@media (max-width: 1080px)'),
 	chatInput.indexOf('@media (prefers-reduced-motion: reduce)')
 );
 

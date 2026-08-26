@@ -746,7 +746,7 @@
 		cursor: not-allowed;
 	}
 
-	@media (max-width: 639px) {
+	@media (max-width: 1080px) {
 		.controls-dock {
 			gap: 3px;
 			padding: 5px 6px 7px;

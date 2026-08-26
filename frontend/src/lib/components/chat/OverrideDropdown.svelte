@@ -40,7 +40,7 @@
 		 *  exclusive — opening one closes the others. */
 		isOpen: boolean;
 		onOpenChange: (open: boolean) => void;
-		/** Desktop (>=640px) label rendered beside the icon as a full pill
+		/** Desktop (>=1081px) label rendered beside the icon as a full pill
 		 *  (icon + label + chevron). When omitted the control stays icon-only at
 		 *  every width. */
 		buttonLabel?: string;
@@ -307,7 +307,7 @@
 		color: var(--warning);
 	}
 
-	/* Label + chevron (desktop pill only — hidden until the 640px breakpoint) */
+	/* Label + chevron (desktop pill only — hidden until the 1081px breakpoint) */
 	.override-label {
 		display: none;
 		max-width: 92px;
@@ -535,7 +535,7 @@
 	}
 
 	/* Mobile: slightly more compact, icon-only (labels stay hidden). */
-	@media (max-width: 639px) {
+	@media (max-width: 1080px) {
 		.override-btn {
 			width: 26px;
 			height: 26px;
@@ -554,7 +554,7 @@
 	/* Desktop: labeled controls expand into the mockup's `.pill` — 26px tall,
 	   fully rounded, `--scrim` fill on a hairline border. Icon-only controls (no
 	   buttonLabel) are untouched and stay compact. */
-	@media (min-width: 640px) {
+	@media (min-width: 1081px) {
 		.override-btn.has-label {
 			width: auto;
 			height: 26px;

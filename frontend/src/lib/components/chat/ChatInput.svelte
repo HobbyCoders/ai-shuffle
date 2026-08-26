@@ -28,6 +28,7 @@
 		reconcileMobileComposerExpanded,
 		shouldCollapseMobileComposer
 	} from './mobile-composer-collapse';
+	import { isPanelFullscreenWidth } from '$lib/utils/viewport';
 	import Banner from '$lib/components/Banner.svelte';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
@@ -226,7 +227,7 @@
 	);
 
 	function isMobileComposerViewport(): boolean {
-		return typeof window !== 'undefined' && window.matchMedia('(max-width: 639px)').matches;
+		return typeof window !== 'undefined' && isPanelFullscreenWidth(window.innerWidth);
 	}
 
 	let mobileReconcileRaf: number | null = null;
@@ -881,7 +882,7 @@
 		flex-shrink: 0;
 	}
 
-	@media (min-width: 640px) {
+	@media (min-width: 1081px) {
 		.chat-input-wrapper {
 			padding: 0 1.5rem 1.25rem;
 		}
@@ -980,7 +981,7 @@
 	   keeps its compact metrics — there the composer collapses/focuses as one
 	   surface already. (.tiptap-editor is TiptapEditor's scoped root; its inner
 	   ProseMirror div inherits the stretch from the flex column.) */
-	@media (min-width: 640px) {
+	@media (min-width: 1081px) {
 		.textarea-wrapper :global(.tiptap-editor),
 		.textarea-wrapper :global(.tiptap-editor .ProseMirror) {
 			min-height: 3.4em;
@@ -1058,7 +1059,7 @@
 
 	/* T3-style mobile composer: an idle chat shrinks to a single pill. Focusing
 	   restores the context and controls rows; a successful send blurs it again. */
-	@media (max-width: 639px) {
+	@media (max-width: 1080px) {
 		.chat-input-wrapper {
 			padding: 12px 0.5rem calc(0.5rem + env(safe-area-inset-bottom, 0px));
 			background: linear-gradient(to top, var(--background) 68%, transparent);

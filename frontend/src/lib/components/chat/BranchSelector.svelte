@@ -520,7 +520,7 @@
 	}
 
 	/* Mobile: keep the dropdown within the viewport. */
-	@media (max-width: 639px) {
+	@media (max-width: 1080px) {
 		.branch-name {
 			max-width: min(120px, 30vw);
 		}

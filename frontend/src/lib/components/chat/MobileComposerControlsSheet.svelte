@@ -570,7 +570,7 @@
 		to { transform: translateY(0); }
 	}
 
-	@media (min-width: 640px) {
+	@media (min-width: 1081px) {
 		.sheet-layer {
 			display: none;
 		}
