@@ -349,6 +349,14 @@ def _reply_frame(reply: HostReply) -> dict:
         # Only the success path carries it, and only when the tool claimed one —
         # the kernel keys its "already delivered this payload" map on it.
         frame["content_id"] = reply.content_id
+    if reply.window_of is not None:
+        # Same success-only rule: the kernel checks it against the payloads it
+        # already holds, so it is meaningless on a denial or an error.
+        frame["window_of"] = {
+            "content_id": reply.window_of.content_id,
+            "start": reply.window_of.start,
+            "stop": reply.window_of.stop,
+        }
     return frame
 
 

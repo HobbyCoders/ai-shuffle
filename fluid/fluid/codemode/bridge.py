@@ -98,6 +98,7 @@ class HostCallBridge:
             result=outcome.text,
             images=outcome.images,
             content_id=outcome.content_id,
+            window_of=outcome.window_of,
         )
 
 # Injected permission round-trip: the engine says "ask", the bridge calls this
@@ -198,4 +199,5 @@ class HostBridge:
             result=outcome.text,
             images=outcome.images,
             content_id=outcome.content_id,
+            window_of=outcome.window_of,
         )

@@ -19,7 +19,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from fluid.tools.registry import ToolImage
+from fluid.tools.registry import ContentWindow, ToolImage
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,11 @@ class HostReply:
     ``ToolOutcome.content_id``): equal ids mean byte-identical payloads. The
     kernel uses it to recognise a repeat read of an unchanged file and answer
     with a pointer at the ``ResultRef`` it already holds.
+
+    ``window_of`` (see ``ToolOutcome.window_of``) extends that to a *narrower*
+    match: ``result`` is a slice of a bigger payload, so if the kernel is
+    holding that bigger payload the window can be sliced out of it instead of
+    fetched again.
     """
 
     result: str | None = None
@@ -49,6 +54,7 @@ class HostReply:
     message: str | None = None
     images: tuple[ToolImage, ...] = ()
     content_id: str | None = None
+    window_of: ContentWindow | None = None
 
 
 @dataclass(frozen=True)

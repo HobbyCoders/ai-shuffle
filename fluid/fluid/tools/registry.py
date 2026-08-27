@@ -160,6 +160,24 @@ class BackgroundTaskReceipt:
 
 
 @dataclass(frozen=True, kw_only=True)
+class ContentWindow:
+    """This result is a *slice* of a bigger payload the tool can also return.
+
+    ``content_id`` is the identity that whole payload has (same shape as
+    ``ToolOutcome.content_id``), and ``start``/``stop`` are the 0-based, Python
+    slice bounds of the lines this result covers within it — ``stop=None``
+    meaning "through the last line". Read stamps every windowed read with the
+    identity the *whole* file would have had at this same mtime/size, which is
+    what lets code mode answer a re-read at a new offset/limit out of a
+    ResultRef it is already holding for the whole file.
+    """
+
+    content_id: str
+    start: int
+    stop: int | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
 class ToolOutcome:
     """Dual-output tool result: ``text`` for the model, ``ui`` for clients."""
 
@@ -181,6 +199,11 @@ class ToolOutcome:
     # instead of a second copy. None = "no identity claim" — the default, and
     # what anything that appends to ``text`` after dispatch must reset it to.
     content_id: str | None = None
+    # Set when ``text`` is a window into a larger payload this same tool can
+    # return whole: it names that whole payload's identity and the slice this
+    # one covers. Code mode uses it to answer a windowed re-read from a ref it
+    # already holds for the whole file. Reset it alongside ``content_id``.
+    window_of: ContentWindow | None = None
 
 
 @dataclass

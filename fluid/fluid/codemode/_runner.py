@@ -19,9 +19,10 @@ frame as the reply (result / error / denied). Large results are wrapped in
 is registered in the namespace's ``_refs`` registry under a short id its repr
 prints — a dropped handle is recovered with ``_refs[7]``, never by re-running
 the tool. A call that would deliver a payload already sitting behind a live ref
-(the host says so with ``content_id``: same file, same window, same bytes) gets
-the id back instead of the bytes. The previous cell's displayed value stays
-bound to ``_``.
+(the host says so with ``content_id``: same file, same bytes) gets the id back
+instead of the bytes; a call that would deliver a *slice* of such a payload
+(``window_of``) gets the id and the slicing expression. The previous cell's
+displayed value stays bound to ``_``.
 """
 
 import ast
@@ -116,6 +117,19 @@ def _host_call(tool_name: str, kwargs: dict):
         # aged out of the registry — moves or clears the map entry, and the
         # read falls through below as an ordinary one.
         return truncate.repeat_read_pointer(held.key, len(held))
+    window = reply.get("window_of")
+    if isinstance(window, dict):
+        # A *narrower* claim: this result is a slice of a payload the host has
+        # identified. If the kernel is holding that whole payload, the model
+        # gets the slicing expression rather than a second, overlapping copy —
+        # this is what makes re-reading the same file at a new offset/limit
+        # free. A partial earlier read never registers the whole-file id, so it
+        # falls through here and reads for real.
+        whole = _live_ref(window.get("content_id"))
+        if whole is not None:
+            return truncate.windowed_read_pointer(
+                whole.key, len(whole), window.get("start") or 0, window.get("stop")
+            )
     wrapped = truncate.to_result_ref(result, vfs.ResultRef, limit=_REF_THRESHOLD)
     if isinstance(wrapped, vfs.ResultRef):
         # Every ref gets an id in ``_refs`` before the cell sees it, so a
