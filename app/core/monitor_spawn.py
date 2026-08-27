@@ -19,7 +19,9 @@ woken with the command's output instead of having to poll.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, Optional
+import os
+import re
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +30,54 @@ logger = logging.getLogger(__name__)
 _SUMMARY_HEAD = 4_000
 _SUMMARY_TAIL = 8_000
 
+# Bound for the log-file tail folded into a summary whose buffer came back
+# empty (see :func:`_log_tail`).
+_LOG_TAIL_BYTES = 4_000
+
+# Redirect / tee targets in a monitored command line. Matches `> f`, `>> f`,
+# `2> f`, `1>>f` and `| tee [-a] f`; quoted paths keep their spaces. `2>&1`
+# does NOT match because a target may not start with `&`.
+_REDIRECT_RE = re.compile(
+    r"""(?:\d?>>?|\|\s*tee(?:\s+-a)?)\s*"""
+    r"""(?P<path>"[^"]+"|'[^']+'|[^\s;|&<>()]+)"""
+)
+
+# Redirect targets that are sinks, not logs.
+_NULL_SINKS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr", "nul", "NUL"})
+
+
+def monitor_receipt_text(task_id: str) -> str:
+    """The receipt every Monitor spawn hands back to the model.
+
+    Fluid's default is the bare fact ("Monitoring started (task X)."), and
+    audited sessions read that as an invitation to sleep-poll in foreground
+    Bash for a notification already queued for them — 9 of 10 spawns in the
+    worst session, 24 minutes of polling. The receipt has to give the
+    instruction, mirroring the TaskList nudge that stopped the same loop there.
+    Shared with the MCP ``Monitor`` tool so both legs say the same thing.
+    """
+    return (
+        f"Monitoring started (task {task_id}). End the turn now — you will be "
+        "woken when it comes to rest."
+    )
+
+
+def _strip_ansi(text: str) -> str:
+    """Fluid's ANSI scrubber, imported lazily so this module stays importable
+    without the vendored harness on the path."""
+    try:
+        from fluid.tools.builtins._util import strip_ansi
+    except Exception:  # noqa: BLE001 — cosmetics must never break a completion
+        return text
+    return strip_ansi(text)
+
 
 def _summarize(lines: list) -> str:
-    text = "\n".join(lines)
+    # Scrub BEFORE slicing: escape sequences are gibberish to the model (and
+    # to the UI), and counting them against the head/tail budget evicts real
+    # output. Ruling A13 makes the app the supervisor here, so fluid's own
+    # supervisor-side strip never runs for these buffers.
+    text = _strip_ansi("\n".join(lines))
     if len(text) <= _SUMMARY_HEAD + _SUMMARY_TAIL:
         return text
     dropped = len(text) - _SUMMARY_HEAD - _SUMMARY_TAIL
@@ -39,6 +86,48 @@ def _summarize(lines: list) -> str:
         + f"\n... [{dropped} chars truncated] ...\n"
         + text[-_SUMMARY_TAIL:]
     )
+
+
+def _redirect_targets(command: str) -> List[str]:
+    """Ordered, de-duplicated redirect/tee targets named by ``command``."""
+    seen: List[str] = []
+    for match in _REDIRECT_RE.finditer(command or ""):
+        path = (match.group("path") or "").strip().strip("\"'")
+        if not path or path in _NULL_SINKS or path in seen:
+            continue
+        seen.append(path)
+    return seen
+
+
+def _log_tail(command: str, cwd: Optional[str]) -> str:
+    """A bounded tail of the log file ``command`` redirected its output into.
+
+    The audited failure: 8 of 9 monitor notifications said "(no output; exit
+    code 0)" because the monitored command sent everything to a log file. The
+    buffer is legitimately empty in that case, and the one thing the parent
+    wants is the end of that file. Redirect targets are the only path the
+    monitor can know without guessing, so that is all this reads — the LAST one
+    named (the command's own final sink) that exists and is readable.
+    """
+    targets = _redirect_targets(command)
+    for path in reversed(targets):
+        candidate = path if os.path.isabs(path) else os.path.join(cwd or "", path)
+        try:
+            if not os.path.isfile(candidate):
+                continue
+            size = os.path.getsize(candidate)
+            with open(candidate, "rb") as fh:
+                if size > _LOG_TAIL_BYTES:
+                    fh.seek(size - _LOG_TAIL_BYTES)
+                raw = fh.read()
+        except OSError:
+            continue
+        text = _strip_ansi(raw.decode("utf-8", errors="replace")).strip()
+        if not text:
+            continue
+        prefix = "" if size <= _LOG_TAIL_BYTES else "... [earlier lines omitted] ...\n"
+        return f"(no buffered output; tail of {path})\n{prefix}{text}"
+    return ""
 
 
 def make_fluid_monitor_spawner(
@@ -96,9 +185,18 @@ def make_fluid_monitor_spawner(
                     await asyncio.sleep(0.5)
                 exit_code = task.exit_code
                 status = "completed" if exit_code == 0 else "error"
-                summary = _summarize(task.lines) or (
-                    f"(no output; exit code {exit_code})"
-                )
+                summary = _summarize(task.lines)
+                if not summary:
+                    # Empty buffer usually means the command redirected into a
+                    # log file; the tail of that file is the result the parent
+                    # was woken for.
+                    try:
+                        summary = _log_tail(command, cwd)
+                    except Exception:  # noqa: BLE001 — best-effort nicety
+                        logger.debug("monitor_spawn: log-tail read failed", exc_info=True)
+                        summary = ""
+                if not summary:
+                    summary = f"(no output; exit code {exit_code})"
                 try:
                     from app.core.task_registry import task_registry
 
@@ -126,9 +224,20 @@ def make_fluid_monitor_spawner(
             watcher = loop.create_task(_on_exit())
             watcher.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
-        return BackgroundTaskReceipt(
+        from fluid.tools.registry import ToolOutcome
+
+        receipt = BackgroundTaskReceipt(
             task_id=task.task_id,
             description=command[:120],
+        )
+        # A ToolOutcome (not the bare receipt) so the app owns the RECEIPT
+        # STRING too: fluid's default renders "Monitoring started (task X)."
+        # and audited sessions read that as permission to keep waiting — one
+        # sleep-polled in foreground Bash after 9 of 10 spawns. The instruction
+        # to park has to be in the receipt itself, the way the TaskList nudge is.
+        return ToolOutcome(
+            text=monitor_receipt_text(task.task_id),
+            background_task=receipt,
         )
 
     return _spawn

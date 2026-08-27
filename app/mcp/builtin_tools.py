@@ -66,6 +66,15 @@ def _err(message: str, **extra: Any) -> Dict[str, Any]:
 _PARK_NUDGE = "all tasks still running — park; you will be woken on completion."
 
 
+def _strip_ansi(text: str) -> str:
+    """Fluid's ANSI scrubber, imported lazily and never fatal."""
+    try:
+        from fluid.tools.builtins._util import strip_ansi
+    except Exception:  # noqa: BLE001 — cosmetics must never break a read
+        return text
+    return strip_ansi(text)
+
+
 def _all_still_running(tasks: Any) -> bool:
     """True when ``tasks`` is non-empty and every entry is still running."""
     records = [t for t in (tasks or []) if isinstance(t, dict)]
@@ -271,7 +280,15 @@ async def _spawn_background(
             if not line:
                 break
             decoded = line.decode("utf-8", errors="replace").rstrip("\n")
-            task.lines.append(decoded)
+            # Scrub terminal control sequences at the SOURCE, so every consumer
+            # of this buffer (TaskOutput, TaskGet, the completion summary the
+            # parent is woken with) is clean. The app overrides fluid's
+            # supervision here (ruling A13), so fluid's own supervisor-side
+            # strip never runs for these lines and the model was being handed
+            # colour codes — a baseline session burned a 34s vitest re-run on an
+            # ANSI-mismatched regex. Line-at-a-time is safe: an escape sequence
+            # never spans a newline.
+            task.lines.append(_strip_ansi(decoded))
             if len(task.lines) > _BACKGROUND_LINE_LIMIT:
                 # drop oldest
                 del task.lines[: len(task.lines) - _BACKGROUND_LINE_LIMIT]
@@ -782,7 +799,14 @@ def create_builtin_tools_server(
                 # OWN-lane admission: without this the shell's terminal frame is
                 # dropped as not-own work and a parked parent never wakes.
                 task_registry.mark_monitor_shell_task(session_id, task.task_id)
+            from app.core.monitor_spawn import monitor_receipt_text
+
+            # The receipt COMMANDS the park (same wording as the native leg's
+            # spawner and the TaskList nudge). Audited sessions read a bare
+            # "started, here's your id" as licence to sleep-poll in foreground
+            # Bash for a notification already queued for them.
             return _ok({
+                "message": monitor_receipt_text(task.task_id),
                 "task_id": task.task_id,
                 "pid": task.process.pid if task.process else None,
                 "started_at": task.started_at,
