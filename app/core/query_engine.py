@@ -2442,6 +2442,14 @@ async def _stream_to_websocket_impl(
                             return PermissionResultAllow(
                                 updated_input={**tool_input, FLUID_ANSWER_KEY: "approve"}
                             )
+                        # A plan gate parked by a turn that died (process
+                        # restart, abandoned run) stays ``pending`` for the rest
+                        # of its 300s TTL. The session resumes still in plan
+                        # mode, the model presents its plan again — and the
+                        # user's "proceed" landed on the DEAD request while this
+                        # one waited out its own TTL. Retire the corpses first
+                        # so the session never has two answerable plan gates.
+                        await permission_handler.supersede_plan_approvals(_sid)
                         request_id = f"perm-{_sid}-{uuid.uuid4().hex[:8]}"
                         logger.debug(
                             f"[WS] StopPlanning requires approval in {_perm_mode} mode: {request_id}"

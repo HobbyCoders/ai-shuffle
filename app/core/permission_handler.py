@@ -354,18 +354,69 @@ class PermissionHandler:
     def _v2_pending_count(self, session_id: str) -> int:
         return len(self._v2_pending_permissions(session_id))
 
+    def _pending_plan_approvals(self, session_id: str) -> List[Dict[str, Any]]:
+        """This session's open plan-approval rows, oldest first."""
+        return [
+            row
+            for row in self._v2_pending_permissions(session_id)
+            if (row.get("payload") or {}).get("tool_name") == PLAN_APPROVAL_TOOL
+        ]
+
     def find_pending_plan_approval(self, session_id: str) -> Optional[Dict[str, Any]]:
         """This session's OPEN plan-approval interaction row, or None.
 
         The row a parked ``StopPlanning`` waits on — the ONE prompt a plain chat
-        message is allowed to answer (see ``PLAN_APPROVAL_TOOL``). Oldest first,
-        matching the order the rows are returned in; a session realistically
-        never has two of these open at once.
+        message is allowed to answer (see ``PLAN_APPROVAL_TOOL``).
+
+        NEWEST wins. A session is not supposed to have two of these open, but it
+        gets there: the process dies (or the turn is abandoned) with a gate
+        parked, the row stays ``pending`` for the rest of its 300s TTL, the
+        session resumes still in plan mode, and the model presents its plan
+        again. Answering oldest-first then sent the user's "proceed" to a
+        request_id nobody is waiting on any more, while the LIVE gate sat there
+        until its own TTL denied it — a plan approval that visibly did nothing
+        and a session that stayed read-only. The newest row is the one with a
+        turn behind it.
         """
-        for row in self._v2_pending_permissions(session_id):
-            if (row.get("payload") or {}).get("tool_name") == PLAN_APPROVAL_TOOL:
-                return row
-        return None
+        rows = self._pending_plan_approvals(session_id)
+        return rows[-1] if rows else None
+
+    async def supersede_plan_approvals(self, session_id: str) -> int:
+        """Cancel this session's open plan-approval rows before a new one parks.
+
+        Called by the ``StopPlanning`` branch just before it creates its own
+        row, so the durable queue never holds two plan gates for one session.
+        Cancelling (rather than leaving them to expire) also clears the stale
+        purple panel off every connected device instead of letting it sit there
+        for minutes looking answerable.
+
+        Returns how many rows were superseded. Never raises: failing to tidy up
+        must not stop the live gate from opening.
+        """
+        superseded = 0
+        try:
+            rows = await asyncio.to_thread(self._pending_plan_approvals, session_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("plan-approval supersede lookup failed", exc_info=True)
+            return 0
+        for row in rows:
+            request_id = (row.get("payload") or {}).get("request_id")
+            if not request_id:
+                continue
+            try:
+                if await self.cancel_request(request_id, session_id):
+                    superseded += 1
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "could not supersede stale plan approval %s", request_id,
+                    exc_info=True,
+                )
+        if superseded:
+            logger.info(
+                "Superseded %d stale plan approval(s) for session %s",
+                superseded, session_id,
+            )
+        return superseded
 
     def _payload_row_to_dict(self, row: Dict[str, Any], state: str) -> Dict[str, Any]:
         """Serialize a permission interaction row to the legacy request dict

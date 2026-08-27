@@ -1346,6 +1346,13 @@ class HarnessAdapter(ProviderAdapter):
     async def set_permission_mode(self, mode: str) -> None:
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
+        # BEFORE the submit: fluid routes a plan-mode flip through the injected
+        # PlanModeControl, so our own wrapper runs inside submit() and reads
+        # this field to decide what mode to restore to. Setting it afterwards
+        # made a chip switch out of plan restore the mode from BEFORE the one
+        # the user just picked.
+        if mode != "plan":
+            self._pre_plan_permission_mode = mode
         try:
             await self._engine.submit(SetPermissionMode(mode=mode))
         except NotImplementedError:
@@ -1358,8 +1365,6 @@ class HarnessAdapter(ProviderAdapter):
                 self._engine.plan_mode = mode == "plan"
         if self._options is not None:
             self._options.permission_mode = mode
-        if mode != "plan":
-            self._pre_plan_permission_mode = mode
 
     async def get_context_usage(self) -> Optional[Dict[str, Any]]:
         """Context-window usage by category, or None when unavailable.
@@ -2336,7 +2341,20 @@ class HarnessAdapter(ProviderAdapter):
             original.set_active(active)
             if was == bool(active):
                 return
-            self._on_plan_mode_changed(bool(active))
+            try:
+                self._on_plan_mode_changed(bool(active))
+            except Exception:  # noqa: BLE001
+                # The engine flag is ALREADY flipped by the line above, so the
+                # session's real mode is settled either way. Letting a
+                # bookkeeping failure (a DB write, a chip event) escape would
+                # surface inside fluid's tool dispatch, which turns the
+                # approval the user just granted into a tool ERROR — the model
+                # reads that as "the exit failed" and goes back to planning.
+                logger.warning(
+                    "[HarnessAdapter] plan-mode bookkeeping failed (active=%s); "
+                    "the engine flag is authoritative and already set",
+                    active, exc_info=True,
+                )
 
         extra["plan_mode_control"] = PlanModeControl(
             is_active=original.is_active,
@@ -2440,7 +2458,15 @@ class HarnessAdapter(ProviderAdapter):
         """
         opts = self._options
         current = ((opts.permission_mode or "") if opts is not None else "") or ""
-        if current != "plan":
+        # The session's OPTIONS mode is only half the signal. When the model
+        # entered plan mode itself (the ``Plan`` builtin, chip still on
+        # ``default``) the options never say ``plan`` — but the engine is read
+        # only and ``sessions.permission_mode`` was persisted as ``plan`` on
+        # the way in. Gating on the options alone skipped the sync for exactly
+        # that session and left the persisted binding on ``plan``, so the NEXT
+        # turn constructed the engine locked again.
+        engine_in_plan = bool(getattr(self._engine, "plan_mode", False))
+        if current != "plan" and not engine_in_plan:
             return None
         restored = self._on_plan_mode_changed(False)
         # Keep the options snapshot in step so requires_reconnect / hot-swap
@@ -2456,7 +2482,11 @@ class HarnessAdapter(ProviderAdapter):
         engine = self._engine
         if engine is not None and hasattr(engine, "plan_mode"):
             engine.plan_mode = False
-        return restored or "default"
+        # Never fall back to a blind "default": a bypassPermissions session
+        # whose model entered plan mode restores nothing (bypass keeps its own
+        # chip), and reporting "default" would re-pin the turn's permission
+        # refs to default and start prompting a user who opted out of prompts.
+        return restored or current or "default"
 
 
 # ─── Module-level helpers ─────────────────────────────────────────────────────

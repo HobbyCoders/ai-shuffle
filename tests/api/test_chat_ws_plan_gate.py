@@ -130,6 +130,73 @@ def test_find_pending_plan_approval_ignores_ordinary_prompts(mock_db):
     assert found is not None and found["id"] == plan_row["id"]
 
 
+def test_the_live_gate_wins_over_a_stale_one(mock_db):
+    """The zombie-gate lock.
+
+    A gate parked by a turn that died stays ``pending`` for the rest of its
+    300s TTL. The session resumes still in plan mode and the model presents its
+    plan again — so for those minutes the session has TWO answerable plan
+    gates. Answering oldest-first sent the user's approval to a request_id
+    nobody was waiting on, while the live gate sat there until its own TTL
+    denied it: an approval that visibly did nothing, and a session that stayed
+    read-only.
+    """
+    _make_session("sess-1")
+    _park_plan_gate("sess-1", request_id="perm-plan-dead")
+    live = _park_plan_gate("sess-1", request_id="perm-plan-live")
+
+    found = permission_handler.find_pending_plan_approval("sess-1")
+    assert found is not None and found["id"] == live["id"]
+    assert found["payload"]["request_id"] == "perm-plan-live"
+
+
+async def test_a_new_gate_supersedes_the_dead_ones_before_it_parks(mock_db):
+    """query_engine's StopPlanning branch retires the corpses first, so the
+    two-gate window never opens in the first place — and the stale purple
+    panel clears off every device instead of looking answerable for minutes."""
+    _make_session("sess-1")
+    dead = _park_plan_gate("sess-1", request_id="perm-plan-dead")
+    bash = _park_bash_prompt("sess-1")
+
+    superseded = await permission_handler.supersede_plan_approvals("sess-1")
+
+    assert superseded == 1
+    assert interactions.get_interaction(dead["id"])["state"] == "cancelled"
+    # An ordinary permission prompt is none of its business.
+    assert interactions.get_interaction(bash["id"])["state"] == "pending"
+
+
+async def test_supersede_is_a_no_op_with_nothing_to_retire(mock_db):
+    _make_session("sess-1")
+    assert await permission_handler.supersede_plan_approvals("sess-1") == 0
+
+
+async def test_chat_approval_answers_the_live_gate_not_the_dead_one(mock_db):
+    """The invariant, through the real WS routing: a session in plan mode has
+    exactly one answerable exit, and "Proceed." finds it."""
+    _make_session("sess-1")
+    _start_live_turn()
+    dead = _park_plan_gate("sess-1", request_id="perm-plan-dead")
+    live = _park_plan_gate("sess-1", request_id="perm-plan-live")
+
+    with _Patches():
+        handler = _make_handler()
+        await handler.handle_query({
+            "prompt": "Proceed.",
+            "session_id": "sess-1",
+            "profile": "claude-code",
+        })
+
+    answered = interactions.get_interaction(live["id"])
+    assert answered["state"] == "answered"
+    assert answered["answer"]["decision"] == "allow"
+    # The dead gate is left exactly as it was — nothing was answered on its
+    # behalf, and the user's approval was not spent on it.
+    assert interactions.get_interaction(dead["id"])["state"] == "pending"
+    acks = _sent(handler, "permission_response_ack")
+    assert [a["request_id"] for a in acks] == ["perm-plan-live"]
+
+
 # ═══ handle_query routing ════════════════════════════════════════════════════
 
 
