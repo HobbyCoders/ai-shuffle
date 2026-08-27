@@ -32,7 +32,15 @@ What this module adds on top of raw ``dispatch_worker``:
   default: Explore-class agents (ones whose declared tool surface cannot write
   files) go ``background``, since a research child's parent has nothing to wait
   for and blocking it turns a fan-out into a queue; everything else stays
-  ``sync``. An explicit ``mode`` always wins.
+  ``sync``. For an Explore-class target the default is not a suggestion — an
+  explicit ``mode`` in the call is IGNORED and the dispatch still goes
+  ``background`` (the round-2 audit found every model defeating the default by
+  passing ``mode="sync"``, and a user Stop then destroyed a finished sync
+  child's research along with its parent). ``build_task_contract`` drops
+  ``mode`` from the tool schema entirely when every reachable target is
+  Explore-class, so on those rosters the key cannot be sent at all; this
+  runtime rule covers the rest — replayed transcripts, retries, and mixed
+  rosters. Everywhere else an explicit ``mode`` still wins.
 
 File-defined agents (Claude-ecosystem compat, ruling CE6)
 ---------------------------------------------------------
@@ -364,7 +372,9 @@ def _default_task_mode(declared_tools: Optional[List[str]], agent_label: str) ->
     agent that can write defaults to ``sync``, where the parent normally does
     need the result in hand before it continues.
 
-    An explicit ``mode`` in the call always wins over this.
+    For an Explore-class target this is not merely a default: see
+    :func:`_effective_task_mode`, which refuses to let an explicit ``mode``
+    override it.
     """
     from app.core.builtin_subagents import is_read_only_tool_surface
 
@@ -377,6 +387,34 @@ def _default_task_mode(declared_tools: Optional[List[str]], agent_label: str) ->
         )
         return "background"
     return "sync"
+
+
+def _effective_task_mode(
+    requested_mode: str, default_mode: str, agent_label: str
+) -> Tuple[str, Optional[str]]:
+    """``(mode, ignored_request)`` for one dispatch.
+
+    A background-default target is background, full stop. The tool schema
+    normally hides ``mode`` for such targets so a model cannot ask for anything
+    else, but a request can still arrive — an old transcript replayed, a retry
+    built from one, a mixed roster where the key stays in the schema for the
+    write-capable targets. Honouring it would reopen exactly the failure the
+    default was added to close: a blocked parent, and a user Stop that takes a
+    finished research child's report down with it. So it is ignored, loudly,
+    and the caller is told in the payload rather than left guessing.
+
+    Every other target keeps the old contract: an explicit ``mode`` wins.
+    """
+    overridden = requested_mode and requested_mode != default_mode
+    if default_mode == "background" and overridden:
+        logger.info(
+            "task_dispatch: ignoring mode=%r for read-only target %r; "
+            "research children always dispatch in the background",
+            requested_mode,
+            agent_label,
+        )
+        return "background", requested_mode
+    return (requested_mode or default_mode), None
 
 
 def _caller_provider_id(
@@ -632,7 +670,11 @@ async def dispatch_task_tool(
             }
         result_agent = target.id
 
-    mode = requested_mode or _default_task_mode(declared_tools, str(result_agent))
+    mode, ignored_mode = _effective_task_mode(
+        requested_mode,
+        _default_task_mode(declared_tools, str(result_agent)),
+        str(result_agent),
+    )
 
     max_depth = int(getattr(settings, "task_tool_max_depth", 5) or 5)
     _, root_session_id, caller_depth = caller_chain(caller_session_id)
@@ -707,7 +749,13 @@ async def dispatch_task_tool(
                 "dispatch continues",
                 worker_id,
             )
-        return {
+        note = (
+            "Worker dispatched in the background. Completion will be "
+            "announced to the parent automatically; continue useful work. "
+            "Use mcp__builtins__TaskList or mcp__builtins__TaskOutput only "
+            "for explicit inspection, not a polling loop."
+        )
+        background_payload: Dict[str, Any] = {
             "ok": True,
             "mode": "background",
             "agent": result_agent,
@@ -715,13 +763,16 @@ async def dispatch_task_tool(
             "task_id": worker_id,
             "worker_session_id": worker_id,
             "description": label,
-            "note": (
-                "Worker dispatched in the background. Completion will be "
-                "announced to the parent automatically; continue useful work. "
-                "Use mcp__builtins__TaskList or mcp__builtins__TaskOutput only "
-                "for explicit inspection, not a polling loop."
-            ),
         }
+        if ignored_mode:
+            background_payload["requested_mode_ignored"] = ignored_mode
+            note = (
+                f"mode={ignored_mode!r} was ignored: '{result_agent}' is a "
+                "read-only research agent and always runs in the background. "
+                + note
+            )
+        background_payload["note"] = note
+        return background_payload
 
     outcome = await provider_agent.dispatch_worker(**kwargs)
     payload: Dict[str, Any] = {

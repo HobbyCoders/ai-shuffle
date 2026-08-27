@@ -174,6 +174,154 @@ def test_task_contract_includes_file_subagents_without_shadowing_db_agents(mock_
     assert [target.id for target in contract.targets].count("reviewer") == 1
 
 
+def test_contract_documents_the_sync_result_shape(mock_db):
+    """R4(a): every audited delegating session burned turns rediscovering this
+    by KeyError, so the contract states it up front."""
+    from app.db import database
+
+    database.create_profile("caller", "Caller", None, {"model": "opus"})
+    database.create_profile("helper", "Helper", None, {"model": "sonnet"})
+
+    description = build_task_contract("caller", None).description
+
+    assert "report_head" in description
+    assert "report_chars" in description
+    assert "report_path" in description
+    assert "NO 'report' key" in description
+    assert "Read(offset=..., limit=...)" in description
+
+
+def test_background_default_targets_lose_the_mode_parameter(mock_db):
+    """R4(b): when every reachable target is Explore-class the model cannot
+    pass mode at all — the key is simply not in the schema."""
+    from app.db import database
+
+    database.create_profile(
+        "caller",
+        "Caller",
+        None,
+        {
+            "model": "opus",
+            "agent_invoke_mode": "custom",
+            "enabled_agents": ["explorer"],
+        },
+    )
+    database.create_profile(
+        "explorer",
+        "Explorer",
+        None,
+        {"model": "sonnet", "allowed_tools": ["Read", "Grep", "Glob"]},
+    )
+
+    contract = build_task_contract("caller", None)
+
+    assert [t.background_default for t in contract.targets] == [True]
+    assert "mode" not in contract.input_schema["properties"]
+    assert "there is no mode parameter" in contract.description
+
+
+def test_mixed_roster_keeps_mode_and_names_the_targets_that_ignore_it(mock_db):
+    from app.db import database
+
+    database.create_profile(
+        "caller",
+        "Caller",
+        None,
+        {
+            "model": "opus",
+            "agent_invoke_mode": "custom",
+            "enabled_agents": ["explorer", "editor"],
+        },
+    )
+    database.create_profile(
+        "explorer",
+        "Explorer",
+        None,
+        {"model": "sonnet", "allowed_tools": ["Read", "Grep", "Glob"]},
+    )
+    database.create_profile(
+        "editor",
+        "Editor",
+        None,
+        {"model": "sonnet", "allowed_tools": ["Read", "Edit"]},
+    )
+
+    contract = build_task_contract("caller", None)
+    flags = {t.id: t.background_default for t in contract.targets}
+    assert flags == {"explorer": True, "editor": False}
+
+    mode = contract.input_schema["properties"]["mode"]
+    assert mode["enum"] == ["sync", "background"]
+    assert "omit mode" in mode["description"]
+    assert "cannot take a single further step" in mode["description"]
+    assert "explorer" in mode["description"]
+    assert "always run in the background and ignore mode" in contract.description
+
+
+def test_unrestricted_roster_keeps_plain_mode_guidance(mock_db):
+    from app.db import database
+
+    database.create_profile(
+        "caller",
+        "Caller",
+        None,
+        {
+            "model": "opus",
+            "agent_invoke_mode": "custom",
+            "enabled_agents": ["helper"],
+        },
+    )
+    database.create_profile("helper", "Helper", None, {"model": "sonnet"})
+
+    contract = build_task_contract("caller", None)
+
+    assert [t.background_default for t in contract.targets] == [False]
+    assert "mode" in contract.input_schema["properties"]
+    assert "Ignored for these always-background targets" not in (
+        contract.input_schema["properties"]["mode"]["description"]
+    )
+
+
+def test_file_agent_tools_frontmatter_sets_the_background_default(mock_db):
+    definitions = {
+        "researcher": {
+            "name": "researcher",
+            "description": "Reads before reporting.",
+            "tools": ["Read", "Grep", "Glob"],
+        },
+        "builder": {
+            "name": "builder",
+            "description": "Writes code.",
+            "tools": ["Read", "Write"],
+        },
+        "inheritor": {"name": "inheritor", "description": "No tools declared."},
+    }
+
+    flags = {
+        target.id: target.background_default
+        for target in file_subagent_targets(definitions, "opus")
+    }
+
+    assert flags == {"researcher": True, "builder": False, "inheritor": False}
+
+
+def test_empty_roster_still_exposes_mode(mock_db):
+    """No targets means no classification to act on; the schema stays whole."""
+    from app.db import database
+
+    database.create_profile(
+        "caller",
+        "Caller",
+        None,
+        {"model": "opus", "agent_invoke_mode": "custom", "enabled_agents": []},
+    )
+
+    contract = build_task_contract("caller", None)
+
+    assert contract.targets == ()
+    assert "mode" in contract.input_schema["properties"]
+
+
 def test_resolve_subagent_never_escapes_roster(mock_db):
     from app.db import database
 

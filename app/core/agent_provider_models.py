@@ -73,6 +73,11 @@ class SubagentTarget:
     name: str
     description: str
     model: str
+    # True when the target's declared tool surface cannot write files, i.e. it
+    # is an Explore-class research agent. ``task_dispatch`` dispatches these in
+    # the background whatever the call asks for, so the contract must not offer
+    # ``mode`` as if it were a live choice.
+    background_default: bool = False
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -108,6 +113,7 @@ def available_subagents(
     if not caller_profile_id:
         return ()
 
+    from app.core.builtin_subagents import is_read_only_tool_surface
     from app.db import database
 
     try:
@@ -204,6 +210,12 @@ def available_subagents(
                 name=str(row.get("name") or target_id).strip() or target_id,
                 description=_clean_description(row.get("description")),
                 model=model,
+                # ``allowed_tools`` is the same field db.subagents surfaces as
+                # ``tools`` and task_dispatch classifies on — one source, so
+                # schema and runtime cannot disagree about a target's mode.
+                background_default=is_read_only_tool_surface(
+                    config.get("allowed_tools")
+                ),
             )
         )
 
@@ -297,17 +309,62 @@ def build_task_contract(
             "Do not call Task until the configuration changes."
         )
 
+    # A background-default target is dispatched in the background whatever the
+    # call says (task_dispatch._effective_task_mode). When EVERY reachable
+    # target is one, ``mode`` is not a choice at all, so it is dropped from the
+    # schema — the round-2 audit found models defeating the default simply
+    # because the key was there to pass. On a mixed roster the key has to stay
+    # for the write-capable targets; the description then names the agents that
+    # ignore it, so an ignored value is documented rather than surprising.
+    background_only_ids = [
+        target.id for target in resolved_targets if target.background_default
+    ]
+    offer_mode = not resolved_targets or len(background_only_ids) < len(
+        resolved_targets
+    )
+
+    if offer_mode:
+        mode_text = (
+            "mode='sync' waits for the report. mode='background' returns a "
+            "worker session ID so the parent can continue independent work; "
+            "completion is push-based, so do not busy-poll. Omitting mode "
+            "takes the target's default: read-only research agents run in the "
+            "background, every other agent runs sync. For a read-only research "
+            "agent, omit mode; pass sync only when you cannot take a single "
+            "further step without the report."
+        )
+        if background_only_ids:
+            mode_text += (
+                " These targets always run in the background and ignore mode "
+                "entirely: " + ", ".join(background_only_ids) + "."
+            )
+    else:
+        mode_text = (
+            "Every target on this roster is a read-only research agent, so "
+            "every dispatch runs in the background and there is no mode "
+            "parameter. The worker's completion is announced to you; do not "
+            "busy-poll."
+        )
+
+    # Documented once, here, because every audited delegating session burned
+    # turns rediscovering it by KeyError.
+    sync_shape = (
+        "A sync result is JSON with report_head (a bounded prefix), "
+        "report_chars (the report's full length), and report_path (the whole "
+        "report on disk) — there is NO 'report' key unless the file could not "
+        "be written, in which case 'report' carries the full text and the note "
+        "says so. Read report_path with Read(offset=..., limit=...), in ONE "
+        "cell, only when report_head is insufficient; never print the whole "
+        "file. A background result carries no report at all: it returns "
+        "worker_session_id/task_id and the completion is announced later."
+    )
+
     description = (
         "Delegate a self-contained task to one configured subagent. The "
         "subagent runs in an isolated session with its own prompt, memory, "
         "and tools; it does not see the parent conversation. Use delegation "
         "for independent or context-heavy work, not a quick lookup or single "
-        "tool call. mode='sync' waits for the report. mode='background' "
-        "returns a worker session ID so the parent can continue independent "
-        "work; completion is push-based, so do not busy-poll. Omitting mode "
-        "takes the target's default: read-only research agents run in the "
-        "background, every other agent runs sync.\n\n"
-        + availability
+        f"tool call. {mode_text}\n\n{sync_shape}\n\n" + availability
     )
 
     agent_property: dict[str, Any] = {
@@ -317,35 +374,46 @@ def build_task_contract(
     if resolved_targets:
         agent_property["enum"] = [target.id for target in resolved_targets]
 
+    properties: dict[str, Any] = {
+        "agent": agent_property,
+        "prompt": {
+            "type": "string",
+            "description": (
+                "Self-contained assignment: objective, relevant paths/data, "
+                "constraints, verification, and expected report. The subagent "
+                "does not see the parent conversation."
+            ),
+        },
+    }
+    if offer_mode:
+        mode_description = (
+            "sync waits for the report; background returns the worker session "
+            "ID immediately. For a read-only research agent, omit mode; pass "
+            "sync only when you cannot take a single further step without the "
+            "report. Omit to take the target's default: background for "
+            "read-only research agents, sync for every other agent."
+        )
+        if background_only_ids:
+            mode_description += (
+                " Ignored for these always-background targets: "
+                + ", ".join(background_only_ids)
+                + "."
+            )
+        properties["mode"] = {
+            "type": "string",
+            "enum": ["sync", "background"],
+            "description": mode_description,
+        }
+    properties["label"] = {
+        "type": "string",
+        "description": "Optional short progress label.",
+    }
+
     return TaskContract(
         description=description,
         input_schema={
             "type": "object",
-            "properties": {
-                "agent": agent_property,
-                "prompt": {
-                    "type": "string",
-                    "description": (
-                        "Self-contained assignment: objective, relevant paths/data, "
-                        "constraints, verification, and expected report. The subagent "
-                        "does not see the parent conversation."
-                    ),
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["sync", "background"],
-                    "description": (
-                        "sync waits for the report; background returns the "
-                        "worker session ID immediately. Omit to take the "
-                        "target's default: background for read-only research "
-                        "agents, sync for every other agent."
-                    ),
-                },
-                "label": {
-                    "type": "string",
-                    "description": "Optional short progress label.",
-                },
-            },
+            "properties": properties,
             "required": ["agent", "prompt"],
             "additionalProperties": False,
         },
@@ -360,15 +428,19 @@ def file_subagent_targets(
     """Project discovered Fluid definitions into Task-contract targets."""
     if not registry:
         return ()
+    from app.core.builtin_subagents import is_read_only_tool_surface
+
     model = str(selected_model or "current model").strip() or "current model"
     targets = []
     for key, definition in registry.items():
         if isinstance(definition, Mapping):
             name = str(definition.get("name") or key).strip()
             description = definition.get("description")
+            tools = definition.get("tools")
         else:
             name = str(getattr(definition, "name", None) or key).strip()
             description = getattr(definition, "description", None)
+            tools = getattr(definition, "tools", None)
         if not name:
             continue
         targets.append(
@@ -377,6 +449,12 @@ def file_subagent_targets(
                 name=name,
                 description=_clean_description(description),
                 model=model,
+                # The definition's ``tools:`` frontmatter is what dispatch
+                # classifies a file agent on (task_dispatch's
+                # ``_definition_tool_allowlist``).
+                background_default=is_read_only_tool_surface(
+                    list(tools) if isinstance(tools, (list, tuple)) else None
+                ),
             )
         )
     return tuple(targets)

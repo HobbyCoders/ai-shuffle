@@ -478,15 +478,55 @@ def test_read_only_agent_defaults_to_background(agents):
     assert payload["task_id"] == payload["worker_session_id"]
 
 
-def test_explicit_sync_beats_the_read_only_default(agents):
-    """A caller that says sync gets sync, Explore-class or not."""
+def test_explicit_sync_cannot_beat_the_read_only_default(agents):
+    """R4: an Explore-class target is background even when the call says sync.
+
+    The tool schema normally hides ``mode`` for such targets, but a request can
+    still arrive from a replayed transcript or a retry built from one. It is
+    ignored — honouring it is what let a user Stop destroy a finished research
+    child's report along with its blocked parent.
+    """
     _mk_session(agents, "s-explore-sync", "root-agent")
     payload, seen = _dispatch_watching_mode(
         {"agent": "explorer", "prompt": "go", "mode": "sync"}, "s-explore-sync"
     )
-    assert payload["mode"] == "sync"
-    assert payload["report_head"] == "done"
-    assert "background" not in seen
+    assert payload["mode"] == "background"
+    assert payload["requested_mode_ignored"] == "sync"
+    assert "was ignored" in payload["note"]
+    assert "report_head" not in payload
+    assert seen.get("background") is True
+
+
+def test_explicit_background_on_a_read_only_target_is_not_flagged(agents):
+    """Asking for what the target already does is not an ignored override."""
+    _mk_session(agents, "s-explore-bg", "root-agent")
+    payload, _ = _dispatch_watching_mode(
+        {"agent": "explorer", "prompt": "go", "mode": "background"}, "s-explore-bg"
+    )
+    assert payload["mode"] == "background"
+    assert "requested_mode_ignored" not in payload
+
+
+def test_explicit_background_still_wins_for_a_write_capable_target(agents):
+    """Only the background default is unoverridable; sync-default targets keep
+    the old contract in both directions."""
+    _mk_session(agents, "s-editor-bg", "root-agent")
+    payload, seen = _dispatch_watching_mode(
+        {"agent": "editor", "prompt": "go", "mode": "background"}, "s-editor-bg"
+    )
+    assert payload["mode"] == "background"
+    assert seen.get("background") is True
+
+
+def test_explicit_sync_on_a_read_only_file_agent_is_also_ignored(agents):
+    """The rule follows the classification, not the target's storage."""
+    _mk_session(agents, "s-file-sync", "root-agent")
+    payload, _ = _dispatch_watching_mode(
+        {"agent": "researcher", "prompt": "go", "mode": "sync"}, "s-file-sync",
+        agent_registry={"researcher": _definition(tools=("Read", "Grep", "Glob"))},
+    )
+    assert payload["mode"] == "background"
+    assert payload["requested_mode_ignored"] == "sync"
 
 
 def test_write_capable_agent_still_defaults_to_sync(agents):
