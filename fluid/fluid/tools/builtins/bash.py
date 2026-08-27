@@ -95,6 +95,9 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "silent `[exit code 0]` means the command SUCCEEDED; do not re-run it "
         "to check, least of all when it was irreversible (merge, push, "
         "delete).\n"
+        "- That no-output form is a NON-EMPTY string, so in code mode test "
+        "`'[exit code' in out` (or `'(no output)' in out`), never `if out:` or "
+        "`out or fallback` — those are always true and will misfire.\n"
         "- Quote file paths that contain spaces. Under Git Bash, write Windows "
         "paths with forward slashes or inside quotes so backslashes survive.\n"
     )
