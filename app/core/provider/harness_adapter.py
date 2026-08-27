@@ -3045,6 +3045,11 @@ yourself, and never poll for it — completion wakes you.
 Reads, greps, edits and the command that VERIFIES them belong in the same \
 cell. Never spend a cell on a single Read. Never sleep-poll in a loop: park \
 on a Monitor and let the wake bring you back.
+A fixed setup->check->test recipe you already know end-to-end is ONE step, \
+not three. Before ending a cell, ask whether the next cell touches the same \
+file or working tree — if so it belongs in this one.
+After binding a large result, do not print it in slices across cells; locate \
+what you need in the same cell: `i = txt.find('needle'); print(txt[i-200:i+800])`.
 
 ## Recall budget
 At most one SessionSearch per question, with `limit<=5`. Stop after two \
@@ -3287,7 +3292,22 @@ through it in Bash — pull requests (gh pr create/view/checks), issues (gh \
 issue), CI runs (gh run list / gh run watch), and API reads (gh api) — rather \
 than reconstructing that state from raw git or asking the user. Plain git \
 remains the tool for local version control: status, diff, commit, branch, \
-push."""
+push.
+
+CI takes minutes; never wait in Bash. Park on a Monitor whose loop ends on \
+ANY terminal state, not just the green one:
+Monitor(command="while true; do s=$(gh pr checks 123 --json bucket --jq \
+'.[].bucket' || true); case $s in *pending*) sleep 30;; *) echo checks: $s; \
+break;; esac; done")
+
+Worktrees share the main checkout's stash stack, so a bare `git stash` \
+followed by `git stash pop` can drop ANOTHER session's work into your tree. \
+Never use either bare form: stash with `git stash push -u -m "<tag>"` and \
+restore that entry by its SHA, or prefer a WIP commit you can reset.
+
+Re-read `git worktree list` immediately before any bulk branch delete — \
+another session may have created one since your listing, and `git branch \
+--merged` will not tell you."""
 
 
 def _model_guidance_blocks(model: Optional[str]) -> Tuple[str, ...]:
