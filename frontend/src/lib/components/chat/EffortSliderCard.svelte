@@ -81,7 +81,7 @@
 	/>
 	<div
 		class="effort-labels"
-		style:grid-template-columns={`repeat(${Math.max(options.length, 1)}, minmax(0, 1fr))`}
+		style:grid-template-columns={`repeat(${Math.max(options.length, 1)}, 0fr)`}
 		aria-hidden="true"
 	>
 		{#each options as option (option.value)}
@@ -227,9 +227,17 @@
 		border-radius: 999px;
 	}
 
+	/* Zero-width tracks spread with space-between put each label's center on
+	   its tick position (0%…100%), matching where the range thumb actually
+	   stops — the old 1fr columns centered labels at 10%…90% instead. */
 	.effort-labels {
 		display: grid;
-		grid-template-columns: repeat(5, minmax(0, 1fr));
+		grid-template-columns: repeat(5, 0fr);
+		justify-content: space-between;
+		/* The thumb is 20px, so its center at min/max sits 10px in from the
+		   edge — inset the label row by the same amount so the end labels
+		   center on the end thumbs too. */
+		padding: 0 10px;
 		margin-top: 2px;
 		color: var(--subtle-foreground);
 		font-size: 0.62rem;
@@ -237,16 +245,9 @@
 	}
 
 	.effort-labels span {
-		min-width: 0;
-		text-align: center;
-	}
-
-	.effort-labels span:first-child {
-		text-align: left;
-	}
-
-	.effort-labels span:last-child {
-		text-align: right;
+		width: max-content;
+		justify-self: center;
+		white-space: nowrap;
 	}
 
 	.effort-labels span.selected {
