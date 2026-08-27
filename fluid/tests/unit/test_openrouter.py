@@ -478,6 +478,63 @@ async def test_in_stream_error_chunk_surfaces_as_error() -> None:
     assert "Provider returned error" in chunks[-1].payload["message"]
 
 
+async def test_in_stream_cloudflare_520_is_retriable() -> None:
+    # Observed on Z.AI behind OpenRouter: HTTP 200, an error chunk carrying
+    # Cloudflare's 520. Marking it fatal cost real calls and a human "Resume".
+    sse = (
+        'data: {"error":{"message":"Provider returned error","code":520,'
+        '"metadata":{"provider_name":"Z.AI"}}}\n\n'
+        "data: [DONE]\n\n"
+    )
+    chunks = await _stream_with(sse)
+    assert chunks[-1].kind == "error"
+    assert chunks[-1].payload["status"] == 520
+    assert chunks[-1].payload["retriable"] is True
+
+
+async def test_in_stream_numeric_string_code_is_classified() -> None:
+    sse = (
+        'data: {"error":{"message":"Web server is returning an unknown error",'
+        '"code":"522"}}\n\n'
+        "data: [DONE]\n\n"
+    )
+    chunks = await _stream_with(sse)
+    assert chunks[-1].payload["retriable"] is True
+
+
+async def test_in_stream_auth_error_stays_fatal() -> None:
+    sse = (
+        'data: {"error":{"message":"No auth credentials found","code":401}}\n\n'
+        "data: [DONE]\n\n"
+    )
+    chunks = await _stream_with(sse)
+    assert chunks[-1].kind == "error"
+    assert chunks[-1].payload["status"] == 401
+    assert chunks[-1].payload["retriable"] is False
+
+
+async def test_in_stream_error_without_a_code_stays_fatal() -> None:
+    # Nothing to classify on: assume fatal rather than loop on a bad request.
+    sse = (
+        'data: {"error":{"message":"model not found"}}\n\n'
+        "data: [DONE]\n\n"
+    )
+    chunks = await _stream_with(sse)
+    assert chunks[-1].payload["retriable"] is False
+
+
+def test_cloudflare_edge_statuses_are_retriable() -> None:
+    from fluid.providers._retry import RETRIABLE_STATUSES, is_retriable_status
+
+    assert {520, 521, 522, 523, 524} <= RETRIABLE_STATUSES
+    assert is_retriable_status(520) and is_retriable_status("429")
+    assert not is_retriable_status(400)
+    assert not is_retriable_status("rate_limit_exceeded")
+    assert not is_retriable_status(None)
+    # A bool is not a status, however happily Python would compare it.
+    assert not is_retriable_status(True)
+
+
 async def test_stream_without_usage_chunk_is_an_error() -> None:
     sse = (
         'data: {"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}\n\n'

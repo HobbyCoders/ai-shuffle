@@ -29,7 +29,12 @@ from fluid.messages import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from fluid.providers._retry import RETRIABLE_STATUSES, RetryPolicy
+from fluid.providers._retry import (
+    RETRIABLE_STATUSES,
+    RetryPolicy,
+    coerce_status,
+    is_retriable_status,
+)
 from fluid.providers._sse import sse_events
 from fluid.providers.base import StreamChunk
 
@@ -283,13 +288,22 @@ class ChatCompletionsNormalizer:
             if isinstance(err, dict):
                 message = str(err.get("message") or err)
                 code = err.get("code")
+                if coerce_status(code) is None and err.get("status") is not None:
+                    code = err["status"]
             else:
                 message, code = str(err), None
             self.errored = True
+            # The embedded code decides retriability, exactly as a non-200
+            # status would: a Cloudflare 520 from the upstream provider is a
+            # blip worth another attempt, an auth or validation failure is not.
             out.append(
                 StreamChunk(
                     "error",
-                    {"status": code, "message": message[:2000], "retriable": False},
+                    {
+                        "status": code,
+                        "message": message[:2000],
+                        "retriable": is_retriable_status(code),
+                    },
                 )
             )
             return out
