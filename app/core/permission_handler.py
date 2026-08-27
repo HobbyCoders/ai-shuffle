@@ -11,6 +11,7 @@ Manages tool permission requests with a queue system that supports:
 import asyncio
 import logging
 import fnmatch
+import re
 from collections import defaultdict
 from typing import Optional, Dict, Any, List, Literal, Union
 from dataclasses import dataclass, field
@@ -28,6 +29,64 @@ logger = logging.getLogger(__name__)
 # form of the legacy 300s auto-deny (OD-2/Q4-5).
 PERMISSION_KIND = "permission"
 PERMISSION_TTL_SECONDS = 300
+
+# ── Plan approval answered from the composer (P10) ───────────────────────────
+#
+# fluid's StopPlanning parks the turn on a permission interaction titled "Plan
+# Approval" (see query_engine's canUseTool). The panel is one way to answer it;
+# the other — the one users actually reach for — is typing "Proceed." into the
+# chat box. Routing that message into the gate needs two things here: a way to
+# FIND the open gate (``find_pending_plan_approval``) and a way to tell an
+# approval apart from plan feedback (``is_plan_approval_text``).
+#
+# Deliberately scoped to StopPlanning. A bare "yes" typed while a
+# dangerous-command prompt is up must keep needing an explicit click.
+PLAN_APPROVAL_TOOL = "StopPlanning"
+
+# Compared against the normalized message, so each entry covers its punctuated
+# and capitalized forms ("Proceed.", "YES, go ahead!"). Anything not listed is
+# plan feedback — fluid keeps planning and revises, which is the safe default
+# for text nobody is sure about.
+_PLAN_APPROVAL_TEXTS = frozenset({
+    "1",
+    "y", "yes", "yes please", "yep", "yeah", "yup",
+    "ok", "okay", "k", "sure", "sounds good", "sgtm",
+    "approve", "approved", "approve it", "approve plan", "approve the plan",
+    "approve and proceed", "i approve", "plan approved",
+    "proceed", "please proceed", "proceed please", "yes proceed",
+    "proceed with the plan",
+    "go", "go ahead", "yes go ahead", "please go ahead", "go for it",
+    "do it", "yes do it", "just do it", "do it please",
+    "lgtm", "looks good", "looks good to me", "this looks good",
+    "ship it", "make it so",
+    "let's do it", "lets do it", "let's go", "lets go",
+    "implement", "implement it", "implement the plan",
+    "execute the plan", "run it",
+    "start", "begin", "continue", "carry on",
+    "complete the plan", "finish the plan",
+    "accept", "accepted", "confirm", "confirmed",
+    "exit plan mode", "leave plan mode",
+})
+
+# Punctuation that only ever decorates such an answer. The apostrophe is NOT in
+# here — stripping it would turn "let's do it" into two unmatchable words.
+_PLAN_ANSWER_PUNCT_RE = re.compile(r"[.,;:!?\"`*()\[\]]+")
+
+
+def normalize_plan_answer(text: Any) -> str:
+    """Lowercase, de-punctuate and collapse a chat message for gate matching."""
+    cleaned = _PLAN_ANSWER_PUNCT_RE.sub(" ", str(text or "").replace("’", "'"))
+    return re.sub(r"\s+", " ", cleaned).strip().lower()
+
+
+def is_plan_approval_text(text: Any) -> bool:
+    """True when this chat message means "approve the plan and get on with it".
+
+    Everything else — including the empty string — is feedback: fluid's second
+    MRTR leg treats any non-approval answer as plan feedback and stays in plan
+    mode, which is exactly the right outcome for text we could not classify.
+    """
+    return normalize_plan_answer(text) in _PLAN_APPROVAL_TEXTS
 
 
 class PermissionDecision(str, Enum):
@@ -294,6 +353,19 @@ class PermissionHandler:
 
     def _v2_pending_count(self, session_id: str) -> int:
         return len(self._v2_pending_permissions(session_id))
+
+    def find_pending_plan_approval(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """This session's OPEN plan-approval interaction row, or None.
+
+        The row a parked ``StopPlanning`` waits on — the ONE prompt a plain chat
+        message is allowed to answer (see ``PLAN_APPROVAL_TOOL``). Oldest first,
+        matching the order the rows are returned in; a session realistically
+        never has two of these open at once.
+        """
+        for row in self._v2_pending_permissions(session_id):
+            if (row.get("payload") or {}).get("tool_name") == PLAN_APPROVAL_TOOL:
+                return row
+        return None
 
     def _payload_row_to_dict(self, row: Dict[str, Any], state: str) -> Dict[str, Any]:
         """Serialize a permission interaction row to the legacy request dict

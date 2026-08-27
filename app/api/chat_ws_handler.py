@@ -22,7 +22,7 @@ from app.core import account_failover
 from app.core.config import settings
 from app.core.connectors.manager import connector_manager
 from app.core.message_resolver import message_resolver, resolve_working_dir
-from app.core.permission_handler import permission_handler
+from app.core.permission_handler import is_plan_approval_text, permission_handler
 from app.core.streaming_context import StreamingContext
 from app.core.sync_engine import sync_engine
 from app.core.user_question_handler import user_question_handler
@@ -692,6 +692,122 @@ class ChatWebSocketHandler:
             project_v2_id,
         )
 
+    async def _persist_user_message(
+        self, session_id: str, prompt: str, profile_id: str
+    ) -> None:
+        """Write a user message to the transcript and fan it out to devices.
+
+        Same role/metadata derivation as ``handle_query``'s own persist (a
+        leading ``/`` makes it a ``command`` row). Best-effort: a persist
+        failure is logged, never raised at the sender.
+        """
+        try:
+            role = "user"
+            meta = None
+            if prompt.strip().startswith("/"):
+                parts = prompt.strip().split(None, 1)
+                role = "command"
+                meta = {
+                    "command_name": parts[0],
+                    "command_args": parts[1] if len(parts) > 1 else "",
+                }
+            await run_sync(
+                database.add_session_message,
+                session_id=session_id,
+                role=role,
+                content=prompt,
+                metadata=meta,
+                profile_id=profile_id,
+            )
+            await sync_engine.broadcast_message_added(
+                session_id=session_id,
+                message={
+                    "role": "user",
+                    "content": prompt,
+                    "profile_id": profile_id,
+                },
+                source_device_id=self.device_id,
+            )
+        except Exception as persist_exc:  # noqa: BLE001
+            logger.warning(
+                f"[v2] user-message persist/broadcast failed for session "
+                f"{session_id}: {persist_exc}"
+            )
+
+    async def _route_plan_gate_message(
+        self, session_id: str, prompt: str
+    ) -> Optional[str]:
+        """Answer an open plan-approval gate with this chat message (P10).
+
+        fluid's ``StopPlanning`` parks the turn on a durable
+        ``pending_interactions`` row that only the panel's
+        ``permission_response`` frame ever resolved. Users answer it in the
+        composer instead — "Proceed.", "plan approved" — and that message used
+        to queue as an ordinary turn while the gate stayed parked until its TTL
+        denied it, the parked turn burning nodes the whole time.
+
+        Returns:
+            ``"approved"`` — the gate was answered as an approval. The caller
+                records the message and runs NO turn for it: the parked turn
+                resumes on its own and implements the plan.
+            ``"feedback"`` — the gate was answered as "keep planning". The
+                caller continues down the normal path so the user's actual
+                words still reach the model (as a steer into the resumed turn);
+                without them the model would be told to revise with nothing to
+                revise toward.
+            ``None`` — no plan gate is open (or answering it lost a race).
+                Nothing was touched; the message is an ordinary query.
+
+        Scoped to ``StopPlanning`` ONLY. A "yes" typed while a
+        dangerous-command prompt is up still needs its explicit click.
+        """
+        try:
+            row = await run_sync(
+                permission_handler.find_pending_plan_approval, session_id
+            )
+        except Exception:  # noqa: BLE001 — never fail a send over the lookup
+            logger.debug(
+                "Plan-gate lookup failed for session %s", session_id, exc_info=True
+            )
+            return None
+        if row is None:
+            return None
+        request_id = (row.get("payload") or {}).get("request_id")
+        if not request_id:
+            return None
+
+        approved = is_plan_approval_text(prompt)
+        result = await permission_handler.respond(
+            request_id=request_id,
+            session_id=session_id,
+            decision="allow" if approved else "deny",
+            broadcast_func=self.send_json,
+            answered_by_device=self.device_id,
+        )
+        if not isinstance(result, dict) or result.get("error"):
+            # Someone (the panel, another device, the TTL sweeper) got there
+            # first. Treat the message as the ordinary query it looks like.
+            logger.debug(
+                f"Plan gate {request_id} was already resolved; treating the "
+                f"message as a normal query"
+            )
+            return None
+
+        logger.debug(
+            f"Plan gate {request_id} answered from chat: "
+            f"{'approve' if approved else 'keep planning'}"
+        )
+        # The same ack the panel's own answer path sends, so the card clears on
+        # THIS device immediately; other devices clear off the durable
+        # ``interaction.answered`` event.
+        await self.send_json({
+            "type": "permission_response_ack",
+            "session_id": session_id,
+            "request_id": request_id,
+            "result": result,
+        })
+        return "approved" if approved else "feedback"
+
     async def handle_query(self, data: dict) -> None:
         """Handle 'query' message type."""
 
@@ -992,6 +1108,21 @@ class ChatWebSocketHandler:
                         updates={"title": derived_title},
                         source_device_id=None,
                     )
+
+        # A plan-approval gate parked on this session makes THIS message its
+        # answer, not a new turn (P10). A brand-new session cannot have one.
+        if not is_new_session:
+            plan_gate = await self._route_plan_gate_message(session_id, prompt)
+            if plan_gate == "approved":
+                # The gate is answered and the parked turn resumes to implement
+                # the plan, so this message must not ALSO run as a turn of its
+                # own. It is still the user's message: it belongs in the
+                # transcript, where the live turn has not written anything yet.
+                await self._persist_user_message(session_id, prompt, profile_id)
+                return
+            # "feedback" falls through: the gate is answered (fluid stays in
+            # plan mode) and the words themselves ride the normal queue/steer
+            # path into the resumed turn.
 
         # v2 turns cutover: submit a durable ``source=user`` turn instead of
         # spawning run_query. ``submit`` enqueues then kicks the scheduler, which
