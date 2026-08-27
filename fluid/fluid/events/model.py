@@ -78,6 +78,11 @@ class Interrupted(Event):
     # reports total_cost_usd even when the turn was interrupted.
     usage: dict[str, Any] = field(default_factory=dict)
     cost_usd: float | None = None
+    # Model calls the turn had issued before the interrupt landed. Without it,
+    # a turn a user stopped books zero calls downstream even though it paid for
+    # every one of them. ``None`` means "not reported" (events persisted before
+    # the field existed, or an emitter that does not count calls).
+    num_model_calls: int | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -89,6 +94,9 @@ class ErrorEvent(Event):
     # ErrorEvents leave these at their defaults.
     usage: dict[str, Any] = field(default_factory=dict)
     cost_usd: float | None = None
+    # Model calls issued before the error ended the turn — same accounting
+    # rationale as Interrupted. ``None`` means "not reported".
+    num_model_calls: int | None = None
 
 
 # ─── Streaming content ───────────────────────────────────────────────────────

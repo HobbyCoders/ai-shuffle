@@ -299,10 +299,12 @@ async def test_interrupt_during_backoff_ends_the_turn(
     watcher.cancel()
 
     events = loop.bus.log(sid)
-    assert any(isinstance(e, Interrupted) for e in events)
+    stopped = next(e for e in events if isinstance(e, Interrupted))
     assert not any(isinstance(e, TurnComplete) for e in events)
     assert not any(isinstance(e, ErrorEvent) for e in events)
     assert provider.calls == 1
+    # The dud call still billed, so it still counts on the terminal event.
+    assert stopped.num_model_calls == 1
     # Ten full backoffs would be 5s; the interrupt cuts the wait short.
     assert elapsed < 2.0
     assert await _assistant_nodes(store, sid) == []

@@ -652,8 +652,130 @@ def test_interrupted_usage_survives_the_durable_codec() -> None:
     ev = Interrupted(
         session_id="s1", turn_id="t1", node_id="n1",
         usage={"input_tokens": 10, "output_tokens": 5}, cost_usd=0.002,
+        num_model_calls=3,
     )
     assert event_from_dict(event_to_dict(ev)) == ev
+
+
+# ─── partial model-call count on turn-ending Interrupted / ErrorEvent ────────
+#
+# Only TurnComplete used to carry num_model_calls, so a turn the user stopped
+# booked zero calls downstream however many it had actually paid for.
+
+
+async def test_interrupted_turn_reports_partial_model_calls() -> None:
+    """Two model calls in, the tool hangs and the user stops the turn: the
+    Interrupted event books both calls."""
+    started = asyncio.Event()
+
+    @tool("hang", "Hang until cancelled", {"type": "object", "properties": {}})
+    async def hang(args: dict) -> dict:
+        started.set()
+        await asyncio.sleep(3600)
+        return {"content": [{"type": "text", "text": "never"}]}
+
+    registry = ToolRegistry()
+    registry.register_inproc(_weather_server())
+    registry.register_inproc(create_inproc_server("m", [hang]))
+    provider = ScriptedProvider([
+        _tool("t1", "mcp__wx__get_weather", '{"city": "Paris"}'),
+        _tool("t2", "mcp__m__hang", "{}"),
+        _text("should never be requested"),
+    ])
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="claude-sonnet-5",
+        registry=registry, permissions=PermissionEngine("never_ask"),
+    )
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(started.wait(), timeout=5)
+    await loop.submit(Interrupt())
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+
+    events = loop.bus.log(loop.session_id)
+    assert not any(isinstance(e, TurnComplete) for e in events)
+    assert provider.calls == 2
+    ev = next(e for e in events if isinstance(e, Interrupted))
+    assert ev.num_model_calls == 2
+
+
+async def test_interrupt_during_model_call_reports_partial_model_calls() -> None:
+    """The other interrupt path — the stop lands while the model call is still
+    streaming, so the call itself comes back marked interrupted."""
+    registry = ToolRegistry()
+    registry.register_inproc(_weather_server())
+
+    class _StopAfterFirstCall(ScriptedProvider):
+        def __init__(self, scripts: list[list[StreamChunk]], loop_ref: dict) -> None:
+            super().__init__(scripts)
+            self.loop_ref = loop_ref
+
+        async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
+            async for chunk in super().stream(request):
+                yield chunk
+            # Press stop as the call finishes streaming. Setting the engine's
+            # flag directly (rather than submitting Interrupt) keeps the timing
+            # deterministic: the op queue runs on its own task.
+            self.loop_ref["loop"]._interrupted.set()
+
+    ref: dict = {}
+    provider = _StopAfterFirstCall(
+        [_tool("t1", "mcp__wx__get_weather", '{"city": "Paris"}')], ref
+    )
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="claude-sonnet-5",
+        registry=registry, permissions=PermissionEngine("never_ask"),
+    )
+    ref["loop"] = loop
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+
+    events = loop.bus.log(loop.session_id)
+    assert not any(isinstance(e, TurnComplete) for e in events)
+    # The call itself was marked interrupted, so the loop stopped before
+    # dispatching the tool it asked for — a different emission point from the
+    # interrupt-during-dispatch test above.
+    assert not any(isinstance(e, ToolResult) for e in events)
+    ev = next(e for e in events if isinstance(e, Interrupted))
+    assert ev.num_model_calls == 1
+
+
+async def test_provider_error_turn_reports_partial_model_calls() -> None:
+    """The failed call counts too: one good call plus the one that exploded."""
+    registry = ToolRegistry()
+    registry.register_inproc(_weather_server())
+    provider = ScriptedProvider([
+        _tool("t1", "mcp__wx__get_weather", '{"city": "Paris"}'),
+        _error("upstream exploded", {"input_tokens": 7}),
+    ])
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="claude-sonnet-5",
+        registry=registry, permissions=PermissionEngine("never_ask"),
+    )
+    await loop.submit(UserTurn(content="weather in Paris?"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+
+    err = next(
+        e for e in loop.bus.log(loop.session_id) if isinstance(e, ErrorEvent)
+    )
+    assert err.num_model_calls == 2
+
+
+def test_legacy_terminal_events_without_call_counts_still_parse() -> None:
+    """Events persisted before the field existed decode with it unset."""
+    from fluid.events.model import event_from_dict
+
+    legacy_interrupt = {
+        "_cls": "Interrupted", "session_id": "s1", "node_id": "n1",
+        "turn_id": "t1", "seq": 4, "message": "interrupted",
+        "usage": {"input_tokens": 10}, "cost_usd": 0.002,
+    }
+    legacy_error = {
+        "_cls": "ErrorEvent", "session_id": "s1", "node_id": "n1",
+        "turn_id": "t1", "seq": 5, "message": "boom", "retriable": False,
+        "usage": {"input_tokens": 7}, "cost_usd": None,
+    }
+    assert event_from_dict(legacy_interrupt).num_model_calls is None
+    assert event_from_dict(legacy_error).num_model_calls is None
 
 
 def test_plan_mode_filters_write_tools() -> None:

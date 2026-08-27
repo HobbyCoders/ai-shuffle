@@ -593,6 +593,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._session: SessionMeta | None = None
         self._session_id = session_id
         self._interrupted = asyncio.Event()
+        # Model calls the current turn has issued so far. Mirrors the agent
+        # loop's local counter so terminal events raised OUTSIDE the loop (the
+        # catch-all handler in _start_and_loop) can still report the count.
+        self._turn_model_calls = 0
         self._turn_task: asyncio.Task | None = None
         self._pending_permissions: dict[str, asyncio.Future] = {}
         self._pending_questions: dict[str, asyncio.Future] = {}
@@ -1007,6 +1011,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         sid = meta.session_id
         turn_id = new_id("turn")
         self._background_turn_terminal = False
+        self._turn_model_calls = 0
         self._active_turn_id = turn_id
 
         # Connect config MCP servers before building the user node so newly
@@ -1038,6 +1043,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                         "assistant reply"
                     ),
                     retriable=False,
+                    num_model_calls=0,
                 ))
                 self._active_turn_id = None
                 return
@@ -1097,7 +1103,10 @@ class NativeLoop(BackgroundLifecycleMixin):
             raise
         except Exception as exc:  # surface, never swallow
             await self._emit_terminal_with_park(
-                ErrorEvent(session_id=sid, turn_id=turn_id, message=repr(exc))
+                ErrorEvent(
+                    session_id=sid, turn_id=turn_id, message=repr(exc),
+                    num_model_calls=self._turn_model_calls,
+                )
             )
         finally:
             self._active_turn_id = None
@@ -1372,6 +1381,7 @@ class NativeLoop(BackgroundLifecycleMixin):
     async def _agent_loop(self, sid: str, turn_id: str, user_node: SessionNode) -> None:
         parent = user_node
         num_calls = 0
+        self._turn_model_calls = 0
         total_usage: dict[str, Any] = {}
         final_stop = "end_turn"
         overflow_retries = 0
@@ -1402,6 +1412,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 sid, turn_id, history, sticky=call_was_sticky
             )
             num_calls += 1
+            self._turn_model_calls = num_calls
             if not _is_empty_completion(result):
                 empty_retries = 0
             elif empty_retries < EMPTY_COMPLETION_MAX_RETRIES:
@@ -1446,6 +1457,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     await self._emit_terminal_with_park(Interrupted(
                         session_id=sid, node_id=parent.node_id, turn_id=turn_id,
                         usage=partial, cost_usd=partial_cost,
+                        num_model_calls=num_calls,
                     ))
                     return
                 continue
@@ -1534,6 +1546,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     message=result.error_message or "provider error",
                     retriable=result.error_retriable,
                     usage=partial, cost_usd=partial_cost,
+                    num_model_calls=num_calls,
                 ))
                 return  # leave the turn open-ended
             self._fold_call_usage(total_usage, result.usage)
@@ -1588,6 +1601,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 await self._emit_terminal_with_park(Interrupted(
                     session_id=sid, node_id=node.node_id, turn_id=turn_id,
                     usage=partial, cost_usd=partial_cost,
+                    num_model_calls=num_calls,
                 ))
                 return
 
@@ -1678,6 +1692,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 await self._emit_terminal_with_park(Interrupted(
                     session_id=sid, node_id=parent.node_id, turn_id=turn_id,
                     usage=partial, cost_usd=partial_cost,
+                    num_model_calls=num_calls,
                 ))
                 return
 
