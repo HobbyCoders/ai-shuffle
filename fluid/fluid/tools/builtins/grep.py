@@ -21,8 +21,10 @@ from typing import Any
 
 from fluid.tools.builtins._util import (
     MAX_FILE_BYTES,
+    GlobFilter,
+    GlobSyntaxError,
     WalkState,
-    glob_to_regex,
+    compile_glob,
     is_binary,
     missing_path_note,
     repeat_search_note,
@@ -61,7 +63,10 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "result means no matches in the searched scope, not an error.\n"
         "\n"
         "The `glob` filter accepts `**`, `?`, character classes and `{a,b}` "
-        "alternation (e.g. *.{py,ts}) whichever engine runs.\n"
+        "alternation (e.g. *.{py,ts}) whichever engine runs, and a leading "
+        "`!` excludes instead of includes (e.g. !{vendor/**,dist/**} searches "
+        "everything else). A glob neither engine can honour comes back as an "
+        "error naming the construct, never as an empty result.\n"
         "\n"
         "Patterns use ripgrep/Rust regex syntax when ripgrep is installed "
         "(escape literal braces, e.g. interface\\{\\}) and Python re syntax "
@@ -81,7 +86,13 @@ SPEC = ToolSpec(
                 "description": "The regular expression to search for.",
             },
             "path": {"type": "string", "description": "File or directory (default cwd)."},
-            "glob": {"type": "string", "description": "Filename glob filter, e.g. *.py."},
+            "glob": {
+                "type": "string",
+                "description": (
+                    "Path glob filter, e.g. *.py or src/**/*.ts. A leading '!' "
+                    "excludes instead of includes, e.g. !vendor/**."
+                ),
+            },
             "no_ignore": {
                 "type": "boolean",
                 "description": "Also search ignored/hidden files (ripgrep -uu).",
@@ -250,14 +261,19 @@ def _pure_python_grep(
     from fluid.tools.hardening import is_sensitive_path
 
     state = WalkState(deadline=time.monotonic() + FALLBACK_DEADLINE_S)
-    # The same compiler Glob uses, so `*.{py,ts}` and `src/**/*.ts` mean the
-    # same thing here as they do under ripgrep.
-    glob_rx = glob_to_regex(glob) if glob else None
+    # The same compiler Glob uses, so `*.{py,ts}`, `src/**/*.ts` and `!vendor/**`
+    # mean the same thing here as they do under ripgrep. A glob this engine
+    # cannot honour is a hard error: filtering everything out and reporting
+    # "(no matches)" would read as a fact about the tree.
+    try:
+        glob_filter = compile_glob(glob) if glob else None
+    except GlobSyntaxError as exc:
+        return ToolOutcome(text=f"{head}\nunsupported glob {glob!r}: {exc}", is_error=True)
     out: list[str] = []
     capped = False
     dropped = 0
     for path in walk_files(root, state):
-        if glob_rx is not None and not _glob_hit(glob_rx, path, root):
+        if glob_filter is not None and not _glob_hit(glob_filter, path, root):
             continue
         if is_sensitive_path(str(path)):
             dropped += 1
@@ -282,13 +298,13 @@ def _pure_python_grep(
     return ToolOutcome(text="\n".join([head, body, *notes]))
 
 
-def _glob_hit(rx: re.Pattern[str], path: Path, root: Path) -> bool:
-    """Does ``path`` match the glob, as a root-relative POSIX path?"""
+def _glob_hit(glob_filter: GlobFilter, path: Path, root: Path) -> bool:
+    """Does ``path`` pass the glob filter, as a root-relative POSIX path?"""
     try:
         rel = path.relative_to(root).as_posix()
     except ValueError:
         rel = path.name
-    return rx.match(rel) is not None
+    return glob_filter.matches(rel)
 
 
 def _search_file(path: Path, rx: re.Pattern[str], remaining: int) -> Iterator[str]:

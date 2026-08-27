@@ -276,8 +276,10 @@ def test_glob_compiler_accepts_brace_alternation() -> None:
     rx = glob_to_regex("*.{py,md}")
     assert rx.match("a.py") and rx.match("nested/a.md")
     assert not rx.match("a.ts")
-    # A brace spanning a separator is not alternation — left as literal text.
-    assert glob_to_regex("{src/a,b}.py").match("{src/a,b}.py")
+    # A brace spanning a separator is alternation too, as it is under ripgrep.
+    spanning = glob_to_regex("{src/a,b}.py")
+    assert spanning.match("src/a.py") and spanning.match("b.py")
+    assert not spanning.match("{src/a,b}.py")
 
 
 async def test_grep_fallback_honours_brace_globs(tmp_path, monkeypatch) -> None:

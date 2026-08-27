@@ -129,17 +129,47 @@ def is_binary(path: Path) -> bool:
         return True
 
 
-def glob_to_regex(pattern: str, *, case_sensitive: bool | None = None) -> re.Pattern[str]:
-    """Compile a glob into a regex matched against a POSIX relative path.
+class GlobSyntaxError(ValueError):
+    """A glob construct the pure-Python glob compiler cannot honour.
 
-    Supports ``**`` (any depth), ``*``/``?`` (within one segment), ``[...]``
-    classes and ``{a,b}`` alternation — the last because ripgrep accepts it, so
-    a ``*.{py,ts}`` that worked through Grep's rg branch must not silently match
-    nothing through the Python one. A pattern with no ``/`` matches the file
-    *name* at any depth, so a bare ``*.py`` behaves the way models tend to
-    expect.
+    Raised rather than quietly compiling to something that matches nothing:
+    a filter that drops every file turns a real hit into a clean "(no
+    matches)", which reads as a fact about the tree and is acted on as one.
+    The caller's job is to surface it as a hard error naming the construct.
     """
-    pat = pattern.replace("\\", "/")
+
+
+def _close_brace(pat: str, start: int) -> int:
+    """Index of the ``}`` closing the group opened at ``start`` (nesting aware)."""
+    depth = 0
+    for i in range(start, len(pat)):
+        if pat[i] == "{":
+            depth += 1
+        elif pat[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    raise GlobSyntaxError("unbalanced '{' — the brace group is never closed")
+
+
+def _split_alternatives(body: str) -> list[str]:
+    """Split a brace body on its top-level commas; nested groups stay whole."""
+    alts: list[str] = []
+    depth = start = 0
+    for i, ch in enumerate(body):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            alts.append(body[start:i])
+            start = i + 1
+    alts.append(body[start:])
+    return alts
+
+
+def _glob_expr(pat: str) -> str:
+    """Translate a glob body (no leading ``!``) into a regex fragment."""
     out: list[str] = []
     i, n = 0, len(pat)
     while i < n:
@@ -162,28 +192,86 @@ def glob_to_regex(pattern: str, *, case_sensitive: bool | None = None) -> re.Pat
             continue
         if ch == "[":
             close = pat.find("]", i + 1)
-            if close != -1:
-                body = pat[i + 1:close]
-                if body.startswith(("!", "^")):
-                    body = "^" + body[1:]
-                out.append(f"[{body}]")
-                i = close + 1
-                continue
+            if close == -1:
+                raise GlobSyntaxError("unterminated '[' — the character class is never closed")
+            body = pat[i + 1:close]
+            if body.startswith(("!", "^")):
+                body = "^" + body[1:]
+            out.append(f"[{body}]")
+            i = close + 1
+            continue
         if ch == "{":
-            close = pat.find("}", i + 1)
-            if close != -1 and "/" not in pat[i + 1:close]:
-                alts = pat[i + 1:close].split(",")
-                out.append("(?:" + "|".join(re.escape(a) for a in alts) + ")")
-                i = close + 1
-                continue
+            close = _close_brace(pat, i)
+            # Each alternative is a glob in its own right, so a separator or a
+            # nested group inside the braces means what it means outside them.
+            alts = _split_alternatives(pat[i + 1:close])
+            out.append("(?:" + "|".join(_glob_expr(alt) for alt in alts) + ")")
+            i = close + 1
+            continue
         out.append(re.escape(ch))
         i += 1
-    expr = "".join(out)
+    return "".join(out)
+
+
+def glob_to_regex(pattern: str, *, case_sensitive: bool | None = None) -> re.Pattern[str]:
+    """Compile a glob into a regex matched against a POSIX relative path.
+
+    Supports ``**`` (any depth), ``*``/``?`` (within one segment), ``[...]``
+    classes and ``{a,b}`` alternation — the last because ripgrep accepts it, so
+    a ``*.{py,ts}`` that worked through Grep's rg branch must not silently match
+    nothing through the Python one. Alternatives may contain ``/`` and may nest,
+    for the same reason. A pattern with no ``/`` matches the file *name* at any
+    depth, so a bare ``*.py`` behaves the way models tend to expect.
+
+    Raises :class:`GlobSyntaxError` for anything it cannot translate faithfully,
+    including a leading ``!`` — that is ripgrep's exclusion marker, not a
+    literal, so it has to go through :func:`compile_glob`.
+    """
+    pat = pattern.replace("\\", "/")
+    if pat.startswith("!"):
+        raise GlobSyntaxError(
+            "a leading '!' is ripgrep's exclusion marker, not a literal; "
+            "compile it with compile_glob()"
+        )
+    expr = _glob_expr(pat)
     if "/" not in pat:
         expr = "(?:.*/)?" + expr
     if case_sensitive is None:
         case_sensitive = os.name != "nt"
-    return re.compile(expr + r"\Z", 0 if case_sensitive else re.IGNORECASE)
+    try:
+        return re.compile(expr + r"\Z", 0 if case_sensitive else re.IGNORECASE)
+    except re.error as exc:  # pragma: no cover - only reachable via odd classes
+        raise GlobSyntaxError(f"glob does not compile: {exc}") from exc
+
+
+@dataclass(frozen=True)
+class GlobFilter:
+    """A compiled ``glob`` value carrying ripgrep's leading-``!`` semantics.
+
+    ``rg --glob '!x'`` is an *exclusion*: every file is searched except the ones
+    matching ``x``. Translating that as an include filter — which is what a
+    plain glob→regex pass does once the ``!`` has been escaped — matches nothing
+    at all, and the search comes back as an honest-looking "(no matches)".
+    """
+
+    regex: re.Pattern[str]
+    negated: bool
+
+    def matches(self, rel_path: str) -> bool:
+        """Does a root-relative POSIX path pass this filter?"""
+        hit = self.regex.match(rel_path) is not None
+        return not hit if self.negated else hit
+
+
+def compile_glob(pattern: str, *, case_sensitive: bool | None = None) -> GlobFilter:
+    """Compile one ripgrep-style ``--glob`` value into a path filter."""
+    negated = pattern.startswith("!")
+    body = pattern[1:] if negated else pattern
+    if not body:
+        raise GlobSyntaxError("'!' with nothing to exclude")
+    return GlobFilter(
+        regex=glob_to_regex(body, case_sensitive=case_sensitive), negated=negated
+    )
 
 
 def detect_newline(text: str) -> str:

@@ -12,7 +12,13 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fluid.tools.builtins._util import WalkState, glob_to_regex, truncate, walk_files
+from fluid.tools.builtins._util import (
+    GlobSyntaxError,
+    WalkState,
+    compile_glob,
+    truncate,
+    walk_files,
+)
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 MAX_RESULTS = 200
@@ -37,7 +43,12 @@ def describe(tools: frozenset[str] | None = None) -> str:
         f"(a note tells you when the cap was hit; raise `limit` up to "
         f"{MAX_LIMIT} or narrow the pattern). Heavy directories "
         "(node_modules, .git, build output, virtualenvs) are pruned from "
-        "the walk."
+        "the walk.\n"
+        "\n"
+        "Patterns accept `**`, `?`, character classes and `{a,b}` alternation, "
+        "and a leading `!` inverts the pattern into an exclusion (e.g. "
+        "!{vendor/**,dist/**}). A pattern that cannot be honoured comes back as "
+        "an error naming the construct, never as an empty result."
     )
 
 
@@ -51,7 +62,8 @@ SPEC = ToolSpec(
                 "type": "string",
                 "description": (
                     "Glob pattern; ** matches any depth. A pattern with no '/' "
-                    "matches the file name at any depth."
+                    "matches the file name at any depth. A leading '!' lists "
+                    "everything EXCEPT what matches, e.g. !{vendor/**,dist/**}."
                 ),
             },
             "path": {"type": "string", "description": "Directory to search (default cwd)."},
@@ -93,7 +105,12 @@ def _glob(pattern: str, root: Path, limit: int = MAX_RESULTS) -> ToolOutcome:
     head = f"globbed under {root}"
     if not root.exists():
         return ToolOutcome(text=f"path not found: {root}", is_error=True)
-    rx = glob_to_regex(pattern)
+    # A pattern this compiler cannot honour is an error, not an empty listing:
+    # "(no matches)" reads as a fact about the tree and gets acted on as one.
+    try:
+        matcher = compile_glob(pattern)
+    except GlobSyntaxError as exc:
+        return ToolOutcome(text=f"unsupported glob {pattern!r}: {exc}", is_error=True)
 
     # Collect everything the walk finds (up to a hard ceiling), THEN sort, THEN
     # cap: truncating during the walk and sorting afterwards would return an
@@ -106,7 +123,7 @@ def _glob(pattern: str, root: Path, limit: int = MAX_RESULTS) -> ToolOutcome:
             rel = path.relative_to(root).as_posix()
         except ValueError:
             rel = path.name
-        if not rx.match(rel):
+        if not matcher.matches(rel):
             continue
         try:
             mtime = path.stat().st_mtime
