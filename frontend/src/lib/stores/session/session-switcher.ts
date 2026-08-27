@@ -527,7 +527,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// The SSE-fed reducer is the transcript authority (full replay from_seq=0 =
 		// history load). Start the feed; permissions/questions flow over legacy WS.
 		if (generation !== _switchGeneration) return;
-		update(s => (s.sessionId === sessionId ? { ...s, isLoadingSession: false } : s));
+		// Keep isLoadingSession true until this feed's caught_up sentinel folds the
+		// complete transcript atomically. Merely starting the fetch is not loaded.
 		// Register with SyncEngine so cross-device broadcast events reach this tab.
 		wsSend({ type: 'watch_session', session_id: sessionId });
 		// Request pending permissions/questions UNCONDITIONALLY (not gated on

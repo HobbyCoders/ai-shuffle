@@ -9,8 +9,8 @@
  *    (the "history paints one message at a time on open" bug). After catch-up,
  *    live events keep the incremental per-frame paint. The flag re-arms only on
  *    the FIRST connect (`onOpen` before any catch-up); reconnects after catch-up
- *    keep folding live events immediately (#611). A no-sentinel fallback means
- *    the view can never be stuck blank against an old backend.
+ *    keep folding live events immediately (#611). Initial hydration treats the
+ *    backend's mandatory caught_up sentinel as the only publish boundary.
  *
  * 2. Flush scheduling. The post-catch-up fold coalesces onto requestAnimationFrame
  *    with a 250ms setTimeout fallback (browsers pause rAF in hidden tabs). These
@@ -29,6 +29,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 const hoisted = vi.hoisted(() => ({
 	onEvent: null as ((e: Record<string, unknown>) => void) | null,
 	onOpen: null as (() => void) | null,
+	creates: 0,
 	stops: 0,
 	revives: 0,
 }));
@@ -38,6 +39,7 @@ vi.mock('./sse-feed', () => ({
 		_sessionId: string,
 		opts: { onEvent: (e: Record<string, unknown>) => void; onOpen?: () => void },
 	) => {
+		hoisted.creates++;
 		hoisted.onEvent = opts.onEvent;
 		hoisted.onOpen = opts.onOpen ?? null;
 		return {
@@ -200,6 +202,7 @@ function interaction(
 beforeEach(() => {
 	hoisted.onEvent = null;
 	hoisted.onOpen = null;
+	hoisted.creates = 0;
 	hoisted.stops = 0;
 	hoisted.revives = 0;
 	rafQueue = [];
@@ -241,7 +244,7 @@ describe('feedController history-batch hydration', () => {
 		hoisted.onEvent!(textDelta('e2', 'bar'));
 		// Even if rAF/timers fire, nothing was scheduled during backfill.
 		flushRaf();
-		vi.advanceTimersByTime(500); // < CATCHUP_FALLBACK_MS (1000)
+		vi.advanceTimersByTime(500);
 		expect(deps.update.mock.calls.length).toBe(callsAfterStart);
 		expect((deps.state.messages as unknown[]).length).toBe(0);
 
@@ -253,28 +256,34 @@ describe('feedController history-batch hydration', () => {
 		expect(msgs[0].content).toBe('foobar');
 	});
 
-	it('(a-fallback) folds once when caught_up never arrives (old backend safety net)', () => {
-		const deps = makeDeps();
+	it('(a-atomic) multi-second stalls never publish a partial backfill', () => {
+		const deps = makeDeps({ isLoadingSession: true, isRestoringSession: true });
 		feedController.attach(deps);
 		feedController.start('s1');
 		const callsAfterStart = deps.update.mock.calls.length;
 
+		// The backend can spend seconds resolving compaction or paging a large log.
+		// Silence before the first frame and between pages must not turn history into
+		// live cadence — caught_up is the authoritative hydration boundary.
+		vi.advanceTimersByTime(20_000);
 		hoisted.onEvent!(textDelta('e1', 'foo'));
+		vi.advanceTimersByTime(5_000);
 		hoisted.onEvent!(textDelta('e2', 'bar'));
-		// No sentinel. The 1s no-sentinel fallback must fold what we have.
+		vi.advanceTimersByTime(20_000);
+
 		expect(deps.update.mock.calls.length).toBe(callsAfterStart);
-		vi.advanceTimersByTime(1000);
+		expect(deps.state.messages).toHaveLength(0);
+		expect(deps.state.isLoadingSession).toBe(true);
+		expect(deps.state.isRestoringSession).toBe(true);
+
+		hoisted.onEvent!(caughtUp(2));
 		expect(deps.update.mock.calls.length).toBe(callsAfterStart + 1);
-		const msgs = deps.state.messages as Array<{ content: string }>;
-		expect(msgs).toHaveLength(1);
-		expect(msgs[0].content).toBe('foobar');
+		expect((deps.state.messages as Array<{ content: string }>)[0].content).toBe('foobar');
+		expect(deps.state.isLoadingSession).toBe(false);
+		expect(deps.state.isRestoringSession).toBe(false);
 	});
 
-	it('(a-fallback-idle) a long backfill stays batched — each frame re-arms the fallback', () => {
-		// A big session backfills for many seconds. The fallback is IDLE-based:
-		// every arriving frame re-arms it, so the stream never flips to per-frame
-		// live painting mid-backfill (which replayed the transcript visibly and
-		// sent the auto-scroll chasing the repaints).
+	it('(a-atomic) a long steady backfill folds exactly once on caught_up', () => {
 		const deps = makeDeps();
 		feedController.attach(deps);
 		feedController.start('s1');
@@ -282,29 +291,46 @@ describe('feedController history-batch hydration', () => {
 
 		for (let i = 0; i < 50; i++) {
 			hoisted.onEvent!(textDelta(`e${i}`, 'x'));
-			vi.advanceTimersByTime(900); // < CATCHUP_FALLBACK_MS between frames
+			vi.advanceTimersByTime(2_000);
 		}
-		// Still batching: not one intermediate fold across 45 seconds of frames.
 		expect(deps.update.mock.calls.length).toBe(callsAfterStart);
 
-		// The sentinel folds the whole accumulated transcript in ONE batch.
 		hoisted.onEvent!(caughtUp(50));
 		expect(deps.update.mock.calls.length).toBe(callsAfterStart + 1);
-		const msgs = deps.state.messages as Array<{ id: string }>;
-		expect(msgs).toHaveLength(1); // 50 deltas → one joined message
+		expect(deps.state.messages).toHaveLength(1);
 	});
 
-	it('(a-fallback-idle) a true idle gap during backfill still folds (stuck view safety)', () => {
+	it('duplicate same-session start is idempotent', () => {
 		const deps = makeDeps();
 		feedController.attach(deps);
 		feedController.start('s1');
-		const callsAfterStart = deps.update.mock.calls.length;
+		const owner = hoisted.onEvent;
 
-		hoisted.onEvent!(textDelta('e1', 'foo'));
-		// Silence for longer than CATCHUP_FALLBACK_MS with no sentinel: fold so
-		// the view can never be stuck blank.
-		vi.advanceTimersByTime(1100);
-		expect(deps.update.mock.calls.length).toBe(callsAfterStart + 1);
+		feedController.start('s1');
+
+		expect(hoisted.creates).toBe(1);
+		expect(hoisted.onEvent).toBe(owner);
+	});
+
+	it('stale callbacks cannot complete a replacement hydration', () => {
+		const deps = makeDeps({ isLoadingSession: true });
+		feedController.attach(deps);
+		feedController.start('s1');
+		const staleEvent = hoisted.onEvent!;
+
+		feedController.restart('s1');
+		const currentEvent = hoisted.onEvent!;
+		const callsAfterRestart = deps.update.mock.calls.length;
+
+		staleEvent(textDelta('stale', 'wrong'));
+		staleEvent(caughtUp(1));
+		expect(deps.update.mock.calls.length).toBe(callsAfterRestart);
+		expect(deps.state.isLoadingSession).toBe(true);
+
+		currentEvent(textDelta('current', 'right'));
+		currentEvent(caughtUp(2));
+		expect((deps.state.messages as Array<{ content: string }>)[0].content).toBe('right');
+		expect(deps.state.isLoadingSession).toBe(false);
 	});
 
 	it('(c) #611: after catch-up, a reconnect (onOpen) folds live events immediately — no re-batch', () => {
@@ -317,15 +343,12 @@ describe('feedController history-batch hydration', () => {
 		hoisted.onEvent!(caughtUp(0));
 
 		// A reconnect after catch-up: onOpen must NOT re-arm the batch flag
-		// (`everCaughtUp` guard). Re-batching here would strand live events behind
-		// the throttleable CATCHUP_FALLBACK_MS timer, which a hidden tab freezes →
-		// transcript stall (#611). The reconnect's near-empty backfill (cursor =
+		// (`everCaughtUp` guard). The reconnect's near-empty backfill (cursor =
 		// lastSeq) IS the live tail, so it must fold on the normal live cadence.
 		hoisted.onOpen!();
 
 		// A live event arrives with NO new `caught_up` sentinel. It must fold via
-		// the normal rAF/250ms cadence — NOT wait for a sentinel or the 1s catch-up
-		// fallback (we never advance timers to 1000ms here).
+		// the normal rAF/250ms cadence — it must not wait for another sentinel.
 		hoisted.onEvent!(textDelta('e1', 'foo'));
 		flushRaf();
 

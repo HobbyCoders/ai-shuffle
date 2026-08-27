@@ -73,41 +73,14 @@ let timerHandle: ReturnType<typeof setTimeout> | null = null;
 // made the list grow one message at a time on open). Re-armed per SSE connect.
 let caughtUp = false;
 // Whether catch-up has EVER completed for the current feed (across reconnects).
-// #611: `onOpen` only re-arms the batch flag on the FIRST connection. Once
-// catch-up has happened, reconnect backfills (cursor = lastSeq, near-empty) keep
-// `caughtUp === true` so live events fold immediately instead of waiting on the
-// throttleable `CATCHUP_FALLBACK_MS` timer in a hidden tab. Reset in start()/stop().
+// `onOpen` only re-arms the batch flag on the FIRST connection. Once catch-up
+// has happened, reconnect backfills (cursor = lastSeq, near-empty) keep live
+// cadence; the reconnect's duplicate sentinel is harmless.
 let everCaughtUp = false;
-// Safety net for an old backend that never emits `caught_up`: if NO frame has
-// arrived for this long, fold whatever has accumulated so the view can never be
-// stuck blank. IDLE-based, not a deadline from connect: a long backfill is a
-// steady stream of frames, each of which re-arms the timer — flipping to live
-// cadence mid-backfill made every remaining history frame repaint individually,
-// which surfaced as the transcript visibly replaying (and auto-scroll chasing)
-// on large sessions. Cleared on `caught_up`.
-let catchupFallbackTimer: ReturnType<typeof setTimeout> | null = null;
-const CATCHUP_FALLBACK_MS = 1_000;
-
-function clearCatchupFallback(): void {
-	if (catchupFallbackTimer !== null) {
-		clearTimeout(catchupFallbackTimer);
-		catchupFallbackTimer = null;
-	}
-}
-
-function armCatchupFallback(): void {
-	clearCatchupFallback();
-	catchupFallbackTimer = setTimeout(() => {
-		catchupFallbackTimer = null;
-		if (!caughtUp) {
-			// No sentinel AND a full second of silence: give up batching and fold
-			// what we have; subsequent events flush per the normal live cadence.
-			caughtUp = true;
-			everCaughtUp = true;
-			fold();
-		}
-	}, CATCHUP_FALLBACK_MS);
-}
+// Every start/stop advances this token. Fetch abort is asynchronous, so a
+// stopped reader can still deliver an already-buffered frame; callbacks from
+// that obsolete reader must never fold or complete the replacement hydration.
+let feedGeneration = 0;
 
 // ─── Optimistic-message seeding ───────────────────────────────────────────────
 
@@ -185,7 +158,7 @@ function reconcileQueuedMessages(queued: QueuedMessage[]): QueuedMessage[] {
 	return pendingQueue.reconcile(currentSessionId, queued);
 }
 
-function fold(): void {
+function fold(hydrationComplete = false): void {
 	if (!deps) return;
 	// Guard against a session switch that landed mid-batch.
 	if (deps.getState().sessionId !== currentSessionId) return;
@@ -207,6 +180,9 @@ function fold(): void {
 					activeTasks,
 					liveContextUsage,
 					queuedMessages: reconcileQueuedMessages(s.queuedMessages),
+					...(hydrationComplete
+						? { isLoadingSession: false, isRestoringSession: false }
+						: {}),
 					...usagePatch,
 				}
 			: s
@@ -254,8 +230,10 @@ function scheduleFlush(): void {
 export interface FeedController {
 	/** Inject the active-session writer. Call once at boot. */
 	attach: (d: FeedControllerDeps) => void;
-	/** Begin feeding a v2 session: full replay from_seq=0, then live tail. */
+	/** Begin feeding a v2 session. Idempotent for the session already feeding. */
 	start: (sessionId: string) => void;
+	/** Explicitly discard reducer state and hydrate this session again from seq 0. */
+	restart: (sessionId: string) => void;
 	/**
 	 * Nudge a possibly-half-open feed: abort the reader and reconnect at the
 	 * cursor (from_seq=lastSeq). Unlike start(), this keeps the reducer state —
@@ -284,7 +262,12 @@ export const feedController: FeedController = {
 			console.warn('[feedController] start() before attach() — ignoring');
 			return;
 		}
+		// Lifecycle signals for one session can arrive through the switcher, WS
+		// start/session_created, and reconnect watchdog. They all mean "ensure a
+		// feed exists", not "throw away hydration and replay from zero again".
+		if (feed !== null && currentSessionId === sessionId) return;
 		this.stop();
+		const generation = ++feedGeneration;
 		currentSessionId = sessionId;
 		reducerState = initialState();
 		pendingQueue.reset(sessionId);
@@ -292,32 +275,21 @@ export const feedController: FeedController = {
 		everCaughtUp = false;
 		feed = createSseFeed(sessionId, {
 			onOpen: () => {
-				// #611: only re-arm the batch flag on the FIRST connection. The
-				// initial connect replays the full history backfill terminated by
-				// `caught_up`, which must batch into one fold (#636). But a reconnect
-				// AFTER catch-up (revive / dropped stream) resumes at cursor=lastSeq —
-				// a near-empty backfill that is just the live tail. Re-arming
-				// `caughtUp=false` there would re-batch live events behind the
-				// throttleable `CATCHUP_FALLBACK_MS` timer, which a hidden tab freezes
-				// → transcript stall. So once catch-up has happened, keep
-				// `caughtUp === true` so those events fold immediately; a duplicate
-				// `caught_up` sentinel from the reconnect backfill just calls fold()
-				// again (harmless).
-				if (!everCaughtUp) {
-					caughtUp = false;
-					armCatchupFallback();
-				}
+				if (generation !== feedGeneration) return;
+				// Initial hydration remains atomic until the backend's mandatory
+				// `caught_up` sentinel. Reconnects after that point resume at lastSeq
+				// and keep live cadence; they never reset the reducer.
+				if (!everCaughtUp) caughtUp = false;
 			},
 			onEvent: (e) => {
-				// Only apply events for the session we're feeding.
-				if (currentSessionId !== sessionId) return;
+				// Only the feed generation that owns this hydration may mutate it.
+				if (generation !== feedGeneration || currentSessionId !== sessionId) return;
 				// History/live boundary sentinel: fold the whole backfill in one
 				// batch, then switch to the per-frame live cadence below.
 				if ((e as { type?: string }).type === 'caught_up') {
 					caughtUp = true;
 					everCaughtUp = true;
-					clearCatchupFallback();
-					fold();
+					fold(true);
 					return;
 				}
 				const ev = e as WireEvent;
@@ -334,9 +306,6 @@ export const feedController: FeedController = {
 					);
 				}
 				seedOptimistic();
-				// A frame just arrived while still batching: the stream is alive,
-				// so keep waiting for `caught_up` (idle-based fallback above).
-				if (!caughtUp) armCatchupFallback();
 				reducerState = reduce(reducerState, ev);
 				// #606 item 4 — cross-device settle: the permission/question CARD was
 				// added on THIS device via the legacy `get_pending_*` WS relay on
@@ -382,11 +351,10 @@ export const feedController: FeedController = {
 					if (caughtUp) scheduleFlush();
 			},
 			onError: (err) => {
+				if (generation !== feedGeneration) return;
 				console.debug('[feedController] feed error', err);
 			},
 		});
-		// Arm the no-sentinel safety net even before the first connect resolves.
-		armCatchupFallback();
 		// FIX B: seed optimistic messages BEFORE the immediate fold. A freshly
 		// committed worktree session commits an optimistic user message +
 		// isStreaming=true just before start(); folding an empty reducerState here
@@ -395,9 +363,20 @@ export const feedController: FeedController = {
 		// optimistic message + streaming flag through this fold; the replayed
 		// `message.user` later reconciles it in place by commandId (no duplicate).
 		seedOptimistic();
-		// Immediate fold so the switch-in clears any transient loading state even
-		// before the first frame lands.
+		// Clear stale transcript state immediately, but leave loading/restoring
+		// true until the matching caught_up folds the final view.
 		fold();
+	},
+
+	restart(sessionId: string) {
+		if (!deps) return;
+		deps.update((s) =>
+			s.sessionId === sessionId
+				? { ...s, messages: [], isLoadingSession: true }
+				: s
+		);
+		this.stop();
+		this.start(sessionId);
 	},
 
 	revive(sessionId?: string) {
@@ -407,12 +386,12 @@ export const feedController: FeedController = {
 	},
 
 	stop() {
+		feedGeneration++;
 		if (feed) {
 			feed.stop();
 			feed = null;
 		}
 		clearScheduledFlush();
-		clearCatchupFallback();
 		caughtUp = false;
 		everCaughtUp = false;
 		currentSessionId = null;

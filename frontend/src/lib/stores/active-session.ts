@@ -201,11 +201,11 @@ export interface ActiveSessionState {
 	 *  so it fires exactly once and never clobbers typed text. */
 	pendingRestorePrompt: string | null;
 	/** True from the moment init() adopts a persisted sessionId until that
-	 *  session's history has been fetched (onConnected's loadSession settles).
+	 *  session's SSE history reaches its first caught_up boundary.
 	 *  During this window the UI looks like "New Chat" (messages=[]) while
 	 *  sessionId silently points at the restored session — sends would land in
 	 *  the old session invisibly. ChatView suppresses the empty-state hero and
-	 *  sendMessage waits for this to clear. Cleared by loadSession settling,
+	 *  sendMessage waits for this to clear. Cleared by the feed's caught_up fold,
 	 *  switchSession/newChat navigation, or reconnect exhaustion. */
 	isRestoringSession: boolean;
 	/** True while an explicit openChat() navigation's history fetch is in flight
@@ -217,7 +217,7 @@ export interface ActiveSessionState {
 	 *  empty hero) so the cleared-session hint can't flash before history loads.
 	 *  Unlike isRestoringSession, sendMessage does NOT wait on this flag —
 	 *  openChat resets it independently and sends are gated elsewhere. Cleared by
-	 *  openChat's loadSession settling and by newChat navigation. */
+	 *  the matching feed's caught_up fold and by newChat navigation. */
 	isLoadingSession: boolean;
 }
 
@@ -479,9 +479,9 @@ const wsConn: WsConnection = createWsConnection({
 				// unconditional restart removed in #640), gap- and duplicate-free.
 				feedController.revive(sessionId);
 			}
-			if (_state.isRestoringSession) {
-				_update(s => (s.sessionId === sessionId ? { ...s, isRestoringSession: false } : s));
-			}
+			// The feed clears isRestoringSession only when its first caught_up
+			// atomically publishes the complete transcript. A connected socket alone
+			// does not mean session history is loaded.
 		}
 	},
 	onDisconnected: (code, _reason, _wasClean) => {
@@ -592,7 +592,8 @@ const draftManager = createDraftManager({
 	getState: () => _state,
 	wsSend: (data) => wsConn.send(data),
 	wsIsConnected: () => wsConn.isConnected(),
-	feedRestart: (id) => feedController.start(id),
+	feedRestart: (id) => feedController.restart(id),
+	feedRevive: (id) => feedController.revive(id),
 });
 
 // Message sender needs a reference to activeSession for recursive calls
@@ -647,7 +648,10 @@ export const activeSession = {
 
 	switchSession: (sessionId: string, projectId?: string | null, worktreeInfo?: import('./session/session-switcher').SessionWorktreeInfo | null, title?: string | null, projectV2Id?: string | null) => {
 		setSkipRestore(false);
-		switcher.switchSession(sessionId, projectId, worktreeInfo, title, projectV2Id);
+		// Explicit navigation wins over an async boot restore still reading the
+		// persisted session. Its generation checks will now discard that stale load.
+		bumpInitGeneration();
+		void switcher.switchSession(sessionId, projectId, worktreeInfo, title, projectV2Id);
 	},
 
 	newChat: () => {
