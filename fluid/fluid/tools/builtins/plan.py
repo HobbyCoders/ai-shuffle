@@ -12,10 +12,18 @@ engine injects a :class:`PlanModeControl` as ``ctx.extra["plan_mode_control"]``
 (NativeLoop wires its own ``plan_mode`` flag). Without one — the delegated
 leg, where the Claude CLI ships its own plan mode — the tools are dropped
 from the surface via ``requires_extra``.
+
+The exit is decided on the MRTR **retry** leg, by the answer alone. The live
+flag is deliberately not a precondition there: a host that gates the approval
+itself (an embedding app renders the panel and syncs its own state before it
+hands the answer back) has already left plan mode by then, and re-checking the
+flag turned an approved exit into an error telling the model to enter plan mode
+again — the session re-locked itself the moment the user approved it.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -104,9 +112,56 @@ STOP_SPEC = ToolSpec(
     requires_extra=("plan_mode_control",),
 )
 
+ALREADY_OFF_RESULT = (
+    "Plan approved — plan mode is OFF (the host had already ended it). Your "
+    "write and shell tools are on the surface. Execute the approved plan now; "
+    "steps it already covers need no further permission."
+)
+
 # Answers treated as approval on the MRTR second leg. "1" is the first
 # option's index (Approve is listed first); anything else is feedback.
-_APPROVALS = frozenset({"1", "y", "yes", "ok", "approve", "approved", "lgtm"})
+#
+# Matched against the NORMALIZED answer, so each entry covers its punctuated
+# and capitalized forms ("Proceed.", "LGTM!", "Yes, go ahead"). A host that
+# renders the approval as a button sends a canonical token, but the fluid REPL
+# hands the user's literal words through — and a user who types the way users
+# actually type ("go ahead") was silently read as plan FEEDBACK and left the
+# session read-only with no sign anything had gone wrong.
+_APPROVALS = frozenset({
+    "1",
+    "y", "yes", "yes please", "yep", "yeah", "yup",
+    "ok", "okay", "k", "sure", "sounds good", "sgtm",
+    "approve", "approved", "approve it", "approve plan", "approve the plan",
+    "approve and proceed", "i approve", "plan approved",
+    "proceed", "please proceed", "proceed please", "yes proceed",
+    "proceed with the plan",
+    "go", "go ahead", "yes go ahead", "please go ahead", "go for it",
+    "do it", "yes do it", "just do it", "do it please",
+    "lgtm", "looks good", "looks good to me", "this looks good",
+    "ship it", "make it so",
+    "let's do it", "lets do it", "let's go", "lets go",
+    "implement", "implement it", "implement the plan",
+    "execute the plan", "run it",
+    "start", "begin", "continue", "carry on",
+    "complete the plan", "finish the plan",
+    "accept", "accepted", "confirm", "confirmed",
+    "exit plan mode", "leave plan mode",
+})
+
+# Punctuation that only ever decorates such an answer. The apostrophe is NOT
+# here — stripping it turns "let's do it" into two unmatchable words.
+_ANSWER_PUNCT_RE = re.compile(r"[.,;:!?\"`*()\[\]]+")
+
+
+def normalize_answer(text: Any) -> str:
+    """Lowercase, de-punctuate and collapse an approval answer for matching."""
+    cleaned = _ANSWER_PUNCT_RE.sub(" ", str(text or "").replace("’", "'"))
+    return re.sub(r"\s+", " ", cleaned).strip().lower()
+
+
+def is_approval(text: Any) -> bool:
+    """True when this answer means "approve the plan and leave plan mode"."""
+    return normalize_answer(text) in _APPROVALS
 
 
 def _control(ctx: ToolCtx) -> PlanModeControl | None:
@@ -146,21 +201,21 @@ async def stop_handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             ),
             is_error=True,
         )
-    if not control.is_active():
-        return ToolOutcome(
-            text="Not in plan mode — nothing to stop. Enter it with Plan.",
-            is_error=True,
-        )
-    plan = str(input.get("plan", "")).strip()
-    if not plan:
-        return ToolOutcome(
-            text="pass the complete plan as markdown in `plan`", is_error=True
-        )
-
     answers = input.get("__input_responses__")
     if answers is None:
-        # First leg: hand the engine one approval request and park (the same
-        # MRTR round-trip AskUser rides).
+        # ── First leg: nothing has been asked yet. ───────────────────────────
+        if not control.is_active():
+            return ToolOutcome(
+                text="Not in plan mode — nothing to stop. Enter it with Plan.",
+                is_error=True,
+            )
+        plan = str(input.get("plan", "")).strip()
+        if not plan:
+            return ToolOutcome(
+                text="pass the complete plan as markdown in `plan`", is_error=True
+            )
+        # Hand the engine one approval request and park (the same MRTR
+        # round-trip AskUser rides).
         question = {
             "question": "Approve this plan and leave plan mode?",
             "header": "Plan",
@@ -193,15 +248,41 @@ async def stop_handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             ),
         )
 
+    # ── Second leg: the user has answered. ───────────────────────────────────
+    #
+    # ``is_active()`` is deliberately NOT re-checked as a precondition here.
+    # A host that gates the approval itself (the embedding app renders the
+    # panel, then syncs its own state) flips the mode OFF before it hands the
+    # answer back, so the retry leg used to hit the first leg's "Not in plan
+    # mode — nothing to stop. Enter it with Plan." guard: an approved exit was
+    # reported to the model as an ERROR whose remedy was to re-enter plan
+    # mode. Models did exactly that, and the session re-locked itself the
+    # instant the user approved it. The answer decides the outcome; the flag
+    # only decides how the outcome is worded.
     raw = str(answers.get("approve", "")).strip()
-    if raw.lower() in _APPROVALS:
+    if is_approval(raw):
+        already_off = not control.is_active()
         control.set_active(False)
         # The state change is the whole point of the call, so it is stated
         # outright: an approval that reads as empty (or merely implied) cost
         # audited sessions whole turns of the model re-checking whether it was
         # allowed to write yet.
-        return ToolOutcome(text=APPROVED_RESULT)
+        return ToolOutcome(text=ALREADY_OFF_RESULT if already_off else APPROVED_RESULT)
     feedback = raw or "(no feedback given)"
+    if not control.is_active():
+        # Rejected, but the host has already ended plan mode out from under the
+        # call (a mode switch while the panel was up). Never claim the mode is
+        # still on when it is not — and never silently turn it back on.
+        return ToolOutcome(
+            text=(
+                "The user did NOT approve the plan and answered:\n"
+                f"{feedback}\n"
+                "Plan mode is no longer active (the host ended it separately), "
+                "so this feedback is not a rejection you can revise against in "
+                "plan mode. Address it before implementing, and ask the user "
+                "how to proceed if it conflicts with the plan."
+            )
+        )
     return ToolOutcome(
         text=(
             "The user did NOT approve the plan and answered:\n"

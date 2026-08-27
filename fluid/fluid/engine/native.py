@@ -784,7 +784,13 @@ class NativeLoop(BackgroundLifecycleMixin):
             }.get(mode, "on_write")
             if self.permissions is not None:
                 self.permissions.approval_policy = policy
-            self.plan_mode = mode == "plan"
+            # Through the injected controller, not the raw attribute: a host
+            # that wrapped PlanModeControl (to persist the mode, update its own
+            # UI, restore its approval policy) has to hear about a chip-driven
+            # flip too, or its idea of the mode and the engine's diverge —
+            # which is how a session ends up read-only with nothing left that
+            # knows how to turn it back off.
+            self._apply_plan_mode(mode == "plan")
         elif isinstance(op, Handoff):
             await self._do_handoff(op)
         elif isinstance(op, Fork):
@@ -1277,6 +1283,32 @@ class NativeLoop(BackgroundLifecycleMixin):
     def _set_plan_mode(self, active: bool) -> None:
         """Plan/StopPlanning's switch: the next request's schemas follow."""
         self.plan_mode = bool(active)
+
+    def _apply_plan_mode(self, active: bool) -> None:
+        """Flip plan mode the way the TOOLS do — through the injected control.
+
+        ``ctx.extra["plan_mode_control"]`` may have been replaced by the host
+        with a wrapper that persists the mode and updates its own UI, so an
+        engine-side flip (SetPermissionMode) has to go through it rather than
+        assigning the attribute. The flag is force-set afterwards regardless:
+        a host wrapper that raises must never leave the engine believing it is
+        still read-only when the session has left plan mode (or vice versa) —
+        that divergence is unrecoverable from inside the loop.
+        """
+        active = bool(active)
+        if active == self.plan_mode:
+            return
+        control = (self.ctx.extra or {}).get("plan_mode_control")
+        setter = getattr(control, "set_active", None)
+        if callable(setter):
+            try:
+                setter(active)
+            except Exception:  # noqa: BLE001 — host bookkeeping, never fatal
+                log.warning(
+                    "plan_mode_control.set_active(%s) failed; forcing the flag",
+                    active, exc_info=True,
+                )
+        self.plan_mode = active
 
     def _without_stale_plan_reminder(self, history: list[Message]) -> list[Message]:
         """Drop plan-mode reminders that the live flag has since contradicted.
