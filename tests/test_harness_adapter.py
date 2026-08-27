@@ -513,6 +513,62 @@ async def test_error_event_carries_partial_usage_and_cost():
     assert got[0].usage["output_tokens"] == 2
 
 
+def _with_model_calls(base: type, **kwargs):
+    """Build a same-named event class that also carries ``num_model_calls``.
+
+    The partial model-call count is a NEW field on fluid's ``Interrupted`` /
+    ``ErrorEvent``; the pinned vendor here does not have it yet. The adapter
+    dispatches on ``type(event).__name__``, so a subclass keeps the same branch
+    while letting these tests pin BOTH sides of the defensive read.
+    """
+    cls = dataclasses.make_dataclass(
+        base.__name__,
+        [("num_model_calls", int, 0)],
+        bases=(base,),
+        frozen=True,
+        kw_only=True,
+    )
+    return cls(**kwargs)
+
+
+@pytest.mark.asyncio
+async def test_interrupted_without_model_calls_books_zero():
+    """Today's vendor has no ``num_model_calls`` on Interrupted. The defensive
+    read must leave the count at zero rather than raising."""
+    got = await _collect(_adapter_with(FakeEngine([
+        lm.Interrupted(session_id=SID, message="stopped",
+                       usage={"input_tokens": 10})])))
+    assert got[0].num_turns == 0
+
+
+@pytest.mark.asyncio
+async def test_interrupted_carries_partial_model_call_count():
+    """The bug: an interrupted turn's ResultMessage carried usage but no
+    ``num_turns``, which is what ``query_persistence`` feeds
+    ``model_calls_increment`` — so every stopped turn booked ZERO model calls
+    and a session with 167 real calls read as 11."""
+    got = await _collect(_adapter_with(FakeEngine([
+        _with_model_calls(
+            lm.Interrupted, session_id=SID, message="stopped",
+            usage={"input_tokens": 10}, cost_usd=0.002, num_model_calls=78,
+        )])))
+    assert len(got) == 1 and isinstance(got[0], ResultMessage)
+    assert got[0].num_turns == 78
+    assert got[0].total_cost_usd == pytest.approx(0.002)
+
+
+@pytest.mark.asyncio
+async def test_error_terminal_carries_partial_model_call_count():
+    got = await _collect(_adapter_with(FakeEngine([
+        _with_model_calls(
+            lm.ErrorEvent, session_id=SID, message="boom", retriable=False,
+            usage={"input_tokens": 7}, num_model_calls=12,
+        )])))
+    assert len(got) == 1 and isinstance(got[0], ResultMessage)
+    assert got[0].is_error is True
+    assert got[0].num_turns == 12
+
+
 # ─── 1c. Context usage ───────────────────────────────────────────────────────
 
 

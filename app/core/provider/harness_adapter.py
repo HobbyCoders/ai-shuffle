@@ -1907,11 +1907,23 @@ class HarnessAdapter(ProviderAdapter):
             # still be None (no usage seen yet, or a leg that reports no cost);
             # the session-row update does `col + value`, so a None would NULL the
             # column — coerce it to 0.0.
+            #
+            # ``num_turns`` is the MODEL-CALL count on this path (see the
+            # TurnComplete branch above), and it is what
+            # ``query_persistence._persist_turn_results`` feeds
+            # ``model_calls_increment``. Leaving it at the field default booked
+            # ZERO calls for every interrupted turn — a session with 167 real
+            # calls read as 11 because its two big turns were stopped. Read
+            # DEFENSIVELY: the partial count is a NEW field on fluid's
+            # ``Interrupted``/``ErrorEvent``, so a vendor without it keeps the
+            # old (0) behaviour instead of raising.
             cost = getattr(event, "cost_usd", None)
+            calls = getattr(event, "num_model_calls", None)
             return [
                 ResultMessage(
                     subtype="success",
                     is_error=False,
+                    num_turns=calls if isinstance(calls, int) else 0,
                     session_id=getattr(event, "session_id", "") or "",
                     result=event.message,
                     total_cost_usd=cost if cost is not None else 0.0,
@@ -1922,13 +1934,16 @@ class HarnessAdapter(ProviderAdapter):
             ]
 
         if cls == "ErrorEvent":
-            # Same partial-usage/cost carry as the Interrupted branch above
-            # (including the None → 0.0 coercion rationale).
+            # Same partial-usage/cost/model-call carry as the Interrupted branch
+            # above (including the None → 0.0 coercion and the defensive
+            # ``num_model_calls`` read).
             cost = getattr(event, "cost_usd", None)
+            calls = getattr(event, "num_model_calls", None)
             return [
                 ResultMessage(
                     subtype="error_during_execution",
                     is_error=True,
+                    num_turns=calls if isinstance(calls, int) else 0,
                     session_id=getattr(event, "session_id", "") or "",
                     result=event.message,
                     errors=[event.message],
