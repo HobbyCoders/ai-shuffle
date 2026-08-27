@@ -9,7 +9,7 @@
  * proceed. It performs NO I/O — DNS resolution and request interception live in
  * the browser layer; here we only classify.
  *
- * DESIGN (see docs/BROWSER_SUITE_PLAN.md, Workstream A6):
+ * DESIGN (Workstream A6 of the browser suite plan):
  *   - RFC1918 private ranges are ALLOWED by default. Self-hosted / homelab
  *     operators legitimately browse LAN services (10/8, 172.16/12, 192.168/16,
  *     and IPv6 unique-local fc00::/7).

@@ -14,7 +14,7 @@ import httpx
 
 from app.core.http_client import get_http_client
 
-# Codex CLI identity header (docs/CODEX_SPIKE_FINDINGS.md working template).
+# Codex CLI identity header (working template carried over from the Codex CLI spike).
 # Relocated here when the translator gateway was retired — this module is the
 # only remaining consumer.
 CODEX_USER_AGENT = "codex_cli_rs/1.0.0"

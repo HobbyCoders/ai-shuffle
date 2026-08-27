@@ -67,8 +67,7 @@ Full documentation rendered in-app covering getting started, all features, conne
 Fully responsive layout with a mobile-optimized sidebar, 44px touch targets, PWA install support, offline detection, and push notifications.
 
 Pair another browser, phone, tablet, or cluster runner with a short-lived,
-one-time code or locally rendered QR—without sharing the admin password. See
-[Device pairing and runner enrollment](docs/DEVICE_PAIRING.md).
+one-time code or locally rendered QR—without sharing the admin password.
 
 ### Security
 BCrypt password hashing, session tokens (secure HTTP-only cookies), API key authentication (`aih_` prefix, SHA-256 hashed), rate limiting, audit logging, encrypted secret storage (Fernet/PBKDF2), OAuth 2.0 + PKCE for Claude authentication, and GitHub device flow.

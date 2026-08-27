@@ -16,7 +16,7 @@ Currently this provides a single built-in:
   ``browser_snapshot``, ``browser_act``, ``browser_screenshot``; more land in later
   PRs).
 
-Architecture (the decision record — see docs/BROWSER_SUITE_PLAN.md):
+Architecture (the decision record):
   Each spawned server is a thin CDP client built on ``playwright-core``. It calls
   ``connectOverCDP('http://127.0.0.1:9221')`` to attach to the *existing supervised
   Chromium* (port from ``CHROME_CDP_PORT``, default 9221) and drives a single

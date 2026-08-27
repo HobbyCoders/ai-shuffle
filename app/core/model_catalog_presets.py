@@ -16,7 +16,7 @@ from the curated set.
 Roster note (``CODEX_PRESET_MODELS``): this is the **live-confirmed** ChatGPT/
 Codex-subscription roster, not speculative naming. It was validated against the
 real Codex backend (``GET /backend-api/codex/models?client_version=1.0.0``) on
-2026-07-18 — see ``docs/CODEX_SPIKE_FINDINGS.md`` (surprise #1). The entitled
+2026-07-18 (see the spike's "surprise #1" finding). The entitled
 roster observed was ``gpt-5.6-sol``, ``gpt-5.6-terra``, ``gpt-5.6-luna``,
 ``gpt-5.5``, ``gpt-5.4``, ``gpt-5.4-mini`` plus ``codex-auto-review``. The
 special-purpose ``codex-auto-review`` is **excluded** — it is not a general
@@ -36,7 +36,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Mapping, Optional
 
 # ChatGPT/Codex-subscription preset roster (LIVE-CONFIRMED 2026-07-18 — see module
-# docstring + docs/CODEX_SPIKE_FINDINGS.md). Shape mirrors ``models_json``:
+# docstring). Shape mirrors ``models_json``:
 # ``[{"id": ..., "label": ...}]``. ``codex-auto-review`` deliberately excluded.
 #
 # An entry MAY additionally carry ``context_window`` (tokens) when the model's

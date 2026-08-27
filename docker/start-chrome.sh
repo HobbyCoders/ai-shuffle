@@ -92,7 +92,7 @@ fi
 #   --renderer-process-limit=4  cap renderer processes. Raised from 2 (the old
 #       single-tab assumption) to leave headroom for a few concurrent agent tabs
 #       driven by browser-mcp. FOLLOW-UP: tune from a load test alongside a soft
-#       cap on concurrent browser sessions (see docs/BROWSER_SUITE_PLAN.md).
+#       cap on concurrent browser sessions.
 #   --disk-cache-size=33554432  bound the on-disk HTTP cache at 32MB (default is
 #       large and grows in the persisted profile volume).
 #   --disable-software-rasterizer  we already --disable-gpu; this also stops the
