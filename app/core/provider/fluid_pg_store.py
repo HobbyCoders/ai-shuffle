@@ -35,6 +35,12 @@ from app.db.base import get_db
 # why NUL and lone surrogates have to go before an INSERT sees them.
 from app.core.pg_session_store import _scrub_pg_illegal
 
+# Issue R12: a model pasted a live DATABASE_URL (password included) into a
+# code-mode cell and it was persisted verbatim. Every string on its way into
+# these two jsonb columns gets its URL-embedded passwords replaced with ``***``
+# first. New rows only — existing rows are untouched by design.
+from app.core.scrub import scrub_url_credentials
+
 # Side-effect import: registers AI Shuffle's legacy ``SafetyWarning`` shape
 # with fluid's event codec. Must precede any ``event_from_dict`` call, or
 # sessions persisted before fluid stopped emitting that event fail to decode.
@@ -113,7 +119,8 @@ def _append_node_sync(session_id: str, node: SessionNode) -> None:
             "VALUES (%s, %s, %s, %s, %s) "
             "ON CONFLICT (session_id, node_id) DO NOTHING",
             (session_id, node.node_id, node.parent_id, node.ts,
-             Json(_scrub_pg_illegal(node.message.to_dict()))),
+             Json(_scrub_pg_illegal(
+                 scrub_url_credentials(node.message.to_dict())))),
         )
         cur.execute(
             "UPDATE fluid_sessions SET head_node_id = %s WHERE session_id = %s",
@@ -143,7 +150,10 @@ def _append_event_sync(session_id: str, event_dict: Dict[str, Any], seq: int) ->
         cur.execute(
             "INSERT INTO fluid_session_events (session_id, seq, event) "
             "VALUES (%s, %s, %s) ON CONFLICT (session_id, seq) DO NOTHING",
-            (session_id, seq, Json(_scrub_pg_illegal(event_dict))),
+            # Same scrub as the node path: ToolUse.input / ToolArgsDelta.
+            # partial_json / TextDelta.text carry the very same cell text.
+            (session_id, seq,
+             Json(_scrub_pg_illegal(scrub_url_credentials(event_dict)))),
         )
         # The conflict clause is there for legitimate bus replays, but it also
         # hides real loss: an engine whose in-memory log restarted at seq 1 for
