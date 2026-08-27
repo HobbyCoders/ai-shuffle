@@ -177,13 +177,12 @@ describe('buildDisplayItems — settled turns', () => {
 		expect(collapsedVisibleMessages(items).some((message) => message.id === running.id)).toBe(true);
 	});
 
-	it('never folds agent, todo, note, question, or subagent surfaces', () => {
+	it('never folds agent, todo, question, or subagent surfaces', () => {
 		const messages = [
 			user('go'),
 			tool(),
 			msg({ type: 'subagent', agentName: 'Explore' }),
 			tool({ toolName: 'TodoWrite' }),
-			tool({ toolName: 'Note' }),
 			tool({ toolName: 'Task' }),
 			tool({ toolName: 'Agent' }),
 			tool({ toolName: 'AskUserQuestion' }),
@@ -193,9 +192,31 @@ describe('buildDisplayItems — settled turns', () => {
 		const visibleMessages = collapsedVisibleMessages(buildDisplayItems(messages, SETTLED));
 
 		expect(visibleMessages.some((message) => message.type === 'subagent')).toBe(true);
-		for (const name of ['TodoWrite', 'Note', 'Task', 'Agent', 'AskUserQuestion', 'AskUser']) {
+		for (const name of ['TodoWrite', 'Task', 'Agent', 'AskUserQuestion', 'AskUser']) {
 			expect(visibleMessages.some((message) => message.toolName === name)).toBe(true);
 		}
+	});
+
+	it('folds Note tools into the work-log group instead of standalone rows', () => {
+		const note = tool({ toolName: 'Note', toolInput: { action: 'add', text: 'step 1' } });
+		const items = buildDisplayItems([user('go'), tool(), note, text('done')], SETTLED);
+		const fold = items.find((item) => item.kind === 'work_log');
+		if (fold?.kind !== 'work_log') throw new Error('expected a work_log');
+
+		expect(fold.folded.map((entry) => entry.message.id)).toContain(note.id);
+		expect(fold.sequence.find((entry) => entry.message.id === note.id)?.hiddenWhenCollapsed).toBe(true);
+		expect(collapsedVisibleMessages(items).some((message) => message.id === note.id)).toBe(false);
+		expect(fold.summary).toBe('Ran 1 command and took 1 note');
+	});
+
+	it('counts note tools in the compact summary tokens', () => {
+		const entries = workEntries([
+			tool({ toolName: 'Note' }),
+			tool({ toolName: 'Note' }),
+			tool({ toolName: 'Read' })
+		]);
+		expect(summarizeWork(entries)).toBe('Took 2 notes and read 1 file');
+		expect(summarizeWorkCompact(entries)).toBe('Notes 2 · Read 1');
 	});
 
 	it('uses whole-turn duration and authoritative final metadata', () => {

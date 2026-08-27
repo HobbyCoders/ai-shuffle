@@ -72,7 +72,6 @@ export function isGroupableSystem(msg: ChatMessage): boolean {
 function isSpecialTool(msg: ChatMessage): boolean {
 	return (
 		msg.toolName === 'TodoWrite' ||
-		msg.toolName === 'Note' ||
 		msg.toolName === 'Task' ||
 		msg.toolName === 'Agent' ||
 		msg.toolName === 'AskUserQuestion' ||
@@ -201,6 +200,7 @@ function turnFoldLabel(turn: ChatMessage[], interrupted: boolean): string {
 type ToolAction =
 	| 'read'
 	| 'edit'
+	| 'note'
 	| 'command'
 	| 'code-search'
 	| 'web-search'
@@ -228,6 +228,7 @@ function toolAction(message: ChatMessage): ToolAction {
 	if (VIDEO_GEN_TOOLS.includes(name)) return 'video-gen';
 	if (AUDIO_GEN_TOOLS.includes(name)) return 'audio-gen';
 	if (THREED_GEN_TOOLS.includes(name)) return 'threed-gen';
+	if (name === 'Note') return 'note';
 	if (['Read', 'BashOutput', 'TaskOutput', 'TaskGet'].includes(name)) return 'read';
 	if (['Write', 'Edit', 'NotebookEdit'].includes(name)) return 'edit';
 	if (['Bash', 'KillShell', 'SlashCommand', 'Monitor', 'TaskStop'].includes(name)) return 'command';
@@ -242,6 +243,8 @@ function actionLabel(action: ToolAction, count: number): string {
 			return `Read ${count} ${count === 1 ? 'file' : 'files'}`;
 		case 'edit':
 			return `Changed ${count} ${count === 1 ? 'file' : 'files'}`;
+		case 'note':
+			return `Took ${count} ${count === 1 ? 'note' : 'notes'}`;
 		case 'command':
 			return `Ran ${count} ${count === 1 ? 'command' : 'commands'}`;
 		case 'code-search':
@@ -278,6 +281,7 @@ function sentenceJoin(labels: string[]): string {
 const COMPACT_ACTION_LABELS: Record<ToolAction, (count: number) => string> = {
 	read: (n) => `Read ${n}`,
 	edit: (n) => `Edit ${n}`,
+	note: (n) => `Notes ${n}`,
 	command: (n) => `Ran ${n}`,
 	'code-search': (n) => `Search ${n}`,
 	'web-search': (n) => `Web ${n}`,
