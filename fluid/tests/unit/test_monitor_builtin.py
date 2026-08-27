@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from fluid.tools.builtins import register_builtins
-from fluid.tools.builtins.monitor import SPEC, handler
+from fluid.tools.builtins.monitor import SPEC, describe, handler
 from fluid.tools.registry import (
     BackgroundTaskReceipt,
     ToolCtx,
@@ -53,6 +53,40 @@ async def test_receipt_result_notifies_session_lifecycle():
     assert not out.is_error
     assert out.background_task == seen[0]
     assert out.background_task.task_id == "mon-1"
+
+
+@pytest.mark.asyncio
+async def test_receipt_commands_the_park():
+    # Sessions read a neutral "started" acknowledgement as permission to keep
+    # working the turn, then sleep-poll the task they just handed off. The
+    # receipt tells them to stop instead.
+    async def spawn(input, ctx):
+        return BackgroundTaskReceipt(task_id="mon-park")
+
+    out = await handler({"command": "make ci"}, ToolCtx(extra={"monitor_spawn": spawn}))
+    assert "mon-park" in out.text
+    assert "End the turn now" in out.text
+    assert "Do not sleep, poll" in out.text
+
+
+@pytest.mark.asyncio
+async def test_mapping_without_text_falls_back_to_the_park_receipt():
+    async def spawn(input, ctx):
+        return {"task_id": "mon-park-2"}
+
+    out = await handler({"command": "make ci"}, ToolCtx(extra={"monitor_spawn": spawn}))
+    assert "mon-park-2" in out.text
+    assert "End the turn now" in out.text
+
+
+def test_description_carries_no_copyable_poll_loop():
+    # Every shell poll recipe here was a recipe a session copied into a
+    # FOREGROUND Bash call instead of running it under Monitor.
+    text = describe(frozenset({"Bash", "Monitor"}))
+    for snippet in ("sleep 0.5", "sleep 30", "gh pr checks", "until grep", "; done"):
+        assert snippet not in text, f"description still shows {snippet!r}"
+    assert "never in Bash" in text
+    assert "end the turn" in text.lower()
 
 
 @pytest.mark.asyncio
