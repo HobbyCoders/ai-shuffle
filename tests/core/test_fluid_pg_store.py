@@ -171,6 +171,40 @@ async def test_cli_session_id_round_trip(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_project_root_round_trip(mock_db, tmp_path):
+    """create_session(cwd=…) records the session's project identity (v83) —
+    the enclosing git repo for a nested cwd — and a cold reload reads it back."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    nested = repo / "src" / "deep"
+    nested.mkdir(parents=True)
+
+    store = PgFluidStore()
+    meta = await store.create_session("ses_root", cwd=str(nested))
+    assert meta.project_root == str(repo.resolve())
+    assert (await PgFluidStore().get_session("ses_root")).project_root == str(repo.resolve())
+
+    # No cwd = no project — stored as NULL, the legacy-session shape recall
+    # treats as "unknown", never as "another project".
+    assert (await store.create_session("ses_rootless")).project_root is None
+    assert (await PgFluidStore().get_session("ses_rootless")).project_root is None
+
+
+@pytest.mark.asyncio
+async def test_resume_keeps_the_stored_project_root(mock_db, tmp_path):
+    """Resuming an existing id returns the stored meta — a different cwd on the
+    resume call must not rewrite the session's recorded project."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+
+    await PgFluidStore().create_session("ses_root2", cwd=str(repo))
+    resumed = await PgFluidStore().create_session("ses_root2", cwd=str(other))
+    assert resumed.project_root == str(repo.resolve())
+
+
+@pytest.mark.asyncio
 async def test_illegal_code_points_are_scrubbed_at_the_jsonb_boundary(mock_db):
     """A model that puts NUL (or a lone surrogate) in its output must not be
     able to kill the turn.
@@ -416,6 +450,29 @@ async def test_search_hits_carry_the_apps_session_titles(mock_db):
     assert by_id["ses_hit_a"].title == "Zebrafish pipeline tuning"
     # A session without an app row (or without a title) stays untitled.
     assert by_id["ses_hit_b"].title is None
+
+
+@pytest.mark.asyncio
+async def test_search_hits_and_listings_carry_project_roots(mock_db, tmp_path):
+    """SessionSearch scopes recall on project_root, so hits and recent-session
+    rows must surface the recorded root for native sessions — and None (never a
+    wrong project) for SDK-mirror sessions, which have no fluid_sessions row."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+
+    store = await _seed_searchable(mock_db)
+    await store.create_session("ses_scoped", cwd=str(repo))
+    await store.append("ses_scoped", _node("s1", None, "zebrafish in this repo"))
+
+    by_id = {h.session_id: h for h in await store.search(["zebrafish"])}
+    assert by_id["ses_scoped"].project_root == str(repo.resolve())
+    assert by_id["ses_hit_a"].project_root is None  # created with no cwd
+    assert by_id["ses_sdk_user"].project_root is None  # SDK arm: unknown
+
+    _session_row(mock_db, "app-s", "ses_scoped", "Scoped session")
+    rows = await store.recent_sessions(limit=10)
+    roots = {r.session_id: r.project_root for r in rows}
+    assert roots["ses_scoped"] == str(repo.resolve())
 
 
 @pytest.mark.asyncio

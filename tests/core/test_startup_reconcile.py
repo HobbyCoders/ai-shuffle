@@ -333,12 +333,18 @@ async def test_boot_reap_requeues_dead_lease_turns_and_kicks(
 # Schema: version parity + parked_task_kind column
 # =============================================================================
 
-def test_schema_version_parity_v82():
+def test_schema_version_parity_v83():
     from app.db.database import SCHEMA_VERSION as db_version
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 82 for the tool-access rulings T2/T5: _migrate_agent_tool_access
+    # Bumped to 83 for fluid_sessions.project_root: the project the session ran
+    # in (fluid's ``project_root_for(cwd)``), recorded by
+    # PgFluidStore.create_session so SessionSearch can scope cross-session
+    # recall to one project. NULL on every pre-existing row = "unknown
+    # project", which recall never excludes. Additive/nullable, guarded ADD
+    # COLUMN alongside cli_session_id.
+    # v82 was the tool-access rulings T2/T5: _migrate_agent_tool_access
     # stamps ``tool_selection_mode`` into every agents.config and folds the two
     # retired switches (``ai_tools`` / ``app_config_tools``) into the tool
     # lists, so the runtime never infers intent from list emptiness again. No
@@ -419,8 +425,8 @@ def test_schema_version_parity_v82():
     # the Phase-2 turns table; v58 was the Phase-1 deletion (v2_stream forced
     # TRUE + default flipped); v57 added the opt-in flag; v56 added the Phase-0
     # primitives.
-    assert db_version == 82
-    assert pg_version == 82
+    assert db_version == 83
+    assert pg_version == 83
     assert db_version == pg_version
 
 

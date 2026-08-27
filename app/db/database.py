@@ -221,7 +221,12 @@ def _safe_json(value):
 #     standard, so nothing changes speed or price on upgrade. Additive/nullable
 #     with no index; lands via the always-run guarded ADD COLUMN in
 #     _run_column_migrations.
-SCHEMA_VERSION = 82
+# 83 (2026-08-27): add fluid_sessions.project_root — the project the session
+#     ran in (fluid's ``project_root_for(cwd)``), recorded at create_session so
+#     SessionSearch can scope cross-session recall to one project. NULL on
+#     every pre-existing row = "unknown project", which recall never excludes.
+#     Additive/nullable, guarded ADD COLUMN alongside cli_session_id.
+SCHEMA_VERSION = 83
 
 
 def _migrate_omni_tables_to_fluid(cursor):
@@ -1255,6 +1260,16 @@ def _run_column_migrations(cursor):
     ):
         cursor.execute("ALTER TABLE fluid_sessions ADD COLUMN cli_session_id TEXT")
         migrations_applied.append("fluid_sessions.cli_session_id")
+
+    # fluid_sessions.project_root (v83). The session's project identity
+    # (fluid's project_root_for over the session cwd), recorded at creation so
+    # SessionSearch can scope recall to one project. Same table_exists guard as
+    # cli_session_id above.
+    if table_exists(cursor, "fluid_sessions") and not column_exists(
+        cursor, "fluid_sessions", "project_root"
+    ):
+        cursor.execute("ALTER TABLE fluid_sessions ADD COLUMN project_root TEXT")
+        migrations_applied.append("fluid_sessions.project_root")
 
     # Cross-session recall trigram indexes. SessionSearch's SQL prefilter is a
     # substring ILIKE over the raw JSON of both transcript stores; without an

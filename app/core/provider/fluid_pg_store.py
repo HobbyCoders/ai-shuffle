@@ -42,7 +42,7 @@ from app.core.provider import legacy_events as _legacy_events  # noqa: F401
 
 from fluid.events.model import Event, event_from_dict, event_to_dict
 from fluid.messages import Message
-from fluid.store.base import SessionMeta, SessionNode, new_id
+from fluid.store.base import SessionMeta, SessionNode, new_id, project_root_for
 from fluid.store.base import (
     RecallMessage,
     SessionSearchHit,
@@ -67,10 +67,10 @@ def _create_session_sync(meta: SessionMeta) -> None:
     with get_db() as conn:
         conn.cursor().execute(
             "INSERT INTO fluid_sessions "
-            "(session_id, head_node_id, created_at, cli_session_id) "
-            "VALUES (%s, %s, %s, %s) ON CONFLICT (session_id) DO NOTHING",
+            "(session_id, head_node_id, created_at, cli_session_id, project_root) "
+            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (session_id) DO NOTHING",
             (meta.session_id, meta.head_node_id, meta.created_at,
-             meta.cli_session_id),
+             meta.cli_session_id, meta.project_root),
         )
 
 
@@ -79,8 +79,8 @@ def _load_session_sync(session_id: str) -> Optional[Dict[str, Any]]:
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT session_id, head_node_id, created_at, cli_session_id "
-            "FROM fluid_sessions WHERE session_id = %s",
+            "SELECT session_id, head_node_id, created_at, cli_session_id, "
+            "project_root FROM fluid_sessions WHERE session_id = %s",
             (session_id,),
         )
         meta_row = cur.fetchone()
@@ -254,6 +254,28 @@ def _titles_for(cur, session_ids: List[str]) -> Dict[str, str]:
     }
 
 
+def _roots_for(cur, session_ids: List[str]) -> Dict[str, str]:
+    """Recorded project roots from ``fluid_sessions``, keyed by session id.
+
+    Only native fluid sessions have a row here; SDK-mirror sessions come back
+    absent, which SessionSearch reads as "unknown project" — never excluded.
+    """
+    ids = [sid for sid in session_ids if sid]
+    if not ids:
+        return {}
+    placeholders = ", ".join(["%s"] * len(ids))
+    cur.execute(
+        f"SELECT session_id, project_root FROM fluid_sessions "
+        f"WHERE session_id IN ({placeholders})",
+        ids,
+    )
+    return {
+        row["session_id"]: str(row["project_root"])
+        for row in cur.fetchall()
+        if row.get("project_root")
+    }
+
+
 def _search_sync(
     terms: List[str], limit: int, exclude_session_id: Optional[str]
 ) -> List[SessionSearchHit]:
@@ -322,9 +344,13 @@ def _search_sync(
     hits = hits[:_SEARCH_SESSION_CAP]
     if hits:
         with get_db() as conn:
-            titles = _titles_for(conn.cursor(), [h.session_id for h in hits])
+            cur = conn.cursor()
+            ids = [h.session_id for h in hits]
+            titles = _titles_for(cur, ids)
+            roots = _roots_for(cur, ids)
         for hit in hits:
             hit.title = titles.get(hit.session_id)
+            hit.project_root = roots.get(hit.session_id)
     return hits
 
 
@@ -517,6 +543,7 @@ def _recent_sync(
             params.append(exclude_session_id)
         cur.execute(sql + " ORDER BY updated_at DESC LIMIT %s", params + [limit])
         rows = [dict(r) for r in cur.fetchall()]
+        roots = _roots_for(cur, [r["sdk_session_id"] for r in rows])
         out: List[SessionSummary] = []
         for row in rows:
             store_id = row["sdk_session_id"]
@@ -527,6 +554,7 @@ def _recent_sync(
                 last_ts=_entry_ts(row.get("updated_at")),
                 preview=preview,
                 message_count=count,
+                project_root=roots.get(store_id),
             ))
     return out
 
@@ -577,6 +605,7 @@ class PgFluidStore:
             head_node_id=meta_row["head_node_id"],
             created_at=meta_row["created_at"],
             cli_session_id=meta_row.get("cli_session_id"),
+            project_root=meta_row.get("project_root"),
         )
         nodes: Dict[str, SessionNode] = {}
         for r in data["nodes"]:
@@ -594,12 +623,17 @@ class PgFluidStore:
 
     # ─── SessionStore protocol ───────────────────────────────────────
 
-    async def create_session(self, session_id: Optional[str] = None) -> SessionMeta:
+    async def create_session(
+        self, session_id: Optional[str] = None, *, cwd: Optional[str] = None
+    ) -> SessionMeta:
         # Resuming an existing id returns the stored meta (JsonlStore parity:
         # its meta record would be replayed rather than re-created).
         if session_id and await self._ensure_loaded(session_id):
             return self._sessions[session_id]
-        meta = SessionMeta(session_id=session_id or new_id("ses"))
+        meta = SessionMeta(
+            session_id=session_id or new_id("ses"),
+            project_root=project_root_for(cwd),
+        )
         self._sessions[meta.session_id] = meta
         self._nodes[meta.session_id] = {}
         self._events[meta.session_id] = []

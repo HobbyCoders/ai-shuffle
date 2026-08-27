@@ -20,7 +20,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 82
+SCHEMA_VERSION = 83
 
 
 def create_postgres_schema(cursor) -> None:
@@ -887,12 +887,16 @@ def create_postgres_schema(cursor) -> None:
     # cli_session_id (v70): the delegated engine's ``claude --resume`` handle —
     # a CLI uuid, NOT the fluid session id — so a restart can reconnect to the
     # same CLI conversation instead of resuming a handle the CLI never issued.
+    # project_root (v83): the project the session ran in, derived from its cwd
+    # (fluid.store.base.project_root_for) — SessionSearch scopes cross-session
+    # recall on it. NULL = unknown (legacy session), never "another project".
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS fluid_sessions (
             session_id TEXT PRIMARY KEY,
             head_node_id TEXT,
             created_at DOUBLE PRECISION NOT NULL,
-            cli_session_id TEXT
+            cli_session_id TEXT,
+            project_root TEXT
         )
     """)
     cursor.execute("""
