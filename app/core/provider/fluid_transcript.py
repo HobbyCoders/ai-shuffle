@@ -164,6 +164,58 @@ def _event_rows(session_id: str) -> List[Dict[str, Any]]:
     ]
 
 
+def _event_rows_of_class(
+    session_id: str, classes: Sequence[str]
+) -> List[Dict[str, Any]]:
+    """Like :func:`_event_rows`, but only the given ``_cls`` values.
+
+    Same shape and same ``seq`` order — just filtered in the database. Callers
+    that need two or three event classes out of a log with tens of thousands of
+    rows must not pay to ship (and JSON-decode) the whole thing; the unfiltered
+    read sorts and materializes every payload, which spills to disk on a long
+    session. ``event ->> '_cls'`` is a single-key text extraction, which the
+    SQLite test shim rewrites to ``json_extract`` (see ``tests/pg_shim.py``).
+    """
+    from app.db.base import get_cursor, get_db
+    from app.db.compat import ph
+
+    if not classes:
+        return []
+    slots = ", ".join(ph() for _ in classes)
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"SELECT seq, event FROM fluid_session_events "
+            f"WHERE session_id = {ph()} AND event ->> '_cls' IN ({slots}) "
+            f"ORDER BY seq",
+            (session_id, *classes),
+        )
+        rows = cursor.fetchall()
+    return [
+        {"seq": dict(r).get("seq"), "event": _as_dict(dict(r).get("event"))}
+        for r in rows
+    ]
+
+
+def _has_event_of_class(session_id: str, cls: str) -> bool:
+    """Whether the session's log holds at least one event of ``_cls``.
+
+    An existence probe, so the caller can bail before doing any of the real
+    work. No ``ORDER BY``, no payloads returned, stops at the first hit.
+    """
+    from app.db.base import get_cursor, get_db
+    from app.db.compat import ph
+
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"SELECT 1 FROM fluid_session_events "
+            f"WHERE session_id = {ph()} AND event ->> '_cls' = {ph()} LIMIT 1",
+            (session_id, cls),
+        )
+        return cursor.fetchone() is not None
+
+
 def _as_dict(value: Any) -> Dict[str, Any]:
     """``jsonb`` arrives as a dict from psycopg2 but as a JSON string from the
     test shim's SQLite — normalize (mirrors ``fluid_pg_store._as_dict``)."""
@@ -1189,8 +1241,16 @@ def latest_compaction_boundary(
     The returned first-retained turn id comes from Fluid's durable
     ``TurnStarted(node_id, turn_id)`` event. It is the exact bridge to the app
     event log; no positional assumption about user rows is required.
+
+    Every session open calls this, so the reads are kept proportional to the
+    answer. The ``ContextCompaction`` existence probe runs FIRST: a session that
+    has never compacted — which is nearly all of them — returns ``None`` without
+    walking its node tree or decoding a single event payload. Only past that
+    probe do we load the path and the two event classes this actually reads.
     """
     try:
+        if not _has_event_of_class(sdk_session_id, "ContextCompaction"):
+            return None
         path = load_fluid_path(sdk_session_id)
         if not path:
             return None
@@ -1209,8 +1269,13 @@ def latest_compaction_boundary(
         start_to_turn = {start: i for i, (start, _end) in enumerate(turn_ranges)}
         end_to_turn = {end: i for i, (_start, end) in enumerate(turn_ranges)}
 
+        # Only these two classes are read below: ContextCompaction for the
+        # promoted spans, TurnStarted for the node -> durable turn-id bridge.
         fluid_events = [
-            _as_dict(row.get("event")) for row in _event_rows(sdk_session_id)
+            _as_dict(row.get("event"))
+            for row in _event_rows_of_class(
+                sdk_session_id, ("ContextCompaction", "TurnStarted")
+            )
         ]
         intervals: List[Tuple[int, int, int]] = []
         for event in fluid_events:

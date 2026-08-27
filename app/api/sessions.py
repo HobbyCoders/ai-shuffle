@@ -980,6 +980,13 @@ def _reconcile_subagent_status(store_messages: list, active_tasks: list) -> None
 async def get_live_session(
     request: Request,
     session_id: str,
+    include_messages: bool = Query(
+        True,
+        description=(
+            "Set false for a metadata-only snapshot: the transcript is skipped "
+            "and `messages` comes back empty."
+        ),
+    ),
     token: str = Depends(require_auth)
 ):
     """
@@ -994,6 +1001,13 @@ async def get_live_session(
     - messages: Persisted transcript
     - is_streaming: Whether the session has an active run
     - usage: Token usage counts
+
+    ``include_messages=false`` serves everything EXCEPT the transcript. A v2
+    session's transcript is owned by the SSE feed, so the switch-in metadata
+    snapshot (session-switcher.ts::applyMetadataSnapshot) only wants the
+    lifecycle/usage/worktree fields — building and shipping a multi-megabyte
+    message list it throws away is pure cost on every session open. Defaults to
+    true, so every existing caller sees the wire shape it always saw.
     """
     from starlette.responses import Response
 
@@ -1066,7 +1080,7 @@ async def get_live_session(
 
     # Primary read: the Postgres session store.
     store_parse_failed = False
-    if not messages and sdk_session_id:
+    if include_messages and not messages and sdk_session_id:
         try:
             from app.core.message_resolver import resolve_working_dir
             from app.core.config import settings
@@ -1144,7 +1158,7 @@ async def get_live_session(
     # legacy view then would resurface the user-rows-only "vanishing replies"
     # trap). Post-cutover sessions always have store rows, so the legacy view
     # can never shadow the store. Mirrors GET /{id}.
-    if not messages and not store_parse_failed:
+    if include_messages and not messages and not store_parse_failed:
         from app.core.db_message_loader import load_messages_from_db
         try:
             db_messages, has_db = await run_sync(load_messages_from_db, session_id)
@@ -1158,19 +1172,26 @@ async def get_live_session(
         except Exception as e:
             logger.warning(f"Legacy DB fallback failed for live {session_id}: {e}")
 
-    # Registry reconcile: even with the buffer gone (or never present), a
-    # sub-agent still running in the task registry must not render "completed".
-    # Force its card back to "running" by matching the launch tool_use id;
-    # non-matching cards (legacy transcripts) are left exactly as loaded.
-    _reconcile_subagent_status(messages, active_tasks)
+    # Message post-processing — every step here reads or rewrites the transcript,
+    # so all of it is skipped along with the transcript itself.
+    if include_messages:
+        # Registry reconcile: even with the buffer gone (or never present), a
+        # sub-agent still running in the task registry must not render
+        # "completed". Force its card back to "running" by matching the launch
+        # tool_use id; non-matching cards (legacy transcripts) are left exactly
+        # as loaded.
+        _reconcile_subagent_status(messages, active_tasks)
 
-    # Attach cost/duration metadata to final assistant messages (cached, O(N))
-    # This ensures the poller gets cost data on the first poll after streaming ends
-    from app.core.cost_utils import attach_cost_metadata, attach_user_message_metadata
-    attach_cost_metadata(messages, session_id)
-    # Store/JSONL transcripts drop the DB row's user-message metadata
-    # (e.g. automation_id/automation_run_id) — merge it back (PR #560 follow-up)
-    attach_user_message_metadata(messages, session_id)
+        # Attach cost/duration metadata to final assistant messages (cached, O(N))
+        # This ensures the poller gets cost data on the first poll after streaming ends
+        from app.core.cost_utils import (
+            attach_cost_metadata,
+            attach_user_message_metadata,
+        )
+        attach_cost_metadata(messages, session_id)
+        # Store/JSONL transcripts drop the DB row's user-message metadata
+        # (e.g. automation_id/automation_run_id) — merge it back (PR #560 follow-up)
+        attach_user_message_metadata(messages, session_id)
 
     # Build response in live format
     # IMPORTANT: For context window calculation, the frontend needs per-turn
@@ -1185,6 +1206,10 @@ async def get_live_session(
 
     # Override with JSONL data if available (legacy sessions without
     # persisted per-turn columns — usage_data only populated when JSONL fallback ran)
+    # A metadata-only request never parses the transcript, so usage_data is None
+    # and the sessions-row columns above stand. That is the intended trade: the
+    # only caller passing include_messages=false uses this as a pre-feed
+    # placeholder gauge, and the SSE feed's turn.usage supersedes it either way.
     if sdk_session_id and usage_data:
         # Use last_input_tokens (per-turn) for context window calculation,
         # NOT total_tokens_in (cumulative sum across all turns)

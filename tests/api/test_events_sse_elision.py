@@ -201,6 +201,63 @@ def test_boundary_uses_latest_contiguous_promoted_prefix(mock_db):
     assert boundary["tier"] == 3
 
 
+def test_uncompacted_session_reads_neither_log_nor_node_tree(mock_db, monkeypatch):
+    """The session-open cost of a session that never compacted must be one
+    existence probe.
+
+    Every session open calls this, and a ``ContextCompaction`` promotion is rare
+    — so the unfiltered ``SELECT ... ORDER BY seq`` over the whole event log,
+    plus the full node-tree walk, were being paid on every open to discover
+    there was nothing to elide (half a second and a disk spill on a long
+    session). Both are booby-trapped here: reaching either one is the bug.
+    """
+    import app.core.provider.fluid_transcript as ft
+
+    sdk = "ses_nocompact01"
+    _seed_fluid(sdk, _four_turn_path())
+
+    def _boom(*_a, **_kw):
+        raise AssertionError("read the whole session before probing for compaction")
+
+    monkeypatch.setattr(ft, "_event_rows", _boom)
+    monkeypatch.setattr(ft, "load_fluid_path", _boom)
+
+    assert latest_compaction_boundary(sdk) is None
+
+
+def test_boundary_lookup_ignores_unrelated_event_classes(mock_db):
+    """The filtered read must still see everything the analysis needs.
+
+    Only ContextCompaction (the promoted spans) and TurnStarted (the node ->
+    durable turn-id bridge) are read; the ToolUse/ToolResult/Usage traffic that
+    makes up the bulk of a real log is filtered out in the database, and its
+    absence must not change the answer.
+    """
+    sdk = "ses_noisylog001"
+    _seed_fluid(sdk, _four_turn_path())
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        for offset, cls in enumerate(("ToolUse", "ToolResult", "Usage", "TextDelta")):
+            cursor.execute(
+                "INSERT INTO fluid_session_events (session_id, seq, event) "
+                "VALUES (%s, %s, %s)",
+                (
+                    sdk,
+                    500 + offset,
+                    Json({"_cls": cls, "session_id": sdk, "payload": "x" * 256}),
+                ),
+            )
+    _append_compaction(sdk, 1, [["n1", "n2", "digest"]])
+
+    boundary = latest_compaction_boundary(sdk)
+
+    assert boundary is not None
+    assert boundary["node_id"] == "n2"
+    assert boundary["turns"] == 1
+    # The bridge still resolves — TurnStarted survived the filter.
+    assert boundary["first_retained_turn_id"] == "turn-1"
+
+
 def test_tier_one_only_has_no_replay_cutoff(mock_db):
     sdk = "ses_trimonly001"
     _seed_fluid(sdk, _four_turn_path())

@@ -50,7 +50,7 @@ def _owner_path_patches(session, lifecycle=None):
 
 
 async def _poll_live(session, store_result, legacy_result, store_side_effect=None,
-                     lifecycle=None):
+                     lifecycle=None, include_messages=True, store_probe=None):
     patches = _owner_path_patches(session, lifecycle=lifecycle)
     for p in patches:
         p.start()
@@ -59,11 +59,14 @@ async def _poll_live(session, store_result, legacy_result, store_side_effect=Non
              patch("app.core.cost_utils.attach_cost_metadata"), \
              patch("app.core.cost_utils.attach_user_message_metadata"), \
              patch("app.api.sessions.parse_session_history_via_store",
-                   return_value=store_result, side_effect=store_side_effect), \
+                   return_value=store_result, side_effect=store_side_effect) as store, \
              patch("app.core.db_message_loader.load_messages_from_db",
                    return_value=legacy_result) as legacy_loader:
+            if store_probe is not None:
+                store_probe.append(store)
             result = await get_live_session(
                 request=MagicMock(), session_id=session["id"], token="tok",
+                include_messages=include_messages,
             )
     finally:
         for p in patches:
@@ -137,3 +140,67 @@ async def test_live_surfaces_lifecycle_fields_on_response_body():
     assert result["unpark_pending"] is True
     assert result["is_streaming"] is False
     assert result["last_update_id"] == 0
+
+
+# ---------------------------------------------------------------------------
+# include_messages=false — metadata-only snapshot (session-open cost)
+# ---------------------------------------------------------------------------
+# The v2 switch-in fetches /live purely for lifecycle/usage/worktree metadata:
+# the SSE feed owns the transcript, so the message list this endpoint builds is
+# discarded the moment it arrives. On a long session that is megabytes of JSON
+# assembled per open. `include_messages=false` skips the whole transcript read.
+
+
+async def test_include_messages_false_ships_no_message_bodies():
+    session = {"id": "meta-sess", "title": "Meta", "sdk_session_id": "sdk-meta-1"}
+    probe: list = []
+
+    result, legacy_loader = await _poll_live(
+        session,
+        store_result=(list(STORE_MSGS), {}),
+        legacy_result=(list(LEGACY_MSGS), True),
+        include_messages=False,
+        store_probe=probe,
+    )
+
+    # No bodies, and neither transcript source was even consulted.
+    assert result["messages"] == []
+    probe[0].assert_not_called()
+    legacy_loader.assert_not_called()
+
+
+async def test_include_messages_false_keeps_the_metadata_fields():
+    """Everything the switch-in actually reads must survive the opt-out."""
+    session = {"id": "meta-sess-2", "title": "Meta Two", "sdk_session_id": "sdk-meta-2",
+               "total_tokens_out": 40, "cache_creation_tokens": 5,
+               "cache_read_tokens": 6, "last_input_tokens": 30}
+    lifecycle = _lifecycle_stub(
+        active_tasks=[{"id": "task-9", "status": "running", "kind": "agent"}],
+        unpark_pending=True,
+    )
+
+    result, _ = await _poll_live(
+        session, store_result=(list(STORE_MSGS), {}), legacy_result=([], False),
+        lifecycle=lifecycle, include_messages=False,
+    )
+
+    assert result["session_id"] == "meta-sess-2"
+    assert result["session_meta"]["title"] == "Meta Two"
+    assert result["usage"] == {
+        "input_tokens": 30, "output_tokens": 40,
+        "cache_creation_tokens": 5, "cache_read_tokens": 6,
+    }
+    assert result["activeTasks"][0]["id"] == "task-9"
+    assert result["unpark_pending"] is True
+    assert result["is_streaming"] is False
+
+
+async def test_include_messages_defaults_to_the_full_transcript():
+    """The param is opt-out only: every existing caller keeps its wire shape."""
+    session = {"id": "default-sess", "title": "Default", "sdk_session_id": "sdk-def-1"}
+
+    result, _ = await _poll_live(
+        session, store_result=(list(STORE_MSGS), {}), legacy_result=([], False),
+    )
+
+    assert [m["content"] for m in result["messages"]] == ["from store"]
