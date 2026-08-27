@@ -176,7 +176,8 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     if stamp is not None:
         ctx.read_seen[key] = stamp
     return ToolOutcome(
-        text=(numbered or "(empty file)") + unchanged_read_note(repeat)
+        text=(numbered or "(empty file)") + unchanged_read_note(repeat),
+        content_id=_content_id(key, stamp),
     )
 
 
@@ -187,3 +188,21 @@ def _stamp(path: Path) -> tuple[int, int] | None:
     except OSError:
         return None
     return (st.st_mtime_ns, st.st_size)
+
+
+def _content_id(
+    key: tuple[str, int, int | None], stamp: tuple[int, int] | None
+) -> str | None:
+    """Identity of the exact window this call returned, or None if unknowable.
+
+    Window *and* file version, so a different offset/limit or a byte that moved
+    yields a different id. Code mode compares it against the ids it has already
+    turned into ResultRefs; a match means the kernel is holding this very
+    payload, so the repeat read can come back as a pointer instead of a copy
+    (see ``codemode/_runner.py``). The trailing "already seen" note is not part
+    of the id — it is presentation, and it is what the pointer replaces.
+    """
+    if stamp is None:
+        return None
+    path, offset, limit = key
+    return f"Read|{path}|{offset}|{limit if limit else ''}|{stamp[0]}|{stamp[1]}"

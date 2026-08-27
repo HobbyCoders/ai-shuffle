@@ -344,7 +344,12 @@ def _reply_frame(reply: HostReply) -> dict:
         return {"kind": "host_reply", "denied": True, "message": reply.message}
     if reply.error is not None:
         return {"kind": "host_reply", "error": reply.error}
-    return {"kind": "host_reply", "result": reply.result}
+    frame = {"kind": "host_reply", "result": reply.result}
+    if reply.content_id:
+        # Only the success path carries it, and only when the tool claimed one —
+        # the kernel keys its "already delivered this payload" map on it.
+        frame["content_id"] = reply.content_id
+    return frame
 
 
 def _dumps(obj: dict) -> bytes:

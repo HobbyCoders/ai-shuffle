@@ -94,7 +94,11 @@ class HostCallBridge:
             if outcome.text.startswith("permission denied"):
                 return HostReply(denied=True, message=outcome.text)
             return HostReply(error=outcome.text)
-        return HostReply(result=outcome.text, images=outcome.images)
+        return HostReply(
+            result=outcome.text,
+            images=outcome.images,
+            content_id=outcome.content_id,
+        )
 
 # Injected permission round-trip: the engine says "ask", the bridge calls this
 # to surface a PermissionRequest and await the user's answer. In production the
@@ -190,4 +194,8 @@ class HostBridge:
 
         if outcome.is_error and not outcome.soft_error:
             return HostReply(error=outcome.text)
-        return HostReply(result=outcome.text, images=outcome.images)
+        return HostReply(
+            result=outcome.text,
+            images=outcome.images,
+            content_id=outcome.content_id,
+        )

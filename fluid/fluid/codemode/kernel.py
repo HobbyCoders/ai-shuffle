@@ -36,6 +36,11 @@ class HostReply:
     ``result`` text — in-sandbox the call returns the ``[image: …]`` caption — and
     the host attaches the images to the enclosing cell's tool result so the model
     can actually see them.
+
+    ``content_id`` is the tool's opaque identity for ``result`` (see
+    ``ToolOutcome.content_id``): equal ids mean byte-identical payloads. The
+    kernel uses it to recognise a repeat read of an unchanged file and answer
+    with a pointer at the ``ResultRef`` it already holds.
     """
 
     result: str | None = None
@@ -43,6 +48,7 @@ class HostReply:
     denied: bool = False
     message: str | None = None
     images: tuple[ToolImage, ...] = ()
+    content_id: str | None = None
 
 
 @dataclass(frozen=True)

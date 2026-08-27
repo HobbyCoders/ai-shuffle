@@ -2428,7 +2428,11 @@ class NativeLoop(BackgroundLifecycleMixin):
             delivered = [_steer_parts(pending) for pending in self._pending_steers]
             self._pending_steers.clear()
             steers = "".join(format_steer(text) for _, text in delivered)
-            outcome = replace(outcome, text=outcome.text + steers)
+            # The steer is new information appended to the payload, so the
+            # tool's content_id no longer describes this text. Dropping it
+            # keeps code mode from collapsing this result into a pointer at an
+            # older ref and losing the user's interjection with it.
+            outcome = replace(outcome, text=outcome.text + steers, content_id=None)
         await self._emit(ToolResult(
             session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id, name=name,
             output=outcome.text, is_error=outcome.is_error, ui=outcome.ui,

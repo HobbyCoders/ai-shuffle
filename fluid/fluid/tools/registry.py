@@ -174,6 +174,13 @@ class ToolOutcome:
     input_required: InputRequired | None = None
     images: tuple[ToolImage, ...] = ()
     background_task: BackgroundTaskReceipt | None = None
+    # Opaque identity of the payload in ``text``: two outcomes carrying the same
+    # ``content_id`` carry byte-identical content. Read stamps it with the file
+    # window plus the file's mtime/size, which is what lets code mode answer a
+    # repeat read with a pointer at the ResultRef it already handed the kernel
+    # instead of a second copy. None = "no identity claim" — the default, and
+    # what anything that appends to ``text`` after dispatch must reset it to.
+    content_id: str | None = None
 
 
 @dataclass

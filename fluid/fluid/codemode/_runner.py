@@ -18,7 +18,10 @@ frame as the reply (result / error / denied). Large results are wrapped in
 ``vfs.ResultRef`` so only a truncated ``repr`` reaches the model, and every ref
 is registered in the namespace's ``_refs`` registry under a short id its repr
 prints — a dropped handle is recovered with ``_refs[7]``, never by re-running
-the tool. The previous cell's displayed value stays bound to ``_``.
+the tool. A call that would deliver a payload already sitting behind a live ref
+(the host says so with ``content_id``: same file, same window, same bytes) gets
+the id back instead of the bytes. The previous cell's displayed value stays
+bound to ``_``.
 """
 
 import ast
@@ -49,6 +52,12 @@ _NS: dict = {}
 # cell that rebinds the name ``_refs`` cannot detach the registry the RPC
 # boundary writes into.
 _REFS = vfs.RefRegistry()
+# ``content_id`` (host-supplied payload identity) -> the ResultRef already
+# holding that exact payload. Populated only for results big enough to become a
+# ref; a hit means a re-read is pointless and gets a pointer instead. Deliberately
+# NOT checkpointed: a restarted kernel has no refs to point at, so it starts
+# empty and every read is a real read again.
+_READ_REFS = {}
 
 
 # ─── framing ─────────────────────────────────────────────────────────────────
@@ -98,13 +107,48 @@ def _host_call(tool_name: str, kwargs: dict):
     result = reply.get("result")
     if result is None:
         result = ""
+    content_id = reply.get("content_id")
+    held = _live_ref(content_id)
+    if held is not None:
+        # This exact payload is already in the kernel and still reachable, so
+        # the model gets the id rather than a second copy of the bytes. Any
+        # break in that chain — the file changed, a different window, the ref
+        # aged out of the registry — moves or clears the map entry, and the
+        # read falls through below as an ordinary one.
+        return truncate.repeat_read_pointer(held.key, len(held))
     wrapped = truncate.to_result_ref(result, vfs.ResultRef, limit=_REF_THRESHOLD)
     if isinstance(wrapped, vfs.ResultRef):
         # Every ref gets an id in ``_refs`` before the cell sees it, so a
         # handle the cell forgets to bind is still recoverable from the id its
         # repr printed (``_refs[7]``) instead of costing a re-run of the tool.
         _REFS.register(wrapped)
+        if content_id:
+            _remember_ref(content_id, wrapped)
     return wrapped
+
+
+def _live_ref(content_id):
+    """The ResultRef already holding ``content_id``'s payload, if still held."""
+    if not content_id:
+        return None
+    ref = _READ_REFS.get(content_id)
+    key = getattr(ref, "key", None)
+    if key is None:
+        return None
+    # ``_refs`` is bounded and FIFO: an evicted id is gone, and asking the
+    # registry (rather than trusting the map) is what makes eviction fall
+    # through to a real read instead of pointing at a dead handle.
+    return _REFS.get(key)
+
+
+def _remember_ref(content_id, ref) -> None:
+    """Record ``ref`` as the holder of ``content_id``, dropping dead entries."""
+    _READ_REFS[content_id] = ref
+    if len(_READ_REFS) <= vfs.REF_REGISTRY_MAX:
+        return
+    for cid, held in list(_READ_REFS.items()):
+        if getattr(held, "key", None) not in _REFS:
+            del _READ_REFS[cid]
 
 
 # ─── cell execution ──────────────────────────────────────────────────────────

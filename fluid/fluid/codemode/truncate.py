@@ -42,6 +42,22 @@ def to_result_ref(
     return ref_cls(text) if exceeds(text, limit) else text
 
 
+def repeat_read_pointer(key: int, size: int) -> str:
+    """The result a repeat read of an unchanged file gets instead of the bytes.
+
+    The passive "unchanged since your earlier read" note asked the model to
+    please not re-read; transcripts show it re-reading anyway and paying full
+    price. This removes the choice: the payload is already alive in the kernel
+    under a registry id, so the second read returns the id and the size and
+    nothing else. Slicing ``_refs[key]`` costs no host round-trip at all.
+    """
+    return (
+        f"unchanged since your earlier read — full content is already in the "
+        f"kernel: _refs[{key}] ({size:,} bytes). Slice it instead of "
+        f"re-reading (e.g. text = _refs[{key}]; text[:2000])."
+    )
+
+
 # ─── cell stdout budget ──────────────────────────────────────────────────────
 
 DEFAULT_STDOUT_CAP = 16384  # chars of cell stdout that reach the model
