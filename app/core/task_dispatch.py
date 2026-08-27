@@ -28,7 +28,11 @@ What this module adds on top of raw ``dispatch_worker``:
   selectively instead of paying for it in context up front;
   ``background`` pre-allocates and returns the exact worker session id as a
   Fluid ``BackgroundTaskReceipt``, then announces completion to the parent
-  without a polling loop.
+  without a polling loop. A call that names no mode takes the target's own
+  default: Explore-class agents (ones whose declared tool surface cannot write
+  files) go ``background``, since a research child's parent has nothing to wait
+  for and blocking it turns a fan-out into a queue; everything else stays
+  ``sync``. An explicit ``mode`` always wins.
 
 File-defined agents (Claude-ecosystem compat, ruling CE6)
 ---------------------------------------------------------
@@ -324,6 +328,57 @@ def _definition_tool_allowlist(definition: Any) -> Optional[List[str]]:
     return names or None
 
 
+def _stored_agent_tools(agent_id: str) -> Optional[List[str]]:
+    """A stored agent's configured tool allowlist, read only to pick a mode.
+
+    Dispatch deliberately sends no ``tool_allowlist`` for a DB agent — the
+    worker's own profile applies its access downstream — so this row lookup
+    exists purely to classify the target. A lookup failure is not worth failing
+    a dispatch over; the caller falls back to the non-Explore default.
+    """
+    try:
+        from app.db.subagents import get_subagent
+
+        row = get_subagent(agent_id)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "task_dispatch: tool lookup failed for agent %r; assuming it is "
+            "not read-only",
+            agent_id,
+            exc_info=True,
+        )
+        return None
+    if not row:
+        return None
+    tools = row.get("tools")
+    return list(tools) if isinstance(tools, (list, tuple)) else None
+
+
+def _default_task_mode(declared_tools: Optional[List[str]], agent_label: str) -> str:
+    """The mode a Task call takes when it names none.
+
+    Explore-class targets — read-only research agents — default to
+    ``background``. A research child produces a report its parent reads when it
+    gets to it; blocking the parent on one turns a fan-out into a queue, which
+    is exactly what made research children serialize their parents before. Any
+    agent that can write defaults to ``sync``, where the parent normally does
+    need the result in hand before it continues.
+
+    An explicit ``mode`` in the call always wins over this.
+    """
+    from app.core.builtin_subagents import is_read_only_tool_surface
+
+    if is_read_only_tool_surface(declared_tools):
+        logger.debug(
+            "task_dispatch: %r declares a read-only tool surface %r; "
+            "defaulting to background",
+            agent_label,
+            declared_tools,
+        )
+        return "background"
+    return "sync"
+
+
 def _caller_provider_id(
     caller_row: Optional[SessionRow], caller_profile_id: Optional[str]
 ) -> Optional[str]:
@@ -500,9 +555,15 @@ async def dispatch_task_tool(
     prompt = (args.get("prompt") or "").strip()
     if not prompt:
         return {"ok": False, "error": "Task requires a prompt."}
-    mode = (args.get("mode") or "sync").strip().lower()
-    if mode not in ("sync", "background"):
-        return {"ok": False, "error": f"Unknown mode '{mode}' (sync|background)."}
+    # The default depends on which agent this call names, so it cannot be
+    # applied until the target resolves below. Validate the explicit value here
+    # so a typo still fails before any of the resolution work.
+    requested_mode = (args.get("mode") or "").strip().lower()
+    if requested_mode and requested_mode not in ("sync", "background"):
+        return {
+            "ok": False,
+            "error": f"Unknown mode '{requested_mode}' (sync|background).",
+        }
     if args.get("model") not in (None, ""):
         return {
             "ok": False,
@@ -551,6 +612,7 @@ async def dispatch_task_tool(
             return {"ok": False, "error": model_error}
         system_prompt_append = _file_agent_prompt(definition)
         tool_allowlist = _definition_tool_allowlist(definition)
+        declared_tools = tool_allowlist
         result_agent = target_name
     else:
         assert target is not None
@@ -559,6 +621,7 @@ async def dispatch_task_tool(
         model_id = target.model
         system_prompt_append = None
         tool_allowlist = None
+        declared_tools = _stored_agent_tools(target.id)
         if target.id in _chain_agent_ids(caller_session_id):
             return {
                 "ok": False,
@@ -568,6 +631,8 @@ async def dispatch_task_tool(
                 ),
             }
         result_agent = target.id
+
+    mode = requested_mode or _default_task_mode(declared_tools, str(result_agent))
 
     max_depth = int(getattr(settings, "task_tool_max_depth", 5) or 5)
     _, root_session_id, caller_depth = caller_chain(caller_session_id)

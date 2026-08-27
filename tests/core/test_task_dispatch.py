@@ -40,6 +40,16 @@ def agents(mock_db):
         "mode-all", "Mode All", None,
         {"model": "opus", "agent_invoke_mode": "all", "enabled_agents": ["helper"]},
     )
+    # Explore-class: an explicit tool surface that cannot write files.
+    database.create_profile(
+        "explorer", "Explorer", None,
+        {"model": "sonnet", "allowed_tools": ["Read", "Grep", "Glob", "Bash"]},
+    )
+    # Explicit surface that CAN write — not Explore-class.
+    database.create_profile(
+        "editor", "Editor", None,
+        {"model": "sonnet", "allowed_tools": ["Read", "Grep", "Edit"]},
+    )
     return database
 
 
@@ -430,6 +440,138 @@ def test_background_registration_failure_is_not_returned_as_a_receipt(agents):
     assert "task_id" not in payload
 
 
+# ─── default mode is per-target: Explore-class runs background ───────────────
+
+
+def _dispatch_watching_mode(args, session_id, **kw):
+    """Dispatch with a stubbed worker, returning (payload, worker kwargs).
+
+    ``_await_worker_registration`` is stubbed out so the background branch does
+    not wait on a DB row that no fake worker ever writes.
+    """
+    seen = {}
+
+    async def fake_worker(**kwargs):
+        seen.update(kwargs)
+        return WorkerOutcome(ok=True, session_id="w-mode", report="done")
+
+    async def run():
+        with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker), \
+             patch.object(td, "_await_worker_registration", return_value=True):
+            return await td.dispatch_task_tool(
+                args, caller_session_id=session_id, **kw
+            )
+
+    return asyncio.run(run()), seen
+
+
+def test_read_only_agent_defaults_to_background(agents):
+    """A research child has nothing its parent must have before continuing, so
+    omitting mode parks it in the background instead of blocking the parent."""
+    _mk_session(agents, "s-explore", "root-agent")
+    payload, seen = _dispatch_watching_mode(
+        {"agent": "explorer", "prompt": "go"}, "s-explore"
+    )
+    assert payload["ok"] is True
+    assert payload["mode"] == "background"
+    assert seen.get("background") is True
+    assert payload["task_id"] == payload["worker_session_id"]
+
+
+def test_explicit_sync_beats_the_read_only_default(agents):
+    """A caller that says sync gets sync, Explore-class or not."""
+    _mk_session(agents, "s-explore-sync", "root-agent")
+    payload, seen = _dispatch_watching_mode(
+        {"agent": "explorer", "prompt": "go", "mode": "sync"}, "s-explore-sync"
+    )
+    assert payload["mode"] == "sync"
+    assert payload["report_head"] == "done"
+    assert "background" not in seen
+
+
+def test_write_capable_agent_still_defaults_to_sync(agents):
+    """An explicit surface containing Edit is not Explore-class."""
+    _mk_session(agents, "s-editor", "root-agent")
+    payload, _ = _dispatch_watching_mode(
+        {"agent": "editor", "prompt": "go"}, "s-editor"
+    )
+    assert payload["mode"] == "sync"
+
+
+def test_unrestricted_agent_still_defaults_to_sync(agents):
+    """No declared tools means "inherit everything", which may well write —
+    never Explore-class."""
+    _mk_session(agents, "s-open", "root-agent")
+    payload, _ = _dispatch_watching_mode(
+        {"agent": "helper", "prompt": "go"}, "s-open"
+    )
+    assert payload["mode"] == "sync"
+
+
+def test_read_only_file_agent_defaults_to_background(agents):
+    """The same rule applies to a file/plugin definition's ``tools:`` list."""
+    _mk_session(agents, "s-file-explore", "root-agent")
+    payload, _ = _dispatch_watching_mode(
+        {"agent": "researcher", "prompt": "go"}, "s-file-explore",
+        agent_registry={"researcher": _definition(tools=("Read", "Grep", "Glob"))},
+    )
+    assert payload["mode"] == "background"
+
+
+def test_write_capable_file_agent_defaults_to_sync(agents):
+    _mk_session(agents, "s-file-write", "root-agent")
+    payload, _ = _dispatch_watching_mode(
+        {"agent": "researcher", "prompt": "go"}, "s-file-write",
+        agent_registry={"researcher": _definition(tools=("Read", "Write"))},
+    )
+    assert payload["mode"] == "sync"
+
+
+def test_unknown_mode_is_still_rejected(agents):
+    """Deferring the default must not stop a typo from failing fast."""
+    payload = asyncio.run(_dispatch(
+        {"agent": "explorer", "prompt": "go", "mode": "detached"}, "s-bad-mode"
+    ))
+    assert payload["ok"] is False
+    assert "detached" in payload["error"]
+
+
+def test_read_only_tool_surface_predicate():
+    """The classifier itself, including the cases it must NOT call read-only."""
+    from app.core.builtin_subagents import is_read_only_tool_surface
+
+    assert is_read_only_tool_surface(["Read", "Grep", "Glob"]) is True
+    # Bash rides along on the shipped Explore/Plan definitions, which the app
+    # declares read-only; the predicate stays in step with them.
+    assert is_read_only_tool_surface(["Read", "Grep", "Glob", "Bash", "Skill"]) is True
+    assert is_read_only_tool_surface(["read", "GREP"]) is True
+
+    assert is_read_only_tool_surface(None) is False
+    assert is_read_only_tool_surface([]) is False
+    assert is_read_only_tool_surface(["  ", ""]) is False
+    assert is_read_only_tool_surface(["*"]) is False
+    assert is_read_only_tool_surface(["Read", "Write"]) is False
+    assert is_read_only_tool_surface(["Read", "Edit"]) is False
+    assert is_read_only_tool_surface(["Read", "NotebookEdit"]) is False
+    assert is_read_only_tool_surface(["Read", "MultiEdit"]) is False
+
+
+def test_builtin_explore_and_plan_are_read_only_but_general_purpose_is_not():
+    """The shipped definitions land on the side the audit expects."""
+    from app.core.builtin_subagents import (
+        get_builtin_subagent_definition,
+        is_read_only_tool_surface,
+    )
+
+    for agent_id in ("Explore", "Plan"):
+        tools = get_builtin_subagent_definition(agent_id)["tools"]
+        assert is_read_only_tool_surface(tools) is True, agent_id
+
+    for agent_id in ("general-purpose", "frontend-designer"):
+        tools = get_builtin_subagent_definition(agent_id)["tools"]
+        assert is_read_only_tool_surface(tools) is False, agent_id
+
+
 def test_launch_tool_use_id_threads_to_the_worker(agents):
     """The fluid dispatcher reads the engine-stamped ctx.extra['tool_use_id'] and
     it reaches dispatch_worker as launch_tool_use_id — what lets the worker
@@ -582,9 +724,12 @@ def test_file_agent_model_cannot_change_binding_and_tools_are_enforced(agents):
         seen.update(kwargs)
         return WorkerOutcome(ok=True, session_id="w-m", report="r")
 
+    # mode is pinned because ("Read", "Grep") is a read-only surface, which
+    # would otherwise default to background; this test is about the model
+    # binding, not the mode.
     with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
         payload = asyncio.run(_dispatch(
-            {"agent": "researcher", "prompt": "go"}, "s-model",
+            {"agent": "researcher", "prompt": "go", "mode": "sync"}, "s-model",
             agent_registry={
                 "researcher": _definition(model="sonnet", tools=("Read", "Grep")),
             },
@@ -609,9 +754,11 @@ def test_file_agent_tools_become_the_workers_allowlist(agents):
         seen.update(kwargs)
         return WorkerOutcome(ok=True, session_id="w-ce12", report="r")
 
+    # Pinned to sync for the same reason as above: the subject here is the
+    # allowlist reaching the worker, not which mode a read-only agent picks.
     with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
         payload = asyncio.run(_dispatch(
-            {"agent": "researcher", "prompt": "go"}, "s-ce12",
+            {"agent": "researcher", "prompt": "go", "mode": "sync"}, "s-ce12",
             agent_registry={"researcher": _definition(tools=("Read", "Grep"))},
         ))
 
