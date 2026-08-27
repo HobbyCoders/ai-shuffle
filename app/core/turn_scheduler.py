@@ -1014,14 +1014,20 @@ def _build_task_notification_prompt(pending: list, kind: str = "own") -> str:
 
     ``kind`` selects the contract variant:
 
-    * ``"own"`` (default) — the parent's own background work came to rest. Byte-
-      identical to the historical output: full ``<note>`` + trailing ``<usage>``
-      block, no ``<kind>`` element.
+    * ``"own"`` (default) — the parent's own background work came to rest. Full
+      ``<note>`` + trailing ``<usage>`` block, no ``<kind>`` element.
     * ``"pump"`` — one internal step of a still-running background agent. Nests a
       ``<kind>pump</kind>`` element right after the opening tag, uses the terse
       pump note, and OMITS ``<usage>`` (the step is not a completed unit of work).
       The full result fallback chain is KEPT — reactivity requires the model see
       the step result.
+
+    Empty elements are OMITTED rather than emitted blank: a frame with no
+    ``tool_use_id``, no ``output_file``, or no usage numbers renders without
+    those tags. A frame whose ``kind`` is ``shell``/``monitor`` (a Monitor'd
+    shell command, not a sub-agent) is labelled ``<kind>monitor</kind>`` and
+    never carries ``<usage>`` — a shell has no sub-agent token accounting, and
+    ``<subagent_tokens></subagent_tokens>`` misnamed the work it described.
     """
     from app.core.query_engine import _read_task_output_file
     from app.core.query_streaming import truncate_large_payload
@@ -1067,32 +1073,61 @@ def _build_task_notification_prompt(pending: list, kind: str = "own") -> str:
         # absent) and <result> is dropped. Only a genuinely DIFFERENT result gets
         # its own element, and then the summary is capped back down to a label.
         result_is_summary = result_text == summary_text
+        # A monitored SHELL command is not a sub-agent: it has no transcript, no
+        # tool-use id of its own, and no token accounting. Saying "subagent" at
+        # it — which an empty <usage> block's <subagent_tokens> did — misnames
+        # the work the parent is being woken about.
+        is_monitor = str(note.get("kind") or "").lower() in ("shell", "monitor")
         # PUMP: nested <kind>pump</kind> right after the opening tag; no <usage>.
-        # OWN: no <kind> element; trailing <usage> block (byte-identical to before).
-        kind_xml = "  <kind>pump</kind>\n" if is_pump else ""
+        # MONITOR: <kind>monitor</kind>, so the model reads the block as a shell
+        # command's exit rather than a sub-agent's report.
+        # OWN AGENT: no <kind> element (byte-identical to before).
         if is_pump:
-            usage_xml = ""
+            kind_xml = "  <kind>pump</kind>\n"
+        elif is_monitor:
+            kind_xml = "  <kind>monitor</kind>\n"
         else:
-            usage = note.get("usage") or {}
-            usage_xml = (
-                "  <usage>\n"
-                f"    <subagent_tokens>{_esc(usage.get('total_tokens'))}</subagent_tokens>\n"
-                f"    <tool_uses>{_esc(usage.get('tool_uses'))}</tool_uses>\n"
-                f"    <duration_ms>{_esc(usage.get('duration_ms'))}</duration_ms>\n"
-                "  </usage>\n"
+            kind_xml = ""
+        # <usage> is sub-agent accounting. Omit it for a pump step, for a
+        # monitored shell, and whenever every field is empty — an all-blank
+        # block is noise the model has to read past.
+        usage = {} if (is_pump or is_monitor) else (note.get("usage") or {})
+        usage_fields = "".join(
+            f"    <{tag}>{_esc(value)}</{tag}>\n"
+            for tag, value in (
+                ("subagent_tokens", usage.get("total_tokens")),
+                ("tool_uses", usage.get("tool_uses")),
+                ("duration_ms", usage.get("duration_ms")),
             )
+            if value is not None and _esc(value) != ""
+        )
+        usage_xml = f"  <usage>\n{usage_fields}  </usage>\n" if usage_fields else ""
         if result_is_summary:
             summary_xml = f"  <summary>{_payload(summary_text)}</summary>\n"
             result_xml = ""
         else:
             summary_xml = f"  <summary>{_label(summary_text)}</summary>\n"
             result_xml = f"  <result>{_payload(result_text)}</result>\n"
+        # Empty identity elements are omitted, not emitted blank. A shell
+        # monitor has neither a tool-use id nor an output file, and
+        # `<tool-use-id></tool-use-id>` told the model nothing while reading
+        # like a field it had failed to populate. Every consumer already treats
+        # an absent tag as "unknown" (jsonl_parser's field extractor returns
+        # None), so omission is the honest form.
+        tool_use_xml = (
+            f"  <tool-use-id>{_esc(note.get('tool_use_id'))}</tool-use-id>\n"
+            if _esc(note.get("tool_use_id")) else ""
+        )
+        output_file_xml = (
+            f"  <output-file>{_esc(output_file)}</output-file>\n"
+            if _esc(output_file) else ""
+        )
         blocks.append(
             "<task-notification>\n"
             f"{kind_xml}"
             f"  <task-id>{_esc(note.get('task_id'))}</task-id>\n"
-            f"  <tool-use-id>{_esc(note.get('tool_use_id'))}</tool-use-id>\n"
-            f"  <output-file>{_esc(output_file)}</output-file>\n"
+            f"{tool_use_xml}"
+            f"{output_file_xml}"
             f"  <status>{_esc(note.get('status'))}</status>\n"
             f"{summary_xml}"
             f"  <note>{note_text}</note>\n"

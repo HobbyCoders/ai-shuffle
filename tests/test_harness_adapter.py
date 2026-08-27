@@ -3874,14 +3874,79 @@ async def test_monitor_spawn_runs_detached_and_returns_receipt(
     monkeypatch.setattr(bt, "_spawn_background", _fake_spawn)
     await _connect_native_leg(monkeypatch, tmp_path, app_session_id="app-sess-m1")
 
-    from fluid.tools.registry import BackgroundTaskReceipt
+    from fluid.tools.registry import BackgroundTaskReceipt, ToolOutcome
 
-    receipt = await _injected_monitor_spawn()(
+    outcome = await _injected_monitor_spawn()(
         {"command": "npm run build", "cwd": str(tmp_path)}, object()
     )
+    # A ToolOutcome carrying the receipt: the app owns the receipt STRING (R6)
+    # while fluid's detach seam still reads ``background_task``.
+    assert isinstance(outcome, ToolOutcome) and not outcome.is_error
+    receipt = outcome.background_task
     assert isinstance(receipt, BackgroundTaskReceipt)
     assert receipt.task_id == "mon-x1"
     assert spawned == [("npm run build", str(tmp_path), "app-sess-m1")]
+
+
+@pytest.mark.asyncio
+async def test_monitor_receipt_commands_the_park(monkeypatch, tmp_path):
+    """R6: the receipt tells the model to END THE TURN, not just that a task
+    started. Audited sessions read the bare 'Monitoring started (task X).' as
+    licence to sleep-poll in foreground Bash — 9 of 10 spawns in one session,
+    24 minutes of polling for a notification already queued for them."""
+    from app.mcp import builtin_tools as bt
+
+    class _FakeTask:
+        task_id = "mon-p1"
+        exit_code = None
+
+        def is_running(self):
+            return True
+
+    async def _fake_spawn(command, cwd, session_id):
+        return _FakeTask()
+
+    monkeypatch.setattr(bt, "_spawn_background", _fake_spawn)
+    await _connect_native_leg(monkeypatch, tmp_path, app_session_id="app-sess-mp")
+
+    outcome = await _injected_monitor_spawn()({"command": "npm test"}, object())
+
+    assert "Monitoring started (task mon-p1)." in outcome.text
+    assert "End the turn now" in outcome.text
+    assert "woken when it comes to rest" in outcome.text
+
+
+@pytest.mark.asyncio
+async def test_monitor_receipt_survives_fluids_outcome_normalizer(
+    monkeypatch, tmp_path
+):
+    """The park instruction must reach the MODEL, so it has to survive the
+    builtin's own receipt handling — fluid renders its default text from a bare
+    BackgroundTaskReceipt, which is exactly what this outcome avoids."""
+    from fluid.tools.builtins import monitor as fluid_monitor
+
+    from app.mcp import builtin_tools as bt
+
+    class _FakeTask:
+        task_id = "mon-p2"
+        exit_code = None
+
+        def is_running(self):
+            return True
+
+    async def _fake_spawn(command, cwd, session_id):
+        return _FakeTask()
+
+    monkeypatch.setattr(bt, "_spawn_background", _fake_spawn)
+    await _connect_native_leg(monkeypatch, tmp_path, app_session_id="app-sess-mp2")
+
+    spawner = _injected_monitor_spawn()
+    input_ = {"command": "npm test"}
+    rendered = fluid_monitor._receipt_from(await spawner(input_, object()), input_)
+
+    assert "End the turn now" in rendered.text
+    assert rendered.background_task is not None
+    assert rendered.background_task.task_id == "mon-p2"
 
 
 @pytest.mark.asyncio
