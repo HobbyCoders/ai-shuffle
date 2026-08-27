@@ -501,7 +501,10 @@ async def test_unpark_synthesizes_notification_turn(mock_db):
     assert "<task-notification>" in wake["prompt"]
     assert "<task-id>task-7</task-id>" in wake["prompt"]
     assert "<summary>crawl finished</summary>" in wake["prompt"]
-    assert "<result>crawl finished</result>" in wake["prompt"]  # summary fallback
+    # The frame has no output_file, so the result chain lands back on the summary.
+    # The payload is emitted ONCE — <summary> carries it and <result> is dropped,
+    # rather than the same text appearing verbatim in both elements.
+    assert "<result>" not in wake["prompt"]
     assert wake["parent_turn_id"] == parked["id"]
     assert wake["profile_id"] == "p9"
     assert wake["project_id"] == "proj-9"
@@ -1490,3 +1493,101 @@ async def test_settlement_hook_never_raises(mock_db):
     ):
         settled = _settled_turn("e1")
         await turn_scheduler.on_turn_settled("e1", settled["id"], "completed")
+
+
+# Task-notification payloads must contain one copy of a result. A summary-only ProviderAgent frame must not
+# repeat the same unbounded report in both summary and result.
+
+
+def _prompt_for(**frame):
+    frame.setdefault("task_id", "task-x")
+    frame.setdefault("tool_use_id", "tu-x")
+    frame.setdefault("status", "completed")
+    frame.setdefault("output_file", "")
+    frame.setdefault("usage", {})
+    with patch("app.core.query_engine._read_task_output_file", return_value=""):
+        return turn_scheduler._build_task_notification_prompt([frame])
+
+
+def test_a_summary_sourced_result_is_emitted_once():
+    """Summary-only frame: the payload appears in ONE element, not two."""
+    report = "the worker's 26KB report " * 500
+    prompt = _prompt_for(summary=report)
+
+    assert prompt.count(report) == 1
+    assert f"<summary>{report}</summary>" in prompt
+    assert "<result>" not in prompt
+
+
+def test_a_distinct_result_keeps_both_but_caps_the_summary():
+    """When the transcript yields a real result the summary is back to being a
+    label — and a label gets a few hundred characters, not the whole payload."""
+    label = "L" * 5_000
+    result = "the sub-agent's actual final answer"
+    with patch(
+        "app.core.turn_scheduler._extract_final_assistant_text",
+        return_value=result,
+    ):
+        prompt = _prompt_for(summary=label)
+
+    assert f"<result>{result}</result>" in prompt
+    assert f"<summary>{label}</summary>" not in prompt
+    summary_body = prompt.split("<summary>")[1].split("</summary>")[0]
+    assert len(summary_body) < turn_scheduler._MAX_TASK_SUMMARY_CHARS + 100
+    assert summary_body.startswith("L" * turn_scheduler._MAX_TASK_SUMMARY_CHARS)
+    assert "see <result>" in summary_body
+
+
+def test_a_summary_sole_payload_is_still_bounded():
+    """Sole carrier or not, nothing unbounded reaches the parent's context."""
+    oversized = turn_scheduler._MAX_TASK_RESULT_CHARS * 2
+    prompt = _prompt_for(summary="x" * oversized)
+
+    summary_body = prompt.split("<summary>")[1].split("</summary>")[0]
+    assert len(summary_body) < oversized
+    assert "truncated" in summary_body
+
+
+def test_one_task_id_yields_one_block_per_prompt():
+    """A task can produce several terminal frames in one wake batch — a bare
+    TaskUpdated and the rich TaskNotification behind it. They are ONE task."""
+    bare = {"task_id": "task-d", "tool_use_id": "tu-d", "status": "completed",
+            "summary": "", "output_file": "", "usage": {}}
+    rich = {"task_id": "task-d", "tool_use_id": "tu-d", "status": "completed",
+            "summary": "the real report", "output_file": "", "usage": {}}
+    other = {"task_id": "task-e", "tool_use_id": "tu-e", "status": "completed",
+             "summary": "unrelated", "output_file": "", "usage": {}}
+
+    with patch("app.core.query_engine._read_task_output_file", return_value=""):
+        prompt = turn_scheduler._build_task_notification_prompt([bare, rich, other])
+
+    assert prompt.count("<task-id>task-d</task-id>") == 1
+    assert prompt.count("<task-id>task-e</task-id>") == 1
+    # The richer frame wins, in the first occurrence's position.
+    assert "<summary>the real report</summary>" in prompt
+    assert prompt.index("task-d") < prompt.index("task-e")
+
+
+def test_frames_without_a_task_id_are_all_kept():
+    """Nothing identifies them, so nothing may collapse them."""
+    anon = {"task_id": "", "tool_use_id": "tu-1", "status": "completed",
+            "summary": "one", "output_file": "", "usage": {}}
+    other = dict(anon, tool_use_id="tu-2", summary="two")
+
+    with patch("app.core.query_engine._read_task_output_file", return_value=""):
+        prompt = turn_scheduler._build_task_notification_prompt([anon, other])
+
+    assert prompt.count("<task-notification>") == 2
+
+
+async def test_a_repeat_frame_never_doubles_the_stored_wake(mock_db):
+    """Payload-level dedupe: the wake turn's pending_frames is what a later
+    merge rebuilds the prompt from, so a duplicate stored there outlives the
+    call that made it."""
+    frame = _terminal_frame("task-r", "done")
+    wake = await turn_scheduler._enqueue_context_wake(
+        "dr1", "unpark", [frame, dict(frame)], ["task-r", "task-r"], "<x/>",
+    )
+
+    assert wake["payload"]["pending_frames"] == [frame]
+    assert wake["payload"]["task_ids"] == ["task-r"]

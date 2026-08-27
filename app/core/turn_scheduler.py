@@ -589,6 +589,35 @@ def _frame_is_richer(incoming: Dict[str, Any], stored: Dict[str, Any]) -> bool:
     )
 
 
+def _dedupe_frames_by_task_id(
+    frames: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Collapse ``frames`` so ONE task_id contributes at most ONE frame.
+
+    A task can produce several terminal frames in a single wake batch — a bare
+    ``TaskUpdated`` and the rich ``TaskNotification`` that follows it, or the same
+    frame arriving down two seams — and every one of them used to become its own
+    ``<task-notification>`` block carrying the same result. The richer frame wins
+    (:func:`_frame_is_richer`) and keeps the FIRST occurrence's position, so batch
+    order is preserved. Frames with no task_id cannot be identified and are all
+    kept, exactly as before.
+    """
+    out: List[Dict[str, Any]] = []
+    index: Dict[str, int] = {}
+    for frame in frames:
+        task_id = frame.get("task_id") if isinstance(frame, dict) else None
+        if not task_id:
+            out.append(frame)
+            continue
+        seen = index.get(task_id)
+        if seen is None:
+            index[task_id] = len(out)
+            out.append(frame)
+        elif _frame_is_richer(frame, out[seen]):
+            out[seen] = frame
+    return out
+
+
 async def _enqueue_context_wake(
     session_id: str,
     source: str,
@@ -602,8 +631,10 @@ async def _enqueue_context_wake(
     ``task_ids`` to the payload, and returns the enqueued turn."""
     context = await asyncio.to_thread(_latest_context_turn, session_id) or {}
     payload = _context_payload(context)
-    payload["pending_frames"] = list(frames)
-    payload["task_ids"] = list(task_ids)
+    # One task_id, one frame — the wake turn's payload is what a later merge
+    # rebuilds the prompt from, so a duplicate stored here outlives this call.
+    payload["pending_frames"] = _dedupe_frames_by_task_id(list(frames))
+    payload["task_ids"] = list(dict.fromkeys(task_ids))
     profile_id = context.get("profile_id")
     if not profile_id:
         # Belt and braces: a profile-less wake is refused downstream ("Profile
@@ -774,12 +805,18 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Optional[s
                 else:
                     # (b) merge this frame into the pending wake and rebuild its
                     # prompt.
-                    pending = existing_pending + [frame]
+                    # Dedupe on the way in: branch (a) already covers the common
+                    # repeat, but pending_frames and task_ids are two lists that
+                    # can drift apart (a frame stored under a task_id that never
+                    # made it into task_ids), and a drifted pair is how one task
+                    # ends up with two blocks in the same prompt.
+                    pending = _dedupe_frames_by_task_id(existing_pending + [frame])
                     merged_payload = dict(existing_payload)
                     merged_payload["pending_frames"] = pending
-                    merged_payload["task_ids"] = existing_task_ids + (
-                        [task_id] if task_id else []
-                    )
+                    merged_task_ids = list(existing_task_ids)
+                    if task_id and task_id not in merged_task_ids:
+                        merged_task_ids.append(task_id)
+                    merged_payload["task_ids"] = merged_task_ids
                     prompt = await asyncio.to_thread(
                         _build_task_notification_prompt, pending
                     )
@@ -895,6 +932,11 @@ _TASK_NOTIFICATION_PUMP_NOTE = (
 
 _MAX_TASK_RESULT_CHARS = 60_000
 
+# A summary beside a distinct result is a label, not another full payload. Keep the full _MAX_TASK_RESULT_CHARS
+# allowance only when the summary is the sole result; otherwise bound the label to avoid repeating an already
+# consumed report.
+_MAX_TASK_SUMMARY_CHARS = 400
+
 
 def _extract_final_assistant_text(output_file: str) -> Optional[str]:
     """Extract the sub-agent's FINAL assistant message from its JSONL transcript.
@@ -959,6 +1001,17 @@ def _build_task_notification_prompt(pending: list, kind: str = "own") -> str:
     always contains the literal ``<task-notification>`` substring, so the existing
     user-message filters keep it from rendering as a chat bubble.
 
+    The payload is emitted ONCE. When the chain falls all the way through to the
+    summary — a ProviderAgent worker's frame has a summary and no output_file, so
+    it always does — the two elements would be byte-identical, so ``<summary>``
+    carries the payload and ``<result>`` is omitted (both the transcript parser
+    and the frontend read ``<summary>`` when ``<result>`` is absent). Only a
+    genuinely different result gets its own element, and then the summary is
+    capped back down to the label it is meant to be.
+
+    ``pending`` is deduplicated by ``task_id`` first: one task contributes one
+    block however many terminal frames it produced in the batch.
+
     ``kind`` selects the contract variant:
 
     * ``"own"`` (default) — the parent's own background work came to rest. Byte-
@@ -976,23 +1029,44 @@ def _build_task_notification_prompt(pending: list, kind: str = "own") -> str:
     def _esc(value: Any) -> str:
         return "" if value is None else str(value)
 
+    def _payload(text: str) -> str:
+        # Truncate via the shared helper (matches query_engine's own use) instead
+        # of a naive head-slice.
+        if text and len(text) > _MAX_TASK_RESULT_CHARS:
+            return truncate_large_payload(text, _MAX_TASK_RESULT_CHARS)
+        return text
+
+    def _label(text: str) -> str:
+        # A label, so a plain head-slice with an honest marker — the shared
+        # payload helper has its own display floor and would not honour a cap
+        # this small.
+        if text and len(text) > _MAX_TASK_SUMMARY_CHARS:
+            dropped = len(text) - _MAX_TASK_SUMMARY_CHARS
+            head = text[:_MAX_TASK_SUMMARY_CHARS].rstrip()
+            return f"{head}… [+{dropped} chars, see <result>]"
+        return text
+
     is_pump = kind == "pump"
     note_text = _TASK_NOTIFICATION_PUMP_NOTE if is_pump else _TASK_NOTIFICATION_NOTE
 
     blocks: List[str] = []
-    for note in pending:
+    for note in _dedupe_frames_by_task_id(pending):
         output_file = note.get("output_file") or ""
+        summary_text = note.get("summary") or ""
         # Fallback chain: parsed final assistant text → raw output-file read
         # (backgrounded-shell stdout) → short summary → "".
         result_text = _extract_final_assistant_text(output_file)
         if not result_text:
             result_text = _read_task_output_file(output_file) or None
         if not result_text:
-            result_text = note.get("summary") or ""
-        if result_text and len(result_text) > _MAX_TASK_RESULT_CHARS:
-            # truncate via the shared helper (matches query_engine's own use)
-            # instead of a naive head-slice.
-            result_text = truncate_large_payload(result_text, _MAX_TASK_RESULT_CHARS)
+            result_text = summary_text
+        # A ProviderAgent worker's frame has a summary and no output_file, so the
+        # chain above lands back on the summary and the two elements come out
+        # byte-identical. Emit the payload ONCE: <summary> carries it (both the
+        # transcript parser and the frontend read <summary> when <result> is
+        # absent) and <result> is dropped. Only a genuinely DIFFERENT result gets
+        # its own element, and then the summary is capped back down to a label.
+        result_is_summary = result_text == summary_text
         # PUMP: nested <kind>pump</kind> right after the opening tag; no <usage>.
         # OWN: no <kind> element; trailing <usage> block (byte-identical to before).
         kind_xml = "  <kind>pump</kind>\n" if is_pump else ""
@@ -1007,6 +1081,12 @@ def _build_task_notification_prompt(pending: list, kind: str = "own") -> str:
                 f"    <duration_ms>{_esc(usage.get('duration_ms'))}</duration_ms>\n"
                 "  </usage>\n"
             )
+        if result_is_summary:
+            summary_xml = f"  <summary>{_payload(summary_text)}</summary>\n"
+            result_xml = ""
+        else:
+            summary_xml = f"  <summary>{_label(summary_text)}</summary>\n"
+            result_xml = f"  <result>{_payload(result_text)}</result>\n"
         blocks.append(
             "<task-notification>\n"
             f"{kind_xml}"
@@ -1014,9 +1094,9 @@ def _build_task_notification_prompt(pending: list, kind: str = "own") -> str:
             f"  <tool-use-id>{_esc(note.get('tool_use_id'))}</tool-use-id>\n"
             f"  <output-file>{_esc(output_file)}</output-file>\n"
             f"  <status>{_esc(note.get('status'))}</status>\n"
-            f"  <summary>{_esc(note.get('summary'))}</summary>\n"
+            f"{summary_xml}"
             f"  <note>{note_text}</note>\n"
-            f"  <result>{result_text}</result>\n"
+            f"{result_xml}"
             f"{usage_xml}"
             "</task-notification>"
         )
