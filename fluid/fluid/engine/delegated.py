@@ -216,7 +216,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if self._session_id is not None:
                 self._session = await self.store.get_session(self._session_id)
             if self._session is None:
-                self._session = await self.store.create_session(self._session_id)
+                self._session = await self.store.create_session(
+                    self._session_id, cwd=self.cwd
+                )
         return self._session
 
     @property

@@ -11,6 +11,13 @@ what comes back. The stock implementations live on ``JsonlStore`` — bounded,
 line-oriented sweeps of the store's directory, no index and no dependencies —
 but a store backed by SQL or a vector index serves the same tool by offering
 the same callables.
+
+The store is one flat global directory, so "every stored session" spans every
+project the user has ever worked in — which is how a question about one repo
+came back answered with another repo's internals. Scoping happens here rather
+than in the backend: rows carry the project root their session recorded, and
+this module keeps the current project's, ranks project-less (legacy) sessions
+after them, and drops other projects' unless ``scope="all"``.
 """
 
 from __future__ import annotations
@@ -20,6 +27,7 @@ import re
 from datetime import datetime
 from typing import Any
 
+from fluid.store.base import project_root_for, same_project
 from fluid.tools.builtins._util import repeat_search_note
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
@@ -27,6 +35,13 @@ _SNIPPET_RADIUS = 160
 _MAX_MATCHES_PER_SESSION = 3
 _OUTPUT_CAP = 16_000
 _DEFAULT_RECENT = 10
+
+# Rows the recent-listing asks the backend for when scoping to this project:
+# it can only filter what it was handed, and the newest N sessions overall may
+# be mostly other projects'. Bounded, because each row costs the backend a
+# session load.
+_SCOPED_FETCH_FACTOR = 4
+_SCOPED_FETCH_CAP = 40
 
 
 def describe(tools: frozenset[str] | None = None) -> str:
@@ -59,7 +74,14 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "on against the current files. The header states how many sessions "
         "matched and how many of them are shown — a large total is the "
         "backend's raw hit count, not a reason to re-query with different "
-        "words; raise `limit` to see further down the same ranking."
+        "words; raise `limit` to see further down the same ranking.\n"
+        "\n"
+        "Scoped to the current project by default: sessions from other "
+        "projects are hidden (pass `scope=\"all\"` to include them, e.g. when "
+        "you know the work happened elsewhere). Sessions stored before "
+        "projects were recorded have no project at all — those are still "
+        "searched, listed after the current project's hits, so older memory "
+        "stays reachable."
         + open_route + recall_route
     )
 
@@ -80,6 +102,15 @@ SPEC = ToolSpec(
             "limit": {
                 "type": "integer",
                 "description": "Maximum sessions to report (default 5; 10 when listing).",
+            },
+            "scope": {
+                "type": "string",
+                "enum": ["project", "all"],
+                "description": (
+                    "'project' (default) searches this project's sessions "
+                    "plus older ones with no project recorded; 'all' searches "
+                    "every stored session, including other projects'."
+                ),
             },
         },
         "required": [],
@@ -132,16 +163,56 @@ def _snippet_lines(texts: list[tuple[str, str]], terms: list[str]) -> list[str]:
     return lines
 
 
-def _repeat_note(terms: list[str], limit: int, ctx: ToolCtx) -> str:
+def _scope_of(input: dict[str, Any]) -> str:
+    """``"all"`` only when explicitly asked for; anything else scopes to project."""
+    return "all" if str(input.get("scope") or "").strip().lower() == "all" else "project"
+
+
+def _rank(row: Any, here: str | None) -> int:
+    """0 = this project, 1 = no project recorded, 2 = a different project.
+
+    Rank 1 is the legacy bucket: sessions stored before project roots existed.
+    They could be from anywhere, so they rank below confirmed local hits — but
+    dropping them would silently retire every memory older than this field,
+    which is worse than showing a few strays.
+    """
+    root = getattr(row, "project_root", None)
+    if not root or not here:
+        return 1
+    return 0 if same_project(root, here) else 2
+
+
+def _scoped(rows: list[Any], here: str | None, scope: str) -> tuple[list[Any], int]:
+    """Rows in scope, ranked local-first, plus how many were dropped."""
+    ranked = [(_rank(row, here), row) for row in rows]
+    if scope == "all":
+        return [row for _, row in ranked], 0
+    kept = [(rank, row) for rank, row in ranked if rank < 2]
+    kept.sort(key=lambda pair: pair[0])  # stable: preserves the caller's order
+    return [row for _, row in kept], len(ranked) - len(kept)
+
+
+def _elsewhere_note(hidden: int) -> str:
+    if not hidden:
+        return ""
+    plural = "" if hidden == 1 else "s"
+    return (
+        f" [{hidden} session{plural} in other projects hidden — "
+        'pass scope="all" to include them]'
+    )
+
+
+def _repeat_note(terms: list[str], limit: int, scope: str, ctx: ToolCtx) -> str:
     """Grep's repeat-search note, for a query already run this session.
 
     The results still come back in full; the note only says the answer is
     already in the conversation, so a re-run does not read as new evidence.
-    State lives in ``ctx.extra`` — the same per-session dict the backend
-    callables arrive through.
+    ``scope`` is part of the key: widening a scoped search to ``"all"`` is a
+    genuinely different question, not a repeat. State lives in ``ctx.extra`` —
+    the same per-session dict the backend callables arrive through.
     """
     seen: set[tuple[Any, ...]] = ctx.extra.setdefault("session_search_seen", set())
-    key = (tuple(terms), limit)
+    key = (tuple(terms), limit, scope)
     note = repeat_search_note(key in seen)
     seen.add(key)
     return note
@@ -158,12 +229,28 @@ async def _list_recent(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             is_error=True,
         )
     limit = max(1, int(input.get("limit") or _DEFAULT_RECENT))
-    rows = recent(limit=limit, exclude_session_id=ctx.session_id)
+    scope = _scope_of(input)
+    # Scoping filters what the backend returns, so ask for more than will be
+    # shown — otherwise a run of other-projects' sessions at the top of the
+    # global listing empties the result.
+    fetch = (
+        limit if scope == "all"
+        else min(limit * _SCOPED_FETCH_FACTOR, _SCOPED_FETCH_CAP)
+    )
+    rows = recent(limit=fetch, exclude_session_id=ctx.session_id)
     if inspect.isawaitable(rows):
         rows = await rows
     if not rows:
         return ToolOutcome(text="no stored sessions yet.")
-    lines = [f"{len(rows[:limit])} recent session(s), newest first:"]
+    rows, hidden = _scoped(list(rows), project_root_for(ctx.cwd), scope)
+    if not rows:
+        return ToolOutcome(
+            text="no sessions stored for this project yet." + _elsewhere_note(hidden)
+        )
+    lines = [
+        f"{len(rows[:limit])} recent session(s), newest first:"
+        + _elsewhere_note(hidden)
+    ]
     for row in rows[:limit]:
         count = f", {row.message_count} messages" if row.message_count else ""
         lines.append(f"{_label(row.session_id, row.title)} ({_stamp(row.last_ts)}{count})")
@@ -187,20 +274,24 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     if not terms:
         return await _list_recent(input, ctx)
     limit = max(1, int(input.get("limit") or 5))
+    scope = _scope_of(input)
 
     hits = search(terms, limit=limit, exclude_session_id=ctx.session_id)
     if inspect.isawaitable(hits):
         hits = await hits
 
     hits = [h for h in hits if h.score > 0]
+    # The backend is asked to rank; re-sorting here keeps the contract cheap
+    # for hosts that only filter. Project scope is applied on top and is a
+    # stable sort, so score order survives inside each bucket.
+    hits = sorted(hits, key=lambda h: (-h.score, -h.last_ts))
+    hits, hidden = _scoped(hits, project_root_for(ctx.cwd), scope)
     if not hits:
         return ToolOutcome(
             text=f"no stored session matched {query!r} — try fewer or different terms."
-            + _repeat_note(terms, limit, ctx)
+            + _elsewhere_note(hidden)
+            + _repeat_note(terms, limit, scope, ctx)
         )
-    # The backend is asked to rank; re-sorting here keeps the contract cheap
-    # for hosts that only filter.
-    hits = sorted(hits, key=lambda h: (-h.score, -h.last_ts))
     shown = hits[:limit]
     # ``limit`` is a hint to the backend, which returns the whole ranked list —
     # so the count must say how many of the matches are actually on screen.
@@ -212,7 +303,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         if len(hits) > len(shown)
         else f"{len(hits)} session(s) matched; best first:"
     )
-    lines: list[str] = [header]
+    lines: list[str] = [header + _elsewhere_note(hidden)]
     for hit in shown:
         lines.append(
             f"{_label(hit.session_id, hit.title)} "
@@ -222,4 +313,4 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     text = "\n".join(lines)
     if len(text) > _OUTPUT_CAP:
         text = text[:_OUTPUT_CAP] + "\n[output capped — narrow the query]"
-    return ToolOutcome(text=text + _repeat_note(terms, limit, ctx))
+    return ToolOutcome(text=text + _repeat_note(terms, limit, scope, ctx))

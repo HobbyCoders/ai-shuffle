@@ -1,7 +1,10 @@
 """JSONL-backed SessionStore — append-only node log per session.
 
 Layout (one directory per store):
-  ``<session_id>.jsonl``         node/head log; first line is a ``meta`` header,
+  ``<session_id>.jsonl``         node/head log; first line is a ``meta`` header
+                                 (session id, creation time, and the project
+                                 root the session ran in, which is what lets
+                                 cross-session recall scope to one project),
                                  then one line per ``append`` (a ``node`` record),
                                  one ``head`` record whenever the head moves
                                  (append, fork, rewind), and one ``cli_session``
@@ -19,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+from itertools import chain
 from pathlib import Path
 
 from fluid.events.model import Event, event_from_dict, event_to_dict
@@ -32,11 +36,18 @@ from fluid.store.base import (
     SessionSummary,
     message_texts,
     new_id,
+    project_root_for,
     recall_message,
 )
 
 _MAX_SESSIONS_SCANNED = 500
 _MAX_MATCHES_PER_SESSION = 3
+# Hits given a title, past the caller's own limit. The caller re-ranks (project
+# scope pushes other projects' sessions down or out), so a hit that shows up on
+# screen is not necessarily one of the top ``limit`` by score — titling only
+# those left the rows the user actually sees unlabelled. Titling costs a full
+# session load, so the window is bounded rather than unlimited.
+_TITLE_FILL = 20
 _TITLE_CAP = 80
 _PREVIEW_CAP = 120
 
@@ -91,6 +102,7 @@ class JsonlStore:
                     head_node_id=rec.get("head_node_id"),
                     created_at=rec.get("created_at", 0.0),
                     cli_session_id=rec.get("cli_session_id"),
+                    project_root=rec.get("project_root"),
                 )
             elif kind == "node":
                 n = rec["node"]
@@ -123,8 +135,13 @@ class JsonlStore:
 
     # ─── SessionStore protocol ───────────────────────────────────────────
 
-    async def create_session(self, session_id: str | None = None) -> SessionMeta:
-        meta = SessionMeta(session_id=session_id or new_id("ses"))
+    async def create_session(
+        self, session_id: str | None = None, *, cwd: str | None = None
+    ) -> SessionMeta:
+        meta = SessionMeta(
+            session_id=session_id or new_id("ses"),
+            project_root=project_root_for(cwd),
+        )
         self._sessions[meta.session_id] = meta
         self._nodes[meta.session_id] = {}
         self._events[meta.session_id] = []
@@ -133,7 +150,8 @@ class JsonlStore:
             self._log_path(meta.session_id),
             {"t": "meta", "session_id": meta.session_id,
              "created_at": meta.created_at, "head_node_id": meta.head_node_id,
-             "cli_session_id": meta.cli_session_id},
+             "cli_session_id": meta.cli_session_id,
+             "project_root": meta.project_root},
         )
         return meta
 
@@ -230,7 +248,7 @@ class JsonlStore:
             if hit.score:
                 hits.append(hit)
         hits.sort(key=lambda h: (-h.score, -h.last_ts))
-        for hit in hits[:limit]:  # titles only for what the tool will show
+        for hit in hits[: max(limit, _TITLE_FILL)]:
             hit.title = self._session_title(hit.session_id)
         return hits
 
@@ -273,6 +291,7 @@ class JsonlStore:
                 last_ts=path[-1].ts if path else 0.0,
                 preview=preview,
                 message_count=len(path),
+                project_root=self._sessions[session_id].project_root,
             ))
         return out
 
@@ -323,10 +342,27 @@ class JsonlStore:
         return None
 
     def _scan_log(self, path: Path, session_id: str, terms: list[str]) -> SessionSearchHit:
+        """One log's contribution to the sweep, in a single streamed pass.
+
+        The header line carries the session's project root, so scoping costs
+        nothing beyond the read the scan was doing anyway. A log whose first
+        line is not a header (hand-written, truncated) is scanned whole and
+        reports no project — which reads as "unknown", not "elsewhere".
+        """
         hit = SessionSearchHit(session_id=session_id, score=0)
         try:
             with path.open(encoding="utf-8") as fh:
-                for line in fh:
+                rest = fh
+                header = next(fh, "")
+                try:
+                    record = json.loads(header) if header.strip() else None
+                except ValueError:
+                    record = None
+                if isinstance(record, dict) and record.get("t") == "meta":
+                    hit.project_root = record.get("project_root")
+                else:
+                    rest = chain([header], fh)
+                for line in rest:
                     if not any(t in line.lower() for t in terms):
                         continue  # cheap line-level prefilter before JSON parsing
                     try:

@@ -723,7 +723,9 @@ class NativeLoop(BackgroundLifecycleMixin):
             if self._session_id is not None:
                 self._session = await self.store.get_session(self._session_id)
             if self._session is None:
-                self._session = await self.store.create_session(self._session_id)
+                self._session = await self.store.create_session(
+                    self._session_id, cwd=self.ctx.cwd
+                )
             # The HistoryExpand/HistorySearch builtins reach the store through
             # the ctx (same seam as tool_registry) — recall re-reads originals
             # that compaction evicted from the rendered view.
@@ -840,7 +842,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 parts.append(chunk.payload["text"])
         content = "".join(parts).strip() or "(handoff document generation failed)"
 
-        new_meta = await self.store.create_session()
+        new_meta = await self.store.create_session(cwd=self.ctx.cwd)
         first = SessionNode(
             node_id=new_id("node"), parent_id=None,
             message=Message(role="user", content=[Text(content)]),

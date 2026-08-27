@@ -366,7 +366,7 @@ class CliHost:
         )
         from fluid.tools.registry import ToolRegistry
 
-        meta = await self.store.create_session()
+        meta = await self.store.create_session(cwd=self.config.cwd)
         worker.worker_session_id = meta.session_id
 
         body = (definition.body.strip() if definition is not None else "") or GENERIC_SUBAGENT_PROMPT

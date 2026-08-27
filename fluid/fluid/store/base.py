@@ -9,9 +9,11 @@ older node; nothing is copied, so the shared prefix stays byte-identical
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 
 from fluid.events.model import Event
@@ -20,6 +22,73 @@ from fluid.messages import Message
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+# ─── project identity ────────────────────────────────────────────────────────
+#
+# The session store is one flat global directory, so nothing about a stored
+# session says which project it belonged to — and cross-session recall happily
+# answered a question about one repo with another repo's internals. Recording a
+# project root at creation is what lets SessionSearch scope its sweep.
+
+
+def _worktree_owner(worktree: Path, dotgit: Path) -> Path | None:
+    """The repository a linked worktree belongs to, from its ``.git`` file.
+
+    In a linked worktree ``.git`` is a file reading ``gitdir: <repo>/.git/
+    worktrees/<name>``. Resolving through it means work done in a worktree is
+    recalled alongside the main checkout instead of looking like a separate
+    project. A ``.git`` file that points somewhere else (a submodule) has no
+    ``worktrees`` segment and yields None, leaving that directory as its own
+    root.
+    """
+    try:
+        text = dotgit.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    if not text.startswith("gitdir:"):
+        return None
+    gitdir = Path(text[len("gitdir:"):].strip())
+    if not gitdir.is_absolute():
+        gitdir = worktree / gitdir
+    parts = gitdir.parts
+    for i in range(len(parts) - 1, 0, -1):
+        if parts[i] == "worktrees" and parts[i - 1] == ".git":
+            return Path(*parts[: i - 1])
+    return None
+
+
+def project_root_for(cwd: str | os.PathLike[str] | None) -> str | None:
+    """The stable project identity of a working directory.
+
+    The nearest enclosing git repository (a linked worktree resolving to the
+    repository that owns it), or the directory itself when nothing upstream
+    looks like a repo. None only when there is no cwd to go on — which is what
+    a legacy session, recorded before this field existed, looks like.
+    """
+    if not cwd:
+        return None
+    try:
+        start = Path(cwd).resolve()
+    except OSError:  # pragma: no cover - defensive
+        return None
+    for d in (start, *start.parents):
+        marker = d / ".git"
+        try:
+            if marker.is_dir():
+                return str(d)
+            if marker.is_file():
+                return str(_worktree_owner(d, marker) or d)
+        except OSError:  # pragma: no cover - unreadable path component
+            break
+    return str(start)
+
+
+def same_project(a: str | None, b: str | None) -> bool:
+    """True when two recorded roots name the same directory (case per platform)."""
+    if not a or not b:
+        return False
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
 
 
 @dataclass
@@ -40,6 +109,10 @@ class SessionMeta:
     # fluid session id and must survive a restart, otherwise a resumed session
     # hands the child a handle it has never seen.
     cli_session_id: str | None = None
+    # The project this session ran in (see ``project_root_for``). None for
+    # sessions stored before the field existed — recall treats those as
+    # "unknown project", never as "some other project".
+    project_root: str | None = None
 
 
 @dataclass
@@ -55,6 +128,9 @@ class SessionSearchHit:
     last_ts: float = 0.0  # newest matched node's epoch timestamp (0.0 if unknown)
     texts: list[tuple[str, str]] = field(default_factory=list)
     title: str | None = None  # human-meaningful session name, when the backend has one
+    # Recorded project root; None = unknown (legacy session, or a backend that
+    # does not track projects). SessionSearch scopes and ranks on it.
+    project_root: str | None = None
 
 
 @dataclass
@@ -66,6 +142,7 @@ class SessionSummary:
     last_ts: float = 0.0  # newest message's epoch timestamp (0.0 if unknown)
     preview: str = ""  # the session's last assistant text, however the backend trims it
     message_count: int = 0  # 0 = unknown
+    project_root: str | None = None  # as on SessionSearchHit; None = unknown
 
 
 @dataclass
@@ -158,7 +235,15 @@ def message_texts(message: dict[str, Any]) -> list[str]:
 
 
 class SessionStore(Protocol):
-    async def create_session(self, session_id: str | None = None) -> SessionMeta: ...
+    async def create_session(
+        self, session_id: str | None = None, *, cwd: str | None = None
+    ) -> SessionMeta:
+        """Mint a session. ``cwd`` is the working directory it runs in; the
+        store records the project root derived from it (``project_root_for``)
+        so cross-session recall can scope to one project. Omit it and the
+        session is stored with no project — indistinguishable from a legacy
+        one, and never excluded on that basis."""
+        ...
     async def get_session(self, session_id: str) -> SessionMeta | None: ...
     async def append(self, session_id: str, node: SessionNode) -> None: ...
     async def get_node(self, session_id: str, node_id: str) -> SessionNode | None: ...
@@ -231,8 +316,13 @@ class MemoryStore:
         self._nodes: dict[str, dict[str, SessionNode]] = {}
         self._events: dict[str, list[Event]] = {}
 
-    async def create_session(self, session_id: str | None = None) -> SessionMeta:
-        meta = SessionMeta(session_id=session_id or new_id("ses"))
+    async def create_session(
+        self, session_id: str | None = None, *, cwd: str | None = None
+    ) -> SessionMeta:
+        meta = SessionMeta(
+            session_id=session_id or new_id("ses"),
+            project_root=project_root_for(cwd),
+        )
         self._sessions[meta.session_id] = meta
         self._nodes[meta.session_id] = {}
         self._events[meta.session_id] = []

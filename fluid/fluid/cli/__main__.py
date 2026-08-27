@@ -84,7 +84,7 @@ async def run_once(
     existing session instead of creating a fresh one.
     """
     out = out or sys.stdout
-    meta = await open_session(store, session_id)
+    meta = await open_session(store, session_id, cwd=config.cwd)
     engine = make_engine(
         config, store, provider=provider, provider_name=provider_name,
         session_id=meta.session_id, permission_responder=on_permission,
@@ -112,16 +112,18 @@ class SessionNotFound(LookupError):
     """``--resume`` named a session the store does not have."""
 
 
-async def open_session(store, session_id: str | None):
+async def open_session(store, session_id: str | None, *, cwd: str | None = None):
     """The session meta to run against: the existing one, or a fresh one.
 
     The engine is always handed the session id of a session the store already
     holds, so ``NativeLoop._ensure_session`` finds it through ``get_session``
     and its first turn runs the rehydration path (deferred catalog, compaction
-    events, background tasks) instead of starting from an empty tree.
+    events, background tasks) instead of starting from an empty tree. That also
+    means the engine never mints the session, so ``cwd`` has to be recorded
+    here or the session ends up with no project for recall to scope on.
     """
     if session_id is None:
-        return await store.create_session()
+        return await store.create_session(cwd=cwd)
     meta = await store.get_session(session_id)
     if meta is None:
         raise SessionNotFound(session_id)
@@ -136,7 +138,7 @@ async def chat_session(
     use_tui: bool = False,
     session_id: str | None = None,
 ) -> int:
-    meta = await open_session(store, session_id)
+    meta = await open_session(store, session_id, cwd=config.cwd)
     engine = make_engine(config, store, provider_name=provider_name, session_id=meta.session_id)
     try:
         if use_tui:
