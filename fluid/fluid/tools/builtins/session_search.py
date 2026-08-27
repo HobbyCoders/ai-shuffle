@@ -20,6 +20,7 @@ import re
 from datetime import datetime
 from typing import Any
 
+from fluid.tools.builtins._util import repeat_search_note
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 _SNIPPET_RADIUS = 160
@@ -55,7 +56,11 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "Matches are scored by how many query terms a message contains. "
         "Results name the session id, its title, and a snippet around the "
         "match; they are recall, not live state — verify anything you act "
-        "on against the current files." + open_route + recall_route
+        "on against the current files. The header states how many sessions "
+        "matched and how many of them are shown — a large total is the "
+        "backend's raw hit count, not a reason to re-query with different "
+        "words; raise `limit` to see further down the same ranking."
+        + open_route + recall_route
     )
 
 
@@ -102,6 +107,44 @@ def _snippet(text: str, term: str) -> str:
     prefix = "…" if start > 0 else ""
     suffix = "…" if end < len(text) else ""
     return f"{prefix}{flat}{suffix}"
+
+
+def _snippet_lines(texts: list[tuple[str, str]], terms: list[str]) -> list[str]:
+    """Up to ``_MAX_MATCHES_PER_SESSION`` *distinct* snippets for one session.
+
+    A session that says the same thing in every matching message — a repeated
+    instruction block, a re-pasted error — otherwise spends the whole per-
+    session budget printing one string three times, so the cap costs context
+    without adding evidence. Deduping on the rendered snippet lets the budget
+    reach further down the session's hits.
+    """
+    lines: list[str] = []
+    seen: set[str] = set()
+    for role, text in texts:
+        term = next((t for t in terms if t in text.lower()), "")
+        snippet = _snippet(text, term)
+        if snippet in seen:
+            continue
+        seen.add(snippet)
+        lines.append(f"  [{role}] {snippet}")
+        if len(lines) >= _MAX_MATCHES_PER_SESSION:
+            break
+    return lines
+
+
+def _repeat_note(terms: list[str], limit: int, ctx: ToolCtx) -> str:
+    """Grep's repeat-search note, for a query already run this session.
+
+    The results still come back in full; the note only says the answer is
+    already in the conversation, so a re-run does not read as new evidence.
+    State lives in ``ctx.extra`` — the same per-session dict the backend
+    callables arrive through.
+    """
+    seen: set[tuple[Any, ...]] = ctx.extra.setdefault("session_search_seen", set())
+    key = (tuple(terms), limit)
+    note = repeat_search_note(key in seen)
+    seen.add(key)
+    return note
 
 
 async def _list_recent(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
@@ -153,20 +196,30 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     if not hits:
         return ToolOutcome(
             text=f"no stored session matched {query!r} — try fewer or different terms."
+            + _repeat_note(terms, limit, ctx)
         )
     # The backend is asked to rank; re-sorting here keeps the contract cheap
     # for hosts that only filter.
     hits = sorted(hits, key=lambda h: (-h.score, -h.last_ts))
-    lines: list[str] = [f"{len(hits)} session(s) matched; best first:"]
-    for hit in hits[:limit]:
+    shown = hits[:limit]
+    # ``limit`` is a hint to the backend, which returns the whole ranked list —
+    # so the count must say how many of the matches are actually on screen.
+    # Reporting the total as if it were the listing read as "25 sessions are
+    # relevant" and drove the same query again with different words.
+    header = (
+        f"{len(hits)} session(s) matched; showing the best {len(shown)} "
+        "(raise limit to see more):"
+        if len(hits) > len(shown)
+        else f"{len(hits)} session(s) matched; best first:"
+    )
+    lines: list[str] = [header]
+    for hit in shown:
         lines.append(
             f"{_label(hit.session_id, hit.title)} "
             f"({_stamp(hit.last_ts)}, score {hit.score}):"
         )
-        for role, text in hit.texts[:_MAX_MATCHES_PER_SESSION]:
-            term = next((t for t in terms if t in text.lower()), "")
-            lines.append(f"  [{role}] {_snippet(text, term)}")
+        lines.extend(_snippet_lines(hit.texts, terms))
     text = "\n".join(lines)
     if len(text) > _OUTPUT_CAP:
         text = text[:_OUTPUT_CAP] + "\n[output capped — narrow the query]"
-    return ToolOutcome(text=text)
+    return ToolOutcome(text=text + _repeat_note(terms, limit, ctx))
