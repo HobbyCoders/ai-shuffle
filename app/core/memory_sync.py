@@ -189,6 +189,31 @@ def memory_dir_for_working_dir(
         return None
 
 
+def ensure_memory_dir(memory_dir: Optional[Path]) -> Optional[Path]:
+    """Create ``memory_dir`` (parents included) if it is not there yet.
+
+    The native prompt tells the model its memory for this project *lives in*
+    this directory (ruling MEM3), so on a project nobody has written memory for
+    the first thing the model does — list it — fails, and the turn is spent
+    working around a directory that was simply never created. The only other
+    mkdir on this path is in ``_write_local``, which runs solely when the DB
+    already has rows to push down.
+
+    Best-effort by construction: a read-only or otherwise unwritable projects
+    root logs at debug and changes nothing. A missing memory dir is a papercut;
+    failing a query over one would not be. Returns the path either way.
+    """
+    if memory_dir is None:
+        return None
+    try:
+        memory_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logger.debug(
+            "memory_sync: could not create memory dir %s", memory_dir, exc_info=True
+        )
+    return memory_dir
+
+
 def memory_leg_for_options(options: object) -> str:
     """"native" | "delegated" for a built ``ClaudeAgentOptions`` object.
 

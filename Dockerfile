@@ -57,6 +57,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # ── System deps (git, curl for health check, gosu for UID/GID, gh CLI) ──
+# ripgrep is not optional comfort: the agent's Grep tool falls back to a pure
+# Python scan without it, which is slow enough to dominate a session.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     curl \
@@ -64,6 +66,7 @@ RUN apt-get update && \
     gnupg \
     git \
     gosu \
+    ripgrep \
     tini \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -116,6 +119,14 @@ RUN groupadd -g 1000 appuser && \
 # ── Python dependencies ──
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# ── Dev / test dependencies ──
+# The runtime image is also the agent's workbench: it checks out this repo and
+# runs the suite. Without pytest baked in, a session spends its first turns
+# pip-installing one. Kept as its own layer so editing dev deps never
+# invalidates the runtime-deps layer above.
+COPY requirements-dev.txt .
+RUN pip install --no-cache-dir -r requirements-dev.txt
 
 # ── fluid harness (REQUIRED — the only provider backend) ──
 # vendor/fluid contains the harness source as a
@@ -170,6 +181,12 @@ ARG GIT_SHA=unknown
 ENV GIT_SHA=$GIT_SHA
 LABEL org.opencontainers.image.revision=$GIT_SHA
 RUN printf '%s\n' "$GIT_SHA" > /app/GIT_SHA
+
+# ── PATH ──
+# Anything the agent installs for itself at runtime (`pip install --user`, an
+# npm prefix in its home) lands in ~/.local/bin. Off PATH those binaries are on
+# disk but "not found", which reads as a failed install.
+ENV PATH="/home/appuser/.local/bin:${PATH}"
 
 # ── Browser-automation defaults ──
 # START_CHROME=1 launches the supervised headless Chromium at container start so

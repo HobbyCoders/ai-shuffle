@@ -116,6 +116,27 @@ if [ -f /root/.config/gh/hosts.yml ] && [ ! -f /home/appuser/.config/gh/hosts.ym
     echo "GitHub CLI auth copied and git configured"
 fi
 
+# =============================================================================
+# Git identity
+# =============================================================================
+# A fresh checkout cannot commit without user.name/user.email, and the failure
+# only surfaces at `git commit` — after the work is done. Seed appuser's global
+# identity when it is unset; an identity already present in the mounted config
+# is never overwritten. Override the defaults with GIT_USER_NAME /
+# GIT_USER_EMAIL.
+if ! setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+        git config --global --get user.name >/dev/null 2>&1; then
+    setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+        git config --global user.name "${GIT_USER_NAME:-AI Shuffle Worker}"
+    echo "Git: seeded user.name=${GIT_USER_NAME:-AI Shuffle Worker}"
+fi
+if ! setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+        git config --global --get user.email >/dev/null 2>&1; then
+    setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+        git config --global user.email "${GIT_USER_EMAIL:-worker@ai-shuffle.local}"
+    echo "Git: seeded user.email=${GIT_USER_EMAIL:-worker@ai-shuffle.local}"
+fi
+
 # Ensure AI tools node_modules exist (in case Docker image was built without them)
 if [ -d /opt/ai-tools ] && [ -f /opt/ai-tools/package.json ] && [ ! -d /opt/ai-tools/node_modules ]; then
     echo "Installing AI tools Node.js dependencies..."

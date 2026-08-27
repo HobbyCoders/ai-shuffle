@@ -723,6 +723,24 @@ class HarnessAdapter(ProviderAdapter):
         if ensure is not None:
             meta = await ensure()
             self._sdk_session_id = meta.session_id
+            # A brand-new native session has NO id when the ToolCtx above is
+            # built (neither options.session_id nor resume_session_id exists
+            # yet), so every session-scoped tool ran against ctx.session_id =
+            # None — the Note tool wrote into a shared ``default.md`` while the
+            # notes reminder read ``<session>.md``, and concurrent sessions on
+            # one project overwrote each other's notes. The real id exists now:
+            # write it back onto the ctx the engine dispatches with. Only when
+            # unset — a resumed session's ctx already carries the right id, and
+            # the delegated leg has no ``ctx`` at all.
+            engine_ctx = getattr(self._engine, "ctx", None)
+            if engine_ctx is not None and not getattr(engine_ctx, "session_id", None):
+                try:
+                    engine_ctx.session_id = meta.session_id
+                except Exception:  # noqa: BLE001 — never fail a connect over this
+                    logger.debug(
+                        "[HarnessAdapter] could not stamp session_id onto ToolCtx",
+                        exc_info=True,
+                    )
             await self._seed_event_log(meta.session_id)
 
         self._connected = True

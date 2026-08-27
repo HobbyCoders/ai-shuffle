@@ -66,6 +66,11 @@ services:
       - AUTO_UPDATE=${AUTO_UPDATE:-true}
       # Delegated Claude CLI stream-close timeout in ms.
       - CLAUDE_CODE_STREAM_CLOSE_TIMEOUT=${CLAUDE_CODE_STREAM_CLOSE_TIMEOUT:-120000}
+      # Git identity used for commits made inside the container. Seeded into
+      # appuser's global gitconfig at startup ONLY when it is unset, so an
+      # identity you set yourself in the mounted config always wins.
+      - GIT_USER_NAME=${GIT_USER_NAME:-AI Shuffle Worker}
+      - GIT_USER_EMAIL=${GIT_USER_EMAIL:-worker@ai-shuffle.local}
       # Import defaults are container paths, never hardcoded host homes. The first
       # path preserves existing installs; /imports/provider-settings is an optional read-only
       # bind mount configured below (or entered explicitly in the preview dialog).
