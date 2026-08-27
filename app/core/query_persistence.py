@@ -425,7 +425,21 @@ async def _persist_turn_results(
                 cost_increment=metadata.get("total_cost_usd") or 0,
                 tokens_in_increment=metadata.get("tokens_in") or 0,
                 tokens_out_increment=metadata.get("tokens_out") or 0,
-                turn_increment=metadata.get("num_turns") or 0,
+                # Usage is normalized Anthropic-style: `tokens_in` is FRESH input
+                # and EXCLUDES cache reads. Sending only that to the cumulative
+                # column booked a 253k-token research child as 15 tokens, because
+                # the cache numbers went exclusively to the overwrite snapshot
+                # columns below. Accumulate them too.
+                cache_read_increment=metadata.get("cache_read_tokens") or 0,
+                cache_creation_increment=metadata.get("cache_creation_tokens") or 0,
+                # `num_turns` on the fluid path is the MODEL-CALL count
+                # (harness_adapter sets num_turns=event.num_model_calls), so
+                # feeding it to turn_count made a 1-turn child read as 16 turns.
+                # One completed turn increments turn_count by one; the model calls
+                # get their own column. An errored turn counts neither — same
+                # gating as the usage log below.
+                turn_increment=0 if metadata.get("error") else 1,
+                model_calls_increment=metadata.get("num_turns") or 0,
                 # Persist per-turn context-window values so /live can render
                 # the context bar on session reload without scanning JSONL.
                 last_input_tokens=last_input_tokens,
@@ -576,6 +590,10 @@ async def _persist_turn_results(
                 model=metadata.get("model"),
                 tokens_in=metadata.get("tokens_in", 0),
                 tokens_out=metadata.get("tokens_out", 0),
+                # The rest of the prompt. Without these the log can never
+                # reconstruct what a cache-heavy turn actually sent.
+                cache_read_tokens=metadata.get("cache_read_tokens") or 0,
+                cache_creation_tokens=metadata.get("cache_creation_tokens") or 0,
                 cost_usd=metadata.get("total_cost_usd", 0),
                 duration_ms=metadata.get("duration_ms", 0)
             )

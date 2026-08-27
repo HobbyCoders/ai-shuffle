@@ -691,6 +691,9 @@ def update_session(
     tokens_in_increment: int = 0,
     tokens_out_increment: int = 0,
     turn_increment: int = 0,
+    cache_read_increment: int = 0,
+    cache_creation_increment: int = 0,
+    model_calls_increment: int = 0,
     worktree_id: Optional[str] = None,
     last_input_tokens: Optional[int] = None,
     cache_creation_tokens: Optional[int] = None,
@@ -703,9 +706,19 @@ def update_session(
     Args:
         sdk_session_id: Set to an SDK session ID, or empty string "" to clear (NULL)
         worktree_id: Set to a worktree ID to link, or empty string "" to unlink
+        cache_read_increment / cache_creation_increment: per-turn cache tokens
+            ADDED to the cumulative ``total_cache_*`` columns. ``tokens_in_increment``
+            carries FRESH input only (usage is normalized Anthropic-style), so
+            these are the rest of the prompt — without them a cache-heavy session's
+            cumulative totals miss most of what it actually sent.
+        model_calls_increment: API hops inside the turn, added to
+            ``total_model_calls``. Distinct from ``turn_increment``, which counts
+            USER-VISIBLE turns (one per completed turn).
         last_input_tokens / cache_creation_tokens / cache_read_tokens: absolute
             per-turn context-window values for the latest turn. These overwrite
-            (not increment) so the context bar reflects the most recent turn.
+            (not increment) so the context bar reflects the most recent turn —
+            they are a SNAPSHOT, which is exactly why the cumulative columns above
+            have to exist separately.
         launched_model: Effective model the session was launched (or switched)
             with, persisted at spawn/link time so the host-op guard can read it
             without waiting for turn-end message commits.
@@ -742,6 +755,22 @@ def update_session(
     if turn_increment:
         updates.append(f"turn_count = turn_count + {_ph}")
         values.append(turn_increment)
+    if cache_read_increment:
+        updates.append(
+            f"total_cache_read_tokens = COALESCE(total_cache_read_tokens, 0) + {_ph}"
+        )
+        values.append(cache_read_increment)
+    if cache_creation_increment:
+        updates.append(
+            f"total_cache_creation_tokens = "
+            f"COALESCE(total_cache_creation_tokens, 0) + {_ph}"
+        )
+        values.append(cache_creation_increment)
+    if model_calls_increment:
+        updates.append(
+            f"total_model_calls = COALESCE(total_model_calls, 0) + {_ph}"
+        )
+        values.append(model_calls_increment)
     if worktree_id is not None:
         updates.append(f"worktree_id = {_ph}")
         # Empty string means unlink (set to NULL)
