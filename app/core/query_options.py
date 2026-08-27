@@ -1597,12 +1597,17 @@ def build_options_from_profile(
     # (the claude CLI owns ~/.claude/projects/<slug>/memory itself). The adapter
     # projects it onto SessionOptions.extra["memory_dir"] and only a native leg
     # reads it, where it becomes the prompt's "# Project memory" section.
+    #
+    # The dir is CREATED here, not merely resolved: the prompt promises the
+    # model that its memory lives there, and on a project no one has written
+    # memory for nothing else would create it (memory_sync only mkdirs when it
+    # has DB rows to write down). ensure_memory_dir swallows its own OSError.
     try:
-        from app.core.memory_sync import memory_dir_for_working_dir
+        from app.core.memory_sync import ensure_memory_dir, memory_dir_for_working_dir
 
         _memory_anchor = get_project_working_dir(project) if project else None
-        _memory_dir = memory_dir_for_working_dir(
-            _memory_anchor or working_dir, "native"
+        _memory_dir = ensure_memory_dir(
+            memory_dir_for_working_dir(_memory_anchor or working_dir, "native")
         )
         options.aih_memory_dir = str(_memory_dir) if _memory_dir else None
     except Exception:  # noqa: BLE001 — a memory dir is context, never a blocker
