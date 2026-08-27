@@ -513,7 +513,12 @@ li.autocomplete-section-header {
    Responsive Adjustments
    ======================================== */
 
-@media (max-width: 640px) {
+/* Composer pop-up cutoff: 1080px matches PANEL_FULLSCREEN_MAX_WIDTH
+   (frontend/src/lib/utils/viewport.ts), the width at which the app shell
+   switches to mobile UI. This file is imported by CommandAutocomplete and
+   FileAutocomplete, whose own panel breakout gates sit at 1080px — keep the
+   three in step. */
+@media (max-width: 1080px) {
   .autocomplete-panel {
     border-radius: var(--radius-md, calc(var(--radius, 0.75rem) * 0.833));
   }

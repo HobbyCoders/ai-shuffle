@@ -266,6 +266,17 @@ def translate_sql(sql: str) -> str:
     # writer; strip them so the SELECT parses.
     s = re.sub(r"\bFOR\s+SHARE\b", "", s, flags=re.I)
     s = re.sub(r"\bFOR\s+UPDATE\b", "", s, flags=re.I)
+    # JSONB key extraction as text: `col ->> 'key'` -> json_extract(col,'$.key').
+    # JSONB columns become TEXT here, and SQLite's json_extract reads that text
+    # with the same "missing key yields NULL" semantics ->> has. Only the
+    # single-key text form is translated — the app's event-class filters
+    # (fluid_session_events.event ->> '_cls') are all that use it, and a
+    # deeper path form would need real path translation.
+    s = re.sub(
+        r"([A-Za-z_][A-Za-z0-9_.]*)\s*->>\s*'([A-Za-z_][A-Za-z0-9_]*)'",
+        r"json_extract(\1, '$.\2')",
+        s,
+    )
     s = _CAST_RE.sub("", s)                    # x::date -> x
     s = re.sub(r"\bILIKE\b", "LIKE", s, flags=re.I)
     s = re.sub(r"\bjsonb_agg\b", "json_group_array", s, flags=re.I)

@@ -405,19 +405,26 @@ class GitHubService:
             On success: (pr, None). On failure: (None, error_detail).
         """
         try:
+            # Last stop before the text is published on the PR. Strips only
+            # unambiguous generation artifacts; prose is untouched.
+            from app.core.git_text import sanitize_pr_body, sanitize_pr_title
+
+            clean_title = sanitize_pr_title(title)
+            clean_body = sanitize_pr_body(body)
+
             # Pass body via stdin (--body-file -) to avoid Windows command
             # line length limits (~8191 chars) with long PR descriptions.
             args = [
                 'pr', 'create',
                 '--repo', repo,
-                '--title', title,
+                '--title', clean_title,
                 '--body-file', '-',
                 '--head', head,
                 '--base', base,
             ]
             if draft:
                 args.append('--draft')
-            result = self._run_gh(args, stdin_data=body)
+            result = self._run_gh(args, stdin_data=clean_body)
 
             if result.returncode != 0:
                 stderr = result.stderr.strip()

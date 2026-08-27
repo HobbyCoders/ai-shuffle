@@ -417,8 +417,11 @@
 		background: var(--muted);
 	}
 
-	/* Mobile: reduce max-height so the chat island stays within viewport bounds */
-	@media (max-width: 639px) {
+	/* Mobile: reduce max-height so the chat island stays within viewport bounds.
+	   1080px is the composer cutoff (PANEL_FULLSCREEN_MAX_WIDTH); ChatInput
+	   applies the taller desktop min-height to .tiptap-editor only above
+	   1081px, so this compact cap has to cover everything below it. */
+	@media (max-width: 1080px) {
 		.tiptap-editor {
 			max-height: 150px;
 		}

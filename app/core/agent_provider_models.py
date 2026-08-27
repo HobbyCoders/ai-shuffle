@@ -304,7 +304,9 @@ def build_task_contract(
         "for independent or context-heavy work, not a quick lookup or single "
         "tool call. mode='sync' waits for the report. mode='background' "
         "returns a worker session ID so the parent can continue independent "
-        "work; completion is push-based, so do not busy-poll.\n\n"
+        "work; completion is push-based, so do not busy-poll. Omitting mode "
+        "takes the target's default: read-only research agents run in the "
+        "background, every other agent runs sync.\n\n"
         + availability
     )
 
@@ -333,8 +335,10 @@ def build_task_contract(
                     "type": "string",
                     "enum": ["sync", "background"],
                     "description": (
-                        "sync (default) waits for the report; background returns "
-                        "the worker session ID immediately."
+                        "sync waits for the report; background returns the "
+                        "worker session ID immediately. Omit to take the "
+                        "target's default: background for read-only research "
+                        "agents, sync for every other agent."
                     ),
                 },
                 "label": {

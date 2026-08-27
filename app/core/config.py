@@ -205,6 +205,15 @@ class Settings(BaseSettings):
     session_secret: Optional[str] = None
     session_expire_days: int = 30
 
+    # fluid_session_events retention. The engine persists every bus event, so
+    # streaming deltas (ToolArgsDelta / TextDelta / ThinkingDelta) dominate the
+    # table by volume — tens of thousands of rows for a single busy session.
+    # They are reconstructible from the completed ToolUse rows and the node
+    # tree, so the maintenance pass drops them once a session has been idle
+    # this many days. Everything else in the log is evidence and is kept, Usage
+    # in particular (it backs the accounting backfill). 0 disables pruning.
+    fluid_event_retention_days: int = 7
+
     # Claude
     command_timeout: int = 300
 

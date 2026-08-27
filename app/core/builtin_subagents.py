@@ -16,7 +16,7 @@ a fresh install).
 """
 
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Sequence
 
 from app.db import database
 
@@ -428,6 +428,40 @@ def _update_builtin_defaults(subagent_id: str, definition: Dict[str, Any]) -> No
     modified-detection read the code definitions directly
     (app/db/subagents.py::_code_defaults)."""
     return None
+
+
+# ============================================================================
+# Read-only ("Explore-class") classification
+# ============================================================================
+
+# Tools that let an agent change the workspace. An agent whose declared tool
+# surface holds none of them can only research, which is what makes it
+# Explore-class (see task_dispatch's per-agent default mode).
+#
+# Bash is deliberately absent: the built-in Explore and Plan definitions above
+# both include it and both are read-only agents — their prompts open with
+# "CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS". Classifying on the
+# file-writing tools keeps this predicate in step with the definitions this
+# module already ships instead of second-guessing them.
+WRITE_CAPABLE_TOOLS = frozenset({"write", "edit", "multiedit", "notebookedit"})
+
+# The wildcard an allowlist uses for "every tool" (app/core/tool_access.py).
+_ALL_TOOLS = "*"
+
+
+def is_read_only_tool_surface(tools: Optional[Sequence[Any]]) -> bool:
+    """True when ``tools`` is an explicit surface that cannot modify files.
+
+    ``None`` or an empty list means "inherit everything the caller has"
+    (ruling CE12) and is never read-only — an unrestricted agent may well
+    write. A non-empty list is the agent's ENTIRE tool surface, so it is
+    read-only exactly when no entry is write-capable and none is the ``*``
+    wildcard.
+    """
+    names = [str(t).strip().lower() for t in (tools or ()) if str(t).strip()]
+    if not names or _ALL_TOOLS in names:
+        return False
+    return not any(name in WRITE_CAPABLE_TOOLS for name in names)
 
 
 def get_builtin_subagent_ids() -> List[str]:

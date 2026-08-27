@@ -2131,6 +2131,27 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
         except Exception as e:
             results["cleaned_upload_blobs"] = f"error: {e}"
 
+        # 2c. fluid event-log retention. Streaming deltas dominate that table by
+        # volume and are reconstructible from the completed ToolUse rows and the
+        # node tree; everything else in the log is evidence and stays, Usage
+        # especially (the accounting backfill has no other source). Bounded to
+        # sessions idle past the window, so live replay is untouched.
+        try:
+            from app.core.config import settings as _settings
+            from app.db.fluid_events import prune_fluid_delta_events
+
+            _retention_days = int(
+                getattr(_settings, "fluid_event_retention_days", 7) or 0
+            )
+            if _retention_days > 0:
+                results["cleaned_fluid_delta_events"] = prune_fluid_delta_events(
+                    _retention_days, cursor=cursor
+                )
+            else:
+                results["cleaned_fluid_delta_events"] = "disabled"
+        except Exception as e:
+            results["cleaned_fluid_delta_events"] = f"error: {e}"
+
         # 2b. Notifications retention: drop anything older than 30 days, then cap
         # each user to the most recent N rows so the table can't grow unbounded.
         try:
