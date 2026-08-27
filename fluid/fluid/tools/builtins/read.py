@@ -29,7 +29,13 @@ from fluid.tools.builtins._util import (
     unchanged_read_note,
 )
 from fluid.tools.fragments import READ_BEFORE_EDIT
-from fluid.tools.registry import ToolCtx, ToolImage, ToolOutcome, ToolSpec
+from fluid.tools.registry import (
+    ContentWindow,
+    ToolCtx,
+    ToolImage,
+    ToolOutcome,
+    ToolSpec,
+)
 
 # Media types the Anthropic/OpenAI vision APIs accept as base64 images.
 IMAGE_MEDIA_TYPES = {
@@ -118,9 +124,14 @@ def _read_image(path: Path, media_type: str) -> ToolOutcome:
     )
 
 
-def _read_text(path: Path, offset: int, limit: int | None) -> str:
+def _read_text(path: Path, offset: int, limit: int | None) -> tuple[str, bool]:
     """Windowed, lazy line read — the file is consumed only up to the window
-    end, so a Read with offset/limit on a huge file stays cheap."""
+    end, so a Read with offset/limit on a huge file stays cheap.
+
+    Returns the numbered text and whether lines were left beyond the window;
+    ``offset == 1`` with nothing left over is the whole file, which is what
+    lets a later windowed read be answered as a slice of this payload.
+    """
     window_len = int(limit) if limit else DEFAULT_LINE_LIMIT
     out: list[str] = []
     more = False
@@ -137,7 +148,7 @@ def _read_text(path: Path, offset: int, limit: int | None) -> str:
             f"\n... [output limited to {window_len} lines — "
             f"continue with offset={offset + window_len}]"
         )
-    return numbered
+    return numbered, more
 
 
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
@@ -164,7 +175,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
 
     offset = max(1, int(input.get("offset", 1)))
     limit = input.get("limit")
-    numbered = _read_text(path, offset, limit)
+    numbered, more = _read_text(path, offset, limit)
     ctx.read_files.add(str(path))
 
     # Same path, same window, same bytes on disk → the content is already in
@@ -175,9 +186,25 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     repeat = stamp is not None and ctx.read_seen.get(key) == stamp
     if stamp is not None:
         ctx.read_seen[key] = stamp
+
+    # A read that starts at line 1 and runs out of file is the whole file,
+    # whatever offset/limit was asked for, so it claims the window-independent
+    # identity. Everything else claims its own window's identity *and* names
+    # the whole-file one, so a holder of the whole file can serve this slice.
+    window = None if offset == 1 and not more else (offset, key[2])
+    span = int(limit) if limit else DEFAULT_LINE_LIMIT
     return ToolOutcome(
         text=(numbered or "(empty file)") + unchanged_read_note(repeat),
-        content_id=_content_id(key, stamp),
+        content_id=_content_id(str(path), window, stamp),
+        window_of=(
+            None
+            if window is None or stamp is None
+            else ContentWindow(
+                content_id=_content_id(str(path), None, stamp),
+                start=offset - 1,
+                stop=offset - 1 + span,
+            )
+        ),
     )
 
 
@@ -191,18 +218,27 @@ def _stamp(path: Path) -> tuple[int, int] | None:
 
 
 def _content_id(
-    key: tuple[str, int, int | None], stamp: tuple[int, int] | None
+    path: str,
+    window: tuple[int, int | None] | None,
+    stamp: tuple[int, int] | None,
 ) -> str | None:
-    """Identity of the exact window this call returned, or None if unknowable.
+    """Identity of the payload this call returned, or None if unknowable.
 
     Window *and* file version, so a different offset/limit or a byte that moved
-    yields a different id. Code mode compares it against the ids it has already
-    turned into ResultRefs; a match means the kernel is holding this very
-    payload, so the repeat read can come back as a pointer instead of a copy
+    yields a different id — except that ``window=None`` means "the whole file",
+    the identity every read that returned all of it shares no matter which
+    offset/limit produced it. Code mode compares these against the ids it has
+    already turned into ResultRefs; a match means the kernel is holding this
+    very payload, so the repeat read comes back as a pointer instead of a copy,
+    and a match on the whole-file id makes a *windowed* re-read a slice of it
     (see ``codemode/_runner.py``). The trailing "already seen" note is not part
     of the id — it is presentation, and it is what the pointer replaces.
     """
     if stamp is None:
         return None
-    path, offset, limit = key
-    return f"Read|{path}|{offset}|{limit if limit else ''}|{stamp[0]}|{stamp[1]}"
+    if window is None:
+        span = "*"
+    else:
+        offset, limit = window
+        span = f"{offset}|{limit if limit else ''}"
+    return f"Read|{path}|{span}|{stamp[0]}|{stamp[1]}"

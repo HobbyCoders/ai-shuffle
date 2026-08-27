@@ -58,6 +58,27 @@ def repeat_read_pointer(key: int, size: int) -> str:
     )
 
 
+def windowed_read_pointer(
+    key: int, size: int, start: int, stop: int | None
+) -> str:
+    """The result a re-read of an unchanged file at a *new* window gets.
+
+    Keying the pointer on the exact ``(path, offset, limit)`` window left the
+    commonest waste in place: transcripts show the same file re-read six to
+    eight times at different offsets, each one a full second payload, when the
+    whole file was sitting in the kernel the entire time. If the ref holds the
+    file whole, any window of it is a slice — so the answer is the slicing
+    expression, spelled out, rather than the lines.
+    """
+    span = f"[{start}:{'' if stop is None else stop}]"
+    last = "end" if stop is None else f"{stop}"
+    return (
+        f"unchanged since your earlier read — the whole file is already in the "
+        f"kernel: _refs[{key}] ({size:,} bytes). Lines {start + 1}-{last} are "
+        f"_refs[{key}].splitlines(){span} — slice it instead of re-reading."
+    )
+
+
 # ─── cell stdout budget ──────────────────────────────────────────────────────
 
 DEFAULT_STDOUT_CAP = 16384  # chars of cell stdout that reach the model
