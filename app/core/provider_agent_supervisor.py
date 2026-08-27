@@ -309,6 +309,33 @@ async def _kill_worker_session(worker_session_id: str) -> str:
     return "idle"
 
 
+async def settle_killed_worker(worker_session_id: str, reason: str) -> None:
+    """Book a killed worker's partial usage and stamp its terminal rows.
+
+    Killing a worker ends the runtime that would otherwise have settled the
+    worker's OWN bookkeeping, which is how the live DB grew a user-killed sync
+    child showing 0 calls / 0 tokens / $0 against real provider usage, with
+    ``turns.state`` never leaving its live state and ``sessions.status`` still
+    ``'active'`` while the background-task row said ``killed``. The parent's
+    card, registry row and attribution were all settled; only the child's own
+    rows were not.
+
+    Delegated to :func:`app.core.query_persistence.settle_killed_session`,
+    which claims the turn with the guarded ``settle_turn`` UPDATE before
+    booking anything — so a worker whose runtime DID reach its own turn end
+    is left completely alone. Never raises.
+    """
+    try:
+        from app.core.query_persistence import settle_killed_session
+
+        await settle_killed_session(worker_session_id, stop_reason=reason)
+    except Exception:  # noqa: BLE001 — teardown must never raise
+        logger.debug(
+            "ProviderAgent supervisor: killed-worker settle failed for %s",
+            worker_session_id, exc_info=True,
+        )
+
+
 def _purge_park_gate_residue(parent_session_id: str, record: WorkerRecord) -> None:
     """Drop this worker's ids from the CUMULATIVE park-gate launch sets.
 
@@ -450,6 +477,10 @@ async def teardown_worker(
     await _settle_card(record, preview, summary)
 
     outcome = await _kill_worker_session(record.worker_session_id)
+    # AFTER the kill, so the runtime has stopped appending to the event log the
+    # flush reads, and BEFORE the registry row goes terminal, so the worker's
+    # own rows are settled by the time anything reads the pair.
+    await settle_killed_worker(record.worker_session_id, reason)
     await _cancel_worker_prompts(record)
 
     try:

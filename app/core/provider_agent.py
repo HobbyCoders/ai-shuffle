@@ -1430,6 +1430,20 @@ async def dispatch_worker(
                 await feed.stop_following(final_drain=not cancelled)
             except BaseException:  # noqa: BLE001 — teardown must not mask the outcome
                 logger.debug("ProviderAgent: feed teardown failed", exc_info=True)
+            # A worker killed on THIS path (parent cancellation) never went
+            # through the supervisor's teardown, so nothing has settled the
+            # worker's own rows: its partial usage would be lost and its
+            # turns/sessions rows would stay live-looking forever. Same flush
+            # the supervisor runs, claimed by the same guarded turn settle, so
+            # a worker that did finish its own turn end is untouched. Shielded
+            # for the same reason the terminal frames are — this ``finally``
+            # can run while the handler is already cancelling.
+            if status == "killed":
+                await emit_shielded(
+                    provider_agent_supervisor.settle_killed_worker(
+                        worker_session_id, "parent_cancelled"
+                    )
+                )
             # ``status`` is the registry vocabulary (completed/error/killed), which
             # is also the reducer's terminal set for the settle frame.
             await emit_shielded(feed.completed(

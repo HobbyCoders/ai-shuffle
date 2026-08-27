@@ -601,3 +601,215 @@ async def _persist_turn_results(
             logger.error(f"{log_prefix}Failed to log usage for session {session_id}: {e}")
 
     return assistant_msg
+
+
+# ---------------------------------------------------------------------------
+# Kill-path accounting
+# ---------------------------------------------------------------------------
+
+#: ``sessions.status`` stamped on a session whose turn was killed under it. The
+#: written status vocabulary is exactly "active"/"archived"/"failed" (see
+#: ``app.core.startup_reconcile._LIVE_LOOKING_STATUSES`` and
+#: ``app.core.provider_agent.WORKER_FAILED_STATUS``); a killed run is a settled
+#: verdict about a run that is over, which is what "failed" already means here.
+#: Deliberately NOT a new value: several queries filter on
+#: ``status NOT IN ('archived','failed')`` and a fresh token would slip past them.
+KILLED_SESSION_STATUS = "failed"
+
+#: ``turns.stop_reason`` recorded when the flush is the thing that settles the
+#: row. ``turns.state`` itself goes to ``'aborted'`` — the only non-completed
+#: terminal ``settle_turn`` accepts.
+KILLED_TURN_STOP_REASON = "killed"
+
+
+def _partial_usage_from_events(session_id: str, turn_id: Optional[str]) -> dict:
+    """Sum the durable ``turn.usage`` records of ``turn_id`` into one total.
+
+    A killed session never reaches its own turn-end persistence: the pool
+    eviction ends the CLI subprocess mid-stream, so no ``ResultMessage`` is ever
+    translated and ``_persist_turn_results`` never runs. The evidence that
+    survives is the ``session_events`` log, where the turn recorder has already
+    written one ``turn.usage`` row per model call.
+
+    Native fluid stamps ``model_call_index`` on every such record and the
+    recorder never coalesces those away, so the records are dedupable and
+    countable: the call count is the number of distinct indices, and the token
+    columns are their sum. Records without an index (the delegated leg, which
+    IS coalesced) are still summed, but contribute no call count — a partial
+    flush is best-effort evidence recovery, not a second accounting system.
+
+    ``cost_usd`` rides the per-call record too (fluid folds an estimate in when
+    the provider reports none), so the spend lands with the tokens.
+    """
+    from app.core.turn_outcome import load_session_events
+
+    totals = {
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
+        "cost_usd": 0.0,
+        "model_calls": 0,
+        "model": None,
+    }
+    seen_indices: Set[Any] = set()
+    unindexed = 0
+
+    for event in load_session_events(session_id):
+        if event.get("event_type") != "turn.usage":
+            continue
+        if turn_id is not None and event.get("turn_id") != turn_id:
+            continue
+        usage = (event.get("payload") or {}).get("usage")
+        if not isinstance(usage, dict):
+            continue
+        index = usage.get("model_call_index")
+        if index is not None:
+            if index in seen_indices:
+                # A retried call re-emits its index; count and bill it once.
+                continue
+            seen_indices.add(index)
+        else:
+            unindexed += 1
+        totals["tokens_in"] += _as_int(usage.get("input_tokens"))
+        totals["tokens_out"] += _as_int(usage.get("output_tokens"))
+        totals["cache_read_tokens"] += _as_int(usage.get("cache_read_input_tokens"))
+        totals["cache_creation_tokens"] += _as_int(
+            usage.get("cache_creation_input_tokens")
+        )
+        cost = usage.get("cost_usd")
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            totals["cost_usd"] += float(cost)
+        if usage.get("model"):
+            totals["model"] = usage["model"]
+
+    totals["model_calls"] = len(seen_indices) or unindexed
+    return totals
+
+
+def _as_int(value: Any) -> int:
+    """Coerce a usage field to a non-negative int; anything else reads as 0."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return int(value) if value > 0 else 0
+
+
+async def settle_killed_session(
+    session_id: str,
+    *,
+    stop_reason: str = KILLED_TURN_STOP_REASON,
+    profile_id: Optional[str] = None,
+) -> bool:
+    """Book a killed session's partial usage and stamp its terminal lifecycle.
+
+    The gap this closes: a user-killed sync child showed 0 calls / 0 tokens /
+    $0 against real provider usage, with ``turns.state='completed'`` and
+    ``sessions.status='active'`` while its background-task row said ``killed``.
+    Nothing settled the child's own rows, because the kill removes the very
+    runtime that would have.
+
+    THE CLAIM IS THE TURN SETTLE, and it comes first. ``settle_turn`` only
+    transitions a row that is not already terminal and returns the row it moved,
+    so exactly one writer can win: if the child's own runtime got far enough to
+    finalize, it settled and booked the turn and this returns ``False`` without
+    touching a number. Only when the kill genuinely beat the runtime do we
+    reconstruct the usage from the event log and book it.
+
+    Never raises — a kill must complete whatever the accounting does.
+    Returns ``True`` when this call is what settled the turn.
+    """
+    from app.db import turns as turns_db
+
+    claimed = False
+    was_live = False
+    turn_id: Optional[str] = None
+    try:
+        live = await run_sync(turns_db.get_live_turn, session_id)
+        if live:
+            was_live = True
+            turn_id = live.get("id")
+            settled = await run_sync(
+                turns_db.settle_turn, turn_id, "aborted", stop_reason
+            )
+            claimed = settled is not None
+    except Exception:
+        logger.warning(
+            "settle_killed_session: turn settle failed for %s", session_id,
+            exc_info=True,
+        )
+
+    if claimed:
+        try:
+            totals = await run_sync(_partial_usage_from_events, session_id, turn_id)
+        except Exception:
+            logger.warning(
+                "settle_killed_session: usage recovery failed for %s", session_id,
+                exc_info=True,
+            )
+            totals = None
+        if totals and (
+            totals["tokens_in"] or totals["tokens_out"]
+            or totals["cache_read_tokens"] or totals["cache_creation_tokens"]
+            or totals["cost_usd"] or totals["model_calls"]
+        ):
+            try:
+                await run_sync(
+                    database.update_session,
+                    session_id=session_id,
+                    cost_increment=totals["cost_usd"],
+                    tokens_in_increment=totals["tokens_in"],
+                    tokens_out_increment=totals["tokens_out"],
+                    cache_read_increment=totals["cache_read_tokens"],
+                    cache_creation_increment=totals["cache_creation_tokens"],
+                    # The turn never completed, so it is not a user-visible turn
+                    # — but its API hops are real and get their own column.
+                    turn_increment=0,
+                    model_calls_increment=totals["model_calls"],
+                )
+            except Exception:
+                logger.warning(
+                    "settle_killed_session: session-row increment failed for %s",
+                    session_id, exc_info=True,
+                )
+            try:
+                await run_sync(
+                    database.log_usage,
+                    session_id=session_id,
+                    profile_id=profile_id,
+                    model=totals["model"],
+                    tokens_in=totals["tokens_in"],
+                    tokens_out=totals["tokens_out"],
+                    cache_read_tokens=totals["cache_read_tokens"],
+                    cache_creation_tokens=totals["cache_creation_tokens"],
+                    cost_usd=totals["cost_usd"],
+                    duration_ms=0,
+                )
+            except Exception:
+                logger.warning(
+                    "settle_killed_session: usage_log write failed for %s",
+                    session_id, exc_info=True,
+                )
+
+    # The session row's own verdict — the half the observed drift was missing
+    # (``sessions.status='active'`` next to a ``killed`` background-task row).
+    #
+    # Gated on the session having been LIVE when the kill landed, not on
+    # winning the claim. Turn-end reap and stop-all both sweep every registered
+    # worker, and a worker that already finished its turn (and is merely
+    # waiting for its dispatch to return) delivered its work — stamping a
+    # failure verdict on that session would be a lie. A worker mid-turn is the
+    # one this is about, whether we or its own dying runtime settled the row.
+    if was_live:
+        try:
+            await run_sync(
+                database.update_session,
+                session_id=session_id,
+                status=KILLED_SESSION_STATUS,
+            )
+        except Exception:
+            logger.warning(
+                "settle_killed_session: status write failed for %s", session_id,
+                exc_info=True,
+            )
+
+    return claimed
