@@ -558,7 +558,13 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	async function applyMetadataSnapshot(sessionId: string, generation: number) {
 		let snap: LiveSnapshot | null;
 		try {
-			snap = await api.get<LiveSnapshot>(`/sessions/${encodeURIComponent(sessionId)}/live?since_update_id=0`);
+			// `include_messages=false`: the SSE feed is the transcript authority, so
+			// the message list this endpoint would otherwise build (megabytes on a
+			// long session) is discarded on arrival. Asking for metadata only keeps
+			// the switch-in off the transcript read path entirely.
+			snap = await api.get<LiveSnapshot>(
+				`/sessions/${encodeURIComponent(sessionId)}/live?since_update_id=0&include_messages=false`
+			);
 		} catch (e) {
 			console.warn('[ActiveSession] metadata snapshot failed:', e);
 			return;
