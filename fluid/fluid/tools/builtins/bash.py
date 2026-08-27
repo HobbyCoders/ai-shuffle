@@ -90,6 +90,11 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "is flagged as an error — read the output before retrying. In code mode "
         "Bash() returns that text instead of raising, so exit codes can be "
         "tested in Python (git merge-base, grep -q, test).\n"
+        "- A command that prints nothing returns `(no output) [exit code N]` — "
+        "the status is stated because there is no output to judge by. A "
+        "silent `[exit code 0]` means the command SUCCEEDED; do not re-run it "
+        "to check, least of all when it was irreversible (merge, push, "
+        "delete).\n"
         "- Quote file paths that contain spaces. Under Git Bash, write Windows "
         "paths with forward slashes or inside quotes so backslashes survive.\n"
     )
@@ -154,10 +159,21 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             ),
             is_error=True,
         )
-    text = truncate(strip_ansi(stdout.decode(errors="replace"))) or "(no output)"
-    if proc.returncode:
+    text = truncate(strip_ansi(stdout.decode(errors="replace")))
+    code = proc.returncode or 0
+    if not text.strip():
+        # A bare "(no output)" is the one result that says nothing about what
+        # happened: a silent success and a silent failure read identically, and
+        # a `gh pr merge` that already went through invites a retry. Whenever
+        # there is no output to judge by, the status is the whole answer.
         return ToolOutcome(
-            text=f"{text.rstrip()}\n[exit code {proc.returncode}]",
+            text=f"(no output) [exit code {code}]",
+            is_error=bool(code),
+            soft_error=bool(code),
+        )
+    if code:
+        return ToolOutcome(
+            text=f"{text.rstrip()}\n[exit code {code}]",
             is_error=True,
             soft_error=True,
         )
