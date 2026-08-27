@@ -598,7 +598,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         # context/compaction.py. A legacy ``trim=`` arg (tier-1 knobs only)
         # folds into a compaction config that inherits its enabled flag, so
         # ``trim=TrimConfig(enabled=False)`` turns context rewriting off
-        # instead of silently enabling the ladder above it.
+        # instead of silently enabling the ladder above it. To run tier-1 trim
+        # *without* digests/epoch folds, pass the explicit contract:
+        # ``compaction=CompactionConfig(enabled=False, trim=TrimConfig(enabled=True))``.
         if compaction is None:
             compaction = (
                 CompactionConfig(trim=trim, enabled=trim.enabled)
@@ -920,7 +922,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             # stub is a stateless view policy inside ``Compactor._render``), so
             # with context rewriting disabled it would report reclaimed tokens
             # the request never actually saves. Report nothing instead.
-            if self._compactor.config.enabled:
+            if self._compactor.active:
                 compaction_stats = self._compactor.stats(nodes)
             recorded = self._last_call_usage.get(sid)
             if recorded is not None and any(n.node_id == recorded[0] for n in nodes):
@@ -1438,7 +1440,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     # the request never actually saved.
                     compaction=(
                         self._compactor.stats(nodes)
-                        if self._compactor.config.enabled
+                        if self._compactor.active
                         else None
                     ),
                     measured_prompt_tokens=prompt_tokens if prompt_tokens > 0 else None,

@@ -229,6 +229,8 @@ class ContextConfig:
     """
 
     enabled: bool = True
+    # Tier 1 only: trim old tool results, never digest a turn or fold an epoch.
+    trim_only: bool = False
     trigger_tokens: int = 120_000
     headroom_tokens: int = 16_000
     target_ratio: float = 0.7
@@ -245,6 +247,7 @@ class ContextConfig:
     def from_dict(cls, d: dict[str, Any]) -> ContextConfig:
         return cls(
             enabled=bool(d.get("enabled", True)),
+            trim_only=bool(d.get("trim_only", False)),
             trigger_tokens=int(d.get("trigger_tokens", 120_000)),
             headroom_tokens=int(d.get("headroom_tokens", 16_000)),
             target_ratio=float(d.get("target_ratio", 0.7)),
@@ -449,6 +452,7 @@ class HarnessConfig:
             },
             "context": {
                 "enabled": self.context.enabled,
+                "trim_only": self.context.trim_only,
                 "trigger_tokens": self.context.trigger_tokens,
                 "headroom_tokens": self.context.headroom_tokens,
                 "target_ratio": self.context.target_ratio,

@@ -92,6 +92,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     # headroom reserve, digest/epoch shape, intake stub size, tier-1 knobs.
     "context": {
         "enabled": True,
+        "trim_only": False,
         "trigger_tokens": 120_000,
         "headroom_tokens": 16_000,
         "target_ratio": 0.7,
@@ -676,8 +677,12 @@ def build_engine(
     from fluid.context.trim import TrimConfig
 
     cc = config.context
+    # ``trim_only`` splits the ladder at tier 1: results are trimmed to
+    # recoverable placeholders, but no turn is digested and no epoch folded.
+    # Inert when the whole section is disabled.
+    trim_only = cc.enabled and getattr(cc, "trim_only", False)
     compaction = CompactionConfig(
-        enabled=cc.enabled,
+        enabled=cc.enabled and not trim_only,
         trim=TrimConfig(
             enabled=cc.enabled,
             trigger_tokens=cc.trigger_tokens,

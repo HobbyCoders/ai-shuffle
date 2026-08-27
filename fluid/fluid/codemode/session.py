@@ -38,7 +38,7 @@ from typing import Any
 
 from fluid.codemode.bridge import HostBridge
 from fluid.codemode.kernel import HostReply
-from fluid.codemode.projection import Projection
+from fluid.codemode.projection import Projection, func_name
 from fluid.codemode.skills import SkillStore, referenced_skills, validate_skill
 from fluid.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
 from fluid.codemode.verify import verify_sources, verify_store
@@ -61,8 +61,11 @@ _RUN_PYTHON_DESC = (
     "direct file I/O are disabled (use the file tools); only a stdlib-safe "
     "import allowlist is available — json, re, math, itertools, collections "
     "and textwrap are already bound in the namespace, along with pathlib.Path. "
-    "The last expression's repr is returned (REPL-style); large tool results "
-    "come back as a ResultRef you can slice in a later call.\n"
+    "The last expression's repr is returned (REPL-style) and stays bound to "
+    "`_` in the next cell; large tool results come back as a ResultRef you can "
+    "slice in a later call. Every ResultRef is also filed in `_refs` under the "
+    "id its repr shows, so a handle you forgot to assign is recovered with "
+    "`_refs[7]` — never re-run a tool to get a result back.\n"
     "\n"
     "One cell per step, not per call: compose the several tool calls a step "
     "needs into a single cell — loop Read over a file list, search then read "
@@ -87,6 +90,59 @@ _JOURNAL_EVENT_CAP = 2000  # user/assistant conversation events
 # Images produced by in-kernel tool calls ride out on the cell's tool result.
 # Capped so one loop over a directory of screenshots can't blow up the request.
 _CELL_IMAGE_CAP = 20
+
+# ── committed-call manifest (appended when a cell dies mid-way) ──
+# The kwarg that names what a call acted on, most identifying first.
+_TARGET_KEYS = (
+    "file_path", "path", "notebook_path", "target_file", "command",
+    "pattern", "url", "query", "name", "description", "prompt",
+)
+_TARGET_CAP = 60
+_MUTATING_RISKS = ("write", "destructive")
+# The manifest exists so the model doesn't re-apply edits it already made; past
+# a certain length it stops being a manifest and starts being noise.
+_MANIFEST_CALL_CAP = 30
+
+
+def _call_target(kwargs: dict) -> str:
+    """A short, recognisable label for what one in-kernel call acted on."""
+    for key in _TARGET_KEYS:
+        value = kwargs.get(key)
+        if isinstance(value, str) and value.strip():
+            text = " ".join(value.split())
+            if len(text) > _TARGET_CAP:
+                text = text[:_TARGET_CAP] + "…"
+            return text
+    return ""
+
+
+def _committed_manifest(calls: list[dict]) -> str:
+    """Ordered record of the calls that ran before the cell blew up.
+
+    A mid-cell ``ToolError`` aborts the whole cell, so the model-facing result
+    is a traceback and nothing else — the Edits that already landed leave no
+    trace in context, and the model's next move is to redo them. This names
+    them instead: what ran, against what, and whether it succeeded.
+    """
+    if not calls:
+        return ""
+    shown = calls[:_MANIFEST_CALL_CAP]
+    parts = []
+    for i, call in enumerate(shown, 1):
+        target = f"({call['target']})" if call["target"] else "()"
+        # The leaf name is what the cell actually wrote — echoing the registry
+        # name (``mcp__fs__Edit``) would read as a different call.
+        name = func_name(call["name"])
+        parts.append(f"{i}. {name}{target} {'ok' if call['ok'] else 'FAILED'}")
+    line = f"calls completed before the error: {', '.join(parts)}"
+    if len(calls) > len(shown):
+        line += f", … and {len(calls) - len(shown)} more"
+    if any(c["ok"] and c["mutates"] for c in calls):
+        line += (
+            " — completed Edits/Writes are already applied to disk; "
+            "do not re-issue them."
+        )
+    return line
 
 
 class CodeModeSession:
@@ -227,14 +283,27 @@ class CodeModeSession:
             tool_filter=self.tool_filter,
         )
 
-        called_tools: list[str] = []
+        # Ordered per-call records: name, what it acted on, whether it landed,
+        # and whether it mutated anything. Feeds the committed-call manifest on
+        # a mid-cell failure and the journal's ordered call list.
+        called_tools: list[dict] = []
         # Image results are host-side only: the kernel gets the "[image: …]"
         # caption as text, and the real blocks ride out on this cell's outcome
         # so the model can actually see them (JSON-path parity).
         collected_images: list[Any] = []
 
         async def _host_call(name: str, kwargs: dict) -> HostReply:
-            called_tools.append(name)
+            spec = self._registry.get(name)
+            record = {
+                "name": name,
+                "target": _call_target(kwargs),
+                "ok": False,
+                "mutates": bool(
+                    spec is not None
+                    and spec.effective_risk(kwargs) in _MUTATING_RISKS
+                ),
+            }
+            called_tools.append(record)
             tool_use_id = new_id("call")
             await loop._emit(ToolUse(
                 session_id=sid, turn_id=turn_id,
@@ -259,6 +328,7 @@ class CodeModeSession:
                     else:
                         extra.pop("tool_use_id", None)
             collected_images.extend(reply.images)
+            record["ok"] = reply.result is not None
             if reply.result is not None:
                 out, is_error = reply.result, False
             elif reply.denied:
@@ -282,6 +352,11 @@ class CodeModeSession:
         text = "\n".join(parts) if parts else "(no output)"
         if result.error:
             text = (text + "\n" if parts else "") + f"Error: {result.error}"
+            # A cell aborts at the first ToolError, so the mutations that
+            # already applied are invisible in the traceback. Name them.
+            manifest = _committed_manifest(called_tools)
+            if manifest:
+                text += "\n" + manifest
         dropped = len(collected_images) - _CELL_IMAGE_CAP
         if dropped > 0:
             text += f"\n({dropped} further images omitted — read fewer per cell)"
@@ -292,7 +367,7 @@ class CodeModeSession:
         )
 
     # ── continual harness hooks ──
-    def _record_cell(self, code: str, result: Any, called_tools: list[str]) -> None:
+    def _record_cell(self, code: str, result: Any, called_tools: list[dict]) -> None:
         """Journal the cell, bump skill usage, kick synthesis. Never raises."""
         if self._skills is None:
             return
@@ -305,7 +380,13 @@ class CodeModeSession:
                 "value": result.value_repr[:_JOURNAL_VALUE_CAP],
                 "error": error_lines[-1] if error_lines else None,
                 "host_calls": result.host_calls,
-                "tools": sorted(set(called_tools)),
+                "tools": sorted({c["name"] for c in called_tools}),
+                # Compatible extension: the same calls in the order they ran,
+                # with their outcome — a workflow is a sequence, and the
+                # unordered ``tools`` set cannot express one.
+                "calls": [
+                    {"name": c["name"], "ok": c["ok"]} for c in called_tools
+                ],
             })
             self._skills.note_uses(referenced_skills(code))
         except Exception:
