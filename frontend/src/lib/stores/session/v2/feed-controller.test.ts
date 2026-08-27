@@ -10,7 +10,12 @@
  *    live events keep the incremental per-frame paint. The flag re-arms only on
  *    the FIRST connect (`onOpen` before any catch-up); reconnects after catch-up
  *    keep folding live events immediately (#611). Initial hydration treats the
- *    backend's mandatory caught_up sentinel as the only publish boundary.
+ *    backend's caught_up sentinel as the publish boundary, floored by an
+ *    IDLE-based fallback (CATCHUP_FALLBACK_MS): a stream that goes quiet without
+ *    ever sending the sentinel publishes what it has and completes hydration,
+ *    because atomic-until-sentinel with no floor leaves a stalled feed blank
+ *    forever with sends blocked. Frames re-arm the timer, so a flowing backfill
+ *    of any length still folds exactly once.
  *
  * 2. Flush scheduling. The post-catch-up fold coalesces onto requestAnimationFrame
  *    with a 250ms setTimeout fallback (browsers pause rAF in hidden tabs). These
@@ -59,7 +64,7 @@ vi.mock('./sse-feed', () => ({
 	},
 }));
 
-import { feedController } from './feed-controller';
+import { feedController, CATCHUP_FALLBACK_MS } from './feed-controller';
 import { pendingQueue } from '../pending-queue';
 import { browserPanel } from '../../browser-panel.svelte';
 import type { ActiveSessionState } from '../../active-session';
@@ -256,48 +261,91 @@ describe('feedController history-batch hydration', () => {
 		expect(msgs[0].content).toBe('foobar');
 	});
 
-	it('(a-atomic) multi-second stalls never publish a partial backfill', () => {
+	it('(a-atomic) a flowing backfill never publishes partially — caught_up is the boundary', () => {
 		const deps = makeDeps({ isLoadingSession: true, isRestoringSession: true });
 		feedController.attach(deps);
 		feedController.start('s1');
 		const callsAfterStart = deps.update.mock.calls.length;
 
-		// The backend can spend seconds resolving compaction or paging a large log.
-		// Silence before the first frame and between pages must not turn history into
-		// live cadence — caught_up is the authoritative hydration boundary.
-		vi.advanceTimersByTime(20_000);
-		hoisted.onEvent!(textDelta('e1', 'foo'));
-		vi.advanceTimersByTime(5_000);
-		hoisted.onEvent!(textDelta('e2', 'bar'));
-		vi.advanceTimersByTime(20_000);
+		// Gaps SHORTER than the idle window are an alive stream, not a stall: each
+		// frame re-arms the fallback, so a paging backfill stays atomic no matter
+		// how many pages it takes. caught_up remains the hydration boundary.
+		for (let i = 0; i < 20; i++) {
+			hoisted.onEvent!(textDelta(`e${i}`, 'x'));
+			vi.advanceTimersByTime(CATCHUP_FALLBACK_MS - 100);
+		}
 
 		expect(deps.update.mock.calls.length).toBe(callsAfterStart);
 		expect(deps.state.messages).toHaveLength(0);
 		expect(deps.state.isLoadingSession).toBe(true);
 		expect(deps.state.isRestoringSession).toBe(true);
 
-		hoisted.onEvent!(caughtUp(2));
+		hoisted.onEvent!(caughtUp(20));
+		expect(deps.update.mock.calls.length).toBe(callsAfterStart + 1);
+		expect((deps.state.messages as Array<{ content: string }>)[0].content).toBe('x'.repeat(20));
+		expect(deps.state.isLoadingSession).toBe(false);
+		expect(deps.state.isRestoringSession).toBe(false);
+	});
+
+	it('(a-fallback) an idle stall mid-backfill publishes what arrived and completes hydration', () => {
+		const deps = makeDeps({ isLoadingSession: true, isRestoringSession: true });
+		feedController.attach(deps);
+		feedController.start('s1');
+		const callsAfterStart = deps.update.mock.calls.length;
+
+		hoisted.onEvent!(textDelta('e1', 'foo'));
+		hoisted.onEvent!(textDelta('e2', 'bar'));
+		// Still inside the idle window — nothing published yet.
+		vi.advanceTimersByTime(CATCHUP_FALLBACK_MS - 1);
+		expect(deps.update.mock.calls.length).toBe(callsAfterStart);
+
+		// The stream goes quiet and the sentinel never arrives. Atomic hydration
+		// has to have a floor: without one the transcript stays blank forever and
+		// isRestoringSession keeps blocking sends.
+		vi.advanceTimersByTime(1);
 		expect(deps.update.mock.calls.length).toBe(callsAfterStart + 1);
 		expect((deps.state.messages as Array<{ content: string }>)[0].content).toBe('foobar');
 		expect(deps.state.isLoadingSession).toBe(false);
 		expect(deps.state.isRestoringSession).toBe(false);
 	});
 
-	it('(a-atomic) a long steady backfill folds exactly once on caught_up', () => {
+	it('(a-fallback) a connect that never delivers a frame still clears the spinner', () => {
+		const deps = makeDeps({ isLoadingSession: true, isRestoringSession: true });
+		feedController.attach(deps);
+		feedController.start('s1');
+
+		// Armed at start(), before the first connect resolves — so a feed that
+		// opens and then says nothing at all is bounded too.
+		vi.advanceTimersByTime(CATCHUP_FALLBACK_MS);
+		expect(deps.state.isLoadingSession).toBe(false);
+		expect(deps.state.isRestoringSession).toBe(false);
+	});
+
+	it('(a-fallback) events after the fallback fired fold at the live cadence', () => {
 		const deps = makeDeps();
 		feedController.attach(deps);
 		feedController.start('s1');
-		const callsAfterStart = deps.update.mock.calls.length;
+		vi.advanceTimersByTime(CATCHUP_FALLBACK_MS);
+		const callsAfterFallback = deps.update.mock.calls.length;
 
-		for (let i = 0; i < 50; i++) {
-			hoisted.onEvent!(textDelta(`e${i}`, 'x'));
-			vi.advanceTimersByTime(2_000);
-		}
-		expect(deps.update.mock.calls.length).toBe(callsAfterStart);
+		hoisted.onEvent!(textDelta('e1', 'late'));
+		flushRaf();
+		expect(deps.update.mock.calls.length).toBe(callsAfterFallback + 1);
+		expect((deps.state.messages as Array<{ content: string }>)[0].content).toBe('late');
+	});
 
-		hoisted.onEvent!(caughtUp(50));
-		expect(deps.update.mock.calls.length).toBe(callsAfterStart + 1);
-		expect(deps.state.messages).toHaveLength(1);
+	it('(a-fallback) a stopped feed does not fold through a pending fallback timer', () => {
+		const deps = makeDeps({ isLoadingSession: true, isRestoringSession: true });
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(textDelta('e1', 'foo'));
+		const callsBeforeStop = deps.update.mock.calls.length;
+
+		feedController.stop();
+		vi.advanceTimersByTime(CATCHUP_FALLBACK_MS * 3);
+
+		expect(deps.update.mock.calls.length).toBe(callsBeforeStop);
+		expect(deps.state.messages).toHaveLength(0);
 	});
 
 	it('duplicate same-session start is idempotent', () => {

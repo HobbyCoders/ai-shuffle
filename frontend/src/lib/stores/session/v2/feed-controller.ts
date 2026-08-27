@@ -81,6 +81,45 @@ let everCaughtUp = false;
 // stopped reader can still deliver an already-buffered frame; callbacks from
 // that obsolete reader must never fold or complete the replacement hydration.
 let feedGeneration = 0;
+// Safety net for a backend that never emits `caught_up` (an older build) or a
+// backfill that stalls part-way: if NO frame has arrived for this long, fold
+// whatever has accumulated so the view can never be stuck blank. Without it,
+// atomic hydration has no floor — a stalled stream leaves the session on its
+// spinner forever with sends blocked behind `isRestoringSession`.
+//
+// IDLE-based, not a deadline from connect: a long backfill is a steady stream
+// of frames, each of which re-arms the timer. Flipping to live cadence mid-
+// backfill would make every remaining history frame repaint individually,
+// which surfaced as the transcript visibly replaying (and auto-scroll chasing)
+// on large sessions. Cleared on `caught_up`.
+let catchupFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+export const CATCHUP_FALLBACK_MS = 1_000;
+
+function clearCatchupFallback(): void {
+	if (catchupFallbackTimer !== null) {
+		clearTimeout(catchupFallbackTimer);
+		catchupFallbackTimer = null;
+	}
+}
+
+function armCatchupFallback(generation: number): void {
+	clearCatchupFallback();
+	catchupFallbackTimer = setTimeout(() => {
+		catchupFallbackTimer = null;
+		// A stop() or a replacement start() since arming owns the view now.
+		if (generation !== feedGeneration) return;
+		if (caughtUp) return;
+		// No sentinel AND a full second of silence: give up batching and fold
+		// what we have; subsequent events flush per the normal live cadence.
+		caughtUp = true;
+		everCaughtUp = true;
+		// `true` because this stands in for the `caught_up` fold: the sentinel is
+		// the only other thing that clears isLoadingSession / isRestoringSession,
+		// so a fallback that folded messages but left those flags set would still
+		// hold the spinner up and keep sendMessage waiting.
+		fold(true);
+	}, CATCHUP_FALLBACK_MS);
+}
 
 // ─── Optimistic-message seeding ───────────────────────────────────────────────
 
@@ -276,10 +315,14 @@ export const feedController: FeedController = {
 		feed = createSseFeed(sessionId, {
 			onOpen: () => {
 				if (generation !== feedGeneration) return;
-				// Initial hydration remains atomic until the backend's mandatory
-				// `caught_up` sentinel. Reconnects after that point resume at lastSeq
-				// and keep live cadence; they never reset the reducer.
-				if (!everCaughtUp) caughtUp = false;
+				// Initial hydration remains atomic until the backend's `caught_up`
+				// sentinel, floored by the idle fallback. Reconnects after that
+				// point resume at lastSeq and keep live cadence; they never reset
+				// the reducer, and must not re-batch live events behind the timer.
+				if (!everCaughtUp) {
+					caughtUp = false;
+					armCatchupFallback(generation);
+				}
 			},
 			onEvent: (e) => {
 				// Only the feed generation that owns this hydration may mutate it.
@@ -289,6 +332,7 @@ export const feedController: FeedController = {
 				if ((e as { type?: string }).type === 'caught_up') {
 					caughtUp = true;
 					everCaughtUp = true;
+					clearCatchupFallback();
 					fold(true);
 					return;
 				}
@@ -306,6 +350,9 @@ export const feedController: FeedController = {
 					);
 				}
 				seedOptimistic();
+				// A frame just arrived while still batching: the stream is alive,
+				// so keep waiting for `caught_up` (idle-based fallback above).
+				if (!caughtUp) armCatchupFallback(generation);
 				reducerState = reduce(reducerState, ev);
 				// #606 item 4 — cross-device settle: the permission/question CARD was
 				// added on THIS device via the legacy `get_pending_*` WS relay on
@@ -355,6 +402,9 @@ export const feedController: FeedController = {
 				console.debug('[feedController] feed error', err);
 			},
 		});
+		// Arm the no-sentinel safety net even before the first connect resolves,
+		// so a connect that never completes is bounded too.
+		armCatchupFallback(generation);
 		// FIX B: seed optimistic messages BEFORE the immediate fold. A freshly
 		// committed worktree session commits an optimistic user message +
 		// isStreaming=true just before start(); folding an empty reducerState here
@@ -392,6 +442,7 @@ export const feedController: FeedController = {
 			feed = null;
 		}
 		clearScheduledFlush();
+		clearCatchupFallback();
 		caughtUp = false;
 		everCaughtUp = false;
 		currentSessionId = null;
