@@ -15,7 +15,10 @@ Wire protocol (length-prefixed JSON, ``>I`` header) matched to
 
 A host call blocks the cell: the runner emits ``host_call`` and reads the next
 frame as the reply (result / error / denied). Large results are wrapped in
-``vfs.ResultRef`` so only a truncated ``repr`` reaches the model.
+``vfs.ResultRef`` so only a truncated ``repr`` reaches the model, and every ref
+is registered in the namespace's ``_refs`` registry under a short id its repr
+prints — a dropped handle is recovered with ``_refs[7]``, never by re-running
+the tool. The previous cell's displayed value stays bound to ``_``.
 """
 
 import ast
@@ -38,10 +41,14 @@ _OUT = sys.stdout.buffer
 
 # Boot-configured globals (populated by the boot frame).
 _REF_THRESHOLD = truncate.DEFAULT_LIMIT
-_STDOUT_CAP = 16384
+_STDOUT_CAP = truncate.DEFAULT_STDOUT_CAP
 _SOURCES: dict = {}
 _SKILLS: dict = {}
 _NS: dict = {}
+# The ResultRef registry backing the namespace's ``_refs``. Held here too so a
+# cell that rebinds the name ``_refs`` cannot detach the registry the RPC
+# boundary writes into.
+_REFS = vfs.RefRegistry()
 
 
 # ─── framing ─────────────────────────────────────────────────────────────────
@@ -91,7 +98,13 @@ def _host_call(tool_name: str, kwargs: dict):
     result = reply.get("result")
     if result is None:
         result = ""
-    return truncate.to_result_ref(result, vfs.ResultRef, limit=_REF_THRESHOLD)
+    wrapped = truncate.to_result_ref(result, vfs.ResultRef, limit=_REF_THRESHOLD)
+    if isinstance(wrapped, vfs.ResultRef):
+        # Every ref gets an id in ``_refs`` before the cell sees it, so a
+        # handle the cell forgets to bind is still recoverable from the id its
+        # repr printed (``_refs[7]``) instead of costing a re-run of the tool.
+        _REFS.register(wrapped)
+    return wrapped
 
 
 # ─── cell execution ──────────────────────────────────────────────────────────
@@ -224,8 +237,53 @@ def _format_cell_traceback(exc: BaseException) -> str:
     return "".join(traceback.format_exception(type(exc), exc, tb))
 
 
+class _SegmentedStdout(io.TextIOBase):
+    """Cell stdout capture that remembers where each ``print`` ended.
+
+    ``print(a, b)`` reaches the stream as several ``write`` calls (arg,
+    separator, arg, terminator), so a segment is defined as the run of writes
+    up to and including one that ends in a newline — one segment per print,
+    near enough. Keeping the boundaries is what lets the cap be fair-shared
+    across prints instead of tail-dropped (see ``truncate.fair_share_stdout``).
+    """
+
+    def __init__(self) -> None:
+        self._done: list = []
+        self._open: list = []
+
+    # ── stream surface ──
+    def write(self, text) -> int:
+        if not isinstance(text, str):
+            text = str(text)
+        if not text:
+            return 0
+        self._open.append(text)
+        if text.endswith("\n"):
+            self._done.append("".join(self._open))
+            self._open.clear()
+        return len(text)
+
+    def writable(self) -> bool:
+        return True
+
+    def isatty(self) -> bool:
+        return False
+
+    def flush(self) -> None:
+        pass
+
+    # ── capture surface ──
+    def segments(self) -> list:
+        if self._open:
+            return [*self._done, "".join(self._open)]
+        return list(self._done)
+
+    def getvalue(self) -> str:
+        return "".join(self._done) + "".join(self._open)
+
+
 def _run_cell(code: str):
-    buf = io.StringIO()
+    buf = _SegmentedStdout()
     value_repr = ""
     err = None
     saved = sys.stdout
@@ -239,6 +297,10 @@ def _run_cell(code: str):
             value = eval(compile(ast.Expression(last.value), "<cell>", "eval"), _NS)
             if value is not None:
                 value_repr = repr(value)
+                # REPL semantics: the displayed value stays reachable as ``_``
+                # in the next cell, so an unbound last expression (a tool call
+                # written bare) is never lost.
+                _NS["_"] = value
         else:
             exec(compile(tree, "<cell>", "exec"), _NS)
     except Exception as exc:
@@ -248,9 +310,10 @@ def _run_cell(code: str):
             err = err.rstrip("\n") + "\n" + hint + "\n"
     finally:
         sys.stdout = saved
-    out = buf.getvalue()
-    if len(out) > _STDOUT_CAP:
-        out = out[:_STDOUT_CAP] + f"\n…[stdout truncated at {_STDOUT_CAP} chars]"
+    # The registry is the runner's, not the cell's: rebinding ``_refs`` in a
+    # cell shadows the view, never the recording.
+    _NS["_refs"] = _REFS
+    out = truncate.fair_share_stdout(buf.segments(), _STDOUT_CAP)
     return out, value_repr, err
 
 
@@ -261,7 +324,17 @@ def _run_cell(code: str):
 # module, which won't exist in a fresh kernel — they are dropped (documented);
 # data (strings, numbers, containers, ResultRefs) survives.
 
-_CKPT_SKIP = ("ResultRef", "ToolError", "HostCallDenied", "Path", *vfs.PRELUDE_MODULES)
+_CKPT_SKIP = (
+    "ResultRef", "ToolError", "HostCallDenied", "Path",
+    # The registry itself is runner state, not cell data: a fresh kernel builds
+    # its own and re-adopts every ResultRef the restore brings back (see
+    # ``_restore``), so ``_refs[7]`` keeps resolving for refs a variable still
+    # holds. Refs that were only ever reachable through ``_refs`` — never
+    # bound in the cell — do not survive a kernel restart.
+    "_refs",
+    "_",
+    *vfs.PRELUDE_MODULES,
+)
 
 
 def _checkpoint() -> dict:
@@ -295,10 +368,16 @@ def _restore(vars_map: dict) -> dict:
     dropped: list = []
     for key, encoded in (vars_map or {}).items():
         try:
-            _NS[key] = pickle.loads(base64.b64decode(encoded))
-            restored.append(key)
+            value = pickle.loads(base64.b64decode(encoded))
         except Exception:
             dropped.append(key)
+            continue
+        _NS[key] = value
+        # A ResultRef pickles with its registry id, so re-adopting it here
+        # keeps ``_refs[7]`` resolving in the restarted kernel.
+        if isinstance(value, vfs.ResultRef):
+            _REFS.adopt(value)
+        restored.append(key)
     return {"kind": "restored", "restored": sorted(restored), "dropped": sorted(dropped)}
 
 
@@ -387,14 +466,16 @@ def _guard_filesystem() -> None:
 def _boot(config: dict) -> None:
     global _REF_THRESHOLD, _STDOUT_CAP, _NS
     _REF_THRESHOLD = config.get("ref_threshold", truncate.DEFAULT_LIMIT)
-    _STDOUT_CAP = config.get("stdout_cap", 16384)
+    _STDOUT_CAP = config.get("stdout_cap", truncate.DEFAULT_STDOUT_CAP)
     _apply_rlimit(config.get("mem_limit_bytes", 0))
     if not config.get("allow_network", False):
         _guard_network()
     if not config.get("allow_fs", False):
         _guard_filesystem()  # must precede make_namespace (it copies builtins)
     allowlist = set(config.get("allowlist") or vfs.DEFAULT_ALLOWLIST)
-    _NS = vfs.make_namespace(allowlist=allowlist, host_call=_host_call)
+    _NS = vfs.make_namespace(
+        allowlist=allowlist, host_call=_host_call, refs=_REFS
+    )
     vfs.install_finder(
         _SOURCES, _host_call,
         skills=_SKILLS, guarded_builtins=_NS["__builtins__"],

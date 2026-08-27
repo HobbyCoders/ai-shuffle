@@ -70,15 +70,105 @@ class ResultRef(str):
     entirely in-kernel with no further host round-trips — the persistent
     namespace keeps the full payload alive across ``run_python`` calls. Only its
     ``repr`` is truncated, so it never floods the model-facing output.
+
+    Every ref handed to a cell is registered in the namespace's
+    :class:`RefRegistry` (``_refs``) and carries that registry ``key``, which
+    its ``repr`` prints. A ref the cell forgot to bind — the classic
+    ``print(Read(...))`` with no assignment — is therefore never lost: the
+    model reads ``#7`` off the repr it already has and recovers the payload
+    with ``_refs[7]`` instead of re-running the tool.
     """
 
     _PREVIEW = 200
+
+    #: Registry id, stamped by :meth:`RefRegistry.register`. ``None`` until then.
+    key: int | None = None
 
     def __repr__(self) -> str:
         n = len(self)
         head = str.__str__(self)[: self._PREVIEW]
         more = " …" if n > self._PREVIEW else ""
-        return f"<ResultRef {n} bytes; preview={head!r}{more}>"
+        ident = f" #{self.key}:" if self.key is not None else ""
+        return f"<ResultRef{ident} {n} bytes; preview={head!r}{more}>"
+
+
+REF_REGISTRY_MAX = 50
+
+
+class RefRegistry:
+    """The cell namespace's ``_refs``: recent :class:`ResultRef`s by short id.
+
+    Bounded and FIFO — the oldest entry is evicted past ``max_entries`` so a
+    long session cannot pin every payload it ever read in kernel memory. Keys
+    are monotonic, so an evicted ``#3`` is never reused for a later ref (a
+    stale ``_refs[3]`` fails loudly instead of returning the wrong payload).
+    """
+
+    def __init__(self, max_entries: int = REF_REGISTRY_MAX) -> None:
+        self._max = max(1, max_entries)
+        self._by_key: dict[int, ResultRef] = {}
+        self._next = 1
+
+    def register(self, ref: ResultRef) -> ResultRef:
+        """Stamp ``ref`` with the next key (if unstamped) and store it."""
+        if getattr(ref, "key", None) is None:
+            try:
+                ref.key = self._next
+            except AttributeError:  # pragma: no cover - defensive
+                return ref
+            self._next += 1
+        return self.adopt(ref)
+
+    def adopt(self, ref: ResultRef) -> ResultRef:
+        """Re-register an already-keyed ref (checkpoint restore)."""
+        key = getattr(ref, "key", None)
+        if key is None:
+            return ref
+        self._by_key.pop(key, None)  # re-insert so it counts as newest
+        self._by_key[key] = ref
+        self._next = max(self._next, key + 1)
+        while len(self._by_key) > self._max:
+            self._by_key.pop(next(iter(self._by_key)))
+        return ref
+
+    def __getitem__(self, key: int) -> ResultRef:
+        try:
+            return self._by_key[key]
+        except KeyError:
+            known = ", ".join(f"#{k}" for k in sorted(self._by_key)) or "none"
+            raise KeyError(
+                f"no ResultRef #{key} in _refs (the last {self._max} are kept; "
+                f"currently held: {known}) — re-run the tool call to get a fresh one"
+            ) from None
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._by_key
+
+    def __iter__(self):
+        return iter(sorted(self._by_key))
+
+    def __len__(self) -> int:
+        return len(self._by_key)
+
+    def get(self, key: int, default: Any = None) -> Any:
+        return self._by_key.get(key, default)
+
+    def keys(self) -> list[int]:
+        return sorted(self._by_key)
+
+    def items(self) -> list[tuple[int, ResultRef]]:
+        return [(k, self._by_key[k]) for k in sorted(self._by_key)]
+
+    def values(self) -> list[ResultRef]:
+        return [self._by_key[k] for k in sorted(self._by_key)]
+
+    def __repr__(self) -> str:
+        if not self._by_key:
+            return "<_refs: empty — tool results over the ref threshold land here>"
+        held = ", ".join(
+            f"#{k} ({len(v)} bytes)" for k, v in sorted(self._by_key.items())
+        )
+        return f"<_refs: {len(self._by_key)} held — {held}>"
 
 
 def _leaf_callable(leaf: str, module: types.ModuleType) -> Any:
@@ -313,8 +403,18 @@ def _prelude(allowlist: set[str]) -> dict[str, Any]:
     return ns
 
 
-def make_namespace(*, allowlist: set[str], host_call: Callable[..., Any]) -> dict[str, Any]:
-    """Build the persistent exec namespace with a guarded ``__import__``."""
+def make_namespace(
+    *,
+    allowlist: set[str],
+    host_call: Callable[..., Any],
+    refs: RefRegistry | None = None,
+) -> dict[str, Any]:
+    """Build the persistent exec namespace with a guarded ``__import__``.
+
+    ``_refs`` (the ResultRef registry) and ``_`` (the previous cell's displayed
+    value, REPL-style) are pre-bound so a model that dropped a handle always
+    has a way back to the payload.
+    """
     guarded_builtins = dict(vars(builtins))
     guarded_builtins["__import__"] = make_guarded_import(allowlist)
     return {
@@ -324,5 +424,7 @@ def make_namespace(*, allowlist: set[str], host_call: Callable[..., Any]) -> dic
         "ResultRef": ResultRef,
         "ToolError": ToolError,
         "HostCallDenied": HostCallDenied,
+        "_refs": refs if refs is not None else RefRegistry(),
+        "_": None,
         **_prelude(allowlist),
     }
