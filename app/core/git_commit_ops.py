@@ -181,7 +181,11 @@ class GitCommitMixin:
             On failure the second element is the error message.
         """
         try:
-            args = ["commit", "-m", message]
+            # Last stop before the message becomes permanent history. Strips
+            # only unambiguous generation artifacts; prose is untouched.
+            from app.core.git_text import sanitize_commit_text
+
+            args = ["commit", "-m", sanitize_commit_text(message)]
             result = self._run_git(working_dir, args, timeout=30)
 
             if result.returncode == 0:
