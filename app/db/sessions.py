@@ -1196,17 +1196,76 @@ def set_working_set_ref(session_id: str, value: Optional[str]) -> bool:
         return cursor.rowcount > 0
 
 
+#: Session-scoped RUNTIME tables that carry a ``session_id`` but no foreign key
+#: into ``sessions``, so nothing cascades for them. Every one of these describes
+#: how a session RAN — its turn queue, its event log and seq counter, its runner
+#: leases, its pending prompts, its background-task mirror. None of it means
+#: anything once the session is gone, and all of it is what the live DB was
+#: found holding for sessions deleted months earlier. Deleting them here gives
+#: them the same lifetime the FK-carrying tables (``session_messages``,
+#: ``sync_log``, ``session_tags``, ``queued_messages``) already get for free.
+_SESSION_RUNTIME_TABLES = (
+    "turns",
+    "session_events",
+    "session_event_counters",
+    "runs",
+    "pending_interactions",
+    "background_tasks",
+)
+
+
 def delete_session(session_id: str) -> bool:
-    """Delete a session and its messages"""
+    """Delete a session, its messages, and its session-scoped runtime rows.
+
+    Three different lifetimes, deliberately:
+
+    * **Runtime state is deleted** (``_SESSION_RUNTIME_TABLES``). It has no
+      meaning without the session and no FK to remove it, so it simply
+      accumulated — orphan ``turns`` / ``session_events`` / ``runs`` rows for
+      sessions that no longer exist.
+    * **The usage ledger is UNLINKED, not deleted** (``usage_log.session_id ->
+      NULL``). Those rows are the spend history the analytics endpoints
+      aggregate; deleting them would silently rewrite finished cost reports for
+      past days. This is exactly what ``delete_profile`` already does with
+      ``usage_log.profile_id``, and what the schema's own soft links
+      (``connector_sessions``, ``automation_runs``) express as
+      ``ON DELETE SET NULL``.
+    * **Child sessions SURVIVE, unlinked** (``parent_session_id -> NULL``).
+      A child here is a fork or a ProviderAgent worker: an independently
+      readable transcript with its own row in the session lists. Cascading the
+      delete down the tree would destroy conversations the user never asked to
+      remove, so the pointer is cleared instead — the same ``ON DELETE SET
+      NULL`` shape ``sessions`` already uses for ``project_id`` /
+      ``profile_id`` / ``worktree_id``. Their own runtime rows stay valid
+      because their session rows do.
+
+    All of it runs in the single transaction that drops the session row, so a
+    failure leaves the session and its dependents intact together.
+    """
     # V2 Phase 4 (Q6): best-effort scratch-ref cleanup before the row dies, so a
     # hard-deleted session leaves no dangling working-set ref on origin. Fully
     # flag-gated and failure-swallowed — flag OFF (or no ref) issues ZERO git
     # commands, and any git failure never blocks the delete.
     _cleanup_working_set_ref(session_id)
     _cleanup_pending_wakeups(session_id)
+    _ph = ph()
     with get_db() as conn:
         cursor = get_cursor(conn)
-        cursor.execute(f"DELETE FROM sessions WHERE id = {ph()}", (session_id,))
+        cursor.execute(
+            f"UPDATE sessions SET parent_session_id = NULL "
+            f"WHERE parent_session_id = {_ph}",
+            (session_id,),
+        )
+        cursor.execute(
+            f"UPDATE usage_log SET session_id = NULL WHERE session_id = {_ph}",
+            (session_id,),
+        )
+        for table in _SESSION_RUNTIME_TABLES:
+            # Table names are a module-level literal tuple, never user input.
+            cursor.execute(
+                f"DELETE FROM {table} WHERE session_id = {_ph}", (session_id,)
+            )
+        cursor.execute(f"DELETE FROM sessions WHERE id = {_ph}", (session_id,))
         return cursor.rowcount > 0
 
 
