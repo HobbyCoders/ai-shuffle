@@ -184,12 +184,25 @@ def create_postgres_schema(cursor) -> None:
             status TEXT DEFAULT 'active',
             is_active BOOLEAN DEFAULT FALSE,
             total_cost_usd DOUBLE PRECISION DEFAULT 0,
-            total_tokens_in INTEGER DEFAULT 0,
-            total_tokens_out INTEGER DEFAULT 0,
+            -- Cumulative usage. total_tokens_in counts FRESH input only (the
+            -- provider normalizes Anthropic-style, so cache reads are excluded);
+            -- the two total_cache_* columns carry the rest. True prompt tokens
+            -- for a session = total_tokens_in + total_cache_read_tokens +
+            -- total_cache_creation_tokens. BIGINT because a cache-heavy session
+            -- blows past INTEGER's 2.1B ceiling.
+            total_tokens_in BIGINT DEFAULT 0,
+            total_tokens_out BIGINT DEFAULT 0,
+            total_cache_read_tokens BIGINT DEFAULT 0,
+            total_cache_creation_tokens BIGINT DEFAULT 0,
+            -- Snapshot (NOT cumulative) of the LAST API call's usage — this is
+            -- what the context bar renders on reload.
             last_input_tokens INTEGER DEFAULT 0,
             cache_creation_tokens INTEGER DEFAULT 0,
             cache_read_tokens INTEGER DEFAULT 0,
+            -- turn_count counts USER-VISIBLE turns (one per completed turn);
+            -- total_model_calls counts the API hops inside them.
             turn_count INTEGER DEFAULT 0,
+            total_model_calls INTEGER DEFAULT 0,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             parent_session_id TEXT,
@@ -317,8 +330,12 @@ def create_postgres_schema(cursor) -> None:
             session_id TEXT,
             profile_id TEXT,
             model TEXT,
+            -- tokens_in is FRESH input only; the cache columns carry the rest of
+            -- the prompt, so a row's true prompt size is the sum of all three.
             tokens_in INTEGER,
             tokens_out INTEGER,
+            cache_read_tokens BIGINT DEFAULT 0,
+            cache_creation_tokens BIGINT DEFAULT 0,
             cost_usd DOUBLE PRECISION,
             duration_ms INTEGER,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()

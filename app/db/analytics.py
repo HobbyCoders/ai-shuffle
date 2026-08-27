@@ -122,15 +122,26 @@ def log_usage(
     tokens_in: int,
     tokens_out: int,
     cost_usd: float,
-    duration_ms: int
+    duration_ms: int,
+    cache_read_tokens: int = 0,
+    cache_creation_tokens: int = 0,
 ):
-    """Log usage for tracking"""
+    """Log usage for tracking.
+
+    ``tokens_in`` is FRESH input only (usage is normalized Anthropic-style, so
+    cache reads are excluded from it). A turn's true prompt size is
+    ``tokens_in + cache_read_tokens + cache_creation_tokens``.
+    """
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO usage_log (session_id, profile_id, model, tokens_in, tokens_out, cost_usd, duration_ms)
-               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-            (session_id, profile_id, model, tokens_in, tokens_out, cost_usd, duration_ms)
+            """INSERT INTO usage_log (session_id, profile_id, model, tokens_in, tokens_out,
+                                      cache_read_tokens, cache_creation_tokens,
+                                      cost_usd, duration_ms)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (session_id, profile_id, model, tokens_in, tokens_out,
+             cache_read_tokens or 0, cache_creation_tokens or 0,
+             cost_usd, duration_ms)
         )
 
     # Update in-memory usage cache (avoids DB re-read on next load)
@@ -545,7 +556,13 @@ def get_analytics_top_sessions(
                 s.profile_id,
                 p.name as profile_name,
                 s.total_cost_usd,
-                s.total_tokens_in,
+                -- TRUE prompt tokens. s.total_tokens_in is FRESH input only, so
+                -- on a cache-heavy session it under-reports by roughly an order
+                -- of magnitude; the cumulative cache columns are the rest.
+                COALESCE(s.total_tokens_in, 0)
+                    + COALESCE(s.total_cache_read_tokens, 0)
+                    + COALESCE(s.total_cache_creation_tokens, 0)
+                    AS total_tokens_in,
                 s.total_tokens_out,
                 s.created_at
             FROM sessions s

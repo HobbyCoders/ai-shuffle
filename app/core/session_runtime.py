@@ -340,6 +340,34 @@ _WS_TRIMMED_RENDER_FRAMES = frozenset({
 })
 _WS_KEPT_SUBAGENT_FRAMES = frozenset({"subagent_tool_use", "subagent_tool_result"})
 
+# Frames that only the MODEL can produce. A steer is folded into a tool result,
+# so one of these arriving after a delivery receipt means the model has been
+# round-tripped WITH the interjection in its context — it read it. Tool results
+# are deliberately absent: they are the carrier, not the model's reply to it.
+_MODEL_OUTPUT_FRAMES = frozenset({
+    "chunk",
+    "text",
+    "stream_delta",
+    "stream_block_start",
+    "thinking_block",
+    "tool_use",
+})
+
+# Bounded retry for the absorb that retires a delivered steer's queue row.
+_ABSORB_ATTEMPTS = 3
+_ABSORB_BACKOFF = 0.2
+
+# Prepended to the prompt of a turn whose text fluid already delivered as a
+# mid-turn interjection but whose queue row could not be retired. The re-run is
+# unavoidable at that point; saying so beats letting the model wonder why it is
+# being asked the same thing twice.
+_REDELIVERY_NOTE = (
+    "[note: this message was already delivered to you mid-turn, folded into a "
+    "tool result, but that delivery could not be confirmed — so it is being sent "
+    "again. If you have already acted on it, say so briefly instead of redoing "
+    "the work.]"
+)
+
 
 def _is_trimmed_render_frame(event_type: Optional[str]) -> bool:
     """True if this frame type is render-only and must not hit the chat WS."""
@@ -462,6 +490,12 @@ class SessionRuntime:
         # whether an absorbed message died unanswered inside an interrupt.
         # Per-turn by construction, like ``_steer_attempted``.
         self._steer_absorbed: Dict[str, tuple] = {}
+        # When this turn last produced MODEL output (text, thinking, a tool call)
+        # — same clock as the absorb stamps above. A steer lands inside a tool
+        # result, so any model output after its absorb stamp is proof the model
+        # read the interjection and acted on it. ``_requeue_stranded_steers`` uses
+        # that to stop replaying a message the model already answered.
+        self._model_output_at: Optional[float] = None
         # When THIS runtime was told to kill the turn — ``interrupt()``'s first
         # instruction, on the same high-resolution clock as the absorb stamps above.
         # ``None`` means no interrupt was ever driven here (a plain error/crash
@@ -815,6 +849,12 @@ class SessionRuntime:
         already_recorded = bool(
             (self.turn.get("payload") or {}).get("user_message_already_recorded")
         )
+        # A row whose steer reached the model but whose absorb never landed. The
+        # engine gets the prompt with an honest note in front of it; the stores
+        # and the recorder keep the user's own words.
+        engine_prompt = prompt
+        if (self.turn.get("payload") or {}).get("steer_already_delivered"):
+            engine_prompt = f"{_REDELIVERY_NOTE}\n\n{prompt}" if prompt else prompt
         if (
             not resume
             and not already_recorded
@@ -843,7 +883,7 @@ class SessionRuntime:
                 )
         try:
             async for event in _stream_to_websocket_impl(
-                prompt=prompt,
+                prompt=engine_prompt,
                 resume=resume,
                 session_id=self.session_id,
                 profile_id=self.turn.get("profile_id"),
@@ -872,6 +912,8 @@ class SessionRuntime:
                     # WS leg as itself.
                     await self._on_steer_delivered(recorder, event)
                     continue
+                if etype in _MODEL_OUTPUT_FRAMES:
+                    self._model_output_at = time.perf_counter()
                 await recorder.on_event(event)
                 if etype in ("done", "interrupted", "error"):
                     self._terminal = etype
@@ -1144,23 +1186,78 @@ class SessionRuntime:
                 profile_id=profile_id,
                 command_id=row.get("command_id"),
             )
-            try:
-                if await asyncio.to_thread(turns_db.absorb_queued_turn, row_id):
-                    absorbed = True
-                    # Remember WHEN this turn swallowed the row, and the row
-                    # itself: if the turn then dies from an interrupt the user
-                    # asked for BEFORE this moment, ``_finalize`` puts the
-                    # message back on the queue rather than leaving it in the
-                    # transcript with no answer under it.
-                    self._steer_absorbed[row_id] = (time.perf_counter(), row)
-            except Exception:
-                logger.warning(
-                    "SessionRuntime: absorb failed for steered turn %s", row_id,
-                    exc_info=True,
-                )
+            if await self._absorb_delivered_row(row_id):
+                absorbed = True
+                # Remember WHEN this turn swallowed the row, and the row
+                # itself: if the turn then dies from an interrupt the user
+                # asked for BEFORE this moment, ``_finalize`` puts the
+                # message back on the queue rather than leaving it in the
+                # transcript with no answer under it.
+                self._steer_absorbed[row_id] = (time.perf_counter(), row)
         if absorbed:
             # The rows left the queue — clear their pending bubbles everywhere.
             await _broadcast_queue_after_start(self.session_id)
+
+    async def _absorb_delivered_row(self, row_id: str) -> bool:
+        """Retire a delivered steer's queue row, retrying a failing write.
+
+        This absorb is the only thing between a delivered interjection and a
+        SECOND delivery: a row left ``queued`` runs again as an ordinary turn and
+        the model reads the same sentence twice. The usual cause of a failure
+        here is a transient DB error, which clears, so a couple of quick retries
+        buy back most of that window.
+
+        Returns True only for the transition that actually absorbed the row. A
+        plain ``False`` from the guarded UPDATE means the row already left the
+        queue — an answer, not a failure, and not retried. When every attempt
+        raises, the row is marked so the re-run it will now cause carries an
+        honest note about the duplicate.
+        """
+        for attempt in range(_ABSORB_ATTEMPTS):
+            try:
+                return await asyncio.to_thread(turns_db.absorb_queued_turn, row_id)
+            except Exception:
+                last = attempt + 1 >= _ABSORB_ATTEMPTS
+                logger.warning(
+                    "SessionRuntime: absorb failed for steered turn %s "
+                    "(attempt %d/%d)%s",
+                    row_id, attempt + 1, _ABSORB_ATTEMPTS,
+                    "" if last else " — retrying",
+                    exc_info=last,
+                )
+                if last:
+                    break
+                await asyncio.sleep(_ABSORB_BACKOFF * (attempt + 1))
+        await self._flag_redelivery(row_id)
+        return False
+
+    async def _flag_redelivery(self, row_id: str) -> None:
+        """Mark a delivered-but-unabsorbed row as a known duplicate.
+
+        The text is already in the model's context — fluid folded it into a tool
+        result — and the row is still queued, so it WILL run again. Nothing can
+        take the first delivery back, so the honest thing is to tell the re-run
+        what happened; ``_run_pump`` turns this flag into a one-line note in front
+        of the prompt it sends. The stored prompt is left exactly as the user
+        typed it, so neither the transcript nor the pending bubble changes.
+
+        Best-effort: a turn that is already limping must still settle.
+        """
+        try:
+            row = await asyncio.to_thread(turns_db.get_turn, row_id)
+            if row is None or row.get("state") != "queued":
+                return
+            payload = dict(row.get("payload") or {})
+            payload["steer_already_delivered"] = True
+            await asyncio.to_thread(
+                turns_db.update_queued_turn_prompt,
+                row_id, row.get("prompt") or "", payload,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "SessionRuntime: could not flag re-delivery on turn %s", row_id,
+                exc_info=True,
+            )
 
     async def _persist_user_message(
         self, content: str, *, profile_id: Optional[str] = None
@@ -1357,6 +1454,16 @@ class SessionRuntime:
         queueing: had the message stayed in the queue it would simply have run
         after the abort.
 
+        Both lines are then crossed with one more fact: whether the model
+        actually READ the interjection. A steer arrives folded into a tool result,
+        so any model output after its absorb stamp means the model was round-
+        tripped with the text in context and worked on it. Re-running such a row
+        shows the model the same sentence twice — the audit watched an
+        interjection arrive on a tool result and then again, minutes later, as a
+        standalone user turn, because a long turn that eventually errored replayed
+        every steer it had ever absorbed. A row the model demonstrably consumed
+        stays consumed.
+
         The re-run carries ``user_message_already_recorded`` so it adds nothing
         to the transcript: the ``message.user`` is up there already, written by
         the receipt. It goes to the FRONT of the queue (the failover-retry
@@ -1371,11 +1478,13 @@ class SessionRuntime:
         if not absorbed:
             return
         cutoff = requested if requested is not None else float("-inf")
+        answered = self._model_output_at
         stranded = sorted(
             (
                 (stamp, row_id, row)
                 for row_id, (stamp, row) in absorbed.items()
                 if stamp >= cutoff
+                and not (answered is not None and answered > stamp)
             ),
             key=lambda item: item[0],
         )

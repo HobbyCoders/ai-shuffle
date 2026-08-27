@@ -552,6 +552,56 @@ def _run_column_migrations(cursor):
         if not column_exists(cursor, "sessions", "launched_model"):
             cursor.execute("ALTER TABLE sessions ADD COLUMN launched_model TEXT")
             migrations_applied.append("sessions.launched_model")
+        # True token accounting (audit P8). `total_tokens_in` holds FRESH input
+        # only — the provider normalizes usage Anthropic-style, so cache reads are
+        # excluded — while the per-turn cache numbers only ever landed in the
+        # OVERWRITE snapshot columns (cache_read_tokens / cache_creation_tokens).
+        # On a cache-heavy session that hid ~90% of the prompt tokens ever spent.
+        # These three columns accumulate what the snapshots throw away.
+        if not column_exists(cursor, "sessions", "total_cache_read_tokens"):
+            cursor.execute(
+                "ALTER TABLE sessions ADD COLUMN total_cache_read_tokens BIGINT DEFAULT 0"
+            )
+            migrations_applied.append("sessions.total_cache_read_tokens")
+        if not column_exists(cursor, "sessions", "total_cache_creation_tokens"):
+            cursor.execute(
+                "ALTER TABLE sessions ADD COLUMN total_cache_creation_tokens BIGINT DEFAULT 0"
+            )
+            migrations_applied.append("sessions.total_cache_creation_tokens")
+        # `turn_count` was fed the fluid path's num_turns, which is the MODEL-CALL
+        # count (harness_adapter sets num_turns=event.num_model_calls) — a 1-turn
+        # child read as 16 turns. turn_count now counts turns; the model calls get
+        # their own column.
+        if not column_exists(cursor, "sessions", "total_model_calls"):
+            cursor.execute(
+                "ALTER TABLE sessions ADD COLUMN total_model_calls INTEGER DEFAULT 0"
+            )
+            migrations_applied.append("sessions.total_model_calls")
+        # INTEGER caps at 2.1B, which a long-lived session's cumulative prompt
+        # tokens now genuinely reach. ALTER ... TYPE rewrites the table, so it is
+        # wrapped in an EXISTS guard rather than re-run every boot. A DO block
+        # (Postgres-only, and skipped wholesale by the SQLite test shim, whose
+        # INTEGER is already 64-bit). The guard reads pg_attribute rather than
+        # information_schema deliberately: the shim rewrites any statement
+        # mentioning information_schema.columns into a two-parameter pragma
+        # query before it ever gets to skip it.
+        try:
+            cursor.execute("""
+                DO $$ BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM pg_attribute a
+                        WHERE a.attrelid = 'sessions'::regclass
+                          AND a.attname IN ('total_tokens_in', 'total_tokens_out')
+                          AND a.atttypid <> 'bigint'::regtype
+                    ) THEN
+                        ALTER TABLE sessions
+                            ALTER COLUMN total_tokens_in TYPE BIGINT,
+                            ALTER COLUMN total_tokens_out TYPE BIGINT;
+                    END IF;
+                END $$
+            """)
+        except _DB_ERRORS:
+            pass  # a backend without DO blocks — the columns stay as they are
         # Legacy cloud offload removal (v48): the per-session proxy model
         # (cloud_remote_url / cloud_remote_session_id) is superseded by the
         # cluster intake/relay, which shares one session id across installs via
@@ -576,6 +626,21 @@ def _run_column_migrations(cursor):
                     logger.info(f"Backfilled worktree_branch/worktree_path for {backfilled} sessions")
             except _DB_ERRORS:
                 pass  # worktrees table may not exist yet
+
+    # Per-turn cache usage on the usage log (audit P8). Without these a usage row
+    # records only the fresh input tokens, so replaying the log can never
+    # reconstruct what a cache-heavy turn actually sent to the provider.
+    if table_exists(cursor, "usage_log"):
+        if not column_exists(cursor, "usage_log", "cache_read_tokens"):
+            cursor.execute(
+                "ALTER TABLE usage_log ADD COLUMN cache_read_tokens BIGINT DEFAULT 0"
+            )
+            migrations_applied.append("usage_log.cache_read_tokens")
+        if not column_exists(cursor, "usage_log", "cache_creation_tokens"):
+            cursor.execute(
+                "ALTER TABLE usage_log ADD COLUMN cache_creation_tokens BIGINT DEFAULT 0"
+            )
+            migrations_applied.append("usage_log.cache_creation_tokens")
 
     # Add action_steps column to automations for multi-step connector actions (v36)
     if table_exists(cursor, "automations") and not column_exists(cursor, "automations", "action_steps"):
