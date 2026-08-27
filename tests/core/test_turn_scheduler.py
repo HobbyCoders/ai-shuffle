@@ -1262,7 +1262,8 @@ async def test_bare_then_rich_frame_upgrades_prompt(mock_db):
         await _drain_kicks()
         (before,) = _by_source("bt1", "unpark")
         assert "<summary></summary>" in before["prompt"]              # bare: empty
-        assert "<subagent_tokens></subagent_tokens>" in before["prompt"]
+        # R16: an all-blank <usage> block is omitted, not emitted empty.
+        assert "<usage>" not in before["prompt"]
 
         await turn_scheduler.on_task_terminal("bt1", rich)
         await _drain_kicks()
@@ -1566,6 +1567,60 @@ def test_one_task_id_yields_one_block_per_prompt():
     # The richer frame wins, in the first occurrence's position.
     assert "<summary>the real report</summary>" in prompt
     assert prompt.index("task-d") < prompt.index("task-e")
+
+
+# ---------------------------------------------------------------------------
+# R16 — template cosmetics: no blank tags, and a monitor is not a subagent
+# ---------------------------------------------------------------------------
+
+
+def test_blank_identity_tags_are_omitted():
+    """A shell monitor has no tool-use id and no output file. Emitting them
+    blank read like fields the notification had failed to populate."""
+    prompt = _prompt_for(task_id="mon-1", tool_use_id="", output_file="",
+                         summary="done", kind="shell")
+
+    assert "<tool-use-id>" not in prompt
+    assert "<output-file>" not in prompt
+    assert "<task-id>mon-1</task-id>" in prompt
+    assert "<status>completed</status>" in prompt
+
+
+def test_populated_identity_tags_are_kept():
+    prompt = _prompt_for(task_id="agent-1", tool_use_id="tu-1",
+                         output_file="/tmp/agent-1.jsonl", summary="done")
+
+    assert "<tool-use-id>tu-1</tool-use-id>" in prompt
+    assert "<output-file>/tmp/agent-1.jsonl</output-file>" in prompt
+
+
+def test_a_shell_monitor_is_labelled_a_monitor_not_a_subagent():
+    prompt = _prompt_for(task_id="mon-2", tool_use_id="", summary="exit 0",
+                         kind="shell", usage={"total_tokens": 10})
+
+    assert "<kind>monitor</kind>" in prompt
+    assert "subagent" not in prompt
+    assert "<usage>" not in prompt
+
+
+def test_an_agent_frame_keeps_its_usage_and_gets_no_kind_element():
+    prompt = _prompt_for(task_id="agent-2", summary="done",
+                         usage={"total_tokens": 99, "tool_uses": 3,
+                                "duration_ms": 2000})
+
+    assert "<kind>" not in prompt
+    assert "<subagent_tokens>99</subagent_tokens>" in prompt
+    assert "<tool_uses>3</tool_uses>" in prompt
+    assert "<duration_ms>2000</duration_ms>" in prompt
+
+
+def test_an_all_blank_usage_block_is_omitted_and_partial_usage_is_kept():
+    assert "<usage>" not in _prompt_for(summary="done", usage={})
+
+    partial = _prompt_for(summary="done", usage={"total_tokens": 5})
+    assert "<subagent_tokens>5</subagent_tokens>" in partial
+    assert "<tool_uses>" not in partial
+    assert "<duration_ms>" not in partial
 
 
 def test_frames_without_a_task_id_are_all_kept():
