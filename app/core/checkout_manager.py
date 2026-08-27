@@ -35,9 +35,10 @@ import os
 import posixpath
 import re
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.config import settings
 from app.core.git_service import git_service
@@ -574,6 +575,17 @@ def _ensure_branch_checkout(
         )
         return None
 
+    # Node packages are gitignored, so the new worktree has none. Link them
+    # from the checkout it branched off before anyone tries to build in it.
+    # Best-effort by contract: a failure here degrades the worktree, it does
+    # not invalidate it.
+    try:
+        provision_node_modules(base_path, dest_str)
+    except Exception as e:  # noqa: BLE001 - defence in depth
+        logger.warning(
+            "checkout_manager: node provisioning raised for %s: %s", dest_str, e
+        )
+
     checkouts_db.upsert_checkout(
         project_id, runner_id, dest_str, branch=branch, status="active"
     )
@@ -585,6 +597,174 @@ def _ensure_branch_checkout(
         dest_str,
     )
     return dest_str
+
+
+# ---------------------------------------------------------------------------
+# Node provisioning for a fresh worktree
+# ---------------------------------------------------------------------------
+
+# A worktree starts with no node_modules — it is gitignored, so `git worktree
+# add` never brings it across. Every frontend command in the new checkout then
+# fails until someone reinstalls a tree that already exists one directory over,
+# on the same lockfile, for the same project. Linking it is instant.
+
+_SVELTE_CONFIG_NAMES = (
+    "svelte.config.js",
+    "svelte.config.ts",
+    "svelte.config.mjs",
+    "svelte.config.cjs",
+)
+
+# `svelte-kit sync` generates .svelte-kit/ (tsconfig, $types, route manifests).
+# Without it svelte-check and vite fail on a fresh checkout.
+_SVELTE_SYNC_TIMEOUT_SECONDS = 300
+
+
+def _node_package_dirs(root: Path) -> List[Path]:
+    """Directories under ``root`` that look like a node package.
+
+    The root itself plus its immediate subdirectories. One level is enough for
+    the common "the app lives in frontend/" layout without walking a whole
+    repository, and it keeps the cost at a single listdir.
+    """
+    found: List[Path] = []
+    try:
+        if (root / "package.json").is_file():
+            found.append(root)
+        children = sorted(p for p in root.iterdir() if p.is_dir())
+    except OSError as e:
+        logger.debug("checkout_manager: cannot scan %s for packages: %s", root, e)
+        return found
+
+    for child in children:
+        if child.name.startswith(".") or child.name == "node_modules":
+            continue
+        try:
+            if (child / "package.json").is_file():
+                found.append(child)
+        except OSError:  # pragma: no cover - defensive
+            continue
+    return found
+
+
+def _link_directory(source: Path, dest: Path) -> None:
+    """Point ``dest`` at ``source``: symlink on POSIX, junction on Windows.
+
+    The worker is Linux, where a plain directory symlink is enough. On a
+    Windows dev host an unprivileged symlink is refused, so a junction — which
+    needs no privilege — is used instead. Raises on failure; the caller logs.
+    """
+    if os.name == "nt":
+        import _winapi
+
+        _winapi.CreateJunction(str(source), str(dest))
+    else:
+        os.symlink(str(source), str(dest), target_is_directory=True)
+
+
+def _run_svelte_kit_sync(package_dir: Path) -> bool:
+    """Best-effort ``npx svelte-kit sync``. Returns whether it succeeded."""
+    try:
+        result = subprocess.run(
+            ["npx", "svelte-kit", "sync"],
+            cwd=str(package_dir),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_SVELTE_SYNC_TIMEOUT_SECONDS,
+            shell=(os.name == "nt"),
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.debug(
+            "checkout_manager: svelte-kit sync could not run in %s: %s",
+            package_dir,
+            e,
+        )
+        return False
+
+    if result.returncode != 0:
+        logger.debug(
+            "checkout_manager: svelte-kit sync failed in %s (rc=%s): %s",
+            package_dir,
+            result.returncode,
+            (result.stderr or "").strip()[:400],
+        )
+        return False
+    return True
+
+
+def provision_node_modules(source_root: str, dest_root: str) -> Dict[str, List[str]]:
+    """Give a fresh worktree the source checkout's installed node packages.
+
+    For each package directory the two checkouts share, links the source's
+    ``node_modules`` into the worktree and then runs ``svelte-kit sync`` where a
+    svelte config says it is a SvelteKit app.
+
+    Entirely best-effort and never raises: a worktree without node_modules is
+    degraded, not broken, and it must not cost anyone a checkout. Returns a
+    summary of what happened, which is what the tests assert on.
+    """
+    summary: Dict[str, List[str]] = {
+        "linked": [],
+        "synced": [],
+        "skipped": [],
+        "errors": [],
+    }
+    try:
+        source = Path(source_root)
+        dest = Path(dest_root)
+        packages = _node_package_dirs(dest)
+    except Exception as e:  # noqa: BLE001 - never fail a checkout over this
+        logger.warning("checkout_manager: node provisioning aborted: %s", e)
+        summary["errors"].append(str(e))
+        return summary
+
+    for package in packages:
+        rel = package.relative_to(dest)
+        source_modules = source / rel / "node_modules"
+        dest_modules = package / "node_modules"
+        label = str(rel) if str(rel) != "." else "<root>"
+
+        try:
+            if dest_modules.exists() or dest_modules.is_symlink():
+                summary["skipped"].append(f"{label}: already present")
+            elif not source_modules.is_dir():
+                summary["skipped"].append(f"{label}: source has no node_modules")
+            else:
+                _link_directory(source_modules, dest_modules)
+                summary["linked"].append(label)
+                logger.info(
+                    "checkout_manager: linked node_modules for %s into %s",
+                    label,
+                    package,
+                )
+        except Exception as e:  # noqa: BLE001
+            summary["errors"].append(f"{label}: link failed: {e}")
+            logger.warning(
+                "checkout_manager: could not link node_modules for %s in %s: %s",
+                label,
+                package,
+                e,
+            )
+            # No modules means sync cannot work either.
+            continue
+
+        try:
+            has_svelte_config = any(
+                (package / name).is_file() for name in _SVELTE_CONFIG_NAMES
+            )
+        except OSError:  # pragma: no cover - defensive
+            has_svelte_config = False
+
+        if not has_svelte_config:
+            continue
+        if _run_svelte_kit_sync(package):
+            summary["synced"].append(label)
+        else:
+            summary["errors"].append(f"{label}: svelte-kit sync failed")
+
+    return summary
 
 
 def ensure_checkout(
