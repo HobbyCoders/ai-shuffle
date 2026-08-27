@@ -10,7 +10,7 @@
 	 * direct git actions. Branch selector is locked during streaming.
 	 */
 	import { onDestroy } from 'svelte';
-	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, ExternalLink, TriangleAlert } from 'lucide-svelte';
+	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert } from 'lucide-svelte';
 	import { git, diffStats, gitStatus, branches as branchStore, gitMode, changedFiles } from '$lib/stores/git.svelte';
 	import { checkoutBranchWithToast } from '$lib/stores/gitCheckoutAction';
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
@@ -633,23 +633,6 @@
 		</div>
 	{/if}
 
-	<!-- Open-PR chip: informational link to the PR on GitHub whenever one
-	     exists for this branch — distinct from the Finish button (which is the
-	     action). Lets the user peek at CI status / discussion without leaving. -->
-	{#if openPR}
-		<a
-			class="git-btn pr-chip"
-			href={openPR.url}
-			target="_blank"
-			rel="noopener noreferrer"
-			title={`Open PR #${openPR.number}: ${openPR.title}`}
-		>
-			<GitPullRequest size={13} strokeWidth={1.5} />
-			<span class="btn-label">PR #{openPR.number}</span>
-			<ExternalLink size={10} strokeWidth={1.5} />
-		</a>
-	{/if}
-
 	<!-- Diff stats (clickable to open review panel) -->
 	{#if hasChanges}
 		<button
@@ -691,18 +674,6 @@
 		display: flex;
 		align-items: center;
 		gap: 4px;
-	}
-
-	.pr-chip {
-		display: inline-flex;
-		align-items: center;
-		gap: 4px;
-		text-decoration: none;
-		color: inherit;
-	}
-
-	.pr-chip:hover {
-		text-decoration: underline;
 	}
 
 	.branch-selector {

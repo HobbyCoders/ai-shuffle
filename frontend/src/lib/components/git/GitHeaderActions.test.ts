@@ -227,18 +227,12 @@ describe('GitHeaderActions button visibility', () => {
 		expect(finishBtn.disabled).toBe(false);
 	});
 
-	it('shows an informational PR chip linking to the PR', () => {
+	it('does not render the informational PR chip even with an open PR', () => {
 		cleanAheadBranch();
 		renderHeader({ openPR: { number: 42, title: 'My PR', url: 'http://x/pr/42' } });
-		const chip = screen.getByRole('link', { name: /PR #42/ }) as HTMLAnchorElement;
-		expect(chip.getAttribute('href')).toBe('http://x/pr/42');
-		expect(chip.getAttribute('target')).toBe('_blank');
-	});
-
-	it('no PR chip when there is no open PR', () => {
-		cleanAheadBranch();
-		renderHeader();
 		expect(screen.queryByRole('link', { name: /PR #/ })).toBeNull();
+		// Finish stays as the PR entry point.
+		expect(screen.getByText('Finish')).toBeTruthy();
 	});
 
 	it('shows Create PR when differsFromBase even with zero commits ahead', () => {
