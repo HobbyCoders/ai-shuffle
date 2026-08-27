@@ -934,6 +934,180 @@ async def test_a_requeued_steer_records_nothing_when_it_runs(mock_db):
 
 
 # ---------------------------------------------------------------------------
+# 4b. A steer the model actually read is never replayed
+# ---------------------------------------------------------------------------
+#
+# The re-queue rescues a message that reached the transcript and got no answer.
+# It must not rescue one the model DID answer: a steer arrives folded into a
+# tool result, so model output after the delivery is proof the model was
+# round-tripped with the interjection in context. The audit watched exactly that
+# go wrong — an interjection appended to a tool result, then again as a
+# standalone user turn minutes later, because a long turn that eventually errored
+# replayed every steer it had ever absorbed.
+
+
+async def test_a_steer_the_model_worked_on_is_not_replayed_by_an_error(mock_db):
+    """The error-abort branch has no interrupt time to draw a line against, so
+    without the consumed check it re-queues everything — including a steer the
+    model demonstrably answered."""
+    _seed_session("s18")
+    live = turns_db.enqueue_turn("s18", "user", prompt="the live one")
+    queued = turns_db.enqueue_turn("s18", "user", prompt="wait, check the logs")
+    events = [
+        {"type": "steer_delivered", "steers": [
+            {"id": queued["id"], "text": "wait, check the logs"},
+        ]},
+        # The model read it and kept working.
+        {"type": "tool_use", "id": "t1", "name": "Bash"},
+        {"type": "chunk", "content": "checking the logs now"},
+        {"type": "error", "error": "boom"},
+    ]
+
+    with _pump_env(_pump(events)):
+        assert await session_runtime.SessionRuntime(live).execute() == "aborted"
+
+    assert turns_db.get_turn(queued["id"])["stop_reason"] == "steered"
+    assert turns_db.get_queued_turns("s18") == []
+
+
+async def test_a_steer_delivered_after_the_last_model_output_still_comes_back(
+    mock_db,
+):
+    """The rescue itself is intact: model output BEFORE the delivery says
+    nothing about whether the model saw the interjection."""
+    _seed_session("s19")
+    live = turns_db.enqueue_turn("s19", "user", prompt="the live one")
+    queued = turns_db.enqueue_turn("s19", "user", prompt="one more thing")
+    events = [
+        {"type": "chunk", "content": "working"},
+        {"type": "steer_delivered", "steers": [
+            {"id": queued["id"], "text": "one more thing"},
+        ]},
+        {"type": "error", "error": "boom"},
+    ]
+
+    with _pump_env(_pump(events)):
+        assert await session_runtime.SessionRuntime(live).execute() == "aborted"
+
+    rows = turns_db.get_queued_turns("s19")
+    assert [r["prompt"] for r in rows] == ["one more thing"]
+    assert rows[0]["payload"]["user_message_already_recorded"] is True
+
+
+async def test_only_the_steers_the_model_never_reached_come_back(mock_db):
+    """Two steers, one boundary: the first was worked on, the second landed
+    after the model went quiet."""
+    _seed_session("s20")
+    live = turns_db.enqueue_turn("s20", "user", prompt="the live one")
+    first = turns_db.enqueue_turn("s20", "user", prompt="one")
+    second = turns_db.enqueue_turn("s20", "user", prompt="two")
+    events = [
+        {"type": "steer_delivered", "steers": [{"id": first["id"], "text": "one"}]},
+        {"type": "chunk", "content": "on it"},
+        {"type": "steer_delivered", "steers": [{"id": second["id"], "text": "two"}]},
+        {"type": "error", "error": "boom"},
+    ]
+
+    with _pump_env(_pump(events)):
+        assert await session_runtime.SessionRuntime(live).execute() == "aborted"
+
+    assert [r["prompt"] for r in turns_db.get_queued_turns("s20")] == ["two"]
+
+
+# ---------------------------------------------------------------------------
+# 4c. The absorb is retried, and an unavoidable re-run says so
+# ---------------------------------------------------------------------------
+#
+# The absorb is the only thing between a delivered interjection and a SECOND
+# delivery: a row left ``queued`` runs again as an ordinary turn and the model
+# reads the same sentence twice.
+
+
+async def test_a_failing_absorb_is_retried(mock_db):
+    """A transient DB error clears — so try again before giving up on the row."""
+    _seed_session("s21")
+    live = turns_db.enqueue_turn("s21", "user", prompt="the live one")
+    queued = turns_db.enqueue_turn("s21", "user", prompt="also check the logs")
+    real = turns_db.absorb_queued_turn
+    attempts = []
+
+    def flaky(turn_id):
+        attempts.append(turn_id)
+        if len(attempts) == 1:
+            raise RuntimeError("connection reset")
+        return real(turn_id)
+
+    events = [
+        {"type": "steer_delivered", "steers": [
+            {"id": queued["id"], "text": "also check the logs"},
+        ]},
+        {"type": "done", "metadata": {}},
+    ]
+
+    with _pump_env(_pump(events)):
+        with patch.object(session_runtime, "_ABSORB_BACKOFF", 0), \
+             patch.object(turns_db, "absorb_queued_turn", flaky):
+            assert await session_runtime.SessionRuntime(live).execute() == "completed"
+
+    assert len(attempts) == 2
+    assert turns_db.get_turn(queued["id"])["stop_reason"] == "steered"
+    assert turns_db.get_queued_turns("s21") == []
+
+
+async def test_an_unabsorbable_row_is_flagged_as_already_delivered(mock_db):
+    """Nothing can take the first delivery back, so the re-run the still-queued
+    row will cause is marked — ``_run_pump`` turns the flag into a one-line note
+    in front of the prompt it sends."""
+    _seed_session("s22")
+    live = turns_db.enqueue_turn("s22", "user", prompt="the live one")
+    queued = turns_db.enqueue_turn("s22", "user", prompt="also check the logs")
+    events = [
+        {"type": "steer_delivered", "steers": [
+            {"id": queued["id"], "text": "also check the logs"},
+        ]},
+        {"type": "done", "metadata": {}},
+    ]
+
+    with _pump_env(_pump(events)):
+        with patch.object(session_runtime, "_ABSORB_BACKOFF", 0), \
+             patch.object(
+                 turns_db, "absorb_queued_turn",
+                 MagicMock(side_effect=RuntimeError("database is gone")),
+             ):
+            assert await session_runtime.SessionRuntime(live).execute() == "completed"
+
+    (row,) = turns_db.get_queued_turns("s22")
+    assert row["id"] == queued["id"]
+    # The user's own words are untouched — only the payload carries the marker.
+    assert row["prompt"] == "also check the logs"
+    assert row["payload"]["steer_already_delivered"] is True
+
+
+async def test_the_flagged_re_run_tells_the_model_about_the_duplicate(mock_db):
+    """The engine gets the note; the transcript keeps the user's words."""
+    _seed_session("s23")
+    turn = turns_db.enqueue_turn(
+        "s23", "user", prompt="also check the logs",
+        payload={"steer_already_delivered": True},
+    )
+
+    seen = {}
+
+    async def _impl(**kwargs):
+        seen["prompt"] = kwargs.get("prompt")
+        yield {"type": "done", "metadata": {}}
+
+    with _pump_env(_impl) as env:
+        assert await session_runtime.SessionRuntime(turn).execute() == "completed"
+
+    assert session_runtime._REDELIVERY_NOTE in seen["prompt"]
+    assert seen["prompt"].endswith("also check the logs")
+    env["recorder"].start.assert_awaited_once_with(
+        "also check the logs", profile_id=None, record_user=True,
+    )
+
+
+# ---------------------------------------------------------------------------
 # 5. The steering prompt block
 # ---------------------------------------------------------------------------
 
