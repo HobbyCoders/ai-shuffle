@@ -1,7 +1,9 @@
 """Grep — regex search: ripgrep when available, bounded pure-Python fallback.
 
 Both branches are bounded and both label their output ("searched via ..."), so
-an empty result is diagnosable rather than ambiguous. The fallback runs on a
+a search that found nothing is diagnosable rather than ambiguous: it comes back
+as that header plus the literal line "(no matches)", never as an empty string.
+Callers must test for the sentinel, not for truthiness. The fallback runs on a
 worker thread: it used to walk the tree synchronously inside the coroutine,
 which pinned the event loop for as long as the walk took (minutes on a large
 repo) and stopped interrupts from landing.
@@ -11,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import re
 import shutil
 import time
@@ -59,14 +62,20 @@ def describe(tools: frozenset[str] | None = None) -> str:
         f"{MAX_LIMIT}) or narrow the pattern to see more. Ignored and hidden "
         "files are skipped unless no_ignore is set. Matches inside "
         "credential-pattern files (.env, keys) are withheld and flagged with "
-        f"a note;{read_route} when its content is genuinely needed. An empty "
-        "result means no matches in the searched scope, not an error.\n"
+        f"a note;{read_route} when its content is genuinely needed. Finding "
+        "nothing is not an error: the result is the header plus the literal "
+        "line `(no matches)`, which is a NON-EMPTY string — test "
+        "`'(no matches)' in out`, never `if out:` or `out or fallback`, which "
+        "are always true and will misfire.\n"
         "\n"
         "The `glob` filter accepts `**`, `?`, character classes and `{a,b}` "
         "alternation (e.g. *.{py,ts}) whichever engine runs, and a leading "
         "`!` excludes instead of includes (e.g. !{vendor/**,dist/**} searches "
-        "everything else). A glob neither engine can honour comes back as an "
-        "error naming the construct, never as an empty result.\n"
+        "everything else). A glob containing `/` is anchored at the searched "
+        "`path` (so src/**/*.ts means src/ directly under it); one with no `/` "
+        "matches the file name at any depth. A glob neither engine can honour "
+        "comes back as an error naming the construct, never as an empty "
+        "result.\n"
         "\n"
         "Patterns use ripgrep/Rust regex syntax when ripgrep is installed "
         "(escape literal braces, e.g. interface\\{\\}) and Python re syntax "
@@ -194,6 +203,33 @@ def _sensitive_note(dropped: int) -> list[str]:
     ]
 
 
+def _absolutize(lines: list[str], run_dir: Path, target: str) -> list[str]:
+    """Re-attach ``run_dir`` to the root-relative paths rg prints.
+
+    rg is run with ``cwd=run_dir`` so globs anchor correctly, which makes it
+    emit ``./a/b.ts:12:…`` instead of the absolute path callers get today —
+    and these lines are pasted straight back into Read. Only the exact prefix
+    rg was told to search is rewritten, so anything else in the stream (and any
+    line that is not a match line) passes through untouched.
+    """
+    if target == ".":
+        heads = ("./", ".\\")
+    else:
+        heads = (target + ":",)
+    out: list[str] = []
+    for line in lines:
+        for head in heads:
+            if line.startswith(head):
+                rest = line[len(head):]
+                line = (
+                    f"{run_dir}{os.sep}{rest}" if target == "."
+                    else f"{run_dir / target}:{rest}"
+                )
+                break
+        out.append(line)
+    return out
+
+
 async def _ripgrep(
     rg: str, pattern: str, root: Path, glob: str | None, no_ignore: bool, limit: int
 ) -> ToolOutcome:
@@ -210,11 +246,22 @@ async def _ripgrep(
         args.append("-uu")
     if glob:
         args += ["--glob", glob]
+    # rg matches ``--glob`` values against paths relative to its OWN working
+    # directory, NOT the search target. Handing it an absolute root while the
+    # process sat in an ancestor directory anchored `frontend/src/**` at that
+    # ancestor, so every directory-prefixed glob matched nothing and the search
+    # came back as a believable "(no matches)". Running *inside* the root with
+    # `.` as the target anchors globs where the caller means them — and where
+    # the Python fallback already anchors its own (root-relative) filter.
+    run_dir, target = (root, ".") if root.is_dir() else (root.parent, root.name)
     # ``--`` so a pattern starting with '-' is not parsed as a flag.
-    args += ["--", pattern, str(root)]
+    args += ["--", pattern, target]
 
     proc = await asyncio.create_subprocess_exec(
-        *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=str(run_dir),
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=RG_TIMEOUT_S)
@@ -235,6 +282,7 @@ async def _ripgrep(
     lines = stdout.decode(errors="replace").split("\n")
     while lines and not lines[-1]:
         lines.pop()
+    lines = _absolutize(lines, run_dir, target)
     lines, dropped = _drop_sensitive_matches(lines)
     total = len(lines)
     notes: list[str] = _sensitive_note(dropped)
