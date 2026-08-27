@@ -5644,21 +5644,132 @@ async def test_fast_mode_absent_matches_off_for_reconnect(monkeypatch):
 # ── code-mode kernel config ───────────────────────────────────────────────
 
 
-def test_codemode_kernel_stdout_cap_fits_a_full_worker_report():
-    """A parent reads a subagent's report by PRINTING its Task result, so the
-    kernel's per-cell stdout cap must fit a maximum-length report plus its JSON
-    envelope. At fluid's 16,384-char default the model saw a fraction of a long
-    report and spent a provider round trip per extra slice it printed."""
+def test_codemode_kernel_keeps_fluids_default_stdout_cap():
+    """The per-cell stdout cap is fluid's 16,384 default, deliberately.
+
+    It was briefly raised to ``MAX_REPORT_CHARS * 2`` so a parent could print a
+    whole subagent report from one cell; every OTHER cell inherited the
+    licence and flooded ~120KB of grep/read output per call. Sync Task results
+    now carry a bounded head plus a ``report_path``, so no legitimate cell
+    needs more than the default."""
     import app.core.provider.harness_adapter as ha
-    from app.core.provider_agent import MAX_REPORT_CHARS
 
     config = ha._codemode_kernel_config()
-
-    assert config.stdout_cap >= MAX_REPORT_CHARS * 2
-    # Everything else stays at fluid's defaults — the cap is the one deliberate
-    # divergence, not a fork of the whole kernel policy.
     default = ha.KernelConfig()
+
+    assert config.stdout_cap == default.stdout_cap == 16_384
     assert config.ref_threshold == default.ref_threshold
     assert config.checkpoint == default.checkpoint
     assert config.allow_network == default.allow_network
     assert config.allow_fs == default.allow_fs
+
+
+# ── model-family guidance on native legs ──────────────────────────────────
+
+
+def test_model_guidance_blocks_reach_a_gpt_native_prompt():
+    """fluid writes "Act, don't narrate" / "Execution discipline" for the
+    families that narrate instead of calling tools, but only emits them from
+    its own ``compose_base_prompt`` — which this app replaces with the
+    profile's prompt (ruling A12). Without this injection they reached nothing."""
+    import app.core.provider.harness_adapter as ha
+    from fluid.cli.prompt import ACT_GUIDANCE_BLOCK, DISCIPLINE_GUIDANCE_BLOCK
+
+    compiled = ha.HarnessAdapter._compile_prompt_sections(
+        "base", None, _native_opts(model="gpt-5")
+    )
+
+    texts = [section.text for section in compiled.sections]
+    assert ACT_GUIDANCE_BLOCK in texts
+    assert DISCIPLINE_GUIDANCE_BLOCK in texts
+
+
+def test_claude_models_get_no_guidance_blocks():
+    """The Claude family is deliberately absent from fluid's tables — every
+    block is paid for in every session's cached prefix."""
+    import app.core.provider.harness_adapter as ha
+    from fluid.cli.prompt import ACT_GUIDANCE_BLOCK, DISCIPLINE_GUIDANCE_BLOCK
+
+    compiled = ha.HarnessAdapter._compile_prompt_sections(
+        "base", None, _native_opts(model="claude-sonnet-4-5")
+    )
+
+    texts = [section.text for section in compiled.sections]
+    assert ACT_GUIDANCE_BLOCK not in texts
+    assert DISCIPLINE_GUIDANCE_BLOCK not in texts
+
+
+def test_guidance_bytes_are_stable_for_one_model():
+    """Prompt-prefix caching: the same model must compile to identical text."""
+    import app.core.provider.harness_adapter as ha
+
+    first = ha._model_guidance_blocks("grok-4")
+    second = ha._model_guidance_blocks("grok-4")
+
+    assert first == second and first
+
+
+def test_guidance_degrades_to_nothing_without_the_fluid_symbol(monkeypatch):
+    """A vendored fluid that predates ``model_guidance_blocks`` must cost no
+    blocks, not a failed prompt compilation."""
+    import builtins
+
+    import app.core.provider.harness_adapter as ha
+
+    real_import = builtins.__import__
+
+    def blocked(name, *args, **kwargs):
+        if name == "fluid.cli.prompt":
+            raise ImportError("no such symbol")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    assert ha._model_guidance_blocks("gpt-5") == ()
+
+
+# ── code-mode prompt contracts ────────────────────────────────────────────
+
+
+def test_code_mode_section_carries_the_four_contracts():
+    """The four model-side contracts the audit sized as highest leverage."""
+    import app.core.provider.harness_adapter as ha
+
+    text = ha._code_mode_section()
+
+    # (a) bind-then-slice, with the recovery seams named.
+    assert "forfeits its ResultRef" in text
+    assert "_refs" in text
+    # (b) park after delegating.
+    assert 'Task(mode="background")' in text and "never poll" in text
+    # (c) one cell carries the whole step.
+    assert "Never spend a cell on a single Read" in text
+    assert "sleep-poll" in text
+    # (d) recall budget.
+    assert "limit<=5" in text and "two unproductive queries" in text
+    # The code-mode rule still ends the block (it is last for a reason).
+    assert text.rstrip().endswith("save it as a skill.")
+
+
+# ── tier-1 trim setting ───────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_trim_is_off_by_default(monkeypatch, tmp_path):
+    """Both tiers disabled at construction — the shipped default."""
+    captured = await _connect_capturing_native(monkeypatch, tmp_path)
+    assert captured["compaction"].enabled is False
+    assert captured["compaction"].trim.enabled is False
+
+
+@pytest.mark.asyncio
+async def test_fluid_trim_setting_enables_tier_one_only(monkeypatch, tmp_path):
+    """``FLUID_TRIM`` turns on tool-result trim and NOTHING else: compaction
+    stays disabled, which is the spelling fluid reads as "tier 1, no span
+    digests"."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "fluid_trim", True)
+    captured = await _connect_capturing_native(monkeypatch, tmp_path)
+
+    assert captured["compaction"].enabled is False
+    assert captured["compaction"].trim.enabled is True

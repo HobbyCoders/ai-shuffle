@@ -59,6 +59,21 @@ def _err(message: str, **extra: Any) -> Dict[str, Any]:
     }
 
 
+#: Prepended to a TaskList/TaskGet result that carries no news. Polling these
+#: tools is the failure mode they invite: an audited parent called TaskList
+#: three times and then re-did its own child's work. Completions wake the
+#: session, so a result where everything is still running has nothing in it.
+_PARK_NUDGE = "all tasks still running — park; you will be woken on completion."
+
+
+def _all_still_running(tasks: Any) -> bool:
+    """True when ``tasks`` is non-empty and every entry is still running."""
+    records = [t for t in (tasks or []) if isinstance(t, dict)]
+    if not records:
+        return False
+    return all(t.get("status") == "running" for t in records)
+
+
 # ============================================================================
 # Background task registry (Monitor / TaskOutput / TaskStop)
 # ============================================================================
@@ -913,12 +928,12 @@ def create_builtin_tools_server(
     # ------------------------------------------------------------------
     @tool(
         "TaskList",
-        "List your currently-running background tasks for this session. "
-        "Covers both background AGENT tasks (Task tool) and background shell "
-        "commands spawned via Monitor. This is a LIVE query — it reflects task "
-        "completions immediately, so call it whenever you need the current "
-        "picture (e.g. before deciding whether to wait, follow up, or move on) "
-        "rather than relying on an earlier snapshot.",
+        "List this session's background tasks — background AGENT tasks (Task "
+        "tool) and background shell commands (Monitor). You do NOT need this "
+        "to find out whether a task finished: a completion wakes this session "
+        "automatically and tells you. Call it only after such a wake, or when "
+        "the user asks what is running. Never call it in a polling loop, and "
+        "never call it to decide whether to keep waiting — park instead.",
         {
             "type": "object",
             "properties": {
@@ -940,7 +955,13 @@ def create_builtin_tools_server(
         else:
             tasks = task_registry.get_active(session_id)
         running_count = sum(1 for t in tasks if t.get("status") == "running")
-        return _ok({"tasks": tasks, "running_count": running_count})
+        payload: Dict[str, Any] = {"tasks": tasks, "running_count": running_count}
+        if _all_still_running(tasks):
+            # Nothing here that a wake had not already told the caller. Say so
+            # at the top of the result so the answer to "should I call this
+            # again?" is in the same breath as the empty answer.
+            payload = {"note": _PARK_NUDGE, **payload}
+        return _ok(payload)
 
     all_tools.append(task_list)
 
@@ -949,11 +970,12 @@ def create_builtin_tools_server(
     # ------------------------------------------------------------------
     @tool(
         "TaskGet",
-        "Get the current details of ONE of your background tasks by task_id "
-        "(background AGENT task or Monitor shell command). This is a LIVE query — "
-        "it reflects completion immediately. For shell tasks it also returns "
-        "whether the process is still running, its exit code, and the tail of its "
-        "output buffer. Use TaskList first to discover task ids.",
+        "Get the details of ONE background task by task_id (background AGENT "
+        "task or Monitor shell command). For shell tasks it also returns "
+        "whether the process is still running, its exit code, and the tail of "
+        "its output buffer. Completions wake this session on their own, so "
+        "this is for inspecting a task you were just woken about or one the "
+        "user asked about — never a polling loop. Use TaskList to discover ids.",
         {
             "type": "object",
             "properties": {
@@ -991,6 +1013,11 @@ def create_builtin_tools_server(
             out["exit_code"] = shell.exit_code
             out["total_lines"] = len(shell.lines)
             out["lines"] = shell.lines[-tail_n:] if tail_n > 0 else []
+        still_running = (
+            out.get("running") if shell is not None else _all_still_running([record])
+        )
+        if still_running:
+            out = {"note": _PARK_NUDGE, **out}
         return _ok(out)
 
     all_tools.append(task_get)

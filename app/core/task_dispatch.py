@@ -22,7 +22,10 @@ What this module adds on top of raw ``dispatch_worker``:
 * root routing (A9) — approvals, progress cards, and supervisor registration
   land on the ROOT session (the one with a human watching), while
   project/worktree/cwd inheritance still reads the direct caller;
-* modes (A8) — ``sync`` blocks and returns the worker's report;
+* modes (A8) — ``sync`` blocks, writes the worker's full report to a file
+  under the parent's ``.fluid/task-reports/`` and returns ``report_path`` +
+  ``report_chars`` + a bounded ``report_head`` so the parent reads the rest
+  selectively instead of paying for it in context up front;
   ``background`` pre-allocates and returns the exact worker session id as a
   Fluid ``BackgroundTaskReceipt``, then announces completion to the parent
   without a polling loop.
@@ -72,6 +75,7 @@ import asyncio
 import json
 import logging
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 if TYPE_CHECKING:  # pragma: no cover — annotation-only; every DB import here is
@@ -87,6 +91,16 @@ _CHAIN_LIMIT = 12
 
 #: Background dispatch tasks, kept referenced so asyncio never GCs them.
 _BACKGROUND_TASKS: set = set()
+
+#: How much of a sync worker's report rides the tool result itself. The whole
+#: report always lands in the report file; this head is the "did it work and
+#: roughly what happened" glance that decides whether to read further.
+SYNC_REPORT_HEAD_CHARS = 2_000
+
+#: Report files live under ``<parent cwd>/.fluid/task-reports/`` — the same
+#: ``.fluid`` infrastructure dir a checkout already carries for worktrees, and
+#: inside the tree the parent's own file tools already reach.
+_REPORT_DIR_PARTS = (".fluid", "task-reports")
 
 # ``None`` is a real provider binding (native Claude), so callers that know the
 # effective turn provider must be able to pass it distinctly from callers that
@@ -653,12 +667,93 @@ async def dispatch_task_tool(
         "worker_session_id": outcome.session_id,
     }
     if outcome.ok:
-        payload["report"] = outcome.report or "(no report)"
+        # Out-of-band delivery. A full report inline is up to MAX_REPORT_CHARS
+        # of the parent's context spent before it knows whether it needs any of
+        # it — and under code mode it lands as one kernel value the model then
+        # prints whole. The file holds everything; the head decides.
+        report = outcome.report or "(no report)"
+        report_path = _write_sync_report(caller_row, outcome.session_id, report)
+        payload["report_chars"] = len(report)
+        payload["report_head"] = report[:SYNC_REPORT_HEAD_CHARS]
+        if report_path:
+            payload["report_path"] = report_path
+            payload["note"] = (
+                "report_head is the complete report; report_path is the same "
+                "text on disk. Nothing further to read."
+                if len(report) <= SYNC_REPORT_HEAD_CHARS
+                else (
+                    f"report_head is the first {SYNC_REPORT_HEAD_CHARS} of "
+                    f"{len(report)} characters. The rest is at report_path — "
+                    "read it with Read(offset=..., limit=...) only if the head "
+                    "does not already answer your question, and never print "
+                    "the whole file."
+                )
+            )
+        else:
+            # The report file could not be written; nothing is lost, but the
+            # parent pays the full context cost it normally would not.
+            payload["report"] = report
+            payload["note"] = (
+                "The report file could not be written, so the full report is "
+                "inline in 'report'."
+            )
         if outcome.truncated:
+            # provider_agent bounded the worker's own final text at
+            # MAX_REPORT_CHARS. The file carries exactly what the parent would
+            # have received inline — nothing is dropped by the file hand-off.
             payload["truncated"] = True
     else:
         payload["error"] = outcome.error or "Worker failed."
     return payload
+
+
+def _sync_report_dir(caller_row: Optional[Mapping[str, Any]]) -> Path:
+    """Where this parent's sync Task reports land.
+
+    The parent's already-materialized checkout when it has one — a report is
+    only useful if the parent's Read reaches it, and its cwd is the one tree
+    that is always reachable. Sessions with no checkout on this runner (bare
+    sessions, tests) fall back to the app data dir.
+    """
+    from app.core.config import settings
+
+    if caller_row:
+        try:
+            from app.core import project_resolver
+
+            cwd = project_resolver.resolve_existing_cwd(dict(caller_row))
+            if cwd:
+                return Path(cwd).joinpath(*_REPORT_DIR_PARTS)
+        except Exception:  # noqa: BLE001 — best-effort; the data dir still works
+            logger.debug("task_dispatch: report cwd resolution failed", exc_info=True)
+    return settings.effective_data_dir.joinpath("fluid", *_REPORT_DIR_PARTS[1:])
+
+
+def _write_sync_report(
+    caller_row: Optional[Mapping[str, Any]],
+    worker_session_id: str,
+    report: str,
+) -> Optional[str]:
+    """Persist a sync worker's full report; return its absolute path or None.
+
+    Out-of-band delivery is the point: the parent gets a bounded head in its
+    context and reads the rest with ``Read(offset=…, limit=…)`` only if it
+    needs to. A write failure returns None and the caller degrades to the old
+    inline delivery rather than losing the worker's output.
+    """
+    try:
+        directory = _sync_report_dir(caller_row)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{worker_session_id or uuid.uuid4()}.md"
+        path.write_text(report, encoding="utf-8")
+        return str(path.resolve())
+    except Exception:  # noqa: BLE001 — never fail a completed dispatch on I/O
+        logger.warning(
+            "task_dispatch: could not write the sync report file for worker %s",
+            worker_session_id,
+            exc_info=True,
+        )
+        return None
 
 
 async def _await_worker_registration(

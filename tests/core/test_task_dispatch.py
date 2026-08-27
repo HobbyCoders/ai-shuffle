@@ -43,6 +43,23 @@ def agents(mock_db):
     return database
 
 
+@pytest.fixture(autouse=True)
+def report_dir(tmp_path, monkeypatch):
+    """Point sync Task report files at tmp_path instead of the real data dir.
+
+    Patches the cwd resolution the real ``_sync_report_dir`` reads, so the path
+    logic under test is the shipped one.
+    """
+    from app.core import project_resolver
+
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    monkeypatch.setattr(
+        project_resolver, "resolve_existing_cwd", lambda row: str(checkout)
+    )
+    return checkout / ".fluid" / "task-reports"
+
+
 def _mk_session(database, session_id, profile_id, parent=None):
     database.create_session(
         session_id=session_id, profile_id=profile_id,
@@ -91,8 +108,103 @@ def test_dispatch_open_by_default(agents):
     with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
         payload = asyncio.run(_dispatch({"agent": "helper", "prompt": "go"}, "s-root"))
     assert payload["ok"] is True
-    assert payload["report"] == "done"
+    assert payload["report_head"] == "done"
     assert payload["agent"] == "helper"
+
+
+# ─── sync report delivery (out-of-band file + bounded head) ──────────────────
+
+
+def test_sync_report_lands_in_a_file_not_the_tool_result(agents):
+    """The full report goes to disk; the result carries a bounded head plus the
+    path. Inlining it cost the parent up to MAX_REPORT_CHARS of context before
+    it knew whether it needed any of it."""
+    from pathlib import Path
+
+    _mk_session(agents, "s-file-report", "root-agent")
+    body = "x" * (td.SYNC_REPORT_HEAD_CHARS + 5_000)
+
+    async def fake_worker(**kwargs):
+        return WorkerOutcome(ok=True, session_id="w-report", report=body)
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        payload = asyncio.run(
+            _dispatch({"agent": "helper", "prompt": "go"}, "s-file-report")
+        )
+
+    assert payload["ok"] is True
+    assert "report" not in payload
+    assert payload["report_chars"] == len(body)
+    assert payload["report_head"] == body[: td.SYNC_REPORT_HEAD_CHARS]
+    assert len(payload["report_head"]) == td.SYNC_REPORT_HEAD_CHARS
+    written = Path(payload["report_path"])
+    assert written.read_text(encoding="utf-8") == body
+    assert written.name == "w-report.md"
+    assert written.parent.name == "task-reports"
+    # The note is the contract the parent reads the file by.
+    assert "report_path" in payload["note"]
+
+
+def test_sync_report_file_failure_falls_back_to_inline(agents, monkeypatch):
+    """A write failure must never lose a completed worker's output."""
+    _mk_session(agents, "s-report-fail", "root-agent")
+    monkeypatch.setattr(td, "_write_sync_report", lambda *a, **k: None)
+
+    async def fake_worker(**kwargs):
+        return WorkerOutcome(ok=True, session_id="w-fail", report="the whole thing")
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        payload = asyncio.run(
+            _dispatch({"agent": "helper", "prompt": "go"}, "s-report-fail")
+        )
+
+    assert payload["report"] == "the whole thing"
+    assert payload["report_head"] == "the whole thing"
+    assert "report_path" not in payload
+
+
+def test_sync_report_keeps_truncated_and_error_semantics(agents):
+    """``truncated`` still marks a report provider_agent bounded, and a failed
+    worker still carries ``error`` with no report fields."""
+    _mk_session(agents, "s-report-sem", "root-agent")
+
+    async def truncated_worker(**kwargs):
+        return WorkerOutcome(
+            ok=True, session_id="w-trunc", report="cut", truncated=True
+        )
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=truncated_worker):
+        payload = asyncio.run(
+            _dispatch({"agent": "helper", "prompt": "go"}, "s-report-sem")
+        )
+    assert payload["truncated"] is True
+    assert payload["report_path"]
+
+    async def failed_worker(**kwargs):
+        return WorkerOutcome(ok=False, session_id="w-bad", error="boom")
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=failed_worker):
+        payload = asyncio.run(
+            _dispatch({"agent": "helper", "prompt": "go"}, "s-report-sem")
+        )
+    assert payload["ok"] is False and payload["error"] == "boom"
+    assert "report_head" not in payload and "report_path" not in payload
+
+
+def test_sync_report_dir_prefers_the_callers_checkout(monkeypatch, tmp_path):
+    """The file must land where the parent's own Read already reaches — its
+    materialized checkout — not in an unrelated data dir."""
+    from app.core import project_resolver
+
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    monkeypatch.setattr(
+        project_resolver, "resolve_existing_cwd", lambda row: str(checkout)
+    )
+
+    directory = td._sync_report_dir({"id": "s-1"})
+
+    assert directory == checkout / ".fluid" / "task-reports"
 
 
 def test_legacy_enabled_agents_restricts_dispatch(agents):

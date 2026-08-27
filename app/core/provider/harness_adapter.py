@@ -629,10 +629,12 @@ class HarnessAdapter(ProviderAdapter):
                 # Context rewriting OFF, explicitly (see the ceiling note
                 # above). fluid's default is compaction ON; AI Shuffle never
                 # rewrites or digests a turn's history behind the user's back,
-                # so both tiers are disabled at construction.
-                compaction=CompactionConfig(
-                    enabled=False, trim=TrimConfig(enabled=False)
-                ),
+                # so both tiers are disabled at construction. ``fluid_trim``
+                # (FLUID_TRIM, default off) turns tier-1 back on: that exact
+                # spelling — compaction disabled, trim enabled — drops
+                # superseded tool RESULTS and never writes a span digest, so
+                # nothing the user or the agent said is ever rewritten.
+                compaction=_compaction_config(),
                 # Native legs have no Claude Code preset — they always run the
                 # fluid-compiled prompt: the profile's configured prompt as the
                 # base (a preset-shaped profile has none) with the append text
@@ -2052,6 +2054,14 @@ class HarnessAdapter(ProviderAdapter):
                 sections.append(
                     PromptSection(kind="extra", text=STEERING_BLOCK)
                 )
+                # fluid's model-family guidance ("Act, don't narrate",
+                # "## Execution discipline"). fluid only ever emits these from
+                # its own ``compose_base_prompt``, which the app replaces with
+                # the profile's prompt (ruling A12) — so without this they
+                # reach no session at all. Claude-family models get none; the
+                # text is fixed per model, so the prefix stays cache-stable.
+                for block in _model_guidance_blocks(options.model):
+                    sections.append(PromptSection(kind="extra", text=block))
             if native and _recall_backend_available() and (
                 permitted is None
                 or {"SessionSearch", "SessionView"} <= permitted
@@ -2689,21 +2699,32 @@ def _delegated_disallowed(options: SessionOptions) -> list:
     return sorted(banned)
 
 
-def _codemode_kernel_config() -> KernelConfig:
-    """Kernel limits tuned for this app's session shapes.
+def _compaction_config() -> CompactionConfig:
+    """This leg's context-rewriting policy.
 
-    The one deliberate change from fluid's defaults is ``stdout_cap`` — the
-    per-cell ceiling on what a ``run_python`` print surfaces to the model. A
-    parent reads a subagent's report by printing its Task call's result, and
-    ``provider_agent`` hands back reports up to ``MAX_REPORT_CHARS``. At the
-    16,384-char default the model sees a fraction of a long report and burns a
-    provider round trip per extra slice it prints out of the kernel namespace.
-    Sized so a maximum-length report plus its JSON envelope fits in one cell;
-    the cap still bounds pathological prints (a cell dumping a whole file).
+    Tier 2 (span digests) is off unconditionally — a model-written summary must
+    never replace what was actually said. Tier 1 (dropping superseded tool
+    results) is behind ``settings.fluid_trim`` and defaults off.
     """
-    from app.core.provider_agent import MAX_REPORT_CHARS
+    from app.core.config import settings
 
-    return KernelConfig(stdout_cap=max(16_384, MAX_REPORT_CHARS * 2))
+    return CompactionConfig(
+        enabled=False,
+        trim=TrimConfig(enabled=bool(getattr(settings, "fluid_trim", False))),
+    )
+
+
+def _codemode_kernel_config() -> KernelConfig:
+    """Kernel limits for this app's sessions — fluid's defaults, unchanged.
+
+    ``stdout_cap`` (16,384 chars per cell) was briefly raised to fit a whole
+    subagent report in one print. That bought one narrow case and taxed every
+    other cell: audited sessions flooded 120KB of grep/read output per cell
+    because the cap no longer corrected them. Sync Task results now carry a
+    bounded head plus a ``report_path`` (see ``app.core.task_dispatch``), so
+    nothing legitimate needs a cell to print more than the default allows.
+    """
+    return KernelConfig()
 
 
 def _tool_allowlist(options: SessionOptions) -> Optional[list]:
@@ -2954,6 +2975,34 @@ through run_python's timeout.
 - Long text arguments (subagent prompts, file contents): build them in a \
 variable first and never nest `\"\"\"` inside a triple-quoted string.
 
+## Bind, then slice
+A bare `print()` of a tool result forfeits its ResultRef and floods your \
+context with text you did not choose. Bind every result to a name, check its \
+size, and print only the slice you need:
+```python
+out = Read(file_path="/repo/app/server.py")
+print(len(out))
+print(out[:800])
+```
+The kernel keeps what you bound. A ref you dropped is still recoverable: \
+`_refs` maps every live ResultRef id to its value, and `_` is the previous \
+cell's result — recover from there instead of re-running the call.
+
+## After you delegate, park
+After `Task(mode="background")` or `Monitor`, either end the turn or work a \
+file set disjoint from the child's. Never re-derive the child's brief \
+yourself, and never poll for it — completion wakes you.
+
+## One cell carries the whole step
+Reads, greps, edits and the command that VERIFIES them belong in the same \
+cell. Never spend a cell on a single Read. Never sleep-poll in a loop: park \
+on a Monitor and let the wake bring you back.
+
+## Recall budget
+At most one SessionSearch per question, with `limit<=5`. Stop after two \
+unproductive queries and work from the files instead. Call SessionView only \
+with a specific offset that a search hit justifies.
+
 ## Discovery
 list_tools returns the catalog, search_tools searches it by keyword, \
 read_tool_docs returns a tool's full stub. The "# Tools" section below already \
@@ -3191,6 +3240,35 @@ issue), CI runs (gh run list / gh run watch), and API reads (gh api) — rather 
 than reconstructing that state from raw git or asking the user. Plain git \
 remains the tool for local version control: status, diff, commit, branch, \
 push."""
+
+
+def _model_guidance_blocks(model: Optional[str]) -> Tuple[str, ...]:
+    """fluid's model-family guidance blocks for ``model``, or ``()``.
+
+    fluid writes these for the families that narrate instead of calling tools
+    and that skip read-back verification (gpt/grok/glm and friends); the
+    Claude family is deliberately excluded upstream and resolves to no blocks
+    here. Only ``compose_base_prompt`` consumes them upstream and this app
+    never calls it, so this is the app's own injection point.
+
+    Import-guarded: a vendored fluid without the symbol degrades to no blocks
+    rather than taking down every native session's prompt compilation.
+    """
+    if not model:
+        return ()
+    try:
+        from fluid.cli.prompt import model_guidance_blocks
+    except Exception:  # noqa: BLE001 — vendored fluid may predate the symbol
+        logger.debug("[HarnessAdapter] fluid model_guidance_blocks unavailable")
+        return ()
+    try:
+        return tuple(model_guidance_blocks(model))
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "[HarnessAdapter] model guidance resolution failed for %r", model,
+            exc_info=True,
+        )
+        return ()
 
 
 # Ruling MEM3: the native leg had no memory surface at all — no CLI behind it
