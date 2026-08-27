@@ -61,6 +61,17 @@ def describe(tools: frozenset[str] | None = None) -> str:
         if has("Bash")
         else ""
     )
+    wait_here = (
+        "**Waiting happens here, never in Bash.** Whatever sleeping, retrying, or "
+        "watching the job needs belongs inside this one Monitor command — never "
+        "in a foreground Bash call."
+        if has("Bash")
+        else "**Waiting happens here.** Whatever sleeping, retrying, or "
+        "watching the job needs belongs inside this one Monitor command."
+    ) + (
+        " Do not start a Monitor and then wait for it yourself: start it and "
+        "end the turn."
+    )
     closing = (
         "Prefer Monitor over a blocking Bash call whenever the wait is longer "
         "than a few seconds: start it, keep doing useful work, and incorporate "
@@ -80,31 +91,26 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "work: CI runs, release and frontend builds, long test suites, "
         "training jobs, waiting on a dev server to come up.\n"
         "\n"
+        f"{wait_here}\n"
+        "\n"
         "**The command must exit.** The completion fires on exit and only on "
         "exit, so an unbounded command (`tail -f`, `inotifywait -m`, a bare "
         "`while true`) never wakes you — it just holds a slot until the "
-        "session ends. For \"tell me when X is ready\", write a loop whose "
-        "condition ends it:\n"
-        "\n"
-        "  # Wait for a dev server to come up, then wake\n"
-        "  until grep -q \"Ready in\" dev.log; do sleep 0.5; done\n"
-        "\n"
-        "  # Poll a remote job until it reaches ANY terminal state\n"
-        "  while true; do\n"
-        "    s=$(gh pr checks 123 --json bucket --jq '[.[].bucket]|unique|join(\",\")')\n"
-        "    case \"$s\" in *pending*) sleep 30;; *) echo \"checks: $s\"; break;; esac\n"
-        "  done\n"
+        "session ends. For \"tell me when X is ready\", give Monitor something "
+        "that ends on its own: the tool's own blocking wait subcommand where "
+        "one exists, otherwise a watch whose condition and overall time budget "
+        "both end it.\n"
         "\n"
         "**Silence is not success.** The exit condition must cover every "
-        "terminal state, not just the happy path. A loop that breaks only on "
+        "terminal state, not just the happy path. A watch that ends only on "
         "the success marker runs forever through a crash, a hung job, or an "
         "unexpected exit — and \"still running\" looks exactly like \"never "
         "finished\". Before starting one, ask: if this job died right now, "
-        "would my loop still end? If not, widen the condition "
-        "(`succeeded|failed|cancelled|timeout`, not just `succeeded`). In poll "
-        "loops, swallow transient failures (`curl ... || true`) so one bad "
-        "request does not kill the watch; poll at 30s+ for remote APIs and "
-        "0.5–1s for local checks.\n"
+        "would the command still end? If not, widen it to every terminal "
+        "outcome — failed, cancelled and timed out, not only succeeded — and "
+        "cap the total wait. A watch on a remote API should survive one failed "
+        "request rather than die on it, and should check at a human interval "
+        "(tens of seconds), not in a tight spin.\n"
         "\n"
         "**Output.** stdout and stderr are merged into one buffer, and the "
         "completion summary keeps head and tail while dropping the middle — so "
@@ -148,12 +154,23 @@ SPEC = ToolSpec(
 )
 
 
+def started_text(task_id: str) -> str:
+    """The success receipt. It commands the park rather than merely reporting
+    the spawn: sessions that read a neutral acknowledgement have gone on to
+    sleep-poll the very task they just handed off."""
+    return (
+        f"Monitoring started (task {task_id}). End the turn now — the "
+        "completion wakes the session when the command exits. Do not sleep, "
+        "poll, or check on it yourself."
+    )
+
+
 def _receipt_from(result: Any, input: dict[str, Any]) -> ToolOutcome:
     if isinstance(result, ToolOutcome):
         return result
     if isinstance(result, BackgroundTaskReceipt):
         return ToolOutcome(
-            text=f"Monitoring started (task {result.task_id}).",
+            text=started_text(result.task_id),
             background_task=result,
         )
     if isinstance(result, dict) and result.get("task_id"):
@@ -174,7 +191,7 @@ def _receipt_from(result: Any, input: dict[str, Any]) -> ToolOutcome:
             text=str(
                 result.get("text")
                 or result.get("message")
-                or f"Monitoring started (task {receipt.task_id})."
+                or started_text(receipt.task_id)
             ),
             ui=result.get("ui", result),
             is_error=bool(result.get("is_error", False)),
