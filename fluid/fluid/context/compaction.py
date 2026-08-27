@@ -25,6 +25,12 @@ Invariants (shared with tier 1, enforced here):
   the currently rendered path (the parent chain is unique, so the interval is
   then identical to the one promoted). Off-path promotions are silently inert.
 
+Tiers are separable at the bottom: ``CompactionConfig(enabled=False,
+trim=TrimConfig(enabled=True))`` runs tier 1 alone — tool results become
+recoverable placeholders, no turn is ever digested, no epoch is ever folded.
+That is the contract host apps configure when they want the context saving
+without the model ever reading a machine summary of its own history.
+
 Oversize user payloads ("intake") are a stateless view policy, not a tier: a
 user ``Text`` block over ``intake_stub_chars`` always renders as a stub with a
 preview and an expand hint, from the very first request — a pure function of
@@ -61,6 +67,13 @@ _REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
 
 @dataclass(kw_only=True)
 class CompactionConfig:
+    # The ladder above tier 1: span digests (tier 2) and epoch folds (tier 3).
+    # ``enabled=False`` with ``trim=TrimConfig(enabled=True)`` is the supported
+    # *trim-only* contract — tool results are trimmed to recoverable
+    # placeholders and oversize payloads still render as stubs, but no turn is
+    # ever digested and no epoch is ever folded. Host apps that want cheap,
+    # fully recoverable tool-result eviction without the model ever reading a
+    # digest of its own history configure exactly that.
     enabled: bool = True
     # Tier-1 knobs (the owned trimmer's config).
     trim: TrimConfig = field(default_factory=TrimConfig)
@@ -289,11 +302,23 @@ class Compactor:
         if self.trimmer is None:
             self.trimmer = ToolResultTrimmer(config=self.config.trim)
 
+    # ── Mode ─────────────────────────────────────────────────────────────
+
+    @property
+    def active(self) -> bool:
+        """True when this compactor rewrites the view at all."""
+        return self.config.enabled or self.config.trim.enabled
+
+    @property
+    def trim_only(self) -> bool:
+        """Tier 1 without the ladder above it — the ai-shuffle contract."""
+        return not self.config.enabled and self.config.trim.enabled
+
     # ── Rendering (pure view; no promotion state is touched) ─────────────
 
     def view(self, nodes: list[SessionNode]) -> list[Message]:
         """The CURRENT compacted view, read-only — nothing is armed."""
-        if not self.config.enabled:
+        if not self.active:
             return [n.message for n in nodes]
         return self._render(nodes)
 
@@ -312,6 +337,14 @@ class Compactor:
         i = 0
         while i < len(nodes):
             node = nodes[i]
+            if not self.config.enabled:
+                # Trim-only: tier 2/3 decisions are never made here, and a
+                # persisted one rehydrated from a session that *did* run the
+                # ladder stays inert rather than digesting history behind the
+                # host app's back.
+                out.append(self._render_live(node, trimmed))
+                i += 1
+                continue
             end_id = self._epoch_by_start.get(node.node_id)
             if end_id is not None and end_id in index and index[end_id] >= i:
                 j = index[end_id]
@@ -399,7 +432,14 @@ class Compactor:
         """Render history; when the estimated total crosses the threshold,
         run the ladder as one amortized batch and return what it did."""
         if not self.config.enabled:
-            return [n.message for n in nodes], []
+            if not self.config.trim.enabled:
+                return [n.message for n in nodes], []
+            return self._apply_trim_only(
+                nodes,
+                overhead_tokens=overhead_tokens,
+                context_window=context_window,
+                output_reserve_tokens=output_reserve_tokens,
+            )
         # Persist consume-once image trims into the sticky set (mirrors
         # trimmer.apply, which the Compactor path never calls). The decision
         # is deterministic from the path, so this is about keeping the
@@ -409,14 +449,9 @@ class Compactor:
                 self.trimmer._consumed_image_results(nodes)
             )
         rendered = self._render(nodes)
-        threshold = self.config.trigger_tokens
-        if context_window is not None:
-            threshold = min(
-                threshold,
-                context_window
-                - self.config.headroom_tokens
-                - output_reserve_tokens,
-            )
+        threshold = self._threshold(
+            self.config.trigger_tokens, context_window, output_reserve_tokens
+        )
         total = overhead_tokens + estimate_tokens_of_messages(rendered)
         if total <= threshold:
             return rendered, []
@@ -480,12 +515,69 @@ class Compactor:
             )
         return rendered, promotions
 
+    def _threshold(
+        self,
+        base: int,
+        context_window: int | None,
+        output_reserve_tokens: int,
+    ) -> int:
+        """``base``, capped so a known window keeps its headroom free."""
+        if context_window is None:
+            return base
+        return min(
+            base,
+            context_window - self.config.headroom_tokens - output_reserve_tokens,
+        )
+
+    def _apply_trim_only(
+        self,
+        nodes: list[SessionNode],
+        *,
+        overhead_tokens: int,
+        context_window: int | None,
+        output_reserve_tokens: int,
+    ) -> tuple[list[Message], list[Promotion]]:
+        """Tier 1 on its own: trim tool results, never digest a turn.
+
+        Same batch-and-sticky discipline as the full ladder (rare, amortized,
+        cache-safe), driven by the tier-1 trigger rather than the ladder's.
+        """
+        self.trimmer._trimmed.update(self.trimmer._consumed_image_results(nodes))
+        rendered = self._render(nodes)
+        threshold = self._threshold(
+            self.config.trim.trigger_tokens, context_window, output_reserve_tokens
+        )
+        if overhead_tokens + estimate_tokens_of_messages(rendered) <= threshold:
+            return rendered, []
+        pairs = self.trimmer.trim_batch(nodes)
+        if not pairs:
+            return rendered, []
+        before = estimate_tokens_of_messages(rendered)
+        rendered = self._render(nodes)
+        return rendered, [
+            Promotion(
+                tier=1,
+                trimmed=tuple(pairs),
+                reclaimed_chars=max(
+                    0, (before - estimate_tokens_of_messages(rendered)) * 4
+                ),
+            )
+        ]
+
     def escalate(self, nodes: list[SessionNode]) -> list[Promotion]:
         """Overflow recovery: force the next rung that can still reclaim
         anything. Called with the provider having rejected the prompt, so
         thresholds no longer matter — reclaim as much as each rung can."""
         if not self.config.enabled:
-            return []
+            if not self.config.trim.enabled:
+                return []
+            # Trim-only: tier 1 is the only rung there is.
+            pairs = self.trimmer.trim_batch(nodes)
+            return (
+                [Promotion(tier=1, reason="overflow", trimmed=tuple(pairs))]
+                if pairs
+                else []
+            )
         pairs = self.trimmer.trim_batch(nodes)
         if pairs:
             return [
@@ -516,6 +608,8 @@ class Compactor:
         so the rehydrated view is byte-identical to the pre-restart one."""
         for promo in promotions:
             self.trimmer.mark_trimmed(promo.trimmed)
+            if not self.config.enabled:
+                continue  # trim-only: tier 2/3 history is not re-armed
             for start, end, kind in promo.spans:
                 self._mark_span(start, end, kind)
 

@@ -146,6 +146,7 @@ Knobs for tool-result trimming and the compaction ladder
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | `false` disables both trimming and compaction. |
+| `trim_only` | `false` | `true` runs tier 1 alone: old tool results become recoverable placeholders, but no turn is ever folded into a digest and no epoch stub is ever written. Ignored when `enabled = false`. |
 | `trigger_tokens` | `120000` | Prompt size at which trimming and compaction start. |
 | `headroom_tokens` | `16000` | Reserve kept free below the trigger. |
 | `target_ratio` | `0.7` | Compaction aims to bring the prompt down to this fraction of the trigger. |
@@ -160,6 +161,16 @@ Knobs for tool-result trimming and the compaction ladder
 A trimmed result is replaced by a placeholder that states how many characters
 were removed, quotes the first 160 characters of the original, and carries a
 `node_...` ref that `HistoryExpand` or `HistorySearch` can recover.
+
+`trim_only = true` is the embedding contract for host apps that want the
+context saving without the model ever reading a machine summary of its own
+history. In library terms it is
+`CompactionConfig(enabled=False, trim=TrimConfig(enabled=True))`, and it means
+exactly: tier-1 trim runs on its own trigger, oversize payloads still render as
+stubs (a stateless size policy, not a tier), tiers 2 and 3 never run — not on
+the trigger, not on an overflow escalation, and not from promotion decisions
+rehydrated from an earlier session. The stored tree keeps full fidelity either
+way.
 
 ### Memory
 
@@ -361,3 +372,27 @@ allowlist (`DEFAULT_ALLOWLIST` in `fluid/codemode/vfs.py`): `json`, `re`,
 `__future__`. `open()` and the network are disabled; files go through the
 permission-gated tools. A failing cell returns a traceback trimmed to the
 cell's own frames.
+
+Three things keep a cell's output honest:
+
+- **Result handles.** A tool result over 8 KB (`KernelConfig.ref_threshold`)
+  comes back as a `ResultRef` — a `str` subclass whose `repr` is a preview, so
+  the payload stays in the kernel and the model slices it there. Every ref is
+  filed in the namespace's `_refs` registry under a short id its `repr` prints
+  (`<ResultRef #7: 55123 bytes; …>`), so a handle the cell forgot to assign is
+  recovered with `_refs[7]` instead of re-running the tool. The registry keeps
+  the 50 most recent refs; the previous cell's displayed value stays bound to
+  `_`, Python-REPL style. Both survive across cells. A kernel restart rebuilds
+  the registry from the refs the checkpoint restored — a ref that was only ever
+  reachable through `_refs` does not come back.
+- **Fair-share stdout.** A cell's stdout is capped at 16384 chars
+  (`KernelConfig.stdout_cap`). The budget is divided across the cell's prints
+  rather than kept from the front, so the summary a model prints *last* still
+  arrives; the closing notice names the totals and the heaviest drops
+  (`…[stdout truncated: kept 16384 of 139201 chars across 13 prints; heaviest
+  drops: print 11 (-48200), print 12 (-31005)]`).
+- **Committed-call manifest.** A tool error aborts the whole cell, so a cell
+  that edited three files before failing would otherwise show only a traceback.
+  The result appends the calls that already ran, in order, with their targets
+  and outcomes, and says plainly that completed Edits and Writes are already on
+  disk and must not be re-issued.
