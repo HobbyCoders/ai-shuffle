@@ -38,6 +38,12 @@ ENTER_RESULT = (
     "describe edits as if you were making them."
 )
 
+APPROVED_RESULT = (
+    "Plan approved — plan mode is now OFF. Your write and shell tools are "
+    "back on the surface. Execute the approved plan now; steps it already "
+    "covers need no further permission."
+)
+
 PLAN_SPEC = ToolSpec(
     name="Plan",
     description=(
@@ -190,19 +196,20 @@ async def stop_handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     raw = str(answers.get("approve", "")).strip()
     if raw.lower() in _APPROVALS:
         control.set_active(False)
-        return ToolOutcome(
-            text=(
-                "Plan approved — plan mode is off. Implement the approved "
-                "plan now; steps it covers need no re-asking."
-            )
-        )
+        # The state change is the whole point of the call, so it is stated
+        # outright: an approval that reads as empty (or merely implied) cost
+        # audited sessions whole turns of the model re-checking whether it was
+        # allowed to write yet.
+        return ToolOutcome(text=APPROVED_RESULT)
     feedback = raw or "(no feedback given)"
     return ToolOutcome(
         text=(
             "The user did NOT approve the plan and answered:\n"
             f"{feedback}\n"
-            "Still in plan mode — revise the plan to address the feedback "
-            "and present it again with StopPlanning."
+            "PLAN MODE IS STILL ACTIVE — your write and shell tools are still "
+            "off the surface. Revise the plan to address that feedback and "
+            "present it again with StopPlanning; do not attempt to implement "
+            "anything yet."
         )
     )
 

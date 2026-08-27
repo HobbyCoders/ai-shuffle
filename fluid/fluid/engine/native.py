@@ -116,6 +116,7 @@ from fluid.messages import (
 from fluid.permissions.engine import PROMPT_DENIAL, PermissionEngine, plan_mode_tools
 from fluid.providers.base import ProviderClient, ProviderRequest
 from fluid.store.base import SessionMeta, SessionNode, SessionStore, new_id
+from fluid.tools.builtins._util import resolve as resolve_tool_path
 from fluid.tools.builtins.tool_search import (
     parse_deferred_catalog,
     render_deferred_catalog,
@@ -126,6 +127,29 @@ from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
 log = logging.getLogger(__name__)
 
 _BACKGROUND_SPAWN_INTERRUPT_GRACE = 1.0
+
+# Opening words of the per-turn plan-mode reminder. They double as the handle
+# the render path uses to drop a reminder the live flag has outlived — see
+# NativeLoop._without_stale_plan_reminder.
+PLAN_MODE_REMINDER_MARK = "Plan mode is active:"
+
+# The builtins that put a file into ``ctx.read_files`` (read.py, write.py).
+# Replaying their calls is what rebuilds the ledger on resume.
+_READ_LEDGER_TOOLS = frozenset({"Read", "Write"})
+
+
+def _read_ledger_path(block: ToolUseBlock, ctx: ToolCtx) -> str | None:
+    """The read-ledger key a replayed Read/Write would have recorded."""
+    if block.name not in _READ_LEDGER_TOOLS or not isinstance(block.input, dict):
+        return None
+    raw = block.input.get("file_path")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        return str(resolve_tool_path(raw, ctx))
+    except (OSError, ValueError):
+        return None
+
 
 # Doom-loop guard texts. The first is the in-context denial under never_ask;
 # the second rides on the PermissionRequest (and any denial) when the guard
@@ -592,6 +616,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         # session does not replay a catalog it already contains.
         self._deferred_announced: set[str] = set()
         self._deferred_rehydrated = False
+        # Read-before-edit ledger rehydration: ``ctx.read_files`` is process
+        # memory, so a resumed session starts blind to every earlier Read.
+        # Replayed once from the stored transcript on the first turn.
+        self._read_files_rehydrated = False
         # The mechanical eviction ladder (view-level; the stored tree keeps
         # full fidelity). Sticky per engine lifetime; promotions are persisted
         # as ContextCompaction events and rehydrated on resume — see
@@ -977,6 +1005,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         # known deferred tools can be announced on this very turn.
         await self._connect_mcp_once(sid, turn_id)
         await self._rehydrate_deferred_announced(sid, meta.head_node_id)
+        await self._rehydrate_read_files(sid, meta.head_node_id)
         await self._rehydrate_compaction(sid)
 
         if isinstance(op, Resume):
@@ -1111,6 +1140,39 @@ class NativeLoop(BackgroundLifecycleMixin):
             if text:
                 self._deferred_announced.update(parse_deferred_catalog(text))
 
+    async def _rehydrate_read_files(self, sid: str, head_node_id: str | None) -> None:
+        """Seed the read-before-edit ledger from the stored transcript (once).
+
+        ``ctx.read_files`` is process memory that only Read and Write add to,
+        but the session outlives the process — and the ToolCtx is rebuilt with
+        it. Without this, a resumed session treats a file the model
+        demonstrably Read as unread and refuses the next Edit to it, pointing
+        at a Read that is sitting right there in the history. The replay
+        records exactly what the live path records: the resolved absolute path
+        of every Read or Write whose result was not an error.
+
+        Deliberately tolerant — a call with no ``file_path``, a store that
+        cannot replay, or a history written before any of this simply
+        contributes nothing and the session re-Reads the old way.
+        """
+        if self._read_files_rehydrated:
+            return
+        self._read_files_rehydrated = True
+        try:
+            nodes = await self.store.load_path(sid, head_node_id)
+        except Exception:  # a store that cannot replay just re-Reads
+            return
+        seen: dict[str, str] = {}  # tool_use_id -> resolved path
+        for node in nodes:
+            for block in node.message.content:
+                if isinstance(block, ToolUseBlock):
+                    path = _read_ledger_path(block, self.ctx)
+                    if path is not None:
+                        seen[block.id] = path
+                elif isinstance(block, ToolResultBlock) and block.is_error:
+                    seen.pop(block.tool_use_id, None)
+        self.ctx.read_files.update(seen.values())
+
     def _deferred_catalog_reminder(self) -> str | None:
         """Announce known-but-unloaded tools, once per tool (name + one-liner).
 
@@ -1216,6 +1278,34 @@ class NativeLoop(BackgroundLifecycleMixin):
         """Plan/StopPlanning's switch: the next request's schemas follow."""
         self.plan_mode = bool(active)
 
+    def _without_stale_plan_reminder(self, history: list[Message]) -> list[Message]:
+        """Drop plan-mode reminders that the live flag has since contradicted.
+
+        The reminder is written into the user node when the turn starts, but
+        approval lands MID-turn: from that moment every remaining call of the
+        same turn re-reads "Plan mode is active" from a node that predates the
+        approval, which is exactly the contradiction the audit watched models
+        try to obey. Once the flag is off the block leaves the rendered
+        history; the stored tree keeps it.
+        """
+        if self.plan_mode:
+            return history
+        out: list[Message] = []
+        changed = False
+        for message in history:
+            kept = [
+                b for b in message.content
+                if not (isinstance(b, Text) and PLAN_MODE_REMINDER_MARK in b.text)
+            ]
+            if len(kept) == len(message.content) or not kept:
+                out.append(message)
+                continue
+            changed = True
+            out.append(Message(
+                role=message.role, content=kept, provider_meta=message.provider_meta,
+            ))
+        return out if changed else history
+
     def _plan_mode_reminder(self) -> str | None:
         """Recite the plan-mode contract onto each user turn while active —
         the mode's rules must survive long exploration stretches, the same
@@ -1235,7 +1325,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         )
         return (
             "<system-reminder>\n"
-            "Plan mode is active: a read-only exploration and planning "
+            f"{PLAN_MODE_REMINDER_MARK} a read-only exploration and planning "
             "phase. Do not write or edit files, run state-changing "
             "commands, or describe edits as if you had made them. Explore "
             "the codebase, weigh approaches and their trade-offs, and "
@@ -1723,7 +1813,9 @@ class NativeLoop(BackgroundLifecycleMixin):
     async def _stream_once(
         self, sid: str, turn_id: str, history: list[Message], *, sticky: bool = True
     ) -> _CallResult:
-        request = self._build_request(history, sticky=sticky)
+        request = self._build_request(
+            self._without_stale_plan_reminder(history), sticky=sticky
+        )
 
         blocks: dict[int, dict[str, Any]] = {}
         usage_totals: dict[str, Any] = {}

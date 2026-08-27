@@ -31,11 +31,12 @@ async def test_add_remove_show_roundtrip(tmp_path) -> None:
     out = await ledger_handler(
         {"action": "add", "section": "threads", "text": "flaky test in CI"}, ctx)
     assert "constraints" in out.text and "threads" in out.text
+    # remove takes the entry's whole text (a substring removes nothing).
     out = await ledger_handler(
-        {"action": "remove", "section": "threads", "text": "flaky"}, ctx)
-    assert "flaky" not in out.text and "never touch prod" in out.text
+        {"action": "remove", "section": "threads", "text": "flaky test in CI"}, ctx)
+    assert "removed 1 threads entry" in out.text and "never touch prod" in out.text
     out = await ledger_handler({"action": "show"}, ctx)
-    assert "never touch prod" in out.text
+    assert "never touch prod" in out.text and "flaky test in CI" not in out.text
 
 
 async def test_validation_errors(tmp_path) -> None:

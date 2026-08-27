@@ -63,10 +63,13 @@ async def test_remove_drops_matching_notes(tmp_path) -> None:
         {"action": "add", "texts": ["clone the repo", "run the tests", "open the PR"]},
         ctx,
     )
-    out = await note_handler({"action": "remove", "text": "tests"}, ctx)
+    # remove takes a note's whole text; a fragment of one removes nothing.
+    out = await note_handler({"action": "remove", "text": "run the tests"}, ctx)
     assert not out.is_error
-    assert "run the tests" not in out.text
-    assert "clone the repo" in out.text and "open the PR" in out.text
+    assert "removed 1 note" in out.text
+    listing = await note_handler({"action": "list"}, ctx)
+    assert "run the tests" not in listing.text
+    assert "clone the repo" in listing.text and "open the PR" in listing.text
     missing = await note_handler({"action": "remove", "text": "not a note"}, ctx)
     assert missing.is_error
 
