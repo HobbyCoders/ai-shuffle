@@ -5433,6 +5433,23 @@ async def test_native_prompt_carries_the_github_section(monkeypatch, agent_works
     assert captured["system_sections"].text == system
 
 
+def test_github_section_carries_the_git_hazard_rules():
+    """Three failures the round-3 audit caught in live sessions, each answered
+    by one line of this block."""
+    import app.core.provider.harness_adapter as ha
+
+    text = ha.GITHUB_BLOCK
+
+    # CI waits are parked on a Monitor, never blocked on in Bash.
+    assert "never wait in Bash" in text
+    assert "Monitor(command=" in text and "gh pr checks" in text
+    # Worktrees share one stash stack: a bare pop can land another session's
+    # work in this tree.
+    assert "git stash" in text and 'push -u -m "<tag>"' in text
+    # A stale ``--merged`` listing nearly deleted a live session's branch.
+    assert "git worktree list" in text and "bulk branch delete" in text
+
+
 @pytest.mark.asyncio
 async def test_no_github_connection_means_no_github_section(
     monkeypatch, agent_workspace
@@ -5865,6 +5882,12 @@ def test_code_mode_section_carries_the_four_contracts():
     # (c) one cell carries the whole step.
     assert "Never spend a cell on a single Read" in text
     assert "sleep-poll" in text
+    # ... and the two batching rules the round-3 audit added beside it: a known
+    # recipe is one step, and a bound result is located in-cell, not paged out
+    # across cells.
+    assert "is ONE step" in text and "same file or working tree" in text
+    assert "do not print it in slices across cells" in text
+    assert "txt.find('needle')" in text
     # (d) recall budget.
     assert "limit<=5" in text and "two unproductive queries" in text
     # The code-mode rule still ends the block (it is last for a reason).
