@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -59,6 +60,7 @@ from fluid.events.model import (
 )
 from fluid.events.ops import BackgroundTaskFinished, RespondPermission, UserTurn
 from fluid.store.base import new_id
+from fluid.tools.builtins._util import strip_ansi
 from fluid.tools.registry import BackgroundTaskReceipt, ToolCtx, ToolOutcome
 from fluid.tools.shell import resolve_shell
 
@@ -259,6 +261,11 @@ class CliHost:
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            # Same hint Bash gives its children: a monitored test runner or
+            # dev server that colourises its output makes the summary
+            # unsearchable. Anything that ignores the hint gets its escapes
+            # stripped as the stream is read (see _supervise).
+            env=dict(os.environ, NO_COLOR="1", FORCE_COLOR="0"),
             **spawn_kwargs,
         )
         worker = Worker(
@@ -276,12 +283,18 @@ class CliHost:
     async def _supervise(self, worker: Worker) -> None:
         process = worker.process
         assert process is not None and process.stdout is not None
+        held = ""  # an escape sequence a chunk boundary cut in half
         try:
             while True:
                 chunk = await process.stdout.read(4096)
                 if not chunk:
+                    if held:
+                        worker.feed(strip_ansi(held))
                     break
-                worker.feed(chunk.decode("utf-8", errors="replace"))
+                text, held = _split_trailing_escape(
+                    held + chunk.decode("utf-8", errors="replace")
+                )
+                worker.feed(strip_ansi(text))
             code = await process.wait()
         except asyncio.CancelledError:
             worker.summary = _monitor_summary(worker, None, cancelled=True)
@@ -468,6 +481,22 @@ class CliHost:
         if worker.status == "cancelled":
             return
         await self._report(worker, status, text)
+
+
+# A read(4096) can land in the middle of an escape sequence, and half a
+# sequence survives strip_ansi as literal garbage. The unterminated tail is
+# held back for the next chunk — up to a bound, so a lone ESC in binary-ish
+# output cannot stall the buffer forever.
+_TRAILING_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*|\][^\x07\x1b]*)?\Z")
+_MAX_HELD_CHARS = 256
+
+
+def _split_trailing_escape(text: str) -> tuple[str, str]:
+    """Split ``text`` into (ready to strip, incomplete escape held back)."""
+    match = _TRAILING_ESCAPE.search(text)
+    if match is None or len(text) - match.start() > _MAX_HELD_CHARS:
+        return text, ""
+    return text[: match.start()], text[match.start():]
 
 
 async def _kill_tree(process: asyncio.subprocess.Process) -> None:

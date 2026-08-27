@@ -22,7 +22,8 @@ SPEC = ToolSpec(
         "Working notes — a scratchpad for the current plan and thoughts "
         "through a session. Actions: 'add' appends one or more notes "
         "(text: one note, or several lines for a batch; texts: an array), "
-        "'remove' deletes notes containing text, 'list' returns all notes, "
+        "'remove' deletes the one note whose text matches exactly, 'list' "
+        "returns all notes, "
         "'clear' empties them. Notes live outside the context window; calling "
         "Note is what brings them back into view. Before multi-step work, add "
         "every current step in one call. When a step is finished, remove it. "
@@ -40,8 +41,8 @@ SPEC = ToolSpec(
                 "type": "string",
                 "description": (
                     "The note (action=add/remove). For add, one note per line "
-                    "to batch several in one call. For remove, a substring "
-                    "identifying notes to delete."
+                    "to batch several in one call. For remove, the note's "
+                    "full text — matching is whole-note, not substring."
                 ),
             },
             "texts": {
@@ -137,14 +138,52 @@ def render_notes_reminder(text: str) -> str:
     )
 
 
-def _outcome(path: Path) -> ToolOutcome:
+def _outcome(path: Path, prefix: str = "") -> ToolOutcome:
     notes = _read_notes(path).strip()
-    return ToolOutcome(text=f"# Notes\n{notes}" if notes else "# Notes\n(empty)")
+    body = f"# Notes\n{notes}" if notes else "# Notes\n(empty)"
+    return ToolOutcome(text=f"{prefix}\n{body}" if prefix else body)
+
+
+# ``remove`` used to drop every note *containing* the text, which turned one
+# imprecise call into a deleted checklist. It matches whole notes now, and a
+# miss lists the near ones instead of guessing.
+_CANDIDATES_SHOWN = 5
+
+
+def _no_match(needle: str, existing: list[str]) -> ToolOutcome:
+    """A remove that matched no whole note: delete nothing, show the near ones."""
+    near = [line for line in existing if needle.lower() in line.lower()]
+    if not near:
+        return ToolOutcome(
+            text=(
+                f'no note reads exactly "{needle}" — nothing was removed. '
+                "remove matches a whole note, not a fragment of one; "
+                "action=list shows the current notes."
+            ),
+            is_error=True,
+        )
+    shown = near[:_CANDIDATES_SHOWN]
+    listing = "\n".join(f"- {line}" for line in shown)
+    more = (
+        f"\n({len(near) - len(shown)} more also contain it.)"
+        if len(near) > len(shown)
+        else ""
+    )
+    return ToolOutcome(
+        text=(
+            f'no note reads exactly "{needle}" — nothing was removed. remove '
+            f"matches a whole note, not a fragment of one. These notes contain "
+            f"it:\n{listing}{more}\n"
+            "Re-issue remove with one of those lines verbatim."
+        ),
+        is_error=True,
+    )
 
 
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     action = str(input.get("action", "")).strip()
     path = _notes_path(ctx)
+    prefix = ""
     if action == "add":
         incoming = _notes_from_add(input)
         if not incoming:
@@ -161,15 +200,19 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         if not needle:
             return ToolOutcome(text="action=remove requires text", is_error=True)
         existing = _parse_lines(_read_notes(path))
-        kept = [line for line in existing if needle.lower() not in line.lower()]
-        if len(kept) == len(existing):
-            return ToolOutcome(
-                text=f'no note contains "{needle}"', is_error=True
-            )
+        target = needle.lower()
+        removed = [line for line in existing if line.strip().lower() == target]
+        kept = [line for line in existing if line.strip().lower() != target]
+        if not removed:
+            return _no_match(needle, existing)
         try:
             _write_lines(path, kept)
         except OSError as exc:
             return ToolOutcome(text=f"failed to write notes: {exc}", is_error=True)
+        prefix = (
+            f'removed {len(removed)} note{"s" if len(removed) != 1 else ""} '
+            f'("{removed[0]}"); {len(kept)} remain'
+        )
     elif action == "clear":
         try:
             path.unlink(missing_ok=True)
@@ -177,4 +220,4 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             return ToolOutcome(text=f"failed to clear notes: {exc}", is_error=True)
     elif action != "list":
         return ToolOutcome(text=f"unknown action: {action}", is_error=True)
-    return _outcome(path)
+    return _outcome(path, prefix)

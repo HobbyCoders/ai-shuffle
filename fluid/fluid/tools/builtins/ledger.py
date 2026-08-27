@@ -31,8 +31,9 @@ SPEC = ToolSpec(
         "compaction verbatim — it is re-shown on every turn. Use it for "
         "user-stated constraints, decisions made, current task state, and "
         "open threads. Actions: 'add' appends an entry to a section "
-        "(requires section + text), 'remove' deletes entries containing text "
-        "from a section, 'show' returns the ledger. Keep entries terse — "
+        "(requires section + text), 'remove' deletes the one entry in a "
+        "section whose text matches exactly, 'show' returns the ledger. Keep "
+        "entries terse — "
         "every entry costs context on every turn."
     ),
     input_schema={
@@ -47,7 +48,8 @@ SPEC = ToolSpec(
             "text": {
                 "type": "string",
                 "description": (
-                    "Entry to add, or substring identifying entries to remove."
+                    "Entry to add, or the full text of the entry to remove "
+                    "(matching is whole-entry, not substring)."
                 ),
             },
         },
@@ -103,6 +105,41 @@ def read_ledger(ctx: ToolCtx, session_id: str | None = None) -> str:
     return _render(_parse(text))
 
 
+# ``remove`` matches a whole entry, never a substring: one imprecise call must
+# not be able to empty a section. A miss lists the near entries instead.
+_CANDIDATES_SHOWN = 5
+
+
+def _no_match(section: str, needle: str, entries: list[str]) -> ToolOutcome:
+    """A remove that matched no whole entry: delete nothing, show the near ones."""
+    near = [e for e in entries if needle.lower() in e.lower()]
+    if not near:
+        return ToolOutcome(
+            text=(
+                f'no {section} entry reads exactly "{needle}" — nothing was '
+                "removed. remove matches a whole entry, not a fragment of one; "
+                "action=show lists the current entries."
+            ),
+            is_error=True,
+        )
+    shown = near[:_CANDIDATES_SHOWN]
+    listing = "\n".join(f"- {e}" for e in shown)
+    more = (
+        f"\n({len(near) - len(shown)} more also contain it.)"
+        if len(near) > len(shown)
+        else ""
+    )
+    return ToolOutcome(
+        text=(
+            f'no {section} entry reads exactly "{needle}" — nothing was '
+            "removed. remove matches a whole entry, not a fragment of one. "
+            f"These {section} entries contain it:\n{listing}{more}\n"
+            "Re-issue remove with one of those lines verbatim."
+        ),
+        is_error=True,
+    )
+
+
 def render_ledger_reminder(text: str) -> str:
     return (
         "<system-reminder>\n"
@@ -120,6 +157,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     except OSError:
         raw = ""
     sections = _parse(raw)
+    prefix = ""
     if action in ("add", "remove"):
         section = str(input.get("section", "")).strip().lower()
         text = str(input.get("text", "")).strip()
@@ -133,14 +171,18 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         if action == "add":
             sections[section].append(text)
         else:
-            before = len(sections[section])
-            sections[section] = [
-                e for e in sections[section] if text.lower() not in e.lower()
-            ]
-            if len(sections[section]) == before:
-                return ToolOutcome(
-                    text=f'no {section} entry contains "{text}"', is_error=True
-                )
+            entries = sections[section]
+            target = text.lower()
+            removed = [e for e in entries if e.strip().lower() == target]
+            kept = [e for e in entries if e.strip().lower() != target]
+            if not removed:
+                return _no_match(section, text, entries)
+            sections[section] = kept
+            prefix = (
+                f'removed {len(removed)} {section} entr'
+                f'{"ies" if len(removed) != 1 else "y"} ("{removed[0]}"); '
+                f"{len(kept)} remain in {section}"
+            )
         rendered = _render(sections)
         try:
             if rendered:
@@ -152,5 +194,5 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             return ToolOutcome(text=f"failed to write ledger: {exc}", is_error=True)
     elif action != "show":
         return ToolOutcome(text=f"unknown action: {action}", is_error=True)
-    current = _render(sections)
-    return ToolOutcome(text=current if current else f"{_HEADER}\n(empty)")
+    current = _render(sections) or f"{_HEADER}\n(empty)"
+    return ToolOutcome(text=f"{prefix}\n{current}" if prefix else current)

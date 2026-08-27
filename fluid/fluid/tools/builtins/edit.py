@@ -10,10 +10,17 @@ model transcription error are corrected rather than refused — a copied
 offset (typically one extra tab, again from Read's separator). Anything else
 fails with a diagnostic that names the line and the difference, because the
 old terse "old_string not found in file" left models guessing.
+
+A Python target gets one more gate before the bytes land: the result must
+still parse. Edit tells the model not to Read the file back, so a botched
+replacement (a truncated condition, a stray ``:w``, a dangling block) is
+otherwise discovered at the next import — often many turns later, with the
+cause long out of view. See :func:`_syntax_rejection`.
 """
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 from typing import Any
@@ -59,6 +66,10 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "- If old_string differs only by a uniform indentation offset or a "
         "copied line-number prefix, Edit corrects it and tells you; any "
         "other mismatch fails with a diagnostic.\n"
+        "- Edits to a .py file that currently parses are syntax-checked "
+        "before anything is written: a result that would not parse is "
+        "rejected, the file is left untouched, and the error names the "
+        "line.\n"
         + verify_clause
     )
 
@@ -308,6 +319,59 @@ def _diagnose(file_lines: list[str], old_lines: list[str]) -> str:
     )
 
 
+# ── post-edit syntax gate (Python targets) ───────────────────────────────────
+
+_PY_SUFFIXES = frozenset({".py", ".pyi"})
+
+
+def _parses(source: str) -> bool:
+    try:
+        ast.parse(source)
+    except (SyntaxError, ValueError):  # ValueError: NUL bytes in source
+        return False
+    return True
+
+
+def _syntax_rejection(path: Path, original: str, candidate: str) -> ToolOutcome | None:
+    """Refuse an edit that would leave a parseable Python file unparseable.
+
+    Asymmetric on purpose: a file that does not parse *before* the edit is a
+    file being repaired, and the repair may well take more than one Edit, so
+    only the parses-then-breaks transition is refused. Nothing is written when
+    it is — the model gets the SyntaxError, its line and that line's text, and
+    can fix ``new_string`` without a Read.
+    """
+    if path.suffix.lower() not in _PY_SUFFIXES or not _parses(original):
+        return None
+    try:
+        ast.parse(candidate)
+    except ValueError as exc:  # NUL bytes and friends — no line to name
+        return ToolOutcome(text=_syntax_message(path, None, str(exc), None), is_error=True)
+    except SyntaxError as exc:
+        return ToolOutcome(
+            text=_syntax_message(path, exc.lineno, exc.msg, candidate), is_error=True
+        )
+    return None
+
+
+def _syntax_message(
+    path: Path, lineno: int | None, detail: str, candidate: str | None
+) -> str:
+    where = f" at line {lineno}" if lineno else ""
+    quoted = ""
+    if candidate is not None and lineno:
+        lines = candidate.split("\n")
+        if 1 <= lineno <= len(lines):
+            quoted = f"\nThe offending line reads:\n{lines[lineno - 1].rstrip()}"
+    return (
+        f"edit REJECTED and nothing was written: the result would not parse as "
+        f"Python — SyntaxError{where}: {detail}.{quoted}\n"
+        f"{path} is unchanged. Fix new_string (a truncated condition, a stray "
+        "editor keystroke and an unclosed block are the usual causes) and "
+        "reissue the Edit."
+    )
+
+
 def _result(path: Path, n: int, note: str) -> ToolOutcome:
     return ToolOutcome(
         text=f"edited {path} ({n} replacement{'s' if n != 1 else ''}){note}"
@@ -356,6 +420,9 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                 is_error=True,
             )
         updated = content.replace(old, new) if replace_all else content.replace(old, new, 1)
+        rejected = _syntax_rejection(path, content, updated)
+        if rejected is not None:
+            return rejected
         write_text_with_newline(path, updated, newline)
         return _result(path, count if replace_all else 1, "")
 
@@ -376,6 +443,9 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                 if replace_all
                 else content.replace(stripped_old, repl, 1)
             )
+            rejected = _syntax_rejection(path, content, updated)
+            if rejected is not None:
+                return rejected
             write_text_with_newline(path, updated, newline)
             return _result(path, count if replace_all else 1, _FALLBACK_NOTE)
 
@@ -394,7 +464,11 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         span = len(old_lines)
         for start, prefix, old_has_extra in reversed(chosen):
             file_lines[start:start + span] = _apply_prefix(new_lines, prefix, old_has_extra)
-        write_text_with_newline(path, "\n".join(file_lines), newline)
+        updated = "\n".join(file_lines)
+        rejected = _syntax_rejection(path, content, updated)
+        if rejected is not None:
+            return rejected
+        write_text_with_newline(path, updated, newline)
         return _result(path, len(chosen), _FALLBACK_NOTE)
 
     # 4. No match — say why.
