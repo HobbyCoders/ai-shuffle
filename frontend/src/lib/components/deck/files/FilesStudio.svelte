@@ -27,6 +27,7 @@
 	let renameTarget = $state<FileItem | null>(null);
 	let renameValue = $state('');
 	let pendingDelete = $state<FileItem | null>(null);
+	let pendingBulkDelete = $state(false);
 	let isDragging = $state(false);
 	// Touch/narrow only: which row has its collapsed ⋮ action tray expanded.
 	// One open at a time; desktop keeps the always-inline hover-revealed rail.
@@ -34,6 +35,9 @@
 
 	// Root-level directories for the tree sidebar.
 	let rootDirs = $state<{ name: string; path: string }[]>([]);
+	// Bumped after every folder mutation so expanded tree nodes refetch children.
+	let treeVersion = $state(0);
+	function refreshTree() { treeVersion++; }
 
 	const currentPath = $derived($files.currentPath);
 	const loading = $derived($files.loading);
@@ -41,6 +45,8 @@
 	const uploadProgress = $derived($files.uploadProgress);
 	const error = $derived($files.error);
 	const showHidden = $derived($files.showHidden);
+	const selectedCount = $derived($files.selectedFiles.size);
+	const allSelected = $derived($sortedFiles.length > 0 && $sortedFiles.every((f) => $files.selectedFiles.has(f.path)));
 
 	async function loadRootDirs() {
 		try {
@@ -82,6 +88,7 @@
 		try {
 			await files.createFolder(name);
 			await loadRootDirs();
+			refreshTree();
 			showNewFolder = false;
 			newFolderName = '';
 		} finally {
@@ -118,6 +125,7 @@
 		if (renameTarget && renameValue.trim() && renameValue.trim() !== renameTarget.name) {
 			await files.rename(renameTarget.path, renameValue.trim());
 			await loadRootDirs();
+			refreshTree();
 		}
 		renameTarget = null;
 		renameValue = '';
@@ -131,6 +139,24 @@
 		if (!t) return;
 		await files.delete(t.path);
 		await loadRootDirs();
+		refreshTree();
+	}
+
+	// ── Multi-select delete ──
+	function toggleSelected(item: FileItem, e: Event) {
+		e.stopPropagation();
+		files.toggleSelection(item.path);
+	}
+	function onHeaderSelectAll(e: Event) {
+		const checked = (e.target as HTMLInputElement).checked;
+		if (checked) files.selectAll();
+		else files.clearSelection();
+	}
+	async function confirmDeleteSelected() {
+		pendingBulkDelete = false;
+		await files.deleteSelected();
+		await loadRootDirs();
+		refreshTree();
 	}
 
 	function rowClick(item: FileItem) {
@@ -256,6 +282,16 @@
 		<Banner severity="error" message={error} dismissible onDismiss={() => files.clearError()} />
 	{/if}
 
+	{#if selectedCount > 0}
+		<div class="fs-bulkbar">
+			<span>{selectedCount} selected</span>
+			<button class="fs-btn fs-btn--sm" onclick={() => files.clearSelection()}>Clear</button>
+			<button class="fs-btn fs-btn--sm fs-btn--danger" onclick={() => (pendingBulkDelete = true)}>
+				<Trash2 size={14} strokeWidth={1.8} /><span>Delete selected</span>
+			</button>
+		</div>
+	{/if}
+
 	<!-- Two-column layout -->
 	<div class="fs-layout">
 		<div class="fs-side">
@@ -264,7 +300,7 @@
 					<Home size={14} strokeWidth={1.8} /><span>Workspace</span>
 				</button>
 				{#each rootDirs as dir (dir.path)}
-					<FilesTreeNode name={dir.name} path={dir.path} depth={0} {currentPath} {showHidden} onNavigate={navigate} />
+					<FilesTreeNode name={dir.name} path={dir.path} depth={0} {currentPath} {showHidden} onNavigate={navigate} {treeVersion} />
 				{/each}
 			</aside>
 		</div>
@@ -280,6 +316,14 @@
 		>
 			<div class="fs-list">
 				<div class="fs-row fs-row--head">
+					<span class="fs-sel">
+						<input
+							type="checkbox"
+							checked={allSelected}
+							aria-label="Select all"
+							onclick={onHeaderSelectAll}
+						/>
+					</span>
 					<span>Name</span>
 					<span>Size</span>
 					<span>Modified</span>
@@ -313,11 +357,21 @@
 							<div
 								class="fs-row"
 								class:dir={item.type === 'directory'}
+								class:selected={$files.selectedFiles.has(item.path)}
 								role="button"
 								tabindex="0"
 								onclick={() => rowClick(item)}
 								onkeydown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && item.type === 'directory') { e.preventDefault(); rowClick(item); } }}
 							>
+								<span class="fs-sel">
+									<input
+										type="checkbox"
+										checked={$files.selectedFiles.has(item.path)}
+										aria-label="Select {item.name}"
+										onclick={(e) => toggleSelected(item, e)}
+										onkeydown={(e) => e.stopPropagation()}
+									/>
+								</span>
 								<span class="fs-nm">
 									<Ic size={16} strokeWidth={1.8} class={item.type === 'directory' ? 'fs-fold' : 'fs-file'} />
 									<span class="fs-nm-text">{item.name}</span>
@@ -359,6 +413,16 @@
 	danger
 	onConfirm={confirmDelete}
 	onCancel={() => (pendingDelete = null)}
+/>
+
+<ConfirmDialog
+	open={pendingBulkDelete}
+	title="Delete selected items"
+	message={`Delete ${selectedCount} selected item${selectedCount === 1 ? '' : 's'}? This cannot be undone.`}
+	confirmLabel="Delete"
+	danger
+	onConfirm={confirmDeleteSelected}
+	onCancel={() => (pendingBulkDelete = false)}
 />
 
 <style>
@@ -449,6 +513,22 @@
 	.fs-btn--sm { height: 30px; padding: 0 11px; font-size: 0.78rem; }
 	.fs-btn--primary { background: var(--primary); color: var(--primary-foreground); border-color: transparent; }
 	.fs-btn--primary:hover { filter: brightness(1.08); background: var(--primary); }
+	.fs-btn--danger { background: var(--destructive); color: white; border-color: transparent; }
+	.fs-btn--danger:hover { filter: brightness(1.08); background: var(--destructive); }
+
+	/* Bulk-selection action bar */
+	.fs-bulkbar {
+		flex-shrink: 0;
+		display: flex; align-items: center; gap: 10px;
+		margin: 0 28px 10px;
+		padding: 8px 14px;
+		border: 1px solid var(--border); border-radius: var(--radius, 0.75rem);
+		background: color-mix(in oklch, var(--primary) 6%, var(--card));
+		font-size: 0.8125rem; font-weight: 500;
+	}
+	.fs-bulkbar span:first-child { color: var(--foreground); }
+	.fs-bulkbar .fs-btn { margin-left: auto; }
+	.fs-bulkbar .fs-btn + .fs-btn { margin-left: 0; }
 
 	/* Two-column layout */
 	.fs-layout {
@@ -483,10 +563,13 @@
 		overflow: hidden; background: var(--card);
 	}
 	.fs-row {
-		display: grid; grid-template-columns: 1fr 92px 116px 84px; align-items: center; gap: 12px;
+		display: grid; grid-template-columns: 28px 1fr 92px 116px 84px; align-items: center; gap: 12px;
 		padding: 10px 16px; border-bottom: 1px solid var(--border-subtle, var(--border)); font-size: 0.8125rem;
 		transition: background-color 110ms ease;
 	}
+	.fs-row.selected { background: color-mix(in oklch, var(--primary) 10%, transparent); }
+	.fs-sel { display: flex; align-items: center; }
+	.fs-sel input { width: 15px; height: 15px; cursor: pointer; accent-color: var(--primary); }
 	.fs-row:last-child { border-bottom: none; }
 	.fs-row--head {
 		font-family: var(--font-mono, monospace); font-size: 0.66rem; text-transform: uppercase;
@@ -547,7 +630,8 @@
 		/* No folder tree on mobile — a single-column flat file list (mockup #page-files). */
 		.fs-side { display: none; }
 		.fs-row--head { display: none; }
-		.fs-row { grid-template-columns: 1fr auto auto; gap: 10px; }
+		.fs-row { grid-template-columns: 28px 1fr auto auto; gap: 10px; }
 		.fs-md { display: none; }
+		.fs-bulkbar { margin: 0 16px 10px; }
 	}
 </style>

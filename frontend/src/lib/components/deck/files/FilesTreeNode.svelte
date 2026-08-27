@@ -6,6 +6,7 @@
 	 * directory at a time) and auto-expands along the active path so the tree
 	 * always reveals where you are. Recurses by importing itself. Theme tokens.
 	 */
+	import { untrack } from 'svelte';
 	import { ChevronRight, Folder } from 'lucide-svelte';
 	import type { FileItem } from '$lib/stores/files.svelte';
 	import FilesTreeNode from './FilesTreeNode.svelte';
@@ -17,9 +18,11 @@
 		currentPath: string;
 		showHidden: boolean;
 		onNavigate: (path: string) => void;
+		/** Bumped by the parent after a rename/delete/create so cached children reload. */
+		treeVersion?: number;
 	}
 
-	let { name, path, depth, currentPath, showHidden, onNavigate }: Props = $props();
+	let { name, path, depth, currentPath, showHidden, onNavigate, treeVersion = 0 }: Props = $props();
 
 	let expanded = $state(false);
 	let children = $state<{ name: string; path: string }[] | null>(null);
@@ -28,8 +31,8 @@
 	const isActive = $derived(currentPath === path);
 	const onPath = $derived(currentPath === path || currentPath.startsWith(path + '/'));
 
-	async function loadChildren() {
-		if (children !== null || loading) return;
+	async function loadChildren(force = false) {
+		if ((children !== null && !force) || loading) return;
 		loading = true;
 		try {
 			const params = new URLSearchParams({ path, show_hidden: String(showHidden) });
@@ -70,6 +73,22 @@
 			loadChildren();
 		}
 	});
+
+	// When the workspace changes (rename/delete/create), refetch so nodes never
+	// show stale folders. An expanded node refetches in place — the keyed {#each}
+	// then preserves child instances, so nested nodes stay expanded and refresh
+	// through the same version prop. A collapsed node just drops its cache; it
+	// refetches on next expand. Everything runs inside untrack: this effect must
+	// depend on treeVersion only — reading `children` in loadChildren's guard
+	// while writing it here would re-trigger the effect in a refetch loop.
+	$effect(() => {
+		if (treeVersion > 0) {
+			untrack(() => {
+				if (expanded) void loadChildren(true);
+				else children = null;
+			});
+		}
+	});
 </script>
 
 <div class="ftn">
@@ -91,7 +110,7 @@
 
 	{#if expanded && children}
 		{#each children as child (child.path)}
-			<FilesTreeNode name={child.name} path={child.path} depth={depth + 1} {currentPath} {showHidden} {onNavigate} />
+			<FilesTreeNode name={child.name} path={child.path} depth={depth + 1} {currentPath} {showHidden} {onNavigate} {treeVersion} />
 		{/each}
 		{#if children.length === 0 && !loading}
 			<div class="ftn-empty" style="padding-left: {8 + (depth + 1) * 15 + 18}px">empty</div>
