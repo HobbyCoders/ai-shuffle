@@ -287,6 +287,10 @@ def _spawn_recheck(session_id: str, force: bool) -> "asyncio.Task":
     """Spawn a recheck chained behind any pending one for this session."""
     prev = _chains.get(session_id)
     task = asyncio.create_task(_recheck(session_id, force, prev))
+    # Fire-and-forget broadcast: if the loop dies before it runs (shutdown,
+    # test teardown) the sweep reconciles later, so the destroy-while-pending
+    # log would only be noise.
+    task._log_destroy_pending = False  # type: ignore[attr-defined]
     _chains[session_id] = task
     return task
 
@@ -322,7 +326,13 @@ async def _recheck(
             return False
         return await _apply_busy_state(session_id, busy, force=force)
     finally:
-        if _chains.get(session_id) is asyncio.current_task():
+        # A recheck GC'd after its loop died resumes here with no running
+        # loop; current_task() would raise and spam "Exception ignored".
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        if current is not None and _chains.get(session_id) is current:
             _chains.pop(session_id, None)
 
 
@@ -488,5 +498,10 @@ def _reset_state() -> None:
     with _cache_lock:
         _cache.clear()
     _last_broadcast.clear()
+    for task in _chains.values():
+        try:
+            task.cancel()
+        except RuntimeError:
+            pass  # task's loop already closed — nothing left to deliver to
     _chains.clear()
     _loop = None
