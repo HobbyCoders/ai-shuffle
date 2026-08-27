@@ -98,6 +98,53 @@ describe('single live feed per session', () => {
 });
 
 describe('revive coalescing', () => {
+	it('a stale fetch cannot publish after revive replaces its connection', async () => {
+		type PendingResponse = {
+			resolve: (response: { ok: boolean; status: number; body: ReadableStream<Uint8Array> }) => void;
+			signal?: AbortSignal;
+		};
+		const pending: PendingResponse[] = [];
+		vi.stubGlobal(
+			'fetch',
+			vi.fn((_url: string, init?: RequestInit) =>
+				new Promise((resolve) => pending.push({ resolve, signal: init?.signal ?? undefined }))
+			)
+		);
+		const opened = vi.fn();
+		const events = vi.fn();
+		const feed = createSseFeed('sess-stale-attempt', { onOpen: opened, onEvent: events });
+		await tick();
+		expect(pending).toHaveLength(1);
+
+		feed.revive();
+		await tick();
+		expect(pending).toHaveLength(2);
+		expect(pending[0].signal?.aborted).toBe(true);
+
+		// Connection A resolves despite abort with a buffered sentinel. It no longer
+		// owns the feed, so neither onOpen nor onEvent may fire.
+		pending[0].resolve({
+			ok: true,
+			status: 200,
+			body: streamThenPending(['event: caught_up\ndata: {"seq":1}\n\n']),
+		});
+		await tick();
+		expect(opened).not.toHaveBeenCalled();
+		expect(events).not.toHaveBeenCalled();
+
+		// Only the replacement connection may complete hydration.
+		pending[1].resolve({
+			ok: true,
+			status: 200,
+			body: streamThenPending(['event: caught_up\ndata: {"seq":2}\n\n']),
+		});
+		await tick();
+		expect(opened).toHaveBeenCalledTimes(1);
+		expect(events).toHaveBeenCalledTimes(1);
+		expect(events).toHaveBeenCalledWith({ seq: 2, type: 'caught_up' });
+		feed.stop();
+	});
+
 	it('a burst of revive triggers reconnects once', async () => {
 		const { urls } = setupFetch();
 		const feed = createSseFeed('sess-A', { onEvent: () => {} });

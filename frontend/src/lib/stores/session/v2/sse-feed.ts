@@ -182,6 +182,10 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 	let nextFrom = lastSeq;
 	let backoff = BACKOFF_MIN_MS;
 	let controller: AbortController | null = null;
+	// Ownership token for one concrete fetch/reader attempt. revive()/stop()
+	// invalidate it before aborting, so buffered work from the old reader cannot
+	// publish frames or caught_up into the replacement connection.
+	let connectionAttempt = 0;
 	let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
 	// Timestamp of the last raw chunk received (frame OR keepalive comment).
@@ -216,6 +220,9 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 			clearTimeout(reconnectTimer);
 			reconnectTimer = null;
 		}
+		// Invalidate this attempt BEFORE aborting: fetch/reader implementations can
+		// still resolve buffered data after AbortController fires.
+		connectionAttempt++;
 		// Abort a possibly-half-open reader so connect() starts fresh.
 		if (controller) {
 			try {
@@ -306,7 +313,10 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 		lastFrameAt = Date.now();
 
 		const ac = new AbortController();
+		const attempt = ++connectionAttempt;
 		controller = ac;
+		const ownsAttempt = () =>
+			running && connectionAttempt === attempt && controller === ac;
 		const from = nextFrom;
 		const url = `/api/v1/sessions/${encodeURIComponent(sessionId)}/events?from_seq=${from}`;
 
@@ -318,6 +328,14 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 				signal: ac.signal,
 			});
 
+			if (!ownsAttempt()) {
+				try {
+					await res.body?.cancel();
+				} catch {
+					/* stale response cleanup is best-effort */
+				}
+				return;
+			}
 			if (!res.ok || !res.body) {
 				throw new Error(`SSE feed HTTP ${res.status}`);
 			}
@@ -335,6 +353,14 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 
 			for (;;) {
 				const { value, done } = await reader.read();
+				if (!ownsAttempt()) {
+					try {
+						await reader.cancel();
+					} catch {
+						/* stale reader cleanup is best-effort */
+					}
+					return;
+				}
 				if (done) break;
 				// Any raw bytes — a data frame OR a `:` keepalive comment — mean the
 				// stream is alive. Stamp BEFORE parsing so keepalives (which yield no
@@ -343,6 +369,7 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 				const chunk = decoder.decode(value, { stream: true });
 				const frames = parser.push(chunk);
 				for (const frame of frames) {
+					if (!ownsAttempt()) return;
 					if (!Number.isNaN(frame.id)) {
 						lastSeq = Math.max(lastSeq, frame.id);
 						// The server filters `WHERE seq > from_seq` (exclusive), so the
@@ -373,11 +400,14 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 				}
 			}
 
-			// Stream ended (server closed the body) — reconnect from the cursor.
-			if (controller === ac) controller = null;
+			// Stream ended (server closed the body) — reconnect from the cursor,
+			// but only if this attempt still owns the feed.
+			if (!ownsAttempt()) return;
+			controller = null;
 			scheduleReconnect();
 		} catch (err) {
-			if (controller === ac) controller = null;
+			if (!ownsAttempt()) return;
+			controller = null;
 			if (ac.signal.aborted || !running) return; // intentional stop
 			options.onError?.(err);
 			scheduleReconnect();
@@ -401,6 +431,7 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 		stop() {
 			if (!running) return;
 			running = false;
+			connectionAttempt++;
 			if (liveFeeds.get(sessionId) === feed) liveFeeds.delete(sessionId);
 			stopWatchdog();
 			if (reconnectTimer !== null) {

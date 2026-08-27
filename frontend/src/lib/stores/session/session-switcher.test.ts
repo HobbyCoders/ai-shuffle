@@ -156,6 +156,7 @@ describe('session-switcher · switchSession isolation', () => {
 		expect(s.contextMax).toBe(200_000);
 		expect(s.contextUsed).toBeNull();
 		expect(s.streamStartTime).toBeNull();
+		expect(s.isLoadingSession).toBe(true);
 		expect(s.worktreeCreateNewBranch).toBe(false);
 
 		// Overrides and draft default on a cache miss (never inherit session A's).

@@ -1159,6 +1159,142 @@ def fork_fluid_session(
     return new_id, len(prefix)
 
 
+# ─── Compaction replay boundary ──────────────────────────────────────────────
+
+def _is_turn_start_node(node: Dict[str, Any]) -> bool:
+    """Whether *node* starts a real user turn (not a tool-result node)."""
+    message = _as_dict(node.get("message"))
+    if message.get("role") != "user":
+        return False
+    for block in message.get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        kind = str(block.get("kind") or "").replace("_", "").lower()
+        if kind != "toolresultblock":
+            return True
+    return False
+
+
+def latest_compaction_boundary(
+    sdk_session_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Return the end of the active path's compacted prefix, if one exists.
+
+    Fluid persists compaction as view-level ``ContextCompaction`` span
+    promotions; the node tree itself remains full fidelity.  A browser replay
+    may omit only a CONTIGUOUS promoted prefix.  Promotions on an abandoned
+    branch are inert, malformed/current-path-crossing spans fail closed, and
+    tier-1-only trimming has no turn boundary to omit.
+
+    The returned first-retained turn id comes from Fluid's durable
+    ``TurnStarted(node_id, turn_id)`` event. It is the exact bridge to the app
+    event log; no positional assumption about user rows is required.
+    """
+    try:
+        path = load_fluid_path(sdk_session_id)
+        if not path:
+            return None
+        index = {str(node.get("node_id")): i for i, node in enumerate(path)}
+
+        # Exact local equivalent of Fluid split_spans(): the first node starts a
+        # span, then each real user node starts the next. Persisted promotions
+        # are accepted only when their endpoints align to these complete spans.
+        turn_ranges: List[Tuple[int, int]] = []
+        turn_start = 0
+        for position in range(1, len(path)):
+            if _is_turn_start_node(path[position]):
+                turn_ranges.append((turn_start, position - 1))
+                turn_start = position
+        turn_ranges.append((turn_start, len(path) - 1))
+        start_to_turn = {start: i for i, (start, _end) in enumerate(turn_ranges)}
+        end_to_turn = {end: i for i, (_start, end) in enumerate(turn_ranges)}
+
+        fluid_events = [
+            _as_dict(row.get("event")) for row in _event_rows(sdk_session_id)
+        ]
+        intervals: List[Tuple[int, int, int]] = []
+        for event in fluid_events:
+            if event.get("_cls") != "ContextCompaction":
+                continue
+            tier = int(event.get("tier") or 0)
+            for raw_span in event.get("spans") or []:
+                if not isinstance(raw_span, (list, tuple)) or len(raw_span) != 3:
+                    return None
+                start_id, end_id, kind = (
+                    str(raw_span[0]),
+                    str(raw_span[1]),
+                    str(raw_span[2]),
+                )
+                if kind not in {"digest", "epoch"}:
+                    return None
+                start_on_path = start_id in index
+                end_on_path = end_id in index
+                if not start_on_path and not end_on_path:
+                    # A well-formed promotion from a branch discarded by rewind.
+                    continue
+                if not start_on_path or not end_on_path:
+                    return None
+                start, end = index[start_id], index[end_id]
+                start_turn = start_to_turn.get(start)
+                end_turn = end_to_turn.get(end)
+                if start_turn is None or end_turn is None or start_turn > end_turn:
+                    return None
+                if kind == "digest" and start_turn != end_turn:
+                    return None
+                intervals.append((start, end, tier))
+
+        if not intervals:
+            return None
+
+        covered_end = -1
+        tier = 0
+        spans = 0
+        for start, end, span_tier in sorted(intervals):
+            if start > covered_end + 1:
+                break
+            if end > covered_end:
+                covered_end = end
+            tier = max(tier, span_tier)
+            spans += 1
+
+        # Only a prefix beginning at the root is safe to hide.
+        if covered_end < 0:
+            return None
+        turns = sum(1 for node in path[: covered_end + 1] if _is_turn_start_node(node))
+        if turns <= 0 or covered_end + 1 >= len(path):
+            return None
+        first_retained = path[covered_end + 1]
+        if not _is_turn_start_node(first_retained):
+            return None
+        retained_node_id = str(first_retained.get("node_id") or "")
+        retained_turn_ids = {
+            str(event.get("turn_id"))
+            for event in fluid_events
+            if event.get("_cls") == "TurnStarted"
+            and str(event.get("node_id") or "") == retained_node_id
+            and event.get("turn_id")
+        }
+        if len(retained_turn_ids) != 1:
+            return None
+        boundary = path[covered_end]
+        return {
+            "node_id": boundary.get("node_id"),
+            "ts": boundary.get("ts"),
+            "turns": turns,
+            "first_retained_node_id": retained_node_id,
+            "first_retained_turn_id": retained_turn_ids.pop(),
+            "spans": spans,
+            "tier": tier,
+        }
+    except Exception:
+        logger.debug(
+            "compaction boundary lookup failed for %s",
+            sdk_session_id,
+            exc_info=True,
+        )
+        return None
+
+
 # ─── Live transcript rendering ───────────────────────────────────────────────
 
 def fluid_live_messages(

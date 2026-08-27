@@ -21,15 +21,16 @@ interface DraftManagerDeps {
 	getState: () => ActiveSessionState;
 	wsSend: (data: Record<string, unknown>) => boolean;
 	wsIsConnected: () => boolean;
-	/** Restart the SSE feed for a session (full from_seq=0 replay). Used after a
-	 *  reload/takeover to re-fetch the transcript from the event log. */
+	/** Explicit full from_seq=0 hydration for user-requested reloads. */
 	feedRestart: (sessionId: string) => void;
+	/** Gap-free resume at the current cursor; does not reset transcript state. */
+	feedRevive: (sessionId: string) => void;
 }
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 export function createDraftManager(deps: DraftManagerDeps) {
-	const { update, getState, wsSend, wsIsConnected, feedRestart } = deps;
+	const { update, getState, wsSend, wsIsConnected, feedRestart, feedRevive } = deps;
 
 	return {
 		setDraft(text: string) {
@@ -104,12 +105,13 @@ export function createDraftManager(deps: DraftManagerDeps) {
 			const state = getState();
 			if (!state.sessionId) return;
 			update(s => ({ ...s, error: null, sessionLocked: false, sessionLockedBy: undefined }));
-			// Send takeover via WS (to acquire the lock), then restart the SSE feed
-			// to re-fetch the transcript (which may differ from another device).
+			// Send takeover via WS to acquire the lock. SSE is already the transcript
+			// authority, so resume it at lastSeq instead of resetting and replaying the
+			// same session from zero a second time.
 			if (wsIsConnected()) {
 				wsSend({ type: 'load_session', session_id: state.sessionId, force: true });
 			}
-			feedRestart(state.sessionId);
+			feedRevive(state.sessionId);
 		},
 	};
 }

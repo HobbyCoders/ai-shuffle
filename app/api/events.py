@@ -27,7 +27,11 @@ from app.api.auth import require_auth
 from app.api.sse_utils import is_client_disconnect
 from app.core.event_gateway import get_gateway
 from app.core.history_backfill import ensure_backfilled
-from app.db.session_events import get_events, get_max_seq
+from app.db.session_events import (
+    get_events,
+    get_max_seq,
+    get_user_seq_for_turn,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +50,81 @@ _PAGE = 500
 # is never dropped: every event still reaches the client, and the live tail
 # (step 2) keeps streaming per-frame so typing still animates.
 _COALESCE_TYPES = ("assistant.thinking_delta", "assistant.text_delta")
+
+
+def _sdk_session_id(session_id: str) -> Optional[str]:
+    """Return the app session's Fluid transcript id, if it has one."""
+    try:
+        from app.db import sessions as sessions_db
+
+        row = sessions_db.get_session(session_id)
+        sdk = (row or {}).get("sdk_session_id")
+        return str(sdk) if sdk else None
+    except Exception:
+        logger.debug("sdk_session_id lookup failed for %s", session_id, exc_info=True)
+        return None
+
+
+def _compacted_replay_start(session_id: str) -> tuple[int, int, int]:
+    """Return ``(first_kept_seq, elided_events, tier)`` or ``(0, 0, 0)``.
+
+    Only a persisted, active-path, contiguous Fluid compacted prefix qualifies.
+    Any mismatch between Fluid turns and app events fails closed to a full
+    replay; sessions without compaction are never arbitrarily truncated.
+    """
+    sdk_session_id = _sdk_session_id(session_id)
+    if not sdk_session_id:
+        return 0, 0, 0
+    try:
+        from app.core.provider.fluid_transcript import (
+            latest_compaction_boundary,
+            looks_like_fluid_session_id,
+        )
+
+        if not looks_like_fluid_session_id(sdk_session_id):
+            return 0, 0, 0
+        boundary = latest_compaction_boundary(sdk_session_id)
+        if boundary is None:
+            return 0, 0, 0
+        covered_turns = int(boundary.get("turns") or 0)
+        retained_turn_id = boundary.get("first_retained_turn_id")
+        if covered_turns <= 0 or not isinstance(retained_turn_id, str):
+            return 0, 0, 0
+        # Fluid TurnStarted persists the exact node -> durable turn-id bridge.
+        # The app query selects that turn's FIRST message.user, so mid-turn steers
+        # cannot become a replay boundary. Rewound/legacy logs fail closed.
+        first_kept = get_user_seq_for_turn(session_id, retained_turn_id)
+        if first_kept is None:
+            return 0, 0, 0
+        return first_kept, first_kept - 1, int(boundary.get("tier") or 0)
+    except Exception:
+        logger.debug(
+            "compacted replay lookup failed for %s", session_id, exc_info=True
+        )
+        return 0, 0, 0
+
+
+def _boundary_frame(
+    session_id: str, first_kept_seq: int, elided_events: int, tier: int
+) -> str:
+    """Synthetic compaction marker; deliberately has no SSE ``id:`` line."""
+    data = json.dumps(
+        {
+            "id": f"elided-{session_id}-{first_kept_seq}",
+            "session_id": session_id,
+            "type": "system.compaction_boundary",
+            "subtype": "compact_boundary",
+            "data": {
+                "trigger": "compacted",
+                "tier": tier,
+                "elidedEvents": elided_events,
+            },
+            "seq": first_kept_seq - 1,
+            "created_at": None,
+        },
+        default=str,
+    )
+    return f"event: system.compaction_boundary\ndata: {data}\n\n"
 
 
 def _delta_key(row: Dict[str, Any]) -> tuple:
@@ -159,11 +238,23 @@ async def event_stream(session_id: str, from_seq: int = 0):
         "SSE feed connected: session=%s from_seq=%s", session_id, from_seq
     )
     try:
-        # 1. Backfill the persisted log in full — history is never elided.
-        #    Consecutive streaming deltas are merged into one frame per run
-        #    (see _coalesce_deltas), which is where a long log gets cheap.
-        #    ``page_from`` pages the DB; ``cursor`` tracks what was actually
-        #    emitted, and lags while a delta run is still open.
+        # 1. A fresh load starts after the latest SAFE compacted prefix.  A
+        #    reconnect keeps its own cursor and must never apply fresh-load
+        #    elision.  The synthetic marker has no SSE id, so reconnect state is
+        #    still advanced only by real persisted events.
+        if cursor == 0:
+            first_kept, elided_events, tier = await asyncio.to_thread(
+                _compacted_replay_start, session_id
+            )
+            if first_kept > 0:
+                yield _boundary_frame(
+                    session_id, first_kept, elided_events, tier
+                )
+                cursor = first_kept - 1
+
+        # Consecutive historical streaming deltas remain coalesced into one
+        # frame per run. ``page_from`` pages the DB while ``cursor`` tracks the
+        # last row actually emitted (it can lag while a delta run is open).
         pending: List[Optional[Dict[str, Any]]] = [None]
         page_from = cursor
         while True:

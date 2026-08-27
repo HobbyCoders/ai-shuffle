@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { createSessionInit, type SessionInitDeps } from './session-init';
+import { bumpInitGeneration, createSessionInit, type SessionInitDeps } from './session-init';
 import type { ActiveSessionState, PersistedSession } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 
@@ -26,7 +26,10 @@ function baseState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 	} as unknown as ActiveSessionState;
 }
 
-function makeInit(persisted: PersistedSession | null) {
+function makeInit(
+	persisted: PersistedSession | null,
+	loadPersistedSession = vi.fn(async () => persisted),
+) {
 	let state = baseState();
 	const update = (fn: (s: ActiveSessionState) => ActiveSessionState) => { state = fn(state); };
 	const getState = () => state;
@@ -54,7 +57,7 @@ function makeInit(persisted: PersistedSession | null) {
 		},
 		switcher: {
 			loadSelectionFromBackend: vi.fn(async () => null),
-			loadPersistedSession: vi.fn(async () => persisted),
+			loadPersistedSession,
 			getPersistedProfile: () => 'profile-1',
 			getPersistedProject: () => 'proj-1',
 			destroy: vi.fn(),
@@ -89,6 +92,36 @@ describe('session-init · isRestoringSession on persisted restore', () => {
 		const s = getState();
 		expect(s.sessionId).toBe('persisted-1');
 		expect(s.isRestoringSession).toBe(true);
+	});
+
+	it('a delayed persisted restore cannot replace explicit navigation', async () => {
+		let release!: (value: PersistedSession | null) => void;
+		const delayed = new Promise<PersistedSession | null>((resolve) => {
+			release = resolve;
+		});
+		const { init, getState, deps } = makeInit(
+			null,
+			vi.fn(() => delayed),
+		);
+
+		const initializing = init();
+		// Let init pass its first await and begin the persisted-session read.
+		await Promise.resolve();
+		deps.update((s) => ({ ...s, sessionId: 'explicit-target', title: 'Chosen' }));
+		bumpInitGeneration();
+		release({
+			sessionId: 'stale-persisted',
+			title: 'Old chat',
+			profile: 'profile-1',
+			project: 'proj-1',
+			modelOverride: null,
+			permissionModeOverride: null,
+			effortLevelOverride: null,
+		});
+		await initializing;
+
+		expect(getState().sessionId).toBe('explicit-target');
+		expect(getState().title).toBe('Chosen');
 	});
 
 	it('does not mark the window when the persisted selection has no sessionId', async () => {

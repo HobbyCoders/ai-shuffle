@@ -305,6 +305,37 @@ def has_subagent_started(session_id: str, task_id: str) -> bool:
         return cursor.fetchone() is not None
 
 
+def get_user_seq_for_turn(session_id: str, turn_id: str) -> Optional[int]:
+    """First ``message.user`` seq for a durable turn id, or ``None`` if unsafe.
+
+    Fluid's persisted ``TurnStarted`` event gives a direct node-to-turn bridge.
+    The first app user row with that same turn id is the real turn start; later
+    mid-turn steers reuse the id and are deliberately ignored. Append-only logs
+    containing a rewind cannot be sliced safely because obsolete branch events
+    remain before the reducer's logical truncation, so they replay in full.
+    """
+    if not turn_id:
+        return None
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM session_events "
+            "WHERE session_id = %s AND event_type = 'transcript.rewound' LIMIT 1",
+            (session_id,),
+        )
+        if cursor.fetchone() is not None:
+            return None
+        cursor.execute(
+            "SELECT MIN(seq) AS seq FROM session_events "
+            "WHERE session_id = %s AND event_type = 'message.user' "
+            "AND turn_id = %s",
+            (session_id, turn_id),
+        )
+        row = cursor.fetchone() or {}
+    seq = row.get("seq")
+    return int(seq) if seq is not None else None
+
+
 def get_max_seq(session_id: str) -> int:
     """Return the highest allocated seq for a session (0 if none)."""
     with get_db() as conn:
