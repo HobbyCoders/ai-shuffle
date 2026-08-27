@@ -131,8 +131,8 @@ Run all checks locally:
 # Python linting
 ruff check app/ main.py run_local.py
 
-# Python tests
-pytest tests/ -v
+# Python tests (see Testing below — the suite needs vendor/fluid importable)
+PYTHONPATH=vendor/fluid pytest tests/ -v
 
 # Frontend type check and build
 cd frontend
@@ -246,18 +246,28 @@ ruff format app/ main.py run_local.py
 
 ### Python Tests
 
+The suite imports the vendored fluid harness (`vendor/fluid`), which is not on
+`sys.path` by default — without it collection fails before a single test runs.
+Either install it once (`pip install -e ./vendor/fluid`) or point `PYTHONPATH`
+at it for the run:
+
 ```bash
-# Run all tests
-pytest tests/ -v
+# Run all tests (POSIX)
+PYTHONPATH=vendor/fluid pytest tests/ -v
 
 # Run with coverage
-pytest tests/ --cov=app --cov-report=term-missing
+PYTHONPATH=vendor/fluid pytest tests/ --cov=app --cov-report=term-missing
 
 # Run specific test file
-pytest tests/test_auth.py -v
+PYTHONPATH=vendor/fluid pytest tests/test_auth.py -v
 
 # Run specific test
-pytest tests/test_auth.py::test_login -v
+PYTHONPATH=vendor/fluid pytest tests/test_auth.py::test_login -v
+```
+
+```powershell
+# Windows / PowerShell
+$env:PYTHONPATH = "vendor/fluid"; python -m pytest tests/ -v
 ```
 
 **Test file structure:**
