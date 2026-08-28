@@ -21,7 +21,11 @@ disk, and it can only do that where the evidence survives: ``fluid_session_event
 keeps every ``Usage`` event (one per model call, carrying ``input_tokens`` /
 ``output_tokens`` / ``cache_read_tokens`` / ``cache_creation_tokens``) and every
 ``TurnComplete`` (one per turn). Sessions with no fluid event log — delegated-leg
-or pre-fluid rows — are left exactly as they are.
+or pre-fluid rows — are left exactly as they are. So are sessions whose log is
+only a FRAGMENT of their history (``sdk_session_id`` names the latest fluid log;
+a re-keyed or mixed-leg session has booked usage the log never saw): when the
+recomputed fresh in/out sums come in below what is already booked, the row is
+reported as "partial event log" and skipped.
 
 What it writes
 --------------
@@ -199,12 +203,32 @@ def backfill(*, dry_run: bool, session_id: Optional[str] = None) -> int:
         logger.info("No sessions with an sdk_session_id to examine.")
         return 0
 
-    examined = skipped = unchanged = changed = 0
+    examined = skipped = partial = unchanged = changed = 0
     for row in rows:
         examined += 1
         totals = _totals_for(str(row["sdk_session_id"]))
         if totals is None:
             skipped += 1
+            continue
+        # Partial-evidence guard. ``sdk_session_id`` names only the session's
+        # LATEST fluid event log; a session whose history spans re-keys or the
+        # delegated leg has real usage that log never saw, and recomputing
+        # absolute totals from the fragment would erase it. The repair only
+        # ever ADDS previously unbooked usage — the fresh in/out semantics are
+        # identical between the old path and the Usage events — so recomputed
+        # fresh-token sums BELOW what is already booked mean missing evidence,
+        # not a correction. Leave those rows alone.
+        if (
+            totals["total_tokens_in"] < _int(row.get("total_tokens_in"))
+            or totals["total_tokens_out"] < _int(row.get("total_tokens_out"))
+        ):
+            partial += 1
+            print(
+                f"  {row['id']}  SKIPPED partial event log "
+                f"(booked in/out {_int(row.get('total_tokens_in')):,}/"
+                f"{_int(row.get('total_tokens_out')):,}, log holds only "
+                f"{totals['total_tokens_in']:,}/{totals['total_tokens_out']:,})"
+            )
             continue
         if all(_int(row.get(c)) == totals[c] for c in _COLUMNS):
             unchanged += 1
@@ -219,8 +243,8 @@ def backfill(*, dry_run: bool, session_id: Optional[str] = None) -> int:
     verb = "would update" if dry_run else "updated"
     logger.info(
         "%d session(s) examined: %s %d, already correct %d, "
-        "no fluid event log %d",
-        examined, verb, changed, unchanged, skipped,
+        "no fluid event log %d, partial event log %d",
+        examined, verb, changed, unchanged, skipped, partial,
     )
     if dry_run and changed:
         logger.info("Dry run — nothing was written.")

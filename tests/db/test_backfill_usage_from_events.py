@@ -104,7 +104,7 @@ def test_the_hidden_cache_tokens_come_back(shim):
 
 def test_dry_run_writes_nothing(shim):
     _seed_session(shim, "sess-2", "ses_dry", total_tokens_in=15, turn_count=16)
-    _seed_events(shim, "ses_dry", [_usage(10, 20, 5_000, 100), _turn_complete()])
+    _seed_events(shim, "ses_dry", [_usage(15, 20, 5_000, 100), _turn_complete()])
 
     backfill.backfill(dry_run=True)
 
@@ -134,6 +134,27 @@ def test_a_session_without_an_event_log_is_left_alone(shim):
     row = _row(shim, "sess-4")
     assert row["total_tokens_in"] == 1234
     assert row["turn_count"] == 7
+
+
+def test_a_partial_event_log_is_left_alone(shim):
+    """``sdk_session_id`` names only the LATEST fluid log. A re-keyed or
+    mixed-leg session has booked usage the log never saw; recomputing absolute
+    totals from the fragment would erase it. The tell: recomputed fresh in/out
+    below what is already booked (the repair only ever adds unbooked usage)."""
+    _seed_session(
+        shim, "sess-7", "ses_frag",
+        total_tokens_in=242, total_tokens_out=94_652, turn_count=41,
+    )
+    # The surviving fragment: a handful of tiny late turns.
+    _seed_events(shim, "ses_frag", [_usage(25, 39, 85_000, 120_000), _turn_complete()])
+
+    backfill.backfill(dry_run=False)
+
+    row = _row(shim, "sess-7")
+    assert row["total_tokens_in"] == 242
+    assert row["total_tokens_out"] == 94_652
+    assert row["turn_count"] == 41
+    assert row["total_cache_read_tokens"] == 0  # untouched, not "repaired"
 
 
 def test_a_single_session_can_be_targeted(shim):
