@@ -141,6 +141,7 @@
 
 		/* Floating panel */
 		--panel-bg: oklch(0.178 0.005 240 / 0.85);
+		--panel-bg-solid: oklch(0.178 0.005 240);
 		--panel-border: oklch(1 0 0 / 0.10);
 		--panel-shadow-inset: oklch(0.95 0 0 / 0.03);
 		--panel-shadow-outer: oklch(0 0 0 / 0.4);
@@ -370,6 +371,7 @@
 
 		/* Floating panel */
 		--panel-bg: oklch(1 0 0 / 0.9);
+		--panel-bg-solid: oklch(1 0 0);
 		--panel-border: oklch(0.21 0.01 250 / 0.14);
 		--panel-shadow-inset: oklch(1 0 0 / 0.5);
 		--panel-shadow-outer: oklch(0 0 0 / 0.1);
@@ -557,6 +559,7 @@
 :root {
 	--fx-glass-backdrop: blur(8px) saturate(150%);
 	--fx-rail-backdrop: blur(8px) saturate(140%);
+	--fx-panel-backdrop: blur(20px);
 	--fx-grain-blend: overlay;
 }
 
@@ -564,20 +567,24 @@
 	:root {
 		--fx-glass-backdrop: none;
 		--fx-rail-backdrop: none;
+		--fx-panel-backdrop: none;
 		--fx-grain-blend: normal;
 		--grain-opacity: 0;
 		--glass: var(--glass-solid);
 		--glass-bg: var(--card);
+		--panel-bg: var(--panel-bg-solid);
 	}
 }
 
 :root[data-fx='low'] {
 	--fx-glass-backdrop: none;
 	--fx-rail-backdrop: none;
+	--fx-panel-backdrop: none;
 	--fx-grain-blend: normal;
 	--grain-opacity: 0;
 	--glass: var(--glass-solid);
 	--glass-bg: var(--card);
+	--panel-bg: var(--panel-bg-solid);
 }
 
 /* Procedural grain overlay for large surfaces.
@@ -1176,8 +1183,8 @@ button, a, .clickable {
 /* Floating Panel System - Glass morphism sidebar */
 .floating-panel {
 	background: var(--panel-bg);
-	backdrop-filter: blur(20px);
-	-webkit-backdrop-filter: blur(20px);
+	backdrop-filter: var(--fx-panel-backdrop);
+	-webkit-backdrop-filter: var(--fx-panel-backdrop);
 	border: 1px solid var(--panel-border);
 	box-shadow:
 		0 0 0 1px var(--panel-shadow-inset) inset,

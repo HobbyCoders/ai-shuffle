@@ -121,10 +121,24 @@ describe('transformPrState', () => {
 		expect(transformPrState({ lookup_failed: true }).lookup_failed).toBe(true);
 	});
 
+	it('carries the backend "served a last-known-good value" companion flag', () => {
+		const s = transformPrState({
+			current_branch: 'feat/x',
+			has_github: true,
+			open_pr: { number: 5, title: 't', url: 'u', draft: false, state: 'OPEN', mergeable: null },
+			pr_lookup_failed: true,
+			stale: true
+		});
+		expect(s.lookup_failed).toBe(true);
+		expect(s.served_stale).toBe(true);
+		expect(s.open_pr?.number).toBe(5);
+	});
+
 	it('degrades gracefully when the backend has not shipped the flag', () => {
 		// An older backend sends no flag at all — treat the lookup as completed.
 		const s = transformPrState({ current_branch: 'feat/x', has_github: true, open_pr: null });
 		expect(s.lookup_failed).toBe(false);
+		expect(s.served_stale).toBe(false);
 		expect(s.open_pr).toBeNull();
 	});
 });

@@ -69,6 +69,7 @@ function prState(number: number | null = 7, extra: Partial<PrState> = {}): PrSta
 			? null
 			: { number, title: 'Do a thing', url: `https://x/pull/${number}`, draft: false, state: 'OPEN', mergeable: null },
 		lookup_failed: false,
+		served_stale: false,
 		...extra
 	};
 }

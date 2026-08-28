@@ -318,7 +318,10 @@ async def conversation(
                 logger.debug("session-created broadcast failed", exc_info=True)
 
         started = time.monotonic()
-        turn_manager.submit(
+        # ``submit_async`` runs the three queue writes in ONE worker-thread hop
+        # and fires the scheduler kick back on this loop — same semantics as
+        # ``submit``, without blocking every other request on the DB writes.
+        await turn_manager.submit_async(
             session_id,
             "api",
             prompt=request.prompt,

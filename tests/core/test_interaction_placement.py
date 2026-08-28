@@ -522,16 +522,34 @@ async def test_sweep_once_expires_overdue_and_notifies(mock_db, monkeypatch):
 
 
 async def test_sweeper_start_stop(mock_db):
-    assert interaction_sweeper._loop_task is None
-    interaction_sweeper.start()
-    task = interaction_sweeper._loop_task
-    assert task is not None and not task.done()
-    # Idempotent: a second start reuses the same task.
-    interaction_sweeper.start()
-    assert interaction_sweeper._loop_task is task
-    await interaction_sweeper.stop()
-    assert interaction_sweeper._loop_task is None
-    assert task.done()
+    """start() registers the expiry pass on the shared sweep driver (F5).
+
+    The sweeper no longer owns a private asyncio task: it contributes a pass to
+    the one background driver in ``turn_claim``, so its lifecycle is
+    register/unregister and the driver task is the thing that runs.
+    """
+    from app.core import turn_claim
+
+    assert "interaction_expiry" not in turn_claim._passes
+    try:
+        interaction_sweeper.start()
+        assert "interaction_expiry" in turn_claim._passes
+        sweep = turn_claim._passes["interaction_expiry"]
+        assert sweep.tight_interval == interaction_sweeper.SWEEP_INTERVAL_SECONDS
+        assert sweep.run is interaction_sweeper.sweep_once
+        # The driver came up on demand.
+        driver = turn_claim._loop_task
+        assert driver is not None and not driver.done()
+
+        # Idempotent: a second start does not duplicate the pass or the driver.
+        interaction_sweeper.start()
+        assert turn_claim._loop_task is driver
+        assert len([n for n in turn_claim._passes if n == "interaction_expiry"]) == 1
+
+        await interaction_sweeper.stop()
+        assert "interaction_expiry" not in turn_claim._passes
+    finally:
+        await turn_claim.stop()
 
 
 # ---------------------------------------------------------------------------

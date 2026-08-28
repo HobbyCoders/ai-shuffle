@@ -55,17 +55,38 @@ function prState(number = 7, extra: Record<string, unknown> = {}) {
 			mergeable: null
 		},
 		lookup_failed: false,
+		served_stale: false,
 		...extra
 	};
 }
 
-/** What the backend returns when it could not ask GitHub this cycle. */
+/** What the backend returns when it could not ask GitHub this cycle and has no
+ *  last-known-good value of its own to serve. */
 function failedLookup() {
 	return {
 		current_branch: 'feat/x',
 		has_github: false,
 		open_pr: null,
-		lookup_failed: true
+		lookup_failed: true,
+		served_stale: false
+	};
+}
+
+/** A failed lookup where the backend DID serve its own last-known-good value. */
+function failedLookupServedStale(number = 11) {
+	return {
+		current_branch: 'feat/x',
+		has_github: true,
+		open_pr: {
+			number,
+			title: 'Do a thing',
+			url: `https://github.com/o/r/pull/${number}`,
+			draft: false,
+			state: 'OPEN',
+			mergeable: null
+		},
+		lookup_failed: true,
+		served_stale: true
 	};
 }
 
@@ -159,7 +180,8 @@ describe('git store — prState', () => {
 			current_branch: 'feat/x',
 			has_github: true,
 			open_pr: null,
-			lookup_failed: false
+			lookup_failed: false,
+			served_stale: false
 		});
 
 		await git.refreshPrState(true);
@@ -168,13 +190,24 @@ describe('git store — prState', () => {
 		expect(git.current.prStateStale).toBe(false);
 	});
 
+	it('prefers the backend\'s served last-known-good PR over the client copy', async () => {
+		await git.loadRepository('proj-1', false, 'ses-1');
+		mocks.getPrState.mockResolvedValue(failedLookupServedStale(11));
+
+		await git.refreshPrState(true);
+
+		expect(git.current.prState?.open_pr?.number).toBe(11);
+		expect(git.current.prStateStale).toBe(true);
+	});
+
 	it('drops a kept PR when the branch has moved on', async () => {
 		await git.loadRepository('proj-1', false, 'ses-1');
 		mocks.getPrState.mockResolvedValue({
 			current_branch: 'feat/other',
 			has_github: false,
 			open_pr: null,
-			lookup_failed: true
+			lookup_failed: true,
+			served_stale: false
 		});
 
 		await git.refreshPrState(true);

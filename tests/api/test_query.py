@@ -349,12 +349,13 @@ class TestConversation:
 
         The endpoint no longer calls the query engine: it submits a
         ``source=api`` turn and reads the settled outcome out of the durable
-        event log, so the seams to stub are ``turn_manager`` and
-        ``turn_outcome``.
+        event log, so the seams to stub are ``turn_manager`` (the off-loop
+        ``submit_async`` twin) and ``turn_outcome``.
         """
         with patch("app.api.query.require_api_key") as mock_api_key, \
              patch("app.api.query.require_claude_auth") as mock_claude, \
-             patch("app.core.turn_manager.submit") as mock_submit, \
+             patch("app.core.turn_manager.submit_async",
+                   new=AsyncMock(return_value="turn-1")) as mock_submit, \
              patch("app.core.turn_manager.wait_session_idle",
                    new=AsyncMock(return_value=True)) as mock_wait, \
              patch("app.core.turn_outcome.final_turn_outcome",
@@ -367,7 +368,6 @@ class TestConversation:
                 "profile_id": "default"
             }
             mock_claude.return_value = None
-            mock_submit.return_value = "turn-1"
             yield {
                 "api_key": mock_api_key,
                 "claude": mock_claude,

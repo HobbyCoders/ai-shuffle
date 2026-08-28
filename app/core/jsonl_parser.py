@@ -261,23 +261,27 @@ _agent_paths_cache_lock = threading.Lock()
 # i.e. on every open/poll of such a session. Without a negative memo that is a
 # full directory scan per request (finding B9). Mirrors the ``_empty_memo``
 # pattern in app/core/history_backfill.py.
-_JSONL_MISS_TTL_SECONDS = 60.0
-_jsonl_miss_memo: Dict[Tuple[str, str], float] = {}
+_JSONL_MISS_TTL_SECONDS = 30.0
+#: (sdk_session_id, working_dir, projects_root) -> monotonic time of the miss.
+#: The projects root is part of the key so a reconfigured CLAUDE_PROJECTS_DIR
+#: never serves a memo taken against the old root.
+_jsonl_miss_memo: Dict[Tuple[str, str, str], float] = {}
 _jsonl_miss_lock = threading.Lock()
 
 
-def _memoize_jsonl_miss(sdk_session_id: str, working_dir: str) -> None:
+def _memoize_jsonl_miss(sdk_session_id: str, working_dir: str, root: str) -> None:
     with _jsonl_miss_lock:
-        _jsonl_miss_memo[(sdk_session_id, working_dir)] = time.monotonic()
+        _jsonl_miss_memo[(sdk_session_id, working_dir, root)] = time.monotonic()
 
 
-def _jsonl_miss_is_fresh(sdk_session_id: str, working_dir: str) -> bool:
+def _jsonl_miss_is_fresh(sdk_session_id: str, working_dir: str, root: str) -> bool:
+    key = (sdk_session_id, working_dir, root)
     with _jsonl_miss_lock:
-        at = _jsonl_miss_memo.get((sdk_session_id, working_dir))
+        at = _jsonl_miss_memo.get(key)
         if at is None:
             return False
         if time.monotonic() - at >= _JSONL_MISS_TTL_SECONDS:
-            _jsonl_miss_memo.pop((sdk_session_id, working_dir), None)
+            _jsonl_miss_memo.pop(key, None)
             return False
         return True
 
@@ -532,11 +536,11 @@ def get_session_jsonl_path(sdk_session_id: str, working_dir: str = "/workspace")
     # appears on disk is picked up within _JSONL_MISS_TTL_SECONDS (immediately
     # when the session's parse cache is invalidated, which is what happens when
     # its transcript changes).
-    if _jsonl_miss_is_fresh(sdk_session_id, working_dir):
-        return None
-
     # Get Claude projects directory from config (supports custom paths via CLAUDE_PROJECTS_DIR env var)
     claude_projects_dir = settings.get_claude_projects_dir
+
+    if _jsonl_miss_is_fresh(sdk_session_id, working_dir, str(claude_projects_dir)):
+        return None
 
     logger.debug(f"Looking for JSONL in claude_projects_dir: {claude_projects_dir}")
 
@@ -564,7 +568,7 @@ def get_session_jsonl_path(sdk_session_id: str, working_dir: str = "/workspace")
                     return jsonl_path
 
     logger.warning(f"JSONL file not found for session {sdk_session_id} in {claude_projects_dir}")
-    _memoize_jsonl_miss(sdk_session_id, working_dir)
+    _memoize_jsonl_miss(sdk_session_id, working_dir, str(claude_projects_dir))
     return None
 
 
@@ -1279,6 +1283,10 @@ def pre_seed_parse_cache(
     # JSONL cache namespace (legacy / non-postgres_only reads): validated by the
     # JSONL file's mtime + size, so it needs a real file to stamp the entry.
     try:
+        # Turn end is exactly when a transcript can have APPEARED on disk for a
+        # session that had none, so re-probe instead of trusting the negative
+        # memo (finding B9). Once per turn, not once per poll.
+        _forget_jsonl_miss(sdk_session_id)
         jsonl_path = get_session_jsonl_path(sdk_session_id, working_dir)
         if not jsonl_path:
             # No JSONL on this machine (expected under postgres_only). The store

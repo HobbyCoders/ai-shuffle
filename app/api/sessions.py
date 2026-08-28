@@ -1811,7 +1811,9 @@ async def resume_session(
         payload["api_user_id"] = api_user["id"]
 
     profile_id = existing.get("profile_id")
-    turn_id = turn_manager.submit(
+    # Off-loop twin of ``submit``: the durable queue writes ride one thread hop
+    # (``no_kick`` is unchanged — the NOTIFY below is the whole hand-off).
+    turn_id = await turn_manager.submit_async(
         session_id,
         "resume",
         prompt="",

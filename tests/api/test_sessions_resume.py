@@ -8,7 +8,7 @@ when the session is not fluid (the Claude CLI owns its own transcript and has no
 head node to continue from).
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -83,8 +83,13 @@ def turns_idle():
 
 @pytest.fixture
 def submit_seam():
-    """The enqueue + NOTIFY pair the route drives."""
-    with patch("app.core.turn_manager.submit", return_value="turn-1") as submit, \
+    """The enqueue + NOTIFY pair the route drives.
+
+    The route enqueues through ``submit_async`` — the off-loop twin of
+    ``submit`` — so the queue writes never block the event loop.
+    """
+    with patch("app.core.turn_manager.submit_async",
+               new=AsyncMock(return_value="turn-1")) as submit, \
             patch("app.core.turn_claim.notify_turns_changed") as notify:
         yield submit, notify
 

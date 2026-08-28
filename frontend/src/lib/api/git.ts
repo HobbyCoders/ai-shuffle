@@ -940,6 +940,11 @@ export interface RawPrState {
     has_github?: boolean;
     open_pr?: OpenPrInfo | null;
     pr_lookup_failed?: boolean;
+    /** Companion flag: `open_pr` is a last-known-good value the server served
+     *  past its TTL because the refresh failed. */
+    stale?: boolean;
+    // Alternative spellings tolerated so the client works against builds that
+    // predate (or rename) the flag.
     lookup_failed?: boolean;
     lookupFailed?: boolean;
 }
@@ -956,6 +961,13 @@ export interface PrState {
      * lookup blipped.
      */
     lookup_failed: boolean;
+    /**
+     * True when `open_pr` is a last-known-good value the SERVER served past its
+     * TTL because the refresh failed. Only ever set together with
+     * `lookup_failed`; it tells the client the payload already carries a usable
+     * previous value rather than nothing at all.
+     */
+    served_stale: boolean;
 }
 
 export function transformPrState(raw: RawPrState): PrState {
@@ -963,7 +975,8 @@ export function transformPrState(raw: RawPrState): PrState {
         current_branch: raw.current_branch ?? null,
         has_github: raw.has_github ?? false,
         open_pr: raw.open_pr ?? null,
-        lookup_failed: Boolean(raw.pr_lookup_failed ?? raw.lookup_failed ?? raw.lookupFailed ?? false)
+        lookup_failed: Boolean(raw.pr_lookup_failed ?? raw.lookup_failed ?? raw.lookupFailed ?? false),
+        served_stale: Boolean(raw.stale ?? false)
     };
 }
 
@@ -975,7 +988,8 @@ export function prStateEqual(a: PrState | null, b: PrState | null): boolean {
     if (
         a.current_branch !== b.current_branch ||
         a.has_github !== b.has_github ||
-        a.lookup_failed !== b.lookup_failed
+        a.lookup_failed !== b.lookup_failed ||
+        a.served_stale !== b.served_stale
     ) {
         return false;
     }
