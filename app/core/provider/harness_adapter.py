@@ -232,7 +232,6 @@ from fluid.codemode.session import CodeModeSession
 from fluid.codemode.skills import SkillStore
 from fluid.codemode.subprocess_kernel import KernelConfig
 from fluid.context.compaction import CompactionConfig
-from fluid.context.trim import TrimConfig
 from fluid.engine.native import NativeLoop
 from fluid.engine.delegated import DelegatedLoop
 from fluid.events.ops import (
@@ -512,13 +511,10 @@ class HarnessAdapter(ProviderAdapter):
                 native_ctx.extra["session_recent"] = store.recent_sessions
             if callable(getattr(store, "session_slice", None)):
                 native_ctx.extra["session_view"] = store.session_slice
-            # Only explicit user configuration may limit a native turn. There
-            # is deliberately no install-wide model/token/cost/loop ceiling and
-            # no automatic context trimming: provider usage remains telemetry,
-            # never a reason for AI Shuffle to stop or rewrite a turn. Both are
-            # now passed EXPLICITLY — fluid's own defaults are a 200-call
-            # ceiling and compaction ON, so omitting either knob would quietly
-            # reintroduce exactly what this paragraph rules out.
+            # Only explicit user configuration may limit the number of model
+            # calls in a native turn. Context size is managed separately by
+            # fluid's recoverable rendered-view compaction: original nodes remain
+            # stored and exact omitted content stays available through recall.
             native_caps: Dict[str, Any] = {}
             requested_calls = _positive_int(getattr(options, "max_turns", None))
             native_caps["max_model_calls_per_turn"] = requested_calls
@@ -626,14 +622,10 @@ class HarnessAdapter(ProviderAdapter):
                     else None
                 ),
                 **native_caps,
-                # Context rewriting OFF, explicitly (see the ceiling note
-                # above). fluid's default is compaction ON; AI Shuffle never
-                # rewrites or digests a turn's history behind the user's back,
-                # so both tiers are disabled at construction. ``fluid_trim``
-                # (FLUID_TRIM, default off) turns tier-1 back on: that exact
-                # spelling — compaction disabled, trim enabled — drops
-                # superseded tool RESULTS and never writes a span digest, so
-                # nothing the user or the agent said is ever rewritten.
+                # Full recoverable context management is explicit host policy:
+                # fluid compacts only the rendered model view, persists mechanical
+                # promotion decisions, and keeps every original node available to
+                # HistorySearch/HistoryExpand, rewind, forks, and audit.
                 compaction=_compaction_config(),
                 # Native legs have no Claude Code preset — they always run the
                 # fluid-compiled prompt: the profile's configured prompt as the
@@ -2763,18 +2755,13 @@ def _delegated_disallowed(options: SessionOptions) -> list:
 
 
 def _compaction_config() -> CompactionConfig:
-    """This leg's context-rewriting policy.
+    """Native fluid's deterministic, recoverable rendered-history policy.
 
-    Tier 2 (span digests) is off unconditionally — a model-written summary must
-    never replace what was actually said. Tier 1 (dropping superseded tool
-    results) is behind ``settings.fluid_trim`` and defaults off.
+    All three mechanical tiers are enabled. They transform only the model-facing
+    view; exact nodes remain stored for recall, rewind, forks, and audit. Delegated
+    loops manage their own context and never receive this configuration.
     """
-    from app.core.config import settings
-
-    return CompactionConfig(
-        enabled=False,
-        trim=TrimConfig(enabled=bool(getattr(settings, "fluid_trim", False))),
-    )
+    return CompactionConfig()
 
 
 def _codemode_kernel_config() -> KernelConfig:
