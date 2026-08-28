@@ -172,6 +172,31 @@ describe('page frames (toolbar url + loading)', () => {
 		}
 	});
 
+	it('routes inspect-hit frames to onInspectHit (element passed through raw)', () => {
+		const seen: Array<{ mode: string; element: unknown }> = [];
+		const client = createBrowserStreamClient({
+			sessionId: 's1',
+			getAuthToken: () => 'tok',
+			onStatus: () => {},
+			onFrame: () => {},
+			onInspectHit: (mode, element) => seen.push({ mode, element }),
+		});
+		try {
+			client.connect();
+			const el = { selector: '#cta', tag: 'button' };
+			latest().receive({ type: 'inspect-hit', mode: 'select', element: el });
+			latest().receive({ type: 'inspect-hit', mode: 'hover', element: null });
+			// Unknown modes are dropped, not forwarded.
+			latest().receive({ type: 'inspect-hit', mode: 'weird', element: el });
+			expect(seen).toEqual([
+				{ mode: 'select', element: el },
+				{ mode: 'hover', element: null },
+			]);
+		} finally {
+			client.destroy();
+		}
+	});
+
 	it('coerces missing/invalid page fields to (null, false)', () => {
 		const seen: Array<{ url: string | null; loading: boolean }> = [];
 		const client = createBrowserStreamClient({

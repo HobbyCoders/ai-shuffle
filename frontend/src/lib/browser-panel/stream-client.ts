@@ -7,8 +7,8 @@
  *
  *   ws(s)://{host}/api/v1/ws/browser/{sessionId}?token=…
  *
- *   server→client: hello · status · page · frame · error · ping
- *   client→server: input · navigate · command · pong
+ *   server→client: hello · status · page · frame · inspect-hit · error · ping
+ *   client→server: input · navigate · command · inspect · pong
  *
  * The caller creates ONE client per (open panel, session). `connect()` is a
  * no-op while already connected/connecting; `destroy()` tears down the socket
@@ -60,6 +60,12 @@ export interface BrowserStreamConfig {
 	onPage?: (url: string | null, loading: boolean) => void;
 	/** A `frame` (base64 JPEG + metadata) arrived. */
 	onFrame: (dataBase64: string, metadata: FrameMessageMetadata) => void;
+	/**
+	 * An `inspect-hit` arrived: the element descriptor answering this client's
+	 * `inspect` request (or null on a miss). `element` is raw page-provided
+	 * data — parse with `parseElementHit` before use.
+	 */
+	onInspectHit?: (mode: 'hover' | 'select', element: unknown) => void;
 	/** An `error` frame arrived. */
 	onError?: (message: string) => void;
 	/** The socket opened. */
@@ -186,6 +192,11 @@ export function createBrowserStreamClient(config: BrowserStreamConfig): BrowserS
 			case 'frame':
 				if (typeof msg.data === 'string') {
 					config.onFrame(msg.data, (msg.metadata ?? {}) as FrameMessageMetadata);
+				}
+				break;
+			case 'inspect-hit':
+				if (msg.mode === 'hover' || msg.mode === 'select') {
+					config.onInspectHit?.(msg.mode, msg.element ?? null);
 				}
 				break;
 			case 'error':

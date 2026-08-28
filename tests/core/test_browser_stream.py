@@ -282,6 +282,105 @@ class TestToolbarCommands:
 
 
 # ===========================================================================
+# Inspect (point-and-prompt hit-test)
+# ===========================================================================
+class TestInspect:
+    def test_parse_inspect_valid(self):
+        inspect = browser_stream.parse_inspect(
+            {"type": "inspect", "x": 12.5, "y": 40, "mode": "select"}
+        )
+        assert (inspect.x, inspect.y, inspect.mode) == (12.5, 40.0, "select")
+
+    def test_parse_inspect_rejects_bad_mode_and_coords(self):
+        with pytest.raises(Exception):
+            browser_stream.parse_inspect({"type": "inspect", "x": 1, "y": 2, "mode": "drag"})
+        with pytest.raises(Exception):
+            browser_stream.parse_inspect({"type": "inspect", "x": 1, "mode": "hover"})
+        with pytest.raises(Exception):
+            browser_stream.parse_inspect(
+                {"type": "inspect", "x": float("nan"), "y": 2, "mode": "hover"}
+            )
+        with pytest.raises(Exception):
+            browser_stream.parse_inspect(
+                {"type": "inspect", "x": float("inf"), "y": 2, "mode": "hover"}
+            )
+
+    def test_build_expression_substitutes_and_clamps(self):
+        expr = browser_stream.build_inspect_expression(9999, -5, detail=True, bounds=(800, 600))
+        assert "document.elementFromPoint(800.0, 0.0)" in expr
+        assert "__X__" not in expr and "__Y__" not in expr and "__DETAIL__" not in expr
+        assert "if (true)" in expr
+
+        hover = browser_stream.build_inspect_expression(10, 20, detail=False)
+        assert "document.elementFromPoint(10.0, 20.0)" in hover
+        assert "if (false)" in hover
+
+    def test_sanitize_inspect_result(self):
+        good = {"selector": "#a", "tag": "div"}
+        assert browser_stream.sanitize_inspect_result(good) == good
+        assert browser_stream.sanitize_inspect_result(None) is None
+        assert browser_stream.sanitize_inspect_result("nope") is None
+        assert browser_stream.sanitize_inspect_result(["a"]) is None
+        huge = {"html": "x" * 40_000}
+        assert browser_stream.sanitize_inspect_result(huge) is None
+
+    async def test_select_round_trip_answers_requesting_viewer(self, monkeypatch):
+        hub, viewer, fake = await _hub_with_fake_upstream(monkeypatch)
+        inspect = browser_stream.parse_inspect(
+            {"type": "inspect", "x": 10, "y": 20, "mode": "select"}
+        )
+        await hub.dispatch_inspect(viewer, inspect)
+
+        ev = next(m for m in fake.sent if m["method"] == "Runtime.evaluate")
+        assert ev["params"]["returnByValue"] is True
+        assert "document.elementFromPoint(10.0, 20.0)" in ev["params"]["expression"]
+
+        descriptor = {"selector": "#cta", "tag": "button", "classes": ["btn"]}
+        fake._incoming.put_nowait(json.dumps({
+            "id": ev["id"],
+            "result": {"result": {"type": "object", "value": descriptor}},
+        }))
+        await _wait_for(
+            lambda: any(m.get("type") == "inspect-hit" for m in viewer.websocket.sent)
+        )
+        hit = next(m for m in viewer.websocket.sent if m.get("type") == "inspect-hit")
+        assert hit["mode"] == "select"
+        assert hit["element"] == descriptor
+        await browser_stream.detach_viewer("hub-cmd", viewer)
+
+    async def test_miss_returns_null_element(self, monkeypatch):
+        hub, viewer, fake = await _hub_with_fake_upstream(monkeypatch)
+        inspect = browser_stream.parse_inspect(
+            {"type": "inspect", "x": 1, "y": 1, "mode": "hover"}
+        )
+        await hub.dispatch_inspect(viewer, inspect)
+        ev = next(m for m in fake.sent if m["method"] == "Runtime.evaluate")
+        fake._incoming.put_nowait(json.dumps({
+            "id": ev["id"],
+            "result": {"result": {"type": "object", "subtype": "null", "value": None}},
+        }))
+        await _wait_for(
+            lambda: any(m.get("type") == "inspect-hit" for m in viewer.websocket.sent)
+        )
+        hit = next(m for m in viewer.websocket.sent if m.get("type") == "inspect-hit")
+        assert hit["mode"] == "hover"
+        assert hit["element"] is None
+        await browser_stream.detach_viewer("hub-cmd", viewer)
+
+    async def test_inspect_without_upstream_answers_immediately(self):
+        hub = browser_stream.BrowserStreamHub("x")
+        viewer = browser_stream._Viewer(FakeViewerWS())
+        hub.viewers.add(viewer)
+        inspect = browser_stream.parse_inspect(
+            {"type": "inspect", "x": 5, "y": 5, "mode": "hover"}
+        )
+        await hub.dispatch_inspect(viewer, inspect)
+        assert viewer.websocket.sent == [
+            {"type": "inspect-hit", "mode": "hover", "element": None}
+        ]
+
+
+# ===========================================================================
 # Hub state machine
 # ===========================================================================
 _CLOSE = object()
@@ -356,7 +455,10 @@ async def _wait_for(cond, timeout=2.0):
 
 @pytest.fixture(autouse=True)
 def _reset_hubs():
-    for sid in ("hub-start", "hub-ack", "hub-stable", "hub-reattach", "hub-death", "hub-cmd"):
+    for sid in (
+        "hub-start", "hub-ack", "hub-stable", "hub-reattach", "hub-death",
+        "hub-cmd", "hub-probe", "hub-retry",
+    ):
         registry.clear(sid)
     browser_stream._hubs.clear()
     yield
@@ -507,9 +609,91 @@ async def test_same_target_updates_do_not_restart_live_screencast(monkeypatch):
     await browser_stream.detach_viewer(sid, viewer)
 
 
-async def test_upstream_death_broadcasts_no_page(monkeypatch):
+async def test_upstream_death_exhausts_retries_then_no_page(monkeypatch):
+    """When the target stays registered but every re-attach fails, the hub
+    spends its retry budget (broadcasting `connecting`, not `no_page`) and only
+    then falls back to no_page + wait-for-change."""
     sid = "hub-death"
     registry.register(sid, "target-x", None, "http://a/")
+    fake = FakeUpstream()
+    opens = 0
+
+    async def opener(uri):
+        nonlocal opens
+        opens += 1
+        if opens == 1:
+            return fake
+        raise ConnectionError("cdp gone")
+
+    monkeypatch.setattr(browser_stream, "_open_upstream", opener)
+    monkeypatch.setattr(browser_stream, "_REATTACH_DELAYS", (0.01,))
+
+    ws = FakeViewerWS()
+    hub, viewer = await browser_stream.attach_viewer(sid, ws)
+    await _wait_for(lambda: "Page.startScreencast" in fake.methods())
+
+    fake.feed_close()  # upstream dies; retry budget: one failed re-open
+    await _wait_for(
+        lambda: any(
+            f.get("type") == "status" and f.get("state") == "no_page"
+            for f in ws.sent
+        )
+    )
+    assert opens >= 2  # the retry actually happened before giving up
+    await browser_stream.detach_viewer(sid, viewer)
+
+
+async def test_upstream_death_reattaches_without_registry_change(monkeypatch):
+    """An upstream hiccup while the target is still registered self-heals: the
+    hub re-attaches on its own instead of waiting for the next browser tool to
+    re-report (which could be a whole streaming turn away)."""
+    sid = "hub-retry"
+    registry.register(sid, "target-r", None, "http://a/")
+    fakes = []
+
+    async def opener(uri):
+        f = FakeUpstream(uri)
+        fakes.append(f)
+        return f
+
+    monkeypatch.setattr(browser_stream, "_open_upstream", opener)
+    monkeypatch.setattr(browser_stream, "_REATTACH_DELAYS", (0.01, 0.01, 0.01))
+
+    ws = FakeViewerWS()
+    hub, viewer = await browser_stream.attach_viewer(sid, ws)
+    await _wait_for(lambda: fakes and "Page.startScreencast" in fakes[0].methods())
+
+    fakes[0].feed_close()  # transient upstream death, registry unchanged
+    await _wait_for(lambda: len(fakes) >= 2)
+    await _wait_for(lambda: "Page.startScreencast" in fakes[1].methods())
+
+    # The gap was reported as connecting, never as no_page.
+    assert not any(
+        f.get("type") == "status" and f.get("state") == "no_page" for f in ws.sent
+    )
+
+    # The re-attached target answers the probe -> live again, no frame needed.
+    probe = next(
+        m for m in fakes[1].sent if m["method"] == "Page.getNavigationHistory"
+    )
+    fakes[1]._incoming.put_nowait(json.dumps({
+        "id": probe["id"],
+        "result": {"currentIndex": 0, "entries": [{"id": 1, "url": "http://a/"}]},
+    }))
+    await _wait_for(
+        lambda: any(
+            f.get("type") == "status" and f.get("state") == "live" for f in ws.sent
+        )
+    )
+    await browser_stream.detach_viewer(sid, viewer)
+
+
+async def test_probe_reply_declares_live_without_any_frame(monkeypatch):
+    """Chrome only paints screencast frames for the foreground tab, so `live`
+    must not be gated on a first frame: the attach-time history probe reply is
+    the health signal."""
+    sid = "hub-probe"
+    registry.register(sid, "target-p", None, "http://p/")
     fake = FakeUpstream()
 
     async def opener(uri):
@@ -519,13 +703,21 @@ async def test_upstream_death_broadcasts_no_page(monkeypatch):
 
     ws = FakeViewerWS()
     hub, viewer = await browser_stream.attach_viewer(sid, ws)
-    await _wait_for(lambda: "Page.startScreencast" in fake.methods())
+    await _wait_for(lambda: "Page.getNavigationHistory" in fake.methods())
+    probe = next(m for m in fake.sent if m["method"] == "Page.getNavigationHistory")
 
-    fake.feed_close()  # upstream dies
+    fake._incoming.put_nowait(json.dumps({
+        "id": probe["id"],
+        "result": {
+            "currentIndex": 0,
+            "entries": [{"id": 1, "url": "http://p/actual"}],
+        },
+    }))
     await _wait_for(
         lambda: any(
-            f.get("type") == "status" and f.get("state") == "no_page"
-            for f in ws.sent
+            f.get("type") == "status" and f.get("state") == "live" for f in ws.sent
         )
     )
+    # No frame was ever fed — live came from the probe round-trip alone.
+    assert not any(f.get("type") == "frame" for f in ws.sent)
     await browser_stream.detach_viewer(sid, viewer)

@@ -3,6 +3,7 @@ import {
 	fitScale,
 	letterbox,
 	canvasToPage,
+	pageRectToCanvas,
 	modifiersFromEvent,
 	MOD_ALT,
 	MOD_CTRL,
@@ -121,5 +122,31 @@ describe('modifiersFromEvent', () => {
 		);
 		// Sanity: all four = 15.
 		expect(modifiersFromEvent(flags(true, true, true, true))).toBe(15);
+	});
+});
+
+describe('pageRectToCanvas', () => {
+	it('is the inverse of canvasToPage (scale + letterbox offsets applied)', () => {
+		// 1000x500 frame in an 800x800 canvas → scale 0.8, letterboxed vertically:
+		// drawn height 400, offset y = 200.
+		const canvasRect = rect(0, 0, 800, 800);
+		const m = meta(1000, 500);
+		const out = pageRectToCanvas({ x: 100, y: 50, width: 200, height: 100 }, canvasRect, m);
+		expect(out).toEqual({ left: 80, top: 240, width: 160, height: 80 });
+	});
+
+	it('does not clamp rects that overflow the viewport (canvas clips them)', () => {
+		const out = pageRectToCanvas(
+			{ x: -10, y: 0, width: 2000, height: 50 },
+			rect(0, 0, 1000, 500),
+			meta(1000, 500),
+		);
+		expect(out).toEqual({ left: -10, top: 0, width: 2000, height: 50 });
+	});
+
+	it('returns null for a degenerate frame', () => {
+		expect(
+			pageRectToCanvas({ x: 0, y: 0, width: 10, height: 10 }, rect(0, 0, 800, 800), meta(0, 0)),
+		).toBeNull();
 	});
 });

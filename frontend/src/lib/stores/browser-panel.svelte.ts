@@ -10,6 +10,7 @@
 import { browser } from '$app/environment';
 import { untrack } from 'svelte';
 import { createSubscribers } from './store-utils';
+import type { SelectedElement } from '$lib/browser-panel/inspect';
 
 // ============================================
 // Types
@@ -46,6 +47,11 @@ interface BrowserPanelState {
 	 * panel the user deliberately dismissed. Cleared whenever the user reopens.
 	 */
 	userClosedForSession: string | null;
+	/** Point-and-prompt mode: clicks in the live view select elements instead
+	 *  of being forwarded to the page. Runtime-only; off on open. */
+	inspectMode: boolean;
+	/** Element picked in inspect mode, feeding the panel's prompt composer. */
+	selectedElement: SelectedElement | null;
 }
 
 // ============================================
@@ -139,6 +145,8 @@ let _state = $state<BrowserPanelState>({
 	pageLoading: false,
 	pageTracked: false,
 	userClosedForSession: null,
+	inspectMode: false,
+	selectedElement: null,
 });
 
 // ============================================
@@ -175,19 +183,46 @@ export const browserPanel = {
 
 	/**
 	 * Close the panel and remember which session it was closed for, so a later
-	 * browser tool in that same session won't auto-reopen it.
+	 * browser tool in that same session won't auto-reopen it. Inspect state is
+	 * per-viewing, so it resets with the panel.
 	 */
 	closePanel(sessionId: string | null) {
-		_update((s) => ({ ...s, open: false, userClosedForSession: sessionId }));
+		_update((s) => ({
+			...s,
+			open: false,
+			userClosedForSession: sessionId,
+			inspectMode: false,
+			selectedElement: null,
+		}));
 	},
 
 	/** Toggle open/closed. Closing records the suppression for `sessionId`. */
 	toggle(sessionId: string | null) {
 		_update((s) =>
 			s.open
-				? { ...s, open: false, userClosedForSession: sessionId }
+				? {
+						...s,
+						open: false,
+						userClosedForSession: sessionId,
+						inspectMode: false,
+						selectedElement: null,
+					}
 				: { ...s, open: true, userClosedForSession: null },
 		);
+	},
+
+	/** Toggle point-and-prompt mode. Leaving it drops the current selection. */
+	setInspectMode(on: boolean) {
+		_update((s) => ({
+			...s,
+			inspectMode: on,
+			selectedElement: on ? s.selectedElement : null,
+		}));
+	},
+
+	/** Store the element picked in inspect mode (null clears the selection). */
+	setSelectedElement(element: SelectedElement | null) {
+		_update((s) => ({ ...s, selectedElement: element }));
 	},
 
 	/** Set the panel width (clamped 320–960) and persist it. */
@@ -218,9 +253,15 @@ export const browserPanel = {
 		}));
 	},
 
-	/** Reset per-attachment page tracking (session switch / stream teardown). */
+	/** Reset per-attachment page tracking (session switch / stream teardown).
+	 *  A selection from the previous session's page is meaningless — drop it. */
 	resetPageTracking() {
-		_update((s) => ({ ...s, pageLoading: false, pageTracked: false }));
+		_update((s) => ({
+			...s,
+			pageLoading: false,
+			pageTracked: false,
+			selectedElement: null,
+		}));
 	},
 
 	/**

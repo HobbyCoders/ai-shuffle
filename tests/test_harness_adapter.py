@@ -2704,6 +2704,7 @@ async def test_delegated_resume_uses_stored_cli_session_id(monkeypatch):
     kwargs = FakeDelegatedLoop.last_kwargs
     assert kwargs["session_id"] == "ses_resume"
     assert kwargs["cli_session_id"] == "cli-uuid-from-init-frame"
+    assert "compaction" not in kwargs  # native rendered-view policy only
 
 
 @pytest.mark.asyncio
@@ -3587,18 +3588,11 @@ async def test_max_turns_becomes_model_call_budget(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_no_max_turns_adds_no_automatic_limits(monkeypatch, tmp_path):
-    """Only an explicitly configured profile may cap a native turn.
-
-    fluid's own defaults are a 200-call ceiling and compaction ON, so the
-    absence of a cap has to be stated: ``max_model_calls_per_turn=None`` and a
-    disabled CompactionConfig are passed EXPLICITLY, never omitted.
-    """
+async def test_no_max_turns_adds_no_automatic_call_limit(monkeypatch, tmp_path):
+    """Only an explicitly configured profile may cap native model calls."""
     for kwargs in ({}, {"max_turns": 0}):
         captured = await _connect_capturing_native(monkeypatch, tmp_path, **kwargs)
         assert captured["max_model_calls_per_turn"] is None
-        assert captured["compaction"].enabled is False
-        assert captured["compaction"].trim.enabled is False
         assert "safety_limits" not in captured
         assert "trim" not in captured
 
@@ -5994,26 +5988,17 @@ def test_code_mode_section_carries_the_four_contracts():
     assert text.rstrip().endswith("save it as a skill.")
 
 
-# ── tier-1 trim setting ───────────────────────────────────────────────────
+# ── native recoverable context policy ─────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_trim_is_off_by_default(monkeypatch, tmp_path):
-    """Both tiers disabled at construction — the shipped default."""
+async def test_recoverable_compaction_is_enabled_for_native_loops(monkeypatch, tmp_path):
+    """Native loops compact only their rendered view and retain exact nodes."""
     captured = await _connect_capturing_native(monkeypatch, tmp_path)
-    assert captured["compaction"].enabled is False
-    assert captured["compaction"].trim.enabled is False
+    compaction = captured["compaction"]
 
-
-@pytest.mark.asyncio
-async def test_fluid_trim_setting_enables_tier_one_only(monkeypatch, tmp_path):
-    """``FLUID_TRIM`` turns on tool-result trim and NOTHING else: compaction
-    stays disabled, which is the spelling fluid reads as "tier 1, no span
-    digests"."""
-    from app.core.config import settings
-
-    monkeypatch.setattr(settings, "fluid_trim", True)
-    captured = await _connect_capturing_native(monkeypatch, tmp_path)
-
-    assert captured["compaction"].enabled is False
-    assert captured["compaction"].trim.enabled is True
+    assert compaction.enabled is True
+    assert compaction.trim.enabled is True
+    assert compaction.trigger_tokens == 120_000
+    assert compaction.headroom_tokens == 16_000
+    assert compaction.target_ratio == 0.70

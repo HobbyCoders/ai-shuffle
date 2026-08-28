@@ -317,15 +317,6 @@ class Settings(BaseSettings):
     fluid_continual_model: Optional[str] = None
     fluid_skills_dir: Optional[str] = None
 
-    # Tier-1 tool-result trim on native legs (FLUID_TRIM=true). OFF, and the
-    # default stays OFF: AI Shuffle does not rewrite a turn's history behind
-    # the user's back. When on, the leg is built with
-    # ``CompactionConfig(enabled=False, trim=TrimConfig(enabled=True))`` — that
-    # exact spelling runs fluid's tier-1 trim of superseded tool RESULTS only
-    # and never the tier-2 span digests, so no model-written summary replaces
-    # anything the user or the agent actually said.
-    fluid_trim: bool = False
-
     # Timeouts (milliseconds)
     hook_timeout_ms: int = 30_000
     # Size limits
