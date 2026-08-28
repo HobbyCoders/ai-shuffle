@@ -1822,7 +1822,11 @@ def clear_session_conversation(session_id: str) -> Optional[str]:
     ``session_messages`` (see :func:`discard_orphan_first_turn`). So a durable
     clear must: wipe the SDK transcript store rows, NULL ``sdk_session_id`` so the
     read path skips the (now stale) transcript and returns nothing, drop the
-    legacy ``session_messages`` rows, and zero the persisted usage counters.
+    legacy ``session_messages`` rows, zero the persisted usage counters, and —
+    because the v2 SSE feed renders the transcript by replaying
+    ``session_events`` from seq 0 — drop the event log and its seq counter too
+    (see the inline comment below for why the counter resets rather than
+    continuing).
 
     Returns the previous ``sdk_session_id`` (or None) so the caller can
     background-clean its JSONL file / pooled subprocess.
@@ -1855,6 +1859,31 @@ def clear_session_conversation(session_id: str) -> Optional[str]:
         # Drop the legacy chat-history rows for this session.
         cursor.execute(
             f"DELETE FROM session_messages WHERE session_id = {_ph}",
+            (session_id,),
+        )
+
+        # Drop the v2 event log AND its seq counter — in this same transaction.
+        # The SSE feed replays ``session_events`` from seq 0 as the transcript
+        # authority, so rows left here resurrect the "cleared" conversation on
+        # every fresh hydration (hard reload, new tab, transcript-cache miss)
+        # no matter what the wipes above did. Deleting the counter row too puts
+        # the session in exactly a brand-new session's state: the next append
+        # re-seeds the counter and allocates from seq 1, and ``get_max_seq``
+        # (which reads ONLY the counter) reports 0 instead of claiming events
+        # an empty log doesn't hold. That reset is safe for live SSE
+        # subscribers — every read path filters ``seq > cursor``, so a tab
+        # still tailing the old high cursor simply goes quiet until the
+        # ``user_session_cleared`` broadcast restarts its feed from seq 0;
+        # continuing the old counter instead would splice the NEXT
+        # conversation's events onto the stale transcript of any tab that
+        # missed that broadcast. Same treatment ``delete_session`` gives both
+        # tables via ``_SESSION_RUNTIME_TABLES``.
+        cursor.execute(
+            f"DELETE FROM session_events WHERE session_id = {_ph}",
+            (session_id,),
+        )
+        cursor.execute(
+            f"DELETE FROM session_event_counters WHERE session_id = {_ph}",
             (session_id,),
         )
 

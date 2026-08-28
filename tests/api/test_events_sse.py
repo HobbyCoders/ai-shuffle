@@ -224,6 +224,40 @@ async def test_caught_up_emitted_on_empty_backfill(mock_db, gw, monkeypatch):
     assert raw[0]["data"] == {"seq": 1}
 
 
+async def test_replay_after_clear_is_empty(mock_db, gw, monkeypatch):
+    """A fresh hydration AFTER an in-place clear must serve an EMPTY transcript.
+
+    ``clear_session_conversation`` used to wipe every other store but leave
+    ``session_events`` (and its seq counter) behind — and since this feed
+    replays the event log from seq 0 as the transcript authority, every hard
+    reload / new tab / transcript-cache miss resurrected the "cleared"
+    conversation. The wipe must reach the log itself.
+    """
+    monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 30.0)
+    from app.db import database
+
+    database.create_session("sess-clear", "default")
+    se.append_events("sess-clear", [
+        {"type": "turn.started"},
+        {"type": "assistant.text_delta", "payload": {"text": "old convo"}},
+        {"type": "turn.completed"},
+    ])
+
+    database.clear_session_conversation("sess-clear")
+
+    agen = event_stream("sess-clear", 0)
+    try:
+        raw = await _collect_raw(agen, 1)
+    finally:
+        await agen.aclose()
+
+    # The one and only frame is the catch-up sentinel at seq 0: no transcript
+    # rows replayed, and the legacy backfill (which a truly empty log triggers)
+    # finds nothing either because the clear also dropped session_messages.
+    assert raw[0]["event"] == "caught_up"
+    assert raw[0]["data"] == {"seq": 0}
+
+
 async def test_close_unsubscribes(mock_db, gw):
     se.append_events("sess-e", [{"type": "turn.started"}])
 

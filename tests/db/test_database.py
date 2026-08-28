@@ -572,7 +572,14 @@ class TestSessionOperations:
     def test_clear_session_conversation(self, mock_db, setup_profile):
         """clear_session_conversation wipes transcript + message rows + usage
         counters and unlinks sdk_session_id, but KEEPS the session row — the
-        in-place "Clear session" reset. Returns the old sdk_session_id."""
+        in-place "Clear session" reset. Returns the old sdk_session_id.
+
+        The v2 event log (``session_events`` + its seq counter) must go too:
+        the SSE feed replays it from seq 0 as the transcript authority, so
+        rows left behind resurrect the "cleared" conversation on every fresh
+        hydration regardless of the other wipes."""
+        from app.db import session_events as se
+
         db.create_session("session-1", setup_profile)
         # Link an SDK session and rack up usage / chat history / transcript rows.
         db.update_session(
@@ -582,6 +589,13 @@ class TestSessionOperations:
         )
         db.add_session_message("session-1", "user", "hello")
         db.add_session_message("session-1", "assistant", "hi there")
+        # …and a v2 event log with its seq counter.
+        se.append_events("session-1", [
+            {"type": "turn.started"},
+            {"type": "assistant.text_delta", "payload": {"text": "hi there"}},
+            {"type": "turn.completed"},
+        ])
+        assert se.get_max_seq("session-1") == 3
         mock_db.execute(
             "INSERT INTO session_store_entries (project_key, session_id, subpath, entry) "
             "VALUES (?, ?, ?, ?)",
@@ -616,6 +630,20 @@ class TestSessionOperations:
             "SELECT COUNT(*) FROM session_store_summaries WHERE session_id = ?", ("sdk-1",)
         )
         assert cur.fetchone()[0] == 0
+        # v2 event log wiped WITH its counter row.
+        cur = mock_db.execute(
+            "SELECT COUNT(*) FROM session_events WHERE session_id = ?", ("session-1",)
+        )
+        assert cur.fetchone()[0] == 0
+        cur = mock_db.execute(
+            "SELECT COUNT(*) FROM session_event_counters WHERE session_id = ?",
+            ("session-1",),
+        )
+        assert cur.fetchone()[0] == 0
+        # The counter reset puts the session in a brand-new session's state:
+        # max_seq reads 0 and the next conversation allocates from seq 1.
+        assert se.get_max_seq("session-1") == 0
+        assert se.append_events("session-1", [{"type": "turn.started"}]) == (1, 1)
 
     def test_clear_session_conversation_no_sdk_session(self, mock_db, setup_profile):
         """With no SDK session linked yet there is no transcript to wipe — the
