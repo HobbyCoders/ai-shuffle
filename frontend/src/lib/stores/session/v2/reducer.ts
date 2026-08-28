@@ -104,9 +104,15 @@ export interface V2SessionState {
 	 *  CREATED it. A message absent from this map is optimistic (seeded outside
 	 *  the reducer, not yet reconciled to an event) and is EXEMPT from rewind
 	 *  removal. Kept off the rendered ChatMessage so the shape stays byte-parity
-	 *  with `convertServerMessage`. */
-	messageOriginSeq: Record<string, number>;
-	/** Same, for `activeTaskSummaries` entries (keyed by task id). */
+	 *  with `convertServerMessage`.
+	 *
+	 *  A `Map`, and the ONE structure in this state the reducer mutates in place
+	 *  (see "Copy-on-publish ownership" below): it is pure bookkeeping, never
+	 *  rendered, and copying it per appended message is what made a large
+	 *  backfill quadratic. */
+	messageOriginSeq: Map<string, number>;
+	/** Same, for `activeTaskSummaries` entries (keyed by task id). Stays a plain
+	 *  record — tasks are a handful per session, not one per event. */
 	taskOriginSeq: Record<string, number>;
 	/** Ids of subagent cards that the LAST `turn.completed` speculatively settled
 	 *  to 'completed' via `settleStaleBackgroundWork`. If a `turn.parked` follows
@@ -137,7 +143,7 @@ export function initialState(): V2SessionState {
 		liveModel: null,
 		liveRequestedModel: null,
 		liveProvider: null,
-		messageOriginSeq: {},
+		messageOriginSeq: own(new Map<string, number>()),
 		taskOriginSeq: {},
 		speculativelySettledCardIds: [],
 		speculativelySettledTaskIds: [],
@@ -388,18 +394,86 @@ function artifactScreenshotUrl(v: unknown): string | undefined {
 	return hash ? `/api/v1/artifacts/${hash}` : undefined;
 }
 
+// ─── Copy-on-publish ownership ────────────────────────────────────────────────
+//
+// `reduce()` is value-semantics from the outside: every call returns a NEW state
+// object and never mutates a state anyone else can observe. Naively that also
+// meant copying the whole `messages` array and the whole `messageOriginSeq`
+// record on every appended event, which makes replaying an N-event backfill
+// O(N²) in both time and allocation (the reported cost of a full switch-in
+// replay on a long session).
+//
+// The fix is an ownership boundary. A container the reducer BUILT since the last
+// time state left this module is "owned" — nobody outside holds a reference, so
+// appending to it in place is unobservable. The moment a state is published to
+// the UI (`releaseMessages`) or stored for later (`sealState`), its containers
+// are disowned and the next append copies once. Anything the reducer did not
+// create (a caller-supplied state, a restored cache entry) is unowned by
+// default, so the model fails closed: an unknown array is always copied.
+//
+// Tracked in WeakSets rather than on the state object so the V2SessionState
+// shape — and its byte-parity with `convertServerMessage` output — is unchanged.
+const ownedMessages = new WeakSet<ChatMessage[]>();
+const ownedOrigins = new WeakSet<Map<string, number>>();
+
+function own<T extends ChatMessage[] | Map<string, number>>(container: T): T {
+	if (Array.isArray(container)) ownedMessages.add(container);
+	else ownedOrigins.add(container as Map<string, number>);
+	return container;
+}
+
+/**
+ * Hand this state's message array to the outside world (a fold into
+ * `activeSession`, a snapshot handed to a consumer). Disowns the array so the
+ * next append copies instead of mutating what the consumer now holds.
+ */
+export function releaseMessages(state: V2SessionState): ChatMessage[] {
+	ownedMessages.delete(state.messages);
+	return state.messages;
+}
+
+/**
+ * Freeze a state for storage (e.g. the feed controller's transcript cache).
+ * Disowns every mutable container so a later lineage that resumes FROM this
+ * snapshot copies on its first write and can never mutate the stored value.
+ */
+export function sealState(state: V2SessionState): V2SessionState {
+	ownedMessages.delete(state.messages);
+	ownedOrigins.delete(state.messageOriginSeq);
+	return state;
+}
+
 /** Append a message and record its origin seq (for `transcript.rewound`). */
 function appendMessage(state: V2SessionState, msg: ChatMessage, seq: number): V2SessionState {
-	return {
-		...state,
-		messages: [...state.messages, msg],
-		messageOriginSeq: { ...state.messageOriginSeq, [msg.id]: seq },
-	};
+	// O(1) when this lineage owns the containers; one O(N) copy otherwise.
+	const messages = ownedMessages.has(state.messages)
+		? state.messages
+		: own(state.messages.slice());
+	messages.push(msg);
+	const messageOriginSeq = ownedOrigins.has(state.messageOriginSeq)
+		? state.messageOriginSeq
+		: own(new Map(state.messageOriginSeq));
+	messageOriginSeq.set(msg.id, seq);
+	return { ...state, messages, messageOriginSeq };
 }
 
 /** Record an origin seq once — the earliest (creation) seq wins on replay. */
 function withOrigin(map: Record<string, number>, id: string, seq: number): Record<string, number> {
 	return map[id] !== undefined ? map : { ...map, [id]: seq };
+}
+
+/** `withOrigin` for the Map-backed message origins (same "earliest wins" rule). */
+function withMessageOrigin(
+	state: V2SessionState,
+	id: string,
+	seq: number
+): Map<string, number> {
+	if (state.messageOriginSeq.has(id)) return state.messageOriginSeq;
+	const next = ownedOrigins.has(state.messageOriginSeq)
+		? state.messageOriginSeq
+		: own(new Map(state.messageOriginSeq));
+	next.set(id, seq);
+	return next;
 }
 
 /** Prefer an event payload `timestamp` over the envelope `created_at`. */
@@ -624,6 +698,16 @@ function classifyToolRejection(raw: string): string | null {
 
 // ─── Reducer ──────────────────────────────────────────────────────────────────
 
+/**
+ * Fold one wire event into the session state.
+ *
+ * Ownership contract (see "Copy-on-publish ownership"): `reduce` CONSUMES
+ * `state` — the returned state supersedes it, and the input must not be reduced
+ * down a second, divergent branch. Snapshot with `sealState(state)` first if you
+ * need to keep a state you will branch from (that is exactly what the feed
+ * controller's transcript cache does), and `releaseMessages(state)` before
+ * handing `state.messages` to a consumer that keeps the reference.
+ */
 export function reduce(state: V2SessionState, event: WireEvent): V2SessionState {
 	const createdAt = str(event.created_at);
 	// lastSeq only ever advances (replay is monotonic).
@@ -1029,7 +1113,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				return {
 					...state,
 					messages,
-					messageOriginSeq: withOrigin(state.messageOriginSeq, keepId, seq),
+					messageOriginSeq: withMessageOrigin(state, keepId, seq),
 					pendingPumpAck: null,
 					pumpAckBuffer: '',
 				};
@@ -1692,13 +1776,15 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// Drop every message/task CREATED at seq >= fromSeq. Optimistic
 			// messages (absent from messageOriginSeq) are exempt. Reducing the
 			// full log from seq 0 reproduces the same truncation → determinism.
-			const keptMessages = state.messages.filter((m) => {
-				const origin = state.messageOriginSeq[m.id];
-				return origin === undefined || origin < fromSeq;
-			});
-			const messageOriginSeq: Record<string, number> = {};
-			for (const [id, origin] of Object.entries(state.messageOriginSeq)) {
-				if (origin < fromSeq) messageOriginSeq[id] = origin;
+			const keptMessages = own(
+				state.messages.filter((m) => {
+					const origin = state.messageOriginSeq.get(m.id);
+					return origin === undefined || origin < fromSeq;
+				})
+			);
+			const messageOriginSeq = own(new Map<string, number>());
+			for (const [id, origin] of state.messageOriginSeq) {
+				if (origin < fromSeq) messageOriginSeq.set(id, origin);
 			}
 			const taskOriginSeq: Record<string, number> = {};
 			const activeTaskSummaries = state.activeTaskSummaries.filter((t) => {
@@ -1745,7 +1831,9 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 
 /** Convenience: fold an ordered event log from scratch (used by replay/tests). */
 export function reduceAll(events: WireEvent[], from: V2SessionState = initialState()): V2SessionState {
-	return events.reduce(reduce, from);
+	// Sealed: replay helpers hand the result around freely (tests branch off it),
+	// so the returned state must not keep in-place-append ownership.
+	return sealState(events.reduce(reduce, from));
 }
 
 // Re-export for callers that seed optimistic messages.

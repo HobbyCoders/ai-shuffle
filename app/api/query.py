@@ -269,12 +269,16 @@ async def conversation(
 
         from app.core import turn_manager, turn_outcome
         from app.db import database
+        from app.db.async_database import run_sync
 
         # ``submit`` requires an existing session row: resolve the caller's id or
         # mint one here (the old engine created it as a side effect of running).
+        # Both DB calls are synchronous psycopg2 — offloaded so they cannot
+        # block the event loop (and with it every other request) while this
+        # long-running endpoint sets up.
         session_id = request.session_id
         if session_id:
-            if database.get_session(session_id) is None:
+            if await run_sync(database.get_session, session_id) is None:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Unknown session_id",
@@ -284,7 +288,8 @@ async def conversation(
             title = request.prompt[:50].strip()
             if len(request.prompt) > 50:
                 title += "..."
-            database.create_session(
+            await run_sync(
+                database.create_session,
                 session_id=session_id,
                 profile_id=profile_id,
                 project_id=project_id,

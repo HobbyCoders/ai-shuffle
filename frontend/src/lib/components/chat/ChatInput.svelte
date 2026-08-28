@@ -946,8 +946,13 @@
 		border-radius: 20px;
 		border: 1px solid var(--border);
 		background: var(--glass);
-		backdrop-filter: blur(22px) saturate(160%);
-		-webkit-backdrop-filter: blur(22px) saturate(160%);
+		/* One switch for the whole app's compositing budget — see the
+		   "COMPOSITING BUDGET" block in app.css. Was blur(22px) saturate(160%),
+		   the heaviest backdrop-filter in the app and sitting directly over the
+		   scrolling transcript; now 8px, and `none` (with an opaque --glass)
+		   under prefers-reduced-transparency or the low-end profile. */
+		backdrop-filter: var(--fx-glass-backdrop);
+		-webkit-backdrop-filter: var(--fx-glass-backdrop);
 		box-shadow: inset 0 1px 0 0 var(--glass-highlight);
 		transition: border-color 0.2s ease, box-shadow 0.2s ease;
 	}

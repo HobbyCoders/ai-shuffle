@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
@@ -125,6 +127,60 @@ def get_system_setting(key: str) -> Optional[str]:
         return row["value"] if row else None
 
 
+# ---------------------------------------------------------------------------
+# Short-TTL memo for settings read on hot paths
+# ---------------------------------------------------------------------------
+#
+# A handful of settings are consulted per REQUEST rather than per user action —
+# ``cluster_share_sessions`` is read by every ``get_sessions*`` /
+# ``search_sessions*`` call to decide whether to add the per-install filter, so
+# every sidebar refresh paid a dedicated pool checkout + SELECT + commit for a
+# value that changes approximately never (finding B8).
+#
+# The memo is per-process and deliberately short-lived: writes THROUGH this
+# module invalidate it immediately (so an in-process change is visible at once),
+# and the TTL bounds how long another install's write to the shared database can
+# go unnoticed. Reads that must be exact use :func:`get_system_setting`.
+SYSTEM_SETTING_MEMO_TTL_SECONDS = 5.0
+
+# key -> (expires_at_monotonic, value)
+_setting_memo: Dict[str, tuple] = {}
+_setting_memo_lock = threading.Lock()
+
+
+def invalidate_system_setting_memo(key: Optional[str] = None) -> None:
+    """Drop memoized system settings (one key, or all when ``key`` is None)."""
+    with _setting_memo_lock:
+        if key is None:
+            _setting_memo.clear()
+        else:
+            _setting_memo.pop(key, None)
+
+
+def get_system_setting_cached(
+    key: str, ttl: float = SYSTEM_SETTING_MEMO_TTL_SECONDS
+) -> Optional[str]:
+    """Memoized :func:`get_system_setting` for per-request hot paths.
+
+    Serves a value cached up to ``ttl`` seconds old. Misses (``None``) are
+    memoized too — an unset setting is the common case and re-querying it on
+    every call is exactly the overhead this exists to remove. Any write through
+    :func:`set_system_setting` / :func:`delete_system_setting` /
+    :func:`get_or_create_system_setting` invalidates the key immediately.
+    """
+    now = time.monotonic()
+    with _setting_memo_lock:
+        entry = _setting_memo.get(key)
+        if entry is not None and entry[0] > now:
+            return entry[1]
+
+    value = get_system_setting(key)
+
+    with _setting_memo_lock:
+        _setting_memo[key] = (time.monotonic() + ttl, value)
+    return value
+
+
 def set_system_setting(key: str, value: str) -> None:
     """Set a system setting (upsert)"""
     with get_db() as conn:
@@ -138,6 +194,8 @@ def set_system_setting(key: str, value: str) -> None:
                    updated_at = excluded.updated_at""",
             (key, value, now)
         )
+    # Explicit invalidation: the memo must never outlive a write we made.
+    invalidate_system_setting_memo(key)
 
 
 def delete_system_setting(key: str) -> bool:
@@ -145,7 +203,9 @@ def delete_system_setting(key: str) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM system_settings WHERE key = %s", (key,))
-        return cursor.rowcount > 0
+        deleted = cursor.rowcount > 0
+    invalidate_system_setting_memo(key)
+    return deleted
 
 
 def get_or_create_system_setting(key: str, default_factory) -> str:
@@ -172,6 +232,7 @@ def get_or_create_system_setting(key: str, default_factory) -> str:
         )
     # Re-read: another install may have won the insert race, so return the
     # value that actually landed rather than our candidate.
+    invalidate_system_setting_memo(key)
     return get_system_setting(key) or value
 
 

@@ -251,7 +251,16 @@ class Settings(BaseSettings):
     # SSH/SMB, or another install) converges everywhere. See app.core.notes_sync.
     # Interval is a poll cadence (watchdog-style fs events are unreliable on the
     # network/fuse filesystems these installs commonly run on). 0 disables it.
-    notes_sync_interval_seconds: int = 15
+    #
+    # F7: a pass is now METADATA-FIRST — it reads (id, title, file_path,
+    # updated_at) for every note and pulls the multi-KB ``content`` column only
+    # for the rows whose file mtime or DB ``updated_at`` actually moved — so the
+    # steady-state cost of a tick is one small indexed read plus one ``stat``
+    # per note. That made the old 15s cadence affordable, but the cadence itself
+    # was never the point: nothing in this loop is latency-critical (the UI's
+    # own GET reconcile covers the note you are looking at), so 60s is the
+    # honest default and cuts the idle wake count 4x.
+    notes_sync_interval_seconds: int = 60
 
     # Codex / ChatGPT-subscription OAuth token-refresh worker. Polls every
     # enabled Codex provider on this cadence and refreshes any whose access token
@@ -260,6 +269,31 @@ class Settings(BaseSettings):
     # are serialized per provider by a lock; this is just the wake-up cadence. 0
     # disables the periodic worker (the refresh-on-401 hook still works on demand).
     codex_token_refresh_interval_seconds: int = 3600
+
+    # ─── Cross-install background sweep (F5) ────────────────────────────────
+    # turn-claim, git-ops-claim and interaction-expiry are cross-INSTALL
+    # correctness loops multiplexed onto one timer (see app.core.turn_claim).
+    # On a deployment with no peer installs they read tables only this process
+    # ever writes, so their tight cadence is pure overhead; the sweep stretches
+    # every pass to this interval when the install registry shows no peers, and
+    # snaps back to the tight per-pass cadences the moment a peer row appears.
+    # NOTIFY (turn submit/interrupt) remains the latency path either way.
+    # Set to 0 to disable the stretch and always run the tight cadences.
+    single_install_sweep_interval_seconds: int = 60
+
+    # How long a "do we have peer installs?" answer is cached before the sweep
+    # re-reads the registry. Bounds the extra read to ~0.2 queries/min, and is
+    # also invalidated immediately whenever a pass actually finds work.
+    single_install_peer_check_seconds: int = 300
+
+    # ─── Orphaned-session reconciler cadence (F6) ───────────────────────────
+    # The reconciler heals sessions whose ``sdk_session_id`` a mid-turn crash
+    # left NULL. It is a RECOVERY sweep, not a hot path: the unbounded backfill
+    # already runs once at startup, and new orphans are prevented at the source
+    # by the persist-on-init write. Running it on the 5-minute monitor tick made
+    # it re-aggregate the session store for every never-used session, forever.
+    # Hourly is ample. 0 disables the periodic pass (startup still runs one).
+    orphan_reconcile_interval_seconds: int = 3600
 
     # SuperGrok / xAI OAuth token-refresh worker. Same cadence semantics as
     # ``codex_token_refresh_interval_seconds`` (0 disables the periodic worker;
@@ -299,20 +333,67 @@ class Settings(BaseSettings):
     max_display_output_chars: int = 2_000  # What we show in the UI
     sdk_buffer_size: int = 50 * 1024 * 1024  # 50MB for base64 images/PDFs
 
-    # SDK Session Pool — max concurrent subprocess sessions kept alive between queries.
-    # Each idle subprocess uses ~100MB RAM, so 8 sessions ≈ 800MB worst case
-    # (idle eviction below reclaims them long before steady state hits that).
-    # At 3, one long-lived orchestrator + a couple of automations evicted the
-    # user's chat session on every message, forcing a full subprocess respawn
-    # (and its Chrome-extension reconnect) per message.
-    sdk_session_pool_size: int = 8
+    # ─── SDK Session Pool sizing + TIERED idle policy (F1) ──────────────────
+    #
+    # Every pooled session owns ONE long-lived Node CLI subprocess at
+    # 100-300+MB RSS, so the pool's steady-state size IS the app's idle RAM
+    # floor. The old shape (8 slots x a flat 30-minute idle timeout, evicted
+    # only on the resource monitor's 5-minute tick) parked up to 8 subprocesses
+    # for ~35 minutes after a few chats — 1-2GB on a machine that is doing
+    # nothing. AI Shuffle targets weak machines, so the defaults below trade a
+    # little respawn latency on rarely-touched sessions for a much lower idle
+    # floor. All of it is configurable; see app.core.session_pool.IdlePolicy,
+    # which is the single place the policy is expressed.
 
-    # How long a pooled subprocess may sit idle before the resource monitor
-    # evicts it. Every eviction turns the next message into a cold respawn
-    # (slower first token, Chrome native-host handshake), so keep this
-    # comfortably above a normal read-and-reply gap. Override via
+    # Max concurrent subprocess sessions kept alive between queries. 4 covers
+    # the realistic concurrent working set (the chat you are in, the one you
+    # just left, and a running automation or two) while capping the worst case
+    # at ~4 subprocesses instead of 8. The hard cap is still 2x this (see
+    # SessionPool._HARD_CAP_MULTIPLIER), so bursts still get headroom; only the
+    # steady state shrinks. Raise it on a big box via SDK_SESSION_POOL_SIZE.
+    sdk_session_pool_size: int = 4
+
+    # HOT tier size: how many most-recently-used sessions keep the long idle
+    # timeout below. These are the ones a user realistically comes back to
+    # within the hour, and keeping them hot is what preserves the "no cold
+    # respawn between messages" feel. Everything past this rank is COLD and
+    # goes on the short timeout. 0 disables the hot tier entirely (everything
+    # cold). Override via SDK_SESSION_HOT_POOL_SIZE.
+    sdk_session_hot_pool_size: int = 2
+
+    # HOT-tier idle timeout: how long one of the ``sdk_session_hot_pool_size``
+    # most-recently-used pooled subprocesses may sit idle before eviction.
+    # Every eviction turns the next message into a cold respawn (slower first
+    # token, Chrome native-host handshake), so keep this comfortably above a
+    # normal read-and-reply gap. Override via
     # SDK_SESSION_IDLE_TIMEOUT_SECONDS.
     sdk_session_idle_timeout_seconds: int = 1800  # 30 minutes
+
+    # COLD-tier idle timeout: everything ranked below the hot tier. These are
+    # sessions you have already moved on from; holding 200MB for half an hour
+    # on the chance you scroll back is the wrong trade on a small box. 7
+    # minutes is long enough to survive a detour into another chat and back.
+    # Override via SDK_SESSION_COLD_IDLE_TIMEOUT_SECONDS.
+    sdk_session_cold_idle_timeout_seconds: int = 420  # 7 minutes
+
+    # DETACHED grace: once the last device (browser/app) watching a session
+    # disconnects, its subprocess is evicted after this grace period REGARDLESS
+    # of tier — a session nobody is watching cannot receive a message without a
+    # reconnect first, and the reconnect itself is slower than the respawn we
+    # would be paying for. The grace absorbs page reloads and brief network
+    # drops. Set to 0 to disable disconnect-driven eviction and rely purely on
+    # the idle tiers. Override via SDK_SESSION_DETACHED_GRACE_SECONDS.
+    sdk_session_detached_grace_seconds: int = 180  # 3 minutes
+
+    # How often the pool's idle watchdog re-evaluates deadlines while sessions
+    # are pooled. The watchdog normally sleeps exactly until the next known
+    # eviction deadline (so RAM is released ON TIME instead of on the resource
+    # monitor's 5-minute tick); this cap bounds how late it can notice a state
+    # change it was not told about — most importantly a device disconnect on an
+    # install where the sync engine is not wired to notify the pool. It is a
+    # pure in-process timer: no DB, no thread, and NO wake at all when the pool
+    # is empty. Override via SDK_SESSION_IDLE_REEVALUATE_SECONDS.
+    sdk_session_idle_reevaluate_seconds: int = 60
 
     # AskUserQuestion backstop (seconds). A parked question keeps its SDK
     # subprocess alive AND pinned in the pool — while awaiting an answer the

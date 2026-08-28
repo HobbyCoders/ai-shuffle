@@ -7,6 +7,7 @@ import {
 	isRemovedProjectSession,
 	isVisibleSidebarSession,
 	liveProjectKeys,
+	sessionTimestamp,
 	STATUS_LABELS,
 } from './session-card-data';
 
@@ -168,5 +169,27 @@ describe('isVisibleSidebarSession', () => {
 
 	it('keeps a local chat on a live project', () => {
 		expect(isVisibleSidebarSession(session({ project_id: 'local-1' }), live)).toBe(true);
+	});
+});
+
+describe('sessionTimestamp', () => {
+	it('parses a naive stamp as UTC and prefers updated_at', () => {
+		expect(sessionTimestamp(session({ updated_at: '2026-08-20T12:00:00' }))).toBe(
+			Date.parse('2026-08-20T12:00:00Z')
+		);
+		expect(sessionTimestamp(session({ updated_at: null as never, created_at: '2026-08-19T12:00:00Z' })))
+			.toBe(Date.parse('2026-08-19T12:00:00Z'));
+		expect(sessionTimestamp(session({ updated_at: null as never, created_at: null as never }))).toBe(0);
+	});
+
+	it('memoizes per row but re-parses when the row\'s stamp changes in place', () => {
+		// The sidebar sorts on this value and every card recomputes its elapsed
+		// time from it each tick — it must be cheap AND never stale.
+		const row = session({ updated_at: '2026-08-20T12:00:00Z' });
+		expect(sessionTimestamp(row)).toBe(Date.parse('2026-08-20T12:00:00Z'));
+		expect(sessionTimestamp(row)).toBe(Date.parse('2026-08-20T12:00:00Z'));
+
+		row.updated_at = '2026-08-20T13:00:00Z';
+		expect(sessionTimestamp(row)).toBe(Date.parse('2026-08-20T13:00:00Z'));
 	});
 });

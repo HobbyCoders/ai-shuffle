@@ -21,6 +21,7 @@ import {
 	isEmptyChatSurface,
 	isClearedSession,
 	chatHeaderTitle,
+	classifyTranscriptRender,
 	type ChatSurfaceInput
 } from './chat-empty-state';
 
@@ -142,5 +143,65 @@ describe('chatHeaderTitle', () => {
 
 	it('shows the title once an unbound chat has messages (first-send window)', () => {
 		expect(chatHeaderTitle({ sessionId: null, title: 'My task', messageCount: 2 })).toBe('My task');
+	});
+});
+
+
+/**
+ * MessageArea renders the message column for the 'loading' surface, so its own
+ * empty branch has to know about the load window too — otherwise every session
+ * switch flashed the full "Start a Conversation" hero between the old
+ * transcript and the new one (PERFORMANCE_REVIEW §3.1 S3).
+ */
+describe('classifyTranscriptRender', () => {
+	it('draws a skeleton while a bound session hydrates', () => {
+		expect(
+			classifyTranscriptRender({
+				sessionId: 'sess-1',
+				messageCount: 0,
+				isRestoringSession: false,
+				isLoadingSession: true
+			})
+		).toBe('skeleton');
+		expect(
+			classifyTranscriptRender({
+				sessionId: 'sess-1',
+				messageCount: 0,
+				isRestoringSession: true,
+				isLoadingSession: false
+			})
+		).toBe('skeleton');
+	});
+
+	it('still shows the real hero for a genuinely empty session', () => {
+		// Brand-new, unbound chat.
+		expect(
+			classifyTranscriptRender({
+				sessionId: null,
+				messageCount: 0,
+				isRestoringSession: false,
+				isLoadingSession: false
+			})
+		).toBe('empty');
+		// Bound but settled and empty — a cleared conversation.
+		expect(
+			classifyTranscriptRender({
+				sessionId: 'sess-1',
+				messageCount: 0,
+				isRestoringSession: false,
+				isLoadingSession: false
+			})
+		).toBe('empty');
+	});
+
+	it('draws the transcript as soon as there are messages, load or no load', () => {
+		expect(
+			classifyTranscriptRender({
+				sessionId: 'sess-1',
+				messageCount: 12,
+				isRestoringSession: false,
+				isLoadingSession: true
+			})
+		).toBe('transcript');
 	});
 });

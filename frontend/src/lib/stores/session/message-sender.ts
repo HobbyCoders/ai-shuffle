@@ -13,7 +13,7 @@ import { STREAM_DEBUG } from '$lib/utils/debug-log';
 import { generateBranchName, generateBranchNameLocal } from '$lib/api/git';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
 // V2 Phase 1: SSE-fed reducer — the transcript authority for a session.
-import { feedController } from './v2/feed-controller';
+import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 // Arbiter of which pending ("not seen yet") bubbles survive.
 import { pendingQueue, newLocalPendingId } from './pending-queue';
 import { contextWindowForChoice } from '$lib/constants/model-context';
@@ -357,7 +357,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			if (options?.skipMessageAppend) {
 				update(s => ({
 					...s,
-					isStreaming: true,
+					// S6: the feed reducer owns isStreaming; this is the declared
+					// optimistic flip, which the fold ORs in and clears on
+					// `turn.started` instead of fighting with it.
+					...OPTIMISTIC_STREAMING_ON,
 					error: null,
 					title: newTitle,
 					currentQueryProfileId: queryProfileId,
@@ -394,7 +397,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							commandId: requestId || undefined,
 							timestamp: new Date().toISOString(),
 						}],
-						isStreaming: true,
+						// S6: declared optimistic flip (see the skipMessageAppend
+						// branch above) — not a competing write of isStreaming.
+						...OPTIMISTIC_STREAMING_ON,
 						error: null,
 						title: newTitle,
 						currentQueryProfileId: queryProfileId,
@@ -427,15 +432,23 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			});
 			if (!querySent) {
 				// WS dropped before the frame went out. Roll the optimistic echo back
-				// and surface an error so the caller can restore the input. A live
-				// turn keeps streaming — only a non-streaming send owns isStreaming.
+				// and surface an error so the caller can restore the input.
+				//
+				// S6: withdrawing the flip restores the AUTHORITATIVE value — what
+				// the feed reducer currently says — rather than forcing false. A
+				// turn that is genuinely live (this send was a steer into it) keeps
+				// its indicator; nothing has to guess.
 				update(s => ({
 					...s,
 					...(optimisticQueuedId
 						? { queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticQueuedId) }
-						: { isStreaming: false }),
+						: {
+								optimisticStreaming: false,
+								isStreaming: feedController.isReducerStreaming(s.sessionId),
+							}),
 					error: 'Connection lost before the message was sent. Please try again.',
 				}));
+				feedController.clearOptimisticSend(_state.sessionId);
 				return false;
 			}
 			// The pick is spent: the session now exists and its row carries the
@@ -472,13 +485,18 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			stopTimeout.set(setTimeout(() => {
 				if (getState().isStreaming) {
 					console.warn('[ActiveSession] Stop confirmation timeout - forcing UI recovery');
+					// Deliberate override, not a competing writer: the stop was never
+					// confirmed, so this is the UI's last-resort recovery. Withdraw
+					// the optimistic flip FIRST — otherwise the next fold would
+					// re-raise isStreaming straight back to true.
+					feedController.clearOptimisticSend(getState().sessionId);
 					update(s => {
 						let messages = s.messages.map(m => {
 							if (m.type === 'tool_use' && m.toolStatus === 'running') return { ...m, streaming: false, toolStatus: 'error' as const };
 							return m.streaming ? { ...m, streaming: false } : m;
 						});
 						messages = messages.filter(m => !(m.type === 'text' && m.role === 'assistant' && !m.content));
-						return { ...s, messages, isStreaming: false };
+						return { ...s, messages, isStreaming: false, optimisticStreaming: false };
 					});
 				}
 				stopTimeout.set(null);
@@ -767,7 +785,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					// so a prior session's running tasks can't flash on it.
 					activeTasks: [],
 					...(response.query_started
-						? { isStreaming: true, error: null }
+						// S6: declared optimistic flip until the freshly started
+						// headless turn reports `turn.started` on the feed opened
+						// just below.
+						? { ...OPTIMISTIC_STREAMING_ON, error: null }
 						: {}),
 				}));
 

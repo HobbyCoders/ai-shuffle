@@ -13,12 +13,111 @@ These caches are updated incrementally when new data is written (via hooks in
 database.py) and serve reads without hitting the database on every poll/load.
 """
 
+import json
 import logging
 import threading
 from collections import OrderedDict, deque
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# Hard ceiling on what a single session may keep in the per-content maps. The
+# LRUs below bound the number of SESSIONS cached but said nothing about entry
+# SIZE, so one pathological transcript could pin an unbounded dict in memory.
+# Oversized sessions are still served correctly — they are just not cached.
+_MAX_CACHED_MAP_VALUES = 20000
+
+
+def _load_user_message_rows(session_id: str) -> List[tuple]:
+    """``(content, profile_id, metadata)`` for a session's USER rows, in order.
+
+    The two per-content caches below are built ONLY from user rows and read
+    only these three columns, but each cache miss used to run
+    ``get_session_messages`` — a full ``SELECT * FROM session_messages`` for
+    the session (every assistant row, every tool payload), twice per session
+    open. This is the narrow projection instead.
+
+    Falls back to ``database.get_session_messages`` if the direct read fails,
+    so behaviour is unchanged on any driver/schema surprise.
+    """
+    try:
+        from app.db.base import get_cursor, get_db, rows_to_list
+        from app.db.compat import ph
+
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            cursor.execute(
+                "SELECT content, profile_id, metadata FROM session_messages "
+                f"WHERE session_id = {ph()} AND role = 'user' "
+                "ORDER BY created_at ASC, id ASC",
+                (session_id,),
+            )
+            rows = rows_to_list(cursor.fetchall())
+    except Exception:  # noqa: BLE001 — never fail a transcript read on this
+        logger.debug(
+            "Narrow user-row read failed for %s; falling back", session_id, exc_info=True
+        )
+        from app.db import database
+
+        rows = [
+            m for m in database.get_session_messages(session_id)
+            if m.get("role") == "user"
+        ]
+
+    resolved: List[tuple] = []
+    for row in rows:
+        metadata = row.get("metadata")
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except (TypeError, ValueError):
+                metadata = None
+        resolved.append((
+            row.get("content", ""),
+            row.get("profile_id"),
+            metadata if isinstance(metadata, dict) else None,
+        ))
+    return resolved
+
+
+def _build_user_row_maps(
+    session_id: str,
+) -> tuple[Dict[str, List[str]], Dict[str, List[Optional[Dict[str, Any]]]]]:
+    """Both per-content maps (profile ids, row metadata) from ONE read.
+
+    They are derived from the same user rows, so a miss on either fills both —
+    a session open no longer pays for two identical scans.
+    """
+    profile_map: Dict[str, List[str]] = {}
+    meta_map: Dict[str, List[Optional[Dict[str, Any]]]] = {}
+    for content, profile_id, metadata in _load_user_message_rows(session_id):
+        if profile_id:
+            profile_map.setdefault(content, []).append(profile_id)
+        meta_map.setdefault(content, []).append(metadata)
+    return profile_map, meta_map
+
+
+def _map_value_count(mapping: Dict[str, list]) -> int:
+    """Total number of queued values across a per-content map."""
+    return sum(len(values) for values in mapping.values())
+
+
+def _store_bounded(cache: OrderedDict, lock: threading.Lock, key: str, value: dict, max_size: int) -> None:
+    """Cache ``value`` under ``key`` (LRU-evicting), unless it is oversized.
+
+    Never clobbers an entry that already exists: a concurrent incremental
+    append (``update_profile_map`` / ``update_user_metadata_map``) landing
+    between the read and this store would otherwise be lost.
+    """
+    if _map_value_count(value) > _MAX_CACHED_MAP_VALUES:
+        return
+    with lock:
+        if key in cache:
+            cache.move_to_end(key)
+            return
+        cache[key] = value
+        while len(cache) > max_size:
+            cache.popitem(last=False)
 
 # ─── Usage Cache ─────────────────────────────────────────────────────────────
 # session_id → list of usage entry dicts (same format as get_all_session_usage)
@@ -123,19 +222,16 @@ def get_cached_profile_map(session_id: str) -> Dict[str, List[str]]:
             _profile_map_cache.move_to_end(session_id)
             return cached
 
-    # Cache miss - build from database
-    from app.db import database
-    db_messages = database.get_session_messages(session_id)
-    profile_map: Dict[str, List[str]] = {}
-    for msg in db_messages:
-        if msg.get("role") == "user" and msg.get("profile_id"):
-            content = msg.get("content", "")
-            profile_map.setdefault(content, []).append(msg["profile_id"])
-
-    with _profile_map_cache_lock:
-        _profile_map_cache[session_id] = profile_map
-        while len(_profile_map_cache) > _PROFILE_CACHE_MAX_SIZE:
-            _profile_map_cache.popitem(last=False)
+    # Cache miss - build from database (one narrow read fills BOTH maps)
+    profile_map, meta_map = _build_user_row_maps(session_id)
+    _store_bounded(
+        _profile_map_cache, _profile_map_cache_lock,
+        session_id, profile_map, _PROFILE_CACHE_MAX_SIZE,
+    )
+    _store_bounded(
+        _user_meta_cache, _user_meta_cache_lock,
+        session_id, meta_map, _PROFILE_CACHE_MAX_SIZE,
+    )
 
     return profile_map
 
@@ -150,10 +246,13 @@ def build_profile_queues(session_id: str) -> Dict[str, "deque[str]"]:
     assigns each occurrence its OWN profile — correct even when the same prompt
     was sent twice under different profiles.
     """
-    return {
-        content: deque(profile_ids)
-        for content, profile_ids in get_cached_profile_map(session_id).items()
-    }
+    profile_map = get_cached_profile_map(session_id)
+    # Snapshot under the lock: the cached map is mutated in place by
+    # ``update_profile_map`` from the write path, and iterating it unguarded
+    # can raise "dictionary changed size during iteration" mid-request.
+    with _profile_map_cache_lock:
+        items = [(content, list(ids)) for content, ids in profile_map.items()]
+    return {content: deque(ids) for content, ids in items}
 
 
 def attach_turn_profile_ids(
@@ -241,20 +340,16 @@ def get_cached_user_metadata_map(session_id: str) -> Dict[str, List[Optional[Dic
             _user_meta_cache.move_to_end(session_id)
             return cached
 
-    from app.db import database
-    db_messages = database.get_session_messages(session_id)
-    meta_map: Dict[str, List[Optional[Dict[str, Any]]]] = {}
-    for msg in db_messages:
-        if msg.get("role") == "user":
-            meta = msg.get("metadata")
-            meta_map.setdefault(msg.get("content", ""), []).append(
-                meta if isinstance(meta, dict) else None
-            )
-
-    with _user_meta_cache_lock:
-        _user_meta_cache[session_id] = meta_map
-        while len(_user_meta_cache) > _PROFILE_CACHE_MAX_SIZE:
-            _user_meta_cache.popitem(last=False)
+    # One narrow read fills BOTH maps (see get_cached_profile_map).
+    profile_map, meta_map = _build_user_row_maps(session_id)
+    _store_bounded(
+        _user_meta_cache, _user_meta_cache_lock,
+        session_id, meta_map, _PROFILE_CACHE_MAX_SIZE,
+    )
+    _store_bounded(
+        _profile_map_cache, _profile_map_cache_lock,
+        session_id, profile_map, _PROFILE_CACHE_MAX_SIZE,
+    )
 
     return meta_map
 
@@ -289,10 +384,11 @@ def attach_user_message_metadata(
     came from the DB merge their own metadata back: a no-op. Returns the same
     list for chaining.
     """
-    meta_queues = {
-        content: deque(metas)
-        for content, metas in get_cached_user_metadata_map(session_id).items()
-    }
+    meta_map = get_cached_user_metadata_map(session_id)
+    # Snapshot under the lock (see build_profile_queues).
+    with _user_meta_cache_lock:
+        items = [(content, list(metas)) for content, metas in meta_map.items()]
+    meta_queues = {content: deque(metas) for content, metas in items}
     if not meta_queues:
         return messages
     for m in messages:

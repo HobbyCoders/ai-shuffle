@@ -18,7 +18,12 @@ from fastapi import APIRouter, HTTPException, Response, Request, Depends, status
 from app.core.models import (
     SetupRequest, LoginRequest, ChangePasswordRequest,
 )
-from app.core.auth import auth_service
+from app.core.auth import (
+    auth_service,
+    is_github_authenticated_cached,
+    reset_github_auth_cache,
+    set_github_auth_cached,
+)
 from app.core.oauth import direct_oauth
 from app.core.config import settings
 from app.core import encryption
@@ -395,6 +400,14 @@ async def get_auth_status(request: Request):
 
     claude_authenticated = auth_service.is_claude_authenticated()
 
+    # ``gh auth status`` is a subprocess with a 10s timeout and this endpoint is
+    # polled — run it off the event loop, and only when the shared TTL cache has
+    # expired (finding G1). Explicit logins/logouts below seed the cache, so the
+    # signal is still immediate after a real auth change.
+    github_authenticated = await run_sync(
+        is_github_authenticated_cached, auth_service.is_github_authenticated
+    )
+
     return {
         "authenticated": is_admin_authenticated or is_paired_authenticated,
         "is_admin": is_admin_authenticated,
@@ -412,7 +425,7 @@ async def get_auth_status(request: Request):
         # reconnect" state even though `claude_authenticated` stays True (file
         # exists) for back-compat.
         "claude_token_valid": auth_service.get_claude_token_status()["token_valid"],
-        "github_authenticated": auth_service.is_github_authenticated(),
+        "github_authenticated": github_authenticated,
         "onboarding_complete": auth_service.is_onboarding_complete(),
         "username": username,
     }
@@ -750,10 +763,35 @@ async def claude_logout(token: str = Depends(require_admin)):
 # GitHub CLI Authentication
 # =========================================================================
 
+def _invalidate_github_auth_caches(value: Optional[bool] = None) -> None:
+    """Propagate an explicit GitHub auth change to every cached copy.
+
+    Two caches hold ``gh auth status``: the module-level one in
+    ``app.core.auth`` (prompt builder, ``/auth/status``) and the one inside
+    ``github_service`` (every PR/actions endpoint). Neither may keep serving a
+    stale answer across a deliberate login or logout, so both are updated here
+    rather than waiting out their TTLs. Pass *value* when the new state is
+    known first-hand; otherwise both are simply dropped.
+    """
+    from app.core.github_service import github_service
+
+    if value is None:
+        reset_github_auth_cache()
+    else:
+        set_github_auth_cached(value)
+    github_service.invalidate_auth_cache(value)
+
+
 @router.get("/github/status")
 async def github_auth_status():
     """Get GitHub CLI authentication status"""
-    return auth_service.get_github_auth_info()
+    # Runs `gh auth status` + `gh api user` — never on the event loop.
+    info = await run_sync(auth_service.get_github_auth_info)
+    # This endpoint is the completion poll for the device-code flow, so its
+    # first-hand answer is the freshest one anybody has: seed the caches with it
+    # instead of letting them expire on their own schedule.
+    _invalidate_github_auth_caches(bool(info.get("authenticated")))
+    return info
 
 
 @router.post("/github/login")
@@ -770,7 +808,9 @@ async def github_login(request: Request, token: str = Depends(require_admin)):
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="GitHub token is required"
             )
-        return auth_service.github_login_with_token(gh_token)
+        result = await run_sync(auth_service.github_login_with_token, gh_token)
+        _invalidate_github_auth_caches(True if result.get("success") else None)
+        return result
     except HTTPException:
         raise
     except Exception as e:
@@ -789,7 +829,11 @@ async def github_login_web(request: Request, token: str = Depends(require_admin)
     Poll GET /auth/github/status for completion.
     """
     try:
-        return await auth_service.github_login_web()
+        result = await auth_service.github_login_web()
+        # The device flow finishes out-of-band; drop the cached answer so the
+        # first status poll after completion sees the real state.
+        _invalidate_github_auth_caches()
+        return result
     except Exception as e:
         logger.exception("GitHub web login error")
         raise HTTPException(
@@ -801,7 +845,9 @@ async def github_login_web(request: Request, token: str = Depends(require_admin)
 @router.post("/github/logout")
 async def github_logout(token: str = Depends(require_admin)):
     """Logout from GitHub CLI"""
-    return auth_service.github_logout()
+    result = await run_sync(auth_service.github_logout)
+    _invalidate_github_auth_caches(False if result.get("success") else None)
+    return result
 
 
 # =========================================================================

@@ -1,9 +1,23 @@
 <script lang="ts">
 	/**
 	 * TeamStatusBar - Compact horizontal bar summarizing active agent teams
-	 * for the current session. Polls GET /api/v1/teams/{sessionId} every 2s.
+	 * for the current session.
+	 *
+	 * Team state is driven by the SESSION FEED, not by a timer: the SSE feed's
+	 * `team.member_*` events are already reduced into `team_member` transcript
+	 * cards, so the transcript says whether this session has teams and whether
+	 * any teammate is running. The REST endpoint is only asked for what those
+	 * cards do not carry (pid, token usage), and only while there is something
+	 * to ask about — see team-status-poll.ts and PERFORMANCE_REVIEW §3.6 F4,
+	 * which measured the old unconditional 2 s poll (per open session, auth + DB
+	 * access check per hit, no visibility gate).
 	 */
 	import { listTeams, killTeammate, type Team, type Teammate } from '$lib/api/client';
+	import { activeSession } from '$lib/stores/active-session';
+	import {
+		deriveTeamFeedSignal,
+		resolveTeamPollIntervalMs
+	} from './team-status-poll';
 
 	interface Props {
 		sessionId: string;
@@ -14,6 +28,27 @@
 	let teams = $state<Team[]>([]);
 	let expanded = $state<Record<string, boolean>>({});
 	let killingKey = $state<string | null>(null);
+	let documentVisible = $state(
+		typeof document === 'undefined' || document.visibilityState !== 'hidden'
+	);
+
+	/** Team presence/activity as reported by the feed's own team cards. */
+	const feedSignal = $derived(deriveTeamFeedSignal($activeSession.messages));
+	// Read through PRIMITIVE deriveds: the signal object is rebuilt on every
+	// streaming fold, so effects must depend on its values (string/boolean,
+	// short-circuited by Svelte on `===`) and not on the object identity — the
+	// difference between one fetch per team change and one fetch per frame.
+	const teamSignature = $derived(feedSignal.signature);
+
+	/** A team is "live" if either the feed or the last poll says a mate is running. */
+	const hasRunning = $derived(
+		feedSignal.hasRunning || teams.some((team) => runningCount(team) > 0)
+	);
+	const hasTeams: boolean = $derived(feedSignal.hasTeams || teams.length > 0);
+
+	const pollIntervalMs = $derived(
+		resolveTeamPollIntervalMs({ visible: documentVisible, hasTeams, hasRunning })
+	);
 
 	function teammateKey(team: string, member: string): string {
 		return `${team}::${member}`;
@@ -29,13 +64,37 @@
 	}
 
 	$effect(() => {
+		if (typeof document === 'undefined') return;
+		const onVisibility = () => {
+			documentVisible = document.visibilityState !== 'hidden';
+		};
+		document.addEventListener('visibilitychange', onVisibility);
+		return () => document.removeEventListener('visibilitychange', onVisibility);
+	});
+
+	// One fetch per session, plus one whenever the feed reports a team change
+	// (a team appearing, a teammate finishing). Sessions that never run a team
+	// therefore issue exactly one request — and none at all once the feed has
+	// spoken, since the signature only changes when team cards do.
+	$effect(() => {
 		const id = sessionId;
 		if (!id) {
 			teams = [];
 			return;
 		}
-		refresh(id);
-		const handle = setInterval(() => refresh(id), 2000);
+		// Tracked so a feed-side change re-fetches the details immediately.
+		void teamSignature;
+		if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+		void refresh(id);
+	});
+
+	// Cadence while a team is live: fast enough to watch teammates finish, and
+	// nothing at all when there are no teams or the tab is hidden.
+	$effect(() => {
+		const id = sessionId;
+		const interval = pollIntervalMs;
+		if (!id || interval === null) return;
+		const handle = setInterval(() => void refresh(id), interval);
 		return () => clearInterval(handle);
 	});
 

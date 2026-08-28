@@ -16,6 +16,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/svelte';
+import { tick } from 'svelte';
 
 // jsdom lacks ResizeObserver; some lucide/layout paths probe for it.
 if (!('ResizeObserver' in globalThis)) {
@@ -41,19 +42,36 @@ const mocks = vi.hoisted(() => {
 			set(v: T) {
 				val = v;
 				subs.forEach((f) => f(val));
+			},
+			get value() {
+				return val;
 			}
 		};
 	}
 	return {
-		gitStatus: store<Record<string, unknown> | null>(null),
-		diffStats: store<Record<string, unknown> | null>(null),
-		branches: store<Record<string, unknown>[]>([]),
+		gitSnapshot: store<Record<string, unknown>>({
+			contextKey: null,
+			status: null,
+			branches: [],
+			diffStats: null,
+			prState: null,
+			changedFiles: null,
+			currentBranch: null,
+			defaultBranch: null,
+			openPr: null,
+			prStateStale: false,
+			stale: false,
+			hydrated: true,
+			githubAvailable: true
+		}),
 		gitMode: store<string>('project'),
-		changedFiles: store<unknown[]>([]),
 		githubRepoInfo: store<Record<string, unknown> | null>({ default_branch: 'main' }),
+		githubChecks: store<Record<string, unknown> | null>(null),
 		loadBranches: vi.fn(),
 		refreshDiffStats: vi.fn(),
 		refreshChangedFiles: vi.fn(),
+		startBackgroundRefresh: vi.fn(),
+		stopBackgroundRefresh: vi.fn(),
 		checkoutBranchWithToast: vi.fn()
 	};
 });
@@ -62,18 +80,45 @@ vi.mock('$lib/stores/git.svelte', () => ({
 	git: {
 		loadBranches: mocks.loadBranches,
 		refreshDiffStats: mocks.refreshDiffStats,
-		refreshChangedFiles: mocks.refreshChangedFiles
+		refreshChangedFiles: mocks.refreshChangedFiles,
+		startBackgroundRefresh: mocks.startBackgroundRefresh,
+		stopBackgroundRefresh: mocks.stopBackgroundRefresh
 	},
-	gitStatus: mocks.gitStatus,
-	diffStats: mocks.diffStats,
-	branches: mocks.branches,
-	gitMode: mocks.gitMode,
-	changedFiles: mocks.changedFiles
+	gitSnapshot: mocks.gitSnapshot,
+	gitMode: mocks.gitMode
 }));
-vi.mock('$lib/stores/github.svelte', () => ({ githubRepoInfo: mocks.githubRepoInfo }));
+vi.mock('$lib/stores/github.svelte', () => ({
+	githubRepoInfo: mocks.githubRepoInfo,
+	githubChecks: mocks.githubChecks
+}));
 vi.mock('$lib/stores/gitCheckoutAction', () => ({
 	checkoutBranchWithToast: mocks.checkoutBranchWithToast
 }));
+
+/**
+ * Publish ONE coherent snapshot. The header reads every action input from this
+ * single object — that is the whole point of finding G4's fix — so tests drive
+ * it the same way the store does.
+ */
+function setSnapshot(patch: Record<string, unknown>) {
+	const status = (patch.status ?? null) as Record<string, unknown> | null;
+	mocks.gitSnapshot.set({
+		contextKey: 'p1#br:x',
+		branches: [],
+		diffStats: null,
+		prState: null,
+		changedFiles: null,
+		prStateStale: false,
+		stale: false,
+		hydrated: true,
+		githubAvailable: true,
+		openPr: null,
+		...patch,
+		status,
+		currentBranch: (status?.current_branch as string | null) ?? null,
+		defaultBranch: (status?.default_branch as string | null) ?? null
+	});
+}
 
 // Imported AFTER the mocks are registered.
 import GitHeaderActions from './GitHeaderActions.svelte';
@@ -84,46 +129,57 @@ import { openHeaderDropdown } from '$lib/stores/header-dropdowns';
 
 /** Dirty tree on a feature branch → Commit + Ship It show. */
 function dirtyFeatureBranch() {
-	mocks.gitStatus.set({
-		current_branch: 'feature/x',
-		ahead: 0,
-		differs_from_base: true,
-		is_git_repo: true
+	setSnapshot({
+		status: {
+			current_branch: 'feature/x',
+			default_branch: 'main',
+			ahead: 0,
+			differs_from_base: true,
+			is_git_repo: true
+		},
+		diffStats: { additions: 5, deletions: 2, files_changed: 1 },
+		changedFiles: [{ file: 'a.ts' }],
+		branches: [
+			{ name: 'feature/x', current: true, remote: false, upstream: 'origin/feature/x', ahead: 0, behind: 0 },
+			{ name: 'main', current: false, remote: false }
+		]
 	});
-	mocks.diffStats.set({ additions: 5, deletions: 2, files_changed: 1 });
-	mocks.changedFiles.set([{ file: 'a.ts' }]);
-	mocks.branches.set([
-		{ name: 'feature/x', current: true, remote: false, upstream: 'origin/feature/x', ahead: 0, behind: 0 },
-		{ name: 'main', current: false, remote: false }
-	]);
-	mocks.githubRepoInfo.set({ default_branch: 'main' });
 }
 
 /** Clean tree, commits ahead of upstream, not behind → Push + Create PR + Ship It. */
 function cleanAheadBranch() {
-	mocks.gitStatus.set({
-		current_branch: 'feature/x',
-		ahead: 2,
-		differs_from_base: true,
-		is_git_repo: true
+	setSnapshot({
+		status: {
+			current_branch: 'feature/x',
+			default_branch: 'main',
+			ahead: 2,
+			differs_from_base: true,
+			is_git_repo: true
+		},
+		diffStats: { additions: 0, deletions: 0, files_changed: 0 },
+		changedFiles: [],
+		branches: [
+			{ name: 'feature/x', current: true, remote: false, upstream: 'origin/feature/x', ahead: 2, behind: 0 },
+			{ name: 'main', current: false, remote: false }
+		]
 	});
-	mocks.diffStats.set({ additions: 0, deletions: 0, files_changed: 0 });
-	mocks.changedFiles.set([]);
-	mocks.branches.set([
-		{ name: 'feature/x', current: true, remote: false, upstream: 'origin/feature/x', ahead: 2, behind: 0 },
-		{ name: 'main', current: false, remote: false }
-	]);
-	mocks.githubRepoInfo.set({ default_branch: 'main' });
 }
 
 /** Behind upstream → Pull shows. */
 function behindBranch() {
-	mocks.gitStatus.set({ current_branch: 'feature/x', ahead: 0, differs_from_base: true, is_git_repo: true });
-	mocks.diffStats.set({ additions: 0, deletions: 0, files_changed: 0 });
-	mocks.branches.set([
-		{ name: 'feature/x', current: true, remote: false, upstream: 'origin/feature/x', ahead: 0, behind: 3 }
-	]);
-	mocks.githubRepoInfo.set({ default_branch: 'main' });
+	setSnapshot({
+		status: {
+			current_branch: 'feature/x',
+			default_branch: 'main',
+			ahead: 0,
+			differs_from_base: true,
+			is_git_repo: true
+		},
+		diffStats: { additions: 0, deletions: 0, files_changed: 0 },
+		branches: [
+			{ name: 'feature/x', current: true, remote: false, upstream: 'origin/feature/x', ahead: 0, behind: 3 }
+		]
+	});
 }
 
 const noop = () => {};
@@ -162,6 +218,7 @@ beforeEach(() => {
 	localStorage.clear();
 	gitActionPreferences.reset();
 	openHeaderDropdown.set(null);
+	mocks.githubChecks.set(null);
 	vi.clearAllMocks();
 });
 
@@ -238,20 +295,183 @@ describe('GitHeaderActions button visibility', () => {
 	it('shows Create PR when differsFromBase even with zero commits ahead', () => {
 		// The matrix gap the helper now closes: content differs from base but
 		// commit count ahead (vs default branch) is 0.
-		mocks.gitStatus.set({
-			current_branch: 'feature/x',
-			ahead: 0,
-			differs_from_base: true,
-			is_git_repo: true
+		setSnapshot({
+			status: {
+				current_branch: 'feature/x',
+				default_branch: 'main',
+				ahead: 0,
+				differs_from_base: true,
+				is_git_repo: true
+			},
+			diffStats: { additions: 0, deletions: 0, files_changed: 0 },
+			changedFiles: [],
+			branches: [
+				{ name: 'feature/x', current: true, remote: false, upstream: 'origin/feature/x', ahead: 0, behind: 0 }
+			]
 		});
-		mocks.diffStats.set({ additions: 0, deletions: 0, files_changed: 0 });
-		mocks.changedFiles.set([]);
-		mocks.branches.set([
-			{ name: 'feature/x', current: true, remote: false, upstream: 'origin/feature/x', ahead: 0, behind: 0 }
-		]);
-		mocks.githubRepoInfo.set({ default_branch: 'main' });
 		renderHeader();
 		expect(screen.getByText('Create PR')).toBeTruthy();
+	});
+});
+
+// ── Default branch comes from /git/status (finding G3) ──────────────────────
+
+describe('GitHeaderActions default branch', () => {
+	it('uses status.default_branch, not a hardcoded "main"', () => {
+		// A `master`-default repo sitting ON its default branch: nothing to ship
+		// and nothing to PR. The old code fell back to 'main' (the github store
+		// that would have supplied the real value was never populated), so
+		// `master !== 'main'` and Ship It / Create PR appeared on the default branch.
+		setSnapshot({
+			status: {
+				current_branch: 'master',
+				default_branch: 'master',
+				ahead: 3,
+				differs_from_base: true,
+				is_git_repo: true
+			},
+			diffStats: { additions: 0, deletions: 0, files_changed: 0 },
+			branches: [
+				{ name: 'master', current: true, remote: false, upstream: 'origin/master', ahead: 0, behind: 0 }
+			]
+		});
+		renderHeader();
+		expect(screen.queryByText('Create PR')).toBeNull();
+		expect(screen.queryByText('Ship It')).toBeNull();
+	});
+
+	it('still offers Create PR on a non-default branch of a master-default repo', () => {
+		setSnapshot({
+			status: {
+				current_branch: 'feature/x',
+				default_branch: 'master',
+				ahead: 3,
+				differs_from_base: true,
+				is_git_repo: true
+			},
+			diffStats: { additions: 0, deletions: 0, files_changed: 0 },
+			branches: [
+				{ name: 'feature/x', current: true, remote: false, upstream: 'origin/feature/x', ahead: 0, behind: 0 }
+			]
+		});
+		renderHeader();
+		expect(screen.getByText('Create PR')).toBeTruthy();
+	});
+});
+
+// ── Snapshot coherence on a session switch (finding G4) ─────────────────────
+
+describe('GitHeaderActions snapshot coherence', () => {
+	it('holds the previous action while a switch revalidates — never an intermediate value', async () => {
+		// Coherent state: an open PR ⇒ Finish.
+		cleanAheadBranch();
+		renderHeader({ openPR: null });
+		setSnapshot({
+			status: {
+				current_branch: 'feature/x',
+				default_branch: 'main',
+				ahead: 2,
+				differs_from_base: true,
+				is_git_repo: true
+			},
+			diffStats: { additions: 0, deletions: 0, files_changed: 0 },
+			branches: [
+				{ name: 'feature/x', current: true, remote: false, upstream: 'origin/feature/x', ahead: 2, behind: 0 }
+			],
+			openPr: { number: 12, title: 'x', url: 'http://x', mergeable: null }
+		});
+		await tick();
+		expect(screen.getByText('Finish')).toBeTruthy();
+
+		// Session switch: the store keeps the last-known values as a placeholder
+		// (hydrated: false) while it revalidates. Half of that placeholder — no
+		// PR yet — would otherwise resolve to "Create PR" for a beat.
+		setSnapshot({
+			status: {
+				current_branch: 'feature/x',
+				default_branch: 'main',
+				ahead: 2,
+				differs_from_base: true,
+				is_git_repo: true
+			},
+			diffStats: { additions: 0, deletions: 0, files_changed: 0 },
+			branches: [
+				{ name: 'feature/x', current: true, remote: false, upstream: 'origin/feature/x', ahead: 2, behind: 0 }
+			],
+			openPr: null,
+			stale: true,
+			hydrated: false
+		});
+		await tick();
+
+		// Still Finish — held from the last coherent snapshot — and disabled so it
+		// can't be fired against unconfirmed state.
+		expect(screen.getByText('Finish')).toBeTruthy();
+		expect(screen.queryByText('Create PR')).toBeNull();
+		expect((screen.getByText('Finish').closest('button') as HTMLButtonElement).disabled).toBe(true);
+	});
+
+	it('never renders Ship It against a carried-over placeholder', async () => {
+		dirtyFeatureBranch();
+		renderHeader();
+		expect(screen.getByText('Ship It')).toBeTruthy();
+
+		// Switch to an unknown checkout: values carry over, hydration does not.
+		setSnapshot({
+			status: {
+				current_branch: 'feature/x',
+				default_branch: 'main',
+				ahead: 0,
+				differs_from_base: true,
+				is_git_repo: true
+			},
+			diffStats: { additions: 5, deletions: 2, files_changed: 1 },
+			changedFiles: [{ file: 'a.ts' }],
+			branches: [
+				{ name: 'feature/x', current: true, remote: false, upstream: 'origin/feature/x', ahead: 0, behind: 0 }
+			],
+			stale: true,
+			hydrated: false
+		});
+		await tick();
+		// The HELD decision still shows Ship It (it was coherent a moment ago),
+		// but the button is disabled until the new context confirms.
+		const shipBtn = screen.getByText('Ship It').closest('button') as HTMLButtonElement;
+		expect(shipBtn.disabled).toBe(true);
+	});
+});
+
+// ── CI badge (the previously dead workflow-runs pathway) ────────────────────
+
+describe('GitHeaderActions CI badge', () => {
+	it('renders the CI verdict for the current branch', async () => {
+		cleanAheadBranch();
+		mocks.githubChecks.set({
+			branch: 'feature/x',
+			state: 'failure',
+			conclusion: 'failure',
+			name: 'build',
+			url: 'http://ci/1',
+			updatedAt: '2026-08-01T00:00:00Z'
+		});
+		renderHeader();
+		await tick();
+		expect(screen.getByLabelText('CI failure for feature/x')).toBeTruthy();
+	});
+
+	it('ignores a verdict for a different branch', async () => {
+		cleanAheadBranch();
+		mocks.githubChecks.set({
+			branch: 'other',
+			state: 'success',
+			conclusion: 'success',
+			name: 'build',
+			url: 'http://ci/2',
+			updatedAt: '2026-08-01T00:00:00Z'
+		});
+		renderHeader();
+		await tick();
+		expect(screen.queryByLabelText(/^CI /)).toBeNull();
 	});
 });
 

@@ -67,12 +67,31 @@ export function deriveStatus(input: {
 	return 'idle';
 }
 
-/** Last-activity timestamp (ms) for ordering and the card timer. */
+/**
+ * Memo for `sessionTimestamp`. Keyed on the session OBJECT (weak, so rows
+ * dropped from the list are collected with it) and validated against the raw
+ * string, so a row mutated in place can never serve a stale timestamp.
+ *
+ * Why: the sidebar sorts every visible session on each recompute and each card
+ * recomputes its elapsed time on every ticker frame. Parsing the date inside
+ * those loops cost thousands of `Date` constructions per second on a large
+ * list (PERFORMANCE_REVIEW_2026-08 R2/R15).
+ */
+const timestampMemo = new WeakMap<object, { raw: string; ms: number }>();
+
+/** Last-activity timestamp (ms) for ordering and the card timer.
+ *  Parsed once per (session object, raw string) pair. */
 export function sessionTimestamp(s: Session): number {
-	const raw = s.updated_at || s.created_at;
-	if (!raw) return 0;
-	const t = parseUTC(raw).getTime();
-	return Number.isNaN(t) ? 0 : t;
+	const raw = s.updated_at || s.created_at || '';
+	const memo = timestampMemo.get(s);
+	if (memo && memo.raw === raw) return memo.ms;
+	let ms = 0;
+	if (raw) {
+		const t = parseUTC(raw).getTime();
+		ms = Number.isNaN(t) ? 0 : t;
+	}
+	timestampMemo.set(s, { raw, ms });
+	return ms;
 }
 
 /** Live elapsed time, e.g. "42s", "4m 12s", "1h 04m". */

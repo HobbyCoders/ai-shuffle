@@ -10,7 +10,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { createMessageHandlers, type MessageHandlerDeps, type InternalMutableState } from './ws-message-handlers';
+import {
+	createMessageHandlers,
+	SESSION_LIST_RELOAD_DEBOUNCE_MS,
+	type MessageHandlerDeps,
+	type InternalMutableState,
+} from './ws-message-handlers';
 import type { ActiveSessionState } from '../active-session';
 
 // Mock the side-effect services the error handlers call. Keeps this a true unit
@@ -409,6 +414,52 @@ describe('ws-message-handlers', () => {
 		});
 
 		// Queue processing is now handled server-side — no frontend trigger to test
+
+		// ── W1: `done` patches the row instead of re-paging the world ──────
+		it('patches the finished row instead of reloading the whole session list', () => {
+			handlers.handleMessage({ type: 'done', session_id: 'session-bg', metadata: {} });
+
+			expect(deps.mergeSessionPatch).toHaveBeenCalledWith(
+				'session-bg',
+				expect.objectContaining({ updated_at: expect.any(String) })
+			);
+			expect(deps.appLoadSessions).not.toHaveBeenCalled();
+		});
+
+		it('never reloads the list for a `done`, even after the debounce window', async () => {
+			vi.useFakeTimers();
+			try {
+				deps = createMockDeps();
+				handlers = createMessageHandlers(deps);
+
+				handlers.handleMessage({ type: 'done', session_id: 'session-bg', metadata: {} });
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS * 3);
+
+				expect(deps.appLoadSessions).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it('falls back to ONE debounced reload when the finished row is unknown locally', async () => {
+			vi.useFakeTimers();
+			try {
+				deps = createMockDeps({ mergeSessionPatch: vi.fn(() => false) });
+				handlers = createMessageHandlers(deps);
+
+				// A burst of completions (several background sessions finishing, a
+				// reconnect backfill) used to cost a full uncapped re-page EACH.
+				for (let i = 0; i < 5; i++) {
+					handlers.handleMessage({ type: 'done', session_id: `unknown-${i}`, metadata: {} });
+				}
+				expect(deps.appLoadSessions).not.toHaveBeenCalled();
+
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
+				expect(deps.appLoadSessions).toHaveBeenCalledTimes(1);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
 	});
 
 	describe('stopped handler', () => {
@@ -1510,14 +1561,28 @@ describe('ws-message-handlers', () => {
 		// fanned user-wide (nobody watches a wake-word session, so the
 		// session-scoped channel would reach no device) and must make a list
 		// that rendered the card drop it live via a refetch.
-		it('refetches the sessions list when a hidden flip arrives', () => {
-			handlers.handleMessage({
-				type: 'user_session_updated',
-				session_id: 'voice-session',
-				updates: { hidden: true },
-			});
+		it('hides the row immediately and refetches the list (debounced)', async () => {
+			vi.useFakeTimers();
+			try {
+				deps = createMockDeps();
+				handlers = createMessageHandlers(deps);
 
-			expect(deps.appLoadSessions).toHaveBeenCalled();
+				handlers.handleMessage({
+					type: 'user_session_updated',
+					session_id: 'voice-session',
+					updates: { hidden: true },
+				});
+
+				// The card disappears at once via the row patch…
+				expect(deps.mergeSessionPatch).toHaveBeenCalledWith('voice-session', { hidden: true });
+				// …and `hidden` also reshapes the list server-side, so an
+				// authoritative reload still follows — once, on the trailing edge.
+				expect(deps.appLoadSessions).not.toHaveBeenCalled();
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
+				expect(deps.appLoadSessions).toHaveBeenCalledTimes(1);
+			} finally {
+				vi.useRealTimers();
+			}
 		});
 	});
 
@@ -1537,28 +1602,109 @@ describe('ws-message-handlers', () => {
 			expect(deps.appLoadSessions).not.toHaveBeenCalled();
 		});
 
-		it('falls back to a refetch when the row is unknown locally', () => {
-			deps = createMockDeps({ mergeSessionPatch: vi.fn(() => false) });
-			handlers = createMessageHandlers(deps);
+		it('falls back to a debounced refetch when the row is unknown locally', async () => {
+			vi.useFakeTimers();
+			try {
+				deps = createMockDeps({ mergeSessionPatch: vi.fn(() => false) });
+				handlers = createMessageHandlers(deps);
 
-			handlers.handleMessage({
-				type: 'user_session_updated',
-				session_id: 'unknown-session',
-				updates: { is_active: true },
-			});
+				handlers.handleMessage({
+					type: 'user_session_updated',
+					session_id: 'unknown-session',
+					updates: { is_active: true },
+				});
 
-			expect(deps.appLoadSessions).toHaveBeenCalled();
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
+				expect(deps.appLoadSessions).toHaveBeenCalledTimes(1);
+			} finally {
+				vi.useRealTimers();
+			}
 		});
 
-		it('still refetches when the patch carries other fields too', () => {
-			handlers.handleMessage({
-				type: 'user_session_updated',
-				session_id: 'session-1',
-				updates: { is_active: false, title: 'Renamed' },
-			});
+		it('patches title + is_active together without any refetch', async () => {
+			vi.useFakeTimers();
+			try {
+				deps = createMockDeps();
+				handlers = createMessageHandlers(deps);
 
-			expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', { is_active: false });
-			expect(deps.appLoadSessions).toHaveBeenCalled();
+				handlers.handleMessage({
+					type: 'user_session_updated',
+					session_id: 'session-1',
+					updates: { is_active: false, title: 'Renamed' },
+				});
+
+				expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', {
+					is_active: false,
+					title: 'Renamed',
+				});
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
+				expect(deps.appLoadSessions).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it('reloads (debounced) when the payload carries a field the row cannot hold', async () => {
+			vi.useFakeTimers();
+			try {
+				deps = createMockDeps();
+				handlers = createMessageHandlers(deps);
+
+				handlers.handleMessage({
+					type: 'user_session_updated',
+					session_id: 'session-1',
+					updates: { tags: [{ id: 't1' }] },
+				});
+
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
+				expect(deps.appLoadSessions).toHaveBeenCalledTimes(1);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it('coalesces a creation burst into one list reload (sessions + api users)', async () => {
+			vi.useFakeTimers();
+			try {
+				deps = createMockDeps();
+				handlers = createMessageHandlers(deps);
+
+				handlers.handleMessage({ type: 'user_session_created', session_id: 'a' });
+				handlers.handleMessage({ type: 'user_session_created', session_id: 'b' });
+				handlers.handleMessage({ type: 'user_session_created', session_id: 'c' });
+				expect(deps.appLoadSessions).not.toHaveBeenCalled();
+
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
+				expect(deps.appLoadSessions).toHaveBeenCalledTimes(1);
+				expect(deps.appLoadApiUserSessions).toHaveBeenCalledTimes(1);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+	});
+
+	describe('session_updated handler (row patch, not a refetch)', () => {
+		it('applies a backfilled title to the open session and the row without reloading', async () => {
+			vi.useFakeTimers();
+			try {
+				const state = mockState();
+				state.sessionId = 'session-1';
+				deps = createMockDeps({ getState: vi.fn(() => state) });
+				handlers = createMessageHandlers(deps);
+
+				handlers.handleMessage({
+					event_type: 'session_updated',
+					session_id: 'session-1',
+					data: { updates: { title: 'Backfilled title' } },
+				});
+
+				expect(deps.update).toHaveBeenCalled();
+				expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', { title: 'Backfilled title' });
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
+				expect(deps.appLoadSessions).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
 		});
 	});
 

@@ -14,11 +14,11 @@ This module tests all endpoints in app/api/github.py:
 """
 
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from pathlib import Path
 from fastapi import Request, HTTPException
 
-from app.core.github_service import PullRequest, WorkflowRun
+from app.core.github_service import GitHubCliError, PullRequest, WorkflowRun
 
 
 # =============================================================================
@@ -340,7 +340,8 @@ class TestGetProjectPath:
 class TestGetRepoForProject:
     """Test get_repo_for_project helper function."""
 
-    def test_returns_repo_when_found(self, mock_project_data):
+    @pytest.mark.asyncio
+    async def test_returns_repo_when_found(self, mock_project_data):
         """Test get_repo_for_project returns repo when found."""
         from app.api.github import get_repo_for_project
         import tempfile
@@ -359,11 +360,12 @@ class TestGetRepoForProject:
                 mock_settings.workspace_dir = workspace_path
                 mock_github.get_repo_from_remote.return_value = "owner/repo"
 
-                result = get_repo_for_project(mock_request, "test-project-id")
+                result = await get_repo_for_project(mock_request, "test-project-id")
 
                 assert result == "owner/repo"
 
-    def test_raises_400_when_no_remote(self, mock_project_data):
+    @pytest.mark.asyncio
+    async def test_raises_400_when_no_remote(self, mock_project_data):
         """Test get_repo_for_project raises 400 when no GitHub remote."""
         from app.api.github import get_repo_for_project
         import tempfile
@@ -383,16 +385,24 @@ class TestGetRepoForProject:
                 mock_github.get_repo_from_remote.return_value = None
 
                 with pytest.raises(HTTPException) as exc_info:
-                    get_repo_for_project(mock_request, "test-project-id")
+                    await get_repo_for_project(mock_request, "test-project-id")
 
                 assert exc_info.value.status_code == 400
                 assert "Could not determine GitHub repository" in exc_info.value.detail
 
 
+def check_github_auth_ref():
+    """Late import so the test exercises the module attribute, not a copy."""
+    from app.api.github import check_github_auth
+
+    return check_github_auth()
+
+
 class TestCheckGitHubAuth:
     """Test check_github_auth helper function."""
 
-    def test_passes_when_authenticated(self):
+    @pytest.mark.asyncio
+    async def test_passes_when_authenticated(self):
         """Test check_github_auth passes when authenticated."""
         from app.api.github import check_github_auth
 
@@ -400,10 +410,11 @@ class TestCheckGitHubAuth:
             mock_github.is_authenticated.return_value = True
 
             # Should not raise
-            check_github_auth()
+            await check_github_auth()
             mock_github.is_authenticated.assert_called_once()
 
-    def test_raises_401_when_not_authenticated(self):
+    @pytest.mark.asyncio
+    async def test_raises_401_when_not_authenticated(self):
         """Test check_github_auth raises 401 when not authenticated."""
         from app.api.github import check_github_auth
 
@@ -411,10 +422,28 @@ class TestCheckGitHubAuth:
             mock_github.is_authenticated.return_value = False
 
             with pytest.raises(HTTPException) as exc_info:
-                check_github_auth()
+                await check_github_auth()
 
             assert exc_info.value.status_code == 401
             assert "not authenticated" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_auth_check_runs_off_the_event_loop(self):
+        """G1: the gh subprocess must never run on the loop thread."""
+        import threading
+
+        loop_thread = threading.current_thread().ident
+        seen = {}
+
+        def _probe():
+            seen["thread"] = threading.current_thread().ident
+            return True
+
+        with patch("app.api.github.github_service") as mock_github:
+            mock_github.is_authenticated.side_effect = _probe
+            await check_github_auth_ref()
+
+        assert seen["thread"] != loop_thread
 
 
 # =============================================================================
@@ -1401,3 +1430,155 @@ class TestCreatePullDraftPassThrough:
 
         args = mock_run.call_args.args[0]
         assert "--draft" not in args
+
+
+# =============================================================================
+# gh unavailable ≠ "no data" (finding G2)
+# =============================================================================
+
+class TestGitHubUnavailableIsNotEmpty:
+    """A gh transport failure surfaces as 502. It must never be reported as an
+    empty list or a 404, because the caller (and its cache) would then record
+    "there is nothing here" for something it simply could not read."""
+
+    @pytest.mark.asyncio
+    async def test_list_pulls_failure_is_502_not_empty(self):
+        from app.api.github import list_pull_requests
+
+        with patch("app.api.github.check_project_access"), \
+             patch("app.api.github.check_github_auth", new=AsyncMock()), \
+             patch("app.api.github.get_repo_for_project", new=AsyncMock(return_value="owner/repo")), \
+             patch("app.api.github.github_service") as mock_github:
+            mock_github.list_pulls.side_effect = GitHubCliError(
+                "gh pr list failed", stderr="API rate limit exceeded"
+            )
+
+            with pytest.raises(HTTPException) as exc_info:
+                await list_pull_requests(
+                    request=MagicMock(spec=Request),
+                    project_id="p1",
+                    state="open",
+                    limit=30,
+                    token="t",
+                )
+
+        assert exc_info.value.status_code == 502
+        assert "rate limit" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_get_pull_failure_is_502_while_missing_is_404(self):
+        from app.api.github import get_pull_request
+
+        async def _call():
+            return await get_pull_request(
+                request=MagicMock(spec=Request), project_id="p1", number=42, token="t"
+            )
+
+        with patch("app.api.github.check_project_access"), \
+             patch("app.api.github.check_github_auth", new=AsyncMock()), \
+             patch("app.api.github.get_repo_for_project", new=AsyncMock(return_value="owner/repo")), \
+             patch("app.api.github.github_service") as mock_github:
+            mock_github.get_pull.side_effect = GitHubCliError("gh pr view failed")
+            with pytest.raises(HTTPException) as unavailable:
+                await _call()
+
+            mock_github.get_pull.side_effect = None
+            mock_github.get_pull.return_value = None
+            with pytest.raises(HTTPException) as missing:
+                await _call()
+
+        assert unavailable.value.status_code == 502
+        assert missing.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_list_runs_failure_is_502(self):
+        from app.api.github import list_workflow_runs
+
+        with patch("app.api.github.check_project_access"), \
+             patch("app.api.github.check_github_auth", new=AsyncMock()), \
+             patch("app.api.github.get_repo_for_project", new=AsyncMock(return_value="owner/repo")), \
+             patch("app.api.github.github_service") as mock_github:
+            mock_github.list_runs.side_effect = GitHubCliError("gh run list failed")
+
+            with pytest.raises(HTTPException) as exc_info:
+                await list_workflow_runs(
+                    request=MagicMock(spec=Request), project_id="p1", limit=10, token="t"
+                )
+
+        assert exc_info.value.status_code == 502
+
+    @pytest.mark.asyncio
+    async def test_status_reports_gh_unavailability_without_denying_the_repo(self):
+        from app.api.github import get_github_status
+
+        with patch("app.api.github.check_project_access"), \
+             patch("app.api.github.get_project_path_async", new=AsyncMock(return_value="/p")), \
+             patch("app.api.github.github_service") as mock_github:
+            mock_github.is_authenticated.return_value = True
+            mock_github.get_repo_from_remote.return_value = "owner/repo"
+            mock_github.get_repo_info.side_effect = GitHubCliError(
+                "gh repo view failed", stderr="HTTP 503"
+            )
+
+            result = await get_github_status(
+                request=MagicMock(spec=Request), project_id="p1", token="t"
+            )
+
+        assert result.authenticated is True
+        assert result.repo == "owner/repo"
+        assert "unavailable" in result.error
+
+
+class TestEndpointsStayOffTheEventLoop:
+    """G1: no gh subprocess may run on the loop thread."""
+
+    @pytest.mark.asyncio
+    async def test_list_pulls_runs_gh_in_a_worker_thread(self, sample_pull_request):
+        import threading
+
+        from app.api.github import list_pull_requests
+
+        loop_thread = threading.current_thread().ident
+        seen = {}
+
+        def _list_pulls(*args, **kwargs):
+            seen["thread"] = threading.current_thread().ident
+            return [sample_pull_request]
+
+        with patch("app.api.github.check_project_access"), \
+             patch("app.api.github.check_github_auth", new=AsyncMock()), \
+             patch("app.api.github.get_repo_for_project", new=AsyncMock(return_value="owner/repo")), \
+             patch("app.api.github.github_service") as mock_github:
+            mock_github.list_pulls.side_effect = _list_pulls
+
+            result = await list_pull_requests(
+                request=MagicMock(spec=Request),
+                project_id="p1",
+                state="open",
+                limit=30,
+                token="t",
+            )
+
+        assert len(result) == 1
+        assert seen["thread"] != loop_thread
+
+    @pytest.mark.asyncio
+    async def test_repo_resolution_runs_in_a_worker_thread(self):
+        """It resolves a project path (DB read) AND shells out to git."""
+        import threading
+
+        from app.api.github import get_repo_for_project
+
+        loop_thread = threading.current_thread().ident
+        seen = {}
+
+        def _resolve(request, project_id):
+            seen["thread"] = threading.current_thread().ident
+            return "owner/repo"
+
+        with patch("app.api.github._resolve_repo_for_project", side_effect=_resolve):
+            repo = await get_repo_for_project(MagicMock(spec=Request), "p1")
+
+        assert repo == "owner/repo"
+        assert seen["thread"] != loop_thread
+

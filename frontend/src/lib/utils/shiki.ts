@@ -1,12 +1,28 @@
 /**
- * Synchronous Shiki highlighter for chat code blocks.
+ * Lazily-loaded Shiki highlighter for chat code blocks.
  *
- * Why the *sync* core: the markdown pipeline in AssistantMessage is a pure
- * synchronous `marked` render driven from a `$derived`. An async highlighter
- * would force a second render pass per code block and re-tear the {@html}
- * subtree — which is exactly what makes embedded media flicker while a message
- * streams. `createHighlighterCoreSync` + the JavaScript RegExp engine gives us
- * highlighting inside the same synchronous call, with no WASM fetch.
+ * ## Why this is no longer a static import
+ *
+ * The previous version statically imported `shiki/core`, the JS RegExp engine,
+ * two theme JSONs and **fourteen grammars** — ~750 kB of raw grammar data that
+ * every visitor downloaded and parsed on boot, whether or not any message
+ * contained code (perf review R6). The highlighter is now assembled on demand:
+ *
+ *  • `shiki/core` + engine + themes load as one `vendor-shiki` chunk.
+ *  • Each grammar loads as its own chunk, **only for languages actually used**.
+ *  • `warmHighlighter()` lets the shell pull the core in during idle time, so
+ *    in practice the highlighter is ready long before the first code block.
+ *
+ * ## Staying synchronous for the caller
+ *
+ * The markdown pipeline in `chat-markdown.ts` is a pure synchronous `marked`
+ * render driven from a `$derived`; it cannot await. `highlightToInnerHtml()`
+ * therefore keeps its original signature and contract: it returns highlighted
+ * HTML when the grammar is resident, and `null` otherwise — the caller already
+ * falls back to escaped plain text for `null`. Asking for an unloaded language
+ * kicks the load in the background and notifies `onHighlighterReady()`
+ * subscribers when it lands, so the caller can re-render (the prefix/tail cache
+ * makes that re-render cheap). A streaming message re-renders anyway.
  *
  * Themes are emitted as CSS custom properties (`--shiki-light` / `--shiki-dark`)
  * so ONE highlighted string serves both app themes; the `.dark` class on <html>
@@ -17,26 +33,7 @@
  * settled code blocks on every scroll-back, and re-tokenising them is by far the
  * most expensive thing the transcript does.
  */
-import { createHighlighterCoreSync, type HighlighterCore } from 'shiki/core';
-import { createJavaScriptRegexEngine } from 'shiki/engine/javascript';
-
-import langTs from 'shiki/langs/typescript.mjs';
-import langJs from 'shiki/langs/javascript.mjs';
-import langSvelte from 'shiki/langs/svelte.mjs';
-import langHtml from 'shiki/langs/html.mjs';
-import langCss from 'shiki/langs/css.mjs';
-import langJson from 'shiki/langs/json.mjs';
-import langPython from 'shiki/langs/python.mjs';
-import langBash from 'shiki/langs/bash.mjs';
-import langDiff from 'shiki/langs/diff.mjs';
-import langMarkdown from 'shiki/langs/markdown.mjs';
-import langYaml from 'shiki/langs/yaml.mjs';
-import langSql from 'shiki/langs/sql.mjs';
-import langRust from 'shiki/langs/rust.mjs';
-import langGo from 'shiki/langs/go.mjs';
-
-import themeDark from 'shiki/themes/github-dark-default.mjs';
-import themeLight from 'shiki/themes/github-light-default.mjs';
+import type { HighlighterCore } from 'shiki/core';
 
 const DARK_THEME = 'github-dark-default';
 const LIGHT_THEME = 'github-light-default';
@@ -63,34 +60,142 @@ const LANG_ALIASES: Record<string, string> = {
 	go: 'go', golang: 'go'
 };
 
-/** Resolve a fence tag to a loaded grammar id, or null when unsupported. */
+/**
+ * One dynamic import per grammar. Each becomes its own Rollup chunk, so a
+ * transcript full of Python pays for `python` and nothing else. Grammars that
+ * embed others (svelte → ts/js/css) pull their dependencies through the shared
+ * chunks Rollup derives automatically.
+ */
+const LANG_LOADERS: Record<string, () => Promise<{ default: unknown }>> = {
+	typescript: () => import('shiki/langs/typescript.mjs'),
+	javascript: () => import('shiki/langs/javascript.mjs'),
+	svelte: () => import('shiki/langs/svelte.mjs'),
+	html: () => import('shiki/langs/html.mjs'),
+	css: () => import('shiki/langs/css.mjs'),
+	json: () => import('shiki/langs/json.mjs'),
+	python: () => import('shiki/langs/python.mjs'),
+	bash: () => import('shiki/langs/bash.mjs'),
+	diff: () => import('shiki/langs/diff.mjs'),
+	markdown: () => import('shiki/langs/markdown.mjs'),
+	yaml: () => import('shiki/langs/yaml.mjs'),
+	sql: () => import('shiki/langs/sql.mjs'),
+	rust: () => import('shiki/langs/rust.mjs'),
+	go: () => import('shiki/langs/go.mjs')
+};
+
+/** Resolve a fence tag to a supported grammar id, or null when unsupported. */
 export function resolveShikiLang(lang: string | undefined | null): string | null {
 	if (!lang) return null;
 	return LANG_ALIASES[lang.trim().toLowerCase()] ?? null;
 }
 
+// ── Highlighter lifecycle ────────────────────────────────────────────────────
+
 let _highlighter: HighlighterCore | null = null;
+let _corePromise: Promise<HighlighterCore | null> | null = null;
 let _highlighterFailed = false;
 
-function getHighlighter(): HighlighterCore | null {
+const _loadedLangs = new Set<string>();
+const _pendingLangs = new Set<string>();
+const _readyListeners = new Set<() => void>();
+
+/**
+ * Subscribe to "new highlighting became available" (the core finished loading,
+ * or a grammar landed). Consumers that render settled, non-streaming content
+ * can use this to re-run their markdown derivation once, turning the plain-text
+ * placeholder into highlighted output. Returns an unsubscribe function.
+ *
+ * Additive API — nothing that existed before changed shape.
+ */
+export function onHighlighterReady(listener: () => void): () => void {
+	_readyListeners.add(listener);
+	return () => _readyListeners.delete(listener);
+}
+
+function notifyReady() {
+	for (const listener of [..._readyListeners]) {
+		try {
+			listener();
+		} catch (e) {
+			console.error('[shiki] ready listener threw', e);
+		}
+	}
+}
+
+async function loadCore(): Promise<HighlighterCore | null> {
 	if (_highlighter) return _highlighter;
 	if (_highlighterFailed) return null;
-	try {
-		_highlighter = createHighlighterCoreSync({
-			themes: [themeDark, themeLight],
-			langs: [
-				langTs, langJs, langSvelte, langHtml, langCss, langJson, langPython,
-				langBash, langDiff, langMarkdown, langYaml, langSql, langRust, langGo
-			],
-			engine: createJavaScriptRegexEngine()
-		});
-		return _highlighter;
-	} catch (e) {
-		// Never let a highlighter failure take the transcript down with it.
-		console.error('[shiki] highlighter init failed; code blocks render plain', e);
-		_highlighterFailed = true;
-		return null;
-	}
+	if (_corePromise) return _corePromise;
+
+	_corePromise = (async () => {
+		try {
+			const [{ createHighlighterCore }, { createJavaScriptRegexEngine }, dark, light] =
+				await Promise.all([
+					import('shiki/core'),
+					import('shiki/engine/javascript'),
+					import('shiki/themes/github-dark-default.mjs'),
+					import('shiki/themes/github-light-default.mjs')
+				]);
+
+			_highlighter = await createHighlighterCore({
+				themes: [dark.default, light.default],
+				// Grammars are attached on demand by ensureLanguage().
+				langs: [],
+				engine: createJavaScriptRegexEngine()
+			});
+			return _highlighter;
+		} catch (e) {
+			// Never let a highlighter failure take the transcript down with it.
+			console.error('[shiki] highlighter init failed; code blocks render plain', e);
+			_highlighterFailed = true;
+			return null;
+		} finally {
+			_corePromise = null;
+		}
+	})();
+
+	return _corePromise;
+}
+
+/**
+ * Pull the highlighter core in ahead of time (call it from an idle callback).
+ * Optionally pre-attach specific grammars. Never throws.
+ */
+export function warmHighlighter(langs: readonly string[] = []): void {
+	if (_highlighterFailed) return;
+	void loadCore().then((core) => {
+		if (!core) return;
+		notifyReady();
+		for (const lang of langs) ensureLanguage(lang);
+	});
+}
+
+/** Kick off (once) the load of the core + one grammar. Never throws. */
+function ensureLanguage(lang: string): void {
+	if (_highlighterFailed) return;
+	if (_loadedLangs.has(lang) || _pendingLangs.has(lang)) return;
+	const loader = LANG_LOADERS[lang];
+	if (!loader) return;
+
+	_pendingLangs.add(lang);
+	void (async () => {
+		try {
+			const [core, mod] = await Promise.all([loadCore(), loader()]);
+			if (!core) return;
+			await core.loadLanguage(mod.default as never);
+			_loadedLangs.add(lang);
+			notifyReady();
+		} catch (e) {
+			console.error('[shiki] grammar load failed; rendering plain', lang, e);
+		} finally {
+			_pendingLangs.delete(lang);
+		}
+	})();
+}
+
+/** True when `lang` can be highlighted synchronously right now. */
+export function isHighlightReady(lang: string | null): boolean {
+	return !!lang && _highlighter !== null && _loadedLangs.has(lang);
 }
 
 // ── LRU cache ────────────────────────────────────────────────────────────────
@@ -126,8 +231,10 @@ export function clearHighlightCache() {
  * Highlight `code` as `lang`, returning the inner HTML of the `<code>` element
  * (spans only — the caller owns the `<pre>`/`<code>` wrapper and its chrome).
  *
- * Returns `null` when the language is unsupported or the highlighter is
- * unavailable, in which case the caller renders escaped plain text.
+ * Returns `null` when the language is unsupported, when the highlighter is
+ * unavailable, or when the grammar has not finished loading yet — in which case
+ * the caller renders escaped plain text. In the last case the grammar load is
+ * started here and `onHighlighterReady` fires when it lands.
  */
 export function highlightToInnerHtml(code: string, lang: string | null): string | null {
 	if (!lang) return null;
@@ -135,8 +242,12 @@ export function highlightToInnerHtml(code: string, lang: string | null): string 
 	const cached = cacheGet(key);
 	if (cached !== undefined) return cached;
 
-	const hl = getHighlighter();
-	if (!hl) return null;
+	const hl = _highlighter;
+	if (!hl || !_loadedLangs.has(lang)) {
+		// Not ready: start (or continue) loading and render plain for now.
+		ensureLanguage(lang);
+		return null;
+	}
 
 	let html: string;
 	try {

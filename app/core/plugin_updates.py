@@ -19,12 +19,34 @@ from app.core.plugin_models import (
 logger = logging.getLogger(__name__)
 
 
+# ─── Auto-update defaults (F10) ───────────────────────────────────────────
+#
+# DELIBERATE DEFAULT CHANGE: auto-update is OFF unless the user turns it on.
+#
+# The old default ran, on every install, an unrequested background burst every
+# six hours: a ``git fetch``-class subprocess per registered marketplace, network
+# I/O for each, and a re-install of every plugin found to be behind. On a weak
+# machine that is a visible stall, it can change what the agent is running
+# underneath a live session, and nobody asked for it. Nothing about the product
+# needs plugins to update by themselves.
+#
+# It stays fully configurable — the settings file and the
+# ``PUT /api/v1/plugins/auto-update/settings`` endpoint are unchanged, and an
+# install that has ALREADY opted in has ``enabled`` written in its settings file,
+# so this default does not turn anything off that a user turned on. The cadence
+# default also moves 6h -> 24h: for a mechanism whose whole job is picking up
+# occasional upstream releases, four checks a day was never buying anything over
+# one, and each check is the expensive part.
+DEFAULT_AUTO_UPDATE_ENABLED = False
+DEFAULT_AUTO_UPDATE_INTERVAL_HOURS = 24
+
+
 def get_auto_update_settings(svc) -> AutoUpdateSettings:
-    """Get auto-update settings."""
+    """Get auto-update settings (defaults: see the block above)."""
     data = svc._read_json_file(svc.AUTO_UPDATE_FILE, {})
     return AutoUpdateSettings(
-        enabled=data.get("enabled", True),
-        interval_hours=data.get("intervalHours", 6),
+        enabled=data.get("enabled", DEFAULT_AUTO_UPDATE_ENABLED),
+        interval_hours=data.get("intervalHours", DEFAULT_AUTO_UPDATE_INTERVAL_HOURS),
         auto_sync_marketplaces=data.get("autoSyncMarketplaces", True),
         auto_update_plugins=data.get("autoUpdatePlugins", True),
         last_check=data.get("lastCheck")

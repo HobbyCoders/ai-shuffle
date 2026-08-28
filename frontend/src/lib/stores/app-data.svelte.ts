@@ -53,11 +53,21 @@ interface AppDataState {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-// Per-request page size when paging through sessions. The sessions list itself
-// is uncapped — loadSessionsInternal keeps fetching pages until the backend
-// reports no more. 100 is the max the /sessions/cursor endpoint allows per call,
-// so it minimises round-trips when loading everything.
+// Per-request page size when paging through sessions. 100 is the max the
+// /sessions/cursor endpoint allows per call.
 const SESSIONS_PAGE_SIZE = 100;
+
+/**
+ * Pages fetched up front by `loadSessions`.
+ *
+ * The list used to be uncapped: every refresh paged through the ENTIRE session
+ * history (⌈N/100⌉ sequential round-trips) and committed a fresh array per
+ * page. With a WS-driven refresh on every turn completion that was the sidebar
+ * refetch storm (PERFORMANCE_REVIEW_2026-08 W1). The initial load is now capped
+ * and the rest is behind the sidebar's explicit "load more" shelf, which calls
+ * `loadMoreSessions()` and appends the next cursor page.
+ */
+const INITIAL_SESSION_PAGES = 1;
 const SEARCH_PAGE_SIZE = 20;
 
 // ─── Reactive State ──────────────────────────────────────────────────────────
@@ -96,24 +106,190 @@ const { subscribe, update: _update, createDerived } =
 		(v) => { _state = v; }
 	);
 
-// ─── Internal Data Loading ───────────────────────────────────────────────────
+// ─── Optimistic Local Edits ──────────────────────────────────────────────────
+
+/**
+ * Local, not-yet-superseded mutations of session rows.
+ *
+ * The problem this solves: every optimistic mutation (rename, settle/unsettle,
+ * delete, a server-pushed row patch) writes straight into `sessions`, while a
+ * paginated load may already be in flight carrying PRE-mutation rows. When that
+ * load commits, the row snaps back — the rename reverts, the settled card jumps
+ * between groups (PERFORMANCE_REVIEW_2026-08 S12 / W7).
+ *
+ * The old fix was per-call-site: `setSessionActive` invalidated in-flight loads,
+ * `renameSession` forgot to, and every future mutation had to remember. Instead
+ * the edit is recorded here and RE-APPLIED on top of every committed page, so
+ * no call site can forget and no genuinely fresh data has to be thrown away.
+ *
+ * An edit retires once the server is known to agree AND a load that started
+ * after that moment has committed (`supersedeAtLoadId`) — from then on the
+ * server rows carry the change themselves. Rolled-back edits are dropped
+ * immediately; anything left behind by a failure path expires on its own.
+ */
+interface PendingRowEdit {
+	/** Field patch to re-apply, or null for a pure removal. */
+	patch: Partial<Session> | null;
+	/** True when the row must stay out of the list (delete / local hide). */
+	removed: boolean;
+	/** Load request id from which this edit may be dropped; null = still
+	 *  unconfirmed by the server, so it is re-applied indefinitely. */
+	supersedeAtLoadId: number | null;
+	createdAt: number;
+}
+
+/** Backstop so a failure path can never leave an edit pinned forever. */
+const PENDING_EDIT_TTL_MS = 5 * 60 * 1000;
+
+const _pendingEdits = new Map<string, PendingRowEdit>();
 
 // Monotonic token so that if a newer load (tag change, manual reload) starts
 // while an earlier one is still paging, the stale loop bails out instead of
 // clobbering the newer results.
 let _loadSessionsRequestId = 0;
 
-/** Invalidate any in-flight paginated session loads (and pending "load more"
- *  appends) WITHOUT starting a new one: bumping the token makes them discard
- *  their remaining pages instead of committing pre-mutation rows over a local
- *  change that has not reached the server yet. */
-function invalidateSessionLoads() {
-	_loadSessionsRequestId++;
-	// An invalidated "load more" would otherwise leave its spinner latched.
-	if (_state.sessionsLoadingMore) _update(s => ({ ...s, sessionsLoadingMore: false }));
+function recordLocalEdit(sessionId: string, patch: Partial<Session>): void {
+	const prev = _pendingEdits.get(sessionId);
+	_pendingEdits.set(sessionId, {
+		patch: { ...(prev?.patch ?? {}), ...patch },
+		removed: prev?.removed ?? false,
+		// A fresh local change is unconfirmed again, even if an earlier edit for
+		// the same row had been confirmed.
+		supersedeAtLoadId: null,
+		createdAt: Date.now(),
+	});
 }
 
-async function loadSessionsInternal(tagId?: string | null) {
+function recordLocalRemoval(sessionIds: Iterable<string>): void {
+	for (const id of sessionIds) {
+		_pendingEdits.set(id, { patch: null, removed: true, supersedeAtLoadId: null, createdAt: Date.now() });
+	}
+}
+
+/** The server now agrees with these edits: the next load STARTED from here on
+ *  carries the change itself, so the edit may retire when that load commits. */
+function confirmLocalEdits(sessionIds: Iterable<string>): void {
+	for (const id of sessionIds) {
+		const edit = _pendingEdits.get(id);
+		if (edit) edit.supersedeAtLoadId = _loadSessionsRequestId + 1;
+	}
+}
+
+/** Drop edits outright (the mutation failed and was rolled back locally). */
+function discardLocalEdits(sessionIds: Iterable<string>): void {
+	for (const id of sessionIds) _pendingEdits.delete(id);
+}
+
+/** Re-apply outstanding local edits on top of a server page. */
+function applyPendingEdits(rows: Session[]): Session[] {
+	if (_pendingEdits.size === 0) return rows;
+	const cutoff = Date.now() - PENDING_EDIT_TTL_MS;
+	for (const [id, edit] of _pendingEdits) {
+		if (edit.createdAt < cutoff) _pendingEdits.delete(id);
+	}
+	if (_pendingEdits.size === 0) return rows;
+	const out: Session[] = [];
+	for (const row of rows) {
+		const edit = _pendingEdits.get(row.id);
+		if (!edit) { out.push(row); continue; }
+		if (edit.removed) continue;
+		out.push(edit.patch ? { ...row, ...edit.patch } : row);
+	}
+	return out;
+}
+
+/** Retire the edits a just-committed load is known to already carry. */
+function retireSupersededEdits(loadRequestId: number): void {
+	for (const [id, edit] of _pendingEdits) {
+		if (edit.supersedeAtLoadId !== null && loadRequestId >= edit.supersedeAtLoadId) {
+			_pendingEdits.delete(id);
+		}
+	}
+}
+
+// ─── Commit Helpers ──────────────────────────────────────────────────────────
+
+function valueEqual(a: unknown, b: unknown): boolean {
+	if (a === b) return true;
+	if (Array.isArray(a) && Array.isArray(b)) {
+		return a.length === b.length && a.every((item, i) => valueEqual(item, b[i]));
+	}
+	if (a && b && typeof a === 'object' && typeof b === 'object') {
+		const ak = Object.keys(a as Record<string, unknown>);
+		const bk = Object.keys(b as Record<string, unknown>);
+		if (ak.length !== bk.length) return false;
+		return ak.every(k => (a as Record<string, unknown>)[k] === (b as Record<string, unknown>)[k]);
+	}
+	return false;
+}
+
+/** True when two session lists carry the same rows with the same field values.
+ *  Committing an equal list would hand every subscriber a NEW array identity
+ *  and re-derive the whole sidebar (filter + map + sort) for nothing. */
+export function sessionListsEqual(a: Session[], b: Session[]): boolean {
+	if (a === b) return true;
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		const x = a[i] as unknown as Record<string, unknown>;
+		const y = b[i] as unknown as Record<string, unknown>;
+		if (x === y) continue;
+		if (x.id !== y.id) return false;
+		const xk = Object.keys(x);
+		if (xk.length !== Object.keys(y).length) return false;
+		for (const k of xk) {
+			if (!valueEqual(x[k], y[k])) return false;
+		}
+	}
+	return true;
+}
+
+interface SessionsPageMeta {
+	total: number;
+	offset: number;
+	hasMore: boolean;
+	tagFilter: string | null;
+	cursor: string | null;
+	cursorId: string | null;
+}
+
+/** Commit a freshly loaded list, keeping the previous ARRAY IDENTITY when the
+ *  rows are unchanged and skipping the store notification entirely when nothing
+ *  at all moved. */
+function commitSessions(rows: Session[], meta: SessionsPageMeta): void {
+	const prev = _state;
+	const rowsChanged = !sessionListsEqual(prev.sessions, rows);
+	const metaChanged =
+		prev.sessionsTotal !== meta.total ||
+		prev.sessionsOffset !== meta.offset ||
+		prev.sessionsHasMore !== meta.hasMore ||
+		prev.sessionsTagFilter !== meta.tagFilter ||
+		prev.sessionsCursor !== meta.cursor ||
+		prev.sessionsCursorId !== meta.cursorId;
+	if (!rowsChanged && !metaChanged) return;
+	_update(s => ({
+		...s,
+		sessions: rowsChanged ? rows : s.sessions,
+		sessionsTotal: meta.total,
+		sessionsOffset: meta.offset,
+		sessionsHasMore: meta.hasMore,
+		sessionsTagFilter: meta.tagFilter,
+		sessionsCursor: meta.cursor,
+		sessionsCursorId: meta.cursorId,
+	}));
+}
+
+// ─── Internal Data Loading ───────────────────────────────────────────────────
+
+/**
+ * Load the first `pages` cursor pages of the session list.
+ *
+ * Two deliberate properties (W1):
+ * - CAPPED: only `INITIAL_SESSION_PAGES` round-trips, never the whole history.
+ *   `loadMoreSessions()` appends the rest on demand.
+ * - ONE COMMIT: pages are accumulated and committed once, so subscribers are
+ *   notified a single time per load instead of once per page.
+ */
+async function loadSessionsInternal(tagId?: string | null, pages: number = INITIAL_SESSION_PAGES) {
 	const requestId = ++_loadSessionsRequestId;
 	_update(s => ({ ...s, sessionsLoading: true }));
 	try {
@@ -122,11 +298,7 @@ async function loadSessionsInternal(tagId?: string | null) {
 		let cursorId: string | null = null;
 		let hasMore = true;
 
-		// Page through every session via cursor pagination. The list is
-		// intentionally uncapped, so we keep fetching until the backend reports
-		// there is nothing left. Each page is committed as it arrives so the UI
-		// renders incrementally instead of waiting for the full set.
-		while (hasMore) {
+		for (let page = 0; page < Math.max(1, pages) && hasMore; page++) {
 			let url = `/sessions/cursor?limit=${SESSIONS_PAGE_SIZE}&admin_only=true`;
 			if (tagId) {
 				url += `&tag_id=${encodeURIComponent(tagId)}`;
@@ -153,19 +325,21 @@ async function loadSessionsInternal(tagId?: string | null) {
 			if (hasMore && !cursor && !cursorId) {
 				hasMore = false;
 			}
-
-			_update(s => ({
-				...s,
-				sessions: [...all],
-				sessionsTotal: all.length,
-				sessionsOffset: all.length,
-				sessionsHasMore: hasMore,
-				sessionsTagFilter: tagId ?? null,
-				sessionsCursor: cursor,
-				sessionsCursorId: cursorId,
-			}));
 		}
 
+		// Re-apply optimistic local edits the server hasn't caught up with yet,
+		// then retire the ones this load is known to already carry.
+		const rows = applyPendingEdits(all);
+		retireSupersededEdits(requestId);
+
+		commitSessions(rows, {
+			total: rows.length + (hasMore ? 1 : 0),
+			offset: rows.length,
+			hasMore,
+			tagFilter: tagId ?? null,
+			cursor,
+			cursorId,
+		});
 		_update(s => ({ ...s, sessionsLoading: false }));
 	} catch (e) {
 		// Don't surface a stale error over a newer in-flight load.
@@ -212,11 +386,16 @@ async function loadMoreSessionsInternal() {
 			return;
 		}
 
+		// The appended page goes through the same optimistic-edit re-apply as a
+		// full load: a rename/settle/delete made while this page was in flight
+		// must not come back undone.
+		const appended = applyPendingEdits(result.items);
+
 		_update(s => ({
 			...s,
-			sessions: [...s.sessions, ...result.items],
-			sessionsOffset: s.sessionsOffset + result.items.length,
-			sessionsTotal: s.sessionsOffset + result.items.length + (result.has_more ? 1 : 0),
+			sessions: [...s.sessions, ...appended],
+			sessionsOffset: s.sessionsOffset + appended.length,
+			sessionsTotal: s.sessionsOffset + appended.length + (result.has_more ? 1 : 0),
 			sessionsHasMore: result.has_more,
 			sessionsLoadingMore: false,
 			sessionsCursor: result.next_cursor,
@@ -410,6 +589,12 @@ export const appData = {
 				: {}),
 		}));
 
+		// The DELETE already succeeded, so the cascade is confirmed — but a list
+		// load may still be in flight with the pre-delete rows. Tombstone them so
+		// its commit cannot resurrect the deleted project's chats.
+		recordLocalRemoval(removedSessionIds);
+		confirmLocalEdits(removedSessionIds);
+
 		if (activeSession.current.sessionId && removedSessionIds.has(activeSession.current.sessionId)) {
 			activeSession.newChat();
 		}
@@ -431,6 +616,10 @@ export const appData = {
 			sessions: s.sessions.filter(session => session.instance_id !== instanceId),
 			sessionsTotal: Math.max(0, s.sessionsTotal - removedSessionIds.size),
 		}));
+		// Hold the hide across any load already in flight; the next load started
+		// from here on is authoritative (enrichment stops resolving the device).
+		recordLocalRemoval(removedSessionIds);
+		confirmLocalEdits(removedSessionIds);
 		if (activeSession.current.sessionId && removedSessionIds.has(activeSession.current.sessionId)) {
 			activeSession.newChat();
 		}
@@ -471,6 +660,9 @@ export const appData = {
 		// Snapshot previous state so we can roll back if the API call fails.
 		const prevSessions = _state.sessions;
 		const prevTotal = _state.sessionsTotal;
+		// Tombstone first: a paginated load already in flight still carries the
+		// row, and its commit would put the deleted chat back in the sidebar.
+		recordLocalRemoval([sessionId]);
 		_update(s => ({
 			...s,
 			sessions: s.sessions.filter(x => x.id !== sessionId),
@@ -479,8 +671,10 @@ export const appData = {
 
 		try {
 			await api.delete(`/sessions/${sessionId}`);
+			confirmLocalEdits([sessionId]);
 		} catch (err) {
 			// Rollback optimistic removal on error, then resync from server.
+			discardLocalEdits([sessionId]);
 			_update(s => ({ ...s, sessions: prevSessions, sessionsTotal: prevTotal }));
 			await appData.loadSessions();
 			throw err;
@@ -491,7 +685,13 @@ export const appData = {
 		// Optimistic rename — patch the row's title in local state immediately for
 		// instant feedback (mirrors deleteSession's optimistic splice). Snapshot the
 		// previous list so we can roll back if the PATCH fails.
+		//
+		// Registering the edit is what keeps a list load that was ALREADY PAGING
+		// when the user renamed from committing the pre-rename row and snapping
+		// the title back (S12): every commit re-applies it until the server is
+		// known to carry it.
 		const prevSessions = _state.sessions;
+		recordLocalEdit(sessionId, { title });
 		_update(s => ({
 			...s,
 			sessions: s.sessions.map(x => (x.id === sessionId ? { ...x, title } : x)),
@@ -499,8 +699,10 @@ export const appData = {
 
 		try {
 			await apiRenameSession(sessionId, title);
+			confirmLocalEdits([sessionId]);
 		} catch (err) {
 			// Roll the optimistic title change back and let the caller surface the error.
+			discardLocalEdits([sessionId]);
 			_update(s => ({ ...s, sessions: prevSessions }));
 			throw err;
 		}
@@ -519,6 +721,13 @@ export const appData = {
 				return { ...x, ...patch };
 			}),
 		}));
+		if (found) {
+			// The push came FROM the server, so it is confirmed on arrival — but a
+			// list load that started before it must not commit the pre-patch row
+			// over it (W7). Re-applied until a load started from here on commits.
+			recordLocalEdit(sessionId, patch);
+			confirmLocalEdits([sessionId]);
+		}
 		return found;
 	},
 
@@ -529,25 +738,25 @@ export const appData = {
 		// paginated refetch. Snapshot the previous list to roll back if the PATCH
 		// fails.
 		const prevSessions = _state.sessions;
+		// Register BEFORE the PATCH resolves. A load already in flight when the
+		// user clicked (e.g. the turn-done refresh) carries the PRE-patch row;
+		// re-applying this edit on its commit is what stops the card snapping
+		// back into Active for the length of the round-trip. Unlike the old
+		// invalidate-the-load guard, the in-flight load's OTHER rows still land.
+		recordLocalEdit(sessionId, { is_active: isActive });
 		_update(s => ({
 			...s,
 			sessions: s.sessions.map(x => (x.id === sessionId ? { ...x, is_active: isActive } : x)),
 		}));
 
-		// Invalidate in-flight paginated loads BEFORE the PATCH resolves, not
-		// just after. A load already in flight when the user clicked (e.g. the
-		// turn-done refresh) carries the PRE-patch row and its per-page commits
-		// would overwrite the optimistic flip during the PATCH round-trip —
-		// the card snaps back into Active, then settles again a second later.
-		// Only invalidate here: a load started NOW would itself fetch pre-patch
-		// rows; the authoritative reconcile happens after the PATCH lands.
-		invalidateSessionLoads();
 		try {
 			await apiSetSessionActive(sessionId, isActive);
+			confirmLocalEdits([sessionId]);
 			// Reconcile with an authoritative reload.
 			await loadSessionsInternal(_state.sessionsTagFilter);
 		} catch (err) {
 			// Roll the optimistic change back and let the caller surface the error.
+			discardLocalEdits([sessionId]);
 			_update(s => ({ ...s, sessions: prevSessions }));
 			throw err;
 		}
@@ -562,6 +771,7 @@ export const appData = {
 		const prevTotal = _state.sessionsTotal;
 
 		// Optimistic removal of all selected sessions.
+		recordLocalRemoval(sessionIds);
 		_update(s => ({
 			...s,
 			sessions: s.sessions.filter(x => !idSet.has(x.id)),
@@ -572,7 +782,9 @@ export const appData = {
 
 		try {
 			await api.post('/sessions/batch-delete', { session_ids: sessionIds });
+			confirmLocalEdits(sessionIds);
 		} catch (err) {
+			discardLocalEdits(sessionIds);
 			_update(s => ({ ...s, sessions: prevSessions, sessionsTotal: prevTotal }));
 			await appData.loadSessions();
 			throw err;
@@ -651,4 +863,8 @@ export const projects = createDerived(() => _state.projects);
 export const clusterProjects = createDerived(() => _state.clusterProjects);
 export const sessions = createDerived(() => _state.sessions);
 export const sessionsTagFilter = createDerived(() => _state.sessionsTagFilter);
+/** True when the server has more session pages behind the loaded ones — drives
+ *  the sidebar's explicit "load more" shelf now that the initial load is capped. */
+export const sessionsHasMore = createDerived(() => _state.sessionsHasMore);
+export const sessionsLoadingMore = createDerived(() => _state.sessionsLoadingMore);
 export const apiUserSessions = createDerived(() => _state.apiUserSessions);

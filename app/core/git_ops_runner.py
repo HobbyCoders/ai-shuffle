@@ -19,6 +19,13 @@ for the same row through ``git_ops.claim_op``; the database picks one winner.
 
 Started from ``startup.install_v2_turns_wiring``, stopped from
 ``startup.shutdown_services`` — the same lifecycle as the turn-claim loop.
+
+**No private timer (F5).** ``start()`` registers two passes — the claim poll and
+the daily retention purge — on the shared background sweep driver in
+:mod:`app.core.turn_claim`, instead of spawning two asyncio tasks of its own.
+The claim cadence is unchanged (5s) whenever the install registry shows a peer,
+and stretches to the single-install cadence when it does not; :func:`kick` runs
+the pass immediately for a seam that just enqueued a local op.
 """
 
 from __future__ import annotations
@@ -46,8 +53,6 @@ REFRESH_STATUS_DEADLINE_SECONDS = 20.0
 SWEEP_INTERVAL_SECONDS = 24 * 60 * 60
 RETENTION_DAYS = 7
 
-_loop_task: Optional[asyncio.Task] = None
-_sweep_task: Optional[asyncio.Task] = None
 
 
 # ---------------------------------------------------------------------------
@@ -259,27 +264,6 @@ async def claim_once() -> int:
     return executed
 
 
-async def claim_loop() -> None:
-    """Poll every ``CLAIM_POLL_SECONDS`` and execute this runner's queued ops."""
-    logger.info(
-        "git_ops: loop started (poll every %ss, runner=%s)",
-        int(CLAIM_POLL_SECONDS), settings.effective_instance_id,
-    )
-    while True:
-        try:
-            await asyncio.sleep(CLAIM_POLL_SECONDS)
-            await claim_once()
-        except asyncio.CancelledError:
-            break
-        except Exception:  # noqa: BLE001 — the loop must survive anything.
-            logger.warning("git_ops: pass failed", exc_info=True)
-            try:
-                await asyncio.sleep(CLAIM_POLL_SECONDS)
-            except asyncio.CancelledError:
-                break
-    logger.info("git_ops: loop stopped")
-
-
 def sweep_once() -> Dict[str, int]:
     """Purge terminal git_ops rows and stale upload blobs (sync)."""
     from app.db import git_ops as git_ops_db
@@ -291,48 +275,72 @@ def sweep_once() -> Dict[str, int]:
     }
 
 
-async def sweep_loop() -> None:
-    """Daily purge of the durable carrier tables. Belt to the DB-maintenance
-    task's own 7-day cleanup (``run_database_maintenance``) — either one alone
-    is sufficient, and both are idempotent deletes."""
-    while True:
-        try:
-            await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
-            purged = await asyncio.to_thread(sweep_once)
-            if any(purged.values()):
-                logger.info("git_ops: swept %s", purged)
-        except asyncio.CancelledError:
-            break
-        except Exception:  # noqa: BLE001
-            logger.warning("git_ops: sweep failed", exc_info=True)
-
-
 def start() -> None:
-    """Start the claim + sweep loops on the running event loop (idempotent)."""
-    global _loop_task, _sweep_task
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        logger.warning("git_ops_runner.start(): no running event loop — not started")
-        return
-    if _loop_task is None or _loop_task.done():
-        _loop_task = loop.create_task(claim_loop())
-    if _sweep_task is None or _sweep_task.done():
-        _sweep_task = loop.create_task(sweep_loop())
+    """Register this install's git-ops passes on the shared sweep driver.
+
+    F5: the claim poll and the daily retention purge used to own two private
+    asyncio tasks. They are now :class:`app.core.turn_claim.SweepPass` entries on
+    the one background driver, which keeps their cadences (5s claim / 24h purge)
+    when peer installs exist and stretches the claim poll to the single-install
+    cadence when the registry shows none.
+
+    Neither pass is NOTIFY-driven: git ops are rare and not latency-critical,
+    and the one case where latency WOULD matter — the first turn of a freshly
+    created remote worktree session — is claimed inline by the spawn path in
+    ``app.core.query_options``. An enqueue seam that wants immediate execution
+    can call :func:`kick`.
+    """
+    from app.core import turn_claim
+
+    turn_claim.register_pass("git_ops", claim_once, CLAIM_POLL_SECONDS)
+    turn_claim.register_pass(
+        "git_ops_retention", _sweep_pass, SWEEP_INTERVAL_SECONDS
+    )
+    logger.info(
+        "git_ops: registered (poll every %ss, runner=%s)",
+        int(CLAIM_POLL_SECONDS), settings.effective_instance_id,
+    )
+
+
+def kick() -> None:
+    """Run the git-ops claim pass on the next event-loop tick.
+
+    Latency escape hatch for an enqueue seam that has just written a ``queued``
+    row targeted at THIS install (``app/api/cluster.py`` refresh-status,
+    ``app/api/sessions_worktree.py`` ensure-worktree). Purely optional: without
+    it the row is picked up on the next scheduled pass.
+    """
+    from app.core import turn_claim
+
+    turn_claim.kick("git_ops")
+
+
+async def _sweep_pass() -> None:
+    """Daily purge of the durable carrier tables, as a sweep pass.
+
+    Belt to the DB-maintenance task's own 7-day cleanup
+    (``run_database_maintenance``) — either one alone is sufficient, and both
+    are idempotent deletes.
+
+    Returns None deliberately: the driver reads a truthy pass result as "peer
+    work exists, re-check the install registry", and deleting our own expired
+    rows is not evidence of a peer.
+    """
+    purged = await asyncio.to_thread(sweep_once)
+    if any(purged.values()):
+        logger.info("git_ops: swept %s", purged)
 
 
 async def stop() -> None:
-    """Cancel both loops and wait for them to exit (idempotent)."""
-    global _loop_task, _sweep_task
-    tasks = [t for t in (_loop_task, _sweep_task) if t is not None and not t.done()]
-    _loop_task = None
-    _sweep_task = None
-    for task in tasks:
-        task.cancel()
-    for task in tasks:
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        except Exception:  # noqa: BLE001 — teardown must never raise.
-            logger.debug("git_ops: loop raised during shutdown", exc_info=True)
+    """Unregister the git-ops passes (idempotent).
+
+    The driver itself is owned by ``turn_claim`` and stopped there; removing the
+    passes here means a restart inside the same process re-registers cleanly.
+    """
+    try:
+        from app.core import turn_claim
+
+        turn_claim.unregister_pass("git_ops")
+        turn_claim.unregister_pass("git_ops_retention")
+    except Exception:  # noqa: BLE001 — teardown must never raise.
+        logger.debug("git_ops: unregister failed during shutdown", exc_info=True)

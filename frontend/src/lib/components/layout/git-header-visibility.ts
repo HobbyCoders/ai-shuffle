@@ -1,7 +1,20 @@
 /**
- * Pure gate for whether the chat header's LOCAL git action buttons
- * (Commit / Push / Pull / Create PR / Ship It — and the no-repo "Init Repo"
- * fallback) should render for the active session.
+ * Pure gates for the chat header's git controls.
+ *
+ * Two questions, deliberately separate (finding G10c):
+ *
+ * 1. `shouldShowHeaderGitActions` — may the LOCAL git controls (Commit / Push /
+ *    Pull, the branch pill, and the no-repo "Init Repo" fallback) render?
+ *    Local git needs a local checkout and nothing else. It does **not** need
+ *    GitHub authentication: `githubAuthenticated` comes from a 120 s
+ *    `/auth/status` poll whose `gh auth status` subprocess transiently fails
+ *    under load, and gating on it hid the entire git UI for up to two minutes
+ *    on a blip.
+ *
+ * 2. `shouldShowGithubGitActions` — may the GITHUB-backed controls (Create PR /
+ *    Finish / Ship It) render? Those genuinely need `gh`, so they consult the
+ *    hysteresis-guarded availability flag from the git store
+ *    (`githubFeaturesAvailable`), not the raw poll result.
  *
  * A remote-placed session runs on ANOTHER install: its git repository lives on
  * that owning device, not on the viewer's local filesystem. The header's git
@@ -26,8 +39,22 @@ export interface HeaderGitActionsInput {
 	viewType: string | undefined;
 	/** The session has an associated project. */
 	hasProject: boolean;
-	/** GitHub CLI is authenticated (git controls require it). */
-	githubAuthenticated: boolean;
+	/**
+	 * Raw GitHub CLI authentication verdict.
+	 *
+	 * IGNORED by `shouldShowHeaderGitActions` — local git works without GitHub.
+	 * Kept on the input so existing callers keep type-checking, and consumed by
+	 * `shouldShowGithubGitActions` (which prefers `githubAvailable` when the
+	 * caller supplies the debounced store flag).
+	 */
+	githubAuthenticated?: boolean;
+	/**
+	 * The git store's hysteresis-guarded "GitHub features are usable" flag
+	 * (`githubFeaturesAvailable`). Preferred over the raw poll verdict because a
+	 * single failed `gh auth status` never flips it. Defaults to
+	 * `githubAuthenticated` when omitted.
+	 */
+	githubAvailable?: boolean;
 	/** The session's worktree directory is gone (already hides git controls). */
 	worktreeDeleted: boolean;
 	/** The session is owned by (placed on) another install. */
@@ -35,22 +62,34 @@ export interface HeaderGitActionsInput {
 }
 
 /**
- * Resolve whether the header's local git action buttons should render.
+ * Resolve whether the header's LOCAL git action buttons should render.
  *
- * Shown only for a chat view with a project on an authenticated, non-deleted,
- * NON-remote session. Remote-placed sessions never show local git actions —
- * their repo lives on the owning install, so the local status is meaningless
- * (and would surface a bogus "Init Repo").
+ * Shown for a chat view with a project on a non-deleted, NON-remote session.
+ * Remote-placed sessions never show local git actions — their repo lives on the
+ * owning install, so the local status is meaningless (and would surface a bogus
+ * "Init Repo").
+ *
+ * Deliberately independent of GitHub auth: a `gh` blip must never blank the
+ * local git UI (G10c).
  */
 export function shouldShowHeaderGitActions(input: HeaderGitActionsInput): boolean {
-	const { viewType, hasProject, githubAuthenticated, worktreeDeleted, isRemote } = input;
+	const { viewType, hasProject, worktreeDeleted, isRemote } = input;
 
 	if (viewType !== 'chat') return false;
 	if (!hasProject) return false;
-	if (!githubAuthenticated) return false;
 	if (worktreeDeleted) return false;
 	// Remote-placed session: repo is on the owning install, never local.
 	if (isRemote) return false;
 
 	return true;
+}
+
+/**
+ * Resolve whether the header's GITHUB-backed actions (Create PR / Finish /
+ * Ship It) should render. Requires everything the local gate requires, plus
+ * usable GitHub access.
+ */
+export function shouldShowGithubGitActions(input: HeaderGitActionsInput): boolean {
+	if (!shouldShowHeaderGitActions(input)) return false;
+	return input.githubAvailable ?? input.githubAuthenticated ?? false;
 }

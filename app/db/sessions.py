@@ -22,9 +22,17 @@ def _share_sessions_across_installs() -> bool:
     Default ON: a shared-database fleet sees every install's sessions in one
     place. Set the ``cluster_share_sessions`` system setting to a falsey value
     ("off"/"false"/"0") to restore the old per-install isolation.
+
+    Read through the short-TTL memo (finding B8): this runs on EVERY
+    ``get_sessions*`` / ``search_sessions*`` call — i.e. on every sidebar
+    refresh — and used to cost a dedicated connection checkout + SELECT +
+    commit each time for a value that changes approximately never. Writes
+    through ``app.db.settings`` invalidate the memo immediately, so a toggle
+    from this install takes effect at once; another install's toggle is picked
+    up within the memo TTL.
     """
     from app.db import database
-    val = database.get_system_setting("cluster_share_sessions")
+    val = database.get_system_setting_cached("cluster_share_sessions")
     if val is None:
         return True
     return val.strip().lower() not in ("0", "false", "off", "no")
@@ -259,15 +267,13 @@ def get_sessions(
             query += " AND s.api_user_id IS NULL" if tag_id else " AND api_user_id IS NULL"
     if not include_hidden:
         # NULL = visible (every pre-v75 row), so coalesce rather than = FALSE.
-        # The turn-source guard also hides worker rows created before workers
-        # began setting sessions.hidden at creation time.
-        outer_id = "s.id" if tag_id else "sessions.id"
+        # ``is_worker`` (v84) is the MATERIALIZED delegated-worker flag: it
+        # replaces the correlated ``NOT EXISTS (SELECT 1 FROM turns ...)``
+        # probe this filter used to run per listed row, and covers the same
+        # population (workers created before v75 stamped hidden=TRUE at
+        # creation; backfilled once by _backfill_sessions_is_worker).
         query += " AND COALESCE(s.hidden, FALSE) = FALSE" if tag_id else " AND COALESCE(hidden, FALSE) = FALSE"
-        query += (
-            " AND NOT EXISTS (SELECT 1 FROM turns worker_turn "
-            f"WHERE worker_turn.session_id = {outer_id} "
-            "AND worker_turn.source = 'provider_agent')"
-        )
+        query += " AND COALESCE(s.is_worker, FALSE) = FALSE" if tag_id else " AND COALESCE(is_worker, FALSE) = FALSE"
 
     query += f" ORDER BY s.updated_at DESC LIMIT {_ph} OFFSET {_ph}" if tag_id else f" ORDER BY updated_at DESC LIMIT {_ph} OFFSET {_ph}"
     params.extend([limit, offset])
@@ -335,15 +341,12 @@ def get_sessions_paginated(
             base_query += f" AND {col_prefix}api_user_id IS NULL"
     if not include_hidden:
         # NULL = visible (every pre-v75 row). Shared by the COUNT query below,
-        # so hidden rows never inflate the total. The turn-source guard catches
-        # worker sessions created before the hidden-at-creation rule.
+        # so hidden rows never inflate the total. ``is_worker`` (v84) is the
+        # materialized delegated-worker flag that replaced the per-row
+        # ``NOT EXISTS (... turns ...)`` probe — which the COUNT paid for EVERY
+        # matching row on every sidebar refresh (finding B7).
         base_query += f" AND COALESCE({col_prefix}hidden, FALSE) = FALSE"
-        outer_id = f"{col_prefix}id" if col_prefix else "sessions.id"
-        base_query += (
-            " AND NOT EXISTS (SELECT 1 FROM turns worker_turn "
-            f"WHERE worker_turn.session_id = {outer_id} "
-            "AND worker_turn.source = 'provider_agent')"
-        )
+        base_query += f" AND COALESCE({col_prefix}is_worker, FALSE) = FALSE"
 
     with get_db() as conn:
         cursor = get_cursor(conn)
@@ -426,15 +429,11 @@ def get_sessions_cursor(
         else:
             base_query += f" AND {col_prefix}api_user_id IS NULL"
     if not include_hidden:
-        # NULL = visible (every pre-v75 row). The turn-source guard catches
-        # worker sessions created before the hidden-at-creation rule.
+        # NULL = visible (every pre-v75 row). ``is_worker`` (v84) is the
+        # materialized delegated-worker flag that replaced the per-row
+        # ``NOT EXISTS (... turns ...)`` probe (finding B7).
         base_query += f" AND COALESCE({col_prefix}hidden, FALSE) = FALSE"
-        outer_id = f"{col_prefix}id" if col_prefix else "sessions.id"
-        base_query += (
-            " AND NOT EXISTS (SELECT 1 FROM turns worker_turn "
-            f"WHERE worker_turn.session_id = {outer_id} "
-            "AND worker_turn.source = 'provider_agent')"
-        )
+        base_query += f" AND COALESCE({col_prefix}is_worker, FALSE) = FALSE"
 
     # Cursor condition: seek past the last seen (updated_at, id)
     if cursor and cursor_id:
@@ -491,6 +490,7 @@ def create_session(
     fast: Optional[bool] = None,
     mode: Optional[str] = None,
     hidden: bool = False,
+    is_worker: bool = False,
     target_instance_id: Optional[str] = None,
     project_v2_id: Optional[str] = None,
     _conn=None
@@ -548,6 +548,13 @@ def create_session(
             wake-word "command" voice sessions are born hidden so they never
             flash into "recent sessions". List-visibility only: the row is
             still fetchable by id.
+        is_worker: Mark this session as a delegated ProviderAgent worker (v84).
+            Workers are also created ``hidden=True``, which is what keeps them
+            out of the lists today; this flag is the durable, queryable fact
+            behind that — it is what the list queries now filter on instead of
+            the correlated ``NOT EXISTS (... turns ...)`` probe they used to run
+            for every row (finding B7). ``False`` (the default) = a normal
+            session.
         target_instance_id: Create this session OWNED BY another install (the
             composer's device picker). The row is stamped with that install as
             ``instance_id`` AND with an EXPLICIT sticky ``placement`` pin
@@ -609,25 +616,28 @@ def create_session(
             resolved_provider_id = None
     resolved_mode = (mode or "").strip() or None
     _ph = ph()
-    columns = ["id", "profile_id", "project_id", "project_v2_id", "title", "api_user_id", "parent_session_id", "fork_point_message_index", "worktree_id", "worktree_branch", "worktree_path", "automation_id", "instance_id", "is_active", "v2_stream", "created_at", "updated_at", "provider_id", "model", "effort", "permission_mode", "context_window", "fast", "mode", "hidden"]
-    params = [session_id, profile_id, project_id, project_v2_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, True, now, now, resolved_provider_id, selected_model, selected_effort, selected_permission_mode, selected_context_window, selected_fast, resolved_mode, hidden]
+    columns = ["id", "profile_id", "project_id", "project_v2_id", "title", "api_user_id", "parent_session_id", "fork_point_message_index", "worktree_id", "worktree_branch", "worktree_path", "automation_id", "instance_id", "is_active", "v2_stream", "created_at", "updated_at", "provider_id", "model", "effort", "permission_mode", "context_window", "fast", "mode", "hidden", "is_worker"]
+    params = [session_id, profile_id, project_id, project_v2_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, True, now, now, resolved_provider_id, selected_model, selected_effort, selected_permission_mode, selected_context_window, selected_fast, resolved_mode, hidden, bool(is_worker)]
     if target_instance_id:
         # Serialized to a JSON string (not a dict) so the SQLite test shim, which
         # stores JSONB columns as TEXT, round-trips identically to Postgres —
         # same handling as pin_session_placement / adopt_session.
         columns.append("placement")
         params.append(json.dumps({"where": f"runner:{target_instance_id}"}))
+    # RETURNING * instead of a follow-up get_session(): one round trip, and the
+    # row returned is exactly the one just written (finding B8).
     sql = f"""INSERT INTO sessions ({", ".join(columns)})
-               VALUES ({", ".join([_ph] * len(columns))})"""
+               VALUES ({", ".join([_ph] * len(columns))})
+               RETURNING *"""
     params = tuple(params)
     if _conn is not None:
         cursor = get_cursor(_conn)
         cursor.execute(sql, params)
-    else:
-        with get_db() as conn:
-            cursor = get_cursor(conn)
-            cursor.execute(sql, params)
-    return get_session(session_id)
+        return row_to_dict(cursor.fetchone())
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(sql, params)
+        return row_to_dict(cursor.fetchone())
 
 
 def create_session_with_stats(
@@ -674,12 +684,12 @@ def create_session_with_stats(
                 id, profile_id, project_id, title, api_user_id,
                 sdk_session_id, total_cost_usd, total_tokens_in, total_tokens_out, turn_count,
                 instance_id, created_at, updated_at
-            ) VALUES ({_phs13})""",
+            ) VALUES ({_phs13}) RETURNING *""",
             (session_id, profile_id, project_id, title, api_user_id,
              sdk_session_id, total_cost_usd, total_tokens_in, total_tokens_out, turn_count,
              instance_id, ts_created, now)
         )
-    return get_session(session_id)
+        return row_to_dict(cursor.fetchone())
 
 
 def update_session(
@@ -793,14 +803,15 @@ def update_session(
 
     values.append(session_id)
 
+    # RETURNING * folds the old UPDATE-then-SELECT into one statement on a path
+    # every turn hits several times (finding B8).
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            f"UPDATE sessions SET {', '.join(updates)} WHERE id = {_ph}",
+            f"UPDATE sessions SET {', '.join(updates)} WHERE id = {_ph} RETURNING *",
             values
         )
-
-    return get_session(session_id)
+        return row_to_dict(cursor.fetchone())
 
 
 def _provider_for_model_pick(
@@ -999,12 +1010,10 @@ def adopt_session(session_id: str, instance_id: str) -> Optional[SessionRow]:
         cursor = get_cursor(conn)
         cursor.execute(
             f"UPDATE sessions SET instance_id = {_ph}, placement = {_ph}, "
-            f"updated_at = {_ph} WHERE id = {_ph}",
+            f"updated_at = {_ph} WHERE id = {_ph} RETURNING *",
             (instance_id, placement_json, now, session_id),
         )
-        if cursor.rowcount == 0:
-            return None
-    return get_session(session_id)
+        return row_to_dict(cursor.fetchone())
 
 
 def adopt_session_follow(session_id: str, instance_id: str) -> Optional[SessionRow]:
@@ -1029,12 +1038,10 @@ def adopt_session_follow(session_id: str, instance_id: str) -> Optional[SessionR
         cursor = get_cursor(conn)
         cursor.execute(
             f"UPDATE sessions SET instance_id = {_ph}, updated_at = {_ph} "
-            f"WHERE id = {_ph}",
+            f"WHERE id = {_ph} RETURNING *",
             (instance_id, now, session_id),
         )
-        if cursor.rowcount == 0:
-            return None
-    return get_session(session_id)
+        return row_to_dict(cursor.fetchone())
 
 
 def unpin_session(session_id: str, instance_id: str) -> Optional[SessionRow]:
@@ -1052,12 +1059,10 @@ def unpin_session(session_id: str, instance_id: str) -> Optional[SessionRow]:
         cursor = get_cursor(conn)
         cursor.execute(
             f"UPDATE sessions SET instance_id = {_ph}, placement = {_ph}, "
-            f"updated_at = {_ph} WHERE id = {_ph}",
+            f"updated_at = {_ph} WHERE id = {_ph} RETURNING *",
             (instance_id, None, now, session_id),
         )
-        if cursor.rowcount == 0:
-            return None
-    return get_session(session_id)
+        return row_to_dict(cursor.fetchone())
 
 
 def pin_session_placement(session_id: str, runner_id: str) -> bool:
@@ -1110,12 +1115,11 @@ def set_session_project(session_id: str, project_id: str) -> Optional[SessionRow
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            f"UPDATE sessions SET project_id = {_ph}, updated_at = {_ph} WHERE id = {_ph}",
+            f"UPDATE sessions SET project_id = {_ph}, updated_at = {_ph} "
+            f"WHERE id = {_ph} RETURNING *",
             (project_id, now, session_id),
         )
-        if cursor.rowcount == 0:
-            return None
-    return get_session(session_id)
+        return row_to_dict(cursor.fetchone())
 
 
 def set_session_branch(
@@ -1139,17 +1143,16 @@ def set_session_branch(
         if project_v2_id is not None:
             cursor.execute(
                 f"UPDATE sessions SET branch = {_ph}, project_v2_id = {_ph}, "
-                f"updated_at = {_ph} WHERE id = {_ph}",
+                f"updated_at = {_ph} WHERE id = {_ph} RETURNING *",
                 (branch, project_v2_id, now, session_id),
             )
         else:
             cursor.execute(
-                f"UPDATE sessions SET branch = {_ph}, updated_at = {_ph} WHERE id = {_ph}",
+                f"UPDATE sessions SET branch = {_ph}, updated_at = {_ph} "
+                f"WHERE id = {_ph} RETURNING *",
                 (branch, now, session_id),
             )
-        if cursor.rowcount == 0:
-            return None
-    return get_session(session_id)
+        return row_to_dict(cursor.fetchone())
 
 
 def set_session_parked_task_kind(session_id: str, kind: Optional[str]) -> bool:
@@ -1316,12 +1319,10 @@ def set_session_active(session_id: str, is_active: bool) -> Optional[SessionRow]
         cursor = get_cursor(conn)
         cursor.execute(
             f"""UPDATE sessions SET is_active = {_ph}, updated_at = {_ph}
-               WHERE id = {_ph}""",
+               WHERE id = {_ph} RETURNING *""",
             (is_active, datetime.now(timezone.utc).isoformat(), session_id)
         )
-        if cursor.rowcount == 0:
-            return None
-    return get_session(session_id)
+        return row_to_dict(cursor.fetchone())
 
 
 def set_session_hidden(session_id: str, hidden: bool) -> Optional[SessionRow]:
@@ -1333,12 +1334,10 @@ def set_session_hidden(session_id: str, hidden: bool) -> Optional[SessionRow]:
         cursor = get_cursor(conn)
         cursor.execute(
             f"""UPDATE sessions SET hidden = {_ph}, updated_at = {_ph}
-               WHERE id = {_ph}""",
+               WHERE id = {_ph} RETURNING *""",
             (hidden, datetime.now(timezone.utc).isoformat(), session_id)
         )
-        if cursor.rowcount == 0:
-            return None
-    return get_session(session_id)
+        return row_to_dict(cursor.fetchone())
 
 
 def session_has_forks(session_id: str) -> bool:
@@ -1602,9 +1601,11 @@ def upsert_team_member_message(
 
     with get_db() as conn:
         cursor = get_cursor(conn)
-        # Find the most recent existing row for this teammate.
+        # Find the most recent existing row for this teammate. ONE query for
+        # id + metadata (finding B10): this used to list every team_member id
+        # and then re-SELECT each row's metadata one at a time.
         cursor.execute(
-            f"""SELECT id FROM session_messages
+            f"""SELECT id, metadata FROM session_messages
                  WHERE session_id = {_ph} AND role = 'team_member'
                  ORDER BY id DESC""",
             (session_id,),
@@ -1612,16 +1613,10 @@ def upsert_team_member_message(
         rows = cursor.fetchall() or []
         target_id: Optional[int] = None
         for r in rows:
-            # Re-read metadata column to filter by teammate name.
-            cursor.execute(
-                f"SELECT metadata FROM session_messages WHERE id = {_ph}",
-                (r["id"],),
-            )
-            m_row = cursor.fetchone()
-            if not m_row or not m_row.get("metadata"):
+            raw = r["metadata"] if not isinstance(r, dict) else r.get("metadata")
+            if not raw:
                 continue
             try:
-                raw = m_row["metadata"]
                 m = json.loads(raw) if isinstance(raw, str) else raw
             except (TypeError, ValueError):
                 continue

@@ -15,6 +15,13 @@ helpers. Readers tail by ``seq > from_seq``. A best-effort ``pg_notify`` on the
 ``session_events`` channel wakes the gateway; delivery must not depend on it (the
 gateway also polls), and ``pg_notify`` does not exist on the SQLite test shim, so
 the notify is guarded and non-fatal.
+
+The ONE exception to "append-only" is :func:`compact_session_deltas` — a
+retention pass for long-idle sessions that is *lossless by construction*: it
+performs exactly the merge the SSE replay already performs at read time
+(``app.api.events._coalesce_deltas``), so the bytes a client receives are
+unchanged. Nothing is ever deleted that a replay would have delivered. See its
+docstring for the full safety argument.
 """
 
 from __future__ import annotations
@@ -22,7 +29,8 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.db.base import get_db, rows_to_list
 
@@ -453,3 +461,317 @@ def copy_session_events(
             params,
         )
     return n
+
+
+# ----------------------------------------------------------------------
+# Retention: lossless delta compaction for long-idle sessions (B6)
+# ----------------------------------------------------------------------
+
+# The delta types the SSE replay already merges at read time
+# (``app.api.events._COALESCE_TYPES``). Kept as a literal rather than an import
+# so the db layer never reaches up into the api layer; the pairing is asserted
+# by tests/db/test_session_events_compaction.py.
+COMPACTABLE_DELTA_TYPES: Tuple[str, ...] = (
+    "assistant.text_delta",
+    "assistant.thinking_delta",
+)
+
+# Rows at the tail of a session are never touched, so no plausible live cursor
+# can sit inside a compacted run (see the safety argument below).
+DEFAULT_KEEP_TAIL_EVENTS = 1000
+# Per-call work caps: this runs inside the periodic maintenance transaction.
+DEFAULT_MAX_RUNS_PER_SESSION = 500
+DEFAULT_MAX_SESSIONS = 25
+_MAX_SCAN_ROWS = 50_000
+
+# Round-robin cursor over session ids so successive maintenance passes work
+# through the whole table instead of re-scanning the same first N sessions.
+_compaction_cursor: str = ""
+
+
+def _run_key(row: Dict[str, Any]) -> Tuple[Any, Any, Any]:
+    """What makes two delta rows part of the same run (mirrors ``_delta_key``)."""
+    return (row.get("event_type"), row.get("turn_id"), row.get("run_id"))
+
+
+def _delta_runs(
+    rows: Sequence[Dict[str, Any]], max_runs: int
+) -> List[Tuple[int, int]]:
+    """Return ``(first_seq, last_seq)`` for each mergeable delta run.
+
+    A run is a maximal group of CONSECUTIVE rows (consecutive in the log's read
+    order, which is what the replay coalescer sees — seq numbers need not be
+    contiguous) sharing one ``(event_type, turn_id, run_id)`` key, where the
+    type is coalescable. Single-row runs are skipped: there is nothing to merge.
+    """
+    runs: List[Tuple[int, int]] = []
+    key: Optional[Tuple[Any, Any, Any]] = None
+    first = last = 0
+    count = 0
+    for row in rows:
+        if row.get("event_type") in COMPACTABLE_DELTA_TYPES:
+            row_key = _run_key(row)
+            if count and row_key == key:
+                last = int(row["seq"])
+                count += 1
+                continue
+            if count > 1:
+                runs.append((first, last))
+                if len(runs) >= max_runs:
+                    return runs
+            key = row_key
+            first = last = int(row["seq"])
+            count = 1
+            continue
+        if count > 1:
+            runs.append((first, last))
+            if len(runs) >= max_runs:
+                return runs
+        key, count = None, 0
+    if count > 1:
+        runs.append((first, last))
+    return runs[:max_runs]
+
+
+def compact_session_deltas(
+    session_id: str,
+    *,
+    keep_tail_events: int = DEFAULT_KEEP_TAIL_EVENTS,
+    max_runs: int = DEFAULT_MAX_RUNS_PER_SESSION,
+    cursor: Optional[Any] = None,
+    dry_run: bool = False,
+) -> Tuple[int, int]:
+    """Merge historical streaming-delta runs in place. Returns ``(runs, rows)``.
+
+    ``session_events`` grows forever: a streamed answer costs one row per ~100 ms
+    chunk, and nothing has ever pruned them. This is the retention pass, and it
+    is deliberately a COMPACTION rather than a deletion.
+
+    What it does, per run of consecutive same-key delta rows: joins their text
+    into the run's payload, keeps ONE row carrying the FIRST row's envelope
+    (id / created_at / command_id / turn_id / run_id / type) at the LAST row's
+    ``seq``, and deletes the rest.
+
+    Safety argument
+    ---------------
+    * **The wire output is unchanged.** That surviving row is byte-for-byte what
+      ``app.api.events._merged_row`` already builds for this run on every
+      replay: the coalescer merges consecutive same-key delta rows into one
+      frame carrying the joined text, the first row's envelope and the LAST
+      row's seq. Compaction therefore removes only rows the replay never emitted
+      individually in the first place. It is not a truncation of history and
+      does not depend on (nor interact with) the compacted-prefix elision: no
+      renderable content is lost even for a session whose Fluid transcript later
+      becomes unreadable and whose elision falls back to a full replay.
+    * **Partial runs stay safe.** If a run straddles the retention ceiling, the
+      part below it merges and the rest stays as individual rows; at read time
+      the coalescer merges survivor + remainder into the identical single frame
+      with the identical final seq. The same holds for a run split by the
+      per-call work cap.
+    * **``seq > from_seq`` stays gap-free and duplicate-free.** Seqs are never
+      reused or renumbered, and the SSE cursor is ``max(seq)`` of what the client
+      was actually sent (``sse-feed.ts``), never an assumption about density —
+      so the numeric holes left behind are unobservable. A fresh load
+      (``from_seq=0``) and any reconnect whose cursor lies at or below a run's
+      first seq, or at or above its last, receive exactly what they did before.
+    * **The one divergent case is excluded by the retention ceiling.** A cursor
+      landing strictly INSIDE a compacted run would now receive the run's whole
+      merged text instead of its tail. Only the last ``keep_tail_events`` seqs
+      of a session can hold a live or resumable cursor, and those are never
+      touched; callers additionally restrict this to sessions idle for days
+      (:func:`compact_idle_session_deltas`).
+    * **Nothing else reads these rows.** Turn-outcome and worker-progress
+      readers reconstruct text from the LAST turn's deltas — inside the retained
+      tail. ``get_user_seq_for_turn`` (the elision bridge) reads ``message.user``
+      rows, ``has_subagent_started`` reads ``subagent.started``; neither is
+      compactable. ``copy_session_events`` (fork) copies the merged rows and
+      renders identically.
+
+    Pass ``cursor`` to run inside a caller's transaction (the maintenance job
+    does); otherwise this opens its own. ``dry_run`` reports what would change
+    without writing.
+    """
+    if keep_tail_events < 0 or max_runs <= 0:
+        return 0, 0
+
+    if cursor is not None:
+        return _compact_session_deltas(
+            cursor, session_id, keep_tail_events, max_runs, dry_run
+        )
+    with get_db() as conn:
+        return _compact_session_deltas(
+            conn.cursor(), session_id, keep_tail_events, max_runs, dry_run
+        )
+
+
+def _compact_session_deltas(
+    cur: Any,
+    session_id: str,
+    keep_tail_events: int,
+    max_runs: int,
+    dry_run: bool,
+) -> Tuple[int, int]:
+    cur.execute(
+        "SELECT next_seq FROM session_event_counters WHERE session_id = %s",
+        (session_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return 0, 0
+    ceiling = int(row["next_seq"]) - int(keep_tail_events)
+    if ceiling <= 1:
+        return 0, 0
+
+    cur.execute(
+        "SELECT seq, event_type, turn_id, run_id FROM session_events "
+        "WHERE session_id = %s AND seq <= %s ORDER BY seq ASC LIMIT %s",
+        (session_id, ceiling, _MAX_SCAN_ROWS),
+    )
+    scanned = rows_to_list(cur.fetchall())
+    runs = _delta_runs(scanned, max_runs)
+    if not runs:
+        return 0, 0
+
+    compacted = 0
+    deleted = 0
+    for first_seq, last_seq in runs:
+        cur.execute(
+            "SELECT id, seq, payload, command_id, created_at FROM session_events "
+            "WHERE session_id = %s AND seq >= %s AND seq <= %s ORDER BY seq ASC",
+            (session_id, first_seq, last_seq),
+        )
+        members = rows_to_list(cur.fetchall())
+        if len(members) < 2:
+            continue  # raced with a concurrent change — leave it alone
+        head = members[0]
+        text = "".join(
+            (_parse_payload(m.get("payload")).get("text") or "") for m in members
+        )
+        payload = dict(_parse_payload(head.get("payload")))
+        payload["text"] = text
+        compacted += 1
+        deleted += len(members) - 1
+        if dry_run:
+            continue
+        cur.execute(
+            "DELETE FROM session_events "
+            "WHERE session_id = %s AND seq >= %s AND seq < %s",
+            (session_id, first_seq, last_seq),
+        )
+        # The survivor becomes the exact row the replay coalescer would have
+        # produced: the FIRST row's envelope carried at the LAST row's seq.
+        cur.execute(
+            "UPDATE session_events SET id = %s, payload = %s, command_id = %s, "
+            "created_at = %s WHERE session_id = %s AND seq = %s",
+            (
+                head["id"],
+                json.dumps(_scrub_pg_illegal(payload)),
+                head.get("command_id"),
+                head.get("created_at"),
+                session_id,
+                last_seq,
+            ),
+        )
+    return compacted, deleted
+
+
+def compact_idle_session_deltas(
+    older_than_days: int = 7,
+    *,
+    keep_tail_events: int = DEFAULT_KEEP_TAIL_EVENTS,
+    max_sessions: int = DEFAULT_MAX_SESSIONS,
+    max_runs_per_session: int = DEFAULT_MAX_RUNS_PER_SESSION,
+    cursor: Optional[Any] = None,
+) -> Dict[str, int]:
+    """Compact delta runs for sessions idle longer than ``older_than_days``.
+
+    The maintenance entry point (``app.db.database.periodic_maintenance`` must
+    call this — see the wiring note there). ``older_than_days <= 0`` disables the
+    pass and touches nothing.
+
+    Idleness comes from ``sessions.updated_at``, the same signal
+    ``prune_fluid_delta_events`` uses: a streaming session bumps it constantly,
+    so an active session can never fall inside the cutoff. Sessions with no
+    ``sessions`` row are skipped — there is no signal to age them by. Work is
+    capped per pass (``max_sessions``) and resumes from a module-level
+    round-robin cursor, so a large install is covered over successive passes
+    instead of one long transaction.
+
+    Returns ``{"sessions": n, "runs": n, "rows": n}`` (rows = rows removed).
+    """
+    global _compaction_cursor
+    if older_than_days <= 0 or max_sessions <= 0:
+        return {"sessions": 0, "runs": 0, "rows": 0}
+
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=older_than_days)
+    ).isoformat()
+
+    def _work(cur: Any) -> Dict[str, int]:
+        global _compaction_cursor
+        candidates = _idle_candidates(
+            cur, cutoff, keep_tail_events, max_sessions, _compaction_cursor
+        )
+        if not candidates and _compaction_cursor:
+            # Wrapped past the end — restart the rotation from the beginning.
+            _compaction_cursor = ""
+            candidates = _idle_candidates(
+                cur, cutoff, keep_tail_events, max_sessions, ""
+            )
+        totals = {"sessions": 0, "runs": 0, "rows": 0}
+        for session_id in candidates:
+            _compaction_cursor = session_id
+            try:
+                runs, rows = _compact_session_deltas(
+                    cur, session_id, keep_tail_events, max_runs_per_session, False
+                )
+            except Exception:
+                logger.warning(
+                    "session_events: delta compaction failed for %s",
+                    session_id, exc_info=True,
+                )
+                continue
+            if rows:
+                totals["sessions"] += 1
+                totals["runs"] += runs
+                totals["rows"] += rows
+        return totals
+
+    if cursor is not None:
+        totals = _work(cursor)
+    else:
+        with get_db() as conn:
+            totals = _work(conn.cursor())
+
+    if totals["rows"]:
+        logger.info(
+            "session_events: compacted %d delta run(s) into %d fewer row(s) "
+            "across %d session(s) idle more than %d day(s)",
+            totals["runs"], totals["rows"], totals["sessions"], older_than_days,
+        )
+    return totals
+
+
+def _idle_candidates(
+    cur: Any,
+    cutoff: str,
+    keep_tail_events: int,
+    limit: int,
+    after_session_id: str,
+) -> List[str]:
+    """Idle sessions with enough history to be worth compacting, id-ordered."""
+    # The lease-valid-active-run exclusion is belt-and-braces on top of the
+    # idle window (a streaming session bumps ``sessions.updated_at`` constantly,
+    # so it cannot be inside the cutoff anyway) — the predicate is verbatim from
+    # app/db/runs.py. It runs over at most ``limit`` candidate rows, not a list
+    # page, so the correlated probe is not a hot path.
+    cur.execute(
+        "SELECT c.session_id AS session_id FROM session_event_counters c "
+        "JOIN sessions s ON s.id = c.session_id "
+        "WHERE c.next_seq > %s AND s.updated_at < %s AND c.session_id > %s "
+        "AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.session_id = c.session_id "
+        "AND r.state = 'active' AND r.lease_expires_at >= NOW()) "
+        "ORDER BY c.session_id ASC LIMIT %s",
+        (int(keep_tail_events) + 1, cutoff, after_session_id, int(limit)),
+    )
+    return [r["session_id"] for r in rows_to_list(cur.fetchall())]

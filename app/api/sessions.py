@@ -13,7 +13,7 @@ All public symbols are re-exported here for backward compatibility.
 import asyncio
 from typing import List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends, Query, status, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends, Query, Response, status, Request
 
 try:
     from claude_agent_sdk import get_session_messages as sdk_get_session_messages
@@ -716,9 +716,57 @@ async def search_sessions_paginated(
     )
 
 
+def _set_message_pagination_headers(response: Response, pagination: dict) -> None:
+    """Publish the transcript window on response headers.
+
+    ``SessionWithMessages`` is a pinned response model, so the window metadata
+    rides headers rather than new body fields — additive, and invisible to
+    every existing client. ``X-Message-Next-Before-Seq`` is the cursor to pass
+    back as ``?before_seq=`` for the next (older) page.
+    """
+    response.headers["X-Message-Total"] = str(pagination["total"])
+    response.headers["X-Message-Returned"] = str(pagination["returned"])
+    response.headers["X-Message-Limit"] = str(pagination["limit"])
+    response.headers["X-Message-Has-More"] = "true" if pagination["has_more"] else "false"
+    if pagination.get("first_seq") is not None:
+        response.headers["X-Message-First-Seq"] = str(pagination["first_seq"])
+    if pagination.get("next_before_seq") is not None:
+        response.headers["X-Message-Next-Before-Seq"] = str(pagination["next_before_seq"])
+
+
 @router.get("/{session_id}", response_model=SessionWithMessages)
-async def get_session(request: Request, session_id: str, token: str = Depends(require_auth)):
-    """Get a session with its message history. API users can only access their assigned sessions."""
+async def get_session(
+    request: Request,
+    response: Response,
+    session_id: str,
+    message_limit: Optional[int] = Query(
+        None,
+        ge=1,
+        le=MAX_MESSAGE_PAGE_LIMIT,
+        description=(
+            "Max messages to return, newest-first window (default "
+            f"{DEFAULT_MESSAGE_PAGE_LIMIT}). See the X-Message-* response headers."
+        ),
+    ),
+    before_seq: Optional[int] = Query(
+        None,
+        ge=0,
+        description=(
+            "Keyset cursor: return the window of messages ENDING before this "
+            "0-based transcript position. Pass X-Message-Next-Before-Seq from "
+            "the previous response to page backwards through older messages."
+        ),
+    ),
+    token: str = Depends(require_auth),
+):
+    """Get a session with its message history. API users can only access their assigned sessions.
+
+    Messages come back oldest→newest, capped to the newest ``message_limit``
+    (default 2000 — above any ordinary transcript, so the default response is
+    unchanged for existing clients). ``X-Message-Has-More`` /
+    ``X-Message-Next-Before-Seq`` expose whether older messages exist and how
+    to fetch them.
+    """
     import traceback
 
     logger.debug(f"Loading session: {session_id}")
@@ -783,63 +831,13 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
                     parse_session_history_via_store, sdk_session_id, working_dir
                 )
             if jsonl_messages:
-                # Per-message profile resolution. JSONL entries carry no DB row id,
-                # so each user message's profile is read from the DB user rows by
-                # matching content and consuming the match in order (cached to avoid
-                # re-loading all DB messages). Popping left-to-right assigns the
-                # correct profile even when the profile changed mid-session and the
-                # same prompt text repeats. (This must reach the response: the
-                # SessionMessage model now carries profile_id/profileId, which the
-                # frontend reads to label each bubble.)
-                from app.core.cost_utils import build_profile_queues
-                profile_queues = build_profile_queues(session_id)
-
-                # Transform to expected format for SessionWithMessages
-                # Use camelCase for frontend compatibility (toolName, toolInput, toolId)
-                current_turn_profile = None
-                for i, m in enumerate(jsonl_messages):
-                    # Resolve this message's profile. A user row reads its OWN
-                    # profile from the ordered per-content queue built from the DB
-                    # user rows; that profile then carries to the turn's
-                    # assistant/thinking rows (which the JSONL transcript stores
-                    # without a profile) so each bubble keeps the profile that
-                    # produced it instead of falling back to the session's CURRENT
-                    # profile when the user switches selection.
-                    if m.get("role") == "user":
-                        queue = profile_queues.get(m.get("content", ""))
-                        current_turn_profile = queue.popleft() if queue else None
-                    msg_profile_id = current_turn_profile
-                    # Timestamps live in metadata (not Pydantic datetime fields);
-                    # the frontend reads them directly from metadata for display.
-                    msg_data = {
-                        "id": m.get("id", i),
-                        "role": m.get("role", "user"),
-                        "content": m.get("content", ""),
-                        "type": m.get("type"),  # Critical for tool_use/tool_result rendering
-                        "subtype": m.get("subtype"),  # For system messages (e.g., local_command)
-                        "systemSubtype": m.get("systemSubtype"),  # Frontend-compatible system subtype
-                        "systemData": m.get("systemData"),  # Structured data for system messages
-                        "toolName": m.get("toolName"),  # camelCase for frontend
-                        "toolInput": m.get("toolInput"),  # camelCase for frontend
-                        "toolId": m.get("toolId"),
-                        "toolResult": m.get("toolResult"),  # Tool output grouped with tool_use
-                        "toolStatus": m.get("toolStatus"),  # Status: running, complete, error
-                        "toolScreenshot": m.get("toolScreenshot"),  # Inline screenshot (Chrome/computer-use, Read of image)
-                        "tool_name": m.get("toolName"),  # Also include snake_case for compatibility
-                        "tool_input": m.get("toolInput"),  # Also include snake_case for compatibility
-                        "metadata": m.get("metadata"),
-                        "profile_id": msg_profile_id,
-                        "profileId": msg_profile_id,
-                        "created_at": None  # Let Pydantic use default; timestamp is in metadata
-                    }
-                    # Include subagent-specific fields if present
-                    if m.get("type") == "subagent":
-                        msg_data["agentId"] = m.get("agentId")
-                        msg_data["agentType"] = m.get("agentType")
-                        msg_data["agentDescription"] = m.get("agentDescription")
-                        msg_data["agentStatus"] = m.get("agentStatus")
-                        msg_data["agentChildren"] = m.get("agentChildren")
-                    messages.append(msg_data)
+                # Transform (incl. the DB-backed per-message profile
+                # resolution) in ONE thread hop — it used to run inline on the
+                # event loop, blocking every concurrent request for the length
+                # of the transcript.
+                messages = await run_sync(
+                    build_detail_messages, session_id, jsonl_messages
+                )
 
             # Token usage from JSONL (extracted in same pass as messages)
             logger.debug(f"[Session API] JSONL usage_data for {session_id}: {usage_data}")
@@ -898,12 +896,17 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
             )
         messages = await _legacy_db_messages(session_id)
 
-    # Attach cost/duration metadata to final assistant messages (cached, O(N))
-    from app.core.cost_utils import attach_cost_metadata, attach_user_message_metadata
-    attach_cost_metadata(messages, session_id)
-    # Store/JSONL transcripts drop the DB row's user-message metadata
-    # (e.g. automation_id/automation_run_id) — merge it back (PR #560 follow-up)
-    attach_user_message_metadata(messages, session_id)
+    # Cost/duration + user-row metadata attach, then the keyset window and the
+    # display caps (tool inputs, inline screenshots) — all synchronous DB/CPU
+    # work, done in ONE thread hop instead of on the event loop.
+    messages, message_pagination = await run_sync(
+        finalize_transcript,
+        session_id,
+        messages,
+        limit=message_limit,
+        before_seq=before_seq,
+    )
+    _set_message_pagination_headers(response, message_pagination)
 
     session["messages"] = messages
     session["tags"] = await run_sync(database.get_session_tags, session_id)
@@ -1006,6 +1009,25 @@ async def get_live_session(
         description=(
             "Set false for a metadata-only snapshot: the transcript is skipped "
             "and `messages` comes back empty."
+        ),
+    ),
+    message_limit: Optional[int] = Query(
+        None,
+        ge=1,
+        le=MAX_MESSAGE_PAGE_LIMIT,
+        description=(
+            "Max messages to return, newest-first window (default "
+            f"{DEFAULT_MESSAGE_PAGE_LIMIT}). The window is described by the "
+            "`message_pagination` object on the response."
+        ),
+    ),
+    before_seq: Optional[int] = Query(
+        None,
+        ge=0,
+        description=(
+            "Keyset cursor: return the window of messages ENDING before this "
+            "0-based transcript position. Pass `message_pagination."
+            "next_before_seq` from the previous response to page backwards."
         ),
     ),
     token: str = Depends(require_auth)
@@ -1130,40 +1152,11 @@ async def get_live_session(
                     parse_session_history_via_store, sdk_session_id, working_dir
                 )
             if jsonl_messages:
-                # Optional fields to include when present (system, tool, subagent, metadata)
-                _OPTIONAL_LIVE_FIELDS = (
-                    "uuid",  # Raw JSONL entry uuid — lets the UI rewind by uuid directly
-                    "subtype", "systemSubtype", "systemData",
-                    "toolName", "toolId", "toolInput", "toolResult", "toolStatus",
-                    "toolScreenshot",  # inline screenshot (Chrome/computer-use, Read of image)
-                    "agentId", "agentType", "agentDescription", "agentPrompt",
-                    "agentStatus", "agentChildren", "agentUsage",
-                    "metadata",
+                # Transform + per-message profile resolution in ONE thread hop
+                # (see GET /{id}); both used to run on the event loop.
+                messages = await run_sync(
+                    build_live_messages, session_id, jsonl_messages
                 )
-
-                # Transform to live format
-                for m in jsonl_messages:
-                    msg = {
-                        "id": m.get("id", ""),
-                        "role": m.get("role", "user"),
-                        "type": m.get("type", "text"),
-                        "content": m.get("content", ""),
-                        "streaming": False,
-                    }
-                    for field in _OPTIONAL_LIVE_FIELDS:
-                        value = m.get(field)
-                        if value is not None:
-                            msg[field] = value
-                    messages.append(msg)
-
-                # Per-message profile resolution — same ordered-queue merge as
-                # GET /{id}: JSONL entries carry no DB row id, so each user
-                # message consumes its content's queue built from the DB rows,
-                # and that profile carries to the turn's assistant/thinking rows
-                # so each bubble keeps the profile that produced it (rather than
-                # re-labelling to the session's CURRENT profile on a switch).
-                from app.core.cost_utils import attach_turn_profile_ids
-                attach_turn_profile_ids(session_id, messages)
 
         except Exception as e:
             logger.error(f"Failed to parse transcript for live session {session_id}: {e}")
@@ -1195,6 +1188,7 @@ async def get_live_session(
 
     # Message post-processing — every step here reads or rewrites the transcript,
     # so all of it is skipped along with the transcript itself.
+    message_pagination = paginate_messages([], message_limit)[1]
     if include_messages:
         # Registry reconcile: even with the buffer gone (or never present), a
         # sub-agent still running in the task registry must not render
@@ -1203,16 +1197,17 @@ async def get_live_session(
         # as loaded.
         _reconcile_subagent_status(messages, active_tasks)
 
-        # Attach cost/duration metadata to final assistant messages (cached, O(N))
-        # This ensures the poller gets cost data on the first poll after streaming ends
-        from app.core.cost_utils import (
-            attach_cost_metadata,
-            attach_user_message_metadata,
+        # Cost/duration + user-row metadata attach (so the poller gets cost data
+        # on the first poll after streaming ends), then the keyset window and
+        # the display caps — ONE thread hop instead of blocking DB work on the
+        # event loop for every poll.
+        messages, message_pagination = await run_sync(
+            finalize_transcript,
+            session_id,
+            messages,
+            limit=message_limit,
+            before_seq=before_seq,
         )
-        attach_cost_metadata(messages, session_id)
-        # Store/JSONL transcripts drop the DB row's user-message metadata
-        # (e.g. automation_id/automation_run_id) — merge it back (PR #560 follow-up)
-        attach_user_message_metadata(messages, session_id)
 
     # Build response in live format
     # IMPORTANT: For context window calculation, the frontend needs per-turn
@@ -1255,6 +1250,10 @@ async def get_live_session(
         "activeTasks": active_tasks,
         "unpark_pending": unpark_pending,
         "v2_stream": v2_stream,
+        # Transcript window (B1). Additive: `messages` still carries the newest
+        # page (the whole transcript for any ordinary session), and this says
+        # whether older messages exist and how to ask for them.
+        "message_pagination": message_pagination,
     }
     if session_meta:
         result["session_meta"] = session_meta

@@ -17,7 +17,7 @@
 	 * chats from deleted projects or devices, are list-hidden and never enter
 	 * the filters or either visible group.
 	 */
-	import { onDestroy, type Snippet } from 'svelte';
+	import { onDestroy, untrack, type Snippet } from 'svelte';
 	import {
 		Search,
 		FolderClosed,
@@ -37,7 +37,14 @@
 	} from 'lucide-svelte';
 	import type { Session } from '$lib/api/client';
 	import { getPullRequests, type PullRequest } from '$lib/api/github';
-	import { sessions, projects, clusterProjects } from '$lib/stores/app-data.svelte';
+	import {
+		appData,
+		sessions,
+		projects,
+		clusterProjects,
+		sessionsHasMore,
+		sessionsLoadingMore
+	} from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
 	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
@@ -129,6 +136,7 @@
 
 	onDestroy(() => {
 		if (tickTimer) clearInterval(tickTimer);
+		if (prRefreshTimer) clearTimeout(prRefreshTimer);
 	});
 
 	// ---------------------------------------------------------------- data
@@ -137,14 +145,23 @@
 	const liveKeys = $derived(liveProjectKeys($projects, $clusterProjects));
 	const sidebarSessions = $derived($sessions.filter((s) => isVisibleSidebarSession(s, liveKeys)));
 
+	// The open session's streaming flag, narrowed to a SINGLE scalar (R2).
+	//
+	// `$activeSession` folds ~60×/s while a turn streams. Reading it inside
+	// `rows` made the sidebar re-filter, re-map and re-sort the whole session
+	// list on every frame. This derived collapses the fold to "which session id
+	// is the open one streaming, if any" — a value that only changes when the
+	// flag actually flips, so `rows` stays clean across folds.
+	//
+	// On switch-in, $activeSession.isStreaming is reset to false until the SSE
+	// replay re-derives it — trusting it alone flashes the card to Done while
+	// the transcript loads. The cross-device map carries the durable busy
+	// signal (backend runs table), so OR it in for the open session too.
+	const activeStreamingId = $derived($activeSession.isStreaming ? $activeSession.sessionId : null);
+	const streamingMap = $derived($streamingSessions);
+
 	function isStreaming(id: string): boolean {
-		// On switch-in, $activeSession.isStreaming is reset to false until the SSE
-		// replay re-derives it — trusting it alone flashes the card to Done while
-		// the transcript loads. The cross-device map carries the durable busy
-		// signal (backend runs table), so OR it in for the open session too.
-		if ($activeSession.sessionId === id)
-			return $activeSession.isStreaming || $streamingSessions.has(id);
-		return $streamingSessions.has(id);
+		return streamingMap.has(id) || activeStreamingId === id;
 	}
 
 	function projectLabel(s: Session): string {
@@ -172,28 +189,78 @@
 		return [...wanted.entries()].map(([projectId, branches]) => ({ projectId, branches }));
 	});
 
+	/** Identity of the (project, branch) set the PR badges depend on. */
+	const prProjectsKey = $derived(
+		prProjects.map((p) => `${p.projectId}\u0000${[...p.branches].sort().join('\u0001')}`).join('\u0002')
+	);
+
+	function prMapsEqual(a: Map<string, Set<string>>, b: Map<string, Set<string>>): boolean {
+		if (a.size !== b.size) return false;
+		for (const [key, branches] of a) {
+			const other = b.get(key);
+			if (!other || other.size !== branches.size) return false;
+			for (const branch of branches) if (!other.has(branch)) return false;
+		}
+		return true;
+	}
+
 	async function refreshOpenPrs() {
 		const token = ++prFetchToken;
+		const projectIds = prProjects.map((p) => p.projectId);
+		const previous = openPrBranches;
 		const next = new Map<string, Set<string>>();
 		await Promise.all(
-			prProjects.map(async ({ projectId }) => {
+			projectIds.map(async (projectId) => {
 				try {
 					const prs: PullRequest[] = await getPullRequests(projectId, 'open', 100);
 					if (token !== prFetchToken) return;
 					next.set(projectId, new Set(prs.map((pr) => pr.head_branch)));
 				} catch {
-					// No GitHub auth / no repo → no PR badge for this project.
+					// A transient failure (auth blip, rate limit, offline) must not
+					// blank a badge that is already on screen — carry the last known
+					// set for this project instead of dropping to "no PR".
+					const known = previous.get(projectId);
+					if (known) next.set(projectId, known);
 				}
 			})
 		);
 		if (token !== prFetchToken) return;
-		openPrBranches = next;
+		// Only publish a genuinely different result: a new Map identity would
+		// re-derive every card row for nothing.
+		if (!prMapsEqual(previous, next)) openPrBranches = next;
 	}
 
 	// Refetch only when the set of (project, branch) pairs actually changes.
+	//
+	// R8: the dedupe key used to be computed and never compared, so this effect
+	// re-ran on every $sessions emission (the filter above hands it a new array
+	// identity each time) and fired getPullRequests(…, 100) for EVERY project —
+	// a GitHub call burst per turn completion. The key is now actually the gate,
+	// and changes after the first fetch are debounced.
+	const PR_REFRESH_DEBOUNCE_MS = 2000;
+	let lastPrKey: string | null = null;
+	let prFetchedOnce = false;
+	let prRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+
 	$effect(() => {
-		const key = JSON.stringify(prProjects.map((p) => [p.projectId, [...p.branches].sort()]));
-		void refreshOpenPrs();
+		const key = prProjectsKey;
+		if (key === lastPrKey) return;
+		lastPrKey = key;
+		if (prRefreshTimer) {
+			clearTimeout(prRefreshTimer);
+			prRefreshTimer = null;
+		}
+		// First real project set: fetch straight away so the badge is not held
+		// back by the debounce on first paint. Everything after that trails.
+		if (key && !prFetchedOnce) {
+			prFetchedOnce = true;
+			untrack(() => void refreshOpenPrs());
+			return;
+		}
+		prRefreshTimer = setTimeout(() => {
+			prRefreshTimer = null;
+			void refreshOpenPrs();
+		}, PR_REFRESH_DEBOUNCE_MS);
 	});
 
 	// --- filters -----------------------------------------------------------
@@ -255,7 +322,10 @@
 	);
 
 	// --- grouping ----------------------------------------------------------
-	interface CardRow { session: Session; status: SessionCardStatus }
+	// `ts` is the row's last-activity time, resolved ONCE per row (R2). The
+	// comparator used to call sessionTimestamp() — a `Date` parse — on every
+	// comparison, i.e. O(n log n) date parses per recompute.
+	interface CardRow { session: Session; status: SessionCardStatus; ts: number }
 
 	const rows = $derived.by((): CardRow[] =>
 		visibleSessions
@@ -270,10 +340,11 @@
 						attention: $backgroundPermissions.get(s.id) ?? null,
 						openPr: !!(branch && prSet?.has(branch)),
 						isActive: !!s.is_active
-					})
+					}),
+					ts: sessionTimestamp(s)
 				};
 			})
-			.sort((a, b) => sessionTimestamp(b.session) - sessionTimestamp(a.session))
+			.sort((a, b) => b.ts - a.ts)
 	);
 
 	const activeRows = $derived(rows.filter((r) => r.session.is_active));
@@ -286,9 +357,9 @@
 	const archivedRows = $derived.by((): CardRow[] =>
 		visibleSessions
 			.filter((s) => isArchived(s))
-			.sort((a, b) => sessionTimestamp(b) - sessionTimestamp(a))
+			.map((s) => ({ session: s, status: 'idle' as SessionCardStatus, ts: sessionTimestamp(s) }))
+			.sort((a, b) => b.ts - a.ts)
 			.slice(0, ARCHIVED_LIMIT)
-			.map((s) => ({ session: s, status: 'idle' as SessionCardStatus }))
 	);
 	const archivedCount = $derived(visibleSessions.filter(isArchived).length);
 	let archivedOpen = $state(false);
@@ -342,14 +413,34 @@
 		deviceMenuOpen = false;
 	}
 
+	// --- delegated card menus ------------------------------------------------
+	// Which card has its swipe actions revealed, if any (R15). Every SessionCard
+	// used to attach its OWN <svelte:window> click/keydown pair, so a single
+	// click anywhere in the app ran one handler per rendered card (60+). The
+	// sidebar owns the open-card id instead and closes it from the one listener
+	// it already had.
+	let openActionsCardId = $state<string | null>(null);
+
+	function closeCardActions() {
+		openActionsCardId = null;
+	}
+
 	function handleWindowClick(e: MouseEvent) {
 		const t = e.target as Node;
 		if (projectMenuOpen && projectMenuRef && !projectMenuRef.contains(t)) projectMenuOpen = false;
 		if (deviceMenuOpen && deviceMenuRef && !deviceMenuRef.contains(t)) deviceMenuOpen = false;
+		if (openActionsCardId) {
+			const el = t instanceof Element ? t : (t as Node)?.parentElement ?? null;
+			const frame = el?.closest?.('[data-session-card]') ?? null;
+			if (frame?.getAttribute('data-session-card') !== openActionsCardId) closeCardActions();
+		}
 	}
 
 	function handleWindowKeydown(e: KeyboardEvent) {
-		if (e.key === 'Escape') closeMenus();
+		if (e.key === 'Escape') {
+			closeMenus();
+			closeCardActions();
+		}
 	}
 
 	function pickProject(id: string | null) {
@@ -363,6 +454,12 @@
 	function pickFeature(type: ViewType) {
 		closeMenus();
 		onOpenFeature(type);
+	}
+
+	/** Pull the next cursor page and reveal it in place. */
+	function loadMoreSessions() {
+		settledLimit += SHOW_MORE_STEP;
+		void appData.loadMoreSessions();
 	}
 </script>
 
@@ -487,6 +584,9 @@
 							projectLabel={projectLabel(row.session)}
 							active={row.session.id === activeId}
 							{now}
+							timestamp={row.ts}
+							openActionsId={openActionsCardId}
+							onActionsOpenChange={(id) => (openActionsCardId = id)}
 							onOpen={onOpenSession}
 							onSettled={onSettledOpenSession}
 						/>
@@ -515,6 +615,9 @@
 							projectLabel={projectLabel(row.session)}
 							active={row.session.id === activeId}
 							{now}
+							timestamp={row.ts}
+							openActionsId={openActionsCardId}
+							onActionsOpenChange={(id) => (openActionsCardId = id)}
 							compact
 							onOpen={onOpenSession}
 						/>
@@ -528,6 +631,15 @@
 					<span class="txt">All sessions ({rows.length})</span>
 					<span class="rule" aria-hidden="true"></span>
 					<span class="txt">{hiddenSettled} more</span>
+					<ChevronDown size={14} strokeWidth={2} />
+				</button>
+			{:else if $sessionsHasMore}
+				<!-- Everything loaded is on screen and the server holds more: the
+				     initial load is capped at one page (W1), so fetch the next one
+				     on demand instead of paging through the whole history up front. -->
+				<button class="shelf" onclick={loadMoreSessions} disabled={$sessionsLoadingMore}>
+					<span class="txt">{$sessionsLoadingMore ? 'Loading…' : 'Load older sessions'}</span>
+					<span class="rule" aria-hidden="true"></span>
 					<ChevronDown size={14} strokeWidth={2} />
 				</button>
 			{:else if fullyExpanded}
@@ -558,6 +670,9 @@
 							projectLabel={projectLabel(row.session)}
 							active={row.session.id === activeId}
 							{now}
+							timestamp={row.ts}
+							openActionsId={openActionsCardId}
+							onActionsOpenChange={(id) => (openActionsCardId = id)}
 							compact
 							onOpen={onOpenSession}
 						/>

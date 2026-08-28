@@ -64,7 +64,16 @@ vi.mock('./sse-feed', () => ({
 	},
 }));
 
-import { feedController, CATCHUP_FALLBACK_MS } from './feed-controller';
+import {
+	feedController,
+	CATCHUP_FALLBACK_MS,
+	FIRST_FRAME_BUDGET_MS,
+	HYDRATION_CEILING_MS,
+	STREAM_FOLD_MS,
+	TRANSCRIPT_CACHE_MAX,
+	TRANSCRIPT_CACHE_TTL_MS,
+	cachedTranscriptCount,
+} from './feed-controller';
 import { pendingQueue } from '../pending-queue';
 import { browserPanel } from '../../browser-panel.svelte';
 import type { ActiveSessionState } from '../../active-session';
@@ -309,29 +318,86 @@ describe('feedController history-batch hydration', () => {
 		expect(deps.state.isRestoringSession).toBe(false);
 	});
 
-	it('(a-fallback) a connect that never delivers a frame still clears the spinner', () => {
+	it('(S1) a connect that has delivered NO frame never completes hydration — it goes slow', () => {
 		const deps = makeDeps({ isLoadingSession: true, isRestoringSession: true });
 		feedController.attach(deps);
 		feedController.start('s1');
 
-		// Armed at start(), before the first connect resolves — so a feed that
-		// opens and then says nothing at all is bounded too.
-		vi.advanceTimersByTime(CATCHUP_FALLBACK_MS);
+		// The old 1s floor fired here and published an EMPTY reducer, clearing
+		// isLoadingSession — which the chat surface reads as `cleared` and renders
+		// the "Conversation cleared" hero for a session that HAS messages. With
+		// zero reduced events there is no transcript to publish, so hydration must
+		// stay open.
+		vi.advanceTimersByTime(CATCHUP_FALLBACK_MS * 3);
+		expect(deps.state.isLoadingSession).toBe(true);
+		expect(deps.state.isRestoringSession).toBe(true);
+		expect(deps.state.messages).toHaveLength(0);
+		expect(deps.state.isHydrationSlow).toBeFalsy();
+
+		// Past the pre-first-frame budget the wait is abnormal — say so, without
+		// pretending the load finished.
+		vi.advanceTimersByTime(FIRST_FRAME_BUDGET_MS);
+		expect(deps.state.isHydrationSlow).toBe(true);
+		expect(deps.state.isLoadingSession).toBe(true);
+		expect(deps.state.isRestoringSession).toBe(true);
+	});
+
+	it('(S1) a feed that produces nothing at all is released at the hard ceiling', () => {
+		const deps = makeDeps({ isLoadingSession: true, isRestoringSession: true });
+		feedController.attach(deps);
+		feedController.start('s1');
+
+		// Dead, not slow: sends must not stay blocked behind isRestoringSession
+		// forever, so the ceiling still releases the flags.
+		vi.advanceTimersByTime(HYDRATION_CEILING_MS + FIRST_FRAME_BUDGET_MS);
 		expect(deps.state.isLoadingSession).toBe(false);
 		expect(deps.state.isRestoringSession).toBe(false);
 	});
 
-	it('(a-fallback) events after the fallback fired fold at the live cadence', () => {
+	it('(S1) a frame arriving after a premature flip re-enters batch mode', () => {
+		const deps = makeDeps({ isLoadingSession: true, isRestoringSession: true });
+		feedController.attach(deps);
+		feedController.start('s1');
+
+		// Force a premature completion: two frames, then a stall past the idle
+		// budget publishes what arrived (the transcript must never stay blank).
+		hoisted.onEvent!(textDelta('e1', 'foo'));
+		vi.advanceTimersByTime(CATCHUP_FALLBACK_MS);
+		expect(deps.state.isLoadingSession).toBe(false);
+		const callsAfterFlip = deps.update.mock.calls.length;
+
+		// The backfill resumes. Every one of these folding individually is the
+		// "transcript visibly rebuilds message by message" bug — they must batch
+		// again and publish ONCE on the real sentinel.
+		for (let i = 0; i < 10; i++) {
+			hoisted.onEvent!(textDelta(`b${i}`, 'x'));
+			vi.advanceTimersByTime(CATCHUP_FALLBACK_MS - 100);
+		}
+		flushRaf();
+		expect(deps.update.mock.calls.length).toBe(callsAfterFlip);
+
+		hoisted.onEvent!(caughtUp(11));
+		expect(deps.update.mock.calls.length).toBe(callsAfterFlip + 1);
+		expect((deps.state.messages as Array<{ content: string }>)[0].content).toBe(
+			'foo' + 'x'.repeat(10)
+		);
+	});
+
+	it('(a-fallback) live cadence resumes once the owed sentinel finally lands', () => {
 		const deps = makeDeps();
 		feedController.attach(deps);
 		feedController.start('s1');
+		// A frame then a stall → premature publish with the sentinel still owed.
+		hoisted.onEvent!(textDelta('e0', 'early'));
 		vi.advanceTimersByTime(CATCHUP_FALLBACK_MS);
-		const callsAfterFallback = deps.update.mock.calls.length;
+		hoisted.onEvent!(caughtUp(1));
+		const callsAfterCatchUp = deps.update.mock.calls.length;
 
+		// Genuinely live now: a delta folds on the streaming cadence.
 		hoisted.onEvent!(textDelta('e1', 'late'));
-		flushRaf();
-		expect(deps.update.mock.calls.length).toBe(callsAfterFallback + 1);
-		expect((deps.state.messages as Array<{ content: string }>)[0].content).toBe('late');
+		vi.advanceTimersByTime(STREAM_FOLD_MS);
+		expect(deps.update.mock.calls.length).toBe(callsAfterCatchUp + 1);
+		expect((deps.state.messages as Array<{ content: string }>)[0].content).toBe('earlylate');
 	});
 
 	it('(a-fallback) a stopped feed does not fold through a pending fallback timer', () => {
@@ -396,9 +462,9 @@ describe('feedController history-batch hydration', () => {
 		hoisted.onOpen!();
 
 		// A live event arrives with NO new `caught_up` sentinel. It must fold via
-		// the normal rAF/250ms cadence — it must not wait for another sentinel.
+		// the normal live cadence — it must not wait for another sentinel.
 		hoisted.onEvent!(textDelta('e1', 'foo'));
-		flushRaf();
+		vi.advanceTimersByTime(STREAM_FOLD_MS);
 
 		const msgs = deps.state.messages as Array<{ content: string }>;
 		expect(msgs).toHaveLength(1);
@@ -407,52 +473,75 @@ describe('feedController history-batch hydration', () => {
 });
 
 describe('feedController flush scheduling (post-catch-up live cadence)', () => {
+	it('(R1) streaming deltas coalesce to one fold per STREAM_FOLD_MS, not per frame', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+		const callsAfterCatchUp = deps.update.mock.calls.length;
+
+		// Nobody can read 60fps text, and a per-frame fold re-renders the whole
+		// subscriber graph. A burst of deltas inside one window folds ONCE — and
+		// a frozen rAF clock (hidden tab) is irrelevant, the throttle is a timer.
+		for (let i = 0; i < 20; i++) hoisted.onEvent!(textDelta(`e${i}`, 'x'));
+		flushRaf();
+		expect(deps.update.mock.calls.length).toBe(callsAfterCatchUp);
+
+		vi.advanceTimersByTime(STREAM_FOLD_MS);
+		expect(deps.update.mock.calls.length).toBe(callsAfterCatchUp + 1);
+		expect((deps.state.messages as Array<{ content: string }>)[0].content).toBe('x'.repeat(20));
+
+		// Exactly once per window: no stray rAF or 250ms timer folds again.
+		const calls = deps.update.mock.calls.length;
+		vi.advanceTimersByTime(500);
+		flushRaf();
+		expect(deps.update.mock.calls.length).toBe(calls);
+	});
+
+	it('(R1) a non-streaming event keeps the immediate rAF cadence', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+		const callsAfterCatchUp = deps.update.mock.calls.length;
+
+		// A permission prompt / turn boundary must not wait out a stream throttle.
+		hoisted.onEvent!(userMessage('evt-u9', 'turn-9', 'hello'));
+		flushRaf();
+		expect(deps.update.mock.calls.length).toBe(callsAfterCatchUp + 1);
+	});
+
+	it('(R1) an immediate event upgrades a pending throttled fold', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+		const callsAfterCatchUp = deps.update.mock.calls.length;
+
+		hoisted.onEvent!(textDelta('e1', 'foo'));      // schedules the throttle
+		hoisted.onEvent!(userMessage('evt-u1', 't1')); // upgrades to next-frame
+		flushRaf();
+		expect(deps.update.mock.calls.length).toBe(callsAfterCatchUp + 1);
+
+		// And the superseded throttle timer must not fold a second time.
+		const calls = deps.update.mock.calls.length;
+		vi.advanceTimersByTime(500);
+		expect(deps.update.mock.calls.length).toBe(calls);
+	});
+
 	it('(b) folds via the 250ms timer when rAF never fires (hidden/occluded tab)', () => {
 		const deps = makeDeps();
 		feedController.attach(deps);
 		feedController.start('s1');
-		// Enter live mode so events flush per the incremental cadence.
 		hoisted.onEvent!(caughtUp(0));
 
-		// Two events arrive while the tab is backgrounded. rAF is captured but
-		// NEVER flushed (simulating a paused rAF clock).
-		hoisted.onEvent!(textDelta('e1', 'foo'));
-		hoisted.onEvent!(textDelta('e2', 'bar'));
-
-		// rAF is pending but frozen — nothing has folded the second event yet.
+		// An immediate-cadence event while the tab is backgrounded: rAF is
+		// captured but NEVER flushed (a paused rAF clock).
+		hoisted.onEvent!(userMessage('evt-u1', 't1', 'hi'));
 		expect(rafQueue.length).toBeGreaterThan(0);
 
-		// The fallback timer fires the fold.
 		vi.advanceTimersByTime(250);
-
-		const msgs = deps.state.messages as Array<{ content: string }>;
-		expect(msgs).toHaveLength(1);
-		expect(msgs[0].content).toBe('foobar'); // both events folded via the timer
-	});
-
-	it('(b) folds via rAF on the normal path and runs exactly once (no double-run)', () => {
-		const deps = makeDeps();
-		feedController.attach(deps);
-		feedController.start('s1');
-		hoisted.onEvent!(caughtUp(0));
-
-		hoisted.onEvent!(textDelta('e1', 'foo'));
-		hoisted.onEvent!(textDelta('e2', 'bar'));
-
-		// rAF fires first (visible tab) → fold happens and the fallback timer is
-		// cancelled.
-		flushRaf();
-
-		const msgs = deps.state.messages as Array<{ content: string }>;
-		expect(msgs).toHaveLength(1);
-		expect(msgs[0].content).toBe('foobar');
-
-		// No double-run: the cancelled timer must not fold again, and no new rAF
-		// is pending.
-		const callsAfterRaf = deps.update.mock.calls.length;
-		vi.advanceTimersByTime(500);
-		flushRaf();
-		expect(deps.update.mock.calls.length).toBe(callsAfterRaf);
+		expect((deps.state.messages as Array<{ content: string }>)).toHaveLength(1);
 	});
 });
 

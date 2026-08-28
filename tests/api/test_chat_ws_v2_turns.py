@@ -4,14 +4,14 @@ With ``AI_SHUFFLE_V2_TURNS`` ON (the default), the WS chat handlers no longer
 drive the legacy in-memory busy-guard / ``queued_messages`` / drain machinery.
 They delegate to the durable ``turns`` table via ``turn_manager``:
 
-* ``handle_query``            -> ``turn_manager.submit(source='user')`` (+ F5
+* ``handle_query``            -> ``turn_manager.submit_async(source='user')`` (+ F5
                                  ``query_queued`` ack when a turn is already live);
-* ``handle_queue_message``    -> ``turn_manager.submit(source='queue')``;
+* ``handle_queue_message``    -> ``turn_manager.submit_async(source='queue')``;
 * ``handle_remove_queued``    -> ``turn_manager.remove_queued`` (queued->aborted);
 * ``handle_clear_queued``     -> ``remove_queued`` for every user/queue chip;
-* ``handle_stop``             -> ``turn_manager.interrupt(mode='stop')`` +
+* ``handle_stop``             -> ``turn_manager.interrupt_async(mode='stop')`` +
                                  all-background-task teardown;
-* ``handle_interrupt_for_query`` -> ``turn_manager.interrupt(mode='send_now')``
+* ``handle_interrupt_for_query`` -> ``turn_manager.interrupt_async(mode='send_now')``
                                  then ``interrupt_confirmed``;
 * ``handle_load_session``     -> ``queuedMessages`` sourced from the turns view.
 
@@ -67,10 +67,11 @@ class _Patches:
         ):
             setattr(self.sync, name, AsyncMock())
 
-        # run offload -> synchronous passthrough so all DB access stays on the
-        # loop thread (mock_db is a single-connection SQLite shim). turn_manager
-        # .submit is invoked DIRECTLY (never via run_sync) so its kick can grab
-        # the running loop.
+        # run offload -> synchronous passthrough so DB access made through
+        # ``run_sync`` stays on the loop thread (mock_db is a single-connection
+        # SQLite shim). ``turn_manager.submit_async`` still hops to a worker
+        # thread of its own (the shim serializes across threads) and fires its
+        # kick back on the loop, which is what test_chat_ws_offload.py asserts.
         async def _run_sync(fn, *a, **k):
             return fn(*a, **k)
 
@@ -312,7 +313,9 @@ async def test_handle_query_ignores_legacy_worktree_id_key(mock_db):
     turn is submitted WITHOUT a worktree_id kwarg (Q9-1 intake deletion)."""
     with _Patches():
         with patch.object(cwh.database, "get_worktree", MagicMock()) as get_wt, \
-             patch.object(cwh.turn_manager, "submit", MagicMock()) as submit:
+             patch.object(
+                 cwh.turn_manager, "submit_async", AsyncMock(return_value="turn-x")
+             ) as submit:
             handler = _make_handler()
             await handler.handle_query({
                 "prompt": "new session please",
@@ -346,7 +349,9 @@ async def test_handle_query_ignores_legacy_worktree_id_key(mock_db):
 
 async def test_handle_query_persists_context_window_on_new_session(mock_db):
     with _Patches():
-        with patch.object(cwh.turn_manager, "submit", MagicMock()):
+        with patch.object(
+            cwh.turn_manager, "submit_async", AsyncMock(return_value="turn-x")
+        ):
             handler = _make_handler()
             await handler.handle_query({
                 "prompt": "new session with standard context",

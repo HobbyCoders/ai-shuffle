@@ -37,32 +37,44 @@
 	import { exportSession } from '$lib/api/sessions';
 	import { toast } from '$lib/stores/toast';
 	import { Download, PanelRight } from 'lucide-svelte';
-	import BrowserPanel from '$lib/components/browser/BrowserPanel.svelte';
 	import { browserPanel, browserPanelOpen } from '$lib/stores/browser-panel.svelte';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import { gitOperations, gitOperationRunning } from '$lib/stores/gitOperations.svelte';
 	import GitProgressPopover from '$lib/components/git/GitProgressPopover.svelte';
 	import ChatView from './ChatView.svelte';
-	import BuildPage from './BuildPage.svelte';
 	import PageHeader from './PageHeader.svelte';
 	import StudioTopBar from './StudioTopBar.svelte';
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
 	import { shouldShowHeaderGitActions } from './git-header-visibility';
 	import { chatHeaderTitle } from './chat-empty-state';
-	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
-	import InitRepoModal from '$lib/components/git/InitRepoModal.svelte';
-	import ChangedFilesPanel from '$lib/components/git/ChangedFilesPanel.svelte';
-	import DiffViewer from '$lib/components/git/DiffViewer.svelte';
+	import { warmHighlighter } from '$lib/utils/shiki';
+	import {
+		gitPollIntervalMs,
+		shouldExecuteGitPollTick,
+		shouldPollDiffStats,
+		shouldRunGitPoll
+	} from './git-poll-cadence';
 
-	// Feature page components (Agents/MCP/Plugins/Hooks now live
-	// inside BuildPage, so they're imported there rather than here).
-	import SettingsCard from '$lib/components/deck/cards/SettingsCard.svelte';
-	import ProjectCard from '$lib/components/deck/cards/ProjectCard.svelte';
-	import FileBrowserCard from '$lib/components/deck/cards/FileBrowserCard.svelte';
-	import NotesCard from '$lib/components/deck/cards/NotesCard.svelte';
-	import AutomationsCard from '$lib/components/deck/cards/AutomationsCard.svelte';
-	import StatsCard from '$lib/components/deck/cards/StatsCard.svelte';
-	import DocsCard from '$lib/components/docs/DocsCard.svelte';
+	// ── Lazy feature surfaces ────────────────────────────────────────────────
+	// Every secondary surface (Settings, Project, Files, Notes, Automations,
+	// Stats, Docs, Build, the live-browser panel and the git modals) is behind a
+	// dynamic import so it gets its own Rollup chunk instead of riding in the
+	// primary route bundle. The CHAT surface is intentionally NOT lazy — a
+	// spinner on the core interaction would be a regression. See
+	// `deck/lazy/panels.ts` for the registry and the prefetch entry points.
+	import LazyPanel from '$lib/components/deck/lazy/LazyPanel.svelte';
+	import { preloadWhenIdle } from '$lib/components/deck/lazy/lazy-component';
+	import {
+		featurePanelKeyForView,
+		panelForKey,
+		IDLE_PRELOAD_ORDER,
+		BrowserSidePanel,
+		ChangedFilesPanelLazy,
+		DiffViewerLazy,
+		CreateBranchModalLazy,
+		InitRepoModalLazy,
+		type FeaturePanelKey
+	} from '$lib/components/deck/lazy/panels';
 
 	interface Props {
 		onOpenSession?: (sessionId: string) => void;
@@ -122,6 +134,56 @@
 	);
 	// One-shot deep-link target (agent id) to open in its editor.
 	const buildRequestedItemId = $derived($activeView?.itemId ?? undefined);
+
+	// =========================================================================
+	// Feature-panel keep-alive (R14)
+	// =========================================================================
+	// The panels used to be `{#if}` branches: leaving Build/Notes unmounted them,
+	// and coming back remounted + refetched everything behind a spinner. We now
+	// keep the current panel plus the most recently visited one mounted (hidden
+	// with `display:none` + `inert`), so a chat → Build → chat → Build round trip
+	// renders instantly from live component state instead of re-running mount
+	// loads. Capped at two so we never accumulate every surface in memory.
+	const KEEP_ALIVE_LIMIT = 2;
+	const featureKey = $derived<FeaturePanelKey | null>(
+		isBuildView ? 'build' : featurePanelKeyForView($activeView?.type)
+	);
+	/** True when the chat surface (not a feature panel) owns the canvas. */
+	const showChatSurface = $derived(featureKey === null);
+	let mountedPanels = $state<FeaturePanelKey[]>([]);
+
+	$effect(() => {
+		const key = featureKey;
+		if (!key) return;
+		untrack(() => {
+			if (mountedPanels[0] === key) return;
+			mountedPanels = [key, ...mountedPanels.filter((k) => k !== key)].slice(0, KEEP_ALIVE_LIMIT);
+		});
+	});
+
+	// Warm the secondary chunks once the app is idle, so the first visit to a
+	// panel is already a cache hit and LazyPanel renders it in the same frame.
+	// Also warms the Shiki highlighter (now dynamically imported) off the
+	// critical path, so the first code block in a transcript is highlighted
+	// immediately rather than re-rendering from plain text.
+	$effect(() => {
+		const cancelPreload = preloadWhenIdle(IDLE_PRELOAD_ORDER);
+		warmHighlighter();
+		return cancelPreload;
+	});
+
+	// The live-browser panel only mounts once the user has actually opened it;
+	// hovering the toggle prefetches the chunk so the first open is instant.
+	let browserPanelEverOpened = $state(false);
+	$effect(() => {
+		if ($browserPanelOpen) browserPanelEverOpened = true;
+	});
+
+	// Same treatment for the git review surfaces: they are modal, so they mount
+	// on first use and stay mounted afterwards (open/close is a prop).
+	let changedFilesEverOpened = $state(false);
+	let createBranchEverOpened = $state(false);
+	let initRepoEverOpened = $state(false);
 
 	// Get the active session state (if in chat view)
 	const activeTab = $derived(
@@ -187,6 +249,20 @@
 	let showChangedFilesPanel = $state(false);
 	let reviewMode = $state(false);
 	let selectedDiffFile = $state<import('$lib/api/git').FileChangeInfo | null>(null);
+
+	function handleViewDiff(file: import('$lib/api/git').FileChangeInfo) {
+		selectedDiffFile = file;
+	}
+
+	function closeChangedFilesPanel() {
+		showChangedFilesPanel = false;
+		reviewMode = false;
+		selectedDiffFile = null;
+	}
+
+	function handleRepoInitialized() {
+		if (activeTab?.project) git.loadRepository(activeTab.project, true);
+	}
 
 	// PR lifecycle for the active session's branch. Fetched by the git store's
 	// session-scoped /git/pr-state call and refreshed after every PR-relevant
@@ -264,68 +340,74 @@
 	});
 
 	// =========================================================================
-	// Adaptive git polling (replaces event-driven three-layer system)
+	// Adaptive git polling
 	// =========================================================================
-	// Frontend-driven polling scoped to the active tab only:
-	// - 2s interval while the agent is actively streaming
-	// - 5s interval after 30s of inactivity
-	// - Paused entirely when the browser tab is hidden
-
-	const GIT_POLL_ACTIVE_MS = 2_000;
-	const GIT_POLL_IDLE_MS = 5_000;
-	const GIT_IDLE_THRESHOLD_MS = 30_000;
+	// Frontend-driven polling scoped to the active tab only. The cadence rules
+	// live in ./git-poll-cadence.ts so they can be unit-tested:
+	// - 2s while the agent is streaming OR just after a user git action
+	// - 30s idle fallback (was 5s: the backend status cache TTL is 2s, so every
+	//   idle tick was a guaranteed miss → a full pygit2 worktree scan; F3)
+	// - diff stats at most once a minute while idle (G8: the old gate compared
+	//   against the tick interval itself, so it fired every tick)
+	// - paused entirely when the tab is hidden OR the git UI is off screen
 
 	let _gitPollTimer: ReturnType<typeof setTimeout> | null = null;
-	let _gitPollProject: string | null = null;
-	let _gitLastActivity = 0; // timestamp of last streaming event
+	let _gitPollRunning = false;
+	let _gitLastActivity = 0; // timestamp of last streaming event / user git action
 
 	let _lastIdleDiffStatsPoll = 0;
 
+	/**
+	 * The git UI is on screen for this session. Polling status for a surface
+	 * nobody can see is pure idle churn — the panel refreshes on return.
+	 */
+	// `$githubAuthenticated` is kept in the gate because the repo-load effect
+	// above only loads git state when authenticated — polling status for a repo
+	// we never loaded would just burn requests.
+	const gitUiVisible = $derived(
+		!!activeTab &&
+			$githubAuthenticated &&
+			shouldShowHeaderGitActions({
+				viewType: $activeView?.type,
+				hasProject: !!activeTab.project,
+				githubAuthenticated: $githubAuthenticated,
+				worktreeDeleted: !!activeTab.worktreeDeleted,
+				isRemote: activeIsRemote
+			})
+	);
+
 	function gitPollNow() {
-		// Skip polling while a commit/push/PR/pull operation is in progress.
-		// These operations make their own API calls; polling concurrently
-		// would saturate the browser's connection pool (6 per host) and
-		// cause progressive slowdown / eventual UI hang.
-		if (git.operationInProgress) return;
-		// Stop polling entirely if the worktree was deleted (404 detected).
-		// Continued polling would spam 404s and waste browser connections.
-		if (git.worktreeGone) return;
+		// Skip polling while a commit/push/PR/pull operation is in progress
+		// (those make their own calls and would saturate the 6-connection pool),
+		// or once the worktree 404'd.
+		if (!shouldExecuteGitPollTick({
+			operationInProgress: git.operationInProgress,
+			worktreeGone: git.worktreeGone
+		})) return;
+
 		const now = Date.now();
-		const isActive = (now - _gitLastActivity) < GIT_IDLE_THRESHOLD_MS;
 		git.refreshStatus();
-		if (isActive) {
-			// Active period — poll diff stats on every cycle (5s).
-			git.refreshDiffStats();
-			_lastIdleDiffStatsPoll = now;
-		} else if (now - _lastIdleDiffStatsPoll >= GIT_POLL_IDLE_MS) {
-			// Idle period — still poll diff stats once per idle interval (30s)
-			// so stale values don't persist indefinitely after streaming ends.
+		if (shouldPollDiffStats(now, _gitLastActivity, _lastIdleDiffStatsPoll)) {
 			git.refreshDiffStats();
 			_lastIdleDiffStatsPoll = now;
 		}
 	}
 
-	function gitPollInterval(): number {
-		return (Date.now() - _gitLastActivity < GIT_IDLE_THRESHOLD_MS)
-			? GIT_POLL_ACTIVE_MS
-			: GIT_POLL_IDLE_MS;
-	}
-
 	function scheduleGitPoll() {
 		if (_gitPollTimer) clearTimeout(_gitPollTimer);
-		if (!_gitPollProject || document.hidden) return;
+		if (!_gitPollRunning || document.hidden) return;
 		_gitPollTimer = setTimeout(() => {
 			gitPollNow();
 			scheduleGitPoll();
-		}, gitPollInterval());
+		}, gitPollIntervalMs(Date.now(), _gitLastActivity));
 	}
 
-	function startGitPoll(project: string) {
+	function startGitPoll() {
 		stopGitPoll();
-		_gitPollProject = project;
+		_gitPollRunning = true;
 		// Don't reset _gitLastActivity — keep idle mode unless there's actual
-		// git activity (streaming). This prevents session/tab switches from
-		// spuriously triggering 30s of active polling.
+		// git activity (streaming / a user action). This prevents session/tab
+		// switches from spuriously triggering 30s of active polling.
 		scheduleGitPoll();
 	}
 
@@ -334,35 +416,41 @@
 			clearTimeout(_gitPollTimer);
 			_gitPollTimer = null;
 		}
-		_gitPollProject = null;
+		_gitPollRunning = false;
+	}
+
+	/**
+	 * A user git action (or the end of a turn) puts the poll back on the fast
+	 * cadence for the activity window, so the header buttons settle promptly.
+	 */
+	function markGitActivity() {
+		_gitLastActivity = Date.now();
+		if (_gitPollRunning) scheduleGitPoll();
 	}
 
 	// Pause/resume git poll when tab visibility changes.
 	function handleVisibilityChange() {
 		if (document.hidden) {
 			stopGitPoll();
-		} else if (_gitPollProject === null && activeProject && $githubAuthenticated && !activeIsRemote) {
-			startGitPoll(activeProject);
+		} else if (!_gitPollRunning && shouldRunGitPoll({ gitUiVisible, documentHidden: false })) {
+			startGitPoll();
 			gitPollNow(); // Immediate refresh on return
 		}
 	}
 
-	// Main effect: start/stop adaptive poll when project/auth/worktree changes.
-	// NOTE: activeSessionId deliberately excluded — session switches within the
-	// same project shouldn't restart polling (worktreeId covers tab-switch context).
+	// Main effect: start/stop adaptive poll when the git UI's visibility or
+	// target changes. NOTE: activeSessionId deliberately excluded — session
+	// switches within the same project shouldn't restart polling (worktreeId
+	// covers tab-switch context).
 	$effect(() => {
-		const project = activeProject;
-		const worktreeId = activeWorktreeId; // Track worktree changes for tab switches
-		const authenticated = $githubAuthenticated;
-		const isRemote = activeIsRemote;
+		const visible = gitUiVisible;
+		void activeProject;
+		void activeWorktreeId; // Track worktree changes for tab switches
 
 		stopGitPoll();
 
-		// Never poll local git for a remote-placed session — the repo lives on the
-		// owning install, so the local status is meaningless (and would spam bogus
-		// is_git_repo:false polls).
-		if (project && authenticated && !isRemote && !document.hidden) {
-			startGitPoll(project);
+		if (shouldRunGitPoll({ gitUiVisible: visible, documentHidden: document.hidden })) {
+			startGitPoll();
 		}
 
 		document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -385,10 +473,9 @@
 			_wasStreaming = false;
 			if (activeProject) {
 				untrack(() => {
-					_gitLastActivity = Date.now();
 					git.forceRefresh();
 					git.refreshPrState(true).catch(() => {});
-					scheduleGitPoll(); // Reset to active interval for post-streaming cool-down
+					markGitActivity(); // Reset to active interval for post-streaming cool-down
 				});
 			}
 		}
@@ -466,6 +553,7 @@
 
 	async function handleCommit(opts: CommitOptions = {}) {
 		if (gitActionsBlocked()) return;
+		markGitActivity(); // user git action → responsive poll cadence
 		const projectId = activeProject!;
 		const prefs = gitActionPreferences.current;
 		const includeUnstaged = opts.includeUnstaged ?? prefs.includeUnstaged;
@@ -525,6 +613,7 @@
 
 	async function handlePush(opts: PushOptions = {}) {
 		if (gitActionsBlocked()) return;
+		markGitActivity(); // user git action → responsive poll cadence
 		const force = opts.force ?? false;
 		gitOperations.begin(force ? 'Force push' : 'Push', []);
 		try {
@@ -544,6 +633,7 @@
 
 	async function handlePull(opts: PullOptions = {}) {
 		if (gitActionsBlocked()) return;
+		markGitActivity(); // user git action → responsive poll cadence
 		const prefs = gitActionPreferences.current;
 		const strategy = opts.strategy ?? prefs.pullStrategy;
 		const autoStash = opts.autoStash ?? prefs.autoStash;
@@ -574,6 +664,7 @@
 
 	async function handleCreatePR(opts: CreatePROptions = {}) {
 		if (gitActionsBlocked()) return;
+		markGitActivity(); // user git action → responsive poll cadence
 		const projectId = activeProject!;
 		gitOperations.begin('Create PR', [
 			{ id: 'push', label: 'Push to remote' },
@@ -599,6 +690,7 @@
 
 	async function handleFinish(opts: FinishOptions = {}) {
 		if (gitActionsBlocked()) return;
+		markGitActivity(); // user git action → responsive poll cadence
 		const projectId = activeProject!;
 		// Capture the origin at START so completion side-effects apply to the
 		// session/project the operation was launched from — never a switched-to one.
@@ -627,6 +719,7 @@
 
 	async function handleShipIt(opts: ShipItOptions = {}) {
 		if (gitActionsBlocked()) return;
+		markGitActivity(); // user git action → responsive poll cadence
 		const projectId = activeProject!;
 		const origin: OperationOrigin = { sessionId: activeSessionId, projectId };
 		const prefs = gitActionPreferences.current;
@@ -688,6 +781,7 @@
 		if (effects.refreshGit) {
 			git.forceRefresh();
 			git.refreshPrState(true).catch(() => {});
+			markGitActivity();
 		}
 		if (effects.toast.prUrl) {
 			const url = effects.toast.prUrl;
@@ -738,6 +832,8 @@
 		<button
 			class="browser-toggle-btn"
 			class:active={$browserPanelOpen}
+			onpointerenter={() => BrowserSidePanel.preload()}
+			onfocus={() => BrowserSidePanel.preload()}
 			onclick={() => browserPanel.toggle(activeTab?.sessionId ?? null)}
 			title="Toggle live browser view"
 			aria-label="Toggle live browser view"
@@ -766,12 +862,12 @@
 				onClickCommit={handleCommit}
 				onClickCreatePR={handleCreatePR}
 				onClickFinish={handleFinish}
-				onClickNewBranch={() => showCreateBranchModal = true}
+				onClickNewBranch={() => { createBranchEverOpened = true; showCreateBranchModal = true; }}
 				onClickPush={handlePush}
 				onClickPull={handlePull}
-				onClickInitRepo={() => showInitRepoModal = true}
+				onClickInitRepo={() => { initRepoEverOpened = true; showInitRepoModal = true; }}
 				onClickShipIt={handleShipIt}
-				onOpenDiffReview={() => { showChangedFilesPanel = true; reviewMode = true; git.refreshChangedFiles(); }}
+				onOpenDiffReview={() => { changedFilesEverOpened = true; showChangedFilesPanel = true; reviewMode = true; git.refreshChangedFiles(); }}
 			/>
 			<GitProgressPopover />
 		</div>
@@ -812,55 +908,57 @@
 				{/snippet}
 			</PageHeader>
 		{/if}
-		{#if $activeView.type === 'chat'}
+		{#if showChatSurface}
 			<div class="chat-row">
 				<ChatView />
-				{#if activeTab?.sessionId}
-					<BrowserPanel sessionId={activeTab.sessionId} />
+				{#if activeTab?.sessionId && browserPanelEverOpened}
+					<LazyPanel
+						handle={BrowserSidePanel}
+						props={{ sessionId: activeTab.sessionId }}
+						label="the live browser"
+						bare
+					/>
 				{/if}
 			</div>
-		{:else if $activeView.type === 'board'}
-			<!-- Legacy persisted view from before the board was retired: show chat -->
-			<div class="chat-row">
-				<ChatView />
-			</div>
-		{:else if isBuildView}
-			<!-- Unified Build page (hosts Agents/MCP/Plugins/Hooks) -->
-			<div class="feature-panel">
-				<BuildPage requestedSub={buildRequestedSub} requestedItemId={buildRequestedItemId} />
-			</div>
-		{:else if $activeView.type === 'project'}
-			<!-- Embedded: uses FeaturePageLayout with its own header -->
-			<div class="feature-panel">
-				<ProjectCard />
-			</div>
-		{:else if $activeView.type === 'settings'}
-			<div class="feature-panel">
-				<SettingsCard />
-			</div>
-		{:else if $activeView.type === 'file-browser'}
-			<div class="feature-panel">
-				<FileBrowserCard />
-			</div>
-		{:else if $activeView.type === 'notes'}
-			<div class="feature-panel">
-				<NotesCard />
-			</div>
-		{:else if $activeView.type === 'automations'}
-			<div class="feature-panel">
-				<AutomationsCard />
-			</div>
-		{:else if $activeView.type === 'stats'}
-			<div class="feature-panel">
-				<StatsCard
-					onSessionClick={onOpenSession || (() => {})}
-				/>
-			</div>
-		{:else if $activeView.type === 'docs'}
-			<div class="feature-panel">
-				<DocsCard mobile={isMobile} />
-			</div>
 		{/if}
+		<!--
+			Feature panels are lazily imported AND kept alive: the active one plus
+			the previous one stay mounted, the inactive one hidden. Revisiting a
+			panel is then a same-frame render with no refetch (R14).
+		-->
+		{#each mountedPanels as key (key)}
+			<div class="feature-panel" class:is-inactive={key !== featureKey} inert={key !== featureKey}>
+				{#if key === 'build'}
+					<LazyPanel
+						handle={panelForKey('build')}
+						props={{ requestedSub: buildRequestedSub, requestedItemId: buildRequestedItemId }}
+						label="Build"
+					/>
+				{:else if key === 'project'}
+					<LazyPanel handle={panelForKey('project')} label="Projects" />
+				{:else if key === 'settings'}
+					<LazyPanel handle={panelForKey('settings')} label="Settings" />
+				{:else if key === 'file-browser'}
+					<LazyPanel handle={panelForKey('file-browser')} label="Files" />
+				{:else if key === 'notes'}
+					<LazyPanel handle={panelForKey('notes')} label="Notes" />
+				{:else if key === 'automations'}
+					<LazyPanel handle={panelForKey('automations')} label="Automations" />
+				{:else if key === 'stats'}
+					<LazyPanel
+						handle={panelForKey('stats')}
+						props={{ onSessionClick: onOpenSession || (() => {}) }}
+						label="Stats"
+					/>
+				{:else if key === 'docs'}
+					<LazyPanel
+						handle={panelForKey('docs')}
+						props={{ mobile: isMobile }}
+						label="Documentation"
+					/>
+				{/if}
+			</div>
+		{/each}
 	{:else}
 		<!-- Default landing: a fresh chat (the Sessions board is retired) -->
 		<div class="chat-row">
@@ -871,39 +969,61 @@
 
 <!-- Git modals (rendered outside main-panel for proper z-index stacking) -->
 {#if activeTab?.project && $githubAuthenticated}
-	<CreateBranchModal
-		open={showCreateBranchModal}
-		projectId={activeTab.project}
-		defaultName={activeTab.title || ''}
-		onClose={() => showCreateBranchModal = false}
-		onCreated={() => git.refreshStatus()}
-	/>
+	{#if createBranchEverOpened}
+		<LazyPanel
+			handle={CreateBranchModalLazy}
+			label="the branch dialog"
+			bare
+			props={{
+				open: showCreateBranchModal,
+				projectId: activeTab.project,
+				defaultName: activeTab.title || '',
+				onClose: () => (showCreateBranchModal = false),
+				onCreated: () => git.refreshStatus()
+			}}
+		/>
+	{/if}
 
-	<InitRepoModal
-		open={showInitRepoModal}
-		projectId={activeTab.project}
-		projectName={headerProjectName ?? ''}
-		onClose={() => showInitRepoModal = false}
-		onInitialized={() => {
-			if (activeTab?.project) {
-				git.loadRepository(activeTab.project, true);
-			}
-		}}
-	/>
+	{#if initRepoEverOpened}
+		<LazyPanel
+			handle={InitRepoModalLazy}
+			label="the init-repo dialog"
+			bare
+			props={{
+				open: showInitRepoModal,
+				projectId: activeTab.project,
+				projectName: headerProjectName ?? '',
+				onClose: () => (showInitRepoModal = false),
+				onInitialized: handleRepoInitialized
+			}}
+		/>
+	{/if}
 
-	<ChangedFilesPanel
-		projectId={activeTab.project}
-		open={showChangedFilesPanel}
-		{reviewMode}
-		onClose={() => { showChangedFilesPanel = false; reviewMode = false; selectedDiffFile = null; }}
-		onViewDiff={(file) => { selectedDiffFile = file; }}
-	/>
+	{#if changedFilesEverOpened}
+		<LazyPanel
+			handle={ChangedFilesPanelLazy}
+			label="changed files"
+			bare
+			props={{
+				projectId: activeTab.project,
+				open: showChangedFilesPanel,
+				reviewMode,
+				onClose: closeChangedFilesPanel,
+				onViewDiff: handleViewDiff
+			}}
+		/>
+	{/if}
 
 	{#if selectedDiffFile && !reviewMode}
-		<DiffViewer
-			projectId={activeTab.project}
-			file={selectedDiffFile}
-			onClose={() => { selectedDiffFile = null; }}
+		<LazyPanel
+			handle={DiffViewerLazy}
+			label="the diff viewer"
+			bare
+			props={{
+				projectId: activeTab.project,
+				file: selectedDiffFile,
+				onClose: () => (selectedDiffFile = null)
+			}}
 		/>
 	{/if}
 {/if}
@@ -1039,6 +1159,11 @@
 		height: 100%;
 		min-height: 0;
 		overflow: hidden;
+	}
+
+	/* Kept-alive but off-screen panel: no layout, no paint, not focusable. */
+	.feature-panel.is-inactive {
+		display: none;
 	}
 
 	/* Feature panels rendered as cards need to fill the space */

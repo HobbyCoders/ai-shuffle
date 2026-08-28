@@ -91,3 +91,24 @@ export function chatHeaderTitle(input: ChatHeaderTitleInput): string {
 	}
 	return 'New Chat';
 }
+
+/**
+ * What MessageArea should draw for the current surface.
+ *
+ * ChatView suppresses its own hero while a session's history is in flight, but
+ * the message column it renders instead contains MessageArea — whose empty
+ * branch keyed purely on `messages.length === 0` and therefore drew the full
+ * "Start a Conversation" hero on EVERY switch, indistinguishable from a
+ * brand-new empty chat, before the incoming transcript popped in.
+ *
+ * The loading window gets a transcript-shaped skeleton instead; a genuinely
+ * empty session (new or cleared, both settled) still gets the real hero.
+ */
+export type TranscriptRender = 'skeleton' | 'empty' | 'transcript';
+
+export function classifyTranscriptRender(input: ChatSurfaceInput): TranscriptRender {
+	const surface = classifyChatSurface(input);
+	if (surface === 'active') return 'transcript';
+	if (surface === 'loading') return 'skeleton';
+	return 'empty';
+}

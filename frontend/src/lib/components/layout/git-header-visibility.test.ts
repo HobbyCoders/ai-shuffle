@@ -11,6 +11,7 @@
 import { describe, it, expect } from 'vitest';
 import {
 	shouldShowHeaderGitActions,
+	shouldShowGithubGitActions,
 	type HeaderGitActionsInput
 } from './git-header-visibility';
 
@@ -50,11 +51,43 @@ describe('shouldShowHeaderGitActions', () => {
 		expect(shouldShowHeaderGitActions(base({ hasProject: false }))).toBe(false);
 	});
 
-	it('hides when GitHub CLI is not authenticated', () => {
-		expect(shouldShowHeaderGitActions(base({ githubAuthenticated: false }))).toBe(false);
+	it('KEEPS local git actions when GitHub CLI auth blips (G10c)', () => {
+		// Local git needs no GitHub auth. `githubAuthenticated` comes from a 120 s
+		// /auth/status poll whose `gh auth status` transiently fails under load —
+		// gating on it hid the whole git UI for up to two minutes.
+		expect(shouldShowHeaderGitActions(base({ githubAuthenticated: false }))).toBe(true);
 	});
 
 	it('hides when the worktree directory is gone', () => {
 		expect(shouldShowHeaderGitActions(base({ worktreeDeleted: true }))).toBe(false);
+	});
+});
+
+describe('shouldShowGithubGitActions', () => {
+	it('shows GitHub-backed actions when GitHub is available', () => {
+		expect(shouldShowGithubGitActions(base({ githubAvailable: true }))).toBe(true);
+	});
+
+	it('hides GitHub-backed actions when GitHub is unavailable', () => {
+		expect(shouldShowGithubGitActions(base({ githubAvailable: false }))).toBe(false);
+	});
+
+	it('prefers the debounced availability flag over the raw auth poll', () => {
+		// A single failed `gh auth status` leaves githubAvailable true (hysteresis
+		// in the git store), and the GitHub actions must stay put.
+		expect(
+			shouldShowGithubGitActions(base({ githubAuthenticated: false, githubAvailable: true }))
+		).toBe(true);
+	});
+
+	it('falls back to the raw auth verdict when no availability flag is supplied', () => {
+		expect(shouldShowGithubGitActions(base({ githubAuthenticated: false }))).toBe(false);
+		expect(shouldShowGithubGitActions(base({ githubAuthenticated: true }))).toBe(true);
+	});
+
+	it('still respects the local gate (remote session hides everything)', () => {
+		expect(
+			shouldShowGithubGitActions(base({ isRemote: true, githubAvailable: true }))
+		).toBe(false);
 	});
 });

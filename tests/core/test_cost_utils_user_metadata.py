@@ -13,6 +13,28 @@ from unittest.mock import patch
 import app.core.cost_utils as cost_utils
 
 
+def _user_rows(db_rows):
+    """Patch the narrow user-row read with rows given in DB-row form.
+
+    ``cost_utils`` no longer runs ``SELECT * FROM session_messages`` per cache
+    miss — it reads only ``(content, profile_id, metadata)`` for the session's
+    USER rows. These tests still express their fixtures as full DB rows, so
+    this converts them the same way the projection would.
+    """
+    return patch(
+        "app.core.cost_utils._load_user_message_rows",
+        return_value=[
+            (
+                r.get("content", ""),
+                r.get("profile_id"),
+                r.get("metadata") if isinstance(r.get("metadata"), dict) else None,
+            )
+            for r in db_rows
+            if r.get("role") == "user"
+        ],
+    )
+
+
 def _clear_caches():
     cost_utils.invalidate_profile_cache()
 
@@ -30,7 +52,7 @@ def test_get_cached_user_metadata_map_builds_ordered_lists():
         {"role": "user", "content": "hi", "metadata": None},
         {"role": "user", "content": "bye", "metadata": {"k": "v"}},
     ]
-    with patch("app.db.database.get_session_messages", return_value=rows):
+    with _user_rows(rows):
         meta_map = cost_utils.get_cached_user_metadata_map("sess-m1")
 
     assert meta_map == {"hi": [AUTO_META, None], "bye": [{"k": "v"}]}
@@ -39,7 +61,7 @@ def test_get_cached_user_metadata_map_builds_ordered_lists():
 
 def test_update_user_metadata_map_appends_when_primed():
     _clear_caches()
-    with patch("app.db.database.get_session_messages", return_value=[]):
+    with _user_rows([]):
         cost_utils.get_cached_user_metadata_map("sess-m2")  # prime empty entry
 
     cost_utils.update_user_metadata_map("sess-m2", "same", AUTO_META)
@@ -74,7 +96,7 @@ def test_attach_merges_db_metadata_onto_transcript_user_rows():
         {"role": "assistant", "content": "done", "type": "text"},
         {"role": "user", "content": "plain", "type": "text"},
     ]
-    with patch("app.db.database.get_session_messages", return_value=db_rows):
+    with _user_rows(db_rows):
         result = cost_utils.attach_user_message_metadata(transcript, "sess-m4")
 
     assert result is transcript  # mutated in place, returned for chaining
@@ -94,7 +116,7 @@ def test_attach_transcript_metadata_wins_on_key_conflict():
     transcript = [
         {"role": "user", "content": "q", "metadata": {"shared": "transcript"}},
     ]
-    with patch("app.db.database.get_session_messages", return_value=db_rows):
+    with _user_rows(db_rows):
         cost_utils.attach_user_message_metadata(transcript, "sess-m5")
 
     assert transcript[0]["metadata"] == {"automation_id": "a", "shared": "transcript"}
@@ -113,7 +135,7 @@ def test_attach_pairs_repeated_content_positionally():
         {"role": "user", "content": "repeat", "type": "text"},
         {"role": "user", "content": "repeat", "type": "text"},
     ]
-    with patch("app.db.database.get_session_messages", return_value=db_rows):
+    with _user_rows(db_rows):
         cost_utils.attach_user_message_metadata(transcript, "sess-m6")
 
     assert transcript[0]["metadata"] == AUTO_META
@@ -124,7 +146,7 @@ def test_attach_pairs_repeated_content_positionally():
 def test_invalidate_profile_cache_clears_metadata_cache_too():
     _clear_caches()
     rows = [{"role": "user", "content": "hi", "metadata": AUTO_META}]
-    with patch("app.db.database.get_session_messages", return_value=rows):
+    with _user_rows(rows):
         cost_utils.get_cached_user_metadata_map("sess-m7")
 
     cost_utils.invalidate_profile_cache("sess-m7")
@@ -132,7 +154,7 @@ def test_invalidate_profile_cache_clears_metadata_cache_too():
         assert "sess-m7" not in cost_utils._user_meta_cache
 
     # And the clear-all form
-    with patch("app.db.database.get_session_messages", return_value=rows):
+    with _user_rows(rows):
         cost_utils.get_cached_user_metadata_map("sess-m8")
     cost_utils.invalidate_profile_cache()
     with cost_utils._user_meta_cache_lock:

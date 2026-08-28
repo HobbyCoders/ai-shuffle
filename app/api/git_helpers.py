@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from fastapi import HTTPException, status
 
 from app.core.git_service import git_service
+from app.core.github_service import CACHE_MISS, TTLCache
 from app.core.project_utils import get_worktree_working_dir
 from app.db import database
 from app.api.common import resolve_project_path
@@ -150,6 +151,69 @@ def get_project_path(project_id: str, allow_missing: bool = False) -> Optional[s
     return str(result) if result is not None else None
 
 
+# ---------------------------------------------------------------------------
+# Working-directory resolution (cached)
+# ---------------------------------------------------------------------------
+# Resolving (project_id, worktree_id, session_id) -> checkout path costs 1-2
+# synchronous DB round trips plus a filesystem stat, and every hot git endpoint
+# does it on every poll (~2s cadence per open tab, finding G9). The mapping is
+# stable for the lifetime of a session, so it is cached with a short TTL and an
+# explicit invalidation hook for the flows that change it.
+_WORKING_DIR_TTL = 30.0
+# A resolution that FELL BACK to the project path because the session's checkout
+# does not exist yet is provisional — the checkout may be materialized moments
+# later — so it is held only briefly.
+_WORKING_DIR_FALLBACK_TTL = 5.0
+
+_working_dir_cache = TTLCache(
+    ttl=_WORKING_DIR_TTL, max_entries=512, name="working-dir"
+)
+
+
+def _resolve_working_dir(
+    project_id: str,
+    worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> Tuple[str, bool]:
+    """Uncached resolution. Returns ``(path, resolved_from_checkout)``.
+
+    Blocking: reads the database and stats the filesystem.
+    """
+    if worktree_id:
+        worktree = database.get_worktree(worktree_id)
+        if not worktree:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Worktree not found: {worktree_id}"
+            )
+        return get_worktree_working_dir(worktree), True
+
+    if session_id:
+        from app.core.project_resolver import resolve_existing_cwd
+
+        session = database.get_session(session_id)
+        if session:
+            cwd = resolve_existing_cwd(session)
+            if cwd:
+                return cwd, True
+
+    return get_project_path(project_id), not session_id
+
+
+def _working_dir_cache_key(
+    project_id: str, worktree_id: Optional[str], session_id: Optional[str]
+) -> Tuple[str, Optional[str], Optional[str]]:
+    return (project_id, worktree_id, session_id)
+
+
+def _store_working_dir(key, value: str, resolved_from_checkout: bool) -> None:
+    _working_dir_cache.set(
+        key,
+        value,
+        ttl=None if resolved_from_checkout else _WORKING_DIR_FALLBACK_TTL,
+    )
+
+
 def get_working_dir(
     project_id: str,
     worktree_id: Optional[str] = None,
@@ -164,26 +228,72 @@ def get_working_dir(
        project_v2_id), so chat-header git actions target the branch checkout
        rather than silently falling back to the base checkout.
     Otherwise returns the main project path.
+
+    Results are memoized for a few seconds (see :data:`_WORKING_DIR_TTL`).
+
+    This is the **synchronous** variant, kept for sync callers. Async handlers
+    should await :func:`get_working_dir_async`, which does the same thing but
+    hands the uncached resolution to a worker thread instead of blocking the
+    event loop.
     """
-    if worktree_id:
-        worktree = database.get_worktree(worktree_id)
-        if not worktree:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Worktree not found: {worktree_id}"
-            )
-        return get_worktree_working_dir(worktree)
+    key = _working_dir_cache_key(project_id, worktree_id, session_id)
+    cached = _working_dir_cache.get_or_miss(key)
+    if cached is not CACHE_MISS:
+        return cached
 
-    if session_id:
-        from app.core.project_resolver import resolve_existing_cwd
+    value, from_checkout = _resolve_working_dir(project_id, worktree_id, session_id)
+    _store_working_dir(key, value, from_checkout)
+    return value
 
-        session = database.get_session(session_id)
-        if session:
-            cwd = resolve_existing_cwd(session)
-            if cwd:
-                return cwd
 
-    return get_project_path(project_id)
+async def get_working_dir_async(
+    project_id: str,
+    worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> str:
+    """Non-blocking :func:`get_working_dir` for async handlers.
+
+    A cache hit never touches a thread; a miss resolves in a worker so the DB
+    round trip and the filesystem stat stay off the event loop.
+    """
+    key = _working_dir_cache_key(project_id, worktree_id, session_id)
+    cached = _working_dir_cache.get_or_miss(key)
+    if cached is not CACHE_MISS:
+        return cached
+
+    value, from_checkout = await asyncio.to_thread(
+        _resolve_working_dir, project_id, worktree_id, session_id
+    )
+    _store_working_dir(key, value, from_checkout)
+    return value
+
+
+def invalidate_working_dir_cache(
+    project_id: Optional[str] = None,
+    worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> None:
+    """Drop memoized checkout paths.
+
+    Call after anything that moves a session's checkout (worktree create/delete,
+    session rebind). With no arguments the whole cache is dropped; otherwise
+    only entries matching every supplied component are.
+    """
+    if project_id is None and worktree_id is None and session_id is None:
+        _working_dir_cache.invalidate()
+        return
+
+    def matches(key) -> bool:
+        p_id, wt_id, s_id = key
+        if project_id is not None and p_id != project_id:
+            return False
+        if worktree_id is not None and wt_id != worktree_id:
+            return False
+        if session_id is not None and s_id != session_id:
+            return False
+        return True
+
+    _working_dir_cache.invalidate_where(matches)
 
 
 # In-memory cache for git repository records to avoid DB+git calls on every poll.

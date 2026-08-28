@@ -13,7 +13,7 @@ import time
 import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any
+from typing import Any, Callable, Dict, Optional
 
 import bcrypt
 
@@ -1068,24 +1068,39 @@ auth_service = AuthService()
 # the freshness the prompt needs: a fresh login shows up in the next section
 # within five minutes, and a logout stops advertising just as quickly.
 _GITHUB_AUTH_TTL_SECONDS = 300.0
+# A *negative* answer is held far more briefly: it can also be the residue of a
+# transient failure (gh timing out under load), and a sign-in performed outside
+# the app should not stay invisible for five minutes.
+_GITHUB_AUTH_NEGATIVE_TTL_SECONDS = 30.0
 _github_auth_cache: Optional[tuple] = None  # (value, monotonic timestamp)
 
 
-def is_github_authenticated_cached() -> bool:
-    """``AuthService.is_github_authenticated()`` behind a 300s TTL cache.
+def is_github_authenticated_cached(probe: Optional[Callable[[], bool]] = None) -> bool:
+    """``AuthService.is_github_authenticated()`` behind a TTL cache.
 
-    Callers on a hot path (the per-turn prompt builder) want the signal, not a
-    subprocess. Errors are already swallowed by the underlying check, which
-    returns False, so a cached False is a real answer rather than a masked
-    failure.
+    Callers on a hot path (the per-turn prompt builder, ``GET /auth/status``)
+    want the signal, not a subprocess. Errors are already swallowed by the
+    underlying check, which returns False, so a cached False is a real answer
+    rather than a masked failure — but it is held for only
+    ``_GITHUB_AUTH_NEGATIVE_TTL_SECONDS`` so a transient gh failure cannot hide
+    a working GitHub setup for the full TTL.
+
+    *probe* overrides the callable used on a miss. It exists so an API layer
+    that resolves ``auth_service`` through its own module namespace (and whose
+    tests patch it there) shares this one cache instead of keeping a second.
+
+    This is a **blocking** call on a miss (``gh auth status``, 10s timeout) —
+    async callers must run it in a thread.
     """
     global _github_auth_cache
 
     now = time.monotonic()
     cached = _github_auth_cache
-    if cached is not None and (now - cached[1]) < _GITHUB_AUTH_TTL_SECONDS:
-        return cached[0]
-    value = auth_service.is_github_authenticated()
+    if cached is not None:
+        ttl = _GITHUB_AUTH_TTL_SECONDS if cached[0] else _GITHUB_AUTH_NEGATIVE_TTL_SECONDS
+        if (now - cached[1]) < ttl:
+            return cached[0]
+    value = (probe or auth_service.is_github_authenticated)()
     _github_auth_cache = (value, now)
     return value
 
@@ -1094,3 +1109,14 @@ def reset_github_auth_cache() -> None:
     """Drop the cached gh signal (tests; a login/logout that wants it now)."""
     global _github_auth_cache
     _github_auth_cache = None
+
+
+def set_github_auth_cached(value: bool) -> None:
+    """Seed the cache with a freshly observed answer.
+
+    Used by the login/logout/status endpoints, which have just learned the
+    truth first-hand: seeding both propagates the change immediately AND avoids
+    the redundant ``gh auth status`` spawn the next reader would otherwise pay.
+    """
+    global _github_auth_cache
+    _github_auth_cache = (bool(value), time.monotonic())

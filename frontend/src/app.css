@@ -103,6 +103,9 @@
 
 		/* Studio Noir surface effects */
 		--glass: oklch(0.24 0.006 240 / 0.55);
+		/* Opaque stand-in used wherever the blur is switched off (see the
+		   compositing-budget block below). */
+		--glass-solid: oklch(0.21 0.006 240);
 		--glass-highlight: oklch(1 0 0 / 0.09);
 		--glow: oklch(0.72 0.14 180 / 0.30);
 		--code-bg: oklch(0.125 0.005 240);
@@ -342,6 +345,7 @@
 
 		/* Studio Noir surface effects */
 		--glass: oklch(1 0 0 / 0.72);
+		--glass-solid: oklch(0.985 0.001 240);
 		--glass-highlight: oklch(1 0 0 / 0.9);
 		--glow: oklch(0.60 0.115 180 / 0.22);
 		--code-bg: oklch(0.975 0.002 250);
@@ -531,6 +535,51 @@
 	letter-spacing: -0.01em;
 }
 
+/* ============================================================
+   COMPOSITING BUDGET  (PERFORMANCE_REVIEW §3.2 R13)
+   ------------------------------------------------------------
+   Every backdrop-filter over the scrolling transcript makes the compositor
+   re-sample the pixels behind it on each frame the transcript moves, and a
+   `mix-blend-mode` overlay forces the whole stacking context through a blend
+   pass. On integrated GPUs that is the difference between a smooth scroll and
+   a visibly stepped one.
+
+   So the effects are expressed as ONE set of custom properties. Capable
+   machines keep the design's character (glass composer, frosted rails, grain);
+   a machine that asks for less transparency — or that the app has profiled as
+   low-end (`data-fx="low"`, see utils/perf-profile.ts) — gets `none`, which
+   removes the compositing work entirely rather than merely reducing the blur
+   radius, plus opaque surfaces so the UI still reads as layered.
+
+   Blur radii are also down from the pre-review values (composer 22px → 8px,
+   rails 12px → 8px): blur cost grows with the radius, and the visual difference
+   above 8px on these small surfaces is marginal. */
+:root {
+	--fx-glass-backdrop: blur(8px) saturate(150%);
+	--fx-rail-backdrop: blur(8px) saturate(140%);
+	--fx-grain-blend: overlay;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+	:root {
+		--fx-glass-backdrop: none;
+		--fx-rail-backdrop: none;
+		--fx-grain-blend: normal;
+		--grain-opacity: 0;
+		--glass: var(--glass-solid);
+		--glass-bg: var(--card);
+	}
+}
+
+:root[data-fx='low'] {
+	--fx-glass-backdrop: none;
+	--fx-rail-backdrop: none;
+	--fx-grain-blend: normal;
+	--grain-opacity: 0;
+	--glass: var(--glass-solid);
+	--glass-bg: var(--card);
+}
+
 /* Procedural grain overlay for large surfaces.
    Host element must be position: relative (or otherwise positioned). */
 .grain::after {
@@ -540,7 +589,7 @@
 	pointer-events: none;
 	z-index: 40;
 	opacity: var(--grain-opacity);
-	mix-blend-mode: overlay;
+	mix-blend-mode: var(--fx-grain-blend, overlay);
 	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)'/%3E%3C/svg%3E");
 	background-size: 200px 200px;
 }
@@ -577,8 +626,8 @@
 /* Glass effect for modals/popovers */
 .glass {
 	background: var(--glass-bg);
-	backdrop-filter: blur(12px);
-	-webkit-backdrop-filter: blur(12px);
+	backdrop-filter: var(--fx-rail-backdrop);
+	-webkit-backdrop-filter: var(--fx-rail-backdrop);
 }
 
 /* Code blocks (chrome is rebuilt in wave 2 — keep this neutral) */
@@ -1075,6 +1124,15 @@ select option {
 	/* Disable specific animations */
 	.panel-slide-in {
 		animation: none !important;
+	}
+
+	/* The streaming cursor is injected as raw HTML by AssistantMessage, so it
+	   carries Tailwind's animate-pulse and is outside any component's scoped
+	   styles — it needs an explicit global stop, and must settle FULLY VISIBLE
+	   rather than mid-fade. Same for the "live" dot on a streaming name line. */
+	.streaming-cursor {
+		animation: none !important;
+		opacity: 1 !important;
 	}
 
 	.theme-toggle-icon.rotating {

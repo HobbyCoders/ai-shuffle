@@ -19,6 +19,33 @@ import { untrack } from 'svelte';
 
 type Subscriber<T> = (value: T) => void;
 type Unsubscribe = () => void;
+/** Equality predicate a derived store uses to decide whether to notify. */
+export type Equals<D> = (a: D, b: D) => boolean;
+
+// ─── Equality helpers ────────────────────────────────────────────────────────
+
+/**
+ * Shallow (own enumerable keys, `Object.is` per value) equality.
+ *
+ * Pass this to `createDerived` for a getter that BUILDS an object or array —
+ * `{ sessionId, title }`, a filtered list — where a fresh reference is produced
+ * on every read and the default identity check could never short-circuit.
+ */
+export function shallowEqual<D>(a: D, b: D): boolean {
+	if (Object.is(a, b)) return true;
+	if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+	if (Array.isArray(a) !== Array.isArray(b)) return false;
+	const ak = Object.keys(a as Record<string, unknown>);
+	const bk = Object.keys(b as Record<string, unknown>);
+	if (ak.length !== bk.length) return false;
+	for (const k of ak) {
+		if (!Object.prototype.hasOwnProperty.call(b, k)) return false;
+		if (!Object.is((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k])) {
+			return false;
+		}
+	}
+	return true;
+}
 
 // ─── withLoading ─────────────────────────────────────────────────────────────
 
@@ -117,16 +144,34 @@ export function createSubscribers<T>(
 	/**
 	 * Create a derived store that piggybacks on this store's subscribers.
 	 * The getter receives no arguments — it should close over the parent state.
+	 *
+	 * EQUALITY SHORT-CIRCUIT (finding W10): the parent notifies on every write of
+	 * its whole state object — for `activeSession` that is once per fold, i.e.
+	 * many times a second while streaming. A derived subscriber is re-invoked
+	 * only when its OWN value actually changed, so a component subscribed to
+	 * `activeSessionStreaming` does no work while message text streams in.
+	 *
+	 * Defaults to `Object.is`, which is the right check for the common
+	 * scalar/reference-stable getter. Pass `shallowEqual` (or a custom
+	 * predicate) for a getter that builds a fresh object or array each read.
 	 */
-	function createDerived<D>(getter: () => D) {
+	function createDerived<D>(getter: () => D, equals: Equals<D> = Object.is) {
 		return {
 			get current(): D {
 				return getter();
 			},
 			subscribe(fn: Subscriber<D>): Unsubscribe {
-				const handler: Subscriber<T> = () => fn(getter());
+				// Seeded from the value delivered on subscribe, so the first
+				// parent notification after an unchanged write is already skipped.
+				let last = untrack(() => getter());
+				const handler: Subscriber<T> = () => {
+					const next = getter();
+					if (equals(last, next)) return;
+					last = next;
+					fn(next);
+				};
 				subscribers.add(handler);
-				untrack(() => fn(getter()));
+				untrack(() => fn(last));
 				return () => {
 					subscribers.delete(handler);
 				};
@@ -152,7 +197,7 @@ interface Store<T> {
 	subscribe: (fn: Subscriber<T>) => Unsubscribe;
 	update: (fn: (s: T) => T) => void;
 	set: (value: T) => void;
-	createDerived: <D>(getter: (s: T) => D) => {
+	createDerived: <D>(getter: (s: T) => D, equals?: Equals<D>) => {
 		readonly current: D;
 		subscribe: (fn: Subscriber<D>) => Unsubscribe;
 	};
@@ -195,8 +240,8 @@ export function createStore<T>(initial: T): Store<T> {
 		(v) => { state = v; }
 	);
 
-	function createDerived<D>(getter: (s: T) => D) {
-		return createDerivedInternal(() => getter(state));
+	function createDerived<D>(getter: (s: T) => D, equals?: Equals<D>) {
+		return createDerivedInternal(() => getter(state), equals);
 	}
 
 	return {

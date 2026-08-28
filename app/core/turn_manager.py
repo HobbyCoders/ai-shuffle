@@ -410,8 +410,9 @@ async def interrupt_async(
 # * **Correctness** rides a poll that starts at the caller's ``poll_interval``
 #   and doubles up to :data:`MAX_POLL_INTERVAL`. With PostgreSQL unreachable, on
 #   the SQLite test shim, or for a settle that somehow appends no event, the poll
-#   alone still returns the right answer — a 300 s wait now costs ~10 queries
-#   instead of ~6000.
+#   alone still returns the right answer, just later: a full 300 s wait costs
+#   ~155 reads at the 2 s ceiling instead of the ~6000 the 50 ms cadence issued
+#   (~0.5/s instead of 20/s), and with the gateway healthy it is two.
 #
 # Both legs run their DB reads through :func:`asyncio.to_thread`, so nothing in
 # here ever touches psycopg2 from the loop thread.

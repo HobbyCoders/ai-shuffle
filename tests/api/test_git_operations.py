@@ -16,7 +16,7 @@ import time
 import pytest
 from contextlib import ExitStack
 from types import SimpleNamespace
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -514,7 +514,7 @@ def op_client(op_app, mock_git_service, mock_github_service, mock_worktree_manag
         stack.enter_context(patch.object(gitops, "github_service", mock_github_service))
         stack.enter_context(patch.object(gitops, "worktree_manager", mock_worktree_manager))
         stack.enter_context(patch.object(gitops, "check_project_access", MagicMock()))
-        stack.enter_context(patch.object(gitops, "get_working_dir", MagicMock(return_value="/wd")))
+        stack.enter_context(patch.object(gitops, "get_working_dir_async", AsyncMock(return_value="/wd")))
         stack.enter_context(patch.object(gitops.asyncio, "create_task", _no_run))
         with TestClient(op_app) as client:
             yield client
@@ -570,7 +570,7 @@ class TestFinishEndpoint:
             json={"worktree_id": "wt-1", "session_id": "ses-1", "cleanup": True},
         )
         assert resp.status_code == 200
-        gitops.get_working_dir.assert_any_call("p1", "wt-1", "ses-1")
+        gitops.get_working_dir_async.assert_any_call("p1", "wt-1", "ses-1")
 
 
 class TestShipEndpoint:
@@ -592,7 +592,7 @@ class TestShipEndpoint:
             json={"worktree_id": "wt-9", "session_id": "ses-2"},
         )
         assert resp.status_code == 200
-        gitops.get_working_dir.assert_any_call("p1", "wt-9", "ses-2")
+        gitops.get_working_dir_async.assert_any_call("p1", "wt-9", "ses-2")
 
     def test_head_equals_base_400(self, op_client, mock_git_service):
         """Backstop: can't ship the base branch onto itself (head == base)."""
@@ -650,7 +650,7 @@ class TestConcurrentGuardRace:
             stack.enter_context(patch.object(gitops, "github_service", mock_github_service))
             stack.enter_context(patch.object(gitops, "worktree_manager", mock_worktree_manager))
             stack.enter_context(patch.object(gitops, "check_project_access", MagicMock()))
-            stack.enter_context(patch.object(gitops, "get_working_dir", MagicMock(return_value="/wd")))
+            stack.enter_context(patch.object(gitops, "get_working_dir_async", AsyncMock(return_value="/wd")))
             stack.enter_context(patch.object(gitops.asyncio, "create_task", _no_run))
 
             transport = httpx.ASGITransport(app=op_app)

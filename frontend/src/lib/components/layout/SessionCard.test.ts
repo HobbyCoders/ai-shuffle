@@ -202,6 +202,58 @@ describe('SessionCard actions', () => {
 		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', true);
 	});
 
+	// ── R15: no per-card global listeners, no per-tick date parsing ──────
+	it('attaches no window click/keydown listeners of its own', () => {
+		const addSpy = vi.spyOn(window, 'addEventListener');
+
+		renderCard();
+
+		const globals = addSpy.mock.calls
+			.map(([type]) => type)
+			.filter((type) => type === 'click' || type === 'keydown');
+		expect(globals).toEqual([]);
+		addSpy.mockRestore();
+	});
+
+	it('uses the timestamp handed down by the list instead of re-parsing the row', () => {
+		// The sidebar resolves each row's last-activity time once when it builds
+		// the list; the card must not parse `updated_at` again on every tick.
+		const { container } = renderCard(
+			{ updated_at: 'not-a-date' },
+			{ timestamp: Date.parse('2026-08-20T12:05:00Z'), status: 'working' }
+		);
+
+		expect(container.querySelector('.timer')?.textContent).toBe('1m 00s');
+	});
+
+	it('follows the parent when the open-card id is controlled', async () => {
+		const { container, rerender } = renderCard({}, { openActionsId: null });
+		const frame = container.querySelector('.scard-frame') as HTMLElement;
+		expect(frame.classList.contains('actions-open')).toBe(false);
+		expect(frame.getAttribute('data-session-card')).toBe('session-a');
+
+		await rerender({ openActionsId: 'session-a' } as never);
+		expect(frame.classList.contains('actions-open')).toBe(true);
+	});
+
+	it('reports its reveal to the parent instead of closing itself', async () => {
+		const onActionsOpenChange = vi.fn();
+		vi.mocked(window.matchMedia).mockImplementation(() => ({
+			matches: true,
+			addEventListener: vi.fn(),
+			removeEventListener: vi.fn(),
+		}) as unknown as MediaQueryList);
+		const { container } = renderCard({}, { openActionsId: null, onActionsOpenChange });
+		const frame = container.querySelector('.scard-frame') as HTMLElement;
+		const card = container.querySelector('.scard') as HTMLElement;
+
+		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, clientX: 260, clientY: 20 });
+		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 180, clientY: 22 });
+		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, clientX: 180, clientY: 22 });
+
+		expect(onActionsOpenChange).toHaveBeenCalledWith('session-a');
+	});
+
 	it('keeps mobile actions hidden until a left swipe reveals them', async () => {
 		vi.mocked(window.matchMedia).mockImplementation(() => ({
 			matches: true,
@@ -239,6 +291,11 @@ describe('SessionCard actions', () => {
 		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 180, clientY: 20 });
 		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, clientX: 180, clientY: 20 });
 		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		// A real tap is pointerdown → pointerup → click; the pointerdown is what
+		// clears the one-shot guard that swallowed the swipe's trailing click.
+		await fireEvent.pointerDown(card, { pointerId: 2, isPrimary: true, button: 0, clientX: 200, clientY: 20 });
+		await fireEvent.pointerUp(frame, { pointerId: 2, isPrimary: true, button: 0, clientX: 200, clientY: 20 });
 		await fireEvent.click(card);
 
 		expect(frame.classList.contains('actions-open')).toBe(false);

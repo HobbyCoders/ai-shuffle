@@ -33,6 +33,14 @@ tracking a baseline instead of comparing mtime alone.
 
 The worker never deletes a database note from a missing local file: a missing
 file is treated as an absent local view and re-materialized from the DB.
+
+Cost shape (F7). A pass is METADATA-FIRST: one projection read of
+``(id, title, file_path, updated_at)`` for every note plus one ``stat`` per
+note, and a full-row read (the multi-KB ``content`` column) ONLY for notes whose
+file mtime or DB ``updated_at`` actually moved since the last pass. In the
+steady state — which is every pass, on every install, almost always — that is
+zero content bytes off the database. The previous implementation paged every
+note's full row on every tick and then discarded it in the fast path.
 """
 
 from __future__ import annotations
@@ -48,6 +56,7 @@ from app.core.note_files import (
     write_note_file,
 )
 from app.db import database
+from app.db.base import get_db, rows_to_list
 
 logger = logging.getLogger(__name__)
 
@@ -207,36 +216,86 @@ def _reconcile_one(note: Dict[str, Any]) -> None:
         )
 
 
-def _fetch_all_notes() -> List[Dict[str, Any]]:
-    """Page through every note (the per-call limit is bounded)."""
-    out: List[Any] = []
-    offset = 0
-    page = 500
-    while True:
-        batch = database.get_all_notes(limit=page, offset=offset)
-        if not batch:
-            break
-        out.extend(batch)
-        if len(batch) < page:
-            break
-        offset += page
-    return out
+def _fetch_note_metadata() -> List[Dict[str, Any]]:
+    """Every note's CHANGE-DETECTION fields — never its ``content`` (F7).
+
+    ``(id, title, file_path, updated_at)`` is everything a pass needs to decide
+    whether a note can take the fast path: ``updated_at`` moves on any DB-side
+    edit (title or content), and ``file_path`` gives the filename to ``stat``.
+    The multi-KB ``content`` column is then read only for the rows that actually
+    changed (see :func:`_fetch_note`).
+
+    Why this matters: the worker used to page every note's FULL row — content
+    included — out of the database on every tick, then throw ~all of it away in
+    the fast path. On an install with a few hundred notes that is megabytes of
+    row traffic per pass, several times a minute, forever.
+
+    Read directly against the ``notes`` table (same pattern as
+    ``app.core.orphan_reconciler``) because no projection-only accessor exists in
+    ``app.db.notes``; a ``get_all_note_metadata()`` there would be the tidier
+    home for this query.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, title, file_path, updated_at FROM notes "
+            "ORDER BY updated_at DESC"
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+def _fetch_note(note_id: str) -> Optional[Dict[str, Any]]:
+    """Full note row (content included) for a note that needs reconciling."""
+    return database.get_note(note_id)
+
+
+def _needs_content(meta: Dict[str, Any], mtime: Optional[float]) -> bool:
+    """True when this note's full row must be read to reconcile it.
+
+    The negation is exactly the old fast path, evaluated against metadata only:
+    we hold a baseline for the note AND neither the file's mtime nor the row's
+    ``updated_at`` has moved since we recorded it. In that state the previous
+    implementation also did nothing — it just paid for the content read first.
+    """
+    note_id = meta.get("id")
+    if note_id not in _baseline_hash:
+        return True
+    if _last_file_mtime.get(note_id) != mtime:
+        return True
+    return _last_db_updated.get(note_id) != meta.get("updated_at")
 
 
 def sync_notes_once() -> Dict[str, int]:
-    """Run one full reconcile pass over all notes. Best-effort per note.
+    """Run one reconcile pass over all notes. Best-effort per note.
+
+    METADATA-FIRST (F7): one small projection read tells us which notes could
+    possibly have changed; only those pay for a full-row read. A steady-state
+    pass therefore costs one indexed SELECT plus one ``stat`` per note and
+    fetches zero content.
 
     Synchronous (blocking DB + file I/O); call via ``asyncio.to_thread`` from
     the async worker. Returns simple stats for logging/tests.
     """
-    notes = _fetch_all_notes()
+    metadata = _fetch_note_metadata()
     seen: set = set()
-    for note in notes:
-        nid = note.get("id")
+    fetched = 0
+    for meta in metadata:
+        nid = meta.get("id")
         if not nid:
             continue
         seen.add(nid)
+        file_path = meta.get("file_path")
+        if not file_path:
+            continue  # Not materialized yet (handled by startup materialization).
         try:
+            filename = file_path.split("/")[-1]
+            mtime = get_note_file_mtime(filename)
+            if not _needs_content(meta, mtime):
+                continue  # Fast path — no content read, no file read.
+            note = _fetch_note(nid)
+            if note is None:
+                continue  # Deleted between the two reads; next pass prunes it.
+            fetched += 1
             _reconcile_one(note)
         except Exception:
             logger.exception("[NotesSync] reconcile failed for note %s", nid)
@@ -247,4 +306,4 @@ def sync_notes_once() -> Dict[str, int]:
         _last_file_mtime.pop(stale, None)
         _last_db_updated.pop(stale, None)
 
-    return {"notes": len(notes)}
+    return {"notes": len(metadata), "fetched": fetched}

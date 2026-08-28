@@ -21,6 +21,9 @@ const mocks = vi.hoisted(() => {
 
 	return {
 		sessions: store<unknown[]>([]),
+		sessionsHasMore: store(false),
+		sessionsLoadingMore: store(false),
+		loadMoreSessions: vi.fn(),
 		projects: store<unknown[]>([]),
 		clusterProjects: store<unknown[]>([]),
 		activeSession: store({ sessionId: null as string | null, isStreaming: false }),
@@ -35,13 +38,23 @@ vi.mock('$lib/stores/app-data.svelte', () => ({
 	sessions: mocks.sessions,
 	projects: mocks.projects,
 	clusterProjects: mocks.clusterProjects,
+	sessionsHasMore: mocks.sessionsHasMore,
+	sessionsLoadingMore: mocks.sessionsLoadingMore,
 	appData: {
 		setSessionActive: vi.fn(),
 		deleteSession: vi.fn(),
 		renameSession: vi.fn(),
 		loadSessions: vi.fn(),
+		loadMoreSessions: mocks.loadMoreSessions,
 	},
 }));
+
+// Spy on the timestamp helper so a test can prove `rows` is NOT rebuilt on a
+// streaming fold (R2) — a rebuild resolves a timestamp for every visible row.
+vi.mock('./session-card-data', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('./session-card-data')>();
+	return { ...actual, sessionTimestamp: vi.fn(actual.sessionTimestamp) };
+});
 
 vi.mock('$lib/stores/active-session', () => ({
 	activeSession: Object.assign(mocks.activeSession, {
@@ -68,6 +81,8 @@ vi.mock('$lib/api/github', () => ({
 	getPullRequests: mocks.getPullRequests,
 }));
 
+import { tick } from 'svelte';
+import { sessionTimestamp } from './session-card-data';
 import Sidebar from './Sidebar.svelte';
 
 function session(
@@ -119,9 +134,16 @@ const sidebarProps = {
 
 beforeEach(() => {
 	localStorage.clear();
+	vi.mocked(sessionTimestamp).mockClear();
+	mocks.sessionsHasMore.set(false);
+	mocks.sessionsLoadingMore.set(false);
+	mocks.loadMoreSessions.mockClear();
 	mocks.activeSession.set({ sessionId: null, isStreaming: false });
 	mocks.streamingSessions.set(new Set());
 	mocks.backgroundPermissions.set(new Map());
+	// Reset the CALL COUNT too: without this the counter accumulates across
+	// tests and any "fetched exactly once" assertion reads a stale total.
+	mocks.getPullRequests.mockReset();
 	mocks.getPullRequests.mockResolvedValue([]);
 	mocks.clusterProjects.set([]);
 	mocks.projects.set([
@@ -148,7 +170,8 @@ describe('Sidebar session groups', () => {
 			},
 		});
 
-		const labels = Array.from(document.querySelectorAll('.grouplabel')).map((node) =>
+		// `.ws-head` is the Workspace nav header, not a session group.
+		const labels = Array.from(document.querySelectorAll('.grouplabel:not(.ws-head)')).map((node) =>
 			node.textContent?.replace(/\s+/g, ' ').trim()
 		);
 		expect(labels).toEqual(['Active 1', 'Settled 1']);
@@ -307,5 +330,271 @@ describe('Sidebar session groups', () => {
 		const active = document.querySelector('.ghostrow.active');
 		expect(active).toBeTruthy();
 		expect(active?.textContent).toContain('Visible Project');
+	});
+});
+
+describe('Sidebar ordering (must never change silently)', () => {
+	// Precomputing timestamps (R2) is only safe if the visible order is
+	// byte-for-byte what the date-parsing comparator produced. This fixture
+	// mixes updated_at, created_at-only and no-date rows.
+	const fixture = [
+		session('newest', 'Newest chat', 'visible-project', false, false, {
+			updated_at: '2026-08-20T12:30:00Z',
+		}),
+		session('middle', 'Middle chat', 'visible-project', false, false, {
+			updated_at: '2026-08-20T09:00:00Z',
+		}),
+		session('created-only', 'Created only chat', 'visible-project', false, false, {
+			updated_at: null,
+			created_at: '2026-08-20T11:00:00Z',
+		}),
+		session('oldest', 'Oldest chat', 'visible-project', false, false, {
+			updated_at: '2026-08-18T23:59:00Z',
+		}),
+		session('undated', 'Undated chat', 'visible-project', false, false, {
+			updated_at: null,
+			created_at: null,
+		}),
+		session('naive', 'Naive timestamp chat', 'visible-project', false, false, {
+			// The API can hand back a naive (no-Z) UTC stamp; parseUTC treats it
+			// as UTC, so it must sort between "newest" and "created-only".
+			updated_at: '2026-08-20T11:30:00',
+		}),
+	];
+
+	it('orders settled cards by last activity, newest first', () => {
+		mocks.sessions.set(fixture);
+
+		render(Sidebar, { props: sidebarProps });
+
+		const titles = Array.from(document.querySelectorAll('.ctitle')).map((n) => n.textContent);
+		expect(titles).toEqual([
+			'Newest chat',
+			'Naive timestamp chat',
+			'Created only chat',
+			'Middle chat',
+			'Oldest chat',
+			'Undated chat',
+		]);
+	});
+
+	it('keeps Active cards in the same order, above the Settled group', () => {
+		mocks.sessions.set([
+			session('a-old', 'Active older', 'visible-project', true, false, {
+				updated_at: '2026-08-20T08:00:00Z',
+			}),
+			session('a-new', 'Active newer', 'visible-project', true, false, {
+				updated_at: '2026-08-20T18:00:00Z',
+			}),
+			session('s-one', 'Settled one', 'visible-project', false, false, {
+				updated_at: '2026-08-20T19:00:00Z',
+			}),
+		]);
+
+		render(Sidebar, { props: sidebarProps });
+
+		const activeTitles = Array.from(document.querySelectorAll('.l2')).map((n) => n.textContent);
+		expect(activeTitles).toEqual(['Active newer', 'Active older']);
+		const settledTitles = Array.from(document.querySelectorAll('.ctitle')).map((n) => n.textContent);
+		expect(settledTitles).toEqual(['Settled one']);
+	});
+});
+
+describe('Sidebar streaming folds (R2)', () => {
+	it('does not rebuild the row list when $activeSession folds mid-stream', async () => {
+		mocks.activeSession.set({ sessionId: 'active', isStreaming: true });
+		render(Sidebar, { props: sidebarProps });
+		await tick();
+
+		const before = vi.mocked(sessionTimestamp).mock.calls.length;
+		expect(before).toBeGreaterThan(0);
+
+		// A streaming turn folds the activeSession store ~60×/s. Each fold hands
+		// down a NEW state object with the same streaming identity — the sidebar
+		// used to re-filter, re-map and re-sort the whole list on every one.
+		for (let i = 0; i < 5; i++) {
+			mocks.activeSession.set({ sessionId: 'active', isStreaming: true });
+			await tick();
+		}
+		expect(vi.mocked(sessionTimestamp).mock.calls.length).toBe(before);
+
+		// Sanity: a REAL streaming change still rebuilds the rows, so the check
+		// above cannot pass just because nothing ever recomputes.
+		mocks.streamingSessions.set(new Set(['settled']));
+		await tick();
+		expect(vi.mocked(sessionTimestamp).mock.calls.length).toBeGreaterThan(before);
+	});
+
+	it('still shows Working from the cross-device map alone', async () => {
+		mocks.activeSession.set({ sessionId: null, isStreaming: false });
+		mocks.streamingSessions.set(new Set(['settled']));
+
+		render(Sidebar, { props: sidebarProps });
+
+		const card = screen.getByText('Settled chat').closest('.scard');
+		expect(card?.querySelector('.status')?.textContent ?? card?.textContent).toBeTruthy();
+		expect(document.body.textContent).toContain('Settled chat');
+	});
+});
+
+describe('Sidebar open-PR refresh (R8)', () => {
+	it('does not refetch when a new $sessions array carries the same project/branch set', async () => {
+		const rows = [
+			session('prsession', 'PR chat', 'visible-project', true, false, { worktree_branch: 'wt/active' }),
+		];
+		mocks.sessions.set(rows);
+		render(Sidebar, { props: sidebarProps });
+
+		await vi.waitFor(() => expect(mocks.getPullRequests).toHaveBeenCalledTimes(1));
+
+		// Every sessions emission hands the sidebar a NEW array identity (a `done`
+		// event, a row patch…). The dedupe key used to be computed and thrown
+		// away, so this fired getPullRequests for every project each time.
+		for (let i = 0; i < 4; i++) {
+			mocks.sessions.set(rows.map((r) => ({ ...r })));
+			await tick();
+		}
+		await new Promise((r) => setTimeout(r, 20));
+		expect(mocks.getPullRequests).toHaveBeenCalledTimes(1);
+	});
+
+	it('debounces a refetch when the branch set actually changes', async () => {
+		vi.useFakeTimers();
+		try {
+			mocks.sessions.set([
+				session('prsession', 'PR chat', 'visible-project', true, false, { worktree_branch: 'wt/active' }),
+			]);
+			render(Sidebar, { props: sidebarProps });
+			await vi.advanceTimersByTimeAsync(0);
+			expect(mocks.getPullRequests).toHaveBeenCalledTimes(1);
+
+			mocks.sessions.set([
+				session('prsession', 'PR chat', 'visible-project', true, false, { worktree_branch: 'wt/active' }),
+				session('other', 'Other chat', 'visible-project', true, false, { worktree_branch: 'wt/other' }),
+			]);
+			await vi.advanceTimersByTimeAsync(100);
+			expect(mocks.getPullRequests).toHaveBeenCalledTimes(1);
+
+			await vi.advanceTimersByTimeAsync(2500);
+			expect(mocks.getPullRequests).toHaveBeenCalledTimes(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('keeps a known PR badge when a later fetch fails', async () => {
+		mocks.getPullRequests.mockResolvedValueOnce([
+			{ number: 7, title: 'Add thing', head_branch: 'wt/active', url: 'https://x/pull/7' },
+		]);
+		mocks.sessions.set([
+			session('prsession', 'PR chat', 'visible-project', true, false, { worktree_branch: 'wt/active' }),
+		]);
+		render(Sidebar, { props: sidebarProps });
+
+		await vi.waitFor(() => {
+			const card = screen.getByText('PR chat').closest('.scard');
+			expect(card?.querySelector('.status')?.textContent).toContain('PR Opened');
+		});
+
+		// A transient failure (auth blip, rate limit) must not blank the badge.
+		mocks.getPullRequests.mockRejectedValue(new Error('gh exploded'));
+		mocks.sessions.set([
+			session('prsession', 'PR chat', 'visible-project', true, false, { worktree_branch: 'wt/active' }),
+			session('other', 'Other chat', 'visible-project', true, false, { worktree_branch: 'wt/other' }),
+		]);
+		await new Promise((r) => setTimeout(r, 2200));
+
+		const card = screen.getByText('PR chat').closest('.scard');
+		expect(card?.querySelector('.status')?.textContent).toContain('PR Opened');
+	});
+});
+
+describe('Sidebar delegated card menus (R15)', () => {
+	beforeEach(() => {
+		Object.defineProperty(window, 'matchMedia', {
+			writable: true,
+			configurable: true,
+			value: vi.fn().mockImplementation(() => ({
+				matches: true,
+				addEventListener: vi.fn(),
+				removeEventListener: vi.fn(),
+			})),
+		});
+	});
+
+	function openActions(id: string) {
+		const frame = document.querySelector(`[data-session-card="${id}"]`) as HTMLElement;
+		const card = frame.querySelector('.scard') as HTMLElement;
+		fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, clientX: 260, clientY: 20 });
+		fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 180, clientY: 22 });
+		fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, clientX: 180, clientY: 22 });
+		return frame;
+	}
+
+	it('attaches ONE window click listener regardless of how many cards render', () => {
+		mocks.sessions.set(
+			Array.from({ length: 12 }, (_, i) =>
+				session(`s${i}`, `Chat ${i}`, 'visible-project', false)
+			)
+		);
+		const addSpy = vi.spyOn(window, 'addEventListener');
+
+		render(Sidebar, { props: sidebarProps });
+
+		const clickListeners = addSpy.mock.calls.filter(([type]) => type === 'click').length;
+		expect(clickListeners).toBe(1);
+		addSpy.mockRestore();
+	});
+
+	it('closes the open card actions on an outside click', async () => {
+		render(Sidebar, { props: sidebarProps });
+		const frame = openActions('settled');
+		await tick();
+		expect(frame.classList.contains('actions-open')).toBe(true);
+
+		await fireEvent.click(document.body);
+		await tick();
+		expect(frame.classList.contains('actions-open')).toBe(false);
+	});
+
+	it('leaves the open card alone when the click lands inside it', async () => {
+		render(Sidebar, { props: sidebarProps });
+		const frame = openActions('settled');
+		await tick();
+
+		await fireEvent.click(frame.querySelector('.card-actions') as HTMLElement);
+		await tick();
+		expect(frame.classList.contains('actions-open')).toBe(true);
+	});
+
+	it('closes the open card actions on Escape', async () => {
+		render(Sidebar, { props: sidebarProps });
+		const frame = openActions('settled');
+		await tick();
+		expect(frame.classList.contains('actions-open')).toBe(true);
+
+		await fireEvent.keyDown(window, { key: 'Escape' });
+		await tick();
+		expect(frame.classList.contains('actions-open')).toBe(false);
+	});
+});
+
+describe('Sidebar load-more shelf (W1)', () => {
+	it('offers the next page when the server holds more than the capped load', async () => {
+		mocks.sessionsHasMore.set(true);
+
+		render(Sidebar, { props: sidebarProps });
+
+		const shelf = screen.getByRole('button', { name: /Load older sessions/ });
+		await fireEvent.click(shelf);
+		expect(mocks.loadMoreSessions).toHaveBeenCalledTimes(1);
+	});
+
+	it('hides the shelf when everything is loaded', () => {
+		mocks.sessionsHasMore.set(false);
+
+		render(Sidebar, { props: sidebarProps });
+
+		expect(screen.queryByRole('button', { name: /Load older sessions/ })).toBeNull();
 	});
 });

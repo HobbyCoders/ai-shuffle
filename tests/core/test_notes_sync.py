@@ -40,12 +40,16 @@ def temp_data_dir():
     shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+_ORIGINAL_FETCH_METADATA = notes_sync._fetch_note_metadata
+
+
 @pytest.fixture(autouse=True)
 def clean_state():
     """Each test starts from a fresh, empty in-memory sync state."""
     notes_sync.reset_state()
     yield
     notes_sync.reset_state()
+    notes_sync._fetch_note_metadata = _ORIGINAL_FETCH_METADATA
 
 
 @pytest.fixture
@@ -102,11 +106,32 @@ def set_mtime(data_dir, filename, epoch):
     os.utime(note_path(data_dir, filename), (epoch, epoch))
 
 
-def single_page(*notes):
-    """A get_all_notes side effect that returns the notes once, then empties."""
-    def _get_all_notes(limit=100, offset=0, **kwargs):
-        return list(notes) if offset == 0 else []
-    return _get_all_notes
+def install_notes(mock_db, *notes):
+    """Install ``notes`` as the DB contents for the metadata-first worker.
+
+    The worker reads change-detection metadata for every note and pulls the
+    full row (content included) only for notes that look changed, so a test
+    fixture has to supply both halves. ``content_reads`` on the returned handle
+    records which note ids actually had their content fetched — that is what
+    the F7 tests assert on.
+    """
+    rows = [dict(n) for n in notes]
+    by_id = {r["id"]: r for r in rows}
+    content_reads: list = []
+
+    def _metadata():
+        return [
+            {k: r.get(k) for k in ("id", "title", "file_path", "updated_at")}
+            for r in rows
+        ]
+
+    def _get_note(note_id):
+        content_reads.append(note_id)
+        return by_id.get(note_id)
+
+    notes_sync._fetch_note_metadata = _metadata
+    mock_db.get_note.side_effect = _get_note
+    return content_reads
 
 
 # =============================================================================
@@ -118,7 +143,7 @@ class TestNotesSync:
         """File already matches DB: record a baseline, touch nothing."""
         note = make_note()
         write_raw(fs, "my-note.md", note["title"], note["content"])
-        mock_db.get_all_notes.side_effect = single_page(note)
+        install_notes(mock_db, note)
 
         notes_sync.sync_notes_once()
 
@@ -129,7 +154,7 @@ class TestNotesSync:
         """A local file edit (db unchanged) is pushed up to the database."""
         note = make_note(content="original")
         write_raw(fs, "my-note.md", note["title"], "original")
-        mock_db.get_all_notes.side_effect = single_page(note)
+        install_notes(mock_db, note)
         mock_db.update_note.return_value = make_note(
             content="edited", updated_at="2024-02-02T00:00:00+00:00"
         )
@@ -158,13 +183,13 @@ class TestNotesSync:
         """
         original = make_note(content="original")
         write_raw(fs, "my-note.md", original["title"], "original")
-        mock_db.get_all_notes.side_effect = single_page(original)
+        install_notes(mock_db, original)
         notes_sync.sync_notes_once()  # baseline established
 
         # DB now holds a newer version (edited elsewhere); file is untouched.
         updated = make_note(content="edited elsewhere",
                             updated_at="2024-03-03T00:00:00+00:00")
-        mock_db.get_all_notes.side_effect = single_page(updated)
+        install_notes(mock_db, updated)
 
         notes_sync.sync_notes_once()
 
@@ -175,13 +200,13 @@ class TestNotesSync:
         """Unchanged file + unchanged DB row: no DB write, no file rewrite."""
         note = make_note()
         write_raw(fs, "my-note.md", note["title"], note["content"])
-        mock_db.get_all_notes.side_effect = single_page(note)
+        install_notes(mock_db, note)
 
         notes_sync.sync_notes_once()
         mtime_before = note_path(fs, "my-note.md").stat().st_mtime
 
         # Re-run with nothing changed.
-        mock_db.get_all_notes.side_effect = single_page(note)
+        install_notes(mock_db, note)
         notes_sync.sync_notes_once()
         mtime_after = note_path(fs, "my-note.md").stat().st_mtime
 
@@ -192,7 +217,7 @@ class TestNotesSync:
         """Both sides changed since baseline: the newer (file) side wins."""
         note = make_note(content="original")
         write_raw(fs, "my-note.md", note["title"], "original")
-        mock_db.get_all_notes.side_effect = single_page(note)
+        install_notes(mock_db, note)
         notes_sync.sync_notes_once()  # baseline
 
         # File edited AND db edited; file mtime is far newer than db updated_at.
@@ -200,7 +225,7 @@ class TestNotesSync:
         set_mtime(fs, "my-note.md", 2_000_000_000)  # ~2033
         db_changed = make_note(content="db loses",
                                updated_at="2020-01-01T00:00:00+00:00")
-        mock_db.get_all_notes.side_effect = single_page(db_changed)
+        install_notes(mock_db, db_changed)
 
         notes_sync.sync_notes_once()
 
@@ -212,7 +237,7 @@ class TestNotesSync:
         """A note whose local file is absent is restored from the DB, not deleted."""
         note = make_note(content="from db")
         # No file on disk.
-        mock_db.get_all_notes.side_effect = single_page(note)
+        install_notes(mock_db, note)
 
         notes_sync.sync_notes_once()
 
@@ -232,7 +257,7 @@ class TestNotesSync:
                           updated_at="2099-01-01T00:00:00+00:00")
         write_raw(fs, "my-note.md", stale["title"], "old content")
         set_mtime(fs, "my-note.md", 1_000_000_000)  # ~2001, older than db
-        mock_db.get_all_notes.side_effect = single_page(stale)
+        install_notes(mock_db, stale)
 
         notes_sync.sync_notes_once()
 
@@ -249,7 +274,7 @@ class TestNotesSync:
                          updated_at="2000-01-01T00:00:00+00:00")
         write_raw(fs, "my-note.md", note["title"], "agent edit")
         set_mtime(fs, "my-note.md", 2_000_000_000)  # ~2033, newer than db
-        mock_db.get_all_notes.side_effect = single_page(note)
+        install_notes(mock_db, note)
 
         notes_sync.sync_notes_once()
 
@@ -261,12 +286,12 @@ class TestNotesSync:
         """In-memory state for notes that vanish from the DB is dropped."""
         note = make_note()
         write_raw(fs, "my-note.md", note["title"], note["content"])
-        mock_db.get_all_notes.side_effect = single_page(note)
+        install_notes(mock_db, note)
         notes_sync.sync_notes_once()
         assert "note-1" in notes_sync._baseline_hash
 
         # Note is gone from the DB on the next pass.
-        mock_db.get_all_notes.side_effect = single_page()
+        install_notes(mock_db)
         notes_sync.sync_notes_once()
 
         assert "note-1" not in notes_sync._baseline_hash
@@ -281,7 +306,7 @@ class TestNotesSync:
         write_raw(fs, "bad.md", bad["title"], bad["content"])
         # Make the bad note explode by giving it no id mid-reconcile is hard;
         # instead force update_note to raise only when the file is edited.
-        mock_db.get_all_notes.side_effect = single_page(bad, good)
+        install_notes(mock_db, bad, good)
 
         # Both are in-sync on first pass, so this simply must not raise.
         result = notes_sync.sync_notes_once()

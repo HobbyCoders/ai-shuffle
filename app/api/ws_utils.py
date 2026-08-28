@@ -20,7 +20,22 @@ logger = logging.getLogger(__name__)
 # for EVERY device (even a hard refresh backfills only the pre-stall events)
 # until TCP finally gives up on the zombie socket. Bounding the send converts
 # that hang into the normal dead-connection error path within seconds.
-WS_SEND_TIMEOUT_SECONDS = 10.0
+#
+# W2: lowered 10.0 -> 2.5s. The device fan-out no longer awaits sockets at all
+# (``app.core.sync_engine`` gives every connection a bounded queue + writer
+# task), so this timeout governs only the ORIGIN socket passthrough in
+# ``SessionRuntime._default_broadcast``. There it is still a per-frame await in
+# the pump, which is exactly why it must be short: it is an eviction deadline
+# for a genuinely dead socket, not a budget for a slow one. Kept numerically in
+# sync with ``app.core.sync_engine._SEND_TIMEOUT_SECONDS`` (core must not import
+# the api layer, hence the duplication).
+#
+# Remaining gap (needs a file outside this change's ownership): the origin
+# socket has no writer queue of its own — ``ChatWebSocketHandler.send_json``
+# still awaits inline. Once a send times out the handler poisons the connection
+# and every later send fast-fails, so the worst case is ONE 2.5s hiccup per dead
+# origin socket rather than one per frame.
+WS_SEND_TIMEOUT_SECONDS = 2.5
 
 
 class WSPayloadEncodeError(Exception):

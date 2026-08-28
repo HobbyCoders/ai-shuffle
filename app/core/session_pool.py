@@ -3,8 +3,14 @@ LRU Session Pool for AI provider sessions.
 
 Keeps provider adapters alive between queries to avoid spawning a new
 subprocess for every message. Bounded by max_size to limit memory usage.
-Eviction happens lazily: only when the pool is full and a new session
-needs to enter.
+
+Eviction has two triggers:
+  * LRU pressure — the pool is full and a new session needs to enter; and
+  * the TIERED IDLE POLICY (:class:`IdlePolicy`) — a recency tier, a
+    last-device-disconnect grace, and an activity floor, enforced by a
+    deadline-driven watchdog that sleeps exactly until the next deadline (and
+    not at all while the pool is empty), so a subprocess's ~100-300MB is
+    released when it goes stale rather than on some unrelated 5-minute tick.
 
 The lifecycle is: connect() -> [query() -> receive_response()]* -> disconnect()
 This module keeps adapters in the [query -> receive_response]* phase between
@@ -159,6 +165,14 @@ class SessionState:
     # mid-wait and kill the wake.
     idle_reader_active: bool = False
     last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    # When the LAST device (browser/app) watching this session disconnected, or
+    # None while a device is attached / while attachment is unknown. Stamped by
+    # SessionPool.note_session_detached (pushed by the sync engine) and/or by the
+    # pool's own attachment probe during a watchdog re-evaluation; cleared by
+    # note_session_attached and by any put() (a query is running, so somebody is
+    # driving this session). Feeds the DETACHED leg of the idle policy — see
+    # IdlePolicy.detached_grace_seconds.
+    detached_since: Optional[datetime] = None
     streaming_started_at: Optional[datetime] = None  # Track when streaming began (for timeout detection)
     background_task: Optional[asyncio.Task] = None
     # Mutable dict for callback indirection — updated each query, read by can_use_tool closure
@@ -446,24 +460,157 @@ def reap_terminated_process_trees() -> int:
     return reaped
 
 
+# ─── Tiered idle policy (F1) ──────────────────────────────────────────────
+#
+# One pooled session == one long-lived Node CLI subprocess at 100-300+MB RSS,
+# so the pool's steady-state occupancy IS the app's idle-RAM floor. The policy
+# below is the SINGLE place that decides when a subprocess has outlived its
+# usefulness; nothing else in the codebase should carry an idle constant.
+#
+# Three legs, evaluated together, earliest deadline wins:
+#
+#   * TIER   — the ``hot_size`` most-recently-used sessions keep the long
+#     ``hot_idle_seconds``; everything ranked below them is COLD and gets the
+#     much shorter ``cold_idle_seconds``. A flat timeout has to be set for the
+#     session you are most likely to return to, which means paying that timeout
+#     for every session you are NOT going to return to. Ranking by recency is
+#     precisely the signal that separates the two.
+#
+#   * DETACHED — once the last device watching a session disconnects, its
+#     subprocess is evicted after ``detached_grace_seconds`` regardless of tier.
+#     A session nobody is watching cannot receive a UI message without a
+#     reconnect first, and that reconnect is slower than the respawn it would
+#     have saved. The grace absorbs page reloads and brief network drops.
+#
+#   * FLOOR  — no session is ever evicted within ``min_idle_floor_seconds`` of
+#     its last activity, whatever the other legs say. This is the guard against
+#     an over-eager detach: a WS flap between two turns of a live conversation
+#     must not cost the subprocess.
+#
+# Eviction never overrides the pool's existing busy guards (streaming, idle
+# reader, in-flight background work) — those are checked first and independently.
+
+
+@dataclass(frozen=True)
+class IdlePolicy:
+    """Declarative idle/eviction policy for the session pool.
+
+    Immutable so a policy can be swapped atomically (tests, runtime reconfig)
+    without a half-applied state. Build the configured one with
+    :meth:`from_settings`.
+    """
+
+    hot_size: int = 2
+    hot_idle_seconds: float = 1800.0
+    cold_idle_seconds: float = 420.0
+    detached_grace_seconds: float = 180.0
+    min_idle_floor_seconds: float = 60.0
+    reevaluate_seconds: float = 60.0
+
+    @classmethod
+    def from_settings(cls, settings: Any = None) -> "IdlePolicy":
+        """Build the policy from app settings, falling back to the defaults.
+
+        Never raises: a missing/garbled setting degrades to this class's default
+        rather than leaving the pool with no policy at all.
+        """
+        if settings is None:
+            try:
+                from app.core.config import settings as _settings
+                settings = _settings
+            except Exception:  # pragma: no cover - config import is not optional
+                return cls()
+
+        def _num(name: str, default: float) -> float:
+            try:
+                value = getattr(settings, name, None)
+                if value is None:
+                    return default
+                value = float(value)
+            except (TypeError, ValueError):
+                return default
+            return value if value >= 0 else default
+
+        return cls(
+            hot_size=max(0, int(_num("sdk_session_hot_pool_size", cls.hot_size))),
+            hot_idle_seconds=_num(
+                "sdk_session_idle_timeout_seconds", cls.hot_idle_seconds
+            ),
+            cold_idle_seconds=_num(
+                "sdk_session_cold_idle_timeout_seconds", cls.cold_idle_seconds
+            ),
+            detached_grace_seconds=_num(
+                "sdk_session_detached_grace_seconds", cls.detached_grace_seconds
+            ),
+            min_idle_floor_seconds=cls.min_idle_floor_seconds,
+            reevaluate_seconds=_num(
+                "sdk_session_idle_reevaluate_seconds", cls.reevaluate_seconds
+            ),
+        )
+
+    def tier_idle_seconds(self, rank_from_mru: int) -> float:
+        """Idle allowance for a session at ``rank_from_mru`` (0 == most recent).
+
+        A cold timeout longer than the hot one would be nonsense (it would make
+        an old session outlive a fresh one), so the cold leg is clamped.
+        """
+        if rank_from_mru < self.hot_size:
+            return self.hot_idle_seconds
+        return min(self.cold_idle_seconds, self.hot_idle_seconds)
+
+
+def _default_attachment_probe(session_id: str) -> Optional[bool]:
+    """Best-effort "is a device watching this session right now?".
+
+    Returns True/False, or None when the answer cannot be determined — the
+    caller MUST treat None as "assume attached" and leave any existing detach
+    stamp alone, so a sync-engine hiccup can never manufacture an eviction.
+
+    Lazy-imported: the pool must not depend on the WS layer at module load.
+    """
+    try:
+        from app.core.sync_engine import sync_engine
+
+        return sync_engine.get_device_count(session_id) > 0
+    except Exception:
+        return None
+
+
 class SessionPool:
     """
     Bounded LRU pool of SDK client sessions.
 
     - OrderedDict for O(1) LRU tracking (move_to_end on access)
-    - Configurable max_size (default 3)
+    - Configurable max_size (``settings.sdk_session_pool_size``)
     - Hard cap at max_size * 2 to prevent unbounded growth when all sessions stream
-    - Eviction only on insertion when full (lazy — no background timer)
+    - Eviction on insertion when full (LRU) AND on the tiered idle policy's
+      deadlines (see :class:`IdlePolicy` and :meth:`start_idle_watchdog`)
     - Thread-safe within a single asyncio event loop
     """
 
     # Hard cap multiplier — even with all sessions streaming, never exceed this
     _HARD_CAP_MULTIPLIER = 2
 
-    def __init__(self, max_size: int = 3):
+    def __init__(
+        self, max_size: int = 3, idle_policy: Optional[IdlePolicy] = None
+    ):
         self._pool: OrderedDict[str, SessionState] = OrderedDict()
         self._max_size = max(1, max_size)
         self._eviction_lock = asyncio.Lock()
+        # Tiered idle policy (F1) — the single source of truth for "when may
+        # this subprocess be reclaimed". Defaults are used when no settings are
+        # available (tests construct bare pools).
+        self._idle_policy: IdlePolicy = idle_policy or IdlePolicy()
+        # Attachment probe: "is a device watching this session?" (None = unknown).
+        self._attachment_probe: Callable[[str], Optional[bool]] = (
+            _default_attachment_probe
+        )
+        # Idle watchdog plumbing. The watchdog sleeps until the NEXT known
+        # eviction deadline instead of riding the resource monitor's 5-minute
+        # tick, so RAM is released on time; it sleeps forever (no wake at all)
+        # while the pool is empty.
+        self._idle_task: Optional[asyncio.Task] = None
+        self._idle_wake: Optional[asyncio.Event] = None
         # Optional async hook fired from _do_evict AFTER a session leaves the pool
         # (LRU + idle paths, which both funnel through _do_evict). It lets a higher
         # layer tear down the per-session artifacts the pool itself knows nothing
@@ -523,11 +670,63 @@ class SessionPool:
     def max_size(self, value: int):
         self._max_size = max(1, value)
 
+    # ─── Idle policy / attachment ────────────────────────────────────────
+
+    @property
+    def idle_policy(self) -> IdlePolicy:
+        return self._idle_policy
+
+    @idle_policy.setter
+    def idle_policy(self, policy: IdlePolicy) -> None:
+        self._idle_policy = policy
+        self._wake_idle_watchdog()
+
+    def set_attachment_probe(
+        self, probe: Optional[Callable[[str], Optional[bool]]]
+    ) -> None:
+        """Replace the "is a device watching this session?" probe.
+
+        ``None`` restores the default (sync-engine) probe. A probe MUST return
+        ``None`` when it cannot tell — the pool treats unknown as attached.
+        """
+        self._attachment_probe = probe or _default_attachment_probe
+
+    def note_session_attached(self, session_id: str) -> None:
+        """A device (re)connected to this session — clear any detach stamp.
+
+        Push hook for the WS layer. Safe to call for a session that is not
+        pooled, and safe to call repeatedly.
+        """
+        state = self._pool.get(session_id)
+        if state is not None and state.detached_since is not None:
+            state.detached_since = None
+            self._wake_idle_watchdog()
+
+    def note_session_detached(self, session_id: str) -> None:
+        """The LAST device watching this session disconnected.
+
+        Starts the detach grace (see IdlePolicy.detached_grace_seconds) and
+        wakes the watchdog so the eviction is scheduled for the grace deadline
+        rather than discovered on some later tick. Idempotent: an existing
+        stamp is kept, so repeated calls do not extend the grace.
+        """
+        state = self._pool.get(session_id)
+        if state is None:
+            return
+        if state.detached_since is None:
+            state.detached_since = datetime.now(timezone.utc)
+            self._wake_idle_watchdog()
+
     def get(self, session_id: str) -> Optional[SessionState]:
         """Get session state, promoting to MRU position. Returns None if not found."""
         state = self._pool.get(session_id)
         if state is not None:
+            # A promotion re-ranks the pool, which can demote another session
+            # from the hot tier to the cold one (and so pull its deadline in).
+            was_mru = next(reversed(self._pool)) == session_id
             self._pool.move_to_end(session_id)
+            if not was_mru:
+                self._wake_idle_watchdog()
         return state
 
     def peek(self, session_id: str) -> Optional[SessionState]:
@@ -541,6 +740,11 @@ class SessionPool:
         """
         self._pool[session_id] = state
         self._pool.move_to_end(session_id)
+        # A query is running against this session, so it is not abandoned:
+        # clear any detach stamp left by a probe that ran while no browser
+        # happened to be attached (automations, API-driven turns).
+        state.detached_since = None
+        self._wake_idle_watchdog()
 
     @property
     def hard_cap(self) -> int:
@@ -840,49 +1044,249 @@ class SessionPool:
         )
         return state
 
-    async def evict_idle(self, max_idle_seconds: int = 600) -> list[str]:
-        """Evict sessions that have been idle (not streaming) for too long.
+    # ─── Idle eviction (tiered) ──────────────────────────────────────────
 
-        This prevents idle SDK subprocesses from consuming server resources
-        indefinitely. Called by the resource monitor's periodic cleanup.
+    def _is_busy(self, session_id: str, state: SessionState) -> bool:
+        """True when live work forbids evicting this session.
 
-        Args:
-            max_idle_seconds: Maximum idle time before eviction (default: 10 minutes).
+        Streaming turns, the between-turns idle reader (which holds the client
+        through the CLI-wake grace window while looking idle to
+        ``is_streaming``), and in-flight background sub-agents / SDK-backgrounded
+        shells all mean "disconnecting would kill running work". This guard is
+        checked BEFORE any deadline arithmetic and is never overridden by the
+        idle policy.
+        """
+        return (
+            state.is_streaming
+            or state.idle_reader_active
+            or self._has_background_work(session_id)
+        )
 
-        Returns:
-            List of evicted session IDs.
+    def _refresh_detachment(self, session_id: str, state: SessionState,
+                            now: datetime) -> None:
+        """Sync ``state.detached_since`` with the attachment probe.
+
+        The push hooks (:meth:`note_session_detached` / :meth:`note_session_attached`)
+        are the responsive path; this is the self-healing one, so the policy
+        still works on an install where nothing wired the hooks up. An *unknown*
+        probe result (None) is deliberately inert: it neither stamps nor clears,
+        so a sync-engine failure can never manufacture an eviction.
+        """
+        try:
+            attached = self._attachment_probe(session_id)
+        except Exception:
+            attached = None
+        if attached is None:
+            return
+        if attached:
+            state.detached_since = None
+        elif state.detached_since is None:
+            state.detached_since = now
+
+    def idle_seconds_remaining(
+        self, session_id: str, now: Optional[datetime] = None
+    ) -> Optional[float]:
+        """Seconds until this session becomes idle-evictable, or None.
+
+        None means "not evictable on a timer": the session is busy, or it is not
+        pooled. A value <= 0 means it is due now. This is the one place the
+        three policy legs (tier / detached / floor) are combined, and it is what
+        both :meth:`evict_idle` and the watchdog's sleep computation read, so a
+        deadline can never be evaluated two different ways.
+        """
+        state = self._pool.get(session_id)
+        if state is None:
+            return None
+        if self._is_busy(session_id, state):
+            return None
+
+        now = now or datetime.now(timezone.utc)
+        policy = self._idle_policy
+
+        # Rank from the MRU end: 0 is the most recently used session.
+        try:
+            rank = len(self._pool) - 1 - list(self._pool.keys()).index(session_id)
+        except ValueError:  # pragma: no cover - popped concurrently
+            return None
+
+        idle_seconds = (now - state.last_activity).total_seconds()
+        remaining = policy.tier_idle_seconds(rank) - idle_seconds
+
+        # DETACHED leg: nobody is watching, so the subprocess is dead weight
+        # once the grace expires — whatever tier the session is in.
+        if policy.detached_grace_seconds > 0 and state.detached_since is not None:
+            detached_for = (now - state.detached_since).total_seconds()
+            remaining = min(remaining, policy.detached_grace_seconds - detached_for)
+
+        # FLOOR leg: never reclaim a subprocess that was doing something a
+        # moment ago, no matter which leg fired. Guards a WS flap mid-conversation.
+        floor_remaining = policy.min_idle_floor_seconds - idle_seconds
+        return max(remaining, floor_remaining)
+
+    async def evict_idle(
+        self, max_idle_seconds: Optional[int] = None
+    ) -> list[str]:
+        """Evict pooled sessions whose idle deadline has passed.
+
+        ``max_idle_seconds=None`` (the default) applies the tiered
+        :class:`IdlePolicy` — recency tier, detach grace, and activity floor.
+        Passing an explicit ``max_idle_seconds`` applies that FLAT timeout to
+        every session instead, which is what the legacy callers/tests expect and
+        what an operator wants from a one-off "reclaim everything older than N"
+        sweep.
+
+        Busy sessions (streaming, idle-reader-held, or parked on in-flight
+        background work) are never evicted by either mode.
+
+        Returns the list of evicted session IDs.
         """
         now = datetime.now(timezone.utc)
-        evicted = []
-        # Snapshot keys to avoid mutation during iteration
-        for session_id in list(self._pool.keys()):
-            state = self._pool.get(session_id)
-            if state is None:
+        evicted: list[str] = []
+
+        # Decide against a SNAPSHOT: evicting mutates LRU ranks, and a session's
+        # tier must not change because an earlier victim left the pool mid-sweep.
+        victims: list[tuple[str, SessionState, float]] = []
+        for session_id, state in list(self._pool.items()):
+            if self._is_busy(session_id, state):
                 continue
-            # Never evict sessions that are currently streaming, nor sessions
-            # held by the between-turns idle reader, nor sessions parked on an
-            # in-flight background sub-agent (the parent turn has returned so
-            # they look idle, but disconnecting would kill the agent). The
-            # idle-reader flag covers the CLI-wake grace window: the reader may
-            # legitimately hold the client with zero running background work
-            # while it waits for the CLI's delayed wake turn — and it reads via
-            # peek (no LRU promote), so last_activity never bumps during that
-            # wait. Evicting mid-wait kills the wake.
-            if (
-                state.is_streaming
-                or state.idle_reader_active
-                or self._has_background_work(session_id)
-            ):
-                continue
-            idle_seconds = (now - state.last_activity).total_seconds()
-            if idle_seconds >= max_idle_seconds:
-                await self._do_evict(session_id, state, "idle")
-                evicted.append(session_id)
-                logger.info(
-                    f"[Pool] Idle-evicted session {session_id} "
-                    f"(idle {idle_seconds:.0f}s > {max_idle_seconds}s)"
-                )
+            if max_idle_seconds is None:
+                self._refresh_detachment(session_id, state, now)
+                remaining = self.idle_seconds_remaining(session_id, now)
+                if remaining is None or remaining > 0:
+                    continue
+            else:
+                idle_seconds = (now - state.last_activity).total_seconds()
+                if idle_seconds < max_idle_seconds:
+                    continue
+            victims.append(
+                (session_id, state, (now - state.last_activity).total_seconds())
+            )
+
+        for session_id, state, idle_seconds in victims:
+            if self._pool.get(session_id) is not state:
+                continue  # removed while we were awaiting an earlier eviction
+            if self._is_busy(session_id, state):
+                continue  # became busy mid-sweep
+            await self._do_evict(session_id, state, "idle")
+            evicted.append(session_id)
+            logger.info(
+                "[Pool] Idle-evicted session %s (idle %.0fs, detached=%s, "
+                "policy=%s)",
+                session_id,
+                idle_seconds,
+                state.detached_since is not None,
+                "flat" if max_idle_seconds is not None else "tiered",
+            )
         return evicted
+
+    # ─── Idle watchdog ───────────────────────────────────────────────────
+
+    def _wake_idle_watchdog(self) -> None:
+        """Ask the watchdog to recompute its sleep (cheap, never raises)."""
+        wake = self._idle_wake
+        if wake is None:
+            return
+        try:
+            wake.set()
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+    def next_idle_deadline(self) -> Optional[float]:
+        """Seconds until the EARLIEST idle deadline in the pool, or None.
+
+        None means no pooled session is on a timer right now (empty pool, or
+        every session busy) — the watchdog then parks on its wake event and
+        costs nothing at all.
+        """
+        now = datetime.now(timezone.utc)
+        soonest: Optional[float] = None
+        for session_id, state in list(self._pool.items()):
+            self._refresh_detachment(session_id, state, now)
+            remaining = self.idle_seconds_remaining(session_id, now)
+            if remaining is None:
+                continue
+            if soonest is None or remaining < soonest:
+                soonest = remaining
+        return soonest
+
+    async def _idle_watchdog_loop(self) -> None:
+        """Evict on the deadline instead of on someone else's tick.
+
+        Sleeps until the earliest known eviction deadline (capped by
+        ``IdlePolicy.reevaluate_seconds`` so a state change nobody told us about
+        — typically a device disconnect on an install that has not wired the
+        push hooks — is noticed within a bounded window), and parks on the wake
+        event with no timeout at all while the pool is empty. Pure in-process
+        timing: no DB, no thread, no work while idle.
+        """
+        assert self._idle_wake is not None
+        while True:
+            try:
+                delay = self.next_idle_deadline()
+                if delay is None:
+                    timeout: Optional[float] = None
+                elif delay <= 0:
+                    timeout = 0.0
+                else:
+                    timeout = min(delay, self._idle_policy.reevaluate_seconds)
+
+                if timeout is None:
+                    await self._idle_wake.wait()
+                    self._idle_wake.clear()
+                    continue
+                if timeout > 0:
+                    try:
+                        await asyncio.wait_for(self._idle_wake.wait(), timeout=timeout)
+                        self._idle_wake.clear()
+                        continue  # state changed — recompute before evicting
+                    except asyncio.TimeoutError:
+                        pass
+                self._idle_wake.clear()
+                await self.evict_idle()
+            except asyncio.CancelledError:
+                break
+            except Exception:  # noqa: BLE001 — the watchdog must survive anything
+                logger.warning("[Pool] idle watchdog pass failed", exc_info=True)
+                try:
+                    await asyncio.sleep(5.0)
+                except asyncio.CancelledError:
+                    break
+
+    def start_idle_watchdog(self) -> Optional[asyncio.Task]:
+        """Start the deadline-driven idle watchdog (idempotent)."""
+        if self._idle_task is not None and not self._idle_task.done():
+            return self._idle_task
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("[Pool] idle watchdog not started (no running loop)")
+            return None
+        self._idle_wake = asyncio.Event()
+        self._idle_task = loop.create_task(self._idle_watchdog_loop())
+        logger.info(
+            "[Pool] Idle watchdog started (hot=%d/%.0fs cold=%.0fs "
+            "detached_grace=%.0fs)",
+            self._idle_policy.hot_size,
+            self._idle_policy.hot_idle_seconds,
+            self._idle_policy.cold_idle_seconds,
+            self._idle_policy.detached_grace_seconds,
+        )
+        return self._idle_task
+
+    async def stop_idle_watchdog(self) -> None:
+        """Cancel the idle watchdog and wait for it to exit (idempotent)."""
+        task = self._idle_task
+        self._idle_task = None
+        self._idle_wake = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001 — teardown must never raise
+            logger.debug("[Pool] idle watchdog raised during shutdown", exc_info=True)
 
     async def evict_dead(self) -> list[str]:
         """Evict sessions whose subprocess has died silently.
@@ -995,6 +1399,7 @@ class SessionPool:
 
     async def shutdown(self) -> None:
         """Disconnect all sessions. Called during server shutdown."""
+        await self.stop_idle_watchdog()
         session_ids = list(self._pool.keys())
         for session_id in session_ids:
             try:
@@ -1155,7 +1560,44 @@ def get_session_pool() -> SessionPool:
     global _session_pool
     if _session_pool is None:
         from app.core.config import settings
-        pool_size = getattr(settings, 'sdk_session_pool_size', 3)
-        _session_pool = SessionPool(max_size=pool_size)
-        logger.info(f"[Pool] Initialized with max_size={pool_size}")
+        pool_size = getattr(settings, 'sdk_session_pool_size', 4)
+        policy = IdlePolicy.from_settings(settings)
+        _session_pool = SessionPool(max_size=pool_size, idle_policy=policy)
+        logger.info(
+            "[Pool] Initialized with max_size=%s hot=%s/%.0fs cold=%.0fs "
+            "detached_grace=%.0fs",
+            pool_size, policy.hot_size, policy.hot_idle_seconds,
+            policy.cold_idle_seconds, policy.detached_grace_seconds,
+        )
     return _session_pool
+
+
+def note_session_attached(session_id: str) -> None:
+    """Module-level push hook: a device connected to ``session_id``.
+
+    Wiring seam for the WS layer (``sync_engine.register_device``) — it must not
+    need to know whether a pool has been created yet, so this is a no-op before
+    the singleton exists and never raises.
+    """
+    if _session_pool is None:
+        return
+    try:
+        _session_pool.note_session_attached(session_id)
+    except Exception:  # noqa: BLE001 — a lifecycle hint must never break a WS path
+        logger.debug("[Pool] note_session_attached failed", exc_info=True)
+
+
+def note_session_detached(session_id: str) -> None:
+    """Module-level push hook: the LAST device watching ``session_id`` left.
+
+    Wiring seam for ``sync_engine.unregister_device`` (fire it only when the
+    session's device map becomes empty). Starts the detach grace and wakes the
+    idle watchdog so the subprocess is reclaimed on the grace deadline instead
+    of at the end of a long idle timeout. No-op before the pool exists.
+    """
+    if _session_pool is None:
+        return
+    try:
+        _session_pool.note_session_detached(session_id)
+    except Exception:  # noqa: BLE001 — a lifecycle hint must never break a WS path
+        logger.debug("[Pool] note_session_detached failed", exc_info=True)

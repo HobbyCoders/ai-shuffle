@@ -816,3 +816,59 @@ async def test_terminal_task_event_failure_never_kills_the_wake_turn(mock_db):
         outcome = await session_runtime.SessionRuntime(turn).execute()
 
     assert outcome == "completed"
+
+
+# ---------------------------------------------------------------------------
+# W3 — WS-leg trim: redundant render content never reaches the broadcast leg
+# ---------------------------------------------------------------------------
+
+async def test_pump_does_not_broadcast_redundant_render_frames(mock_db):
+    """The pump yields the COMPLETE assistant text block and a thinking marker
+    after the deltas that already carried the same content. Neither has a
+    frontend WS dispatch case, and both already ride the SSE feed — so they must
+    reach the recorder (SSE) but NOT the broadcast leg (W3)."""
+    turn = turns_db.enqueue_turn("s1w3", "user", prompt="hi")
+    frames = [
+        {"type": "stream_delta", "content": "he"},
+        {"type": "text", "content": "hello world"},
+        {"type": "thinking_block", "content": "hmm"},
+        {"type": "tool_use", "id": "t1", "input": {"path": "a.py"}},
+        {"type": "done", "metadata": {}},
+    ]
+
+    with _runtime_env(pump=_make_pump(frames)) as env:
+        await session_runtime.SessionRuntime(turn).execute()
+
+    # Everything still reaches the recorder → session event log → SSE.
+    recorded = [c.args[0]["type"] for c in env["recorder"].on_event.call_args_list]
+    assert recorded == ["stream_delta", "text", "thinking_block", "tool_use", "done"]
+
+    # Only the non-trimmed frames hit the WS/broadcast leg.
+    broadcast = [c.args[1]["type"] for c in env["broadcaster"].await_args_list]
+    assert broadcast == ["tool_use", "done"]
+    assert "text" not in broadcast
+    assert "thinking_block" not in broadcast
+    assert "stream_delta" not in broadcast
+
+
+async def test_pump_caps_oversized_tool_input_on_the_ws_leg_only(mock_db):
+    """The tool_use FRAME is correctness-bearing (the client's pendingTools set)
+    so it is still broadcast — but a multi-MB input, which no WS consumer reads,
+    is replaced by a marker. The recorder's copy keeps the full input."""
+    big = "x" * (session_runtime._WS_MAX_TOOL_INPUT_CHARS * 4)
+    turn = turns_db.enqueue_turn("s1w3b", "user", prompt="hi")
+    frames = [
+        {"type": "tool_use", "id": "t1", "input": {"content": big}},
+        {"type": "done", "metadata": {}},
+    ]
+
+    with _runtime_env(pump=_make_pump(frames)) as env:
+        await session_runtime.SessionRuntime(turn).execute()
+
+    recorded = env["recorder"].on_event.call_args_list[0].args[0]
+    assert recorded["input"] == {"content": big}  # SSE/persistence untouched
+
+    broadcast = env["broadcaster"].await_args_list[0].args[1]
+    assert broadcast["id"] == "t1"
+    assert broadcast["input"]["_ws_truncated"] is True
+    assert broadcast["input"]["_original_chars"] > session_runtime._WS_MAX_TOOL_INPUT_CHARS

@@ -11,6 +11,28 @@ from unittest.mock import patch
 import app.core.cost_utils as cost_utils
 
 
+def _user_rows(db_rows):
+    """Patch the narrow user-row read with rows given in DB-row form.
+
+    ``cost_utils`` no longer runs ``SELECT * FROM session_messages`` per cache
+    miss — it reads only ``(content, profile_id, metadata)`` for the session's
+    USER rows. These tests still express their fixtures as full DB rows, so
+    this converts them the same way the projection would.
+    """
+    return patch(
+        "app.core.cost_utils._load_user_message_rows",
+        return_value=[
+            (
+                r.get("content", ""),
+                r.get("profile_id"),
+                r.get("metadata") if isinstance(r.get("metadata"), dict) else None,
+            )
+            for r in db_rows
+            if r.get("role") == "user"
+        ],
+    )
+
+
 def _clear_cache():
     with cost_utils._profile_map_cache_lock:
         cost_utils._profile_map_cache.clear()
@@ -25,7 +47,7 @@ def test_get_cached_profile_map_builds_ordered_lists():
         {"role": "user", "content": "hi", "profile_id": "p2"},
         {"role": "user", "content": "bye", "profile_id": "p3"},
     ]
-    with patch("app.db.database.get_session_messages", return_value=rows):
+    with _user_rows(rows):
         profile_map = cost_utils.get_cached_profile_map("sess-1")
 
     assert profile_map == {"hi": ["p1", "p2"], "bye": ["p3"]}
@@ -39,7 +61,7 @@ def test_build_profile_queues_pops_in_order():
         {"role": "user", "content": "repeat", "profile_id": "first"},
         {"role": "user", "content": "repeat", "profile_id": "second"},
     ]
-    with patch("app.db.database.get_session_messages", return_value=rows):
+    with _user_rows(rows):
         queues = cost_utils.build_profile_queues("sess-2")
 
     q = queues["repeat"]
@@ -52,7 +74,7 @@ def test_build_profile_queues_pops_in_order():
 def test_update_profile_map_appends_preserving_order():
     """Incremental writes append (not overwrite) so duplicates are kept."""
     _clear_cache()
-    with patch("app.db.database.get_session_messages", return_value=[]):
+    with _user_rows([]):
         cost_utils.get_cached_profile_map("sess-3")  # seed empty cache entry
 
     cost_utils.update_profile_map("sess-3", "same", "a")
@@ -79,7 +101,7 @@ def test_attach_turn_profile_ids_carries_turn_profile_to_all_rows():
         {"role": "user", "content": "q2", "type": "text"},
         {"role": "assistant", "content": "a2", "type": "text"},
     ]
-    with patch("app.db.database.get_session_messages", return_value=db_rows):
+    with _user_rows(db_rows):
         result = cost_utils.attach_turn_profile_ids("sess-4", transcript)
 
     assert result is transcript  # mutated in place, returned for chaining
@@ -101,7 +123,7 @@ def test_attach_turn_profile_ids_leaves_unresolved_turn_untouched():
         {"role": "user", "content": "known", "type": "text"},
         {"role": "assistant", "content": "a1", "type": "text"},
     ]
-    with patch("app.db.database.get_session_messages", return_value=db_rows):
+    with _user_rows(db_rows):
         cost_utils.attach_turn_profile_ids("sess-5", transcript)
 
     assert "profile_id" not in transcript[0]
@@ -116,7 +138,7 @@ def test_attach_turn_profile_ids_both_keys_false_writes_snake_only():
     _clear_cache()
     db_rows = [{"role": "user", "content": "q", "profile_id": "p-a"}]
     transcript = [{"role": "user", "content": "q", "type": "text"}]
-    with patch("app.db.database.get_session_messages", return_value=db_rows):
+    with _user_rows(db_rows):
         cost_utils.attach_turn_profile_ids("sess-6", transcript, both_keys=False)
 
     assert transcript[0]["profile_id"] == "p-a"

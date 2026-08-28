@@ -34,7 +34,21 @@ vi.mock('./v2/feed-controller', () => ({
 		stop: vi.fn(),
 		isFeeding: vi.fn(() => false),
 		currentSessionId: vi.fn(() => null),
+		// Transcript cache (S2): switchSession primes its single update from
+		// whatever the controller has cached for the target. Default = cache miss,
+		// i.e. the full-replay behaviour these isolation tests assert; the cache
+		// hit is covered by its own suite below.
+		cachedPatch: vi.fn(() => null),
+		hasCachedTranscript: vi.fn(() => false),
+		invalidate: vi.fn(),
+		// /live snapshot gating (W7): default = the feed has published no usage,
+		// so the snapshot still applies its own.
+		hasAppliedUsage: vi.fn(() => false),
+		isReducerStreaming: vi.fn(() => false),
+		noteOptimisticSend: vi.fn(),
+		clearOptimisticSend: vi.fn(),
 	},
+	OPTIMISTIC_STREAMING_ON: { isStreaming: true, optimisticStreaming: true },
 }));
 
 /**

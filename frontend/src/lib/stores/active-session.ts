@@ -46,7 +46,7 @@ import { getOrCreateDeviceId } from './device-id';
 import { appData } from './app-data.svelte';
 import { git } from './git.svelte';
 import { untrack } from 'svelte';
-import { createStore, createSubscribers } from './store-utils';
+import { createStore, createSubscribers, shallowEqual } from './store-utils';
 import { ensureModelRegistryHydrated } from '$lib/constants/models.svelte';
 import type { ContextWindowChoice } from '$lib/constants/model-context';
 // Shared types
@@ -100,7 +100,28 @@ export interface ActiveSessionState {
 	sessionId: string | null;
 	title: string;
 	messages: ChatMessage[];
+	/** Whether a turn is live for this session.
+	 *
+	 *  SINGLE WRITER (finding S6): the SSE feed's reducer, folded through
+	 *  feed-controller. The one sanctioned exception is `optimisticStreaming`
+	 *  below, which the fold ORs in and clears. Nothing else may write this
+	 *  field — competing writers produced the turn-start indicator stutter
+	 *  (a WS `start` flipped it true, an SSE frame folded before `turn.started`
+	 *  flipped it back, `turn.started` flipped it true again). */
 	isStreaming: boolean;
+	/** Optimistic streaming flip: the user hit send (or a WS `start` landed) and
+	 *  the server has not yet reported `turn.started` on the event feed.
+	 *
+	 *  Set through `feedController.noteOptimisticSend()` / by the send paths in
+	 *  message-sender; READ AND CLEARED by the feed fold, which publishes
+	 *  `isStreaming = reducer.isStreaming || optimisticStreaming` and drops the
+	 *  flag the moment the reducer confirms a live turn. Never write
+	 *  `isStreaming` directly instead of this.
+	 *
+	 *  Optional in the type only so existing full-state literals (and other
+	 *  modules' fixtures) keep compiling; `defaultState()` always sets it, and
+	 *  every read treats `undefined` as false. */
+	optimisticStreaming?: boolean;
 	/** Id of the turn currently believed live (from the v2 feed's `turn.*`
 	 *  events; null when no turn is live). Read at Stop-press time so the stop
 	 *  targets that turn — a stop delivered after its turn settled then no-ops
@@ -219,6 +240,14 @@ export interface ActiveSessionState {
 	 *  openChat resets it independently and sends are gated elsewhere. Cleared by
 	 *  the matching feed's caught_up fold and by newChat navigation. */
 	isLoadingSession: boolean;
+	/** Degraded hydration state (finding S1): the session's SSE feed has been
+	 *  open for longer than the pre-first-frame budget without delivering a
+	 *  single event. `isLoadingSession` stays TRUE throughout — this only says
+	 *  the wait is abnormal, so the surface can show "still loading" rather than
+	 *  either a bare spinner or, worse, an empty transcript read as "cleared".
+	 *  Written only by feed-controller; cleared when hydration completes.
+	 *  Optional for the same reason as `optimisticStreaming` above. */
+	isHydrationSlow?: boolean;
 }
 
 /** Minimal shape persisted to the backend. */
@@ -261,6 +290,7 @@ function defaultState(): ActiveSessionState {
 		title: 'New Chat',
 		messages: [],
 		isStreaming: false,
+		optimisticStreaming: false,
 		liveTurnId: null,
 		liveModel: null,
 		liveRequestedModel: null,
@@ -312,6 +342,7 @@ function defaultState(): ActiveSessionState {
 		pendingRestorePrompt: null,
 		isRestoringSession: false,
 		isLoadingSession: false,
+		isHydrationSlow: false,
 	};
 }
 
@@ -908,5 +939,74 @@ export const activeSession = {
 };
 
 // ─── Derived Convenience Stores (via store-utils createDerived) ─────────────
+//
+// FINE-GRAINED SUBSCRIPTIONS (finding R1/W10).
+//
+// `activeSession` is one large state object whose subscribers are ALL notified
+// on every write — and the SSE fold writes it many times a second while a turn
+// streams. Seventeen components subscribe to it today; most read one or two
+// fields, so every streamed token re-invokes every one of them.
+//
+// These derived stores subscribe to the same notifications but re-invoke their
+// own subscriber ONLY when the value they select actually changed (the equality
+// short-circuit in store-utils' createDerived). A component that needs just the
+// streaming flag, or just the header metadata, does zero work while text
+// streams in.
+//
+// PURELY ADDITIVE: `activeSession` itself is unchanged, so consumers migrate one
+// at a time. Migration guide — replace `$activeSession.messages` with
+// `$activeSessionMessages`, `$activeSession.isStreaming` with
+// `$activeSessionStreaming`, and a header/title/profile read with
+// `$activeSessionMeta`.
 
 export const activeWsConnected = createDerived(() => _state.wsConnected);
+
+/** The active session's id (null on a New Chat compose screen). */
+export const activeSessionId = createDerived(() => _state.sessionId);
+
+/** The transcript. Reference-stable between folds that did not change it, so
+ *  the identity check alone is the right equality here. */
+export const activeSessionMessages = createDerived(() => _state.messages);
+
+/** Whether a turn is live — the reducer's value, already unioned with the
+ *  optimistic flip by the fold (see ActiveSessionState.isStreaming). */
+export const activeSessionStreaming = createDerived(() => _state.isStreaming);
+
+/** Header/identity metadata: everything a title bar or a tab needs, and nothing
+ *  that changes while a turn streams. */
+export const activeSessionMeta = createDerived(
+	() => ({
+		sessionId: _state.sessionId,
+		title: _state.title,
+		profile: _state.profile,
+		sessionProfileId: _state.sessionProfileId,
+		project: _state.project,
+		projectV2Id: _state.projectV2Id,
+	}),
+	shallowEqual
+);
+
+/** Hydration state of the session surface: whether history is still loading and
+ *  whether that load has gone abnormally slow (S1). */
+export const activeSessionLoading = createDerived(
+	() => ({
+		isLoadingSession: _state.isLoadingSession,
+		isRestoringSession: _state.isRestoringSession,
+		isHydrationSlow: _state.isHydrationSlow,
+	}),
+	shallowEqual
+);
+
+/** Token / context gauge inputs, for the context bar only. */
+export const activeSessionUsage = createDerived(
+	() => ({
+		totalTokensIn: _state.totalTokensIn,
+		totalTokensOut: _state.totalTokensOut,
+		totalCacheCreationTokens: _state.totalCacheCreationTokens,
+		totalCacheReadTokens: _state.totalCacheReadTokens,
+		contextUsed: _state.contextUsed,
+		contextMax: _state.contextMax,
+		liveContextUsage: _state.liveContextUsage,
+	}),
+	shallowEqual
+);

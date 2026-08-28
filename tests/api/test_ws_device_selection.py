@@ -81,9 +81,12 @@ class _Patches:
         s.enter_context(
             patch.object(cwh, "run_sync", new=AsyncMock(side_effect=_run_sync))
         )
-        # submit is the placed_remote witness: no_kick mirrors it exactly.
+        # submit_async (the off-loop twin the handler calls — W6) is the
+        # placed_remote witness: no_kick mirrors it exactly.
         self.submit = s.enter_context(
-            patch.object(cwh.turn_manager, "submit", MagicMock())
+            patch.object(
+                cwh.turn_manager, "submit_async", AsyncMock(return_value="turn-x")
+            )
         )
         from app.core import turn_claim
 

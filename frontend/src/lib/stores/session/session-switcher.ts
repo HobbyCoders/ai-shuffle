@@ -211,6 +211,47 @@ async function loadSelectionFromBackend(): Promise<{ selectedProfile: string; se
 	return null;
 }
 
+/**
+ * Which snapshot fields may still be applied (finding W7).
+ *
+ * The `/live` snapshot and the SSE feed race on switch-in and the apply used
+ * to be last-write-wins, guarded only by switch generation + session id. A
+ * slow snapshot landing after a fresher `turn.usage` overwrote `contextUsed`
+ * and the token counters with older DB values — counters visibly jumping
+ * backwards mid-turn.
+ *
+ * Rather than special-casing fields ad hoc, the rule is stated once: the feed
+ * OWNS a field group as soon as it has published values for it, and a
+ * snapshot may only fill groups the feed does not own yet.
+ *
+ *   - usage/context totals: owned the moment the feed folds any `turn.usage`.
+ *   - title: owned by any source that already replaced the placeholder — the
+ *     sessions row, a WS `session_updated`, an inline rename. The snapshot
+ *     may only fill in a title that is still the 'New Chat' placeholder
+ *     (which is exactly the deep-link / notification-open case it exists for).
+ *   - worktree/cloud fields: the feed never carries them, so the snapshot is
+ *     authoritative and they always apply.
+ *
+ * Pure and exported so the precedence is unit-testable on its own.
+ */
+export function gateSnapshotPatch(
+	patch: Partial<ActiveSessionState>,
+	context: { feedOwnsUsage: boolean; currentTitle: string }
+): Partial<ActiveSessionState> {
+	const gated: Partial<ActiveSessionState> = { ...patch };
+	if (context.feedOwnsUsage) {
+		delete gated.totalTokensIn;
+		delete gated.totalTokensOut;
+		delete gated.totalCacheCreationTokens;
+		delete gated.totalCacheReadTokens;
+		delete gated.contextUsed;
+	}
+	if (context.currentTitle && context.currentTitle !== 'New Chat') {
+		delete gated.title;
+	}
+	return gated;
+}
+
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitcher {
@@ -420,10 +461,23 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// then safe defaults — NEVER s.currentValue. Using s.currentValue caused
 		// worktreeDeleted to bleed between sessions (the leaving session's state
 		// would infect the target session when no ephemeral cache existed).
-		// Resolve title: caller-provided (from sessions list API) > ephemeral cache > 'New Chat'
-		// Caller-provided title is authoritative (from the backend); ephemeral may
-		// be stale (e.g., 'New Chat' saved before the backend set the real title).
-		const resolvedTitle = title || ephemeral?.title || 'New Chat';
+		// Resolve title (finding S10). Server-derived values win over the ephemeral
+		// cache, which is written from whatever this tab last displayed and can
+		// easily hold a stale placeholder — 'New Chat' saved before the backend
+		// backfilled the real title, which then flashed until /live corrected it.
+		// A cached 'New Chat' is therefore treated as ABSENT, not as a value.
+		//   caller-provided (sessions list / deep link) > appData row > ephemeral
+		//   (unless placeholder) > 'New Chat'
+		const cachedTitle =
+			ephemeral?.title && ephemeral.title !== 'New Chat' ? ephemeral.title : '';
+		const resolvedTitle = title || row?.title || cachedTitle || 'New Chat';
+
+		// S2: the exact transcript this tab already holds for the target session,
+		// as of its cached cursor. Spread into THIS update (below) so the switch
+		// never paints an empty list first — there is no window in which the
+		// surface could read the reset as a cleared conversation, and the feed
+		// resumes at from_seq=lastSeq instead of replaying the whole log.
+		const cachedTranscript = feedController.cachedPatch(sessionId);
 
 		update(s => ({
 			...s,
@@ -522,6 +576,13 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			worktreeMode: ephemeral?.worktreeMode ?? 'new',
 			worktreeDeleted: ephemeral?.worktreeDeleted ?? worktreeInfo?.worktreeDeleted ?? false,
 			queuedMessages: [],  // Populated from backend via history/queue_updated
+			// A send in flight belongs to the session being LEFT (S6).
+			optimisticStreaming: false,
+			isHydrationSlow: false,
+			// LAST: on a cache hit this replaces messages / isStreaming / usage /
+			// the loading flags above with the cached session's own exact values.
+			// On a miss it is null and the reset stands unchanged.
+			...(cachedTranscript ?? {}),
 		}));
 
 		// The SSE-fed reducer is the transcript authority (full replay from_seq=0 =
@@ -599,7 +660,14 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			}
 		}
 
-		update(s => (s.sessionId === sessionId ? { ...s, ...patch } : s));
+		update(s => {
+			if (s.sessionId !== sessionId) return s;
+			const gated = gateSnapshotPatch(patch, {
+				feedOwnsUsage: feedController.hasAppliedUsage(sessionId),
+				currentTitle: s.title,
+			});
+			return Object.keys(gated).length > 0 ? { ...s, ...gated } : s;
+		});
 		// Persist any server-authoritative worktree/cloud correction.
 		persistSession();
 	}

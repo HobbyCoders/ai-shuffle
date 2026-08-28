@@ -10,7 +10,9 @@ Only schema initialisation and maintenance helpers live here directly.
 
 import json
 import logging
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 import psycopg2
@@ -2180,36 +2182,34 @@ def migrations_fingerprint() -> str:
     single boot (finding B11) — hundreds of synchronous round trips before the
     server accepts traffic. Skipping it requires proving the database is already
     up to date with THIS build, which ``SCHEMA_VERSION`` alone cannot do: the
-    codebase deliberately adds guarded blocks WITHOUT bumping the version.
+    codebase deliberately adds guarded migration blocks WITHOUT bumping the
+    version (see the "no SCHEMA_VERSION bump needed" comments throughout
+    :func:`_run_column_migrations`).
 
-    Hashing the source of the migration functions themselves closes that gap —
-    any edit to them (version bump or not) changes the fingerprint and the pass
-    runs once more, then records the new fingerprint. Returns ``""`` when the
-    source is unavailable (frozen / zipped deployment), which never matches a
-    stored value and therefore degrades to the old always-run behaviour.
+    Hashing the SOURCE of the two modules that own the schema closes that gap:
+    any edit to a migration — version bump or not — changes the fingerprint, so
+    the pass runs exactly once more and then records the new value. Unrelated
+    edits to these files also trigger one extra (idempotent, cheap) pass, which
+    is the safe direction to err in.
+
+    Returns ``""`` when the sources cannot be read (frozen / zipped
+    deployment); an empty fingerprint never matches a stored value, so the gate
+    degrades to the old always-run behaviour.
     """
     import hashlib
-    import inspect
+
+    from app.db import schema_postgres
 
     h = hashlib.sha256()
     h.update(f"v{SCHEMA_VERSION}\n".encode())
-    for fn in (
-        _run_column_migrations,
-        _backfill_sessions_is_worker,
-        _migrate_agent_tool_access,
-        _migrate_profiles_to_agents,
-        _migrate_omni_tables_to_fluid,
-    ):
-        try:
-            h.update(inspect.getsource(fn).encode("utf-8", "replace"))
-        except (OSError, TypeError):
+    for module in (sys.modules[__name__], schema_postgres):
+        path = getattr(module, "__file__", None)
+        if not path:
             return ""
-    try:
-        from app.db import schema_postgres
-
-        h.update(inspect.getsource(schema_postgres).encode("utf-8", "replace"))
-    except (OSError, TypeError):
-        return ""
+        try:
+            h.update(Path(path).read_bytes())
+        except OSError:
+            return ""
     return h.hexdigest()
 
 
@@ -2589,6 +2589,8 @@ from app.db.settings import (  # noqa: F401
     delete_user_preference,
     get_all_user_preferences,
     get_system_setting,
+    get_system_setting_cached,
+    invalidate_system_setting_memo,
     set_system_setting,
     delete_system_setting,
     get_or_create_system_setting,

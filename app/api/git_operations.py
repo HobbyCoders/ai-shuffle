@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field
 
 from app.core.git_service import git_service
 from app.core.github_service import (
-    _CACHE_MISS,
+    CACHE_MISS,
     GitHubCliError,
     TTLCache,
     github_service,
@@ -44,7 +44,6 @@ from app.api.auth import require_auth
 from app.api.common import check_project_access
 from app.api.git_helpers import (
     run_git,
-    get_working_dir,
     get_working_dir_async,
     stage_and_commit,
 )
@@ -322,8 +321,11 @@ async def _do_cleanup(
     # Liveness guard: never remove a worktree / rewrite the main checkout while
     # another session is busy (streaming or running background work). Applies to
     # BOTH modes — the operation still counts as done (merge already landed).
+    # Both guards below fan out into synchronous DB queries — off the loop.
     if worktree_id:
-        if _worktree_has_other_active_session(worktree_id, session_id):
+        if await asyncio.to_thread(
+            _worktree_has_other_active_session, worktree_id, session_id
+        ):
             op.set_step(
                 "cleanup",
                 STEP_WARNING,
@@ -331,7 +333,9 @@ async def _do_cleanup(
             )
             return
     else:
-        if _project_has_other_active_session(op.project_id, session_id):
+        if await asyncio.to_thread(
+            _project_has_other_active_session, op.project_id, session_id
+        ):
             op.set_step(
                 "cleanup",
                 STEP_WARNING,
@@ -410,6 +414,9 @@ async def _execute_finish(
         # --- merge -----------------------------------------------------------
         if not await _merge_step(op, repo, pr_number, merge_method):
             return
+        # The PR just closed — drop the cached "open PR" answer for this
+        # checkout so the header does not show a merged PR for another TTL.
+        _invalidate_pr_state_cache(working_dir)
         op.result["pr_number"] = pr_number
         op.result["pr_url"] = pr_url
 
@@ -501,6 +508,9 @@ async def _execute_ship(
                 return
             pr_number = pr.number
             pr_url = pr.url
+            # A brand-new PR exists — a cached "no open PR" would hide it for
+            # the rest of the TTL.
+            _invalidate_pr_state_cache(working_dir)
             op.set_step("create_pr", STEP_DONE, detail=pr.url)
 
         op.result["pr_number"] = pr_number
@@ -509,6 +519,7 @@ async def _execute_ship(
         # --- merge -----------------------------------------------------------
         if not await _merge_step(op, repo, pr_number, merge_method):
             return
+        _invalidate_pr_state_cache(working_dir)
 
         # --- cleanup ---------------------------------------------------------
         if cleanup:
@@ -764,18 +775,43 @@ async def get_operation(
 # =============================================================================
 
 _PR_STATE_TTL_SECONDS = 15.0
-_pr_state_cache: Dict[str, tuple] = {}  # key -> (expires_monotonic, response_dict)
+# How long a *known-good* answer may still be served after it expired, when the
+# refresh fails (stale-while-revalidate). Beyond this the client is told the
+# state is unknown rather than being shown something arbitrarily old.
+_PR_STATE_STALE_MAX_SECONDS = 300.0
+
+# key ("<working_dir>:<branch>") -> response dict. Bounded + thread-safe; the
+# entries survive expiry so a failed refresh can serve the last good value.
+_pr_state_cache = TTLCache(
+    ttl=_PR_STATE_TTL_SECONDS, max_entries=128, name="pr-state"
+)
 
 
 def _invalidate_pr_state_cache(working_dir: Optional[str] = None) -> None:
     """Drop cached PR state — after a PR create/merge, or for tests.
 
-    With *working_dir*, only that entry is dropped; without it, everything.
+    With *working_dir*, only that checkout's entries are dropped (keys are
+    ``"<working_dir>:<branch>"``, so this matches on the prefix); without it,
+    everything.
     """
     if working_dir is None:
-        _pr_state_cache.clear()
+        _pr_state_cache.invalidate()
     else:
-        _pr_state_cache.pop(working_dir, None)
+        prefix = f"{working_dir}:"
+        _pr_state_cache.invalidate_where(lambda k: str(k).startswith(prefix))
+
+
+def _stale_pr_state(cache_key: str) -> Optional[Dict[str, Any]]:
+    """Last known-good PR state for *cache_key*, if recent enough to serve.
+
+    Used only when a refresh failed: serving a flagged stale value keeps the
+    header stable, where returning ``open_pr: None`` would claim the PR
+    vanished and flip the button to "Create PR".
+    """
+    entry = _pr_state_cache.peek(cache_key)
+    if entry is None or entry.age() > _PR_STATE_STALE_MAX_SECONDS:
+        return None
+    return entry.value
 
 
 @router.get("/pr-state", response_model=PrStateResponse)
@@ -794,10 +830,15 @@ async def get_pr_state(
     verdict — None means still computing) so the UI can decide between
     Create-PR / Finish("Merge PR #N") / clean states. Degrades gracefully:
     no git repo or no GitHub remote just yields ``has_github=False``.
+
+    Failure is reported, never invented (finding G2). If GitHub cannot be
+    reached the response carries ``pr_lookup_failed=True`` and — when a recent
+    known-good answer exists — that answer with ``stale=True``. A failed lookup
+    is never written to the cache, so the next poll retries immediately.
     """
     check_project_access(request, project_id)
 
-    working_dir = get_working_dir(project_id, worktree_id, session_id)
+    working_dir = await get_working_dir_async(project_id, worktree_id, session_id)
 
     st = await run_git(git_service.get_status, working_dir)
     branch = (st or {}).get("current_branch") if st else None
@@ -805,39 +846,67 @@ async def get_pr_state(
         return PrStateResponse(current_branch=None, has_github=False, open_pr=None)
 
     cache_key = f"{working_dir}:{branch}"
-    now = time.monotonic()
-    cached = _pr_state_cache.get(cache_key)
-    if cached and cached[0] > now:
-        return PrStateResponse(**cached[1])
+    cached = _pr_state_cache.get_or_miss(cache_key)
+    if cached is not CACHE_MISS:
+        return PrStateResponse(**cached)
 
     # Base shape when there's nothing to say about GitHub.
-    result = {"current_branch": branch, "has_github": False, "open_pr": None}
+    result: Dict[str, Any] = {
+        "current_branch": branch,
+        "has_github": False,
+        "open_pr": None,
+        "pr_lookup_failed": False,
+        "stale": False,
+    }
 
     lookup_ok = True
     try:
+        # Both of these shell out (git remote / gh auth status) — keep them off
+        # the event loop. is_authenticated is cached inside github_service, so
+        # this is normally a dict lookup rather than a process spawn.
         repo = await asyncio.to_thread(github_service.get_repo_from_remote, working_dir)
-        if repo and github_service.is_authenticated():
+        authenticated = (
+            await asyncio.to_thread(github_service.is_authenticated) if repo else False
+        )
+        if repo and authenticated:
             result["has_github"] = True
-            pr = await asyncio.to_thread(_find_open_pr_for_branch, repo, branch)
-            if pr is _find_open_pr_failed:
-                # Couldn't ask gh — PR state is unknown for this cycle. DON'T
-                # cache (a cached failure would hide a just-created PR for the
-                # whole TTL); has_github stays True because the repo IS known.
+            try:
+                pr = await asyncio.to_thread(_find_open_pr_for_branch, repo, branch)
+            except Exception as e:  # noqa: BLE001 — GitHubCliError, or anything else
+                # Couldn't ask gh — PR state is unknown for this cycle. has_github
+                # stays True because the repo IS known: a PR hiccup must not take
+                # the whole git UI down with it.
+                logger.warning(
+                    "pr-state: gh lookup failed for %s (%s): %s", project_id, branch, e
+                )
                 lookup_ok = False
-            elif pr is not None:
-                result["open_pr"] = {
-                    "number": pr.number,
-                    "title": pr.title,
-                    "url": pr.url,
-                    "draft": bool(getattr(pr, "draft", False)),
-                    "state": getattr(pr, "state", None),
-                    "mergeable": getattr(pr, "mergeable", None),
-                }
+            else:
+                if pr is not None:
+                    result["open_pr"] = {
+                        "number": pr.number,
+                        "title": pr.title,
+                        "url": pr.url,
+                        "draft": bool(getattr(pr, "draft", False)),
+                        "state": getattr(pr, "state", None),
+                        "mergeable": getattr(pr, "mergeable", None),
+                    }
     except Exception as e:  # noqa: BLE001
         logger.warning("pr-state lookup failed for %s (%s): %s", project_id, branch, e)
         result["has_github"] = False
         lookup_ok = False
 
-    if lookup_ok and result["has_github"]:
-        _pr_state_cache[cache_key] = (now + _PR_STATE_TTL_SECONDS, dict(result))
+    if lookup_ok:
+        # Only a complete, authoritative answer is cached. "No GitHub remote" /
+        # "not signed in" stay uncached so they cost nothing to correct.
+        if result["has_github"]:
+            _pr_state_cache.set(cache_key, dict(result))
+        return PrStateResponse(**result)
+
+    # --- failed refresh: never cache, serve the last good value if we have one
+    result["pr_lookup_failed"] = True
+    stale = _stale_pr_state(cache_key)
+    if stale is not None:
+        result["open_pr"] = stale.get("open_pr")
+        result["has_github"] = result["has_github"] or bool(stale.get("has_github"))
+        result["stale"] = True
     return PrStateResponse(**result)

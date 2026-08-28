@@ -1,6 +1,6 @@
 """Pending-interaction expiry sweeper (V2 Phase 4, Q4-4).
 
-A dedicated ~10s background loop that flips every ``pending_interactions`` row
+A ~10s periodic pass that flips every ``pending_interactions`` row
 past its TTL to ``expired`` and NOTIFYs each affected session so any in-process
 waiter re-reads the durable row (and the FE tidies its stale modal on the next
 resync). This is *belt* — the ``interaction_wait`` adapter ALSO honours its own
@@ -13,21 +13,22 @@ Start/stop plumbing mirrors ``turn_claim`` exactly:
 * started from ``startup.install_v2_turns_wiring``;
 * cancelled at teardown from ``startup.shutdown_services`` via a ``sys.modules``
   lookup.
+
+Since F5 the "~10s background loop" is not a loop of its own: ``start()``
+registers the expiry pass on the shared sweep driver in
+:mod:`app.core.turn_claim`, which runs it every ``SWEEP_INTERVAL_SECONDS`` while
+peer installs exist and at the stretched single-install cadence otherwise.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 # Cleanup cadence (Q4-4: "dedicated standalone ~10s sweeper loop").
 SWEEP_INTERVAL_SECONDS = 10.0
-
-_loop_task: Optional[asyncio.Task] = None
-
 
 async def sweep_once() -> int:
     """Expire every overdue pending interaction; NOTIFY each affected session.
@@ -76,58 +77,55 @@ async def sweep_once() -> int:
     return len(rows)
 
 
-async def sweep_loop() -> None:
-    """Run :func:`sweep_once` every ``SWEEP_INTERVAL_SECONDS`` until cancelled."""
-    logger.info(
-        "interaction_sweeper: loop started (every %ss)",
-        int(SWEEP_INTERVAL_SECONDS),
-    )
-    while True:
-        try:
-            await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
-            await sweep_once()
-        except asyncio.CancelledError:
-            break
-        except Exception:  # noqa: BLE001 — the loop must survive anything.
-            logger.warning("interaction_sweeper: pass failed", exc_info=True)
-    logger.info("interaction_sweeper: loop stopped")
-
-
 def start() -> None:
-    """Start the sweeper loop on the running event loop (idempotent).
+    """Register the expiry pass on the shared sweep driver (idempotent).
 
     Called from ``startup.install_v2_turns_wiring`` (inside the lifespan
-    startup, so a loop is running). The task ref is module-held so it is never
-    GC'd; ``shutdown_services`` cancels it via :func:`stop`.
+    startup, so a loop is running).
+
+    F5: this used to own a private 10s asyncio task. It is now a
+    :class:`app.core.turn_claim.SweepPass`, so it shares one timer with the
+    other cross-install loops — same 10s cadence whenever the install registry
+    shows a peer, stretched to the single-install cadence when it does not.
+
+    SAFETY of the stretch. The sweeper is *belt*: the ``interaction_wait``
+    adapter honours its own local ``expires_at`` deadline, so a late sweep can
+    never wedge a turn (Q4-4). What it adds is making the lapse DURABLE so peer
+    installs and reconnecting clients agree the prompt is gone — and on an
+    install with no peers the only reader is this process and its own browsers,
+    which re-read the row on resync. So the stretch delays a tidy-up by at most
+    one cadence and changes no correctness property. The moment a peer install
+    appears, the tight 10s cadence returns.
     """
-    global _loop_task
-    if _loop_task is not None and not _loop_task.done():
-        return
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        logger.warning(
-            "interaction_sweeper.start(): no running event loop — not started"
-        )
-        return
-    _loop_task = loop.create_task(sweep_loop())
+    from app.core import turn_claim
+
+    turn_claim.register_pass(
+        "interaction_expiry", sweep_once, SWEEP_INTERVAL_SECONDS
+    )
+    logger.info(
+        "interaction_sweeper: registered (every %ss)",
+        int(SWEEP_INTERVAL_SECONDS),
+    )
+
+
+def kick() -> None:
+    """Run the expiry pass on the next event-loop tick (latency escape hatch)."""
+    from app.core import turn_claim
+
+    turn_claim.kick("interaction_expiry")
 
 
 async def stop() -> None:
-    """Cancel the sweeper loop and wait for it to exit (idempotent).
+    """Unregister the expiry pass (idempotent).
 
-    No-op when the loop was never started (e.g. a test process that never
-    called :func:`start`).
+    The driver itself belongs to ``turn_claim`` and is stopped there; dropping
+    the pass here keeps a same-process restart clean.
     """
-    global _loop_task
-    task = _loop_task
-    _loop_task = None
-    if task is None or task.done():
-        return
-    task.cancel()
     try:
-        await task
-    except asyncio.CancelledError:
-        pass
+        from app.core import turn_claim
+
+        turn_claim.unregister_pass("interaction_expiry")
     except Exception:  # noqa: BLE001 — teardown must never raise.
-        logger.debug("interaction_sweeper: loop raised during shutdown", exc_info=True)
+        logger.debug(
+            "interaction_sweeper: unregister failed during shutdown", exc_info=True
+        )

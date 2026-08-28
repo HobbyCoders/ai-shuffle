@@ -13,11 +13,15 @@ Tests cover:
 import pytest
 import subprocess
 import json
+import time
 from unittest.mock import patch, MagicMock
 
 from app.core.github_service import (
+    CACHE_MISS,
+    GitHubCliError,
     GitHubService,
     PullRequest,
+    TTLCache,
     WorkflowRun,
     github_service,
 )
@@ -497,14 +501,23 @@ class TestGetRepoInfo:
 
             assert result is None
 
-    def test_exception_returns_none(self, service):
-        """Should return None on exception."""
+    def test_transport_failure_raises(self, service):
+        """A gh failure is 'unknown', not 'no such repo' — it must raise."""
         with patch('subprocess.run') as mock_run:
             mock_run.side_effect = Exception("Network error")
 
-            result = service.get_repo_info("owner/repo")
+            with pytest.raises(GitHubCliError):
+                service.get_repo_info("owner/repo")
 
-            assert result is None
+    def test_unclassified_nonzero_exit_raises(self, service, mock_completed_process):
+        """Non-zero exit that does not say 'not found' is a failure."""
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = mock_completed_process(
+                returncode=1, stderr="HTTP 503: upstream unavailable"
+            )
+
+            with pytest.raises(GitHubCliError):
+                service.get_repo_info("owner/repo")
 
 
 # =============================================================================
@@ -592,38 +605,44 @@ class TestListPulls:
 
             assert result == []
 
-    def test_command_failure_returns_empty(self, service, mock_completed_process):
-        """Should return empty list on command failure."""
+    def test_command_failure_raises(self, service, mock_completed_process):
+        """G2: a gh failure must NOT look like 'this repo has no PRs'."""
         with patch('subprocess.run') as mock_run:
             mock_run.return_value = mock_completed_process(
                 returncode=1,
-                stderr="Error"
+                stderr="API rate limit exceeded"
             )
 
-            result = service.list_pulls("owner/repo")
+            with pytest.raises(GitHubCliError) as exc_info:
+                service.list_pulls("owner/repo")
 
-            assert result == []
+            assert "rate limit" in exc_info.value.stderr
 
-    def test_json_decode_error_returns_empty(self, service, mock_completed_process):
-        """Should return empty list on JSON decode error."""
+    def test_json_decode_error_raises(self, service, mock_completed_process):
+        """Truncated/garbled output is a failure, not an empty repository."""
         with patch('subprocess.run') as mock_run:
             mock_run.return_value = mock_completed_process(
                 returncode=0,
                 stdout="invalid json"
             )
 
-            result = service.list_pulls("owner/repo")
+            with pytest.raises(GitHubCliError):
+                service.list_pulls("owner/repo")
 
-            assert result == []
-
-    def test_exception_returns_empty(self, service):
-        """Should return empty list on exception."""
+    def test_transport_exception_raises(self, service):
+        """A timeout/spawn failure surfaces as GitHubCliError."""
         with patch('subprocess.run') as mock_run:
-            mock_run.side_effect = Exception("Network error")
+            mock_run.side_effect = subprocess.TimeoutExpired(cmd=[], timeout=60)
 
-            result = service.list_pulls("owner/repo")
+            with pytest.raises(GitHubCliError):
+                service.list_pulls("owner/repo")
 
-            assert result == []
+    def test_empty_list_is_a_real_answer(self, service, mock_completed_process):
+        """The only way to get [] is gh actually answering with []."""
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = mock_completed_process(returncode=0, stdout="[]")
+
+            assert service.list_pulls("owner/repo") == []
 
     def test_missing_author_login(self, service, mock_completed_process, sample_pr_data):
         """Should handle missing author login gracefully."""
@@ -670,26 +689,34 @@ class TestGetPull:
 
             assert result is None
 
-    def test_json_decode_error_returns_none(self, service, mock_completed_process):
-        """Should return None on JSON decode error."""
+    def test_json_decode_error_raises(self, service, mock_completed_process):
+        """Garbled output is a failure, not 'the PR does not exist'."""
         with patch('subprocess.run') as mock_run:
             mock_run.return_value = mock_completed_process(
                 returncode=0,
                 stdout="not json"
             )
 
-            result = service.get_pull("owner/repo", 42)
+            with pytest.raises(GitHubCliError):
+                service.get_pull("owner/repo", 42)
 
-            assert result is None
-
-    def test_exception_returns_none(self, service):
-        """Should return None on exception."""
+    def test_transport_exception_raises(self, service):
+        """Should raise on a subprocess failure."""
         with patch('subprocess.run') as mock_run:
             mock_run.side_effect = Exception("Error")
 
-            result = service.get_pull("owner/repo", 42)
+            with pytest.raises(GitHubCliError):
+                service.get_pull("owner/repo", 42)
 
-            assert result is None
+    def test_unclassified_failure_raises(self, service, mock_completed_process):
+        """A 5xx from GitHub is not 'no such PR'."""
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = mock_completed_process(
+                returncode=1, stderr="HTTP 502: Bad gateway"
+            )
+
+            with pytest.raises(GitHubCliError):
+                service.get_pull("owner/repo", 42)
 
 
 class TestCreatePull:
@@ -923,38 +950,42 @@ class TestListRuns:
 
             assert result == []
 
-    def test_list_runs_failure(self, service, mock_completed_process):
-        """Should return empty list on failure."""
+    def test_list_runs_empty_is_a_real_answer(self, service, mock_completed_process):
+        """[] only ever means 'no runs'."""
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = mock_completed_process(returncode=0, stdout="[]")
+
+            assert service.list_runs("owner/repo") == []
+
+    def test_list_runs_failure_raises(self, service, mock_completed_process):
+        """A gh failure must not read as 'this repo has no workflow runs'."""
         with patch('subprocess.run') as mock_run:
             mock_run.return_value = mock_completed_process(
                 returncode=1,
                 stderr="Error"
             )
 
-            result = service.list_runs("owner/repo")
+            with pytest.raises(GitHubCliError):
+                service.list_runs("owner/repo")
 
-            assert result == []
-
-    def test_list_runs_json_error(self, service, mock_completed_process):
-        """Should return empty list on JSON error."""
+    def test_list_runs_json_error_raises(self, service, mock_completed_process):
+        """Should raise on JSON error."""
         with patch('subprocess.run') as mock_run:
             mock_run.return_value = mock_completed_process(
                 returncode=0,
                 stdout="not json"
             )
 
-            result = service.list_runs("owner/repo")
+            with pytest.raises(GitHubCliError):
+                service.list_runs("owner/repo")
 
-            assert result == []
-
-    def test_list_runs_exception(self, service):
-        """Should return empty list on exception."""
+    def test_list_runs_exception_raises(self, service):
+        """Should raise on a subprocess failure."""
         with patch('subprocess.run') as mock_run:
             mock_run.side_effect = Exception("Error")
 
-            result = service.list_runs("owner/repo")
-
-            assert result == []
+            with pytest.raises(GitHubCliError):
+                service.list_runs("owner/repo")
 
 
 class TestGetRun:
@@ -986,26 +1017,24 @@ class TestGetRun:
 
             assert result is None
 
-    def test_get_run_json_error(self, service, mock_completed_process):
-        """Should return None on JSON error."""
+    def test_get_run_json_error_raises(self, service, mock_completed_process):
+        """Should raise on JSON error."""
         with patch('subprocess.run') as mock_run:
             mock_run.return_value = mock_completed_process(
                 returncode=0,
                 stdout="invalid"
             )
 
-            result = service.get_run("owner/repo", 12345)
+            with pytest.raises(GitHubCliError):
+                service.get_run("owner/repo", 12345)
 
-            assert result is None
-
-    def test_get_run_exception(self, service):
-        """Should return None on exception."""
+    def test_get_run_exception_raises(self, service):
+        """Should raise on a subprocess failure."""
         with patch('subprocess.run') as mock_run:
             mock_run.side_effect = Exception("Error")
 
-            result = service.get_run("owner/repo", 12345)
-
-            assert result is None
+            with pytest.raises(GitHubCliError):
+                service.get_run("owner/repo", 12345)
 
 
 class TestRerunWorkflow:
@@ -1050,16 +1079,15 @@ class TestEdgeCases:
     """Test edge cases and boundary conditions."""
 
     def test_empty_repo_string(self, service, mock_completed_process):
-        """Should handle empty repo string."""
+        """An invalid repo argument is a gh failure, surfaced as such."""
         with patch('subprocess.run') as mock_run:
             mock_run.return_value = mock_completed_process(
                 returncode=1,
                 stderr="Invalid repository"
             )
 
-            result = service.get_repo_info("")
-
-            assert result is None
+            with pytest.raises(GitHubCliError):
+                service.get_repo_info("")
 
     def test_special_characters_in_repo_name(self, service, mock_completed_process):
         """Should handle special characters in repo name."""
@@ -1137,9 +1165,13 @@ class TestEdgeCases:
             assert len(result[0].body) == 100000
 
     def test_null_author_in_json(self, service, mock_completed_process):
-        """Should return empty list when author is null (triggers exception)."""
-        # When author is None, accessing .get('login', 'unknown') on None raises
-        # AttributeError, which is caught and returns empty list
+        """A null author degrades to 'unknown' — it must not eat the PR.
+
+        Previously ``author: None`` raised inside the parse loop and the blanket
+        handler turned the whole response into ``[]`` — i.e. one odd PR made the
+        branch look PR-less. The parse is now null-safe, and a failure is the
+        only thing that can stop a list from coming back.
+        """
         pr_data = {
             "number": 1,
             "title": "Test",
@@ -1162,10 +1194,9 @@ class TestEdgeCases:
 
             result = service.list_pulls("owner/repo")
 
-            # When author is None, pr_data.get('author', {}) returns None
-            # and then .get('login', 'unknown') fails with AttributeError
-            # This is caught by the general exception handler and returns []
-            assert result == []
+            assert len(result) == 1
+            assert result[0].author == "unknown"
+            assert result[0].number == 1
 
     def test_missing_optional_fields(self, service, mock_completed_process):
         """Should handle missing optional fields with defaults."""
@@ -1193,3 +1224,213 @@ class TestEdgeCases:
             assert pr.head_branch == ""
             assert pr.base_branch == ""
             assert pr.author == "user"
+
+
+# =============================================================================
+# TTLCache
+# =============================================================================
+
+class TestTTLCache:
+    """The shared cache primitive behind gh-auth, pr-state and checkout paths."""
+
+    def test_hit_within_ttl(self):
+        cache = TTLCache(ttl=60)
+        cache.set("k", "v")
+        assert cache.get("k") == "v"
+        assert cache.get_or_miss("k") == "v"
+        assert "k" in cache
+
+    def test_miss_is_distinguishable_from_a_cached_none(self):
+        """False/None are legitimate values, so the miss signal is a sentinel."""
+        cache = TTLCache(ttl=60)
+        cache.set("k", None)
+        assert cache.get_or_miss("k") is None
+        assert cache.get_or_miss("absent") is CACHE_MISS
+
+    def test_expiry(self):
+        cache = TTLCache(ttl=60)
+        cache.set("k", "v", ttl=0.001)
+        time.sleep(0.005)
+        assert cache.get_or_miss("k") is CACHE_MISS
+        assert "k" not in cache
+
+    def test_peek_returns_expired_entries_for_stale_while_revalidate(self):
+        cache = TTLCache(ttl=60)
+        cache.set("k", "v", ttl=0.001)
+        time.sleep(0.005)
+        entry = cache.peek("k")
+        assert entry is not None
+        assert entry.value == "v"
+        assert entry.is_fresh() is False
+        assert entry.age() >= 0.005
+
+    def test_invalidate_single_key_and_all(self):
+        cache = TTLCache(ttl=60)
+        cache.set("a", 1)
+        cache.set("b", 2)
+        cache.invalidate("a")
+        assert cache.get_or_miss("a") is CACHE_MISS
+        assert cache.get("b") == 2
+        cache.invalidate()
+        assert len(cache) == 0
+
+    def test_invalidate_where(self):
+        cache = TTLCache(ttl=60)
+        cache.set("/wd:main", 1)
+        cache.set("/wd:feat", 2)
+        cache.set("/other:main", 3)
+        dropped = cache.invalidate_where(lambda k: k.startswith("/wd:"))
+        assert dropped == 2
+        assert cache.get("/other:main") == 3
+        assert cache.get_or_miss("/wd:main") is CACHE_MISS
+
+    def test_bounded_by_max_entries(self):
+        """Unbounded growth is the failure mode of the dict-plus-timestamp
+        pattern this replaces: a per-branch key space must not leak."""
+        cache = TTLCache(ttl=60, max_entries=3)
+        for i in range(10):
+            cache.set(f"k{i}", i)
+        assert len(cache) == 3
+        # The most recent writes survive; the oldest are evicted.
+        assert cache.get("k9") == 9
+        assert cache.get_or_miss("k0") is CACHE_MISS
+
+    def test_expired_entries_are_evicted_before_live_ones(self):
+        cache = TTLCache(ttl=60, max_entries=2)
+        cache.set("stale", "x", ttl=0.001)
+        time.sleep(0.005)
+        cache.set("live", "y")
+        cache.set("newer", "z")
+        assert cache.get("live") == "y"
+        assert cache.get("newer") == "z"
+        assert cache.peek("stale") is None
+
+    def test_rejects_nonsense_configuration(self):
+        with pytest.raises(ValueError):
+            TTLCache(ttl=0)
+        with pytest.raises(ValueError):
+            TTLCache(ttl=60, max_entries=0)
+
+    def test_is_thread_safe(self):
+        """Populated from to_thread workers as well as the loop."""
+        import threading
+
+        cache = TTLCache(ttl=60, max_entries=1000)
+        errors = []
+
+        def worker(base):
+            try:
+                for i in range(200):
+                    cache.set((base, i), i)
+                    cache.get((base, i))
+                    cache.invalidate_where(lambda k: k == (base, i))
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker, args=(n,)) for n in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert not errors
+
+
+# =============================================================================
+# gh auth status caching (G1)
+# =============================================================================
+
+class TestAuthStatusCaching:
+    """``gh auth status`` is a 10s-timeout subprocess asked by every PR and
+    actions endpoint. It must be asked once per TTL window, not once per
+    request — and an explicit login/logout must not have to wait that out."""
+
+    def test_repeat_calls_hit_the_cache(self, service, mock_completed_process):
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = mock_completed_process(returncode=0)
+
+            assert service.is_authenticated() is True
+            assert service.is_authenticated() is True
+            assert service.is_authenticated() is True
+
+            assert mock_run.call_count == 1
+
+    def test_refresh_forces_a_probe(self, service, mock_completed_process):
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = mock_completed_process(returncode=0)
+
+            service.is_authenticated()
+            service.is_authenticated(refresh=True)
+
+            assert mock_run.call_count == 2
+
+    def test_invalidate_forces_the_next_call_to_probe(self, service, mock_completed_process):
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = mock_completed_process(returncode=0)
+            assert service.is_authenticated() is True
+
+            # A real logout happened; the cached True must not survive it.
+            service.invalidate_auth_cache()
+            mock_run.return_value = mock_completed_process(returncode=1)
+
+            assert service.is_authenticated() is False
+            assert mock_run.call_count == 2
+
+    def test_invalidate_can_seed_a_known_value_without_probing(
+        self, service, mock_completed_process
+    ):
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = mock_completed_process(returncode=1)
+
+            # The login endpoint knows first-hand that gh is now signed in.
+            service.invalidate_auth_cache(True)
+
+            assert service.is_authenticated() is True
+            assert mock_run.call_count == 0
+
+    def test_negative_answers_are_held_briefly(self, service, mock_completed_process):
+        """A transient failure must not hide a working setup for the full TTL."""
+        from app.core import github_service as gh_mod
+
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = mock_completed_process(returncode=1)
+            assert service.is_authenticated() is False
+
+        entry = service._auth_cache.peek(service._AUTH_CACHE_KEY)
+        held = entry.expires_at - entry.stored_at
+        assert held == pytest.approx(gh_mod.GH_AUTH_NEGATIVE_TTL_SECONDS)
+        assert held < gh_mod.GH_AUTH_TTL_SECONDS
+
+    def test_positive_answers_are_held_for_the_full_ttl(
+        self, service, mock_completed_process
+    ):
+        from app.core import github_service as gh_mod
+
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = mock_completed_process(returncode=0)
+            assert service.is_authenticated() is True
+
+        entry = service._auth_cache.peek(service._AUTH_CACHE_KEY)
+        assert entry.expires_at - entry.stored_at == pytest.approx(
+            gh_mod.GH_AUTH_TTL_SECONDS
+        )
+
+    def test_expired_cache_reprobes(self, service, mock_completed_process):
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = mock_completed_process(returncode=0)
+            assert service.is_authenticated() is True
+
+            entry = service._auth_cache.peek(service._AUTH_CACHE_KEY)
+            entry.expires_at = time.monotonic() - 1
+
+            mock_run.return_value = mock_completed_process(returncode=1)
+            assert service.is_authenticated() is False
+            assert mock_run.call_count == 2
+
+    def test_each_service_instance_has_its_own_cache(self, mock_completed_process):
+        a, b = GitHubService(), GitHubService()
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = mock_completed_process(returncode=0)
+            a.is_authenticated()
+            b.is_authenticated()
+            assert mock_run.call_count == 2
+

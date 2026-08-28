@@ -101,6 +101,10 @@ async def _auth_status(claude_authenticated: bool = False, session_token: str | 
     oauth = MagicMock()
     oauth.ensure_fresh_credentials = AsyncMock(return_value=None)
 
+    # The gh signal is behind a process-wide TTL cache; start from a clean
+    # slate so this call's own stub is what answers.
+    auth_api.reset_github_auth_cache()
+
     with patch.object(auth_api, "auth_service") as mock_auth, \
          patch.object(auth_api, "direct_oauth", oauth), \
          patch.object(auth_api, "_sync_back_active_account_safe", MagicMock()):
@@ -241,3 +245,185 @@ class TestCountConfiguredModelProviders:
         _make_provider("codex", auth_token=None)
         db.update_model_provider("codex", codex_access_token="enc:codex")
         assert db.count_configured_model_providers() == 1
+
+
+# =============================================================================
+# GitHub auth status: caching + invalidation (finding G1)
+# =============================================================================
+
+class TestGithubAuthStatusCaching:
+    """``gh auth status`` is a 10s-timeout subprocess and ``/auth/status`` is
+    polled. It must run off the event loop, once per TTL window — and an
+    explicit login/logout must invalidate the cache rather than wait it out."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_caches(self):
+        from app.core.auth import reset_github_auth_cache
+        from app.core.github_service import github_service
+
+        reset_github_auth_cache()
+        github_service.invalidate_auth_cache()
+        yield
+        reset_github_auth_cache()
+        github_service.invalidate_auth_cache()
+
+    @pytest.mark.asyncio
+    async def test_status_probes_once_across_repeated_polls(self, mock_db):
+        calls = []
+
+        async def _poll():
+            from app.api import auth as auth_api
+
+            request = MagicMock()
+            request.cookies = {}
+            oauth = MagicMock()
+            oauth.ensure_fresh_credentials = AsyncMock(return_value=None)
+
+            with patch.object(auth_api, "auth_service") as mock_auth, \
+                 patch.object(auth_api, "direct_oauth", oauth), \
+                 patch.object(auth_api, "_sync_back_active_account_safe", MagicMock()):
+                mock_auth.validate_session.return_value = False
+                mock_auth.is_setup_required.return_value = False
+                mock_auth.is_claude_authenticated.return_value = False
+                mock_auth.get_claude_token_status.return_value = {"token_valid": False}
+                mock_auth.is_onboarding_complete.return_value = True
+                mock_auth.is_github_authenticated.side_effect = lambda: (
+                    calls.append(1) or True
+                )
+                return await auth_api.get_auth_status(request)
+
+        from app.core.auth import reset_github_auth_cache
+
+        reset_github_auth_cache()
+        first = await _poll()
+        second = await _poll()
+
+        assert first["github_authenticated"] is True
+        assert second["github_authenticated"] is True
+        assert len(calls) == 1, "gh auth status re-run on a cached poll"
+
+    @pytest.mark.asyncio
+    async def test_status_runs_the_probe_off_the_event_loop(self, mock_db):
+        import threading
+
+        from app.api import auth as auth_api
+        from app.core.auth import reset_github_auth_cache
+
+        loop_thread = threading.current_thread().ident
+        seen = {}
+
+        def _probe():
+            seen["thread"] = threading.current_thread().ident
+            return True
+
+        request = MagicMock()
+        request.cookies = {}
+        oauth = MagicMock()
+        oauth.ensure_fresh_credentials = AsyncMock(return_value=None)
+
+        reset_github_auth_cache()
+        with patch.object(auth_api, "auth_service") as mock_auth, \
+             patch.object(auth_api, "direct_oauth", oauth), \
+             patch.object(auth_api, "_sync_back_active_account_safe", MagicMock()):
+            mock_auth.validate_session.return_value = False
+            mock_auth.is_setup_required.return_value = False
+            mock_auth.is_claude_authenticated.return_value = False
+            mock_auth.get_claude_token_status.return_value = {"token_valid": False}
+            mock_auth.is_onboarding_complete.return_value = True
+            mock_auth.is_github_authenticated.side_effect = _probe
+
+            await auth_api.get_auth_status(request)
+
+        assert seen["thread"] != loop_thread
+
+    @pytest.mark.asyncio
+    async def test_login_invalidates_both_caches(self):
+        from app.api import auth as auth_api
+        from app.core import auth as core_auth
+        from app.core.github_service import github_service
+
+        # Pretend both caches believe GitHub is signed out.
+        core_auth.set_github_auth_cached(False)
+        github_service.invalidate_auth_cache(False)
+
+        request = MagicMock()
+        request.json = AsyncMock(return_value={"token": "ghp_x"})
+
+        with patch.object(auth_api, "auth_service") as mock_auth:
+            mock_auth.github_login_with_token.return_value = {"success": True}
+            result = await auth_api.github_login(request, token="admin")
+
+        assert result["success"] is True
+        # Both caches now reflect the login without another subprocess.
+        assert core_auth._github_auth_cache[0] is True
+        assert github_service._auth_cache.get(github_service._AUTH_CACHE_KEY) is True
+
+    @pytest.mark.asyncio
+    async def test_logout_invalidates_both_caches(self):
+        from app.api import auth as auth_api
+        from app.core import auth as core_auth
+        from app.core.github_service import github_service
+
+        core_auth.set_github_auth_cached(True)
+        github_service.invalidate_auth_cache(True)
+
+        with patch.object(auth_api, "auth_service") as mock_auth:
+            mock_auth.github_logout.return_value = {"success": True}
+            result = await auth_api.github_logout(token="admin")
+
+        assert result["success"] is True
+        assert core_auth._github_auth_cache[0] is False
+        assert github_service._auth_cache.get(github_service._AUTH_CACHE_KEY) is False
+
+    @pytest.mark.asyncio
+    async def test_github_status_endpoint_seeds_the_caches(self):
+        """It is the device-flow completion poll, so its answer is the freshest
+        one available — and it must not block the loop while it asks."""
+        import threading
+
+        from app.api import auth as auth_api
+        from app.core import auth as core_auth
+        from app.core.github_service import github_service
+
+        core_auth.set_github_auth_cached(False)
+        github_service.invalidate_auth_cache(False)
+
+        loop_thread = threading.current_thread().ident
+        seen = {}
+
+        def _info():
+            seen["thread"] = threading.current_thread().ident
+            return {"authenticated": True, "user": "octocat"}
+
+        with patch.object(auth_api, "auth_service") as mock_auth:
+            mock_auth.get_github_auth_info.side_effect = _info
+            result = await auth_api.github_auth_status()
+
+        assert result["user"] == "octocat"
+        assert seen["thread"] != loop_thread
+        assert core_auth._github_auth_cache[0] is True
+        assert github_service._auth_cache.get(github_service._AUTH_CACHE_KEY) is True
+
+    @pytest.mark.asyncio
+    async def test_web_login_drops_the_cached_answer(self):
+        """The device flow finishes out-of-band: nothing is known yet, so the
+        cache is cleared rather than seeded."""
+        from app.api import auth as auth_api
+        from app.core import auth as core_auth
+        from app.core.github_service import github_service
+
+        core_auth.set_github_auth_cached(False)
+        github_service.invalidate_auth_cache(False)
+
+        request = MagicMock()
+        with patch.object(auth_api, "auth_service") as mock_auth:
+            mock_auth.github_login_web = AsyncMock(return_value={"code": "ABCD-1234"})
+            result = await auth_api.github_login_web(request, token="admin")
+
+        assert result["code"] == "ABCD-1234"
+        assert core_auth._github_auth_cache is None
+        assert (
+            github_service._auth_cache.get_or_miss(github_service._AUTH_CACHE_KEY)
+            is not False
+        )
+

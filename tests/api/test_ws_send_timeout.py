@@ -17,9 +17,12 @@ The fix bounds every send in the pump's broadcast path:
   2. ``ChatWebSocketHandler.send_json`` marks the connection dead on timeout
      and force-closes the zombie socket so the receive loop's finally-cleanup
      actually runs.
-  3. ``sync_engine`` device fan-out (broadcast_event / send_event / send_json)
-     times out per device and prunes the dead one, so one zombie device can't
-     stall delivery to the healthy ones.
+  3. ``sync_engine`` device fan-out no longer awaits sockets at ALL: every
+     connection owns a bounded queue + writer task, the producer only enqueues,
+     and each writer times its own send out (2.5 s) and reaps its connection
+     out of the registry. One zombie device can neither stall the producer nor
+     delay delivery to the healthy ones. See
+     ``tests/core/test_sync_engine_writer.py`` for the full W2 coverage.
 """
 
 import asyncio
@@ -114,46 +117,74 @@ async def test_send_json_timeout_poisons_connection_and_force_closes(monkeypatch
 # ─── sync_engine fan-out ─────────────────────────────────────────────────────
 
 
+async def _until(predicate, timeout: float = 2.0):
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(0.005)
+    return predicate()
+
+
 @pytest.mark.asyncio
 async def test_broadcast_event_prunes_hung_device_and_reaches_healthy_one(monkeypatch):
-    """One half-open device must not stall the fan-out: the hung device times
-    out, is pruned from the registry, and the healthy device still receives the
-    frame."""
+    """One half-open device must not stall the fan-out. Post-W2 the producer
+    never waits for it at all — the hung device's OWN writer times its send
+    out, closes the zombie socket and reaps the device from the registry, while
+    the healthy device receives the frame from its own writer."""
     monkeypatch.setattr("app.core.sync_engine._SEND_TIMEOUT_SECONDS", 0.05)
     engine = SyncEngine()
     hung = _HungWebSocket()
     healthy = _HealthyWebSocket()
     await engine.register_device("dev-hung", "sess-1", hung)  # type: ignore
     await engine.register_device("dev-ok", "sess-1", healthy)  # type: ignore
+    try:
+        await engine.broadcast_event(
+            SyncEvent(event_type="stream_frame", session_id="sess-1", data={"type": "start"})
+        )
 
-    await engine.broadcast_event(
-        SyncEvent(event_type="stream_frame", session_id="sess-1", data={"type": "start"})
-    )
-
-    # Healthy device got the frame despite the zombie sibling.
-    assert len(healthy.sent) == 1
-    # The hung device was pruned so future broadcasts skip it entirely.
-    assert "dev-hung" not in engine._connections.get("sess-1", {})
-    assert "dev-ok" in engine._connections.get("sess-1", {})
+        # Healthy device got the frame despite the zombie sibling.
+        assert await _until(lambda: len(healthy.sent) == 1)
+        # The hung device is pruned so future broadcasts skip it entirely.
+        assert await _until(lambda: "dev-hung" not in engine._connections.get("sess-1", {}))
+        assert "dev-ok" in engine._connections.get("sess-1", {})
+    finally:
+        await engine.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_device_connection_send_event_times_out(monkeypatch):
+async def test_device_connection_send_event_evicts_a_hung_socket(monkeypatch):
+    """send_event is now a non-blocking enqueue (it returns True: the frame was
+    accepted), and the connection's writer independently declares the socket
+    dead once its bounded send times out."""
     monkeypatch.setattr("app.core.sync_engine._SEND_TIMEOUT_SECONDS", 0.05)
     conn = DeviceConnection(
         device_id="dev-1", session_id="sess-1", websocket=_HungWebSocket()  # type: ignore
     )
-    ok = await conn.send_event(
-        SyncEvent(event_type="stream_frame", session_id="sess-1", data={})
-    )
-    assert ok is False
+    try:
+        queued = await conn.send_event(
+            SyncEvent(event_type="stream_frame", session_id="sess-1", data={})
+        )
+        assert queued is True
+        assert await _until(lambda: not conn.writer.alive)
+        assert conn.writer.death_reason == "send_failed"
+        # Subsequent frames fast-fail so the caller can prune the connection.
+        assert await conn.send_event(
+            SyncEvent(event_type="stream_frame", session_id="sess-1", data={})
+        ) is False
+    finally:
+        await conn.writer.aclose()
 
 
 @pytest.mark.asyncio
-async def test_user_device_connection_send_json_times_out(monkeypatch):
+async def test_user_device_connection_send_json_evicts_a_hung_socket(monkeypatch):
     monkeypatch.setattr("app.core.sync_engine._SEND_TIMEOUT_SECONDS", 0.05)
     conn = UserDeviceConnection(
         device_id="dev-1", user_id="u1", websocket=_HungWebSocket()  # type: ignore
     )
-    ok = await conn.send_json({"type": "ping"})
-    assert ok is False
+    try:
+        assert await conn.send_json({"type": "ping"}) is True
+        assert await _until(lambda: not conn.writer.alive)
+        assert await conn.send_json({"type": "ping"}) is False
+    finally:
+        await conn.writer.aclose()

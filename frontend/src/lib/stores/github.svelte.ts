@@ -13,6 +13,23 @@ import { createSubscribers } from './store-utils';
 // Types
 // ============================================================================
 
+/**
+ * The CI verdict for one branch, distilled from the newest workflow run on it.
+ *
+ * `state` collapses GitHub's (status, conclusion) pair into what the header
+ * needs to render: `running` while queued/in-progress, otherwise the run's
+ * conclusion bucketed into success / failure / neutral.
+ */
+export interface BranchChecks {
+	branch: string;
+	state: 'running' | 'success' | 'failure' | 'neutral';
+	/** Raw conclusion (success / failure / cancelled / …), null while running. */
+	conclusion: string | null;
+	name: string;
+	url: string;
+	updatedAt: string;
+}
+
 interface GitHubState {
 	projectId: string | null;
 	authenticated: boolean;
@@ -29,6 +46,8 @@ interface GitHubState {
 	} | null;
 	pullRequests: githubApi.PullRequest[];
 	workflowRuns: githubApi.WorkflowRun[];
+	/** Newest workflow run for the branch the git header is showing. */
+	checks: BranchChecks | null;
 	loading: boolean;
 	loadingPRs: boolean;
 	loadingRuns: boolean;
@@ -46,6 +65,7 @@ const initialState: GitHubState = {
 	repoInfo: null,
 	pullRequests: [],
 	workflowRuns: [],
+	checks: null,
 	loading: false,
 	loadingPRs: false,
 	loadingRuns: false,
@@ -67,6 +87,48 @@ const { subscribe, update: _update, notifySubscribers: _notifySubscribers, creat
 		() => _state,
 		(v) => { _state = v; }
 	);
+
+// ============================================================================
+// Pure helpers
+// ============================================================================
+
+/**
+ * Pick the newest workflow run on `branch` and collapse it into a BranchChecks
+ * verdict. Returns null when the branch has no runs (nothing to show).
+ */
+export function summarizeBranchChecks(
+	runs: githubApi.WorkflowRun[],
+	branch: string
+): BranchChecks | null {
+	let newest: githubApi.WorkflowRun | null = null;
+	for (const run of runs) {
+		if (run.branch !== branch) continue;
+		if (!newest || run.created_at > newest.created_at) newest = run;
+	}
+	if (!newest) return null;
+
+	const status = (newest.status || '').toLowerCase();
+	const conclusion = newest.conclusion ? newest.conclusion.toLowerCase() : null;
+	let state: BranchChecks['state'];
+	if (status === 'queued' || status === 'in_progress' || status === 'waiting' || status === 'pending') {
+		state = 'running';
+	} else if (conclusion === 'success') {
+		state = 'success';
+	} else if (conclusion === 'failure' || conclusion === 'timed_out' || conclusion === 'startup_failure') {
+		state = 'failure';
+	} else {
+		state = 'neutral';
+	}
+
+	return {
+		branch,
+		state,
+		conclusion,
+		name: newest.name,
+		url: newest.url,
+		updatedAt: newest.created_at
+	};
+}
 
 // ============================================================================
 // Exported Store
@@ -216,6 +278,43 @@ export const github = {
 	},
 
 	/**
+	 * Load repository metadata (auth + default branch + full name) at most once
+	 * per caller-enforced TTL.
+	 *
+	 * `/github/status` shells out to `gh`, so this is deliberately a one-shot
+	 * lazy load driven by the git store's slow, visibility-gated refresh — never
+	 * a poll. Repo metadata is near-static.
+	 */
+	async ensureRepoInfo(projectId: string): Promise<boolean> {
+		if (_state.projectId === projectId && _state.repoInfo) return _state.authenticated;
+		return github.loadStatus(projectId);
+	},
+
+	/**
+	 * Refresh the CI verdict for `branch` from the project's recent workflow runs.
+	 *
+	 * This is the (previously dead) workflow-runs pathway, now wired to the git
+	 * header's CI badge. Called only from the git store's slow refresh, which
+	 * runs solely while a git surface is mounted, the tab is visible, and the
+	 * branch actually has an open PR — so it adds no idle cost.
+	 *
+	 * @returns true when a verdict (or a definitive "no runs") landed.
+	 */
+	async refreshChecks(projectId: string, branch: string): Promise<boolean> {
+		_update(s => ({ ...s, projectId, loadingRuns: true }));
+		try {
+			const runs = await githubApi.getWorkflowRuns(projectId, 10);
+			const checks = summarizeBranchChecks(runs, branch);
+			_update(s => ({ ...s, workflowRuns: runs, checks, loadingRuns: false }));
+			return true;
+		} catch {
+			// Advisory: keep the previous verdict rather than blanking the badge.
+			_update(s => ({ ...s, loadingRuns: false }));
+			return false;
+		}
+	},
+
+	/**
 	 * Load workflow runs for the current project
 	 */
 	async loadWorkflowRuns(limit: number = 10) {
@@ -286,3 +385,6 @@ export const github = {
 // ============================================================================
 
 export const githubRepoInfo = createDerived(() => _state.repoInfo);
+
+/** CI verdict for the branch the git header is showing (null when unknown). */
+export const githubChecks = createDerived(() => _state.checks);

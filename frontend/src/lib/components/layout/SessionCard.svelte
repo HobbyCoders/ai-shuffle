@@ -49,17 +49,40 @@
 		active?: boolean;
 		/** Current clock (ms) supplied by the sidebar's shared ticker. */
 		now: number;
+		/** Last-activity time (ms) precomputed by the sidebar's row builder, so a
+		 *  ticking card never re-parses its date (R15). Falls back to parsing the
+		 *  row when the card is used standalone. */
+		timestamp?: number;
 		/** Single-line dense row — used for the settled/archived groups. */
 		compact?: boolean;
+		/** Id of the card whose swipe actions are currently revealed, owned by the
+		 *  parent list so ONE delegated listener can close them (R15). Leave it
+		 *  undefined to let the card manage its own reveal state (standalone use). */
+		openActionsId?: string | null;
+		/** Notifies the parent that this card opened (its id) or closed (null). */
+		onActionsOpenChange?: (sessionId: string | null) => void;
 		onOpen: (sessionId: string) => void;
 		/** Fired after this card is settled while it is the open session, so the shell can move to a fresh chat. */
 		onSettled?: () => void;
 	}
 
-	let { session, status, projectLabel, active = false, now, compact = false, onOpen, onSettled }: Props = $props();
+	let {
+		session,
+		status,
+		projectLabel,
+		active = false,
+		now,
+		timestamp,
+		compact = false,
+		openActionsId,
+		onActionsOpenChange,
+		onOpen,
+		onSettled
+	}: Props = $props();
 
 	const live = $derived(isLiveStatus(status));
-	const elapsed = $derived(Math.max(0, now - sessionTimestamp(session)));
+	const lastActivity = $derived(timestamp ?? sessionTimestamp(session));
+	const elapsed = $derived(Math.max(0, now - lastActivity));
 	const timer = $derived(live ? formatElapsed(elapsed) : formatAge(elapsed));
 	const title = $derived(session.title?.trim() || 'Untitled');
 	const device = $derived(deviceLabel(session));
@@ -70,7 +93,17 @@
 	const receded = $derived(status === 'working' && !active);
 
 	let cardRef = $state<HTMLElement | null>(null);
-	let actionsOpen = $state(false);
+	// Reveal state is parent-owned when `openActionsId` is supplied (the sidebar
+	// path); the local fallback keeps the card self-contained on its own.
+	let localActionsOpen = $state(false);
+	const controlledActions = $derived(openActionsId !== undefined);
+	const actionsOpen = $derived(controlledActions ? openActionsId === session.id : localActionsOpen);
+
+	function setActionsOpen(open: boolean) {
+		if (controlledActions) onActionsOpenChange?.(open ? session.id : null);
+		else localActionsOpen = open;
+	}
+
 	let swipeLayout = $state(false);
 	let dragOffset = $state<number | null>(null);
 
@@ -87,20 +120,12 @@
 	let actionJustCommitted = false;
 
 	function closeActions() {
-		actionsOpen = false;
+		setActionsOpen(false);
 		dragOffset = null;
 	}
 
-	function handleWindowClick(event: MouseEvent) {
-		if (actionsOpen && cardRef && !cardRef.contains(event.target as Node)) closeActions();
-	}
-
-	function handleWindowKeydown(event: KeyboardEvent) {
-		if (event.key === 'Escape') closeActions();
-	}
-
 	async function commitToggle() {
-		actionsOpen = false;
+		setActionsOpen(false);
 		const settling = session.is_active;
 		try {
 			await appData.setSessionActive(session.id, !settling);
@@ -194,9 +219,11 @@
 		const dx = event.clientX - pointerStartX;
 		if (horizontalDrag) {
 			const nextOffset = dragOffset ?? pointerStartOffset;
-			actionsOpen = actionsOpen
-				? nextOffset < -(ACTION_REVEAL_WIDTH - SWIPE_COMMIT_DISTANCE)
-				: nextOffset <= -SWIPE_COMMIT_DISTANCE;
+			setActionsOpen(
+				actionsOpen
+					? nextOffset < -(ACTION_REVEAL_WIDTH - SWIPE_COMMIT_DISTANCE)
+					: nextOffset <= -SWIPE_COMMIT_DISTANCE
+			);
 			// Swallow the trailing click from this gesture; cleared on the next press.
 			suppressNextClick = true;
 		} else if (Math.abs(dx) > 6) {
@@ -236,10 +263,13 @@
 	});
 </script>
 
-<svelte:window onclick={handleWindowClick} onkeydown={handleWindowKeydown} />
-
+<!-- No <svelte:window> here on purpose: with 60+ cards rendered, per-card
+     global click/keydown handlers ran 60+ times per document click (R15). The
+     sidebar closes the open card's actions from one delegated listener, keyed
+     on `data-session-card`. -->
 <div
 	bind:this={cardRef}
+	data-session-card={session.id}
 	class="scard-frame"
 	class:compact
 	class:actions-open={actionsOpen}

@@ -37,13 +37,58 @@ each streaming delta batch — so wakes are damped by a cooldown floor: at most
 one pass per ``WAKE_COOLDOWN_SECONDS``, and both passes are tiny indexed reads.
 
 Started from ``startup.install_v2_turns_wiring``.
+
+
+THE UNIFIED BACKGROUND SWEEP (F5)
+---------------------------------
+This module also hosts the driver that all of the cross-install correctness
+loops now share. There used to be four independent timers — turn claim (5s),
+git-ops claim (5s), interaction expiry (10s) and the streaming reap — each with
+its own task, its own sleep, its own thread dispatch and its own connection
+checkout, producing ~46 empty DB reads a minute on a box where nothing was
+happening. They are now multiplexed onto ONE timer here: peers register a
+:class:`SweepPass` via :func:`register_pass` and the driver runs each one when
+it comes due, batching everything that falls in the same tick.
+
+Two things make the idle cost collapse:
+
+* **One timer instead of N.** Passes that fall due together are executed in one
+  wake-up. The driver sleeps exactly until the next due pass and not at all in
+  between.
+
+* **Single-install detection.** Every registered pass exists to notice work
+  that a PEER INSTALL wrote into a shared table. When the install registry
+  contains no peer, nothing but this process can write those rows, so the tight
+  cadence buys nothing — the driver stretches every pass to
+  ``settings.single_install_sweep_interval_seconds`` (60s). The moment a peer
+  row appears the tight per-pass cadences come back, and the answer is cached
+  for only ``settings.single_install_peer_check_seconds`` (and invalidated
+  immediately whenever a pass finds real work).
+
+  SAFETY. The stretch changes LATENCY, never correctness, and each pass keeps a
+  latency path that does not depend on the poll at all:
+    - turn claim: the submit/interrupt seams fire ``notify_session`` after the
+      durable write, and this driver runs the turn-claim pass on the resulting
+      NOTIFY tick regardless of its schedule. The poll is the fallback for a
+      LOST notify, and a lost notify on an install with no peers can only
+      concern a row this same process wrote.
+    - git-ops claim: the one latency-critical case (first turn of a freshly
+      created remote worktree session) is claimed INLINE by the spawn path in
+      ``app.core.query_options``, never by this loop; :func:`kick` is available
+      for an enqueue seam that wants immediate execution.
+    - interaction expiry: the ``interaction_wait`` adapter honours its own local
+      ``expires_at`` deadline, so a late sweep can never wedge a turn; the sweep
+      only makes the lapse durable for peers and reconnecting clients — and on
+      a single install "peers" is the empty set.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional, Set
+import time
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 from app.core.config import settings
 
@@ -55,11 +100,20 @@ CLAIM_POLL_SECONDS = 5.0
 # run passes more often than this.
 WAKE_COOLDOWN_SECONDS = 1.0
 
-# Loop plumbing — set by claim_loop() on its own event loop; the gateway
+# Loop plumbing — set by sweep_loop() on its own event loop; the gateway
 # listener thread only ever touches them via call_soon_threadsafe.
 _wake: Optional[asyncio.Event] = None
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _loop_task: Optional[asyncio.Task] = None
+
+# Set by the gateway listener; consumed by the driver to decide whether the
+# NOTIFY-driven passes should run on this wake. Distinguishing it from a plain
+# wake keeps an unrelated kick() from paying for the turn-claim reads.
+_notify_pending: bool = False
+
+# Peer-install cache: (answer, monotonic timestamp). None = never resolved.
+_peer_answer: Optional[bool] = None
+_peer_checked_at: float = 0.0
 
 # Strong refs to fire-and-forget interrupt-drive tasks (asyncio only holds
 # weak refs; a GC'd task silently vanishes mid-escalation).
@@ -78,14 +132,24 @@ def notify_turns_changed(session_id: str) -> None:
     session_events.notify_session(session_id)
 
 
+def _mark_notify() -> None:
+    """Flag a pending NOTIFY and wake the driver (runs ON the driver's loop)."""
+    global _notify_pending
+    _notify_pending = True
+    if _wake is not None:
+        _wake.set()
+
+
 def _on_gateway_tick(session_id: str) -> None:
     """Gateway global listener — runs on the LISTEN thread; must be cheap and
-    never raise. Just sets the wake event on the claim loop's event loop."""
+    never raise. Hands the driver's event loop a flag-and-wake callback; the
+    flag is what tells the driver to run the NOTIFY-driven passes (the turn
+    claim + interrupt-observe reads) irrespective of their poll schedule."""
     loop, wake = _loop, _wake
     if loop is None or wake is None:
         return
     try:
-        loop.call_soon_threadsafe(wake.set)
+        loop.call_soon_threadsafe(_mark_notify)
     except RuntimeError:
         pass  # loop already closed (shutdown) — poll cadence is gone anyway.
 
@@ -164,12 +228,273 @@ async def claim_once() -> int:
     return claimed
 
 
-async def claim_loop() -> None:
-    """The background loop: pass every CLAIM_POLL_SECONDS, sooner on NOTIFY."""
-    global _loop, _wake
+# ---------------------------------------------------------------------------
+# The unified sweep driver (F5)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SweepPass:
+    """One registered periodic read, multiplexed onto the shared driver.
+
+    * ``tight_interval`` is the pass's own correctness cadence — what it polled
+      at when it owned a private timer. It is used verbatim whenever peer
+      installs exist.
+    * ``wake_on_notify`` marks a pass whose latency contract is "run me on the
+      gateway NOTIFY tick". Only the turn-claim pass sets it: NOTIFY ticks
+      arrive per event batch during streaming, so waking anything else on them
+      would trade an idle-cost win for a streaming-cost regression.
+    * ``next_due`` is a monotonic timestamp.
+    """
+
+    name: str
+    run: Callable[[], Awaitable[Any]]
+    tight_interval: float
+    wake_on_notify: bool = False
+    next_due: float = field(default=0.0)
+
+
+_passes: Dict[str, SweepPass] = {}
+
+
+def register_pass(
+    name: str,
+    run: Callable[[], Awaitable[Any]],
+    tight_interval: float,
+    *,
+    wake_on_notify: bool = False,
+    first_delay: Optional[float] = None,
+) -> None:
+    """Register (or replace) a periodic pass and make sure the driver is up.
+
+    ``first_delay`` defaults to the pass's effective interval, i.e. a pass does
+    NOT fire the instant it registers — matching the ``sleep(interval)``-first
+    shape every one of these loops had when it owned its own task.
+
+    Registration is order-independent: a module may register before or after
+    :func:`start`, and the driver is spawned on demand either way.
+    """
+    delay = tight_interval if first_delay is None else first_delay
+    existing = _passes.get(name)
+    sweep = SweepPass(
+        name=name,
+        run=run,
+        tight_interval=tight_interval,
+        wake_on_notify=wake_on_notify,
+        next_due=existing.next_due if existing else (time.monotonic() + delay),
+    )
+    _passes[name] = sweep
+    _ensure_driver()
+    if _wake is not None:
+        _wake.set()
+
+
+def unregister_pass(name: str) -> None:
+    """Remove a pass (its owner is shutting down). Never raises."""
+    _passes.pop(name, None)
+
+
+def kick(name: Optional[str] = None) -> None:
+    """Make ``name`` (or every pass) due immediately and wake the driver.
+
+    The in-process latency escape hatch for a seam that has just written a row
+    one of these passes is responsible for — it turns "up to one cadence" into
+    "next event-loop tick" without anybody having to shorten a poll. Safe to
+    call from any coroutine on the driver's loop; a no-op when the driver is
+    not running.
+    """
+    now = time.monotonic()
+    for sweep in _passes.values():
+        if name is None or sweep.name == name:
+            sweep.next_due = now
+    if _wake is not None:
+        _wake.set()
+
+
+def invalidate_peer_cache() -> None:
+    """Force the next tick to re-read the install registry."""
+    global _peer_answer, _peer_checked_at
+    _peer_answer = None
+    _peer_checked_at = 0.0
+
+
+async def _peers_present() -> bool:
+    """Cached "does this database carry any install other than me?".
+
+    Fails SAFE: any error answers True (assume a cluster, keep the tight
+    cadences) and is cached like any other answer so a broken registry cannot
+    turn into a read per tick.
+
+    Deliberately counts EVERY registered peer, not just the currently-online
+    ones: an offline peer can come back and enqueue work at any time, and
+    flapping the cadence with peer liveness would make the deployment's cost
+    profile depend on someone else's uptime.
+    """
+    global _peer_answer, _peer_checked_at
+    try:
+        ttl = float(getattr(settings, "single_install_peer_check_seconds", 300))
+    except (TypeError, ValueError):
+        ttl = 300.0
+    now = time.monotonic()
+    if _peer_answer is not None and (now - _peer_checked_at) < ttl:
+        return _peer_answer
+    try:
+        from app.db import installs as installs_db
+
+        rows = await asyncio.to_thread(installs_db.get_installs)
+        me = settings.effective_instance_id
+        answer = any((row.get("id") or "") != me for row in rows)
+    except Exception:  # noqa: BLE001 — never let a registry hiccup stop the sweep
+        logger.debug("turn_claim: peer-install check failed", exc_info=True)
+        answer = True
+    _peer_answer = answer
+    _peer_checked_at = now
+    return answer
+
+
+def _stretch_interval() -> float:
+    """Single-install cadence, or 0 when the stretch is disabled."""
+    try:
+        return max(0.0, float(
+            getattr(settings, "single_install_sweep_interval_seconds", 60)
+        ))
+    except (TypeError, ValueError):
+        return 60.0
+
+
+def _effective_interval(sweep: SweepPass, peers: bool) -> float:
+    """The cadence to schedule ``sweep`` at right now.
+
+    Never shorter than the pass's own tight interval — the stretch can only
+    lengthen a cadence, so a pass that already polls slowly (e.g. the daily
+    git-ops retention purge) is untouched by it.
+    """
+    if peers:
+        return sweep.tight_interval
+    return max(sweep.tight_interval, _stretch_interval())
+
+
+async def _run_passes(due: List[SweepPass], peers: bool) -> None:
+    """Execute the given passes, reschedule them, and react to found work."""
+    for sweep in due:
+        try:
+            result = await sweep.run()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — one bad pass must not starve the rest
+            logger.warning("turn_claim: sweep pass %r failed", sweep.name,
+                           exc_info=True)
+            result = None
+        sweep.next_due = time.monotonic() + _effective_interval(sweep, peers)
+        # Real work on a supposedly single-install deployment is the strongest
+        # possible hint that the peer answer is stale — re-derive it next tick.
+        if result and not peers:
+            invalidate_peer_cache()
+
+
+async def sweep_loop() -> None:
+    """The shared driver: run every registered pass at its effective cadence.
+
+    Sleeps until the earliest due pass (and parks on the wake event with no
+    timeout at all when nothing is registered), so an idle install pays one
+    wake-up per cadence instead of one per loop.
+    """
+    global _loop, _wake, _notify_pending
     _loop = asyncio.get_running_loop()
     _wake = asyncio.Event()
 
+    logger.info(
+        "turn_claim: unified sweep driver started (passes=%s, runner=%s)",
+        sorted(_passes), settings.effective_instance_id,
+    )
+    last_peers: Optional[bool] = None
+    while True:
+        try:
+            peers = await _peers_present()
+            if last_peers is not None and peers != last_peers:
+                # The cadence just changed under every pass; re-anchor their
+                # deadlines so a tightening takes effect on THIS tick instead of
+                # waiting out a schedule computed under the old regime.
+                now = time.monotonic()
+                for sweep in _passes.values():
+                    sweep.next_due = min(
+                        sweep.next_due, now + _effective_interval(sweep, peers)
+                    )
+                logger.info(
+                    "turn_claim: cadence switched to %s-install mode",
+                    "multi" if peers else "single",
+                )
+            last_peers = peers
+
+            now = time.monotonic()
+            if _passes:
+                delay = max(0.0, min(p.next_due for p in _passes.values()) - now)
+            else:
+                delay = None
+
+            if delay is None:
+                await _wake.wait()
+            elif delay > 0:
+                try:
+                    await asyncio.wait_for(_wake.wait(), timeout=delay)
+                except asyncio.TimeoutError:
+                    pass
+            _wake.clear()
+
+            notify = _notify_pending
+            _notify_pending = False
+
+            now = time.monotonic()
+            due = [p for p in _passes.values() if p.next_due <= now]
+            if notify:
+                for sweep in _passes.values():
+                    if sweep.wake_on_notify and sweep not in due:
+                        due.append(sweep)
+            if not due:
+                # A bare wake (registration, kick of an already-scheduled pass,
+                # cadence change) — just recompute the sleep.
+                continue
+
+            await _run_passes(due, peers)
+            # Damping floor: NOTIFY ticks fire per event batch during
+            # streaming; never run passes more than once per cooldown.
+            await asyncio.sleep(WAKE_COOLDOWN_SECONDS)
+        except asyncio.CancelledError:
+            break
+        except Exception:  # noqa: BLE001 — the loop must survive anything.
+            logger.warning("turn_claim: sweep tick failed", exc_info=True)
+            try:
+                await asyncio.sleep(WAKE_COOLDOWN_SECONDS)
+            except asyncio.CancelledError:
+                break
+    logger.info("turn_claim: unified sweep driver stopped")
+
+
+# Back-compat alias — this loop's only caller is :func:`start`, but the name is
+# referenced in docs/commit history.
+claim_loop = sweep_loop
+
+
+def _ensure_driver() -> None:
+    """Spawn the sweep driver task if it is not already running."""
+    global _loop_task
+    if _loop_task is not None and not _loop_task.done():
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        logger.warning("turn_claim: no running event loop — sweep driver not started")
+        return
+    _loop_task = loop.create_task(sweep_loop())
+
+
+def start() -> None:
+    """Register the turn-claim pass and start the shared driver (idempotent).
+
+    Called from ``startup.install_v2_turns_wiring`` (which runs inside the
+    lifespan startup, so a loop is running). The task ref is module-held so it
+    is never GC'd; ``shutdown_services`` cancels it via :func:`stop` (rF4).
+    """
     try:
         from app.core.event_gateway import get_gateway
 
@@ -180,63 +505,38 @@ async def claim_loop() -> None:
             exc_info=True,
         )
 
+    register_pass(
+        "turn_claim",
+        claim_once,
+        CLAIM_POLL_SECONDS,
+        wake_on_notify=True,
+    )
     logger.info(
-        "turn_claim: loop started (poll every %ss + NOTIFY wake, runner=%s)",
+        "turn_claim: registered (poll every %ss + NOTIFY wake, runner=%s)",
         int(CLAIM_POLL_SECONDS), settings.effective_instance_id,
     )
-    while True:
-        try:
-            try:
-                await asyncio.wait_for(_wake.wait(), timeout=CLAIM_POLL_SECONDS)
-            except asyncio.TimeoutError:
-                pass
-            _wake.clear()
-            await claim_once()
-            # Damping floor: NOTIFY ticks fire per event batch during
-            # streaming; never pass more than once per cooldown.
-            await asyncio.sleep(WAKE_COOLDOWN_SECONDS)
-        except asyncio.CancelledError:
-            break
-        except Exception:  # noqa: BLE001 — the loop must survive anything.
-            logger.warning("turn_claim: pass failed", exc_info=True)
-            try:
-                await asyncio.sleep(WAKE_COOLDOWN_SECONDS)
-            except asyncio.CancelledError:
-                break
-    logger.info("turn_claim: loop stopped")
-
-
-def start() -> None:
-    """Start the claim loop on the running event loop (idempotent).
-
-    Called from ``startup.install_v2_turns_wiring`` (which runs inside the
-    lifespan startup, so a loop is running). The task ref is module-held so it
-    is never GC'd; ``shutdown_services`` cancels it via :func:`stop` (rF4).
-    """
-    global _loop_task
-    if _loop_task is not None and not _loop_task.done():
-        return
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        logger.warning("turn_claim.start(): no running event loop — not started")
-        return
-    _loop_task = loop.create_task(claim_loop())
 
 
 async def stop() -> None:
-    """Cancel the claim loop and wait for it to exit (idempotent; rF4).
+    """Cancel the sweep driver and wait for it to exit (idempotent; rF4).
 
     Called from ``startup.shutdown_services`` so teardown cancels the loop
     cleanly instead of relying on process death — a pass racing the session-
     pool shutdown could otherwise kick the scheduler into starting new work
-    mid-teardown. No-op when the loop was never started (flag OFF, or a test
-    process that never called :func:`start`).
+    mid-teardown. Stopping the driver stops EVERY registered pass, which is the
+    intended shutdown behaviour; the other owners' ``stop()`` functions then
+    unregister their passes so a restart in the same process is clean.
+
+    No-op when the driver was never started (flag OFF, or a test process that
+    never called :func:`start`).
     """
-    global _loop_task
+    global _loop_task, _wake, _loop
+    unregister_pass("turn_claim")
     task = _loop_task
     _loop_task = None
     if task is None or task.done():
+        _wake = None
+        _loop = None
         return
     task.cancel()
     try:
@@ -245,3 +545,6 @@ async def stop() -> None:
         pass
     except Exception:  # noqa: BLE001 — teardown must never raise.
         logger.debug("turn_claim: loop raised during shutdown", exc_info=True)
+    finally:
+        _wake = None
+        _loop = None

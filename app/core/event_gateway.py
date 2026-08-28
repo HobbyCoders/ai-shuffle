@@ -2,7 +2,9 @@
 
 Bridges a dedicated PostgreSQL ``LISTEN session_events`` connection to
 per-session asyncio subscriber queues. The SSE route (``app/api/events.py``)
-subscribes a queue per client and wakes on the ``max_seq`` values pushed here.
+subscribes ONE queue per session — a shared reader that turns each ``max_seq``
+tick into a single DB read plus a single serialization pass, then fans the
+resulting frames out to every client on that session.
 
 Delivery must never depend on this gateway: the SSE route also polls
 ``get_max_seq`` on a keepalive timer, so if PostgreSQL is unreachable the
@@ -43,6 +45,11 @@ class EventGateway:
         # Set by ``stop()`` to interrupt the reconnect backoff sleep at once, so
         # shutdown/teardown never has to wait out a multi-second backoff hop.
         self._stop_event = threading.Event()
+        # True only while a LISTEN connection is established and being polled.
+        # Consumers use this to decide whether NOTIFY delivery can be trusted as
+        # the *primary* wake path (SSE readers then drop their per-tick poll to a
+        # low-frequency correctness re-sync); False means "degraded — poll".
+        self._connected = False
 
     # ------------------------------------------------------------------
     # Subscription management
@@ -75,6 +82,16 @@ class EventGateway:
             if fn not in self._global_listeners:
                 self._global_listeners.append(fn)
         self._ensure_listener()
+
+    def is_connected(self) -> bool:
+        """True while the LISTEN connection is established and being polled.
+
+        Notify delivery is only trustworthy while this holds. Readers that would
+        otherwise poll the database on every keepalive tick (``app.api.events``)
+        use it to tell "quiet session, notifies healthy" (skip the read) apart
+        from "gateway degraded" (keep polling — the documented fallback).
+        """
+        return self._connected
 
     def unsubscribe(self, session_id: str, queue) -> None:
         """Remove a subscriber; drop the session key once empty."""
@@ -139,6 +156,7 @@ class EventGateway:
                 cursor.execute(f"LISTEN {LISTEN_CHANNEL}")
                 backoff = 1.0  # Reset on a successful connect.
                 consecutive_failures = 0
+                self._connected = True
                 while not self._stop:
                     if select.select([conn], [], [], 5.0) == ([], [], []):
                         continue
@@ -147,6 +165,7 @@ class EventGateway:
                         notify = conn.notifies.pop(0)
                         self._handle_payload(notify.payload)
             except Exception as e:  # noqa: BLE001 — must never crash the app.
+                self._connected = False
                 logger.warning(
                     "event gateway listener error (will reconnect): %s", e
                 )
@@ -179,6 +198,7 @@ class EventGateway:
                 self._sleep(backoff)
                 backoff = min(backoff * 2, 30.0)
             finally:
+                self._connected = False
                 if conn is not None:
                     try:
                         conn.close()
@@ -221,6 +241,7 @@ class EventGateway:
         and event)."""
         self._stop = True
         self._stop_event.set()
+        self._connected = False
         thread = self._thread
         if thread is not None:
             thread.join(timeout=join_timeout)

@@ -7,7 +7,9 @@
  * - initial load fetches prState alongside status (parallel batch),
  * - the fetch is session-scoped (session_id reaches the API),
  * - refreshPrState honors its throttle unless forced,
- * - a context switch mid-flight never writes another context's PR state.
+ * - a context switch mid-flight never writes another context's PR state,
+ * - a FAILED lookup keeps the previous open PR and flags it stale — it is never
+ *   read as "no open PR" (findings G2 / G3).
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -27,24 +29,20 @@ vi.mock('$lib/api/git', async (importOriginal) => {
 	return { ...actual, ...mocks };
 });
 
+import { transformGitStatus } from '$lib/api/git';
 import { git } from './git.svelte';
 
 function okStatus() {
-	return {
+	return transformGitStatus({
 		is_git_repo: true,
 		current_branch: 'feat/x',
-		remote_url: null,
-		has_changes: false,
-		staged: 0,
-		modified: 0,
-		untracked: 0,
+		default_branch: 'main',
 		ahead: 1,
-		behind: 0,
 		differs_from_base: true
-	};
+	});
 }
 
-function prState(number = 7) {
+function prState(number = 7, extra: Record<string, unknown> = {}) {
 	return {
 		current_branch: 'feat/x',
 		has_github: true,
@@ -55,7 +53,19 @@ function prState(number = 7) {
 			draft: false,
 			state: 'OPEN',
 			mergeable: null
-		}
+		},
+		lookup_failed: false,
+		...extra
+	};
+}
+
+/** What the backend returns when it could not ask GitHub this cycle. */
+function failedLookup() {
+	return {
+		current_branch: 'feat/x',
+		has_github: false,
+		open_pr: null,
+		lookup_failed: true
 	};
 }
 
@@ -112,6 +122,66 @@ describe('git store — prState', () => {
 		await git.refreshPrState(true);
 		expect(mocks.getPrState.mock.calls.length).toBe(callsAfterLoad + 1);
 		expect(git.current.prState?.open_pr?.number).toBe(9);
+	});
+
+	it('a FAILED lookup keeps the previous open PR and marks it stale', async () => {
+		await git.loadRepository('proj-1', false, 'ses-1');
+		expect(git.current.prState?.open_pr?.number).toBe(7);
+
+		// `gh` blipped: has_github:false + open_pr:null would read as "no PR" and
+		// flip the header Merge PR #7 → Create PR. It must not.
+		mocks.getPrState.mockResolvedValue(failedLookup());
+		await git.refreshPrState(true);
+
+		expect(git.current.prState?.open_pr?.number).toBe(7);
+		expect(git.current.prStateStale).toBe(true);
+
+		// A successful lookup clears the stale flag and applies the real verdict.
+		mocks.getPrState.mockResolvedValue(prState(7));
+		await git.refreshPrState(true);
+		expect(git.current.prStateStale).toBe(false);
+		expect(git.current.prState?.open_pr?.number).toBe(7);
+	});
+
+	it('a transport failure also keeps the previous PR rather than clearing it', async () => {
+		await git.loadRepository('proj-1', false, 'ses-1');
+		mocks.getPrState.mockRejectedValue(new Error('gh down'));
+
+		await git.refreshPrState(true);
+
+		expect(git.current.prState?.open_pr?.number).toBe(7);
+		expect(git.current.prStateStale).toBe(true);
+	});
+
+	it('a genuine "no open PR" verdict DOES clear the previous PR', async () => {
+		await git.loadRepository('proj-1', false, 'ses-1');
+		mocks.getPrState.mockResolvedValue({
+			current_branch: 'feat/x',
+			has_github: true,
+			open_pr: null,
+			lookup_failed: false
+		});
+
+		await git.refreshPrState(true);
+
+		expect(git.current.prState?.open_pr).toBeNull();
+		expect(git.current.prStateStale).toBe(false);
+	});
+
+	it('drops a kept PR when the branch has moved on', async () => {
+		await git.loadRepository('proj-1', false, 'ses-1');
+		mocks.getPrState.mockResolvedValue({
+			current_branch: 'feat/other',
+			has_github: false,
+			open_pr: null,
+			lookup_failed: true
+		});
+
+		await git.refreshPrState(true);
+
+		// PR #7 belongs to feat/x — showing it for feat/other would be worse than
+		// showing nothing.
+		expect(git.current.prState?.open_pr).toBeNull();
 	});
 
 	it('context switch mid-flight drops the stale response', async () => {

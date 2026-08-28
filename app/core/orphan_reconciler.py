@@ -33,6 +33,7 @@ attaching the wrong transcript.
 """
 
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 from app.db.base import get_db, get_cursor
@@ -56,11 +57,77 @@ DEFAULT_WINDOW_SECONDS = 120
 # itself.
 MIN_SESSION_AGE_SECONDS = 60
 
+# ─── Inconclusive-result memo (F6) ────────────────────────────────────────
+#
+# The overwhelming majority of NULL-link sessions are not orphans at all: they
+# are sessions that were opened and never produced a turn. They stay NULL
+# forever, so every sweep re-examined every one of them — and the examination is
+# an aggregation over the whole session store. On the old 5-minute cadence that
+# was the heaviest recurring query on the box, repeated for 14 days per session,
+# to re-derive the same "no candidates" answer every time.
+#
+# We therefore remember which session ids came back INCONCLUSIVE ("none" or
+# "ambiguous") and skip them until the memo entry ages out. Two properties make
+# this safe:
+#
+#   * It can only ever DELAY a heal, never prevent one. The memo is per-process
+#     and TTL-bounded, so a session that later becomes healable (it gained store
+#     entries after a crash) is re-examined within MEMO_TTL_SECONDS, and again
+#     on every restart. Healing is a recovery path with no deadline — the
+#     transcript is not going anywhere.
+#   * It never memoizes a CONFIDENT result, so nothing that could be healed is
+#     ever skipped on the strength of a previous look.
+#
+# Combined with the single-aggregation rewrite below (one GROUP BY per sweep
+# instead of one per NULL session), a steady-state sweep costs exactly one small
+# indexed SELECT and nothing else.
+MEMO_TTL_SECONDS = 6 * 3600
+
+# Bound on the memo so a database full of never-used sessions cannot grow it
+# without limit. Oldest entries are dropped first; a dropped entry just means
+# that session is re-examined sooner.
+MEMO_MAX_ENTRIES = 5000
+
+# session_id -> monotonic deadline after which it must be re-examined.
+_inconclusive_until: Dict[str, float] = {}
+
+
+def _now() -> float:
+    """Monotonic clock, indirected so tests can advance it."""
+    return time.monotonic()
+
+
+def reset_memo() -> None:
+    """Forget every memoized inconclusive result (tests / operator tooling)."""
+    _inconclusive_until.clear()
+
+
+def _memo_skip(session_id: str) -> bool:
+    """True when this session was recently examined with no usable candidate."""
+    deadline = _inconclusive_until.get(session_id)
+    if deadline is None:
+        return False
+    if _now() >= deadline:
+        _inconclusive_until.pop(session_id, None)
+        return False
+    return True
+
+
+def _memo_record(session_id: str) -> None:
+    """Remember that ``session_id`` came back inconclusive just now."""
+    if MEMO_TTL_SECONDS <= 0:
+        return
+    _inconclusive_until[session_id] = _now() + MEMO_TTL_SECONDS
+    while len(_inconclusive_until) > MEMO_MAX_ENTRIES:
+        oldest = min(_inconclusive_until, key=_inconclusive_until.get)
+        _inconclusive_until.pop(oldest, None)
+
 
 def find_orphan_candidates(
     window_seconds: int = DEFAULT_WINDOW_SECONDS,
     max_age_days: Optional[int] = None,
     min_age_seconds: int = MIN_SESSION_AGE_SECONDS,
+    skip_memoized: bool = False,
 ) -> List[Dict[str, Any]]:
     """Return one record per NULL-link session describing its match status.
 
@@ -72,6 +139,19 @@ def find_orphan_candidates(
     recent belongs to a session that is still mid-first-turn, not one orphaned
     by a past crash. Healing it would clobber a live run — and can double-link
     two young sessions to one live transcript (see ``MIN_SESSION_AGE_SECONDS``).
+
+    ``skip_memoized`` (used by the periodic sweep, not by operator inspection)
+    drops sessions whose last examination was inconclusive and is still inside
+    ``MEMO_TTL_SECONDS`` — see the memo notes above.
+
+    COST (F6): the unlinked-transcript aggregation runs ONCE per call, over the
+    union of every examined session's match window, and its rows are then
+    assigned to individual sessions in Python. It used to run once PER NULL
+    session with the per-session window inlined into ``HAVING``. The two are
+    equivalent — the per-session ``HAVING`` was a filter on ``min(created_at)``,
+    which is exactly what the Python assignment now applies — but the rewrite
+    turns N aggregations over ``session_store_entries`` into one. When every
+    NULL session is memoized, the aggregation is skipped entirely.
     """
     results: List[Dict[str, Any]] = []
     with get_db() as conn:
@@ -101,36 +181,55 @@ def find_orphan_candidates(
         )
         null_sessions = cur.fetchall()
 
+        if skip_memoized:
+            null_sessions = [
+                s for s in null_sessions if not _memo_skip(s["id"])
+            ]
+        if not null_sessions:
+            return results
+
+        # ONE aggregation over the union of every examined session's window.
+        # Unlinked MAIN transcripts whose FIRST entry falls just after some
+        # examined session was created. The window is asymmetric: a tiny
+        # lookback absorbs clock skew, the forward window covers init latency.
+        created_values = [s["created_at"] for s in null_sessions]
+        cur.execute(
+            """
+            SELECT e.session_id,
+                   count(*)        AS n,
+                   min(e.created_at) AS first_at,
+                   max(e.created_at) AS last_at
+            FROM session_store_entries e
+            LEFT JOIN sessions s2 ON s2.sdk_session_id = e.session_id
+            WHERE s2.id IS NULL
+              AND e.subpath IS NULL
+            GROUP BY e.session_id
+            HAVING min(e.created_at)
+                   BETWEEN %s - interval '2 seconds'
+                       AND %s + (%s || ' seconds')::interval
+            ORDER BY min(e.created_at)
+            """,
+            (min(created_values), max(created_values), str(window_seconds)),
+        )
+        transcripts = [dict(c) for c in cur.fetchall()]
+
         for s in null_sessions:
             created = s["created_at"]
-            # Unlinked MAIN transcripts whose FIRST entry falls just after this
-            # session was created. Window is asymmetric: a tiny lookback absorbs
-            # clock skew, the forward window covers init latency.
-            cur.execute(
-                """
-                SELECT e.session_id,
-                       count(*)        AS n,
-                       min(e.created_at) AS first_at,
-                       max(e.created_at) AS last_at
-                FROM session_store_entries e
-                LEFT JOIN sessions s2 ON s2.sdk_session_id = e.session_id
-                WHERE s2.id IS NULL
-                  AND e.subpath IS NULL
-                GROUP BY e.session_id
-                HAVING min(e.created_at)
-                       BETWEEN %s - interval '2 seconds'
-                           AND %s + (%s || ' seconds')::interval
-                ORDER BY min(e.created_at)
-                """,
-                (created, created, str(window_seconds)),
-            )
-            candidates = [dict(c) for c in cur.fetchall()]
+            # Per-session window filter — identical to the HAVING clause the
+            # old per-session query applied, just evaluated here instead.
+            candidates = [
+                t for t in transcripts
+                if t["first_at"] is not None
+                and _in_window(t["first_at"], created, window_seconds)
+            ]
             if len(candidates) == 1:
                 confidence = "confident"
             elif len(candidates) > 1:
                 confidence = "ambiguous"
             else:
                 confidence = "none"
+            if confidence != "confident":
+                _memo_record(s["id"])
             results.append(
                 {
                     "session_id": s["id"],
@@ -142,6 +241,19 @@ def find_orphan_candidates(
                 }
             )
     return results
+
+
+def _in_window(first_at: Any, created: Any, window_seconds: int) -> bool:
+    """``created - 2s <= first_at <= created + window_seconds``.
+
+    Mirrors the SQL ``HAVING ... BETWEEN`` the per-session query used to run, so
+    the single-aggregation rewrite selects exactly the same candidate sets.
+    """
+    try:
+        delta = (first_at - created).total_seconds()
+    except (TypeError, AttributeError):
+        return False
+    return -2.0 <= delta <= float(window_seconds)
 
 
 def reconcile_orphaned_sessions(
@@ -158,8 +270,15 @@ def reconcile_orphaned_sessions(
     to assign a transcript that any session already owns (both an in-sweep
     ``claimed_sdk_ids`` set and a ``NOT EXISTS`` write guard), so it can never
     double-link two sessions to one ``sdk_session_id``.
+
+    Uses the inconclusive-result memo (``skip_memoized=True``): sessions that
+    were recently examined and had no usable candidate are not re-examined until
+    the memo entry ages out. That can only delay a heal, never skip one — see
+    the memo notes at the top of this module.
     """
-    candidates = find_orphan_candidates(window_seconds, max_age_days)
+    candidates = find_orphan_candidates(
+        window_seconds, max_age_days, skip_memoized=True
+    )
     healed: List[Dict[str, Any]] = []
     ambiguous = 0
     # sdk_session_ids claimed earlier in THIS sweep. find_orphan_candidates runs

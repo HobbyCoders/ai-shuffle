@@ -14,11 +14,15 @@ Three consumers:
   guard paths don't hammer the DB) or :func:`get_user_streaming_sessions`
   (connect-time snapshot join). Both fail OPEN (not busy / empty) — a status
   read must never take down its caller.
-* Run-lifecycle writers (the TurnRecorder's claim/release, the event gateway's
-  NOTIFY ticks) call :func:`notify` — cheap, synchronous, thread-safe. It
-  schedules an UNCACHED async re-check, diffs against the last-broadcast busy
-  state, and on change emits the existing ``user_streaming_changed`` WS frame
-  (exact legacy wire shape — the frontend needs zero changes).
+* Run-lifecycle writers (the TurnRecorder's claim/release) call :func:`notify`
+  — cheap, synchronous, thread-safe. It schedules an UNCACHED async re-check,
+  diffs against the last-broadcast busy state, and on change emits the existing
+  ``user_streaming_changed`` WS frame (exact legacy wire shape — the frontend
+  needs zero changes). The event gateway's NOTIFY ticks go through
+  :func:`notify_gateway_tick` instead, which drops ticks for sessions already
+  broadcast as busy and throttles the rest per session — an append batch is not
+  a run-lifecycle change, and there are ~7 of them a second per streaming
+  session.
 * :func:`sweep_loop` (started from ``startup.start_background_tasks``)
   re-checks every session we last broadcast as busy so a lease that expires
   with no terminal event (crashed runner) still turns its board spinner off.
@@ -40,6 +44,16 @@ logger = logging.getLogger(__name__)
 CACHE_TTL_SECONDS = 1.5
 # Reconciler cadence: catches lease expiry with no terminal event.
 SWEEP_INTERVAL_SECONDS = 15.0
+# Damping floor for gateway NOTIFY ticks (W5). Append batches arrive ~7/s per
+# streaming session; without this every one of them cost an uncached runs+turns
+# read that almost always diffed to "no change" — and popped the guard cache
+# other busy-guards read through. Mirrors turn_claim's WAKE_COOLDOWN_SECONDS.
+# Leading edge fires immediately (no added latency for a real transition), then
+# at most one trailing re-check per window, so a burst that ENDS inside the
+# window is still evaluated.
+GATEWAY_TICK_COOLDOWN_SECONDS = 1.0
+# Size at which the per-session throttle bookkeeping sheds its stale entries.
+_TICK_STATE_MAX = 512
 
 # The lease-validity predicate, verbatim from app/db/runs.py (renew_run /
 # expire_due_runs): an active run whose lease lapsed is NOT busy.
@@ -62,6 +76,12 @@ _last_broadcast: Dict[str, Dict[str, Optional[str]]] = {}
 # the board dark with no recovery: the sweep only revisits sessions it still
 # believes are busy, and plain gateway-tick rechecks are diff-suppressed.
 _chains: Dict[str, "asyncio.Task"] = {}
+
+# Gateway-tick throttle state, both touched only on the event loop:
+#   _tick_last_fired: session_id -> loop time of the last tick-driven recheck.
+#   _tick_pending:    session_id -> the armed trailing-edge timer, if any.
+_tick_last_fired: Dict[str, float] = {}
+_tick_pending: Dict[str, "asyncio.TimerHandle"] = {}
 
 # Event loop captured at startup so notify() can be called from any thread
 # (the event gateway's LISTEN loop runs in a daemon thread).
@@ -272,6 +292,95 @@ def notify(session_id: str, force: bool = False) -> None:
         )
 
 
+def notify_gateway_tick(session_id: str) -> None:
+    """Damped entry point for event-gateway NOTIFY ticks (W5).
+
+    The gateway fires this for EVERY append batch on EVERY session — roughly
+    7/s per streaming session. Two dampers, both safe:
+
+    1. **Already-busy sessions are skipped outright.** A tick carries no event
+       types, so an ordinary append can only ever confirm "still busy". The
+       busy->idle edge does not depend on this path at all: the run-lifecycle
+       writer calls :func:`notify` directly on release/abort, and a lease that
+       lapses with no terminal event is caught by :func:`sweep_once` within
+       ``SWEEP_INTERVAL_SECONDS``. Skipping also leaves the guard TTL cache
+       intact, which is correct — the session IS busy — instead of forcing every
+       other busy-guard's next read back to the database.
+    2. **Idle sessions are throttled per session** at
+       ``GATEWAY_TICK_COOLDOWN_SECONDS``: the first tick fires immediately (an
+       idle->busy edge keeps its latency) and further ticks inside the window
+       collapse into a single trailing re-check, so a burst that ends mid-window
+       is still evaluated exactly once.
+
+    Cheap, synchronous, thread-safe, never raises — the listener thread calls it.
+    """
+    if not session_id:
+        return
+    try:
+        # Fast path, no loop hop: an already-busy session needs no re-check.
+        if session_id in _last_broadcast:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = _loop
+            if loop is None or loop.is_closed():
+                return
+            loop.call_soon_threadsafe(_throttled_tick, session_id)
+            return
+        _throttled_tick(session_id)
+    except Exception:
+        logger.debug(
+            "[streaming_status] gateway tick scheduling failed for %s",
+            session_id, exc_info=True,
+        )
+
+
+def _throttled_tick(session_id: str) -> None:
+    """Leading-edge-with-trailing throttle. Runs on the event loop."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    if session_id in _last_broadcast:
+        return  # became busy between the listener thread and this hop
+    now = loop.time()
+    last = _tick_last_fired.get(session_id)
+    if last is None or now - last >= GATEWAY_TICK_COOLDOWN_SECONDS:
+        _tick_last_fired[session_id] = now
+        _prune_tick_state(now)
+        notify(session_id)
+        return
+    if session_id in _tick_pending:
+        return  # a trailing re-check is already armed for this window
+    delay = GATEWAY_TICK_COOLDOWN_SECONDS - (now - last)
+    _tick_pending[session_id] = loop.call_later(delay, _fire_trailing_tick, session_id)
+
+
+def _fire_trailing_tick(session_id: str) -> None:
+    """Trailing edge of the throttle window."""
+    _tick_pending.pop(session_id, None)
+    if session_id in _last_broadcast:
+        return  # a claim already turned the spinner on — nothing to re-check
+    try:
+        _tick_last_fired[session_id] = asyncio.get_running_loop().time()
+    except RuntimeError:
+        return
+    notify(session_id)
+
+
+def _prune_tick_state(now: float) -> None:
+    """Bound the throttle bookkeeping; sessions are unbounded over a process."""
+    if len(_tick_last_fired) <= _TICK_STATE_MAX:
+        return
+    stale = [
+        sid for sid, when in _tick_last_fired.items()
+        if now - when >= GATEWAY_TICK_COOLDOWN_SECONDS * 10
+    ]
+    for sid in stale:
+        _tick_last_fired.pop(sid, None)
+
+
 def _schedule_recheck(session_id: str, force: bool = False) -> None:
     """Loop-thread trampoline for cross-thread notify()."""
     try:
@@ -473,9 +582,11 @@ async def sweep_loop() -> None:
 def install_gateway_listener() -> None:
     """Secondary trigger: re-check busy on session-event flow.
 
-    Registers :func:`notify` as an all-sessions listener on the event gateway
-    (NOTIFY ticks from ANY install's appends, since the gateway listens on the
-    shared database). Also captures the running loop for cross-thread notify.
+    Registers :func:`notify_gateway_tick` (the DAMPED wrapper around
+    :func:`notify` — see its docstring) as an all-sessions listener on the event
+    gateway (NOTIFY ticks from ANY install's appends, since the gateway listens
+    on the shared database). Also captures the running loop for cross-thread
+    notify.
     """
     global _loop
     try:
@@ -485,7 +596,7 @@ def install_gateway_listener() -> None:
     try:
         from app.core.event_gateway import get_gateway
 
-        get_gateway().add_global_listener(notify)
+        get_gateway().add_global_listener(notify_gateway_tick)
     except Exception:
         logger.warning(
             "[streaming_status] gateway listener install failed", exc_info=True
@@ -498,6 +609,13 @@ def _reset_state() -> None:
     with _cache_lock:
         _cache.clear()
     _last_broadcast.clear()
+    for handle in _tick_pending.values():
+        try:
+            handle.cancel()
+        except Exception:  # noqa: BLE001 — loop already gone
+            pass
+    _tick_pending.clear()
+    _tick_last_fired.clear()
     for task in _chains.values():
         try:
             task.cancel()

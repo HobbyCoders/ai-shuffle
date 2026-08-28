@@ -2,7 +2,41 @@
  * Git Store for AI Hub
  *
  * Manages git repository state including branches, commits, and worktrees.
- * Features per-key caching for instant tab switches and deferred remote fetch.
+ *
+ * Design notes (see docs/PERFORMANCE_REVIEW_2026-08.md §3.3):
+ *
+ * - **Cache identity is the checkout, not the session** (G4). Two sessions that
+ *   resolve to the same checkout directory share one cache entry, so switching
+ *   between them is instant. Within a project a branch is checked out in exactly
+ *   one directory, so `project#br:<branch>` identifies the checkout; a scope
+ *   (project / worktree / session) is aliased onto that identity as soon as a
+ *   status response tells us which branch it resolves to.
+ *
+ * - **Never reset to empty on a switch** (G4). An unknown context keeps the
+ *   last-known values as a *stale placeholder* (`stale: true`,
+ *   `hydrated: false`) while it revalidates, so the header greys out the
+ *   previous real state instead of flashing "no repo / Init Repo".
+ *
+ * - **One coherent snapshot** (G4). `gitSnapshot` exposes status + branches +
+ *   diff + PR state together with the coherence flags, so the header's primary
+ *   action is computed from a single object rather than four independently
+ *   arriving fields.
+ *
+ * - **Per-key request versioning** (G4). Every network write carries a
+ *   monotonic sequence number; a response whose sequence is older than the last
+ *   applied one for that field is discarded, so a slow in-flight response can
+ *   never overwrite a newer one for the same key.
+ *
+ * - **Real equality suppression** (G7). Status/PR-state arrive in a canonical
+ *   flat shape (see `$lib/api/git`), so an unchanged poll genuinely does not
+ *   notify subscribers.
+ *
+ * - **Inline mutation payloads are applied** (G6) instead of being discarded in
+ *   favour of 3–5 follow-up refresh requests.
+ *
+ * - **Local git does not require GitHub auth** (G10c). `githubAvailable` is a
+ *   separate, hysteresis-guarded flag; a transient `gh auth status` blip never
+ *   clears local repository state.
  *
  * Migrated to Svelte 5 runes. Provides subscribe() shim for backward
  * compatibility with $storeName auto-subscription in .svelte files.
@@ -10,6 +44,7 @@
 
 import * as gitApi from '$lib/api/git';
 import { isApiError } from '$lib/api/client';
+import { github } from './github.svelte';
 import { createSubscribers } from './store-utils';
 
 // Re-export types from API
@@ -51,9 +86,24 @@ interface GitState {
 	changedFilesLoading: boolean;
 	loading: boolean;
 	error: string | null;
+	/** Identity of the checkout the data above belongs to (see module docs). */
+	contextKey: string | null;
+	/** The displayed values are a placeholder being revalidated: either carried
+	 *  over from another context, or a cache hit whose refresh is in flight. */
+	stale: boolean;
+	/** A complete, coherent load has landed for the CURRENT context. While this
+	 *  is false the header must keep showing its previous action rather than
+	 *  deriving a new one from half-filled state. */
+	hydrated: boolean;
+	/** The last PR lookup did not complete (backend flag or transport error), so
+	 *  `prState.open_pr` is the previous known value, not a fresh verdict. */
+	prStateStale: boolean;
+	/** GitHub-backed features (PR / CI) are usable. Independent of whether LOCAL
+	 *  git works — see `setGithubAuth`. */
+	githubAvailable: boolean;
 }
 
-// Subset of GitState that we cache per key
+// Subset of GitState that we cache per checkout identity
 interface CachedState {
 	status: gitApi.GitStatus | null;
 	branches: gitApi.Branch[];
@@ -62,6 +112,7 @@ interface CachedState {
 	diffStats: gitApi.DiffStats | null;
 	prState: gitApi.PrState | null;
 	changedFiles: gitApi.FileChangeInfo[] | null;
+	prStateStale: boolean;
 }
 
 const EMPTY_STATE: GitState = {
@@ -78,25 +129,12 @@ const EMPTY_STATE: GitState = {
 	changedFiles: null,
 	changedFilesLoading: false,
 	loading: false,
-	error: null
-};
-
-// Definitive "this folder has no repo" status. Used when we positively learn the
-// working folder is gone (e.g. a cleaned-up / reused worktree whose directory no
-// longer exists → 404). Setting this — rather than leaving a stale is_git_repo=true
-// status behind — makes the header fail closed and hide Ship It and other git
-// controls instead of acting on a folder that isn't a repo.
-const NOT_A_REPO_STATUS: gitApi.GitStatus = {
-	is_git_repo: false,
-	current_branch: null,
-	remote_url: null,
-	has_changes: false,
-	staged: 0,
-	modified: 0,
-	untracked: 0,
-	ahead: 0,
-	behind: 0,
-	differs_from_base: false
+	error: null,
+	contextKey: null,
+	stale: false,
+	hydrated: false,
+	prStateStale: false,
+	githubAvailable: true
 };
 
 const MAX_CACHE_ENTRIES = 10;
@@ -118,10 +156,13 @@ const { subscribe, update: _update, set: _set, notifySubscribers: _notifySubscri
 	);
 
 // ============================================================================
-// Shallow equality helpers — prevent no-op poll updates from triggering
-// subscriber cascades and Svelte re-renders when data hasn't changed.
+// Equality helpers — prevent no-op poll updates from triggering subscriber
+// cascades and Svelte re-renders when the data genuinely hasn't changed.
 // ============================================================================
 
+/** Shallow (primitive-field) equality. Correct for DiffStats, whose three
+ *  fields are all numbers. Status and PR state have their own structural
+ *  comparators in `$lib/api/git` — a shallow compare on those never matched. */
 function _shallowEqual<T extends Record<string, unknown>>(a: T | null, b: T | null): boolean {
 	if (a === b) return true;
 	if (!a || !b) return false;
@@ -138,7 +179,10 @@ function _shallowEqual<T extends Record<string, unknown>>(a: T | null, b: T | nu
 // Internal state (non-reactive)
 // ============================================================================
 
+/** Identity of the checkout the store is currently pointed at. */
 let _loadedKey: string | null = null;
+/** The raw scope (project / worktree / session) that resolved to `_loadedKey`. */
+let _loadedScope: string | null = null;
 let _loadInFlight: string | null = null;
 let _bgFetchRunning = false;
 
@@ -152,10 +196,37 @@ let _branchesInFlight = false;
 let _changedFilesInFlight = false;
 
 // PR state refreshes at a slower cadence than status (gh CLI cost) — track the
-// last fetch so poll cycles can throttle it.
+// last fetch PER CHECKOUT so one context's fetch can't throttle another's.
 const PR_STATE_MIN_INTERVAL_MS = 30_000;
 let _prStateInFlight = false;
-let _lastPrStateFetch = 0;
+const _lastPrStateFetch = new Map<string, number>();
+
+// ── Request versioning ──────────────────────────────────────────────────────
+// Every network write takes a ticket from a single monotonic counter and is
+// applied only if no NEWER response for the same field has already landed. The
+// context key check ("is this still the checkout we're looking at?") guards
+// across keys; this guards within a key, where two overlapping requests for the
+// same field can otherwise complete out of order and snap the UI backwards.
+let _requestSeq = 0;
+const _appliedSeq = new Map<string, number>();
+
+function _nextSeq(): number {
+	return ++_requestSeq;
+}
+
+/** Claim the right to write `field`. False when a newer response already won. */
+function _acceptSeq(field: string, seq: number): boolean {
+	if (seq <= (_appliedSeq.get(field) ?? 0)) return false;
+	_appliedSeq.set(field, seq);
+	return true;
+}
+
+/** Mark `field` as written right now (used when state is applied from a source
+ *  other than a tracked request, e.g. an inline mutation payload). */
+function _claimSeq(...fields: string[]): void {
+	const seq = _nextSeq();
+	for (const field of fields) _appliedSeq.set(field, seq);
+}
 
 // AbortControllers for poll-triggered fetches so they can be cancelled when
 // an operation starts or the component unmounts, freeing browser connections.
@@ -211,18 +282,80 @@ function _isServerError(e: unknown): boolean {
 	return isApiError(e) && e.status !== undefined && e.status >= 500;
 }
 
-const _cache = new Map<string, CachedState>();
+// ============================================================================
+// Checkout identity + cache
+// ============================================================================
 
-function _makeKey(projectId: string, worktreeId?: string | null, sessionId?: string | null): string {
-	if (worktreeId) return `${projectId}:${worktreeId}`;
-	if (sessionId) return `${projectId}:ses:${sessionId}`;
-	return projectId;
+const _cache = new Map<string, CachedState>();
+/** scope key → resolved checkout identity (learned from status responses). */
+const _scopeAlias = new Map<string, string>();
+
+/**
+ * The raw scope the caller asked for. Stable for a given
+ * project/worktree/session triple, and used only as a lookup into `_scopeAlias`
+ * (and as the provisional identity until the alias is learned).
+ */
+function _scopeKey(projectId: string, worktreeId?: string | null, sessionId?: string | null): string {
+	if (worktreeId) return `${projectId}#wt:${worktreeId}`;
+	if (sessionId) return `${projectId}#ses:${sessionId}`;
+	return `${projectId}#base`;
+}
+
+/** The checkout identity a scope currently resolves to. */
+function _identityFor(scope: string): string {
+	return _scopeAlias.get(scope) ?? scope;
+}
+
+/**
+ * Point `scope` at the canonical checkout identity for `branch`.
+ *
+ * Within a project a branch lives in exactly one checkout directory (git
+ * refuses to check the same branch out twice), so the branch names the
+ * directory — which is what makes two sessions on the same checkout share one
+ * cache entry instead of each flashing empty on switch.
+ *
+ * Returns the identity the scope now resolves to.
+ */
+function _learnIdentity(scope: string, projectId: string, branch: string | null | undefined): string {
+	const current = _identityFor(scope);
+	if (!branch) return current;
+	const canonical = `${projectId}#br:${branch}`;
+	if (canonical === current) return current;
+
+	// Only fold the PROVISIONAL entry into the canonical one. Re-pointing from
+	// one canonical identity to another means the branch changed under us (a
+	// checkout); the old branch's entry still describes that branch and must not
+	// be moved or dropped.
+	const wasProvisional = current === scope;
+	_scopeAlias.set(scope, canonical);
+
+	if (wasProvisional) {
+		const provisional = _cache.get(current);
+		if (provisional) {
+			_cache.set(canonical, { ...(_cache.get(canonical) ?? provisional), ...provisional });
+			_cache.delete(current);
+		}
+		const lastPr = _lastPrStateFetch.get(current);
+		if (lastPr !== undefined) {
+			_lastPrStateFetch.set(canonical, Math.max(lastPr, _lastPrStateFetch.get(canonical) ?? 0));
+			_lastPrStateFetch.delete(current);
+		}
+	}
+
+	if (_loadedKey === current) {
+		_loadedKey = canonical;
+		if (_state.contextKey === current) _update((s) => ({ ...s, contextKey: canonical }));
+	}
+	return canonical;
 }
 
 function _saveToCache(key: string, state: CachedState) {
 	if (_cache.size >= MAX_CACHE_ENTRIES && !_cache.has(key)) {
 		const oldest = _cache.keys().next().value;
-		if (oldest !== undefined) _cache.delete(oldest);
+		if (oldest !== undefined) {
+			_cache.delete(oldest);
+			_lastPrStateFetch.delete(oldest);
+		}
 	}
 	_cache.set(key, state);
 }
@@ -244,6 +377,20 @@ function _syncToCache(fields: Partial<CachedState>) {
 	if (cached) Object.assign(cached, fields);
 }
 
+/** Snapshot the cacheable slice of the live state. */
+function _cacheableSlice(s: GitState): CachedState {
+	return {
+		status: s.status,
+		branches: s.branches,
+		commits: s.commits,
+		worktrees: s.worktrees,
+		diffStats: s.diffStats,
+		prState: s.prState,
+		changedFiles: s.changedFiles,
+		prStateStale: s.prStateStale
+	};
+}
+
 /**
  * Check if an error is a 404 for a worktree that no longer exists.
  * When detected, stops all further polling AND clears git state to a definitive
@@ -257,18 +404,27 @@ function _checkWorktreeGone(e: unknown): boolean {
 		console.warn(`[git] Worktree ${_state.worktreeId} no longer exists, stopping git polling`);
 		// Fail closed: drop any stale repo state (status/branches/diff) and evict
 		// the cache so restoreCacheImmediate() can't resurrect it on the next switch.
+		// This is a POSITIVE finding ("the folder is gone"), not a switch flicker —
+		// hydrated stays true so the header renders the no-repo state immediately.
+		_claimSeq('status', 'diffStats', 'branches', 'prState', 'changedFiles');
 		_update((s) => ({
 			...s,
-			status: NOT_A_REPO_STATUS,
+			status: gitApi.notARepoStatus(),
 			branches: [],
 			commits: [],
 			worktrees: [],
 			diffStats: null,
 			prState: null,
 			changedFiles: null,
-			loading: false
+			loading: false,
+			stale: false,
+			hydrated: true,
+			prStateStale: false
 		}));
-		if (_loadedKey) _cache.delete(_loadedKey);
+		if (_loadedKey) {
+			_cache.delete(_loadedKey);
+			_lastPrStateFetch.delete(_loadedKey);
+		}
 		return true;
 	}
 	return false;
@@ -276,9 +432,14 @@ function _checkWorktreeGone(e: unknown): boolean {
 
 /**
  * Core load logic shared by loadRepository and loadForWorktree.
+ *
+ * Lands as ONE atomic, coherent write: status, branches, commits, worktrees,
+ * diff stats, changed files and PR state are applied together with
+ * `hydrated: true, stale: false`. The header therefore never sees a half-filled
+ * snapshot and never walks through an intermediate primary action.
  */
 async function _loadCore(
-	key: string,
+	scope: string,
 	projectId: string,
 	worktreeId: string | undefined,
 	mode: GitMode,
@@ -286,21 +447,34 @@ async function _loadCore(
 ) {
 	_worktreeGone = false; // Reset on context switch
 	_clearServerBackoff(); // Reset backoff on context switch
+	let key = _identityFor(scope);
 	const cached = _restoreFromCache(key);
+	_loadedScope = scope;
+	_loadedKey = key;
 	_update((s) => ({
 		...s,
 		projectId,
 		worktreeId: worktreeId ?? null,
 		sessionId: sessionId ?? null,
 		mode,
-		...cached,
+		...(cached ?? {}),
+		contextKey: key,
+		// A cache hit is real data for THIS checkout; a miss leaves whatever was
+		// on screen as a placeholder. Either way we are revalidating.
+		stale: true,
+		hydrated: cached ? true : s.contextKey === key && s.hydrated,
 		loading: true,
 		error: null
 	}));
 
+	const statusSeq = _nextSeq();
 	try {
 		const status = await gitApi.getGitStatus(projectId, worktreeId, undefined, sessionId);
-		if (_loadInFlight !== key) return;
+		if (_loadInFlight !== scope) return;
+		// Resolve the scope onto its real checkout identity now that we know the
+		// branch, so sibling sessions on the same checkout share this entry.
+		key = _learnIdentity(scope, projectId, status.current_branch);
+		_loadedKey = key;
 
 		if (status.is_git_repo) {
 			const [branches, graphResponse, worktrees, diffStats, changedFilesResp, prState] = await Promise.all([
@@ -311,8 +485,16 @@ async function _loadCore(
 				gitApi.getChangedFiles(projectId, worktreeId, sessionId).catch(() => null),
 				gitApi.getPrState(projectId, worktreeId ?? undefined, sessionId ?? undefined).catch(() => null)
 			]);
-			if (_loadInFlight !== key) return;
-			if (prState) _lastPrStateFetch = Date.now();
+			if (_loadInFlight !== scope) return;
+			if (prState) _lastPrStateFetch.set(key, Date.now());
+
+			// A failed (or failing) PR lookup must NOT be read as "no open PR":
+			// keep whatever we knew for this checkout and flag it stale.
+			const prLookupFailed = !prState || prState.lookup_failed;
+			const previousPr = cached?.prState ?? null;
+			const resolvedPr = prLookupFailed
+				? _keepPreviousPrState(previousPr, prState, status.current_branch)
+				: prState;
 
 			const newState: CachedState = {
 				status,
@@ -320,23 +502,31 @@ async function _loadCore(
 				commits: graphResponse.commits,
 				worktrees,
 				diffStats: diffStats ?? null,
-				prState: prState ?? null,
-				changedFiles: changedFilesResp?.files ?? null
+				prState: resolvedPr,
+				changedFiles: changedFilesResp?.files ?? null,
+				prStateStale: prLookupFailed
 			};
 
+			// One atomic write — see the function docstring.
+			_claimSeq('status', 'diffStats', 'branches', 'prState', 'changedFiles', 'commits', 'worktrees');
 			_update((s) => ({
 				...s,
 				...newState,
+				contextKey: key,
+				stale: false,
+				hydrated: true,
 				loading: false
 			}));
 
-			_loadedKey = key;
 			_saveToCache(key, newState);
 
 			_backgroundFetch(key, projectId, worktreeId, sessionId);
 		} else {
-			// Not a git repo — clear ALL git state so stale cached values
-			// (diffStats, prState, branches, etc.) from a previous load don't persist.
+			// Not a git repo — a POSITIVE answer, so clear ALL git state (stale
+			// cached diffStats/prState/branches from a previous load must not
+			// persist) and mark the context hydrated.
+			if (!_acceptSeq('status', statusSeq)) return;
+			_claimSeq('diffStats', 'branches', 'prState', 'changedFiles');
 			_update((s) => ({
 				...s,
 				status,
@@ -346,33 +536,58 @@ async function _loadCore(
 				diffStats: null,
 				prState: null,
 				changedFiles: null,
-				loading: false
+				loading: false,
+				contextKey: key,
+				stale: false,
+				hydrated: true,
+				prStateStale: false
 			}));
-			_loadedKey = key;
-			// Evict any stale cache entry for this project so
+			// Evict any stale cache entry for this checkout so
 			// restoreCacheImmediate() won't resurrect old data.
 			_cache.delete(key);
+			_lastPrStateFetch.delete(key);
 		}
 	} catch (e) {
-		if (_loadInFlight !== key) return;
+		if (_loadInFlight !== scope) return;
 		// A 404 on the initial load means the worktree's folder is gone (cleaned-up
 		// / reused worktree session). _checkWorktreeGone clears state to a definitive
 		// no-repo status so the header hides Ship It rather than showing stale controls.
 		if (_checkWorktreeGone(e)) {
-			_loadedKey = key;
 			return;
 		}
 		const errObj = e as { detail?: string; message?: string; status?: number };
 		console.error('Failed to load git repository:', errObj.detail || errObj.message || e, errObj.status ?? '');
 		const error = e as { detail?: string; message?: string };
+		// Keep whatever is on screen (stale) rather than blanking on a transient
+		// failure — the next poll cycle revalidates.
 		_update((s) => ({
 			...s,
 			loading: false,
+			stale: true,
 			error: error.detail || error.message || 'Failed to load repository'
 		}));
 	} finally {
-		if (_loadInFlight === key) _loadInFlight = null;
+		if (_loadInFlight === scope) _loadInFlight = null;
 	}
+}
+
+/**
+ * Resolve the PR state to display when the backend could not complete the
+ * lookup. Keeps the previous `open_pr` (a failed lookup is not "no PR") unless
+ * the branch has moved on, in which case the old PR belongs to another branch
+ * and must be dropped.
+ */
+function _keepPreviousPrState(
+	previous: gitApi.PrState | null,
+	incoming: gitApi.PrState | null,
+	currentBranch: string | null
+): gitApi.PrState | null {
+	if (!previous?.open_pr) return incoming ?? previous;
+	const branch = incoming?.current_branch ?? currentBranch ?? null;
+	if (branch && previous.current_branch && branch !== previous.current_branch) {
+		return incoming ?? { ...previous, open_pr: null, lookup_failed: true };
+	}
+	return { ...previous, lookup_failed: true };
 }
 
 /**
@@ -383,6 +598,7 @@ function _backgroundFetch(key: string, projectId: string, worktreeId?: string, s
 	_bgFetchRunning = true;
 
 	(async () => {
+		const seq = _nextSeq();
 		try {
 			await gitApi.fetchRemote(projectId, worktreeId, sessionId);
 
@@ -393,13 +609,17 @@ function _backgroundFetch(key: string, projectId: string, worktreeId?: string, s
 				gitApi.getBranches(projectId, true, worktreeId, undefined, sessionId)
 			]);
 
+			if (_loadedKey !== key) return;
+			if (!_acceptSeq('status', seq)) return;
+			_acceptSeq('branches', seq);
+
 			const cached = _cache.get(key);
 			if (cached) {
 				cached.status = status;
 				cached.branches = branches;
 			}
 
-			if (_loadedKey === key && !_loadInFlight) {
+			if (!_loadInFlight) {
 				_update((s) => ({ ...s, status, branches }));
 			}
 		} catch {
@@ -408,6 +628,109 @@ function _backgroundFetch(key: string, projectId: string, worktreeId?: string, s
 			_bgFetchRunning = false;
 		}
 	})();
+}
+
+// ============================================================================
+// GitHub availability (G10c) — hysteresis so an auth blip never hides git
+// ============================================================================
+//
+// `githubAuthenticated` comes from a 120 s `/auth/status` poll whose
+// `gh auth status` subprocess can transiently fail under load. Flipping the
+// store on the first false hid the ENTIRE git UI for up to two minutes — even
+// though local git needs no GitHub auth at all. So: local state is never
+// cleared for auth, and the GitHub-features flag only flips false after two
+// consecutive failures spanning at least the grace window.
+
+const GITHUB_AUTH_GRACE_MS = 60_000;
+let _githubAuthFirstFailureAt = 0;
+let _githubAuthFailures = 0;
+
+// ============================================================================
+// Visible-only PR / CI refresh (G3)
+// ============================================================================
+//
+// PR and CI state change on GitHub, not locally — a PR merged by a teammate or
+// a check that just went red is invisible until something refetches. This is a
+// SLOW refresh that runs only while a git surface is mounted AND the tab is
+// visible, with jitter (so many tabs don't herd) and exponential backoff.
+
+const PR_CI_REFRESH_BASE_MS = 45_000;
+const PR_CI_REFRESH_JITTER_MS = 10_000; // → 35–55 s
+const PR_CI_REFRESH_MAX_MS = 5 * 60_000;
+/** Repo metadata is near-static; refresh it at most this often. */
+const REPO_INFO_TTL_MS = 10 * 60_000;
+
+let _bgRefreshHolders = 0;
+let _bgRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let _bgRefreshFailures = 0;
+let _visibilityBound = false;
+let _lastRepoInfoLoad = 0;
+
+function _bgRefreshInterval(): number {
+	const base = Math.min(
+		PR_CI_REFRESH_BASE_MS * Math.pow(2, Math.min(_bgRefreshFailures, 3)),
+		PR_CI_REFRESH_MAX_MS
+	);
+	const jitter = (Math.random() * 2 - 1) * PR_CI_REFRESH_JITTER_MS;
+	return Math.max(10_000, base + jitter);
+}
+
+function _tabHidden(): boolean {
+	return typeof document !== 'undefined' && document.hidden;
+}
+
+async function _bgRefreshTick(): Promise<void> {
+	if (_bgRefreshHolders === 0 || _tabHidden()) return;
+	// Never compete with a user-initiated operation or a dead/backing-off context.
+	if (_operationInProgress || _worktreeGone || _isBackingOff()) return;
+
+	const projectId = _state.projectId;
+	if (!projectId || _state.status?.is_git_repo !== true) return;
+
+	const ok = await git.refreshPrState();
+	if (ok === false) {
+		_bgRefreshFailures = Math.min(_bgRefreshFailures + 1, 4);
+	} else {
+		_bgRefreshFailures = 0;
+	}
+
+	if (!_state.githubAvailable) return;
+
+	// Repo metadata (default branch, full name) — one call, TTL'd, not a poll.
+	const hasGithub = _state.prState?.has_github === true || !!_state.status?.github_repo_name;
+	if (hasGithub && Date.now() - _lastRepoInfoLoad > REPO_INFO_TTL_MS) {
+		_lastRepoInfoLoad = Date.now();
+		await github.ensureRepoInfo(projectId).catch(() => {});
+	}
+
+	// CI: only meaningful (and only worth a `gh` round trip) once there is an
+	// open PR whose checks the user is waiting on.
+	const branch = _state.status?.current_branch ?? null;
+	if (hasGithub && branch && _state.prState?.open_pr) {
+		await github.refreshChecks(projectId, branch).catch(() => {});
+	}
+}
+
+function _scheduleBgRefresh(): void {
+	if (_bgRefreshTimer) clearTimeout(_bgRefreshTimer);
+	_bgRefreshTimer = null;
+	if (_bgRefreshHolders === 0 || _tabHidden()) return;
+	_bgRefreshTimer = setTimeout(() => {
+		_bgRefreshTimer = null;
+		void _bgRefreshTick().finally(_scheduleBgRefresh);
+	}, _bgRefreshInterval());
+}
+
+function _handleBgVisibility(): void {
+	if (_tabHidden()) {
+		if (_bgRefreshTimer) clearTimeout(_bgRefreshTimer);
+		_bgRefreshTimer = null;
+		return;
+	}
+	if (_bgRefreshHolders > 0) {
+		// Returning to a visible tab: catch up once, then resume the slow cadence.
+		void _bgRefreshTick().finally(_scheduleBgRefresh);
+	}
 }
 
 // ============================================================================
@@ -422,26 +745,42 @@ export const git = {
 	subscribe,
 
 	async loadRepository(projectId: string, _forceReload = false, sessionId?: string) {
-		const key = _makeKey(projectId, undefined, sessionId);
-		if (_loadInFlight === key) return;
-		_loadInFlight = key;
-		await _loadCore(key, projectId, undefined, 'project', sessionId);
+		const scope = _scopeKey(projectId, undefined, sessionId);
+		if (_loadInFlight === scope) return;
+		_loadInFlight = scope;
+		await _loadCore(scope, projectId, undefined, 'project', sessionId);
 	},
 
 	async loadForWorktree(projectId: string, worktreeId: string, _forceReload = false, sessionId?: string) {
-		const key = _makeKey(projectId, worktreeId);
-		if (_loadInFlight === key) return;
-		_loadInFlight = key;
-		await _loadCore(key, projectId, worktreeId, 'worktree', sessionId);
+		const scope = _scopeKey(projectId, worktreeId);
+		if (_loadInFlight === scope) return;
+		_loadInFlight = scope;
+		await _loadCore(scope, projectId, worktreeId, 'worktree', sessionId);
 	},
 
+	/**
+	 * Point the store at a context synchronously, within the same frame as the
+	 * session switch.
+	 *
+	 * Two sessions on the same checkout resolve to the same identity, so the
+	 * switch is instant and lossless. A context we have never loaded KEEPS the
+	 * values already on screen and marks them `stale` + not `hydrated` — the
+	 * header greys the previous state out instead of flashing an empty repo.
+	 */
 	restoreCacheImmediate(
 		projectId: string,
 		worktreeId?: string | null,
 		mode: GitMode = 'project',
-		sessionId?: string | null
+		sessionId?: string | null,
+		branchHint?: string | null
 	) {
-		const key = _makeKey(projectId, worktreeId ?? undefined, sessionId ?? undefined);
+		const scope = _scopeKey(projectId, worktreeId ?? undefined, sessionId ?? undefined);
+		// A caller that already knows the session's branch (the host has it on the
+		// session row) resolves the checkout identity in the same frame, so the
+		// FIRST visit to a sibling session on a known checkout is instant too —
+		// without the hint we only learn the identity from the status response.
+		const key = branchHint ? _learnIdentity(scope, projectId, branchHint) : _identityFor(scope);
+		_loadedScope = scope;
 		_loadedKey = key;
 		const cached = _cache.get(key);
 		const base = {
@@ -450,27 +789,89 @@ export const git = {
 			sessionId: sessionId ?? null,
 			mode,
 			loading: true,
-			error: null
+			error: null,
+			contextKey: key,
+			githubAvailable: _state.githubAvailable
 		};
 		if (cached) {
 			_set({
+				..._state,
 				...base,
 				...cached,
-				changedFilesLoading: false
+				changedFilesLoading: false,
+				stale: true,
+				hydrated: true
 			});
 		} else {
+			// NEVER blank the UI on a switch: carry the last-known values over as a
+			// placeholder while the real load runs.
 			_set({
-				...EMPTY_STATE,
-				...base
+				..._state,
+				...base,
+				changedFilesLoading: false,
+				stale: true,
+				hydrated: false
 			});
 		}
 	},
 
 	clearRepository() {
 		_loadedKey = null;
+		_loadedScope = null;
 		_worktreeGone = false;
 		_clearServerBackoff();
-		_set({ ...EMPTY_STATE });
+		_set({ ...EMPTY_STATE, githubAvailable: _state.githubAvailable });
+	},
+
+	/**
+	 * Report the latest GitHub authentication verdict.
+	 *
+	 * Local git NEVER depends on this — status/branch/diff keep working with no
+	 * GitHub auth at all. Only the GitHub-backed surfaces (PR lookup, CI, Create
+	 * PR / Ship It) consult `githubAvailable`, and a single failed check never
+	 * flips it: `gh auth status` is a subprocess that transiently fails under
+	 * load, so we require two consecutive failures at least
+	 * GITHUB_AUTH_GRACE_MS apart before believing it.
+	 */
+	setGithubAuth(authenticated: boolean) {
+		if (authenticated) {
+			_githubAuthFailures = 0;
+			_githubAuthFirstFailureAt = 0;
+			if (!_state.githubAvailable) _update((s) => ({ ...s, githubAvailable: true }));
+			return;
+		}
+		_githubAuthFailures += 1;
+		if (_githubAuthFirstFailureAt === 0) _githubAuthFirstFailureAt = Date.now();
+		const settled =
+			_githubAuthFailures >= 2 && Date.now() - _githubAuthFirstFailureAt >= GITHUB_AUTH_GRACE_MS;
+		if (settled && _state.githubAvailable) {
+			_update((s) => ({ ...s, githubAvailable: false }));
+		}
+	},
+
+	/**
+	 * Register interest in the slow PR/CI refresh. Call from a git surface's
+	 * mount and pair with `stopBackgroundRefresh()` on destroy — the refresh runs
+	 * only while at least one holder is mounted AND the tab is visible.
+	 */
+	startBackgroundRefresh() {
+		_bgRefreshHolders += 1;
+		if (typeof document !== 'undefined' && !_visibilityBound) {
+			document.addEventListener('visibilitychange', _handleBgVisibility);
+			_visibilityBound = true;
+		}
+		if (_bgRefreshHolders === 1) _scheduleBgRefresh();
+	},
+
+	stopBackgroundRefresh() {
+		_bgRefreshHolders = Math.max(0, _bgRefreshHolders - 1);
+		if (_bgRefreshHolders > 0) return;
+		if (_bgRefreshTimer) clearTimeout(_bgRefreshTimer);
+		_bgRefreshTimer = null;
+		if (typeof document !== 'undefined' && _visibilityBound) {
+			document.removeEventListener('visibilitychange', _handleBgVisibility);
+			_visibilityBound = false;
+		}
 	},
 
 	async refreshStatus() {
@@ -478,7 +879,9 @@ export const git = {
 		if (_statusInFlight) return; // Prevent overlapping requests
 		if (_worktreeGone) return; // Worktree deleted — stop polling
 		if (_isBackingOff()) return; // Server error backoff — skip this cycle
-		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined, _state.sessionId);
+		const scope = _loadedScope ?? _scopeKey(_state.projectId, _state.worktreeId, _state.sessionId);
+		const key = _identityFor(scope);
+		const projectId = _state.projectId;
 
 		_statusAbort?.abort();
 		const controller = new AbortController();
@@ -486,18 +889,23 @@ export const git = {
 		const timeout = setTimeout(() => controller.abort(), GIT_POLL_FETCH_TIMEOUT_MS);
 
 		_statusInFlight = true;
+		const seq = _nextSeq();
 		try {
 			const status = await gitApi.getGitStatus(
-				_state.projectId,
+				projectId,
 				_state.worktreeId ?? undefined,
 				{ signal: controller.signal },
 				_state.sessionId ?? undefined
 			);
 			if (_loadedKey !== key) return;
 			_clearServerBackoff();
-			// Skip update if status hasn't changed — prevents no-op reactive cascades
-			// that cause progressive slowdown from GC pressure during idle polling.
-			if (_shallowEqual(status as unknown as Record<string, unknown>, _state.status as unknown as Record<string, unknown>)) return;
+			// Discard a response that a newer one has already superseded.
+			if (!_acceptSeq('status', seq)) return;
+			_learnIdentity(scope, projectId, status.current_branch);
+			// Skip the write when nothing changed — with the canonical flat status
+			// this genuinely suppresses the poll, instead of comparing fresh array
+			// references that never match.
+			if (gitApi.gitStatusEqual(status, _state.status)) return;
 			_update((s) => ({ ...s, status }));
 			_syncToCache({ status });
 		} catch (e) {
@@ -518,7 +926,8 @@ export const git = {
 		if (!_state.projectId) return;
 		if (_branchesInFlight) return; // Prevent overlapping requests
 		if (_worktreeGone) return; // Worktree deleted — stop polling
-		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined, _state.sessionId);
+		const scope = _loadedScope ?? _scopeKey(_state.projectId, _state.worktreeId, _state.sessionId);
+		const key = _identityFor(scope);
 
 		_branchesAbort?.abort();
 		const controller = new AbortController();
@@ -526,6 +935,7 @@ export const git = {
 		const timeout = setTimeout(() => controller.abort(), GIT_POLL_FETCH_TIMEOUT_MS);
 
 		_branchesInFlight = true;
+		const seq = _nextSeq();
 		try {
 			const branches = await gitApi.getBranches(
 				_state.projectId,
@@ -535,6 +945,7 @@ export const git = {
 				_state.sessionId ?? undefined
 			);
 			if (_loadedKey !== key) return;
+			if (!_acceptSeq('branches', seq)) return;
 			_update((s) => ({ ...s, branches }));
 			_syncToCache({ branches });
 		} catch (e) {
@@ -552,11 +963,13 @@ export const git = {
 
 	async loadGraph(limit?: number) {
 		if (!_state.projectId) return;
-		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined, _state.sessionId);
+		const key = _loadedKey;
 
+		const seq = _nextSeq();
 		try {
 			const graphResponse = await gitApi.getCommitGraph(_state.projectId, limit);
 			if (_loadedKey !== key) return;
+			if (!_acceptSeq('commits', seq)) return;
 			_update((s) => ({ ...s, commits: graphResponse.commits }));
 			_syncToCache({ commits: graphResponse.commits });
 		} catch (e) {
@@ -568,11 +981,13 @@ export const git = {
 
 	async loadWorktrees() {
 		if (!_state.projectId) return;
-		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined, _state.sessionId);
+		const key = _loadedKey;
 
+		const seq = _nextSeq();
 		try {
 			const worktrees = await gitApi.getWorktrees(_state.projectId);
 			if (_loadedKey !== key) return;
+			if (!_acceptSeq('worktrees', seq)) return;
 			_update((s) => ({ ...s, worktrees }));
 			_syncToCache({ worktrees });
 		} catch (e) {
@@ -650,6 +1065,9 @@ export const git = {
 			await git.loadBranches();
 			await git.refreshStatus();
 			await git.loadGraph();
+			// The branch just changed, so the open-PR verdict for the new branch is
+			// unknown — re-ask rather than showing the old branch's PR.
+			git.refreshPrState(true).catch(() => {});
 			_update((s) => ({ ...s, loading: false }));
 			return response;
 		} catch (e) {
@@ -684,6 +1102,14 @@ export const git = {
 		}
 	},
 
+	/**
+	 * Pull, then apply the backend's inline post-pull status + diff stats.
+	 *
+	 * Reconciling refetches kept on purpose: `loadBranches` (upstream
+	 * ahead/behind, which the inline status does not carry), `loadGraph` (new
+	 * commits) and a forced `refreshPrState` (a pull can change GitHub's
+	 * mergeability verdict).
+	 */
 	async pull(
 		strategy: 'merge' | 'rebase' = 'merge',
 		autoStash: boolean = false
@@ -698,10 +1124,10 @@ export const git = {
 				_state.sessionId ?? undefined
 			);
 
+			_applyMutationPayload(response.status, response.diff_stats);
+
 			await Promise.all([
-				git.refreshStatus(),
 				git.loadBranches(),
-				git.refreshDiffStats(),
 				git.loadGraph(),
 				git.refreshPrState(true).catch(() => {})
 			]);
@@ -743,7 +1169,7 @@ export const git = {
 		if (_diffStatsInFlight) return; // Prevent overlapping requests
 		if (_worktreeGone) return; // Worktree deleted — stop polling
 		if (_isBackingOff()) return; // Server error backoff — skip this cycle
-		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined, _state.sessionId);
+		const key = _loadedKey;
 
 		_diffStatsAbort?.abort();
 		const controller = new AbortController();
@@ -751,6 +1177,7 @@ export const git = {
 		const timeout = setTimeout(() => controller.abort(), GIT_POLL_FETCH_TIMEOUT_MS);
 
 		_diffStatsInFlight = true;
+		const seq = _nextSeq();
 		try {
 			const diffStats = await gitApi.getDiffStats(
 				_state.projectId,
@@ -761,6 +1188,7 @@ export const git = {
 			);
 			if (_loadedKey !== key) return;
 			_clearServerBackoff();
+			if (!_acceptSeq('diffStats', seq)) return;
 			// Skip update if diff stats haven't changed — prevents no-op reactive cascades
 			if (_shallowEqual(diffStats as unknown as Record<string, unknown>, _state.diffStats as unknown as Record<string, unknown>)) return;
 			_update((s) => ({ ...s, diffStats }));
@@ -780,40 +1208,76 @@ export const git = {
 
 	/**
 	 * Refresh the PR-lifecycle state (open PR for the current branch) for the
-	 * active context. Throttled to PR_STATE_MIN_INTERVAL_MS when triggered by
-	 * polling; explicit callers (after commit-with-PR, Create PR, Finish,
-	 * Ship It, pull, streaming-end) can force past the throttle with `force`.
+	 * active checkout. Throttled to PR_STATE_MIN_INTERVAL_MS per checkout when
+	 * triggered by polling; explicit callers (after commit-with-PR, Create PR,
+	 * Finish, Ship It, pull, checkout, streaming-end) force past the throttle.
+	 *
+	 * A lookup the backend could not complete NEVER downgrades to "no PR": the
+	 * previous `open_pr` is kept and `prStateStale` is set, so the header cannot
+	 * flip "Merge PR #12" → "Create PR" because `gh` hiccuped.
+	 *
+	 * @returns true when a fresh verdict landed, false when the lookup failed,
+	 *          undefined when the call was skipped (throttled / guarded).
 	 */
-	async refreshPrState(force: boolean = false) {
-		if (!_state.projectId) return;
-		if (_prStateInFlight) return;
-		if (_worktreeGone) return; // Worktree deleted — stop polling
-		if (_isBackingOff()) return;
-		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined, _state.sessionId);
+	async refreshPrState(force: boolean = false): Promise<boolean | undefined> {
+		if (!_state.projectId) return undefined;
+		if (_prStateInFlight) return undefined;
+		if (_worktreeGone) return undefined; // Worktree deleted — stop polling
+		if (_isBackingOff()) return undefined;
+		const key = _loadedKey;
+		if (!key) return undefined;
 		const now = Date.now();
-		if (!force && now - _lastPrStateFetch < PR_STATE_MIN_INTERVAL_MS) return;
+		if (!force && now - (_lastPrStateFetch.get(key) ?? 0) < PR_STATE_MIN_INTERVAL_MS) {
+			return undefined;
+		}
 
 		_prStateInFlight = true;
+		const seq = _nextSeq();
 		try {
 			const prState = await gitApi.getPrState(
 				_state.projectId,
 				_state.worktreeId ?? undefined,
 				_state.sessionId ?? undefined
 			);
-			if (_loadedKey !== key) return; // context switched mid-flight
-			_lastPrStateFetch = Date.now();
-			if (_shallowEqual(prState as unknown as Record<string, unknown>, _state.prState as unknown as Record<string, unknown>)) return;
-			_update((s) => ({ ...s, prState }));
-			_syncToCache({ prState });
+			if (_loadedKey !== key) return undefined; // context switched mid-flight
+			if (!_acceptSeq('prState', seq)) return undefined;
+			_lastPrStateFetch.set(key, Date.now());
+
+			if (prState.lookup_failed) {
+				const kept = _keepPreviousPrState(_state.prState, prState, _state.status?.current_branch ?? null);
+				if (!gitApi.prStateEqual(kept, _state.prState) || !_state.prStateStale) {
+					_update((s) => ({ ...s, prState: kept, prStateStale: true }));
+					_syncToCache({ prState: kept, prStateStale: true });
+				}
+				return false;
+			}
+
+			if (gitApi.prStateEqual(prState, _state.prState) && !_state.prStateStale) return true;
+			_update((s) => ({ ...s, prState, prStateStale: false }));
+			_syncToCache({ prState, prStateStale: false });
+			return true;
 		} catch {
-			// PR state is advisory — a failure just leaves the previous value.
-			// Deliberately not recorded as a server error: gh hiccups shouldn't
-			// trip the status poller's backoff.
+			// PR state is advisory — a transport failure keeps the previous value and
+			// flags it stale. It is NOT "no open PR", and it is deliberately not
+			// recorded as a server error: gh hiccups shouldn't trip the status
+			// poller's backoff.
+			if (_loadedKey === key && !_state.prStateStale) {
+				_update((s) => ({ ...s, prStateStale: true }));
+				_syncToCache({ prStateStale: true });
+			}
+			return false;
 		} finally {
 			_prStateInFlight = false;
 		}
 	},
 
+	/**
+	 * Commit, then apply the backend's inline post-commit status + diff stats
+	 * (which it computes anyway, "for instant frontend update").
+	 *
+	 * The only reconciling refetch kept is `loadBranches`: upstream ahead/behind
+	 * drive the Push badge and are NOT part of the inline status payload.
+	 */
 	async commitChanges(
 		message: string,
 		includeUnstaged: boolean = true
@@ -831,11 +1295,8 @@ export const git = {
 				_state.sessionId ?? undefined
 			);
 
-			await Promise.all([
-				git.refreshStatus(),
-				git.refreshDiffStats(),
-				git.loadBranches()
-			]);
+			_applyMutationPayload(response.status, response.diff_stats);
+			await git.loadBranches();
 
 			return response;
 		} catch (e) {
@@ -848,11 +1309,18 @@ export const git = {
 		}
 	},
 
+	/**
+	 * Push, then apply the backend's inline post-push status.
+	 *
+	 * Reconciling refetches kept on purpose: `loadBranches` (the Push badge reads
+	 * `branch.ahead`, which the inline status does not carry) and a forced
+	 * `refreshPrState` (a push changes GitHub's mergeable verdict on an open PR).
+	 */
 	async pushCommits(
 		branch?: string,
 		setUpstream: boolean = false,
 		force: boolean = false
-	): Promise<{ success: boolean; message: string }> {
+	): Promise<gitApi.OperationResponse> {
 		if (!_state.projectId) throw new Error('No project selected');
 
 		try {
@@ -867,11 +1335,9 @@ export const git = {
 				_state.sessionId ?? undefined
 			);
 
-			// Refresh both status and branches so the Push badge
-			// (which reads branch.ahead) reflects the new state. Push can also
-			// change GitHub's mergeable verdict on an open PR.
+			_applyMutationPayload(response.status, response.diff_stats);
+
 			await Promise.all([
-				git.refreshStatus(),
 				git.loadBranches(),
 				git.refreshPrState(true).catch(() => {})
 			]);
@@ -892,10 +1358,11 @@ export const git = {
 		if (_changedFilesInFlight) return;
 		if (_worktreeGone) return; // Worktree deleted — stop polling
 		if (_isBackingOff()) return; // Server error backoff — skip this cycle
-		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined, _state.sessionId);
+		const key = _loadedKey;
 
 		_changedFilesInFlight = true;
 		_update((s) => ({ ...s, changedFilesLoading: true }));
+		const seq = _nextSeq();
 		try {
 			const response = await gitApi.getChangedFiles(
 				_state.projectId,
@@ -904,11 +1371,12 @@ export const git = {
 			);
 			if (_loadedKey !== key) return;
 			_clearServerBackoff();
+			if (!_acceptSeq('changedFiles', seq)) {
+				_update((s) => ({ ...s, changedFilesLoading: false }));
+				return;
+			}
 			_update((s) => ({ ...s, changedFiles: response.files, changedFilesLoading: false }));
-
-			// Update cache
-			const cached = _cache.get(key);
-			if (cached) cached.changedFiles = response.files;
+			_syncToCache({ changedFiles: response.files });
 		} catch (e) {
 			if (_loadedKey !== key) return;
 			if (_checkWorktreeGone(e)) return; // Worktree deleted — stop polling
@@ -920,22 +1388,23 @@ export const git = {
 		}
 	},
 
+	/**
+	 * Stage files, then apply the backend's inline status + diff stats.
+	 * `refreshChangedFiles` is the one reconciling refetch: the per-file list
+	 * (with its per-file add/delete counts) is not part of the inline payload.
+	 */
 	async stageFiles(files: string[]) {
 		if (!_state.projectId) return;
 
 		try {
-			await gitApi.stageFiles(
+			const response = await gitApi.stageFiles(
 				_state.projectId,
 				files,
 				_state.worktreeId ?? undefined,
 				_state.sessionId ?? undefined
 			);
-			// Refresh all related state in parallel
-			await Promise.all([
-				git.refreshChangedFiles(),
-				git.refreshStatus(),
-				git.refreshDiffStats()
-			]);
+			_applyMutationPayload(response.status, response.diff_stats);
+			await git.refreshChangedFiles();
 		} catch (e) {
 			const error = e as { detail?: string };
 			_update((s) => ({ ...s, error: error.detail || 'Failed to stage files' }));
@@ -943,21 +1412,19 @@ export const git = {
 		}
 	},
 
+	/** @see stageFiles — same inline-payload + changed-files reconcile. */
 	async unstageFiles(files: string[]) {
 		if (!_state.projectId) return;
 
 		try {
-			await gitApi.unstageFiles(
+			const response = await gitApi.unstageFiles(
 				_state.projectId,
 				files,
 				_state.worktreeId ?? undefined,
 				_state.sessionId ?? undefined
 			);
-			await Promise.all([
-				git.refreshChangedFiles(),
-				git.refreshStatus(),
-				git.refreshDiffStats()
-			]);
+			_applyMutationPayload(response.status, response.diff_stats);
+			await git.refreshChangedFiles();
 		} catch (e) {
 			const error = e as { detail?: string };
 			_update((s) => ({ ...s, error: error.detail || 'Failed to unstage files' }));
@@ -965,22 +1432,20 @@ export const git = {
 		}
 	},
 
+	/** @see stageFiles — same inline-payload + changed-files reconcile. */
 	async discardChanges(files: string[], fileStatuses: Record<string, string>) {
 		if (!_state.projectId) return;
 
 		try {
-			await gitApi.discardChanges(
+			const response = await gitApi.discardChanges(
 				_state.projectId,
 				files,
 				fileStatuses,
 				_state.worktreeId ?? undefined,
 				_state.sessionId ?? undefined
 			);
-			await Promise.all([
-				git.refreshChangedFiles(),
-				git.refreshStatus(),
-				git.refreshDiffStats()
-			]);
+			_applyMutationPayload(response.status, response.diff_stats);
+			await git.refreshChangedFiles();
 		} catch (e) {
 			const error = e as { detail?: string };
 			_update((s) => ({ ...s, error: error.detail || 'Failed to discard changes' }));
@@ -994,6 +1459,12 @@ export const git = {
 
 	clear() {
 		_loadedKey = null;
+		_loadedScope = null;
+		_cache.clear();
+		_scopeAlias.clear();
+		_lastPrStateFetch.clear();
+		_appliedSeq.clear();
+		_worktreeGone = false;
 		_set({ ...EMPTY_STATE });
 	},
 
@@ -1040,7 +1511,9 @@ export const git = {
 			_statusAbort = null;
 			_diffStatsAbort = null;
 			_branchesAbort = null;
-			// Reset in-flight guards so post-operation refreshes aren't blocked
+			// Reset in-flight guards so post-operation refreshes aren't blocked.
+			// Request versioning (not these flags) is what keeps the aborted
+			// requests' responses from landing on top of newer ones.
 			_statusInFlight = false;
 			_diffStatsInFlight = false;
 			_branchesInFlight = false;
@@ -1073,6 +1546,41 @@ export const git = {
 	}
 };
 
+/**
+ * Apply a mutation endpoint's inline status/diff payload as ONE coherent write.
+ *
+ * The commit/push/pull/stage/unstage/discard endpoints already compute a fresh
+ * status (and usually diff stats) server-side. Applying them here removes 2–4
+ * follow-up HTTP round trips per action AND closes the window in which the
+ * header rendered pre-mutation state — the "post-commit button flip".
+ *
+ * The sequence claim makes any poll response issued BEFORE this write lose:
+ * a status fetch that raced the commit can no longer resurrect the dirty tree.
+ */
+function _applyMutationPayload(
+	status: gitApi.GitStatus | null | undefined,
+	diffStats: gitApi.DiffStats | null | undefined
+): void {
+	if (!status && !diffStats) return;
+	// Inline payloads are built from git_service.get_status alone and carry no
+	// repository record, so preserve default_branch & friends.
+	const merged = status ? gitApi.mergeStatusRepoMeta(_state.status, status) : null;
+	const fields: string[] = [];
+	if (merged) fields.push('status');
+	if (diffStats) fields.push('diffStats');
+	_claimSeq(...fields);
+	_update((s) => ({
+		...s,
+		...(merged ? { status: merged } : {}),
+		...(diffStats ? { diffStats } : {}),
+		stale: false
+	}));
+	_syncToCache({
+		...(merged ? { status: merged } : {}),
+		...(diffStats ? { diffStats } : {})
+	});
+}
+
 // ============================================================================
 // Derived stores (via store-utils createDerived)
 // ============================================================================
@@ -1090,3 +1598,50 @@ export const currentBranch = createDerived(
 export const changedFiles = createDerived(() => _state.changedFiles);
 export const changedFilesLoading = createDerived(() => _state.changedFilesLoading);
 export const gitPrState = createDerived(() => _state.prState);
+
+/** GitHub-backed features (PR lookup, CI, Create PR / Ship It) are usable.
+ *  Local git status/branch/diff do NOT depend on this. */
+export const githubFeaturesAvailable = createDerived(() => _state.githubAvailable);
+
+/**
+ * ONE coherent view of the git state for the current checkout.
+ *
+ * The header's primary action must be derived from this object, never from the
+ * individual derived stores: those arrive on four independent cadences, so a
+ * consumer reading them separately walks through intermediate combinations
+ * after every switch and every mutation. `hydrated`/`stale` tell the consumer
+ * whether the snapshot describes the CURRENT context yet.
+ */
+export interface GitSnapshot {
+	contextKey: string | null;
+	status: gitApi.GitStatus | null;
+	branches: gitApi.Branch[];
+	diffStats: gitApi.DiffStats | null;
+	prState: gitApi.PrState | null;
+	changedFiles: gitApi.FileChangeInfo[] | null;
+	/** Branch from status (authoritative for the checked-out ref). */
+	currentBranch: string | null;
+	/** Repo default branch straight from /git/status — never a hardcoded 'main'. */
+	defaultBranch: string | null;
+	openPr: gitApi.OpenPrInfo | null;
+	prStateStale: boolean;
+	stale: boolean;
+	hydrated: boolean;
+	githubAvailable: boolean;
+}
+
+export const gitSnapshot = createDerived<GitSnapshot>(() => ({
+	contextKey: _state.contextKey,
+	status: _state.status,
+	branches: _state.branches,
+	diffStats: _state.diffStats,
+	prState: _state.prState,
+	changedFiles: _state.changedFiles,
+	currentBranch: _state.status?.current_branch ?? null,
+	defaultBranch: _state.status?.default_branch ?? null,
+	openPr: _state.prState?.open_pr ?? null,
+	prStateStale: _state.prStateStale,
+	stale: _state.stale,
+	hydrated: _state.hydrated,
+	githubAvailable: _state.githubAvailable
+}));

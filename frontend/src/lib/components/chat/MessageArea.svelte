@@ -39,7 +39,28 @@
 	} from '$lib/stores/session/auto-scroll';
 	import ToolUseMessage from './ToolUseMessage.svelte';
 	import WorkLogGroup from './WorkLogGroup.svelte';
-	import { buildDisplayItems, type DisplayItem } from '$lib/utils/work-log';
+	import {
+		buildTranscriptModel,
+		hasLinkedSubagent as hasLinkedSubagentIn,
+		type DisplayItem,
+		type TranscriptModel
+	} from '$lib/utils/work-log';
+	import {
+		TRANSCRIPT_WINDOW_SIZE,
+		TRANSCRIPT_WINDOW_CHUNK,
+		clampWindowStart,
+		classifyTurnEntry,
+		expandedWindowStart,
+		initialWindowStart,
+		isLiveTailIndex,
+		scrollTopPreservingBottom,
+		shouldExpandOnScroll,
+		turnTopsFromVisibility,
+		windowStartForItem,
+		type TurnVisibility
+	} from './transcript-window';
+	import { classifyTranscriptRender } from '$lib/components/layout/chat-empty-state';
+	import { applyPerformanceProfile } from '$lib/utils/perf-profile';
 	import {
 		deriveUserTurnNavigationItems,
 		isNavigableUserTurn,
@@ -56,7 +77,6 @@
 	import SystemMessage from '$lib/components/SystemMessage.svelte';
 	import SubagentMessage from '$lib/components/SubagentMessage.svelte';
 	import TeamMemberMessage from '$lib/components/TeamMemberMessage.svelte';
-	import TeamStatusBar from '$lib/components/TeamStatusBar.svelte';
 	import TodoList from '$lib/components/TodoList.svelte';
 	import NotesList from '$lib/components/NotesList.svelte';
 	import { notesFromToolMessage } from '$lib/utils/note-tool';
@@ -148,7 +168,16 @@
 	// Set on session switch — ensures scroll-to-bottom fires after messages load,
 	// even if intermediate DOM changes set shouldAutoScroll to false.
 	let pendingScrollToBottom = false;
-	let pendingScrollTimer: ReturnType<typeof setInterval> | null = null;
+	// Content-driven scroll settle (replaces the old 50 ms polling loop, S11).
+	let settleObserver: ResizeObserver | null = null;
+	let settleIdleTimer: ReturnType<typeof setTimeout> | null = null;
+	let settleDeadline = 0;
+	/** Quiet period after the last height change before the settle gives up. */
+	const SETTLE_IDLE_MS = 400;
+	/** Hard ceiling — a transcript that never stops growing must not pin forever. */
+	const SETTLE_MAX_MS = 3000;
+	/** The message column: what actually changes height while content renders. */
+	let chatColumnRef = $state<HTMLDivElement | null>(null);
 
 	// Reader recovery affordance. Away-from-end waits briefly before appearing so
 	// session switches and layout settles never flash a transient button.
@@ -170,53 +199,74 @@
 	let latestTurnTailPx = $state(MIN_TRANSCRIPT_TAIL_RESERVE);
 
 	/**
-	 * Aggressively scroll to bottom over multiple frames until stable.
-	 * Large messages (tables, code blocks) may take several frames to fully render,
-	 * so a single scrollToBottom() call isn't enough.
+	 * Scroll to the bottom and KEEP it there until the transcript stops growing.
+	 *
+	 * Large messages (tables, code blocks, images) take several frames to lay
+	 * out, so one scrollToBottom() lands short. This used to be a 50 ms interval
+	 * running for up to 3 s, reading `scrollHeight` and writing `scrollTop` on
+	 * every tick — a forced layout 20×/s, fired twice per session switch (once
+	 * against an EMPTY container, before history had even arrived). See
+	 * PERFORMANCE_REVIEW §3.1 S11.
+	 *
+	 * Now it is event-driven: a ResizeObserver on the message column re-pins
+	 * exactly when the content actually changes height, and the settle ends
+	 * after a quiet period (or the 3 s ceiling). No polling, no speculative
+	 * layout reads.
 	 */
 	function scrollToBottomUntilStable() {
-		if (pendingScrollTimer) clearInterval(pendingScrollTimer);
-		let lastScrollHeight = 0;
-		let stableCount = 0;
-		let tick = 0;
+		if (!containerRef) return;
+		stopScrollSettle();
+		scrollToBottom();
+
+		const content = chatColumnRef;
+		if (!content || typeof ResizeObserver === 'undefined') {
+			// No column mounted yet (or no ResizeObserver): one deferred re-pin.
+			requestAnimationFrame(() => requestAnimationFrame(() => {
+				if (shouldAutoScroll || pendingScrollToBottom) scrollToBottom();
+			}));
+			return;
+		}
+
+		settleDeadline = Date.now() + SETTLE_MAX_MS;
 		// eslint-disable-next-line no-console
-		if (STREAM_DEBUG) console.log(`[AS] stable START initSH=${containerRef?.scrollHeight} initST=${containerRef?.scrollTop} msgLen=${$activeSession.messages.length}`);
-		pendingScrollTimer = setInterval(() => {
-			if (!containerRef) {
-				if (pendingScrollTimer) { clearInterval(pendingScrollTimer); pendingScrollTimer = null; }
+		if (STREAM_DEBUG) console.log(`[AS] settle START SH=${containerRef.scrollHeight} ST=${containerRef.scrollTop} msgLen=${$activeSession.messages.length}`);
+		settleObserver = new ResizeObserver(() => {
+			if (!containerRef || Date.now() > settleDeadline) {
+				stopScrollSettle();
 				return;
 			}
-			tick++;
-			const shBefore = containerRef.scrollHeight;
+			// The reader took over (wheel/touch/scrollbar): stop fighting them.
+			if (!shouldAutoScroll && !pendingScrollToBottom) {
+				stopScrollSettle();
+				return;
+			}
 			scrollToBottom();
-			const shAfter = containerRef.scrollHeight;
+			armSettleIdleTimer();
+		});
+		settleObserver.observe(content);
+		armSettleIdleTimer();
+	}
+
+	/** End the settle once the column has been quiet for SETTLE_IDLE_MS. */
+	function armSettleIdleTimer() {
+		if (settleIdleTimer) clearTimeout(settleIdleTimer);
+		settleIdleTimer = setTimeout(() => {
+			settleIdleTimer = null;
 			// eslint-disable-next-line no-console
-			if (STREAM_DEBUG) console.log(`[AS] stable tick=${tick} shBefore=${shBefore} shAfter=${shAfter} ST=${containerRef.scrollTop} CH=${containerRef.clientHeight} stable=${stableCount} msgLen=${$activeSession.messages.length}`);
-			if (containerRef.scrollHeight === lastScrollHeight) {
-				stableCount++;
-				// Require 5 stable ticks (~250ms) before declaring done. Large content
-				// (tables, code blocks, markdown trees) can render in bursts, so brief
-				// stability does not mean the layout has settled.
-				if (stableCount >= 5) {
-					// eslint-disable-next-line no-console
-					if (STREAM_DEBUG) console.log(`[AS] stable DONE finalSH=${containerRef.scrollHeight} finalST=${containerRef.scrollTop} tick=${tick}`);
-					if (pendingScrollTimer) { clearInterval(pendingScrollTimer); pendingScrollTimer = null; }
-				}
-			} else {
-				stableCount = 0;
-				lastScrollHeight = containerRef.scrollHeight;
-			}
-		}, 50);
-		// Safety: stop after 3s regardless. Prior 1s was too aggressive — on large
-		// sessions the scrollHeight kept growing past the 1s mark (e.g. 18k → 30k px),
-		// leaving the viewport anchored at stale content.
-		setTimeout(() => {
-			if (pendingScrollTimer) {
-				// eslint-disable-next-line no-console
-				if (STREAM_DEBUG) console.log('[AS] stable TIMEOUT (3s)', { finalSH: containerRef?.scrollHeight, finalST: containerRef?.scrollTop });
-				clearInterval(pendingScrollTimer); pendingScrollTimer = null;
-			}
-		}, 3000);
+			if (STREAM_DEBUG) console.log(`[AS] settle DONE SH=${containerRef?.scrollHeight} ST=${containerRef?.scrollTop}`);
+			stopScrollSettle();
+		}, SETTLE_IDLE_MS);
+	}
+
+	function stopScrollSettle() {
+		if (settleObserver) {
+			settleObserver.disconnect();
+			settleObserver = null;
+		}
+		if (settleIdleTimer) {
+			clearTimeout(settleIdleTimer);
+			settleIdleTimer = null;
+		}
 	}
 
 	// Current profile for message settings (uses current UI selection)
@@ -313,16 +363,12 @@
 	// notifications, prompts retained after an empty-turn discard) — global
 	// positions skew in any session that has seen an interrupt. No-match still
 	// fails closed server-side (content guard).
-	function userPromptOccurrence(messages: ChatMessage[], index: number): number {
-		const want = (messages[index]?.content ?? '').trim();
-		let occurrence = 0;
-		for (let k = 0; k < index; k++) {
-			const m = messages[k];
-			if (m.role === 'user' && m.type !== 'command' && (m.content ?? '').trim() === want) {
-				occurrence++;
-			}
-		}
-		return occurrence;
+	//
+	// Computed ONCE for the whole transcript by buildTranscriptModel (it already
+	// walks the array); this is the O(1) read. It used to be an O(N) scan run
+	// per rendered user row per streaming fold — see work-log.ts.
+	function userPromptOccurrence(messageIndex: number): number {
+		return transcript.promptOccurrence[messageIndex] ?? 0;
 	}
 
 	const latestTurnUnsettled = $derived(
@@ -342,10 +388,16 @@
 	// made streaming get progressively choppier as a session grew. A plain
 	// object (not $state) avoids Svelte 5 compiling these into reactive signals
 	// inside the derived.
-	const _displayCache: { messages: ChatMessage[] | null; isStreaming: boolean; latestTurnUnsettled: boolean; groupingEnabled: boolean; items: DisplayItem[] } =
-		{ messages: null, isStreaming: false, latestTurnUnsettled: false, groupingEnabled: true, items: [] };
+	const _displayCache: { messages: ChatMessage[] | null; isStreaming: boolean; latestTurnUnsettled: boolean; groupingEnabled: boolean; model: TranscriptModel } =
+		{
+			messages: null,
+			isStreaming: false,
+			latestTurnUnsettled: false,
+			groupingEnabled: true,
+			model: { items: [], promptOccurrence: [], subagentToolIds: new Set(), itemIndexByTurnId: new Map() }
+		};
 
-	const displayItems: DisplayItem[] = $derived.by(() => {
+	const transcript: TranscriptModel = $derived.by(() => {
 		const messages = $activeSession.messages;
 		const isStreamingNow = $activeSession.isStreaming;
 		const latestIsUnsettled = latestTurnUnsettled;
@@ -359,8 +411,8 @@
 			&& groupingEnabled === _displayCache.groupingEnabled
 		) {
 			// Same message identities (e.g. a WS-delta-only update) — reuse the
-			// cached array reference so downstream {#each} skips re-diffing.
-			return _displayCache.items;
+			// cached model so downstream {#each} skips re-diffing.
+			return _displayCache.model;
 		}
 		// Diagnostic: log when displayItems re-evaluates after streaming ends
 		if (STREAM_DEBUG && !isStreamingNow && messages.length > 0) {
@@ -369,7 +421,7 @@
 			console.debug(`[displayItems] re-eval: ${messages.length} msgs, streaming=${isStreamingNow}, hasStreamingMsg=${hasStrmMsg}, aTexts=${aTexts.length} [${aTexts.map((m: ChatMessage) => `len=${(m.content||'').length}`).join(',')}]`);
 		}
 
-		const items = buildDisplayItems(messages, {
+		const model = buildTranscriptModel(messages, {
 			isStreaming: isStreamingNow,
 			latestTurnUnsettled: latestIsUnsettled,
 			groupingEnabled
@@ -379,16 +431,189 @@
 		_displayCache.isStreaming = isStreamingNow;
 		_displayCache.latestTurnUnsettled = latestIsUnsettled;
 		_displayCache.groupingEnabled = groupingEnabled;
-		_displayCache.items = items;
-		return items;
+		_displayCache.model = model;
+		return model;
 	});
+
+	const displayItems: DisplayItem[] = $derived(transcript.items);
+
+	// What this column should DRAW right now (PERFORMANCE_REVIEW §3.1 S3).
+	// ChatView already suppresses its own hero while history loads, but the
+	// message column it renders instead contains this component — whose empty
+	// branch keyed purely on `messages.length === 0` and so flashed the full
+	// "Start a Conversation" hero on EVERY session switch, indistinguishable
+	// from a brand-new chat, before the incoming transcript popped in. The
+	// loading window now draws a transcript-shaped skeleton; a genuinely empty
+	// session still gets the real hero.
+	const transcriptRender = $derived(
+		classifyTranscriptRender({
+			sessionId: $activeSession.sessionId,
+			messageCount: $activeSession.messages.length,
+			isRestoringSession: $activeSession.isRestoringSession,
+			isLoadingSession: $activeSession.isLoadingSession
+		})
+	);
+
+	/** True when a Task/Agent tool row already has a SubagentMessage rendering it. */
+	function hasLinkedSubagent(toolId: string | undefined | null): boolean {
+		return hasLinkedSubagentIn(transcript, toolId);
+	}
 
 	// Transcript-local navigation: one stable anchor per user prompt. The left
 	// timeline is only mounted when it can move somewhere (two or more turns).
-	const turnNavigationItems = $derived(deriveUserTurnNavigationItems($activeSession.messages));
-	const turnNavigationSignature = $derived(
-		turnNavigationItems.map((item) => item.id).join('\u0000')
+	//
+	// deriveUserTurnNavigationItems() normalises and previews every prompt
+	// (several regexes per turn) and returns a fresh array. Running that on each
+	// streaming fold re-rendered the whole rail 60×/s for a list that only
+	// changes when a prompt is added. So a cheap identity signature — turn ids
+	// plus prompt lengths, no regex — gates the real derivation AND keeps the
+	// array reference stable, which is what stops TurnNavigator re-rendering.
+	const _navCache: { signature: string; items: ReturnType<typeof deriveUserTurnNavigationItems> } = {
+		signature: '\u0000uninitialised',
+		items: []
+	};
+
+	const turnNavigationSignature = $derived.by(() => {
+		let signature = '';
+		for (const message of $activeSession.messages) {
+			if (!isNavigableUserTurn(message) || !message.id) continue;
+			signature += `${message.id}:${(message.content ?? '').length}\u0000`;
+		}
+		return signature;
+	});
+
+	const turnNavigationItems = $derived.by(() => {
+		const signature = turnNavigationSignature;
+		if (signature === _navCache.signature) return _navCache.items;
+		_navCache.signature = signature;
+		_navCache.items = deriveUserTurnNavigationItems($activeSession.messages);
+		return _navCache.items;
+	});
+
+	/** Stable id vector for the observer-driven rail index (no per-call allocation). */
+	const turnNavigationIds = $derived(turnNavigationItems.map((item) => item.id));
+
+	// ── Windowed mounting (PERFORMANCE_REVIEW §3.2 R4) ─────────────────────
+	// Only a trailing window of display items is mounted. Everything below is
+	// about growing that window BACKWARDS without ever moving what the reader
+	// is looking at: on scroll-up, on a jump to an older turn, on demand, and —
+	// so in-page search and long-range scrolling eventually see everything — in
+	// idle-time chunks until the whole transcript is mounted.
+	let mountedStart = $state(0);
+	let windowSessionKey: string | null | undefined = undefined;
+	let previousItemCount = 0;
+	let backfillHandle: number | null = null;
+	let backfillIsIdleCallback = false;
+
+	const visibleItems = $derived(
+		mountedStart > 0 ? displayItems.slice(mountedStart) : displayItems
 	);
+
+	/**
+	 * Mount `target`..end, holding the reader's distance from the BOTTOM fixed.
+	 *
+	 * Prepending above the viewport would otherwise push the visible content
+	 * down by the height of everything inserted. Distance-from-bottom is the
+	 * right invariant for a transcript: it also keeps a bottom-pinned view
+	 * pinned, with no special case.
+	 */
+	function expandMountedWindow(target: number): boolean {
+		const next = Math.max(0, Math.min(target, mountedStart));
+		if (next === mountedStart) return false;
+		const container = containerRef;
+		const distanceFromBottom = container ? container.scrollHeight - container.scrollTop : null;
+		mountedStart = next;
+		if (container && distanceFromBottom !== null) {
+			void tick().then(() => {
+				if (!containerRef) return;
+				markProgrammaticScrollSettling();
+				containerRef.scrollTop = scrollTopPreservingBottom(
+					containerRef.scrollHeight,
+					distanceFromBottom
+				);
+				lastKnownScrollTop = containerRef.scrollTop;
+				lastScrollMetrics = readScrollMetrics();
+			});
+		}
+		return true;
+	}
+
+	/** Mount everything above the window (the "show earlier messages" control). */
+	function mountAllEarlierItems() {
+		expandMountedWindow(0);
+	}
+
+	/** Make sure a display item is mounted before we try to scroll to it. */
+	async function ensureItemMounted(itemIndex: number): Promise<void> {
+		if (itemIndex < 0 || itemIndex >= mountedStart) return;
+		if (expandMountedWindow(windowStartForItem(mountedStart, itemIndex))) {
+			await tick();
+		}
+	}
+
+	function cancelWindowBackfill() {
+		if (backfillHandle === null) return;
+		if (backfillIsIdleCallback && typeof cancelIdleCallback !== 'undefined') {
+			cancelIdleCallback(backfillHandle);
+		} else {
+			clearTimeout(backfillHandle);
+		}
+		backfillHandle = null;
+	}
+
+	/**
+	 * Mount the rest of the transcript during idle time.
+	 *
+	 * The window makes first paint cheap; this makes the window a scheduling
+	 * decision rather than a permanent hole — Ctrl+F, screen readers and long
+	 * scrolls all end up with the complete transcript, just not before the
+	 * reader can see anything. requestIdleCallback yields to streaming work, so
+	 * the backfill never competes with a live turn.
+	 */
+	function scheduleWindowBackfill() {
+		if (backfillHandle !== null || mountedStart === 0 || !isMounted) return;
+		const run = () => {
+			backfillHandle = null;
+			if (!isMounted || mountedStart === 0) return;
+			expandMountedWindow(expandedWindowStart(mountedStart, TRANSCRIPT_WINDOW_CHUNK));
+			scheduleWindowBackfill();
+		};
+		if (typeof requestIdleCallback !== 'undefined') {
+			backfillIsIdleCallback = true;
+			backfillHandle = requestIdleCallback(run, { timeout: 1500 }) as unknown as number;
+		} else {
+			backfillIsIdleCallback = false;
+			backfillHandle = setTimeout(run, 300) as unknown as number;
+		}
+	}
+
+	// Keep the window legal as the transcript grows, shrinks, or is replaced.
+	$effect(() => {
+		const sessionKey = $activeSession.sessionId ?? 'new';
+		const count = displayItems.length;
+		untrack(() => {
+			const isNewSession = sessionKey !== windowSessionKey;
+			// A bulk arrival is a hydration (history load / reload), not streaming:
+			// re-window to the tail so a 500-message session does not mount whole.
+			const bulkArrival = count - previousItemCount > TRANSCRIPT_WINDOW_SIZE;
+			windowSessionKey = sessionKey;
+			previousItemCount = count;
+			if (isNewSession || bulkArrival) {
+				cancelWindowBackfill();
+				mountedStart = initialWindowStart(count);
+			} else {
+				const clamped = clampWindowStart(mountedStart, count);
+				if (clamped !== mountedStart) mountedStart = clamped;
+			}
+		});
+	});
+
+	// Idle backfill driver: re-arms itself whenever there is still history above
+	// the mounted window.
+	$effect(() => {
+		if (!isMounted || mountedStart === 0) return;
+		scheduleWindowBackfill();
+	});
 	let currentTurnIndex = $state(0);
 	let manualNavigationReleaseUntil = 0;
 	let settleSessionId: string | null | undefined = undefined;
@@ -401,14 +626,95 @@
 		return resolveLiveTurnStartedAt($activeSession.messages, $activeSession.liveTurnId);
 	});
 
+	// ── Turn tracking (PERFORMANCE_REVIEW §3.2 R12) ────────────────────────
+	// The rail's current tick used to be resolved by reading a
+	// getBoundingClientRect() for EVERY turn anchor — from the rAF scroll
+	// handler, from the ResizeObserver, and after every programmatic scroll.
+	// That is O(turns) forced layout per scroll frame, and reading the rect of a
+	// `content-visibility: auto` row can force the browser to size it.
+	//
+	// An IntersectionObserver reports crossings instead: its root is clipped to
+	// the band between the container top and the reading line, so an anchor is
+	// "inside" exactly while it sits in that band, and the callback's own rects
+	// classify the rest. Scrolling then costs O(1) amortised, with zero layout
+	// reads on the scroll path. The rect-scan below is kept as the fallback for
+	// environments without IntersectionObserver.
+	const turnVisibility = new Map<string, TurnVisibility>();
+	let turnObserver: IntersectionObserver | null = null;
+	let observedReadingLine = 0;
+	/** Bumped by the container ResizeObserver: the reading line is height-derived. */
+	let viewportHeight = $state(0);
+
+	function readingLineFor(height: number): number {
+		return Math.min(140, height * 0.3);
+	}
+
+	function handleTurnIntersect(entries: IntersectionObserverEntry[]) {
+		for (const entry of entries) {
+			const id = (entry.target as HTMLElement).dataset.userTurnId;
+			if (!id) continue;
+			const next = classifyTurnEntry(
+				entry.isIntersecting,
+				entry.boundingClientRect.top,
+				entry.rootBounds?.top,
+				turnVisibility.get(id)
+			);
+			if (next) turnVisibility.set(id, next);
+		}
+		updateCurrentTurnIndex();
+	}
+
+	/** (Re)build the observer for the mounted anchors and the current geometry. */
+	function syncTurnObserver() {
+		if (!containerRef || typeof IntersectionObserver === 'undefined') return;
+		const container = containerRef;
+		const height = container.clientHeight;
+		observedReadingLine = readingLineFor(height);
+		const bottomInset = Math.max(0, Math.round(height - observedReadingLine));
+		turnObserver?.disconnect();
+		turnObserver = new IntersectionObserver(handleTurnIntersect, {
+			root: container,
+			rootMargin: `0px 0px -${bottomInset}px 0px`,
+			threshold: 0
+		});
+		for (const anchor of container.querySelectorAll<HTMLElement>('[data-user-turn-id]')) {
+			turnObserver.observe(anchor);
+		}
+	}
+
+	// Re-observe when the mounted anchor set changes (a new turn, a window
+	// expansion) or when the container is resized (the reading line moves).
+	// NOT on every fold: streaming deltas change neither.
+	$effect(() => {
+		if (!containerRef || !isMounted) return;
+		if (typeof IntersectionObserver === 'undefined') return;
+		const key = `${mountedStart}:${turnNavigationSignature}:${viewportHeight}`;
+		void key;
+		void tick().then(() => untrack(() => syncTurnObserver()));
+	});
+
 	function updateCurrentTurnIndex() {
 		if (Date.now() < manualNavigationReleaseUntil) return;
 		if (!containerRef || turnNavigationItems.length === 0) {
 			currentTurnIndex = 0;
 			return;
 		}
+		if (turnObserver) {
+			const readingLine = observedReadingLine || readingLineFor(containerRef.clientHeight);
+			const tops = turnTopsFromVisibility(
+				turnNavigationIds,
+				turnVisibility,
+				readingLine,
+				(turnId) => {
+					const itemIndex = transcript.itemIndexByTurnId.get(turnId);
+					return itemIndex === undefined || itemIndex >= mountedStart;
+				}
+			);
+			currentTurnIndex = resolveCurrentTurnIndex(tops, readingLine);
+			return;
+		}
 		const containerTop = containerRef.getBoundingClientRect().top;
-		const readingLine = Math.min(140, containerRef.clientHeight * 0.3);
+		const readingLine = readingLineFor(containerRef.clientHeight);
 		const tops = turnNavigationItems.map((item) => {
 			const anchor = document.getElementById(turnAnchorId(item.id));
 			return anchor && containerRef?.contains(anchor)
@@ -418,10 +724,15 @@
 		currentTurnIndex = resolveCurrentTurnIndex(tops, readingLine);
 	}
 
-	function navigateToTurn(index: number) {
+	async function navigateToTurn(index: number) {
 		if (!containerRef) return;
 		const item = turnNavigationItems[index];
 		if (!item) return;
+		// The target turn may be older than the mounted window — mount back to it
+		// first, otherwise the rail would silently refuse to move.
+		const itemIndex = transcript.itemIndexByTurnId.get(item.id);
+		if (itemIndex !== undefined) await ensureItemMounted(itemIndex);
+		if (!containerRef) return;
 		const anchor = document.getElementById(turnAnchorId(item.id));
 		if (!anchor || !containerRef.contains(anchor)) return;
 
@@ -647,13 +958,12 @@
 	 */
 	function refreshLatestTurnTailReserve() {
 		if (!containerRef || !tailSpacerRef || currentTurnAnchorId) return;
-		const messages = $activeSession.messages;
-		const latestTurn = messages.findLast((message) => isNavigableUserTurn(message) && message.id);
-		if (!latestTurn?.id) {
+		const latestTurnId = transcript.latestUserTurnId;
+		if (!latestTurnId) {
 			if (latestTurnTailPx !== MIN_TRANSCRIPT_TAIL_RESERVE) latestTurnTailPx = MIN_TRANSCRIPT_TAIL_RESERVE;
 			return;
 		}
-		const anchor = document.getElementById(turnAnchorId(latestTurn.id));
+		const anchor = document.getElementById(turnAnchorId(latestTurnId));
 		if (!anchor || !containerRef.contains(anchor)) {
 			if (latestTurnTailPx !== MIN_TRANSCRIPT_TAIL_RESERVE) latestTurnTailPx = MIN_TRANSCRIPT_TAIL_RESERVE;
 			return;
@@ -749,6 +1059,13 @@
 			const currentScrollTop = containerRef.scrollTop;
 			const currentMetrics = readScrollMetrics();
 
+			// Reading back into history: mount the next chunk before the reader
+			// reaches the top of what is mounted. expandMountedWindow() holds the
+			// distance from the bottom, so nothing under the reader moves.
+			if (shouldExpandOnScroll(currentScrollTop, mountedStart)) {
+				expandMountedWindow(expandedWindowStart(mountedStart, TRANSCRIPT_WINDOW_CHUNK));
+			}
+
 			// Save scroll position to non-reactive cache (doesn't trigger effects)
 			scrollPositionCache.set(cacheKey, currentScrollTop);
 			// Also save to session store for cross-session persistence
@@ -801,9 +1118,9 @@
 	function disengageAutoScroll() {
 		cancelCurrentTurnAnchor();
 		if (!shouldAutoScroll && !pendingScrollToBottom) return;
-		// Stop any in-flight programmatic scroll loop so it can't keep fighting
-		// the user after they've expressed intent to read earlier content.
-		if (pendingScrollTimer) { clearInterval(pendingScrollTimer); pendingScrollTimer = null; }
+		// Stop any in-flight scroll settle so it can't keep fighting the user
+		// after they've expressed intent to read earlier content.
+		stopScrollSettle();
 		pendingScrollToBottom = false;
 		shouldAutoScroll = false;
 		// eslint-disable-next-line no-console
@@ -833,6 +1150,9 @@
 	// Restore scroll position only on mount - not on every reactive update
 	onMount(() => {
 		isMounted = true;
+		// Stamps data-fx="low" on <html> for the compositing-budget switch in
+		// app.css (R13). Idempotent — the first component to mount wins.
+		applyPerformanceProfile();
 		// eslint-disable-next-line no-console
 		if (STREAM_DEBUG) console.log(`[AS] onMount sid=${$activeSession.sessionId} msgLen=${$activeSession.messages.length}`);
 		// Wait for DOM to be ready
@@ -858,13 +1178,24 @@
 				const storedPosition = cachedPosition ?? $activeSession.scrollTop;
 
 				if (storedPosition > 0) {
-					programmaticScrollDepth++;
-					containerRef.scrollTop = storedPosition;
-					lastKnownScrollTop = containerRef.scrollTop;
-					lastScrollMetrics = readScrollMetrics();
+					// The saved offset was measured against the FULL transcript, so
+					// the window has to be opened all the way before it means
+					// anything — otherwise the restore clamps to the short content
+					// and drops the reader somewhere else entirely.
+					mountedStart = 0;
 					shouldAutoScroll = false;
-					requestAnimationFrame(() => {
-						programmaticScrollDepth = Math.max(0, programmaticScrollDepth - 1);
+					programmaticScrollDepth++;
+					void tick().then(() => {
+						if (!containerRef) {
+							programmaticScrollDepth = Math.max(0, programmaticScrollDepth - 1);
+							return;
+						}
+						containerRef.scrollTop = storedPosition;
+						lastKnownScrollTop = containerRef.scrollTop;
+						lastScrollMetrics = readScrollMetrics();
+						requestAnimationFrame(() => {
+							programmaticScrollDepth = Math.max(0, programmaticScrollDepth - 1);
+						});
 					});
 				} else {
 					// No saved position even though they scrolled up - scroll to bottom
@@ -925,7 +1256,10 @@
 	});
 
 	onDestroy(() => {
-		if (pendingScrollTimer) { clearInterval(pendingScrollTimer); pendingScrollTimer = null; }
+		stopScrollSettle();
+		cancelWindowBackfill();
+		turnObserver?.disconnect();
+		turnObserver = null;
 		clearJumpRevealTimer();
 		if (anchorMaintenanceRaf !== null) cancelAnimationFrame(anchorMaintenanceRaf);
 		const cacheKey = $activeSession.sessionId ?? 'new';
@@ -963,6 +1297,9 @@
 			cancelCurrentTurnAnchor();
 			clearJumpRevealTimer();
 			showJumpToLatest = false;
+			// Anchors from the old transcript are gone; their cached visibility
+			// must not decide the new session's rail position.
+			turnVisibility.clear();
 		}
 
 		// eslint-disable-next-line no-console
@@ -1001,12 +1338,16 @@
 		prevLastContent = '';
 		prevLastMetadata = null;
 
-		// Immediate scroll attempt — may run on empty/partial container.
-		// pendingScrollToBottom ensures another scroll after messages load.
-		// Use scrollToBottomUntilStable to handle large content that takes
-		// multiple frames to render (tables, code blocks, etc).
+		// While the new session's history is still in flight the column is EMPTY:
+		// settling it is layout work against nothing, and pendingScrollToBottom
+		// already guarantees a settle once the transcript lands (S11). Sessions
+		// whose transcript is already in the store still settle immediately.
 		tick().then(() => {
 			if (!containerRef) return;
+			const state = $activeSession;
+			if (state.isLoadingSession || state.isRestoringSession || state.messages.length === 0) {
+				return;
+			}
 			scrollToBottomUntilStable();
 			scheduleLatestTurnTailRefresh();
 		});
@@ -1023,7 +1364,13 @@
 			resizeObserver.disconnect();
 		}
 
-		resizeObserver = new ResizeObserver(() => {
+		resizeObserver = new ResizeObserver((entries) => {
+			// The reading line is a fraction of the viewport height, so the turn
+			// observer's root margin has to be rebuilt when the container resizes.
+			const height = entries[0]?.contentRect.height;
+			if (typeof height === 'number' && Math.abs(height - viewportHeight) >= 1) {
+				viewportHeight = height;
+			}
 			updateCurrentTurnIndex();
 			if (currentTurnAnchorId) {
 				scheduleCurrentTurnAnchorMaintenance();
@@ -1213,10 +1560,11 @@
 	// Get metadata for the last assistant message that has metadata (cost/duration
 	// rendered there). This message may not be the absolute last in the array
 	// (e.g. a TodoWrite tool_use could follow it).
+	// Resolved by the single transcript walk rather than its own findLast over
+	// the whole array per fold (R3).
 	const lastMessageMetadata = $derived.by(() => {
-		const msg = $activeSession.messages.findLast(m => m.role === 'assistant' && m.metadata);
-		if (!msg?.metadata) return null;
-		const m = msg.metadata as Record<string, unknown>;
+		const m = transcript.lastAssistantMetadata;
+		if (!m) return null;
 		return JSON.stringify({
 			cost: m.cost_usd ?? m.total_cost_usd,
 			duration: m.duration_ms
@@ -1335,10 +1683,8 @@
 			refreshLatestTurnTailReserve();
 			await tick();
 			if (!containerRef || !untrack(() => shouldAutoScroll)) return;
-			const latestTurn = $activeSession.messages.findLast(
-				(message) => isNavigableUserTurn(message) && message.id
-			);
-			const anchor = latestTurn?.id ? document.getElementById(turnAnchorId(latestTurn.id)) : null;
+			const latestTurnId = transcript.latestUserTurnId;
+			const anchor = latestTurnId ? document.getElementById(turnAnchorId(latestTurnId)) : null;
 			if (!anchor || !containerRef.contains(anchor)) {
 				scrollToBottom();
 				updateCurrentTurnIndex();
@@ -1363,7 +1709,26 @@
 	aria-label="Conversation messages"
 	class="msg-scroll flex-1 overflow-y-auto overscroll-contain"
 >
-	{#if $activeSession.messages.length === 0}
+	{#if transcriptRender === 'skeleton'}
+		<!-- Hydration skeleton. NOT the empty hero: this session has a transcript,
+		     it just has not arrived yet. The blocks mirror the transcript's own
+		     rhythm (prompt, then a taller response), so the switch to real
+		     content is a fill rather than a jump. -->
+		<div class="chat-column" aria-busy="true" aria-live="polite">
+			<span class="sr-only">Loading conversation…</span>
+			{#each [0, 1, 2] as group (group)}
+				<div class="sk-turn" aria-hidden="true">
+					<div class="sk-line sk-prompt"></div>
+					<div class="sk-response">
+						<div class="sk-line sk-name"></div>
+						<div class="sk-line"></div>
+						<div class="sk-line"></div>
+						<div class="sk-line sk-short"></div>
+					</div>
+				</div>
+			{/each}
+		</div>
+	{:else if transcriptRender === 'empty'}
 		<!-- Empty State -->
 		<div class="h-full flex flex-col">
 			<!-- Error display for empty state -->
@@ -1400,14 +1765,24 @@
 		</div>
 	{:else}
 		<!-- Messages -->
-		<div class="chat-column">
-			{#each displayItems as item, i (displayItemKey(item))}
+		<div class="chat-column" bind:this={chatColumnRef}>
+			{#if mountedStart > 0}
+				<!-- Older turns are mounted on demand (scroll-up, timeline jump) and
+				     backfilled during idle time; this is the explicit way in — it
+				     matters for in-page search, which can only find mounted text. -->
+				<div class="earlier-row">
+					<button type="button" class="earlier-button" onclick={mountAllEarlierItems}>
+						Show {mountedStart} earlier {mountedStart === 1 ? 'message' : 'messages'}
+					</button>
+				</div>
+			{/if}
+			{#each visibleItems as item, i (displayItemKey(item))}
 				<!-- content-visibility: auto lets the browser skip paint/layout for off-screen
 				     messages. The last LIVE_TAIL items opt OUT (.msg-live) so the growing
 				     streaming region near the viewport bottom is never re-estimated. -->
 				<div
 					class="msg-virtualized"
-					class:msg-live={i >= displayItems.length - LIVE_TAIL}
+					class:msg-live={isLiveTailIndex(mountedStart + i, displayItems.length, LIVE_TAIL)}
 					id={item.kind === 'message' && item.message.id && isNavigableUserTurn(item.message) ? turnAnchorId(item.message.id) : undefined}
 					data-user-turn-id={item.kind === 'message' && item.message.id && isNavigableUserTurn(item.message) ? item.message.id : undefined}
 				>
@@ -1514,7 +1889,7 @@
 			timestamp={message.timestamp}
 			sessionId={$activeSession.sessionId}
 			messageUuid={message.jsonlUuid}
-			userPromptOccurrence={userPromptOccurrence($activeSession.messages, messageIndex)}
+			userPromptOccurrence={userPromptOccurrence(messageIndex)}
 			{fileCheckpointingEnabled}
 			onRewindComplete={handleRewindComplete}
 		/>
@@ -1575,8 +1950,10 @@
 	{:else if message.type === 'tool_use' && (message.toolName === 'Task' || message.toolName === 'Agent')}
 		<!-- Subagent tool_use (SDK "Task" or "Agent") - Skip if a linked SubagentMessage exists -->
 		<!-- The SubagentMessage component handles displaying the agent's work -->
-		{@const hasLinkedSubagent = $activeSession.messages.some(m => m.type === 'subagent' && m.toolId === message.toolId)}
-		{#if !hasLinkedSubagent}
+		<!-- The linked-subagent set is precomputed once per transcript build
+		     (work-log.ts); this used to be a full `messages.some(...)` scan per
+		     Task row per streaming fold. -->
+		{#if !hasLinkedSubagent(message.toolId)}
 			<ToolUseMessage
 				name={message.toolName || 'Tool'}
 				input={message.toolInput}
@@ -1681,6 +2058,90 @@
 		}
 	}
 
+	/* ── Hydration skeleton (S3) ──────────────────────────────────────────
+	   Shaped like the transcript it is standing in for: a short prompt line,
+	   then a taller response block. Same column, same 22px rhythm, so the real
+	   content lands into the same layout instead of replacing a centred hero. */
+	.sk-turn {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+
+	.sk-response {
+		display: flex;
+		flex-direction: column;
+		gap: 9px;
+	}
+
+	.sk-line {
+		height: 12px;
+		border-radius: 6px;
+		background: color-mix(in oklch, var(--foreground) 9%, transparent);
+		animation: sk-pulse 1.6s ease-in-out infinite;
+	}
+
+	.sk-prompt {
+		height: 34px;
+		width: 46%;
+		align-self: flex-end;
+		border-radius: 14px;
+		background: color-mix(in oklch, var(--foreground) 12%, transparent);
+	}
+
+	.sk-name {
+		width: 118px;
+		height: 10px;
+	}
+
+	.sk-short { width: 62%; }
+
+	.sk-turn:nth-child(2) .sk-prompt { width: 34%; }
+	.sk-turn:nth-child(3) .sk-prompt { width: 52%; }
+	.sk-turn:nth-child(2) .sk-short { width: 44%; }
+
+	/* Stagger so the column reads as one surface waking up, not three. */
+	.sk-turn:nth-child(2) .sk-line { animation-delay: 120ms; }
+	.sk-turn:nth-child(3) .sk-line { animation-delay: 240ms; }
+
+	@keyframes sk-pulse {
+		0%, 100% { opacity: 1; }
+		50% { opacity: 0.45; }
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.sk-line { animation: none; }
+	}
+
+	/* ── Windowed mounting affordance (R4) ────────────────────────────────
+	   Older turns mount on scroll-up and during idle backfill; this is the
+	   explicit control, and the honest signal that they are not mounted yet. */
+	.earlier-row {
+		display: flex;
+		justify-content: center;
+	}
+
+	.earlier-button {
+		padding: 5px 12px;
+		border: 1px solid color-mix(in oklch, var(--border) 84%, transparent);
+		border-radius: 999px;
+		background: color-mix(in oklch, var(--background) 88%, transparent);
+		color: var(--muted-foreground);
+		font-size: 12px;
+		cursor: pointer;
+		transition: color 150ms ease, border-color 150ms ease;
+	}
+
+	.earlier-button:hover {
+		color: var(--foreground);
+		border-color: var(--border-strong, var(--border));
+	}
+
+	.earlier-button:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+
 	/* Browser-native virtualization: skip paint/layout for off-screen messages.
 	   `auto` in contain-intrinsic-size remembers the last rendered height so
 	   the scrollbar stays stable when scrolling back through history. */
@@ -1725,8 +2186,8 @@
 		background: color-mix(in oklch, var(--background) 86%, transparent);
 		color: var(--muted-foreground);
 		box-shadow: var(--shadow-m);
-		backdrop-filter: blur(12px) saturate(140%);
-		-webkit-backdrop-filter: blur(12px) saturate(140%);
+		backdrop-filter: var(--fx-rail-backdrop);
+		-webkit-backdrop-filter: var(--fx-rail-backdrop);
 		pointer-events: auto;
 		cursor: pointer;
 		animation: jump-latest-in 160ms ease-out both;

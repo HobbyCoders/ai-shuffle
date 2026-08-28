@@ -10,20 +10,183 @@ const BASE = '/projects';
 // Git Status Types
 // ============================================================================
 
+/** A staged entry as it arrives on the wire (`{file, status}`). */
+export interface StagedFileEntry {
+    file: string;
+    status: string;  // A=added, M=modified, D=deleted, R=renamed, C=copied
+}
+
+/**
+ * `/git/status` EXACTLY as the backend sends it
+ * (`app/api/schemas/git.py::GitStatusResponse`).
+ *
+ * `staged` / `modified` / `untracked` / `conflicts` are **lists**, not counts.
+ * The old `GitStatus` declared them as numbers, so every poll produced fresh
+ * array references that reference-equality "no-op suppression" could never
+ * match — a store write + subscriber cascade fired on every 2 s poll whenever
+ * any file list was non-empty. `transformGitStatus` below collapses the wire
+ * shape into a flat, cheaply-comparable record so suppression actually works.
+ */
+export interface RawGitStatus {
+    is_git_repo: boolean;
+    current_branch?: string | null;
+    is_detached?: boolean;
+    head_commit?: string | null;
+    remote_url?: string | null;
+    is_clean?: boolean;
+    staged?: StagedFileEntry[];
+    modified?: string[];
+    untracked?: string[];
+    conflicts?: string[];
+    ahead?: number;
+    behind?: number;
+    differs_from_base?: boolean;
+    // Repository-record fields. Present on GET /git/status, ABSENT from the
+    // inline status payloads returned by the mutation endpoints (which call
+    // git_service.get_status directly) — see mergeStatusRepoMeta.
+    repository_id?: string | null;
+    default_branch?: string | null;
+    github_repo_name?: string | null;
+    last_synced_at?: string | null;
+}
+
+/**
+ * Canonical git status: flat scalars plus one digest of the file lists.
+ *
+ * Every consumer in the app reads this shape, and `gitStatusEqual` can decide
+ * "nothing changed" with a handful of primitive comparisons. Nothing here is a
+ * fresh object/array per poll, so an unchanged status never notifies.
+ */
 export interface GitStatus {
     is_git_repo: boolean;
     current_branch: string | null;
+    is_detached: boolean;
+    head_commit: string | null;
     remote_url: string | null;
+    is_clean: boolean;
+    /** Any uncommitted work at all (staged, modified, untracked or conflicted). */
     has_changes: boolean;
+    /** Counts, derived from the wire's lists. */
     staged: number;
     modified: number;
     untracked: number;
+    conflicts: number;
     ahead: number;
     behind: number;
     /** True when the branch has real content over its base branch (non-empty
      *  base...HEAD diff). False for branches whose commits net to no change,
      *  so the UI can hide "Ship It" when there is nothing left to ship. */
     differs_from_base: boolean;
+    /** Repository record (GET /git/status only — null on inline payloads). */
+    repository_id: string | null;
+    /** The repo's real default branch. Authoritative source for "am I on the
+     *  default branch?" — do NOT fall back to a hardcoded 'main'. */
+    default_branch: string | null;
+    github_repo_name: string | null;
+    /**
+     * Digest of the staged/modified/untracked/conflict file lists. Two statuses
+     * with the same digest describe the same working tree, so equality checks
+     * never have to walk the lists. Not order-normalized: the backend emits a
+     * deterministic order, and a spurious mismatch costs one extra update.
+     */
+    files_fingerprint: string;
+}
+
+function _fingerprint(raw: RawGitStatus): string {
+    const staged = (raw.staged ?? []).map((s) => `${s.status}:${s.file}`).join(',');
+    const modified = (raw.modified ?? []).join(',');
+    const untracked = (raw.untracked ?? []).join(',');
+    const conflicts = (raw.conflicts ?? []).join(',');
+    return `${staged}|${modified}|${untracked}|${conflicts}`;
+}
+
+/** Collapse a wire status into the canonical flat shape. */
+export function transformGitStatus(raw: RawGitStatus): GitStatus {
+    const staged = raw.staged?.length ?? 0;
+    const modified = raw.modified?.length ?? 0;
+    const untracked = raw.untracked?.length ?? 0;
+    const conflicts = raw.conflicts?.length ?? 0;
+    const isClean = raw.is_clean ?? (staged + modified + untracked + conflicts === 0);
+    return {
+        is_git_repo: raw.is_git_repo ?? false,
+        current_branch: raw.current_branch ?? null,
+        is_detached: raw.is_detached ?? false,
+        head_commit: raw.head_commit ?? null,
+        remote_url: raw.remote_url ?? null,
+        is_clean: isClean,
+        has_changes: !isClean || staged + modified + untracked + conflicts > 0,
+        staged,
+        modified,
+        untracked,
+        conflicts,
+        ahead: raw.ahead ?? 0,
+        behind: raw.behind ?? 0,
+        differs_from_base: raw.differs_from_base ?? false,
+        repository_id: raw.repository_id ?? null,
+        default_branch: raw.default_branch ?? null,
+        github_repo_name: raw.github_repo_name ?? null,
+        files_fingerprint: _fingerprint(raw)
+    };
+}
+
+/**
+ * The definitive "this folder has no repo" status, in the SAME shape every
+ * other status has. Used when we positively learn the working folder is gone
+ * (e.g. a cleaned-up worktree whose directory 404s) so the header fails closed
+ * instead of keeping a stale `is_git_repo: true`.
+ */
+export function notARepoStatus(): GitStatus {
+    return transformGitStatus({ is_git_repo: false });
+}
+
+/**
+ * True when two canonical statuses describe the same repository state.
+ * Every field is a primitive, so this is a handful of `===` comparisons —
+ * the whole point of the canonical shape (see RawGitStatus docs).
+ */
+export function gitStatusEqual(a: GitStatus | null, b: GitStatus | null): boolean {
+    if (a === b) return true;
+    if (!a || !b) return false;
+    return (
+        a.is_git_repo === b.is_git_repo &&
+        a.current_branch === b.current_branch &&
+        a.is_detached === b.is_detached &&
+        a.head_commit === b.head_commit &&
+        a.remote_url === b.remote_url &&
+        a.is_clean === b.is_clean &&
+        a.has_changes === b.has_changes &&
+        a.staged === b.staged &&
+        a.modified === b.modified &&
+        a.untracked === b.untracked &&
+        a.conflicts === b.conflicts &&
+        a.ahead === b.ahead &&
+        a.behind === b.behind &&
+        a.differs_from_base === b.differs_from_base &&
+        a.repository_id === b.repository_id &&
+        a.default_branch === b.default_branch &&
+        a.github_repo_name === b.github_repo_name &&
+        a.files_fingerprint === b.files_fingerprint
+    );
+}
+
+/**
+ * Carry the repository-record fields (repository_id / default_branch /
+ * github_repo_name) forward from `prev` onto an inline mutation payload.
+ *
+ * The mutation endpoints build their inline status from
+ * `git_service.get_status` alone, which knows nothing about the DB repo record,
+ * so applying such a payload verbatim would blank `default_branch` — and the
+ * header would immediately mis-decide "am I on the default branch?".
+ */
+export function mergeStatusRepoMeta(prev: GitStatus | null, next: GitStatus): GitStatus {
+    if (!prev) return next;
+    if (next.repository_id !== null || next.default_branch !== null) return next;
+    return {
+        ...next,
+        repository_id: prev.repository_id,
+        default_branch: prev.default_branch,
+        github_repo_name: prev.github_repo_name
+    };
 }
 
 // ============================================================================
@@ -163,10 +326,9 @@ export interface CommitGraphResponse {
 // Worktree Types
 // ============================================================================
 
-export interface StagedFile {
-    file: string;
-    status: string;  // A=added, M=modified, D=deleted, R=renamed, C=copied
-}
+/** @deprecated Alias kept for the worktree-list shape below; new code uses
+ *  {@link StagedFileEntry}. */
+export type StagedFile = StagedFileEntry;
 
 export interface WorktreeGitStatus {
     is_clean: boolean;
@@ -213,10 +375,14 @@ function scopeQs(worktreeId?: string, sessionId?: string): string {
 }
 
 /**
- * Get the git status for a project or worktree
+ * Get the git status for a project or worktree.
+ *
+ * The wire response is normalized into the canonical flat `GitStatus` here, at
+ * the API boundary, so no consumer ever sees the raw list shape.
  */
 export async function getGitStatus(projectId: string, worktreeId?: string, options?: RequestOptions, sessionId?: string): Promise<GitStatus> {
-    return api.get<GitStatus>(`${BASE}/${projectId}/git/status${scopeQs(worktreeId, sessionId)}`, options);
+    const raw = await api.get<RawGitStatus>(`${BASE}/${projectId}/git/status${scopeQs(worktreeId, sessionId)}`, options);
+    return transformGitStatus(raw);
 }
 
 // ============================================================================
@@ -512,11 +678,38 @@ export interface FileDiffResponse {
     truncated: boolean;
 }
 
+/**
+ * Generic mutation response.
+ *
+ * The stage / unstage / discard / push endpoints compute a fresh status (and,
+ * where relevant, diff stats) inline "for instant frontend update". These are
+ * normalized into the canonical shapes here so the store can APPLY them instead
+ * of throwing them away and re-issuing refresh requests (finding G6).
+ */
 export interface OperationResponse {
     success: boolean;
     message: string;
-    status?: Record<string, unknown>;
-    diff_stats?: DiffStats;
+    /** Inline post-mutation status. Lacks the repository-record fields — run it
+     *  through {@link mergeStatusRepoMeta} before storing. */
+    status?: GitStatus | null;
+    diff_stats?: DiffStats | null;
+}
+
+/** The same response before normalization. */
+interface RawOperationResponse {
+    success: boolean;
+    message: string;
+    status?: RawGitStatus | null;
+    diff_stats?: DiffStats | null;
+}
+
+function transformOperationResponse(raw: RawOperationResponse): OperationResponse {
+    return {
+        success: raw.success,
+        message: raw.message,
+        status: raw.status ? transformGitStatus(raw.status) : null,
+        diff_stats: raw.diff_stats ?? null
+    };
 }
 
 /**
@@ -551,7 +744,9 @@ export async function stageFiles(
     worktreeId?: string,
     sessionId?: string
 ): Promise<OperationResponse> {
-    return api.post<OperationResponse>(`${BASE}/${projectId}/git/stage${scopeQs(worktreeId, sessionId)}`, { files });
+    return transformOperationResponse(
+        await api.post<RawOperationResponse>(`${BASE}/${projectId}/git/stage${scopeQs(worktreeId, sessionId)}`, { files })
+    );
 }
 
 /**
@@ -563,7 +758,9 @@ export async function unstageFiles(
     worktreeId?: string,
     sessionId?: string
 ): Promise<OperationResponse> {
-    return api.post<OperationResponse>(`${BASE}/${projectId}/git/unstage${scopeQs(worktreeId, sessionId)}`, { files });
+    return transformOperationResponse(
+        await api.post<RawOperationResponse>(`${BASE}/${projectId}/git/unstage${scopeQs(worktreeId, sessionId)}`, { files })
+    );
 }
 
 /**
@@ -576,10 +773,12 @@ export async function discardChanges(
     worktreeId?: string,
     sessionId?: string
 ): Promise<OperationResponse> {
-    return api.post<OperationResponse>(`${BASE}/${projectId}/git/discard${scopeQs(worktreeId, sessionId)}`, {
-        files,
-        file_statuses: fileStatuses,
-    });
+    return transformOperationResponse(
+        await api.post<RawOperationResponse>(`${BASE}/${projectId}/git/discard${scopeQs(worktreeId, sessionId)}`, {
+            files,
+            file_statuses: fileStatuses,
+        })
+    );
 }
 
 // ============================================================================
@@ -617,13 +816,32 @@ export interface CommitResponse {
     success: boolean;
     message: string;
     commit_sha: string | null;
+    /** Post-commit status computed inline by the backend. */
+    status?: GitStatus | null;
+    diff_stats?: DiffStats | null;
+}
+
+interface RawCommitResponse {
+    success: boolean;
+    message: string;
+    commit_sha: string | null;
+    status?: RawGitStatus | null;
+    diff_stats?: DiffStats | null;
 }
 
 /**
- * Create a commit
+ * Create a commit. The response carries the backend's inline post-commit
+ * status + diff stats, which the store applies directly (finding G6).
  */
 export async function commitChanges(projectId: string, request: CommitRequest, worktreeId?: string, sessionId?: string): Promise<CommitResponse> {
-    return api.post<CommitResponse>(`${BASE}/${projectId}/git/commit${scopeQs(worktreeId, sessionId)}`, request);
+    const raw = await api.post<RawCommitResponse>(`${BASE}/${projectId}/git/commit${scopeQs(worktreeId, sessionId)}`, request);
+    return {
+        success: raw.success,
+        message: raw.message,
+        commit_sha: raw.commit_sha ?? null,
+        status: raw.status ? transformGitStatus(raw.status) : null,
+        diff_stats: raw.diff_stats ?? null
+    };
 }
 
 // ============================================================================
@@ -638,10 +856,12 @@ export interface PushRequest {
 }
 
 /**
- * Push commits to remote
+ * Push commits to remote. Returns the backend's inline post-push status.
  */
-export async function pushCommits(projectId: string, request: PushRequest = {}, worktreeId?: string, sessionId?: string): Promise<{ success: boolean; message: string }> {
-    return api.post<{ success: boolean; message: string }>(`${BASE}/${projectId}/git/push${scopeQs(worktreeId, sessionId)}`, request);
+export async function pushCommits(projectId: string, request: PushRequest = {}, worktreeId?: string, sessionId?: string): Promise<OperationResponse> {
+    return transformOperationResponse(
+        await api.post<RawOperationResponse>(`${BASE}/${projectId}/git/push${scopeQs(worktreeId, sessionId)}`, request)
+    );
 }
 
 // ============================================================================
@@ -659,6 +879,18 @@ export interface PullResponse {
     message: string;
     conflicts: string[];
     has_conflicts: boolean;
+    /** Post-pull status + diff stats computed inline by the backend. */
+    status?: GitStatus | null;
+    diff_stats?: DiffStats | null;
+}
+
+interface RawPullResponse {
+    success: boolean;
+    message: string;
+    conflicts?: string[];
+    has_conflicts?: boolean;
+    status?: RawGitStatus | null;
+    diff_stats?: DiffStats | null;
 }
 
 /**
@@ -670,7 +902,15 @@ export async function pullFromRemote(
     worktreeId?: string,
     sessionId?: string
 ): Promise<PullResponse> {
-    return api.post<PullResponse>(`${BASE}/${projectId}/git/pull${scopeQs(worktreeId, sessionId)}`, request);
+    const raw = await api.post<RawPullResponse>(`${BASE}/${projectId}/git/pull${scopeQs(worktreeId, sessionId)}`, request);
+    return {
+        success: raw.success,
+        message: raw.message,
+        conflicts: raw.conflicts ?? [],
+        has_conflicts: raw.has_conflicts ?? false,
+        status: raw.status ? transformGitStatus(raw.status) : null,
+        diff_stats: raw.diff_stats ?? null
+    };
 }
 
 // ============================================================================
@@ -687,10 +927,70 @@ export interface OpenPrInfo {
     mergeable: boolean | null;
 }
 
+/**
+ * `/git/pr-state` as it arrives on the wire.
+ *
+ * The failure flag is accepted under several spellings: the backend is adding
+ * an explicit "the GitHub lookup did not complete" signal, and older builds
+ * ship none at all. Absent ⇒ `false` (treat as a completed lookup) — see
+ * {@link transformPrState}.
+ */
+export interface RawPrState {
+    current_branch?: string | null;
+    has_github?: boolean;
+    open_pr?: OpenPrInfo | null;
+    pr_lookup_failed?: boolean;
+    lookup_failed?: boolean;
+    lookupFailed?: boolean;
+}
+
 export interface PrState {
     current_branch: string | null;
     has_github: boolean;
     open_pr: OpenPrInfo | null;
+    /**
+     * True when the backend could NOT complete the GitHub PR lookup this cycle
+     * (gh unavailable / rate limited / errored). A failed lookup is NOT the
+     * same as "no open PR": the store keeps the previous `open_pr` and flags it
+     * stale, so the header never flips "Merge PR #12" → "Create PR" because a
+     * lookup blipped.
+     */
+    lookup_failed: boolean;
+}
+
+export function transformPrState(raw: RawPrState): PrState {
+    return {
+        current_branch: raw.current_branch ?? null,
+        has_github: raw.has_github ?? false,
+        open_pr: raw.open_pr ?? null,
+        lookup_failed: Boolean(raw.pr_lookup_failed ?? raw.lookup_failed ?? raw.lookupFailed ?? false)
+    };
+}
+
+/** Deep equality for PR state — `open_pr` is a nested object rebuilt on every
+ *  poll, so a shallow reference compare never suppressed anything. */
+export function prStateEqual(a: PrState | null, b: PrState | null): boolean {
+    if (a === b) return true;
+    if (!a || !b) return false;
+    if (
+        a.current_branch !== b.current_branch ||
+        a.has_github !== b.has_github ||
+        a.lookup_failed !== b.lookup_failed
+    ) {
+        return false;
+    }
+    const x = a.open_pr;
+    const y = b.open_pr;
+    if (x === y) return true;
+    if (!x || !y) return false;
+    return (
+        x.number === y.number &&
+        x.title === y.title &&
+        x.url === y.url &&
+        x.draft === y.draft &&
+        x.state === y.state &&
+        x.mergeable === y.mergeable
+    );
 }
 
 /**
@@ -698,7 +998,8 @@ export interface PrState {
  * (session-scoped like every other git call).
  */
 export async function getPrState(projectId: string, worktreeId?: string, sessionId?: string, options?: RequestOptions): Promise<PrState> {
-    return api.get<PrState>(`${BASE}/${projectId}/git/pr-state${scopeQs(worktreeId, sessionId)}`, options);
+    const raw = await api.get<RawPrState>(`${BASE}/${projectId}/git/pr-state${scopeQs(worktreeId, sessionId)}`, options);
+    return transformPrState(raw);
 }
 
 // ============================================================================

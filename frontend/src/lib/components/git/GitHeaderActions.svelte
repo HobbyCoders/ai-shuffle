@@ -9,14 +9,14 @@
 	 * per-invocation overrides. Branch selector, diff review, and Init Repo remain
 	 * direct git actions. Branch selector is locked during streaming.
 	 */
-	import { onDestroy } from 'svelte';
-	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert } from 'lucide-svelte';
-	import { git, diffStats, gitStatus, branches as branchStore, gitMode, changedFiles } from '$lib/stores/git.svelte';
+	import { onDestroy, onMount } from 'svelte';
+	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert, CircleDot, CircleCheck, CircleX } from 'lucide-svelte';
+	import { git, gitSnapshot, gitMode } from '$lib/stores/git.svelte';
 	import { checkoutBranchWithToast } from '$lib/stores/gitCheckoutAction';
-	import { githubRepoInfo } from '$lib/stores/github.svelte';
+	import { githubRepoInfo, githubChecks } from '$lib/stores/github.svelte';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import { computeShowShipIt } from '$lib/stores/derived/ship-it-visibility';
-	import { computePrimaryAction, finishBlockedByMergeability } from '$lib/stores/derived/git-primary-action';
+	import { computePrimaryAction, finishBlockedByMergeability, type PrimaryGitAction } from '$lib/stores/derived/git-primary-action';
 	import GitActionOptionsDropdown from './GitActionOptionsDropdown.svelte';
 	import type {
 		CommitOptions,
@@ -69,6 +69,31 @@
 	// work is running.
 	const actionsBusy = $derived(isStreaming || operationInProgress);
 
+	// ── ONE coherent snapshot ────────────────────────────────────────────────
+	// Every value the action decision depends on is read from a SINGLE store
+	// object rather than from four independently-timed derived stores. Reading
+	// them separately is what made the header walk through intermediate states
+	// after each session switch and each mutation (finding G4).
+	const snapshot = $derived($gitSnapshot);
+	// True until a complete load has landed for the CURRENT checkout. While it
+	// is false the values on screen belong to the previous context (or are a
+	// cache hit mid-revalidation) and must not be used to derive a NEW action.
+	const snapshotPending = $derived(!snapshot.hydrated);
+	// The mutating action buttons are ALSO disabled while the snapshot is still
+	// resolving for this context: what's rendered is the previous coherent
+	// action, greyed out, so the user can't fire it against state we haven't
+	// confirmed yet.
+	const primaryDisabled = $derived(actionsBusy || snapshotPending);
+
+	// Slow, visibility-gated PR/CI refresh: PR merges, reviews and CI results
+	// happen on GitHub and are otherwise invisible until a session switch. It
+	// runs only while this header is mounted (i.e. actually visible) and only
+	// while the browser tab is visible — see git.startBackgroundRefresh.
+	onMount(() => {
+		git.startBackgroundRefresh();
+		return () => git.stopBackgroundRefresh();
+	});
+
 	// Worktree mode: determined by prop (immediate) OR store (after load)
 	const isWorktreeMode = $derived(!!worktreeBranch || $gitMode === 'worktree');
 
@@ -88,26 +113,43 @@
 	const shipItOptsOpen = $derived($openHeaderDropdown === 'git-shipit');
 
 	// Use worktreeBranch prop as immediate fallback while store is loading
-	const currentBranch = $derived($gitStatus?.current_branch ?? worktreeBranch ?? null);
+	const currentBranch = $derived(snapshot.currentBranch ?? worktreeBranch ?? null);
 	const hasChanges = $derived(
-		($diffStats?.additions ?? 0) > 0 ||
-		($diffStats?.deletions ?? 0) > 0 ||
-		($diffStats?.files_changed ?? 0) > 0
+		(snapshot.diffStats?.additions ?? 0) > 0 ||
+		(snapshot.diffStats?.deletions ?? 0) > 0 ||
+		(snapshot.diffStats?.files_changed ?? 0) > 0
 	);
-	const additions = $derived($diffStats?.additions ?? 0);
-	const deletions = $derived($diffStats?.deletions ?? 0);
-	const filesChanged = $derived($changedFiles?.length ?? $diffStats?.files_changed ?? 0);
-	const commitsAhead = $derived($gitStatus?.ahead ?? 0);
+	const additions = $derived(snapshot.diffStats?.additions ?? 0);
+	const deletions = $derived(snapshot.diffStats?.deletions ?? 0);
+	const filesChanged = $derived(snapshot.changedFiles?.length ?? snapshot.diffStats?.files_changed ?? 0);
+	const commitsAhead = $derived(snapshot.status?.ahead ?? 0);
 	// Whether the branch carries real content over its base branch (non-empty
 	// base...HEAD diff). Distinct from commitsAhead: a branch can be ahead by
 	// commit count yet have a 0/0 net diff (empty/cancelling commits, or an
 	// already-merged/cleaned-up worktree) — those have nothing left to ship.
-	const branchDiffersFromBase = $derived($gitStatus?.differs_from_base ?? false);
-	const defaultBranch = $derived($githubRepoInfo?.default_branch ?? 'main');
+	const branchDiffersFromBase = $derived(snapshot.status?.differs_from_base ?? false);
+	// `/git/status` reports the repository's REAL default branch. The old
+	// fallback chain started at the github store, which nothing ever populated,
+	// so every `master`-default repo silently used 'main' — and Ship It / Create
+	// PR appeared while sitting ON the default branch (finding G3).
+	const defaultBranch = $derived(
+		snapshot.defaultBranch ?? $githubRepoInfo?.default_branch ?? 'main'
+	);
 	const isOnDefaultBranch = $derived(currentBranch === defaultBranch);
 
+	// The open PR for this branch. The host passes it from the same store field;
+	// the snapshot is the fallback so the value can never disagree with the rest
+	// of the decision inputs.
+	const openPr = $derived(openPR ?? snapshot.openPr);
+
+	// CI verdict for this branch (wired to the workflow-runs pathway, refreshed
+	// on the same visibility-gated slow cadence as PR state).
+	const checks = $derived(
+		$githubChecks && currentBranch && $githubChecks.branch === currentBranch ? $githubChecks : null
+	);
+
 	// Upstream tracking branch state (for push/pull buttons)
-	const currentBranchInfo = $derived($branchStore.find(b => b.current));
+	const currentBranchInfo = $derived(snapshot.branches.find(b => b.current));
 	const commitsBehindUpstream = $derived(currentBranchInfo?.behind ?? 0);
 	const commitsAheadUpstream = $derived(currentBranchInfo?.ahead ?? 0);
 	const hasUpstream = $derived(!!currentBranchInfo?.upstream);
@@ -121,31 +163,47 @@
 
 	// Primary action decision (Commit / Finish / Create PR / clean placeholder)
 	// extracted into a pure, unit-tested helper — the template renders its result.
-	const primaryAction = $derived(
+	const computedPrimaryAction = $derived(
 		computePrimaryAction({
 			hasChanges,
-			hasOpenPr: !!openPR,
-			isMergeable: openPR?.mergeable ?? null,
+			hasOpenPr: !!openPr,
+			isMergeable: openPr?.mergeable ?? null,
 			commitsAhead,
 			differsFromBase: branchDiffersFromBase,
 			isOnDefaultBranch,
 			needsPull
 		})
 	);
-	const finishBlocked = $derived(finishBlockedByMergeability(openPR?.mergeable ?? null));
+
+	// Hold the last action computed from a COHERENT snapshot. While the current
+	// context has not fully loaded, the header keeps showing that action (greyed
+	// and disabled) instead of re-deriving from half-filled state — this is what
+	// stops "Merge PR #12 → Create PR → Merge PR #12" flicker on a switch.
+	type HeaderOpenPr = { number: number; title: string; url: string; mergeable?: boolean | null };
+	let heldPrimaryAction = $state<PrimaryGitAction>('clean');
+	let heldShowShipIt = $state(false);
+	let heldOpenPr = $state<HeaderOpenPr | null>(null);
+
+	const primaryAction = $derived(snapshotPending ? heldPrimaryAction : computedPrimaryAction);
+	/** The PR the rendered action refers to — held alongside the action so a
+	 *  greyed "Finish" still names the PR it would merge. */
+	const shownPr = $derived(snapshotPending ? heldOpenPr : openPr);
+	const finishBlocked = $derived(finishBlockedByMergeability(shownPr?.mergeable ?? null));
 
 	// Whether this folder is a *confirmed* git repo. Strict `=== true` (not the
 	// optimistic `!== false` used for the header gate): for a reused/cleaned-up
 	// worktree the folder may be empty, so Ship It must only show once status has
 	// loaded and positively confirms a repo — never on null/unconfirmed or stale
 	// state. (diffStats, which drives hasChanges, can outlive the repo in cache.)
-	const isRepoConfirmed = $derived($gitStatus?.is_git_repo === true);
+	// Also requires a hydrated snapshot: a carried-over placeholder from another
+	// checkout must never be read as confirmation of THIS one.
+	const isRepoConfirmed = $derived(!snapshotPending && snapshot.status?.is_git_repo === true);
 
 	// Ship It shows only when there's actually something to ship — uncommitted
 	// changes OR real content over the base branch — on a non-default branch
 	// that isn't behind upstream, and only for a confirmed repo. See
 	// computeShowShipIt for the full rationale.
-	const showShipIt = $derived(computeShowShipIt({
+	const computedShowShipIt = $derived(computeShowShipIt({
 		isRepoConfirmed,
 		hasChanges,
 		branchDiffersFromBase,
@@ -153,10 +211,20 @@
 		needsPull,
 		hasShipItHandler: !!onClickShipIt
 	}));
+	const showShipIt = $derived(snapshotPending ? heldShowShipIt : computedShowShipIt);
+
+	// Remember the coherent decision so the next switch has something real to
+	// show while it revalidates.
+	$effect(() => {
+		if (snapshotPending) return;
+		heldPrimaryAction = computedPrimaryAction;
+		heldShowShipIt = computedShowShipIt;
+		heldOpenPr = openPr;
+	});
 
 	// Local branches for the dropdown (exclude remotes)
 	const localBranches = $derived(
-		$branchStore.filter(b => !b.remote)
+		snapshot.branches.filter(b => !b.remote)
 	);
 
 	// Local branch names offered as PR base targets in the Create PR popover.
@@ -167,7 +235,7 @@
 	// `$derived(() => ...)` whose value is a closure re-run on every call site.
 	const remoteBranches = $derived.by(() => {
 		const localNames = new Set(localBranches.map(b => b.name));
-		return $branchStore
+		return snapshot.branches
 			.filter(b => b.remote)
 			.map(b => ({
 				...b,
@@ -367,9 +435,10 @@
 		<div class="split-btn-group">
 			<button
 				class="git-btn split-main pull-btn"
+				class:stale={snapshotPending}
 				class:diverged={isDiverged}
 				onclick={() => onClickPull()}
-				disabled={actionsBusy}
+				disabled={primaryDisabled}
 				title={isStreaming
 					? 'Cannot pull during streaming'
 					: isDiverged
@@ -399,7 +468,7 @@
 					{currentBranch}
 					{defaultBranch}
 					baseBranches={baseBranchNames}
-					{openPR}
+					openPR={shownPr}
 					{hasChanges}
 					{isWorktreeMode}
 					busy={actionsBusy}
@@ -415,8 +484,9 @@
 		<div class="split-btn-group">
 			<button
 				class="git-btn split-main push-btn"
+				class:stale={snapshotPending}
 				onclick={() => onClickPush()}
-				disabled={actionsBusy}
+				disabled={primaryDisabled}
 				title={isStreaming
 					? 'Cannot push during streaming'
 					: `${commitsAheadUpstream} commit${commitsAheadUpstream === 1 ? '' : 's'} to push`}
@@ -443,7 +513,7 @@
 					{currentBranch}
 					{defaultBranch}
 					baseBranches={baseBranchNames}
-					{openPR}
+					openPR={shownPr}
 					{hasChanges}
 					{isWorktreeMode}
 					busy={actionsBusy}
@@ -460,8 +530,9 @@
 		<div class="split-btn-group">
 			<button
 				class="git-btn split-main"
+				class:stale={snapshotPending}
 				onclick={() => onClickCommit()}
-				disabled={actionsBusy}
+				disabled={primaryDisabled}
 				title={isStreaming ? 'Cannot commit during streaming' : 'Quick commit with saved settings'}
 			>
 				<GitCommitHorizontal size={14} strokeWidth={1.5} />
@@ -485,7 +556,7 @@
 					{currentBranch}
 					{defaultBranch}
 					baseBranches={baseBranchNames}
-					{openPR}
+					openPR={shownPr}
 					{hasChanges}
 					{isWorktreeMode}
 					busy={actionsBusy}
@@ -498,13 +569,14 @@
 		<div class="split-btn-group">
 			<button
 				class="git-btn split-main"
+				class:stale={snapshotPending}
 				onclick={() => onClickFinish()}
-				disabled={actionsBusy || finishBlocked}
+				disabled={primaryDisabled || finishBlocked}
 				title={isStreaming
 					? 'Cannot finish during streaming'
 					: finishBlocked
-						? `PR #${openPR!.number} is not mergeable yet — resolve conflicts on GitHub or wait for GitHub to compute mergeability`
-						: `Quick merge PR #${openPR!.number} with saved settings`}
+						? `PR #${shownPr?.number} is not mergeable yet — resolve conflicts on GitHub or wait for GitHub to compute mergeability`
+						: `Quick merge PR #${shownPr?.number} with saved settings`}
 			>
 				{#if finishBlocked}
 					<TriangleAlert size={14} strokeWidth={1.5} />
@@ -531,7 +603,7 @@
 					{currentBranch}
 					{defaultBranch}
 					baseBranches={baseBranchNames}
-					{openPR}
+					openPR={shownPr}
 					{hasChanges}
 					{isWorktreeMode}
 					busy={actionsBusy}
@@ -544,8 +616,9 @@
 		<div class="split-btn-group">
 			<button
 				class="git-btn split-main"
+				class:stale={snapshotPending}
 				onclick={() => onClickCreatePR()}
-				disabled={actionsBusy}
+				disabled={primaryDisabled}
 				title={isStreaming ? 'Cannot create PR during streaming' : `Quick create PR (${commitsAhead} commit${commitsAhead === 1 ? '' : 's'} ahead)`}
 			>
 				<GitPullRequest size={14} strokeWidth={1.5} />
@@ -569,7 +642,7 @@
 					{currentBranch}
 					{defaultBranch}
 					baseBranches={baseBranchNames}
-					{openPR}
+					openPR={shownPr}
 					{hasChanges}
 					{isWorktreeMode}
 					busy={actionsBusy}
@@ -597,8 +670,9 @@
 		<div class="split-btn-group">
 			<button
 				class="git-btn split-main"
+				class:stale={snapshotPending}
 				onclick={() => onClickShipIt?.()}
-				disabled={actionsBusy}
+				disabled={primaryDisabled}
 				title={isStreaming ? 'Cannot ship during streaming' : 'Ship It — commit, push, create PR, merge, and clean up in one shot'}
 			>
 				<Rocket size={13} strokeWidth={1.5} />
@@ -622,7 +696,7 @@
 					{currentBranch}
 					{defaultBranch}
 					baseBranches={baseBranchNames}
-					{openPR}
+					openPR={shownPr}
 					{hasChanges}
 					{isWorktreeMode}
 					busy={actionsBusy}
@@ -631,6 +705,31 @@
 				/>
 			{/if}
 		</div>
+	{/if}
+
+	<!-- CI status for the current branch. Fed by the (previously dead) workflow-
+	     runs pathway, refreshed on the same visibility-gated slow cadence as PR
+	     state — never a background poll. -->
+	{#if checks}
+		<a
+			class="ci-badge {checks.state}"
+			href={checks.url}
+			target="_blank"
+			rel="noopener noreferrer"
+			title="{checks.name}: {checks.state === 'running' ? 'in progress' : (checks.conclusion ?? checks.state)}"
+			aria-label="CI {checks.state} for {checks.branch}"
+		>
+			{#if checks.state === 'success'}
+				<CircleCheck size={13} strokeWidth={1.75} />
+			{:else if checks.state === 'failure'}
+				<CircleX size={13} strokeWidth={1.75} />
+			{:else if checks.state === 'running'}
+				<Loader2 size={13} strokeWidth={1.75} class="spin" />
+			{:else}
+				<CircleDot size={13} strokeWidth={1.75} />
+			{/if}
+			<span class="btn-label">CI</span>
+		</a>
 	{/if}
 
 	<!-- Diff stats (clickable to open review panel) -->
@@ -674,6 +773,37 @@
 		display: flex;
 		align-items: center;
 		gap: 4px;
+	}
+
+	/* The action shown belongs to the previous coherent snapshot while the
+	   current checkout revalidates — indicate it rather than flashing empty. */
+	.git-btn.stale {
+		opacity: 0.55;
+	}
+
+	.ci-badge {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		padding: 3px 7px;
+		border-radius: 5px;
+		font-size: 11px;
+		line-height: 1;
+		text-decoration: none;
+		border: 1px solid transparent;
+		color: var(--text-secondary, #888);
+	}
+
+	.ci-badge.success {
+		color: var(--success, #3fb950);
+	}
+
+	.ci-badge.failure {
+		color: var(--error, #f85149);
+	}
+
+	.ci-badge.running {
+		color: var(--warning, #d29922);
 	}
 
 	.branch-selector {

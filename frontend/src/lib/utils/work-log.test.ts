@@ -5,6 +5,9 @@ import { describe, it, expect } from 'vitest';
 import type { ChatMessage } from '$lib/stores/types';
 import {
 	buildDisplayItems,
+	buildTranscriptModel,
+	hasLinkedSubagent,
+	userPromptOccurrenceAt,
 	formatDuration,
 	summarizeWork,
 	summarizeWorkCompact,
@@ -687,5 +690,143 @@ describe('duration helpers', () => {
 	it('detects the interrupt marker', () => {
 		expect(turnWasInterrupted([text('partial\n\n[Stopped]')])).toBe(true);
 		expect(turnWasInterrupted([text('all done')])).toBe(false);
+	});
+});
+
+
+/**
+ * The transcript model carries the two whole-array lookups the template used to
+ * recompute per rendered row (PERFORMANCE_REVIEW §3.2 R3). These pin the
+ * precomputed values against the original per-row implementations, which are
+ * kept in work-log.ts as the oracle.
+ */
+describe('transcript model lookups', () => {
+	function linkedSubagentByScan(messages: ChatMessage[], toolId: string | undefined): boolean {
+		return messages.some((m) => m.type === 'subagent' && m.toolId === toolId);
+	}
+
+	const SETTLED_OPTS = { isStreaming: false, groupingEnabled: true };
+
+	it('matches the per-row prompt-occurrence scan for every message', () => {
+		const messages: ChatMessage[] = [
+			user('deploy the site'),
+			text('done'),
+			user('deploy the site'),
+			text('done again'),
+			msg({ role: 'user', type: 'command', content: 'deploy the site', commandName: '/deploy' }),
+			user('  deploy the site  '),
+			user('something else'),
+			text('ok')
+		];
+		const model = buildTranscriptModel(messages, SETTLED_OPTS);
+		expect(model.promptOccurrence).toHaveLength(messages.length);
+		messages.forEach((message, index) => {
+			if (message.role !== 'user' || message.type === 'command') return;
+			expect(model.promptOccurrence[index]).toBe(userPromptOccurrenceAt(messages, index));
+		});
+		// The interesting case: identical prompts get 0, 1, 2 — trimmed, and with
+		// the slash-command row not counted.
+		expect([0, 2, 5].map((i) => model.promptOccurrence[i])).toEqual([0, 1, 2]);
+	});
+
+	it('counts prompts that the display list drops (duplicate ids)', () => {
+		const dupe = user('again');
+		const messages = [user('again'), dupe, dupe, text('ok')];
+		const model = buildTranscriptModel(messages, SETTLED_OPTS);
+		messages.forEach((_, index) => {
+			expect(model.promptOccurrence[index]).toBe(userPromptOccurrenceAt(messages, index));
+		});
+	});
+
+	it('matches the per-row subagent scan, including the id-less case', () => {
+		const messages: ChatMessage[] = [
+			user('research this'),
+			msg({ type: 'tool_use', toolName: 'Task', toolId: 'tool-1', toolStatus: 'complete' }),
+			msg({ type: 'subagent', toolId: 'tool-1', agentStatus: 'completed' }),
+			msg({ type: 'tool_use', toolName: 'Task', toolId: 'tool-2', toolStatus: 'complete' }),
+			text('done')
+		];
+		const model = buildTranscriptModel(messages, SETTLED_OPTS);
+		for (const toolId of ['tool-1', 'tool-2', undefined]) {
+			expect(hasLinkedSubagent(model, toolId)).toBe(linkedSubagentByScan(messages, toolId));
+		}
+		expect(hasLinkedSubagent(model, 'tool-1')).toBe(true);
+		expect(hasLinkedSubagent(model, 'tool-2')).toBe(false);
+	});
+
+	it('matches the id-less scan when a subagent card carries no toolId', () => {
+		const messages: ChatMessage[] = [
+			user('go'),
+			msg({ type: 'tool_use', toolName: 'Task', toolStatus: 'complete' }),
+			msg({ type: 'subagent', agentStatus: 'completed' }),
+			text('done')
+		];
+		const model = buildTranscriptModel(messages, SETTLED_OPTS);
+		expect(hasLinkedSubagent(model, undefined)).toBe(linkedSubagentByScan(messages, undefined));
+		expect(hasLinkedSubagent(model, undefined)).toBe(true);
+		expect(hasLinkedSubagent(model, 'other')).toBe(false);
+	});
+
+	it('locates each user turn in the display list so windowing can reach it', () => {
+		const messages: ChatMessage[] = [
+			user('first'),
+			tool(),
+			tool(),
+			text('one'),
+			user('second'),
+			tool(),
+			text('two')
+		];
+		const model = buildTranscriptModel(messages, SETTLED_OPTS);
+		for (const message of messages) {
+			if (message.role !== 'user' || !message.id) continue;
+			const itemIndex = model.itemIndexByTurnId.get(message.id);
+			expect(itemIndex).toBeDefined();
+			const item = model.items[itemIndex as number];
+			expect(item.kind).toBe('message');
+			expect(item.kind === 'message' && item.message.id).toBe(message.id);
+		}
+	});
+
+	it('reports the last assistant metadata and latest user turn in one pass', () => {
+		const first = user('first');
+		const last = user('second');
+		const messages: ChatMessage[] = [
+			first,
+			msg({ role: 'assistant', type: 'text', content: 'a', metadata: { cost_usd: 1, duration_ms: 10 } }),
+			last,
+			msg({ role: 'assistant', type: 'text', content: 'b', metadata: { cost_usd: 2, duration_ms: 20 } }),
+			tool()
+		];
+		const model = buildTranscriptModel(messages, SETTLED_OPTS);
+		expect(model.lastAssistantMetadata).toEqual({ cost_usd: 2, duration_ms: 20 });
+		expect(model.latestUserTurnId).toBe(last.id);
+
+		const withoutMetadata = buildTranscriptModel([user('only')], SETTLED_OPTS);
+		expect(withoutMetadata.lastAssistantMetadata).toBeNull();
+
+		const withoutTurns = buildTranscriptModel([text('orphan')], SETTLED_OPTS);
+		expect(withoutTurns.latestUserTurnId).toBeNull();
+	});
+
+	it('ignores slash-command rows when resolving the latest user turn', () => {
+		const prompt = user('do the thing');
+		const messages: ChatMessage[] = [
+			prompt,
+			msg({ role: 'user', type: 'command', content: '/commit', commandName: '/commit' })
+		];
+		expect(buildTranscriptModel(messages, SETTLED_OPTS).latestUserTurnId).toBe(prompt.id);
+	});
+
+	it('produces exactly the list buildDisplayItems returns', () => {
+		const messages: ChatMessage[] = [
+			user('go'),
+			msg({ type: 'thinking', content: 'hmm' }),
+			tool(),
+			tool({ toolStatus: 'error' }),
+			text('the answer')
+		];
+		const model = buildTranscriptModel(messages, SETTLED_OPTS);
+		expect(model.items).toEqual(buildDisplayItems(messages, SETTLED_OPTS));
 	});
 });

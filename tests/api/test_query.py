@@ -398,6 +398,36 @@ class TestConversation:
         assert database.get_session(result["session_id"]) is not None
 
     @pytest.mark.asyncio
+    async def test_conversation_session_db_calls_are_offloaded(
+        self, mock_conv_dependencies
+    ):
+        """B2: the session lookup/create must not run on the event loop.
+
+        ``database.get_session`` / ``create_session`` are synchronous psycopg2
+        calls; run inline they stall every other request while this endpoint
+        sets up.
+        """
+        from app.api.query import conversation
+        from app.core.models import ConversationRequest
+        from app.db import async_database, database
+
+        offloaded = []
+        real_run_sync = async_database.run_sync
+
+        async def tracking_run_sync(fn, *args, **kwargs):
+            offloaded.append(getattr(fn, "__name__", str(fn)))
+            return await real_run_sync(fn, *args, **kwargs)
+
+        request = ConversationRequest(prompt="Offload me", profile="default")
+        api_user = mock_conv_dependencies["api_key"].return_value
+
+        with patch.object(async_database, "run_sync", tracking_run_sync):
+            result = await conversation(request, api_user)
+
+        assert "create_session" in offloaded
+        assert database.get_session(result["session_id"]) is not None
+
+    @pytest.mark.asyncio
     async def test_conversation_continue_session(self, mock_conv_dependencies):
         """Should continue existing session when session_id provided."""
         from app.api.query import conversation

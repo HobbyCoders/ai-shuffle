@@ -11,7 +11,9 @@ import logging
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Set, Tuple
+from typing import (
+    Any, Awaitable, Callable, Coroutine, Deque, Dict, List, Optional, Set, Tuple,
+)
 
 from fastapi import WebSocket
 
@@ -81,7 +83,7 @@ _COALESCABLE_USER_FRAMES = frozenset({"usage_snapshot", "tabs_sync"})
 _background_tasks: Set["asyncio.Task[Any]"] = set()
 
 
-def _spawn_detached(coro: Awaitable[None], name: str) -> None:
+def _spawn_detached(coro: Coroutine[Any, Any, None], name: str) -> None:
     """Run ``coro`` as a fire-and-forget task, keeping a strong reference.
 
     Used from synchronous, non-blocking code paths (``_ConnectionWriter.enqueue``)
@@ -90,6 +92,7 @@ def _spawn_detached(coro: Awaitable[None], name: str) -> None:
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:  # no loop (interpreter teardown / sync unit context)
+        coro.close()  # don't leave a "never awaited" coroutine behind
         return
     task = loop.create_task(coro, name=name)
     _background_tasks.add(task)
@@ -418,6 +421,7 @@ class UserDeviceConnection:
             return True
         return self.send_text(text, _user_coalesce_key(data))
 
+
 class SyncEngine:
     """
     Manages real-time synchronization between devices.
@@ -456,12 +460,17 @@ class SyncEngine:
             if session_id not in self._connections:
                 self._connections[session_id] = {}
 
-            # Close existing connection for this device if any. aclose() cancels
-            # and awaits the old writer task (no leak) and closes its socket
-            # detached, so a zombie peer can't stall registration.
+            # Retire the existing connection for this device if any. aclose()
+            # cancels AND awaits the old writer task (no leak) and closes its
+            # socket detached, so a zombie peer can't stall registration. The
+            # socket is only closed when it is genuinely a different one — a
+            # re-register of the SAME live socket (watch_session on an open
+            # tab) must not hang up on the user.
             old_conn = self._connections[session_id].pop(device_id, None)
             if old_conn is not None:
-                await old_conn.writer.aclose(close_socket=True)
+                await old_conn.writer.aclose(
+                    close_socket=old_conn.websocket is not websocket
+                )
 
             connection = DeviceConnection(
                 device_id=device_id,

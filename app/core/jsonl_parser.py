@@ -20,11 +20,13 @@ Key fields that affect parsing:
 
 import json
 import logging
+import sys
 import threading
+import time
 import uuid
 from collections import OrderedDict
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Generator
+from typing import List, Dict, Any, Optional, Generator, Tuple
 from datetime import datetime, timezone
 
 from app.core.config import settings
@@ -36,24 +38,262 @@ logger = logging.getLogger(__name__)
 # ─── Parse Result Cache ─────────────────────────────────────────────────────
 # Cache parsed JSONL results to avoid re-reading files on every poll/load.
 # Validated by file mtime + size - if file changes, cache entry is invalidated.
+#
+# Two things about these caches used to be wrong (finding B5):
+#   * entries were stored as JSON STRINGS, so every cache HIT paid a full
+#     ``json.loads`` of the whole transcript — megabytes, per request;
+#   * the only bound was a COUNT of 50 sessions, and a transcript entry is
+#     unbounded in size (inline base64 screenshots, untruncated tool inputs),
+#     so 50 entries could be hundreds of megabytes on a machine that is
+#     supposed to run in a small footprint.
+# Both caches are now :class:`ByteBoundedLRU`: they hold the transformed
+# message list itself (a hit costs one shallow copy, no deserialization) and
+# are bounded by ESTIMATED BYTES as well as by count.
 _PARSE_CACHE_MAX_SIZE = 50
 
-# Cache: sdk_session_id -> (file_mtime, file_size, messages_copy, usage_data_copy)
-_parse_cache: OrderedDict = OrderedDict()
-_parse_cache_lock = threading.Lock()
+#: Byte budget per cache namespace. Screenshot-heavy transcripts are what make
+#: entries large, so they are what this bounds.
+_PARSE_CACHE_MAX_BYTES = 32 * 1024 * 1024
+
+#: A single entry bigger than this is not cached at all. Without it one
+#: screenshot-heavy session would evict every other session on each insert and
+#: still be evicted itself before being read back — pure churn.
+_PARSE_CACHE_MAX_ENTRY_BYTES = 8 * 1024 * 1024
+
+
+def estimate_size(obj: Any, _depth: int = 0) -> int:
+    """Estimated retained size of a parsed-transcript structure, in bytes.
+
+    Walks the (acyclic, JSON-shaped) message structure summing
+    ``sys.getsizeof`` for scalars and containers. Approximate on purpose: it
+    only has to be proportional to the real footprint so the LRU's budget is
+    meaningful, and it must be cheap enough to run once per cache insert (the
+    caller has just parsed the whole transcript anyway).
+    """
+    if _depth > 12:  # transcripts are shallow; stop pathological nesting
+        return sys.getsizeof(obj)
+    if isinstance(obj, str):
+        return sys.getsizeof(obj)
+    if isinstance(obj, (bytes, bytearray)):
+        return sys.getsizeof(obj)
+    if isinstance(obj, dict):
+        total = sys.getsizeof(obj)
+        for k, v in obj.items():
+            total += estimate_size(k, _depth + 1) + estimate_size(v, _depth + 1)
+        return total
+    if isinstance(obj, (list, tuple, set)):
+        total = sys.getsizeof(obj)
+        for item in obj:
+            total += estimate_size(item, _depth + 1)
+        return total
+    return sys.getsizeof(obj)
+
+
+class ByteBoundedLRU:
+    """A small, thread-safe LRU bounded by BOTH entry count and estimated bytes.
+
+    Deliberately not an ad-hoc dict: the eviction rule has to hold on every
+    write path (there are four), and "50 entries" is not a memory bound when a
+    single entry can be tens of megabytes.
+
+    * ``__setitem__`` measures the value with :func:`estimate_size`, refuses
+      anything above ``max_entry_bytes`` (evicting any previous value for that
+      key, so a stale entry is never left behind), and evicts least-recently-
+      used entries until both budgets are satisfied.
+    * ``get`` / ``__getitem__`` / ``move_to_end`` refresh recency.
+    * ``lock`` is a re-entrant lock the module also exposes, so callers can
+      hold it across a read-then-write sequence without deadlocking against
+      the cache's own locking.
+    """
+
+    def __init__(
+        self,
+        max_entries: int,
+        max_bytes: int,
+        max_entry_bytes: Optional[int] = None,
+    ) -> None:
+        self.max_entries = max_entries
+        self.max_bytes = max_bytes
+        self.max_entry_bytes = (
+            max_entry_bytes if max_entry_bytes is not None else max_bytes
+        )
+        self.lock = threading.RLock()
+        self._data: "OrderedDict[Any, Any]" = OrderedDict()
+        self._sizes: Dict[Any, int] = {}
+        self._bytes = 0
+
+    # -- introspection ---------------------------------------------------
+    @property
+    def current_bytes(self) -> int:
+        with self.lock:
+            return self._bytes
+
+    def __len__(self) -> int:
+        with self.lock:
+            return len(self._data)
+
+    def __contains__(self, key) -> bool:
+        with self.lock:
+            return key in self._data
+
+    def keys(self):
+        with self.lock:
+            return list(self._data.keys())
+
+    # -- reads -----------------------------------------------------------
+    def get(self, key, default=None):
+        with self.lock:
+            if key not in self._data:
+                return default
+            self._data.move_to_end(key)
+            return self._data[key]
+
+    def __getitem__(self, key):
+        with self.lock:
+            value = self._data[key]  # KeyError propagates, dict semantics
+            self._data.move_to_end(key)
+            return value
+
+    def move_to_end(self, key) -> None:
+        with self.lock:
+            if key in self._data:
+                self._data.move_to_end(key)
+
+    # -- writes ----------------------------------------------------------
+    def __setitem__(self, key, value) -> None:
+        self.put(key, value)
+
+    def put(self, key, value, size: Optional[int] = None) -> bool:
+        """Insert ``value``; returns False when it was too big to cache."""
+        if size is None:
+            size = estimate_size(value)
+        with self.lock:
+            self._discard(key)
+            if size > self.max_entry_bytes:
+                logger.debug(
+                    "Parse cache: entry %r (%d bytes) exceeds the per-entry "
+                    "budget (%d) — not cached",
+                    key, size, self.max_entry_bytes,
+                )
+                return False
+            self._data[key] = value
+            self._sizes[key] = size
+            self._bytes += size
+            self._evict()
+            return True
+
+    def pop(self, key, default=None):
+        with self.lock:
+            if key not in self._data:
+                return default
+            value = self._data[key]
+            self._discard(key)
+            return value
+
+    def __delitem__(self, key) -> None:
+        with self.lock:
+            if key not in self._data:
+                raise KeyError(key)
+            self._discard(key)
+
+    def clear(self) -> None:
+        with self.lock:
+            self._data.clear()
+            self._sizes.clear()
+            self._bytes = 0
+
+    # -- internals (call with the lock held) -----------------------------
+    def _discard(self, key) -> None:
+        if key in self._data:
+            self._bytes -= self._sizes.pop(key, 0)
+            del self._data[key]
+
+    def _evict(self) -> None:
+        while self._data and (
+            len(self._data) > self.max_entries or self._bytes > self.max_bytes
+        ):
+            oldest, _ = next(iter(self._data.items()))
+            self._discard(oldest)
+
+
+def _copy_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return a caller-owned shallow copy of a cached message list.
+
+    Cached values are treated as IMMUTABLE snapshots. Callers routinely
+    re-key/extend the top level of each message (the session API builds its own
+    dicts from them; the cost-metadata pass writes into them), so the top level
+    is copied; nested values (``toolInput``, ``metadata``, screenshots …) are
+    shared and must not be mutated in place — the same contract every consumer
+    in the codebase already follows. Copying one dict per message costs
+    microseconds; the JSON round-trip this replaces cost tens of milliseconds
+    and re-allocated the entire transcript on every cache HIT.
+    """
+    return [dict(m) for m in messages]
+
+
+# Cache: sdk_session_id -> (file_mtime, file_size, messages, usage_data)
+_parse_cache = ByteBoundedLRU(
+    _PARSE_CACHE_MAX_SIZE, _PARSE_CACHE_MAX_BYTES, _PARSE_CACHE_MAX_ENTRY_BYTES
+)
+_parse_cache_lock = _parse_cache.lock
 
 # Separate cache namespace for the store-backed parse path. Keyed by
-# sdk_session_id, value is (messages_json, usage_json). Kept ENTIRELY separate
-# from _parse_cache so a store read can never serve a JSONL-derived result, or
-# vice-versa. There is no on-disk mtime to validate a store result against, so
-# entries are invalidated alongside the JSONL cache via
-# invalidate_parse_cache().
-_store_parse_cache: OrderedDict = OrderedDict()
-_store_parse_cache_lock = threading.Lock()
+# sdk_session_id, value is (messages, usage_data, store_version). Kept ENTIRELY
+# separate from _parse_cache so a store read can never serve a JSONL-derived
+# result, or vice-versa. There is no on-disk mtime to validate a store result
+# against, so entries carry a (count, max_id) store version stamp and are
+# invalidated alongside the JSONL cache via invalidate_parse_cache().
+_store_parse_cache = ByteBoundedLRU(
+    _PARSE_CACHE_MAX_SIZE, _PARSE_CACHE_MAX_BYTES, _PARSE_CACHE_MAX_ENTRY_BYTES
+)
+_store_parse_cache_lock = _store_parse_cache.lock
 
 # Cache: sdk_session_id -> (dir_mtime, agent_files_dict)
+# Count-bounded only: entries are a handful of Paths, not transcript payloads.
 _agent_paths_cache: OrderedDict = OrderedDict()
 _agent_paths_cache_lock = threading.Lock()
+
+# ─── Negative memo for "this session has no local JSONL" ────────────────────
+# get_session_jsonl_path falls back to iterating EVERY Claude project directory
+# with a stat() each. Under postgres_only most sessions have no local JSONL at
+# all (the transcript lives in Postgres, and the CLI writes to a tmpfs config
+# dir), and pg_session_store's lazy backfill probes this on every store miss —
+# i.e. on every open/poll of such a session. Without a negative memo that is a
+# full directory scan per request (finding B9). Mirrors the ``_empty_memo``
+# pattern in app/core/history_backfill.py.
+_JSONL_MISS_TTL_SECONDS = 60.0
+_jsonl_miss_memo: Dict[Tuple[str, str], float] = {}
+_jsonl_miss_lock = threading.Lock()
+
+
+def _memoize_jsonl_miss(sdk_session_id: str, working_dir: str) -> None:
+    with _jsonl_miss_lock:
+        _jsonl_miss_memo[(sdk_session_id, working_dir)] = time.monotonic()
+
+
+def _jsonl_miss_is_fresh(sdk_session_id: str, working_dir: str) -> bool:
+    with _jsonl_miss_lock:
+        at = _jsonl_miss_memo.get((sdk_session_id, working_dir))
+        if at is None:
+            return False
+        if time.monotonic() - at >= _JSONL_MISS_TTL_SECONDS:
+            _jsonl_miss_memo.pop((sdk_session_id, working_dir), None)
+            return False
+        return True
+
+
+def _forget_jsonl_miss(sdk_session_id: Optional[str] = None) -> None:
+    """Drop negative-lookup memos (one session, or all when ``None``).
+
+    Called whenever a session's cached parse is invalidated: that is exactly
+    when a transcript may have just appeared on disk.
+    """
+    with _jsonl_miss_lock:
+        if sdk_session_id is None:
+            _jsonl_miss_memo.clear()
+            return
+        for k in [k for k in _jsonl_miss_memo if k[0] == sdk_session_id]:
+            _jsonl_miss_memo.pop(k, None)
 
 # Maximum display size for tool output content (matches streaming behavior)
 MAX_DISPLAY_OUTPUT_SIZE = 2000
@@ -285,6 +525,16 @@ def get_session_jsonl_path(sdk_session_id: str, working_dir: str = "/workspace")
     Returns:
         Path to the JSONL file, or None if not found
     """
+    # A recent miss short-circuits the whole probe (finding B9): the fallback
+    # below stats EVERY project directory, and this is called on every store
+    # miss — i.e. on every open/poll of a session whose transcript lives only in
+    # Postgres. The memo is negative-only and TTL'd, so a transcript that
+    # appears on disk is picked up within _JSONL_MISS_TTL_SECONDS (immediately
+    # when the session's parse cache is invalidated, which is what happens when
+    # its transcript changes).
+    if _jsonl_miss_is_fresh(sdk_session_id, working_dir):
+        return None
+
     # Get Claude projects directory from config (supports custom paths via CLAUDE_PROJECTS_DIR env var)
     claude_projects_dir = settings.get_claude_projects_dir
 
@@ -300,6 +550,7 @@ def get_session_jsonl_path(sdk_session_id: str, working_dir: str = "/workspace")
         jsonl_path = project_dir / f"{sdk_session_id}.jsonl"
         logger.debug(f"Checking JSONL path: {jsonl_path}")
         if jsonl_path.exists():
+            _forget_jsonl_miss(sdk_session_id)
             return jsonl_path
 
     # Try to search all project directories for this session
@@ -309,9 +560,11 @@ def get_session_jsonl_path(sdk_session_id: str, working_dir: str = "/workspace")
                 jsonl_path = proj_dir / f"{sdk_session_id}.jsonl"
                 if jsonl_path.exists():
                     logger.debug(f"Found JSONL in alternate project dir: {jsonl_path}")
+                    _forget_jsonl_miss(sdk_session_id)
                     return jsonl_path
 
     logger.warning(f"JSONL file not found for session {sdk_session_id} in {claude_projects_dir}")
+    _memoize_jsonl_miss(sdk_session_id, working_dir)
     return None
 
 
@@ -836,29 +1089,25 @@ def parse_session_history(
     except OSError:
         return [], {}
 
-    # Check cache
-    with _parse_cache_lock:
-        cached = _parse_cache.get(sdk_session_id)
-        if cached is not None:
-            c_mtime, c_size, c_messages_json, c_usage_json = cached
-            if c_mtime == file_mtime and c_size == file_size:
-                _parse_cache.move_to_end(sdk_session_id)
-                logger.debug(f"Parse cache hit for session {sdk_session_id}")
-                # Deserialize from JSON strings (much faster than deepcopy under lock)
-                return json.loads(c_messages_json), json.loads(c_usage_json)
+    # Check cache. A hit returns a shallow copy of the cached message list —
+    # no deserialization at all (finding B5).
+    cached = _parse_cache.get(sdk_session_id)
+    if cached is not None:
+        c_mtime, c_size, c_messages, c_usage = cached
+        if c_mtime == file_mtime and c_size == file_size:
+            logger.debug(f"Parse cache hit for session {sdk_session_id}")
+            return _copy_messages(c_messages), dict(c_usage)
 
     # Cache miss - do full parse
     logger.debug(f"Parse cache miss for session {sdk_session_id}, parsing JSONL")
     messages, usage_data = _parse_session_history_uncached(sdk_session_id, working_dir, jsonl_path)
 
-    # Store in cache as serialized JSON strings (fast to copy on read, no deepcopy needed).
-    # default=str keeps the cache resilient to non-JSON-native values that can slip in
-    # from PostgreSQL rows (e.g. datetime timestamps) — a single such value must not
-    # raise and silently drop the cache, forcing a 6-20s JSONL re-parse on every load.
-    with _parse_cache_lock:
-        _parse_cache[sdk_session_id] = (file_mtime, file_size, json.dumps(messages, default=str), json.dumps(usage_data, default=str))
-        while len(_parse_cache) > _PARSE_CACHE_MAX_SIZE:
-            _parse_cache.popitem(last=False)
+    # Cache the transformed structure itself, byte-bounded. An oversized
+    # transcript (inline base64 screenshots) is simply not cached rather than
+    # evicting every other session on insert.
+    _parse_cache[sdk_session_id] = (
+        file_mtime, file_size, _copy_messages(messages), dict(usage_data),
+    )
 
     return messages, usage_data
 
@@ -910,6 +1159,10 @@ def invalidate_parse_cache(sdk_session_id: str = None) -> None:
     Args:
         sdk_session_id: If provided, invalidate only this session. If None, clear all.
     """
+    # A transcript that just changed may also have just APPEARED on disk, so
+    # the negative JSONL memo has to go with it (finding B9).
+    _forget_jsonl_miss(sdk_session_id or None)
+
     with _parse_cache_lock:
         if sdk_session_id:
             _parse_cache.pop(sdk_session_id, None)
@@ -968,15 +1221,14 @@ def pre_seed_parse_cache(
     Returns:
         True if cache was pre-seeded, False on failure (falls back to invalidation)
     """
-    # Serialize once and reuse for both cache namespaces.
-    # default=str: live-store messages can carry non-JSON-native values
-    # (e.g. PostgreSQL datetime timestamps). Without it a single such value
-    # raises, the pre-seed is abandoned, and the next load pays a full re-parse.
+    # Snapshot once and reuse for both cache namespaces. The caller keeps
+    # ownership of its own list, so copy the top level (see _copy_messages);
+    # from here on the cached snapshot is immutable.
     try:
-        messages_json = json.dumps(messages, default=str)
-        usage_json = json.dumps(usage_data, default=str)
+        cached_messages = _copy_messages(messages)
+        cached_usage = dict(usage_data or {})
     except Exception as e:
-        logger.error(f"Failed to serialize messages for pre-seed {sdk_session_id}: {e}")
+        logger.error(f"Failed to snapshot messages for pre-seed {sdk_session_id}: {e}")
         invalidate_parse_cache(sdk_session_id)
         return False
 
@@ -1017,13 +1269,10 @@ def pre_seed_parse_cache(
     with _store_parse_cache_lock:
         if store_version is not None:
             _store_parse_cache[sdk_session_id] = (
-                messages_json,
-                usage_json,
+                cached_messages,
+                cached_usage,
                 store_version,
             )
-            _store_parse_cache.move_to_end(sdk_session_id)
-            while len(_store_parse_cache) > _PARSE_CACHE_MAX_SIZE:
-                _store_parse_cache.popitem(last=False)
         else:
             _store_parse_cache.pop(sdk_session_id, None)
 
@@ -1045,12 +1294,9 @@ def pre_seed_parse_cache(
             _parse_cache[sdk_session_id] = (
                 stat.st_mtime,
                 stat.st_size,
-                messages_json,
-                usage_json,
+                cached_messages,
+                cached_usage,
             )
-            _parse_cache.move_to_end(sdk_session_id)
-            while len(_parse_cache) > _PARSE_CACHE_MAX_SIZE:
-                _parse_cache.popitem(last=False)
 
         logger.debug(f"Pre-seeded parse cache for session {sdk_session_id} with {len(messages)} messages")
         return True
@@ -1922,9 +2168,16 @@ def parse_session_history_from_store(
                     and cached[2] == current_version
                 ):
                     _store_parse_cache.move_to_end(sdk_session_id)
-                    c_messages_json, c_usage_json, _ = cached
-                    return json.loads(c_messages_json), json.loads(c_usage_json)
-                _store_parse_cache.pop(sdk_session_id, None)
+                    c_messages, c_usage, _ = cached
+                    # Legacy JSON-string entries (older build, or a test
+                    # planting the pre-B5 shape) are re-parsed rather than
+                    # served: the value shape is part of the cache contract.
+                    if isinstance(c_messages, str) or isinstance(c_usage, str):
+                        _store_parse_cache.pop(sdk_session_id, None)
+                    else:
+                        return _copy_messages(c_messages), dict(c_usage)
+                else:
+                    _store_parse_cache.pop(sdk_session_id, None)
 
     main_entries = store_loader(sdk_session_id, None) or []
 
@@ -1946,13 +2199,10 @@ def parse_session_history_from_store(
     if use_cache and current_version is not None:
         with _store_parse_cache_lock:
             _store_parse_cache[sdk_session_id] = (
-                json.dumps(messages, default=str),
-                json.dumps(usage_data, default=str),
+                _copy_messages(messages),
+                dict(usage_data),
                 current_version,
             )
-            _store_parse_cache.move_to_end(sdk_session_id)
-            while len(_store_parse_cache) > _PARSE_CACHE_MAX_SIZE:
-                _store_parse_cache.popitem(last=False)
 
     return messages, usage_data
 

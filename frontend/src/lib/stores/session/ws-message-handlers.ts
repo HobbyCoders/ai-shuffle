@@ -128,6 +128,52 @@ export interface MessageHandlerDeps {
 	clearStopTimeout: () => void;
 }
 
+// ─── Session-list refresh policy ─────────────────────────────────────────────
+
+/**
+ * Trailing-edge debounce for full session-list reloads.
+ *
+ * Every `done` / `session_updated` / `user_session_*` frame used to trigger an
+ * uncapped re-page of the whole session list — ⌈N/100⌉ sequential HTTP
+ * round-trips and a full sidebar re-derive per completion event, from every
+ * device and every background session, with no coalescing
+ * (PERFORMANCE_REVIEW_2026-08 W1). Row-level changes are now merged into the
+ * sidebar row directly; a full reload is reserved for changes that reshape the
+ * LIST (a session appearing/disappearing, a tag/hidden flip the server filters
+ * on) and is coalesced over this window.
+ */
+export const SESSION_LIST_RELOAD_DEBOUNCE_MS = 700;
+
+/**
+ * Fields of a `session_updated` / `user_session_updated` payload that can be
+ * merged straight into the local sidebar row. Everything here is displayed
+ * from the row itself, so patching is equivalent to refetching it.
+ */
+const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
+	'title',
+	'is_active',
+	'hidden',
+	'status',
+	'updated_at',
+	'branch',
+	'worktree_branch',
+	'worktree_id',
+	'worktree_deleted',
+	'degraded',
+	'device_name',
+	'instance_id',
+	'is_remote',
+	'turn_count',
+	'total_cost_usd',
+]);
+
+/**
+ * Fields whose change also reshapes the list SERVER-side (membership of the
+ * paginated/tag-filtered query), so the row patch is only half the story and an
+ * authoritative reload still has to follow — debounced.
+ */
+const LIST_SHAPE_FIELDS: ReadonlySet<string> = new Set(['hidden', 'tags', 'project_id']);
+
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 export function createMessageHandlers(deps: MessageHandlerDeps): {
@@ -143,6 +189,45 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		onNotifySessionComplete, onNotifyWaitingForResponse,
 		clearStopTimeout,
 	} = deps;
+
+	// ── Debounced list reloads ───────────────────────────────────────
+	// Trailing edge: a burst of lifecycle frames (several sessions finishing,
+	// a reconnect backfill) collapses into ONE reload.
+	let reloadTimer: ReturnType<typeof setTimeout> | null = null;
+	let reloadApiUsers = false;
+
+	function scheduleSessionsReload(alsoApiUsers = false): void {
+		if (alsoApiUsers) reloadApiUsers = true;
+		if (reloadTimer !== null) return;
+		reloadTimer = setTimeout(() => {
+			reloadTimer = null;
+			const withApiUsers = reloadApiUsers;
+			reloadApiUsers = false;
+			appLoadSessions();
+			if (withApiUsers) appLoadApiUserSessions();
+		}, SESSION_LIST_RELOAD_DEBOUNCE_MS);
+	}
+
+	/**
+	 * Merge a metadata-update payload into the sidebar row instead of refetching
+	 * the world (W1). Schedules a debounced reload only when the row is unknown
+	 * locally or the change reshapes the list server-side.
+	 */
+	function applyRowUpdates(sessionId: string | undefined, updates: Record<string, unknown>): void {
+		const keys = Object.keys(updates);
+		const patch: Record<string, unknown> = {};
+		let needsReload = false;
+		for (const key of keys) {
+			if (ROW_PATCHABLE_FIELDS.has(key)) patch[key] = updates[key];
+			else needsReload = true;
+			if (LIST_SHAPE_FIELDS.has(key)) needsReload = true;
+		}
+		const patched =
+			!!sessionId && Object.keys(patch).length > 0 && mergeSessionPatch(sessionId, patch);
+		// Nothing patchable, or the row isn't loaded here (paged out / brand new):
+		// only then is the list itself out of date.
+		if (!patched || needsReload) scheduleSessionsReload();
+	}
 
 	function mapPermissionRequests(
 		requests: PermissionRequestType[],
@@ -240,7 +325,16 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		// attention dot now takes precedence over the streaming dot in the board.
 		setNeedsAttention(doneSessionId, 0);
 
-		appLoadSessions();
+		// A completed turn only moves the row's last-activity time (and with it
+		// its place in the sidebar order) — patch that in rather than re-paging
+		// the entire session list on every `done`, from every device and every
+		// background session (W1). A `done` for a session we don't hold locally
+		// (paged out, or created elsewhere) does change the list, so that case
+		// falls back to a debounced reload.
+		if (doneSessionId) {
+			const patched = mergeSessionPatch(doneSessionId, { updated_at: new Date().toISOString() });
+			if (!patched) scheduleSessionsReload();
+		}
 	}
 
 	// ── Handler: stopped / interrupted ───────────────────────────────
@@ -342,27 +436,20 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const syncData = data.data as Record<string, unknown> | undefined;
 				const updates = (syncData?.updates ?? {}) as Record<string, unknown>;
 				const updatedTitle = typeof updates.title === 'string' ? updates.title : undefined;
-				// An is_active flip can be merged straight into the sidebar row —
-				// no refetch, so no chance of a stale paginated response
-				// re-flipping the card the user just settled/unsettled. If the
-				// row isn't loaded locally the merge is a no-op and we fall back
-				// to the refetch below.
-				let mergedActive = false;
-				if (typeof updates.is_active === 'boolean') {
-					const sid = data.session_id as string | undefined;
-					mergedActive = !!sid && mergeSessionPatch(sid, { is_active: updates.is_active });
-				}
+				const updatedSessionId = data.session_id as string | undefined;
 				if (updatedTitle) {
-					const updatedSessionId = data.session_id as string | undefined;
 					const currentState = getState();
 					if (updatedSessionId && updatedSessionId === currentState.sessionId) {
 						update(s => ({ ...s, title: updatedTitle }));
 						onPersistSession();
 					}
-					appLoadSessions();
-				} else if (!mergedActive) {
-					appLoadSessions();
 				}
+				// Row-level metadata (title backfill, is_active flip, …) is merged
+				// straight into the sidebar row — no refetch, so no chance of a
+				// stale paginated response re-flipping the card the user just
+				// settled/unsettled, and no reload storm per turn (W1). Only an
+				// unknown row or a list-reshaping field falls back to a reload.
+				applyRowUpdates(updatedSessionId, updates);
 			}
 
 			// message_added from server-side queue processing (_process_next_queued)
@@ -395,8 +482,9 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		}
 
 		if (msgType === 'user_session_created') {
-			appLoadSessions();
-			appLoadApiUserSessions();
+			// A genuine list-shape change (a row appeared) — reload, debounced so
+			// a burst of creations costs one round-trip, not one each.
+			scheduleSessionsReload(true);
 			return;
 		}
 
@@ -407,18 +495,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		if (msgType === 'user_session_updated') {
 			const updates = (data.updates ?? {}) as Record<string, unknown>;
 			const sessionId = data.session_id as string | undefined;
-			// An is_active flip (settle/unsettle, possibly from another device)
-			// can be merged straight into the sidebar row — no refetch, so no
-			// chance of a stale paginated response re-flipping the card.
-			let merged = false;
-			if (sessionId && typeof updates.is_active === 'boolean') {
-				merged = mergeSessionPatch(sessionId, { is_active: updates.is_active });
-			}
-			// Anything else in the payload (hidden flips, tag changes…) filters or
-			// reshapes the list server-side, so a refetch is still required.
-			if (!merged || Object.keys(updates).some((k) => k !== 'is_active')) {
-				appLoadSessions();
-			}
+			// Same policy as session_updated: patch the row, and only reload when
+			// the row is unknown here or the change reshapes the list server-side
+			// (hidden / tags / project move).
+			applyRowUpdates(sessionId, updates);
 			return;
 		}
 
@@ -572,7 +652,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					}
 					onPersistSession();
 				}
-				appLoadSessions();
+				// A new row exists server-side — a real list-shape change, but a
+				// debounced one (the create is usually followed by title/start/done
+				// frames for the same session).
+				scheduleSessionsReload();
 				break;
 			}
 
@@ -744,7 +827,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				if (!data.session_id) break;
 				const missingId = data.session_id as string;
 				console.warn(`[ActiveSession] Session not found: ${missingId}`);
-				appLoadSessions();
+				// The row is gone server-side: a list-shape change, debounced.
+				scheduleSessionsReload();
 				const currentId = getState().sessionId;
 				if (currentId === missingId) {
 					update(s => ({ ...s, error: 'This session no longer exists.' }));

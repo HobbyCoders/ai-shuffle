@@ -666,10 +666,11 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
         logger.debug("Failed to load installs registry for enrichment", exc_info=True)
         installs_map = {}
 
-    # Batch: resolve project names + link groups via the NON-instance-filtered
-    # get_project so projects owned by another install still resolve. The link
-    # group lets the board fold same-repo clones from every install into one
-    # logical project.
+    # Batch: resolve project names + link groups with ONE non-instance-filtered
+    # ``IN (...)`` read (was ``get_project`` per distinct project — an N+1 on
+    # every sidebar poll) so projects owned by another install still resolve.
+    # The link group lets the board fold same-repo clones from every install
+    # into one logical project.
     project_names: dict[str, str] = {}
     project_link_groups: dict[str, Optional[str]] = {}
     # v2-projects: origin of each legacy project (link_group_id or synth
@@ -684,11 +685,12 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
         project_link_groups[pid] = proj.get("link_group_id")
         project_origins[pid] = origin_for_legacy_project(proj)
 
-    # v2-projects: resolve each session's origin-keyed project + origin token via
-    # ONE batched pass over ``list_projects_v2`` (never a per-session DB call — the
-    # board fetches every session). ``origin`` is 1:1 with ``link_group_id`` for
-    # grouped projects, so the board folds identically. Unconditional since PR-B
-    # (the ``v2_projects`` kill switch was removed).
+    # v2-projects: resolve each session's origin-keyed project + origin token
+    # with TARGETED reads for just the ids/origins this page references (never a
+    # per-session DB call, and no longer a full ``list_projects_v2`` table scan
+    # per request). ``origin`` is 1:1 with ``link_group_id`` for grouped
+    # projects, so the board folds identically. Unconditional since PR-B (the
+    # ``v2_projects`` kill switch was removed).
     pv2_by_id, pv2_origin_to_id = _projects_v2_targeted(
         (s.get("project_v2_id") for s in sessions),
         project_origins.values(),
@@ -982,9 +984,26 @@ MAX_TOOL_INPUT_CHARS = 2000
 _MAX_TOOL_INPUT_DEPTH = 6
 
 
+# Appended to a capped string; also the marker that makes capping idempotent.
+_TRUNCATION_MARKER = "[... truncated"
+
+
 def _truncate_display_text(value: str) -> str:
     """Cap one string for display, with an explicit marker (parser's format)."""
-    return f"{value[:MAX_TOOL_INPUT_CHARS]}\n\n[... truncated - {len(value) // 1024}KB total]"
+    return (
+        f"{value[:MAX_TOOL_INPUT_CHARS]}\n\n"
+        f"{_TRUNCATION_MARKER} - {len(value) // 1024}KB total]"
+    )
+
+
+def _already_capped(value: str) -> bool:
+    """True when ``value`` is a string this module already truncated.
+
+    Keeps capping idempotent: a value that survived one pass (the cap plus its
+    marker is itself longer than the cap) must not be truncated again, which
+    would stack markers and lie about the original size.
+    """
+    return value[MAX_TOOL_INPUT_CHARS:].startswith(f"\n\n{_TRUNCATION_MARKER}")
 
 
 def _cap_value(value, depth: int = 0):
@@ -995,7 +1014,7 @@ def _cap_value(value, depth: int = 0):
     untruncated payload keeps its original object identity.
     """
     if isinstance(value, str):
-        if len(value) > MAX_TOOL_INPUT_CHARS:
+        if len(value) > MAX_TOOL_INPUT_CHARS and not _already_capped(value):
             return _truncate_display_text(value), True
         return value, False
     if depth >= _MAX_TOOL_INPUT_DEPTH:
@@ -1094,11 +1113,16 @@ def compact_messages_for_display(messages: List[dict]) -> None:
                 msg["toolScreenshot"] = url
 
 
-def resolve_message_page_limit(limit: Optional[int]) -> int:
-    """Clamp a caller-supplied message limit into the allowed range."""
-    if limit is None:
+def resolve_message_page_limit(limit) -> int:
+    """Clamp a caller-supplied message limit into the allowed range.
+
+    Anything that is not a plain int (None, or an unevaluated FastAPI ``Query``
+    default when the endpoint function is called directly, as several tests and
+    internal callers do) means "unspecified" and takes the default.
+    """
+    if not isinstance(limit, int) or isinstance(limit, bool):
         return DEFAULT_MESSAGE_PAGE_LIMIT
-    return max(1, min(int(limit), MAX_MESSAGE_PAGE_LIMIT))
+    return max(1, min(limit, MAX_MESSAGE_PAGE_LIMIT))
 
 
 def paginate_messages(
@@ -1118,8 +1142,11 @@ def paginate_messages(
     messages exist) and ``next_before_seq`` (the cursor for them).
     """
     page_limit = resolve_message_page_limit(limit)
+    # Same leniency as the limit: a non-int cursor means "from the end".
+    if not isinstance(before_seq, int) or isinstance(before_seq, bool):
+        before_seq = None
     total = len(messages)
-    end = total if before_seq is None else max(0, min(int(before_seq), total))
+    end = total if before_seq is None else max(0, min(before_seq, total))
     start = max(0, end - page_limit)
     page = messages[start:end]
     return page, {

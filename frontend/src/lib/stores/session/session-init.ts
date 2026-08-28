@@ -104,7 +104,18 @@ export function createSessionInit(deps: SessionInitDeps) {
 		console.debug(`[ActiveSession] init(): skipRestore=${skipRestore}, initGen=${initGen}, currentSessionId=${getState().sessionId}, messages=${getState().messages.length}`);
 
 		try {
-			const backendSelection = await switcher.loadSelectionFromBackend();
+			// Boot waterfall (finding S5): these two preference reads are
+			// INDEPENDENT — the device selection (profile/project) and this tab's
+			// persisted session. Awaiting them in series added a whole round trip
+			// before anything could be rendered or fetched. The restore read is
+			// skipped entirely (not just ignored) when skipRestore is set, so the
+			// parallel form costs nothing extra on that path.
+			const [backendSelection, persisted] = await Promise.all([
+				switcher.loadSelectionFromBackend(),
+				skipRestore
+					? Promise.resolve(null)
+					: switcher.loadPersistedSession(),
+			]);
 
 			if (initGen !== getInitGeneration()) {
 				console.debug(`[ActiveSession] init(): stale (gen ${initGen} < ${getInitGeneration()}), bailing`);
@@ -125,13 +136,6 @@ export function createSessionInit(deps: SessionInitDeps) {
 					),
 				}));
 			} else {
-				const persisted = await switcher.loadPersistedSession();
-
-				if (initGen !== getInitGeneration()) {
-					console.debug(`[ActiveSession] init(): stale after loadPersistedSession (gen ${initGen} < ${getInitGeneration()}), bailing`);
-					return;
-				}
-
 				console.debug(`[ActiveSession] init(): persisted sessionId=${persisted?.sessionId ?? 'null'}`);
 
 				if (persisted) {
@@ -173,6 +177,21 @@ export function createSessionInit(deps: SessionInitDeps) {
 						selectedWorktreeBranch: persisted.selectedWorktreeBranch ?? null,
 						worktreeDeleted: persisted.worktreeDeleted ?? false,
 					}));
+
+					// Start the transcript feed the moment the session id is known
+					// (finding S5). The SSE feed is a cookie-authed fetch — it needs
+					// no WebSocket at all, yet history used to wait for the WS
+					// handshake below because the only start call sat in
+					// `onConnected`. Starting here removes that round trip from the
+					// critical path for the restored session.
+					//
+					// The single-feed invariant is preserved: start() is idempotent
+					// for the session already feeding, `onConnected` re-checks
+					// isFeeding() before starting (and only revives otherwise), and
+					// sse-feed itself closes any earlier reader for the same session.
+					if (persisted.sessionId) {
+						feedController.start(persisted.sessionId);
+					}
 				} else {
 					update(s => ({ ...s, profile: defaultProfile, project: defaultProject }));
 				}

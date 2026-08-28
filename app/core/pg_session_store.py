@@ -19,9 +19,25 @@ Tables
 
 ``session_store_summaries``
     Incrementally-folded ``SessionSummaryEntry`` sidecar, one row per
-    (project_key, session_id). Updated inside :meth:`PgSessionStore.append`
-    via :func:`fold_session_summary`, guarded by a per-session
-    ``SELECT ... FOR UPDATE`` to serialize concurrent appends.
+    (project_key, session_id), plus a ``folded_through_id`` watermark naming
+    the highest ``session_store_entries.id`` already folded into ``data``.
+    Updated by :func:`_fold_summary_sync` under a per-session
+    ``SELECT ... FOR UPDATE``.
+
+    The fold is COALESCED (finding B4): the SDK flushes the transcript mirror
+    roughly every 100ms while a turn streams, and folding on every one of those
+    appends meant 4-5 statements + a commit ~10x/second per streaming session,
+    rewriting the whole summary JSONB row (one dead tuple per append) for a
+    sidecar nobody reads mid-turn. The fold now runs at most once per
+    ``_SUMMARY_FOLD_INTERVAL_S`` inside the append path, and on demand from the
+    two readers that actually consume summaries (``list_sessions`` /
+    ``list_session_summaries``).
+
+    Correctness does not depend on the in-process timer: the summary is a pure
+    fold of the entries and the watermark lives in the DATABASE, so whatever a
+    crash (or a rollback, or another install) left unfolded is folded by the
+    next append or read from exactly where the last one stopped. The in-memory
+    state is a rate limiter, nothing more.
 
 Blocking I/O
 ------------
@@ -40,6 +56,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import threading
 import time
 from contextlib import nullcontext
 from typing import Any
@@ -111,13 +128,240 @@ def _scrub_pg_illegal(value: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def _append_sync(key: SessionKey, entries: list[SessionStoreEntry]) -> None:
-    """Insert entries and (for main transcripts) update the summary sidecar.
+# ---------------------------------------------------------------------------
+# Coalesced summary fold (finding B4)
+# ---------------------------------------------------------------------------
 
-    Summary fold is serialized per (project_key, session_id) via
-    ``SELECT ... FOR UPDATE`` on the summaries row. The row is created on
-    first append (INSERT ... ON CONFLICT DO NOTHING) so the lock target
-    always exists before we read it.
+#: Minimum wall-clock gap between two summary folds for the same session inside
+#: the append path. The SDK mirrors the transcript roughly every 100ms while a
+#: turn streams; folding each time rewrote the whole summary JSONB row ~10x a
+#: second. Two seconds keeps the sidecar within the staleness window the SDK's
+#: mtime fast-path already tolerates, and readers flush on demand anyway.
+_SUMMARY_FOLD_INTERVAL_S = 2.0
+
+#: session_id -> {"project_key": str, "last_fold": monotonic, "pending": bool}.
+#: Purely an in-process rate limiter + "who owes a fold" list: the authoritative
+#: watermark is ``session_store_summaries.folded_through_id`` in the database,
+#: so losing this dict (crash, restart, another install) costs nothing but a
+#: slightly later fold.
+_fold_state: dict[str, dict[str, Any]] = {}
+_fold_state_lock = threading.Lock()
+
+
+def _forget_fold_state(session_id: str) -> None:
+    """Drop a session's fold bookkeeping (called when its store rows go away).
+
+    Without this, a pending fold recorded before a delete/truncate would be
+    replayed by the next flush against a row that no longer exists. The fold
+    itself refuses to recreate a missing summary row, so this is belt and
+    braces — but it also stops the flush list growing without bound.
+    """
+    with _fold_state_lock:
+        _fold_state.pop(session_id, None)
+
+
+def _reset_fold_state() -> None:
+    """Test helper — drop every session's fold bookkeeping."""
+    with _fold_state_lock:
+        _fold_state.clear()
+
+
+def _claim_fold(session_id: str, project_key: str, now: float) -> bool:
+    """Decide whether THIS append should fold, marking the session pending if not.
+
+    Returns True when the caller should fold now (first append for the session
+    in this process, or the interval has elapsed). The claim is recorded
+    optimistically: if the surrounding transaction later rolls back, the DB
+    watermark is unchanged and the next fold simply picks the same entries up
+    again, so the only cost of a wrong guess is a slightly later fold.
+    """
+    with _fold_state_lock:
+        state = _fold_state.get(session_id)
+        if state is None:
+            _fold_state[session_id] = {
+                "project_key": project_key,
+                "last_fold": now,
+                "pending": False,
+            }
+            return True
+        state["project_key"] = project_key
+        if now - state["last_fold"] >= _SUMMARY_FOLD_INTERVAL_S:
+            state["last_fold"] = now
+            state["pending"] = False
+            return True
+        state["pending"] = True
+        return False
+
+
+def _fold_summary_sync(cur, project_key: str, session_id: str) -> bool:
+    """Fold every not-yet-folded main-transcript entry into the summary sidecar.
+
+    Reads the row ``FOR UPDATE`` (serializing concurrent folders exactly as the
+    old per-append fold did), then folds the entries with
+    ``id > folded_through_id`` and advances the watermark to the last one.
+
+    Deliberately does NOT create the summary row: the row is a tombstone meaning
+    "this session WAS store-recorded" (see :func:`_has_summary_by_session_id_sync`)
+    and recreating it here would resurrect a session that was just deleted or
+    rewound to empty. The append path creates it before folding.
+
+    Entries are matched by ``session_id`` alone, like every other read in this
+    module — the stored ``project_key`` is the on-disk folder name and diverges
+    from any cwd-derived key. Returns True when the summary was rewritten.
+    """
+    cur.execute(
+        "SELECT data, mtime_ms, folded_through_id FROM session_store_summaries "
+        "WHERE project_key = %s AND session_id = %s FOR UPDATE",
+        (project_key, session_id),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return False
+
+    prev_data = row["data"] if row["data"] else {}
+    prev_mtime = row["mtime_ms"] or 0
+    watermark = int(row["folded_through_id"] or 0)
+
+    cur.execute(
+        "SELECT id, entry FROM session_store_entries "
+        "WHERE session_id = %s AND subpath IS NULL AND id > %s "
+        "ORDER BY id ASC",
+        (session_id, watermark),
+    )
+    rows = cur.fetchall() or []
+    if not rows:
+        return False
+
+    entries = [r["entry"] for r in rows]
+    last_id = int(rows[-1]["id"])
+
+    # A first fold (row just created, nothing folded yet) passes prev=None so
+    # the fold seeds created_at / is_sidechain from the first entry.
+    if prev_data or prev_mtime:
+        prev_summary: SessionSummaryEntry | None = {
+            "session_id": session_id,
+            "mtime": int(prev_mtime),
+            "data": dict(prev_data),
+        }
+    else:
+        prev_summary = None
+
+    key: SessionKey = {"project_key": project_key, "session_id": session_id}
+    folded = fold_session_summary(prev_summary, key, entries)
+
+    # mtime_ms is generated Postgres-side (same formula as _list_sessions_sync's
+    # MAX(created_at)) so the SDK's fast-path staleness check sees a single
+    # shared clock — otherwise app↔DB drift breaks list_sessions_from_store.
+    cur.execute(
+        "UPDATE session_store_summaries "
+        "SET data = %s, "
+        "    mtime_ms = (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT, "
+        "    folded_through_id = %s "
+        "WHERE project_key = %s AND session_id = %s",
+        (
+            Json(_scrub_pg_illegal(folded["data"])),
+            last_id,
+            project_key,
+            session_id,
+        ),
+    )
+    return True
+
+
+def flush_summary_folds(session_id: str | None = None) -> int:
+    """Fold every summary this process still owes, now.
+
+    Call this wherever a reader needs an up-to-date sidecar (the two list
+    readers below do) or at turn end. Never raises: a failed flush leaves the
+    work pending, and the DB watermark means the next attempt picks up exactly
+    where this one stopped. Returns the number of summaries rewritten.
+    """
+    with _fold_state_lock:
+        if session_id is not None:
+            state = _fold_state.get(session_id)
+            targets = (
+                [(session_id, state["project_key"])]
+                if state is not None and state["pending"]
+                else []
+            )
+        else:
+            targets = [
+                (sid, st["project_key"])
+                for sid, st in _fold_state.items()
+                if st["pending"]
+            ]
+        now = time.monotonic()
+        for sid, _pk in targets:
+            st = _fold_state.get(sid)
+            if st is not None:
+                st["pending"] = False
+                st["last_fold"] = now
+
+    folded = 0
+    for sid, pk in targets:
+        try:
+            with get_db() as conn:
+                if _fold_summary_sync(conn.cursor(), pk, sid):
+                    folded += 1
+        except Exception:
+            # Re-arm so the next flush retries; the watermark makes the retry
+            # idempotent.
+            with _fold_state_lock:
+                st = _fold_state.get(sid)
+                if st is not None:
+                    st["pending"] = True
+            logger.warning(
+                "Deferred session-summary fold failed for %s", sid, exc_info=True
+            )
+    return folded
+
+
+def _repair_stale_summaries_sync(project_key: str, limit: int = 100) -> int:
+    """Fold summaries left behind by a process that died mid-turn.
+
+    The in-process pending list does not survive a restart, so a summary whose
+    session is never appended to again could otherwise stay at its last
+    watermark forever. This finds rows in ``project_key`` that have entries
+    beyond ``folded_through_id`` and folds them — the crash-recovery half of
+    the coalesced fold (the summary is a pure function of the entries, so
+    nothing is lost, only late). Bounded by ``limit`` so a first run against a
+    large project cannot turn one read into an unbounded repair loop.
+    """
+    repaired = 0
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT s.session_id FROM session_store_summaries s "
+                "WHERE s.project_key = %s AND EXISTS ("
+                "    SELECT 1 FROM session_store_entries e "
+                "    WHERE e.session_id = s.session_id AND e.subpath IS NULL "
+                "    AND e.id > s.folded_through_id) "
+                "LIMIT %s",
+                (project_key, limit),
+            )
+            stale = [r["session_id"] for r in (cur.fetchall() or [])]
+            for sid in stale:
+                if _fold_summary_sync(cur, project_key, sid):
+                    repaired += 1
+    except Exception:
+        logger.warning(
+            "Stale session-summary repair failed for project %s",
+            project_key,
+            exc_info=True,
+        )
+    return repaired
+
+
+def _append_sync(key: SessionKey, entries: list[SessionStoreEntry]) -> None:
+    """Insert entries and (for main transcripts) keep the summary sidecar fresh.
+
+    The insert always happens. The summary fold is coalesced to at most one per
+    ``_SUMMARY_FOLD_INTERVAL_S`` per session (finding B4) — see the module
+    docstring for why that is safe — and is serialized per
+    (project_key, session_id) via ``SELECT ... FOR UPDATE`` on the summaries
+    row, which is created on first append (INSERT ... ON CONFLICT DO NOTHING)
+    so the lock target always exists.
     """
     if not entries:
         return
@@ -145,49 +389,22 @@ def _append_sync(key: SessionKey, entries: list[SessionStoreEntry]) -> None:
         if subpath is not None:
             return
 
-        # Ensure the summary row exists so FOR UPDATE has something to lock.
-        # mtime_ms=0 is the fold's placeholder; we overwrite below.
+        should_fold = _claim_fold(session_id, project_key, time.monotonic())
+
+        # Ensure the summary row exists. Cheap (one ON CONFLICT DO NOTHING) and
+        # kept on EVERY append rather than only on the folding ones: the row
+        # doubles as the "this session was store-recorded" tombstone the lazy
+        # JSONL backfill checks, so it must not wait for the first fold.
         cur.execute(
             "INSERT INTO session_store_summaries "
-            "(project_key, session_id, data, mtime_ms) "
-            "VALUES (%s, %s, %s, 0) "
+            "(project_key, session_id, data, mtime_ms, folded_through_id) "
+            "VALUES (%s, %s, %s, 0, 0) "
             "ON CONFLICT (project_key, session_id) DO NOTHING",
             (project_key, session_id, Json({})),
         )
-        cur.execute(
-            "SELECT data, mtime_ms FROM session_store_summaries "
-            "WHERE project_key = %s AND session_id = %s FOR UPDATE",
-            (project_key, session_id),
-        )
-        row = cur.fetchone()
-        prev_data = row["data"] if row and row["data"] else {}
-        prev_mtime = row["mtime_ms"] if row else 0
 
-        # If this is the first real fold on this row (we just inserted it),
-        # pass prev=None so fold seeds created_at / is_sidechain from the
-        # first entry rather than leaving them off.
-        if prev_data or prev_mtime:
-            prev_summary: SessionSummaryEntry | None = {
-                "session_id": session_id,
-                "mtime": int(prev_mtime),
-                "data": dict(prev_data),
-            }
-        else:
-            prev_summary = None
-
-        folded = fold_session_summary(prev_summary, key, list(entries))
-
-        # mtime_ms is generated Postgres-side (same formula as
-        # _list_sessions_sync's MAX(created_at)) so the SDK's fast-path
-        # staleness check sees a single shared clock — otherwise app↔DB
-        # drift breaks list_sessions_from_store.
-        cur.execute(
-            "UPDATE session_store_summaries "
-            "SET data = %s, "
-            "    mtime_ms = (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT "
-            "WHERE project_key = %s AND session_id = %s",
-            (Json(_scrub_pg_illegal(folded["data"])), project_key, session_id),
-        )
+        if should_fold:
+            _fold_summary_sync(cur, project_key, session_id)
 
 
 def _count_entries_sync(key: SessionKey, _conn=None) -> int:
@@ -283,41 +500,19 @@ def _backfill_entries_sync(
             return written
 
         # Fold the whole transcript into the summary sidecar in one shot,
-        # mirroring _append_sync's create-then-fold flow. prev=None seeds
-        # created_at / is_sidechain from the first entry. mtime_ms is stamped
-        # Postgres-side with the same NOW()-epoch-ms formula as live appends.
+        # mirroring _append_sync's create-then-fold flow. The shared fold reads
+        # the rows back from this same transaction (id > folded_through_id, so
+        # exactly what was just inserted), seeds created_at / is_sidechain from
+        # the first entry, and stamps mtime_ms Postgres-side with the same
+        # NOW()-epoch-ms formula as live appends.
         cur.execute(
             "INSERT INTO session_store_summaries "
-            "(project_key, session_id, data, mtime_ms) "
-            "VALUES (%s, %s, %s, 0) "
+            "(project_key, session_id, data, mtime_ms, folded_through_id) "
+            "VALUES (%s, %s, %s, 0, 0) "
             "ON CONFLICT (project_key, session_id) DO NOTHING",
             (project_key, session_id, Json({})),
         )
-        cur.execute(
-            "SELECT data, mtime_ms FROM session_store_summaries "
-            "WHERE project_key = %s AND session_id = %s FOR UPDATE",
-            (project_key, session_id),
-        )
-        row = cur.fetchone()
-        prev_data = row["data"] if row and row["data"] else {}
-        prev_mtime = row["mtime_ms"] if row else 0
-        if prev_data or prev_mtime:
-            prev_summary: SessionSummaryEntry | None = {
-                "session_id": session_id,
-                "mtime": int(prev_mtime),
-                "data": dict(prev_data),
-            }
-        else:
-            prev_summary = None
-
-        folded = fold_session_summary(prev_summary, key, list(entries))
-        cur.execute(
-            "UPDATE session_store_summaries "
-            "SET data = %s, "
-            "    mtime_ms = (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT "
-            "WHERE project_key = %s AND session_id = %s",
-            (Json(_scrub_pg_illegal(folded["data"])), project_key, session_id),
-        )
+        _fold_summary_sync(cur, project_key, session_id)
 
     return written
 
@@ -585,7 +780,12 @@ def _list_sessions_sync(project_key: str) -> list[SessionStoreListEntry]:
     to epoch milliseconds. This shares a clock with the summary sidecar's
     ``mtime_ms`` (both are Postgres-side NOW() timestamps) so the fast-path
     staleness check in ``list_sessions_from_store`` sees sidecars as fresh.
+
+    Flushes any deferred summary fold first: this listing is half of the SDK's
+    freshness comparison, so it must not report entry mtimes newer than the
+    sidecars it is about to be compared against (finding B4).
     """
+    flush_summary_folds()
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -601,6 +801,15 @@ def _list_sessions_sync(project_key: str) -> list[SessionStoreListEntry]:
 
 
 def _list_session_summaries_sync(project_key: str) -> list[SessionSummaryEntry]:
+    """Return every folded summary for ``project_key``.
+
+    The summary sidecar is folded lazily (finding B4), so this — the only place
+    the folded ``data`` is actually consumed — brings it current first: it
+    flushes what this process still owes, then repairs anything a previous
+    process left unfolded when it died mid-turn.
+    """
+    flush_summary_folds()
+    _repair_stale_summaries_sync(project_key)
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -629,6 +838,9 @@ def _delete_sync(key: SessionKey) -> None:
     project_key = key["project_key"]
     session_id = key["session_id"]
     subpath = _subpath_of(key)
+
+    if subpath is None:
+        _forget_fold_state(session_id)
 
     with get_db() as conn:
         cur = conn.cursor()
@@ -663,6 +875,7 @@ def _delete_session_data_by_session_id_sync(session_id: str) -> int:
     NO foreign key into the store tables, so without this every deleted
     session leaked its full transcript forever (Bug E).
     """
+    _forget_fold_state(session_id)
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -708,7 +921,15 @@ def _truncate_main_transcript_to_keep_count_sync(
     (``subpath IS NOT NULL``) are intentionally left untouched: a truncated turn
     no longer references them, so they are inert, and mapping each subagent
     transcript back to the turn that spawned it is not worth the risk here.
+
+    Drops any deferred summary fold for the session first: the entries it was
+    going to fold may be the ones being deleted here. The summary ``data``
+    itself is left exactly as the pre-rewind behaviour left it (it is advisory
+    metadata, and the watermark only ever moves forward — BIGSERIAL never
+    reissues an id, so entries appended after a rewind are still strictly above
+    it and cannot be skipped).
     """
+    _forget_fold_state(session_id)
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -830,6 +1051,15 @@ class PgSessionStore:
     ) -> None:
         await asyncio.to_thread(_append_sync, key, entries)
 
+    async def flush_summaries(self, session_id: str | None = None) -> int:
+        """Fold any summary this process still owes (see :func:`flush_summary_folds`).
+
+        NOT part of the SDK SessionStore protocol. Exposed so a turn-end hook
+        can bring the sidecar current the moment a turn finishes instead of
+        waiting for the next reader.
+        """
+        return await asyncio.to_thread(flush_summary_folds, session_id)
+
     async def load(self, key: SessionKey) -> list[SessionStoreEntry] | None:
         return await asyncio.to_thread(_load_sync, key)
 
@@ -928,5 +1158,6 @@ class PgSessionStore:
 __all__ = [
     "PgSessionStore",
     "RewindTargetNotFound",
+    "flush_summary_folds",
     "truncate_session_store_to_checkpoint",
 ]

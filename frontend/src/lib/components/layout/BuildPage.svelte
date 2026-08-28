@@ -1,3 +1,28 @@
+<script module lang="ts">
+	/**
+	 * Module-scoped freshness stamp for the sub-nav count loads.
+	 *
+	 * BuildPage used to refire four list loads on EVERY mount (R14). It is now
+	 * kept alive by MainPanel, so mounts are rare — but a deep link or a reload
+	 * still remounts it, and re-fetching profiles/MCP/plugins/hooks that were
+	 * read seconds ago just to redraw the same badges is wasted work. The stores
+	 * keep their last value, so this is a plain stale-while-revalidate: render
+	 * the cached counts immediately, revalidate only when they are actually old.
+	 */
+	const BUILD_COUNTS_TTL_MS = 60_000;
+	let lastCountsLoadAt = 0;
+
+	/** Exported for tests: forget the freshness stamp. */
+	export function resetBuildCountsFreshness() {
+		lastCountsLoadAt = 0;
+	}
+
+	/** True when the sub-nav counts should be refetched on mount. */
+	export function buildCountsAreStale(now: number = Date.now()): boolean {
+		return now - lastCountsLoadAt >= BUILD_COUNTS_TTL_MS;
+	}
+</script>
+
 <script lang="ts">
 	/**
 	 * BuildPage — the unified "Build" surface (Studio-v2 design).
@@ -20,12 +45,33 @@
 	import { mcp, globalMcpServers } from '$lib/stores/mcp.svelte';
 	import { plugins, installedPlugins } from '$lib/stores/plugins.svelte';
 	import { hooks, projectHooks } from '$lib/stores/hooks.svelte';
-	import ProfileCard from '$lib/components/deck/cards/ProfileCard.svelte';
-	import McpManagerCard from '$lib/components/deck/cards/McpManagerCard.svelte';
-	import BuildPluginList from '$lib/components/layout/build/BuildPluginList.svelte';
-	import HooksCard from '$lib/components/deck/cards/HooksCard.svelte';
+	import LazyPanel from '$lib/components/deck/lazy/LazyPanel.svelte';
+	import {
+		createLazyComponent,
+		type LazyComponentHandle
+	} from '$lib/components/deck/lazy/lazy-component';
 
 	type BuildSub = 'profile' | 'mcp' | 'plugins' | 'hooks';
+
+	// Each sub-tab is its own chunk. ProfileCard/McpManagerCard/HooksCard drag in
+	// their editors, forms and validation; loading all four to show one of them
+	// is what made "Build" the heaviest branch of the route bundle. The sub-nav
+	// prefetches on hover/focus, so the switch is a same-frame render in
+	// practice (LazyPanel renders a resolved handle synchronously).
+	const SUB_PANELS: Record<BuildSub, LazyComponentHandle<unknown>> = {
+		profile: createLazyComponent('build:profile', () =>
+			import('$lib/components/deck/cards/ProfileCard.svelte')
+		),
+		mcp: createLazyComponent('build:mcp', () =>
+			import('$lib/components/deck/cards/McpManagerCard.svelte')
+		),
+		plugins: createLazyComponent('build:plugins', () =>
+			import('$lib/components/layout/build/BuildPluginList.svelte')
+		),
+		hooks: createLazyComponent('build:hooks', () =>
+			import('$lib/components/deck/cards/HooksCard.svelte')
+		)
+	};
 
 	interface Props {
 		/** Deep-link target (e.g. "Configure agents →", "Manage plugins"). */
@@ -85,11 +131,27 @@
 		detail = false;
 	}
 
+	/** Prefetch a sub-tab's chunk on hover/focus so the click is instant. */
+	function prefetch(next: BuildSub) {
+		SUB_PANELS[next].preload();
+	}
+
+	/** Passed to the section components; hoisted so the markup stays type-free. */
+	function setDetail(next: boolean) {
+		detail = next;
+	}
+
 	const gridMode = $derived(NATIVE.has(sub) && !detail);
 
 	// Per-section counts for the sub-nav badges. Trigger lightweight loads on mount
 	// so the numbers show even before a section is opened; badge hidden when 0.
 	onMount(() => {
+		// Warm the sub-tab the page will actually show first.
+		SUB_PANELS[untrack(() => sub)].preload();
+		// Stale-while-revalidate: the stores still hold the previous values, so
+		// the badges render instantly; only refetch when they've gone stale.
+		if (!buildCountsAreStale()) return;
+		lastCountsLoadAt = Date.now();
 		appData.loadProfiles();
 		mcp.loadGlobalServers();
 		plugins.loadInstalled();
@@ -115,6 +177,8 @@
 						class="bp-tab"
 						class:on={sub === item.id}
 						aria-current={sub === item.id ? 'page' : undefined}
+						onpointerenter={() => prefetch(item.id)}
+						onfocus={() => prefetch(item.id)}
 						onclick={() => select(item.id)}
 					>
 						<item.icon size={15} strokeWidth={1.7} />
@@ -131,13 +195,29 @@
 		     toggle (rendering it in two branches would remount it → loop). -->
 		<div class="bp-inner">
 			{#if sub === 'profile'}
-				<ProfileCard embedded initialSelectedId={requestedItemId} onDetailChange={(d) => (detail = d)} />
+				<LazyPanel
+					handle={SUB_PANELS.profile}
+					label="Agents"
+					props={{
+						embedded: true,
+						initialSelectedId: requestedItemId,
+						onDetailChange: setDetail
+					}}
+				/>
 			{:else if sub === 'mcp'}
-				<McpManagerCard embedded onDetailChange={(d) => (detail = d)} />
+				<LazyPanel
+					handle={SUB_PANELS.mcp}
+					label="MCP Servers"
+					props={{ embedded: true, onDetailChange: setDetail }}
+				/>
 			{:else if sub === 'plugins'}
-				<BuildPluginList />
+				<LazyPanel handle={SUB_PANELS.plugins} label="Plugins" />
 			{:else if sub === 'hooks'}
-				<HooksCard embedded onDetailChange={(d) => (detail = d)} />
+				<LazyPanel
+					handle={SUB_PANELS.hooks}
+					label="Hooks"
+					props={{ embedded: true, onDetailChange: setDetail }}
+				/>
 			{/if}
 		</div>
 	</div>

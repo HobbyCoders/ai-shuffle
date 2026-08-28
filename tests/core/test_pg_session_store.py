@@ -92,9 +92,15 @@ def _schema(pg_pool):
                 session_id TEXT NOT NULL,
                 data JSONB NOT NULL,
                 mtime_ms BIGINT NOT NULL,
+                folded_through_id BIGINT NOT NULL DEFAULT 0,
                 PRIMARY KEY (project_key, session_id)
             )
             """
+        )
+        # v84 fold watermark (the table may predate it from an earlier run).
+        cur.execute(
+            "ALTER TABLE session_store_summaries "
+            "ADD COLUMN IF NOT EXISTS folded_through_id BIGINT NOT NULL DEFAULT 0"
         )
 
 

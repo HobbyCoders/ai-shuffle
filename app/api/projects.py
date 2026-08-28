@@ -18,6 +18,7 @@ from app.core.config import settings
 from app.core.project_utils import get_project_working_dir, get_project_working_dir_as_path, get_worktree_working_dir, is_absolute_project_path
 from app.core.platform import is_local_mode
 from app.db import database
+from app.db.async_database import run_sync
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
 from app.api.common import check_project_access, format_file_size, api_error_handler
 from app.core.project_links import is_link_locked
@@ -40,6 +41,19 @@ class ProjectLinkRequest(BaseModel):
 router = APIRouter(prefix="/api/v1/projects", tags=["Projects"])
 
 
+def _needs_link_backfill(projects: List[dict]) -> List[dict]:
+    """The rows a link-group backfill could still fix — a pure, in-memory check.
+
+    Deliberately cheap and query-free: it is what keeps the listing endpoint
+    from touching the database at all once every project carries a group (the
+    steady state), so the backfill's read + writes never run on the hot path.
+    """
+    return [
+        p for p in projects
+        if not p.get("link_group_id") and not is_link_locked(p)
+    ]
+
+
 def _backfill_link_groups(projects: List[dict]) -> None:
     """Best-effort: fill NULL link_group_id from each project's git remote.
 
@@ -48,11 +62,13 @@ def _backfill_link_groups(projects: List[dict]) -> None:
     clone that was never git-polled stays NULL and shows as a duplicate entry.
     Deriving it here keeps the picker list identical to the sessions board.
     Locked rows keep their manual group; failures never break the listing.
+
+    Self-limiting: a derived group is WRITTEN to the row, so that project is
+    never pending again — after the one-time derivation the listing issues no
+    query and no write at all (see ``_needs_link_backfill``). Synchronous; the
+    listing runs it inside its single ``run_sync`` hop, never on the event loop.
     """
-    pending = [
-        p for p in projects
-        if not p.get("link_group_id") and not is_link_locked(p)
-    ]
+    pending = _needs_link_backfill(projects)
     if not pending:
         return
     try:
@@ -143,28 +159,38 @@ def validate_project_path(path: str, allow_create: bool = False) -> Path:
     return full_path
 
 
+def _load_projects_for_listing(api_user_project_id: Optional[str]) -> tuple:
+    """Every DB read (and the one-time link-group derivation) for the listing.
+
+    Runs in ONE worker thread: these are synchronous psycopg2 calls that used
+    to execute directly on the event loop, stalling every concurrent request
+    for the duration of a full ``projects`` scan plus a session-count GROUP BY.
+    """
+    session_counts = database.get_all_project_session_counts()
+
+    if api_user_project_id:
+        # API user with assigned project - only return that project
+        project = database.get_project(api_user_project_id)
+        projects = [project] if project else []
+    else:
+        # Admin or unrestricted API user - return all projects
+        projects = database.get_all_projects()
+
+    # No-op (not one query, not one write) once every row carries a group.
+    _backfill_link_groups(projects)
+    return projects, session_counts
+
+
 @router.get("", response_model=List[Project])
 async def list_projects(request: Request, token: str = Depends(require_auth)):
     """List all projects. API users only see their assigned project."""
     api_user = get_api_user_from_request(request)
+    api_user_project_id = api_user.get("project_id") if api_user else None
 
-    # Get session counts for all projects
-    session_counts = database.get_all_project_session_counts()
+    projects, session_counts = await run_sync(
+        _load_projects_for_listing, api_user_project_id
+    )
 
-    if api_user and api_user.get("project_id"):
-        # API user with assigned project - only return that project
-        project = database.get_project(api_user["project_id"])
-        if project:
-            _backfill_link_groups([project])
-            project["session_count"] = session_counts.get(project["id"], 0)
-            if not is_absolute_project_path(project["path"]):
-                project["path"] = get_project_working_dir(project)
-            return [project]
-        return []
-
-    # Admin or unrestricted API user - return all projects
-    projects = database.get_all_projects()
-    _backfill_link_groups(projects)
     for project in projects:
         project["session_count"] = session_counts.get(project["id"], 0)
         # Resolve relative paths to absolute for display
@@ -173,18 +199,27 @@ async def list_projects(request: Request, token: str = Depends(require_auth)):
     return projects
 
 
+def _load_project_detail(project_id: str) -> tuple:
+    """Project row + its session count — one thread hop for the detail read."""
+    project = database.get_project(project_id)
+    if not project:
+        return None, 0
+    return project, database.get_project_session_count(project_id)
+
+
 @router.get("/{project_id}", response_model=Project)
 async def get_project(request: Request, project_id: str, token: str = Depends(require_auth)):
     """Get a specific project. API users can only access their assigned project."""
     check_project_access(request, project_id)
 
-    project = database.get_project(project_id)
+    # Both reads in ONE thread hop (they were sync calls on the event loop).
+    project, session_count = await run_sync(_load_project_detail, project_id)
     if not project:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Project not found: {project_id}"
         )
-    project["session_count"] = database.get_project_session_count(project_id)
+    project["session_count"] = session_count
     # Resolve relative paths to absolute for display
     if not is_absolute_project_path(project["path"]):
         project["path"] = get_project_working_dir(project)

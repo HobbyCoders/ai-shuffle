@@ -6,9 +6,21 @@ live, waking on gateway notifies (``app.core.event_gateway``) and — crucially 
 falling back to a keepalive-timer poll of ``get_max_seq`` so delivery never
 depends on LISTEN/NOTIFY being healthy.
 
-Ordering is gap-free: the gateway queue is subscribed *before* backfill, so no
-event can slip between the backfill snapshot and the live tail, and every frame
-is emitted in strictly increasing ``seq`` order (``cursor`` dedupes).
+Ordering is gap-free: the session's shared tail reader is subscribed *before*
+backfill, so no event can slip between the backfill snapshot and the live tail,
+and every frame is emitted in strictly increasing ``seq`` order (``cursor``
+dedupes).
+
+Live delivery is shared per session, not per client (:class:`_SessionTail`).
+Each notify tick used to cost every connected client a ``get_max_seq`` + a
+``get_events`` + a full re-serialization of every row; with C clients on a
+streaming session that was ~14*C queries/second against a 10-connection pool
+shared with the whole REST surface. Now ONE reader per session does one read and
+one serialization per append batch and fans the resulting frame text out to
+every subscriber. A client only emits a pushed batch when it continues exactly
+where that client left off; anything else (a dropped batch, a late attach, a
+degraded reader) falls back to reading from its own cursor, so the
+"``seq > from_seq`` is gap- and duplicate-free" contract holds by construction.
 """
 
 from __future__ import annotations
@@ -17,7 +29,18 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any, Dict, Iterator, List, Optional, Sequence
+from typing import (
+    Any,
+    AsyncIterator,
+    Dict,
+    Iterator,
+    List,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
@@ -39,6 +62,20 @@ router = APIRouter(prefix="/api/v1/sessions", tags=["Sessions"])
 
 # Keepalive / poll cadence. Monkeypatched small in tests.
 KEEPALIVE_SECONDS = 15.0
+
+# Correctness re-sync cadence for a client whose live delivery is healthy (the
+# gateway LISTEN connection is up AND this session's shared reader is running).
+# The keepalive tick then costs a comment, not a DB read (F9): a hidden tab on a
+# quiet session used to run get_max_seq every KEEPALIVE_SECONDS forever. The
+# re-sync stays as a cheap belt-and-braces reconciliation; the moment either
+# health signal drops, every tick reconciles again, exactly as before.
+LIVE_RESYNC_SECONDS = 120.0
+
+# Per-client push queue depth. Frames are shared strings (one serialization,
+# many references), so the real bound is on how far a slow client may lag before
+# we stop buffering for it. Overflow is SAFE, not lossy: dropped batches leave a
+# discontinuity the client detects and repairs with a read from its own cursor.
+_TAIL_QUEUE_MAXSIZE = 64
 
 _PAGE = 500
 
@@ -218,6 +255,276 @@ def _frame(row: Dict[str, Any]) -> str:
     return f"id: {row['seq']}\nevent: {row['event_type']}\ndata: {data}\n\n"
 
 
+# ---------------------------------------------------------------------------
+# Shared per-session tail reader (W4)
+#
+# One reader per session, not per client: it holds the session's ONLY gateway
+# subscription, turns each notify tick into a single ``get_events`` read plus a
+# single ``_frame`` serialization pass, and publishes the resulting text to
+# every attached client.
+#
+# Safety of the pushed path — a batch is emitted by a client ONLY when
+# ``batch.prev_seq`` equals that client's own cursor, i.e. the batch starts
+# exactly where the client stopped. Rows inside a batch come from one
+# ``get_events`` call in ``seq ASC`` order, and the reader advances its cursor
+# to the last row it published, so consecutive batches chain end-to-end. Any
+# other case — a batch dropped by queue overflow, a client that attached
+# mid-flight, a reader that died — leaves ``prev_seq != cursor``, and the client
+# repairs it by reading from its own cursor instead of trusting the push. A
+# pushed row can therefore never arrive out of order, be skipped, or be
+# duplicated: when in doubt we read.
+# ---------------------------------------------------------------------------
+
+
+class _TailBatch(NamedTuple):
+    """One published batch: the cursor it continues from and its frames."""
+
+    prev_seq: int
+    last_seq: int
+    frames: Tuple[Tuple[int, str], ...]
+
+
+# Pushed into the reader's gateway queue to force a read pass (cursor seeding).
+_KICK = object()
+
+
+class _TailSubscriber:
+    """One connected SSE client's slot on a session's shared reader."""
+
+    __slots__ = ("queue",)
+
+    def __init__(self) -> None:
+        self.queue: asyncio.Queue = asyncio.Queue(maxsize=_TAIL_QUEUE_MAXSIZE)
+
+
+class _SessionTail:
+    """The shared reader for one session. Created with its first client."""
+
+    def __init__(self, session_id: str, loop: asyncio.AbstractEventLoop) -> None:
+        self.session_id = session_id
+        self.loop = loop
+        self.closed = False
+        # True only while the reader task is actually running; a client that
+        # sees False keeps reconciling on every keepalive tick.
+        self.alive = False
+        self._subs: Set[_TailSubscriber] = set()
+        # Cursor of the last row published. ``None`` until seeded (see _seed).
+        self._cursor: Optional[int] = None
+        self._hint: Optional[int] = None
+        self._gateway = get_gateway()
+        self._queue = self._gateway.subscribe(session_id)
+        self._task = loop.create_task(self._run())
+        # Fire-and-forget: teardown cancels it, and a destroy-pending warning on
+        # loop shutdown would be pure noise.
+        self._task._log_destroy_pending = False  # type: ignore[attr-defined]
+
+    # -- subscriber bookkeeping ------------------------------------------
+    def attach(self) -> _TailSubscriber:
+        sub = _TailSubscriber()
+        self._subs.add(sub)
+        return sub
+
+    def detach(self, sub: _TailSubscriber) -> None:
+        self._subs.discard(sub)
+        if not self._subs:
+            self.close()
+
+    def close(self) -> None:
+        """Drop the gateway subscription and stop the reader (idempotent).
+
+        The unsubscribe is SYNCHRONOUS — the last client's teardown must leave
+        no gateway registration behind even if the cancelled task has not been
+        scheduled yet.
+        """
+        if self.closed:
+            return
+        self.closed = True
+        self.alive = False
+        if _tails.get(self.session_id) is self:
+            _tails.pop(self.session_id, None)
+        try:
+            self._gateway.unsubscribe(self.session_id, self._queue)
+        except Exception:  # noqa: BLE001 — teardown must never raise
+            logger.debug(
+                "SSE tail unsubscribe failed for %s", self.session_id, exc_info=True
+            )
+        try:
+            self._task.cancel()
+        except RuntimeError:
+            pass  # the reader's loop is already closed — nothing left to stop
+
+    def note_cursor(self, cursor: int) -> None:
+        """Seed the reader from a client that just finished its backfill.
+
+        The reader must not start at the CURRENT tail: an event appended between
+        that client's last backfill page and the reader's first pass would then
+        never be pushed. It must not blindly trust the client either
+        (``from_seq`` is caller-supplied). It therefore starts at
+        ``min(hint, get_max_seq)`` — never above the real tail, never above what
+        a connected client has already been sent.
+        """
+        if self._cursor is not None or self.closed:
+            return
+        self._hint = cursor if self._hint is None else min(self._hint, cursor)
+        self._kick()
+
+    def _kick(self) -> None:
+        try:
+            self._queue.put_nowait(_KICK)
+        except Exception:  # noqa: BLE001
+            logger.debug("SSE tail kick failed for %s", self.session_id, exc_info=True)
+
+    # -- reader ------------------------------------------------------------
+    async def _run(self) -> None:
+        self.alive = True
+        try:
+            while True:
+                item = await self._queue.get()
+                force, max_seq = self._drain_ticks(item)
+                if self._cursor is None:
+                    if self._hint is None or not await self._seed():
+                        continue
+                elif not force and max_seq <= self._cursor:
+                    # Redundant tick (e.g. a bare notify_session wake): nothing
+                    # past our cursor exists, so no read at all.
+                    continue
+                await self._read_and_publish()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a reader bug must not wedge clients
+            logger.warning(
+                "SSE tail reader failed for %s — clients fall back to polling",
+                self.session_id, exc_info=True,
+            )
+        finally:
+            self.alive = False
+            # Wake every client so it reconciles from the database immediately
+            # rather than waiting out a keepalive interval.
+            self._publish(None)
+
+    def _drain_ticks(self, item: Any) -> Tuple[bool, int]:
+        """Collapse a burst of queued ticks into one (force, max_seq) decision."""
+        force = item is _KICK
+        max_seq = 0 if force else int(item)
+        while True:
+            try:
+                nxt = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if nxt is _KICK:
+                force = True
+            else:
+                max_seq = max(max_seq, int(nxt))
+        return force, max_seq
+
+    async def _seed(self) -> bool:
+        try:
+            db_max = await asyncio.to_thread(get_max_seq, self.session_id)
+        except Exception:  # noqa: BLE001 — retry on the next tick
+            logger.debug(
+                "SSE tail seed read failed for %s", self.session_id, exc_info=True
+            )
+            return False
+        self._cursor = min(int(self._hint or 0), int(db_max))
+        return True
+
+    async def _read_and_publish(self) -> None:
+        """ONE read + ONE serialization per batch, fanned out to every client."""
+        while True:
+            cursor = int(self._cursor or 0)
+            rows = await asyncio.to_thread(get_events, self.session_id, cursor, _PAGE)
+            if not rows:
+                return
+            frames = tuple(
+                (row["seq"], _frame(row)) for row in rows if row["seq"] > cursor
+            )
+            if not frames:
+                return
+            self._cursor = frames[-1][0]
+            self._publish(_TailBatch(cursor, frames[-1][0], frames))
+            if len(rows) < _PAGE:
+                return
+
+    def _publish(self, batch: Optional[_TailBatch]) -> None:
+        for sub in list(self._subs):
+            try:
+                sub.queue.put_nowait(batch)
+            except asyncio.QueueFull:
+                # Safe by construction: the drop breaks batch continuity, and
+                # the client repairs that with a read from its own cursor.
+                logger.debug(
+                    "SSE tail subscriber lagging on %s — dropped a batch",
+                    self.session_id,
+                )
+
+
+# session_id -> the live reader for it. Only ever touched from the event loop.
+_tails: Dict[str, _SessionTail] = {}
+
+
+def _acquire_tail(session_id: str) -> _SessionTail:
+    """Return this session's reader, creating it for the first client."""
+    loop = asyncio.get_running_loop()
+    tail = _tails.get(session_id)
+    if tail is not None and (tail.closed or tail.loop is not loop):
+        # A reader left behind by another (or a finished) event loop — e.g.
+        # between tests. Release its gateway registration and start fresh.
+        tail.close()
+        tail = None
+    if tail is None:
+        tail = _SessionTail(session_id, loop)
+        _tails[session_id] = tail
+    return tail
+
+
+def _push_delivery_healthy(tail: _SessionTail) -> bool:
+    """True when live delivery can be trusted without a per-tick DB read."""
+    try:
+        return tail.alive and not tail.closed and get_gateway().is_connected()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _replay_from(
+    session_id: str, from_seq: int
+) -> AsyncIterator[Tuple[int, str]]:
+    """Yield ``(seq, frame)`` for the backfill, coalescing streaming deltas."""
+    pending: List[Optional[Dict[str, Any]]] = [None]
+    page_from = from_seq
+    while True:
+        page = await asyncio.to_thread(get_events, session_id, page_from, _PAGE)
+        for row in _coalesce_deltas(page, pending):
+            yield row["seq"], _frame(row)
+        if page:
+            page_from = page[-1]["seq"]
+        if len(page) < _PAGE:
+            break
+    for row in _flush_pending(pending):
+        yield row["seq"], _frame(row)
+
+
+async def _tail_from_db(
+    session_id: str, from_seq: int
+) -> AsyncIterator[Tuple[int, str]]:
+    """Yield ``(seq, frame)`` for everything past ``from_seq`` — the read path.
+
+    The correctness fallback for the pushed path (and the whole delivery path
+    while the gateway is down). Deliberately NOT coalesced: the live tail
+    streams per-frame so typing animates.
+    """
+    cursor = from_seq
+    while True:
+        page = await asyncio.to_thread(get_events, session_id, cursor, _PAGE)
+        if not page:
+            return
+        for row in page:
+            if row["seq"] > cursor:
+                yield row["seq"], _frame(row)
+                cursor = row["seq"]
+        if len(page) < _PAGE:
+            return
+
+
 async def event_stream(session_id: str, from_seq: int = 0):
     """Yield SSE frames for a session: backfill from ``from_seq``, then tail.
 
@@ -225,13 +532,10 @@ async def event_stream(session_id: str, from_seq: int = 0):
     the stream directly — ASGI test transports buffer the whole response and
     cannot read a never-ending SSE body incrementally.
     """
-    # Seed the log from legacy history (idempotent, no-op once populated)
-    # BEFORE subscribing, so the backfill pass below already sees it.
-    await ensure_backfilled(session_id)
-
-    gateway = get_gateway()
-    # Subscribe FIRST so no event falls between backfill and the live tail.
-    queue = gateway.subscribe(session_id)
+    # Attach to the session's shared reader FIRST so no event can fall between
+    # the backfill snapshot and the live tail.
+    tail = _acquire_tail(session_id)
+    sub = tail.attach()
     start_time = time.monotonic()
     cursor = from_seq
     logger.info(
@@ -253,24 +557,30 @@ async def event_stream(session_id: str, from_seq: int = 0):
                 cursor = first_kept - 1
 
         # Consecutive historical streaming deltas remain coalesced into one
-        # frame per run. ``page_from`` pages the DB while ``cursor`` tracks the
-        # last row actually emitted (it can lag while a delta run is open).
-        pending: List[Optional[Dict[str, Any]]] = [None]
-        page_from = cursor
-        while True:
-            page = await asyncio.to_thread(
-                get_events, session_id, page_from, _PAGE
-            )
-            for row in _coalesce_deltas(page, pending):
-                yield _frame(row)
-                cursor = row["seq"]
-            if page:
-                page_from = page[-1]["seq"]
-            if len(page) < _PAGE:
-                break
-        for row in _flush_pending(pending):
-            yield _frame(row)
-            cursor = row["seq"]
+        # frame per run (see ``_replay_from``).
+        replayed = False
+        async for seq, frame in _replay_from(session_id, cursor):
+            yield frame
+            cursor = seq
+            replayed = True
+
+        # 1a. Legacy-history seeding, made LAZY (B6). ``ensure_backfilled``
+        #     re-materializes a whole legacy transcript into ``session_events``;
+        #     it is needed only when this feed is the render authority AND the
+        #     log has nothing to serve. A populated log (the overwhelmingly
+        #     common case) no longer pays even the probing read, and a reconnect
+        #     (``from_seq > 0``) never re-seeds history the client already holds
+        #     — seeding one there would replay a duplicate legacy prefix past a
+        #     cursor the client cannot reconcile.
+        if not replayed and cursor == 0 and from_seq == 0:
+            await ensure_backfilled(session_id)
+            async for seq, frame in _replay_from(session_id, cursor):
+                yield frame
+                cursor = seq
+
+        # Seed the shared reader from this client's post-backfill cursor, so the
+        # very next append is pushed rather than waited for.
+        tail.note_cursor(cursor)
 
         # 1b. Catch-up sentinel: mark the history/live boundary so the client can
         #     paint the whole backfilled transcript in ONE batch instead of
@@ -279,31 +589,54 @@ async def event_stream(session_id: str, from_seq: int = 0):
         #     (a near-empty reconnect backfill just folds once).
         yield f"event: caught_up\ndata: {json.dumps({'seq': cursor})}\n\n"
 
-        # 2. Live tail. Wake on a notify OR the keepalive timer; either way
-        #    reconcile against get_max_seq so we also serve as the poll
-        #    fallback when notifies are absent.
+        # 2. Live tail. Steady state is a pushed batch from the session's shared
+        #    reader — no DB work per client. Everything else (a discontinuity, a
+        #    degraded reader, a dead gateway, the periodic re-sync) reconciles by
+        #    reading from this client's own cursor.
+        resync_at = time.monotonic() + LIVE_RESYNC_SECONDS
         while True:
             timed_out = False
+            item: Any = None
             try:
-                await asyncio.wait_for(queue.get(), timeout=KEEPALIVE_SECONDS)
+                item = await asyncio.wait_for(
+                    sub.queue.get(), timeout=KEEPALIVE_SECONDS
+                )
             except asyncio.TimeoutError:
                 timed_out = True
 
-            max_seq = await asyncio.to_thread(get_max_seq, session_id)
-            if max_seq > cursor:
-                while True:
-                    page = await asyncio.to_thread(
-                        get_events, session_id, cursor, _PAGE
-                    )
-                    if not page:
-                        break
-                    for row in page:
-                        if row["seq"] > cursor:
-                            yield _frame(row)
-                            cursor = row["seq"]
-                    if len(page) < _PAGE:
-                        break
-            elif timed_out:
+            reconcile = False
+            if isinstance(item, _TailBatch):
+                if item.prev_seq == cursor:
+                    # Continues exactly where we stopped: emit as-is.
+                    for seq, frame in item.frames:
+                        yield frame
+                        cursor = seq
+                elif item.last_seq > cursor:
+                    # Discontinuity (dropped batch / late attach): never guess.
+                    reconcile = True
+                # else: wholly-seen batch — drop it.
+            elif not timed_out:
+                # ``None`` marker: the shared reader stopped.
+                reconcile = True
+
+            now = time.monotonic()
+            if timed_out:
+                reconcile = now >= resync_at or not _push_delivery_healthy(tail)
+            elif now >= resync_at:
+                reconcile = True
+
+            if not reconcile:
+                if timed_out:
+                    yield ": keepalive\n\n"
+                continue
+
+            wrote = False
+            async for seq, frame in _tail_from_db(session_id, cursor):
+                yield frame
+                cursor = seq
+                wrote = True
+            resync_at = time.monotonic() + LIVE_RESYNC_SECONDS
+            if timed_out and not wrote:
                 yield ": keepalive\n\n"
     except (asyncio.CancelledError, ClientDisconnect, BaseExceptionGroup) as exc:
         # A normal SSE client disconnect must end the stream cleanly, NOT bubble
@@ -323,7 +656,7 @@ async def event_stream(session_id: str, from_seq: int = 0):
             cursor,
             time.monotonic() - start_time,
         )
-        gateway.unsubscribe(session_id, queue)
+        tail.detach(sub)
 
 
 @router.get("/{session_id}/events")

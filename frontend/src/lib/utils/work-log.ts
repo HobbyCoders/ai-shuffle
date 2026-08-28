@@ -52,6 +52,79 @@ export type DisplayItem =
 			compactSummary: string | null;
 	  };
 
+/**
+ * Everything the transcript view needs, derived in ONE pass over `messages`.
+ *
+ * The view used to compute two of these per RENDERED ROW inside the template:
+ * `userPromptOccurrence()` scanned every preceding message for each user row,
+ * and the Task/Agent branch ran `messages.some(...)` for each delegation row.
+ * With M rows mounted that is O(N·M) — re-run on every streaming fold, which is
+ * why streaming got choppier as a session grew (see PERFORMANCE_REVIEW §3.2 R3).
+ * Both are now accumulated by the walk `buildDisplayItems` already performs, so
+ * the per-row lookup is a single array/Set read.
+ */
+export interface TranscriptModel {
+	/** The grouped presentation list — identical to `buildDisplayItems()`. */
+	items: DisplayItem[];
+	/**
+	 * Occurrence ordinal of each user PROMPT among earlier prompts with the same
+	 * trimmed content, indexed by MESSAGE index (0 for every other message).
+	 * Indexed by message index — not item index — because the same lookup serves
+	 * rows rendered inline and rows rendered inside a work-log disclosure, which
+	 * both carry their original message index.
+	 */
+	promptOccurrence: number[];
+	/**
+	 * Tool ids that own a linked `subagent` card, so a Task/Agent `tool_use`
+	 * knows whether the richer card already renders its work. Use
+	 * `hasLinkedSubagent()` rather than reading this directly — it encodes the
+	 * id-less case the old `some()` scan matched.
+	 */
+	subagentToolIds: ReadonlySet<string>;
+	/** Display-item index of each navigable user turn, by message id. */
+	itemIndexByTurnId: ReadonlyMap<string, number>;
+	/**
+	 * Metadata of the LAST assistant message that carries any (cost/duration are
+	 * rendered from it). Also a single-pass result: the view used to run a
+	 * separate `messages.findLast(...)` over the whole array on every fold.
+	 */
+	lastAssistantMetadata: Record<string, unknown> | null;
+	/** Id of the last navigable user turn — the transcript's live anchor. */
+	latestUserTurnId: string | null;
+}
+
+/**
+ * Sentinel for subagent cards that carry no `toolId`. The scan this replaced
+ * (`messages.some(m => m.type === 'subagent' && m.toolId === message.toolId)`)
+ * matched an id-less Task against an id-less subagent card, so the set has to
+ * be able to represent "no id" to stay behaviour-identical.
+ */
+const NO_TOOL_ID = '\u0000no-tool-id';
+
+/** True when a Task/Agent `tool_use` already has a SubagentMessage rendering it. */
+export function hasLinkedSubagent(
+	model: Pick<TranscriptModel, 'subagentToolIds'>,
+	toolId: string | undefined | null
+): boolean {
+	return model.subagentToolIds.has(toolId ?? NO_TOOL_ID);
+}
+
+/**
+ * Reference implementation of the per-row prompt-occurrence scan, kept as the
+ * oracle the model is tested against. Not used at render time — O(N) per row.
+ */
+export function userPromptOccurrenceAt(messages: ChatMessage[], index: number): number {
+	const want = (messages[index]?.content ?? '').trim();
+	let occurrence = 0;
+	for (let k = 0; k < index; k++) {
+		const m = messages[k];
+		if (m.role === 'user' && m.type !== 'command' && (m.content ?? '').trim() === want) {
+			occurrence++;
+		}
+	}
+	return occurrence;
+}
+
 /** Low-signal system messages that may collapse when consecutive. */
 const GROUPABLE_SYSTEM_SUBTYPES = new Set([
 	'hook_started',
@@ -536,15 +609,55 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[]): void {
 	flushPlain();
 }
 
-/** Build the transcript display list without changing store or protocol semantics. */
+/**
+ * Build the transcript display list without changing store or protocol semantics.
+ *
+ * Thin wrapper over `buildTranscriptModel` for callers (and tests) that only
+ * want the grouped list.
+ */
 export function buildDisplayItems(messages: ChatMessage[], options: BuildOptions): DisplayItem[] {
+	return buildTranscriptModel(messages, options).items;
+}
+
+/**
+ * One pass over `messages` producing the grouped display list AND the two
+ * whole-array lookups the template used to recompute per rendered row.
+ *
+ * The walk that de-duplicates ids and drops assistant phantoms already touches
+ * every message, so the prompt-occurrence counter and the subagent-linked tool
+ * ids ride along on it: O(N) once instead of O(N) per row per fold.
+ */
+export function buildTranscriptModel(
+	messages: ChatMessage[],
+	options: BuildOptions
+): TranscriptModel {
 	const { isStreaming, groupingEnabled } = options;
 	const latestTurnUnsettled = options.latestTurnUnsettled ?? isStreaming;
 
 	// Duplicate ids crash Svelte's keyed each; drop repeats defensively.
 	const seen = new Set<string>();
 	const positioned: Positioned[] = [];
+	// Prompt-occurrence bookkeeping: how many earlier prompts carried the exact
+	// same trimmed text. Counted over the RAW array (phantom/duplicate filtering
+	// below must not shift the ordinals the rewind API resolves against).
+	const promptOccurrence = new Array<number>(messages.length).fill(0);
+	const promptCounts = new Map<string, number>();
+	const subagentToolIds = new Set<string>();
+	let lastAssistantMetadata: Record<string, unknown> | null = null;
+	let latestUserTurnId: string | null = null;
 	messages.forEach((message, index) => {
+		if (message.role === 'user' && message.type !== 'command') {
+			const key = (message.content ?? '').trim();
+			const count = promptCounts.get(key) ?? 0;
+			promptOccurrence[index] = count;
+			promptCounts.set(key, count + 1);
+			if (message.id) latestUserTurnId = message.id;
+		} else if (message.type === 'subagent') {
+			subagentToolIds.add(message.toolId ?? NO_TOOL_ID);
+		}
+		if (message.role === 'assistant' && message.metadata) {
+			lastAssistantMetadata = message.metadata as Record<string, unknown>;
+		}
 		// Empty assistant placeholders intentionally have no visual row. Keeping them
 		// in this model can split the final live tool run and hide its active tail.
 		if (isAssistantPhantom(message)) return;
@@ -618,5 +731,23 @@ export function buildDisplayItems(messages: ChatMessage[], options: BuildOptions
 		});
 	});
 
-	return items;
+	// Turn navigation jumps by message id; windowed mounting needs to know which
+	// display item that id lives in so it can mount far enough back to reach it.
+	const itemIndexByTurnId = new Map<string, number>();
+	items.forEach((item, itemIndex) => {
+		if (item.kind !== 'message') return;
+		const { message } = item;
+		if (message.id && message.role === 'user' && message.type !== 'command') {
+			if (!itemIndexByTurnId.has(message.id)) itemIndexByTurnId.set(message.id, itemIndex);
+		}
+	});
+
+	return {
+		items,
+		promptOccurrence,
+		subagentToolIds,
+		itemIndexByTurnId,
+		lastAssistantMetadata,
+		latestUserTurnId
+	};
 }

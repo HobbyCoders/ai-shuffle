@@ -67,6 +67,12 @@ describe('appData.setSessionActive vs stale list loads', () => {
 		expect(appData.mergeSessionPatch('session-b', { is_active: true })).toBe(true);
 		expect(appData.current.sessions.find((s) => s.id === 'session-b')?.is_active).toBe(true);
 		expect(appData.mergeSessionPatch('missing', { is_active: true })).toBe(false);
+
+		// A server-pushed patch is also held against in-flight list pages until a
+		// load started after it commits (W7) — and the fake server here never
+		// learns about it. Patch the row back so this test leaves the shared
+		// module state exactly as it found it.
+		appData.mergeSessionPatch('session-b', { is_active: false });
 	});
 
 	it('a paginated load already in flight when the user settles cannot flip the card back', async () => {

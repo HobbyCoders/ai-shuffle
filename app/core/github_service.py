@@ -77,7 +77,9 @@ class _CacheEntry:
         return (time.monotonic() if now is None else now) - self.stored_at
 
 
-_CACHE_MISS = object()
+# Public "no fresh entry" sentinel: cached values may legitimately be None or
+# False, so a distinct object is the only safe miss signal.
+CACHE_MISS = object()
 
 
 class TTLCache:
@@ -125,7 +127,7 @@ class TTLCache:
         Needed when ``None``/``False`` are legitimate cached values.
         """
         entry = self._get_fresh_entry(key)
-        return _CACHE_MISS if entry is None else entry.value
+        return CACHE_MISS if entry is None else entry.value
 
     def peek(self, key: Any) -> Optional[_CacheEntry]:
         """Return the entry for *key* even if expired (None if absent)."""
@@ -136,10 +138,15 @@ class TTLCache:
         return self._get_fresh_entry(key) is not None
 
     def __len__(self) -> int:
-        """Number of *fresh* entries (expired ones are purged first)."""
+        """Number of *fresh* entries.
+
+        Deliberately non-destructive: expired entries are retained (they are
+        what :meth:`peek` serves during stale-while-revalidate) and are dropped
+        only by eviction or explicit invalidation.
+        """
+        now = time.monotonic()
         with self._lock:
-            self._purge_expired()
-            return len(self._entries)
+            return sum(1 for e in self._entries.values() if e.is_fresh(now))
 
     def keys(self) -> List[Any]:
         """Snapshot of all stored keys, including expired ones."""
@@ -341,7 +348,7 @@ class GitHubService:
         """
         if not refresh:
             cached = self._auth_cache.get_or_miss(self._AUTH_CACHE_KEY)
-            if cached is not _CACHE_MISS:
+            if cached is not CACHE_MISS:
                 return cached
 
         try:

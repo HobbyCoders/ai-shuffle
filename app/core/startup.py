@@ -123,6 +123,12 @@ def _adopt_orphaned_instance_data() -> None:
     (12-char hex strings) and re-assigns them to the current stable instance_id.
     It only touches hex-looking IDs to avoid clobbering data from legitimately
     separate named instances.
+
+    Runs synchronously at boot, before the server accepts traffic, so it stays
+    ONE round trip: the two ``SELECT DISTINCT instance_id`` scans it used to
+    issue are unioned into a single statement, and both columns are now indexed
+    (``idx_projects_instance`` / ``idx_sessions_instance``) so each side is an
+    index scan rather than a sequential scan of the table (finding B11).
     """
     import re
     from app.db.base import get_db
@@ -137,28 +143,21 @@ def _adopt_orphaned_instance_data() -> None:
         with get_db() as conn:
             cursor = conn.cursor()
 
-            # Find orphan instance_ids in projects that look like Docker container IDs
+            # Candidate orphan instance_ids from BOTH tables in one statement
+            # (UNION already deduplicates).
             cursor.execute(
-                "SELECT DISTINCT instance_id FROM projects WHERE instance_id IS NOT NULL AND instance_id != %s",
-                (current_id,)
+                "SELECT instance_id FROM projects "
+                "WHERE instance_id IS NOT NULL AND instance_id != %s "
+                "UNION "
+                "SELECT instance_id FROM sessions "
+                "WHERE instance_id IS NOT NULL AND instance_id != %s",
+                (current_id, current_id),
             )
-            orphan_ids = [
-                row["instance_id"] if isinstance(row, dict) else row[0]
-                for row in cursor.fetchall()
-                if _DOCKER_HEX_RE.match(row["instance_id"] if isinstance(row, dict) else row[0])
-            ]
-
-            # Also check sessions for orphan IDs not already found
-            cursor.execute(
-                "SELECT DISTINCT instance_id FROM sessions WHERE instance_id IS NOT NULL AND instance_id != %s",
-                (current_id,)
-            )
-            session_orphans = [
-                row["instance_id"] if isinstance(row, dict) else row[0]
-                for row in cursor.fetchall()
-                if _DOCKER_HEX_RE.match(row["instance_id"] if isinstance(row, dict) else row[0])
-            ]
-            orphan_ids = list(set(orphan_ids + session_orphans))
+            orphan_ids = []
+            for row in cursor.fetchall():
+                value = row["instance_id"] if isinstance(row, dict) else row[0]
+                if value and _DOCKER_HEX_RE.match(value):
+                    orphan_ids.append(value)
 
             if not orphan_ids:
                 return

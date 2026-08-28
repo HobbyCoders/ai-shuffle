@@ -146,8 +146,8 @@
 		border-radius: 12px;
 		background: color-mix(in oklch, var(--popover) 96%, transparent);
 		box-shadow: var(--shadow-m);
-		backdrop-filter: blur(12px) saturate(140%);
-		-webkit-backdrop-filter: blur(12px) saturate(140%);
+		backdrop-filter: var(--fx-rail-backdrop);
+		-webkit-backdrop-filter: var(--fx-rail-backdrop);
 		opacity: 0;
 		pointer-events: none;
 		transform: translate(-8px, -50%) scale(0.98);

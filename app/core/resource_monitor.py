@@ -294,10 +294,20 @@ def _check_warnings(metrics: dict) -> list[str]:
     if children > pool_size + 2:  # Allow some slack
         warnings.append(f"{children} child processes but pool size is {pool_size} - possible subprocess leak")
 
-    # Session pool at capacity
+    # Session pool at capacity. pool_max_size is reported by _collect_metrics
+    # straight off the live pool; the fallback reads the CONFIGURED size rather
+    # than a hardcoded constant, which is what previously went stale when the
+    # default moved (it still said 3 long after the default was 8). If neither
+    # is available the pool is not up yet — there is nothing to warn about.
     pool_size = metrics.get("pool_size", 0)
-    pool_max = metrics.get("pool_max_size", 3)
-    if pool_size >= pool_max:
+    pool_max = metrics.get("pool_max_size")
+    if pool_max is None:
+        try:
+            from app.core.config import settings
+            pool_max = getattr(settings, "sdk_session_pool_size", None)
+        except Exception:
+            pool_max = None
+    if pool_max and pool_size >= pool_max:
         warnings.append(f"Session pool at capacity ({pool_size}/{pool_max})")
 
     # DB connection pool near/at exhaustion. Warn early (>=80%) so a slow
@@ -512,15 +522,19 @@ async def _periodic_cleanup() -> dict:
     except Exception as e:
         logger.debug(f"{_PREFIX} Failed to evict dead pool sessions: {e}")
 
-    # Evict idle sessions from the session pool
+    # Evict idle sessions from the session pool.
+    #
+    # BELT, not braces: the pool's own idle watchdog (started below in
+    # start_resource_monitor) evicts ON the deadline, so by the time this
+    # 5-minute sweep runs there is normally nothing left to do. It stays because
+    # it costs one dict scan and covers the case where the watchdog task died.
+    # No ``max_idle_seconds`` argument — passing one would force the FLAT legacy
+    # timeout and silently defeat the tiered policy.
     try:
-        from app.core.config import settings
         from app.core.session_pool import get_session_pool, _session_pool
         if _session_pool is not None:
             pool = get_session_pool()
-            idle = await pool.evict_idle(
-                max_idle_seconds=settings.sdk_session_idle_timeout_seconds
-            )
+            idle = await pool.evict_idle()
             if idle:
                 cleaned["idle_pool_sessions"] = len(idle)
     except Exception as e:
@@ -644,6 +658,36 @@ async def reconcile_orphans_once(max_age_days: Optional[int] = None) -> list:
         return []
 
 
+# Monotonic timestamp of the last orphan-reconcile pass (0 = never run here).
+_last_orphan_reconcile: float = 0.0
+
+
+def _orphan_reconcile_interval() -> float:
+    """Configured seconds between periodic orphan-reconcile passes (0 = off)."""
+    try:
+        from app.core.config import settings
+        return float(getattr(settings, "orphan_reconcile_interval_seconds", 3600))
+    except Exception:
+        return 3600.0
+
+
+def _orphan_reconcile_due(now: Optional[float] = None) -> bool:
+    """True when the periodic orphan reconcile should run on this monitor tick.
+
+    Returns False forever when the interval is configured to 0 (the startup pass
+    still runs — this only gates the periodic one).
+    """
+    global _last_orphan_reconcile
+    interval = _orphan_reconcile_interval()
+    if interval <= 0:
+        return False
+    now = time.monotonic() if now is None else now
+    if _last_orphan_reconcile and (now - _last_orphan_reconcile) < interval:
+        return False
+    _last_orphan_reconcile = now
+    return True
+
+
 async def _monitor_loop(interval_seconds: int):
     """Main monitoring loop."""
     global _snapshot_count, _start_time
@@ -672,7 +716,15 @@ async def _monitor_loop(interval_seconds: int):
             # Self-heal sessions orphaned by a mid-turn crash. Bounded to recent
             # sessions so the sweep stays cheap; the unbounded backfill runs once
             # at startup. Logs an ERROR per heal (recovery implies a prior crash).
-            await reconcile_orphans_once(max_age_days=14)
+            #
+            # F6: this is a RECOVERY sweep, not a hot path, so it runs on its own
+            # (hourly by default) cadence rather than every monitor tick. New
+            # orphans are prevented at the source by the persist-on-init write,
+            # the startup pass covers the whole backlog, and the reconciler
+            # itself now memoizes inconclusive ids — so a 5-minute cadence bought
+            # nothing but a repeated aggregation over the session store.
+            if _orphan_reconcile_due():
+                await reconcile_orphans_once(max_age_days=14)
 
         except asyncio.CancelledError:
             logger.info(f"{_PREFIX} Monitor stopped after {_snapshot_count} snapshots")
@@ -700,13 +752,31 @@ async def start_resource_monitor(interval_seconds: int = 300) -> asyncio.Task:
     except Exception as e:
         logger.error(f"{_PREFIX} Failed to register pool eviction callback: {e}")
 
+    # Start the pool's deadline-driven idle watchdog (F1). Idle eviction used to
+    # ride THIS task's 5-minute tick, which added up to 5 minutes of latency on
+    # top of an already long flat timeout — ~35 minutes of parked subprocesses in
+    # the worst case. The watchdog wakes exactly on the next eviction deadline
+    # (and never while the pool is empty), so RAM comes back on time. The sweep
+    # in _periodic_cleanup stays as a belt in case the watchdog task dies.
+    try:
+        from app.core.session_pool import get_session_pool
+        get_session_pool().start_idle_watchdog()
+    except Exception as e:
+        logger.error(f"{_PREFIX} Failed to start pool idle watchdog: {e}")
+
     task = asyncio.create_task(_monitor_loop(interval_seconds))
     logger.info(f"{_PREFIX} Started (interval={interval_seconds}s)")
     return task
 
 
 async def stop_resource_monitor(task: asyncio.Task):
-    """Stop the resource monitor."""
+    """Stop the resource monitor (and the pool idle watchdog it started)."""
+    try:
+        from app.core.session_pool import _session_pool
+        if _session_pool is not None:
+            await _session_pool.stop_idle_watchdog()
+    except Exception as e:
+        logger.debug(f"{_PREFIX} Failed to stop pool idle watchdog: {e}")
     task.cancel()
     try:
         await task

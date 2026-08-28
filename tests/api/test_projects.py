@@ -22,6 +22,7 @@ from unittest.mock import patch, MagicMock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.api import projects as projects_module
 from app.api.projects import router, validate_project_path, normalize_docker_path, check_project_access
 from app.api.auth import require_auth, require_admin
 
@@ -497,6 +498,83 @@ class TestListProjects:
         mock_database.get_remote_urls_for_projects.assert_not_called()
         mock_database.set_project_link_group.assert_not_called()
         assert response.json()[0]["link_group_id"] == "manual:abc"
+
+    def test_list_projects_writes_nothing_in_the_steady_state(
+        self, client, mock_database, sample_project
+    ):
+        """B2: a GET listing must not write — nor even read — for the backfill.
+
+        Once every row carries a link group (the steady state, since a derived
+        group is persisted the one time it is derived), the backfill is a pure
+        in-memory no-op: no ``get_remote_urls_for_projects``, no
+        ``set_project_link_group``.
+        """
+        mock_database.get_all_projects.return_value = [
+            dict(sample_project, id="p1", link_group_id="git:abc"),
+            dict(sample_project, id="p2", link_group_id="git:def"),
+        ]
+
+        for _ in range(3):  # repeated polls, as the picker does
+            assert client.get("/api/v1/projects").status_code == 200
+
+        mock_database.get_remote_urls_for_projects.assert_not_called()
+        mock_database.set_project_link_group.assert_not_called()
+
+    def test_link_group_write_happens_once_then_never_again(
+        self, client, mock_database, sample_project
+    ):
+        """The derivation persists, so the next listing has nothing to do."""
+        mock_database.get_all_projects.return_value = [
+            dict(sample_project, link_group_id=None)
+        ]
+        mock_database.get_remote_urls_for_projects.return_value = {
+            "test-project": "https://github.com/Owner/Repo.git"
+        }
+
+        assert client.get("/api/v1/projects").status_code == 200
+        assert mock_database.set_project_link_group.call_count == 1
+
+        # The row now carries the derived group (as the DB row would).
+        mock_database.get_all_projects.return_value = [
+            dict(sample_project, link_group_id="git:whatever")
+        ]
+        mock_database.set_project_link_group.reset_mock()
+        mock_database.get_remote_urls_for_projects.reset_mock()
+
+        assert client.get("/api/v1/projects").status_code == 200
+        mock_database.set_project_link_group.assert_not_called()
+        mock_database.get_remote_urls_for_projects.assert_not_called()
+
+    def test_needs_link_backfill_is_a_pure_check(self, sample_project):
+        """The gate that keeps the hot path query-free."""
+        from app.api.projects import _needs_link_backfill
+
+        assert _needs_link_backfill([dict(sample_project, link_group_id="git:x")]) == []
+        assert _needs_link_backfill([
+            dict(sample_project, link_group_id=None, settings={"link_group_locked": True})
+        ]) == []
+        pending = _needs_link_backfill([dict(sample_project, link_group_id=None)])
+        assert [p["id"] for p in pending] == ["test-project"]
+
+    def test_listing_reads_are_offloaded_off_the_event_loop(
+        self, client, mock_database, sample_project
+    ):
+        """B2: the listing's synchronous psycopg2 work runs in a worker thread."""
+        mock_database.get_all_projects.return_value = [sample_project]
+        seen = []
+
+        real_run_sync = projects_module.run_sync
+
+        async def tracking_run_sync(fn, *args, **kwargs):
+            seen.append(fn.__name__)
+            return await real_run_sync(fn, *args, **kwargs)
+
+        with patch.object(projects_module, "run_sync", tracking_run_sync):
+            assert client.get("/api/v1/projects").status_code == 200
+
+        assert seen == ["_load_projects_for_listing"], (
+            "the projects listing should do all of its DB work in ONE offloaded call"
+        )
 
     def test_list_projects_skips_remoteless_rows(self, client, mock_database, sample_project):
         """A project with no git remote stays NULL and is not written."""

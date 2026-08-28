@@ -174,10 +174,21 @@
 
 	// Reload the list when search/filter changes. In the side-by-side layout the
 	// list stays visible while editing, so filtering must work at all times.
+	//
+	// The FIRST run is skipped on purpose (R14): an effect always runs once on
+	// mount, so with onMount's load this fired a second, 300 ms-delayed
+	// /notes request for the identical (empty) filter — two spinners and two
+	// round trips every time Notes was opened. Only real filter *changes*
+	// should refetch.
+	let filterEffectPrimed = false;
 	$effect(() => {
 		// Access these to establish reactivity
 		searchQuery;
 		selectedTag;
+		if (!filterEffectPrimed) {
+			filterEffectPrimed = true;
+			return;
+		}
 		const timeout = setTimeout(loadData, 300);
 		return () => clearTimeout(timeout);
 	});

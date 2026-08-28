@@ -358,6 +358,7 @@ _WS_TRIMMED_RENDER_FRAMES = frozenset({
 # is kept and only its oversized input is replaced by a marker.
 _WS_MAX_TOOL_INPUT_CHARS = 4096
 _WS_TOOL_INPUT_FRAMES = frozenset({"tool_use", "subagent_tool_use"})
+
 _WS_KEPT_SUBAGENT_FRAMES = frozenset({"subagent_tool_use", "subagent_tool_result"})
 
 # Frames that only the MODEL can produce. A steer is folded into a tool result,
