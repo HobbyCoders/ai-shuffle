@@ -14,6 +14,7 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
 from app.db import database
+from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -352,7 +353,11 @@ class ProactiveScheduler:
     async def _load_schedules_from_db(self) -> None:
         """Load schedules from database."""
         try:
-            schedules = database.get_mobile_schedules()
+            # Only the query is offloaded: the loop below calls
+            # _add_apscheduler_job, which registers jobs against the
+            # AsyncIOScheduler bound to THIS loop, so it must not move to a
+            # worker thread.
+            schedules = await run_sync(database.get_mobile_schedules)
             for row in schedules:
                 task = ScheduledTask(
                     id=row["id"],
@@ -379,7 +384,8 @@ class ProactiveScheduler:
     async def _save_schedule_to_db(self, task: ScheduledTask) -> None:
         """Save a schedule to database."""
         try:
-            database.save_mobile_schedule(
+            await run_sync(
+                database.save_mobile_schedule,
                 schedule_id=task.id,
                 device_id=task.device_id,
                 schedule_type=task.schedule_type.value,
@@ -396,7 +402,7 @@ class ProactiveScheduler:
     async def _delete_schedule_from_db(self, schedule_id: str) -> None:
         """Delete a schedule from database."""
         try:
-            database.delete_mobile_schedule(schedule_id)
+            await run_sync(database.delete_mobile_schedule, schedule_id)
         except Exception as e:
             logger.warning(f"Could not delete schedule from database: {e}")
 

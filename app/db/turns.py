@@ -41,6 +41,7 @@ from typing import Any, Dict, List, Optional
 import psycopg2
 
 from app.db.base import get_db
+from app.db.compat import phs
 
 logger = logging.getLogger(__name__)
 
@@ -600,7 +601,7 @@ def pop_ready(session_id: str) -> Optional[Dict[str, Any]]:
     return _row(row)
 
 
-def list_claimable_sessions() -> List[str]:
+def list_claimable_sessions(session_ids: Optional[List[str]] = None) -> List[str]:
     """Return the DISTINCT session ids that have at least one ``queued`` turn and
     NO live run lease — the candidate set for the cross-runner claim loop
     (V2 Phase 4).
@@ -610,15 +611,41 @@ def list_claimable_sessions() -> List[str]:
     claimer's ``runs.claim_run`` reaps it atomically on the way in. Sessions
     only (not turns): the claim loop resolves placement per SESSION and kicks
     the scheduler, which orders the queue itself.
+
+    ``session_ids`` (optional) narrows the anti-join to just those sessions.
+    The claim loop wants the whole cluster-wide candidate set and passes
+    nothing; a read-path caller that only needs "which of THESE rows are
+    claimable" (the session-list ``degraded`` derivation, which runs on every
+    sidebar poll) passes its page and gets the same answer without scanning
+    every queued turn in the database.
+
+    The narrowing is a pure WHERE filter on ``t.session_id``, applied to the
+    identical join and predicates, so the result is EXACTLY
+    ``set(list_claimable_sessions()) & set(session_ids)`` — never a different
+    rule. Duplicates and falsy ids are dropped; an explicitly empty list is
+    answered with ``[]`` and no query at all (``IN ()`` is a syntax error in
+    Postgres). Passing ``None`` (the default) keeps the full scan.
     """
+    sql = (
+        "SELECT DISTINCT t.session_id FROM turns t "
+        "LEFT JOIN runs r ON r.session_id = t.session_id "
+        "AND r.state = 'active' AND r.lease_expires_at >= NOW() "
+        "WHERE t.state = 'queued' AND r.id IS NULL"
+    )
+    params: Optional[tuple] = None
+    if session_ids is not None:
+        wanted = [sid for sid in dict.fromkeys(session_ids) if sid]
+        if not wanted:
+            return []
+        sql += f" AND t.session_id IN ({phs(len(wanted))})"
+        params = tuple(wanted)
+
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT DISTINCT t.session_id FROM turns t "
-            "LEFT JOIN runs r ON r.session_id = t.session_id "
-            "AND r.state = 'active' AND r.lease_expires_at >= NOW() "
-            "WHERE t.state = 'queued' AND r.id IS NULL",
-        )
+        if params is None:
+            cursor.execute(sql)
+        else:
+            cursor.execute(sql, params)
         rows = cursor.fetchall()
     return [r["session_id"] if isinstance(r, dict) else r[0] for r in rows]
 

@@ -16,7 +16,6 @@ from app.core.models import (
     AutomationTestResult, VALID_AUTOMATION_TRIGGER_TYPES, TriggerItem,
 )
 from app.api.auth import require_admin
-from app.db import async_database as adb
 from app.db import database
 from app.db.async_database import run_sync
 
@@ -30,7 +29,7 @@ router = APIRouter(prefix="/api/v1/automations", tags=["Automations"])
 @router.get("", response_model=List[Automation])
 async def list_automations(token: str = Depends(require_admin)):
     """List all automations."""
-    return await adb.get_all_automations()
+    return await run_sync(database.get_all_automations)
 
 
 @router.post("", response_model=Automation, status_code=status.HTTP_201_CREATED)
@@ -88,7 +87,7 @@ async def list_trigger_types(token: str = Depends(require_admin)):
 @router.get("/approvals/pending", response_model=List[AutomationApproval])
 async def list_pending_approvals(token: str = Depends(require_admin)):
     """List all pending automation approvals."""
-    return await adb.get_pending_automation_approvals()
+    return await run_sync(database.get_pending_automation_approvals)
 
 
 @router.post("/approvals/{approval_id}/approve", response_model=AutomationApproval)
@@ -119,7 +118,7 @@ async def approve_run_endpoint(approval_id: str, token: str = Depends(require_ad
     from app.core.automation_manager import automation_manager
     await automation_manager.execute_approved_run(approval_id)
 
-    return await adb.get_automation_approval(approval_id)
+    return await run_sync(database.get_automation_approval, approval_id)
 
 
 @router.post("/approvals/{approval_id}/deny", response_model=AutomationApproval)
@@ -145,7 +144,7 @@ async def deny_run_endpoint(approval_id: str, token: str = Depends(require_admin
 @router.get("/{automation_id}", response_model=Automation)
 async def get_automation(automation_id: str, token: str = Depends(require_admin)):
     """Get an automation by ID."""
-    automation = await adb.get_automation(automation_id)
+    automation = await run_sync(database.get_automation, automation_id)
     if not automation:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Automation not found: {automation_id}")
     return automation
@@ -222,7 +221,7 @@ async def enable_automation(automation_id: str, token: str = Depends(require_adm
     from app.core.automation_manager import automation_manager
     if has_scheduled:
         await automation_manager.schedule_automation(automation_id)
-        automation = await adb.get_automation(automation_id)
+        automation = await run_sync(database.get_automation, automation_id)
 
     return automation
 
@@ -230,7 +229,7 @@ async def enable_automation(automation_id: str, token: str = Depends(require_adm
 @router.post("/{automation_id}/disable", response_model=Automation)
 async def disable_automation(automation_id: str, token: str = Depends(require_admin)):
     """Disable an automation and unschedule it."""
-    automation = await adb.get_automation(automation_id)
+    automation = await run_sync(database.get_automation, automation_id)
     if not automation:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Automation not found: {automation_id}")
 
@@ -257,7 +256,7 @@ async def trigger_automation(
 
     For webhook triggers, include the ``X-Webhook-Signature`` header.
     """
-    automation = await adb.get_automation(automation_id)
+    automation = await run_sync(database.get_automation, automation_id)
     if not automation:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Automation not found: {automation_id}")
 
@@ -298,7 +297,7 @@ async def trigger_automation(
 async def test_automation_endpoint(automation_id: str, token: str = Depends(require_admin)):
     """Dry-run: render prompt and check budget without executing."""
     from app.core.automation_service import test_automation
-    automation = await adb.get_automation(automation_id)
+    automation = await run_sync(database.get_automation, automation_id)
     if not automation:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Automation not found: {automation_id}")
     return await test_automation(automation_id)
@@ -327,7 +326,7 @@ async def list_automation_runs(
 @router.get("/{automation_id}/runs/{run_id}", response_model=AutomationRun)
 async def get_automation_run(automation_id: str, run_id: str, token: str = Depends(require_admin)):
     """Get a specific automation run."""
-    run = await adb.get_automation_run(run_id)
+    run = await run_sync(database.get_automation_run, run_id)
     if not run or run.get("automation_id") != automation_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
     return run

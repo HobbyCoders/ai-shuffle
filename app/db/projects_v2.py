@@ -23,6 +23,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from app.db.base import get_db
+from app.db.compat import phs
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,48 @@ def get_project_v2_by_origin(origin: str) -> Optional[Dict[str, Any]]:
         cursor.execute("SELECT * FROM projects_v2 WHERE origin = %s", (origin,))
         row = cursor.fetchone()
     return _row(row)
+
+
+def get_projects_v2_by_ids(ids) -> Dict[str, Dict[str, Any]]:
+    """``{id: row}`` for the requested project_v2 ids, in ONE query.
+
+    The batched sibling of :func:`get_project_v2`, for callers that resolve a
+    whole page at once. Duplicates and falsy ids are dropped; missing ids are
+    simply absent from the result. An empty (or entirely falsy) input returns
+    ``{}`` WITHOUT touching the database — ``IN ()`` is a syntax error in
+    Postgres.
+    """
+    unique = [i for i in dict.fromkeys(ids) if i]
+    if not unique:
+        return {}
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"SELECT * FROM projects_v2 WHERE id IN ({phs(len(unique))})",
+            unique,
+        )
+        rows = cursor.fetchall()
+    return {row["id"]: row for row in _rows(rows) if row.get("id")}
+
+
+def get_projects_v2_by_origins(origins) -> Dict[str, Dict[str, Any]]:
+    """``{origin: row}`` for the requested origins, in ONE query.
+
+    The batched sibling of :func:`get_project_v2_by_origin` (``origin`` is the
+    UNIQUE key, so the mapping is 1:1). Same empty-input and missing-key
+    semantics as :func:`get_projects_v2_by_ids`.
+    """
+    unique = [o for o in dict.fromkeys(origins) if o]
+    if not unique:
+        return {}
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"SELECT * FROM projects_v2 WHERE origin IN ({phs(len(unique))})",
+            unique,
+        )
+        rows = cursor.fetchall()
+    return {row["origin"]: row for row in _rows(rows) if row.get("origin")}
 
 
 def list_projects_v2() -> List[Dict[str, Any]]:

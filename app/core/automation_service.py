@@ -17,6 +17,7 @@ from app.core.project_links import (  # noqa: F401 — re-exported for existing 
     resolve_runnable_local_project,
 )
 from app.db import database
+from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -302,41 +303,51 @@ async def create_automation(
     trigger_type = triggers[0]["type"]
     trigger_config = triggers[0]["config"]
 
-    # Validate profile exists
-    profile = database.get_profile(profile_id)
-    if not profile:
-        raise ValueError(f"Profile not found: {profile_id}")
+    def _create_blocking() -> Tuple[str, Optional[Dict]]:
+        """Validate-then-insert, in ONE thread hop and ONE atomic block.
 
-    # Validate project exists if specified
-    if project_id:
-        project = database.get_project(project_id)
-        if not project:
-            raise ValueError(f"Project not found: {project_id}")
+        The two existence checks and the INSERT are contiguous (no awaits
+        between them), so they run as a unit off the loop instead of three
+        blocking round trips. The ``ValueError``s raised here propagate out of
+        the ``await`` to the caller exactly as they did when this ran inline.
+        """
+        # Validate profile exists
+        profile = database.get_profile(profile_id)
+        if not profile:
+            raise ValueError(f"Profile not found: {profile_id}")
 
-    # Generate automation ID
-    automation_id = f"auto-{secrets.token_hex(4)}"
+        # Validate project exists if specified
+        if project_id:
+            project = database.get_project(project_id)
+            if not project:
+                raise ValueError(f"Project not found: {project_id}")
 
-    automation = database.create_automation(
-        automation_id=automation_id,
-        name=name,
-        trigger_type=trigger_type,
-        trigger_config=trigger_config,
-        triggers=triggers,
-        prompt=prompt,
-        profile_id=profile_id,
-        project_id=project_id,
-        description=description,
-        output_config=output_config,
-        max_turns=max_turns,
-        timeout_seconds=timeout_seconds,
-        max_cost_per_run=max_cost_per_run,
-        max_cost_per_day=max_cost_per_day,
-        max_cost_total=max_cost_total,
-        max_runs_per_day=max_runs_per_day,
-        requires_approval=requires_approval,
-        action_steps=action_steps,
-        enabled=enabled,
-    )
+        # Generate automation ID
+        automation_id = f"auto-{secrets.token_hex(4)}"
+
+        return automation_id, database.create_automation(
+            automation_id=automation_id,
+            name=name,
+            trigger_type=trigger_type,
+            trigger_config=trigger_config,
+            triggers=triggers,
+            prompt=prompt,
+            profile_id=profile_id,
+            project_id=project_id,
+            description=description,
+            output_config=output_config,
+            max_turns=max_turns,
+            timeout_seconds=timeout_seconds,
+            max_cost_per_run=max_cost_per_run,
+            max_cost_per_day=max_cost_per_day,
+            max_cost_total=max_cost_total,
+            max_runs_per_day=max_runs_per_day,
+            requires_approval=requires_approval,
+            action_steps=action_steps,
+            enabled=enabled,
+        )
+
+    automation_id, automation = await run_sync(_create_blocking)
 
     if not automation:
         raise RuntimeError("Failed to create automation in database")
@@ -363,49 +374,63 @@ async def update_automation(automation_id: str, **kwargs) -> Optional[Dict]:
 
     If trigger config changes and the automation is enabled, it will be rescheduled.
     """
-    existing = database.get_automation(automation_id)
-    if not existing:
-        return None
+    def _update_blocking() -> Tuple[Optional[Dict], bool]:
+        """The whole read-validate-write sequence, in ONE thread hop.
 
-    # Validate profile if being changed
-    if "profile_id" in kwargs and kwargs["profile_id"]:
-        profile = database.get_profile(kwargs["profile_id"])
-        if not profile:
-            raise ValueError(f"Profile not found: {kwargs['profile_id']}")
+        Up to four contiguous round trips (the existing row, the two optional
+        existence checks, the UPDATE) with nothing but pure validation and
+        secret encryption between them — so they stay a single unit off the
+        loop. Keeping the read and the write in one block also preserves the
+        original ordering: the row is re-read, validated and only then written.
+        ``ValueError`` still propagates to the caller unchanged. Returns
+        ``(updated_row_or_None, trigger_changed)``; a missing row yields
+        ``(None, False)``, the same ``None`` the caller returned before.
+        """
+        existing = database.get_automation(automation_id)
+        if not existing:
+            return None, False
 
-    # Validate project if being changed
-    if "project_id" in kwargs and kwargs["project_id"]:
-        project = database.get_project(kwargs["project_id"])
-        if not project:
-            raise ValueError(f"Project not found: {kwargs['project_id']}")
+        # Validate profile if being changed
+        if "profile_id" in kwargs and kwargs["profile_id"]:
+            profile = database.get_profile(kwargs["profile_id"])
+            if not profile:
+                raise ValueError(f"Profile not found: {kwargs['profile_id']}")
 
-    # Handle triggers array — validate and encrypt webhook secrets
-    trigger_changed = False
-    if "triggers" in kwargs and kwargs["triggers"] is not None:
-        for i, trig in enumerate(kwargs["triggers"]):
-            t_type = trig.get("type")
-            if t_type and t_type not in VALID_AUTOMATION_TRIGGER_TYPES:
-                raise ValueError(f"Invalid trigger type at index {i}: {t_type}")
-            t_config = trig.get("config", {})
-            if t_type == "interval" and t_config.get("seconds", 0) < 60:
-                raise ValueError(f"Interval trigger at index {i} must be at least 60 seconds")
-            if t_type == "webhook":
-                if not t_config.get("secret"):
-                    t_config["secret"] = secrets.token_urlsafe(32)
-                trig["config"] = encrypt_webhook_secret(t_config)
-        trigger_changed = True
+        # Validate project if being changed
+        if "project_id" in kwargs and kwargs["project_id"]:
+            project = database.get_project(kwargs["project_id"])
+            if not project:
+                raise ValueError(f"Project not found: {kwargs['project_id']}")
 
-    # Encrypt webhook secret if trigger config is being updated (legacy path)
-    if "trigger_config" in kwargs and kwargs["trigger_config"] is not None:
-        trigger_type = kwargs.get("trigger_type", existing["trigger_type"])
-        if trigger_type == "webhook":
-            kwargs["trigger_config"] = encrypt_webhook_secret(kwargs["trigger_config"])
-        trigger_changed = True
+        # Handle triggers array — validate and encrypt webhook secrets
+        trigger_changed = False
+        if "triggers" in kwargs and kwargs["triggers"] is not None:
+            for i, trig in enumerate(kwargs["triggers"]):
+                t_type = trig.get("type")
+                if t_type and t_type not in VALID_AUTOMATION_TRIGGER_TYPES:
+                    raise ValueError(f"Invalid trigger type at index {i}: {t_type}")
+                t_config = trig.get("config", {})
+                if t_type == "interval" and t_config.get("seconds", 0) < 60:
+                    raise ValueError(f"Interval trigger at index {i} must be at least 60 seconds")
+                if t_type == "webhook":
+                    if not t_config.get("secret"):
+                        t_config["secret"] = secrets.token_urlsafe(32)
+                    trig["config"] = encrypt_webhook_secret(t_config)
+            trigger_changed = True
 
-    if "trigger_type" in kwargs:
-        trigger_changed = True
+        # Encrypt webhook secret if trigger config is being updated (legacy path)
+        if "trigger_config" in kwargs and kwargs["trigger_config"] is not None:
+            trigger_type = kwargs.get("trigger_type", existing["trigger_type"])
+            if trigger_type == "webhook":
+                kwargs["trigger_config"] = encrypt_webhook_secret(kwargs["trigger_config"])
+            trigger_changed = True
 
-    updated = database.update_automation(automation_id, **kwargs)
+        if "trigger_type" in kwargs:
+            trigger_changed = True
+
+        return database.update_automation(automation_id, **kwargs), trigger_changed
+
+    updated, trigger_changed = await run_sync(_update_blocking)
     if not updated:
         return None
 
@@ -422,7 +447,9 @@ async def update_automation(automation_id: str, **kwargs) -> Optional[Dict]:
 
 async def delete_automation(automation_id: str) -> bool:
     """Delete an automation, stop it if running."""
-    automation = database.get_automation(automation_id)
+    # Two hops, not one: the unschedule between the read and the DELETE is a
+    # genuine await that must stay on the loop (APScheduler job removal).
+    automation = await run_sync(database.get_automation, automation_id)
     if not automation:
         return False
 
@@ -434,7 +461,7 @@ async def delete_automation(automation_id: str) -> bool:
         except Exception as e:
             logger.error(f"Error unscheduling automation {automation_id}: {e}")
 
-    return database.delete_automation(automation_id)
+    return await run_sync(database.delete_automation, automation_id)
 
 
 async def test_automation(automation_id: str) -> Dict:
@@ -442,21 +469,27 @@ async def test_automation(automation_id: str) -> Dict:
 
     Returns ``{"prompt_rendered": str, "budget_ok": bool, "message": str}``.
     """
-    automation = database.get_automation(automation_id)
-    if not automation:
-        return {"prompt_rendered": "", "budget_ok": False, "message": "Automation not found"}
+    def _test_blocking() -> Dict:
+        """Row read + budget check in ONE hop. ``check_budget`` is itself a
+        blocking read (the daily-stats aggregate), so offloading only the
+        ``get_automation`` here would have left half the stall behind."""
+        automation = database.get_automation(automation_id)
+        if not automation:
+            return {"prompt_rendered": "", "budget_ok": False, "message": "Automation not found"}
 
-    # Render prompt with empty trigger data to show what it looks like
-    rendered = render_prompt(automation.get("prompt") or "", {"event": {}, "payload": {}})
+        # Render prompt with empty trigger data to show what it looks like
+        rendered = render_prompt(automation.get("prompt") or "", {"event": {}, "payload": {}})
 
-    # Check budget
-    ok, reason = check_budget(automation)
+        # Check budget
+        ok, reason = check_budget(automation)
 
-    return {
-        "prompt_rendered": rendered,
-        "budget_ok": ok,
-        "message": reason,
-    }
+        return {
+            "prompt_rendered": rendered,
+            "budget_ok": ok,
+            "message": reason,
+        }
+
+    return await run_sync(_test_blocking)
 
 
 def get_automation_stats(automation_id: str) -> Dict:

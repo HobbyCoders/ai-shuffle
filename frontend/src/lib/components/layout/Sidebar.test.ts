@@ -81,6 +81,42 @@ vi.mock('$lib/api/github', () => ({
 	getPullRequests: mocks.getPullRequests,
 }));
 
+// ── Lazy-panel prefetch (workspace nav intent) ──────────────────────────────
+// The handles are built from the REAL `createLazyComponent`, so the dedupe the
+// "repeated hover" test asserts is production behaviour, not a test double.
+// Only the module loader is faked, so no Svelte chunk is actually imported.
+const panelSpies = vi.hoisted(() => ({
+	/** Every `preloadPanelForView(viewType)` the component made. */
+	preloadCalls: [] as (string | null | undefined)[],
+	/** Panel keys whose chunk loader actually ran (i.e. a real fetch). */
+	chunkFetches: [] as string[],
+	/** Shared across tests, so it must be cleared between them. */
+	handles: new Map<string, { preload(): void }>(),
+}));
+
+vi.mock('$lib/components/deck/lazy/panels', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('$lib/components/deck/lazy/panels')>();
+	const { createLazyComponent } = await import('$lib/components/deck/lazy/lazy-component');
+
+	return {
+		...actual,
+		preloadPanelForView(viewType: string | null | undefined) {
+			panelSpies.preloadCalls.push(viewType);
+			const key = actual.featurePanelKeyForView(viewType);
+			if (!key) return;
+			let handle = panelSpies.handles.get(key);
+			if (!handle) {
+				handle = createLazyComponent(key, async () => {
+					panelSpies.chunkFetches.push(key);
+					return { default: {} as never };
+				});
+				panelSpies.handles.set(key, handle);
+			}
+			handle.preload();
+		},
+	};
+});
+
 import { tick } from 'svelte';
 import { sessionTimestamp } from './session-card-data';
 import Sidebar from './Sidebar.svelte';
@@ -146,6 +182,11 @@ beforeEach(() => {
 	mocks.getPullRequests.mockReset();
 	mocks.getPullRequests.mockResolvedValue([]);
 	mocks.clusterProjects.set([]);
+	panelSpies.preloadCalls.length = 0;
+	panelSpies.chunkFetches.length = 0;
+	// Handles cache their resolved chunk forever by design; a fresh map per test
+	// keeps "fetched exactly once" meaningful instead of trivially true.
+	panelSpies.handles.clear();
 	mocks.projects.set([
 		{ id: 'visible-project', name: 'Visible Project' },
 		{ id: 'hidden-project', name: 'Hidden Project' },
@@ -596,5 +637,79 @@ describe('Sidebar load-more shelf (W1)', () => {
 		render(Sidebar, { props: sidebarProps });
 
 		expect(screen.queryByRole('button', { name: /Load older sessions/ })).toBeNull();
+	});
+});
+
+describe('Sidebar workspace nav prefetch', () => {
+	/** The Workspace rows, keyed by their visible label. */
+	function wsrow(label: string): HTMLElement {
+		const row = Array.from(document.querySelectorAll('.wsrow')).find(
+			(node) => node.querySelector('.label')?.textContent?.trim() === label
+		);
+		if (!row) throw new Error(`no workspace row labelled ${label}`);
+		return row as HTMLElement;
+	}
+
+	it('does not prefetch anything just by rendering', () => {
+		render(Sidebar, { props: sidebarProps });
+
+		expect(panelSpies.preloadCalls).toEqual([]);
+		expect(panelSpies.chunkFetches).toEqual([]);
+	});
+
+	it('prefetches the panel chunk when the pointer enters a row', async () => {
+		render(Sidebar, { props: sidebarProps });
+
+		await fireEvent.pointerEnter(wsrow('Notes'));
+		await Promise.resolve();
+
+		expect(panelSpies.preloadCalls).toEqual(['notes']);
+		expect(panelSpies.chunkFetches).toEqual(['notes']);
+	});
+
+	it('prefetches on focus, so keyboard navigation warms the same chunk', async () => {
+		render(Sidebar, { props: sidebarProps });
+
+		await fireEvent.focus(wsrow('Stats'));
+		await Promise.resolve();
+
+		expect(panelSpies.preloadCalls).toEqual(['stats']);
+		expect(panelSpies.chunkFetches).toEqual(['stats']);
+	});
+
+	it('maps every Build sub-view row onto the Build panel chunk', async () => {
+		render(Sidebar, { props: sidebarProps });
+
+		await fireEvent.pointerEnter(wsrow('Build'));
+		await Promise.resolve();
+
+		expect(panelSpies.chunkFetches).toEqual(['build']);
+	});
+
+	it('does not re-fetch a chunk on repeated hover or on a later focus', async () => {
+		render(Sidebar, { props: sidebarProps });
+		const row = wsrow('Files');
+
+		await fireEvent.pointerEnter(row);
+		await Promise.resolve();
+		await fireEvent.pointerLeave(row);
+		await fireEvent.pointerEnter(row);
+		await fireEvent.focus(row);
+		await Promise.resolve();
+
+		// The component asked three times — the handle fetched once.
+		expect(panelSpies.preloadCalls).toEqual(['file-browser', 'file-browser', 'file-browser']);
+		expect(panelSpies.chunkFetches).toEqual(['file-browser']);
+	});
+
+	it('still routes the click through onOpenFeature after a prefetch', async () => {
+		const onOpenFeature = vi.fn();
+		render(Sidebar, { props: { ...sidebarProps, onOpenFeature } });
+
+		const row = wsrow('Docs');
+		await fireEvent.pointerEnter(row);
+		await fireEvent.click(row);
+
+		expect(onOpenFeature).toHaveBeenCalledWith('docs');
 	});
 });

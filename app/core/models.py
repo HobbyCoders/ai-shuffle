@@ -492,9 +492,52 @@ class Session(SessionBase):
         return value
 
 
+class MessagePagination(BaseModel):
+    """The transcript window carried by a paginated session read.
+
+    ``GET /sessions/{id}`` returns the NEWEST window of a transcript, not the
+    whole thing, and walks BACKWARDS from there. The same six values already
+    ride the ``X-Message-*`` response headers; this is the body-visible copy,
+    because the frontend reads the JSON and not the headers — without it a
+    transcript longer than the page cap silently renders as its newest page
+    with no way to ask for the rest.
+
+    Fields mirror the headers 1:1:
+
+    ==================  =====================================================
+    ``total``           Size of the whole transcript (``X-Message-Total``).
+    ``returned``        How many came back in this page.
+    ``limit``           The page size actually applied (after clamping).
+    ``has_more``        OLDER items exist before this window.
+    ``first_seq``       0-based position of the first item of this page in the
+                        full transcript; ``None`` for an empty page.
+    ``next_before_seq`` Cursor for the next (older) page — pass it back as
+                        ``?before_seq=``. ``None`` at the start of history.
+    ==================  =====================================================
+
+    ``seq`` is a stable 0-based position: transcripts are append-only, so a
+    position never shifts under a client that is paging backwards.
+    """
+
+    total: int
+    returned: int
+    limit: int
+    has_more: bool
+    first_seq: Optional[int] = None
+    next_before_seq: Optional[int] = None
+
+
 class SessionWithMessages(Session):
     """Session with message history"""
     messages: List[SessionMessage] = []
+    # Transcript window state. Optional and defaulting to None so the shape is
+    # backward compatible: every existing caller (and every response built
+    # before the API layer was taught to fill this in) serializes exactly as it
+    # did before. The ``X-Message-*`` headers stay — this is additive, not a
+    # replacement. ``paginate_messages()`` returns a superset of these keys
+    # (``last_seq``, ``has_more_after``); the extras are ignored on validation,
+    # so the dict can be assigned straight through.
+    message_pagination: Optional[MessagePagination] = None
 
 
 class SessionSearchResult(Session):

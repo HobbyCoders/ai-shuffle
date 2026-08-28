@@ -17,6 +17,11 @@ from app.db.async_database import run_sync
 from app.db.api_users import get_api_users_by_ids
 from app.db.tags import get_tags_for_sessions
 from app.db.sessions import get_fork_info_for_sessions
+from app.db.projects import get_projects_by_ids
+from app.db.projects_v2 import (
+    get_projects_v2_by_ids,
+    get_projects_v2_by_origins,
+)
 from app.api.auth import get_api_user_from_request
 
 import logging
@@ -489,7 +494,11 @@ def apply_sdk_session_keep(session_row: dict, destination_instance_id: str) -> N
     )
 
 
-def is_session_degraded(session_row: dict, claimable_ids: set) -> bool:
+def is_session_degraded(
+    session_row: dict,
+    claimable_ids: set,
+    installs_map: Optional[dict] = None,
+) -> bool:
     """Derive the transient V2 Q7 ``degraded`` state for one session.
 
     ``degraded`` is True IFF ALL of:
@@ -503,6 +512,12 @@ def is_session_degraded(session_row: dict, claimable_ids: set) -> bool:
     or the legacy cloud/sync paths). Derive-on-read only — nothing is persisted.
     Any exception anywhere ⇒ False (this NEVER raises, so a listing can never
     500 on the derivation).
+
+    ``installs_map`` (optional) is a preloaded install registry snapshot handed
+    to the resolver. The enrichment pipeline has already read the registry for
+    its device annotations, so passing it makes the whole page cost ONE registry
+    read instead of two per degraded candidate. Omit it and the resolver reads
+    the registry itself, exactly as before.
     """
     try:
         # Not a queued-with-no-live-run candidate ⇒ not degraded.
@@ -511,7 +526,7 @@ def is_session_degraded(session_row: dict, claimable_ids: set) -> bool:
 
         from app.core.placement import resolve_placement
 
-        return resolve_placement(session_row).kind == "none"
+        return resolve_placement(session_row, installs_map=installs_map).kind == "none"
     except Exception:  # noqa: BLE001 — derivation must never break the listing
         logger.debug(
             "degraded derivation failed for %s",
@@ -524,56 +539,15 @@ def is_session_degraded(session_row: dict, claimable_ids: set) -> bool:
 # Batched lookups for the listing-enrichment pipeline
 #
 # The enrichment pipeline runs on EVERY sidebar poll, so every lookup it makes
-# has to be batched: one query for the whole page, never one per row. The two
-# helpers below replace the former ``get_project``-per-distinct-project N+1 and
-# the full ``list_projects_v2()`` table scan with targeted ``IN (...)`` reads.
-#
-# They issue their SQL here (rather than through a ``app.db`` helper) only
-# because no batched project reader exists yet; both fall back to the
-# per-id/full-scan path if the query fails, so behaviour is unchanged when the
-# schema or driver disagrees. See the TODO on each.
+# has to be batched: one query for the whole page, never one per row. The SQL
+# now lives beside its siblings in the DB layer
+# (``app.db.projects.get_projects_by_ids`` — which also owns the per-id
+# fallback — and ``app.db.projects_v2.get_projects_v2_by_ids`` /
+# ``get_projects_v2_by_origins``). Only the composition and the degrade-to-
+# full-scan policy are here, because they are the LISTING's policy: the two
+# targeted ``projects_v2`` reads are one logical lookup, so a failure in either
+# falls back to the single old full scan rather than to two of them.
 # ---------------------------------------------------------------------------
-
-def _projects_by_ids(project_ids) -> dict[str, dict]:
-    """``{project_id: row}`` for every requested legacy project, in ONE query.
-
-    Deliberately NOT instance-filtered (mirrors ``database.get_project``) so a
-    session owned by another install still resolves its project name.
-
-    TODO: move this to a ``app.db.projects.get_projects_by_ids`` bulk helper —
-    it belongs next to ``get_project``; it lives here only because that module
-    is owned elsewhere right now.
-    """
-    ids = [pid for pid in dict.fromkeys(project_ids) if pid]
-    if not ids:
-        return {}
-    try:
-        from app.db.base import get_db, rows_to_list
-        from app.db.compat import phs
-
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT id, name, path, link_group_id FROM projects "
-                f"WHERE id IN ({phs(len(ids))})",
-                ids,
-            )
-            rows = rows_to_list(cursor.fetchall())
-        return {row["id"]: dict(row) for row in rows if row.get("id")}
-    except Exception:  # noqa: BLE001 — enrichment must never break the listing
-        logger.debug("Batched project lookup failed; falling back", exc_info=True)
-
-    # Fallback: one lookup per DISTINCT id (never per session).
-    resolved: dict[str, dict] = {}
-    for pid in ids:
-        try:
-            proj = database.get_project(pid)
-        except Exception:  # noqa: BLE001
-            proj = None
-        if proj:
-            resolved[pid] = proj
-    return resolved
-
 
 def _projects_v2_targeted(pv2_ids, origins) -> tuple[dict[str, dict], dict[str, str]]:
     """``(by_id, origin_to_id)`` for just the projects this page references.
@@ -581,45 +555,25 @@ def _projects_v2_targeted(pv2_ids, origins) -> tuple[dict[str, dict], dict[str, 
     Replaces the full ``list_projects_v2()`` scan that ran on every listing:
     only the ``project_v2_id``s carried by the page's sessions and the origins
     of the page's legacy projects can ever be looked up, so only those are read.
-
-    TODO: move to ``app.db.projects_v2`` bulk helpers (``get_projects_v2_by_ids``
-    / ``get_projects_v2_by_origins``) once that module can be edited.
+    Falls back to that full scan if either targeted read fails, so behaviour is
+    unchanged when the schema or driver disagrees.
     """
-    ids = [i for i in dict.fromkeys(pv2_ids) if i]
-    origin_list = [o for o in dict.fromkeys(origins) if o]
-    if not ids and not origin_list:
-        return {}, {}
-
     by_id: dict[str, dict] = {}
     origin_to_id: dict[str, str] = {}
     try:
-        from app.db.base import get_db, rows_to_list
-        from app.db.compat import phs
-
-        with get_db() as conn:
-            cursor = conn.cursor()
-            if ids:
-                cursor.execute(
-                    f"SELECT id, origin FROM projects_v2 WHERE id IN ({phs(len(ids))})",
-                    ids,
-                )
-                for row in rows_to_list(cursor.fetchall()):
-                    by_id[row["id"]] = dict(row)
-            if origin_list:
-                cursor.execute(
-                    "SELECT id, origin FROM projects_v2 "
-                    f"WHERE origin IN ({phs(len(origin_list))})",
-                    origin_list,
-                )
-                for row in rows_to_list(cursor.fetchall()):
-                    if row.get("origin"):
-                        origin_to_id[row["origin"]] = row["id"]
+        by_id = dict(get_projects_v2_by_ids(pv2_ids))
+        origin_to_id = {
+            origin: row["id"]
+            for origin, row in get_projects_v2_by_origins(origins).items()
+            if row.get("id")
+        }
         return by_id, origin_to_id
     except Exception:  # noqa: BLE001 — enrichment must never break the listing
         logger.debug(
             "Targeted projects_v2 lookup failed; falling back to full scan",
             exc_info=True,
         )
+        by_id, origin_to_id = {}, {}
 
     # Fallback: the old full scan.
     try:
@@ -678,7 +632,7 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
     # extra DB call. Used to self-heal ``origin``/``project_v2_id`` for sessions
     # whose ``project_v2_id`` column is still NULL (created before the seed).
     project_origins: dict[str, str] = {}
-    for pid, proj in _projects_by_ids(
+    for pid, proj in get_projects_by_ids(
         s.get("project_id") for s in sessions
     ).items():
         project_names[pid] = proj.get("name") or proj.get("path") or pid
@@ -703,7 +657,15 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
     try:
         from app.db.turns import list_claimable_sessions
 
-        claimable_ids = set(list_claimable_sessions())
+        # Targeted anti-join over THIS page's ids only — the no-argument form is
+        # a full ``turns ⋈ runs`` DISTINCT scan, and this runs on every listing.
+        # Same predicates, just a WHERE on ``t.session_id``, so the result is
+        # exactly the page's subset of the full candidate set.
+        claimable_ids = set(
+            list_claimable_sessions(
+                session_ids=[s["id"] for s in sessions if s.get("id")]
+            )
+        )
     except Exception:  # noqa: BLE001 — annotation must never break the listing
         logger.debug(
             "Failed to load claimable sessions for degraded derivation",
@@ -718,7 +680,11 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
         session["is_remote"] = is_remote
         session["is_pinned"] = is_pinned(session)
 
-        session["degraded"] = is_session_degraded(session, claimable_ids)
+        # Pass the registry snapshot read above: resolve_placement would
+        # otherwise re-read it (twice) per degraded candidate.
+        session["degraded"] = is_session_degraded(
+            session, claimable_ids, installs_map=installs_map
+        )
 
         if is_remote:
             install = installs_map.get(inst)

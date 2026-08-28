@@ -25,6 +25,7 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
     """Create hook management tools."""
     from claude_agent_sdk import tool
     from app.db import database
+    from app.db.async_database import run_sync
 
     _is_admin = is_admin
     _project_id = project_id
@@ -54,14 +55,19 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
     async def list_hooks(args: dict) -> dict:
         scope = args.get("scope", "all")
 
-        if scope == "project" and _project_id:
-            hooks = database.get_hooks_for_project(_project_id)
-        elif scope == "app":
-            hooks = database.get_app_hooks()
-        elif scope == "all" and _project_id:
-            hooks = database.get_all_hooks_for_project(_project_id)
-        else:
-            hooks = database.get_app_hooks()
+        def _load():
+            """The scope branch, off-loop. Exactly one of these reads runs per
+            call — as before — it just runs on a worker thread."""
+            if scope == "project" and _project_id:
+                return database.get_hooks_for_project(_project_id)
+            elif scope == "app":
+                return database.get_app_hooks()
+            elif scope == "all" and _project_id:
+                return database.get_all_hooks_for_project(_project_id)
+            else:
+                return database.get_app_hooks()
+
+        hooks = await run_sync(_load)
 
         event_filter = args.get("event")
         if event_filter:
@@ -88,7 +94,7 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
         },
     )
     async def get_hook(args: dict) -> dict:
-        hook = database.get_hook(args["hook_id"])
+        hook = await run_sync(database.get_hook, args["hook_id"])
         if not hook:
             return _error(f"Hook not found: {args['hook_id']}")
         return _tool_result(_sanitize_hook(hook))
@@ -180,7 +186,8 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
         timeout_s = min(args.get("timeout", 30), 300)
 
         hook_id = f"hook-{_secrets.token_hex(4)}"
-        hook = database.create_hook(
+        hook = await run_sync(
+            database.create_hook,
             hook_id=hook_id,
             name=args["name"],
             event=event,
@@ -241,24 +248,40 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
             return _error("App configuration tools require admin access.")
 
         hook_id = args["hook_id"]
-        existing = database.get_hook(hook_id)
-        if not existing:
-            return _error(f"Hook not found: {hook_id}")
 
-        # Build update kwargs — only include provided fields
-        kwargs: Dict[str, Any] = {}
-        for field in ("name", "event", "hook_type", "command", "url",
-                      "message_template", "tool_matcher", "enabled"):
-            if field in args and args[field] is not None:
-                kwargs[field] = args[field]
+        def _read_validate_write():
+            """READ-MODIFY-WRITE — must stay in ONE hop.
 
-        if "timeout" in args and args["timeout"] is not None:
-            kwargs["timeout"] = min(args["timeout"], 300) * 1000  # seconds → ms
+            The existence read and the UPDATE that depends on it are one
+            logical operation. Split across thread hops, two concurrent
+            updateHook calls could interleave and the later write would clobber
+            the earlier one (lost update), or write to a hook deleted between
+            the check and the write.
 
-        if not kwargs:
-            return _error("No fields provided to update.")
+            Returns ``(error_message, updated_row, kwargs)``.
+            """
+            existing = database.get_hook(hook_id)
+            if not existing:
+                return f"Hook not found: {hook_id}", None, None
 
-        updated = database.update_hook(hook_id, **kwargs)
+            # Build update kwargs — only include provided fields
+            kwargs: Dict[str, Any] = {}
+            for field in ("name", "event", "hook_type", "command", "url",
+                          "message_template", "tool_matcher", "enabled"):
+                if field in args and args[field] is not None:
+                    kwargs[field] = args[field]
+
+            if "timeout" in args and args["timeout"] is not None:
+                kwargs["timeout"] = min(args["timeout"], 300) * 1000  # seconds → ms
+
+            if not kwargs:
+                return "No fields provided to update.", None, None
+
+            return None, database.update_hook(hook_id, **kwargs), kwargs
+
+        error, updated, kwargs = await run_sync(_read_validate_write)
+        if error:
+            return _error(error)
         if not updated:
             return _error("Failed to update hook.")
 
@@ -294,12 +317,19 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
         if not args.get("confirm"):
             return _error("Set confirm=true to delete. Ask the user for confirmation first.")
 
-        hook = database.get_hook(args["hook_id"])
+        def _read_and_delete():
+            """Existence read + DELETE in ONE hop — nothing runs between them,
+            so the name reported as deleted is the row that was deleted."""
+            hook = database.get_hook(args["hook_id"])
+            if not hook:
+                return None, None
+            return hook, database.delete_hook(args["hook_id"])
+
+        hook, deleted = await run_sync(_read_and_delete)
         if not hook:
             return _error(f"Hook not found: {args['hook_id']}")
 
         name = hook.get("name", args["hook_id"])
-        deleted = database.delete_hook(args["hook_id"])
         if not deleted:
             return _error("Failed to delete hook.")
 
@@ -328,11 +358,21 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
         if not _is_admin:
             return _error("App configuration tools require admin access.")
 
-        hook = database.get_hook(args["hook_id"])
+        def _read_and_toggle():
+            """READ-MODIFY-WRITE — existence check plus the enabled flip in ONE
+            hop, so a concurrent toggle cannot land between them and leave the
+            hook in a state this call did not report."""
+            hook = database.get_hook(args["hook_id"])
+            if not hook:
+                return None, None
+            return hook, database.update_hook(
+                args["hook_id"], enabled=args["enabled"]
+            )
+
+        hook, updated = await run_sync(_read_and_toggle)
         if not hook:
             return _error(f"Hook not found: {args['hook_id']}")
 
-        updated = database.update_hook(args["hook_id"], enabled=args["enabled"])
         if not updated:
             return _error("Failed to toggle hook.")
 
@@ -363,7 +403,7 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
         if not _is_admin:
             return _error("App configuration tools require admin access.")
 
-        hook = database.get_hook(args["hook_id"])
+        hook = await run_sync(database.get_hook, args["hook_id"])
         if not hook:
             return _error(f"Hook not found: {args['hook_id']}")
 

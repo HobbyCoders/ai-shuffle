@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.db import database
+from app.db.async_database import run_sync
 from app.api.auth import require_admin, require_auth
 from app.core.ai_tools import AI_TOOLS
 from app.core.query_engine import DEFAULT_SECURITY_INSTRUCTIONS
@@ -164,59 +165,68 @@ async def get_integration_settings(token: str = Depends(require_auth)):
 
     Returns whether API keys are configured (without exposing the actual keys).
     """
-    fal_key = get_decrypted_api_key("fal_api_key")
-    anthropic_key = get_decrypted_api_key("anthropic_api_key")
-    image_model = database.get_system_setting("image_model")
-    image_edit_model = database.get_system_setting("image_edit_model")
-    video_model = database.get_system_setting("video_model")
-    i2v_model = database.get_system_setting("i2v_model")
-    model3d_model = database.get_system_setting("model3d_model")
-    image_to_3d_model = database.get_system_setting("image_to_3d_model")
-    tts_model = database.get_system_setting("tts_model") or "fal-ai/kokoro/american-english"
-    tts_voice = database.get_system_setting("tts_voice") or "af_heart"
-    tts_speed_str = database.get_system_setting("tts_speed")
-    tts_speed = float(tts_speed_str) if tts_speed_str else 1.0
-    tts_output_format = database.get_system_setting("tts_output_format") or "wav"
-    stt_model = database.get_system_setting("stt_model") or "fal-ai/whisper"
-    audio_model = database.get_system_setting("audio_model")
-    audio_to_audio_model = database.get_system_setting("audio_to_audio_model")
-    # Per-model generation settings
-    image_aspect_ratio = database.get_system_setting("image_aspect_ratio")
-    image_resolution = database.get_system_setting("image_resolution")
-    video_aspect_ratio = database.get_system_setting("video_aspect_ratio")
-    video_duration_str = database.get_system_setting("video_duration")
-    video_duration = int(video_duration_str) if video_duration_str else None
-    video_resolution = database.get_system_setting("video_resolution")
-    stt_language = database.get_system_setting("stt_language")
+    def _load() -> IntegrationSettingsResponse:
+        """Both key reads (+ decrypt) and all 19 setting reads in ONE hop.
 
-    return IntegrationSettingsResponse(
-        fal_api_key_set=bool(fal_key),
-        fal_api_key_masked=mask_api_key(fal_key) if fal_key else "",
-        anthropic_api_key_set=bool(anthropic_key),
-        anthropic_api_key_masked=mask_api_key(anthropic_key) if anthropic_key else "",
-        # Key set → Claude Code authenticates with the API key (overrides the
-        # connected account). Key absent → connected OAuth account is used.
-        claude_code_auth_method="api_key" if anthropic_key else "account",
-        image_model=image_model,
-        image_edit_model=image_edit_model,
-        video_model=video_model,
-        i2v_model=i2v_model,
-        model3d_model=model3d_model,
-        image_to_3d_model=image_to_3d_model,
-        tts_model=tts_model,
-        tts_voice=tts_voice,
-        tts_speed=tts_speed,
-        tts_output_format=tts_output_format,
-        stt_model=stt_model,
-        audio_model=audio_model,
-        audio_to_audio_model=audio_to_audio_model,
-        image_aspect_ratio=image_aspect_ratio,
-        image_resolution=image_resolution,
-        video_aspect_ratio=video_aspect_ratio,
-        video_duration=video_duration,
-        video_resolution=video_resolution,
-        stt_language=stt_language,
-    )
+        This endpoint made 21 blocking round trips on the event loop; the
+        whole body is straight-line synchronous work, so it collapses into a
+        single closure with the query order untouched.
+        """
+        fal_key = get_decrypted_api_key("fal_api_key")
+        anthropic_key = get_decrypted_api_key("anthropic_api_key")
+        image_model = database.get_system_setting("image_model")
+        image_edit_model = database.get_system_setting("image_edit_model")
+        video_model = database.get_system_setting("video_model")
+        i2v_model = database.get_system_setting("i2v_model")
+        model3d_model = database.get_system_setting("model3d_model")
+        image_to_3d_model = database.get_system_setting("image_to_3d_model")
+        tts_model = database.get_system_setting("tts_model") or "fal-ai/kokoro/american-english"
+        tts_voice = database.get_system_setting("tts_voice") or "af_heart"
+        tts_speed_str = database.get_system_setting("tts_speed")
+        tts_speed = float(tts_speed_str) if tts_speed_str else 1.0
+        tts_output_format = database.get_system_setting("tts_output_format") or "wav"
+        stt_model = database.get_system_setting("stt_model") or "fal-ai/whisper"
+        audio_model = database.get_system_setting("audio_model")
+        audio_to_audio_model = database.get_system_setting("audio_to_audio_model")
+        # Per-model generation settings
+        image_aspect_ratio = database.get_system_setting("image_aspect_ratio")
+        image_resolution = database.get_system_setting("image_resolution")
+        video_aspect_ratio = database.get_system_setting("video_aspect_ratio")
+        video_duration_str = database.get_system_setting("video_duration")
+        video_duration = int(video_duration_str) if video_duration_str else None
+        video_resolution = database.get_system_setting("video_resolution")
+        stt_language = database.get_system_setting("stt_language")
+
+        return IntegrationSettingsResponse(
+            fal_api_key_set=bool(fal_key),
+            fal_api_key_masked=mask_api_key(fal_key) if fal_key else "",
+            anthropic_api_key_set=bool(anthropic_key),
+            anthropic_api_key_masked=mask_api_key(anthropic_key) if anthropic_key else "",
+            # Key set → Claude Code authenticates with the API key (overrides the
+            # connected account). Key absent → connected OAuth account is used.
+            claude_code_auth_method="api_key" if anthropic_key else "account",
+            image_model=image_model,
+            image_edit_model=image_edit_model,
+            video_model=video_model,
+            i2v_model=i2v_model,
+            model3d_model=model3d_model,
+            image_to_3d_model=image_to_3d_model,
+            tts_model=tts_model,
+            tts_voice=tts_voice,
+            tts_speed=tts_speed,
+            tts_output_format=tts_output_format,
+            stt_model=stt_model,
+            audio_model=audio_model,
+            audio_to_audio_model=audio_to_audio_model,
+            image_aspect_ratio=image_aspect_ratio,
+            image_resolution=image_resolution,
+            video_aspect_ratio=video_aspect_ratio,
+            video_duration=video_duration,
+            video_resolution=video_resolution,
+            stt_language=stt_language,
+        )
+
+    return await run_sync(_load)
 
 
 @router.post("/integrations/fal-ai", response_model=FalAIKeyResponse)
@@ -253,8 +263,10 @@ async def set_fal_api_key(
         logger.warning(f"Error validating fal.ai key: {e}")
         # Don't fail on network errors - save the key
 
-    # Save to database (encrypted if encryption is ready)
-    set_encrypted_api_key("fal_api_key", api_key)
+    # Save to database (encrypted if encryption is ready). One hop: the fal.ai
+    # validation above is a real network await, so this cannot share a closure
+    # with anything before it.
+    await run_sync(set_encrypted_api_key, "fal_api_key", api_key)
 
     return FalAIKeyResponse(
         success=True,
@@ -267,7 +279,7 @@ async def remove_fal_api_key(token: str = Depends(require_admin)):
     """
     Remove the fal.ai API key (admin only).
     """
-    database.delete_system_setting("fal_api_key")
+    await run_sync(database.delete_system_setting, "fal_api_key")
     return {"success": True}
 
 
@@ -321,8 +333,9 @@ async def set_anthropic_api_key(
         # Malformed / unexpected response — surface so the user can investigate
         raise HTTPException(status_code=400, detail=f"Anthropic API error: {e}")
 
-    # Save to database (encrypted if encryption is ready)
-    set_encrypted_api_key("anthropic_api_key", api_key)
+    # Save to database (encrypted if encryption is ready). One hop: the
+    # Anthropic validation above is a real network await.
+    await run_sync(set_encrypted_api_key, "anthropic_api_key", api_key)
 
     return AnthropicKeyResponse(
         success=True,
@@ -338,7 +351,7 @@ async def remove_anthropic_api_key(token: str = Depends(require_admin)):
     Reverts Claude Code authentication to the connected Claude account /
     OAuth credentials. No effect on the OAuth login flow itself.
     """
-    database.delete_system_setting("anthropic_api_key")
+    await run_sync(database.delete_system_setting, "anthropic_api_key")
     return {"success": True}
 
 
@@ -357,7 +370,7 @@ async def get_available_ai_tools(token: str = Depends(require_auth)):
     Returns tools grouped by category with availability status.
     Used by the profile management UI to show only available tools.
     """
-    fal_key = get_decrypted_api_key("fal_api_key")
+    fal_key = await run_sync(get_decrypted_api_key, "fal_api_key")
     available_providers = {"fal-ai"} if fal_key else set()
 
     # Build tools list with availability
@@ -426,7 +439,7 @@ async def get_security_instructions(token: str = Depends(require_admin)):
 
     Admin only.
     """
-    custom_instructions = database.get_system_setting("security_instructions")
+    custom_instructions = await run_sync(database.get_system_setting, "security_instructions")
 
     return SecurityInstructionsResponse(
         current=custom_instructions if custom_instructions else DEFAULT_SECURITY_INSTRUCTIONS,
@@ -456,7 +469,7 @@ async def update_security_instructions(
             detail="Instructions cannot be empty. Use DELETE to revert to default."
         )
 
-    database.set_system_setting("security_instructions", instructions)
+    await run_sync(database.set_system_setting, "security_instructions", instructions)
 
     return {
         "success": True,
@@ -476,9 +489,12 @@ async def revert_security_instructions(token: str = Depends(require_admin)):
     # Delete the custom setting to revert to default
     from app.db.base import get_db
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM system_settings WHERE key = %s", ("security_instructions",))
+    def _delete() -> None:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM system_settings WHERE key = %s", ("security_instructions",))
+
+    await run_sync(_delete)
 
     return {
         "success": True,
@@ -627,7 +643,8 @@ def get_voice_settings() -> dict:
 @router.get("/voice", response_model=VoiceSettingsResponse)
 async def get_voice_settings_endpoint(token: str = Depends(require_auth)):
     """Get the current voice-mode settings (defaults applied)."""
-    return VoiceSettingsResponse(**get_voice_settings())
+    # get_voice_settings() is eight synchronous reads — one hop for all of them.
+    return VoiceSettingsResponse(**await run_sync(get_voice_settings))
 
 
 @router.put("/voice", response_model=VoiceSettingsResponse)
@@ -644,80 +661,92 @@ async def update_voice_settings(
 
     Admin only.
     """
-    provided = request.model_fields_set
+    def _apply() -> dict:
+        """Every validation, write and the closing re-read in ONE hop.
 
-    if "voice_model" in provided:
-        model = (request.voice_model or "").strip()
-        if model not in VOICE_MODELS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"voice_model must be one of {list(VOICE_MODELS)}",
-            )
-        database.set_system_setting(VOICE_MODEL_KEY, model)
+        Read-decide-write: the provider check reads the eligible-provider
+        list and that result gates the write, so the two must not be split
+        across awaits. The trailing ``get_voice_settings()`` read joins the
+        same hop so the response reflects the writes made just above it.
+        HTTPExceptions raised in here propagate unchanged, and the order of
+        writes vs. a later 400 is exactly as before.
+        """
+        provided = request.model_fields_set
 
-    if "voice_voice" in provided:
-        voice = (request.voice_voice or "").strip()
-        if voice not in VOICE_VOICES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"voice_voice must be one of {list(VOICE_VOICES)}",
-            )
-        database.set_system_setting(VOICE_VOICE_KEY, voice)
-
-    if "voice_max_call_minutes" in provided:
-        minutes = request.voice_max_call_minutes
-        if minutes is None or minutes <= 0:
-            raise HTTPException(
-                status_code=400,
-                detail="voice_max_call_minutes must be a positive integer",
-            )
-        database.set_system_setting(VOICE_MAX_CALL_MINUTES_KEY, str(minutes))
-
-    if "voice_mode_enabled" in provided:
-        database.set_system_setting(
-            VOICE_MODE_ENABLED_KEY, "true" if request.voice_mode_enabled else "false"
-        )
-
-    for field, key in (
-        ("voice_instructions", VOICE_INSTRUCTIONS_KEY),
-        ("voice_instructions_command", VOICE_INSTRUCTIONS_COMMAND_KEY),
-        ("voice_instructions_chat", VOICE_INSTRUCTIONS_CHAT_KEY),
-    ):
-        if field in provided:
-            text = (getattr(request, field) or "").strip()
-            if len(text) > MAX_VOICE_INSTRUCTIONS_CHARS:
+        if "voice_model" in provided:
+            model = (request.voice_model or "").strip()
+            if model not in VOICE_MODELS:
                 raise HTTPException(
                     status_code=400,
-                    detail=(
-                        f"{field} is limited to "
-                        f"{MAX_VOICE_INSTRUCTIONS_CHARS} characters."
-                    ),
+                    detail=f"voice_model must be one of {list(VOICE_MODELS)}",
                 )
-            # Empty string clears the override → back to the built-in default.
-            database.set_system_setting(key, text)
+            database.set_system_setting(VOICE_MODEL_KEY, model)
 
-    if "voice_provider_id" in provided:
-        # Imported lazily: app.api.voice imports this module for the reader
-        # above, so a module-level import here would be circular.
-        from app.api.voice import list_eligible_voice_providers
-
-        provider_id = (request.voice_provider_id or "").strip()
-        if not provider_id:
-            database.delete_system_setting(VOICE_PROVIDER_ID_KEY)
-        else:
-            eligible_ids = {p["id"] for p in list_eligible_voice_providers()}
-            if provider_id not in eligible_ids:
+        if "voice_voice" in provided:
+            voice = (request.voice_voice or "").strip()
+            if voice not in VOICE_VOICES:
                 raise HTTPException(
                     status_code=400,
-                    detail=(
-                        f"Provider {provider_id!r} cannot fund voice calls. Pick an "
-                        "enabled OpenAI provider that stores an API key (Realtime "
-                        "does not support ChatGPT-subscription logins)."
-                    ),
+                    detail=f"voice_voice must be one of {list(VOICE_VOICES)}",
                 )
-            database.set_system_setting(VOICE_PROVIDER_ID_KEY, provider_id)
+            database.set_system_setting(VOICE_VOICE_KEY, voice)
 
-    return VoiceSettingsResponse(**get_voice_settings())
+        if "voice_max_call_minutes" in provided:
+            minutes = request.voice_max_call_minutes
+            if minutes is None or minutes <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="voice_max_call_minutes must be a positive integer",
+                )
+            database.set_system_setting(VOICE_MAX_CALL_MINUTES_KEY, str(minutes))
+
+        if "voice_mode_enabled" in provided:
+            database.set_system_setting(
+                VOICE_MODE_ENABLED_KEY, "true" if request.voice_mode_enabled else "false"
+            )
+
+        for field, key in (
+            ("voice_instructions", VOICE_INSTRUCTIONS_KEY),
+            ("voice_instructions_command", VOICE_INSTRUCTIONS_COMMAND_KEY),
+            ("voice_instructions_chat", VOICE_INSTRUCTIONS_CHAT_KEY),
+        ):
+            if field in provided:
+                text = (getattr(request, field) or "").strip()
+                if len(text) > MAX_VOICE_INSTRUCTIONS_CHARS:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"{field} is limited to "
+                            f"{MAX_VOICE_INSTRUCTIONS_CHARS} characters."
+                        ),
+                    )
+                # Empty string clears the override → back to the built-in default.
+                database.set_system_setting(key, text)
+
+        if "voice_provider_id" in provided:
+            # Imported lazily: app.api.voice imports this module for the reader
+            # above, so a module-level import here would be circular.
+            from app.api.voice import list_eligible_voice_providers
+
+            provider_id = (request.voice_provider_id or "").strip()
+            if not provider_id:
+                database.delete_system_setting(VOICE_PROVIDER_ID_KEY)
+            else:
+                eligible_ids = {p["id"] for p in list_eligible_voice_providers()}
+                if provider_id not in eligible_ids:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Provider {provider_id!r} cannot fund voice calls. Pick an "
+                            "enabled OpenAI provider that stores an API key (Realtime "
+                            "does not support ChatGPT-subscription logins)."
+                        ),
+                    )
+                database.set_system_setting(VOICE_PROVIDER_ID_KEY, provider_id)
+
+        return get_voice_settings()
+
+    return VoiceSettingsResponse(**await run_sync(_apply))
 
 
 # ============================================================================
@@ -760,7 +789,7 @@ def get_text_generation_settings() -> Dict[str, str]:
 @router.get("/text-generation", response_model=TextGenerationSettingsResponse)
 async def get_text_generation_settings_endpoint(token: str = Depends(require_auth)):
     """Get the model and effort used for internal text generation."""
-    return TextGenerationSettingsResponse(**get_text_generation_settings())
+    return TextGenerationSettingsResponse(**await run_sync(get_text_generation_settings))
 
 
 @router.put("/text-generation", response_model=TextGenerationSettingsResponse)
@@ -775,48 +804,56 @@ async def update_text_generation_settings(
     rather than failing every commit-message generation afterwards. An empty
     string on either key clears it back to the default.
     """
-    from app.core.generation_options import (
-        TEXT_GENERATION_EFFORT_KEY,
-        TEXT_GENERATION_MODEL_KEY,
-        VALID_EFFORTS,
-    )
+    def _apply() -> dict:
+        """Validation, writes and the closing re-read in ONE hop.
 
-    provided = request.model_fields_set
+        Read-decide-write: ``validate_provider_model`` reads the provider
+        row and its verdict gates the write.
+        """
+        from app.core.generation_options import (
+            TEXT_GENERATION_EFFORT_KEY,
+            TEXT_GENERATION_MODEL_KEY,
+            VALID_EFFORTS,
+        )
 
-    if "text_generation_model" in provided:
-        model = (request.text_generation_model or "").strip()
-        if not model:
-            database.delete_system_setting(TEXT_GENERATION_MODEL_KEY)
-        else:
-            from app.core.query_options import decode_provider_model
+        provided = request.model_fields_set
 
-            decoded = decode_provider_model(model)
-            if decoded:
-                from app.core.provider_agent import validate_provider_model
+        if "text_generation_model" in provided:
+            model = (request.text_generation_model or "").strip()
+            if not model:
+                database.delete_system_setting(TEXT_GENERATION_MODEL_KEY)
+            else:
+                from app.core.query_options import decode_provider_model
 
-                validation = validate_provider_model(
-                    decoded[0], decoded[1], require_servable=False
-                )
-                if not validation.ok:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            validation.reason
-                            or f"Model {decoded[1]!r} is not available on that provider."
-                        ),
+                decoded = decode_provider_model(model)
+                if decoded:
+                    from app.core.provider_agent import validate_provider_model
+
+                    validation = validate_provider_model(
+                        decoded[0], decoded[1], require_servable=False
                     )
-            database.set_system_setting(TEXT_GENERATION_MODEL_KEY, model)
+                    if not validation.ok:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                validation.reason
+                                or f"Model {decoded[1]!r} is not available on that provider."
+                            ),
+                        )
+                database.set_system_setting(TEXT_GENERATION_MODEL_KEY, model)
 
-    if "text_generation_effort" in provided:
-        effort = (request.text_generation_effort or "").strip()
-        if not effort:
-            database.delete_system_setting(TEXT_GENERATION_EFFORT_KEY)
-        elif effort not in VALID_EFFORTS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"text_generation_effort must be one of {list(VALID_EFFORTS)}",
-            )
-        else:
-            database.set_system_setting(TEXT_GENERATION_EFFORT_KEY, effort)
+        if "text_generation_effort" in provided:
+            effort = (request.text_generation_effort or "").strip()
+            if not effort:
+                database.delete_system_setting(TEXT_GENERATION_EFFORT_KEY)
+            elif effort not in VALID_EFFORTS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"text_generation_effort must be one of {list(VALID_EFFORTS)}",
+                )
+            else:
+                database.set_system_setting(TEXT_GENERATION_EFFORT_KEY, effort)
 
-    return TextGenerationSettingsResponse(**get_text_generation_settings())
+        return get_text_generation_settings()
+
+    return TextGenerationSettingsResponse(**await run_sync(_apply))

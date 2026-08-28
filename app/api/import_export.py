@@ -14,6 +14,8 @@ import json
 from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File
 from pydantic import BaseModel, Field
 
+from app.db.async_database import run_sync
+
 logger = logging.getLogger(__name__)
 
 from app.db import database
@@ -111,7 +113,7 @@ def _export_subagent(s: dict) -> dict:
 @router.get("/profiles", response_model=ExportData)
 async def export_profiles(token: str = Depends(require_admin)):
     """Export all profiles as JSON (all config fields are preserved dynamically)"""
-    profiles = database.get_all_profiles()
+    profiles = await run_sync(database.get_all_profiles)
 
     exported_profiles = [_export_profile(p) for p in profiles]
 
@@ -126,7 +128,7 @@ async def export_profiles(token: str = Depends(require_admin)):
 @router.get("/profiles/{profile_id}", response_model=ExportData)
 async def export_single_profile(profile_id: str, token: str = Depends(require_admin)):
     """Export a single profile as JSON (all config fields are preserved dynamically)"""
-    profile = database.get_profile(profile_id)
+    profile = await run_sync(database.get_profile, profile_id)
     if not profile:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -144,7 +146,7 @@ async def export_single_profile(profile_id: str, token: str = Depends(require_ad
 @router.get("/subagents")
 async def export_subagents(token: str = Depends(require_admin)):
     """Export all subagents as JSON (all fields are preserved dynamically)"""
-    subagents = database.get_all_subagents()
+    subagents = await run_sync(database.get_all_subagents)
 
     exported_subagents = [_export_subagent(s) for s in subagents]
 
@@ -159,7 +161,7 @@ async def export_subagents(token: str = Depends(require_admin)):
 @router.get("/subagents/{subagent_id}")
 async def export_single_subagent(subagent_id: str, token: str = Depends(require_admin)):
     """Export a single subagent as JSON (all fields are preserved dynamically)"""
-    subagent = database.get_subagent(subagent_id)
+    subagent = await run_sync(database.get_subagent, subagent_id)
     if not subagent:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -177,8 +179,11 @@ async def export_single_subagent(subagent_id: str, token: str = Depends(require_
 @router.get("/all")
 async def export_all(token: str = Depends(require_admin)):
     """Export all profiles and subagents as JSON (all fields are preserved dynamically)"""
-    profiles = database.get_all_profiles()
-    subagents = database.get_all_subagents()
+    # Two contiguous listings — one hop, not two.
+    def _load():
+        return database.get_all_profiles(), database.get_all_subagents()
+
+    profiles, subagents = await run_sync(_load)
 
     exported_profiles = [_export_profile(p) for p in profiles]
     exported_subagents = [_export_subagent(s) for s in subagents]
@@ -238,102 +243,116 @@ async def import_data(
             detail=f"Unsupported export version: {version}"
         )
 
-    result = ImportResult(success=True)
+    def _apply_import():
+        """Every DB touch of the import, in ONE hop.
 
-    # Import subagents first (profiles may reference them)
-    subagents = data.get("subagents", [])
-    if subagents:
-        for subagent_data in subagents:
-            try:
-                subagent_id = subagent_data.get("id")
-                if not subagent_id:
-                    result.errors.append("Subagent missing required 'id' field")
-                    continue
+        Each item costs a read plus a write, so on the loop a file with N
+        profiles/subagents stalled the whole worker for 2N queries — the worst
+        case in this module. Nothing here awaits, so the entire loop moves as a
+        unit; ``result`` is local to this request and not yet published, so
+        mutating it on a worker thread is safe. The per-item ``except`` blocks
+        keep their exact behaviour (recorded in ``result.errors``, never
+        raised), and no collection larger than the parsed payload is built.
+        """
+        result = ImportResult(success=True)
 
-                # Check if exists
-                existing = database.get_subagent(subagent_id)
-                if existing:
-                    if overwrite_existing:
-                        database.update_subagent(
-                            subagent_id=subagent_id,
-                            name=subagent_data.get("name"),
-                            description=subagent_data.get("description"),
-                            prompt=subagent_data.get("prompt"),
-                            tools=subagent_data.get("tools"),
-                            model=subagent_data.get("model")
-                        )
-                        result.subagents_updated += 1
+        # Import subagents first (profiles may reference them)
+        subagents = data.get("subagents", [])
+        if subagents:
+            for subagent_data in subagents:
+                try:
+                    subagent_id = subagent_data.get("id")
+                    if not subagent_id:
+                        result.errors.append("Subagent missing required 'id' field")
+                        continue
+
+                    # Check if exists
+                    existing = database.get_subagent(subagent_id)
+                    if existing:
+                        if overwrite_existing:
+                            database.update_subagent(
+                                subagent_id=subagent_id,
+                                name=subagent_data.get("name"),
+                                description=subagent_data.get("description"),
+                                prompt=subagent_data.get("prompt"),
+                                tools=subagent_data.get("tools"),
+                                model=subagent_data.get("model")
+                            )
+                            result.subagents_updated += 1
+                        else:
+                            result.subagents_skipped += 1
+                            result.warnings.append(f"Subagent '{subagent_id}' already exists, skipped")
                     else:
-                        result.subagents_skipped += 1
-                        result.warnings.append(f"Subagent '{subagent_id}' already exists, skipped")
-                else:
-                    database.create_subagent(
-                        subagent_id=subagent_id,
-                        name=subagent_data.get("name", subagent_id),
-                        description=subagent_data.get("description", ""),
-                        prompt=subagent_data.get("prompt", ""),
-                        tools=subagent_data.get("tools"),
-                        model=subagent_data.get("model"),
-                        is_builtin=False
-                    )
-                    result.subagents_imported += 1
-            except Exception as e:
-                result.errors.append(f"Failed to import subagent '{subagent_data.get('id', 'unknown')}': {str(e)}")
-
-    # Import profiles
-    # Build set of valid subagent IDs (including any just-imported ones)
-    all_subagents = database.get_all_subagents()
-    valid_agent_ids = {s["id"] for s in all_subagents}
-
-    profiles = data.get("profiles", [])
-    if profiles:
-        for profile_data in profiles:
-            try:
-                profile_id = profile_data.get("id")
-                if not profile_id:
-                    result.errors.append("Profile missing required 'id' field")
-                    continue
-
-                # Check if exists
-                existing = database.get_profile(profile_id)
-                config = profile_data.get("config", {})
-
-                # Filter out ghost subagent references
-                enabled_agents = config.get("enabled_agents")
-                if enabled_agents and isinstance(enabled_agents, list):
-                    valid_enabled = [aid for aid in enabled_agents if aid in valid_agent_ids]
-                    skipped_agents = [aid for aid in enabled_agents if aid not in valid_agent_ids]
-                    if skipped_agents:
-                        result.warnings.append(
-                            f"Profile '{profile_id}': removed {len(skipped_agents)} "
-                            f"subagent(s) not found in environment: {', '.join(skipped_agents)}"
+                        database.create_subagent(
+                            subagent_id=subagent_id,
+                            name=subagent_data.get("name", subagent_id),
+                            description=subagent_data.get("description", ""),
+                            prompt=subagent_data.get("prompt", ""),
+                            tools=subagent_data.get("tools"),
+                            model=subagent_data.get("model"),
+                            is_builtin=False
                         )
-                    config["enabled_agents"] = valid_enabled
+                        result.subagents_imported += 1
+                except Exception as e:
+                    result.errors.append(f"Failed to import subagent '{subagent_data.get('id', 'unknown')}': {str(e)}")
 
-                if existing:
-                    if overwrite_existing:
-                        database.update_profile(
+        # Import profiles
+        # Build set of valid subagent IDs (including any just-imported ones)
+        all_subagents = database.get_all_subagents()
+        valid_agent_ids = {s["id"] for s in all_subagents}
+
+        profiles = data.get("profiles", [])
+        if profiles:
+            for profile_data in profiles:
+                try:
+                    profile_id = profile_data.get("id")
+                    if not profile_id:
+                        result.errors.append("Profile missing required 'id' field")
+                        continue
+
+                    # Check if exists
+                    existing = database.get_profile(profile_id)
+                    config = profile_data.get("config", {})
+
+                    # Filter out ghost subagent references
+                    enabled_agents = config.get("enabled_agents")
+                    if enabled_agents and isinstance(enabled_agents, list):
+                        valid_enabled = [aid for aid in enabled_agents if aid in valid_agent_ids]
+                        skipped_agents = [aid for aid in enabled_agents if aid not in valid_agent_ids]
+                        if skipped_agents:
+                            result.warnings.append(
+                                f"Profile '{profile_id}': removed {len(skipped_agents)} "
+                                f"subagent(s) not found in environment: {', '.join(skipped_agents)}"
+                            )
+                        config["enabled_agents"] = valid_enabled
+
+                    if existing:
+                        if overwrite_existing:
+                            database.update_profile(
+                                profile_id=profile_id,
+                                name=profile_data.get("name"),
+                                description=profile_data.get("description"),
+                                config=config,
+                                allow_builtin=True
+                            )
+                            result.profiles_updated += 1
+                        else:
+                            result.profiles_skipped += 1
+                            result.warnings.append(f"Profile '{profile_id}' already exists, skipped")
+                    else:
+                        database.create_profile(
                             profile_id=profile_id,
-                            name=profile_data.get("name"),
+                            name=profile_data.get("name", profile_id),
                             description=profile_data.get("description"),
                             config=config,
-                            allow_builtin=True
+                            is_builtin=False
                         )
-                        result.profiles_updated += 1
-                    else:
-                        result.profiles_skipped += 1
-                        result.warnings.append(f"Profile '{profile_id}' already exists, skipped")
-                else:
-                    database.create_profile(
-                        profile_id=profile_id,
-                        name=profile_data.get("name", profile_id),
-                        description=profile_data.get("description"),
-                        config=config,
-                        is_builtin=False
-                    )
-                    result.profiles_imported += 1
-            except Exception as e:
-                result.errors.append(f"Failed to import profile '{profile_data.get('id', 'unknown')}': {str(e)}")
+                        result.profiles_imported += 1
+                except Exception as e:
+                    result.errors.append(f"Failed to import profile '{profile_data.get('id', 'unknown')}': {str(e)}")
+        return result
+
+    result = await run_sync(_apply_import)
 
     # Set success to False if there were any errors
     if result.errors:
@@ -354,89 +373,94 @@ async def import_data_json(
     - **data**: ExportData object containing profiles and/or subagents
     - **overwrite_existing**: If True, overwrite existing items with same ID
     """
-    result = ImportResult(success=True)
+    def _apply_import():
+        """Every DB touch of the import, in ONE hop — see ``import_data``."""
+        result = ImportResult(success=True)
 
-    # Import subagents first (profiles may reference them)
-    if data.subagents:
-        for subagent in data.subagents:
-            try:
-                existing = database.get_subagent(subagent.id)
-                if existing:
-                    if overwrite_existing:
-                        database.update_subagent(
+        # Import subagents first (profiles may reference them)
+        if data.subagents:
+            for subagent in data.subagents:
+                try:
+                    existing = database.get_subagent(subagent.id)
+                    if existing:
+                        if overwrite_existing:
+                            database.update_subagent(
+                                subagent_id=subagent.id,
+                                name=subagent.name,
+                                description=subagent.description,
+                                prompt=subagent.prompt,
+                                tools=subagent.tools,
+                                model=subagent.model
+                            )
+                            result.subagents_updated += 1
+                        else:
+                            result.subagents_skipped += 1
+                            result.warnings.append(f"Subagent '{subagent.id}' already exists, skipped")
+                    else:
+                        database.create_subagent(
                             subagent_id=subagent.id,
                             name=subagent.name,
                             description=subagent.description,
                             prompt=subagent.prompt,
                             tools=subagent.tools,
-                            model=subagent.model
+                            model=subagent.model,
+                            is_builtin=False
                         )
-                        result.subagents_updated += 1
+                        result.subagents_imported += 1
+                except Exception as e:
+                    result.errors.append(f"Failed to import subagent '{subagent.id}': {str(e)}")
+
+        # Import profiles
+        # Build set of valid subagent IDs (including any just-imported ones)
+        all_subagents_json = database.get_all_subagents()
+        valid_agent_ids_json = {s["id"] for s in all_subagents_json}
+
+        if data.profiles:
+            for profile in data.profiles:
+                try:
+                    existing = database.get_profile(profile.id)
+                    # config is already a Dict[str, Any], no conversion needed
+                    config = profile.config
+
+                    # Filter out ghost subagent references
+                    enabled_agents = config.get("enabled_agents")
+                    if enabled_agents and isinstance(enabled_agents, list):
+                        valid_enabled = [aid for aid in enabled_agents if aid in valid_agent_ids_json]
+                        skipped_agents = [aid for aid in enabled_agents if aid not in valid_agent_ids_json]
+                        if skipped_agents:
+                            result.warnings.append(
+                                f"Profile '{profile.id}': removed {len(skipped_agents)} "
+                                f"subagent(s) not found in environment: {', '.join(skipped_agents)}"
+                            )
+                        config["enabled_agents"] = valid_enabled
+
+                    if existing:
+                        if overwrite_existing:
+                            database.update_profile(
+                                profile_id=profile.id,
+                                name=profile.name,
+                                description=profile.description,
+                                config=config,
+                                allow_builtin=True
+                            )
+                            result.profiles_updated += 1
+                        else:
+                            result.profiles_skipped += 1
+                            result.warnings.append(f"Profile '{profile.id}' already exists, skipped")
                     else:
-                        result.subagents_skipped += 1
-                        result.warnings.append(f"Subagent '{subagent.id}' already exists, skipped")
-                else:
-                    database.create_subagent(
-                        subagent_id=subagent.id,
-                        name=subagent.name,
-                        description=subagent.description,
-                        prompt=subagent.prompt,
-                        tools=subagent.tools,
-                        model=subagent.model,
-                        is_builtin=False
-                    )
-                    result.subagents_imported += 1
-            except Exception as e:
-                result.errors.append(f"Failed to import subagent '{subagent.id}': {str(e)}")
-
-    # Import profiles
-    # Build set of valid subagent IDs (including any just-imported ones)
-    all_subagents_json = database.get_all_subagents()
-    valid_agent_ids_json = {s["id"] for s in all_subagents_json}
-
-    if data.profiles:
-        for profile in data.profiles:
-            try:
-                existing = database.get_profile(profile.id)
-                # config is already a Dict[str, Any], no conversion needed
-                config = profile.config
-
-                # Filter out ghost subagent references
-                enabled_agents = config.get("enabled_agents")
-                if enabled_agents and isinstance(enabled_agents, list):
-                    valid_enabled = [aid for aid in enabled_agents if aid in valid_agent_ids_json]
-                    skipped_agents = [aid for aid in enabled_agents if aid not in valid_agent_ids_json]
-                    if skipped_agents:
-                        result.warnings.append(
-                            f"Profile '{profile.id}': removed {len(skipped_agents)} "
-                            f"subagent(s) not found in environment: {', '.join(skipped_agents)}"
-                        )
-                    config["enabled_agents"] = valid_enabled
-
-                if existing:
-                    if overwrite_existing:
-                        database.update_profile(
+                        database.create_profile(
                             profile_id=profile.id,
                             name=profile.name,
                             description=profile.description,
                             config=config,
-                            allow_builtin=True
+                            is_builtin=False
                         )
-                        result.profiles_updated += 1
-                    else:
-                        result.profiles_skipped += 1
-                        result.warnings.append(f"Profile '{profile.id}' already exists, skipped")
-                else:
-                    database.create_profile(
-                        profile_id=profile.id,
-                        name=profile.name,
-                        description=profile.description,
-                        config=config,
-                        is_builtin=False
-                    )
-                    result.profiles_imported += 1
-            except Exception as e:
-                result.errors.append(f"Failed to import profile '{profile.id}': {str(e)}")
+                        result.profiles_imported += 1
+                except Exception as e:
+                    result.errors.append(f"Failed to import profile '{profile.id}': {str(e)}")
+        return result
+
+    result = await run_sync(_apply_import)
 
     # Set success to False if there were any errors
     if result.errors:

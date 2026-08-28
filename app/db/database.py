@@ -2513,6 +2513,7 @@ from app.db.profiles import (  # noqa: F401
 
 from app.db.projects import (  # noqa: F401
     get_project,
+    get_projects_by_ids,
     get_all_projects,
     create_project,
     update_project,

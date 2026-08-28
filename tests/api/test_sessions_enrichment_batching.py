@@ -17,8 +17,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import app.api.sessions as sessions_module
-import app.db.base as db_base
+import app.db.projects as projects_db
 from app.api import sessions_helpers
+from app.db.projects import get_projects_by_ids
 from app.api.auth import require_auth
 
 
@@ -155,11 +156,15 @@ class TestNoNPlusOne:
         assert " IN (" in project_reads[0]
 
     def test_projects_are_never_fetched_one_by_one(self, install_settings, mock_db):
-        """``get_project`` (the old N+1) must not be called at all."""
+        """``get_project`` (the old N+1) must not be called at all — neither
+        through the API-layer facade nor inside the relocated DB helper."""
         with patch.object(sessions_helpers.database, "get_project",
-                          side_effect=AssertionError("per-project N+1")) as mock_get_project:
+                          side_effect=AssertionError("per-project N+1")) as mock_facade, \
+                patch.object(projects_db, "get_project",
+                             side_effect=AssertionError("per-project N+1")) as mock_db_layer:
             _enrich(_sessions(5), install_settings)
-        mock_get_project.assert_not_called()
+        mock_facade.assert_not_called()
+        mock_db_layer.assert_not_called()
 
     def test_api_users_are_fetched_in_one_batch(self, install_settings, mock_db):
         """One ``IN (...)`` read for the page, never ``get_api_user`` per row."""
@@ -186,17 +191,96 @@ class TestNoNPlusOne:
             database.create_project(
                 project_id=f"proj-{i}", name=f"P{i}", description=None, path=f"p{i}",
             )
-        resolved = sessions_helpers._projects_by_ids(["proj-0", "proj-1", "proj-2", "missing"])
+        resolved = get_projects_by_ids(["proj-0", "proj-1", "proj-2", "missing"])
         assert sorted(resolved) == ["proj-0", "proj-1", "proj-2"]
         assert resolved["proj-1"]["name"] == "P1"
 
     def test_batched_project_lookup_falls_back_when_the_query_fails(self, install_settings):
         """A failed batch read degrades to the per-id path, never to no data."""
-        with patch.object(db_base, "get_db", side_effect=RuntimeError("no pool")), \
-                patch.object(sessions_helpers.database, "get_project",
+        with patch.object(projects_db, "get_db", side_effect=RuntimeError("no pool")), \
+                patch.object(projects_db, "get_project",
                              return_value={"id": "p1", "name": "Fallback"}):
-            resolved = sessions_helpers._projects_by_ids(["p1"])
+            resolved = get_projects_by_ids(["p1"])
         assert resolved["p1"]["name"] == "Fallback"
+
+
+class TestClaimableAndPlacementAreBatched:
+    """The two read-path N+1s the degraded pill used to pay per page."""
+
+    def _run(self, sessions, install_settings, claimable):
+        """Enrich, counting installs reads and capturing the claimable call."""
+        calls = {"installs": 0}
+        registry = {
+            "me-install": {
+                "id": "me-install", "device_name": "Mine",
+                "online": True, "capabilities": {},
+            },
+        }
+
+        def _read_installs():
+            calls["installs"] += 1
+            return registry
+
+        claimable_mock = MagicMock(side_effect=lambda **kw: list(claimable))
+        with patch("app.api.sessions_helpers.get_tags_for_sessions", return_value={}), \
+                patch("app.api.sessions_helpers.get_fork_info_for_sessions", return_value={}), \
+                patch("app.api.sessions_helpers.get_api_users_by_ids", return_value={}), \
+                patch("app.core.config.settings", install_settings), \
+                patch("app.db.turns.list_claimable_sessions", claimable_mock), \
+                patch.object(sessions_helpers.database, "get_installs_map",
+                             _read_installs):
+            sessions_helpers.enrich_sessions_with_tags(sessions)
+        return calls, claimable_mock
+
+    def test_claimable_read_is_targeted_at_the_page(self, install_settings, mock_db):
+        """ONE claimable read, narrowed to this page's ids — not the full
+        ``turns ⋈ runs`` DISTINCT scan it used to run on every listing."""
+        sessions = _sessions(6)
+        _, claimable_mock = self._run(sessions, install_settings, claimable=[])
+
+        claimable_mock.assert_called_once()
+        assert claimable_mock.call_args.args == ()
+        assert claimable_mock.call_args.kwargs["session_ids"] == [
+            f"s{i}" for i in range(6)
+        ]
+
+    def test_one_installs_read_regardless_of_degraded_candidate_count(
+        self, install_settings, mock_db
+    ):
+        """``resolve_placement`` is called once per claimable row; the registry
+        must still be read exactly ONCE for the whole page (it used to be twice
+        per candidate)."""
+        few = _sessions(2)
+        many = _sessions(20)
+
+        calls_few, _ = self._run(
+            few, install_settings, claimable=[s["id"] for s in few],
+        )
+        calls_many, _ = self._run(
+            many, install_settings, claimable=[s["id"] for s in many],
+        )
+
+        assert calls_few["installs"] == 1
+        assert calls_many["installs"] == 1, (
+            f"installs registry read {calls_many['installs']} times for 20 "
+            "candidates — the placement N+1 is back"
+        )
+
+    def test_degraded_verdicts_are_unchanged_by_the_preloaded_map(
+        self, install_settings, mock_db
+    ):
+        """Same answer as the resolver reading the registry itself."""
+        sessions = _sessions(3)
+        self._run(sessions, install_settings, claimable=[s["id"] for s in sessions])
+        # Owner "me-install" is online+capable in the stub registry, so the
+        # implicit pin resolves to a runner: not degraded.
+        assert [s["degraded"] for s in sessions] == [False, False, False]
+
+        offline = [
+            {"id": "s9", "instance_id": "ghost-install", "project_id": None}
+        ]
+        self._run(offline, install_settings, claimable=["s9"])
+        assert offline[0]["degraded"] is True
 
 
 class TestOneThreadHop:

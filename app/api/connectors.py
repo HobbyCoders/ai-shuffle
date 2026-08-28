@@ -19,7 +19,6 @@ from app.core.models import (
 )
 from app.api.auth import require_admin
 from app.api.common import api_error_handler
-from app.db import async_database as adb
 from app.db import database
 from app.db.async_database import run_sync
 
@@ -228,7 +227,7 @@ def _owns_local_runner(connector: Dict[str, Any]) -> bool:
 async def test_connector_endpoint(connector_id: str, token: str = Depends(require_admin)):
     """Test a connector's connection."""
     from app.core.connector_service import test_connector
-    connector = await adb.get_connector(connector_id)
+    connector = await run_sync(database.get_connector, connector_id)
     if not connector:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
     return await test_connector(connector_id)
@@ -238,35 +237,55 @@ async def test_connector_endpoint(connector_id: str, token: str = Depends(requir
 async def activate_connector(connector_id: str, token: str = Depends(require_admin)):
     """Activate (enable + start) a connector."""
     from app.core.connector_service import mask_config
-    connector = database.get_connector(connector_id)
-    if not connector:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
 
-    # Persist the enabled flag regardless of which install runs the live client.
-    database.update_connector(connector_id, is_active=True)
-
-    # Only start the live client here if this install owns the connector (or
-    # claims an unowned one). If it is pinned to a DIFFERENT install, the flag is
-    # still persisted above; the owning install starts it on its next restart
-    # (KNOWN LIMITATION: no cross-install watcher yet).
-    if not _owns_local_runner(connector):
+    def _read_masked():
         updated = database.get_connector(connector_id)
         updated["config"] = mask_config(updated.get("config", {}), updated.get("type", ""))
-        updated["applies_on"] = updated.get("runner_id")
+        return updated
+
+    def _enable_and_claim():
+        """Everything before the (awaited) client start, in ONE hop.
+
+        The existence check, the is_active write and the runner claim are a
+        read-decide-write sequence: ``_owns_local_runner`` may issue an atomic
+        claim, and splitting it from the check would let a concurrent activate
+        on another install slip between them. When we do NOT own the runner
+        there is no await at all, so the response read joins this hop too.
+        """
+        connector = database.get_connector(connector_id)
+        if not connector:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
+
+        # Persist the enabled flag regardless of which install runs the live client.
+        database.update_connector(connector_id, is_active=True)
+
+        # Only start the live client here if this install owns the connector (or
+        # claims an unowned one). If it is pinned to a DIFFERENT install, the flag is
+        # still persisted above; the owning install starts it on its next restart
+        # (KNOWN LIMITATION: no cross-install watcher yet).
+        if not _owns_local_runner(connector):
+            updated = _read_masked()
+            updated["applies_on"] = updated.get("runner_id")
+            return False, updated
+        return True, None
+
+    owns_locally, updated = await run_sync(_enable_and_claim)
+    if not owns_locally:
         return updated
 
     from app.core.connectors.manager import connector_manager
     success = await connector_manager.start_connector(connector_id)
+
+    # Both outcomes re-read the row after the start attempt (it carries
+    # last_error / status stamped by the client), so the two branches share
+    # this single second hop.
+    updated = await run_sync(_read_masked)
     if not success:
-        updated = database.get_connector(connector_id)
-        updated["config"] = mask_config(updated.get("config", {}), updated.get("type", ""))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to start connector: {updated.get('last_error', 'unknown error')}",
         )
 
-    updated = database.get_connector(connector_id)
-    updated["config"] = mask_config(updated.get("config", {}), updated.get("type", ""))
     return updated
 
 
@@ -274,22 +293,35 @@ async def activate_connector(connector_id: str, token: str = Depends(require_adm
 async def deactivate_connector(connector_id: str, token: str = Depends(require_admin)):
     """Deactivate (stop + disable) a connector."""
     from app.core.connector_service import mask_config
-    connector = database.get_connector(connector_id)
-    if not connector:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
 
-    # Only stop the live client here if this install owns the connector. If it is
-    # pinned to a DIFFERENT install we still persist is_active=False below; the
-    # owning install stops it on its next restart (KNOWN LIMITATION: no
-    # cross-install watcher yet).
-    owns_locally = _owns_local_runner(connector)
+    def _check_and_claim():
+        """Existence check + runner claim in ONE hop — the claim is a
+        read-decide-write that must not be split from the row it decides on."""
+        connector = database.get_connector(connector_id)
+        if not connector:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
+
+        # Only stop the live client here if this install owns the connector. If it is
+        # pinned to a DIFFERENT install we still persist is_active=False below; the
+        # owning install stops it on its next restart (KNOWN LIMITATION: no
+        # cross-install watcher yet).
+        return _owns_local_runner(connector)
+
+    owns_locally = await run_sync(_check_and_claim)
+
+    # The client stop is a real await sitting between the claim and the write,
+    # so this handler cannot be a single hop.
     if owns_locally:
         from app.core.connectors.manager import connector_manager
         await connector_manager.stop_connector(connector_id)
-    database.update_connector(connector_id, is_active=False)
 
-    updated = database.get_connector(connector_id)
-    updated["config"] = mask_config(updated.get("config", {}), updated.get("type", ""))
+    def _disable():
+        database.update_connector(connector_id, is_active=False)
+        updated = database.get_connector(connector_id)
+        updated["config"] = mask_config(updated.get("config", {}), updated.get("type", ""))
+        return updated
+
+    updated = await run_sync(_disable)
     if not owns_locally:
         updated["applies_on"] = updated.get("runner_id")
     return updated
@@ -299,20 +331,31 @@ async def deactivate_connector(connector_id: str, token: str = Depends(require_a
 async def restart_connector(connector_id: str, token: str = Depends(require_admin)):
     """Restart a running connector."""
     from app.core.connector_service import mask_config
-    connector = database.get_connector(connector_id)
-    if not connector:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
 
-    # Only restart the live client here if this install owns the connector. If it
-    # is pinned to a DIFFERENT install, do nothing locally (KNOWN LIMITATION: no
-    # cross-install watcher yet — the owning install controls its own client).
-    owns_locally = _owns_local_runner(connector)
+    def _check_and_claim():
+        """Existence check + runner claim in ONE hop — see deactivate."""
+        connector = database.get_connector(connector_id)
+        if not connector:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
+
+        # Only restart the live client here if this install owns the connector. If it
+        # is pinned to a DIFFERENT install, do nothing locally (KNOWN LIMITATION: no
+        # cross-install watcher yet — the owning install controls its own client).
+        return _owns_local_runner(connector)
+
+    owns_locally = await run_sync(_check_and_claim)
+
+    # The restart is a real await between the claim and the response read.
     if owns_locally:
         from app.core.connectors.manager import connector_manager
         await connector_manager.restart_connector(connector_id)
 
-    updated = database.get_connector(connector_id)
-    updated["config"] = mask_config(updated.get("config", {}), updated.get("type", ""))
+    def _read_masked():
+        updated = database.get_connector(connector_id)
+        updated["config"] = mask_config(updated.get("config", {}), updated.get("type", ""))
+        return updated
+
+    updated = await run_sync(_read_masked)
     if not owns_locally:
         updated["applies_on"] = updated.get("runner_id")
     return updated
@@ -323,7 +366,7 @@ async def restart_connector(connector_id: str, token: str = Depends(require_admi
 @router.get("/{connector_id}/status")
 async def get_connector_status(connector_id: str, token: str = Depends(require_admin)):
     """Get runtime status of a connector."""
-    connector = database.get_connector(connector_id)
+    connector = await run_sync(database.get_connector, connector_id)
     if not connector:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
 
@@ -343,10 +386,14 @@ async def get_connector_status(connector_id: str, token: str = Depends(require_a
 @router.get("/{connector_id}/logs", response_model=List[ConnectorEventLog])
 async def get_connector_logs(connector_id: str, token: str = Depends(require_admin)):
     """Get recent event logs for a connector."""
-    connector = database.get_connector(connector_id)
-    if not connector:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
-    return database.get_connector_event_log(connector_id)
+
+    def _logs():
+        connector = database.get_connector(connector_id)
+        if not connector:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
+        return database.get_connector_event_log(connector_id)
+
+    return await run_sync(_logs)
 
 
 # ---- Triggers, Actions & Tools ----
@@ -357,7 +404,7 @@ async def get_connector_triggers(connector_id: str, token: str = Depends(require
     from dataclasses import asdict
     from app.core.connectors.registry import get_connector_class
 
-    connector = database.get_connector(connector_id)
+    connector = await run_sync(database.get_connector, connector_id)
     if not connector:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
 
@@ -378,7 +425,7 @@ async def get_connector_actions(connector_id: str, token: str = Depends(require_
     from dataclasses import asdict
     from app.core.connectors.registry import get_connector_class
 
-    connector = database.get_connector(connector_id)
+    connector = await run_sync(database.get_connector, connector_id)
     if not connector:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
 
@@ -399,7 +446,7 @@ async def get_connector_tools(connector_id: str, token: str = Depends(require_ad
     from dataclasses import asdict
     from app.core.connectors.registry import get_connector_class
 
-    connector = database.get_connector(connector_id)
+    connector = await run_sync(database.get_connector, connector_id)
     if not connector:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
 
@@ -425,7 +472,7 @@ async def execute_connector_action(
     from app.core.connectors.manager import connector_manager
     from app.core.connectors.registry import get_connector_class
 
-    connector = database.get_connector(connector_id)
+    connector = await run_sync(database.get_connector, connector_id)
     if not connector:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
 
@@ -485,17 +532,25 @@ async def whatsapp_webhook_verify(request: Request):
     if mode != "subscribe" or not token or not challenge:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid verification request")
 
-    # Find a WhatsApp connector with matching verify_token
-    connectors = database.get_all_connectors()
-    for c in connectors:
-        if c.get("type") != "whatsapp":
-            continue
-        config = c.get("config", {})
-        # Decrypt verify_token if needed
-        from app.core.connector_service import decrypt_config
-        decrypted = decrypt_config(config, "whatsapp")
-        if decrypted.get("verify_token") == token:
-            return PlainTextResponse(content=challenge)
+    # Find a WhatsApp connector with matching verify_token. The listing and the
+    # per-row decrypt scan are one hop: a decrypt-per-row loop on the loop
+    # thread is the whole stall, and it short-circuits on the first match
+    # exactly as before.
+    def _verify_token_matches():
+        connectors = database.get_all_connectors()
+        for c in connectors:
+            if c.get("type") != "whatsapp":
+                continue
+            config = c.get("config", {})
+            # Decrypt verify_token if needed
+            from app.core.connector_service import decrypt_config
+            decrypted = decrypt_config(config, "whatsapp")
+            if decrypted.get("verify_token") == token:
+                return True
+        return False
+
+    if await run_sync(_verify_token_matches):
+        return PlainTextResponse(content=challenge)
 
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid verify token")
 
@@ -533,29 +588,46 @@ async def whatsapp_webhook_receive(request: Request):
     except (IndexError, AttributeError):
         phone_number_id = None
 
-    for connector_id, connector in connector_manager.get_running_connectors("whatsapp"):
-        conn_row = database.get_connector(connector_id)
-        config = conn_row.get("config", {}) if conn_row else {}
-        decrypted = decrypt_config(config, "whatsapp")
+    def _select_recipients():
+        """Row read + decrypt + signature/phone matching for every running
+        WhatsApp connector, in ONE hop.
 
-        # Verify signature using the connector's app_secret if configured
-        app_secret = decrypted.get("app_secret")
-        if app_secret and signature:
-            expected = "sha256=" + _hmac.new(
-                app_secret.encode(), body, _hashlib.sha256
-            ).hexdigest()
-            if not _hmac.compare_digest(expected, signature):
-                logger.warning(f"WhatsApp webhook signature mismatch for connector {connector_id}")
+        The per-connector row read used to sit inside the dispatch loop, so a
+        webhook with N connectors did N blocking reads interleaved with the
+        handler awaits. The selection is a pure function of the row config and
+        this request, and the config cannot change while we dispatch, so
+        hoisting the whole filter ahead of the awaits is behaviour-preserving —
+        and it keeps the credential decrypt off the loop as well. Only the
+        matched connectors are kept, so this is no larger than the running set.
+        """
+        recipients = []
+        for connector_id, connector in connector_manager.get_running_connectors("whatsapp"):
+            conn_row = database.get_connector(connector_id)
+            config = conn_row.get("config", {}) if conn_row else {}
+            decrypted = decrypt_config(config, "whatsapp")
+
+            # Verify signature using the connector's app_secret if configured
+            app_secret = decrypted.get("app_secret")
+            if app_secret and signature:
+                expected = "sha256=" + _hmac.new(
+                    app_secret.encode(), body, _hashlib.sha256
+                ).hexdigest()
+                if not _hmac.compare_digest(expected, signature):
+                    logger.warning(f"WhatsApp webhook signature mismatch for connector {connector_id}")
+                    continue
+            elif app_secret and not signature:
+                logger.warning(f"WhatsApp webhook missing signature for connector {connector_id}")
                 continue
-        elif app_secret and not signature:
-            logger.warning(f"WhatsApp webhook missing signature for connector {connector_id}")
-            continue
 
-        # Match by phone_number_id if available
-        configured_phone = decrypted.get("phone_number_id")
-        if phone_number_id and configured_phone and phone_number_id != configured_phone:
-            continue
+            # Match by phone_number_id if available
+            configured_phone = decrypted.get("phone_number_id")
+            if phone_number_id and configured_phone and phone_number_id != configured_phone:
+                continue
 
+            recipients.append((connector_id, connector))
+        return recipients
+
+    for connector_id, connector in await run_sync(_select_recipients):
         any_handled = True
         try:
             await connector.handle_webhook_payload(payload)

@@ -33,6 +33,7 @@ from app.core.project_utils import (
 )
 from app.db import checkouts as checkouts_db
 from app.db import database
+from app.db.async_database import run_sync
 from app.db.base import WorktreeStatus
 
 logger = logging.getLogger(__name__)
@@ -692,7 +693,9 @@ class WorktreeManager:
         from app.core.session_pool import get_session_pool
         from app.core import streaming_status
 
-        sessions = database.get_sessions_for_worktree(worktree_id)
+        # One isolated read: everything after it is per-session await work
+        # (pool teardown, turn finalization) that must stay on the loop.
+        sessions = await run_sync(database.get_sessions_for_worktree, worktree_id)
         if not sessions:
             return []
 
@@ -763,25 +766,44 @@ class WorktreeManager:
         Returns:
             True if successful
         """
-        worktree = database.get_worktree(worktree_id)
-        if not worktree:
-            logger.warning(f"Worktree not found: {worktree_id}")
-            return False
+        def _resolve_cleanup_targets() -> Tuple[
+            Optional[Dict[str, Any]], Optional[Dict[str, Any]],
+            Optional[Dict[str, Any]], Optional[bool],
+        ]:
+            """Resolve worktree → repository → project in ONE thread hop.
 
-        # Get repository to find main directory
-        repo = database.get_git_repository(worktree["repository_id"])
-        if not repo:
-            logger.warning(f"Repository not found for worktree: {worktree_id}")
-            # Still try to clean up the database record
-            database.delete_worktree(worktree_id)
-            return True
+            These three reads are contiguous, and each failure branch DELETES
+            the worktree row — a read-decide-write that has to stay atomic
+            inside one block rather than being split across thread hops. The
+            fourth element is the early-return value (``False``/``True``) when
+            one of those branches fired, ``None`` when the caller should carry
+            on with the resolved rows.
+            """
+            worktree = database.get_worktree(worktree_id)
+            if not worktree:
+                logger.warning(f"Worktree not found: {worktree_id}")
+                return None, None, None, False
 
-        # Get project to find main directory
-        project = database.get_project(repo["project_id"])
-        if not project:
-            logger.warning(f"Project not found for repository: {repo['id']}")
-            database.delete_worktree(worktree_id)
-            return True
+            # Get repository to find main directory
+            repo = database.get_git_repository(worktree["repository_id"])
+            if not repo:
+                logger.warning(f"Repository not found for worktree: {worktree_id}")
+                # Still try to clean up the database record
+                database.delete_worktree(worktree_id)
+                return worktree, None, None, True
+
+            # Get project to find main directory
+            project = database.get_project(repo["project_id"])
+            if not project:
+                logger.warning(f"Project not found for repository: {repo['id']}")
+                database.delete_worktree(worktree_id)
+                return worktree, repo, None, True
+
+            return worktree, repo, project, None
+
+        worktree, repo, project, early = await run_sync(_resolve_cleanup_targets)
+        if early is not None:
+            return early
 
         # Terminate SDK sessions BEFORE removing the worktree folder.
         # Their subprocess CWD is inside the worktree — if we don't kill
@@ -813,8 +835,12 @@ class WorktreeManager:
                 self.git_service.delete_branch(main_dir, branch_name, force=True)
                 logger.debug(f"Deleted branch {branch_name}")
 
-        # Mark as completed (preserve record for session reopen)
-        database.update_worktree(worktree_id, status=WorktreeStatus.COMPLETED)
+        # Mark as completed (preserve record for session reopen). Its own hop:
+        # the session teardown and the git worktree removal above sit between
+        # this write and the reads at the top.
+        await run_sync(
+            database.update_worktree, worktree_id, status=WorktreeStatus.COMPLETED
+        )
 
         logger.debug(f"Cleaned up worktree {worktree_id} (marked COMPLETED)")
         return True

@@ -15,12 +15,13 @@ import secrets
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
 from app.core import turn_outcome
 from app.db import database
+from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +141,9 @@ class AutomationManager:
             return
 
         want: Dict[str, str] = {}
-        for auto in database.get_enabled_automations():
+        # One read off the loop; the scheduling below awaits per automation, so
+        # nothing further folds into this hop.
+        for auto in await run_sync(database.get_enabled_automations):
             triggers = auto.get("triggers") or []
             if any(t.get("type") in ("cron", "interval") for t in triggers):
                 want[auto["id"]] = self._trigger_version(auto)
@@ -173,7 +176,9 @@ class AutomationManager:
         if not self._scheduler:
             return
 
-        automation = database.get_automation(automation_id)
+        # Single read; everything after it is APScheduler bookkeeping that
+        # belongs on this loop.
+        automation = await run_sync(database.get_automation, automation_id)
         if not automation:
             return
 
@@ -298,16 +303,26 @@ class AutomationManager:
         can insert the (automation_id, fire_bucket) row, and only that winner
         executes the tick.
         """
-        try:
+        def _gate_blocking() -> Tuple[Optional[Dict[str, Any]], bool, str]:
+            """Row read + runner election in ONE hop. ``should_run_scheduled_here``
+            is itself a chain of blocking reads (install registry, project,
+            placement), so offloading only ``get_automation`` would have left
+            the bigger stall on the loop. The stale-schedule teardown stays on
+            the caller — it drives APScheduler."""
             automation = database.get_automation(automation_id)
+            if not automation:
+                return None, False, ""
+            from app.core.automation_service import should_run_scheduled_here
+            return (automation, *should_run_scheduled_here(automation))
+
+        try:
+            automation, should_run, reason = await run_sync(_gate_blocking)
             if not automation:
                 # Deleted (possibly on another install) while our job survived.
                 logger.warning(f"Automation {automation_id} no longer exists — removing stale schedule")
                 await self.unschedule_automation(automation_id)
                 return
 
-            from app.core.automation_service import should_run_scheduled_here
-            should_run, reason = should_run_scheduled_here(automation)
             if not should_run:
                 logger.debug(f"Automation {automation_id}: scheduled fire skipped on this install ({reason})")
                 return
@@ -318,22 +333,32 @@ class AutomationManager:
 
         fired_at = datetime.now(timezone.utc)
         fire_bucket = self._fire_bucket(trigger_type, trigger_config, fired_at)
-        try:
-            claimed = database.claim_automation_fire(automation_id, fire_bucket)
-        except Exception as e:  # noqa: BLE001 — claim trouble must not drop the fire
-            # Same fail-open stance as the election: if the claim table is
-            # unreachable here it is unreachable on the other installs too.
-            logger.warning(f"Automation {automation_id}: fire claim {fire_bucket} failed ({e}) — running locally")
-            claimed = True
+
+        def _claim_blocking() -> bool:
+            """The atomic cross-install fire claim and, only when we win it, the
+            fire-table prune — ONE hop for both. The prune ran immediately after
+            the claim's ``if not claimed: return`` before, so it still runs
+            exactly when the claim is won, with the same fail-open handling."""
+            try:
+                claimed = database.claim_automation_fire(automation_id, fire_bucket)
+            except Exception as e:  # noqa: BLE001 — claim trouble must not drop the fire
+                # Same fail-open stance as the election: if the claim table is
+                # unreachable here it is unreachable on the other installs too.
+                logger.warning(f"Automation {automation_id}: fire claim {fire_bucket} failed ({e}) — running locally")
+                claimed = True
+            if claimed:
+                try:
+                    database.prune_automation_fires()
+                except Exception:  # noqa: BLE001 — hygiene must never block a fire
+                    pass
+            return claimed
+
+        claimed = await run_sync(_claim_blocking)
         if not claimed:
             logger.info(
                 f"Automation {automation_id}: fire {fire_bucket} already claimed by another install — skipping"
             )
             return
-        try:
-            database.prune_automation_fires()
-        except Exception:  # noqa: BLE001 — hygiene must never block a fire
-            pass
 
         # The claimed tick stays consumed even if _execute's budget check then
         # blocks the run: budget counters live in the shared database, so a
@@ -343,7 +368,8 @@ class AutomationManager:
 
     async def handle_connector_event(self, event_type: str, data: Dict[str, Any]) -> None:
         """Check for automations triggered by connector events and fire them."""
-        automations = database.get_automations_for_event(
+        automations = await run_sync(
+            database.get_automations_for_event,
             trigger_type="connector_event",
             event_type=event_type,
         )
@@ -365,7 +391,8 @@ class AutomationManager:
 
     async def handle_connector_trigger(self, connector_id: str, trigger_id: str, data: Dict[str, Any]) -> None:
         """Fire automations that match a specific connector trigger."""
-        automations = database.get_automations_for_event(
+        automations = await run_sync(
+            database.get_automations_for_event,
             trigger_type="connector_trigger",
             event_type=trigger_id,
             connector_id=connector_id,
@@ -390,7 +417,9 @@ class AutomationManager:
         Verifies HMAC signature if the automation has a secret configured.
         Returns the created run dict, or None if validation fails.
         """
-        automation = database.get_automation(automation_id)
+        # Single read; the HMAC verification below is CPU work and the fire is
+        # a task creation that needs this loop.
+        automation = await run_sync(database.get_automation, automation_id)
         if not automation:
             return None
         if not automation.get("is_enabled"):
@@ -434,7 +463,7 @@ class AutomationManager:
 
     async def trigger_manual(self, automation_id: str) -> Optional[Dict]:
         """Manual trigger from the UI."""
-        automation = database.get_automation(automation_id)
+        automation = await run_sync(database.get_automation, automation_id)
         if not automation:
             return None
 
@@ -448,7 +477,9 @@ class AutomationManager:
 
     async def _execute(self, automation_id: str, trigger_data: Dict[str, Any]) -> None:
         """Core execution flow: budget → approval → query → output."""
-        automation = database.get_automation(automation_id)
+        # Own hop: the concurrency latch below is an ``asyncio.Lock`` and has
+        # to be taken on this loop.
+        automation = await run_sync(database.get_automation, automation_id)
         if not automation:
             logger.error(f"Automation not found for execution: {automation_id}")
             return
@@ -468,46 +499,71 @@ class AutomationManager:
         run_id = f"run-{secrets.token_hex(4)}"
 
         try:
-            # Budget check
-            from app.core.automation_service import check_budget, render_prompt
-            ok, reason = check_budget(automation)
-            if not ok:
-                logger.info(f"Automation {automation_id} budget exceeded: {reason}")
+
+            def _admit_blocking() -> Tuple[bool, str, Optional[str]]:
+                """Budget gate + run/approval records — ONE hop, ONE atomic block.
+
+                This is the file's most important read-decide-write: ``check_budget``
+                READS the shared daily-spend aggregate and the rest of this block
+                WRITES the run row that the next read will count. Splitting the
+                read from the write across thread hops would let two concurrent
+                fires of the same automation both see the pre-run total and both
+                admit themselves — a double-spend of the daily/lifetime budget.
+                Everything here is contiguous in the original (no awaits between
+                any of it), so keeping it in one closure changes nothing but
+                where it runs.
+
+                Returns ``(admitted, rendered_prompt, approval_id)``. The
+                approval NOTIFICATION deliberately stays with the caller: it is
+                an ``await`` that talks to live connector clients.
+                """
+                # Budget check
+                from app.core.automation_service import check_budget, render_prompt
+                ok, reason = check_budget(automation)
+                if not ok:
+                    logger.info(f"Automation {automation_id} budget exceeded: {reason}")
+                    database.create_automation_run(
+                        run_id=run_id,
+                        automation_id=automation_id,
+                        status="budget_exceeded",
+                        trigger_data=trigger_data,
+                    )
+                    database.update_automation(
+                        automation_id, last_error=reason, failure_count=automation.get("failure_count", 0) + 1
+                    )
+                    return False, "", None
+
+                # Render prompt
+                rendered_prompt = render_prompt(automation.get("prompt") or "", trigger_data)
+
+                # Create run record
                 database.create_automation_run(
                     run_id=run_id,
                     automation_id=automation_id,
-                    status="budget_exceeded",
+                    status="pending",
                     trigger_data=trigger_data,
+                    prompt_rendered=rendered_prompt,
                 )
-                database.update_automation(
-                    automation_id, last_error=reason, failure_count=automation.get("failure_count", 0) + 1
-                )
+
+                # Approval check
+                approval_id = None
+                if automation.get("requires_approval"):
+                    approval_id = f"appr-{secrets.token_hex(4)}"
+                    database.create_automation_approval(
+                        approval_id=approval_id,
+                        run_id=run_id,
+                        automation_id=automation_id,
+                        prompt_preview=rendered_prompt[:2000],
+                    )
+                    database.update_automation_run(run_id, status="pending")
+                    database.update_automation(automation_id, status="idle")
+                return True, rendered_prompt, approval_id
+
+            admitted, rendered_prompt, approval_id = await run_sync(_admit_blocking)
+            if not admitted:
                 return
 
-            # Render prompt
-            rendered_prompt = render_prompt(automation.get("prompt") or "", trigger_data)
-
-            # Create run record
-            database.create_automation_run(
-                run_id=run_id,
-                automation_id=automation_id,
-                status="pending",
-                trigger_data=trigger_data,
-                prompt_rendered=rendered_prompt,
-            )
-
-            # Approval check
-            if automation.get("requires_approval"):
-                approval_id = f"appr-{secrets.token_hex(4)}"
-                database.create_automation_approval(
-                    approval_id=approval_id,
-                    run_id=run_id,
-                    automation_id=automation_id,
-                    prompt_preview=rendered_prompt[:2000],
-                )
-                database.update_automation_run(run_id, status="pending")
-                database.update_automation(automation_id, status="idle")
-
+            if approval_id is not None:
                 # Notify via connectors
                 await self._notify_approval_needed(automation, approval_id, rendered_prompt)
 
@@ -519,17 +575,25 @@ class AutomationManager:
 
         except Exception as e:
             logger.error(f"Automation {automation_id} execution error: {e}", exc_info=True)
-            try:
+            # Bound now: ``e`` is unbound at the end of this except clause, and
+            # the closure below runs inside a nested try.
+            error_text = str(e)
+
+            def _record_failure() -> None:
+                """The two failure writes are contiguous — one hop for the pair."""
                 database.update_automation_run(
-                    run_id, status="failed", error=str(e),
+                    run_id, status="failed", error=error_text,
                     completed_at=datetime.now(timezone.utc).isoformat()
                 )
                 database.update_automation(
                     automation_id,
                     status="error",
-                    last_error=str(e),
+                    last_error=error_text,
                     failure_count=automation.get("failure_count", 0) + 1,
                 )
+
+            try:
+                await run_sync(_record_failure)
             except Exception as db_err:
                 logger.error(
                     "Failed to record error status for automation %s run %s: %s (original error: %s)",
@@ -646,18 +710,27 @@ class AutomationManager:
         has_action_steps = bool(action_steps)
         if not has_prompt and not has_action_steps:
             logger.info(f"Automation {automation_id} has no prompt and no action_steps — skipping")
-            database.update_automation_run(
-                run_id, status="completed",
-                started_at=datetime.now(timezone.utc).isoformat(),
-                completed_at=datetime.now(timezone.utc).isoformat(),
-            )
-            database.record_automation_run_success(automation_id)
+
+            def _settle_empty_run() -> None:
+                """Terminal stamp + success accounting, contiguous — one hop."""
+                database.update_automation_run(
+                    run_id, status="completed",
+                    started_at=datetime.now(timezone.utc).isoformat(),
+                    completed_at=datetime.now(timezone.utc).isoformat(),
+                )
+                database.record_automation_run_success(automation_id)
+
+            await run_sync(_settle_empty_run)
             return
 
-        database.update_automation_run(
-            run_id, status="running", started_at=datetime.now(timezone.utc).isoformat()
-        )
-        database.update_automation(automation_id, status="running")
+        def _mark_running() -> None:
+            """Both "now running" writes in one hop; they were already adjacent."""
+            database.update_automation_run(
+                run_id, status="running", started_at=datetime.now(timezone.utc).isoformat()
+            )
+            database.update_automation(automation_id, status="running")
+
+        await run_sync(_mark_running)
 
         try:
             response_text = ""
@@ -687,8 +760,13 @@ class AutomationManager:
                     # _resolve_v2_project_here raises the missing-here ValueError itself.
                     # Legacy project_id is left intact (hazard 7): the resolver derives
                     # project_v2 from it and the legacy id keeps flowing downstream.
-                    project_v2_id = self._resolve_v2_project_here(
-                        automation_id, project_id
+                    # Off-loop: this resolver reads placement state and can
+                    # LAZILY CLONE a checkout (#607) — seconds of blocking work,
+                    # not milliseconds. It is plain sync code (no loop use), so
+                    # a worker thread runs it unchanged; the ValueError it may
+                    # raise still lands in this method's handlers below.
+                    project_v2_id = await run_sync(
+                        self._resolve_v2_project_here, automation_id, project_id
                     )
                     if not project_v2_id:
                         raise ValueError(self._missing_project_message(project_id))
@@ -727,21 +805,31 @@ class AutomationManager:
             # its user message from the start and streams like a user chat.
             # `response` keeps only a short tail for the runs-list preview;
             # the full transcript lives in the session history.
-            database.update_automation_run(
-                run_id,
-                status="completed",
-                response=self._response_tail(response_text),
-                cost_usd=cost,
-                tokens_in=tokens_in,
-                tokens_out=tokens_out,
-                duration_ms=duration_ms,
-                completed_at=datetime.now(timezone.utc).isoformat(),
-            )
+            def _settle_success() -> None:
+                """Run completion + cost accounting in ONE hop.
 
-            # Update automation stats. The increments happen in SQL (one
-            # atomic UPDATE) so a concurrent run on another install can't
-            # make this stale in-memory row lose a count or a cost.
-            database.record_automation_run_success(automation_id, cost)
+                These two are a unit: the run row's terminal stamp and the SQL
+                increment of the automation's spend counters are what the NEXT
+                fire's budget check reads. Adjacent in the original, adjacent
+                here — no await may open a window between them.
+                """
+                database.update_automation_run(
+                    run_id,
+                    status="completed",
+                    response=self._response_tail(response_text),
+                    cost_usd=cost,
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
+                    duration_ms=duration_ms,
+                    completed_at=datetime.now(timezone.utc).isoformat(),
+                )
+
+                # Update automation stats. The increments happen in SQL (one
+                # atomic UPDATE) so a concurrent run on another install can't
+                # make this stale in-memory row lose a count or a cost.
+                database.record_automation_run_success(automation_id, cost)
+
+            await run_sync(_settle_success)
 
             # Deliver output
             await self._deliver_output(automation, run_id, response_text)
@@ -749,14 +837,19 @@ class AutomationManager:
         except asyncio.TimeoutError:
             duration_ms = int((time.time() - start_time) * 1000)
             error_msg = f"Execution timed out after {automation.get('timeout_seconds', 300)}s"
-            database.update_automation_run(
-                run_id, status="failed", error=error_msg,
-                duration_ms=duration_ms, completed_at=datetime.now(timezone.utc).isoformat()
-            )
-            database.update_automation(
-                automation_id, status="error", last_error=error_msg,
-                failure_count=automation.get("failure_count", 0) + 1,
-            )
+
+            def _settle_timeout() -> None:
+                """Both failure writes, contiguous — one hop."""
+                database.update_automation_run(
+                    run_id, status="failed", error=error_msg,
+                    duration_ms=duration_ms, completed_at=datetime.now(timezone.utc).isoformat()
+                )
+                database.update_automation(
+                    automation_id, status="error", last_error=error_msg,
+                    failure_count=automation.get("failure_count", 0) + 1,
+                )
+
+            await run_sync(_settle_timeout)
 
         except (Exception, BaseExceptionGroup) as e:
             # Unwrap ExceptionGroup from SDK's anyio.TaskGroup (Python 3.11+)
@@ -772,14 +865,21 @@ class AutomationManager:
 
             duration_ms = int((time.time() - start_time) * 1000)
             error_msg = str(actual)
-            database.update_automation_run(
-                run_id, status="failed", error=error_msg,
-                duration_ms=duration_ms, completed_at=datetime.now(timezone.utc).isoformat()
-            )
-            database.update_automation(
-                automation_id, status="error", last_error=error_msg,
-                failure_count=automation.get("failure_count", 0) + 1,
-            )
+
+            def _settle_failure() -> None:
+                """Both failure writes, contiguous — one hop."""
+                database.update_automation_run(
+                    run_id, status="failed", error=error_msg,
+                    duration_ms=duration_ms, completed_at=datetime.now(timezone.utc).isoformat()
+                )
+                database.update_automation(
+                    automation_id, status="error", last_error=error_msg,
+                    failure_count=automation.get("failure_count", 0) + 1,
+                )
+
+            # Awaiting inside the handler keeps the active exception bound to
+            # this frame, so the bare ``raise`` below still re-raises it.
+            await run_sync(_settle_failure)
             raise
 
     # ------------------------------------------------------------------
@@ -827,29 +927,42 @@ class AutomationManager:
         session_id = str(uuid.uuid4())
         fired_label = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         title = f"{automation.get('name') or 'Automation'} — {fired_label}"
-        database.create_session(
-            session_id=session_id,
-            profile_id=profile_id,
-            project_id=project_id,
-            title=title,
-            automation_id=automation_id,
-        )
-        # Bind the session to its project_v2 when the v2 path owns this run.
-        # create_session does not take the column, so persist it directly (the
-        # NULL-guarded self-heal write in project_resolver). Legacy project_id is
-        # already set above and stays intact.
-        if project_v2_id:
-            from app.core import project_resolver
 
-            project_resolver._persist_session_project_v2(session_id, project_v2_id)
-        # Session starts empty until the recorder's first event: the turn
-        # recorder persists the prompt as a message.user event at turn start.
+        def _mint_session_blocking() -> None:
+            """Mint the session, bind its project_v2, and link the run to it —
+            ONE hop, and one indivisible unit.
 
-        # 2. Link run → session BEFORE the turn starts: the session is the
-        #    primary artifact, the run row a thin index into it. Completion
-        #    never re-writes the link, so the old completion-time
-        #    FK-violation race is unrepresentable.
-        database.update_automation_run(run_id, session_id=session_id)
+            Steps 1 and 2 are contiguous in the original and must stay that
+            way: a session row without its run link (or a run linked to a
+            session whose project_v2 binding never landed) is exactly the
+            half-built state this ordering exists to prevent. Nothing here
+            needs the loop; the sidebar broadcast that does stays below.
+            """
+            database.create_session(
+                session_id=session_id,
+                profile_id=profile_id,
+                project_id=project_id,
+                title=title,
+                automation_id=automation_id,
+            )
+            # Bind the session to its project_v2 when the v2 path owns this run.
+            # create_session does not take the column, so persist it directly (the
+            # NULL-guarded self-heal write in project_resolver). Legacy project_id is
+            # already set above and stays intact.
+            if project_v2_id:
+                from app.core import project_resolver
+
+                project_resolver._persist_session_project_v2(session_id, project_v2_id)
+            # Session starts empty until the recorder's first event: the turn
+            # recorder persists the prompt as a message.user event at turn start.
+
+            # 2. Link run → session BEFORE the turn starts: the session is the
+            #    primary artifact, the run row a thin index into it. Completion
+            #    never re-writes the link, so the old completion-time
+            #    FK-violation race is unrepresentable.
+            database.update_automation_run(run_id, session_id=session_id)
+
+        await run_sync(_mint_session_blocking)
 
         # Best-effort: surface the new session on connected devices immediately
         # (scheduler-created sessions otherwise only appear on the next sidebar
@@ -895,16 +1008,20 @@ class AutomationManager:
         #    longer sniffs WS frames). The last terminal event of the session
         #    decides success / error / interruption; ``turn.completed`` carries
         #    the usage summary the run row is stamped from.
-        outcome = self._final_turn_outcome(session_id)
+        # Off-loop: this loads the session's whole durable event log. Kept as
+        # its own hop rather than batched with the text read below, because the
+        # text read must still NOT happen when the outcome says error/interrupt.
+        outcome = await run_sync(self._final_turn_outcome, session_id)
         if outcome["error"] is not None:
             raise RuntimeError(outcome["error"])
         if outcome["interrupted"]:
             raise RuntimeError("Turn was interrupted before completion")
 
         usage = outcome["usage"]
+        final_text = await run_sync(self._extract_final_assistant_text, session_id)
         return {
             "session_id": session_id,
-            "response": self._extract_final_assistant_text(session_id),
+            "response": final_text,
             "cost_usd": float(usage.get("total_cost_usd") or 0),
             "tokens_in": int(usage.get("tokens_in") or 0),
             "tokens_out": int(usage.get("tokens_out") or 0),
@@ -1003,7 +1120,8 @@ class AutomationManager:
                     rendered = render_prompt(prompt_text, {**trigger_data, "response": response_text})
                     from app.core import account_failover
 
-                    automation = database.get_automation(automation_id)
+                    # Isolated read between two awaits — one hop.
+                    automation = await run_sync(database.get_automation, automation_id)
                     profile_id = step.get("profile_id") or (automation.get("profile_id") if automation else None)
                     max_turns = step.get("max_turns", 1)
 
@@ -1083,16 +1201,28 @@ class AutomationManager:
 
     async def execute_approved_run(self, approval_id: str) -> Optional[Dict]:
         """Resume execution of an approved automation run."""
-        approval = database.get_automation_approval(approval_id)
-        if not approval or approval["status"] != "approved":
-            return None
+        def _load_approved() -> Tuple[Optional[Dict], Optional[Dict]]:
+            """Approval → run → automation: three contiguous reads, ONE hop.
 
-        run = database.get_automation_run(approval["run_id"])
-        if not run:
-            return None
+            Each early return is just "not found", so the caller only needs to
+            know whether all three resolved. The background task creation stays
+            on the loop.
+            """
+            approval = database.get_automation_approval(approval_id)
+            if not approval or approval["status"] != "approved":
+                return None, None
 
-        automation = database.get_automation(run["automation_id"])
-        if not automation:
+            run = database.get_automation_run(approval["run_id"])
+            if not run:
+                return None, None
+
+            automation = database.get_automation(run["automation_id"])
+            if not automation:
+                return None, None
+            return run, automation
+
+        run, automation = await run_sync(_load_approved)
+        if run is None or automation is None:
             return None
 
         # Execute in background
@@ -1124,56 +1254,72 @@ class AutomationManager:
         output_config = automation.get("output_config", {})
         output_type = output_config.get("type", "session")
 
-        # --- Suppress matching responses (heartbeat pattern) ---
-        suppress_pattern = output_config.get("suppress_pattern")
-        if suppress_pattern and response:
-            cleaned = response.strip()
-            if cleaned.upper() == suppress_pattern.strip().upper():
-                logger.info(
-                    f"Automation {automation['id']} run {run_id}: "
-                    f"output suppressed (matched suppress_pattern)"
-                )
-                database.update_automation_run(run_id, output_status="suppressed")
-                return
+        def _gate_and_settle_blocking() -> bool:
+            """Every delivery decision that needs no network, in ONE hop.
 
-        # --- Deduplicate identical responses within window ---
-        dedup_window = output_config.get("deduplicate_window_seconds")
-        if dedup_window and isinstance(dedup_window, (int, float)) and dedup_window > 0 and response:
-            recent = database.get_automation_runs(automation["id"], limit=5)
-            now = datetime.now(timezone.utc)
-            for prev in recent:
-                if prev["id"] == run_id:
-                    continue
-                if (
-                    prev.get("response") == response
-                    and prev.get("output_status") == "delivered"
-                ):
-                    completed = prev.get("completed_at")
-                    if completed:
-                        try:
-                            completed_dt = datetime.fromisoformat(
-                                str(completed).replace("Z", "+00:00").replace("+00:00", "")
-                            )
-                            age = (now - completed_dt).total_seconds()
-                            if 0 < age < dedup_window:
-                                logger.info(
-                                    f"Automation {automation['id']} run {run_id}: "
-                                    f"deduplicated (same response {age:.0f}s ago)"
+            The suppress check, the dedup check and the two no-op output types
+            are contiguous in the original — no awaits anywhere between them —
+            and the dedup leg in particular is a read-decide-write (read the
+            recent runs, compare, stamp ``deduplicated``) that has to stay
+            atomic: split across hops, two runs finishing together could each
+            read the other as "not yet delivered" and both deliver. Returns
+            True when the delivery is fully settled here and the caller is
+            done.
+            """
+            # --- Suppress matching responses (heartbeat pattern) ---
+            suppress_pattern = output_config.get("suppress_pattern")
+            if suppress_pattern and response:
+                cleaned = response.strip()
+                if cleaned.upper() == suppress_pattern.strip().upper():
+                    logger.info(
+                        f"Automation {automation['id']} run {run_id}: "
+                        f"output suppressed (matched suppress_pattern)"
+                    )
+                    database.update_automation_run(run_id, output_status="suppressed")
+                    return True
+
+            # --- Deduplicate identical responses within window ---
+            dedup_window = output_config.get("deduplicate_window_seconds")
+            if dedup_window and isinstance(dedup_window, (int, float)) and dedup_window > 0 and response:
+                recent = database.get_automation_runs(automation["id"], limit=5)
+                now = datetime.now(timezone.utc)
+                for prev in recent:
+                    if prev["id"] == run_id:
+                        continue
+                    if (
+                        prev.get("response") == response
+                        and prev.get("output_status") == "delivered"
+                    ):
+                        completed = prev.get("completed_at")
+                        if completed:
+                            try:
+                                completed_dt = datetime.fromisoformat(
+                                    str(completed).replace("Z", "+00:00").replace("+00:00", "")
                                 )
-                                database.update_automation_run(
-                                    run_id, output_status="deduplicated"
-                                )
-                                return
-                        except (ValueError, TypeError) as parse_err:
-                            logger.debug("Skipping dedup check for run %s: timestamp parse error: %s", prev["id"], parse_err)
+                                age = (now - completed_dt).total_seconds()
+                                if 0 < age < dedup_window:
+                                    logger.info(
+                                        f"Automation {automation['id']} run {run_id}: "
+                                        f"deduplicated (same response {age:.0f}s ago)"
+                                    )
+                                    database.update_automation_run(
+                                        run_id, output_status="deduplicated"
+                                    )
+                                    return True
+                            except (ValueError, TypeError) as parse_err:
+                                logger.debug("Skipping dedup check for run %s: timestamp parse error: %s", prev["id"], parse_err)
 
-        if output_type == "session":
-            # Already saved via execute_query
-            database.update_automation_run(run_id, output_status="delivered")
-            return
+            if output_type == "session":
+                # Already saved via execute_query
+                database.update_automation_run(run_id, output_status="delivered")
+                return True
 
-        if output_type == "none":
-            database.update_automation_run(run_id, output_status="delivered")
+            if output_type == "none":
+                database.update_automation_run(run_id, output_status="delivered")
+                return True
+            return False
+
+        if await run_sync(_gate_and_settle_blocking):
             return
 
         try:
@@ -1182,12 +1328,15 @@ class AutomationManager:
             elif output_type == "webhook":
                 await self._deliver_to_webhook(output_config, automation, response)
 
-            database.update_automation_run(run_id, output_status="delivered")
+            await run_sync(
+                database.update_automation_run, run_id, output_status="delivered"
+            )
 
         except Exception as e:
             logger.error(f"Output delivery failed for run {run_id}: {e}")
-            database.update_automation_run(
-                run_id, output_status="failed", output_error=str(e)
+            await run_sync(
+                database.update_automation_run,
+                run_id, output_status="failed", output_error=str(e),
             )
 
     async def _deliver_to_connector(
@@ -1247,23 +1396,29 @@ class AutomationManager:
         try:
             from app.core.connectors.manager import connector_manager
 
-            # Get all active connectors to notify about pending approval
-            connectors = database.get_active_connectors()
+            # Get all active connectors to notify about pending approval. One
+            # hop; the per-connector work below is all awaits.
+            connectors = await run_sync(database.get_active_connectors)
             for conn_row in connectors:
                 cid = conn_row["id"]
                 instance = await connector_manager.get_running_connector(cid)
                 if not instance:
                     continue
 
-                # Get active connector sessions to notify
-                from app.db.base import get_db, rows_to_list
-                with get_db() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        "SELECT * FROM connector_sessions WHERE connector_id = %s AND is_active = TRUE",
-                        (cid,),
-                    )
-                    sessions = rows_to_list(cursor.fetchall())
+                # Get active connector sessions to notify. Its own cursor, so
+                # the scanner does not see it — but it is the same blocking
+                # psycopg2 round trip and gets the same treatment.
+                def _load_sessions(connector_id: str = cid) -> List[Dict[str, Any]]:
+                    from app.db.base import get_db, rows_to_list
+                    with get_db() as conn:
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "SELECT * FROM connector_sessions WHERE connector_id = %s AND is_active = TRUE",
+                            (connector_id,),
+                        )
+                        return rows_to_list(cursor.fetchall())
+
+                sessions = await run_sync(_load_sessions)
 
                 for sess in sessions:
                     chat_id = sess.get("platform_chat_id")

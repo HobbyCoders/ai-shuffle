@@ -301,7 +301,8 @@ class GmailConnector(BaseConnector):
                         logger.error("GmailConnector %s entering ERROR state after %d consecutive failures", self.connector_id, consecutive_failures)
                         try:
                             from app.db import database
-                            database.update_connector_status(self.connector_id, "error", error=str(exc))
+                            from app.db.async_database import run_sync
+                            await run_sync(database.update_connector_status, self.connector_id, "error", error=str(exc))
                         except Exception:
                             logger.debug("Failed to update DB status", exc_info=True)
                 await asyncio.sleep(poll_interval)

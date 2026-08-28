@@ -6,11 +6,12 @@ import hashlib
 import logging
 import secrets
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.core import encryption
 from app.core.models import VALID_CONNECTOR_EVENTS
 from app.db import database
+from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -178,53 +179,67 @@ async def create_connector(
     # 2. Generate connector ID
     connector_id = f"conn-{secrets.token_hex(4)}"
 
-    # 3. Resolve API user
-    auto_created = False
-    if api_user_id:
-        # Use the provided (existing) API user
-        existing_user = database.get_api_user(api_user_id)
-        if not existing_user:
-            raise ValueError(f"API user not found: {api_user_id}")
-    else:
-        # Auto-create a dedicated API user for this connector
-        auto_created = True
-        api_user_id = secrets.token_hex(4)
-        api_key = f"aih_{secrets.token_urlsafe(32)}"
-        api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+    def _create_blocking() -> Dict:
+        """Steps 3–5 in ONE thread hop, and as ONE atomic block.
 
-        database.create_api_user(
-            user_id=api_user_id,
-            name=f"connector:{connector_type}:{name}",
-            api_key_hash=api_key_hash,
-            project_id=project_id,
-            profile_ids=profile_ids,
-            web_login_allowed=False,
-            description=f"Auto-created API user for connector {connector_id}",
+        The API-user resolve/insert, the connector INSERT and the compensating
+        ``delete_api_user`` on failure are contiguous (no awaits between them),
+        and the rollback in particular MUST stay in the same block as the write
+        that it undoes. Same calls, same order; ``ValueError``/``RuntimeError``
+        propagate out of the ``await`` exactly as before.
+        """
+        nonlocal api_user_id, config
+
+        # 3. Resolve API user
+        auto_created = False
+        if api_user_id:
+            # Use the provided (existing) API user
+            existing_user = database.get_api_user(api_user_id)
+            if not existing_user:
+                raise ValueError(f"API user not found: {api_user_id}")
+        else:
+            # Auto-create a dedicated API user for this connector
+            auto_created = True
+            api_user_id = secrets.token_hex(4)
+            api_key = f"aih_{secrets.token_urlsafe(32)}"
+            api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+
+            database.create_api_user(
+                user_id=api_user_id,
+                name=f"connector:{connector_type}:{name}",
+                api_key_hash=api_key_hash,
+                project_id=project_id,
+                profile_ids=profile_ids,
+                web_login_allowed=False,
+                description=f"Auto-created API user for connector {connector_id}",
+            )
+
+        # 4. Normalize list-type fields, then encrypt sensitive config fields
+        config = normalize_config(config, connector_type)
+        encrypted_config = encrypt_config(config, connector_type)
+
+        # 5. Persist the connector, pinned to this install so that — when two
+        # installs share one Postgres — only the install that created it starts
+        # the live client (see ConnectorManager.start_all).
+        from app.core.config import settings
+
+        connector = database.create_connector(
+            connector_id=connector_id,
+            connector_type=connector_type,
+            name=name,
+            config=encrypted_config,
+            events=events,
+            api_user_id=api_user_id,
+            runner_id=settings.effective_instance_id,
         )
 
-    # 4. Normalize list-type fields, then encrypt sensitive config fields
-    config = normalize_config(config, connector_type)
-    encrypted_config = encrypt_config(config, connector_type)
+        if not connector:
+            if auto_created:
+                database.delete_api_user(api_user_id)
+            raise RuntimeError("Failed to create connector in database")
+        return connector
 
-    # 5. Persist the connector, pinned to this install so that — when two
-    # installs share one Postgres — only the install that created it starts the
-    # live client (see ConnectorManager.start_all).
-    from app.core.config import settings
-
-    connector = database.create_connector(
-        connector_id=connector_id,
-        connector_type=connector_type,
-        name=name,
-        config=encrypted_config,
-        events=events,
-        api_user_id=api_user_id,
-        runner_id=settings.effective_instance_id,
-    )
-
-    if not connector:
-        if auto_created:
-            database.delete_api_user(api_user_id)
-        raise RuntimeError("Failed to create connector in database")
+    connector = await run_sync(_create_blocking)
 
     # 6. Return with masked config
     connector["config"] = mask_config(connector.get("config", {}), connector_type)
@@ -240,56 +255,77 @@ async def update_connector(connector_id: str, **kwargs) -> Optional[Dict]:
     If config changes and the connector is active, it will be restarted.
     Returns the updated connector with masked config, or ``None`` if not found.
     """
-    existing = database.get_connector(connector_id)
-    if not existing:
-        return None
+    def _update_blocking() -> Tuple[Optional[Dict], bool, bool, Optional[str]]:
+        """Read → validate → UPDATE → runner claim, in ONE thread hop.
 
-    connector_type = existing["type"]
+        Every DB touch here is contiguous — the only thing that has to happen
+        on the loop is the ``restart_connector`` await below, which needs the
+        claim decision this block makes. Keeping the read, the write and the
+        ``claim_connector_runner`` compare-and-set in one block also keeps the
+        ownership decision atomic: splitting them would let two installs both
+        conclude they own an unclaimed connector. Returns
+        ``(updated, config_changed, owns_locally, connector_type)``; a missing
+        row yields ``updated=None``, the same ``None`` the caller returned.
+        """
+        existing = database.get_connector(connector_id)
+        if not existing:
+            return None, False, False, None
 
-    # Encrypt sensitive config fields if config is being updated.
-    # Preserve existing encrypted values when the frontend sends masked
-    # placeholders (e.g. "****abcd") back — these must not overwrite the
-    # real token stored in the database.
-    config_changed = False
-    if "config" in kwargs and kwargs["config"] is not None:
-        new_config = normalize_config(kwargs["config"], connector_type)
-        kwargs["config"] = new_config
-        existing_config = existing.get("config", {}) or {}
-        sensitive = get_sensitive_fields(connector_type)
+        connector_type = existing["type"]
 
-        for key in sensitive:
-            new_val = new_config.get(key, "")
-            if isinstance(new_val, str) and new_val.startswith("****"):
-                # Masked value — keep the original encrypted value from DB
-                new_config[key] = existing_config.get(key, new_val)
+        # Encrypt sensitive config fields if config is being updated.
+        # Preserve existing encrypted values when the frontend sends masked
+        # placeholders (e.g. "****abcd") back — these must not overwrite the
+        # real token stored in the database.
+        config_changed = False
+        if "config" in kwargs and kwargs["config"] is not None:
+            new_config = normalize_config(kwargs["config"], connector_type)
+            kwargs["config"] = new_config
+            existing_config = existing.get("config", {}) or {}
+            sensitive = get_sensitive_fields(connector_type)
 
-        # Check if config actually changed vs what's in the DB
-        if new_config != existing_config:
-            kwargs["config"] = encrypt_config(new_config, connector_type)
-            config_changed = True
-        else:
-            # No real change — drop config from the update
-            del kwargs["config"]
+            for key in sensitive:
+                new_val = new_config.get(key, "")
+                if isinstance(new_val, str) and new_val.startswith("****"):
+                    # Masked value — keep the original encrypted value from DB
+                    new_config[key] = existing_config.get(key, new_val)
 
-    # Validate events if provided
-    if "events" in kwargs and kwargs["events"] is not None:
-        invalid = [e for e in kwargs["events"] if e not in VALID_CONNECTOR_EVENTS]
-        if invalid:
-            raise ValueError(f"Invalid event types: {', '.join(invalid)}")
+            # Check if config actually changed vs what's in the DB
+            if new_config != existing_config:
+                kwargs["config"] = encrypt_config(new_config, connector_type)
+                config_changed = True
+            else:
+                # No real change — drop config from the update
+                del kwargs["config"]
 
-    updated = database.update_connector(connector_id, **kwargs)
+        # Validate events if provided
+        if "events" in kwargs and kwargs["events"] is not None:
+            invalid = [e for e in kwargs["events"] if e not in VALID_CONNECTOR_EVENTS]
+            if invalid:
+                raise ValueError(f"Invalid event types: {', '.join(invalid)}")
+
+        updated = database.update_connector(connector_id, **kwargs)
+        if not updated:
+            return None, config_changed, False, connector_type
+
+        # Restart if the connector is active and config was changed — but only
+        # when this install owns (or claims) the connector, otherwise a config
+        # edit on a non-owning install would connect a duplicate live client
+        # here.
+        from app.core.config import settings
+        me = settings.effective_instance_id
+        runner_id = updated.get("runner_id")
+        owns_locally = runner_id == me or (
+            runner_id is None and database.claim_connector_runner(connector_id, me)
+        )
+        return updated, config_changed, owns_locally, connector_type
+
+    updated, config_changed, owns_locally, connector_type = await run_sync(
+        _update_blocking
+    )
     if not updated:
         return None
 
-    # Restart if the connector is active and config was changed — but only when
-    # this install owns (or claims) the connector, otherwise a config edit on a
-    # non-owning install would connect a duplicate live client here.
-    from app.core.config import settings
-    me = settings.effective_instance_id
-    runner_id = updated.get("runner_id")
-    owns_locally = runner_id == me or (
-        runner_id is None and database.claim_connector_runner(connector_id, me)
-    )
     if config_changed and updated.get("is_active") and owns_locally:
         try:
             # Lazy import to avoid circular dependency
@@ -306,7 +342,7 @@ async def update_connector(connector_id: str, **kwargs) -> Optional[Dict]:
 
 async def delete_connector(connector_id: str) -> bool:
     """Delete a connector, its API user, and stop it if running."""
-    connector = database.get_connector(connector_id)
+    connector = await run_sync(database.get_connector, connector_id)
     if not connector:
         return False
 
@@ -317,18 +353,26 @@ async def delete_connector(connector_id: str) -> bool:
     except Exception as e:
         logger.error(f"Error stopping connector {connector_id} during delete: {e}")
 
-    # Only delete the API user if it was auto-created for this connector
-    api_user_id = connector.get("api_user_id")
-    if api_user_id:
-        try:
-            api_user = database.get_api_user(api_user_id)
-            if api_user and api_user.get("name", "").startswith("connector:"):
-                database.delete_api_user(api_user_id)
-        except Exception as e:
-            logger.error(f"Failed to delete API user {api_user_id} for connector {connector_id}: {e}")
+    def _delete_blocking() -> bool:
+        """The deletion tail in ONE hop: the API-user check/delete and the
+        connector DELETE are contiguous (the only await, the live-client stop,
+        already happened above). Error handling is unchanged — the API-user
+        failure is logged and swallowed exactly where it was, and the connector
+        DELETE's result is what this returns."""
+        # Only delete the API user if it was auto-created for this connector
+        api_user_id = connector.get("api_user_id")
+        if api_user_id:
+            try:
+                api_user = database.get_api_user(api_user_id)
+                if api_user and api_user.get("name", "").startswith("connector:"):
+                    database.delete_api_user(api_user_id)
+            except Exception as e:
+                logger.error(f"Failed to delete API user {api_user_id} for connector {connector_id}: {e}")
 
-    # Delete the connector itself (cascades to event_log / sessions via FK)
-    return database.delete_connector(connector_id)
+        # Delete the connector itself (cascades to event_log / sessions via FK)
+        return database.delete_connector(connector_id)
+
+    return await run_sync(_delete_blocking)
 
 
 async def test_connector(connector_id: str) -> Dict:
@@ -338,7 +382,9 @@ async def test_connector(connector_id: str) -> Dict:
     """
     from app.core.connectors.registry import get_connector_class
 
-    connector = database.get_connector(connector_id)
+    # One isolated read; the credential test below is network work that stays
+    # on the loop.
+    connector = await run_sync(database.get_connector, connector_id)
     if not connector:
         return {"success": False, "message": "Connector not found", "elapsed_ms": 0}
 

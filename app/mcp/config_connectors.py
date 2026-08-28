@@ -16,6 +16,7 @@ def _create_connector_tools(is_admin: bool) -> list:
     """Create connector status tools."""
     from claude_agent_sdk import tool
     from app.db import database
+    from app.db.async_database import run_sync
 
     _is_admin = is_admin
     tools = []
@@ -28,7 +29,7 @@ def _create_connector_tools(is_admin: bool) -> list:
         {"type": "object", "properties": {}},
     )
     async def list_connectors(args: dict) -> dict:
-        connectors = database.get_all_connectors()
+        connectors = await run_sync(database.get_all_connectors)
         return _tool_result({
             "connectors": [
                 {
@@ -61,7 +62,9 @@ def _create_connector_tools(is_admin: bool) -> list:
         },
     )
     async def get_connector_status(args: dict) -> dict:
-        connector = database.get_connector(args["connector_id"])
+        # Single isolated read; the runtime-status lookup below is in-memory
+        # state owned by the connector manager on this loop, so it stays here.
+        connector = await run_sync(database.get_connector, args["connector_id"])
         if not connector:
             return _error(f"Connector not found: {args['connector_id']}")
 
@@ -98,7 +101,9 @@ def _create_connector_tools(is_admin: bool) -> list:
         if not _is_admin:
             return _error("App configuration tools require admin access.")
 
-        connector = database.get_connector(args["connector_id"])
+        # Only a read: the start/stop below are coroutines that must run on the
+        # caller's loop, so there is nothing to fold this into.
+        connector = await run_sync(database.get_connector, args["connector_id"])
         if not connector:
             return _error(f"Connector not found: {args['connector_id']}")
 

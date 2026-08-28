@@ -21,7 +21,11 @@ Run:  cd /home/owner/Documents/AI-Shuffle && \
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
+import os
+import pathlib
+import types
 
 import pytest
 
@@ -4383,22 +4387,118 @@ def test_native_mutation_tool_guidance_requires_write_or_edit_but_keeps_bash():
     assert "Edit/Write" in bash
 
 
-def test_native_environment_declares_the_actual_windows_shell(tmp_path, monkeypatch):
+@contextlib.contextmanager
+def _os_name_is_nt():
+    """Make ``os.name`` report ``"nt"`` for the body of the block only.
+
+    ``os.name`` is process-global and ``pathlib.Path()`` re-reads it on every
+    instantiation, so while it is ``"nt"`` *any* ``Path()`` on this Linux host
+    raises ``NotImplementedError: cannot instantiate 'WindowsPath'`` — including
+    the ones pytest itself makes. ``monkeypatch`` is not tight enough here: it
+    undoes its patches during fixture *teardown*, which runs after pytest has
+    already built the call-phase report, and ``nodes._repr_failure_py`` does
+    ``Path(os.getcwd())``. A test body that raised under the mutation therefore
+    took pytest's reporting down with it (INTERNALERROR), which in turn skipped
+    the monkeypatch undo and left ``os.name == "nt"`` for the rest of the
+    session — crashing tmp_path cleanup at sessionfinish and swallowing the
+    run's summary line. Restoring in ``finally``, inside the call phase, means
+    nothing pytest touches afterwards ever observes the mutated value.
+    """
+    original = os.name
+    os.name = "nt"
+    try:
+        yield
+    finally:
+        os.name = original
+
+
+@pytest.fixture()
+def simulated_windows(monkeypatch):
+    """Point fluid's shell/environment path handling at Windows semantics.
+
+    Returns the ``os.name`` context manager; everything that can be scoped with
+    ``monkeypatch`` (module attributes, which pytest never reads) is scoped that
+    way and auto-reverts.
+
+    ``fluid.tools.shell`` — not ``fluid.context.environment`` — is where Windows
+    shell detection actually builds paths, and it holds its own module-level
+    ``Path`` binding. Giving it ``PureWindowsPath`` reproduces Windows path
+    splitting (that is what ``_is_wsl_bash`` needs) without asking pathlib for a
+    concrete ``WindowsPath`` the host cannot make. ``environment.Path`` stays
+    native so the cwd in the block still resolves against the real filesystem.
+    """
     import fluid.context.environment as environment
+    import fluid.tools.shell as shell
 
-    # Keep path construction native to the Linux test host. Mutating the shared
-    # ``os.name`` module otherwise makes pathlib select WindowsPath, which cannot
-    # be instantiated here and prevents the shell assertion from running.
-    monkeypatch.setattr(environment, "Path", type(tmp_path))
-    monkeypatch.setattr(environment.os, "name", "nt")
+    # ``resolve_shell`` is ``lru_cache``d for the whole process: clear it on
+    # both sides so a Windows ShellInfo can never leak into another test.
+    shell.resolve_shell.cache_clear()
+    monkeypatch.setattr(shell, "Path", pathlib.PureWindowsPath)
+    # A *concrete* native class, resolved before the mutation: bare
+    # ``pathlib.Path`` is the dispatcher and would still pick WindowsPath
+    # once ``os.name`` flips.
+    monkeypatch.setattr(environment, "Path", type(pathlib.Path()))
     monkeypatch.setattr(environment, "git_context", lambda cwd: None)
-    block = environment.environment_block(tmp_path)
-    # fluid resolves the real shell (Git Bash when installed, cmd.exe
-    # otherwise) and the block must name whichever one the Bash tool runs.
-    from fluid.tools.shell import describe
+    try:
+        yield _os_name_is_nt
+    finally:
+        shell.resolve_shell.cache_clear()
 
-    assert f"Shell: {describe()}" in block
-    assert ("Git Bash" in block) or ("cmd.exe" in block)
+
+def test_native_environment_declares_the_actual_windows_shell(
+    tmp_path, simulated_windows
+):
+    import fluid.context.environment as environment
+    from fluid.tools.shell import describe, resolve_shell
+
+    with simulated_windows():
+        # Detection must take the Windows branch, not the POSIX one — that is
+        # the behaviour ``os.name == "nt"`` is here to exercise.
+        info = resolve_shell()
+        shell_line = describe(info)
+        block = environment.environment_block(tmp_path)
+
+    assert info.name in {"git-bash", "cmd"}, info
+    # Git Bash when a non-WSL bash.exe is found, cmd.exe otherwise; the block
+    # must name whichever one the Bash tool would actually run.
+    assert ("Git Bash" in shell_line) or ("cmd.exe" in shell_line)
+    assert f"Shell: {shell_line}" in block
+
+
+def test_native_windows_shell_falls_back_to_cmd_without_git_bash(
+    tmp_path, simulated_windows, monkeypatch
+):
+    """With no bash.exe on the box, Windows detection lands on cmd.exe."""
+    import fluid.tools.shell as shell
+
+    # Scoped to the shell module: never touch the global ``shutil.which``.
+    monkeypatch.setattr(shell, "shutil", types.SimpleNamespace(which=lambda _n: None))
+    monkeypatch.delenv(shell.ENV_OVERRIDE, raising=False)
+    for var in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("COMSPEC", r"C:\Windows\system32\cmd.exe")
+
+    with simulated_windows():
+        info = shell.resolve_shell()
+        shell_line = shell.describe(info)
+
+    assert info.name == "cmd"
+    assert "cmd.exe" in shell_line
+
+
+def test_native_windows_shell_ignores_the_wsl_launcher(simulated_windows, monkeypatch):
+    """``System32\\bash.exe`` is WSL, not a shell for the Windows host."""
+    import fluid.tools.shell as shell
+
+    wsl = r"C:\Windows\System32\bash.exe"
+    monkeypatch.setattr(shell, "shutil", types.SimpleNamespace(which=lambda _n: wsl))
+    monkeypatch.delenv(shell.ENV_OVERRIDE, raising=False)
+    for var in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        monkeypatch.delenv(var, raising=False)
+
+    with simulated_windows():
+        assert shell._is_wsl_bash(wsl) is True
+        assert shell.resolve_shell().name == "cmd"
 
 
 # ─── 7. CE12 — enforced tool restriction projected onto the engines ──────────

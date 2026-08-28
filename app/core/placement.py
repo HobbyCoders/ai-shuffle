@@ -99,7 +99,28 @@ def _normalize_placement(raw: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _online_runners() -> set:
+def _installs_map(preloaded: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """The install registry snapshot to resolve against.
+
+    ``preloaded`` lets a caller that has ALREADY read the registry hand it in,
+    so a batch of resolutions costs ONE read instead of one (in fact two —
+    ``capable_runners`` used to read it again for ``_online_runners``) per
+    candidate. Passing ``None`` reads it here, exactly as before, which keeps
+    every existing caller working standalone. A registry failure yields ``{}``:
+    trouble here must never crash resolution (self is re-added by
+    ``_online_runners``, so a failed read cannot make every send refuse with
+    "no capable device online").
+    """
+    if preloaded is not None:
+        return preloaded
+    try:
+        return database.get_installs_map()
+    except Exception:  # noqa: BLE001 — registry trouble must not crash resolution
+        logger.debug("Placement: install registry unavailable", exc_info=True)
+        return {}
+
+
+def _online_runners(installs_map: Optional[Dict[str, Any]] = None) -> set:
     """Online approved installs, plus self unless its own row says unapproved.
 
     Mirrors ``should_run_scheduled_here``: this code is running, so self is
@@ -108,11 +129,7 @@ def _online_runners() -> set:
     a boot-time registration race or a failed registry read — must not make
     every send refuse with "no capable device online".
     """
-    try:
-        installs = database.get_installs_map()
-    except Exception:  # noqa: BLE001 — registry trouble must not crash resolution
-        logger.debug("Placement: install registry unavailable", exc_info=True)
-        installs = {}
+    installs = _installs_map(installs_map)
     online = {
         iid for iid, row in installs.items()
         if row.get("online") and row.get("approved", True)
@@ -150,7 +167,9 @@ def _satisfies(install_row: Optional[Dict[str, Any]], constraints: Dict[str, Any
 
 
 def capable_runners(
-    project_v2_id: Optional[str], constraints: Optional[Dict[str, Any]] = None
+    project_v2_id: Optional[str],
+    constraints: Optional[Dict[str, Any]] = None,
+    installs_map: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     """Online runners that can execute a session for ``project_v2_id``.
 
@@ -165,14 +184,18 @@ def capable_runners(
           install-scoped account constraint to apply. Were accounts ever made
           install-local, this is where the per-account filter would go.
 
+    ``installs_map`` (optional) is a PRELOADED install registry snapshot: pass
+    the map you already read and this makes NO registry read of its own — the
+    same snapshot serves both the capability filter and the online set. Omit it
+    and the registry is read here exactly as before.
+
     Returns a sorted list (deterministic; feeds ``elect_runner``).
     """
     constraints = constraints or {}
-    try:
-        installs = database.get_installs_map()
-    except Exception:  # noqa: BLE001
-        installs = {}
-    online = _online_runners()
+    # ONE snapshot for both the capability filter and the online set (this used
+    # to be two separate reads of the same registry).
+    installs = _installs_map(installs_map)
+    online = _online_runners(installs)
 
     if project_v2_id:
         try:
@@ -207,7 +230,10 @@ def elect_runner(candidates: List[str]) -> Optional[str]:
     return sorted(candidates)[0]
 
 
-def resolve_placement(session_row: Dict[str, Any]) -> PlacementDecision:
+def resolve_placement(
+    session_row: Dict[str, Any],
+    installs_map: Optional[Dict[str, Any]] = None,
+) -> PlacementDecision:
     """Resolve where ``session_row`` should execute (pure; writes nothing).
 
     Honors the three canonical placement forms:
@@ -227,6 +253,16 @@ def resolve_placement(session_row: Dict[str, Any]) -> PlacementDecision:
         ``"none"``.
     ``session_row`` is a mapping with at least ``placement`` and (optionally)
     ``project_v2_id``.
+
+    ``installs_map`` (optional) is a PRELOADED install registry snapshot. A
+    caller resolving many rows at once (the session-list ``degraded``
+    derivation, once per queued-with-no-runner row on the page) reads the
+    registry ONCE and threads it through, instead of paying two registry reads
+    per row. It is handed straight to the single ``capable_runners`` call each
+    branch makes (at most one per resolution), so the read stays LAZY: a
+    local-default row still touches the registry zero times, exactly as before.
+    Omit it and the registry is read as it always was — resolution is unchanged
+    either way, since it already ran against one point-in-time snapshot.
     """
     me = settings.effective_instance_id
     placement = _normalize_placement(session_row.get("placement"))
@@ -240,7 +276,7 @@ def resolve_placement(session_row: Dict[str, Any]) -> PlacementDecision:
         # row (instance_id empty/None) is truly local-default.
         owner = (session_row.get("instance_id") or "").strip()
         if owner:
-            if owner in capable_runners(None, {}):
+            if owner in capable_runners(None, {}, installs_map):
                 return PlacementDecision(
                     "runner", owner, f"implicit-pin:instance_id {owner} online+capable"
                 )
@@ -261,7 +297,7 @@ def resolve_placement(session_row: Dict[str, Any]) -> PlacementDecision:
         # owner has not yet re-materialized the checkout would otherwise resolve
         # "none" with the owner online and able. Checkout honesty is enforced at
         # spawn by the resolver-first refusal (hazard-3 terminal state).
-        if pinned and pinned in capable_runners(None, constraints):
+        if pinned and pinned in capable_runners(None, constraints, installs_map):
             return PlacementDecision("runner", pinned, f"pinned runner {pinned} online+capable")
         return PlacementDecision("none", None, f"pinned runner {pinned or '<blank>'} offline or not capable")
 
@@ -269,7 +305,7 @@ def resolve_placement(session_row: Dict[str, Any]) -> PlacementDecision:
     if where in _KNOWN_CAPABILITY_WHERES:
         constraints[where] = True
 
-    elected = elect_runner(capable_runners(project_v2_id, constraints))
+    elected = elect_runner(capable_runners(project_v2_id, constraints, installs_map))
     if elected:
         return PlacementDecision("runner", elected, f"elected capable runner {elected}")
     return PlacementDecision("none", None, "no capable runner online")

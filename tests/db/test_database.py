@@ -328,6 +328,91 @@ class TestProjectOperations:
         assert result is True
         assert db.get_project("project-1") is None
 
+    def test_get_projects_by_ids_matches_the_per_id_path(self, mock_db):
+        """The batched reader must agree with ``get_project`` per id, on every
+        field the session-list enrichment reads (name / path / link_group_id)."""
+        for i in range(3):
+            db.create_project(f"proj-{i}", f"P{i}", None, f"/p{i}")
+        db.set_project_link_group("proj-1", "git:group")
+        db.create_project("proj-other", "Other", None, "/other")  # not requested
+
+        wanted = ["proj-0", "proj-1", "proj-2"]
+        batched = db.get_projects_by_ids(wanted)
+        assert sorted(batched) == wanted
+        for pid in wanted:
+            single = db.get_project(pid)
+            for field in ("id", "name", "path", "link_group_id"):
+                assert batched[pid][field] == single[field], (pid, field)
+
+    def test_get_projects_by_ids_omits_missing_ids(self, mock_db):
+        """A missing id is simply absent — same as ``get_project`` returning
+        None — never a placeholder row."""
+        db.create_project("proj-0", "P0", None, "/p0")
+        batched = db.get_projects_by_ids(["proj-0", "missing"])
+        assert list(batched) == ["proj-0"]
+        assert db.get_project("missing") is None
+
+    def test_get_projects_by_ids_empty_input_short_circuits(self, mock_db):
+        """``WHERE id IN ()`` is a Postgres syntax error — return early."""
+        db.create_project("proj-0", "P0", None, "/p0")
+        assert db.get_projects_by_ids([]) == {}
+        assert db.get_projects_by_ids([None, ""]) == {}
+        assert db.get_projects_by_ids(iter([])) == {}
+
+    def test_get_projects_by_ids_is_not_instance_filtered(self, mock_db):
+        """Deliberate: mirrors ``get_project``, not ``get_all_projects``, so a
+        session owned by ANOTHER install still resolves its project name."""
+        db.create_project("proj-0", "P0", None, "/p0")
+        from app.db.base import get_db
+
+        with get_db() as conn:
+            conn.cursor().execute(
+                "UPDATE projects SET instance_id = %s WHERE id = %s",
+                ("some-other-install", "proj-0"),
+            )
+
+        assert db.get_all_projects() == []  # instance-filtered: invisible here
+        assert db.get_projects_by_ids(["proj-0"])["proj-0"]["name"] == "P0"
+
+    def test_get_projects_by_ids_falls_back_to_per_id_reads(self, mock_db):
+        """A failed batch read degrades to one ``get_project`` per DISTINCT id,
+        never to no data at all."""
+        from app.db import projects as projects_db
+
+        rows = {
+            "proj-0": {"id": "proj-0", "name": "P0"},
+            "proj-1": {"id": "proj-1", "name": "P1"},
+        }
+        with patch.object(projects_db, "get_db",
+                          side_effect=RuntimeError("batch read down")), \
+                patch.object(projects_db, "get_project",
+                             side_effect=rows.get) as per_id:
+            resolved = projects_db.get_projects_by_ids(
+                ["proj-0", "proj-0", "proj-1", "missing"]
+            )
+
+        assert sorted(resolved) == ["proj-0", "proj-1"]
+        assert resolved["proj-1"]["name"] == "P1"
+        # Per DISTINCT id, never per requested id.
+        assert [c.args[0] for c in per_id.call_args_list] == [
+            "proj-0", "proj-1", "missing",
+        ]
+
+    def test_get_projects_by_ids_fallback_survives_a_single_bad_id(self, mock_db):
+        """One raising ``get_project`` must not lose the other rows."""
+        from app.db import projects as projects_db
+
+        def flaky(pid):
+            if pid == "boom":
+                raise RuntimeError("row read failed")
+            return {"id": pid, "name": "P0"}
+
+        with patch.object(projects_db, "get_db",
+                          side_effect=RuntimeError("batch read down")), \
+                patch.object(projects_db, "get_project", side_effect=flaky):
+            resolved = projects_db.get_projects_by_ids(["boom", "proj-0"])
+        assert list(resolved) == ["proj-0"]
+
 
 # =============================================================================
 # Session Operations Tests

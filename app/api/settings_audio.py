@@ -14,6 +14,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from app.db import database
+from app.db.async_database import run_sync
 from app.api.auth import require_admin, require_auth
 from app.api.settings_crypto import get_decrypted_api_key
 from app.api.settings_media import get_model_params
@@ -460,9 +461,14 @@ async def get_audio_models(token: str = Depends(require_auth)):
     """
     Get available TTS and STT models.
     """
-    fal_key = get_decrypted_api_key("fal_api_key")
-    current_tts = database.get_system_setting("tts_model") or "fal-ai/kokoro/american-english"
-    current_stt = database.get_system_setting("stt_model") or "fal-ai/whisper"
+    def _load() -> tuple[str | None, str, str]:
+        """The key read (+ decrypt) and both model settings in ONE hop."""
+        fal_key = get_decrypted_api_key("fal_api_key")
+        current_tts = database.get_system_setting("tts_model") or "fal-ai/kokoro/american-english"
+        current_stt = database.get_system_setting("stt_model") or "fal-ai/whisper"
+        return fal_key, current_tts, current_stt
+
+    fal_key, current_tts, current_stt = await run_sync(_load)
 
     tts_models = [
         {
@@ -512,7 +518,8 @@ async def update_tts_model(
     if not model:
         raise HTTPException(status_code=400, detail="Model cannot be empty")
 
-    database.set_system_setting("tts_model", model)
+    # One isolated write — one thread hop, no closure needed.
+    await run_sync(database.set_system_setting, "tts_model", model)
     return {"success": True, "model": model}
 
 
@@ -526,27 +533,34 @@ async def update_tts_settings(
 
     All fields are optional - only provided fields will be updated.
     """
-    if request.model:
-        model = request.model.strip()
-        if model:
-            database.set_system_setting("tts_model", model)
+    def _write() -> None:
+        """Up to four writes in ONE hop, in the original order.
 
-    if request.voice:
-        database.set_system_setting("tts_voice", request.voice.strip())
+        The order matters and is preserved: an out-of-range speed raises AFTER
+        the model/voice writes have already landed, exactly as before.
+        """
+        if request.model:
+            model = request.model.strip()
+            if model:
+                database.set_system_setting("tts_model", model)
 
-    if request.speed is not None:
-        if request.speed < 0.1 or request.speed > 5.0:
-            raise HTTPException(
-                status_code=400,
-                detail="Speed must be between 0.1 and 5.0"
-            )
-        database.set_system_setting("tts_speed", str(request.speed))
+        if request.voice:
+            database.set_system_setting("tts_voice", request.voice.strip())
 
-    if request.output_format:
-        fmt = request.output_format.strip().lower()
-        if fmt in ("wav", "mp3", "ogg", "flac"):
-            database.set_system_setting("tts_output_format", fmt)
+        if request.speed is not None:
+            if request.speed < 0.1 or request.speed > 5.0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Speed must be between 0.1 and 5.0"
+                )
+            database.set_system_setting("tts_speed", str(request.speed))
 
+        if request.output_format:
+            fmt = request.output_format.strip().lower()
+            if fmt in ("wav", "mp3", "ogg", "flac"):
+                database.set_system_setting("tts_output_format", fmt)
+
+    await run_sync(_write)
     return {"success": True}
 
 
@@ -560,7 +574,8 @@ async def update_stt_model(
     if not model:
         raise HTTPException(status_code=400, detail="Model cannot be empty")
 
-    database.set_system_setting("stt_model", model)
+    # One isolated write — one thread hop, no closure needed.
+    await run_sync(database.set_system_setting, "stt_model", model)
     return {"success": True, "model": model}
 
 
@@ -569,8 +584,13 @@ async def get_tts_models(token: str = Depends(require_auth)):
     """
     Get available TTS models with voice options.
     """
-    fal_key = get_decrypted_api_key("fal_api_key")
-    current_tts = database.get_system_setting("tts_model") or "fal-ai/kokoro/american-english"
+    def _load() -> tuple[str | None, str]:
+        """Key read (+ decrypt) and the current model in ONE hop."""
+        fal_key = get_decrypted_api_key("fal_api_key")
+        current_tts = database.get_system_setting("tts_model") or "fal-ai/kokoro/american-english"
+        return fal_key, current_tts
+
+    fal_key, current_tts = await run_sync(_load)
 
     models = [
         {
@@ -599,8 +619,13 @@ async def get_stt_models(token: str = Depends(require_auth)):
     """
     Get available STT models.
     """
-    fal_key = get_decrypted_api_key("fal_api_key")
-    current_stt = database.get_system_setting("stt_model") or "fal-ai/whisper"
+    def _load() -> tuple[str | None, str]:
+        """Key read (+ decrypt) and the current model in ONE hop."""
+        fal_key = get_decrypted_api_key("fal_api_key")
+        current_stt = database.get_system_setting("stt_model") or "fal-ai/whisper"
+        return fal_key, current_stt
+
+    fal_key, current_stt = await run_sync(_load)
 
     models = [
         {
@@ -639,7 +664,7 @@ async def transcribe_audio(
     Accepts audio files (webm, mp3, mp4, wav, m4a, etc.) and returns transcribed text.
     The file is uploaded to fal.ai's file storage first, then passed to the Whisper model.
     """
-    fal_key = get_decrypted_api_key("fal_api_key")
+    fal_key = await run_sync(get_decrypted_api_key, "fal_api_key")
     if not fal_key:
         raise HTTPException(
             status_code=400,
@@ -682,8 +707,11 @@ async def transcribe_audio(
     # to obtain a real HTTPS URL, then reference that URL in the STT payload.
     mime_type = _normalize_mime(content_type, fallback="audio/webm")
 
-    # Call fal.ai STT model with the uploaded file URL
-    stt_model = database.get_system_setting("stt_model") or "fal-ai/whisper"
+    # Call fal.ai STT model with the uploaded file URL.
+    # A SECOND hop: the request body read (``await file.read()``) and the
+    # size/format validation that can reject it sit between this and the key
+    # read above, so the two cannot share a closure.
+    stt_model = await run_sync(database.get_system_setting, "stt_model") or "fal-ai/whisper"
 
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -778,24 +806,33 @@ async def generate_tts(
 
     Returns a URL to the generated audio file.
     """
-    fal_key = get_decrypted_api_key("fal_api_key")
-    if not fal_key:
-        raise HTTPException(
-            status_code=400,
-            detail="fal.ai API key not configured. Go to Settings > Integrations to add your key."
-        )
+    def _load_config() -> tuple[str | None, str, str, float]:
+        """The key read (+ decrypt) and the three TTS settings in ONE hop.
 
-    # Get configured model or use request override. Any fal.ai TTS model is
-    # accepted — curated models get tuned payloads, others are schema-driven.
-    tts_model = request.model or database.get_system_setting("tts_model") or "fal-ai/kokoro/american-english"
+        Each ``request.*`` override short-circuits its read exactly as before,
+        so an override still costs no query.
+        """
+        fal_key = get_decrypted_api_key("fal_api_key")
+        if not fal_key:
+            raise HTTPException(
+                status_code=400,
+                detail="fal.ai API key not configured. Go to Settings > Integrations to add your key."
+            )
+
+        # Get configured model or use request override. Any fal.ai TTS model is
+        # accepted — curated models get tuned payloads, others are schema-driven.
+        tts_model = request.model or database.get_system_setting("tts_model") or "fal-ai/kokoro/american-english"
+
+        # Get voice and other settings
+        voice = request.voice or database.get_system_setting("tts_voice") or "af_heart"
+        speed = request.speed
+        if speed is None:
+            speed_str = database.get_system_setting("tts_speed")
+            speed = float(speed_str) if speed_str else 1.0
+        return fal_key, tts_model, voice, speed
+
+    fal_key, tts_model, voice, speed = await run_sync(_load_config)
     model_info = TTS_MODELS.get(tts_model)
-
-    # Get voice and other settings
-    voice = request.voice or database.get_system_setting("tts_voice") or "af_heart"
-    speed = request.speed
-    if speed is None:
-        speed_str = database.get_system_setting("tts_speed")
-        speed = float(speed_str) if speed_str else 1.0
 
     # Validate text
     text = request.text.strip()
@@ -811,8 +848,12 @@ async def generate_tts(
             raise HTTPException(status_code=400, detail=f"Speed must be between {speed_range[0]} and {speed_range[1]}")
 
     # Stored schema-driven params (set via the dynamic settings form) are used
-    # when the request doesn't override them.
-    extra_params = request.params if request.params is not None else get_model_params("tts_model")
+    # when the request doesn't override them. A SECOND hop: the text/speed
+    # validation above can reject the request with a 400, and folding this read
+    # into the first hop would run it for requests that never get here.
+    extra_params = request.params
+    if extra_params is None:
+        extra_params = await run_sync(get_model_params, "tts_model")
 
     # Build the fal payload (curated shape, or schema-driven for any other model)
     payload = await _resolve_tts_payload(
@@ -901,21 +942,26 @@ async def stream_tts(
     """
     Stream TTS audio directly from fal.ai without saving to disk.
     """
-    fal_key = get_decrypted_api_key("fal_api_key")
-    if not fal_key:
-        raise HTTPException(
-            status_code=400,
-            detail="fal.ai API key not configured. Go to Settings > Integrations to add your key."
-        )
+    def _load_config() -> tuple[str | None, str, str, float]:
+        """The key read (+ decrypt) and the three TTS settings in ONE hop."""
+        fal_key = get_decrypted_api_key("fal_api_key")
+        if not fal_key:
+            raise HTTPException(
+                status_code=400,
+                detail="fal.ai API key not configured. Go to Settings > Integrations to add your key."
+            )
 
-    tts_model = request.model or database.get_system_setting("tts_model") or "fal-ai/kokoro/american-english"
+        tts_model = request.model or database.get_system_setting("tts_model") or "fal-ai/kokoro/american-english"
+
+        voice = request.voice or database.get_system_setting("tts_voice") or "af_heart"
+        speed = request.speed
+        if speed is None:
+            speed_str = database.get_system_setting("tts_speed")
+            speed = float(speed_str) if speed_str else 1.0
+        return fal_key, tts_model, voice, speed
+
+    fal_key, tts_model, voice, speed = await run_sync(_load_config)
     model_info = TTS_MODELS.get(tts_model)
-
-    voice = request.voice or database.get_system_setting("tts_voice") or "af_heart"
-    speed = request.speed
-    if speed is None:
-        speed_str = database.get_system_setting("tts_speed")
-        speed = float(speed_str) if speed_str else 1.0
 
     text = request.text.strip()
     if not text:
@@ -923,7 +969,11 @@ async def stream_tts(
     if len(text) > 4096:
         raise HTTPException(status_code=400, detail="Text too long. Maximum 4096 characters.")
 
-    extra_params = request.params if request.params is not None else get_model_params("tts_model")
+    # A SECOND hop, for the same reason as /tts/generate: the text validation
+    # above can reject the request before this read is reachable.
+    extra_params = request.params
+    if extra_params is None:
+        extra_params = await run_sync(get_model_params, "tts_model")
     payload = await _resolve_tts_payload(
         tts_model, text, voice, speed, model_info, fal_key, extra_params
     )

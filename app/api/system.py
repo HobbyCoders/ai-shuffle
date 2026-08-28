@@ -19,6 +19,7 @@ from app.core.models import HealthResponse, VersionResponse, StatsResponse
 from app.core.auth import auth_service
 from app.core.config import settings
 from app.db import database
+from app.db.async_database import run_sync
 from app.api.auth import require_auth, require_admin
 
 logger = logging.getLogger(__name__)
@@ -157,7 +158,8 @@ async def get_version():
 @router.get("/api/v1/stats", response_model=StatsResponse)
 async def get_stats(token: str = Depends(require_auth)):
     """Get usage statistics"""
-    stats = database.get_usage_stats()
+    # Polled for the status widget: one aggregation, one off-loop hop.
+    stats = await run_sync(database.get_usage_stats)
     return stats
 
 
@@ -225,8 +227,17 @@ async def get_workspace_config() -> WorkspaceConfigResponse:
     # back to the global path for `workspace_path` display is fine so the
     # setup UI can pre-fill a sensible default.
     instance_key = f"workspace_path:{settings.effective_instance_id}"
-    instance_path = database.get_system_setting(instance_key)
-    legacy_path = database.get_system_setting("workspace_path")
+
+    def _read_paths():
+        """Both settings reads in ONE hop — this endpoint is polled during
+        setup, and two separate hops would double the scheduler churn for what
+        is a single logical lookup."""
+        return (
+            database.get_system_setting(instance_key),
+            database.get_system_setting("workspace_path"),
+        )
+
+    instance_path, legacy_path = await run_sync(_read_paths)
     configured_path = instance_path or legacy_path
 
     # Determine current effective path
@@ -293,7 +304,7 @@ async def set_workspace_config(
 
     # Save to database (instance-scoped so multi-instance deployments don't conflict)
     instance_key = f"workspace_path:{settings.effective_instance_id}"
-    database.set_system_setting(instance_key, str(path))
+    await run_sync(database.set_system_setting, instance_key, str(path))
 
     # Update the runtime settings
     object.__setattr__(settings, 'workspace_dir', path)

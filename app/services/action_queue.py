@@ -14,6 +14,7 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
 from app.db import database
+from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -424,7 +425,10 @@ class ActionQueue:
     async def _load_actions_from_db(self) -> None:
         """Load pending actions from database."""
         try:
-            actions = database.get_mobile_actions()
+            # Off-loop: the row->QueuedAction decode below is pure CPU and stays
+            # here. The try/except is unchanged, so a DB failure still degrades
+            # to the same warning rather than propagating.
+            actions = await run_sync(database.get_mobile_actions)
             for row in actions:
                 action = QueuedAction(
                     id=row["id"],
@@ -450,7 +454,8 @@ class ActionQueue:
     async def _save_action_to_db(self, action: QueuedAction) -> None:
         """Save an action to database."""
         try:
-            database.save_mobile_action(
+            await run_sync(
+                database.save_mobile_action,
                 action_id=action.id,
                 device_id=action.device_id,
                 action_type=action.action_type,
@@ -469,7 +474,7 @@ class ActionQueue:
     async def _delete_action_from_db(self, action_id: str) -> None:
         """Delete an action from database."""
         try:
-            database.delete_mobile_action(action_id)
+            await run_sync(database.delete_mobile_action, action_id)
         except Exception as e:
             logger.warning(f"Could not delete action from database: {e}")
 

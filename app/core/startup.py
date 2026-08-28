@@ -13,6 +13,7 @@ from typing import List, Optional
 
 from app.core.config import settings, ensure_directories, load_workspace_from_database
 from app.db import database
+from app.db.async_database import run_sync
 from app.db.database import init_database
 from app.core.profiles import run_migrations
 from app.core.auth import auth_service
@@ -399,7 +400,10 @@ async def start_services() -> None:
     await automation_manager.start()
 
     from app.services.fal_catalog import catalog_service
-    catalog_service.load_from_db()
+    # Reads the whole model catalog; keep it off the loop so boot does not stall
+    # the first requests. (Not visible to scan_blocking_db.py — it goes through
+    # get_db() inside the service rather than a database.* call.)
+    await run_sync(catalog_service.load_from_db)
 
     # Guaranteed terminal notification (lifecycle batch, item 4b): register the
     # chat layer's callback ONCE so every error/killed transition of a parent's

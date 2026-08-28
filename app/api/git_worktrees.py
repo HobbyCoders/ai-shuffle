@@ -21,6 +21,7 @@ from app.core.git_service import git_service
 from app.core.worktree_manager import worktree_manager, WorktreeError
 from app.core.project_utils import get_worktree_working_dir
 from app.db import database
+from app.db.async_database import run_sync
 from app.api.auth import require_auth
 from app.api.common import check_project_access
 from app.api.git_helpers import run_git, get_project_path, invalidate_working_dir_cache
@@ -510,28 +511,47 @@ async def reopen_worktree(
     # MCP servers resolve the wrong project forever. Broad repointing is correct
     # here: reopen is an explicit manual relocation of the whole worktree, unlike
     # the send path which stays scoped to one session (PR #493 follow-up #2).
-    local_pid: Optional[str] = None
-    local_repo = database.get_git_repository(updated["repository_id"])
-    if local_repo:
-        local_pid = local_repo.get("project_id")
-
     # Reopen relocates the whole worktree: the fan-out result and any memoized
     # working dir for this project both describe the old (deleted) checkout.
+    # (Both are in-memory caches, so invalidating them before the DB block
+    # below rather than in the middle of it changes nothing.)
     _invalidate_worktree_status_cache(project_id)
     invalidate_working_dir_cache(project_id=project_id)
+
+    def _repoint_sessions() -> list:
+        """Resolve the local project and repoint this worktree's sessions.
+
+        READ-DECIDE-WRITE, kept atomic in ONE hop: the local repo lookup, the
+        session fan-out and the per-session ``set_session_project`` decision all
+        depend on each other. Split across separate thread hops, a session
+        created or re-parented between the read and the write would be missed or
+        repointed on stale data — a race that does not exist today.
+
+        Returns the session ids (in fan-out order) so the caller can evict their
+        pooled subprocesses, which must happen ON the loop.
+        """
+        local_pid: Optional[str] = None
+        local_repo = database.get_git_repository(updated["repository_id"])
+        if local_repo:
+            local_pid = local_repo.get("project_id")
+
+        sessions = database.get_sessions_for_worktree(worktree_id)
+        for sess in sessions:
+            sid = sess["id"]
+            if local_pid and sess.get("project_id") != local_pid:
+                database.set_session_project(sid, local_pid)
+                logger.info(
+                    f"Repointed session {sid} to local project {local_pid} after worktree reopen"
+                )
+        return [sess["id"] for sess in sessions]
+
+    session_ids = await run_sync(_repoint_sessions)
 
     # Evict stale pooled subprocesses whose CWD pointed to the old (deleted) worktree.
     # Must be done here (async context) since recreate_worktree is sync.
     from app.core.session_pool import get_session_pool
     pool = get_session_pool()
-    sessions = database.get_sessions_for_worktree(worktree_id)
-    for sess in sessions:
-        sid = sess["id"]
-        if local_pid and sess.get("project_id") != local_pid:
-            database.set_session_project(sid, local_pid)
-            logger.info(
-                f"Repointed session {sid} to local project {local_pid} after worktree reopen"
-            )
+    for sid in session_ids:
         if pool.get(sid):
             await pool.remove(sid)
             logger.debug(f"Evicted pooled session {sid} after worktree reopen")

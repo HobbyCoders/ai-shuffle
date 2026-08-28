@@ -13,6 +13,7 @@ Tests cover:
 
 import pytest
 import asyncio
+import threading
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -569,6 +570,9 @@ class TestRateLimiter:
             endpoint="/api/test",
             is_admin=False
         )
+        # Request logging is fire-and-forget so it never adds latency to a
+        # request; drain it before asserting the write landed.
+        await limiter.drain_pending_logs()
 
         mock_database.log_request.assert_called_once()
         call_kwargs = mock_database.log_request.call_args
@@ -576,6 +580,54 @@ class TestRateLimiter:
         assert call_kwargs[1]["api_key_id"] == "api456"
         assert call_kwargs[1]["endpoint"] == "/api/test"
         assert call_kwargs[1]["status"] == "success"
+
+    @pytest.mark.asyncio
+    async def test_record_request_returns_without_waiting_for_the_write(self, limiter, mock_database):
+        """A slow log write must not delay the request.
+
+        This used to be an inline synchronous DB write on every request, while
+        its own comment claimed it was fire-and-forget: a slow database stalled
+        the loop, and with it every other request, WS frame and SSE stream on
+        the worker. Asserting on elapsed time is what actually pins that —
+        counting ticker iterations does not, because the ticker simply finishes
+        after the blocking call returns and still reaches its full count.
+        """
+        import time as _time
+
+        def _slow_log(**kwargs):
+            _time.sleep(0.4)
+
+        mock_database.log_request.side_effect = _slow_log
+
+        start = _time.perf_counter()
+        await limiter.record_request(
+            user_id="u", api_key_id=None, endpoint="/x", is_admin=False
+        )
+        elapsed = _time.perf_counter() - start
+
+        # Inline, this took the full 0.4s. Fire-and-forget returns immediately.
+        assert elapsed < 0.1, f"record_request waited {elapsed:.3f}s for the log write"
+
+        await limiter.drain_pending_logs(timeout=2.0)
+        mock_database.log_request.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_record_request_logs_off_the_loop_thread(self, limiter, mock_database):
+        """The write executes on a worker thread, not the loop thread."""
+        loop_thread = threading.get_ident()
+        seen = {}
+
+        def _capture(**kwargs):
+            seen["thread"] = threading.get_ident()
+
+        mock_database.log_request.side_effect = _capture
+
+        await limiter.record_request(
+            user_id="u", api_key_id=None, endpoint="/x", is_admin=False
+        )
+        await limiter.drain_pending_logs(timeout=2.0)
+
+        assert seen["thread"] != loop_thread
 
     @pytest.mark.asyncio
     async def test_record_request_handles_database_error(self, limiter, mock_database):

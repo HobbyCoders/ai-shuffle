@@ -290,7 +290,8 @@ class HueConnector(BaseConnector):
                     logger.error("HueConnector %s entering ERROR state after %d consecutive failures", self.connector_id, consecutive_failures)
                     try:
                         from app.db import database
-                        database.update_connector_status(self.connector_id, "error", error=self._status_message)
+                        from app.db.async_database import run_sync
+                        await run_sync(database.update_connector_status, self.connector_id, "error", error=self._status_message)
                     except Exception:
                         logger.debug("Failed to update DB status", exc_info=True)
 

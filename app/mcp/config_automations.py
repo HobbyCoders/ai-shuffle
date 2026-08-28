@@ -24,6 +24,7 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
     """Create automation management tools."""
     from claude_agent_sdk import tool
     from app.db import database
+    from app.db.async_database import run_sync
 
     _is_admin = is_admin
     _project_id = project_id
@@ -50,7 +51,7 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
         },
     )
     async def list_automations(args: dict) -> dict:
-        automations = database.get_all_automations()
+        automations = await run_sync(database.get_all_automations)
 
         if args.get("status"):
             automations = [a for a in automations if a.get("status") == args["status"]]
@@ -78,14 +79,25 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
         },
     )
     async def get_automation(args: dict) -> dict:
-        auto = database.get_automation(args["automation_id"])
+        def _load():
+            """Row + its recent runs in ONE hop.
+
+            The runs read still only happens when the automation exists, so the
+            query count is unchanged; it just no longer costs two separate
+            stalls of the event loop mid-turn.
+            """
+            auto = database.get_automation(args["automation_id"])
+            if not auto:
+                return None, []
+            return auto, database.get_automation_runs(args["automation_id"], limit=5)
+
+        auto, runs = await run_sync(_load)
         if not auto:
             return _error(f"Automation not found: {args['automation_id']}")
 
         sanitized = _sanitize_automation(auto)
 
         # Include recent runs summary
-        runs = database.get_automation_runs(args["automation_id"], limit=5)
         sanitized["recent_runs"] = [
             {
                 "id": r.get("id"),
@@ -187,61 +199,80 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
 
         trigger_type = args["trigger_type"]
 
-        # Validate profile exists
-        profile = database.get_profile(args["profile_id"])
-        if not profile:
-            return _error(
-                f"Profile '{args['profile_id']}' not found. "
-                "Use listProfiles to see available profiles."
+        def _validate_and_create():
+            """Profile lookup → trigger validation → INSERT, in ONE hop.
+
+            The profile read and the insert that depends on it stay in a single
+            closure: split across hops another tool call could delete the
+            profile in between, and the insert would reference a row this tool
+            just proved existed. Validation order is unchanged (profile first,
+            then trigger config), so the error a caller sees for a bad request
+            is exactly the one it saw before.
+
+            Returns ``(error_message, created_row, automation_id,
+            max_cost_per_run)`` — errors are values, never swallowed
+            exceptions.
+            """
+            # Validate profile exists
+            profile = database.get_profile(args["profile_id"])
+            if not profile:
+                return (
+                    f"Profile '{args['profile_id']}' not found. "
+                    "Use listProfiles to see available profiles."
+                ), None, None, None
+
+            # Build trigger config
+            trigger_config: Dict[str, Any] = {}
+            if trigger_type == "cron":
+                if not args.get("cron_expression"):
+                    return "Cron automations require 'cron_expression' (e.g., '0 9 * * 1-5').", None, None, None
+                trigger_config = {
+                    "expression": args["cron_expression"],
+                    "timezone": args.get("cron_timezone", "UTC"),
+                }
+            elif trigger_type == "interval":
+                if not args.get("interval_seconds"):
+                    return "Interval automations require 'interval_seconds' (minimum 60).", None, None, None
+                if args["interval_seconds"] < 60:
+                    return "Interval must be at least 60 seconds.", None, None, None
+                trigger_config = {"seconds": args["interval_seconds"]}
+            elif trigger_type == "webhook":
+                trigger_config = {"secret": _secrets.token_urlsafe(32)}
+
+            # Enforce budget defaults if not provided
+            max_cost = args.get("max_cost_per_run")
+            if max_cost is None:
+                max_cost = 0.50  # Safe default
+
+            # Default enabled=True: an agent creating an automation intends it
+            # to run. Callers can pass enabled=false to create it paused.
+            enabled = args.get("enabled", True)
+
+            auto_id = f"auto-{_secrets.token_hex(4)}"
+            proj_id = args.get("project_id") or _project_id
+
+            created = database.create_automation(
+                automation_id=auto_id,
+                name=args["name"],
+                description=args.get("description"),
+                trigger_type=trigger_type,
+                trigger_config=trigger_config,
+                prompt=args["prompt"],
+                profile_id=args["profile_id"],
+                project_id=proj_id,
+                max_turns=args.get("max_turns", 1),
+                timeout_seconds=args.get("timeout_seconds", 300),
+                max_cost_per_run=max_cost,
+                max_cost_per_day=args.get("max_cost_per_day"),
+                max_runs_per_day=args.get("max_runs_per_day"),
+                requires_approval=args.get("requires_approval", False),
+                enabled=enabled,
             )
+            return None, created, auto_id, max_cost
 
-        # Build trigger config
-        trigger_config: Dict[str, Any] = {}
-        if trigger_type == "cron":
-            if not args.get("cron_expression"):
-                return _error("Cron automations require 'cron_expression' (e.g., '0 9 * * 1-5').")
-            trigger_config = {
-                "expression": args["cron_expression"],
-                "timezone": args.get("cron_timezone", "UTC"),
-            }
-        elif trigger_type == "interval":
-            if not args.get("interval_seconds"):
-                return _error("Interval automations require 'interval_seconds' (minimum 60).")
-            if args["interval_seconds"] < 60:
-                return _error("Interval must be at least 60 seconds.")
-            trigger_config = {"seconds": args["interval_seconds"]}
-        elif trigger_type == "webhook":
-            trigger_config = {"secret": _secrets.token_urlsafe(32)}
-
-        # Enforce budget defaults if not provided
-        max_cost_per_run = args.get("max_cost_per_run")
-        if max_cost_per_run is None:
-            max_cost_per_run = 0.50  # Safe default
-
-        # Default enabled=True: an agent creating an automation intends it to
-        # run. Callers can pass enabled=false to create it paused.
-        enabled = args.get("enabled", True)
-
-        automation_id = f"auto-{_secrets.token_hex(4)}"
-        proj_id = args.get("project_id") or _project_id
-
-        auto = database.create_automation(
-            automation_id=automation_id,
-            name=args["name"],
-            description=args.get("description"),
-            trigger_type=trigger_type,
-            trigger_config=trigger_config,
-            prompt=args["prompt"],
-            profile_id=args["profile_id"],
-            project_id=proj_id,
-            max_turns=args.get("max_turns", 1),
-            timeout_seconds=args.get("timeout_seconds", 300),
-            max_cost_per_run=max_cost_per_run,
-            max_cost_per_day=args.get("max_cost_per_day"),
-            max_runs_per_day=args.get("max_runs_per_day"),
-            requires_approval=args.get("requires_approval", False),
-            enabled=enabled,
-        )
+        error, auto, automation_id, max_cost_per_run = await run_sync(_validate_and_create)
+        if error:
+            return _error(error)
 
         if not auto:
             return _error("Failed to create automation — database error.")
@@ -336,28 +367,44 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
             return _error("App configuration tools require admin access.")
 
         auto_id = args["automation_id"]
-        existing = database.get_automation(auto_id)
-        if not existing:
-            return _error(f"Automation not found: {auto_id}")
 
-        # Build update kwargs
-        kwargs: Dict[str, Any] = {}
-        for field in ("name", "description", "prompt", "profile_id",
-                      "max_turns", "timeout_seconds", "max_cost_per_run",
-                      "max_cost_per_day", "max_runs_per_day", "requires_approval"):
-            if field in args and args[field] is not None:
-                kwargs[field] = args[field]
+        def _read_validate_write():
+            """READ-MODIFY-WRITE — must stay in ONE hop.
 
-        if not kwargs:
-            return _error("No fields provided to update.")
+            The existence read, the profile validation and the UPDATE are a
+            single logical operation. Split across thread hops, two concurrent
+            updateAutomation calls could interleave read/read/write/write and
+            the second would clobber the first (lost update), or write against
+            a row that was deleted between the check and the write.
 
-        # Validate profile if changing
-        if "profile_id" in kwargs:
-            profile = database.get_profile(kwargs["profile_id"])
-            if not profile:
-                return _error(f"Profile '{kwargs['profile_id']}' not found.")
+            Returns ``(error_message, updated_row, kwargs)``.
+            """
+            existing = database.get_automation(auto_id)
+            if not existing:
+                return f"Automation not found: {auto_id}", None, None
 
-        updated = database.update_automation(auto_id, **kwargs)
+            # Build update kwargs
+            kwargs: Dict[str, Any] = {}
+            for field in ("name", "description", "prompt", "profile_id",
+                          "max_turns", "timeout_seconds", "max_cost_per_run",
+                          "max_cost_per_day", "max_runs_per_day", "requires_approval"):
+                if field in args and args[field] is not None:
+                    kwargs[field] = args[field]
+
+            if not kwargs:
+                return "No fields provided to update.", None, None
+
+            # Validate profile if changing
+            if "profile_id" in kwargs:
+                profile = database.get_profile(kwargs["profile_id"])
+                if not profile:
+                    return f"Profile '{kwargs['profile_id']}' not found.", None, None
+
+            return None, database.update_automation(auto_id, **kwargs), kwargs
+
+        error, updated, kwargs = await run_sync(_read_validate_write)
+        if error:
+            return _error(error)
         if not updated:
             return _error("Failed to update automation.")
 
@@ -393,7 +440,11 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
         if not args.get("confirm"):
             return _error("Set confirm=true to delete. Ask the user for confirmation first.")
 
-        auto = database.get_automation(args["automation_id"])
+        # Two hops, deliberately: the unschedule between the read and the
+        # delete is a coroutine that must run on the caller's loop (it touches
+        # the scheduler's loop-bound state), so the read and the write cannot
+        # be folded into one closure without changing the order of operations.
+        auto = await run_sync(database.get_automation, args["automation_id"])
         if not auto:
             return _error(f"Automation not found: {args['automation_id']}")
 
@@ -406,7 +457,7 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
         except Exception as e:
             logger.warning(f"Failed to unschedule automation: {e}")
 
-        deleted = database.delete_automation(args["automation_id"])
+        deleted = await run_sync(database.delete_automation, args["automation_id"])
         if not deleted:
             return _error("Failed to delete automation.")
 
@@ -435,11 +486,21 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
         if not _is_admin:
             return _error("App configuration tools require admin access.")
 
-        auto = database.get_automation(args["automation_id"])
+        def _read_and_toggle():
+            """READ-MODIFY-WRITE — existence check plus the is_enabled flip in
+            ONE hop, so a concurrent toggle cannot land between them and leave
+            the automation in the state this call already reported."""
+            auto = database.get_automation(args["automation_id"])
+            if not auto:
+                return None, None
+            return auto, database.update_automation(
+                args["automation_id"], is_enabled=args["enabled"]
+            )
+
+        auto, updated = await run_sync(_read_and_toggle)
         if not auto:
             return _error(f"Automation not found: {args['automation_id']}")
 
-        updated = database.update_automation(args["automation_id"], is_enabled=args["enabled"])
         if not updated:
             return _error("Failed to toggle automation.")
 
@@ -480,7 +541,7 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
         if not _is_admin:
             return _error("App configuration tools require admin access.")
 
-        auto = database.get_automation(args["automation_id"])
+        auto = await run_sync(database.get_automation, args["automation_id"])
         if not auto:
             return _error(f"Automation not found: {args['automation_id']}")
 
@@ -516,12 +577,19 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
         },
     )
     async def get_automation_runs(args: dict) -> dict:
-        auto = database.get_automation(args["automation_id"])
+        def _load():
+            """Existence check + the run history in ONE hop. The limit is still
+            clamped only after the row is known to exist, so an unknown id
+            reports "not found" exactly as before."""
+            auto = database.get_automation(args["automation_id"])
+            if not auto:
+                return None, []
+            limit = min(args.get("limit", 10), 50)
+            return auto, database.get_automation_runs(args["automation_id"], limit=limit)
+
+        auto, runs = await run_sync(_load)
         if not auto:
             return _error(f"Automation not found: {args['automation_id']}")
-
-        limit = min(args.get("limit", 10), 50)
-        runs = database.get_automation_runs(args["automation_id"], limit=limit)
 
         return _tool_result({
             "automation_id": args["automation_id"],

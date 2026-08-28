@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.db import database
+from app.db.async_database import run_sync
 from app.core.rate_limiter import rate_limiter
 from app.core.queue_manager import request_queue
 from app.api import auth as _auth
@@ -118,34 +119,42 @@ async def get_current_user(request: Request) -> tuple[Optional[str], Optional[st
 
     Returns ``(None, None, False)`` when the request is unauthenticated; the
     caller decides whether to raise 401.
+
+    Every step below is synchronous DB/CPU work, so the whole resolution runs
+    in ONE off-loop hop: the cookie path is a session lookup and the bearer
+    path is up to two more queries. Reading cookies/headers off the loop is
+    safe — they are already-parsed attributes of the Request, not I/O.
     """
-    user_id: Optional[str] = None
-    api_key_id: Optional[str] = None
-    is_admin = False
+    def _resolve() -> tuple[Optional[str], Optional[str], bool]:
+        user_id: Optional[str] = None
+        api_key_id: Optional[str] = None
+        is_admin = False
 
-    # Cookie session -> admin (canonical validation)
-    token = _auth.get_session_token(request)
-    if token and _auth.auth_service.validate_session(token):
-        is_admin = True
-        user_id = "admin"
+        # Cookie session -> admin (canonical validation)
+        token = _auth.get_session_token(request)
+        if token and _auth.auth_service.validate_session(token):
+            is_admin = True
+            user_id = "admin"
 
-    # Bearer token: aih_ API key (canonical) or opaque API-key session
-    api_key = _auth.get_api_key(request)
-    if api_key:
-        if api_key.startswith("aih_"):
-            api_user = database.get_api_user_by_key_hash(_auth.hash_api_key(api_key))
-            if api_user:
-                api_key_id = api_user["id"]
-                user_id = api_user.get("username") or api_user["name"]
-        else:
-            api_session = database.get_api_key_session(api_key)
-            if api_session:
-                api_user = database.get_api_user(api_session["api_user_id"])
+        # Bearer token: aih_ API key (canonical) or opaque API-key session
+        api_key = _auth.get_api_key(request)
+        if api_key:
+            if api_key.startswith("aih_"):
+                api_user = database.get_api_user_by_key_hash(_auth.hash_api_key(api_key))
                 if api_user:
                     api_key_id = api_user["id"]
                     user_id = api_user.get("username") or api_user["name"]
+            else:
+                api_session = database.get_api_key_session(api_key)
+                if api_session:
+                    api_user = database.get_api_user(api_session["api_user_id"])
+                    if api_user:
+                        api_key_id = api_user["id"]
+                        user_id = api_user.get("username") or api_user["name"]
 
-    return user_id, api_key_id, is_admin
+        return user_id, api_key_id, is_admin
+
+    return await run_sync(_resolve)
 
 
 # =============================================================================
@@ -233,7 +242,7 @@ async def list_rate_limit_configs(
 
     Admin only. Returns all configured rate limits.
     """
-    configs = database.get_all_rate_limits()
+    configs = await run_sync(database.get_all_rate_limits)
     return [RateLimitConfigModel(**config) for config in configs]
 
 
@@ -248,31 +257,41 @@ async def create_rate_limit_config(
     Admin only. Creates a rate limit configuration for a user or API key.
     If both user_id and api_key_id are null, creates a default configuration.
     """
-    # Check for existing config
-    existing = database.get_rate_limit_for_user(config.user_id, config.api_key_id)
-    if existing:
-        # Check if it's an exact match (same user_id and api_key_id)
-        if existing.get("user_id") == config.user_id and existing.get("api_key_id") == config.api_key_id:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Rate limit configuration already exists for this user/API key"
-            )
-
     # Generate ID
     rate_limit_id = str(uuid.uuid4())
 
-    # Create config
-    created = database.create_rate_limit(
-        rate_limit_id=rate_limit_id,
-        user_id=config.user_id,
-        api_key_id=config.api_key_id,
-        requests_per_minute=config.requests_per_minute,
-        requests_per_hour=config.requests_per_hour,
-        requests_per_day=config.requests_per_day,
-        concurrent_requests=config.concurrent_requests,
-        priority=config.priority,
-        is_unlimited=config.is_unlimited
-    )
+    def _create():
+        """Duplicate probe + insert in ONE hop.
+
+        Read-decide-write: split into two hops, a concurrent create between the
+        409 check and the insert would slip past the duplicate guard and write a
+        second config for the same user/API key — a race that does not exist
+        today. The 409 propagates out of ``run_sync`` unchanged.
+        """
+        # Check for existing config
+        existing = database.get_rate_limit_for_user(config.user_id, config.api_key_id)
+        if existing:
+            # Check if it's an exact match (same user_id and api_key_id)
+            if existing.get("user_id") == config.user_id and existing.get("api_key_id") == config.api_key_id:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Rate limit configuration already exists for this user/API key"
+                )
+
+        # Create config
+        return database.create_rate_limit(
+            rate_limit_id=rate_limit_id,
+            user_id=config.user_id,
+            api_key_id=config.api_key_id,
+            requests_per_minute=config.requests_per_minute,
+            requests_per_hour=config.requests_per_hour,
+            requests_per_day=config.requests_per_day,
+            concurrent_requests=config.concurrent_requests,
+            priority=config.priority,
+            is_unlimited=config.is_unlimited
+        )
+
+    created = await run_sync(_create)
 
     # Clear cache
     rate_limiter.clear_cache()
@@ -292,22 +311,31 @@ async def update_rate_limit_config(
 
     Admin only. Updates the specified rate limit configuration.
     """
-    existing = database.get_rate_limit(config_id)
-    if not existing:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Rate limit configuration not found"
+    def _update():
+        """Existence probe + update in ONE hop.
+
+        Read-decide-write: two hops would let a concurrent delete land between
+        the 404 check and the update, so ``updated`` could come back None and
+        blow up in ``RateLimitConfigModel(**updated)`` instead of returning 404.
+        """
+        existing = database.get_rate_limit(config_id)
+        if not existing:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Rate limit configuration not found"
+            )
+
+        return database.update_rate_limit(
+            rate_limit_id=config_id,
+            requests_per_minute=updates.requests_per_minute,
+            requests_per_hour=updates.requests_per_hour,
+            requests_per_day=updates.requests_per_day,
+            concurrent_requests=updates.concurrent_requests,
+            priority=updates.priority,
+            is_unlimited=updates.is_unlimited
         )
 
-    updated = database.update_rate_limit(
-        rate_limit_id=config_id,
-        requests_per_minute=updates.requests_per_minute,
-        requests_per_hour=updates.requests_per_hour,
-        requests_per_day=updates.requests_per_day,
-        concurrent_requests=updates.concurrent_requests,
-        priority=updates.priority,
-        is_unlimited=updates.is_unlimited
-    )
+    updated = await run_sync(_update)
 
     # Clear cache
     rate_limiter.clear_cache()
@@ -327,14 +355,18 @@ async def delete_rate_limit_config(
     Admin only. Deletes the specified rate limit configuration.
     Users will fall back to default limits.
     """
-    existing = database.get_rate_limit(config_id)
-    if not existing:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Rate limit configuration not found"
-        )
+    def _delete():
+        """Existence probe + delete in ONE hop (read-decide-write)."""
+        existing = database.get_rate_limit(config_id)
+        if not existing:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Rate limit configuration not found"
+            )
 
-    database.delete_rate_limit(config_id)
+        database.delete_rate_limit(config_id)
+
+    await run_sync(_delete)
 
     # Clear cache
     rate_limiter.clear_cache()

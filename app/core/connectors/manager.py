@@ -6,7 +6,7 @@ import asyncio
 import logging
 import secrets
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.connectors.base import (
     BaseConnector,
@@ -17,6 +17,7 @@ from app.core.connectors.base import (
 )
 from app.core.connectors.registry import get_connector_class
 from app.db import database
+from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,9 @@ class ConnectorManager:
         from app.core.config import settings
 
         me = settings.effective_instance_id
-        connectors = database.get_active_connectors()
+        # One isolated read; each connector is then started with an await, so
+        # nothing after this can be folded into the same hop.
+        connectors = await run_sync(database.get_active_connectors)
         logger.info(
             f"Evaluating {len(connectors)} active connector(s) for runner {me}"
         )
@@ -61,7 +64,9 @@ class ConnectorManager:
                 elif runner_id is None:
                     # Race-safe claim: only the install whose UPDATE flips the
                     # NULL owner starts it; losers skip.
-                    if database.claim_connector_runner(cid, me):
+                    # Its own hop: the claim decides whether the ``await``
+                    # below runs, so it cannot be batched with anything.
+                    if await run_sync(database.claim_connector_runner, cid, me):
                         logger.info(f"Claimed unowned connector {cid} for runner {me}")
                         await self.start_connector(cid)
                     else:
@@ -91,24 +96,41 @@ class ConnectorManager:
 
     async def start_connector(self, connector_id: str) -> bool:
         """Instantiate, connect, and register a single connector."""
-        connector_row = database.get_connector(connector_id)
-        if not connector_row:
-            logger.error(f"Connector not found in DB: {connector_id}")
+        def _prepare_blocking() -> Optional[Dict[str, Any]]:
+            """Row read, config decrypt and impl-class lookup in ONE hop.
+
+            Contiguous — no awaits between them — and the unknown-type branch
+            STAMPS the error status, so the decide-and-write stays inside the
+            same block rather than becoming a second hop. ``None`` means the
+            caller returns ``False``; the logging is unchanged.
+            """
+            connector_row = database.get_connector(connector_id)
+            if not connector_row:
+                logger.error(f"Connector not found in DB: {connector_id}")
+                return None
+
+            connector_type = connector_row["type"]
+            config = connector_row.get("config", {}) or {}
+
+            # Decrypt sensitive configuration fields
+            config = self._decrypt_config(config, connector_type)
+
+            # Look up the implementation class from the registry
+            try:
+                cls = get_connector_class(connector_type)
+            except ValueError as e:
+                logger.error(f"Cannot start connector {connector_id}: {e}")
+                database.update_connector_status(connector_id, "error", error=str(e))
+                return None
+            return {"row": connector_row, "type": connector_type,
+                    "config": config, "cls": cls}
+
+        prepared = await run_sync(_prepare_blocking)
+        if prepared is None:
             return False
-
-        connector_type = connector_row["type"]
-        config = connector_row.get("config", {}) or {}
-
-        # Decrypt sensitive configuration fields
-        config = self._decrypt_config(config, connector_type)
-
-        # Look up the implementation class from the registry
-        try:
-            cls = get_connector_class(connector_type)
-        except ValueError as e:
-            logger.error(f"Cannot start connector {connector_id}: {e}")
-            database.update_connector_status(connector_id, "error", error=str(e))
-            return False
+        connector_type = prepared["type"]
+        config = prepared["config"]
+        cls = prepared["cls"]
 
         # Create the connector instance
         instance = cls(
@@ -122,11 +144,15 @@ class ConnectorManager:
 
         # Attempt to connect
         try:
-            database.update_connector_status(connector_id, "connecting")
+            # The status flip has to land BEFORE connect() is awaited, so it is
+            # its own hop; connect() is network work that stays on the loop.
+            await run_sync(database.update_connector_status, connector_id, "connecting")
             success = await instance.connect()
         except Exception as e:
             logger.error(f"Connector {connector_id} connect() raised: {e}")
-            database.update_connector_status(connector_id, "error", error=str(e))
+            await run_sync(
+                database.update_connector_status, connector_id, "error", error=str(e)
+            )
             return False
 
         if success:
@@ -138,8 +164,9 @@ class ConnectorManager:
             logger.info(f"Connector started: {connector_id} ({connector_type})")
             return True
         else:
-            database.update_connector_status(
-                connector_id, "error", error="connect() returned False"
+            await run_sync(
+                database.update_connector_status,
+                connector_id, "error", error="connect() returned False",
             )
             return False
 
@@ -154,7 +181,8 @@ class ConnectorManager:
             except Exception as e:
                 logger.error(f"Error disconnecting connector {connector_id}: {e}")
 
-        database.update_connector_status(connector_id, "disconnected")
+        # Single write after the disconnect await — one hop, nothing to batch.
+        await run_sync(database.update_connector_status, connector_id, "disconnected")
         logger.info(f"Connector stopped: {connector_id}")
 
     async def restart_connector(self, connector_id: str) -> bool:
@@ -201,7 +229,7 @@ class ConnectorManager:
         that AI session are notified.  Otherwise every active session for each
         connector is sent the notification.
         """
-        subscribed = database.get_connectors_for_event(event_type)
+        subscribed = await run_sync(database.get_connectors_for_event, event_type)
         if not subscribed:
             # Still dispatch to legacy webhooks
             try:
@@ -225,12 +253,15 @@ class ConnectorManager:
                 continue
 
             try:
-                # Determine which platform chats to notify
-                if session_id:
-                    sessions = database.get_connector_sessions_for_ai_session(session_id)
-                    # Filter to only sessions belonging to this connector
-                    sessions = [s for s in sessions if s.get("connector_id") == cid]
-                else:
+                # Determine which platform chats to notify. Either branch is a
+                # blocking query (the broadcast branch opens its own cursor), so
+                # the whole decision runs off-loop as one hop; exceptions still
+                # land in this ``try``'s handler below.
+                def _load_sessions() -> List[Dict[str, Any]]:
+                    if session_id:
+                        rows = database.get_connector_sessions_for_ai_session(session_id)
+                        # Filter to only sessions belonging to this connector
+                        return [s for s in rows if s.get("connector_id") == cid]
                     # Broadcast to all active sessions for this connector
                     # (no dedicated DB helper — query directly)
                     from app.db.base import get_db, rows_to_list
@@ -240,7 +271,9 @@ class ConnectorManager:
                             "SELECT * FROM connector_sessions WHERE connector_id = %s AND is_active = TRUE",
                             (cid,),
                         )
-                        sessions = rows_to_list(cursor.fetchall())
+                        return rows_to_list(cursor.fetchall())
+
+                sessions = await run_sync(_load_sessions)
 
                 if not sessions:
                     logger.debug(
@@ -263,29 +296,38 @@ class ConnectorManager:
                             )
 
                 status = "delivered" if any_sent else "failed"
-                database.create_connector_event_log(
-                    log_id=log_id,
-                    connector_id=cid,
-                    event_type=event_type,
-                    direction="outbound",
-                    payload=data,
-                    status=status,
-                    error=None if any_sent else "No messages were delivered to platform",
-                )
-                database.update_connector_event_dispatched(cid, success=any_sent)
+
+                # Both writes are contiguous — one hop for the pair.
+                def _log_delivery() -> None:
+                    database.create_connector_event_log(
+                        log_id=log_id,
+                        connector_id=cid,
+                        event_type=event_type,
+                        direction="outbound",
+                        payload=data,
+                        status=status,
+                        error=None if any_sent else "No messages were delivered to platform",
+                    )
+                    database.update_connector_event_dispatched(cid, success=any_sent)
+
+                await run_sync(_log_delivery)
 
             except Exception as e:
                 logger.error(f"Event dispatch failed for connector {cid}: {e}")
-                database.create_connector_event_log(
-                    log_id=log_id,
-                    connector_id=cid,
-                    event_type=event_type,
-                    direction="outbound",
-                    payload=data,
-                    status="failed",
-                    error=str(e),
-                )
-                database.update_connector_event_dispatched(cid, success=False)
+
+                def _log_failure(err: str = str(e)) -> None:
+                    database.create_connector_event_log(
+                        log_id=log_id,
+                        connector_id=cid,
+                        event_type=event_type,
+                        direction="outbound",
+                        payload=data,
+                        status="failed",
+                        error=err,
+                    )
+                    database.update_connector_event_dispatched(cid, success=False)
+
+                await run_sync(_log_failure)
 
         # Also dispatch to legacy webhooks
         try:
@@ -397,42 +439,69 @@ class ConnectorManager:
                 except Exception:
                     logger.debug("Mark-as-read failed", exc_info=True)
 
-            # Look up or create connector session
-            session = database.get_connector_session(
-                message.connector_id, message.platform_chat_id
-            )
+            def _resolve_routing_blocking() -> Optional[Dict[str, Any]]:
+                """Session lookup/creation + connector row + API user + profile
+                fallback: FIVE contiguous round trips, ONE thread hop.
 
-            if not session:
-                session_id = secrets.token_hex(8)
-                session = database.create_connector_session(
-                    session_id=session_id,
-                    connector_id=message.connector_id,
-                    platform_chat_id=message.platform_chat_id,
-                    platform_user_id=message.platform_user_id,
-                    platform_user_name=message.platform_user_name,
+                Nothing between them awaits, and the "no session row yet →
+                create one" step is a read-decide-write that must not be split
+                across hops (two inbound messages racing on a fresh chat would
+                otherwise both decide to create the session). ``None`` means
+                "no profiles available" — the caller returns, exactly as the
+                inline code did after logging the same error here.
+                """
+                # Look up or create connector session
+                session = database.get_connector_session(
+                    message.connector_id, message.platform_chat_id
                 )
 
-            # Determine the API user for this connector
-            connector_row = database.get_connector(message.connector_id)
-            api_user_id = connector_row.get("api_user_id") if connector_row else None
+                if not session:
+                    session_id = secrets.token_hex(8)
+                    session = database.create_connector_session(
+                        session_id=session_id,
+                        connector_id=message.connector_id,
+                        platform_chat_id=message.platform_chat_id,
+                        platform_user_id=message.platform_user_id,
+                        platform_user_name=message.platform_user_name,
+                    )
 
-            # Resolve profile / project from the API user
-            api_user = database.get_api_user(api_user_id) if api_user_id else None
-            profile_id = None
-            project_id = None
-            if api_user:
-                profile_ids = api_user.get("profile_ids", [])
-                profile_id = profile_ids[0] if profile_ids else None
-                project_id = api_user.get("project_id")
+                # Determine the API user for this connector
+                connector_row = database.get_connector(message.connector_id)
+                api_user_id = connector_row.get("api_user_id") if connector_row else None
 
-            # Fall back to the first available profile when none is configured
-            if not profile_id:
-                profiles = database.get_all_profiles()
-                if profiles:
-                    profile_id = profiles[0]["id"]
-                else:
-                    logger.error("No profiles available for connector query")
-                    return
+                # Resolve profile / project from the API user
+                api_user = database.get_api_user(api_user_id) if api_user_id else None
+                profile_id = None
+                project_id = None
+                if api_user:
+                    profile_ids = api_user.get("profile_ids", [])
+                    profile_id = profile_ids[0] if profile_ids else None
+                    project_id = api_user.get("project_id")
+
+                # Fall back to the first available profile when none is configured
+                if not profile_id:
+                    profiles = database.get_all_profiles()
+                    if profiles:
+                        profile_id = profiles[0]["id"]
+                    else:
+                        logger.error("No profiles available for connector query")
+                        return None
+                return {
+                    "session": session,
+                    "connector_row": connector_row,
+                    "api_user_id": api_user_id,
+                    "profile_id": profile_id,
+                    "project_id": project_id,
+                }
+
+            routing = await run_sync(_resolve_routing_blocking)
+            if routing is None:
+                return
+            session = routing["session"]
+            connector_row = routing["connector_row"]
+            api_user_id = routing["api_user_id"]
+            profile_id = routing["profile_id"]
+            project_id = routing["project_id"]
 
             # Pre-mint + link the AI session BEFORE the turn is submitted.
             #
@@ -452,7 +521,13 @@ class ConnectorManager:
                 title = (message.text or "")[:50].strip()
                 if len(message.text or "") > 50:
                     title += "..."
-                try:
+
+                def _mint_blocking() -> None:
+                    """The session INSERT and its connector-session link, as
+                    ONE hop and ONE unit: a link written without its session
+                    row (or vice versa) is exactly the split this must not
+                    allow. The sidebar broadcast below stays on the loop — it
+                    is a coroutine and would be dropped from a worker thread."""
                     database.create_session(
                         session_id=minted_id,
                         profile_id=profile_id,
@@ -464,6 +539,9 @@ class ConnectorManager:
                     database.update_connector_session_ai_session(
                         session.get("id"), minted_id
                     )
+
+                try:
+                    await run_sync(_mint_blocking)
                     ai_session_id = minted_id
                     link_written = True
                     # Mirror execute_query's sidebar broadcast for new sessions so
@@ -558,11 +636,16 @@ class ConnectorManager:
                 )
                 response_text = "I couldn't generate a response."
             else:
-                outcome = turn_outcome.final_turn_outcome(ai_session_id)
-                response_text = (
-                    turn_outcome.extract_final_assistant_text(ai_session_id)
-                    or "I couldn't generate a response."
-                )
+                # Both helpers load the session's whole event log — two
+                # blocking reads back to back, so they share one hop.
+                def _read_outcome() -> Tuple[Dict[str, Any], str]:
+                    return (
+                        turn_outcome.final_turn_outcome(ai_session_id),
+                        turn_outcome.extract_final_assistant_text(ai_session_id),
+                    )
+
+                outcome, final_text = await run_sync(_read_outcome)
+                response_text = final_text or "I couldn't generate a response."
                 if outcome["error"]:
                     # Still send whatever text the turn produced before it died.
                     logger.error(
@@ -579,8 +662,10 @@ class ConnectorManager:
                 and session.get("id")
                 and session.get("session_id") != ai_session_id
             ):
-                database.update_connector_session_ai_session(
-                    session.get("id"), ai_session_id
+                # Isolated repair write between two awaits — one hop.
+                await run_sync(
+                    database.update_connector_session_ai_session,
+                    session.get("id"), ai_session_id,
                 )
 
             # Send response back through the connector
@@ -599,18 +684,23 @@ class ConnectorManager:
                         f"{message.connector_id} chat_id={message.platform_chat_id}"
                     )
 
-            # Log the inbound message cycle and update last_event_at
+            # Log the inbound message cycle and update last_event_at — two
+            # contiguous writes, one hop.
             log_id = secrets.token_hex(8)
-            database.create_connector_event_log(
-                log_id=log_id,
-                connector_id=message.connector_id,
-                event_type="message.received",
-                direction="inbound",
-                payload={"text": message.text[:100], "platform_chat_id": message.platform_chat_id},
-                status="delivered" if sent else "failed",
-                error=None if sent else "Failed to send response",
-            )
-            database.update_connector_event_dispatched(message.connector_id, success=sent)
+
+            def _log_inbound() -> None:
+                database.create_connector_event_log(
+                    log_id=log_id,
+                    connector_id=message.connector_id,
+                    event_type="message.received",
+                    direction="inbound",
+                    payload={"text": message.text[:100], "platform_chat_id": message.platform_chat_id},
+                    status="delivered" if sent else "failed",
+                    error=None if sent else "Failed to send response",
+                )
+                database.update_connector_event_dispatched(message.connector_id, success=sent)
+
+            await run_sync(_log_inbound)
 
         except Exception as e:
             logger.error(

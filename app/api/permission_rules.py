@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Depends, status
 from pydantic import BaseModel, Field
 
 from app.db import database
+from app.db.async_database import run_sync
 from app.api.auth import require_admin
 
 router = APIRouter(prefix="/api/v1/permission-rules", tags=["Permission Rules"])
@@ -44,7 +45,9 @@ async def list_permission_rules(
     List permission rules with optional filters.
     Admin only - these are profile-level rules.
     """
-    rules = database.get_permission_rules(profile_id=profile_id, tool_name=tool_name)
+    rules = await run_sync(
+        database.get_permission_rules, profile_id=profile_id, tool_name=tool_name
+    )
     return rules
 
 
@@ -54,15 +57,21 @@ async def get_profile_permission_rules(
     token: str = Depends(require_admin)
 ):
     """Get all permission rules for a specific profile."""
-    # Verify profile exists
-    profile = database.get_profile(profile_id)
-    if not profile:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Profile not found: {profile_id}"
-        )
+    def _load():
+        """Existence probe + rule read in ONE hop.
 
-    rules = database.get_permission_rules(profile_id=profile_id)
+        The 404 short-circuits before the rule query exactly as before — the
+        second read is never reached for an unknown profile.
+        """
+        profile = database.get_profile(profile_id)
+        if not profile:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Profile not found: {profile_id}"
+            )
+        return database.get_permission_rules(profile_id=profile_id)
+
+    rules = await run_sync(_load)
     return rules
 
 
@@ -82,21 +91,30 @@ async def create_permission_rule(
             detail="Decision must be 'allow' or 'deny'"
         )
 
-    # Verify profile exists
-    profile = database.get_profile(rule.profile_id)
-    if not profile:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Profile not found: {rule.profile_id}"
+    def _create():
+        """Profile check + insert in ONE hop.
+
+        Read-decide-write: run as two hops the profile could be deleted between
+        the check and the insert, so the rule would be written against a profile
+        that no longer exists (a race that does not exist today).
+        """
+        # Verify profile exists
+        profile = database.get_profile(rule.profile_id)
+        if not profile:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Profile not found: {rule.profile_id}"
+            )
+
+        # Create the rule
+        return database.add_permission_rule(
+            profile_id=rule.profile_id,
+            tool_name=rule.tool_name,
+            tool_pattern=rule.tool_pattern,
+            decision=rule.decision
         )
 
-    # Create the rule
-    new_rule = database.add_permission_rule(
-        profile_id=rule.profile_id,
-        tool_name=rule.tool_name,
-        tool_pattern=rule.tool_pattern,
-        decision=rule.decision
-    )
+    new_rule = await run_sync(_create)
 
     return new_rule
 
@@ -107,19 +125,28 @@ async def delete_permission_rule(
     token: str = Depends(require_admin)
 ):
     """Delete a permission rule. Admin only."""
-    rule = database.get_permission_rule(rule_id)
-    if not rule:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Rule not found: {rule_id}"
-        )
+    def _delete():
+        """Existence probe + delete in ONE hop.
 
-    success = database.delete_permission_rule(rule_id)
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to delete rule"
-        )
+        Read-decide-write: split across two hops a concurrent delete between
+        them would turn the 404 into a spurious 500 ("Failed to delete rule").
+        Both HTTPExceptions propagate out of ``run_sync`` unchanged.
+        """
+        rule = database.get_permission_rule(rule_id)
+        if not rule:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Rule not found: {rule_id}"
+            )
+
+        success = database.delete_permission_rule(rule_id)
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to delete rule"
+            )
+
+    await run_sync(_delete)
 
     return {"deleted": True, "id": rule_id}
 
@@ -130,13 +157,17 @@ async def delete_profile_permission_rules(
     token: str = Depends(require_admin)
 ):
     """Delete all permission rules for a profile. Admin only."""
-    # Verify profile exists
-    profile = database.get_profile(profile_id)
-    if not profile:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Profile not found: {profile_id}"
-        )
+    def _delete_all():
+        """Profile check + bulk delete in ONE hop (read-decide-write)."""
+        # Verify profile exists
+        profile = database.get_profile(profile_id)
+        if not profile:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Profile not found: {profile_id}"
+            )
 
-    count = database.delete_profile_permission_rules(profile_id)
+        return database.delete_profile_permission_rules(profile_id)
+
+    count = await run_sync(_delete_all)
     return {"deleted": count, "profile_id": profile_id}

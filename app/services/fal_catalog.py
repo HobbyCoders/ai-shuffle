@@ -17,6 +17,7 @@ from typing import Optional
 
 import httpx
 
+from app.db.async_database import run_sync
 from app.db.base import get_db
 
 logger = logging.getLogger(__name__)
@@ -271,7 +272,13 @@ class FalCatalogService:
 
             self._cache = models
             self._last_refresh = time.time()
-            self._persist_to_db(models)
+            # Off-loop: _persist_to_db is a synchronous DELETE + one INSERT per
+            # model (~600 rows) in a single get_db() transaction. Run inline it
+            # froze every other request on the worker for the whole write, and
+            # refresh() is awaited from an MCP tool (ai_tools_sdk) mid-turn as
+            # well as from the catalog API routes. The scanner cannot see this
+            # one: it goes through get_db() rather than a `database.*` call.
+            await run_sync(self._persist_to_db, models)
 
             logger.info(f"Refreshed fal.ai catalog: {len(models)} models across {len(self.get_categories())} categories")
             return len(models)

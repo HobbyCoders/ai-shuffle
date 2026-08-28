@@ -10,7 +10,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app.db import database
-from app.db import async_database as adb
 from app.db.async_database import run_sync
 from app.api.auth import require_admin
 
@@ -56,8 +55,8 @@ async def _update_model_setting(setting_name: str, body: ModelUpdateRequest):
     model = body.model.strip()
     if not model:
         raise HTTPException(status_code=400, detail="Model cannot be empty")
-    # One isolated write — the async twin is a single thread hop.
-    await adb.set_system_setting(setting_name, model)
+    # One isolated write — one thread hop, no closure needed.
+    await run_sync(database.set_system_setting, setting_name, model)
     return {"success": True, "model": model}
 
 
@@ -184,7 +183,7 @@ async def update_stt_settings(
 ):
     """Update STT defaults (language)."""
     if request.language is not None:
-        await adb.set_system_setting("stt_language", request.language)
+        await run_sync(database.set_system_setting, "stt_language", request.language)
     return {"success": True}
 
 
@@ -246,5 +245,5 @@ async def update_model_params(
         k: v for k, v in (request.params or {}).items()
         if v is not None and v != ""
     }
-    await adb.set_system_setting(f"{key}_params", json.dumps(cleaned))
+    await run_sync(database.set_system_setting, f"{key}_params", json.dumps(cleaned))
     return {"success": True, "params": cleaned}

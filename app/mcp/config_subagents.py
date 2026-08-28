@@ -18,6 +18,7 @@ def _create_subagent_tools(is_admin: bool) -> list:
     """Create subagent management tools."""
     from claude_agent_sdk import tool
     from app.db import database
+    from app.db.async_database import run_sync
 
     _is_admin = is_admin
     tools = []
@@ -30,7 +31,7 @@ def _create_subagent_tools(is_admin: bool) -> list:
         {"type": "object", "properties": {}},
     )
     async def list_subagents(args: dict) -> dict:
-        subagents = database.get_all_subagents()
+        subagents = await run_sync(database.get_all_subagents)
         return _tool_result({
             "subagents": [
                 {
@@ -62,7 +63,7 @@ def _create_subagent_tools(is_admin: bool) -> list:
         },
     )
     async def get_subagent(args: dict) -> dict:
-        subagent = database.get_subagent(args["subagent_id"])
+        subagent = await run_sync(database.get_subagent, args["subagent_id"])
         if not subagent:
             return _error(f"Subagent not found: {args['subagent_id']}")
         return _tool_result(cast(dict, subagent))
@@ -118,25 +119,37 @@ def _create_subagent_tools(is_admin: bool) -> list:
         subagent_id = re.sub(r'[^a-z0-9-]', '-', name.lower().strip())
         subagent_id = re.sub(r'-+', '-', subagent_id).strip('-')[:50]
 
-        # Check for existing subagent with this ID
-        existing = database.get_subagent(subagent_id)
-        if existing:
-            return _error(
-                f"A subagent with ID '{subagent_id}' already exists. "
-                "Choose a different name."
+        def _check_and_create():
+            """Duplicate-ID check + INSERT in ONE hop.
+
+            Split across thread hops, two concurrent createSubagent calls for
+            the same name could both see "no such subagent" and the second
+            would overwrite the first — the duplicate-ID error exists precisely
+            to prevent that, so the check and the insert stay together.
+            """
+            # Check for existing subagent with this ID
+            existing = database.get_subagent(subagent_id)
+            if existing:
+                return (
+                    f"A subagent with ID '{subagent_id}' already exists. "
+                    "Choose a different name."
+                ), None
+
+            return None, database.create_subagent(
+                subagent_id=subagent_id,
+                name=name,
+                description=args["description"],
+                prompt=args["prompt"],
+                tools=args.get("tools"),
+                model=args.get("model"),
+                skills=args.get("skills"),
+                memory=args.get("memory"),
+                mcp_servers=args.get("mcp_servers"),
             )
 
-        subagent = database.create_subagent(
-            subagent_id=subagent_id,
-            name=name,
-            description=args["description"],
-            prompt=args["prompt"],
-            tools=args.get("tools"),
-            model=args.get("model"),
-            skills=args.get("skills"),
-            memory=args.get("memory"),
-            mcp_servers=args.get("mcp_servers"),
-        )
+        error, subagent = await run_sync(_check_and_create)
+        if error:
+            return _error(error)
         if not subagent:
             return _error(f"Failed to create subagent: {subagent_id}")
 
@@ -191,33 +204,49 @@ def _create_subagent_tools(is_admin: bool) -> list:
         if not _is_admin:
             return _error("App configuration tools require admin access.")
 
-        existing = database.get_subagent(args["subagent_id"])
-        if not existing:
-            return _error(f"Subagent not found: {args['subagent_id']}")
+        def _read_validate_write():
+            """READ-MODIFY-WRITE — must stay in ONE hop.
 
-        # Built-in subagents remain editable via MCP (mirrors REST behavior).
-        # Use revertSubagent / built-in revert flow to undo unwanted changes.
+            The existence read, the field selection and the UPDATE are one
+            logical operation, and the response name falls back to the row read
+            here. Split across thread hops a concurrent updateSubagent could
+            land between them, so the tool would report a name that never
+            coexisted with the fields it just wrote — or write to a subagent
+            deleted after the check.
 
-        updatable_fields = (
-            "name", "description", "prompt", "tools",
-            "model", "skills", "memory", "mcp_servers",
-        )
-        updated_fields = [k for k in updatable_fields if k in args]
+            Returns ``(error_message, updated_row, existing_row, updated_fields)``.
+            """
+            existing = database.get_subagent(args["subagent_id"])
+            if not existing:
+                return f"Subagent not found: {args['subagent_id']}", None, None, None
 
-        if not updated_fields:
-            return _error("No fields provided to update.")
+            # Built-in subagents remain editable via MCP (mirrors REST behavior).
+            # Use revertSubagent / built-in revert flow to undo unwanted changes.
 
-        # Build kwargs only for keys explicitly supplied. Omitted keys fall
-        # through to the DB layer's Ellipsis sentinel default, which means
-        # "leave unchanged". Explicit None clears the field.
-        update_kwargs: dict[str, Any] = {
-            k: args[k] for k in updatable_fields if k in args
-        }
+            updatable_fields = (
+                "name", "description", "prompt", "tools",
+                "model", "skills", "memory", "mcp_servers",
+            )
+            fields = [k for k in updatable_fields if k in args]
 
-        updated = database.update_subagent(
-            args["subagent_id"],
-            **update_kwargs,
-        )
+            if not fields:
+                return "No fields provided to update.", None, None, None
+
+            # Build kwargs only for keys explicitly supplied. Omitted keys fall
+            # through to the DB layer's Ellipsis sentinel default, which means
+            # "leave unchanged". Explicit None clears the field.
+            update_kwargs: dict[str, Any] = {
+                k: args[k] for k in updatable_fields if k in args
+            }
+
+            return None, database.update_subagent(
+                args["subagent_id"],
+                **update_kwargs,
+            ), existing, fields
+
+        error, updated, existing, updated_fields = await run_sync(_read_validate_write)
+        if error:
+            return _error(error)
 
         updated_name = (updated or existing).get("name")
         return _tool_result({
@@ -253,23 +282,36 @@ def _create_subagent_tools(is_admin: bool) -> list:
         if not args.get("confirm"):
             return _error("Deletion requires confirm=true.")
 
-        existing = database.get_subagent(args["subagent_id"])
-        if not existing:
-            return _error(f"Subagent not found: {args['subagent_id']}")
+        def _guard_and_delete():
+            """Existence check → built-in guard → in-use guard → DELETE, in ONE
+            hop, so "no automation still references this subagent" is true at
+            the moment of deletion rather than a few thread hops earlier.
 
-        if existing.get("is_builtin"):
-            return _error(
-                f"Cannot delete built-in subagent: {args['subagent_id']}."
-            )
+            Returns ``(error_message, existing_row, deleted)``.
+            """
+            existing = database.get_subagent(args["subagent_id"])
+            if not existing:
+                return f"Subagent not found: {args['subagent_id']}", None, None
 
-        blocking = database.get_automations_for_profile(args["subagent_id"])
-        if blocking:
-            names = ", ".join(a["name"] for a in blocking)
-            return _error(
-                f"Agent is used by {len(blocking)} automation(s): {names} — delete or reassign them first"
-            )
+            if existing.get("is_builtin"):
+                return (
+                    f"Cannot delete built-in subagent: {args['subagent_id']}."
+                ), None, None
 
-        if not database.delete_subagent(args["subagent_id"]):
+            blocking = database.get_automations_for_profile(args["subagent_id"])
+            if blocking:
+                names = ", ".join(a["name"] for a in blocking)
+                return (
+                    f"Agent is used by {len(blocking)} automation(s): {names} — delete or reassign them first"
+                ), None, None
+
+            return None, existing, database.delete_subagent(args["subagent_id"])
+
+        error, existing, deleted = await run_sync(_guard_and_delete)
+        if error:
+            return _error(error)
+
+        if not deleted:
             return _error("Failed to delete subagent.")
 
         return _tool_result({

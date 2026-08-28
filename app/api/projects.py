@@ -229,57 +229,65 @@ async def get_project(request: Request, project_id: str, token: str = Depends(re
 @router.post("", response_model=Project, status_code=status.HTTP_201_CREATED)
 async def create_project(request: ProjectCreate, token: str = Depends(require_admin)):
     """Create a new project - Admin only"""
-    # Check if ID already exists
-    existing = database.get_project(request.id)
-    if existing:
-        # If the existing project belongs to a different instance, auto-suffix
-        # the ID so the same project name can exist on multiple machines.
-        if existing.get("instance_id") and existing["instance_id"] != settings.effective_instance_id:
-            import hashlib
-            suffix = hashlib.sha256(settings.effective_instance_id.encode()).hexdigest()[:6]
-            request = request.model_copy(update={"id": f"{request.id}-{suffix}"})
-            # Re-check with the new ID
-            if database.get_project(request.id):
+    def _create():
+        # Read-decide-write in ONE hop. The duplicate-id probe (twice, once for
+        # the instance-suffixed id) decides whether the INSERT happens at all;
+        # splitting it from the write would let a concurrent create claim the id
+        # in between. The directory mkdir is blocking filesystem I/O and rides
+        # the same hop rather than stalling the loop on its own.
+        payload = request
+
+        # Check if ID already exists
+        existing = database.get_project(payload.id)
+        if existing:
+            # If the existing project belongs to a different instance, auto-suffix
+            # the ID so the same project name can exist on multiple machines.
+            if existing.get("instance_id") and existing["instance_id"] != settings.effective_instance_id:
+                import hashlib
+                suffix = hashlib.sha256(settings.effective_instance_id.encode()).hexdigest()[:6]
+                payload = payload.model_copy(update={"id": f"{payload.id}-{suffix}"})
+                # Re-check with the new ID
+                if database.get_project(payload.id):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=f"Project already exists: {payload.id}"
+                    )
+            else:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail=f"Project already exists: {request.id}"
+                    detail=f"Project already exists: {payload.id}"
                 )
+
+        # Determine project path and create directory if needed
+        # Normalize Docker paths first (e.g., /workspace/foo → foo)
+        effective_path = normalize_docker_path(payload.path) if payload.path else None
+
+        if effective_path and is_absolute_project_path(effective_path):
+            # Absolute path (local mode only) - create directory if it doesn't exist
+            project_path = validate_project_path(effective_path, allow_create=True)
+            project_path.mkdir(parents=True, exist_ok=True)
+            db_path = effective_path
         else:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Project already exists: {request.id}"
-            )
+            # Relative path (or normalized Docker path) - create directory inside workspace
+            rel_path = effective_path if effective_path else payload.id
+            project_path = validate_project_path(rel_path)
+            project_path.mkdir(parents=True, exist_ok=True)
+            db_path = rel_path
 
-    # Determine project path and create directory if needed
-    # Normalize Docker paths first (e.g., /workspace/foo → foo)
-    effective_path = normalize_docker_path(request.path) if request.path else None
+        # Create project in database
+        settings_dict = None
+        if payload.settings:
+            settings_dict = payload.settings.model_dump(exclude_none=True)
 
-    if effective_path and is_absolute_project_path(effective_path):
-        # Absolute path (local mode only) - create directory if it doesn't exist
-        project_path = validate_project_path(effective_path, allow_create=True)
-        project_path.mkdir(parents=True, exist_ok=True)
-        db_path = effective_path
-    else:
-        # Relative path (or normalized Docker path) - create directory inside workspace
-        rel_path = effective_path if effective_path else request.id
-        project_path = validate_project_path(rel_path)
-        project_path.mkdir(parents=True, exist_ok=True)
-        db_path = rel_path
+        return database.create_project(
+            project_id=payload.id,
+            name=payload.name,
+            description=payload.description,
+            path=db_path,
+            settings_dict=settings_dict
+        )
 
-    # Create project in database
-    settings_dict = None
-    if request.settings:
-        settings_dict = request.settings.model_dump(exclude_none=True)
-
-    project = database.create_project(
-        project_id=request.id,
-        name=request.name,
-        description=request.description,
-        path=db_path,
-        settings_dict=settings_dict
-    )
-
-    return project
+    return await run_sync(_create)
 
 
 @router.put("/{project_id}", response_model=Project)
@@ -289,50 +297,56 @@ async def update_project(
     token: str = Depends(require_admin)
 ):
     """Update a project - Admin only"""
-    existing = database.get_project(project_id)
-    if not existing:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}"
+    def _update():
+        # Read-decide-write kept atomic: the existence probe gates the UPDATE.
+        existing = database.get_project(project_id)
+        if not existing:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project not found: {project_id}"
+            )
+
+        # Validate new path if provided
+        db_path = None
+        if request.path is not None:
+            effective_path = normalize_docker_path(request.path) if request.path else None
+            if effective_path and is_absolute_project_path(effective_path):
+                validate_project_path(effective_path, allow_create=False)
+                db_path = effective_path
+            elif effective_path:
+                validate_project_path(effective_path)
+                db_path = effective_path
+
+        settings_dict = None
+        if request.settings:
+            settings_dict = request.settings.model_dump(exclude_none=True)
+
+        return database.update_project(
+            project_id=project_id,
+            name=request.name,
+            description=request.description,
+            path=db_path,
+            settings_dict=settings_dict
         )
 
-    # Validate new path if provided
-    db_path = None
-    if request.path is not None:
-        effective_path = normalize_docker_path(request.path) if request.path else None
-        if effective_path and is_absolute_project_path(effective_path):
-            validate_project_path(effective_path, allow_create=False)
-            db_path = effective_path
-        elif effective_path:
-            validate_project_path(effective_path)
-            db_path = effective_path
-
-    settings_dict = None
-    if request.settings:
-        settings_dict = request.settings.model_dump(exclude_none=True)
-
-    project = database.update_project(
-        project_id=project_id,
-        name=request.name,
-        description=request.description,
-        path=db_path,
-        settings_dict=settings_dict
-    )
-
-    return project
+    return await run_sync(_update)
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_project(project_id: str, token: str = Depends(require_admin)):
     """Delete a project (database record only, not files) - Admin only"""
-    existing = database.get_project(project_id)
-    if not existing:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}"
-        )
+    def _delete():
+        # Read-decide-write kept atomic: existence probe + DELETE in one hop.
+        existing = database.get_project(project_id)
+        if not existing:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project not found: {project_id}"
+            )
 
-    database.delete_project(project_id)
+        database.delete_project(project_id)
+
+    await run_sync(_delete)
 
 
 def _project_with_meta(project_id: str) -> dict:
@@ -360,35 +374,42 @@ async def link_project(
     """
     from app.core.project_links import LINK_LOCKED_KEY
 
-    source = database.get_project(project_id)
-    if not source:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}",
-        )
-    target = database.get_project(request.target_project_id)
-    if not target:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {request.target_project_id}",
-        )
-    if source["id"] == target["id"]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot link a project to itself",
-        )
+    def _link():
+        # Read-decide-write kept atomic in ONE hop: both rows are read, their
+        # existing settings/link groups decide the group id, and four writes
+        # follow. Splitting the reads from the writes would let a concurrent
+        # link (or an unlink) land in between and clobber the merged settings.
+        source = database.get_project(project_id)
+        if not source:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project not found: {project_id}",
+            )
+        target = database.get_project(request.target_project_id)
+        if not target:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project not found: {request.target_project_id}",
+            )
+        if source["id"] == target["id"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot link a project to itself",
+            )
 
-    # Prefer an existing group so linking into a group of 3+ keeps everyone
-    # together; otherwise mint a fresh manual group id.
-    group_id = target.get("link_group_id") or source.get("link_group_id") or f"manual:{uuid.uuid4().hex[:16]}"
+        # Prefer an existing group so linking into a group of 3+ keeps everyone
+        # together; otherwise mint a fresh manual group id.
+        group_id = target.get("link_group_id") or source.get("link_group_id") or f"manual:{uuid.uuid4().hex[:16]}"
 
-    for proj in (source, target):
-        merged = dict(proj.get("settings") or {})
-        merged[LINK_LOCKED_KEY] = True
-        database.update_project(proj["id"], settings_dict=merged)
-        database.set_project_link_group(proj["id"], group_id)
+        for proj in (source, target):
+            merged = dict(proj.get("settings") or {})
+            merged[LINK_LOCKED_KEY] = True
+            database.update_project(proj["id"], settings_dict=merged)
+            database.set_project_link_group(proj["id"], group_id)
 
-    return _project_with_meta(project_id)
+        return _project_with_meta(project_id)
+
+    return await run_sync(_link)
 
 
 @router.delete("/{project_id}/link", response_model=Project)
@@ -401,26 +422,32 @@ async def unlink_project(project_id: str, token: str = Depends(require_admin)):
     """
     from app.core.project_links import LINK_LOCKED_KEY, maybe_auto_link_project
 
-    project = database.get_project(project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}",
-        )
+    def _unlink():
+        # Read-decide-write kept atomic: the row read supplies the settings dict
+        # that is written back, so the clear and the re-derivation must not be
+        # split across hops.
+        project = database.get_project(project_id)
+        if not project:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project not found: {project_id}",
+            )
 
-    merged = dict(project.get("settings") or {})
-    merged.pop(LINK_LOCKED_KEY, None)
-    database.update_project(project_id, settings_dict=merged)
-    database.set_project_link_group(project_id, None)
+        merged = dict(project.get("settings") or {})
+        merged.pop(LINK_LOCKED_KEY, None)
+        database.update_project(project_id, settings_dict=merged)
+        database.set_project_link_group(project_id, None)
 
-    # Re-derive the deterministic auto group from the git remote, if any.
-    try:
-        repo = database.get_git_repository_by_project(project_id)
-        maybe_auto_link_project(project_id, (repo or {}).get("remote_url"))
-    except Exception:  # noqa: BLE001
-        logger.debug("re-auto-link after unlink failed for %s", project_id, exc_info=True)
+        # Re-derive the deterministic auto group from the git remote, if any.
+        try:
+            repo = database.get_git_repository_by_project(project_id)
+            maybe_auto_link_project(project_id, (repo or {}).get("remote_url"))
+        except Exception:  # noqa: BLE001
+            logger.debug("re-auto-link after unlink failed for %s", project_id, exc_info=True)
 
-    return _project_with_meta(project_id)
+        return _project_with_meta(project_id)
+
+    return await run_sync(_unlink)
 
 
 def get_file_extension(name: str) -> str:
@@ -441,41 +468,98 @@ async def list_project_files(
     """List files in a project directory. API users can only access their assigned project."""
     check_project_access(request, project_id)
 
-    # A v2 branch session's own checkout takes priority over the base project dir
-    # (pure-read resolution — an unmaterialized checkout falls back to the project).
-    session_cwd: Optional[Path] = None
-    if session_id:
-        from app.core.project_resolver import resolve_existing_cwd
+    def _list():
+        # ONE hop for the whole listing. Everything here is blocking: the
+        # session/project reads, the checkout resolution (an isdir probe) and,
+        # dominating them all, an ``iterdir`` with a ``stat`` per entry. The
+        # directory walk used to run straight on the event loop.
+        # A v2 branch session's own checkout takes priority over the base project dir
+        # (pure-read resolution — an unmaterialized checkout falls back to the project).
+        session_cwd: Optional[Path] = None
+        if session_id:
+            from app.core.project_resolver import resolve_existing_cwd
 
-        session = database.get_session(session_id)
-        if session:
-            cwd = resolve_existing_cwd(session)
-            if cwd:
-                session_cwd = Path(cwd)
+            session = database.get_session(session_id)
+            if session:
+                cwd = resolve_existing_cwd(session)
+                if cwd:
+                    session_cwd = Path(cwd)
 
-    if session_cwd is not None:
-        base_path = session_cwd
-        full_path = base_path / path if path else base_path
+        if session_cwd is not None:
+            base_path = session_cwd
+            full_path = base_path / path if path else base_path
+
+            if not full_path.exists():
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Directory not found"
+                )
+            if not full_path.is_dir():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Path is not a directory"
+                )
+
+            files = []
+            for item in full_path.iterdir():
+                if item.name.startswith('.') and not show_hidden:
+                    continue
+                try:
+                    stat_info = item.stat()
+                    is_dir = item.is_dir()
+                    files.append({
+                        "name": item.name,
+                        "type": "directory" if is_dir else "file",
+                        "size": stat_info.st_size if not is_dir else None,
+                        "sizeFormatted": format_file_size(stat_info.st_size) if not is_dir else None,
+                        "path": str(item.relative_to(base_path)),
+                        "extension": get_file_extension(item.name) if not is_dir else None,
+                        "modifiedAt": datetime.fromtimestamp(stat_info.st_mtime).isoformat(),
+                        "createdAt": datetime.fromtimestamp(stat_info.st_ctime).isoformat(),
+                    })
+                except (OSError, PermissionError):
+                    continue
+            files.sort(key=lambda x: (x["type"] != "directory", x["name"].lower()))
+            return {"files": files, "path": path, "projectId": project_id}
+
+        project = database.get_project(project_id)
+        if not project:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project not found: {project_id}"
+            )
+
+        # Build the full path
+        base_path = get_project_working_dir_as_path(project)
+        if path:
+            full_path = validate_project_path(f"{project['path']}/{path}")
+        else:
+            full_path = base_path
 
         if not full_path.exists():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Directory not found"
             )
+
         if not full_path.is_dir():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Path is not a directory"
             )
 
+        # List directory contents
         files = []
         for item in full_path.iterdir():
+            # Skip hidden files unless requested
             if item.name.startswith('.') and not show_hidden:
                 continue
+
             try:
                 stat_info = item.stat()
                 is_dir = item.is_dir()
-                files.append({
+
+                file_info = {
                     "name": item.name,
                     "type": "directory" if is_dir else "file",
                     "size": stat_info.st_size if not is_dir else None,
@@ -484,68 +568,18 @@ async def list_project_files(
                     "extension": get_file_extension(item.name) if not is_dir else None,
                     "modifiedAt": datetime.fromtimestamp(stat_info.st_mtime).isoformat(),
                     "createdAt": datetime.fromtimestamp(stat_info.st_ctime).isoformat(),
-                })
+                }
+                files.append(file_info)
             except (OSError, PermissionError):
+                # Skip files we can't access
                 continue
+
+        # Sort: directories first, then files
         files.sort(key=lambda x: (x["type"] != "directory", x["name"].lower()))
+
         return {"files": files, "path": path, "projectId": project_id}
 
-    project = database.get_project(project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}"
-        )
-
-    # Build the full path
-    base_path = get_project_working_dir_as_path(project)
-    if path:
-        full_path = validate_project_path(f"{project['path']}/{path}")
-    else:
-        full_path = base_path
-
-    if not full_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Directory not found"
-        )
-
-    if not full_path.is_dir():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Path is not a directory"
-        )
-
-    # List directory contents
-    files = []
-    for item in full_path.iterdir():
-        # Skip hidden files unless requested
-        if item.name.startswith('.') and not show_hidden:
-            continue
-
-        try:
-            stat_info = item.stat()
-            is_dir = item.is_dir()
-
-            file_info = {
-                "name": item.name,
-                "type": "directory" if is_dir else "file",
-                "size": stat_info.st_size if not is_dir else None,
-                "sizeFormatted": format_file_size(stat_info.st_size) if not is_dir else None,
-                "path": str(item.relative_to(base_path)),
-                "extension": get_file_extension(item.name) if not is_dir else None,
-                "modifiedAt": datetime.fromtimestamp(stat_info.st_mtime).isoformat(),
-                "createdAt": datetime.fromtimestamp(stat_info.st_ctime).isoformat(),
-            }
-            files.append(file_info)
-        except (OSError, PermissionError):
-            # Skip files we can't access
-            continue
-
-    # Sort: directories first, then files
-    files.sort(key=lambda x: (x["type"] != "directory", x["name"].lower()))
-
-    return {"files": files, "path": path, "projectId": project_id}
+    return await run_sync(_list)
 
 
 MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50 MB
@@ -681,19 +715,30 @@ async def upload_file(
         )
 
     check_project_access(request, project_id)
-    project = database.get_project(project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}"
-        )
+
+    def _load_project():
+        project = database.get_project(project_id)
+        if not project:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project not found: {project_id}"
+            )
+        return project
+
+    # TWO hops here, deliberately: the 404 is decided before the body is read
+    # (unchanged ordering) and the body read is a real await that cannot happen
+    # inside a worker thread. The second hop is the write, and it must stay
+    # inside ``api_error_handler`` so a filesystem failure keeps mapping to the
+    # same 500 — the project read must NOT be inside that handler.
+    project = await run_sync(_load_project)
 
     # Read the bytes (enforcing the size limit) before deciding local vs relay so
     # oversized files are rejected here and never carried over the peer channel.
     content = await _read_upload_within_limit(file)
 
     async with api_error_handler("save uploaded file"):
-        return _perform_project_upload(
+        return await run_sync(
+            _perform_project_upload,
             project,
             content=content,
             filename=file.filename or "upload",
@@ -712,27 +757,36 @@ async def download_file(
 ):
     """Download a file from the project."""
     check_project_access(request, project_id)
-    project = database.get_project(project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}"
-        )
 
-    # Validate and build full path
-    full_path = validate_project_path(f"{project['path']}/{path}")
+    def _resolve():
+        # ONE hop: the project read plus the exists/is_file stats. Only the
+        # FileResponse object is built back on the loop (Starlette streams the
+        # file off-loop itself).
+        project = database.get_project(project_id)
+        if not project:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project not found: {project_id}"
+            )
 
-    if not full_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="File not found"
-        )
+        # Validate and build full path
+        full_path = validate_project_path(f"{project['path']}/{path}")
 
-    if not full_path.is_file():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Path is not a file"
-        )
+        if not full_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="File not found"
+            )
+
+        if not full_path.is_file():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Path is not a file"
+            )
+
+        return full_path
+
+    full_path = await run_sync(_resolve)
 
     return FileResponse(
         path=full_path,
@@ -751,12 +805,6 @@ async def create_folder(
 ):
     """Create a new folder within the project."""
     check_project_access(request, project_id)
-    project = database.get_project(project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}"
-        )
 
     # Validate folder name
     folder_name = body.name.strip()
@@ -766,22 +814,37 @@ async def create_folder(
             detail="Invalid folder name"
         )
 
-    # Build the folder path
-    if path:
-        folder_path = validate_project_path(f"{project['path']}/{path}/{folder_name}")
-    else:
-        folder_path = validate_project_path(f"{project['path']}/{folder_name}")
+    def _resolve():
+        project = database.get_project(project_id)
+        if not project:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project not found: {project_id}"
+            )
 
-    if folder_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Folder already exists"
-        )
+        # Build the folder path
+        if path:
+            folder_path = validate_project_path(f"{project['path']}/{path}/{folder_name}")
+        else:
+            folder_path = validate_project_path(f"{project['path']}/{folder_name}")
+
+        if folder_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Folder already exists"
+            )
+
+        return folder_path, get_project_working_dir_as_path(project)
+
+    # TWO hops on purpose: ``api_error_handler`` today wraps ONLY the mkdir, so
+    # a DB failure keeps surfacing as itself rather than as "Failed to create
+    # folder". Folding the read into that block would change the status a
+    # database error produces.
+    folder_path, base_path = await run_sync(_resolve)
 
     async with api_error_handler("create folder"):
-        folder_path.mkdir(parents=True, exist_ok=False)
+        await run_sync(folder_path.mkdir, parents=True, exist_ok=False)
 
-    base_path = get_project_working_dir_as_path(project)
     return {
         "name": folder_name,
         "path": str(folder_path.relative_to(base_path)),
@@ -799,12 +862,6 @@ async def rename_file_or_folder(
 ):
     """Rename a file or folder within the project."""
     check_project_access(request, project_id)
-    project = database.get_project(project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}"
-        )
 
     # Validate new name
     new_name = body.new_name.strip()
@@ -814,30 +871,48 @@ async def rename_file_or_folder(
             detail="Invalid name"
         )
 
-    # Get current path
-    current_path = validate_project_path(f"{project['path']}/{path}")
-    if not current_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="File or folder not found"
-        )
+    def _resolve():
+        project = database.get_project(project_id)
+        if not project:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project not found: {project_id}"
+            )
 
-    # Build new path
-    new_path = current_path.parent / new_name
-    if new_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="A file or folder with that name already exists"
-        )
+        # Get current path
+        current_path = validate_project_path(f"{project['path']}/{path}")
+        if not current_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="File or folder not found"
+            )
+
+        # Build new path
+        new_path = current_path.parent / new_name
+        if new_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A file or folder with that name already exists"
+            )
+
+        return current_path, new_path, get_project_working_dir_as_path(project)
+
+    # TWO hops: ``api_error_handler`` must keep wrapping only the rename, as it
+    # does today, so a DB error is not relabelled as a rename failure.
+    current_path, new_path, base_path = await run_sync(_resolve)
+
+    def _rename():
+        current_path.rename(new_path)
+        # The is_dir() stat is part of the same filesystem step, not a second one.
+        return new_path.is_dir()
 
     async with api_error_handler("rename file or folder"):
-        current_path.rename(new_path)
+        is_dir = await run_sync(_rename)
 
-    base_path = get_project_working_dir_as_path(project)
     return {
         "name": new_name,
         "path": str(new_path.relative_to(base_path)),
-        "type": "directory" if new_path.is_dir() else "file"
+        "type": "directory" if is_dir else "file"
     }
 
 
@@ -850,34 +925,45 @@ async def delete_file_or_folder(
 ):
     """Delete a file or folder within the project."""
     check_project_access(request, project_id)
-    project = database.get_project(project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}"
-        )
 
-    # Get the path to delete
-    target_path = validate_project_path(f"{project['path']}/{path}")
-    if not target_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="File or folder not found"
-        )
+    def _resolve():
+        project = database.get_project(project_id)
+        if not project:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project not found: {project_id}"
+            )
 
-    # Don't allow deleting the project root
-    base_path = get_project_working_dir_as_path(project)
-    if target_path.resolve() == base_path.resolve():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot delete project root directory"
-        )
+        # Get the path to delete
+        target_path = validate_project_path(f"{project['path']}/{path}")
+        if not target_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="File or folder not found"
+            )
 
-    async with api_error_handler("delete file or folder"):
+        # Don't allow deleting the project root
+        base_path = get_project_working_dir_as_path(project)
+        if target_path.resolve() == base_path.resolve():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot delete project root directory"
+            )
+
+        return target_path
+
+    # TWO hops: ``api_error_handler`` must keep wrapping only the removal, so a
+    # DB error is not relabelled as a delete failure.
+    target_path = await run_sync(_resolve)
+
+    def _remove():
         if target_path.is_dir():
             shutil.rmtree(target_path)
         else:
             target_path.unlink()
+
+    async with api_error_handler("delete file or folder"):
+        await run_sync(_remove)
 
     return {"deleted": path}
 
@@ -924,47 +1010,49 @@ async def list_chat_history(
 
     check_project_access(request, project_id)
 
-    # Resolve working directory: session checkout > worktree > project.
-    # A v2 branch session's JSONL history lives under ITS checkout dir.
-    if not worktree_id and session_id:
-        from app.core.project_resolver import resolve_existing_cwd
+    def _load():
+        # ONE hop for the working-dir resolution AND the history scan. The scan
+        # walks the SDK's JSONL history directory and parses every file it
+        # finds — by far the most expensive thing this endpoint does, and it
+        # used to run on the event loop together with up to two DB reads.
+        # Resolve working directory: session checkout > worktree > project.
+        # A v2 branch session's JSONL history lives under ITS checkout dir.
+        if not worktree_id and session_id:
+            from app.core.project_resolver import resolve_existing_cwd
 
-        session = database.get_session(session_id)
-        if session:
-            cwd = resolve_existing_cwd(session)
-            if cwd:
-                return ChatHistoryResponse(
-                    sessions=[
-                        ChatHistoryItem(**s)
-                        for s in list_chat_history_sessions(
-                            working_dir=cwd, search=search, limit=limit
-                        )
-                    ]
-                )
+            session = database.get_session(session_id)
+            if session:
+                cwd = resolve_existing_cwd(session)
+                if cwd:
+                    return list_chat_history_sessions(
+                        working_dir=cwd, search=search, limit=limit
+                    )
 
-    # Resolve working directory: worktree takes priority over project
-    working_dir: str
-    if worktree_id:
-        worktree = database.get_worktree(worktree_id)
-        if worktree:
-            working_dir = get_worktree_working_dir(worktree)
+        # Resolve working directory: worktree takes priority over project
+        working_dir: str
+        if worktree_id:
+            worktree = database.get_worktree(worktree_id)
+            if worktree:
+                working_dir = get_worktree_working_dir(worktree)
+            else:
+                project = database.get_project(project_id)
+                if not project:
+                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Project not found: {project_id}")
+                working_dir = get_project_working_dir(project)
         else:
             project = database.get_project(project_id)
             if not project:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Project not found: {project_id}")
             working_dir = get_project_working_dir(project)
-    else:
-        project = database.get_project(project_id)
-        if not project:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Project not found: {project_id}")
-        working_dir = get_project_working_dir(project)
 
-    # List chat history sessions
-    sessions = list_chat_history_sessions(
-        working_dir=working_dir,
-        search=search,
-        limit=limit
-    )
+        # List chat history sessions
+        return list_chat_history_sessions(
+            working_dir=working_dir,
+            search=search,
+            limit=limit
+        )
+
+    sessions = await run_sync(_load)
 
     return ChatHistoryResponse(sessions=[ChatHistoryItem(**s) for s in sessions])
 
@@ -1003,19 +1091,26 @@ async def sync_project_worktrees(
     # Check project access
     check_project_access(request, project_id)
 
-    # During startup, the frontend may poll before the project record exists.
-    # Return a safe default instead of 404 to avoid noisy logs.
-    project = database.get_project(project_id)
-    if not project:
+    def _sync():
+        # ONE hop: the existence probe and the sync itself, which shells out to
+        # git and writes worktree rows — blocking work that dwarfs the read.
+        # During startup, the frontend may poll before the project record
+        # exists. Return a safe default instead of 404 to avoid noisy logs.
+        project = database.get_project(project_id)
+        if not project:
+            return None
+
+        # Run sync
+        return worktree_manager.sync_worktrees_for_project(project_id)
+
+    result = await run_sync(_sync)
+    if result is None:
         return WorktreeSyncResponse(
             is_git_repo=False,
             active_worktrees=0,
             cleaned_up=[],
             imported=0
         )
-
-    # Run sync
-    result = worktree_manager.sync_worktrees_for_project(project_id)
 
     return WorktreeSyncResponse(
         is_git_repo=result.get("is_git_repo", False),
@@ -1074,19 +1169,25 @@ async def sync_project_sessions(
     # Check project access
     check_project_access(request, project_id)
 
-    # Verify project exists
-    project = database.get_project(project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}"
+    def _sync():
+        # ONE hop: the existence probe plus the import, which scans and parses
+        # every JSONL session file under the Claude projects dir and inserts
+        # rows for the new ones — all of it blocking.
+        # Verify project exists
+        project = database.get_project(project_id)
+        if not project:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project not found: {project_id}"
+            )
+
+        # Run session sync
+        return session_sync_service.sync_project_sessions(
+            project_id=project_id,
+            profile_id=profile_id
         )
 
-    # Run session sync
-    result = session_sync_service.sync_project_sessions(
-        project_id=project_id,
-        profile_id=profile_id
-    )
+    result = await run_sync(_sync)
 
     return SessionSyncResponse(
         imported_count=result["imported_count"],

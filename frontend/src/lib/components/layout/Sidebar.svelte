@@ -48,6 +48,7 @@
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
 	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
+	import { preloadPanelForView } from '$lib/components/deck/lazy/panels';
 	import SessionCard from './SessionCard.svelte';
 	import {
 		branchLabel,
@@ -558,7 +559,21 @@
 		</button>
 		{#if workspaceOpen}
 			{#each railItems as item (item.label)}
-				<button class="ghostrow wsrow" class:active={item.on} onclick={() => pickFeature(item.type)}>
+				<!--
+					Intent prefetch: `pointerenter` fires once per genuine entry into the
+					row (not per render, not per scroll tick, and — unlike `pointermove`
+					or `pointerover` — not repeatedly while the pointer sits inside), and
+					`focus` gives keyboard and screen-reader users the identical warm-up.
+					`preloadPanelForView` dedupes against the resolved/in-flight chunk, so
+					re-entering a row costs nothing beyond the call itself.
+				-->
+				<button
+					class="ghostrow wsrow"
+					class:active={item.on}
+					onclick={() => pickFeature(item.type)}
+					onpointerenter={() => preloadPanelForView(item.type)}
+					onfocus={() => preloadPanelForView(item.type)}
+				>
 					<item.icon size={16} strokeWidth={1.85} />
 					<span class="label">{item.label}</span>
 				</button>

@@ -496,3 +496,83 @@ def test_migration_seeds_turns_from_queued_messages(test_db):
         # Idempotent: re-running does not duplicate.
         database._run_column_migrations(shim.cursor())
         assert len(turns.get_queued_turns("sess-1")) == 2
+
+
+# ---------------------------------------------------------------------------
+# list_claimable_sessions — full scan vs. the targeted (session_ids=…) form
+# ---------------------------------------------------------------------------
+
+def _seed_claimable_fixture():
+    """A mixed fixture: claimable, lease-blocked, dead-lease and non-queued
+    sessions, so the two forms have something to actually disagree about."""
+    # Plainly claimable: a queued turn, no run at all.
+    turns.enqueue_turn("c-plain", "user", prompt="p")
+    # Two queued turns for one session -> DISTINCT must still yield one id.
+    turns.enqueue_turn("c-dupe", "user", prompt="a")
+    turns.enqueue_turn("c-dupe", "queue", prompt="b")
+    # Queued, but a LIVE foreign lease blocks the claim.
+    turns.enqueue_turn("blocked", "user", prompt="p")
+    assert runs.claim_run("blocked", "peer", 60) is not None
+    # Queued with an EXPIRED lease -> still claimable (crashed owner).
+    turns.enqueue_turn("c-dead-lease", "user", prompt="p")
+    assert runs.claim_run("c-dead-lease", "peer", -1) is not None
+    # Not queued at all: a running turn is never a claim candidate.
+    running = turns.enqueue_turn("running-only", "user", prompt="p")
+    assert runs.claim_run("running-only", "me", 60) is not None
+    turns.start_turn(running["id"], "me")
+
+
+def test_claimable_targeted_equals_the_filtered_full_scan(mock_db):
+    """The whole point of the targeted form: it must return EXACTLY the subset
+    the full scan would have returned for those ids. A silent divergence here
+    mis-marks sessions as claimable in the sidebar."""
+    _seed_claimable_fixture()
+
+    full = set(turns.list_claimable_sessions())
+    assert full == {"c-plain", "c-dupe", "c-dead-lease"}
+
+    # Every prefix of the seeded ids (plus ids that do not exist at all) must
+    # agree with the full scan filtered to the same ids.
+    universe = [
+        "c-plain", "c-dupe", "blocked", "c-dead-lease", "running-only",
+        "never-existed",
+    ]
+    for size in range(1, len(universe) + 1):
+        page = universe[:size]
+        targeted = set(turns.list_claimable_sessions(session_ids=page))
+        assert targeted == full & set(page), page
+
+    # And the reverse order, to prove the answer does not depend on ordering.
+    assert set(turns.list_claimable_sessions(session_ids=universe[::-1])) == full
+
+
+def test_claimable_no_argument_form_is_unchanged(mock_db):
+    """Existing callers (the cross-runner claim loop) pass nothing and keep the
+    full cluster-wide candidate set."""
+    _seed_claimable_fixture()
+    assert sorted(turns.list_claimable_sessions()) == [
+        "c-dead-lease", "c-dupe", "c-plain",
+    ]
+    assert sorted(turns.list_claimable_sessions(None)) == [
+        "c-dead-lease", "c-dupe", "c-plain",
+    ]
+
+
+def test_claimable_empty_id_list_returns_nothing_without_querying(mock_db):
+    """``IN ()`` is a syntax error in Postgres: an empty page short-circuits.
+
+    An empty list is NOT the same as ``None`` — it means "these zero sessions",
+    whose claimable subset is empty.
+    """
+    _seed_claimable_fixture()
+    assert turns.list_claimable_sessions(session_ids=[]) == []
+    # Blank/None ids are dropped; a page of only those is also empty.
+    assert turns.list_claimable_sessions(session_ids=["", None]) == []
+
+
+def test_claimable_targeted_deduplicates_repeated_ids(mock_db):
+    """A repeated id must not produce a repeated (or missing) result."""
+    _seed_claimable_fixture()
+    assert turns.list_claimable_sessions(
+        session_ids=["c-plain", "c-plain", "c-plain"]
+    ) == ["c-plain"]

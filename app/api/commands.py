@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Query, Depends, Request
 from pydantic import BaseModel
 
 from app.db import database
+from app.db.async_database import run_sync
 from app.api.auth import require_auth
 from app.api.sessions import check_session_access
 from app.core.config import settings
@@ -249,19 +250,21 @@ async def execute_command(request: ExecuteCommandRequest, http_request: Request 
             is_interactive=False
         )
 
-    # Get session to find project
-    session = database.get_session(request.session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+    # Get session to find project, resolve its checkout and load the command
+    # definition — all synchronous (DB read + project resolution + a scan of
+    # the command files on disk), so they run as ONE off-loop hop.
+    def _load_command():
+        session = database.get_session(request.session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
 
-    if http_request is not None:
-        check_session_access(http_request, session)
+        if http_request is not None:
+            check_session_access(http_request, session)
 
-    project_id = session.get("project_id")
-    working_dir = get_working_dir_for_project(project_id)
+        working_dir = get_working_dir_for_project(session.get("project_id"))
+        return get_command_by_name(working_dir, command_name)
 
-    # Get command
-    cmd = get_command_by_name(working_dir, command_name)
+    cmd = await run_sync(_load_command)
     if not cmd:
         raise HTTPException(status_code=404, detail=f"Command not found: {command_name}")
 
@@ -315,61 +318,76 @@ async def sync_after_rewind(
             "deleted_count": 0
         }
 
-    # Get session
-    session = database.get_session(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+    def _sync():
+        """Load the transcript, locate the checkpoint and delete past it.
 
-    if http_request is not None:
-        check_session_access(http_request, session)
+        READ-DECIDE-WRITE, kept atomic in ONE hop: the message list read, the
+        checkpoint search over that exact list, and the N deletes derived from
+        its indices are a single logical operation. Splitting them across thread
+        hops would let a concurrent write land between the read and the deletes,
+        so the row ids computed from the stale snapshot would delete the wrong
+        tail — a race that does not exist today. It also collapses what was
+        2 + N blocking calls into one hop.
 
-    # Get all messages for this session
-    messages = database.get_session_messages(session_id)
+        Returns the response body, or None when the checkpoint is not found.
+        """
+        # Get session
+        session = database.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
 
-    # Find the checkpoint message (user message matching the checkpoint text)
-    checkpoint_index = -1
-    for i, msg in enumerate(messages):
-        if msg["role"] == "user" and checkpoint_message in msg["content"]:
-            checkpoint_index = i
-            break
+        if http_request is not None:
+            check_session_access(http_request, session)
 
-    if checkpoint_index == -1:
-        # Try partial match
+        # Get all messages for this session
+        messages = database.get_session_messages(session_id)
+
+        # Find the checkpoint message (user message matching the checkpoint text)
+        checkpoint_index = -1
         for i, msg in enumerate(messages):
-            if msg["role"] == "user" and (
-                msg["content"].startswith(checkpoint_message[:50]) or
-                checkpoint_message.startswith(msg["content"][:50])
-            ):
+            if msg["role"] == "user" and checkpoint_message in msg["content"]:
                 checkpoint_index = i
                 break
 
-    if checkpoint_index == -1:
-        logger.warning(f"Could not find checkpoint message: {checkpoint_message[:50]}...")
+        if checkpoint_index == -1:
+            # Try partial match
+            for i, msg in enumerate(messages):
+                if msg["role"] == "user" and (
+                    msg["content"].startswith(checkpoint_message[:50]) or
+                    checkpoint_message.startswith(msg["content"][:50])
+                ):
+                    checkpoint_index = i
+                    break
+
+        if checkpoint_index == -1:
+            logger.warning(f"Could not find checkpoint message: {checkpoint_message[:50]}...")
+            return {
+                "success": False,
+                "message": "Could not find checkpoint message in chat history",
+                "deleted_count": 0
+            }
+
+        # Delete all messages after the checkpoint
+        messages_to_delete = messages[checkpoint_index + 1:]
+        deleted_count = 0
+
+        for msg in messages_to_delete:
+            try:
+                database.delete_session_message(session_id, msg["id"])
+                deleted_count += 1
+            except Exception as e:
+                logger.error(f"Failed to delete message {msg['id']}: {e}")
+
+        logger.debug(f"Synced chat after rewind: deleted {deleted_count} messages after checkpoint")
+
         return {
-            "success": False,
-            "message": "Could not find checkpoint message in chat history",
-            "deleted_count": 0
+            "success": True,
+            "message": f"Deleted {deleted_count} messages after checkpoint",
+            "deleted_count": deleted_count,
+            "checkpoint_index": checkpoint_index
         }
 
-    # Delete all messages after the checkpoint
-    messages_to_delete = messages[checkpoint_index + 1:]
-    deleted_count = 0
-
-    for msg in messages_to_delete:
-        try:
-            database.delete_session_message(session_id, msg["id"])
-            deleted_count += 1
-        except Exception as e:
-            logger.error(f"Failed to delete message {msg['id']}: {e}")
-
-    logger.debug(f"Synced chat after rewind: deleted {deleted_count} messages after checkpoint")
-
-    return {
-        "success": True,
-        "message": f"Deleted {deleted_count} messages after checkpoint",
-        "deleted_count": deleted_count,
-        "checkpoint_index": checkpoint_index
-    }
+    return await run_sync(_sync)
 
 
 # =============================================================================
@@ -504,72 +522,83 @@ async def get_rewind_checkpoints(session_id: str, http_request: Request = None):
 
     Uses JSONL rewind service to parse checkpoints directly from JSONL file.
     """
-    # Get session info
-    session = database.get_session(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+    def _load_checkpoints() -> CheckpointsResponseV2:
+        """The whole handler body in ONE hop — every step of it blocks.
 
-    if http_request is not None:
-        check_session_access(http_request, session)
+        The session read, the project-path resolution, the JSONL transcript
+        parse (``_get_checkpoints``, potentially megabytes of file I/O) and the
+        DB fallback are all synchronous with no awaits between them, so there is
+        nothing to interleave: run inline they froze every other request on this
+        worker for the whole parse. Same calls, same order, same short-circuits.
+        """
+        # Get session info
+        session = database.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
 
-    sdk_session_id = session.get("sdk_session_id")
-    if not sdk_session_id:
-        return CheckpointsResponseV2(
-            success=False,
-            session_id=session_id,
-            checkpoints=[],
-            error="Session has no SDK session ID - start a conversation first"
-        )
+        if http_request is not None:
+            check_session_access(http_request, session)
 
-    # Get working directory for project
-    working_dir = get_working_dir_for_project(session.get("project_id"))
+        sdk_session_id = session.get("sdk_session_id")
+        if not sdk_session_id:
+            return CheckpointsResponseV2(
+                success=False,
+                session_id=session_id,
+                checkpoints=[],
+                error="Session has no SDK session ID - start a conversation first"
+            )
 
-    # Get checkpoints from JSONL rewind service
-    checkpoints = _get_checkpoints(sdk_session_id, working_dir)
+        # Get working directory for project
+        working_dir = get_working_dir_for_project(session.get("project_id"))
 
-    if not checkpoints:
-        # Fallback: get from our local database (less accurate but better than nothing)
-        messages = database.get_session_messages(session_id)
-        fallback_checkpoints = []
+        # Get checkpoints from JSONL rewind service
+        checkpoints = _get_checkpoints(sdk_session_id, working_dir)
 
-        for i, msg in enumerate(messages):
-            if msg["role"] == "user":
-                content = msg["content"]
-                fallback_checkpoints.append(CheckpointV2(
-                    uuid=f"db-{msg['id']}",  # Prefix to indicate DB-sourced
-                    index=len(fallback_checkpoints),
-                    message_preview=content[:100] + ('...' if len(content) > 100 else ''),
-                    full_message=content,
-                    timestamp=str(msg.get("created_at", "")),
-                ))
+        if not checkpoints:
+            # Fallback: get from our local database (less accurate but better than nothing)
+            messages = database.get_session_messages(session_id)
+            fallback_checkpoints = []
+
+            for i, msg in enumerate(messages):
+                if msg["role"] == "user":
+                    content = msg["content"]
+                    fallback_checkpoints.append(CheckpointV2(
+                        uuid=f"db-{msg['id']}",  # Prefix to indicate DB-sourced
+                        index=len(fallback_checkpoints),
+                        message_preview=content[:100] + ('...' if len(content) > 100 else ''),
+                        full_message=content,
+                        timestamp=str(msg.get("created_at", "")),
+                    ))
+
+            return CheckpointsResponseV2(
+                success=True,
+                session_id=session_id,
+                sdk_session_id=sdk_session_id,
+                checkpoints=fallback_checkpoints,
+                error="Using fallback - JSONL file not found" if not fallback_checkpoints else None
+            )
+
+        # Convert to response model
+        response_checkpoints = [
+            CheckpointV2(
+                uuid=cp.uuid,
+                index=cp.index,
+                message_preview=cp.message_preview,
+                full_message=cp.full_message,
+                role=cp.role,
+                timestamp=cp.timestamp,
+            )
+            for cp in checkpoints
+        ]
 
         return CheckpointsResponseV2(
             success=True,
             session_id=session_id,
             sdk_session_id=sdk_session_id,
-            checkpoints=fallback_checkpoints,
-            error="Using fallback - JSONL file not found" if not fallback_checkpoints else None
+            checkpoints=response_checkpoints
         )
 
-    # Convert to response model
-    response_checkpoints = [
-        CheckpointV2(
-            uuid=cp.uuid,
-            index=cp.index,
-            message_preview=cp.message_preview,
-            full_message=cp.full_message,
-            role=cp.role,
-            timestamp=cp.timestamp,
-        )
-        for cp in checkpoints
-    ]
-
-    return CheckpointsResponseV2(
-        success=True,
-        session_id=session_id,
-        sdk_session_id=sdk_session_id,
-        checkpoints=response_checkpoints
-    )
+    return await run_sync(_load_checkpoints)
 
 
 # ----------------------------------------------------------------------
@@ -771,13 +800,23 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     - restore_files: Restore files to checkpoint state (requires file checkpointing)
     - include_response: Keep Claude's response to target message
     """
-    # Get session info
-    session = database.get_session(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+    # Get session info and (when the rewind can actually proceed) its checkout,
+    # in ONE hop — both are synchronous DB work with nothing awaited between
+    # them. The working dir is resolved only on the path that reaches it, so the
+    # two early returns below still short-circuit before project resolution.
+    def _load_session():
+        session = database.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
 
-    if http_request is not None:
-        check_session_access(http_request, session)
+        if http_request is not None:
+            check_session_access(http_request, session)
+
+        if not session.get("sdk_session_id") or request.target_uuid.startswith("db-"):
+            return session, None
+        return session, get_working_dir_for_project(session.get("project_id"))
+
+    session, working_dir = await run_sync(_load_session)
 
     sdk_session_id = session.get("sdk_session_id")
     if not sdk_session_id:
@@ -794,9 +833,6 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
             message="Cannot rewind to database checkpoint",
             error="JSONL file not found - rewind requires the original JSONL file"
         )
-
-    # Get working directory for project
-    working_dir = get_working_dir_for_project(session.get("project_id"))
 
     # Which transcript store owns this session? A fluid (flag-on) session keeps
     # its conversation in fluid's node tree, so the JSONL/session-store
@@ -1168,7 +1204,12 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
                 current_turns = session.get("turn_count", 0)
                 turn_diff = result.remaining_user_turns - current_turns
                 if turn_diff != 0:
-                    database.update_session(session_id, turn_increment=turn_diff)
+                    # Isolated single write: `current_turns` comes from the
+                    # session dict already loaded above, not a fresh read, so
+                    # there is no read-decide-write pair to keep together here.
+                    await run_sync(
+                        database.update_session, session_id, turn_increment=turn_diff
+                    )
 
         # Overall chat-rewind success: the store is the chat.
         chat_rewound = store_truncated
@@ -1355,18 +1396,21 @@ async def execute_rewind_legacy(session_id: str, request: RewindRequest, http_re
 
     Maintained for backwards compatibility with older frontends.
     """
-    # Get checkpoints to find UUID for the index
-    session = database.get_session(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+    # Get checkpoints to find UUID for the index. The session read, the project
+    # resolution and the JSONL transcript parse are contiguous and synchronous —
+    # ONE hop covers all three.
+    def _load_checkpoints():
+        session = database.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
 
-    if http_request is not None:
-        check_session_access(http_request, session)
+        if http_request is not None:
+            check_session_access(http_request, session)
 
-    sdk_session_id = session.get("sdk_session_id")
-    working_dir = get_working_dir_for_project(session.get("project_id"))
+        working_dir = get_working_dir_for_project(session.get("project_id"))
+        return _get_checkpoints(session.get("sdk_session_id"), working_dir)
 
-    checkpoints = _get_checkpoints(sdk_session_id, working_dir)
+    checkpoints = await run_sync(_load_checkpoints)
 
     if request.checkpoint_index >= len(checkpoints):
         return RewindExecuteResponse(

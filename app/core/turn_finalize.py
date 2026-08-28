@@ -10,8 +10,22 @@ DURABLE write a finished turn owes the session row:
    "parked awaiting unpark" apart from idle (boot reconcile force-clears
    stale markers, since no background work survives a restart).
 
+2. Summary sidecar flush — the ``session_store_summaries`` fold is COALESCED
+   (finding B4): while a turn streams, at most one fold per ~2s runs inside
+   the append path, so the sidecar is normally a little behind when the turn
+   ends and stays behind until the next summary READER flushes it. Folding
+   here makes it current the moment the turn completes, which is when the
+   session list is most likely to be looked at next.
+
 This write is best-effort and never raises: a persistence bug must never
 break turn teardown.
+
+Ordering: the parked marker goes FIRST because it is the load-bearing write
+(unpark and boot reconcile read it) and it is what a caller waiting on this
+coroutine actually needs. The summary flush runs after it, off-loop in a
+worker thread, and its failure is swallowed — the fold watermark lives in the
+DATABASE, so a skipped flush costs nothing but staleness: the next append or
+the next reader folds from exactly where this one stopped.
 """
 
 from __future__ import annotations
@@ -36,3 +50,25 @@ async def persist_turn_end_state(session_id: str) -> None:
         )
     except Exception:
         logger.debug("persisting parked_task_kind failed", exc_info=True)
+
+    # 2. Bring the coalesced session-summary fold current for this session.
+    #
+    # Deliberately LAST: every user-visible part of the turn is already done
+    # (the recorder emitted turn.completed before the runtime called us) and
+    # the durable marker above — the only write a caller depends on — has
+    # landed. This is a no-op with no DB connection at all when nothing is
+    # pending for this session, and one short fold transaction when there is,
+    # so the added cost is bounded by ~2s of appends, not by transcript size.
+    #
+    # Never fatal: the fold watermark is in Postgres, so a failed flush is
+    # picked up verbatim by the next append or the next summary reader.
+    try:
+        from app.core import pg_session_store
+
+        await asyncio.to_thread(
+            pg_session_store.flush_summary_folds, session_id
+        )
+    except Exception:
+        logger.debug(
+            "turn-end summary fold flush failed for %s", session_id, exc_info=True
+        )

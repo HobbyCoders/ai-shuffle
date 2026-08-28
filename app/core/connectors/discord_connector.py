@@ -189,7 +189,9 @@ class DiscordConnector(BaseConnector):
             # Persist the error status to the database so the UI reflects it
             try:
                 from app.db import database
-                database.update_connector_status(
+                from app.db.async_database import run_sync
+                await run_sync(
+                    database.update_connector_status,
                     self.connector_id, "error",
                     error=str(exc),
                 )

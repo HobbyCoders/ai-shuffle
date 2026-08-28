@@ -17,6 +17,7 @@ def _create_profile_tools(is_admin: bool) -> list:
     """Create profile management tools."""
     from claude_agent_sdk import tool
     from app.db import database
+    from app.db.async_database import run_sync
 
     _is_admin = is_admin
     tools = []
@@ -29,7 +30,7 @@ def _create_profile_tools(is_admin: bool) -> list:
         {"type": "object", "properties": {}},
     )
     async def list_profiles(args: dict) -> dict:
-        profiles = database.get_all_profiles()
+        profiles = await run_sync(database.get_all_profiles)
         return _tool_result({
             "profiles": [
                 {
@@ -61,7 +62,7 @@ def _create_profile_tools(is_admin: bool) -> list:
         },
     )
     async def get_profile(args: dict) -> dict:
-        profile = database.get_profile(args["profile_id"])
+        profile = await run_sync(database.get_profile, args["profile_id"])
         if not profile:
             return _error(f"Profile not found: {args['profile_id']}")
         return _tool_result(cast(dict, profile))
@@ -123,57 +124,70 @@ def _create_profile_tools(is_admin: bool) -> list:
         profile_id = re.sub(r'[^a-z0-9-]', '-', args["name"].lower().strip())
         profile_id = re.sub(r'-+', '-', profile_id).strip('-')[:50]
 
-        # Check for existing profile with this ID
-        existing = database.get_profile(profile_id)
-        if existing:
-            return _error(
-                f"A profile with ID '{profile_id}' already exists. "
-                "Choose a different name."
+        def _check_and_create():
+            """Duplicate-ID check + INSERT in ONE hop.
+
+            The check and the insert are one logical operation: split across
+            thread hops, two concurrent createProfile calls for the same name
+            could both see "no such profile" and the second would overwrite the
+            first. Keeping them in one closure preserves the guarantee the
+            duplicate-ID error is meant to give.
+            """
+            # Check for existing profile with this ID
+            existing = database.get_profile(profile_id)
+            if existing:
+                return (
+                    f"A profile with ID '{profile_id}' already exists. "
+                    "Choose a different name."
+                ), None
+
+            # Build config. No model or permission mode: an agent is
+            # configuration, and the person starting a chat picks the model,
+            # effort and permission mode for that session.
+            config: Dict[str, Any] = {
+                "tools_preset": args.get("tools_preset", "claude_code"),
+            }
+
+            if args.get("thinking_mode"):
+                config["thinking_mode"] = args["thinking_mode"]
+            if args.get("max_turns"):
+                config["max_turns"] = args["max_turns"]
+            if args.get("allowed_tools"):
+                config["allowed_tools"] = args["allowed_tools"]
+            if args.get("disallowed_tools"):
+                config["disallowed_tools"] = args["disallowed_tools"]
+            if args.get("app_config_tools"):
+                config["app_config_tools"] = True
+
+            # System prompt
+            if args.get("system_prompt_content"):
+                config["system_prompt"] = {
+                    "type": "custom",
+                    "content": args["system_prompt_content"],
+                    "inject_env_details": True,
+                }
+            elif args.get("system_prompt_append"):
+                config["system_prompt"] = {
+                    "type": "preset",
+                    "preset": "claude_code",
+                    "append": args["system_prompt_append"],
+                }
+            else:
+                config["system_prompt"] = {
+                    "type": "preset",
+                    "preset": "claude_code",
+                }
+
+            return None, database.create_profile(
+                profile_id=profile_id,
+                name=args["name"],
+                description=args.get("description"),
+                config=config,
             )
 
-        # Build config. No model or permission mode: an agent is configuration,
-        # and the person starting a chat picks the model, effort and permission
-        # mode for that session.
-        config: Dict[str, Any] = {
-            "tools_preset": args.get("tools_preset", "claude_code"),
-        }
-
-        if args.get("thinking_mode"):
-            config["thinking_mode"] = args["thinking_mode"]
-        if args.get("max_turns"):
-            config["max_turns"] = args["max_turns"]
-        if args.get("allowed_tools"):
-            config["allowed_tools"] = args["allowed_tools"]
-        if args.get("disallowed_tools"):
-            config["disallowed_tools"] = args["disallowed_tools"]
-        if args.get("app_config_tools"):
-            config["app_config_tools"] = True
-
-        # System prompt
-        if args.get("system_prompt_content"):
-            config["system_prompt"] = {
-                "type": "custom",
-                "content": args["system_prompt_content"],
-                "inject_env_details": True,
-            }
-        elif args.get("system_prompt_append"):
-            config["system_prompt"] = {
-                "type": "preset",
-                "preset": "claude_code",
-                "append": args["system_prompt_append"],
-            }
-        else:
-            config["system_prompt"] = {
-                "type": "preset",
-                "preset": "claude_code",
-            }
-
-        profile = database.create_profile(
-            profile_id=profile_id,
-            name=args["name"],
-            description=args.get("description"),
-            config=config,
-        )
+        error, profile = await run_sync(_check_and_create)
+        if error:
+            return _error(error)
         if not profile:
             return _error(f"Failed to create profile: {profile_id}")
 
@@ -217,63 +231,80 @@ def _create_profile_tools(is_admin: bool) -> list:
         if not _is_admin:
             return _error("App configuration tools require admin access.")
 
-        profile = database.get_profile(args["profile_id"])
-        if not profile:
-            return _error(f"Profile not found: {args['profile_id']}")
+        def _read_merge_write():
+            """READ-MODIFY-WRITE — must stay in ONE hop.
 
-        # Merge updates into existing config
-        config = dict(profile.get("config", {}))
-        updated_fields = []
+            This tool reads the stored ``config`` blob, merges the requested
+            keys into a copy and writes the WHOLE blob back. Split across
+            thread hops, two concurrent updateProfile calls would each merge
+            onto the config they read before the other wrote, and whichever
+            wrote last would silently erase the other's change — the classic
+            lost update, and the most damaging one in this file because config
+            is a single JSON column rather than per-field columns.
 
-        for field in ("thinking_mode", "tools_preset", "max_turns",
-                      "app_config_tools"):
-            if field in args and args[field] is not None:
-                config[field] = args[field]
-                updated_fields.append(field)
+            Returns ``(error_message, updated_row, updated_fields)``.
+            """
+            profile = database.get_profile(args["profile_id"])
+            if not profile:
+                return f"Profile not found: {args['profile_id']}", None, None
 
-        for field in ("allowed_tools", "disallowed_tools"):
-            if field in args:
-                config[field] = args[field]
-                updated_fields.append(field)
+            # Merge updates into existing config
+            config = dict(profile.get("config", {}))
+            updated_fields = []
 
-        # System prompt merge — mirrors createProfile semantics
-        if args.get("system_prompt_content"):
-            config["system_prompt"] = {
-                "type": "custom",
-                "content": args["system_prompt_content"],
-                "inject_env_details": True,
-            }
-            updated_fields.append("system_prompt")
-        elif args.get("system_prompt_append"):
-            existing_sp = config.get("system_prompt") or {}
-            config["system_prompt"] = {
-                "type": "preset",
-                "preset": existing_sp.get("preset", "claude_code"),
-                "append": args["system_prompt_append"],
-            }
-            updated_fields.append("system_prompt")
-        # If neither key provided (or both empty string), leave system_prompt untouched.
+            for field in ("thinking_mode", "tools_preset", "max_turns",
+                          "app_config_tools"):
+                if field in args and args[field] is not None:
+                    config[field] = args[field]
+                    updated_fields.append(field)
 
-        # Update profile-level fields
-        name = args.get("name")
-        description = args.get("description")
-        if name:
-            updated_fields.append("name")
-        if description is not None:
-            updated_fields.append("description")
+            for field in ("allowed_tools", "disallowed_tools"):
+                if field in args:
+                    config[field] = args[field]
+                    updated_fields.append(field)
 
-        if not updated_fields:
-            return _error("No fields provided to update.")
+            # System prompt merge — mirrors createProfile semantics
+            if args.get("system_prompt_content"):
+                config["system_prompt"] = {
+                    "type": "custom",
+                    "content": args["system_prompt_content"],
+                    "inject_env_details": True,
+                }
+                updated_fields.append("system_prompt")
+            elif args.get("system_prompt_append"):
+                existing_sp = config.get("system_prompt") or {}
+                config["system_prompt"] = {
+                    "type": "preset",
+                    "preset": existing_sp.get("preset", "claude_code"),
+                    "append": args["system_prompt_append"],
+                }
+                updated_fields.append("system_prompt")
+            # If neither key provided (or both empty string), leave system_prompt untouched.
 
-        # Built-in profiles remain editable via MCP (mirrors REST behavior).
-        # Use the restore endpoint / UI to revert built-in profiles to defaults.
-        updated = database.update_profile(
-            args["profile_id"],
-            name=name,
-            description=description,
-            config=config,
-            allow_builtin=True,
-        )
+            # Update profile-level fields
+            name = args.get("name")
+            description = args.get("description")
+            if name:
+                updated_fields.append("name")
+            if description is not None:
+                updated_fields.append("description")
+
+            if not updated_fields:
+                return "No fields provided to update.", None, None
+
+            # Built-in profiles remain editable via MCP (mirrors REST behavior).
+            # Use the restore endpoint / UI to revert built-in profiles to defaults.
+            return None, database.update_profile(
+                args["profile_id"],
+                name=name,
+                description=description,
+                config=config,
+                allow_builtin=True,
+            ), updated_fields
+
+        error, updated, updated_fields = await run_sync(_read_merge_write)
+        if error:
+            return _error(error)
 
         if not updated:
             return _error("Failed to update profile.")
@@ -308,21 +339,34 @@ def _create_profile_tools(is_admin: bool) -> list:
         if not args.get("confirm"):
             return _error("Deletion requires confirm=true.")
 
-        profile = database.get_profile(args["profile_id"])
-        if not profile:
-            return _error(f"Profile not found: {args['profile_id']}")
+        def _guard_and_delete():
+            """Existence check → built-in guard → in-use guard → DELETE, in ONE
+            hop. Keeping the guards and the delete in one closure is what makes
+            "no automation still references this profile" true AT THE MOMENT OF
+            DELETION rather than merely true a few thread hops earlier.
 
-        if profile.get("is_builtin"):
-            return _error(f"Cannot delete built-in profile: {args['profile_id']}")
+            Returns ``(error_message, profile_row, deleted)``.
+            """
+            profile = database.get_profile(args["profile_id"])
+            if not profile:
+                return f"Profile not found: {args['profile_id']}", None, None
 
-        blocking = database.get_automations_for_profile(args["profile_id"])
-        if blocking:
-            names = ", ".join(a["name"] for a in blocking)
-            return _error(
-                f"Agent is used by {len(blocking)} automation(s): {names} — delete or reassign them first"
-            )
+            if profile.get("is_builtin"):
+                return f"Cannot delete built-in profile: {args['profile_id']}", None, None
 
-        deleted = database.delete_profile(args["profile_id"])
+            blocking = database.get_automations_for_profile(args["profile_id"])
+            if blocking:
+                names = ", ".join(a["name"] for a in blocking)
+                return (
+                    f"Agent is used by {len(blocking)} automation(s): {names} — delete or reassign them first"
+                ), None, None
+
+            return None, profile, database.delete_profile(args["profile_id"])
+
+        error, profile, deleted = await run_sync(_guard_and_delete)
+        if error:
+            return _error(error)
+
         if not deleted:
             return _error("Failed to delete profile.")
 

@@ -16,6 +16,7 @@ from app.core.models import (
     VALID_HOOK_EVENTS,
 )
 from app.db import database
+from app.db.async_database import run_sync
 from app.api.auth import require_admin, get_api_user_from_request
 from app.api.common import check_project_access
 
@@ -67,7 +68,7 @@ async def get_app_hooks(
     token: str = Depends(require_admin)
 ):
     """Get all app-level hooks (not scoped to any project)"""
-    return database.get_app_hooks()
+    return await run_sync(database.get_app_hooks)
 
 
 @router.post("/app", response_model=Hook, status_code=status.HTTP_201_CREATED)
@@ -80,7 +81,9 @@ async def create_app_hook(
     _validate_hook_data(hook_data, is_create=True)
 
     hook_id = f"hook-{uuid.uuid4().hex[:12]}"
-    hook = database.create_hook(
+    # A single isolated write — no read to keep it atomic with.
+    hook = await run_sync(
+        database.create_hook,
         hook_id=hook_id,
         project_id=None,
         name=hook_data.name,
@@ -110,15 +113,18 @@ async def get_project_hooks(
     """Get all hooks for a project (project-scoped + app-level)"""
     check_project_access(request, project_id)
 
-    # Verify project exists
-    project = database.get_project(project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}"
-        )
+    def _load():
+        # Verify project exists
+        project = database.get_project(project_id)
+        if not project:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project not found: {project_id}"
+            )
 
-    return database.get_all_hooks_for_project(project_id)
+        return database.get_all_hooks_for_project(project_id)
+
+    return await run_sync(_load)
 
 
 @router.post("/project/{project_id}", response_model=Hook, status_code=status.HTTP_201_CREATED)
@@ -131,32 +137,39 @@ async def create_project_hook(
     """Create a new hook for a project"""
     check_project_access(request, project_id)
 
-    # Verify project exists
-    project = database.get_project(project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}"
+    def _create():
+        """Existence check -> validate -> insert, in ONE hop.
+
+        read-decide-write: split across hops, a project deleted in between
+        would leave the insert pointing at a vanished project.
+        """
+        # Verify project exists
+        project = database.get_project(project_id)
+        if not project:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project not found: {project_id}"
+            )
+
+        _validate_hook_data(hook_data, is_create=True)
+
+        hook_id = f"hook-{uuid.uuid4().hex[:12]}"
+        return database.create_hook(
+            hook_id=hook_id,
+            project_id=project_id,
+            name=hook_data.name,
+            event=hook_data.event,
+            hook_type=hook_data.hook_type,
+            command=hook_data.command,
+            timeout=hook_data.timeout,
+            url=hook_data.url,
+            secret=hook_data.secret,
+            enabled=hook_data.enabled,
+            tool_matcher=hook_data.tool_matcher,
+            message_template=hook_data.message_template
         )
 
-    _validate_hook_data(hook_data, is_create=True)
-
-    hook_id = f"hook-{uuid.uuid4().hex[:12]}"
-    hook = database.create_hook(
-        hook_id=hook_id,
-        project_id=project_id,
-        name=hook_data.name,
-        event=hook_data.event,
-        hook_type=hook_data.hook_type,
-        command=hook_data.command,
-        timeout=hook_data.timeout,
-        url=hook_data.url,
-        secret=hook_data.secret,
-        enabled=hook_data.enabled,
-        tool_matcher=hook_data.tool_matcher,
-        message_template=hook_data.message_template
-    )
-    return hook
+    return await run_sync(_create)
 
 
 # =========================================================================
@@ -170,7 +183,7 @@ async def get_hook(
     token: str = Depends(require_admin)
 ):
     """Get a hook by ID"""
-    hook = database.get_hook(hook_id)
+    hook = await run_sync(database.get_hook, hook_id)
     if not hook:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -191,31 +204,41 @@ async def update_hook(
     token: str = Depends(require_admin)
 ):
     """Update a hook"""
-    existing = database.get_hook(hook_id)
-    if not existing:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Hook not found: {hook_id}"
+
+    def _update():
+        """read -> authorise -> validate -> write, in ONE hop.
+
+        The access check reads only ``request.state`` (no I/O), so it stays
+        with the row it authorises rather than being split off; splitting the
+        read from the write would let a concurrent delete/re-scope land in
+        between.
+        """
+        existing = database.get_hook(hook_id)
+        if not existing:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Hook not found: {hook_id}"
+            )
+
+        if existing.get("project_id"):
+            check_project_access(request, existing["project_id"])
+        _validate_hook_data(hook_data)
+
+        return database.update_hook(
+            hook_id=hook_id,
+            name=hook_data.name,
+            event=hook_data.event,
+            hook_type=hook_data.hook_type,
+            command=hook_data.command,
+            timeout=hook_data.timeout,
+            url=hook_data.url,
+            secret=hook_data.secret,
+            enabled=hook_data.enabled,
+            tool_matcher=hook_data.tool_matcher,
+            message_template=hook_data.message_template
         )
 
-    if existing.get("project_id"):
-        check_project_access(request, existing["project_id"])
-    _validate_hook_data(hook_data)
-
-    hook = database.update_hook(
-        hook_id=hook_id,
-        name=hook_data.name,
-        event=hook_data.event,
-        hook_type=hook_data.hook_type,
-        command=hook_data.command,
-        timeout=hook_data.timeout,
-        url=hook_data.url,
-        secret=hook_data.secret,
-        enabled=hook_data.enabled,
-        tool_matcher=hook_data.tool_matcher,
-        message_template=hook_data.message_template
-    )
-    return hook
+    return await run_sync(_update)
 
 
 @router.delete("/{hook_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -225,21 +248,26 @@ async def delete_hook(
     token: str = Depends(require_admin)
 ):
     """Delete a hook"""
-    existing = database.get_hook(hook_id)
-    if not existing:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Hook not found: {hook_id}"
-        )
 
-    if existing.get("project_id"):
-        check_project_access(request, existing["project_id"])
+    def _delete():
+        """read -> authorise -> delete, in ONE hop (see update_hook)."""
+        existing = database.get_hook(hook_id)
+        if not existing:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Hook not found: {hook_id}"
+            )
 
-    if not database.delete_hook(hook_id):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Hook not found: {hook_id}"
-        )
+        if existing.get("project_id"):
+            check_project_access(request, existing["project_id"])
+
+        if not database.delete_hook(hook_id):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Hook not found: {hook_id}"
+            )
+
+    await run_sync(_delete)
 
 
 @router.post("/{hook_id}/test", response_model=HookTestResult)
@@ -249,7 +277,7 @@ async def test_hook(
     token: str = Depends(require_admin)
 ):
     """Test a hook with sample event data"""
-    hook = database.get_hook(hook_id)
+    hook = await run_sync(database.get_hook, hook_id)
     if not hook:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -279,4 +307,8 @@ async def get_plugin_hooks(
     # Import plugin service to get hook info
     from app.core.plugin_service import get_all_plugin_hooks
 
-    return get_all_plugin_hooks()
+    # Not a DB call — so the scanner does not see it — but blocking all the
+    # same: this reads installed.json and settings.json, then globs every
+    # plugin's hooks/ directory and parses each hook file. Run on the loop it
+    # stalled the worker for the whole scan.
+    return await run_sync(get_all_plugin_hooks)

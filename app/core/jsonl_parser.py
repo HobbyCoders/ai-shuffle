@@ -18,6 +18,8 @@ Key fields that affect parsing:
 - parentUuid: String - points to parent message in conversation tree
 """
 
+import base64
+import binascii
 import json
 import logging
 import sys
@@ -687,6 +689,124 @@ def write_system_message(
         logger.error(f"Failed to write system message to {jsonl_path}: {e}")
 
 
+# ─── Inline screenshots → artifact URLs, at PARSE time ──────────────────────
+# A transcript's screenshots are the single biggest thing in it: a Chrome/
+# computer-use tool result carries a whole PNG as base64, and a session can hold
+# dozens. The parser used to reconstruct every one of them as a
+# ``data:<mime>;base64,<megabytes>`` string, hand that to the caller, AND keep it
+# in the parse cache — after which the API layer rewrote it to
+# ``/api/v1/artifacts/<sha256>`` whenever the bytes were already in the artifact
+# store, and threw the big string away.
+#
+# The hash is knowable right here (the bytes are in the entry), so the
+# substitution moves to parse time and the multi-megabyte string is never built
+# or retained at all.
+#
+# Behaviour is unchanged: the URL is used ONLY when the artifact store already
+# holds those exact bytes. A screenshot the store does not have still becomes
+# the inline data URI, exactly as before, so nothing can vanish from a
+# transcript. (``compact_messages_for_display`` still runs on the API side and
+# is a no-op on an already-rewritten value — it only touches ``data:`` URIs.)
+
+
+def _image_block_payload(content: Any) -> Optional[tuple]:
+    """``(base64_data, mime)`` for the first image block — no URI built.
+
+    Mirrors the block shapes ``app.core.query_streaming.extract_mcp_image``
+    accepts (Anthropic API ``source`` dicts, flat MCP wire blocks, and the
+    Pydantic content objects of both), but stops one step short: it returns the
+    raw payload instead of concatenating it into a data URI, so a caller that
+    can resolve the bytes to an artifact never materialises the big string.
+
+    Returns ``None`` when there is no image block, or when the block is a shape
+    this does not recognise — the caller then falls back to ``extract_mcp_image``
+    so an unfamiliar shape degrades to the old behaviour rather than to a lost
+    screenshot.
+    """
+    if not isinstance(content, list):
+        return None
+    for block in content:
+        # dict-based blocks (Anthropic API format / MCP wire / parsed JSONL)
+        if isinstance(block, dict):
+            if block.get("type") != "image":
+                continue
+            source = block.get("source")
+            if isinstance(source, dict) and source.get("data"):
+                mime = (
+                    source.get("media_type") or source.get("mimeType") or "image/png"
+                )
+                return source["data"], mime
+            if block.get("data"):
+                mime = block.get("mimeType") or block.get("mime_type") or "image/png"
+                return block["data"], mime
+        # Pydantic content-block objects (e.g. ImageContent from the SDK)
+        elif getattr(block, "type", None) == "image":
+            source = getattr(block, "source", None)
+            if source is not None:
+                data = (
+                    source.get("data") if isinstance(source, dict)
+                    else getattr(source, "data", None)
+                )
+                if data:
+                    mime = (
+                        source.get("media_type") if isinstance(source, dict)
+                        else getattr(source, "media_type", None)
+                    ) or "image/png"
+                    return data, mime
+            data = getattr(block, "data", None)
+            if data:
+                return data, (getattr(block, "mimeType", None) or "image/png")
+    return None
+
+
+def _stored_artifact_url(b64_data: Any, mime: Any) -> Optional[str]:
+    """``/api/v1/artifacts/<sha256>`` iff those exact bytes are already stored.
+
+    The mime is validated against the SAME shape the API-side rewrite requires
+    (``data:<mime>;base64,<payload>`` with a mime free of ``;`` and ``,``), so a
+    payload the old path would have LEFT inline is still left inline here.
+    Returns ``None`` on anything unusual — undecodable base64, empty bytes, an
+    absent artifact, or an unavailable artifact store — and never raises: a
+    screenshot lookup must not be able to break a transcript read.
+    """
+    if not isinstance(b64_data, str) or not b64_data:
+        return None
+    if not isinstance(mime, str) or not mime or ";" in mime or "," in mime:
+        return None
+    try:
+        from app.core.artifact_ingest import content_hash
+        from app.core.artifact_store import artifact_path
+
+        try:
+            raw = base64.b64decode(b64_data, validate=False)
+        except (binascii.Error, ValueError):
+            return None
+        if not raw:
+            return None
+        digest = content_hash(raw)
+        if artifact_path(digest) is None:
+            return None
+        return f"/api/v1/artifacts/{digest}"
+    except Exception:  # noqa: BLE001 — never break a transcript read
+        logger.debug("screenshot artifact lookup failed", exc_info=True)
+        return None
+
+
+def extract_screenshot_ref(content: Any) -> Optional[str]:
+    """The renderable reference for the first image block in ``content``.
+
+    An artifact URL when the bytes are already content-addressed on disk,
+    otherwise the same inline ``data:`` URI :func:`extract_mcp_image` has always
+    returned. ``None`` when there is no image.
+    """
+    payload = _image_block_payload(content)
+    if payload is None:
+        # Unrecognised shape: defer to the original extractor verbatim.
+        return extract_mcp_image(content)
+    data, mime = payload
+    return _stored_artifact_url(data, mime) or f"data:{mime};base64,{data}"
+
+
 def parse_hooks_jsonl(sdk_session_id: str, working_dir: str) -> List[Dict[str, Any]]:
     """
     Parse a session's hooks JSONL file and return plugin warning messages.
@@ -1055,7 +1175,10 @@ def transform_agent_entries(entries) -> List[Dict[str, Any]]:
 
                         # Inline screenshot (browser/computer-use image block) —
                         # rendered below the child tool card, same as top-level.
-                        screenshot = extract_mcp_image(raw_content)
+                        # Resolves to the stored artifact URL when we have the
+                        # bytes, else the inline data URI (see
+                        # :func:`extract_screenshot_ref`).
+                        screenshot = extract_screenshot_ref(raw_content)
 
                         # Group tool result with its corresponding tool_use
                         found_tool_use = False
@@ -1197,6 +1320,11 @@ def invalidate_parse_cache(sdk_session_id: str = None) -> None:
     with _store_parse_cache_lock:
         if sdk_session_id:
             _store_parse_cache.pop(sdk_session_id, None)
+            # Windowed pages live under composite keys in the same cache; the
+            # pop above cannot reach them, and a page that survived an
+            # invalidation would be a stale slice of a transcript we just
+            # declared untrustworthy.
+            _drop_window_cache_entries(sdk_session_id)
         else:
             _store_parse_cache.clear()
 
@@ -1292,6 +1420,12 @@ def pre_seed_parse_cache(
             )
         else:
             _store_parse_cache.pop(sdk_session_id, None)
+        # The turn that just ended appended entries, so every cached WINDOW of
+        # this session describes a shorter transcript: its seq cursors point at
+        # the wrong rows now. The version stamp would catch that on read, but
+        # dropping them here keeps "the pre-seed leaves this session's cache
+        # coherent" true for both namespaces rather than one.
+        _drop_window_cache_entries(sdk_session_id)
 
     # JSONL cache namespace (legacy / non-postgres_only reads): validated by the
     # JSONL file's mtime + size, so it needs a real file to stamp the entry.
@@ -1330,11 +1464,31 @@ def pre_seed_parse_cache(
         return False
 
 
+def _track_entry_boundaries(entries, messages: list, out: list):
+    """Yield ``entries`` unchanged, recording the message count before each one.
+
+    ``out[i]`` ends up being the number of messages produced by ``entries[:i]``
+    — i.e. the index in ``messages`` where entry ``i``'s output begins. The
+    generator is pulled once per loop iteration, AFTER the previous entry's body
+    has fully run (``continue`` included), so this measures real per-entry
+    output without touching the transform body at all.
+
+    That mapping is what lets a WINDOWED parse hand back exactly the messages a
+    given range of entries produced, dropping the boundary context it had to
+    transform in order to merge correctly.
+    """
+    for entry in entries:
+        out.append(len(messages))
+        yield entry
+
+
 def _transform_entries(
     entries,
     sdk_session_id: str,
     working_dir: str,
     agent_children_loader=None,
+    *,
+    entry_message_boundaries: Optional[list] = None,
 ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Transform raw transcript entries into chat messages + usage data.
 
@@ -1355,6 +1509,12 @@ def _transform_entries(
             subagent message), the loader is expected to return the children on
             the first call for an agent_id and ``[]`` (or already-consumed) on
             subsequent calls. When ``None``, subagent messages carry no children.
+        entry_message_boundaries: Optional list, filled in place with one int
+            per entry: the index in the returned ``messages`` where that entry's
+            output starts (see :func:`_track_entry_boundaries`). Purely
+            observational — passing it does not change a single produced
+            message — and used by the windowed store read to map an entry range
+            back to the messages it produced.
 
     Returns:
         Tuple of (messages, usage_data) — identical shape to the legacy parser.
@@ -1365,6 +1525,9 @@ def _transform_entries(
 
     messages: List[Dict[str, Any]] = []
     msg_counter = 0
+
+    if entry_message_boundaries is not None:
+        entries = _track_entry_boundaries(entries, messages, entry_message_boundaries)
 
     # Track tool names by ID for matching tool_result to tool_use
     tool_names_by_id: Dict[str, str] = {}
@@ -1572,14 +1735,21 @@ def _transform_entries(
                             is_error = block.get("is_error", False)
                             tool_use_id = block.get("tool_use_id")
 
-                            # Reconstruct any inline screenshot (data URI) from MCP
-                            # image content blocks so reloaded sessions show the
+                            # Reconstruct any inline screenshot from MCP image
+                            # content blocks so reloaded sessions show the
                             # screenshot below the tool call, just like live. The
                             # image lives in the tool_result content blocks (and,
                             # for some tools, in toolUseResult.content).
-                            screenshot = extract_mcp_image(raw_content)
+                            #
+                            # Bytes already in the artifact store resolve to
+                            # ``/api/v1/artifacts/<hash>`` here rather than to a
+                            # multi-megabyte data URI that the API layer would
+                            # rewrite and discard; anything the store does not
+                            # have still comes back inline (see
+                            # :func:`extract_screenshot_ref`).
+                            screenshot = extract_screenshot_ref(raw_content)
                             if not screenshot and isinstance(tool_result, dict):
-                                screenshot = extract_mcp_image(tool_result.get("content"))
+                                screenshot = extract_screenshot_ref(tool_result.get("content"))
 
                             # Handle content that can be string or list of content blocks
                             # Some tool results have content as [{'type': 'text', 'text': '...'}]
@@ -2226,6 +2396,335 @@ def parse_session_history_from_store(
             )
 
     return messages, usage_data
+
+
+# ─── Windowed store reads ───────────────────────────────────────────────────
+# Pagination used to live entirely in the API layer: the store materialised the
+# WHOLE transcript, this module transformed all of it, and only then was a
+# window sliced off the end and sent. A long session paid a full table read, a
+# full parse and a full transform to render its newest page — every open.
+#
+# ``parse_session_window_from_store`` pushes the window down to the SQL: it asks
+# the store for one page of ENTRIES (plus a small, constant merge context) and
+# transforms only those.
+#
+# The cache trap: ``_store_parse_cache`` is keyed by ``sdk_session_id`` and its
+# value is "the whole transcript". A windowed result put under that key would be
+# served to the next FULL reader as if it were the entire session — the
+# transcript would silently lose its history. And a full transcript served to a
+# windowed reader would defeat the point of the window. So windowed results live
+# under their own composite key, in the SAME cache (so they share its byte
+# budget and eviction), and the two shapes can never be confused:
+#
+#     full read   -> key  sdk_session_id            value (messages, usage, version)
+#     window read -> key  ("window", sid, limit, before_seq)
+#                                              value (messages, usage, pagination, version)
+#
+# Both are stamped with the same ``(count, max_id)`` store version, so a new turn
+# or a rewind (including one performed on another install) drops both.
+
+
+def _window_cache_key(sdk_session_id: str, limit: int, before_seq) -> tuple:
+    """Cache key for one windowed parse — never collides with the full-read key.
+
+    The full-transcript entry is keyed by the bare ``sdk_session_id`` (a str);
+    every windowed entry is keyed by a tuple whose first element is the literal
+    ``"window"``. A str and a tuple can never be equal, so no windowed result
+    can be served to (or evict-by-overwrite) the full-transcript entry.
+    """
+    return ("window", sdk_session_id, int(limit), before_seq)
+
+
+def _drop_window_cache_entries(sdk_session_id: Optional[str]) -> None:
+    """Drop windowed cache entries for one session (or all of them).
+
+    Call with the ``_store_parse_cache`` lock held. Windowed keys are tuples, so
+    they are not reachable by the bare-``sdk_session_id`` pop that clears the
+    full-transcript entry — they have to be swept explicitly or a stale page
+    would outlive the invalidation that dropped the full parse.
+    """
+    for key in _store_parse_cache.keys():
+        if not isinstance(key, tuple) or not key or key[0] != "window":
+            continue
+        if sdk_session_id is None or key[1] == sdk_session_id:
+            _store_parse_cache.pop(key, None)
+
+
+def _window_pagination(
+    total: int, window_start: int, window_end: int, page_limit: int, returned_messages: int
+) -> Dict[str, Any]:
+    """Build the window descriptor returned alongside a page.
+
+    UNITS: every ``seq`` here — ``total``, ``returned``, ``first_seq``,
+    ``next_before_seq`` — counts TRANSCRIPT ENTRIES, not rendered messages. That
+    is forced by where the window is now applied: the store can only page rows,
+    and one entry can produce zero, one or several messages (an assistant entry
+    with two text blocks and a tool call is three messages; a tool_result entry
+    that merges into an earlier card is none). Counting messages instead would
+    mean reading the whole transcript to find out how many there are, which is
+    exactly the cost being removed.
+
+    ``messages_returned`` carries the true message count for the page, and
+    ``unit`` names the space so a consumer never has to guess.
+    """
+    empty = window_end <= window_start
+    return {
+        "total": total,
+        "returned": max(0, window_end - window_start),
+        "limit": page_limit,
+        "has_more": window_start > 0,
+        "first_seq": None if empty else window_start,
+        "last_seq": None if empty else window_end - 1,
+        "next_before_seq": window_start if window_start > 0 else None,
+        "has_more_after": window_end < total,
+        "messages_returned": returned_messages,
+        "unit": "entries",
+    }
+
+
+def _entries_are_window_safe(entries) -> bool:
+    """True when a windowed parse of ``entries`` yields trustworthy identities.
+
+    The transform falls back to ``msg-<running counter>`` for an entry with no
+    ``uuid``, and that counter depends on how many entries were processed
+    BEFORE it. In a full parse the fallback is stable; in a windowed parse the
+    same entry would be labelled differently, and ``uuid`` is the anchor a
+    REWIND resolves against — a mislabelled one could truncate a session at the
+    wrong point. Real SDK entries always carry a uuid; the pre-cutover and
+    hand-built ones that do not are rare and are worth the slower, whole-
+    transcript path.
+    """
+    for entry in entries:
+        if not isinstance(entry, dict) or not entry.get("uuid"):
+            return False
+    return True
+
+
+def _window_merges_are_provable(
+    page: List[Dict[str, Any]], load_start: int, load_end: int, total: int
+) -> bool:
+    """True when this page's tool cards cannot depend on unloaded entries.
+
+    The merge context (``_WINDOW_MERGE_CONTEXT_ENTRIES``) covers the distance
+    between a ``tool_use`` and its ``tool_result`` many times over, but "many
+    times over" is not "always" — a backgrounded command can return thousands of
+    entries later. This is the check that turns "almost certainly right" into
+    "right, or slower": it looks for the two shapes a missed merge produces and
+    reports whether the loaded range can account for them.
+
+    * A free-standing ``tool_result`` card means the transform never found a
+      matching ``tool_use``. That is genuine only if we read from the very
+      beginning of the transcript; otherwise the ``tool_use`` may be in an entry
+      we skipped, and a full parse would have MERGED the two — one card, not two.
+    * A tool card with no result yet is genuine only if we read to the very end;
+      otherwise its result may live past the entries we loaded, and a full parse
+      would show it complete instead of running.
+
+    Anything unproven sends the caller to the whole-transcript path, which is
+    slower and certainly correct.
+    """
+    for msg in page:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("type") == "tool_result" and load_start > 0:
+            return False
+        if load_end >= total:
+            continue
+        if msg.get("type") in ("tool_use", "subagent") and "toolResult" not in msg:
+            return False
+    return True
+
+
+def parse_session_window_from_store(
+    sdk_session_id: str,
+    working_dir: str,
+    window_loader,
+    *,
+    limit: int,
+    before_seq: Optional[int] = None,
+    store_loader=None,
+    use_cache: bool = True,
+    store_version_loader=None,
+) -> tuple[List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
+    """Parse ONE window of a store-backed transcript — newest page first.
+
+    The paginated counterpart of :func:`parse_session_history_from_store`, and
+    the reason a long session no longer pays for its whole history on every
+    open. Only the window's rows are read from Postgres and only they (plus a
+    small constant merge context) are transformed.
+
+    Args:
+        sdk_session_id: The Claude SDK session ID.
+        working_dir: Passed through for context (never used to rebuild a
+            project_key — store reads match on session_id alone).
+        window_loader: ``loader(session_id, subpath=None, *, limit, before_seq)``
+            returning the dict described by
+            ``pg_session_store._load_entries_window_by_session_id_sync``:
+            ``entries`` (id ASC, INCLUDING boundary context), ``total``,
+            ``start``, ``window_start``, ``window_end``.
+        limit: Maximum ENTRIES in the window (>= 1).
+        before_seq: Entry-seq cursor; ``None`` means the newest window.
+        store_loader: ``loader(session_id, subpath=None) -> list[dict]``. Used
+            for subagent child transcripts (always read whole — they are small)
+            and as the slower-but-correct fallback path. Without it, subagent
+            cards render childless and no fallback is possible.
+        use_cache: Use the windowed namespace of ``_store_parse_cache``.
+        store_version_loader: ``loader(session_id) -> (count, max_id)`` — the
+            same cheap version stamp the full path uses.
+
+    Returns:
+        ``(messages, usage_data, pagination)``. ``messages`` is exactly the
+        window's messages, oldest→newest; ``pagination`` is the entry-space
+        descriptor from :func:`_window_pagination`.
+
+    Equivalence with slicing a full parse — what is guaranteed and what is not:
+
+    * Guaranteed: the page contains the same messages, in the same order, with
+      the same ``uuid``, role, type, content, tool merges and metadata that a
+      full parse of the whole transcript produces for that entry range. The
+      merge context is what buys this at the window's edges.
+    * NOT guaranteed: the synthesized ``id`` of assistant text/thinking cards
+      (``text-<uuid>-<n>``), where ``n`` is the transform's running counter and
+      therefore depends on how much transcript preceded the window. Ids stay
+      unique (they carry the entry ``uuid``), but the SAME message read through
+      a full parse and through a window gets different ``id`` values. Callers
+      must not merge results from the two paths into one view.
+
+    ``usage_data`` is likewise windowed: its cumulative totals cover the window
+    only, and it carries ``"windowed": True`` so a caller can tell and prefer
+    the session row's persisted totals.
+    """
+    page_limit = max(1, int(limit))
+    cursor = before_seq if isinstance(before_seq, int) and not isinstance(before_seq, bool) else None
+
+    current_version = None
+    cache_key = _window_cache_key(sdk_session_id, page_limit, cursor)
+    if use_cache:
+        current_version = _resolve_store_version(sdk_session_id, store_version_loader)
+        with _store_parse_cache_lock:
+            cached = _store_parse_cache.get(cache_key)
+            if cached is not None:
+                if (
+                    len(cached) == 4
+                    and current_version is not None
+                    and cached[3] == current_version
+                    and not isinstance(cached[0], str)
+                ):
+                    _store_parse_cache.move_to_end(cache_key)
+                    c_messages, c_usage, c_pagination, _ = cached
+                    return (
+                        _copy_messages(c_messages),
+                        dict(c_usage),
+                        dict(c_pagination),
+                    )
+                _store_parse_cache.pop(cache_key, None)
+
+    agent_children_loader = (
+        _make_store_agent_children_loader(sdk_session_id, store_loader)
+        if store_loader is not None
+        else None
+    )
+
+    def _full_parse_and_slice(reason: str):
+        """The slower-but-certainly-correct path: parse everything, cut the
+        same entry range out of it."""
+        logger.debug(
+            "Windowed store parse for %s falling back to a full parse (%s)",
+            sdk_session_id, reason,
+        )
+        if store_loader is None:
+            raise ValueError(
+                "parse_session_window_from_store needs store_loader to fall "
+                "back to a full parse"
+            )
+        all_entries = list(store_loader(sdk_session_id, None) or [])
+        bounds: List[int] = []
+        all_msgs, usage = _transform_entries(
+            all_entries,
+            sdk_session_id,
+            working_dir,
+            agent_children_loader=(
+                _make_store_agent_children_loader(sdk_session_id, store_loader)
+            ),
+            entry_message_boundaries=bounds,
+        )
+        n = len(all_entries)
+        end = n if cursor is None else max(0, min(cursor, n))
+        start = max(0, end - page_limit)
+        page = all_msgs[
+            _boundary(bounds, start, len(all_msgs)):
+            _boundary(bounds, end, len(all_msgs))
+        ]
+        return page, dict(usage), n, start, end
+
+    window = window_loader(
+        sdk_session_id, None, limit=page_limit, before_seq=cursor
+    ) or {}
+    entries = list(window.get("entries") or [])
+    total = int(window.get("total") or 0)
+    load_start = int(window.get("start") or 0)
+    window_start = int(window.get("window_start") or 0)
+    window_end = int(window.get("window_end") or 0)
+
+    if entries and not _entries_are_window_safe(entries):
+        # An entry with no uuid takes its identity from a running counter, and
+        # that counter means something different inside a window.
+        messages, usage_data, total, window_start, window_end = _full_parse_and_slice(
+            "uuid-less entries"
+        )
+    else:
+        boundaries: List[int] = []
+        all_messages, usage_data = _transform_entries(
+            entries,
+            sdk_session_id,
+            working_dir,
+            agent_children_loader=agent_children_loader,
+            entry_message_boundaries=boundaries,
+        )
+        # Drop the merge context: it was transformed only so the window's own
+        # messages merge the way a full parse merges them.
+        messages = all_messages[
+            _boundary(boundaries, window_start - load_start, len(all_messages)):
+            _boundary(boundaries, window_end - load_start, len(all_messages))
+        ]
+        usage_data = dict(usage_data)
+
+        if not _window_merges_are_provable(
+            messages, load_start, load_start + len(entries), total
+        ):
+            messages, usage_data, total, window_start, window_end = (
+                _full_parse_and_slice("a tool card may merge outside the window")
+            )
+
+    usage_data["windowed"] = True
+    pagination = _window_pagination(
+        total, window_start, window_end, page_limit, len(messages)
+    )
+
+    if use_cache and current_version is not None:
+        with _store_parse_cache_lock:
+            _store_parse_cache[cache_key] = (
+                _copy_messages(messages),
+                dict(usage_data),
+                dict(pagination),
+                current_version,
+            )
+
+    return messages, usage_data, pagination
+
+
+def _boundary(boundaries: List[int], index: int, total_messages: int) -> int:
+    """Message index where entry ``index`` starts, clamped to the parse.
+
+    ``boundaries[i]`` is only defined for entries that were actually
+    transformed; ``index`` at or past the end means "everything that was
+    produced", and a negative index means "from the beginning".
+    """
+    if index <= 0:
+        return 0
+    if index >= len(boundaries):
+        return total_messages
+    return boundaries[index]
 
 
 def get_session_cost_from_jsonl(

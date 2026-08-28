@@ -16,6 +16,7 @@ from enum import Enum
 from typing import Dict, List, Optional, Tuple
 
 from app.db import database
+from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,11 @@ class RateLimiter:
         # In-memory request windows: key -> RequestWindow
         # Key format: "user:{user_id}" or "api:{api_key_id}"
         self._windows: Dict[str, RequestWindow] = defaultdict(RequestWindow)
+
+        # Strong refs for in-flight fire-and-forget log writes. asyncio keeps
+        # only a weak reference to a bare task, so without this a request-log
+        # write can be garbage collected before it runs.
+        self._log_tasks: set = set()
 
         # Cache for rate limit configurations
         self._config_cache: Dict[str, Tuple[RateLimitConfig, datetime]] = {}
@@ -265,6 +271,48 @@ class RateLimiter:
 
             return (RateLimitResult.ALLOWED, status)
 
+    async def drain_pending_logs(self, timeout: Optional[float] = None) -> None:
+        """Wait for in-flight request-log writes to finish.
+
+        Request logging is fire-and-forget so it never adds latency to a
+        request, which means the write is not observable the moment
+        ``record_request`` returns. This makes it observable on purpose, for
+        two callers: tests that assert the write happened, and shutdown, which
+        should flush pending logs rather than drop them.
+
+        Never raises: individual writes already swallow their own errors, and
+        a timeout simply leaves the remaining tasks running.
+        """
+        pending = [t for t in self._log_tasks if not t.done()]
+        if not pending:
+            return
+        await asyncio.wait(pending, timeout=timeout)
+
+    async def _log_request_off_loop(
+        self,
+        *,
+        request_id: str,
+        user_id: Optional[str],
+        api_key_id: Optional[str],
+        endpoint: str,
+    ) -> None:
+        """Persist one request log entry without blocking the event loop.
+
+        Failures are swallowed with a warning, exactly as the previous inline
+        version did: a logging failure must not fail the request it describes.
+        """
+        try:
+            await run_sync(
+                database.log_request,
+                request_id=request_id,
+                user_id=user_id,
+                api_key_id=api_key_id,
+                endpoint=endpoint,
+                status="success",
+            )
+        except Exception as e:  # noqa: BLE001 - observability must not fail a request
+            logger.warning("Failed to log request to database: %s", e)
+
     async def record_request(
         self,
         user_id: Optional[str],
@@ -291,17 +339,21 @@ class RateLimiter:
             now = datetime.now(timezone.utc)
             self._windows[key].add_request(now)
 
-        # Log to database for persistence (fire and forget)
-        try:
-            database.log_request(
+        # Log to database for persistence. This is genuinely fire-and-forget
+        # now: it used to be described that way while running inline and
+        # synchronously, so every single request blocked the event loop on a
+        # DB write. Rate limiting itself is decided from the in-memory window
+        # above, so the log is observability and must never gate the request.
+        task = asyncio.create_task(
+            self._log_request_off_loop(
                 request_id=request_id,
                 user_id=user_id,
                 api_key_id=api_key_id,
                 endpoint=endpoint,
-                status="success"
             )
-        except Exception as e:
-            logger.warning(f"Failed to log request to database: {e}")
+        )
+        self._log_tasks.add(task)
+        task.add_done_callback(self._log_tasks.discard)
 
         return request_id
 

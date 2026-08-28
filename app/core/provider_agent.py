@@ -923,6 +923,19 @@ def _provider_display_name(provider_id: Optional[str]) -> str:
     return str((row or {}).get("name") or provider_id)
 
 
+def _log_status_write_failure(task: "asyncio.Future[Any]") -> None:
+    """Retrieve (and log) the outcome of a status write that outlived our own
+    cancellation, so a failure is neither hidden nor left as an unretrieved
+    exception on the loop."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.exception(
+            "ProviderAgent: failed-status write failed", exc_info=exc
+        )
+
+
 async def _notify_caller_terminal(
     parent_session_id: str,
     worker_session_id: str,
@@ -1063,59 +1076,94 @@ async def dispatch_worker(
     from app.core.provider_agent_feed import WorkerFeed, emit_shielded
     from app.core.task_registry import task_registry
     from app.db import database
-
-    # Inheritance (project/worktree/cwd) reads the DIRECT caller's session;
-    # ``parent_session_id`` is the ROUTING parent — for nested Task-tool
-    # dispatch it is the ROOT session, whose UI renders the card and answers
-    # approvals (ruling A9 multi-level routing). They coincide for depth-1.
-    parent_row: Optional[SessionRow] = None
-    try:
-        parent_row = database.get_session(context_session_id or parent_session_id)
-    except Exception:  # noqa: BLE001 — inheritance is best-effort
-        logger.debug("ProviderAgent: parent session read failed", exc_info=True)
-        parent_row = None
-
-    project_id = (parent_row or {}).get("project_id")
-    worktree_id = (parent_row or {}).get("worktree_id")
-    worktree_branch = (parent_row or {}).get("worktree_branch")
-    worktree_path = (parent_row or {}).get("worktree_path")
+    from app.db.async_database import run_sync
 
     # Task supplies the caller's provider and the target's configured model on
     # that provider. ``provider_id=None`` is an explicit native-Claude binding,
     # not permission to fall back to the target profile's top-level provider.
+    # (Pure computation — hoisted above the offloaded prologue below so the
+    # worker's identity is known to both the closure and this coroutine.)
     worker_session_id = worker_session_id or str(uuid.uuid4())
     title = (label or "").strip() or f"Task worker · {model_id or profile_id}"
-    # The provider's NAME, not its row id: the registry summary and the card's
-    # settle frame are user-facing, and a raw `model_providers` UUID told nobody
-    # anything (2026-08-17 incident).
-    provider_tag = _provider_display_name(provider_id)
     model_tag = model_id or "inherit"
 
-    try:
-        database.create_session(
-            session_id=worker_session_id,
-            profile_id=profile_id,
-            project_id=project_id,
-            title=title,
-            parent_session_id=parent_session_id,
-            worktree_id=worktree_id,
-            worktree_branch=worktree_branch,
-            worktree_path=worktree_path,
-            provider_id=provider_id,
-            derive_provider_from_profile=False,
-            model=model_id,
-            hidden=True,
-            # Materialized flag backing the sidebar's worker filter. `hidden`
-            # alone still hides this row, but stamping it here keeps the column
-            # self-maintaining instead of relying on the one-shot backfill.
-            is_worker=True,
+    def _prepare_worker_blocking() -> Tuple[
+        Optional[SessionRow], Optional[str], Optional[str], Optional[str],
+        Optional[str], str, Optional[BaseException],
+    ]:
+        """The dispatch prologue's DB work, in ONE thread hop.
+
+        Three contiguous synchronous round trips with no awaits between them —
+        the inheritance read, the provider-name lookup (``_provider_display_name``
+        is itself a DB read) and the worker-session INSERT. Same calls, same
+        order, same best-effort error handling as before; the INSERT's failure
+        is RETURNED rather than raised so the caller can build the identical
+        ``WorkerOutcome`` on its own loop. Nothing here needs a running loop.
+        """
+        # Inheritance (project/worktree/cwd) reads the DIRECT caller's session;
+        # ``parent_session_id`` is the ROUTING parent — for nested Task-tool
+        # dispatch it is the ROOT session, whose UI renders the card and answers
+        # approvals (ruling A9 multi-level routing). They coincide for depth-1.
+        parent_row: Optional[SessionRow] = None
+        try:
+            parent_row = database.get_session(context_session_id or parent_session_id)
+        except Exception:  # noqa: BLE001 — inheritance is best-effort
+            logger.debug("ProviderAgent: parent session read failed", exc_info=True)
+            parent_row = None
+
+        project_id = (parent_row or {}).get("project_id")
+        worktree_id = (parent_row or {}).get("worktree_id")
+        worktree_branch = (parent_row or {}).get("worktree_branch")
+        worktree_path = (parent_row or {}).get("worktree_path")
+
+        # The provider's NAME, not its row id: the registry summary and the
+        # card's settle frame are user-facing, and a raw `model_providers` UUID
+        # told nobody anything (2026-08-17 incident).
+        provider_tag = _provider_display_name(provider_id)
+
+        create_error: Optional[BaseException] = None
+        try:
+            database.create_session(
+                session_id=worker_session_id,
+                profile_id=profile_id,
+                project_id=project_id,
+                title=title,
+                parent_session_id=parent_session_id,
+                worktree_id=worktree_id,
+                worktree_branch=worktree_branch,
+                worktree_path=worktree_path,
+                provider_id=provider_id,
+                derive_provider_from_profile=False,
+                model=model_id,
+                hidden=True,
+                # Materialized flag backing the sidebar's worker filter.
+                # `hidden` alone still hides this row, but stamping it here
+                # keeps the column self-maintaining instead of relying on the
+                # one-shot backfill.
+                is_worker=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("ProviderAgent: worker session creation failed")
+            create_error = exc
+        return (
+            parent_row, project_id, worktree_id, worktree_branch,
+            worktree_path, provider_tag, create_error,
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("ProviderAgent: worker session creation failed")
+
+    (
+        parent_row,
+        project_id,
+        worktree_id,
+        worktree_branch,
+        worktree_path,
+        provider_tag,
+        create_error,
+    ) = await run_sync(_prepare_worker_blocking)
+    if create_error is not None:
         return WorkerOutcome(
             ok=False,
             session_id=worker_session_id,
-            error=f"Could not create the worker session: {exc}",
+            error=f"Could not create the worker session: {create_error}",
         )
 
     # Mark BEFORE the turn starts: the worker must never be offered the tool it
@@ -1476,10 +1524,24 @@ async def dispatch_worker(
             # is "failed" and not "completed". Best-effort: a status write must
             # never change what the dispatch reports to the caller.
             if status == "error":
-                try:
-                    database.update_session(
-                        worker_session_id, status=WORKER_FAILED_STATUS
+                # SHIELDED, like the terminal frames above: this ``finally`` can
+                # run while the handler is already cancelling, and this write
+                # used to be synchronous (it always completed). A bare ``await``
+                # would be cancelled at its first suspension and silently lose
+                # the verdict; the shield promotes it to an independent task
+                # that finishes either way. Same swallow-our-own-cancellation
+                # rule as ``emit_shielded`` — the caller owns cancellation.
+                _status_write = asyncio.ensure_future(
+                    run_sync(
+                        database.update_session,
+                        worker_session_id,
+                        status=WORKER_FAILED_STATUS,
                     )
+                )
+                try:
+                    await asyncio.shield(_status_write)
+                except asyncio.CancelledError:
+                    _status_write.add_done_callback(_log_status_write_failure)
                 except Exception:  # noqa: BLE001
                     logger.exception(
                         "ProviderAgent: failed-status write failed for worker %s",

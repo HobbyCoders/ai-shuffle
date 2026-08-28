@@ -28,6 +28,7 @@ from app.core.git_service import git_service
 from app.core.worktree_manager import worktree_manager
 from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
 from app.db import database
+from app.db.async_database import run_sync
 from app.db.base import WorktreeStatus
 from app.api.auth import require_auth, get_api_user_from_request
 from app.api.common import check_project_access, resolve_project_path
@@ -322,9 +323,11 @@ async def init_repository(
 
     # Update record with GitHub info if we created a repo
     if github_full_name and repo:
-        database.update_git_repository(
+        remote_url = await run_git(git_service.get_remote_url, working_dir)
+        await run_sync(
+            database.update_git_repository,
             repo["id"],
-            remote_url=await run_git(git_service.get_remote_url, working_dir),
+            remote_url=remote_url,
             github_repo_name=github_full_name,
         )
 
@@ -386,7 +389,8 @@ async def clone_repository(
     if repo:
         remote_url = await run_git(git_service.get_remote_url, working_dir)
         current_branch = await run_git(git_service.get_current_branch, working_dir)
-        database.update_git_repository(
+        await run_sync(
+            database.update_git_repository,
             repo["id"],
             remote_url=remote_url,
             default_branch=current_branch or "main",
@@ -430,14 +434,19 @@ async def list_branches(
     current_branch = await run_git(git_service.get_current_branch, working_dir)
     branch_data = {"branches": branches_list, "current_branch": current_branch}
 
-    # Enrich with worktree associations from database
-    repo = database.get_git_repository_by_project(project_id)
-    worktree_branch_map: dict[str, str] = {}  # branch_name -> worktree_id
-    if repo:
-        worktrees = database.get_worktrees_for_repository(repo["id"])
-        for wt in worktrees:
-            if wt.get("branch_name"):
-                worktree_branch_map[wt["branch_name"]] = wt["id"]
+    # Enrich with worktree associations from database. The repo lookup and its
+    # worktree fan-out are a contiguous read pair — one hop, not two.
+    def _worktree_branch_map() -> dict[str, str]:
+        """branch_name -> worktree_id for this project's repository."""
+        mapping: dict[str, str] = {}
+        repo = database.get_git_repository_by_project(project_id)
+        if repo:
+            for wt in database.get_worktrees_for_repository(repo["id"]):
+                if wt.get("branch_name"):
+                    mapping[wt["branch_name"]] = wt["id"]
+        return mapping
+
+    worktree_branch_map = await run_sync(_worktree_branch_map)
 
     branch_infos = [
         BranchInfo(
@@ -736,11 +745,17 @@ async def fetch_from_remote(
 
     success = await run_git(git_service.fetch, working_dir, remote=remote)
 
-    # Update last_synced_at if we have a repository record
+    # Update last_synced_at if we have a repository record.
+    # Read-decide-write kept atomic in ONE hop: the lookup and the stamp must
+    # not be split, or a repo record deleted between them would be re-stamped
+    # (or the write aimed at a row that no longer exists).
     if success:
-        repo = database.get_git_repository_by_project(project_id)
-        if repo:
-            database.update_git_repository_synced(repo["id"])
+        def _stamp_synced():
+            repo = database.get_git_repository_by_project(project_id)
+            if repo:
+                database.update_git_repository_synced(repo["id"])
+
+        await run_sync(_stamp_synced)
 
     if not success:
         raise HTTPException(
@@ -1279,13 +1294,21 @@ async def migrate_uploads_to_worktree(
 
     check_project_access(request, project_id)
 
-    project = database.get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    def _load_project_and_worktree():
+        """Both existence probes in ONE hop, same order, same short-circuit:
+        an unknown project still 404s before the worktree row is ever read.
+        The HTTPExceptions propagate out of ``run_sync`` unchanged."""
+        project = database.get_project(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
 
-    worktree = database.get_worktree(body.worktree_id)
-    if not worktree:
-        raise HTTPException(status_code=404, detail="Worktree not found")
+        worktree = database.get_worktree(body.worktree_id)
+        if not worktree:
+            raise HTTPException(status_code=404, detail="Worktree not found")
+
+        return project, worktree
+
+    project, worktree = await run_sync(_load_project_and_worktree)
 
     worktree_dir = Path(get_worktree_working_dir(worktree))
     if not worktree_dir.exists():

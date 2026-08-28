@@ -404,7 +404,7 @@ async def resolve_credential(
     if credential_type not in admin_setting_map:
         raise HTTPException(status_code=400, detail=f"Unknown credential type: {credential_type}")
 
-    def _resolve() -> tuple[Optional[str], Optional[str], str]:
+    def _resolve() -> tuple[str | None, str | None, str]:
         """Policy read, user-credential read and admin-key read in ONE hop.
 
         The policy read decides which of the following reads happen, so the

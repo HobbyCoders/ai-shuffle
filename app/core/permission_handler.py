@@ -21,6 +21,7 @@ from enum import Enum
 from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
 from app.db import database
+from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -692,7 +693,10 @@ class PermissionHandler:
                 # rule created on a peer install does not reach the owner.
                 self._session_rules.setdefault(session_id, []).append(rule)
             else:
-                database.add_permission_rule(
+                # Awaited, not fire-and-forget: the rule must be durable before
+                # the next permission check consults it.
+                await run_sync(
+                    database.add_permission_rule,
                     profile_id=profile_id,
                     tool_name=rule.tool_name,
                     tool_pattern=rule.tool_pattern,

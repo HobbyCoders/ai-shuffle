@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
+from app.db.compat import phs
 from app.core.config import settings
 
 
@@ -41,6 +42,55 @@ def get_project(project_id: str) -> Optional[ProjectRow]:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM projects WHERE id = %s", (project_id,))
         return _parse_project_row(row_to_dict(cursor.fetchone()))
+
+
+def get_projects_by_ids(project_ids) -> Dict[str, Dict[str, Any]]:
+    """``{project_id: row}`` for every requested project, in ONE query.
+
+    The batched sibling of :func:`get_project`, for callers that resolve a whole
+    page of sessions at once (the session-list enrichment pipeline runs on every
+    sidebar poll, so a ``get_project`` per distinct project is an N+1 on the
+    hottest endpoint in the app).
+
+    Deliberately NOT instance-filtered — mirrors :func:`get_project`, not
+    :func:`get_all_projects` — so a session owned by another install still
+    resolves its project name. Reads only the columns the listing needs
+    (``id``, ``name``, ``path``, ``link_group_id``); use :func:`get_project`
+    when the full row (``settings``, ``description``, …) is wanted.
+
+    Missing ids are omitted. An empty/blank-only input returns ``{}`` without
+    touching the database (``IN ()`` is a syntax error in Postgres). If the
+    batched read fails, degrades to one :func:`get_project` per DISTINCT id
+    rather than to no data at all.
+    """
+    ids = [pid for pid in dict.fromkeys(project_ids) if pid]
+    if not ids:
+        return {}
+
+    placeholders = phs(len(ids))
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, name, path, link_group_id FROM projects "
+                f"WHERE id IN ({placeholders})",
+                ids,
+            )
+            rows = rows_to_list(cursor.fetchall())
+        return {row["id"]: dict(row) for row in rows if row.get("id")}
+    except Exception:  # noqa: BLE001 — callers must never break on a batch read
+        logger.debug("Batched project lookup failed; falling back", exc_info=True)
+
+    # Fallback: one lookup per DISTINCT id (never per caller row).
+    resolved: Dict[str, Dict[str, Any]] = {}
+    for pid in ids:
+        try:
+            proj = get_project(pid)
+        except Exception:  # noqa: BLE001
+            proj = None
+        if proj:
+            resolved[pid] = proj
+    return resolved
 
 
 def get_all_projects() -> List[ProjectRow]:

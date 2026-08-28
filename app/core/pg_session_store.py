@@ -592,6 +592,178 @@ def _load_entries_by_session_id_sync(
     return [row["entry"] for row in rows]
 
 
+# ---------------------------------------------------------------------------
+# Windowed transcript reads (store-side pagination)
+# ---------------------------------------------------------------------------
+
+#: Entries loaded on EACH side of a requested window purely so that entries
+#: which merge across the boundary still merge the way a full parse merges
+#: them. A ``tool_result`` entry attaches itself to the ``tool_use`` message of
+#: an EARLIER entry; without a prefix of context the transform cannot find that
+#: message and emits a free-standing ``tool_result`` card the full parse never
+#: produces. The mirror case (a ``tool_use`` at the newest edge of an OLDER page
+#: whose result lands in the next page) is why the context is symmetric.
+#:
+#: Two hundred entries is far more than the 1–3 that separate a tool_use from
+#: its result in practice, and it is a constant — it does not grow with the
+#: transcript, which is the entire point of windowing.
+_WINDOW_MERGE_CONTEXT_ENTRIES = 200
+
+
+def _count_entries_by_session_id_sync(
+    session_id: str, subpath: str | None = None, _conn=None
+) -> tuple[int, int]:
+    """``(count, max_id)`` for ``session_id`` (+``subpath``), matched by id alone.
+
+    The ``subpath IS NULL`` case is what :func:`_store_version_by_session_id_sync`
+    computes; this generalises it to subagent transcripts and takes an optional
+    open connection so a windowed read can count and page inside ONE connection.
+    ``max_id`` is 0 for an empty transcript.
+    """
+    with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
+        cur = conn.cursor()
+        if subpath is None:
+            cur.execute(
+                "SELECT COUNT(*) AS n, MAX(id) AS max_id FROM session_store_entries "
+                "WHERE session_id = %s AND subpath IS NULL",
+                (session_id,),
+            )
+        else:
+            cur.execute(
+                "SELECT COUNT(*) AS n, MAX(id) AS max_id FROM session_store_entries "
+                "WHERE session_id = %s AND subpath = %s",
+                (session_id, subpath),
+            )
+        row = cur.fetchone()
+    if not row:
+        return (0, 0)
+    return (int(row["n"]), int(row["max_id"]) if row["max_id"] is not None else 0)
+
+
+def _load_entries_window_by_session_id_sync(
+    session_id: str,
+    subpath: str | None = None,
+    *,
+    limit: int,
+    before_seq: int | None = None,
+    context: int | None = None,
+) -> dict:
+    """Read ONE window of a transcript instead of the whole thing.
+
+    This is the store half of transcript pagination. Until it existed, every
+    session open read and transformed the ENTIRE transcript and the API layer
+    then sliced a window off the end — so a long session paid a full table read,
+    a full parse and a full transform to display its newest 2000 messages.
+
+    The window is expressed in ENTRY SEQUENCE space: ``seq`` is a row's 0-based
+    position within this session's ``(session_id, subpath)`` log ordered by
+    ``id ASC``. The log is append-only, so a position is a stable cursor — the
+    same property the API's message-space cursor relies on.
+
+    Newest-window-first, walking backwards: with ``before_seq=None`` the NEWEST
+    ``limit`` entries are returned (what opening a session wants), and the
+    returned ``window_start`` is the cursor for the next, older page.
+
+    Args:
+        session_id: SDK session UUID. Matched ALONE — no ``project_key``
+            predicate, for the reason spelled out in
+            :func:`_load_entries_by_session_id_sync`.
+        subpath: ``None`` for the main transcript, else an exact subpath.
+        limit: Maximum entries in the window (>= 1).
+        before_seq: Keyset cursor — return the window ENDING before this entry
+            seq. ``None`` means "from the newest end". Clamped into range, so a
+            stale cursor from before a rewind degrades to a valid window rather
+            than to an error.
+        context: Entries to load either side of the window for boundary-correct
+            merging (default :data:`_WINDOW_MERGE_CONTEXT_ENTRIES`). These are
+            RETURNED — the parse layer transforms them and then drops the
+            messages they produced; it needs them to reproduce the merges a full
+            parse performs.
+
+    Returns:
+        A dict with ``entries`` (raw ``entry`` dicts, id ASC, INCLUDING the
+        context on both sides), ``total`` (entries in the whole transcript),
+        ``start`` (seq of ``entries[0]``), ``window_start`` and ``window_end``
+        (the half-open seq range of the window proper).
+
+    Consistency: the count and the page run on ONE connection, and the page is
+    pinned with ``id <= max_id`` from the count. A concurrent append therefore
+    cannot shift the offset out from under the read and silently drop the newest
+    entry — the classic symptom of paginating an append-only log with a bare
+    ``OFFSET``. A concurrent REWIND (a DELETE) can still shift it; that already
+    invalidates every cached parse of this session, and the read simply returns
+    a window of the post-rewind transcript.
+    """
+    page_limit = max(1, int(limit))
+    ctx = _WINDOW_MERGE_CONTEXT_ENTRIES if context is None else max(0, int(context))
+
+    with get_db() as conn:
+        total, max_id = _count_entries_by_session_id_sync(session_id, subpath, conn)
+        if total <= 0:
+            return {
+                "entries": [],
+                "total": 0,
+                "start": 0,
+                "window_start": 0,
+                "window_end": 0,
+            }
+
+        # Clamp the cursor: anything not a usable int means "from the newest
+        # end", matching the API layer's leniency about a garbage ?before_seq=.
+        if isinstance(before_seq, bool) or not isinstance(before_seq, int):
+            end = total
+        else:
+            end = max(0, min(before_seq, total))
+        window_start = max(0, end - page_limit)
+
+        load_start = max(0, window_start - ctx)
+        load_end = min(total, end + ctx)
+        count = load_end - load_start
+        if count <= 0:
+            return {
+                "entries": [],
+                "total": total,
+                "start": load_start,
+                "window_start": window_start,
+                "window_end": end,
+            }
+
+        # Read from the NEWEST end (id DESC) so the common "newest page" case
+        # has OFFSET 0 and Postgres walks exactly the rows it returns. Only the
+        # returned rows have their (frequently TOASTed) ``entry`` JSONB
+        # detoasted, transferred and built into Python dicts — which is where
+        # the whole-transcript cost used to be.
+        offset = total - load_end
+        cur = conn.cursor()
+        if subpath is None:
+            cur.execute(
+                "SELECT entry FROM session_store_entries "
+                "WHERE session_id = %s AND subpath IS NULL AND id <= %s "
+                "ORDER BY id DESC "
+                "LIMIT %s OFFSET %s",
+                (session_id, max_id, count, offset),
+            )
+        else:
+            cur.execute(
+                "SELECT entry FROM session_store_entries "
+                "WHERE session_id = %s AND subpath = %s AND id <= %s "
+                "ORDER BY id DESC "
+                "LIMIT %s OFFSET %s",
+                (session_id, subpath, max_id, count, offset),
+            )
+        rows = cur.fetchall()
+
+    # id DESC on the wire, oldest-first to the caller (the transform's contract).
+    entries = [row["entry"] for row in reversed(rows)]
+    return {
+        "entries": entries,
+        "total": total,
+        "start": load_start,
+        "window_start": window_start,
+        "window_end": end,
+    }
+
+
 def _store_version_by_session_id_sync(session_id: str, _conn=None) -> tuple[int, int]:
     """Return a cheap ``(count, max_id)`` version stamp for ``session_id``'s main
     transcript (``subpath IS NULL``), matched by ``session_id`` ALONE.
@@ -1135,6 +1307,32 @@ class PgSessionStore:
         """
         return await asyncio.to_thread(
             _load_entries_by_session_id_sync, session_id, subpath
+        )
+
+    async def load_entries_window_by_session_id(
+        self,
+        session_id: str,
+        subpath: str | None = None,
+        *,
+        limit: int,
+        before_seq: int | None = None,
+        context: int | None = None,
+    ) -> dict:
+        """One WINDOW of ``session_id``'s transcript, newest-first by default.
+
+        See :func:`_load_entries_window_by_session_id_sync` for the seq-space
+        contract and the returned dict. Use this instead of
+        :meth:`load_entries_by_session_id` whenever the caller only intends to
+        display a page: it reads the window's rows and nothing else, where the
+        full loader materialises the entire transcript.
+        """
+        return await asyncio.to_thread(
+            _load_entries_window_by_session_id_sync,
+            session_id,
+            subpath,
+            limit=limit,
+            before_seq=before_seq,
+            context=context,
         )
 
     async def list_subpaths_by_session_id(self, session_id: str) -> list[str]:

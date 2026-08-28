@@ -27,6 +27,11 @@ import sys
 # Module names that are synchronous DB facades.
 SYNC_MODULES = {"database", "git_ops_db", "turns_db", "session_events_db"}
 
+# Bare functions that open a synchronous DB connection directly. Code using
+# these bypasses the `database.*` facade entirely, so matching only on module
+# attributes misses them (this blind spot hid a real blocker in fal_catalog).
+SYNC_DB_FUNCS = {"get_db"}
+
 # If any of these appear on the call's source line, it is already offloaded
 # (or awaited via an async wrapper) and is not a finding.
 OFFLOAD_HINTS = ("await", "run_sync", "to_thread", "run_in_executor")
@@ -58,7 +63,12 @@ def scan_file(path: pathlib.Path):
         if not isinstance(node, ast.Call):
             continue
         base = getattr(getattr(node.func, "value", None), "id", None)
-        if base not in SYNC_MODULES:
+        bare = getattr(node.func, "id", None)
+        if base in SYNC_MODULES:
+            label = f"{base}.{getattr(node.func, 'attr', '?')}"
+        elif bare in SYNC_DB_FUNCS:
+            label = f"{bare}()"
+        else:
             continue
         enc = _enclosing(funcs, node.lineno)
         if not (enc and enc[3]):  # only calls directly inside an async def
@@ -70,7 +80,7 @@ def scan_file(path: pathlib.Path):
             {
                 "file": str(path),
                 "line": node.lineno,
-                "call": f"{base}.{getattr(node.func, 'attr', '?')}",
+                "call": label,
                 "handler": enc[2],
             }
         )

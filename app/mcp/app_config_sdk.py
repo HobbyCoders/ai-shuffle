@@ -105,6 +105,7 @@ def _create_discovery_tools() -> list:
     """Create the getConfigCapabilities discovery tool."""
     from claude_agent_sdk import tool
     from app.db import database
+    from app.db.async_database import run_sync
 
     tools = []
 
@@ -116,9 +117,21 @@ def _create_discovery_tools() -> list:
         {"type": "object", "properties": {}},
     )
     async def get_capabilities(args: dict) -> dict:
-        all_hooks = database.get_app_hooks()
-        all_automations = database.get_all_automations()
-        all_profiles = database.get_all_profiles()
+        def _load_stats():
+            """The three discovery counts in ONE hop.
+
+            Contiguous, independent reads with nothing between them — folding
+            them into a single closure costs one thread hop instead of three
+            separate stalls of the event loop, and this tool is the one an
+            agent is told to call FIRST in every config turn.
+            """
+            return (
+                database.get_app_hooks(),
+                database.get_all_automations(),
+                database.get_all_profiles(),
+            )
+
+        all_hooks, all_automations, all_profiles = await run_sync(_load_stats)
 
         return _tool_result({
             "hook_events": [

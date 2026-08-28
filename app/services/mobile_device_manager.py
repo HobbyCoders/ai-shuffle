@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.db import database
+from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,9 @@ class MobileDeviceManager:
             return
 
         try:
-            devices = database.get_mobile_devices()
+            # Off-loop read; the row->MobileDevice decode stays on the loop
+            # (pure CPU, and it populates loop-owned state).
+            devices = await run_sync(database.get_mobile_devices)
             for row in devices:
                 device = self._row_to_device(row)
                 self._devices[device.id] = device
@@ -414,7 +417,8 @@ class MobileDeviceManager:
         import json
 
         try:
-            database.save_mobile_device(
+            await run_sync(
+                database.save_mobile_device,
                 device_id=device.id,
                 name=device.name,
                 platform=device.platform,
@@ -440,7 +444,7 @@ class MobileDeviceManager:
     async def _delete_device_from_db(self, device_id: str) -> None:
         """Delete a device from database."""
         try:
-            database.delete_mobile_device(device_id)
+            await run_sync(database.delete_mobile_device, device_id)
         except Exception as e:
             logger.warning(f"Could not delete device from database: {e}")
 

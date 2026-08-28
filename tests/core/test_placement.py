@@ -329,3 +329,108 @@ def test_anywhere_no_capable_runner_yields_none(mock_db, monkeypatch):
         {"placement": {"where": "anywhere"}, "project_v2_id": PROJECT}
     )
     assert d.kind == "none" and d.runner_id is None
+
+
+# ---------------------------------------------------------------------------
+# Preloaded install registry — the N+1 the read path used to pay.
+#
+# ``resolve_placement`` is called once per degraded candidate on a session-list
+# page; it used to read ``get_installs_map`` TWICE per call (once in
+# ``capable_runners``, once again in ``_online_runners``). A caller that has
+# already read the registry can now hand the snapshot in.
+# ---------------------------------------------------------------------------
+
+def _counting_installs(monkeypatch, online_ids, caps_by_id=None):
+    """Stub the registry and count how many times it is READ."""
+    caps_by_id = caps_by_id or {}
+    rows = {
+        iid: {"id": iid, "online": True, "capabilities": caps_by_id.get(iid, {})}
+        for iid in online_ids
+    }
+    calls = {"n": 0}
+
+    def _read():
+        calls["n"] += 1
+        return rows
+
+    monkeypatch.setattr(database, "get_installs_map", _read)
+    return rows, calls
+
+
+def test_resolve_placement_reads_the_registry_once_standalone(mock_db, monkeypatch):
+    """Standalone (no preloaded map) a resolution costs ONE registry read —
+    it used to cost two for the same single decision."""
+    _, calls = _counting_installs(monkeypatch, [RUNNER_ME, "runner-a"])
+    d = placement.resolve_placement({"placement": {"where": "runner:runner-a"}})
+    assert d.kind == "runner" and d.runner_id == "runner-a"
+    assert calls["n"] == 1
+
+
+def test_preloaded_map_makes_a_whole_page_cost_one_read(mock_db, monkeypatch):
+    """ONE installs read regardless of candidate count: the caller reads the
+    registry once and threads the snapshot through every resolution."""
+    _, calls = _counting_installs(monkeypatch, [RUNNER_ME, "runner-a"])
+
+    preloaded = database.get_installs_map()  # the caller's single read
+    assert calls["n"] == 1
+
+    candidates = [
+        {"placement": {"where": "runner:runner-a"}, "id": f"s{i}"}
+        for i in range(25)
+    ]
+    decisions = [
+        placement.resolve_placement(row, installs_map=preloaded)
+        for row in candidates
+    ]
+
+    assert all(d.kind == "runner" and d.runner_id == "runner-a" for d in decisions)
+    # Still exactly the caller's one read — 25 resolutions added none.
+    assert calls["n"] == 1
+
+
+def test_preloaded_map_yields_the_same_decision_as_reading_it(mock_db, monkeypatch):
+    """Threading the snapshot must not change a single decision."""
+    _counting_installs(
+        monkeypatch,
+        [RUNNER_ME, "runner-a", "runner-b"],
+        caps_by_id={"runner-b": {"has_chrome": True}},
+    )
+    _seed_checkout(PROJECT, "runner-a", "/a/x")
+    _seed_checkout(PROJECT, "runner-b", "/b/x")
+
+    session_rows = [
+        {"placement": None, "instance_id": None},
+        {"placement": None, "instance_id": "runner-a"},
+        {"placement": None, "instance_id": "gone-offline"},
+        {"placement": {"where": "runner:runner-b"}},
+        {"placement": {"where": "runner:missing"}},
+        {"placement": {"where": "anywhere"}, "project_v2_id": PROJECT},
+        {"placement": {"where": "has_chrome"}, "project_v2_id": PROJECT},
+        {"placement": {"where": "anywhere"}, "project_v2_id": "pv2-nothing"},
+    ]
+    for row in session_rows:
+        assert placement.resolve_placement(row) == placement.resolve_placement(
+            row, installs_map=database.get_installs_map()
+        ), row
+
+
+def test_capable_runners_accepts_a_preloaded_map_without_reading(mock_db, monkeypatch):
+    _, calls = _counting_installs(monkeypatch, [RUNNER_ME, "runner-a"])
+    preloaded = database.get_installs_map()
+    calls["n"] = 0
+
+    assert placement.capable_runners(None, {}, preloaded) == [RUNNER_ME, "runner-a"]
+    assert calls["n"] == 0
+    # ...and reads exactly once when not given one (was two: capability set +
+    # online set were separate reads of the same registry).
+    assert placement.capable_runners(None, {}) == [RUNNER_ME, "runner-a"]
+    assert calls["n"] == 1
+
+
+def test_local_default_still_never_touches_the_registry(mock_db, monkeypatch):
+    """An ownerless NULL-placement row short-circuits to local before any
+    registry read — the preloading must not turn that into a query."""
+    _, calls = _counting_installs(monkeypatch, [RUNNER_ME])
+    d = placement.resolve_placement({"placement": None, "instance_id": None})
+    assert d.kind == "local" and d.runner_id == RUNNER_ME
+    assert calls["n"] == 0

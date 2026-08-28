@@ -34,6 +34,7 @@ from claude_agent_sdk.types import (
 )
 
 from app.db import database
+from app.db.async_database import run_sync
 from app.core.hook_executor import execute_hook, spawn_hook_shell
 
 logger = logging.getLogger(__name__)
@@ -295,7 +296,7 @@ async def get_database_hooks_for_event(
         return []
 
     try:
-        hooks = database.get_hooks_for_project_and_event(project_id, event)
+        hooks = await run_sync(database.get_hooks_for_project_and_event, project_id, event)
         return hooks or []
     except Exception as e:
         logger.warning(f"Failed to get database hooks: {e}")
@@ -802,7 +803,7 @@ def create_db_pretooluse_hook_handler(
             hook_id = hook.get("id")
             if hook_id:
                 try:
-                    database.update_hook_triggered(hook_id, status == "ok")
+                    await run_sync(database.update_hook_triggered, hook_id, status == "ok")
                 except Exception as e:
                     logger.debug(f"Failed to update hook triggered status: {e}")
 
