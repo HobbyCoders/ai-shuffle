@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from contextlib import suppress
 from typing import Dict, Optional, Set, Tuple
 from urllib.parse import urlparse
@@ -45,6 +46,15 @@ _SCREENCAST_PARAMS = {
     "maxHeight": 1440,
     "everyNthFrame": 1,
 }
+
+# Backoff schedule for re-attaching to a still-registered target after the
+# upstream CDP socket dies. Roughly 17.5s of patience before falling back to
+# no_page + wait-for-registry-change.
+_REATTACH_DELAYS: Tuple[float, ...] = (0.5, 1.0, 2.0, 4.0, 5.0, 5.0)
+
+# An attach that stayed up longer than this is considered to have been healthy:
+# its eventual death starts a fresh retry budget instead of accumulating.
+_ATTACH_HEALTHY_SECONDS = 10.0
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +374,9 @@ class BrowserStreamHub:
         self._pending_inspects: Dict[int, Tuple["_Viewer", str]] = {}
         self.page_url: Optional[str] = None
         self.page_loading: bool = False
+        # Monotonic time the current/last upstream attach opened, for the
+        # healthy-attach check in the reattach backoff. None = never opened.
+        self._attach_opened_at: Optional[float] = None
 
     # -- lifecycle -----------------------------------------------------------
     def start(self) -> None:
@@ -594,6 +607,7 @@ class BrowserStreamHub:
     # -- state machine -------------------------------------------------------
     async def _run(self) -> None:
         try:
+            failures = 0
             while True:
                 target = registry.get_target(self.session_id)
                 if target is None or not target.target_id:
@@ -605,6 +619,7 @@ class BrowserStreamHub:
                 try:
                     await self._attach_and_pump(target)
                 except _RegistryChanged:
+                    failures = 0
                     continue
                 except Exception:
                     logger.debug(
@@ -612,18 +627,57 @@ class BrowserStreamHub:
                         self.session_id,
                         exc_info=True,
                     )
+                    # An upstream hiccup while the registry STILL points at this
+                    # target is not "no page": the agent's browser tools only
+                    # re-report on tab create/close/switch, so waiting for a
+                    # registry change here left the panel dead for the rest of
+                    # the turn (the mid-stream "reconnecting forever" bug).
+                    # Retry the same target with backoff, racing a registry
+                    # change; only after the retry budget is spent do we fall
+                    # back to no_page + wait. A connection that had been healthy
+                    # for a while earns a fresh budget; an instant-death target
+                    # accumulates failures until the budget runs out.
+                    if self._attach_alive_for() > _ATTACH_HEALTHY_SECONDS:
+                        failures = 1
+                    else:
+                        failures += 1
+                    current = registry.get_target(self.session_id)
+                    same_target = (
+                        current is not None
+                        and current.target_id == target.target_id
+                    )
+                    if same_target and failures <= len(_REATTACH_DELAYS):
+                        delay = _REATTACH_DELAYS[failures - 1]
+                        change = asyncio.create_task(
+                            registry.wait_for_change(self.session_id)
+                        )
+                        done, _ = await asyncio.wait({change}, timeout=delay)
+                        if not done:
+                            change.cancel()
+                            with suppress(asyncio.CancelledError, Exception):
+                                await change
+                        continue
+                    failures = 0
                     await self._broadcast_status("no_page", None)
                     await registry.wait_for_change(self.session_id)
                     continue
         except asyncio.CancelledError:
             pass
 
+    def _attach_alive_for(self) -> float:
+        """Seconds the current/last attach has been open (0 if it never opened)."""
+        if self._attach_opened_at is None:
+            return 0.0
+        return time.monotonic() - self._attach_opened_at
+
     async def _attach_and_pump(self, target: registry.PanelTarget) -> None:
         uri = (
             f"ws://127.0.0.1:{native_chrome._cdp_port()}"
             f"/devtools/page/{target.target_id}"
         )
+        self._attach_opened_at = None
         ws = await _open_upstream(uri)
+        self._attach_opened_at = time.monotonic()
         self._upstream = ws
         self._upstream_msg_id = 0
         self._pending_jumps.clear()
@@ -658,7 +712,21 @@ class BrowserStreamHub:
                         continue
                     method = msg.get("method")
                     if "id" in msg and msg["id"] in self._pending_jumps:
+                        is_attach_probe = self._pending_jumps.get(msg["id"]) == 0
                         await self._complete_history_jump(msg["id"], msg.get("result", {}))
+                        if is_attach_probe and not live:
+                            # The target answered the attach-time probe, so the
+                            # attachment is healthy — declare live NOW instead
+                            # of waiting for a first screencast frame. Chrome
+                            # only paints frames for the FOREGROUND tab, so a
+                            # backgrounded or static page may never produce one;
+                            # gating "live" on frames kept the panel stuck on
+                            # "connecting"/"Reconnecting…" through an entire
+                            # streaming turn (the panel-flicker bug).
+                            live = True
+                            await self._broadcast_status(
+                                "live", self.page_url or target.url
+                            )
                         continue
                     if "id" in msg and msg["id"] in self._pending_inspects:
                         await self._complete_inspect(msg["id"], msg.get("result", {}))

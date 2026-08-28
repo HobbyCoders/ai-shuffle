@@ -455,7 +455,10 @@ async def _wait_for(cond, timeout=2.0):
 
 @pytest.fixture(autouse=True)
 def _reset_hubs():
-    for sid in ("hub-start", "hub-ack", "hub-stable", "hub-reattach", "hub-death", "hub-cmd"):
+    for sid in (
+        "hub-start", "hub-ack", "hub-stable", "hub-reattach", "hub-death",
+        "hub-cmd", "hub-probe", "hub-retry",
+    ):
         registry.clear(sid)
     browser_stream._hubs.clear()
     yield
@@ -606,9 +609,91 @@ async def test_same_target_updates_do_not_restart_live_screencast(monkeypatch):
     await browser_stream.detach_viewer(sid, viewer)
 
 
-async def test_upstream_death_broadcasts_no_page(monkeypatch):
+async def test_upstream_death_exhausts_retries_then_no_page(monkeypatch):
+    """When the target stays registered but every re-attach fails, the hub
+    spends its retry budget (broadcasting `connecting`, not `no_page`) and only
+    then falls back to no_page + wait-for-change."""
     sid = "hub-death"
     registry.register(sid, "target-x", None, "http://a/")
+    fake = FakeUpstream()
+    opens = 0
+
+    async def opener(uri):
+        nonlocal opens
+        opens += 1
+        if opens == 1:
+            return fake
+        raise ConnectionError("cdp gone")
+
+    monkeypatch.setattr(browser_stream, "_open_upstream", opener)
+    monkeypatch.setattr(browser_stream, "_REATTACH_DELAYS", (0.01,))
+
+    ws = FakeViewerWS()
+    hub, viewer = await browser_stream.attach_viewer(sid, ws)
+    await _wait_for(lambda: "Page.startScreencast" in fake.methods())
+
+    fake.feed_close()  # upstream dies; retry budget: one failed re-open
+    await _wait_for(
+        lambda: any(
+            f.get("type") == "status" and f.get("state") == "no_page"
+            for f in ws.sent
+        )
+    )
+    assert opens >= 2  # the retry actually happened before giving up
+    await browser_stream.detach_viewer(sid, viewer)
+
+
+async def test_upstream_death_reattaches_without_registry_change(monkeypatch):
+    """An upstream hiccup while the target is still registered self-heals: the
+    hub re-attaches on its own instead of waiting for the next browser tool to
+    re-report (which could be a whole streaming turn away)."""
+    sid = "hub-retry"
+    registry.register(sid, "target-r", None, "http://a/")
+    fakes = []
+
+    async def opener(uri):
+        f = FakeUpstream(uri)
+        fakes.append(f)
+        return f
+
+    monkeypatch.setattr(browser_stream, "_open_upstream", opener)
+    monkeypatch.setattr(browser_stream, "_REATTACH_DELAYS", (0.01, 0.01, 0.01))
+
+    ws = FakeViewerWS()
+    hub, viewer = await browser_stream.attach_viewer(sid, ws)
+    await _wait_for(lambda: fakes and "Page.startScreencast" in fakes[0].methods())
+
+    fakes[0].feed_close()  # transient upstream death, registry unchanged
+    await _wait_for(lambda: len(fakes) >= 2)
+    await _wait_for(lambda: "Page.startScreencast" in fakes[1].methods())
+
+    # The gap was reported as connecting, never as no_page.
+    assert not any(
+        f.get("type") == "status" and f.get("state") == "no_page" for f in ws.sent
+    )
+
+    # The re-attached target answers the probe -> live again, no frame needed.
+    probe = next(
+        m for m in fakes[1].sent if m["method"] == "Page.getNavigationHistory"
+    )
+    fakes[1]._incoming.put_nowait(json.dumps({
+        "id": probe["id"],
+        "result": {"currentIndex": 0, "entries": [{"id": 1, "url": "http://a/"}]},
+    }))
+    await _wait_for(
+        lambda: any(
+            f.get("type") == "status" and f.get("state") == "live" for f in ws.sent
+        )
+    )
+    await browser_stream.detach_viewer(sid, viewer)
+
+
+async def test_probe_reply_declares_live_without_any_frame(monkeypatch):
+    """Chrome only paints screencast frames for the foreground tab, so `live`
+    must not be gated on a first frame: the attach-time history probe reply is
+    the health signal."""
+    sid = "hub-probe"
+    registry.register(sid, "target-p", None, "http://p/")
     fake = FakeUpstream()
 
     async def opener(uri):
@@ -618,13 +703,21 @@ async def test_upstream_death_broadcasts_no_page(monkeypatch):
 
     ws = FakeViewerWS()
     hub, viewer = await browser_stream.attach_viewer(sid, ws)
-    await _wait_for(lambda: "Page.startScreencast" in fake.methods())
+    await _wait_for(lambda: "Page.getNavigationHistory" in fake.methods())
+    probe = next(m for m in fake.sent if m["method"] == "Page.getNavigationHistory")
 
-    fake.feed_close()  # upstream dies
+    fake._incoming.put_nowait(json.dumps({
+        "id": probe["id"],
+        "result": {
+            "currentIndex": 0,
+            "entries": [{"id": 1, "url": "http://p/actual"}],
+        },
+    }))
     await _wait_for(
         lambda: any(
-            f.get("type") == "status" and f.get("state") == "no_page"
-            for f in ws.sent
+            f.get("type") == "status" and f.get("state") == "live" for f in ws.sent
         )
     )
+    # No frame was ever fed — live came from the probe round-trip alone.
+    assert not any(f.get("type") == "frame" for f in ws.sent)
     await browser_stream.detach_viewer(sid, viewer)

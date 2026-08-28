@@ -300,6 +300,21 @@
 		}[status],
 	);
 
+	// Debounced status badge: agent-driven tab switches and upstream re-attaches
+	// produce sub-second connecting→live blips. Flashing "Reconnecting…" over a
+	// perfectly good frame for each one made the panel look broken (the flicker
+	// bug) — only a non-live spell that actually lasts earns the badge.
+	const BADGE_DELAY_MS = 1200;
+	let showStreamBadge = $state(false);
+	$effect(() => {
+		if (isLive) {
+			showStreamBadge = false;
+			return;
+		}
+		const t = setTimeout(() => (showStreamBadge = true), BADGE_DELAY_MS);
+		return () => clearTimeout(t);
+	});
+
 	const chipLabel = $derived(selectedElement ? describeElement(selectedElement) : '');
 </script>
 
@@ -446,7 +461,7 @@
 						onHoverLeave={() => (hoverRect = null)}
 						onExitInspect={exitInspect}
 					/>
-					{#if !isLive}
+					{#if showStreamBadge}
 						<div class="stream-badge" role="status">
 							{#if status === 'connecting' || status === 'disconnected'}
 								<Loader2 class="spin" size={12} strokeWidth={2} />
@@ -461,6 +476,12 @@
 						<Loader2 class="spin" size={26} strokeWidth={1.5} />
 						<p class="empty-title">Connecting to the live view</p>
 						<p class="empty-copy">Hooking up to the agent's browser…</p>
+					{:else if status === 'live'}
+						<!-- Attached and healthy, but the page hasn't painted a frame
+						     yet (background tab / nothing to draw). Not an error. -->
+						<Loader2 class="spin" size={26} strokeWidth={1.5} />
+						<p class="empty-title">Connected</p>
+						<p class="empty-copy">Waiting for the page to draw its first frame…</p>
 					{:else if status === 'no_page'}
 						<Globe size={26} strokeWidth={1.5} />
 						<p class="empty-title">No page open yet</p>
