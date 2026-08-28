@@ -256,7 +256,11 @@ function completeHydration(premature: boolean): void {
 //   R2. `restart(sessionId)` drops the entry. That is the explicit "hydrate
 //       from zero again" path used by rewind / reload-session.
 //   R3. `invalidate(sessionId)` drops it on demand — for session delete, fork,
-//       or any out-of-band signal that the log was rewritten.
+//       or any out-of-band signal that the log was rewritten. The
+//       `user_session_cleared` / `user_session_deleted` WS broadcasts
+//       (ws-message-handlers.ts) are the cross-device drivers: an in-place
+//       clear or a delete elsewhere rewrites/removes the log WITHOUT appending
+//       anything a resume cursor could see, so only this signal invalidates.
 //   R4. Cursor sanity: because the server filter is exclusive, the first event
 //       of a resumed connection MUST carry `seq > from_seq`. If one arrives at
 //       or below the cursor, the log is not the one this entry was built from

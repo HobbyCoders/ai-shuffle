@@ -652,6 +652,23 @@ export interface WsServerUserSessionUpdated {
 	updates: Record<string, unknown>;
 }
 
+/** A session's conversation was cleared IN PLACE (POST /sessions/{id}/clear —
+ * possibly on another device). The row survives but its event log was
+ * rewritten to empty: receivers must drop any cached transcript and
+ * re-hydrate an open view from seq 0 — a row patch alone would leave the
+ * deleted conversation on screen. */
+export interface WsServerUserSessionCleared {
+	type: 'user_session_cleared';
+	session_id: string;
+}
+
+/** A session row was deleted (counterpart of user_session_created): drop it
+ * from the list, drop its cached transcript, and leave it if it is open. */
+export interface WsServerUserSessionDeleted {
+	type: 'user_session_deleted';
+	session_id: string;
+}
+
 /** A session's streaming state changed (for side panel indicators). */
 export interface WsServerUserStreamingChanged {
 	type: 'user_streaming_changed';
@@ -866,6 +883,8 @@ export type ServerMessage =
 	| WsServerTabsSync
 	| WsServerUserSessionCreated
 	| WsServerUserSessionUpdated
+	| WsServerUserSessionCleared
+	| WsServerUserSessionDeleted
 	| WsServerUserStreamingChanged
 	| WsServerUserStreamingSessions
 	| WsServerUserBranchChanged;

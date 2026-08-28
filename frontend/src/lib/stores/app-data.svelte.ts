@@ -693,7 +693,10 @@ export const appData = {
 		// R3, and load-bearing: the row survives with the same id but an emptied
 		// event log, so a resume at from_seq=lastSeq matches nothing and would
 		// leave the cached transcript on screen. Drop it so the next open replays
-		// from seq 0.
+		// from seq 0. (The server also fans out `user_session_cleared`, which
+		// repeats this invalidation on every device — including this one, where
+		// it additionally restarts the feed if the session is open. Keeping the
+		// local drop makes the clearing tab correct even with its WS down.)
 		feedController.invalidate(sessionId);
 		// Refresh the row so its updated_at / turn_count / cost reflect the reset.
 		await appData.loadSessions();

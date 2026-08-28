@@ -502,6 +502,58 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			return;
 		}
 
+		// A session's conversation was wiped IN PLACE (POST /sessions/{id}/clear
+		// — another device/tab, an API user, or this tab's own request echoed
+		// back). The row survives, but its event log was rewritten out-of-band:
+		// any cached transcript is now for a log that no longer exists, and a
+		// feed resuming at from_seq=lastSeq would match nothing and leave the
+		// deleted conversation on screen.
+		if (msgType === 'user_session_cleared') {
+			const sessionId = data.session_id as string | undefined;
+			if (!sessionId) return;
+			// R3: drop the cached transcript so a later switch-in replays from 0.
+			feedController.invalidate(sessionId);
+			// If the cleared session is on screen, re-hydrate from seq 0: the
+			// emptied log folds to zero messages and the view collapses to the
+			// "Conversation cleared" hero instead of keeping the stale transcript.
+			if (feedController.isFeeding(sessionId)) {
+				feedController.restart(sessionId);
+			}
+			// A cleared conversation has nothing left awaiting the user's input.
+			setNeedsAttention(sessionId, 0);
+			// Sidebar row: the server zeroed the counters as part of the clear —
+			// mirror that on the row (all patchable fields) instead of re-paging.
+			applyRowUpdates(sessionId, {
+				turn_count: 0,
+				total_cost_usd: 0,
+				updated_at: new Date().toISOString(),
+			});
+			return;
+		}
+
+		// A session row was deleted (counterpart of user_session_created). Drop
+		// everything this tab holds for it: the cached transcript (R3), any
+		// attention/streaming dot, the sidebar row (via reload — the list's
+		// shape changed), and the open view if this tab is sitting on the
+		// deleted session (mirrors the session_not_found case).
+		if (msgType === 'user_session_deleted') {
+			const sessionId = data.session_id as string | undefined;
+			if (!sessionId) return;
+			feedController.invalidate(sessionId);
+			setNeedsAttention(sessionId, 0);
+			streamingSessions.update(map => {
+				if (!map.has(sessionId)) return map;
+				const next = new Map(map);
+				next.delete(sessionId);
+				return next;
+			});
+			scheduleSessionsReload();
+			if (getState().sessionId === sessionId) {
+				onNewChat();
+			}
+			return;
+		}
+
 		// Unified notification funnel: server emitted a user-facing message via
 		// app/services/notification_service.emit_notification. Already persisted
 		// server-side — feed it to the store for live render + the bell. Actions

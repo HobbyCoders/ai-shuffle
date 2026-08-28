@@ -1692,6 +1692,20 @@ async def delete_session(
     # Delete DB row first — cheap and authoritative for the UI.
     await run_sync(database.delete_session, session_id)
 
+    # Fan the deletion out to the user's other devices/tabs so their sidebars
+    # drop the row and an open view of this session leaves it — without this a
+    # second tab keeps rendering the deleted transcript. Best-effort: the
+    # caller already sees the row gone via its own 204.
+    try:
+        from app.core.sync_engine import sync_engine
+        await sync_engine.broadcast_user_session_deleted(
+            user_id=existing.get("api_user_id") or "admin",
+            session_id=session_id,
+            source_device_id=None,
+        )
+    except Exception:  # noqa: BLE001 — sync fan-out is best-effort
+        logger.debug("session delete broadcast failed", exc_info=True)
+
     # Defer slow cleanup (subprocess termination, JSONL file I/O) to background.
     background_tasks.add_task(
         _cleanup_session_artifacts,
@@ -1761,6 +1775,22 @@ async def clear_session(
         reap_session_background_shells(session_id)
     except Exception:
         logger.debug("clear-session shell reap scheduling failed", exc_info=True)
+
+    # Fan the wipe out to every one of the user's devices/tabs. The clear
+    # appends NOTHING to the session's event log — it rewrites the log out
+    # from under any connected feed's resume cursor — so without this
+    # broadcast a tab with the session open keeps rendering the deleted
+    # transcript (and its cached copy survives switching away and back).
+    # Best-effort: the caller's own store invalidates locally on the 200.
+    try:
+        from app.core.sync_engine import sync_engine
+        await sync_engine.broadcast_user_session_cleared(
+            user_id=existing.get("api_user_id") or "admin",
+            session_id=session_id,
+            source_device_id=None,
+        )
+    except Exception:  # noqa: BLE001 — sync fan-out is best-effort
+        logger.debug("session clear broadcast failed", exc_info=True)
 
     background_tasks.add_task(
         _cleanup_session_artifacts,
@@ -1858,6 +1888,17 @@ async def batch_delete_sessions(
         try:
             existing = await require_session(request, session_id)
             await run_sync(database.delete_session, session_id)
+            # Same fan-out as the single delete: other devices drop the row
+            # and leave the session if they have it open. Best-effort.
+            try:
+                from app.core.sync_engine import sync_engine
+                await sync_engine.broadcast_user_session_deleted(
+                    user_id=existing.get("api_user_id") or "admin",
+                    session_id=session_id,
+                    source_device_id=None,
+                )
+            except Exception:  # noqa: BLE001 — sync fan-out is best-effort
+                logger.debug("session delete broadcast failed", exc_info=True)
             background_tasks.add_task(
                 _cleanup_session_artifacts,
                 session_id,

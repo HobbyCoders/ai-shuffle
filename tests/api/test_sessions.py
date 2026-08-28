@@ -1206,6 +1206,28 @@ class TestDeleteSession:
         assert response.status_code == 204
         mock_database.delete_session.assert_called_once_with("test-session-id")
 
+    def test_delete_session_broadcasts_user_session_deleted(
+        self, client, mock_database, sample_session, monkeypatch
+    ):
+        """Deletion must fan out user-wide: without the broadcast, another
+        device/tab keeps the row in its sidebar and — if it has the session
+        open — keeps rendering the deleted transcript (nothing is ever
+        appended to a deleted session's log, so no feed event arrives)."""
+        mock_database.get_session.return_value = sample_session
+
+        from app.core.sync_engine import sync_engine
+        broadcasts = []
+
+        async def _record(user_id, session_id, source_device_id=None):
+            broadcasts.append((user_id, session_id))
+
+        monkeypatch.setattr(sync_engine, "broadcast_user_session_deleted", _record)
+
+        response = client.delete("/api/v1/sessions/test-session-id")
+
+        assert response.status_code == 204
+        assert broadcasts == [("admin", "test-session-id")]
+
     def test_delete_session_not_found(self, client, mock_database):
         """Should return 404 for non-existent session."""
         mock_database.get_session.return_value = None
@@ -1308,6 +1330,53 @@ class TestClearSession:
 
         assert response.status_code == 409
         mock_database.clear_session_conversation.assert_not_called()
+
+    def test_clear_session_broadcasts_user_session_cleared(
+        self, client, mock_database, sample_session, monkeypatch
+    ):
+        """The wipe must reach OTHER devices/tabs. A clear rewrites the event
+        log without appending anything a connected feed's resume cursor could
+        see, so without this user-level broadcast a tab with the session open
+        keeps rendering the deleted transcript — and its cached copy survives
+        even switching away and back."""
+        mock_database.get_session.return_value = sample_session
+        mock_database.clear_session_conversation.return_value = None
+
+        from app.core.sync_engine import sync_engine
+        broadcasts = []
+
+        async def _record(user_id, session_id, source_device_id=None):
+            broadcasts.append((user_id, session_id))
+
+        monkeypatch.setattr(sync_engine, "broadcast_user_session_cleared", _record)
+
+        with patch("app.core.streaming_status.has_active_run", return_value=False):
+            response = client.post("/api/v1/sessions/test-session-id/clear")
+
+        assert response.status_code == 200
+        assert broadcasts == [("admin", "test-session-id")]
+
+    def test_clear_session_no_broadcast_when_blocked(
+        self, client, mock_database, sample_session, monkeypatch
+    ):
+        """A 409 (turn in flight) wipes nothing, so nothing may be announced —
+        a broadcast here would make every device drop a transcript that is
+        still fully intact."""
+        mock_database.get_session.return_value = sample_session
+
+        from app.core.sync_engine import sync_engine
+        broadcasts = []
+
+        async def _record(user_id, session_id, source_device_id=None):
+            broadcasts.append((user_id, session_id))
+
+        monkeypatch.setattr(sync_engine, "broadcast_user_session_cleared", _record)
+
+        with patch("app.core.streaming_status.has_active_run", return_value=True):
+            response = client.post("/api/v1/sessions/test-session-id/clear")
+
+        assert response.status_code == 409
+        assert broadcasts == []
 
 
 # =============================================================================

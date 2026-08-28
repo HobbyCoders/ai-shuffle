@@ -36,6 +36,7 @@ vi.mock('./v2/feed-controller', () => ({
 		attach: vi.fn(),
 		start: vi.fn(),
 		stop: vi.fn(),
+		restart: vi.fn(),
 		isFeeding: vi.fn(() => false),
 		currentSessionId: vi.fn(() => null),
 		invalidate: vi.fn(),
@@ -1685,6 +1686,87 @@ describe('ws-message-handlers', () => {
 			} finally {
 				vi.useRealTimers();
 			}
+		});
+	});
+
+	describe('user_session_cleared handler (in-place transcript wipe)', () => {
+		// POST /sessions/{id}/clear rewrites the event log WITHOUT appending
+		// anything a resume cursor could see. Pre-fix, a tab with the session
+		// open kept rendering the deleted transcript — even across a switch
+		// away and back, because the transcript cache served the stale copy.
+		beforeEach(() => {
+			(feedController.invalidate as ReturnType<typeof vi.fn>).mockClear();
+			(feedController.restart as ReturnType<typeof vi.fn>).mockClear();
+		});
+
+		it('drops the cached transcript and patches the row counters (R3, no refetch)', () => {
+			handlers.handleMessage({ type: 'user_session_cleared', session_id: 'background-session' });
+
+			expect(feedController.invalidate).toHaveBeenCalledWith('background-session');
+			// Not being fed → nothing on screen to reset, so no feed restart.
+			expect(feedController.restart).not.toHaveBeenCalled();
+			expect(deps.mergeSessionPatch).toHaveBeenCalledWith(
+				'background-session',
+				expect.objectContaining({ turn_count: 0, total_cost_usd: 0 })
+			);
+			expect(deps.appLoadSessions).not.toHaveBeenCalled();
+		});
+
+		it('re-hydrates from seq 0 when the cleared session is the one being fed', () => {
+			(feedController.isFeeding as ReturnType<typeof vi.fn>).mockReturnValue(true);
+
+			handlers.handleMessage({ type: 'user_session_cleared', session_id: 'session-1' });
+
+			// The emptied log folds to zero messages, collapsing the open view to
+			// the "Conversation cleared" hero instead of the stale transcript.
+			expect(feedController.invalidate).toHaveBeenCalledWith('session-1');
+			expect(feedController.restart).toHaveBeenCalledWith('session-1');
+		});
+
+		it('clears the attention dot — a wiped conversation awaits no input', () => {
+			handlers.handleMessage({ type: 'user_session_cleared', session_id: 'session-1' });
+			expect(deps.backgroundPermissions.update).toHaveBeenCalled();
+		});
+
+		it('ignores a payload without a session_id', () => {
+			handlers.handleMessage({ type: 'user_session_cleared' });
+			expect(feedController.invalidate).not.toHaveBeenCalled();
+			expect(deps.mergeSessionPatch).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('user_session_deleted handler', () => {
+		beforeEach(() => {
+			(feedController.invalidate as ReturnType<typeof vi.fn>).mockClear();
+		});
+
+		it('drops the cache, reloads the list (debounced), and leaves the open session', async () => {
+			vi.useFakeTimers();
+			try {
+				deps = createMockDeps(); // mockState().sessionId === 'session-1'
+				handlers = createMessageHandlers(deps);
+
+				handlers.handleMessage({ type: 'user_session_deleted', session_id: 'session-1' });
+
+				expect(feedController.invalidate).toHaveBeenCalledWith('session-1');
+				// The open view must not keep rendering a deleted transcript —
+				// mirror of the session_not_found escape hatch.
+				expect(deps.onNewChat).toHaveBeenCalledTimes(1);
+				// A row disappeared: list shape changed, so an authoritative
+				// (debounced) reload follows.
+				expect(deps.appLoadSessions).not.toHaveBeenCalled();
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
+				expect(deps.appLoadSessions).toHaveBeenCalledTimes(1);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it('stays put when a different session was deleted', () => {
+			handlers.handleMessage({ type: 'user_session_deleted', session_id: 'other-session' });
+
+			expect(feedController.invalidate).toHaveBeenCalledWith('other-session');
+			expect(deps.onNewChat).not.toHaveBeenCalled();
 		});
 	});
 

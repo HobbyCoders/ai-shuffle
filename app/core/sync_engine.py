@@ -1224,6 +1224,48 @@ class SyncEngine:
             source_device_id=source_device_id
         )
 
+    async def broadcast_user_session_cleared(
+        self,
+        user_id: str,
+        session_id: str,
+        source_device_id: Optional[str] = None
+    ):
+        """Broadcast that a session's conversation was cleared IN PLACE.
+
+        User-level fan-out like ``broadcast_user_session_updated``: the clear
+        appends NOTHING to the session's event log — it rewrites the log out
+        from under any feed resuming at ``from_seq=lastSeq`` — so a device
+        watching the session gets no per-session signal to react to, and a
+        device merely listing it needs its row counters reset too.
+
+        A dedicated type (not a ``user_session_updated`` field patch) because
+        receivers must do more than patch a row: drop the session's cached
+        transcript and re-hydrate an open view from seq 0, unambiguously.
+        """
+        await self._broadcast_user_message(
+            user_id=user_id,
+            message={"type": "user_session_cleared", "session_id": session_id},
+            source_device_id=source_device_id
+        )
+
+    async def broadcast_user_session_deleted(
+        self,
+        user_id: str,
+        session_id: str,
+        source_device_id: Optional[str] = None
+    ):
+        """Broadcast that a session row was deleted.
+
+        Counterpart of ``broadcast_user_session_created``: other devices drop
+        the row from their lists, drop any cached transcript for it, and leave
+        the chat view if they are sitting on the deleted session.
+        """
+        await self._broadcast_user_message(
+            user_id=user_id,
+            message={"type": "user_session_deleted", "session_id": session_id},
+            source_device_id=source_device_id
+        )
+
     async def broadcast_notification(
         self,
         user_id: str,
