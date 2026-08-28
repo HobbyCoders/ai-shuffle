@@ -1825,9 +1825,12 @@ async def resume_session(
     from app.core import turn_manager, turn_claim
     from app.db import turns as turns_db
 
-    live = await run_sync(turns_db.get_live_turn, session_id)
-    queued = await run_sync(turns_db.get_queued_turns, session_id)
-    if live or queued:
+    # ONE atomic read, not separate live/queued checks: a turn flipping
+    # queued→running between two reads is invisible to both (the
+    # wait_session_idle race, 2026-08-28), which here would let a duplicate
+    # resume enqueue behind a turn that is actually running.
+    busy = await run_sync(turns_db.session_has_unsettled_turns, session_id)
+    if busy:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="a turn is already running",

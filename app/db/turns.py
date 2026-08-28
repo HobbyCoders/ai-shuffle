@@ -581,6 +581,34 @@ def get_queued_turns(session_id: str) -> List[Dict[str, Any]]:
     return _rows(rows)
 
 
+def session_has_unsettled_turns(session_id: str) -> bool:
+    """True iff the session has ANY turn row outside the terminal states
+    (i.e. ``queued``, ``running``, ``interrupting`` or ``draining``) — the
+    busy predicate behind ``turn_manager.wait_session_idle``.
+
+    ONE statement on purpose. The predicate used to be two separate reads
+    ("no live turn" via :func:`get_live_turn`, then "no queued turns" via
+    :func:`get_queued_turns`), each on its own connection/transaction — and a
+    turn moves AGAINST that read order during the queued→running handoff:
+    ``start_turn`` flips the row out of the second-checked set (queued) into
+    the first-checked set (live). A flip that landed between the two reads was
+    invisible to both (live read: still queued → none; queued read: already
+    running → none), so a waiter declared the session idle while its turn was
+    actually running (the automation empty-"completed" run race, 2026-08-28).
+    A single SELECT sees one consistent snapshot, so a turn is always in
+    exactly one of the counted states or terminal — there is no in-between to
+    fall through.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM turns WHERE session_id=%s "
+            "AND state NOT IN ('completed','aborted','parked') LIMIT 1",
+            (session_id,),
+        )
+        return cursor.fetchone() is not None
+
+
 def pop_ready(session_id: str) -> Optional[Dict[str, Any]]:
     """Return the front (lowest ``position``) ``queued`` turn for a session, or
     ``None`` if the queue is empty.

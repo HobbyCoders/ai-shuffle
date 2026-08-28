@@ -1,0 +1,65 @@
+"""Unit tests for app/core/turn_outcome.py — the shared event-log outcome
+reader behind automation, the REST conversation endpoint and connector intake.
+
+Focused on ``terminal_found`` (2026-08-28 regression): an event log with no
+terminal turn event must be distinguishable from a clean empty completion, or
+a caller that read the log too early stamps a bogus empty success.
+"""
+
+from unittest.mock import patch
+
+from app.core import turn_outcome
+
+
+def _events(*events):
+    return patch("app.db.session_events.get_events", return_value=list(events))
+
+
+def test_no_terminal_event_is_flagged_not_shaped_as_success():
+    log = [
+        {"seq": 1, "turn_id": "t1", "event_type": "turn.started", "payload": {}},
+        {"seq": 2, "turn_id": "t1", "event_type": "assistant.text_delta",
+         "payload": {"text": "still streaming"}},
+    ]
+    with _events(*log):
+        outcome = turn_outcome.final_turn_outcome("s1")
+    assert outcome["terminal_found"] is False
+    # The derived fields still read "clean and empty" for callers that only
+    # consume them — terminal_found is what fail-closed callers key on.
+    assert outcome["error"] is None
+    assert outcome["interrupted"] is False
+    assert outcome["usage"] == {}
+
+
+def test_empty_log_is_flagged():
+    with _events():
+        assert turn_outcome.final_turn_outcome("s1")["terminal_found"] is False
+
+
+def test_completed_turn_sets_terminal_found_and_usage():
+    with _events(
+        {"seq": 1, "turn_id": "t1", "event_type": "turn.completed",
+         "payload": {"usage": {"tokens_out": 7}}},
+    ):
+        outcome = turn_outcome.final_turn_outcome("s1")
+    assert outcome["terminal_found"] is True
+    assert outcome["usage"] == {"tokens_out": 7}
+    assert outcome["error"] is None
+
+
+def test_aborted_and_parked_turns_set_terminal_found():
+    with _events(
+        {"seq": 1, "turn_id": "t1", "event_type": "turn.aborted",
+         "payload": {"reason": "error", "message": "boom"}},
+    ):
+        outcome = turn_outcome.final_turn_outcome("s1")
+    assert outcome["terminal_found"] is True
+    assert outcome["error"] == "boom"
+
+    with _events(
+        {"seq": 1, "turn_id": "t1", "event_type": "turn.parked",
+         "payload": {}},
+    ):
+        outcome = turn_outcome.final_turn_outcome("s1")
+    assert outcome["terminal_found"] is True
+    assert outcome["error"] is None

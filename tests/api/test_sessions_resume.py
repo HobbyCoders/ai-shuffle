@@ -75,10 +75,13 @@ def fluid_session():
 
 @pytest.fixture
 def turns_idle():
-    """No live turn, empty queue — the session is free to resume."""
-    with patch("app.db.turns.get_live_turn", return_value=None) as live, \
-            patch("app.db.turns.get_queued_turns", return_value=[]) as queued:
-        yield live, queued
+    """No unsettled turn — the session is free to resume. The route's busy
+    check is ONE atomic read (``session_has_unsettled_turns``), not separate
+    live/queued reads a queued→running flip could slip between."""
+    with patch(
+        "app.db.turns.session_has_unsettled_turns", return_value=False
+    ) as busy:
+        yield busy
 
 
 @pytest.fixture
@@ -108,23 +111,12 @@ class TestResumeSession:
         assert response.status_code == 404
         submit_seam[0].assert_not_called()
 
-    def test_live_turn_is_409(self, client, mock_database, fluid_session, submit_seam):
-        """A resume must never race the turn already in flight."""
+    def test_unsettled_turn_is_409(self, client, mock_database, fluid_session, submit_seam):
+        """A resume must never race a turn already in flight OR queued — the
+        busy check counts every non-terminal turn state in one atomic read."""
         mock_database.get_session.return_value = fluid_session
 
-        with patch("app.db.turns.get_live_turn", return_value={"id": "turn-live"}), \
-                patch("app.db.turns.get_queued_turns", return_value=[]):
-            response = client.post("/api/v1/sessions/test-session-id/resume")
-
-        assert response.status_code == 409
-        assert response.json()["detail"] == "a turn is already running"
-        submit_seam[0].assert_not_called()
-
-    def test_queued_turn_is_409(self, client, mock_database, fluid_session, submit_seam):
-        mock_database.get_session.return_value = fluid_session
-
-        with patch("app.db.turns.get_live_turn", return_value=None), \
-                patch("app.db.turns.get_queued_turns", return_value=[{"id": "turn-q"}]):
+        with patch("app.db.turns.session_has_unsettled_turns", return_value=True):
             response = client.post("/api/v1/sessions/test-session-id/resume")
 
         assert response.status_code == 409

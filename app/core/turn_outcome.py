@@ -52,14 +52,25 @@ def final_turn_outcome(session_id: str) -> Dict[str, Any]:
     event (``turn.completed`` / ``turn.aborted`` / ``turn.parked``).
 
     Replaces the headless handler's WS-frame sniffing — the durable log is
-    now the record. Returns ``{"usage", "error", "interrupted"}``:
+    now the record. Returns ``{"usage", "error", "interrupted",
+    "terminal_found"}``:
 
     * ``turn.completed`` → ``usage`` = its usage summary, no error;
     * ``turn.aborted`` with ``reason == 'interrupt'`` → ``interrupted`` True
       (a genuine stop that settled before the timeout);
     * any other ``turn.aborted`` (error / crash / escalation / lease) →
       ``error`` = the aborted ``message`` or a reason-derived string;
-    * ``turn.parked`` / no terminal event → treated as a clean, empty run.
+    * ``turn.parked`` → treated as a clean, empty run.
+
+    ``terminal_found`` says whether a terminal event existed AT ALL (mirrors
+    ``provider_agent.final_turn_outcome``). It is the difference between "the
+    turn finished cleanly with no usage" and "the log knows nothing about a
+    settled turn" — two states the rest of the dict renders identically, which
+    is how a caller that read the log while a turn was still running (or whose
+    turn crashed before its recorder wrote anything) used to stamp a bogus
+    empty SUCCESS. Callers that only care about the derived outcome may keep
+    ignoring it; callers that just waited a submitted turn out must fail
+    closed on it (``AutomationManager._run_prompt_as_session`` does).
     """
     events = load_session_events(session_id)
     terminal = None
@@ -67,7 +78,12 @@ def final_turn_outcome(session_id: str) -> Dict[str, Any]:
         if ev.get("event_type") in ("turn.completed", "turn.aborted", "turn.parked"):
             terminal = ev
             break
-    result: Dict[str, Any] = {"usage": {}, "error": None, "interrupted": False}
+    result: Dict[str, Any] = {
+        "usage": {},
+        "error": None,
+        "interrupted": False,
+        "terminal_found": terminal is not None,
+    }
     if terminal is None:
         return result
     etype = terminal.get("event_type")

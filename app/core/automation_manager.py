@@ -1016,6 +1016,19 @@ class AutomationManager:
             raise RuntimeError(outcome["error"])
         if outcome["interrupted"]:
             raise RuntimeError("Turn was interrupted before completion")
+        # Fail closed on a log with NO terminal turn event. We just submitted a
+        # turn and drained the session, so a terminal event must exist — its
+        # absence means the outcome is underivable (the recorder never wrote a
+        # terminal, e.g. the turn crashed before the pump ran, or the log read
+        # failed), and stamping the run "completed" from it would fabricate an
+        # empty $0 success. Exactly the bogus run the 2026-08-28 idle-wait race
+        # produced — the wait bug is fixed at the source, this is the backstop.
+        if not outcome.get("terminal_found"):
+            raise RuntimeError(
+                "Automation turn produced no terminal event in the session log "
+                "— outcome unknown, refusing to stamp an empty success "
+                f"(session {session_id})"
+            )
 
         usage = outcome["usage"]
         final_text = await run_sync(self._extract_final_assistant_text, session_id)

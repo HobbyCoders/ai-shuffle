@@ -298,6 +298,65 @@ async def test_wait_session_idle_false_while_queued(mock_db):
     assert await turn_manager.wait_session_idle("s1", timeout=0.15, poll_interval=0.02) is False
 
 
+async def test_wait_session_idle_busy_in_every_non_terminal_state(mock_db):
+    """EVERY non-terminal turn state keeps the session busy, and every terminal
+    one releases it. The idle predicate is 'no turn row in ANY non-terminal
+    state' — not a hand-maintained list of live/queued reads that a new (or
+    overlooked) state could fall out of."""
+    # queued
+    tid = turn_manager.submit("s1", "user", prompt="p")
+    assert await turn_manager.wait_session_idle("s1", timeout=0.0) is False
+    # running
+    turns.start_turn(tid, run_id="run-1")
+    assert await turn_manager.wait_session_idle("s1", timeout=0.0) is False
+    # interrupting
+    turns.interrupt_turn("s1", "stop")
+    assert await turn_manager.wait_session_idle("s1", timeout=0.0) is False
+    # draining
+    turns.escalate_to_draining(tid)
+    assert await turn_manager.wait_session_idle("s1", timeout=0.0) is False
+    # terminal (aborted) → idle
+    turns.settle_turn(tid, "aborted", stop_reason="user_stop")
+    assert await turn_manager.wait_session_idle("s1", timeout=0.0) is True
+
+    # parked is terminal too — the park released the live slot.
+    tid2 = turn_manager.submit("s1", "user", prompt="p2")
+    turns.start_turn(tid2, run_id="run-2")
+    turns.park_turn(tid2, ["task-1"])
+    assert await turn_manager.wait_session_idle("s1", timeout=0.0) is True
+
+
+async def test_wait_session_idle_not_fooled_by_queued_to_running_handoff(mock_db):
+    """Regression for the 2026-08-28 automation race: the idle predicate used
+    to be TWO reads — get_live_turn (none: still queued), then
+    get_queued_turns (none: just started) — so a queued→running flip landing
+    between them made a running session read as idle and an automation stamped
+    an empty "completed" run 6 s before its turn actually finished.
+
+    Reproduce that exact interleave: make the split live-read flip the row to
+    running as its side effect (the scheduler's ``start_turn`` claim landing
+    right after it). A predicate still built on the split readers sees neither
+    set populated and returns idle=True; the atomic single-statement predicate
+    never opens that window, so the wait stays blocked."""
+    tid = turn_manager.submit("s1", "user", prompt="p")
+
+    real_get_live = turns.get_live_turn
+
+    def get_live_then_scheduler_claims(session_id):
+        row = real_get_live(session_id)
+        turns.start_turn(tid, run_id="run-1")  # the claim lands "between reads"
+        return row
+
+    with patch.object(turns, "get_live_turn", get_live_then_scheduler_claims):
+        idle = await turn_manager.wait_session_idle(
+            "s1", timeout=0.15, poll_interval=0.02
+        )
+    assert idle is False, (
+        "wait_session_idle declared a session idle across the queued→running "
+        "handoff — the idle check is not atomic"
+    )
+
+
 async def test_wait_session_idle_true_after_settle(mock_db):
     tid = turn_manager.submit("s1", "user", prompt="p")
     turns.start_turn(tid, run_id="run-1")
@@ -475,13 +534,13 @@ async def test_wait_settled_reads_off_the_event_loop(mock_db):
 async def test_wait_session_idle_reads_off_the_event_loop(mock_db):
     loop_thread = threading.get_ident()
     threads = set()
-    real_live = turns.get_live_turn
+    real_busy = turns.session_has_unsettled_turns
 
     def spy(session_id):
         threads.add(threading.get_ident())
-        return real_live(session_id)
+        return real_busy(session_id)
 
-    with patch.object(turns, "get_live_turn", spy):
+    with patch.object(turns, "session_has_unsettled_turns", spy):
         assert await turn_manager.wait_session_idle("s1", timeout=1.0) is True
 
     assert threads and loop_thread not in threads
@@ -509,26 +568,18 @@ async def test_wait_settled_backs_off_instead_of_hot_polling(mock_db):
 
 
 async def test_wait_session_idle_backs_off_instead_of_hot_polling(mock_db):
-    live_calls = []
-    queued_calls = []
+    busy_calls = []
 
-    def counting_live(session_id):
-        live_calls.append(session_id)
-        return {"id": "turn-x", "session_id": session_id, "state": "running"}
+    def counting_busy(session_id):
+        busy_calls.append(session_id)
+        return True  # forever busy — the wait must time out on backoff alone
 
-    def counting_queued(session_id):
-        queued_calls.append(session_id)
-        return []
-
-    with patch.object(turns, "get_live_turn", counting_live), \
-         patch.object(turns, "get_queued_turns", counting_queued):
+    with patch.object(turns, "session_has_unsettled_turns", counting_busy):
         assert await turn_manager.wait_session_idle(
             "s1", timeout=1.0, poll_interval=0.05
         ) is False
 
-    assert len(live_calls) <= 8, f"expected a handful of reads, got {len(live_calls)}"
-    # ``get_queued_turns`` is short-circuited by the live turn, so it never ran.
-    assert queued_calls == []
+    assert len(busy_calls) <= 8, f"expected a handful of reads, got {len(busy_calls)}"
 
 
 async def test_wait_settled_backoff_is_capped(mock_db):

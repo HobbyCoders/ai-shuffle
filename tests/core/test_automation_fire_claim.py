@@ -374,6 +374,7 @@ class TestAtomicRunAccounting:
             "usage": {"total_cost_usd": 0.25, "tokens_in": 1, "tokens_out": 2},
             "error": None,
             "interrupted": False,
+            "terminal_found": True,
         }
 
         with patch("app.core.automation_manager.database") as db, patch(

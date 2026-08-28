@@ -68,6 +68,40 @@ def test_enqueue_persists_optional_fields(mock_db):
     assert got["instance_id"] == "inst-1"
 
 
+def test_session_has_unsettled_turns_counts_every_non_terminal_state(mock_db):
+    """The wait_session_idle busy predicate: ANY non-terminal row counts, in
+    one atomic statement (the split live/queued reads let a queued→running
+    flip land between them and read as idle — the 2026-08-28 automation race).
+    """
+    assert turns.session_has_unsettled_turns("s1") is False
+
+    t = turns.enqueue_turn("s1", "user", prompt="p")
+    assert turns.session_has_unsettled_turns("s1") is True  # queued
+
+    turns.start_turn(t["id"], run_id="run-1")
+    assert turns.session_has_unsettled_turns("s1") is True  # running
+
+    turns.interrupt_turn("s1", "stop")
+    assert turns.session_has_unsettled_turns("s1") is True  # interrupting
+
+    turns.escalate_to_draining(t["id"])
+    assert turns.session_has_unsettled_turns("s1") is True  # draining
+
+    turns.settle_turn(t["id"], "aborted", stop_reason="user_stop")
+    assert turns.session_has_unsettled_turns("s1") is False  # terminal
+
+    # Parked and completed rows are terminal — they never hold a session busy.
+    t2 = turns.enqueue_turn("s1", "user", prompt="p2")
+    turns.start_turn(t2["id"], run_id="run-2")
+    turns.park_turn(t2["id"], ["task-1"])
+    assert turns.session_has_unsettled_turns("s1") is False
+
+    # Scoped per session.
+    turns.enqueue_turn("s2", "user", prompt="other")
+    assert turns.session_has_unsettled_turns("s1") is False
+    assert turns.session_has_unsettled_turns("s2") is True
+
+
 # ---------------------------------------------------------------------------
 # Ad-hoc terminal history rows
 # ---------------------------------------------------------------------------

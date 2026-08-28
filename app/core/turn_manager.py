@@ -532,12 +532,16 @@ def _next_interval(interval: float, poll_interval: float) -> float:
 
 
 def _session_is_idle(session_id: str) -> bool:
-    """No live turn AND no queued turns. Blocking (two reads) — ONE thread hop
-    per check rather than two."""
-    return (
-        turns.get_live_turn(session_id) is None
-        and not turns.get_queued_turns(session_id)
-    )
+    """No turn row in ANY non-terminal state — one atomic read.
+
+    This must be a SINGLE statement (``turns.session_has_unsettled_turns``),
+    never separate live/queued reads: the queued→running handoff moves a turn
+    from the second-checked set into the first-checked set, so a two-read
+    predicate that straddled ``start_turn``'s commit saw neither and declared
+    a session idle while its turn was running (the automation
+    empty-"completed" run race, 2026-08-28). Blocking — call off the loop.
+    """
+    return not turns.session_has_unsettled_turns(session_id)
 
 
 async def wait_settled(

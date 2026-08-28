@@ -601,6 +601,40 @@ class TestRunAsSession:
         db.record_automation_run_success.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_unterminated_log_fails_run_instead_of_empty_success(self, manager):
+        """Regression for the 2026-08-28 race: the wait returned while the turn
+        was still running, so the event log had NO terminal turn event yet —
+        and ``_final_turn_outcome`` shaped that exactly like a clean empty
+        completion, stamping the run "completed" with an empty response, 0
+        tokens and $0 while the real turn kept streaming. A log without a
+        terminal event for the submitted turn must fail the run, never
+        succeed it silently."""
+        # A turn that has started and streamed text but has not settled: the
+        # fake log minus its trailing terminal event.
+        log = _fake_event_log("half an answer")[:-1]
+        assert not any(
+            ev["event_type"].startswith("turn.")
+            and ev["event_type"] != "turn.started"
+            for ev in log
+        )
+        stack, db, _submit, _wait, _int = _session_run_env(log=log)
+        with stack:
+            with pytest.raises(RuntimeError, match="no terminal event"):
+                await manager._execute_run(self._automation(), "run-s9", "do it", {})
+
+        completed = [
+            c.kwargs for c in db.update_automation_run.call_args_list
+            if c.kwargs.get("status") == "completed"
+        ]
+        assert not completed, "an unterminated log must never stamp completed"
+        failed = [
+            c.kwargs for c in db.update_automation_run.call_args_list
+            if c.kwargs.get("status") == "failed"
+        ]
+        assert failed and "no terminal event" in failed[0]["error"]
+        db.record_automation_run_success.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_handoff_successor_outcome_wins_via_last_turn(self, manager):
         """A hand-off (failover retry / auto-continue) is enqueued by the
         scheduler as a NEW turn; ``wait_session_idle`` only returns once the
