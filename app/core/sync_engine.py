@@ -6,22 +6,314 @@ watching the same session.
 """
 
 import asyncio
+import json
 import logging
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
+from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Set, Tuple
 
 from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
 
-# Upper bound on any single outbound send. A half-open connection (client
-# vanished uncleanly) never raises — the send just blocks forever once the
-# socket buffer fills, and one dead device would then stall broadcast_event's
-# sequential fan-out (which the turn pump awaits, freezing event recording for
-# every device). Mirrors app.api.ws_utils.WS_SEND_TIMEOUT_SECONDS; duplicated
-# locally because core must not import the api layer.
-_SEND_TIMEOUT_SECONDS = 10.0
+# ---------------------------------------------------------------------------
+# Outbound WebSocket delivery model (W2)
+# ---------------------------------------------------------------------------
+# Every connection owns a bounded queue plus a dedicated writer task. Producers
+# (the turn pump's broadcast leg, notification fan-out, usage snapshots, ...)
+# only ever ENQUEUE — they never await a socket. Before this, ``broadcast_event``
+# awaited each device's ``send_text`` serially, so one half-open client (phone
+# locked, cellular NAT timeout) stalled the producer for up to the send timeout
+# PER FRAME PER DEVICE. The producer is the turn pump, so that stall froze SDK
+# event consumption and the TurnRecorder — and therefore SSE delivery to EVERY
+# device, not just the sick one.
+#
+# Ordering: each connection has exactly one writer task draining one FIFO deque,
+# so frames for a given connection are delivered in enqueue order. There is no
+# cross-connection ordering guarantee, and there never was.
+
+# Upper bound on any single outbound send performed by a writer task. A
+# half-open connection (client vanished uncleanly) never raises — the send just
+# blocks forever once the socket buffer fills. This timeout no longer governs
+# any producer's progress (producers only enqueue); it purely bounds how long a
+# writer waits before declaring its own socket dead, so it can be aggressive.
+# Mirrors app.api.ws_utils.WS_SEND_TIMEOUT_SECONDS; duplicated locally because
+# core must not import the api layer.
+_SEND_TIMEOUT_SECONDS = 2.5
+
+# Depth of a connection's outbound queue. Sized for a burst of lifecycle/tool
+# frames from a fast turn (the render frames ride SSE, not this leg) while still
+# capping per-connection memory at a few hundred small JSON strings.
+_OUTBOUND_QUEUE_MAXSIZE = 256
+
+# ---------------------------------------------------------------------------
+# Overflow policy
+# ---------------------------------------------------------------------------
+# What still rides this WS leg is lifecycle/coordination, not render content:
+# ``done``, ``error``, ``tool_use``/``tool_result`` (they maintain the client's
+# pendingTools set), permission and question frames, session/queue updates,
+# notifications. Silently dropping any of those leaves the client incoherent —
+# a spinner that never stops, a permission modal that never appears, a tool card
+# stuck "running". So the policy is two-tier:
+#
+#   1. COALESCABLE frames — those carrying a COMPLETE replacement snapshot,
+#      where the newest one alone is sufficient and the older one is pure waste
+#      (``usage_snapshot``, ``tabs_sync``, ``session_attention`` per session,
+#      ``queue_updated`` per session). These are collapsed IN PLACE at enqueue
+#      time: the queued frame's payload is overwritten with the newer one and
+#      keeps its queue position, so ordering relative to other frame types is
+#      preserved and the client never sees a stale snapshot. A coalescable
+#      frame therefore never contributes more than one slot per key.
+#
+#   2. EVERYTHING ELSE — no safe drop exists, so the connection is dropped
+#      instead: the writer is killed, the socket closed, the device pruned from
+#      the registry. The client reconnects and resyncs from durable state (the
+#      SSE event feed's cursor resume, the /live snapshot, and the
+#      pending_permissions / pending_questions replay), which is exactly the
+#      path a network drop already takes. A disconnect the client recovers from
+#      beats a silently truncated stream it cannot detect.
+_COALESCABLE_SESSION_EVENTS = frozenset({"queue_updated"})
+_COALESCABLE_USER_FRAMES = frozenset({"usage_snapshot", "tabs_sync"})
+
+# Detached teardown tasks (socket close + registry reap) spawned from the
+# non-blocking enqueue path. Held so they are not garbage-collected mid-flight.
+_background_tasks: Set["asyncio.Task[Any]"] = set()
+
+
+def _spawn_detached(coro: Awaitable[None], name: str) -> None:
+    """Run ``coro`` as a fire-and-forget task, keeping a strong reference.
+
+    Used from synchronous, non-blocking code paths (``_ConnectionWriter.enqueue``)
+    that must not await anything.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:  # no loop (interpreter teardown / sync unit context)
+        return
+    task = loop.create_task(coro, name=name)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+def _session_coalesce_key(event_type: str, session_id: str) -> Optional[Tuple[Any, ...]]:
+    """Coalescing key for a session-scoped SyncEvent, or None if it must not drop."""
+    if event_type in _COALESCABLE_SESSION_EVENTS:
+        return ("session", event_type, session_id)
+    return None
+
+
+def _user_coalesce_key(message: Dict[str, Any]) -> Optional[Tuple[Any, ...]]:
+    """Coalescing key for a user-scoped WS frame, or None if it must not drop."""
+    mtype = message.get("type")
+    if mtype in _COALESCABLE_USER_FRAMES:
+        return ("user", mtype)
+    if mtype == "session_attention":
+        # Whole-state ("N items pending for this session", 0 clears): the newest
+        # count for a session fully supersedes any earlier one.
+        return ("user", mtype, message.get("session_id"))
+    return None
+
+
+@dataclass
+class _OutboundFrame:
+    """One pre-serialized text frame waiting on a connection's writer queue."""
+    text: str
+    coalesce_key: Optional[Tuple[Any, ...]] = None
+
+
+class _ConnectionWriter:
+    """Bounded outbound queue + dedicated writer task for a single WebSocket.
+
+    Producers call :meth:`enqueue`, which is fully synchronous and never awaits.
+    The writer task owns the socket: it is the ONLY place an outbound send is
+    awaited, so a slow peer costs exactly one stalled task — its own.
+
+    Lifecycle: :meth:`start` on connect (idempotent), :meth:`aclose` on
+    disconnect (cancels and awaits the task, so nothing leaks), and
+    ``SyncEngine.shutdown`` for process teardown. Any exception inside the
+    writer is contained: it kills that one connection, never the loop.
+    """
+
+    def __init__(
+        self,
+        websocket: Any,
+        *,
+        label: str,
+        maxsize: int = _OUTBOUND_QUEUE_MAXSIZE,
+        on_sent: Optional[Callable[[], None]] = None,
+    ) -> None:
+        self._websocket = websocket
+        self._label = label
+        self._maxsize = maxsize
+        self._on_sent = on_sent
+        self._on_dead: Optional[Callable[[], Awaitable[None]]] = None
+        self._pending: Deque[_OutboundFrame] = deque()
+        self._coalescable: Dict[Tuple[Any, ...], _OutboundFrame] = {}
+        self._wakeup = asyncio.Event()
+        self._task: Optional["asyncio.Task[None]"] = None
+        self._dead = False
+        self._reap = True
+        # Observability: frames superseded by coalescing, and the reason this
+        # writer died (None while healthy).
+        self.coalesced = 0
+        self.death_reason: Optional[str] = None
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def start(self) -> None:
+        """Create the writer task if it doesn't exist yet. Idempotent."""
+        if self._task is not None or self._dead:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # no loop yet — frames buffer until a start() with one
+        self._task = loop.create_task(self._run(), name=f"ws-writer:{self._label}")
+
+    def set_on_dead(self, hook: Optional[Callable[[], Awaitable[None]]]) -> None:
+        """Register the registry-reap callback fired when this writer dies."""
+        self._on_dead = hook
+
+    @property
+    def alive(self) -> bool:
+        return not self._dead
+
+    @property
+    def depth(self) -> int:
+        """Frames currently queued (test/metrics visibility)."""
+        return len(self._pending)
+
+    async def aclose(self, *, close_socket: bool = False) -> None:
+        """Stop the writer, awaiting its task so nothing is left pending.
+
+        Deliberate teardown: the reap hook is suppressed (the caller is already
+        removing this connection from the registry). Idempotent.
+        """
+        self._reap = False
+        self._dead = True
+        task, self._task = self._task, None
+        self._wakeup.set()
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001 — teardown must never propagate
+                logger.debug("ws-writer %s errored during close", self._label, exc_info=True)
+        self._pending.clear()
+        self._coalescable.clear()
+        if close_socket:
+            _spawn_detached(self._close_socket(), f"ws-writer-close:{self._label}")
+
+    async def _close_socket(self) -> None:
+        try:
+            await asyncio.wait_for(self._websocket.close(), _SEND_TIMEOUT_SECONDS)
+        except Exception:  # noqa: BLE001 — the socket is already a zombie
+            pass
+
+    def _mark_dead(self, reason: str) -> None:
+        """Kill this connection. Synchronous: safe from the enqueue path.
+
+        The socket close and the registry reap run detached so no producer ever
+        waits on them.
+        """
+        if self._dead:
+            return
+        self._dead = True
+        self.death_reason = reason
+        self._pending.clear()
+        self._coalescable.clear()
+        self._wakeup.set()
+        _spawn_detached(self._teardown(), f"ws-writer-teardown:{self._label}")
+
+    async def _teardown(self) -> None:
+        await self._close_socket()
+        hook = self._on_dead
+        if self._reap and hook is not None:
+            try:
+                await hook()
+            except Exception:  # noqa: BLE001
+                logger.debug("ws-writer %s reap hook failed", self._label, exc_info=True)
+
+    # -- producer side (never awaits) --------------------------------------
+
+    def enqueue(self, text: str, coalesce_key: Optional[Tuple[Any, ...]] = None) -> bool:
+        """Queue one pre-serialized text frame. Never blocks, never awaits.
+
+        Returns False when the frame was not accepted, which always means the
+        connection is finished: it has been marked dead and its socket close +
+        reap are already in flight. Callers should prune it from their registry.
+        """
+        if self._dead:
+            return False
+        if coalesce_key is not None:
+            superseded = self._coalescable.get(coalesce_key)
+            if superseded is not None:
+                # Newest whole-state snapshot wins, in the position the older
+                # one already held (see "Overflow policy" above).
+                superseded.text = text
+                self.coalesced += 1
+                self._wakeup.set()
+                return True
+        if len(self._pending) >= self._maxsize:
+            logger.warning(
+                "ws-writer %s: outbound queue full (%d frames) — dropping connection; "
+                "the client resyncs from the event feed on reconnect",
+                self._label, self._maxsize,
+            )
+            self._mark_dead("queue_overflow")
+            return False
+        frame = _OutboundFrame(text=text, coalesce_key=coalesce_key)
+        self._pending.append(frame)
+        if coalesce_key is not None:
+            self._coalescable[coalesce_key] = frame
+        self._wakeup.set()
+        if self._task is None:
+            self.start()
+        return True
+
+    # -- consumer side -----------------------------------------------------
+
+    async def _run(self) -> None:
+        """Drain the queue onto the socket, one frame at a time, in order."""
+        try:
+            while True:
+                if not self._pending:
+                    self._wakeup.clear()
+                    # Re-check after clear: producers are synchronous and set
+                    # the event AFTER appending, so this ordering cannot lose a
+                    # wakeup.
+                    if not self._pending:
+                        await self._wakeup.wait()
+                    if self._dead:
+                        return
+                    continue
+                frame = self._pending.popleft()
+                key = frame.coalesce_key
+                if key is not None and self._coalescable.get(key) is frame:
+                    del self._coalescable[key]
+                try:
+                    await asyncio.wait_for(
+                        self._websocket.send_text(frame.text), _SEND_TIMEOUT_SECONDS
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # noqa: BLE001 — includes TimeoutError
+                    logger.warning(
+                        "ws-writer %s: send failed (%s) — dropping connection",
+                        self._label, e,
+                    )
+                    self._mark_dead("send_failed")
+                    return
+                if self._on_sent is not None:
+                    self._on_sent()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — one bad connection must not kill the loop
+            logger.warning("ws-writer %s crashed", self._label, exc_info=True)
+            self._mark_dead("writer_crashed")
 
 
 @dataclass
@@ -51,23 +343,41 @@ class DeviceConnection:
     websocket: WebSocket
     connected_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    writer: _ConnectionWriter = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        self.writer = _ConnectionWriter(
+            self.websocket,
+            label=f"device={self.device_id} session={self.session_id}",
+            on_sent=self._touch,
+        )
+
+    def _touch(self) -> None:
+        self.last_activity = datetime.now(timezone.utc)
+
+    def send_text(self, text: str, coalesce_key: Optional[Tuple[Any, ...]] = None) -> bool:
+        """Hand one pre-serialized frame to this device's writer (non-blocking).
+
+        Returns False if the connection is finished and must be pruned.
+        """
+        self.writer.start()
+        return self.writer.enqueue(text, coalesce_key)
 
     async def send_event(self, event: SyncEvent) -> bool:
-        """Send an event to this device. Returns False if send failed.
+        """Queue an event for this device. Returns False if the connection is dead.
 
-        Bounded: a send that can't complete within _SEND_TIMEOUT_SECONDS (a
-        half-open socket with a full buffer) counts as a failure instead of
-        blocking the caller indefinitely.
+        Non-blocking despite being a coroutine: it performs no awaits, so the
+        caller resumes without ever yielding to the socket. Delivery (and the
+        only bounded await) happens on this connection's writer task.
         """
         try:
-            await asyncio.wait_for(
-                self.websocket.send_json(event.to_dict()), _SEND_TIMEOUT_SECONDS
-            )
-            self.last_activity = datetime.now(timezone.utc)
+            text = json.dumps(event.to_dict(), separators=(",", ":"), default=str)
+        except (TypeError, ValueError) as e:
+            # A non-serializable payload is a bug in that one message, not a
+            # sign the socket died — drop the frame, keep the connection.
+            logger.error("Failed to serialize event for device %s: %s", self.device_id, e)
             return True
-        except Exception as e:
-            logger.warning(f"Failed to send event to device {self.device_id}: {e}")
-            return False
+        return self.send_text(text)
 
 
 @dataclass
@@ -78,22 +388,35 @@ class UserDeviceConnection:
     websocket: WebSocket
     connected_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    writer: _ConnectionWriter = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        self.writer = _ConnectionWriter(
+            self.websocket,
+            label=f"user={self.user_id} device={self.device_id}",
+            on_sent=self._touch,
+        )
+
+    def _touch(self) -> None:
+        self.last_activity = datetime.now(timezone.utc)
+
+    def send_text(self, text: str, coalesce_key: Optional[Tuple[Any, ...]] = None) -> bool:
+        """Hand one pre-serialized frame to this device's writer (non-blocking)."""
+        self.writer.start()
+        return self.writer.enqueue(text, coalesce_key)
 
     async def send_json(self, data: Dict[str, Any]) -> bool:
-        """Send JSON data to this device. Returns False if send failed.
+        """Queue JSON data for this device. Returns False if the connection is dead.
 
-        Bounded: a send that can't complete within _SEND_TIMEOUT_SECONDS (a
-        half-open socket with a full buffer) counts as a failure instead of
-        blocking the caller indefinitely.
+        Non-blocking despite being a coroutine (no awaits): the send itself
+        happens on this connection's writer task.
         """
         try:
-            await asyncio.wait_for(self.websocket.send_json(data), _SEND_TIMEOUT_SECONDS)
-            self.last_activity = datetime.now(timezone.utc)
+            text = json.dumps(data, separators=(",", ":"), default=str)
+        except (TypeError, ValueError) as e:
+            logger.error("Failed to serialize frame for device %s: %s", self.device_id, e)
             return True
-        except Exception as e:
-            logger.warning(f"Failed to send to device {self.device_id}: {e}")
-            return False
-
+        return self.send_text(text, _user_coalesce_key(data))
 
 class SyncEngine:
     """
@@ -133,23 +456,46 @@ class SyncEngine:
             if session_id not in self._connections:
                 self._connections[session_id] = {}
 
-            # Close existing connection for this device if any
-            if device_id in self._connections[session_id]:
-                old_conn = self._connections[session_id][device_id]
-                try:
-                    await old_conn.websocket.close()
-                except Exception:
-                    pass
+            # Close existing connection for this device if any. aclose() cancels
+            # and awaits the old writer task (no leak) and closes its socket
+            # detached, so a zombie peer can't stall registration.
+            old_conn = self._connections[session_id].pop(device_id, None)
+            if old_conn is not None:
+                await old_conn.writer.aclose(close_socket=True)
 
             connection = DeviceConnection(
                 device_id=device_id,
                 session_id=session_id,
                 websocket=websocket
             )
+            # Reap hook: if the writer dies on its own (dead socket / overflow)
+            # it prunes itself from this registry instead of lingering as a
+            # zombie entry that every later broadcast has to rediscover.
+            connection.writer.set_on_dead(
+                lambda: self._reap_device(device_id, session_id, connection)
+            )
+            connection.writer.start()
             self._connections[session_id][device_id] = connection
 
-            logger.info(f"Device {device_id} registered to watch session {session_id}")
+            logger.info("Device %s registered to watch session %s", device_id, session_id)
             return connection
+
+    async def _reap_device(
+        self, device_id: str, session_id: str, connection: "DeviceConnection"
+    ) -> None:
+        """Drop a device whose writer died. Identity-checked so a newer
+        connection for the same device_id is never collateral damage."""
+        async with self._lock:
+            devices = self._connections.get(session_id)
+            if devices is None or devices.get(device_id) is not connection:
+                return
+            del devices[device_id]
+            if not devices:
+                self._connections.pop(session_id, None)
+        logger.info(
+            "Device %s dropped from session %s (writer died: %s)",
+            device_id, session_id, connection.writer.death_reason,
+        )
 
     async def unregister_device(self, device_id: str, session_id: str, websocket: Optional[WebSocket] = None):
         """Unregister a device from watching a session.
@@ -161,22 +507,34 @@ class SyncEngine:
                       uses this exact websocket. This prevents race conditions where
                       a new connection is established before cleanup of the old one.
         """
+        writer: Optional[_ConnectionWriter] = None
         async with self._lock:
-            if session_id in self._connections:
-                if device_id in self._connections[session_id]:
+            devices = self._connections.get(session_id)
+            if devices is not None:
+                conn = devices.get(device_id)
+                if conn is not None:
                     # If websocket is provided, only unregister if it matches
-                    if websocket is not None:
-                        current_conn = self._connections[session_id][device_id]
-                        if current_conn.websocket is not websocket:
-                            logger.debug(f"Device {device_id} has new connection, skipping unregister for old websocket")
-                            return
+                    if websocket is not None and conn.websocket is not websocket:
+                        logger.debug(
+                            "Device %s has new connection, skipping unregister for old websocket",
+                            device_id,
+                        )
+                        return
 
-                    del self._connections[session_id][device_id]
-                    logger.info(f"Device {device_id} unregistered from session {session_id}")
+                    del devices[device_id]
+                    writer = conn.writer
+                    logger.info(
+                        "Device %s unregistered from session %s", device_id, session_id
+                    )
 
                 # Clean up empty session entries
-                if not self._connections[session_id]:
-                    del self._connections[session_id]
+                if not devices:
+                    self._connections.pop(session_id, None)
+
+        # Outside the lock: cancels the writer task and AWAITS it, so no writer
+        # outlives its connection.
+        if writer is not None:
+            await writer.aclose()
 
     def get_connected_devices(self, session_id: str) -> List[str]:
         """Get list of device IDs watching a session"""
@@ -228,8 +586,8 @@ class SyncEngine:
                     removed += 1
         if removed:
             logger.info(
-                f"Swept {removed} orphaned session lock(s). "
-                f"Remaining: session_locks={len(self._session_locks)}"
+                "Swept %d orphaned session lock(s). Remaining: session_locks=%d",
+                removed, len(self._session_locks),
             )
         return removed
 
@@ -252,13 +610,18 @@ class SyncEngine:
             if session_id in self._session_locks:
                 current_owner = self._session_locks[session_id]
                 if current_owner != device_id:
-                    logger.debug(f"Session {session_id[:8]} lock denied for device {device_id[:8]}, owned by {current_owner[:8]}")
+                    logger.debug(
+                        "Session %s lock denied for device %s, owned by %s",
+                        session_id, device_id, current_owner,
+                    )
                     return False, current_owner
                 # Same device already owns it
                 return True, None
 
             self._session_locks[session_id] = device_id
-            logger.debug(f"Session {session_id[:8]} lock acquired by device {device_id[:8]}")
+            logger.debug(
+                "Session %s lock acquired by device %s", session_id, device_id
+            )
             return True, None
 
     async def release_session_lock(self, session_id: str, device_id: str) -> bool:
@@ -278,11 +641,16 @@ class SyncEngine:
                 return True  # No lock exists, consider it released
 
             if self._session_locks[session_id] != device_id:
-                logger.warning(f"Device {device_id[:8]} tried to release lock on session {session_id[:8]} owned by {self._session_locks[session_id][:8]}")
+                logger.warning(
+                    "Device %s tried to release lock on session %s owned by %s",
+                    device_id, session_id, self._session_locks[session_id],
+                )
                 return False
 
             del self._session_locks[session_id]
-            logger.debug(f"Session {session_id[:8]} lock released by device {device_id[:8]}")
+            logger.debug(
+                "Session %s lock released by device %s", session_id, device_id
+            )
             return True
 
     def get_session_lock_owner(self, session_id: str) -> Optional[str]:
@@ -301,61 +669,69 @@ class SyncEngine:
         """
         Broadcast an event to all devices watching the session.
 
+        This runs inside the turn pump's broadcast leg, so it must never await
+        a socket: every device gets a NON-BLOCKING enqueue onto its own writer
+        queue (W2). A device that cannot keep up stalls only its own writer.
+
         Args:
             event: The event to broadcast
             exclude_device_id: Device ID to exclude (usually the source device)
         """
-        import json
-
         session_id = event.session_id
 
         # Snapshot connections under lock to avoid TOCTOU race with
         # register_device/unregister_device which modify _connections under lock.
         async with self._lock:
-            if session_id not in self._connections:
-                logger.debug(f"No connections for session {session_id}, skipping broadcast")
+            devices = self._connections.get(session_id)
+            if not devices:
+                # Lazy %-args: this is a per-event hot path (W9).
+                logger.debug("No connections for session %s, skipping broadcast", session_id)
                 return
 
             # Get connections to broadcast to
-            connections = list(self._connections[session_id].values())
-        logger.debug(f"Broadcasting {event.event_type} to {len(connections)} devices for session {session_id[:8]}...")
+            connections = list(devices.values())
+        logger.debug(
+            "Broadcasting %s to %d devices for session %s",
+            event.event_type, len(connections), session_id,
+        )
 
         # Pre-serialize once so a serialization error doesn't disconnect all devices.
         # default=str: event payloads can include PostgreSQL datetime values (e.g. a
         # queued message's created_at). Without it those raise here and the event is
         # dropped for every device — e.g. queue_updated never reaching the client.
         try:
-            event_text = json.dumps(event.to_dict(), default=str)
+            event_text = json.dumps(event.to_dict(), separators=(",", ":"), default=str)
         except (TypeError, ValueError) as e:
-            logger.error(f"Failed to serialize event {event.event_type} for session {session_id[:8]}: {e}")
+            logger.error(
+                "Failed to serialize event %s for session %s: %s",
+                event.event_type, session_id, e,
+            )
             return
 
-        # Send to all devices except the excluded one
+        coalesce_key = _session_coalesce_key(event.event_type, session_id)
+
+        # Send to all devices except the excluded one. No awaits in this loop —
+        # a producer stall here is exactly the W2 bug.
         failed_devices = []
         for conn in connections:
             if exclude_device_id and conn.device_id == exclude_device_id:
-                logger.debug(f"Skipping source device {conn.device_id[:8]}")
+                logger.debug("Skipping source device %s", conn.device_id)
                 continue
 
-            logger.debug(f"Sending {event.event_type} to device {conn.device_id[:8]}")
-            try:
-                # Bounded: this fan-out runs inside the turn pump's broadcast
-                # leg — ONE half-open device must not stall event recording
-                # (and therefore the transcript) for everyone else.
-                await asyncio.wait_for(
-                    conn.websocket.send_text(event_text), _SEND_TIMEOUT_SECONDS
-                )
-                conn.last_activity = datetime.now(timezone.utc)
-            except Exception as e:
-                logger.warning(f"Failed to send event to device {conn.device_id}: {e}")
+            logger.debug("Queueing %s for device %s", event.event_type, conn.device_id)
+            if not conn.send_text(event_text, coalesce_key):
                 failed_devices.append(conn.device_id)
 
-        # Clean up failed connections (only actual send failures, not serialization)
+        # Clean up connections the writer refused (dead / overflowed). Their
+        # sockets are already being closed detached by the writer.
         if failed_devices:
             async with self._lock:
-                for device_id in failed_devices:
-                    if session_id in self._connections:
-                        self._connections[session_id].pop(device_id, None)
+                devices = self._connections.get(session_id)
+                if devices is not None:
+                    for device_id in failed_devices:
+                        devices.pop(device_id, None)
+                    if not devices:
+                        self._connections.pop(session_id, None)
 
     async def broadcast_message_added(
         self,
@@ -489,15 +865,41 @@ class SyncEngine:
             # Note: If device already registered, it's the same websocket being re-registered
             # Just overwrite the entry - no need to close
 
+            # A re-register for the same device replaces the entry; retire the
+            # old writer so its task doesn't leak.
+            old_conn = self._user_connections[user_id].pop(device_id, None)
+            if old_conn is not None and old_conn.websocket is not websocket:
+                await old_conn.writer.aclose()
+
             connection = UserDeviceConnection(
                 device_id=device_id,
                 user_id=user_id,
                 websocket=websocket
             )
+            connection.writer.set_on_dead(
+                lambda: self._reap_user_device(user_id, device_id, connection)
+            )
+            connection.writer.start()
             self._user_connections[user_id][device_id] = connection
 
-            logger.debug(f"User device registered: user={user_id[:8]}... device={device_id[:8]}...")
+            logger.debug("User device registered: user=%s device=%s", user_id, device_id)
             return connection
+
+    async def _reap_user_device(
+        self, user_id: str, device_id: str, connection: "UserDeviceConnection"
+    ) -> None:
+        """Drop a user device whose writer died (identity-checked)."""
+        async with self._user_lock:
+            devices = self._user_connections.get(user_id)
+            if devices is None or devices.get(device_id) is not connection:
+                return
+            del devices[device_id]
+            if not devices:
+                self._user_connections.pop(user_id, None)
+        logger.debug(
+            "User device %s dropped for user %s (writer died: %s)",
+            device_id, user_id, connection.writer.death_reason,
+        )
 
     async def unregister_user_device(
         self,
@@ -506,22 +908,33 @@ class SyncEngine:
         websocket: Optional[WebSocket] = None
     ):
         """Unregister a device from user connection tracking."""
+        writer: Optional[_ConnectionWriter] = None
         async with self._user_lock:
-            if user_id in self._user_connections:
-                if device_id in self._user_connections[user_id]:
+            devices = self._user_connections.get(user_id)
+            if devices is not None:
+                conn = devices.get(device_id)
+                if conn is not None:
                     # If websocket is provided, only unregister if it matches
-                    if websocket is not None:
-                        current_conn = self._user_connections[user_id][device_id]
-                        if current_conn.websocket is not websocket:
-                            logger.debug(f"User device {device_id[:8]} has new connection, skipping unregister")
-                            return
+                    if websocket is not None and conn.websocket is not websocket:
+                        logger.debug(
+                            "User device %s has new connection, skipping unregister",
+                            device_id,
+                        )
+                        return
 
-                    del self._user_connections[user_id][device_id]
-                    logger.debug(f"User device unregistered: user={user_id[:8]}... device={device_id[:8]}...")
+                    del devices[device_id]
+                    writer = conn.writer
+                    logger.debug(
+                        "User device unregistered: user=%s device=%s", user_id, device_id
+                    )
 
                 # Clean up empty user entries
-                if not self._user_connections[user_id]:
-                    del self._user_connections[user_id]
+                if not devices:
+                    self._user_connections.pop(user_id, None)
+
+        # Outside the lock: cancel + await the writer task so nothing leaks.
+        if writer is not None:
+            await writer.aclose()
 
     def get_user_device_count(self, user_id: str) -> int:
         """Get number of devices connected for a user."""
@@ -562,25 +975,13 @@ class SyncEngine:
             "source_device_id": source_device_id
         }
 
-        failed_devices = []
-        for device_id, conn in targets:
-            success = await conn.send_json(message)
-            if not success:
-                failed_devices.append(device_id)
-
-        # Clean up failed connections under the lock
-        if failed_devices:
-            async with self._user_lock:
-                for device_id in failed_devices:
-                    if device_id in self._user_connections.get(user_id, {}):
-                        del self._user_connections[user_id][device_id]
-
-                if user_id in self._user_connections and not self._user_connections[user_id]:
-                    del self._user_connections[user_id]
+        failed_devices = self._fan_out_to_user_devices(user_id, targets, message)
 
         sent_count = len(targets) - len(failed_devices)
         if sent_count > 0:
-            logger.debug(f"Broadcast tabs_sync to {sent_count} devices for user {user_id[:8]}...")
+            logger.debug("Broadcast tabs_sync to %d devices for user %s", sent_count, user_id)
+        if failed_devices:
+            await self._prune_user_devices(user_id, failed_devices)
 
     async def _broadcast_user_message(
         self,
@@ -592,11 +993,12 @@ class SyncEngine:
 
         Private helper used by user-level broadcast methods.
 
-        Takes a snapshot of connections under the lock, then releases before
-        performing potentially-slow WebSocket sends (same pattern as
-        broadcast_tabs_updated).
+        Takes a snapshot of connections under the lock, releases it, then hands
+        the frame to each device's writer queue. The fan-out itself performs NO
+        awaits (W2), so a half-open device can never stall the caller — which on
+        several of these paths is the turn pump.
         """
-        # Snapshot connections under lock, then release before I/O
+        # Snapshot connections under lock, then release before fan-out
         async with self._user_lock:
             user_devices = self._user_connections.get(user_id, {})
             if not user_devices:
@@ -609,20 +1011,51 @@ class SyncEngine:
         if not targets:
             return
 
-        failed_devices = []
-        for device_id, conn in targets:
-            success = await conn.send_json(message)
-            if not success:
-                failed_devices.append(device_id)
-
-        # Clean up failed connections under the lock
+        failed_devices = self._fan_out_to_user_devices(user_id, targets, message)
         if failed_devices:
-            async with self._user_lock:
-                for device_id in failed_devices:
-                    if device_id in self._user_connections.get(user_id, {}):
-                        del self._user_connections[user_id][device_id]
-                if user_id in self._user_connections and not self._user_connections[user_id]:
-                    del self._user_connections[user_id]
+            await self._prune_user_devices(user_id, failed_devices)
+
+    # -- user fan-out helpers ------------------------------------------------
+
+    def _fan_out_to_user_devices(
+        self,
+        user_id: str,
+        targets: List[tuple],
+        message: Dict[str, Any],
+    ) -> List[str]:
+        """Serialize once and enqueue to every target. Never awaits.
+
+        Returns the device ids whose writer refused the frame (dead socket or
+        queue overflow) and must therefore be pruned.
+        """
+        try:
+            text = json.dumps(message, separators=(",", ":"), default=str)
+        except (TypeError, ValueError) as e:
+            # A bad payload is one message's bug, not a transport failure:
+            # drop the frame, keep every connection.
+            logger.error(
+                "Failed to serialize %s frame for user %s: %s",
+                message.get("type"), user_id, e,
+            )
+            return []
+
+        coalesce_key = _user_coalesce_key(message)
+        failed: List[str] = []
+        for device_id, conn in targets:
+            if not conn.send_text(text, coalesce_key):
+                failed.append(device_id)
+        return failed
+
+    async def _prune_user_devices(self, user_id: str, device_ids: List[str]) -> None:
+        """Remove finished user connections from the registry."""
+        async with self._user_lock:
+            devices = self._user_connections.get(user_id)
+            if devices is None:
+                return
+            for device_id in device_ids:
+                devices.pop(device_id, None)
+            if not devices:
+                self._user_connections.pop(user_id, None)
 
     async def broadcast_session_attention(
         self,
@@ -797,19 +1230,30 @@ class SyncEngine:
         if not targets:
             return
 
+        # Serialize once for the whole cluster fan-out, then enqueue without
+        # awaiting (W2). ``usage_snapshot`` is coalescable: it is a complete
+        # snapshot, so a newer one queued behind an older one simply replaces it.
+        try:
+            text = json.dumps(message, separators=(",", ":"), default=str)
+        except (TypeError, ValueError) as e:
+            logger.error("Failed to serialize usage_snapshot: %s", e)
+            return
+
+        coalesce_key = _user_coalesce_key(message)
         failed: List[tuple] = []
         for user_id, device_id, conn in targets:
-            success = await conn.send_json(message)
-            if not success:
+            if not conn.send_text(text, coalesce_key):
                 failed.append((user_id, device_id))
 
         if failed:
             async with self._user_lock:
                 for user_id, device_id in failed:
-                    if device_id in self._user_connections.get(user_id, {}):
-                        del self._user_connections[user_id][device_id]
-                    if user_id in self._user_connections and not self._user_connections[user_id]:
-                        del self._user_connections[user_id]
+                    devices = self._user_connections.get(user_id)
+                    if devices is None:
+                        continue
+                    devices.pop(device_id, None)
+                    if not devices:
+                        self._user_connections.pop(user_id, None)
 
     async def broadcast_branch_changed(
         self,
@@ -829,6 +1273,35 @@ class SyncEngine:
                 "branch_name": branch_name,
             }
         )
+
+    # ============= Process teardown =============
+
+    async def shutdown(self) -> None:
+        """Cancel every connection writer and clear the registries.
+
+        Called from the app's shutdown path so no writer task outlives the event
+        loop (otherwise uvicorn's reload/exit logs "Task was destroyed but it is
+        pending" once per connected device). Safe to call more than once, and
+        safe to call with nothing connected.
+        """
+        writers: List[_ConnectionWriter] = []
+        async with self._lock:
+            for devices in self._connections.values():
+                writers.extend(conn.writer for conn in devices.values())
+            self._connections.clear()
+        async with self._user_lock:
+            for devices in self._user_connections.values():
+                writers.extend(conn.writer for conn in devices.values())
+            self._user_connections.clear()
+
+        if not writers:
+            return
+        # aclose() suppresses each writer's reap hook, so no task races us for
+        # the (now empty) registries.
+        await asyncio.gather(
+            *(w.aclose() for w in writers), return_exceptions=True
+        )
+        logger.info("SyncEngine: shut down %d connection writer(s)", len(writers))
 
 
 # Global sync engine instance

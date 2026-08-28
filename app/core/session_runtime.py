@@ -34,6 +34,7 @@ Nothing calls this module yet — the transport/caller wiring is commits A6/A7.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from pathlib import Path
@@ -337,7 +338,26 @@ _WS_TRIMMED_RENDER_FRAMES = frozenset({
     "task_progress",
     "system",
     "usage_update",
+    # W3: the complete assistant text block and the thinking marker. The pump
+    # yields these AFTER the deltas that already carried the same content, and
+    # they are pure render payload: the frontend WS dispatcher has no case for
+    # either (they fall through to `default: break`), so every byte was
+    # serialized, fanned out to every watching device, parsed and discarded.
+    # The content still reaches every client on the SSE feed as coalesced
+    # deltas — this only stops the duplicate on the WS leg.
+    "text",
+    "thinking_block",
 })
+
+# W3: cap on the serialized size of a tool frame's ``input`` on the WS leg.
+# The frontend's `tool_use` / `subagent_tool_use` handlers read ONLY
+# `session_id` and `id` (they just maintain the pendingTools set); the rendered
+# arguments come from the SSE feed. A multi-MB Write/Edit payload was therefore
+# being fanned out to every device for nothing. The frame itself must still be
+# delivered (it is correctness-bearing for the pendingTools set), so the frame
+# is kept and only its oversized input is replaced by a marker.
+_WS_MAX_TOOL_INPUT_CHARS = 4096
+_WS_TOOL_INPUT_FRAMES = frozenset({"tool_use", "subagent_tool_use"})
 _WS_KEPT_SUBAGENT_FRAMES = frozenset({"subagent_tool_use", "subagent_tool_result"})
 
 # Frames that only the MODEL can produce. A steer is folded into a tool result,
@@ -367,6 +387,33 @@ _REDELIVERY_NOTE = (
     "again. If you have already acted on it, say so briefly instead of redoing "
     "the work.]"
 )
+
+
+def _cap_ws_tool_input(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Return ``event`` with an oversized tool ``input`` replaced by a marker.
+
+    Returns the SAME object when nothing needs capping; otherwise a shallow
+    COPY, because the recorder has already been handed this dict and persists
+    it — the WS leg must never mutate the recorded frame.
+    """
+    if event.get("type") not in _WS_TOOL_INPUT_FRAMES:
+        return event
+    raw = event.get("input")
+    if raw is None:
+        return event
+    try:
+        encoded = json.dumps(raw, default=str)
+    except (TypeError, ValueError):
+        encoded = repr(raw)
+    if len(encoded) <= _WS_MAX_TOOL_INPUT_CHARS:
+        return event
+    capped = dict(event)
+    capped["input"] = {
+        "_ws_truncated": True,
+        "_original_chars": len(encoded),
+        "_preview": encoded[:_WS_MAX_TOOL_INPUT_CHARS],
+    }
+    return capped
 
 
 def _is_trimmed_render_frame(event_type: Optional[str]) -> bool:
@@ -921,10 +968,15 @@ class SessionRuntime:
                 # lifecycle/tool frames hit the WS/broadcast leg (legacy :4155
                 # parity — without the trim, render content double-delivers).
                 if not _is_trimmed_render_frame(etype):
+                    ws_event = event
                     if isinstance(event, dict):
                         # FE cross-session guard tag (legacy :4148 parity).
                         event["session_id"] = self.session_id
-                    await self._broadcast(event)
+                        # W3: keep the frame, drop a multi-MB tool input that no
+                        # WS consumer reads (copies rather than mutating, so the
+                        # recorder's already-handed-over dict is untouched).
+                        ws_event = _cap_ws_tool_input(event)
+                    await self._broadcast(ws_event)
         finally:
             await recorder.close()
 

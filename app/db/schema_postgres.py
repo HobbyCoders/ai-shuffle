@@ -20,7 +20,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 83
+SCHEMA_VERSION = 84
 
 
 def create_postgres_schema(cursor) -> None:
@@ -104,6 +104,12 @@ def create_postgres_schema(cursor) -> None:
         )
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_projects_link_group ON projects(link_group_id)")
+    # Boot's orphaned-instance adoption scans DISTINCT instance_id here (v84).
+    # Guarded like idx_sessions_active below: on a database old enough to
+    # predate projects.instance_id the CREATE TABLE above is a no-op and the
+    # column only arrives in _run_column_migrations, which runs AFTER this pass.
+    if column_exists(cursor, "projects", "instance_id"):
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_projects_instance ON projects(instance_id)")
 
     # ------------------------------------------------------------------
     # 6. API users (for programmatic access with isolated workspaces)
@@ -223,6 +229,12 @@ def create_postgres_schema(cursor) -> None:
             fast BOOLEAN,
             mode TEXT,
             hidden BOOLEAN,
+            -- v84: materialized "this session is a delegated ProviderAgent
+            -- worker" flag. Replaces the per-row correlated
+            -- ``NOT EXISTS (SELECT 1 FROM turns ...)`` probe the sessions-list
+            -- queries used to carry (one index probe into ``turns`` per listed
+            -- row AND per COUNT(*) row). NULL/FALSE = a normal session.
+            is_worker BOOLEAN,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
             FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE SET NULL,
             FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL,
@@ -1335,6 +1347,10 @@ def create_postgres_schema(cursor) -> None:
 
     # -- usage_log
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_usage_log_created ON usage_log(created_at)")
+    # Per-session lookups (``get_all_session_usage`` on every session open, and
+    # the ``UPDATE usage_log SET session_id = NULL`` unlink in delete_session)
+    # sequentially scanned the whole ledger without this (v84).
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_usage_log_session ON usage_log(session_id)")
 
     # -- auth_sessions
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at)")
@@ -1586,6 +1602,13 @@ def create_postgres_schema(cursor) -> None:
             session_id TEXT NOT NULL,
             data JSONB NOT NULL,
             mtime_ms BIGINT NOT NULL,
+            -- v84: highest ``session_store_entries.id`` already folded into
+            -- ``data``. The fold is COALESCED (every few seconds / on read)
+            -- instead of running on every ~100ms streaming append, so the
+            -- summary has to know where it left off. Crash-safe: the fold is a
+            -- pure function of the entries, so whatever was not folded before a
+            -- crash is folded by the next append/read from this watermark.
+            folded_through_id BIGINT NOT NULL DEFAULT 0,
             PRIMARY KEY (project_key, session_id)
         )
     """)

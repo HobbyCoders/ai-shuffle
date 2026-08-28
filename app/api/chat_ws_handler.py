@@ -1245,7 +1245,11 @@ class ChatWebSocketHandler:
             if blob_ids:
                 payload["upload_blob_ids"] = blob_ids
 
-        turn_manager.submit(
+        # W6: ``submit`` performs up to three DB writes (run binding, wakeup
+        # supersede, enqueue). ``submit_async`` pays ONE thread hop for all
+        # three and still fires the kick on this loop, so the send path never
+        # blocks the worker's other sockets.
+        await turn_manager.submit_async(
             session_id,
             "user",
             prompt=prompt,
@@ -1320,7 +1324,7 @@ class ChatWebSocketHandler:
             # after its target settled cannot interrupt the successor turn.
             # Absent turn_id keeps the legacy session-scoped stop.
             target_turn_id = data.get("turn_id") or None
-            flipped = turn_manager.interrupt(
+            flipped = await turn_manager.interrupt_async(
                 session_id,
                 "stop",
                 stop_background=True,
@@ -1374,7 +1378,7 @@ class ChatWebSocketHandler:
         # (F6), so it can never cross a mid-turn CLI. Confirm unconditionally so
         # the frontend's replacement query is unblocked.
         try:
-            flipped = turn_manager.interrupt(session_id, "send_now")
+            flipped = await turn_manager.interrupt_async(session_id, "send_now")
             if flipped is not None:
                 # Cross-runner wake (see handle_stop) — latency only.
                 from app.core import turn_claim
@@ -1462,22 +1466,65 @@ class ChatWebSocketHandler:
         # Unified message resolution: DB -> JSONL -> SDK (V2: no live tier).
         sdk_session_id = session.get("sdk_session_id")
         working_dir = resolve_working_dir(dict(session))
+        worktree_id = session.get("worktree_id")
 
-        resolved = message_resolver.resolve(session_id, sdk_session_id, working_dir)
+        def _resolve_history_blocking() -> Dict[str, Any]:
+            """Every BLOCKING step of a session open, in ONE thread hop (W6).
+
+            Opening a session parses the whole JSONL transcript (sync file I/O
+            + a JSON parse of potentially megabytes) and then makes three more
+            synchronous DB calls. On the event loop that froze every other
+            WebSocket, SSE generator and HTTP request on the worker for the
+            duration; run as a unit off-loop it costs one thread hop.
+
+            Everything here either mutates ``messages`` (owned by this
+            coroutine, not yet published) or returns a value — no loop-bound
+            work, so it is safe on a worker thread.
+            """
+            resolved = message_resolver.resolve(
+                session_id, sdk_session_id, working_dir
+            )
+            messages = resolved.messages
+
+            # Post-processing: merge profile_id for JSONL-sourced messages
+            # (DB messages already include profile_id). Consume the
+            # ordered per-content queue so each user message gets its own profile
+            # even when the same prompt repeats under a changed profile, and carry
+            # that turn's profile onto its assistant/thinking rows (JSONL stores
+            # none) so each bubble keeps the profile that produced it instead of
+            # re-labelling to the session's CURRENT profile on a switch. Emit both
+            # the snake_case and camelCase keys the frontend may read.
+            if resolved.source == "jsonl":
+                from app.core.cost_utils import attach_turn_profile_ids
+                attach_turn_profile_ids(session_id, messages)
+
+            # Attach cost/duration metadata to final assistant messages
+            # (cached, O(N) — a cache MISS reads the whole message table).
+            from app.core.cost_utils import attach_cost_metadata
+            attach_cost_metadata(messages, session_id)
+
+            # Is the session currently streaming (late-joining device)? Busy
+            # truth from the durable runs table (v2 core) — a cache miss here is
+            # a DB read too.
+            from app.core import streaming_status
+            is_streaming = streaming_status.has_active_run(session_id)
+
+            # Worktree row for the link enrichment below.
+            worktree = (
+                database.get_worktree(worktree_id) if worktree_id else None
+            )
+            return {
+                "resolved": resolved,
+                "is_streaming": is_streaming,
+                "worktree": worktree,
+            }
+
+        loaded = await run_sync(_resolve_history_blocking)
+        resolved = loaded["resolved"]
         messages = resolved.messages
+        is_streaming = loaded["is_streaming"]
         logger.debug(f"Loaded {len(messages)} messages from {resolved.source} for session {session_id}")
-
-        # Post-processing: merge profile_id for JSONL-sourced messages
-        # (DB messages already include profile_id). Consume the
-        # ordered per-content queue so each user message gets its own profile even
-        # when the same prompt repeats under a changed profile, and carry that
-        # turn's profile onto its assistant/thinking rows (JSONL stores none) so
-        # each bubble keeps the profile that produced it instead of re-labelling to
-        # the session's CURRENT profile on a switch. Emit both the snake_case and
-        # camelCase keys the frontend may read.
-        if resolved.source == "jsonl":
-            from app.core.cost_utils import attach_turn_profile_ids
-            attach_turn_profile_ids(session_id, messages)
+        logger.debug(f"Session {session_id} streaming status: {is_streaming}")
 
         # Enrich session with usage/token data from resolver
         if resolved.usage:
@@ -1495,16 +1542,6 @@ class ChatWebSocketHandler:
                 session["total_tokens_out"] = resolved.usage.get("total_tokens_out", 0)
 
             logger.debug(f"Loaded context tokens for session {session_id}: context={session['context_tokens']}")
-
-        # Attach cost/duration metadata to final assistant messages (cached, O(N))
-        from app.core.cost_utils import attach_cost_metadata
-        attach_cost_metadata(messages, session_id)
-
-        # Check if session is currently streaming (late-joining device) — busy
-        # truth from the durable runs table (v2 core).
-        from app.core import streaming_status
-        is_streaming = streaming_status.has_active_run(session_id)
-        logger.debug(f"Session {session_id} streaming status: {is_streaming}")
 
         # Also check for queries that are about to stream but haven't
         # started yet (gap between session creation and first stream_start
@@ -1524,9 +1561,8 @@ class ChatWebSocketHandler:
         # Add worktree info if session is linked to a worktree. Worktree sessions
         # are always reopenable — we never null worktree_id; worktree_deleted only
         # means "not materialized right now" (recreated on next send). See helper.
-        worktree_id = session.get("worktree_id")
-        worktree = database.get_worktree(worktree_id) if worktree_id else None
-        wt_meta = enrich_session_worktree_meta(session, worktree)
+        # (The row was read in the off-loop block above.)
+        wt_meta = enrich_session_worktree_meta(session, loaded["worktree"])
         if wt_meta:
             session["worktree_id"] = wt_meta["worktree_id"]
             session["worktree_branch"] = wt_meta["worktree_branch"]
@@ -1928,8 +1964,10 @@ class ChatWebSocketHandler:
         # ``queued_messages`` row. ``submit`` kicks the scheduler, which starts it
         # immediately when the session is idle, or leaves it queued behind the
         # live turn (busy-write guard implicit — the unique live index prevents a
-        # double-start). Called on the loop so the kick can schedule. The
-        # queue_updated frame is re-sourced from the turns table (B3).
+        # double-start). The
+        # queue_updated frame is re-sourced from the turns table (B3). W6: the
+        # enqueue writes run in ONE worker-thread hop (``submit_async``) while
+        # the kick still fires on this loop, so it can schedule.
         # Remote-placed: no kick (the owner's claim loop starts it) and the
         # install-local 'claude-code' sentinel never rides a foreign turn row.
         queue_profile_id = profile_id
@@ -1943,7 +1981,7 @@ class ChatWebSocketHandler:
             payload["api_user_id"] = self.api_user_id
         if getattr(self, "user_id", None):
             payload["user_id"] = self.user_id
-        turn_manager.submit(
+        await turn_manager.submit_async(
             session_id,
             "queue",
             prompt=content,

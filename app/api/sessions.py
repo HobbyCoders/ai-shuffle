@@ -79,6 +79,18 @@ from app.api.sessions_helpers import (  # noqa: F401 — re-exports
     require_session,
     enrich_sessions_with_tags,
     enrich_search_results_with_tags,
+    fetch_and_enrich_sessions,
+    fetch_and_enrich_search_results,
+    build_detail_messages,
+    build_live_messages,
+    finalize_transcript,
+    paginate_messages,
+    compact_messages_for_display,
+    cap_tool_input,
+    resolve_message_page_limit,
+    DEFAULT_MESSAGE_PAGE_LIMIT,
+    MAX_MESSAGE_PAGE_LIMIT,
+    MAX_TOOL_INPUT_CHARS,
     _annotate_cluster_fields,
     _apply_session_filters,
     BatchDeleteRequest,
@@ -486,7 +498,11 @@ async def list_sessions(
         request, project_id, profile_id, api_user_id, admin_only, api_users_only, sync_claude_sessions
     )
 
-    sessions = await run_sync(
+    # Query + enrichment in ONE thread hop: both are synchronous psycopg2 work,
+    # and the enrichment pipeline (6-10 queries) used to run on the event loop,
+    # stalling every concurrent request on every sidebar poll.
+    return await run_sync(
+        fetch_and_enrich_sessions,
         database.get_sessions,
         project_id=project_id,
         profile_id=profile_id,
@@ -498,7 +514,6 @@ async def list_sessions(
         limit=limit,
         offset=offset
     )
-    return enrich_sessions_with_tags(sessions)
 
 
 @router.get("/paginated", response_model=PaginatedSessions)
@@ -525,7 +540,9 @@ async def list_sessions_paginated(
         request, project_id, profile_id, api_user_id, admin_only, api_users_only, sync_claude_sessions
     )
 
+    # Query + enrichment in ONE thread hop (see list_sessions).
     sessions, total = await run_sync(
+        fetch_and_enrich_sessions,
         database.get_sessions_paginated,
         project_id=project_id,
         profile_id=profile_id,
@@ -538,7 +555,7 @@ async def list_sessions_paginated(
         offset=offset
     )
 
-    enriched = enrich_sessions_with_tags(sessions)
+    enriched = sessions
     has_more = offset + len(sessions) < total
 
     return PaginatedSessions(
@@ -576,7 +593,9 @@ async def list_sessions_cursor(
         request, project_id, profile_id, api_user_id, admin_only, api_users_only, sync_claude_sessions
     )
 
+    # Query + enrichment in ONE thread hop (see list_sessions).
     sessions, next_cursor, next_cursor_id, has_more = await run_sync(
+        fetch_and_enrich_sessions,
         database.get_sessions_cursor,
         project_id=project_id,
         profile_id=profile_id,
@@ -590,7 +609,7 @@ async def list_sessions_cursor(
         cursor_id=cursor_id,
     )
 
-    enriched = enrich_sessions_with_tags(sessions)
+    enriched = sessions
 
     return CursorPaginatedSessions(
         items=enriched,
@@ -672,7 +691,9 @@ async def search_sessions_paginated(
     elif admin_only:
         filter_api_user_id = None
 
+    # Query + enrichment in ONE thread hop (see list_sessions).
     results, total = await run_sync(
+        fetch_and_enrich_search_results,
         database.search_sessions_paginated,
         query=q,
         project_id=project_id,
@@ -683,7 +704,7 @@ async def search_sessions_paginated(
         offset=offset
     )
 
-    enriched = enrich_search_results_with_tags(results)
+    enriched = results
     has_more = offset + len(results) < total
 
     return PaginatedSessionSearchResults(

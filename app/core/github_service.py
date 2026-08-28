@@ -9,10 +9,210 @@ import subprocess
 import json
 import logging
 import re
-from typing import Optional, List, Dict, Any, Tuple
+import threading
+import time
+from collections import OrderedDict
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Errors
+# =============================================================================
+
+class GitHubCliError(RuntimeError):
+    """A ``gh`` invocation failed — the answer is *unknown*, not "empty".
+
+    Raised by the read helpers (``list_pulls``, ``get_pull``, ``list_runs``,
+    ``get_run``, ``get_repo_info``) when gh exits non-zero for a reason that is
+    not "the thing does not exist", times out, or returns unparseable JSON.
+
+    This exists because swallowing those failures into ``[]`` / ``None`` makes a
+    rate-limited, offline or slow gh indistinguishable from "there is no pull
+    request" — a lie that then gets cached and flips the UI between states.
+    Callers that cache MUST NOT store a negative result derived from this error.
+    """
+
+    def __init__(self, message: str, *, stderr: Optional[str] = None):
+        super().__init__(message)
+        self.stderr = (stderr or "").strip()
+
+
+# Substrings that mark a non-zero gh exit as an honest "it does not exist"
+# rather than a failure to reach GitHub. Matched case-insensitively against
+# stderr (gh writes API/GraphQL errors there).
+_NOT_FOUND_MARKERS = (
+    "could not resolve to",
+    "not found",
+    "no pull requests found",
+    "could not find",
+    "no such",
+    "404",
+)
+
+
+def _looks_like_not_found(stderr: str) -> bool:
+    """True when *stderr* says the object does not exist (vs. gh failing)."""
+    low = (stderr or "").lower()
+    return any(marker in low for marker in _NOT_FOUND_MARKERS)
+
+
+# =============================================================================
+# Small shared TTL cache
+# =============================================================================
+
+@dataclass
+class _CacheEntry:
+    """One cached value plus the wall-clock bookkeeping for expiry/staleness."""
+    value: Any
+    stored_at: float
+    expires_at: float
+
+    def is_fresh(self, now: Optional[float] = None) -> bool:
+        return (time.monotonic() if now is None else now) < self.expires_at
+
+    def age(self, now: Optional[float] = None) -> float:
+        return (time.monotonic() if now is None else now) - self.stored_at
+
+
+_CACHE_MISS = object()
+
+
+class TTLCache:
+    """Bounded, thread-safe TTL cache with explicit invalidation.
+
+    Deliberately small, but with the three properties the naive
+    ``dict``-with-a-timestamp pattern lacks:
+
+    * **Bounded** — ``max_entries`` with expired-first, then oldest-first
+      eviction, so a per-path/per-branch key space cannot grow without limit.
+    * **Thread-safe** — every read and write is under a lock, because these
+      caches are populated from ``asyncio.to_thread`` workers as well as from
+      the event loop.
+    * **Stale-readable** — :meth:`peek` returns an *expired* entry so callers
+      can implement stale-while-revalidate (serve the last known-good value,
+      flagged, instead of inventing a negative answer) when a refresh fails.
+
+    Values are stored as-is; store immutable values (or copies) if the caller
+    might mutate them.
+    """
+
+    __slots__ = ("_ttl", "_max_entries", "_name", "_lock", "_entries")
+
+    def __init__(self, ttl: float, max_entries: int = 256, name: str = "") -> None:
+        if ttl <= 0:
+            raise ValueError("ttl must be > 0")
+        if max_entries <= 0:
+            raise ValueError("max_entries must be > 0")
+        self._ttl = float(ttl)
+        self._max_entries = int(max_entries)
+        self._name = name
+        self._lock = threading.RLock()
+        self._entries: "OrderedDict[Any, _CacheEntry]" = OrderedDict()
+
+    # -- reads ---------------------------------------------------------------
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        """Return the fresh value for *key*, or *default* on miss/expiry."""
+        entry = self._get_fresh_entry(key)
+        return default if entry is None else entry.value
+
+    def get_or_miss(self, key: Any) -> Any:
+        """Return the fresh value, or the ``CACHE_MISS`` sentinel.
+
+        Needed when ``None``/``False`` are legitimate cached values.
+        """
+        entry = self._get_fresh_entry(key)
+        return _CACHE_MISS if entry is None else entry.value
+
+    def peek(self, key: Any) -> Optional[_CacheEntry]:
+        """Return the entry for *key* even if expired (None if absent)."""
+        with self._lock:
+            return self._entries.get(key)
+
+    def __contains__(self, key: Any) -> bool:
+        return self._get_fresh_entry(key) is not None
+
+    def __len__(self) -> int:
+        """Number of *fresh* entries (expired ones are purged first)."""
+        with self._lock:
+            self._purge_expired()
+            return len(self._entries)
+
+    def keys(self) -> List[Any]:
+        """Snapshot of all stored keys, including expired ones."""
+        with self._lock:
+            return list(self._entries.keys())
+
+    def _get_fresh_entry(self, key: Any) -> Optional[_CacheEntry]:
+        now = time.monotonic()
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return None
+            if not entry.is_fresh(now):
+                # Keep the value around for stale-while-revalidate peeks, but
+                # move it to the front of the eviction queue.
+                self._entries.move_to_end(key, last=False)
+                return None
+            return entry
+
+    # -- writes --------------------------------------------------------------
+
+    def set(self, key: Any, value: Any, ttl: Optional[float] = None) -> None:
+        """Store *value* under *key* for *ttl* seconds (default: the cache TTL)."""
+        now = time.monotonic()
+        span = self._ttl if ttl is None else float(ttl)
+        with self._lock:
+            self._entries[key] = _CacheEntry(
+                value=value, stored_at=now, expires_at=now + span
+            )
+            self._entries.move_to_end(key, last=True)
+            self._evict_if_needed()
+
+    def invalidate(self, key: Any = None) -> None:
+        """Drop *key*, or everything when *key* is None."""
+        with self._lock:
+            if key is None:
+                self._entries.clear()
+            else:
+                self._entries.pop(key, None)
+
+    def invalidate_where(self, predicate: Callable[[Any], bool]) -> int:
+        """Drop every key for which *predicate* is true. Returns the count."""
+        with self._lock:
+            doomed = [k for k in self._entries if predicate(k)]
+            for k in doomed:
+                self._entries.pop(k, None)
+            return len(doomed)
+
+    clear = invalidate
+
+    # -- internals -----------------------------------------------------------
+
+    def _purge_expired(self, now: Optional[float] = None) -> None:
+        now = time.monotonic() if now is None else now
+        for key in [k for k, e in self._entries.items() if not e.is_fresh(now)]:
+            self._entries.pop(key, None)
+
+    def _evict_if_needed(self) -> None:
+        if len(self._entries) <= self._max_entries:
+            return
+        self._purge_expired()
+        while len(self._entries) > self._max_entries:
+            # OrderedDict is kept in insertion/refresh order: oldest first.
+            self._entries.popitem(last=False)
+
+
+# ``gh auth status`` spawns a process and can hang for its full timeout. Being
+# signed in is a machine-level fact that changes only on an explicit login or
+# logout, both of which invalidate these caches — so a multi-minute TTL is
+# safe. A *negative* answer gets a much shorter TTL so a login performed
+# outside the app (``gh auth login`` in a terminal) is picked up quickly.
+GH_AUTH_TTL_SECONDS = 300.0
+GH_AUTH_NEGATIVE_TTL_SECONDS = 30.0
 
 
 def _parse_mergeable(value: Any) -> Optional[bool]:
@@ -68,6 +268,11 @@ class GitHubService:
 
     def __init__(self):
         self.timeout = 60
+        # ``gh auth status`` result, keyed by a single constant. Per-instance so
+        # tests get a clean cache with every fresh GitHubService().
+        self._auth_cache = TTLCache(
+            ttl=GH_AUTH_TTL_SECONDS, max_entries=1, name="gh-auth"
+        )
 
     def _run_gh(
         self,
@@ -120,19 +325,54 @@ class GitHubService:
             logger.error(f"gh command error: {e}")
             raise
 
-    def is_authenticated(self) -> bool:
+    _AUTH_CACHE_KEY = "gh-auth-status"
+
+    def is_authenticated(self, *, refresh: bool = False) -> bool:
         """
         Check if gh CLI is authenticated.
+
+        The answer is cached (see :data:`GH_AUTH_TTL_SECONDS`) because this
+        shells out to ``gh auth status`` with a 10s timeout and every PR /
+        actions endpoint asks. Pass ``refresh=True`` to force the subprocess,
+        or call :meth:`invalidate_auth_cache` after an explicit login/logout.
 
         Returns:
             True if authenticated, False otherwise
         """
+        if not refresh:
+            cached = self._auth_cache.get_or_miss(self._AUTH_CACHE_KEY)
+            if cached is not _CACHE_MISS:
+                return cached
+
         try:
             result = self._run_gh(['auth', 'status'], timeout=10)
-            return result.returncode == 0
+            value = result.returncode == 0
         except Exception as e:
             logger.debug(f"GitHub auth check failed: {e}")
-            return False
+            value = False
+
+        self._auth_cache.set(
+            self._AUTH_CACHE_KEY,
+            value,
+            ttl=None if value else GH_AUTH_NEGATIVE_TTL_SECONDS,
+        )
+        return value
+
+    def invalidate_auth_cache(self, value: Optional[bool] = None) -> None:
+        """Drop the cached ``gh auth status`` answer.
+
+        Called by the login/logout endpoints so an explicit auth change is
+        visible immediately instead of at the end of the TTL. Pass *value* to
+        seed the cache with a freshly observed answer instead of clearing it.
+        """
+        if value is None:
+            self._auth_cache.invalidate()
+        else:
+            self._auth_cache.set(
+                self._AUTH_CACHE_KEY,
+                bool(value),
+                ttl=None if value else GH_AUTH_NEGATIVE_TTL_SECONDS,
+            )
 
     def get_auth_info(self) -> Dict[str, Any]:
         """
@@ -172,7 +412,11 @@ class GitHubService:
             working_dir: Path to git repository
 
         Returns:
-            Repository in "owner/repo" format, or None if not found
+            Repository in "owner/repo" format, or None if not found.
+
+        Unlike the gh read helpers this stays fail-soft: it shells out to local
+        ``git``, where "the command failed" and "there is no GitHub origin" are
+        the same actionable answer for the caller ("no GitHub repo here").
         """
         try:
             result = subprocess.run(
@@ -217,28 +461,39 @@ class GitHubService:
             repo: Repository in "owner/repo" format
 
         Returns:
-            Dict with repo info or None on failure
+            Dict with repo info, or None when the repository does not exist.
+
+        Raises:
+            GitHubCliError: gh could not answer (offline, rate-limited, timed
+                out, unparseable output). Distinct from "repo not found".
         """
         try:
             result = self._run_gh([
                 'repo', 'view', repo,
                 '--json', 'name,owner,description,url,defaultBranchRef'
             ])
-
-            if result.returncode != 0:
-                return None
-
-            data = json.loads(result.stdout)
-            return {
-                'name': data.get('name'),
-                'owner': data.get('owner', {}).get('login'),
-                'description': data.get('description'),
-                'url': data.get('url'),
-                'default_branch': data.get('defaultBranchRef', {}).get('name', 'main')
-            }
         except Exception as e:
-            logger.debug(f"Failed to get repo info: {e}")
-            return None
+            raise GitHubCliError(f"gh repo view failed: {e}") from e
+
+        if result.returncode != 0:
+            if _looks_like_not_found(result.stderr):
+                return None
+            raise GitHubCliError(
+                f"gh repo view failed for {repo}", stderr=result.stderr
+            )
+
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            raise GitHubCliError(f"gh repo view returned invalid JSON: {e}") from e
+
+        return {
+            'name': data.get('name'),
+            'owner': data.get('owner', {}).get('login'),
+            'description': data.get('description'),
+            'url': data.get('url'),
+            'default_branch': data.get('defaultBranchRef', {}).get('name', 'main')
+        }
 
     def create_repo(
         self,
@@ -297,7 +552,13 @@ class GitHubService:
             limit: Maximum number of PRs to return
 
         Returns:
-            List of PullRequest objects
+            List of PullRequest objects. An empty list means "this repository
+            genuinely has no matching pull requests" — never "we could not ask".
+
+        Raises:
+            GitHubCliError: gh could not answer. Callers MUST NOT treat this as
+                "no PR exists" (that is finding G2: a failure cached as a
+                negative answer flips the UI between Merge-PR and Create-PR).
         """
         try:
             result = self._run_gh([
@@ -307,35 +568,36 @@ class GitHubService:
                 '--limit', str(limit),
                 '--json', 'number,title,body,state,headRefName,baseRefName,author,url,createdAt,updatedAt,mergeable'
             ])
-
-            if result.returncode != 0:
-                return []
-
-            data = json.loads(result.stdout)
-
-            pulls = []
-            for pr_data in data:
-                pulls.append(PullRequest(
-                    number=pr_data.get('number', 0),
-                    title=pr_data.get('title', ''),
-                    body=pr_data.get('body', ''),
-                    state=pr_data.get('state', 'unknown'),
-                    head_branch=pr_data.get('headRefName', ''),
-                    base_branch=pr_data.get('baseRefName', ''),
-                    author=pr_data.get('author', {}).get('login', 'unknown'),
-                    url=pr_data.get('url', ''),
-                    created_at=pr_data.get('createdAt', ''),
-                    updated_at=pr_data.get('updatedAt', ''),
-                    mergeable=_parse_mergeable(pr_data.get('mergeable'))
-                ))
-
-            return pulls
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse PR list: {e}")
-            return []
         except Exception as e:
-            logger.error(f"Failed to list PRs: {e}")
-            return []
+            raise GitHubCliError(f"gh pr list failed: {e}") from e
+
+        if result.returncode != 0:
+            raise GitHubCliError(
+                f"gh pr list failed for {repo}", stderr=result.stderr
+            )
+
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            raise GitHubCliError(f"gh pr list returned invalid JSON: {e}") from e
+
+        pulls = []
+        for pr_data in data:
+            pulls.append(PullRequest(
+                number=pr_data.get('number', 0),
+                title=pr_data.get('title', ''),
+                body=pr_data.get('body', ''),
+                state=pr_data.get('state', 'unknown'),
+                head_branch=pr_data.get('headRefName', ''),
+                base_branch=pr_data.get('baseRefName', ''),
+                author=(pr_data.get('author') or {}).get('login', 'unknown'),
+                url=pr_data.get('url', ''),
+                created_at=pr_data.get('createdAt', ''),
+                updated_at=pr_data.get('updatedAt', ''),
+                mergeable=_parse_mergeable(pr_data.get('mergeable'))
+            ))
+
+        return pulls
 
     def get_pull(self, repo: str, pr_number: int) -> Optional[PullRequest]:
         """
@@ -346,7 +608,11 @@ class GitHubService:
             pr_number: Pull request number
 
         Returns:
-            PullRequest object or None if not found
+            PullRequest object, or None when the PR genuinely does not exist.
+
+        Raises:
+            GitHubCliError: gh could not answer (offline, rate-limited, timed
+                out, unparseable output).
         """
         try:
             result = self._run_gh([
@@ -354,30 +620,46 @@ class GitHubService:
                 '--repo', repo,
                 '--json', 'number,title,body,state,headRefName,baseRefName,author,url,createdAt,updatedAt,mergeable'
             ])
-
-            if result.returncode != 0:
-                return None
-
-            pr_data = json.loads(result.stdout)
-
-            return PullRequest(
-                number=pr_data.get('number', 0),
-                title=pr_data.get('title', ''),
-                body=pr_data.get('body', ''),
-                state=pr_data.get('state', 'unknown'),
-                head_branch=pr_data.get('headRefName', ''),
-                base_branch=pr_data.get('baseRefName', ''),
-                author=pr_data.get('author', {}).get('login', 'unknown'),
-                url=pr_data.get('url', ''),
-                created_at=pr_data.get('createdAt', ''),
-                updated_at=pr_data.get('updatedAt', ''),
-                mergeable=_parse_mergeable(pr_data.get('mergeable'))
-            )
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse PR: {e}")
-            return None
         except Exception as e:
-            logger.error(f"Failed to get PR: {e}")
+            raise GitHubCliError(f"gh pr view failed: {e}") from e
+
+        if result.returncode != 0:
+            if _looks_like_not_found(result.stderr):
+                return None
+            raise GitHubCliError(
+                f"gh pr view failed for {repo}#{pr_number}", stderr=result.stderr
+            )
+
+        try:
+            pr_data = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            raise GitHubCliError(f"gh pr view returned invalid JSON: {e}") from e
+
+        return PullRequest(
+            number=pr_data.get('number', 0),
+            title=pr_data.get('title', ''),
+            body=pr_data.get('body', ''),
+            state=pr_data.get('state', 'unknown'),
+            head_branch=pr_data.get('headRefName', ''),
+            base_branch=pr_data.get('baseRefName', ''),
+            author=(pr_data.get('author') or {}).get('login', 'unknown'),
+            url=pr_data.get('url', ''),
+            created_at=pr_data.get('createdAt', ''),
+            updated_at=pr_data.get('updatedAt', ''),
+            mergeable=_parse_mergeable(pr_data.get('mergeable'))
+        )
+
+    def _get_pull_or_none(self, repo: str, pr_number: int) -> Optional[PullRequest]:
+        """:meth:`get_pull` for callers with a (value, error) contract.
+
+        ``create_pull`` reports failure through its error string rather than by
+        raising, so the read-back of a just-created / already-existing PR must
+        not propagate :class:`GitHubCliError`.
+        """
+        try:
+            return self.get_pull(repo, pr_number)
+        except GitHubCliError as e:
+            logger.warning("Could not read back PR %s#%s: %s", repo, pr_number, e)
             return None
 
     def create_pull(
@@ -433,7 +715,7 @@ class GitHubService:
                 if existing_match:
                     existing_number = int(existing_match.group(1))
                     logger.debug(f"PR already exists (#{existing_number}), returning existing PR")
-                    pr = self.get_pull(repo, existing_number)
+                    pr = self._get_pull_or_none(repo, existing_number)
                     return (pr, None) if pr else (None, f"PR #{existing_number} exists but could not be fetched")
                 logger.error(f"Failed to create PR: {stderr}")
                 return None, stderr or "gh pr create failed with no error output"
@@ -443,7 +725,7 @@ class GitHubService:
             pr_url_match = re.search(r'/pull/(\d+)', output)
             if pr_url_match:
                 pr_number = int(pr_url_match.group(1))
-                pr = self.get_pull(repo, pr_number)
+                pr = self._get_pull_or_none(repo, pr_number)
                 return (pr, None) if pr else (None, f"PR #{pr_number} created but could not be fetched")
 
             return None, "gh pr create succeeded but returned no PR URL"
@@ -529,7 +811,10 @@ class GitHubService:
             limit: Maximum number of runs to return
 
         Returns:
-            List of WorkflowRun objects
+            List of WorkflowRun objects. Empty means "no runs", not "unknown".
+
+        Raises:
+            GitHubCliError: gh could not answer.
         """
         try:
             result = self._run_gh([
@@ -538,32 +823,33 @@ class GitHubService:
                 '--limit', str(limit),
                 '--json', 'databaseId,name,status,conclusion,headBranch,event,url,createdAt'
             ])
-
-            if result.returncode != 0:
-                return []
-
-            data = json.loads(result.stdout)
-
-            runs = []
-            for run_data in data:
-                runs.append(WorkflowRun(
-                    id=run_data.get('databaseId', 0),
-                    name=run_data.get('name', ''),
-                    status=run_data.get('status', 'unknown'),
-                    conclusion=run_data.get('conclusion'),
-                    branch=run_data.get('headBranch', ''),
-                    event=run_data.get('event', ''),
-                    url=run_data.get('url', ''),
-                    created_at=run_data.get('createdAt', '')
-                ))
-
-            return runs
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse workflow runs: {e}")
-            return []
         except Exception as e:
-            logger.error(f"Failed to list workflow runs: {e}")
-            return []
+            raise GitHubCliError(f"gh run list failed: {e}") from e
+
+        if result.returncode != 0:
+            raise GitHubCliError(
+                f"gh run list failed for {repo}", stderr=result.stderr
+            )
+
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            raise GitHubCliError(f"gh run list returned invalid JSON: {e}") from e
+
+        runs = []
+        for run_data in data:
+            runs.append(WorkflowRun(
+                id=run_data.get('databaseId', 0),
+                name=run_data.get('name', ''),
+                status=run_data.get('status', 'unknown'),
+                conclusion=run_data.get('conclusion'),
+                branch=run_data.get('headBranch', ''),
+                event=run_data.get('event', ''),
+                url=run_data.get('url', ''),
+                created_at=run_data.get('createdAt', '')
+            ))
+
+        return runs
 
     def get_run(self, repo: str, run_id: int) -> Optional[WorkflowRun]:
         """
@@ -574,7 +860,10 @@ class GitHubService:
             run_id: Workflow run ID
 
         Returns:
-            WorkflowRun object or None if not found
+            WorkflowRun object, or None when the run genuinely does not exist.
+
+        Raises:
+            GitHubCliError: gh could not answer.
         """
         try:
             result = self._run_gh([
@@ -582,28 +871,31 @@ class GitHubService:
                 '--repo', repo,
                 '--json', 'databaseId,name,status,conclusion,headBranch,event,url,createdAt'
             ])
-
-            if result.returncode != 0:
-                return None
-
-            run_data = json.loads(result.stdout)
-
-            return WorkflowRun(
-                id=run_data.get('databaseId', 0),
-                name=run_data.get('name', ''),
-                status=run_data.get('status', 'unknown'),
-                conclusion=run_data.get('conclusion'),
-                branch=run_data.get('headBranch', ''),
-                event=run_data.get('event', ''),
-                url=run_data.get('url', ''),
-                created_at=run_data.get('createdAt', '')
-            )
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse workflow run: {e}")
-            return None
         except Exception as e:
-            logger.error(f"Failed to get workflow run: {e}")
-            return None
+            raise GitHubCliError(f"gh run view failed: {e}") from e
+
+        if result.returncode != 0:
+            if _looks_like_not_found(result.stderr):
+                return None
+            raise GitHubCliError(
+                f"gh run view failed for {repo} run {run_id}", stderr=result.stderr
+            )
+
+        try:
+            run_data = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            raise GitHubCliError(f"gh run view returned invalid JSON: {e}") from e
+
+        return WorkflowRun(
+            id=run_data.get('databaseId', 0),
+            name=run_data.get('name', ''),
+            status=run_data.get('status', 'unknown'),
+            conclusion=run_data.get('conclusion'),
+            branch=run_data.get('headBranch', ''),
+            event=run_data.get('event', ''),
+            url=run_data.get('url', ''),
+            created_at=run_data.get('createdAt', '')
+        )
 
     def rerun_workflow(self, repo: str, run_id: int) -> bool:
         """

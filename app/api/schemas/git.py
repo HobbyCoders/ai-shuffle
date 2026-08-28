@@ -141,10 +141,29 @@ class OpenPrInfo(BaseModel):
 
 
 class PrStateResponse(BaseModel):
-    """Response for the pr-state endpoint (PR lifecycle for the current branch)."""
+    """Response for the pr-state endpoint (PR lifecycle for the current branch).
+
+    ``open_pr is None`` is only meaningful when ``pr_lookup_failed`` is False.
+    The two flags together give the client a tri-state instead of the old
+    lie-by-omission where an unreachable ``gh`` looked exactly like "this branch
+    has no pull request" (finding G2):
+
+    * ``pr_lookup_failed=False`` — the answer is authoritative.
+    * ``pr_lookup_failed=True``, ``stale=True`` — the refresh failed and
+      ``open_pr`` is the last known-good value (stale-while-revalidate). Render
+      it, optionally marked stale; do NOT fall back to "Create PR".
+    * ``pr_lookup_failed=True``, ``stale=False`` — nothing is known. Keep
+      whatever the client last rendered; do NOT render "no PR exists".
+    """
     current_branch: Optional[str] = None
     has_github: bool = False
     open_pr: Optional[OpenPrInfo] = None
+    # True when GitHub could not be asked this cycle (gh offline, rate-limited,
+    # timed out). Never cached as a negative result.
+    pr_lookup_failed: bool = False
+    # True when open_pr is a previously known-good value served past its TTL
+    # because the refresh failed.
+    stale: bool = False
 
 
 class CommitRequest(BaseModel):

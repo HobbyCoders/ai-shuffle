@@ -33,11 +33,21 @@ from fastapi import APIRouter, HTTPException, Depends, Request, status
 from pydantic import BaseModel, Field
 
 from app.core.git_service import git_service
-from app.core.github_service import github_service
+from app.core.github_service import (
+    _CACHE_MISS,
+    GitHubCliError,
+    TTLCache,
+    github_service,
+)
 from app.core.worktree_manager import worktree_manager
 from app.api.auth import require_auth
 from app.api.common import check_project_access
-from app.api.git_helpers import run_git, get_working_dir, stage_and_commit
+from app.api.git_helpers import (
+    run_git,
+    get_working_dir,
+    get_working_dir_async,
+    stage_and_commit,
+)
 from app.api.schemas.git import PrStateResponse
 from app.api.git_ai import (
     generate_commit_message_for_dir,
@@ -190,26 +200,38 @@ def _is_already_merged(error: Optional[str]) -> bool:
     return "already merged" in low or "already been merged" in low
 
 
-# Unique sentinel returned by _find_open_pr_for_branch when the gh lookup fails,
-# so callers can tell "no PR exists" apart from "couldn't ask GitHub".
-_find_open_pr_failed = object()
-
-
 def _find_open_pr_for_branch(repo: str, branch: str):
-    """Return the open PullRequest whose head is *branch*.
+    """Return the open PullRequest whose head is *branch*, else None.
 
-    Returns None when the lookup genuinely finds no match; returns
-    ``_find_open_pr_failed`` (a unique sentinel) when the gh call itself fails.
+    Blocking (spawns ``gh pr list``) — always call through ``asyncio.to_thread``.
+
+    ``None`` means "GitHub answered, and no open PR has this head". A failure to
+    ask GitHub at all raises :class:`GitHubCliError` instead of degrading to
+    ``None``: the two are different facts and the caller must not cache the
+    second as the first (finding G2).
+
+    (This replaces the old ``_find_open_pr_failed`` sentinel, which was
+    unreachable dead code because ``list_pulls`` swallowed every failure into an
+    empty list — and which callers would have mis-handled as a PullRequest.)
     """
-    try:
-        pulls = github_service.list_pulls(repo, state="open", limit=100)
-    except Exception:
-        logger.exception("Failed to list pull requests for %s", repo)
-        return _find_open_pr_failed
+    pulls = github_service.list_pulls(repo, state="open", limit=100)
     for pr in pulls:
         if pr.head_branch == branch:
             return pr
     return None
+
+
+def _gh_unavailable_error(branch: str, exc: Exception) -> HTTPException:
+    """502 for "we could not ask GitHub" — distinct from "there is no PR"."""
+    stderr = getattr(exc, "stderr", "") or str(exc)
+    logger.warning("PR lookup for branch %s failed: %s", branch, exc)
+    return HTTPException(
+        status.HTTP_502_BAD_GATEWAY,
+        detail=(
+            f"Could not determine the pull-request state for branch '{branch}' — "
+            f"GitHub is unreachable: {stderr}"
+        ),
+    )
 
 
 def _session_is_busy(session_id: Optional[str]) -> bool:
@@ -542,7 +564,7 @@ async def _prepare_operation(
     Returns ``(working_dir, current_branch, repo, op)``.
     """
     check_project_access(request, project_id)
-    working_dir = get_working_dir(project_id, worktree_id, session_id)
+    working_dir = await get_working_dir_async(project_id, worktree_id, session_id)
 
     if not await run_git(git_service.is_git_repo, working_dir):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Project is not a git repository")
@@ -605,7 +627,12 @@ async def finish(
 
     try:
         # list_pulls shells out to gh — keep it off the event loop.
-        pr = await asyncio.to_thread(_find_open_pr_for_branch, repo, current_branch)
+        try:
+            pr = await asyncio.to_thread(_find_open_pr_for_branch, repo, current_branch)
+        except GitHubCliError as e:
+            # Never downgrade "couldn't ask" to "no PR": that would tell the
+            # user to create a duplicate PR while GitHub is merely unreachable.
+            raise _gh_unavailable_error(current_branch, e)
         if pr is None:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
@@ -684,7 +711,14 @@ async def ship(
             )
 
         # list_pulls shells out to gh — keep it off the event loop.
-        existing_pr = await asyncio.to_thread(_find_open_pr_for_branch, repo, current_branch)
+        try:
+            existing_pr = await asyncio.to_thread(
+                _find_open_pr_for_branch, repo, current_branch
+            )
+        except GitHubCliError as e:
+            # Unknown PR state: opening a second PR for this branch (or failing
+            # mid-flow) is worse than refusing while GitHub is unreachable.
+            raise _gh_unavailable_error(current_branch, e)
     except BaseException:
         _operations.pop(op.id, None)
         raise

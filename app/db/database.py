@@ -226,7 +226,24 @@ def _safe_json(value):
 #     SessionSearch can scope cross-session recall to one project. NULL on
 #     every pre-existing row = "unknown project", which recall never excludes.
 #     Additive/nullable, guarded ADD COLUMN alongside cli_session_id.
-SCHEMA_VERSION = 83
+# 84 (2026-08-28): performance schema pass (docs/PERFORMANCE_REVIEW_2026-08.md
+#     findings B3/B4/B7/B11). Three additive, idempotent changes:
+#       * ``idx_usage_log_session`` on ``usage_log(session_id)`` — every session
+#         open ran ``get_all_session_usage`` (and every delete ran the
+#         ``session_id -> NULL`` unlink) as a sequential scan of the ledger (B3).
+#       * ``sessions.is_worker BOOLEAN`` — materializes the delegated-worker
+#         flag the sessions-list queries used to derive with a correlated
+#         ``NOT EXISTS (SELECT 1 FROM turns ...)`` per listed row AND per
+#         COUNT(*) row (B7). NULL/FALSE = a normal session. Backfilled once
+#         from ``turns.source = 'provider_agent'`` (marker-gated, idempotent).
+#       * ``session_store_summaries.folded_through_id BIGINT NOT NULL DEFAULT 0``
+#         — watermark for the coalesced summary fold (B4): the fold no longer
+#         runs on every ~100ms streaming append, so it must know which entries
+#         it has already folded. 0 on every pre-existing row means "fold
+#         everything from the start", which is exactly right for a summary that
+#         is a pure function of the entries.
+#     Also ``idx_projects_instance`` for boot's orphan-adoption scan (B11).
+SCHEMA_VERSION = 84
 
 
 def _migrate_omni_tables_to_fluid(cursor):
@@ -2032,8 +2049,168 @@ def _run_column_migrations(cursor):
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(is_active)")
         migrations_applied.append("sessions.is_favorite->is_active")
 
+    # ------------------------------------------------------------------
+    # v84 performance pass (docs/PERFORMANCE_REVIEW_2026-08.md B3/B4/B7/B11).
+    # All three are additive and idempotent, so an upgrade from any older
+    # version lands them without needing the bootstrap path to fire (same
+    # defensive pattern as every block above).
+    # ------------------------------------------------------------------
+
+    # B3: per-session index on the usage ledger. Session open
+    # (get_all_session_usage) and session delete (the session_id -> NULL
+    # unlink) both filter on session_id and had only idx_usage_log_created.
+    if table_exists(cursor, "usage_log"):
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_usage_log_session "
+            "ON usage_log(session_id)"
+        )
+
+    # B11: boot's _adopt_orphaned_instance_data scans DISTINCT instance_id over
+    # projects (sessions already has idx_sessions_instance).
+    if table_exists(cursor, "projects") and column_exists(cursor, "projects", "instance_id"):
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_projects_instance "
+            "ON projects(instance_id)"
+        )
+
+    # B4: fold watermark for the coalesced session-store summary fold.
+    if table_exists(cursor, "session_store_summaries") and not column_exists(
+        cursor, "session_store_summaries", "folded_through_id"
+    ):
+        cursor.execute(
+            "ALTER TABLE session_store_summaries "
+            "ADD COLUMN folded_through_id BIGINT NOT NULL DEFAULT 0"
+        )
+        migrations_applied.append("session_store_summaries.folded_through_id")
+
+    # B7: materialize the delegated-worker flag the sessions-list queries used
+    # to derive per row with a correlated NOT EXISTS over ``turns``.
+    if table_exists(cursor, "sessions"):
+        if not column_exists(cursor, "sessions", "is_worker"):
+            cursor.execute("ALTER TABLE sessions ADD COLUMN is_worker BOOLEAN")
+            migrations_applied.append("sessions.is_worker")
+        backfilled = _backfill_sessions_is_worker(cursor)
+        if backfilled is not None:
+            migrations_applied.append(f"sessions.is_worker_backfill({backfilled} rows)")
+
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
+
+
+# ---------------------------------------------------------------------------
+# v84 one-time data migrations + the migration gate
+# ---------------------------------------------------------------------------
+
+#: system_settings key marking that the one-time ``sessions.is_worker`` backfill
+#: has run against THIS database (not this install — the database can be shared).
+IS_WORKER_BACKFILL_MARKER = "migration:sessions_is_worker_backfilled"
+
+#: system_settings key holding the fingerprint of the migration code that has
+#: successfully run against this database (see :func:`migrations_fingerprint`).
+MIGRATIONS_FINGERPRINT_KEY = "schema_migrations_fingerprint"
+
+
+def _get_marker(cursor, key: str) -> Optional[str]:
+    """Read a system_settings marker, tolerating a database old enough not to
+    have the table yet (returns None)."""
+    if not table_exists(cursor, "system_settings"):
+        return None
+    cursor.execute("SELECT value FROM system_settings WHERE key = %s", (key,))
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return row["value"] if isinstance(row, dict) else row[0]
+
+
+def _set_marker(cursor, key: str, value: str) -> None:
+    """Upsert a system_settings marker (no-op when the table does not exist)."""
+    if not table_exists(cursor, "system_settings"):
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    cursor.execute(
+        """INSERT INTO system_settings (key, value, updated_at)
+           VALUES (%s, %s, %s)
+           ON CONFLICT(key) DO UPDATE SET
+               value = excluded.value,
+               updated_at = excluded.updated_at""",
+        (key, value, now),
+    )
+
+
+def _backfill_sessions_is_worker(cursor) -> Optional[int]:
+    """One-time backfill of ``sessions.is_worker`` from ``turns.source`` (v84).
+
+    Delegated ProviderAgent workers have been created ``hidden=True`` since
+    v75, so this only has to catch the rows created BEFORE that — exactly the
+    population the correlated ``NOT EXISTS (SELECT 1 FROM turns ...)`` guard in
+    the list queries existed for. Running it once lets that per-row subquery be
+    replaced by a plain column predicate.
+
+    Gated on a ``system_settings`` marker rather than on "the column was just
+    added" so it runs exactly once per DATABASE and is correct for both paths
+    that can create the column (the fresh-install schema pass and the upgrade
+    ALTER above) — and so a re-run after a partially applied migration still
+    completes it. Returns the number of rows updated, or ``None`` when the
+    backfill was skipped because it had already run.
+    """
+    if _get_marker(cursor, IS_WORKER_BACKFILL_MARKER):
+        return None
+    if not column_exists(cursor, "sessions", "is_worker"):
+        return None
+    if table_exists(cursor, "turns"):
+        cursor.execute(
+            "UPDATE sessions SET is_worker = TRUE "
+            "WHERE COALESCE(is_worker, FALSE) = FALSE "
+            "AND EXISTS (SELECT 1 FROM turns t "
+            "            WHERE t.session_id = sessions.id "
+            "            AND t.source = 'provider_agent')"
+        )
+        updated = cursor.rowcount or 0
+    else:
+        updated = 0
+    _set_marker(cursor, IS_WORKER_BACKFILL_MARKER, "1")
+    return updated
+
+
+def migrations_fingerprint() -> str:
+    """Fingerprint of the migration code that must have run against a database.
+
+    The DDL/migration pass is ~1,900 lines of ``CREATE ... IF NOT EXISTS`` plus
+    dozens of ``information_schema`` probes, and it used to run in full on every
+    single boot (finding B11) — hundreds of synchronous round trips before the
+    server accepts traffic. Skipping it requires proving the database is already
+    up to date with THIS build, which ``SCHEMA_VERSION`` alone cannot do: the
+    codebase deliberately adds guarded blocks WITHOUT bumping the version.
+
+    Hashing the source of the migration functions themselves closes that gap —
+    any edit to them (version bump or not) changes the fingerprint and the pass
+    runs once more, then records the new fingerprint. Returns ``""`` when the
+    source is unavailable (frozen / zipped deployment), which never matches a
+    stored value and therefore degrades to the old always-run behaviour.
+    """
+    import hashlib
+    import inspect
+
+    h = hashlib.sha256()
+    h.update(f"v{SCHEMA_VERSION}\n".encode())
+    for fn in (
+        _run_column_migrations,
+        _backfill_sessions_is_worker,
+        _migrate_agent_tool_access,
+        _migrate_profiles_to_agents,
+        _migrate_omni_tables_to_fluid,
+    ):
+        try:
+            h.update(inspect.getsource(fn).encode("utf-8", "replace"))
+        except (OSError, TypeError):
+            return ""
+    try:
+        from app.db import schema_postgres
+
+        h.update(inspect.getsource(schema_postgres).encode("utf-8", "replace"))
+    except (OSError, TypeError):
+        return ""
+    return h.hexdigest()
 
 
 def init_database():
@@ -2041,7 +2218,28 @@ def init_database():
 
     Delegates to schema_postgres.create_postgres_schema() for initial DDL,
     then runs idempotent column migrations.
+
+    Both passes are gated (finding B11). The DDL pass has always been gated on
+    ``schema_version``; the column-migration pass — ~1,600 lines of guarded DDL
+    and ``information_schema`` probes — used to run in full on EVERY boot,
+    synchronously, before the server accepted traffic. It is now skipped when
+    the database already carries the fingerprint of THIS build's migration code
+    (see :func:`migrations_fingerprint`), which is recorded only after the pass
+    completes successfully. Consequences, all deliberate:
+
+    * a partially migrated database never records the fingerprint (the whole
+      init runs in one transaction that rolls back on failure), so the next
+      boot runs the pass again;
+    * an older install stamps an older fingerprint, so upgrading always runs
+      the pass once more;
+    * editing ANY migration function — with or without a ``SCHEMA_VERSION``
+      bump, which this codebase deliberately often skips — changes the
+      fingerprint and re-runs the pass exactly once;
+    * ``FORCE_DB_MIGRATIONS=1`` in the environment forces the pass (operator
+      escape hatch for a hand-edited schema).
     """
+    import os
+
     logger.info("Initializing PostgreSQL database")
 
     with get_db() as conn:
@@ -2069,10 +2267,39 @@ def init_database():
             create_postgres_schema(cursor)
             cursor.execute("DELETE FROM schema_version")
             cursor.execute("INSERT INTO schema_version (version) VALUES (%s)", (SCHEMA_VERSION,))
+            # The schema pass rewrote the version row; any fingerprint recorded
+            # for the OLD schema is meaningless now, so force the column pass.
+            current_version = SCHEMA_VERSION
+            stored_fingerprint = None
+        else:
+            stored_fingerprint = _get_marker(cursor, MIGRATIONS_FINGERPRINT_KEY)
 
-        # Always run column migrations to handle edge cases where
-        # schema version is correct but columns are missing
-        _run_column_migrations(cursor)
+        fingerprint = migrations_fingerprint()
+        forced = os.environ.get("FORCE_DB_MIGRATIONS", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        up_to_date = (
+            not forced
+            and bool(fingerprint)
+            and stored_fingerprint == fingerprint
+            and current_version == SCHEMA_VERSION
+        )
+
+        if up_to_date:
+            logger.debug(
+                "Schema already at version %d with matching migration "
+                "fingerprint — skipping the column-migration pass",
+                SCHEMA_VERSION,
+            )
+        else:
+            # Column migrations handle every edge case where the schema version
+            # is current but a guarded block has not run yet.
+            _run_column_migrations(cursor)
+            if fingerprint:
+                # Recorded LAST, inside the same transaction as the pass itself:
+                # a failure anywhere above rolls this back with it, so the
+                # fingerprint can only ever describe a COMPLETED migration.
+                _set_marker(cursor, MIGRATIONS_FINGERPRINT_KEY, fingerprint)
 
     logger.info("Database initialized successfully")
 

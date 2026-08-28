@@ -14,6 +14,7 @@ import time
 
 from app.db import database
 from app.db.async_database import run_sync
+from app.db.api_users import get_api_users_by_ids
 from app.db.tags import get_tags_for_sessions
 from app.db.sessions import get_fork_info_for_sessions
 from app.api.auth import get_api_user_from_request
@@ -519,6 +520,120 @@ def is_session_degraded(session_row: dict, claimable_ids: set) -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+# Batched lookups for the listing-enrichment pipeline
+#
+# The enrichment pipeline runs on EVERY sidebar poll, so every lookup it makes
+# has to be batched: one query for the whole page, never one per row. The two
+# helpers below replace the former ``get_project``-per-distinct-project N+1 and
+# the full ``list_projects_v2()`` table scan with targeted ``IN (...)`` reads.
+#
+# They issue their SQL here (rather than through a ``app.db`` helper) only
+# because no batched project reader exists yet; both fall back to the
+# per-id/full-scan path if the query fails, so behaviour is unchanged when the
+# schema or driver disagrees. See the TODO on each.
+# ---------------------------------------------------------------------------
+
+def _projects_by_ids(project_ids) -> dict[str, dict]:
+    """``{project_id: row}`` for every requested legacy project, in ONE query.
+
+    Deliberately NOT instance-filtered (mirrors ``database.get_project``) so a
+    session owned by another install still resolves its project name.
+
+    TODO: move this to a ``app.db.projects.get_projects_by_ids`` bulk helper —
+    it belongs next to ``get_project``; it lives here only because that module
+    is owned elsewhere right now.
+    """
+    ids = [pid for pid in dict.fromkeys(project_ids) if pid]
+    if not ids:
+        return {}
+    try:
+        from app.db.base import get_db, rows_to_list
+        from app.db.compat import phs
+
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, name, path, link_group_id FROM projects "
+                f"WHERE id IN ({phs(len(ids))})",
+                ids,
+            )
+            rows = rows_to_list(cursor.fetchall())
+        return {row["id"]: dict(row) for row in rows if row.get("id")}
+    except Exception:  # noqa: BLE001 — enrichment must never break the listing
+        logger.debug("Batched project lookup failed; falling back", exc_info=True)
+
+    # Fallback: one lookup per DISTINCT id (never per session).
+    resolved: dict[str, dict] = {}
+    for pid in ids:
+        try:
+            proj = database.get_project(pid)
+        except Exception:  # noqa: BLE001
+            proj = None
+        if proj:
+            resolved[pid] = proj
+    return resolved
+
+
+def _projects_v2_targeted(pv2_ids, origins) -> tuple[dict[str, dict], dict[str, str]]:
+    """``(by_id, origin_to_id)`` for just the projects this page references.
+
+    Replaces the full ``list_projects_v2()`` scan that ran on every listing:
+    only the ``project_v2_id``s carried by the page's sessions and the origins
+    of the page's legacy projects can ever be looked up, so only those are read.
+
+    TODO: move to ``app.db.projects_v2`` bulk helpers (``get_projects_v2_by_ids``
+    / ``get_projects_v2_by_origins``) once that module can be edited.
+    """
+    ids = [i for i in dict.fromkeys(pv2_ids) if i]
+    origin_list = [o for o in dict.fromkeys(origins) if o]
+    if not ids and not origin_list:
+        return {}, {}
+
+    by_id: dict[str, dict] = {}
+    origin_to_id: dict[str, str] = {}
+    try:
+        from app.db.base import get_db, rows_to_list
+        from app.db.compat import phs
+
+        with get_db() as conn:
+            cursor = conn.cursor()
+            if ids:
+                cursor.execute(
+                    f"SELECT id, origin FROM projects_v2 WHERE id IN ({phs(len(ids))})",
+                    ids,
+                )
+                for row in rows_to_list(cursor.fetchall()):
+                    by_id[row["id"]] = dict(row)
+            if origin_list:
+                cursor.execute(
+                    "SELECT id, origin FROM projects_v2 "
+                    f"WHERE origin IN ({phs(len(origin_list))})",
+                    origin_list,
+                )
+                for row in rows_to_list(cursor.fetchall()):
+                    if row.get("origin"):
+                        origin_to_id[row["origin"]] = row["id"]
+        return by_id, origin_to_id
+    except Exception:  # noqa: BLE001 — enrichment must never break the listing
+        logger.debug(
+            "Targeted projects_v2 lookup failed; falling back to full scan",
+            exc_info=True,
+        )
+
+    # Fallback: the old full scan.
+    try:
+        from app.db import projects_v2 as projects_v2_db
+
+        for row in projects_v2_db.list_projects_v2():
+            by_id[row["id"]] = row
+            if row.get("origin"):
+                origin_to_id[row["origin"]] = row["id"]
+    except Exception:  # noqa: BLE001
+        logger.debug("Failed to load projects_v2 for enrichment", exc_info=True)
+    return by_id, origin_to_id
+
+
 def _annotate_cluster_fields(sessions: List[dict]) -> None:
     """Annotate each session (in place) with owning-device + project info.
 
@@ -528,16 +643,17 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
     server-side: the frontend ``$projects`` map is instance-filtered, so a
     cross-install session's project would otherwise render as unknown.
 
-    Cheap and batched: one registry read (``get_installs_map``) plus one
-    ``get_project`` per distinct project id (the non-instance-filtered lookup,
-    so cross-install projects resolve too).
+    Cheap and fully batched — a fixed number of queries regardless of page
+    size: one registry read (``get_installs_map``), ONE ``IN (...)`` read for
+    every distinct legacy project (non-instance-filtered, so cross-install
+    projects resolve too), targeted ``projects_v2`` reads for only the ids /
+    origins this page references, and one claimable-sessions read.
     """
     if not sessions:
         return
 
     from app.core.config import settings
     from app.core.project_resolver import origin_for_legacy_project
-    from app.db import projects_v2 as projects_v2_db
     me = settings.effective_instance_id
 
     # Batch: installs registry (id -> row, each carrying an in-DB ``online``
@@ -561,30 +677,22 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
     # extra DB call. Used to self-heal ``origin``/``project_v2_id`` for sessions
     # whose ``project_v2_id`` column is still NULL (created before the seed).
     project_origins: dict[str, str] = {}
-    for pid in {s.get("project_id") for s in sessions if s.get("project_id")}:
-        try:
-            proj = database.get_project(pid)
-        except Exception:  # noqa: BLE001
-            proj = None
-        if proj:
-            project_names[pid] = proj.get("name") or proj.get("path") or pid
-            project_link_groups[pid] = proj.get("link_group_id")
-            project_origins[pid] = origin_for_legacy_project(proj)
+    for pid, proj in _projects_by_ids(
+        s.get("project_id") for s in sessions
+    ).items():
+        project_names[pid] = proj.get("name") or proj.get("path") or pid
+        project_link_groups[pid] = proj.get("link_group_id")
+        project_origins[pid] = origin_for_legacy_project(proj)
 
     # v2-projects: resolve each session's origin-keyed project + origin token via
     # ONE batched pass over ``list_projects_v2`` (never a per-session DB call — the
     # board fetches every session). ``origin`` is 1:1 with ``link_group_id`` for
     # grouped projects, so the board folds identically. Unconditional since PR-B
     # (the ``v2_projects`` kill switch was removed).
-    pv2_by_id: dict[str, dict] = {}
-    pv2_origin_to_id: dict[str, str] = {}
-    try:
-        for row in projects_v2_db.list_projects_v2():
-            pv2_by_id[row["id"]] = row
-            if row.get("origin"):
-                pv2_origin_to_id[row["origin"]] = row["id"]
-    except Exception:  # noqa: BLE001 — enrichment must never break the listing
-        logger.debug("Failed to load projects_v2 for enrichment", exc_info=True)
+    pv2_by_id, pv2_origin_to_id = _projects_v2_targeted(
+        (s.get("project_v2_id") for s in sessions),
+        project_origins.values(),
+    )
 
     # V2 Q7 degraded derivation. Read the queued-with-no-live-run candidate set
     # ONCE (batched — never a per-session query); each degraded derivation then
@@ -664,13 +772,21 @@ def enrich_sessions_with_tags(sessions: List[dict]) -> List[dict]:
 
     session_ids = [s["id"] for s in sessions]
 
-    # Batch-lookup API user names
-    api_user_ids = {s["api_user_id"] for s in sessions if s.get("api_user_id")}
+    # Batch-lookup API user names — ONE ``IN (...)`` query for the whole page.
+    # (This was a ``get_api_user`` call per distinct user id: an N+1 on the
+    # hottest endpoint in the app.)
+    api_user_ids = [s["api_user_id"] for s in sessions if s.get("api_user_id")]
     api_user_names: dict[str, str] = {}
-    for uid in api_user_ids:
-        user = database.get_api_user(uid)
-        if user:
-            api_user_names[uid] = user.get("name") or user.get("username") or uid
+    if api_user_ids:
+        try:
+            users = get_api_users_by_ids(api_user_ids)
+        except Exception:  # noqa: BLE001 — enrichment must never break the listing
+            logger.debug("Batched api_user lookup failed", exc_info=True)
+            users = {}
+        api_user_names = {
+            uid: (user.get("name") or user.get("username") or uid)
+            for uid, user in users.items()
+        }
 
     # Batch: tags for all sessions (1 query instead of N)
     tags_by_session = get_tags_for_sessions(session_ids)
@@ -717,6 +833,38 @@ def enrich_search_results_with_tags(results: list) -> list:
     # Annotate owning device + project (cross-install sharing).
     _annotate_cluster_fields(results)
     return results
+
+
+# ---------------------------------------------------------------------------
+# One-thread-hop listing helpers
+#
+# The listing query and the whole enrichment pipeline are both synchronous
+# psycopg2 work. Running them as two ``run_sync`` calls costs two thread hops
+# per request; running the enrichment on the event loop (as it used to be)
+# blocked EVERY concurrent request for the duration of 6-10 queries. These
+# wrappers let a handler do the lot in ONE ``run_sync``.
+# ---------------------------------------------------------------------------
+
+def fetch_and_enrich_sessions(fetch, **kwargs):
+    """Run ``fetch(**kwargs)`` and enrich its sessions — one thread hop.
+
+    ``fetch`` is a synchronous listing function (``database.get_sessions``,
+    ``get_sessions_paginated``, ``get_sessions_cursor``); it may return a bare
+    list or a tuple whose FIRST element is the list. The return value is passed
+    through unchanged (enrichment mutates the rows in place).
+    """
+    result = fetch(**kwargs)
+    sessions = result[0] if isinstance(result, tuple) else result
+    enrich_sessions_with_tags(sessions)
+    return result
+
+
+def fetch_and_enrich_search_results(fetch, **kwargs):
+    """``fetch_and_enrich_sessions`` for the search endpoints."""
+    result = fetch(**kwargs)
+    results = result[0] if isinstance(result, tuple) else result
+    enrich_search_results_with_tags(results)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -800,3 +948,326 @@ async def _apply_session_filters(
         filter_api_user_id = api_user_id
 
     return project_id, profile_id, filter_api_user_id, filter_api_users_only
+
+
+# ---------------------------------------------------------------------------
+# Transcript payload shaping (B1)
+#
+# A session open used to return the ENTIRE transcript with untruncated tool
+# inputs (a Write call carries the whole file) and inline base64 screenshot
+# data URIs — multi-megabyte JSON per open and per legacy ``/live`` poll. The
+# helpers below add, in the API layer:
+#   * opt-in keyset pagination over the message list (newest window first,
+#     cursor for older) with a generous default cap so existing clients are
+#     unaffected;
+#   * a display cap on tool INPUTS, mirroring the 2000-char cap the parser
+#     already applies to tool OUTPUTS, with a truncation indicator;
+#   * substitution of an inline screenshot data URI by its content-addressed
+#     artifact URL when those bytes are already in the artifact store (the
+#     exact form the SSE path emits, which the frontend already renders).
+# ---------------------------------------------------------------------------
+
+# Messages returned when the caller does not ask for a specific window. Chosen
+# well above any normal transcript so the default response is byte-identical
+# for ordinary sessions; it exists to bound the pathological ones.
+DEFAULT_MESSAGE_PAGE_LIMIT = 2000
+MAX_MESSAGE_PAGE_LIMIT = 10000
+
+# Per-string display cap for tool INPUTS — same budget the parser applies to
+# tool outputs (``jsonl_parser.MAX_DISPLAY_OUTPUT_SIZE``), kept as an
+# independent constant so the two can diverge without a cross-module import.
+MAX_TOOL_INPUT_CHARS = 2000
+
+# Guard against pathological nesting when walking a tool-input structure.
+_MAX_TOOL_INPUT_DEPTH = 6
+
+
+def _truncate_display_text(value: str) -> str:
+    """Cap one string for display, with an explicit marker (parser's format)."""
+    return f"{value[:MAX_TOOL_INPUT_CHARS]}\n\n[... truncated - {len(value) // 1024}KB total]"
+
+
+def _cap_value(value, depth: int = 0):
+    """Recursively cap long strings inside a tool-input value.
+
+    Returns ``(new_value, truncated)``. The input is never mutated: a copy is
+    made only on the branches that actually contain an over-long string, so an
+    untruncated payload keeps its original object identity.
+    """
+    if isinstance(value, str):
+        if len(value) > MAX_TOOL_INPUT_CHARS:
+            return _truncate_display_text(value), True
+        return value, False
+    if depth >= _MAX_TOOL_INPUT_DEPTH:
+        return value, False
+    if isinstance(value, dict):
+        capped: dict = {}
+        truncated = False
+        for key, item in value.items():
+            new_item, item_truncated = _cap_value(item, depth + 1)
+            capped[key] = new_item
+            truncated = truncated or item_truncated
+        return (capped, True) if truncated else (value, False)
+    if isinstance(value, list):
+        capped_list = []
+        truncated = False
+        for item in value:
+            new_item, item_truncated = _cap_value(item, depth + 1)
+            capped_list.append(new_item)
+            truncated = truncated or item_truncated
+        return (capped_list, True) if truncated else (value, False)
+    return value, False
+
+
+def cap_tool_input(tool_input):
+    """Cap a message's ``toolInput`` for display.
+
+    Returns ``(tool_input, truncated)`` — the same object when nothing needed
+    capping, so unaffected messages are untouched.
+    """
+    if not isinstance(tool_input, (dict, list, str)):
+        return tool_input, False
+    return _cap_value(tool_input)
+
+
+def screenshot_artifact_url(data_uri) -> Optional[str]:
+    """``/api/v1/artifacts/<sha256>`` for an inline screenshot already stored.
+
+    The turn recorder content-addresses screenshot bytes into the artifact
+    store as they stream (``app.core.artifact_ingest``), and the SSE path emits
+    exactly this URL — which the frontend already renders. So whenever the
+    bytes are on disk here we can hand a REST client the URL instead of a
+    multi-megabyte base64 data URI. Returns None when the screenshot is not a
+    data URI or its bytes are not in the store (then the data URI is kept, and
+    the transcript still renders).
+    """
+    try:
+        from app.core.artifact_ingest import content_hash, parse_screenshot_data_uri
+        from app.core.artifact_store import artifact_path
+
+        parsed = parse_screenshot_data_uri(data_uri)
+        if not parsed:
+            return None
+        digest = content_hash(parsed[0])
+        if artifact_path(digest) is None:
+            return None
+        return f"/api/v1/artifacts/{digest}"
+    except Exception:  # noqa: BLE001 — never break a transcript read
+        logger.debug("screenshot artifact lookup failed", exc_info=True)
+        return None
+
+
+def compact_messages_for_display(messages: List[dict]) -> None:
+    """Cap tool inputs and de-inline stored screenshots, in place.
+
+    Applied to the messages actually being SENT (i.e. after pagination), so the
+    cost is proportional to the response, not to the transcript.
+    """
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+
+        # Tool input: camelCase is the field the frontend reads; the detail
+        # endpoint also emits the snake_case alias pointing at the SAME object,
+        # so both are rewritten from ONE capped copy (never capped twice).
+        raw_input = msg.get("toolInput")
+        input_key_present = "toolInput" in msg
+        if raw_input is None:
+            raw_input = msg.get("tool_input")
+        capped, truncated = cap_tool_input(raw_input)
+        if truncated:
+            if input_key_present:
+                msg["toolInput"] = capped
+            if "tool_input" in msg:
+                msg["tool_input"] = capped
+            metadata = msg.get("metadata")
+            metadata = dict(metadata) if isinstance(metadata, dict) else {}
+            metadata["toolInputTruncated"] = True
+            metadata["tool_input_truncated"] = True
+            msg["metadata"] = metadata
+
+        # Screenshot: prefer the artifact URL over the inline base64 payload.
+        screenshot = msg.get("toolScreenshot")
+        if isinstance(screenshot, str) and screenshot.startswith("data:"):
+            url = screenshot_artifact_url(screenshot)
+            if url:
+                msg["toolScreenshot"] = url
+
+
+def resolve_message_page_limit(limit: Optional[int]) -> int:
+    """Clamp a caller-supplied message limit into the allowed range."""
+    if limit is None:
+        return DEFAULT_MESSAGE_PAGE_LIMIT
+    return max(1, min(int(limit), MAX_MESSAGE_PAGE_LIMIT))
+
+
+def paginate_messages(
+    messages: List[dict],
+    limit: Optional[int] = None,
+    before_seq: Optional[int] = None,
+) -> tuple[List[dict], dict]:
+    """Keyset window over an oldest→newest transcript, newest page first.
+
+    ``seq`` is a message's 0-based position in the full transcript (transcripts
+    are append-only, so a position is a stable cursor). With no ``before_seq``
+    the NEWEST ``limit`` messages are returned — what a client opening a session
+    wants — and ``next_before_seq`` walks backwards through older pages.
+
+    Returns ``(page, pagination)`` where ``pagination`` carries ``total``,
+    ``returned``, ``limit``, ``first_seq``/``last_seq``, ``has_more`` (older
+    messages exist) and ``next_before_seq`` (the cursor for them).
+    """
+    page_limit = resolve_message_page_limit(limit)
+    total = len(messages)
+    end = total if before_seq is None else max(0, min(int(before_seq), total))
+    start = max(0, end - page_limit)
+    page = messages[start:end]
+    return page, {
+        "total": total,
+        "returned": len(page),
+        "limit": page_limit,
+        "first_seq": start if page else None,
+        "last_seq": end - 1 if page else None,
+        "has_more": start > 0,
+        "next_before_seq": start if start > 0 else None,
+        "has_more_after": end < total,
+    }
+
+
+def finalize_transcript(
+    session_id: str,
+    messages: List[dict],
+    *,
+    limit: Optional[int] = None,
+    before_seq: Optional[int] = None,
+) -> tuple[List[dict], dict]:
+    """Attach cost/user metadata, paginate, and compact — ONE thread hop.
+
+    Every step here is synchronous DB or CPU work that used to run directly on
+    the event loop. Cost attachment walks the WHOLE transcript (turn indices
+    must line up with ``usage_log`` rows), so it runs before the window is
+    taken; the display caps then apply only to the messages being sent.
+    """
+    from app.core.cost_utils import attach_cost_metadata, attach_user_message_metadata
+
+    attach_cost_metadata(messages, session_id)
+    # Store/JSONL transcripts drop the DB row's user-message metadata
+    # (e.g. automation_id/automation_run_id) — merge it back (PR #560 follow-up)
+    attach_user_message_metadata(messages, session_id)
+
+    page, pagination = paginate_messages(messages, limit, before_seq)
+    compact_messages_for_display(page)
+    return page, pagination
+
+
+def build_detail_messages(session_id: str, jsonl_messages: List[dict]) -> List[dict]:
+    """Transform parsed transcript entries into ``GET /sessions/{id}`` messages.
+
+    Moved verbatim out of the endpoint so the whole transform (which also
+    resolves per-message profiles from the DB) runs in a worker thread instead
+    of on the event loop.
+
+    Per-message profile resolution: JSONL/store entries carry no DB row id, so
+    each user message's profile is read from the DB user rows by matching
+    content and consuming the match in order (cached to avoid re-loading all DB
+    messages). Popping left-to-right assigns the correct profile even when the
+    profile changed mid-session and the same prompt text repeats. (This must
+    reach the response: the SessionMessage model carries profile_id/profileId,
+    which the frontend reads to label each bubble.)
+    """
+    from app.core.cost_utils import build_profile_queues
+
+    profile_queues = build_profile_queues(session_id)
+    messages: List[dict] = []
+
+    # Use camelCase for frontend compatibility (toolName, toolInput, toolId)
+    current_turn_profile = None
+    for i, m in enumerate(jsonl_messages):
+        # A user row reads its OWN profile from the ordered per-content queue
+        # built from the DB user rows; that profile then carries to the turn's
+        # assistant/thinking rows (which the transcript stores without a
+        # profile) so each bubble keeps the profile that produced it instead of
+        # falling back to the session's CURRENT profile when the user switches
+        # selection.
+        if m.get("role") == "user":
+            queue = profile_queues.get(m.get("content", ""))
+            current_turn_profile = queue.popleft() if queue else None
+        msg_profile_id = current_turn_profile
+        # Timestamps live in metadata (not Pydantic datetime fields); the
+        # frontend reads them directly from metadata for display.
+        msg_data = {
+            "id": m.get("id", i),
+            "role": m.get("role", "user"),
+            "content": m.get("content", ""),
+            "type": m.get("type"),  # Critical for tool_use/tool_result rendering
+            "subtype": m.get("subtype"),  # For system messages (e.g., local_command)
+            "systemSubtype": m.get("systemSubtype"),  # Frontend-compatible system subtype
+            "systemData": m.get("systemData"),  # Structured data for system messages
+            "toolName": m.get("toolName"),  # camelCase for frontend
+            "toolInput": m.get("toolInput"),  # camelCase for frontend
+            "toolId": m.get("toolId"),
+            "toolResult": m.get("toolResult"),  # Tool output grouped with tool_use
+            "toolStatus": m.get("toolStatus"),  # Status: running, complete, error
+            "toolScreenshot": m.get("toolScreenshot"),  # Inline screenshot (Chrome/computer-use, Read of image)
+            "tool_name": m.get("toolName"),  # Also include snake_case for compatibility
+            "tool_input": m.get("toolInput"),  # Also include snake_case for compatibility
+            "metadata": m.get("metadata"),
+            "profile_id": msg_profile_id,
+            "profileId": msg_profile_id,
+            "created_at": None  # Let Pydantic use default; timestamp is in metadata
+        }
+        # Include subagent-specific fields if present
+        if m.get("type") == "subagent":
+            msg_data["agentId"] = m.get("agentId")
+            msg_data["agentType"] = m.get("agentType")
+            msg_data["agentDescription"] = m.get("agentDescription")
+            msg_data["agentStatus"] = m.get("agentStatus")
+            msg_data["agentChildren"] = m.get("agentChildren")
+        messages.append(msg_data)
+    return messages
+
+
+# Optional fields the live wire shape carries when present (system, tool,
+# subagent, metadata).
+_OPTIONAL_LIVE_FIELDS = (
+    "uuid",  # Raw JSONL entry uuid — lets the UI rewind by uuid directly
+    "subtype", "systemSubtype", "systemData",
+    "toolName", "toolId", "toolInput", "toolResult", "toolStatus",
+    "toolScreenshot",  # inline screenshot (Chrome/computer-use, Read of image)
+    "agentId", "agentType", "agentDescription", "agentPrompt",
+    "agentStatus", "agentChildren", "agentUsage",
+    "metadata",
+)
+
+
+def build_live_messages(session_id: str, jsonl_messages: List[dict]) -> List[dict]:
+    """Transform parsed transcript entries into ``GET /sessions/{id}/live`` messages.
+
+    Moved verbatim out of the endpoint (see ``build_detail_messages``) so the
+    transform AND the profile-id resolution it triggers run off the event loop.
+    """
+    from app.core.cost_utils import attach_turn_profile_ids
+
+    messages: List[dict] = []
+    for m in jsonl_messages:
+        msg = {
+            "id": m.get("id", ""),
+            "role": m.get("role", "user"),
+            "type": m.get("type", "text"),
+            "content": m.get("content", ""),
+            "streaming": False,
+        }
+        for field in _OPTIONAL_LIVE_FIELDS:
+            value = m.get(field)
+            if value is not None:
+                msg[field] = value
+        messages.append(msg)
+
+    # Per-message profile resolution — same ordered-queue merge as
+    # GET /{id}: JSONL entries carry no DB row id, so each user message
+    # consumes its content's queue built from the DB rows, and that profile
+    # carries to the turn's assistant/thinking rows so each bubble keeps the
+    # profile that produced it (rather than re-labelling to the session's
+    # CURRENT profile on a switch).
+    attach_turn_profile_ids(session_id, messages)
+    return messages

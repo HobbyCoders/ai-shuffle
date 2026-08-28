@@ -9,9 +9,18 @@ It owns none of the state machine — every real transition lives in
 * **submit** a new turn (enqueue) and **kick** the session so the scheduler
   starts it, and **interrupt** the live turn — both delegating straight to the
   DB layer.
-* **wait** helpers (``wait_settled`` / ``wait_session_idle``) that poll the
-  turns table, used by automation (which must block until a headless turn
-  finishes) and by tests.
+* **wait** helpers (``wait_settled`` / ``wait_session_idle``) used by automation
+  (which must block until a headless turn finishes) and by tests. They are
+  event-driven first (the PostgreSQL ``session_events`` NOTIFY gateway wakes
+  them the moment a turn settles) with an exponentially backing-off poll as the
+  correctness backstop.
+
+Every DB touch here is synchronous ``psycopg2``, so each command has an ``_async``
+twin (:func:`submit_async` / :func:`interrupt_async`) that runs the blocking part
+in a worker thread and keeps the loop-bound part (the kick / the interrupt
+executor, both of which need a running loop) on the caller's event loop. **Async
+callers must use the ``_async`` twins** — calling the sync form from a coroutine
+blocks every other connection on the worker.
 
 The *kick* is an injected seam: this module does not know how a queued turn gets
 started — the runtime/scheduler (Phase 2 A5/A6) registers a kick callback via
@@ -25,7 +34,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable, Dict, List, Optional
+import threading
+from typing import Any, Callable, Dict, Optional, Set, Tuple
 
 from app.db import turns
 
@@ -134,7 +144,7 @@ _WAKEUP_SUPERSEDING_SOURCES = ("user", "queue", "resume")
 _BINDING_SOURCES = ("user", "queue", "api", "worktree", "connector")
 
 
-def submit(
+def _submit_blocking(
     session_id: str,
     source: str,
     *,
@@ -147,21 +157,17 @@ def submit(
     command_id: Optional[str] = None,
     parent_turn_id: Optional[str] = None,
     instance_id: Optional[str] = None,
-    no_kick: bool = False,
 ) -> str:
-    """Enqueue a new turn for ``session_id`` and kick the scheduler.
+    """Every BLOCKING part of :func:`submit` — up to three DB round trips (run
+    binding, wakeup supersede, enqueue) — and nothing else.
+
+    Split out so :func:`submit_async` can pay ONE thread hop for the whole
+    logical operation instead of one per write, while the kick (which needs a
+    running event loop) stays with the caller. Never fires the kick.
 
     Returns the new turn's id. The turn is durably ``queued`` before the kick
     fires, so even if the kick is a no-op (nothing registered yet) or fails, the
     work is never lost — a later kick or the periodic reap sweep starts it.
-
-    ``no_kick=True`` skips the in-process kick entirely — used by the V2
-    placement submit seam (Phase 4) when the session is placed on ANOTHER
-    runner: the durable queued row is the whole hand-off (that runner's
-    turn_claim loop picks it up via NOTIFY wake or its 5s poll), and a local
-    kick would only lose the placement-gate race in session_runtime.execute.
-    The skip is an optimization, not a correctness gate — the execute-side
-    placement check is the backstop either way.
 
     A turn from a human-facing source also PERSISTS its model / effort /
     permission overrides onto the session row (v79). Agents no longer pin a
@@ -213,9 +219,98 @@ def submit(
         parent_turn_id=parent_turn_id,
         instance_id=instance_id,
     )
+    return turn["id"]
+
+
+def submit(
+    session_id: str,
+    source: str,
+    *,
+    prompt: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    worktree_id: Optional[str] = None,
+    overrides: Optional[Dict[str, Any]] = None,
+    payload: Optional[Dict[str, Any]] = None,
+    command_id: Optional[str] = None,
+    parent_turn_id: Optional[str] = None,
+    instance_id: Optional[str] = None,
+    no_kick: bool = False,
+) -> str:
+    """Enqueue a new turn and kick the scheduler — the SYNCHRONOUS form.
+
+    See :func:`_submit_blocking` for the full contract. This does the DB work on
+    the CALLING thread, so it is for sync callers only (the wakeup service, the
+    session-delete path, worker threads). **From a coroutine use
+    :func:`submit_async`** — three sync DB round trips on the event loop stall
+    every WebSocket, SSE stream and HTTP request on the worker.
+
+    ``no_kick=True`` skips the in-process kick entirely — used by the V2
+    placement submit seam (Phase 4) when the session is placed on ANOTHER
+    runner: the durable queued row is the whole hand-off (that runner's
+    turn_claim loop picks it up via NOTIFY wake or its 5s poll), and a local
+    kick would only lose the placement-gate race in session_runtime.execute.
+    The skip is an optimization, not a correctness gate — the execute-side
+    placement check is the backstop either way.
+    """
+    turn_id = _submit_blocking(
+        session_id,
+        source,
+        prompt=prompt,
+        profile_id=profile_id,
+        project_id=project_id,
+        worktree_id=worktree_id,
+        overrides=overrides,
+        payload=payload,
+        command_id=command_id,
+        parent_turn_id=parent_turn_id,
+        instance_id=instance_id,
+    )
     if not no_kick:
         _kick(session_id)
-    return turn["id"]
+    return turn_id
+
+
+async def submit_async(
+    session_id: str,
+    source: str,
+    *,
+    prompt: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    worktree_id: Optional[str] = None,
+    overrides: Optional[Dict[str, Any]] = None,
+    payload: Optional[Dict[str, Any]] = None,
+    command_id: Optional[str] = None,
+    parent_turn_id: Optional[str] = None,
+    instance_id: Optional[str] = None,
+    no_kick: bool = False,
+) -> str:
+    """:func:`submit` for async callers — identical semantics, off the loop.
+
+    ONE thread hop covers all three DB writes; the kick then fires HERE, on the
+    caller's event loop, because the registered kick
+    (``turn_scheduler.kick``) needs ``asyncio.get_running_loop()`` to schedule
+    the start and silently drops the nudge from a worker thread. Ordering is
+    unchanged: the turn is durably ``queued`` before the kick.
+    """
+    turn_id = await asyncio.to_thread(
+        _submit_blocking,
+        session_id,
+        source,
+        prompt=prompt,
+        profile_id=profile_id,
+        project_id=project_id,
+        worktree_id=worktree_id,
+        overrides=overrides,
+        payload=payload,
+        command_id=command_id,
+        parent_turn_id=parent_turn_id,
+        instance_id=instance_id,
+    )
+    if not no_kick:
+        _kick(session_id)
+    return turn_id
 
 
 def remove_queued(turn_id: str) -> Optional[Dict[str, Any]]:
@@ -255,6 +350,10 @@ def interrupt(
     runtime signal (so the live runtime is only signalled when it is executing
     that turn). ``None`` preserves the legacy session-scoped behavior used by
     the internal auto/resource/send-now callers (GitHub #585).
+
+    SYNCHRONOUS: the guarded UPDATE runs on the calling thread. **From a
+    coroutine use :func:`interrupt_async`** — this is the stop button's hot
+    path, and a sync DB write there freezes every other connection.
     """
     row = turns.interrupt_turn(
         session_id, mode, stop_background=stop_background, turn_id=turn_id
@@ -264,30 +363,220 @@ def interrupt(
     return row
 
 
+async def interrupt_async(
+    session_id: str,
+    mode: str,
+    stop_background: bool = False,
+    turn_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """:func:`interrupt` for async callers — identical semantics, off the loop.
+
+    The durable ``running -> interrupting`` flip runs in a worker thread; the
+    executor then fires HERE, on the caller's event loop, because the registered
+    executor is a coroutine function that needs a running loop to be scheduled
+    (from a worker thread ``_fire_interrupt_executor`` would have to drop it).
+    Ordering is unchanged: durable row first, runtime signal second.
+    """
+    row = await asyncio.to_thread(
+        turns.interrupt_turn,
+        session_id,
+        mode,
+        stop_background=stop_background,
+        turn_id=turn_id,
+    )
+    if row is not None:
+        _fire_interrupt_executor(session_id, mode, turn_id)
+    return row
+
 # ---------------------------------------------------------------------------
-# Wait helpers (poll the turns table)
+# Wait helpers (event-driven, with a backing-off poll as the safety net)
 # ---------------------------------------------------------------------------
+#
+# These block a caller (automation, the cluster/cloud intake, the voice bridge,
+# tests) for as long as five minutes. The original implementation re-read the
+# turns table every 50 ms with SYNCHRONOUS psycopg2 **on the event loop** — one
+# waiting automation cost 20–60 blocking queries/second and stalled every other
+# coroutine on the worker for the whole wait (perf review 2026-08, finding F2).
+#
+# The replacement has two legs:
+#
+# * **Latency** rides the PostgreSQL ``session_events`` NOTIFY gateway. Every
+#   terminal turn event (``turn.completed`` / ``turn.aborted`` / ``turn.parked``)
+#   is appended to ``session_events``, and that append fires ``pg_notify`` on the
+#   ``session_events`` channel (see :mod:`app.db.session_events`). The gateway's
+#   LISTEN thread hands us the tick, we set the waiter's event and re-check at
+#   once — so the common case settles in one extra query, within a millisecond
+#   of the turn actually settling.
+# * **Correctness** rides a poll that starts at the caller's ``poll_interval``
+#   and doubles up to :data:`MAX_POLL_INTERVAL`. With PostgreSQL unreachable, on
+#   the SQLite test shim, or for a settle that somehow appends no event, the poll
+#   alone still returns the right answer — a 300 s wait now costs ~10 queries
+#   instead of ~6000.
+#
+# Both legs run their DB reads through :func:`asyncio.to_thread`, so nothing in
+# here ever touches psycopg2 from the loop thread.
+
+# Ceiling for the exponential poll backoff. A caller that explicitly asks for a
+# SLOWER cadence than this keeps its own interval (the ceiling is never allowed
+# to speed a poll up).
+MAX_POLL_INTERVAL = 2.0
+
+# Growth factor per un-woken poll.
+POLL_BACKOFF_FACTOR = 2.0
+
+# session_id -> set of (loop, asyncio.Event) waiter pairs. Mutated from the
+# gateway's LISTEN thread as well as from the loop, so it is guarded by a
+# THREADING lock (never an asyncio one).
+_waiters: Dict[str, Set[Tuple[Any, Any]]] = {}
+_waiters_lock = threading.Lock()
+_gateway_listener_registered = False
+
+
+def _on_gateway_tick(session_id: str) -> None:
+    """Gateway global listener — runs on the LISTEN thread, so it must be cheap
+    and must never raise. Sets every waiter event registered for the session."""
+    with _waiters_lock:
+        pairs = list(_waiters.get(session_id, ()))
+    for loop, event in pairs:
+        try:
+            loop.call_soon_threadsafe(event.set)
+        except RuntimeError:
+            pass  # Loop already closed — that waiter is gone anyway.
+
+
+def _ensure_gateway_listener() -> None:
+    """Register the gateway global listener exactly once (best-effort).
+
+    No gateway (PostgreSQL unreachable, test shim) ⇒ the waits degrade to the
+    backing-off poll, which is still correct — only slower to notice. Mirrors
+    :func:`app.core.interaction_wait._ensure_listener`.
+    """
+    global _gateway_listener_registered
+    if _gateway_listener_registered:
+        return
+    try:
+        from app.core.event_gateway import get_gateway
+
+        get_gateway().add_global_listener(_on_gateway_tick)
+        _gateway_listener_registered = True
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "turn_manager: gateway listener unavailable — wait helpers fall "
+            "back to poll-only cadence",
+            exc_info=True,
+        )
+
+
+class _SessionWake:
+    """A wake handle for one session's NOTIFY ticks.
+
+    ``session_id`` may be unknown at construction time (``wait_settled`` only
+    learns it from the turn row it is waiting on), so the binding is lazy and
+    idempotent — :meth:`bind` registers on the first real id and does nothing
+    thereafter. Always used from a single coroutine; :meth:`close` MUST run in
+    that coroutine's ``finally`` so a cancelled wait leaves no registration
+    behind.
+    """
+
+    __slots__ = ("_event", "_loop", "_session_id")
+
+    def __init__(self, session_id: Optional[str] = None) -> None:
+        self._session_id: Optional[str] = None
+        self._event = asyncio.Event()
+        self._loop = asyncio.get_running_loop()
+        self.bind(session_id)
+
+    def bind(self, session_id: Optional[str]) -> None:
+        """Register for ``session_id``'s ticks (first non-empty id wins)."""
+        if not session_id or self._session_id is not None:
+            return
+        _ensure_gateway_listener()
+        with _waiters_lock:
+            _waiters.setdefault(session_id, set()).add((self._loop, self._event))
+        self._session_id = session_id
+
+    async def wait(self, timeout: float) -> bool:
+        """Sleep until a NOTIFY tick arrives or ``timeout`` elapses.
+
+        Returns ``True`` when a tick woke us (the caller resets its backoff:
+        the session is moving), ``False`` on the plain timeout.
+        """
+        try:
+            await asyncio.wait_for(self._event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return False
+        finally:
+            self._event.clear()
+        return True
+
+    def close(self) -> None:
+        """Drop the registration; the session key goes with the last waiter."""
+        session_id = self._session_id
+        if session_id is None:
+            return
+        self._session_id = None
+        with _waiters_lock:
+            pairs = _waiters.get(session_id)
+            if not pairs:
+                return
+            pairs.discard((self._loop, self._event))
+            if not pairs:
+                _waiters.pop(session_id, None)
+
+
+def _next_interval(interval: float, poll_interval: float) -> float:
+    """Back off one step, never past the ceiling (or the caller's own, slower,
+    cadence)."""
+    return min(interval * POLL_BACKOFF_FACTOR, max(MAX_POLL_INTERVAL, poll_interval))
+
+
+def _session_is_idle(session_id: str) -> bool:
+    """No live turn AND no queued turns. Blocking (two reads) — ONE thread hop
+    per check rather than two."""
+    return (
+        turns.get_live_turn(session_id) is None
+        and not turns.get_queued_turns(session_id)
+    )
+
 
 async def wait_settled(
     turn_id: str,
     timeout: float = 300.0,
     poll_interval: float = 0.05,
 ) -> Optional[Dict[str, Any]]:
-    """Poll until ``turn_id`` reaches a terminal state
-    (completed/aborted/parked) and return its row, or ``None`` on timeout /
-    unknown turn.
+    """Wait until ``turn_id`` reaches a terminal state (completed/aborted/parked)
+    and return its row, or ``None`` on timeout / unknown turn.
 
     Used by automation (block until a headless turn finishes) and tests.
+
+    Wakes on the session's NOTIFY ticks; ``poll_interval`` is the FIRST re-check
+    delay of the backstop poll, which then backs off exponentially to
+    :data:`MAX_POLL_INTERVAL`. Return values and timeout semantics are exactly
+    those of the original 50 ms poll: the state is checked once before any sleep,
+    an unknown turn keeps being retried until the deadline, and a lapsed deadline
+    yields ``None``.
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
-    while True:
-        turn = turns.get_turn(turn_id)
-        if turn is not None and turn["state"] in turns.TERMINAL_STATES:
-            return turn
-        if loop.time() >= deadline:
-            return None
-        await asyncio.sleep(poll_interval)
+    interval = poll_interval
+    wake = _SessionWake()
+    try:
+        while True:
+            turn = await asyncio.to_thread(turns.get_turn, turn_id)
+            if turn is not None:
+                if turn["state"] in turns.TERMINAL_STATES:
+                    return turn
+                # Only now do we know which session's ticks to listen for.
+                wake.bind(turn.get("session_id"))
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return None
+            if await wake.wait(min(interval, remaining)):
+                interval = poll_interval  # Session is moving — stay responsive.
+            else:
+                interval = _next_interval(interval, poll_interval)
+    finally:
+        wake.close()
 
 
 async def wait_session_idle(
@@ -295,17 +584,27 @@ async def wait_session_idle(
     timeout: float = 300.0,
     poll_interval: float = 0.05,
 ) -> bool:
-    """Poll until ``session_id`` is idle — no live turn AND no queued turns —
+    """Wait until ``session_id`` is idle — no live turn AND no queued turns —
     and return ``True``, or ``False`` on timeout.
 
     Used by the non-WS intake callers (automation / cluster / cloud) that submit
-    then block until the session has fully drained.
+    then block until the session has fully drained. Same wake/backoff design and
+    the same timeout semantics as :func:`wait_settled`.
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
-    while True:
-        if turns.get_live_turn(session_id) is None and not turns.get_queued_turns(session_id):
-            return True
-        if loop.time() >= deadline:
-            return False
-        await asyncio.sleep(poll_interval)
+    interval = poll_interval
+    wake = _SessionWake(session_id)
+    try:
+        while True:
+            if await asyncio.to_thread(_session_is_idle, session_id):
+                return True
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            if await wake.wait(min(interval, remaining)):
+                interval = poll_interval
+            else:
+                interval = _next_interval(interval, poll_interval)
+    finally:
+        wake.close()

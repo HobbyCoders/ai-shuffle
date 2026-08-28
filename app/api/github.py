@@ -5,6 +5,7 @@ Provides endpoints for managing GitHub pull requests and workflow runs
 through the gh CLI.
 """
 
+import asyncio
 import logging
 import time
 from typing import Optional, List, Dict, Any
@@ -12,7 +13,12 @@ from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 from pydantic import BaseModel, Field
 
-from app.core.github_service import github_service, PullRequest, WorkflowRun
+from app.core.github_service import (
+    GitHubCliError,
+    github_service,
+    PullRequest,
+    WorkflowRun,
+)
 from app.core.config import settings
 from app.db import database
 from app.api.auth import require_auth, get_api_user_from_request
@@ -80,8 +86,19 @@ class GitHubStatusResponse(BaseModel):
 # Helper Functions
 # =============================================================================
 
+# Every handler below is ``async def`` and therefore runs ON the event loop.
+# ``github_service`` and the project-path resolver are synchronous: they spawn
+# ``gh``/``git`` subprocesses (up to a 60s timeout) and hit the database. Calling
+# them inline froze the entire server — no other request, WebSocket frame or SSE
+# byte could be served for the duration (finding G1). Everything blocking in
+# this module now goes through ``asyncio.to_thread``; nothing here may call
+# ``github_service.*``, ``resolve_project_path`` or the DB directly.
+
 def get_project_path(request: Request, project_id: str) -> str:
     """Get the filesystem path for a project after verifying access.
+
+    Blocking (database read + filesystem stat) — call via
+    :func:`get_project_path_async` from async code.
 
     .. deprecated:: Use :func:`app.api.common.resolve_project_path` instead.
     """
@@ -91,8 +108,13 @@ def get_project_path(request: Request, project_id: str) -> str:
     return str(result)
 
 
-def get_repo_for_project(request: Request, project_id: str) -> str:
-    """Get the GitHub repository for a project from git remote."""
+async def get_project_path_async(request: Request, project_id: str) -> str:
+    """Off-loop :func:`get_project_path`."""
+    return await asyncio.to_thread(get_project_path, request, project_id)
+
+
+def _resolve_repo_for_project(request: Request, project_id: str) -> str:
+    """Blocking body of :func:`get_repo_for_project` (DB read + git subprocess)."""
     project_path = get_project_path(request, project_id)
     repo = github_service.get_repo_from_remote(project_path)
 
@@ -105,13 +127,34 @@ def get_repo_for_project(request: Request, project_id: str) -> str:
     return repo
 
 
-def check_github_auth() -> None:
-    """Check if GitHub CLI is authenticated. Raises HTTPException if not."""
-    if not github_service.is_authenticated():
+async def get_repo_for_project(request: Request, project_id: str) -> str:
+    """Get the GitHub repository for a project from git remote (off-loop)."""
+    return await asyncio.to_thread(_resolve_repo_for_project, request, project_id)
+
+
+async def check_github_auth() -> None:
+    """Check if GitHub CLI is authenticated. Raises HTTPException if not.
+
+    ``github_service.is_authenticated`` caches its answer for minutes, so this
+    is normally a dictionary lookup; the ``to_thread`` hop only matters on the
+    refresh that actually spawns ``gh auth status``.
+    """
+    if not await asyncio.to_thread(github_service.is_authenticated):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="GitHub CLI is not authenticated. Please configure GitHub authentication."
         )
+
+
+def _github_unavailable(action: str, exc: GitHubCliError) -> HTTPException:
+    """Map a gh transport failure to 502 — "unknown", not "no data" (G2)."""
+    detail = f"GitHub CLI could not {action}"
+    if exc.stderr:
+        detail = f"{detail}: {exc.stderr}"
+    else:
+        detail = f"{detail}: {exc}"
+    logger.warning("gh unavailable while trying to %s: %s", action, exc)
+    return HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail)
 
 
 def pr_to_response(pr: PullRequest) -> PullRequestResponse:
@@ -185,7 +228,7 @@ async def get_github_status(
     check_project_access(request, project_id)
 
     response = GitHubStatusResponse(
-        authenticated=github_service.is_authenticated()
+        authenticated=await asyncio.to_thread(github_service.is_authenticated)
     )
 
     if not response.authenticated:
@@ -193,17 +236,22 @@ async def get_github_status(
         return response
 
     try:
-        project_path = get_project_path(request, project_id)
-        repo = github_service.get_repo_from_remote(project_path)
+        project_path = await get_project_path_async(request, project_id)
+        repo = await asyncio.to_thread(github_service.get_repo_from_remote, project_path)
 
         if repo:
             response.repo = repo
-            response.repo_info = github_service.get_repo_info(repo)
+            response.repo_info = await asyncio.to_thread(github_service.get_repo_info, repo)
         else:
             response.error = "No GitHub remote found in project"
 
     except HTTPException as e:
         response.error = e.detail
+    except GitHubCliError as e:
+        # Repo is known, gh just could not answer — say so instead of
+        # reporting the repository as missing.
+        logger.warning("GitHub status: gh unavailable: %s", e)
+        response.error = f"GitHub CLI is unavailable: {e.stderr or e}"
     except Exception as e:
         logger.error(f"Error getting GitHub status: {e}")
         response.error = str(e)
@@ -231,13 +279,18 @@ async def list_pull_requests(
         limit: Maximum number of PRs to return (default 30, max 100)
     """
     check_project_access(request, project_id)
-    check_github_auth()
+    await check_github_auth()
 
     if limit > 100:
         limit = 100
 
-    repo = get_repo_for_project(request, project_id)
-    pulls = github_service.list_pulls(repo, state=state, limit=limit)
+    repo = await get_repo_for_project(request, project_id)
+    try:
+        pulls = await asyncio.to_thread(
+            github_service.list_pulls, repo, state=state, limit=limit
+        )
+    except GitHubCliError as e:
+        raise _github_unavailable("list pull requests", e)
 
     return [pr_to_response(pr) for pr in pulls]
 
@@ -253,10 +306,13 @@ async def get_pull_request(
     Get details of a specific pull request.
     """
     check_project_access(request, project_id)
-    check_github_auth()
+    await check_github_auth()
 
-    repo = get_repo_for_project(request, project_id)
-    pr = github_service.get_pull(repo, number)
+    repo = await get_repo_for_project(request, project_id)
+    try:
+        pr = await asyncio.to_thread(github_service.get_pull, repo, number)
+    except GitHubCliError as e:
+        raise _github_unavailable(f"read pull request #{number}", e)
 
     if not pr:
         raise HTTPException(
@@ -281,19 +337,21 @@ async def create_pull_request(
     """
     t_start = time.perf_counter()
     check_project_access(request, project_id)
-    check_github_auth()
+    await check_github_auth()
 
-    repo = get_repo_for_project(request, project_id)
+    repo = await get_repo_for_project(request, project_id)
 
     try:
         t_gh_start = time.perf_counter()
-        pr, error = github_service.create_pull(
-            repo=repo,
-            title=body.title,
-            body=body.body,
-            head=body.head,
-            base=body.base,
-            draft=body.draft
+        pr, error = await asyncio.to_thread(
+            lambda: github_service.create_pull(
+                repo=repo,
+                title=body.title,
+                body=body.body,
+                head=body.head,
+                base=body.base,
+                draft=body.draft,
+            )
         )
         t_gh_ms = (time.perf_counter() - t_gh_start) * 1000
     except Exception as e:
@@ -338,15 +396,17 @@ async def merge_pull_request(
     """
     t_start = time.perf_counter()
     check_project_access(request, project_id)
-    check_github_auth()
+    await check_github_auth()
 
     method = body.method if body else "merge"
 
-    repo = get_repo_for_project(request, project_id)
+    repo = await get_repo_for_project(request, project_id)
 
     try:
         t_gh_start = time.perf_counter()
-        success, error = github_service.merge_pull(repo, number, method=method)
+        success, error = await asyncio.to_thread(
+            github_service.merge_pull, repo, number, method=method
+        )
         t_gh_ms = (time.perf_counter() - t_gh_start) * 1000
     except Exception as e:
         logger.exception(f"Unhandled error merging pull request #{number}")
@@ -383,12 +443,14 @@ async def close_pull_request(
     Close a pull request without merging.
     """
     check_project_access(request, project_id)
-    check_github_auth()
+    await check_github_auth()
 
-    repo = get_repo_for_project(request, project_id)
+    repo = await get_repo_for_project(request, project_id)
 
     try:
-        success, error = github_service.close_pull(repo, number)
+        success, error = await asyncio.to_thread(
+            github_service.close_pull, repo, number
+        )
     except Exception as e:
         logger.exception(f"Unhandled error closing pull request #{number}")
         raise HTTPException(
@@ -423,13 +485,16 @@ async def list_workflow_runs(
         limit: Maximum number of runs to return (default 10, max 50)
     """
     check_project_access(request, project_id)
-    check_github_auth()
+    await check_github_auth()
 
     if limit > 50:
         limit = 50
 
-    repo = get_repo_for_project(request, project_id)
-    runs = github_service.list_runs(repo, limit=limit)
+    repo = await get_repo_for_project(request, project_id)
+    try:
+        runs = await asyncio.to_thread(github_service.list_runs, repo, limit=limit)
+    except GitHubCliError as e:
+        raise _github_unavailable("list workflow runs", e)
 
     return [run_to_response(run) for run in runs]
 
@@ -445,10 +510,13 @@ async def get_workflow_run(
     Get details of a specific workflow run.
     """
     check_project_access(request, project_id)
-    check_github_auth()
+    await check_github_auth()
 
-    repo = get_repo_for_project(request, project_id)
-    run = github_service.get_run(repo, run_id)
+    repo = await get_repo_for_project(request, project_id)
+    try:
+        run = await asyncio.to_thread(github_service.get_run, repo, run_id)
+    except GitHubCliError as e:
+        raise _github_unavailable(f"read workflow run #{run_id}", e)
 
     if not run:
         raise HTTPException(
@@ -470,10 +538,10 @@ async def rerun_workflow(
     Re-run a workflow.
     """
     check_project_access(request, project_id)
-    check_github_auth()
+    await check_github_auth()
 
-    repo = get_repo_for_project(request, project_id)
-    success = github_service.rerun_workflow(repo, run_id)
+    repo = await get_repo_for_project(request, project_id)
+    success = await asyncio.to_thread(github_service.rerun_workflow, repo, run_id)
 
     if not success:
         raise HTTPException(
