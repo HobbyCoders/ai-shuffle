@@ -12,11 +12,6 @@
 	const BUILD_COUNTS_TTL_MS = 60_000;
 	let lastCountsLoadAt = 0;
 
-	/** Exported for tests: forget the freshness stamp. */
-	export function resetBuildCountsFreshness() {
-		lastCountsLoadAt = 0;
-	}
-
 	/** True when the sub-nav counts should be refetched on mount. */
 	export function buildCountsAreStale(now: number = Date.now()): boolean {
 		return now - lastCountsLoadAt >= BUILD_COUNTS_TTL_MS;

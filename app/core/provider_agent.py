@@ -1105,6 +1105,10 @@ async def dispatch_worker(
             derive_provider_from_profile=False,
             model=model_id,
             hidden=True,
+            # Materialized flag backing the sidebar's worker filter. `hidden`
+            # alone still hides this row, but stamping it here keeps the column
+            # self-maintaining instead of relying on the one-shot backfill.
+            is_worker=True,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("ProviderAgent: worker session creation failed")

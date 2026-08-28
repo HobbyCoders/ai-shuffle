@@ -6,6 +6,7 @@
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { rewriteMediaMarkdown, clampRevealToMediaBoundary } from '$lib/utils/media';
 	import { renderChatMarkdown } from '$lib/utils/chat-markdown';
+	import { highlightGenerationForSource, onHighlighterReady } from '$lib/utils/shiki';
 	import { Typewriter } from '$lib/utils/typewriter';
 	import MessageActions from './MessageActions.svelte';
 	import { formatMessageTime } from '$lib/utils/message-time';
@@ -140,6 +141,7 @@
 		wasStreaming: false,
 		stablePrefixContent: '',
 		stablePrefixHtml: '',
+		highlightGen: 0,
 		result: { prefix: '', tail: '' }
 	};
 
@@ -150,11 +152,36 @@
 	// media that has settled into the prefix is NOT torn down and refetched when
 	// the tail keeps streaming. That is what stops the image from flickering /
 	// reloading while the rest of the message arrives.
-	const rendered = $derived(renderMarkdownMemoized(displayContent, streaming));
+	// Shiki loads its core and each grammar lazily, so a settled message can
+	// render with plain-text code blocks and then have its grammar arrive. The
+	// generation counters are plain module state; this reactive epoch is what
+	// makes the $derived re-run, and `highlightGen` in the memo key is what
+	// stops it returning the stale plain-text HTML. A message with no fences
+	// has generation 0 forever and is never invalidated.
+	let highlightEpoch = $state(0);
+	const _stopHighlightWatch = onHighlighterReady(() => { highlightEpoch += 1; });
+	onDestroy(_stopHighlightWatch);
 
-	function renderMarkdownMemoized(text: string, isStreaming: boolean): { prefix: string; tail: string } {
-		// Fast path: content and streaming flag unchanged
-		if (text === _cache.content && isStreaming === _cache.wasStreaming) return _cache.result;
+	const rendered = $derived(renderMarkdownMemoized(displayContent, streaming, highlightEpoch));
+
+	// `_epoch` is unused by the body: it exists so the $derived above tracks the
+	// highlighter-readiness signal as a dependency.
+	function renderMarkdownMemoized(
+		text: string,
+		isStreaming: boolean,
+		_epoch: number = 0
+	): { prefix: string; tail: string } {
+		const gen = highlightGenerationForSource(text);
+		const prevGen = _cache.highlightGen;
+		// Fast path: content, streaming flag AND available highlighting unchanged
+		if (
+			text === _cache.content &&
+			isStreaming === _cache.wasStreaming &&
+			gen === prevGen
+		) {
+			return _cache.result;
+		}
+		_cache.highlightGen = gen;
 
 		// Transition from streaming→not-streaming: full re-render for final media processing
 		if (_cache.wasStreaming && !isStreaming) {
@@ -167,7 +194,12 @@
 		}
 
 		// During streaming: incremental render if content was only appended
-		if (isStreaming && _cache.content.length > 0 && text.startsWith(_cache.content)) {
+		if (
+			isStreaming &&
+			_cache.content.length > 0 &&
+			text.startsWith(_cache.content) &&
+			gen === prevGen
+		) {
 			_cache.result = renderMarkdownIncremental(text);
 			_cache.content = text;
 			_cache.wasStreaming = true;
