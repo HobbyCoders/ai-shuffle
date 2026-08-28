@@ -589,6 +589,7 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
                     "task_id": u_task_id,
                     "status": u_status,
                     "tool_use_id": u_record.get("toolUseId"),
+                    "kind": u_record.get("kind"),
                 })
                 if _signal == CLI_OWNED_WAKE_SIGNAL:
                     wake_deadline = time.monotonic() + settings.cli_wake_grace_seconds
@@ -605,6 +606,12 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
             status = frame.get("status")
             if status not in _TERMINAL_TASK_STATUSES:
                 continue
+            # The wire frame carries no kind; the registry does. Attach it so the
+            # scheduler's wake prompt labels a backgrounded shell as a monitor
+            # instead of a sub-agent ("agent"/missing renders no <kind> element).
+            _n_record = task_registry.get_task(session_id, frame.get("task_id"))
+            if _n_record and _n_record.get("kind"):
+                frame["kind"] = _n_record.get("kind")
             tool_use_id = frame.get("tool_use_id")
             # Suppress the chip ONLY when the task is POSITIVELY subagent-owned:
             # a grandchild's terminal notification must not surface a "Task

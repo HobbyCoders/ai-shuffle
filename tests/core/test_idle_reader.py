@@ -400,8 +400,66 @@ async def test_killed_task_update_single_chip_and_tool_use_id_handoff(mock_db):
     assert frame["task_id"] == "task-k"
     assert frame["status"] == "killed"
     assert frame["tool_use_id"] == "tu-k"
+    assert frame["kind"] == "agent"
 
     task_registry.reset_all()
+
+
+async def test_shell_notification_handoff_carries_registry_kind(mock_db):
+    """The wire frame carries no kind; the reader attaches the registry's so the
+    scheduler's wake prompt labels a Monitor'd shell as a monitor, not a
+    sub-agent. (Shells completing via the delegated CLI leg used to render as
+    agent frames — only monitor_spawn's native leg set kind.)"""
+    from app.core.task_registry import task_registry
+
+    task_registry.reset_all()
+    task_registry.start_task("s2", "task-sh", "shell", "bg", tool_use_id="tu-sh")
+    turns_db.enqueue_turn("s2", "user", prompt="hi")
+
+    handoff = AsyncMock()
+    idle_reader.register_on_task_terminal(handoff)
+
+    notif = _make_message(TaskNotificationMessage)
+    frame = {"status": "completed", "task_id": "task-sh", "tool_use_id": "tu-sh",
+             "summary": "done", "usage": None}
+    pool, _ = _make_pool([notif])
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("app.core.session_pool.get_session_pool", return_value=pool))
+        stack.enter_context(patch("app.core.query_engine._task_notification_frame", return_value=frame))
+        await idle_reader.run_idle_reader("s2")
+
+    handoff.assert_awaited_once()
+    _, sent = handoff.call_args.args
+    assert sent["kind"] == "shell"
+
+    task_registry.reset_all()
+
+
+async def test_unregistered_notification_handoff_stays_kindless(mock_db):
+    """A terminal notification for a task the registry never saw keeps its frame
+    shape — no kind key is invented."""
+    from app.core.task_registry import task_registry
+
+    task_registry.reset_all()
+    turns_db.enqueue_turn("s2", "user", prompt="hi")
+
+    handoff = AsyncMock()
+    idle_reader.register_on_task_terminal(handoff)
+
+    notif = _make_message(TaskNotificationMessage)
+    frame = {"status": "completed", "task_id": "task-x", "tool_use_id": "tu-x",
+             "summary": "done", "usage": None}
+    pool, _ = _make_pool([notif])
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("app.core.session_pool.get_session_pool", return_value=pool))
+        stack.enter_context(patch("app.core.query_engine._task_notification_frame", return_value=frame))
+        await idle_reader.run_idle_reader("s2")
+
+    handoff.assert_awaited_once()
+    _, sent = handoff.call_args.args
+    assert "kind" not in sent
 
 
 # ---------------------------------------------------------------------------
