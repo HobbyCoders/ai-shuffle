@@ -42,6 +42,7 @@
  * compatibility with $storeName auto-subscription in .svelte files.
  */
 
+import { untrack } from 'svelte';
 import * as gitApi from '$lib/api/git';
 import { isApiError } from '$lib/api/client';
 import { github } from './github.svelte';
@@ -792,6 +793,11 @@ export const git = {
 		_loadedScope = scope;
 		_loadedKey = key;
 		const cached = _cache.get(key);
+		// untrack: this runs synchronously inside component $effects (the session
+		// switch effect in MainPanel). Reading _state tracked there while _set
+		// replaces it would make that effect re-trigger itself forever
+		// (effect_update_depth_exceeded).
+		const prev = untrack(() => ({ ..._state }));
 		const base = {
 			projectId,
 			worktreeId: worktreeId ?? null,
@@ -800,11 +806,11 @@ export const git = {
 			loading: true,
 			error: null,
 			contextKey: key,
-			githubAvailable: _state.githubAvailable
+			githubAvailable: prev.githubAvailable
 		};
 		if (cached) {
 			_set({
-				..._state,
+				...prev,
 				...base,
 				...cached,
 				changedFilesLoading: false,
@@ -815,7 +821,7 @@ export const git = {
 			// NEVER blank the UI on a switch: carry the last-known values over as a
 			// placeholder while the real load runs.
 			_set({
-				..._state,
+				...prev,
 				...base,
 				changedFilesLoading: false,
 				stale: true,
@@ -829,7 +835,9 @@ export const git = {
 		_loadedScope = null;
 		_worktreeGone = false;
 		_clearServerBackoff();
-		_set({ ...EMPTY_STATE, githubAvailable: _state.githubAvailable });
+		// untrack: called synchronously from component $effects — see
+		// restoreCacheImmediate.
+		_set({ ...EMPTY_STATE, githubAvailable: untrack(() => _state.githubAvailable) });
 	},
 
 	/**
@@ -843,17 +851,21 @@ export const git = {
 	 * GITHUB_AUTH_GRACE_MS apart before believing it.
 	 */
 	setGithubAuth(authenticated: boolean) {
+		// untrack: called synchronously from a component $effect; a tracked read
+		// of githubAvailable would re-run that effect on every flip — see
+		// restoreCacheImmediate.
+		const available = untrack(() => _state.githubAvailable);
 		if (authenticated) {
 			_githubAuthFailures = 0;
 			_githubAuthFirstFailureAt = 0;
-			if (!_state.githubAvailable) _update((s) => ({ ...s, githubAvailable: true }));
+			if (!available) _update((s) => ({ ...s, githubAvailable: true }));
 			return;
 		}
 		_githubAuthFailures += 1;
 		if (_githubAuthFirstFailureAt === 0) _githubAuthFirstFailureAt = Date.now();
 		const settled =
 			_githubAuthFailures >= 2 && Date.now() - _githubAuthFirstFailureAt >= GITHUB_AUTH_GRACE_MS;
-		if (settled && _state.githubAvailable) {
+		if (settled && available) {
 			_update((s) => ({ ...s, githubAvailable: false }));
 		}
 	},
