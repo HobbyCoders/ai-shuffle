@@ -201,6 +201,14 @@ async def browser_panel_websocket(
                 if cdp_cmd is not None:
                     await hub.dispatch_input(cdp_cmd)
                 continue
+            if mtype == "inspect":
+                try:
+                    inspect = browser_stream.parse_inspect(data)
+                except Exception:
+                    await websocket.close(code=4400, reason="Protocol violation")
+                    break
+                await hub.dispatch_inspect(viewer, inspect)
+                continue
 
             # Anything else is a protocol violation.
             await websocket.close(code=4400, reason="Protocol violation")

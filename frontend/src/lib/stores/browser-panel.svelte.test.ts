@@ -12,7 +12,16 @@ beforeEach(() => {
 	// Reset per-attachment page tracking so url assertions start clean.
 	browserPanel.resetPageTracking();
 	browserPanel.setStatus('disconnected', null);
+	browserPanel.setInspectMode(false);
 });
+
+const sampleElement = {
+	selector: 'main > button#cta',
+	tag: 'button',
+	id: 'cta',
+	classes: ['btn'],
+	rect: { x: 1, y: 2, width: 3, height: 4 },
+};
 
 describe('browserPanel open/close/toggle', () => {
 	it('openPanel opens and clears close-suppression', () => {
@@ -144,5 +153,49 @@ describe('browserPanel page tracking', () => {
 		expect(browserPanel.current.pageLoading).toBe(false);
 		expect(browserPanel.current.pageTracked).toBe(false);
 		expect(browserPanel.current.url).toBe('https://kept.example/');
+	});
+});
+
+describe('browserPanel inspect mode + selection', () => {
+	it('starts with inspect off and nothing selected', () => {
+		expect(browserPanel.current.inspectMode).toBe(false);
+		expect(browserPanel.current.selectedElement).toBeNull();
+	});
+
+	it('setInspectMode(true) keeps a selection; setInspectMode(false) drops it', () => {
+		browserPanel.setInspectMode(true);
+		browserPanel.setSelectedElement(sampleElement);
+		expect(browserPanel.current.selectedElement).toEqual(sampleElement);
+
+		browserPanel.setInspectMode(true); // re-arm is a no-op for the selection
+		expect(browserPanel.current.selectedElement).toEqual(sampleElement);
+
+		browserPanel.setInspectMode(false);
+		expect(browserPanel.current.inspectMode).toBe(false);
+		expect(browserPanel.current.selectedElement).toBeNull();
+	});
+
+	it('closePanel and toggle-close reset inspect state', () => {
+		browserPanel.setInspectMode(true);
+		browserPanel.setSelectedElement(sampleElement);
+		browserPanel.closePanel('s1');
+		expect(browserPanel.current.inspectMode).toBe(false);
+		expect(browserPanel.current.selectedElement).toBeNull();
+
+		browserPanel.openPanel();
+		browserPanel.setInspectMode(true);
+		browserPanel.setSelectedElement(sampleElement);
+		browserPanel.toggle('s1'); // closes
+		expect(browserPanel.current.inspectMode).toBe(false);
+		expect(browserPanel.current.selectedElement).toBeNull();
+	});
+
+	it('resetPageTracking (session switch) drops the selection', () => {
+		browserPanel.setInspectMode(true);
+		browserPanel.setSelectedElement(sampleElement);
+		browserPanel.resetPageTracking();
+		expect(browserPanel.current.selectedElement).toBeNull();
+		// The mode itself survives — the user re-picks on the new page.
+		expect(browserPanel.current.inspectMode).toBe(true);
 	});
 });

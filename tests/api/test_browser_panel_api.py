@@ -108,6 +108,9 @@ class _DummyHub:
     async def dispatch_input(self, cmd):
         return None
 
+    async def dispatch_inspect(self, viewer, inspect):
+        return None
+
 
 class TestBrowserPanelWebSocket:
     def _patch_hub(self, monkeypatch):
@@ -197,3 +200,46 @@ class TestBrowserPanelWebSocket:
         # After the context exits the connection is closed; the input we sent
         # should have been translated + dispatched.
         assert dispatched and dispatched[0]["method"] == "Input.dispatchMouseEvent"
+
+    def test_inspect_is_dispatched_to_hub(self, client, monkeypatch):
+        monkeypatch.setattr(bp, "authenticate_websocket", AsyncMock(return_value=(True, None)))
+        monkeypatch.setattr(bp.database, "get_session", lambda sid: {"id": sid})
+        monkeypatch.setattr(bp, "_browser_running", AsyncMock(return_value=False))
+
+        inspected = []
+        hub = _DummyHub()
+
+        async def _dispatch_inspect(viewer, inspect):
+            inspected.append(inspect)
+
+        hub.dispatch_inspect = _dispatch_inspect
+
+        async def _attach(session_id, websocket):
+            return hub, object()
+
+        async def _detach(session_id, viewer):
+            return None
+
+        monkeypatch.setattr(bp.browser_stream, "attach_viewer", _attach)
+        monkeypatch.setattr(bp.browser_stream, "detach_viewer", _detach)
+
+        with client.websocket_connect("/api/v1/ws/browser/s1?token=x") as ws:
+            ws.receive_json()  # hello
+            ws.receive_json()  # status
+            ws.send_json({"type": "inspect", "x": 12, "y": 34, "mode": "select"})
+        assert inspected and inspected[0].mode == "select"
+        assert (inspected[0].x, inspected[0].y) == (12.0, 34.0)
+
+    def test_invalid_inspect_closes_4400(self, client, monkeypatch):
+        monkeypatch.setattr(bp, "authenticate_websocket", AsyncMock(return_value=(True, None)))
+        monkeypatch.setattr(bp.database, "get_session", lambda sid: {"id": sid})
+        monkeypatch.setattr(bp, "_browser_running", AsyncMock(return_value=False))
+        self._patch_hub(monkeypatch)
+
+        with client.websocket_connect("/api/v1/ws/browser/s1?token=x") as ws:
+            ws.receive_json()  # hello
+            ws.receive_json()  # status
+            ws.send_json({"type": "inspect", "x": 1, "y": 2, "mode": "drag"})
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_json()
+        assert exc.value.code == 4400

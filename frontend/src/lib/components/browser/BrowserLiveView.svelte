@@ -7,11 +7,23 @@
 	 * Drawing: each incoming base64 JPEG is decoded to an ImageBitmap and painted
 	 * on requestAnimationFrame (intermediate frames are coalesced). The paint uses
 	 * the SAME fit-scale + letterbox math as the input mapping (coords.ts), so a
-	 * click always lands where the cursor visually is.
+	 * click always lands where the cursor visually is. Inspect-mode element
+	 * highlights (hover + selection rects, in page CSS pixels) are drawn straight
+	 * onto the canvas after the frame, so they stay pixel-aligned with the page
+	 * image through resizes and letterbox changes.
 	 *
 	 * Input: captured on a focusable wrapper. Pointer moves are rAF-coalesced
 	 * (~60 Hz), wheel and key events preventDefault while focused so page hotkeys
 	 * and the app's own shortcuts don't fire underneath the live view.
+	 *
+	 * Touch: a touch drag is translated into wheel (scroll) events — the page
+	 * content follows the finger — and a tap (< slop movement) into a full
+	 * move/down/up click sequence, so handheld users can actually browse.
+	 *
+	 * Inspect mode (`inspecting`): pointer events are NOT forwarded to the page.
+	 * Hovering sends throttled `onInspect(x, y, 'hover')` hit-tests and a click
+	 * (or tap) sends `onInspect(x, y, 'select')`; wheel still scrolls so deeper
+	 * content stays reachable.
 	 */
 	import { onDestroy } from 'svelte';
 	import {
@@ -20,6 +32,7 @@
 		letterbox,
 		modifiersFromEvent,
 		type FrameMetadata,
+		type PageRect,
 	} from '$lib/browser-panel/coords';
 
 	interface FramePayload {
@@ -32,11 +45,33 @@
 		frame: FramePayload | null;
 		/** Whether input is accepted (true only while the stream is live). */
 		interactive?: boolean;
+		/** Point-and-prompt mode: hit-test instead of forwarding pointer input. */
+		inspecting?: boolean;
+		/** Hover-highlight rect in page CSS pixels (inspect mode). */
+		hoverRect?: PageRect | null;
+		/** Selection-highlight rect in page CSS pixels (inspect mode). */
+		selectionRect?: PageRect | null;
 		/** Send a client→server input payload over the socket. */
 		onInput: (payload: Record<string, unknown>) => void;
+		/** Request an element hit-test at a page CSS-pixel point (inspect mode). */
+		onInspect?: (x: number, y: number, mode: 'hover' | 'select') => void;
+		/** The pointer left the view — clear any hover highlight (inspect mode). */
+		onHoverLeave?: () => void;
+		/** The user asked to leave inspect mode from inside the view (Escape). */
+		onExitInspect?: () => void;
 	}
 
-	let { frame, interactive = true, onInput }: Props = $props();
+	let {
+		frame,
+		interactive = true,
+		inspecting = false,
+		hoverRect = null,
+		selectionRect = null,
+		onInput,
+		onInspect,
+		onHoverLeave,
+		onExitInspect,
+	}: Props = $props();
 
 	let wrapperEl: HTMLDivElement | undefined = $state();
 	let canvasEl: HTMLCanvasElement | undefined = $state();
@@ -97,6 +132,47 @@
 		);
 	}
 
+	/** Resolve a CSS custom property for canvas drawing, with a fixed fallback. */
+	function cssColor(name: string, fallback: string): string {
+		if (!canvasEl) return fallback;
+		const v = getComputedStyle(canvasEl).getPropertyValue(name).trim();
+		return v || fallback;
+	}
+
+	function drawHighlight(
+		ctx: CanvasRenderingContext2D,
+		r: PageRect,
+		scale: number,
+		off: { x: number; y: number },
+		kind: 'hover' | 'selection',
+	) {
+		const x = off.x + r.x * scale;
+		const y = off.y + r.y * scale;
+		const w = r.width * scale;
+		const h = r.height * scale;
+		if (!(Number.isFinite(x) && Number.isFinite(y) && w >= 0 && h >= 0)) return;
+		const color = cssColor('--primary', '#6366f1');
+		ctx.save();
+		if (kind === 'hover') {
+			ctx.globalAlpha = 0.14;
+			ctx.fillStyle = color;
+			ctx.fillRect(x, y, w, h);
+			ctx.globalAlpha = 0.9;
+			ctx.lineWidth = 1.5;
+			ctx.strokeStyle = color;
+			ctx.strokeRect(x, y, w, h);
+		} else {
+			ctx.globalAlpha = 0.08;
+			ctx.fillStyle = color;
+			ctx.fillRect(x, y, w, h);
+			ctx.globalAlpha = 1;
+			ctx.lineWidth = 2;
+			ctx.strokeStyle = color;
+			ctx.strokeRect(x, y, w, h);
+		}
+		ctx.restore();
+	}
+
 	function paint() {
 		const bitmap = currentBitmap;
 		const meta = currentMeta;
@@ -124,6 +200,15 @@
 		ctx.clearRect(0, 0, rect.width, rect.height);
 		ctx.imageSmoothingQuality = 'high';
 		ctx.drawImage(bitmap, off.x, off.y, meta.deviceWidth * scale, meta.deviceHeight * scale);
+
+		if (inspecting) {
+			if (selectionRect) drawHighlight(ctx, selectionRect, scale, off, 'selection');
+			if (hoverRect) drawHighlight(ctx, hoverRect, scale, off, 'hover');
+		} else if (selectionRect) {
+			// Selection stays visible outside inspect mode so the composer's
+			// context is still anchored to something on screen.
+			drawHighlight(ctx, selectionRect, scale, off, 'selection');
+		}
 	}
 
 	// Repaint on container resize so the letterbox re-fits. Observe the WRAPPER,
@@ -144,6 +229,14 @@
 	$effect(() => {
 		const f = frame;
 		if (f) scheduleDraw(f);
+	});
+
+	// Highlight rect / mode changes repaint the last frame (no new bitmap).
+	$effect(() => {
+		void hoverRect;
+		void selectionRect;
+		void inspecting;
+		paint();
 	});
 
 	onDestroy(() => {
@@ -185,6 +278,98 @@
 		});
 	}
 
+	// ── Inspect hit-testing (hover throttled to ~12 Hz, trailing kept) ────
+	const HOVER_THROTTLE_MS = 80;
+	let lastHoverSent = 0;
+	let trailingHover: { clientX: number; clientY: number } | null = null;
+	let trailingHoverTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function sendInspect(e: { clientX: number; clientY: number }, mode: 'hover' | 'select') {
+		if (!interactive || !onInspect) return;
+		if (mode === 'hover') {
+			const now = Date.now();
+			if (now - lastHoverSent < HOVER_THROTTLE_MS) {
+				// Keep the newest position; fire it when the window closes so the
+				// highlight settles under a stopped cursor instead of lagging.
+				trailingHover = { clientX: e.clientX, clientY: e.clientY };
+				if (trailingHoverTimer === null) {
+					trailingHoverTimer = setTimeout(() => {
+						trailingHoverTimer = null;
+						const t = trailingHover;
+						trailingHover = null;
+						if (t) sendInspect(t, 'hover');
+					}, HOVER_THROTTLE_MS - (now - lastHoverSent));
+				}
+				return;
+			}
+			lastHoverSent = now;
+		}
+		const p = pagePoint(e);
+		if (!p) return;
+		onInspect(p.x, p.y, mode);
+	}
+
+	onDestroy(() => {
+		if (trailingHoverTimer !== null) clearTimeout(trailingHoverTimer);
+	});
+
+	// ── Touch drag→scroll / tap→click synthesis ───────────────────────────
+	/** Movement under this (px) still counts as a tap. */
+	const TAP_SLOP_PX = 8;
+	let touch: {
+		id: number;
+		lastX: number;
+		lastY: number;
+		startX: number;
+		startY: number;
+		moved: boolean;
+	} | null = null;
+
+	function onTouchDown(e: PointerEvent) {
+		if (touch !== null) return; // ignore secondary fingers
+		touch = {
+			id: e.pointerId,
+			lastX: e.clientX,
+			lastY: e.clientY,
+			startX: e.clientX,
+			startY: e.clientY,
+			moved: false,
+		};
+	}
+
+	function onTouchMove(e: PointerEvent) {
+		if (!touch || e.pointerId !== touch.id) return;
+		const dx = e.clientX - touch.lastX;
+		const dy = e.clientY - touch.lastY;
+		touch.lastX = e.clientX;
+		touch.lastY = e.clientY;
+		if (
+			Math.abs(e.clientX - touch.startX) > TAP_SLOP_PX ||
+			Math.abs(e.clientY - touch.startY) > TAP_SLOP_PX
+		) {
+			touch.moved = true;
+		}
+		// Content follows the finger: dragging up scrolls down.
+		if (touch.moved) sendMouse('wheel', e, { deltaX: -dx, deltaY: -dy });
+	}
+
+	function onTouchUp(e: PointerEvent) {
+		if (!touch || e.pointerId !== touch.id) return;
+		const wasTap = !touch.moved;
+		touch = null;
+		if (!wasTap) return;
+		if (inspecting) {
+			sendInspect(e, 'select');
+			return;
+		}
+		// Full click sequence at the tap point.
+		sendMouse('move', e);
+		sendMouse('down', e, { clickCount: 1 });
+		sendMouse('up', e, { clickCount: 1 });
+	}
+
+	// ── Pointer handlers ───────────────────────────────────────────────────
+
 	// Pointer moves coalesced to one send per animation frame (~60 Hz).
 	let pendingMove: PointerEvent | null = null;
 	let moveScheduled = false;
@@ -198,6 +383,14 @@
 
 	function onPointerMove(e: PointerEvent) {
 		if (!interactive) return;
+		if (e.pointerType === 'touch') {
+			onTouchMove(e);
+			return;
+		}
+		if (inspecting) {
+			sendInspect(e, 'hover');
+			return;
+		}
 		pendingMove = e;
 		if (moveScheduled) return;
 		moveScheduled = true;
@@ -209,17 +402,42 @@
 		wrapperEl?.focus();
 		if (!interactive) return;
 		e.preventDefault();
+		if (e.pointerType === 'touch') {
+			onTouchDown(e);
+			return;
+		}
+		if (inspecting) return; // select fires on pointerup
 		sendMouse('down', e);
 	}
 
 	function onPointerUp(e: PointerEvent) {
 		if (!interactive) return;
+		if (e.pointerType === 'touch') {
+			onTouchUp(e);
+			return;
+		}
+		if (inspecting) {
+			sendInspect(e, 'select');
+			return;
+		}
 		sendMouse('up', e);
+	}
+
+	function onPointerCancel(e: PointerEvent) {
+		if (touch && e.pointerId === touch.id) touch = null;
+	}
+
+	function onPointerLeave() {
+		if (!inspecting) return;
+		// Drop a queued trailing hover so it can't re-highlight after leaving.
+		trailingHover = null;
+		onHoverLeave?.();
 	}
 
 	function onWheel(e: WheelEvent) {
 		if (!interactive) return;
 		e.preventDefault();
+		// Inspect mode still scrolls — deeper content must stay reachable.
 		sendMouse('wheel', e, { deltaX: e.deltaX, deltaY: e.deltaY });
 	}
 
@@ -247,6 +465,11 @@
 		// Keep the keystroke inside the live view — don't let it trigger app hotkeys.
 		e.preventDefault();
 		e.stopPropagation();
+		if (inspecting) {
+			// Keys are not forwarded while inspecting; Escape leaves the mode.
+			if (e.key === 'Escape') onExitInspect?.();
+			return;
+		}
 		sendKey('down', e);
 	}
 
@@ -254,6 +477,7 @@
 		if (!interactive || !focused) return;
 		e.preventDefault();
 		e.stopPropagation();
+		if (inspecting) return;
 		sendKey('up', e);
 	}
 </script>
@@ -268,12 +492,17 @@
 	class="live-wrapper"
 	class:focused
 	class:non-interactive={!interactive}
+	class:inspecting
 	tabindex="0"
 	role="application"
-	aria-label="Live browser view — click to interact, keyboard input is sent to the page"
+	aria-label={inspecting
+		? 'Live browser view — inspect mode, click an element to select it'
+		: 'Live browser view — click to interact, keyboard input is sent to the page'}
 	onpointerdown={onPointerDown}
 	onpointerup={onPointerUp}
 	onpointermove={onPointerMove}
+	onpointercancel={onPointerCancel}
+	onpointerleave={onPointerLeave}
 	onwheel={onWheel}
 	onkeydown={onKeyDown}
 	onkeyup={onKeyUp}
@@ -282,7 +511,9 @@
 	oncontextmenu={(e) => e.preventDefault()}
 >
 	<canvas bind:this={canvasEl} class="live-canvas"></canvas>
-	{#if interactive && !focused}
+	{#if interactive && inspecting}
+		<div class="focus-hint inspect-hint">Click an element to select it</div>
+	{:else if interactive && !focused}
 		<div class="focus-hint">Click to interact</div>
 	{/if}
 </div>
@@ -301,8 +532,12 @@
 				)
 				50% / 20px 20px;
 		touch-action: none;
-		cursor: crosshair;
+		cursor: default;
 		overflow: hidden;
+	}
+
+	.live-wrapper.inspecting {
+		cursor: crosshair;
 	}
 
 	.live-wrapper.non-interactive {
@@ -346,6 +581,12 @@
 		backdrop-filter: blur(6px);
 		pointer-events: none;
 		opacity: 0.85;
+		white-space: nowrap;
+	}
+
+	.inspect-hint {
+		color: var(--primary);
+		border-color: color-mix(in oklch, var(--primary) 40%, transparent);
 	}
 
 	@media (prefers-reduced-motion: reduce) {

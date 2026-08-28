@@ -89,6 +89,37 @@ export function canvasToPage(
 	};
 }
 
+/** Page-CSS-pixel rect (e.g. an element's `getBoundingClientRect` in the page). */
+export interface PageRect {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+}
+
+/**
+ * Map a page-CSS-pixel rect into canvas-local coordinates (the inverse of
+ * `canvasToPage`, for drawing element highlights over the screencast). The
+ * result is NOT clamped — a rect partially outside the viewport draws
+ * partially outside the letterboxed image, which the canvas clips naturally.
+ * Returns `null` for a degenerate frame.
+ */
+export function pageRectToCanvas(
+	pageRect: PageRect,
+	rect: CanvasRect,
+	meta: FrameMetadata,
+): { left: number; top: number; width: number; height: number } | null {
+	const scale = fitScale(rect, meta);
+	if (scale <= 0) return null;
+	const off = letterbox(rect, meta, scale);
+	return {
+		left: off.x + pageRect.x * scale,
+		top: off.y + pageRect.y * scale,
+		width: pageRect.width * scale,
+		height: pageRect.height * scale,
+	};
+}
+
 // ─── CDP modifier bitmask ──────────────────────────────────────────────────────
 // Chrome DevTools Protocol Input.dispatch* modifiers: 1=Alt, 2=Ctrl, 4=Meta, 8=Shift.
 

@@ -5,8 +5,8 @@ down after the last one leaves. The hub opens a single upstream CDP WebSocket to
 the supervised Chromium page published in ``browser_panel_registry`` and drives
 ``Page.startScreencast``; each JPEG frame is fanned out to every connected
 viewer through a per-viewer latest-frame-wins queue. Client input (mouse / key /
-navigate) is translated — never forwarded raw — into CDP ``Input.*`` /
-``Page.navigate`` commands on the same upstream socket.
+navigate / inspect) is translated — never forwarded raw — into CDP ``Input.*`` /
+``Page.navigate`` / ``Runtime.evaluate`` commands on the same upstream socket.
 
 State machine (per hub, run by :meth:`BrowserStreamHub._run`):
   * no target registered            -> broadcast ``no_page``, wait for change
@@ -84,6 +84,14 @@ class _CommandInput(BaseModel):
     """A toolbar command: history walk, reload, or stop loading."""
 
     command: str  # back | forward | reload | stop
+
+
+class InspectInput(BaseModel):
+    """A point-and-prompt hit-test request at page CSS-pixel coordinates."""
+
+    x: float
+    y: float
+    mode: str  # hover | select
 
 
 _MOUSE_CDP_TYPE = {
@@ -196,6 +204,114 @@ def translate_input(msg: dict, bounds: Optional[Tuple[int, int]] = None) -> Opti
 
 
 # ---------------------------------------------------------------------------
+# Inspect (point-and-prompt element hit-test)
+# ---------------------------------------------------------------------------
+_VALID_INSPECT_MODES = {"hover", "select"}
+
+# Upper bound on the JSON-encoded element descriptor a page may hand back. The
+# in-page script caps every field itself, but the page owns its own JS realm,
+# so the server re-checks before fanning anything out to a viewer.
+_MAX_INSPECT_RESULT_BYTES = 32_768
+
+# Self-contained hit-test script evaluated in the page. Placeholders __X__ /
+# __Y__ / __DETAIL__ are substituted with JSON-encoded values. Returns either
+# null or a plain-JSON element descriptor (returnByValue serialisable).
+_INSPECT_JS_TEMPLATE = """
+(() => {
+  const el = document.elementFromPoint(__X__, __Y__);
+  if (!el || el.nodeType !== 1) return null;
+  const cap = (s, n) =>
+    typeof s === 'string' && s.length > n ? s.slice(0, n) + '…' : s;
+  const path = [];
+  let cur = el;
+  while (cur && cur.nodeType === 1 && path.length < 8) {
+    let seg = cur.tagName.toLowerCase();
+    if (cur.id) {
+      path.unshift(seg + '#' + CSS.escape(cur.id));
+      break;
+    }
+    const parent = cur.parentElement;
+    if (parent) {
+      const same = Array.from(parent.children).filter(
+        (c) => c.tagName === cur.tagName,
+      );
+      if (same.length > 1) seg += ':nth-of-type(' + (same.indexOf(cur) + 1) + ')';
+    }
+    path.unshift(seg);
+    cur = parent;
+  }
+  const r = el.getBoundingClientRect();
+  const out = {
+    selector: path.join(' > '),
+    tag: el.tagName.toLowerCase(),
+    id: el.id || null,
+    classes: Array.from(el.classList).slice(0, 12).map((c) => cap(c, 80)),
+    rect: { x: r.x, y: r.y, width: r.width, height: r.height },
+  };
+  if (__DETAIL__) {
+    out.role = el.getAttribute('role');
+    out.text = cap(
+      ((el.innerText || el.textContent || '') + '').trim().replace(/\\s+/g, ' '),
+      200,
+    );
+    out.html = cap(el.outerHTML, 800);
+    const attrs = {};
+    for (const a of Array.from(el.attributes).slice(0, 12)) {
+      attrs[cap(a.name, 60)] = cap(a.value, 160);
+    }
+    out.attrs = attrs;
+  }
+  return out;
+})()
+"""
+
+
+def parse_inspect(msg: dict) -> InspectInput:
+    """Validate one client ``inspect`` message. Raises on anything invalid."""
+    inspect = InspectInput(**msg)
+    if inspect.mode not in _VALID_INSPECT_MODES:
+        raise ValueError(f"invalid inspect mode: {inspect.mode!r}")
+    if not (
+        _is_finite(inspect.x) and _is_finite(inspect.y)
+    ):
+        raise ValueError("inspect coordinates must be finite")
+    return inspect
+
+
+def _is_finite(v: float) -> bool:
+    return v == v and v not in (float("inf"), float("-inf"))
+
+
+def build_inspect_expression(
+    x: float, y: float, detail: bool, bounds: Optional[Tuple[int, int]] = None
+) -> str:
+    """Build the page-side hit-test expression for one inspect request."""
+    if bounds is not None:
+        w, h = bounds
+        x = min(max(x, 0.0), float(w))
+        y = min(max(y, 0.0), float(h))
+    return (
+        _INSPECT_JS_TEMPLATE
+        .replace("__X__", json.dumps(float(x)))
+        .replace("__Y__", json.dumps(float(y)))
+        .replace("__DETAIL__", "true" if detail else "false")
+    )
+
+
+def sanitize_inspect_result(value: object) -> Optional[dict]:
+    """Server-side guard on the page-provided descriptor: dict + bounded size."""
+    if not isinstance(value, dict):
+        return None
+    try:
+        encoded = json.dumps(value)
+    except (TypeError, ValueError):
+        return None
+    if len(encoded) > _MAX_INSPECT_RESULT_BYTES:
+        return None
+    return value
+
+
+# ---------------------------------------------------------------------------
 # Upstream connection seam (patched in tests)
 # ---------------------------------------------------------------------------
 async def _open_upstream(uri: str):
@@ -244,6 +360,8 @@ class BrowserStreamHub:
         # Toolbar state tracked from CDP page events, mirrored to viewers as
         # ``page`` messages. msg-id -> history offset awaiting its reply.
         self._pending_jumps: Dict[int, int] = {}
+        # msg-id -> (viewer, mode) awaiting a Runtime.evaluate hit-test reply.
+        self._pending_inspects: Dict[int, Tuple["_Viewer", str]] = {}
         self.page_url: Optional[str] = None
         self.page_loading: bool = False
 
@@ -389,6 +507,50 @@ class BrowserStreamHub:
             # The pump loop pairs the reply (same id) back to this jump.
             self._pending_jumps[self._upstream_msg_id] = int(offset)
 
+    async def dispatch_inspect(self, viewer: "_Viewer", inspect: InspectInput) -> None:
+        """Run one point-and-prompt hit-test for ``viewer``.
+
+        Sends ``Runtime.evaluate`` with the in-page hit-test script; the pump
+        loop pairs the reply back through ``_pending_inspects`` and answers the
+        requesting viewer with an ``inspect-hit`` frame. With no upstream page
+        attached the viewer gets an immediate empty hit so its hover/selection
+        state clears instead of hanging.
+        """
+        ws = self._upstream
+        if ws is None:
+            await self.send_to_viewer(
+                viewer, {"type": "inspect-hit", "mode": inspect.mode, "element": None}
+            )
+            return
+        expression = build_inspect_expression(
+            inspect.x,
+            inspect.y,
+            detail=inspect.mode == "select",
+            bounds=self.last_bounds(),
+        )
+        if not await self._send_upstream(
+            ws,
+            "Runtime.evaluate",
+            {"expression": expression, "returnByValue": True},
+            response=True,
+        ):
+            return
+        self._pending_inspects[self._upstream_msg_id] = (viewer, inspect.mode)
+
+    async def _complete_inspect(self, msg_id: int, reply: dict) -> None:
+        """Answer the viewer that asked for the hit-test (if still connected)."""
+        pending = self._pending_inspects.pop(msg_id, None)
+        if pending is None:
+            return
+        viewer, mode = pending
+        if viewer not in self.viewers:
+            return
+        value = reply.get("result", {}).get("value")
+        element = sanitize_inspect_result(value)
+        await self.send_to_viewer(
+            viewer, {"type": "inspect-hit", "mode": mode, "element": element}
+        )
+
     async def _complete_history_jump(self, msg_id: int, reply: dict) -> None:
         """Finish a back/forward command once getNavigationHistory replies.
 
@@ -465,6 +627,7 @@ class BrowserStreamHub:
         self._upstream = ws
         self._upstream_msg_id = 0
         self._pending_jumps.clear()
+        self._pending_inspects.clear()
         self.page_url = target.url
         self.page_loading = False
         change_task: Optional[asyncio.Task] = None
@@ -496,6 +659,9 @@ class BrowserStreamHub:
                     method = msg.get("method")
                     if "id" in msg and msg["id"] in self._pending_jumps:
                         await self._complete_history_jump(msg["id"], msg.get("result", {}))
+                        continue
+                    if "id" in msg and msg["id"] in self._pending_inspects:
+                        await self._complete_inspect(msg["id"], msg.get("result", {}))
                         continue
                     changed = False
                     if method in (
