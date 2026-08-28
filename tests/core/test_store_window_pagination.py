@@ -684,17 +684,15 @@ def test_a_windowed_hit_is_scoped_to_its_own_cursor(monkeypatch):
     entries = _text_transcript(20)
     _install_fake_db(monkeypatch, entries)
     loader = _window_loader_over(entries)
-    kwargs = dict(
-        store_loader=_full_loader(entries),
-        store_version_loader=_version_loader(entries),
-    )
+    full = _full_loader(entries)
+    kwargs = dict(store_version_loader=_version_loader(entries))
 
     newest, _u, _p = jp.parse_session_window_from_store(
-        "sess-window", "/workspace", loader, limit=6, **kwargs)
+        "sess-window", "/workspace", loader, full, limit=6, **kwargs)
     older, _u2, _p2 = jp.parse_session_window_from_store(
-        "sess-window", "/workspace", loader, limit=6, before_seq=34, **kwargs)
+        "sess-window", "/workspace", loader, full, limit=6, before_seq=34, **kwargs)
     newest_again, _u3, _p3 = jp.parse_session_window_from_store(
-        "sess-window", "/workspace", loader, limit=6, **kwargs)
+        "sess-window", "/workspace", loader, full, limit=6, **kwargs)
 
     assert [m["uuid"] for m in newest] != [m["uuid"] for m in older]
     assert [m["uuid"] for m in newest_again] == [m["uuid"] for m in newest]
@@ -706,16 +704,16 @@ def test_a_windowed_hit_is_dropped_when_the_store_version_moves(monkeypatch):
     loader = _window_loader_over(entries)
 
     first, _u, _p = jp.parse_session_window_from_store(
-        "sess-window", "/workspace", loader, limit=4,
-        store_loader=_full_loader(entries),
+        "sess-window", "/workspace", loader,
+        _full_loader(entries), limit=4,
         store_version_loader=lambda _sid: (40, 40),
     )
     # A turn lands: same call, newer version stamp -> re-read, not the old page.
     entries.extend(_text_transcript(1))
     _install_fake_db(monkeypatch, entries)
     second, _u2, _p2 = jp.parse_session_window_from_store(
-        "sess-window", "/workspace", loader, limit=4,
-        store_loader=_full_loader(entries),
+        "sess-window", "/workspace", loader,
+        _full_loader(entries), limit=4,
         store_version_loader=lambda _sid: (42, 42),
     )
     assert [m["uuid"] for m in second] != [m["uuid"] for m in first]
@@ -727,8 +725,8 @@ def test_invalidate_drops_windowed_entries_too(monkeypatch):
     _install_fake_db(monkeypatch, entries)
 
     jp.parse_session_window_from_store(
-        "sess-window", "/workspace", _window_loader_over(entries), limit=4,
-        store_loader=_full_loader(entries),
+        "sess-window", "/workspace", _window_loader_over(entries),
+        _full_loader(entries), limit=4,
         store_version_loader=_version_loader(entries),
     )
     assert any(isinstance(k, tuple) for k in jp._store_parse_cache.keys())
@@ -742,15 +740,15 @@ def test_pre_seed_drops_windowed_entries_for_that_session(monkeypatch):
     _install_fake_db(monkeypatch, entries)
 
     jp.parse_session_window_from_store(
-        "sess-window", "/workspace", _window_loader_over(entries), limit=4,
-        store_loader=_full_loader(entries),
+        "sess-window", "/workspace", _window_loader_over(entries),
+        _full_loader(entries), limit=4,
         store_version_loader=_version_loader(entries),
     )
     jp.parse_session_window_from_store(
         "other-sess", "/workspace",
         lambda *_a, **_k: {"entries": [], "total": 0, "start": 0,
                            "window_start": 0, "window_end": 0},
-        limit=4, store_loader=_full_loader([]),
+        _full_loader([]), limit=4,
         store_version_loader=lambda _s: (0, 0),
     )
 
@@ -771,8 +769,8 @@ def test_window_entries_respect_the_byte_bounded_lru(monkeypatch):
     monkeypatch.setattr(jp._store_parse_cache, "max_entry_bytes", 1)
 
     jp.parse_session_window_from_store(
-        "sess-window", "/workspace", _window_loader_over(entries), limit=2,
-        store_loader=_full_loader(entries),
+        "sess-window", "/workspace", _window_loader_over(entries),
+        _full_loader(entries), limit=2,
         store_version_loader=_version_loader(entries),
     )
     assert jp._store_parse_cache.keys() == []
@@ -956,8 +954,8 @@ def test_message_pagination_accepts_the_windowed_store_descriptor(monkeypatch):
     entries = _text_transcript(20)
     _install_fake_db(monkeypatch, entries)
     _msgs, _usage, pagination = jp.parse_session_window_from_store(
-        "sess-window", "/workspace", _window_loader_over(entries), limit=8,
-        store_loader=_full_loader(entries),
+        "sess-window", "/workspace", _window_loader_over(entries),
+        _full_loader(entries), limit=8,
         store_version_loader=_version_loader(entries),
     )
     model = SessionWithMessages.model_validate(

@@ -405,7 +405,13 @@ def attach_user_message_metadata(
 
 # ─── Cost Attachment Helper ──────────────────────────────────────────────────
 
-def attach_cost_metadata(messages: List[Dict[str, Any]], session_id: str) -> None:
+def attach_cost_metadata(
+    messages: List[Dict[str, Any]],
+    session_id: str,
+    *,
+    turn_offset: int = 0,
+    total_turns: Optional[int] = None,
+) -> None:
     """
     Attach cost/duration metadata to final assistant messages in-place.
 
@@ -420,6 +426,15 @@ def attach_cost_metadata(messages: List[Dict[str, Any]], session_id: str) -> Non
     Args:
         messages: List of message dicts (modified in-place)
         session_id: Session ID for looking up usage entries
+        turn_offset: Absolute index of the first turn in ``messages``. Usage
+            entries are matched positionally against the WHOLE session, so a
+            windowed/paginated slice must say where it starts or every message
+            gets the cost of a different turn. 0 for a full transcript.
+        total_turns: Total turns in the session, when known. Only the session's
+            genuinely last turn carries ``is_final_message`` and the cumulative
+            total; without this a window's last turn would falsely claim to be
+            the end of the conversation. Defaults to treating the supplied list
+            as the whole session.
     """
     if not messages:
         return
@@ -449,10 +464,15 @@ def attach_cost_metadata(messages: List[Dict[str, Any]], session_id: str) -> Non
 
     # Get usage entries (cached) and match to final messages
     usage_entries = get_cached_usage(session_id)
-    for turn_idx, msg_idx in enumerate(final_indices):
+    # Absolute turn count for deciding which message is the session's last.
+    effective_total = (
+        total_turns if total_turns is not None else turn_offset + len(final_indices)
+    )
+    for local_idx, msg_idx in enumerate(final_indices):
+        turn_idx = turn_offset + local_idx
         if turn_idx < len(usage_entries):
             usage = usage_entries[turn_idx]
-            is_absolute_final = (turn_idx == len(final_indices) - 1)
+            is_absolute_final = (turn_idx == effective_total - 1)
             existing_metadata = messages[msg_idx].get("metadata") or {}
 
             metadata = {
