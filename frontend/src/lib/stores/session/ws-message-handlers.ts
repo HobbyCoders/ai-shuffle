@@ -99,6 +99,10 @@ export interface MessageHandlerDeps {
 	// Callbacks for app-level side effects
 	appLoadSessions: () => void;
 	appLoadApiUserSessions: () => void;
+	/** Merge a server-pushed field patch into the sidebar session list without a
+	 *  refetch (e.g. is_active from user_session_updated). Returns true when the
+	 *  row exists locally and was updated. */
+	mergeSessionPatch: (sessionId: string, patch: Record<string, unknown>) => boolean;
 
 	// Internal mutable state (shared reference)
 	internal: InternalMutableState;
@@ -133,7 +137,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		update, getState, wsSend,
 		streamingSessions, backgroundPermissions,
 		gitRefreshStatus, gitRefreshDiffStats, gitRefreshPrState, gitGetProjectId, gitGetLoading,
-		appLoadSessions, appLoadApiUserSessions,
+		appLoadSessions, appLoadApiUserSessions, mergeSessionPatch,
 		internal,
 		onNewChat, onPersistSession,
 		onNotifySessionComplete, onNotifyWaitingForResponse,
@@ -338,8 +342,16 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const syncData = data.data as Record<string, unknown> | undefined;
 				const updates = (syncData?.updates ?? {}) as Record<string, unknown>;
 				const updatedTitle = typeof updates.title === 'string' ? updates.title : undefined;
-				const reactivated = updates.is_active === true;
-				if (reactivated) appLoadSessions();
+				// An is_active flip can be merged straight into the sidebar row —
+				// no refetch, so no chance of a stale paginated response
+				// re-flipping the card the user just settled/unsettled. If the
+				// row isn't loaded locally the merge is a no-op and we fall back
+				// to the refetch below.
+				let mergedActive = false;
+				if (typeof updates.is_active === 'boolean') {
+					const sid = data.session_id as string | undefined;
+					mergedActive = !!sid && mergeSessionPatch(sid, { is_active: updates.is_active });
+				}
 				if (updatedTitle) {
 					const updatedSessionId = data.session_id as string | undefined;
 					const currentState = getState();
@@ -347,6 +359,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 						update(s => ({ ...s, title: updatedTitle }));
 						onPersistSession();
 					}
+					appLoadSessions();
+				} else if (!mergedActive) {
 					appLoadSessions();
 				}
 			}
@@ -391,7 +405,20 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		// session (the list queries exclude hidden rows, so a refetch drops the
 		// card that flashed during the create→attach window).
 		if (msgType === 'user_session_updated') {
-			appLoadSessions();
+			const updates = (data.updates ?? {}) as Record<string, unknown>;
+			const sessionId = data.session_id as string | undefined;
+			// An is_active flip (settle/unsettle, possibly from another device)
+			// can be merged straight into the sidebar row — no refetch, so no
+			// chance of a stale paginated response re-flipping the card.
+			let merged = false;
+			if (sessionId && typeof updates.is_active === 'boolean') {
+				merged = mergeSessionPatch(sessionId, { is_active: updates.is_active });
+			}
+			// Anything else in the payload (hidden flips, tag changes…) filters or
+			// reshapes the list server-side, so a refetch is still required.
+			if (!merged || Object.keys(updates).some((k) => k !== 'is_active')) {
+				appLoadSessions();
+			}
 			return;
 		}
 

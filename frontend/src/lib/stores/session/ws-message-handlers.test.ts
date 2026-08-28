@@ -73,6 +73,7 @@ function createMockDeps(overrides?: Partial<MessageHandlerDeps>): MessageHandler
 		gitGetLoading: vi.fn(() => false),
 		appLoadSessions: vi.fn(),
 		appLoadApiUserSessions: vi.fn(),
+		mergeSessionPatch: vi.fn(() => true),
 		internal: createMockInternal(),
 		onNewChat: vi.fn(),
 		onPersistSession: vi.fn(),
@@ -1516,6 +1517,47 @@ describe('ws-message-handlers', () => {
 				updates: { hidden: true },
 			});
 
+			expect(deps.appLoadSessions).toHaveBeenCalled();
+		});
+	});
+
+	describe('user_session_updated handler (is_active flip)', () => {
+		// Settle/unsettle from any device fans out as user_session_updated with
+		// { is_active }. Merging the row in place (no refetch) is what keeps a
+		// stale paginated response from re-flipping the card the user just
+		// settled — the regression this pins.
+		it('merges the is_active patch without a refetch', () => {
+			handlers.handleMessage({
+				type: 'user_session_updated',
+				session_id: 'session-1',
+				updates: { is_active: false },
+			});
+
+			expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', { is_active: false });
+			expect(deps.appLoadSessions).not.toHaveBeenCalled();
+		});
+
+		it('falls back to a refetch when the row is unknown locally', () => {
+			deps = createMockDeps({ mergeSessionPatch: vi.fn(() => false) });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'user_session_updated',
+				session_id: 'unknown-session',
+				updates: { is_active: true },
+			});
+
+			expect(deps.appLoadSessions).toHaveBeenCalled();
+		});
+
+		it('still refetches when the patch carries other fields too', () => {
+			handlers.handleMessage({
+				type: 'user_session_updated',
+				session_id: 'session-1',
+				updates: { is_active: false, title: 'Renamed' },
+			});
+
+			expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', { is_active: false });
 			expect(deps.appLoadSessions).toHaveBeenCalled();
 		});
 	});

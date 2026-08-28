@@ -554,6 +554,7 @@ const { handleMessage } = createMessageHandlers({
 	gitGetLoading: () => git.current.loading,
 	appLoadSessions: () => appData.loadSessions(),
 	appLoadApiUserSessions: () => appData.loadApiUserSessions(),
+	mergeSessionPatch: (sessionId, patch) => appData.mergeSessionPatch(sessionId, patch),
 	internal,
 	onNewChat: () => activeSession.newChat(),
 	onPersistSession: () => persistSession(),

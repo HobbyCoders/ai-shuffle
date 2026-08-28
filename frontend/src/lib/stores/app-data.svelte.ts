@@ -103,6 +103,16 @@ const { subscribe, update: _update, createDerived } =
 // clobbering the newer results.
 let _loadSessionsRequestId = 0;
 
+/** Invalidate any in-flight paginated session loads (and pending "load more"
+ *  appends) WITHOUT starting a new one: bumping the token makes them discard
+ *  their remaining pages instead of committing pre-mutation rows over a local
+ *  change that has not reached the server yet. */
+function invalidateSessionLoads() {
+	_loadSessionsRequestId++;
+	// An invalidated "load more" would otherwise leave its spinner latched.
+	if (_state.sessionsLoadingMore) _update(s => ({ ...s, sessionsLoadingMore: false }));
+}
+
 async function loadSessionsInternal(tagId?: string | null) {
 	const requestId = ++_loadSessionsRequestId;
 	_update(s => ({ ...s, sessionsLoading: true }));
@@ -175,6 +185,10 @@ async function loadMoreSessionsInternal() {
 	const capturedCursorId = _state.sessionsCursorId;
 	const capturedTagFilter = _state.sessionsTagFilter;
 
+	// Capture the full-load request id too: a reload that starts while this
+	// "load more" is in flight (e.g. the settle reconciliation) invalidates the
+	// captured cursor, and appending the response would duplicate/stale rows.
+	const requestId = _loadSessionsRequestId;
 	_update(s => ({ ...s, sessionsLoadingMore: true }));
 	try {
 		let url = `/sessions/cursor?limit=${SESSIONS_PAGE_SIZE}&admin_only=true`;
@@ -189,10 +203,11 @@ async function loadMoreSessionsInternal() {
 		}
 		const result = await api.get<CursorPaginatedSessions>(url);
 
-		// Verify cursor and tag filter haven't changed while we were fetching.
-		// If they changed (e.g. user switched tag filter, or sessions were
-		// reloaded), discard this stale response to avoid duplicates.
-		if (_state.sessionsCursor !== capturedCursor || _state.sessionsCursorId !== capturedCursorId || _state.sessionsTagFilter !== capturedTagFilter) {
+		// Discard when superseded: a newer full reload bumped the request id,
+		// or the cursor/tag filter changed while we were fetching (e.g. user
+		// switched tag filter) — appending would duplicate/stale rows.
+		if (requestId !== _loadSessionsRequestId ||
+			_state.sessionsCursor !== capturedCursor || _state.sessionsCursorId !== capturedCursorId || _state.sessionsTagFilter !== capturedTagFilter) {
 			_update(s => ({ ...s, sessionsLoadingMore: false }));
 			return;
 		}
@@ -491,6 +506,22 @@ export const appData = {
 		}
 	},
 
+	/** Merge a server-pushed field patch (e.g. is_active from a
+	 *  user_session_updated WS event) into the matching row without a refetch.
+	 *  Returns true when a row was found and updated. */
+	mergeSessionPatch(sessionId: string, patch: Partial<Session>): boolean {
+		let found = false;
+		_update(s => ({
+			...s,
+			sessions: s.sessions.map(x => {
+				if (x.id !== sessionId) return x;
+				found = true;
+				return { ...x, ...patch };
+			}),
+		}));
+		return found;
+	},
+
 	async setSessionActive(sessionId: string, isActive: boolean) {
 		// Optimistic Active-membership flip — patch the row's is_active in local
 		// state immediately (mirrors renameSession's optimistic splice) so it
@@ -503,14 +534,17 @@ export const appData = {
 			sessions: s.sessions.map(x => (x.id === sessionId ? { ...x, is_active: isActive } : x)),
 		}));
 
+		// Invalidate in-flight paginated loads BEFORE the PATCH resolves, not
+		// just after. A load already in flight when the user clicked (e.g. the
+		// turn-done refresh) carries the PRE-patch row and its per-page commits
+		// would overwrite the optimistic flip during the PATCH round-trip —
+		// the card snaps back into Active, then settles again a second later.
+		// Only invalidate here: a load started NOW would itself fetch pre-patch
+		// rows; the authoritative reconcile happens after the PATCH lands.
+		invalidateSessionLoads();
 		try {
 			await apiSetSessionActive(sessionId, isActive);
-			// Reconcile with an authoritative reload. A paginated load that was
-			// already in flight when the user clicked (e.g. the turn-done refresh)
-			// carries the PRE-patch row and its per-page commits would overwrite
-			// the optimistic flip — the card snaps back into Active. Starting a
-			// fresh load bumps the request-id guard, so those stale loads discard
-			// themselves instead.
+			// Reconcile with an authoritative reload.
 			await loadSessionsInternal(_state.sessionsTagFilter);
 		} catch (err) {
 			// Roll the optimistic change back and let the caller surface the error.
