@@ -10,7 +10,13 @@
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { projects, sessions } from '$lib/stores/app-data.svelte';
 	import { activeSession } from '$lib/stores/active-session';
-	import { git, gitStatus, gitPrState, branches as branchStore } from '$lib/stores/git.svelte';
+	import {
+		git,
+		gitStatus,
+		gitPrState,
+		githubFeaturesAvailable,
+		branches as branchStore
+	} from '$lib/stores/git.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
 	import { gitControlsStreaming } from '$lib/stores/derived/active-streaming.svelte';
@@ -313,13 +319,21 @@
 		$sessions.find((s) => s.id === activeSessionId)?.is_remote ?? false
 	);
 
+	// GitHub auth verdicts feed the git store's hysteresis guard rather than
+	// gating the UI directly: `gh auth status` is a subprocess that transiently
+	// fails under load, and a single blip used to blank the whole git surface
+	// for up to two minutes (G10c). The store only believes a `false` after two
+	// consecutive failures ≥60s apart.
+	$effect(() => {
+		git.setGithubAuth($githubAuthenticated);
+	});
+
 	// Debounce rapid project changes (e.g., clicking through chats quickly)
 	// to prevent cascading git loads that break commit/branch buttons.
 	let _projectDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 	$effect(() => {
 		const project = activeProject;
 		const worktreeId = activeWorktreeId;
-		const authenticated = $githubAuthenticated;
 		const isRemote = activeIsRemote;
 		// Track session ID so the effect re-fires on every tab switch,
 		// even when two sessions share the same project/worktree.
@@ -331,12 +345,18 @@
 			_projectDebounceTimer = null;
 		}
 
-		if (project && authenticated && !isRemote) {
+		// NOTE: no `githubAuthenticated` term. Local git (status, branches,
+		// commit, diff) needs a local checkout and nothing else; requiring GitHub
+		// auth here is what made a `gh` blip call clearRepository() and hide the
+		// UI. GitHub-backed actions consult `githubFeaturesAvailable` instead.
+		if (project && !isRemote) {
 			// IMMEDIATE: restore cached state so UI updates within the same frame.
 			// sessionId scopes v2 branch sessions to their own checkout — without it
 			// a branch session with no legacy worktree row would poll the base checkout.
+			// The branch hint resolves the checkout identity in the same frame, so a
+			// FIRST visit to a sibling session on a known checkout is instant too.
 			const mode = worktreeId ? 'worktree' : 'project';
-			git.restoreCacheImmediate(project, worktreeId, mode, sessionId);
+			git.restoreCacheImmediate(project, worktreeId, mode, sessionId, activeWorktreeBranch ?? null);
 
 			// DEBOUNCED: network fetch for fresh data
 			_projectDebounceTimer = setTimeout(() => {
@@ -381,16 +401,15 @@
 	 * The git UI is on screen for this session. Polling status for a surface
 	 * nobody can see is pure idle churn — the panel refreshes on return.
 	 */
-	// `$githubAuthenticated` is kept in the gate because the repo-load effect
-	// above only loads git state when authenticated — polling status for a repo
-	// we never loaded would just burn requests.
+	// Deliberately NOT gated on GitHub auth (see the repo-load effect): the poll
+	// feeds the LOCAL git status, which works without `gh`.
 	const gitUiVisible = $derived(
 		!!activeTab &&
-			$githubAuthenticated &&
 			shouldShowHeaderGitActions({
 				viewType: $activeView?.type,
 				hasProject: !!activeTab.project,
 				githubAuthenticated: $githubAuthenticated,
+				githubAvailable: $githubFeaturesAvailable,
 				worktreeDeleted: !!activeTab.worktreeDeleted,
 				isRemote: activeIsRemote
 			})
@@ -493,8 +512,9 @@
 			_wasStreaming = false;
 			if (activeProject) {
 				untrack(() => {
+					// forceRefresh() now covers PR state; a separate refreshPrState()
+					// would just duplicate the request.
 					git.forceRefresh();
-					git.refreshPrState(true).catch(() => {});
 					markGitActivity(); // Reset to active interval for post-streaming cool-down
 				});
 			}
@@ -519,7 +539,7 @@
 	const currentBranchForPrompt = $derived($branchStore.find(b => b.current));
 	const needsPull = $derived((currentBranchForPrompt?.behind ?? 0) > 0);
 	const isOnDefaultBranch = $derived(
-		($gitStatus?.current_branch ?? null) === ($githubRepoInfo?.default_branch ?? 'main')
+		($gitStatus?.current_branch ?? null) === ($gitStatus?.default_branch ?? $githubRepoInfo?.default_branch ?? 'main')
 	);
 
 	// Git-action option-bag types are shared with GitHeaderActions /
@@ -557,7 +577,7 @@
 		const projectId = activeProject!;
 		const worktreeId = activeWorktreeId ?? undefined;
 		const sessionId = activeSessionId ?? undefined;
-		const base = opts.base ?? $githubRepoInfo?.default_branch ?? 'main';
+		const base = opts.base ?? $gitStatus?.default_branch ?? $githubRepoInfo?.default_branch ?? 'main';
 		const head = $gitStatus?.current_branch;
 		if (!head) throw new Error('No current branch to open a pull request from');
 		let title = opts.title?.trim();
@@ -746,7 +766,7 @@
 		const mergeMethod = opts.mergeMethod ?? prefs.mergeMethod;
 		const cleanup = opts.cleanup ?? prefs.cleanupAfterMerge;
 		const includeUnstaged = opts.includeUnstaged ?? prefs.includeUnstaged;
-		const base = opts.base ?? $githubRepoInfo?.default_branch ?? undefined;
+		const base = opts.base ?? $gitStatus?.default_branch ?? $githubRepoInfo?.default_branch ?? undefined;
 		try {
 			const op = await gitOperations.runServer(
 				projectId,
@@ -800,7 +820,6 @@
 		}
 		if (effects.refreshGit) {
 			git.forceRefresh();
-			git.refreshPrState(true).catch(() => {});
 			markGitActivity();
 		}
 		if (effects.toast.prUrl) {
@@ -866,6 +885,7 @@
 		viewType: $activeView?.type,
 		hasProject: !!activeTab.project,
 		githubAuthenticated: $githubAuthenticated,
+		githubAvailable: $githubFeaturesAvailable,
 		worktreeDeleted: !!activeTab.worktreeDeleted,
 		isRemote: activeIsRemote
 	})}
@@ -988,7 +1008,11 @@
 </div>
 
 <!-- Git modals (rendered outside main-panel for proper z-index stacking) -->
-{#if activeTab?.project && $githubAuthenticated}
+<!--
+	Local-git surfaces: gated on a project, NOT on GitHub auth. A transient
+	`gh auth status` failure must not unmount an open diff review (G10c).
+-->
+{#if activeTab?.project}
 	{#if createBranchEverOpened}
 		<LazyPanel
 			handle={CreateBranchModalLazy}

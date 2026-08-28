@@ -38,7 +38,12 @@ vi.mock('./v2/feed-controller', () => ({
 		stop: vi.fn(),
 		isFeeding: vi.fn(() => false),
 		currentSessionId: vi.fn(() => null),
+		invalidate: vi.fn(),
 	},
+	// Mirrors the real constant: `start` marks streaming OPTIMISTICALLY so the
+	// fold clears it once the reducer confirms the turn, instead of competing
+	// with the feed as a second writer of isStreaming.
+	OPTIMISTIC_STREAMING_ON: { isStreaming: true, optimisticStreaming: true },
 }));
 
 import { notify } from '../notifications';

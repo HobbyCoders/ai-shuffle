@@ -100,10 +100,67 @@ const _pendingLangs = new Set<string>();
 const _readyListeners = new Set<() => void>();
 
 /**
+ * Monotonic readiness generations.
+ *
+ * A consumer that memoises rendered HTML by content (AssistantMessage caches the
+ * sanitized stable prefix) needs something in its cache key that changes when
+ * new highlighting becomes possible — otherwise a message rendered *before* its
+ * grammar arrived keeps plain-text code blocks forever, which is the common case
+ * when switching into an existing transcript.
+ *
+ * Per-language counters, not one global flag: a Rust message must not be
+ * re-rendered because Python's grammar landed.
+ */
+const _langGeneration = new Map<string, number>();
+let _globalGeneration = 0;
+
+function bumpGeneration(lang: string) {
+	_langGeneration.set(lang, (_langGeneration.get(lang) ?? 0) + 1);
+	_globalGeneration += 1;
+}
+
+/**
+ * Readiness generation to fold into a render cache key.
+ *
+ * - `highlightGeneration('typescript')` — 0 until that grammar is resident,
+ *   then a stable non-zero number. Only changes for that language.
+ * - `highlightGeneration()` — the global counter (changes whenever ANY grammar
+ *   lands); use only when the caller cannot know the languages involved.
+ */
+export function highlightGeneration(lang?: string | null): number {
+	if (lang === undefined || lang === null) return _globalGeneration;
+	return _langGeneration.get(lang) ?? 0;
+}
+
+/** Fenced-code info strings in a markdown source: ```lang … */
+const FENCE_RE = /^[ \t]{0,3}(?:`{3,}|~{3,})[ \t]*([^\s`~]+)/gm;
+
+/**
+ * Readiness generation for one markdown source: the sum of the per-language
+ * generations of the fences it contains, and 0 for text with no highlightable
+ * code. Folding this into a content-keyed memo invalidates a message exactly
+ * once, when a grammar *it uses* becomes available — and never for a message
+ * with no code blocks.
+ */
+export function highlightGenerationForSource(markdown: string): number {
+	if (!markdown.includes('```') && !markdown.includes('~~~')) return 0;
+	let total = 0;
+	FENCE_RE.lastIndex = 0;
+	let m: RegExpExecArray | null;
+	const seen = new Set<string>();
+	while ((m = FENCE_RE.exec(markdown)) !== null) {
+		const lang = resolveShikiLang(m[1].split(':')[0]);
+		if (!lang || seen.has(lang)) continue;
+		seen.add(lang);
+		total += _langGeneration.get(lang) ?? 0;
+	}
+	return total;
+}
+
+/**
  * Subscribe to "new highlighting became available" (the core finished loading,
- * or a grammar landed). Consumers that render settled, non-streaming content
- * can use this to re-run their markdown derivation once, turning the plain-text
- * placeholder into highlighted output. Returns an unsubscribe function.
+ * or a grammar landed). Pair it with `highlightGeneration*()` when the consumer
+ * needs to invalidate a memo rather than just re-run.
  *
  * Additive API — nothing that existed before changed shape.
  */
@@ -183,7 +240,27 @@ function ensureLanguage(lang: string): void {
 			const [core, mod] = await Promise.all([loadCore(), loader()]);
 			if (!core) return;
 			await core.loadLanguage(mod.default as never);
+			// Warm-up tokenisation, discarded. Attaching a grammar to a live
+			// highlighter leaves the theme colour map lazily resolved, and the
+			// FIRST codeToHtml for that grammar can emit a colour a later call
+			// does not (observed: a numeric literal taking the keyword colour).
+			// With the old sync constructor every grammar was present before the
+			// first call, so this state never existed. One throwaway pass makes
+			// the on-demand path produce the same output as the eager one — and
+			// it must happen before the language is published as ready, or the
+			// bad first result gets stored in the LRU cache.
+			try {
+				core.codeToHtml('const a = 1', {
+					lang,
+					themes: { light: LIGHT_THEME, dark: DARK_THEME },
+					defaultColor: false,
+					cssVariablePrefix: '--shiki-'
+				});
+			} catch {
+				/* warm-up is best effort */
+			}
 			_loadedLangs.add(lang);
+			bumpGeneration(lang);
 			notifyReady();
 		} catch (e) {
 			console.error('[shiki] grammar load failed; rendering plain', lang, e);

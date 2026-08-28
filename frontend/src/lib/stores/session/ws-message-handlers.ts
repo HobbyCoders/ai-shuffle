@@ -19,7 +19,7 @@ import { rateLimit } from '../rate-limit';
 import { reportClientError } from '$lib/services/error-reporter';
 import { startFixChat } from '$lib/services/fix-with-ai';
 // The SSE-fed reducer store — the transcript authority for a session.
-import { feedController } from './v2/feed-controller';
+import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 // Arbiter of which pending ("not seen yet") bubbles survive.
 import { pendingQueue } from './pending-queue';
 
@@ -693,7 +693,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					update(s => ({
 						...s,
 						sessionId,
-						isStreaming: true,
+						...OPTIMISTIC_STREAMING_ON,
 						streamStartTime: Date.now(),
 						...(startAdoptsNewSession ? { activeTasks: [] } : {}),
 					}));
@@ -818,7 +818,13 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// Only the in-view session surfaces the banner and resets its
 				// streaming flag (so the user can send again).
 				if (isActiveError) {
-					update(s => ({ ...s, error: errMessage, isStreaming: false, streamStartTime: null }));
+					update(s => ({
+						...s,
+						error: errMessage,
+						isStreaming: false,
+						optimisticStreaming: false,
+						streamStartTime: null,
+					}));
 				}
 				break;
 			}

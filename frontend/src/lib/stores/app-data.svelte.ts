@@ -9,6 +9,7 @@
  */
 
 import type { Session, Profile, PaginatedSessions, CursorPaginatedSessions, SessionSearchResult, PaginatedSessionSearchResults } from '$lib/api/client';
+import { feedController } from './session/v2/feed-controller';
 import { api, searchSessionsPaginated, renameSession as apiRenameSession, setSessionActive as apiSetSessionActive } from '$lib/api/client';
 import { listClusterProjects, type ClusterProject } from '$lib/api/installs';
 import type { Project } from './types';
@@ -163,6 +164,9 @@ function recordLocalEdit(sessionId: string, patch: Partial<Session>): void {
 function recordLocalRemoval(sessionIds: Iterable<string>): void {
 	for (const id of sessionIds) {
 		_pendingEdits.set(id, { patch: null, removed: true, supersedeAtLoadId: null, createdAt: Date.now() });
+		// R3: drop any cached transcript for a row that is going away, so the
+		// feed's LRU never holds state for a session that no longer exists.
+		feedController.invalidate(id);
 	}
 }
 
@@ -686,6 +690,11 @@ export const appData = {
 		// conversation is reset. The caller updates the open chat's local message
 		// store separately (activeSession.clearMessages()) for instant feedback.
 		await api.post(`/sessions/${sessionId}/clear`);
+		// R3, and load-bearing: the row survives with the same id but an emptied
+		// event log, so a resume at from_seq=lastSeq matches nothing and would
+		// leave the cached transcript on screen. Drop it so the next open replays
+		// from seq 0.
+		feedController.invalidate(sessionId);
 		// Refresh the row so its updated_at / turn_count / cost reflect the reset.
 		await appData.loadSessions();
 	},

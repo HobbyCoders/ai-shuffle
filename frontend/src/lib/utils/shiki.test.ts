@@ -7,6 +7,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
 	clearHighlightCache,
+	highlightGeneration,
+	highlightGenerationForSource,
 	highlightToInnerHtml,
 	isHighlightReady,
 	onHighlighterReady,
@@ -58,4 +60,39 @@ describe('highlightToInnerHtml', () => {
 		expect(highlightToInnerHtml('x', 'cobol')).toBeNull();
 		expect(isHighlightReady('cobol')).toBe(false);
 	});
+});
+
+
+describe('readiness generations', () => {
+	it('is 0 for a language that has not loaded, and stable once it has', async () => {
+		expect(highlightGeneration('rust')).toBe(0);
+
+		warmHighlighter(['go']);
+		await vi.waitFor(() => expect(isHighlightReady('go')).toBe(true), { timeout: 20_000 });
+
+		const gen = highlightGeneration('go');
+		expect(gen).toBeGreaterThan(0);
+		expect(highlightGeneration('go')).toBe(gen); // stable — no render churn
+		// A different language landing must NOT invalidate this one.
+		expect(highlightGeneration('rust')).toBe(0);
+	}, 30_000);
+
+	it('source-level generation ignores prose and unknown fences', () => {
+		expect(highlightGenerationForSource('just some prose')).toBe(0);
+		expect(highlightGenerationForSource('```brainfuck\n+++\n```')).toBe(0);
+	});
+
+	it('source-level generation changes exactly once, when a used grammar lands', async () => {
+		const src = '```sql\nselect 1;\n```';
+		expect(highlightGenerationForSource(src)).toBe(0);
+
+		warmHighlighter(['sql']);
+		await vi.waitFor(() => expect(isHighlightReady('sql')).toBe(true), { timeout: 20_000 });
+
+		const after = highlightGenerationForSource(src);
+		expect(after).toBeGreaterThan(0);
+		expect(highlightGenerationForSource(src)).toBe(after);
+		// Prose in the same transcript stays at 0 — never re-rendered.
+		expect(highlightGenerationForSource('no code here')).toBe(0);
+	}, 30_000);
 });
