@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, field_serializer
 
 from app.db import database
+from app.db.async_database import run_sync
 from app.api.auth import require_auth, get_api_user_from_request
 from app.core.auth import auth_service
 
@@ -64,7 +65,9 @@ async def get_all_preferences(
     """
     user_type, user_id = get_user_identity(request)
 
-    prefs = database.get_all_user_preferences(user_type, user_id)
+    # ONE thread hop: this endpoint is hit on nearly every page load, and the
+    # synchronous psycopg2 read used to run straight on the event loop.
+    prefs = await run_sync(database.get_all_user_preferences, user_type, user_id)
     # Convert list of preference objects to a key->value dictionary
     preferences_dict = {p["key"]: p["value"] for p in prefs}
 
@@ -80,7 +83,7 @@ async def get_preference(
     """Get a specific preference by key"""
     user_type, user_id = get_user_identity(request)
 
-    pref = database.get_user_preference(user_type, user_id, key)
+    pref = await run_sync(database.get_user_preference, user_type, user_id, key)
     if pref:
         return PreferenceResponse(
             key=pref["key"],
@@ -100,7 +103,9 @@ async def set_preference(
     """Set a preference value"""
     user_type, user_id = get_user_identity(request)
 
-    result = database.set_user_preference(user_type, user_id, key, body.value)
+    result = await run_sync(
+        database.set_user_preference, user_type, user_id, key, body.value
+    )
     return PreferenceResponse(
         key=result["key"],
         value=result["value"],
@@ -123,7 +128,9 @@ async def set_preference_post(
     """
     user_type, user_id = get_user_identity(request)
 
-    result = database.set_user_preference(user_type, user_id, key, body.value)
+    result = await run_sync(
+        database.set_user_preference, user_type, user_id, key, body.value
+    )
     return PreferenceResponse(
         key=result["key"],
         value=result["value"],
@@ -140,5 +147,5 @@ async def delete_preference(
     """Delete a preference"""
     user_type, user_id = get_user_identity(request)
 
-    deleted = database.delete_user_preference(user_type, user_id, key)
+    deleted = await run_sync(database.delete_user_preference, user_type, user_id, key)
     return {"deleted": deleted}

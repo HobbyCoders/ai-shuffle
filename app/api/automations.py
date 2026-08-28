@@ -16,7 +16,9 @@ from app.core.models import (
     AutomationTestResult, VALID_AUTOMATION_TRIGGER_TYPES, TriggerItem,
 )
 from app.api.auth import require_admin
+from app.db import async_database as adb
 from app.db import database
+from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +30,7 @@ router = APIRouter(prefix="/api/v1/automations", tags=["Automations"])
 @router.get("", response_model=List[Automation])
 async def list_automations(token: str = Depends(require_admin)):
     """List all automations."""
-    return database.get_all_automations()
+    return await adb.get_all_automations()
 
 
 @router.post("", response_model=Automation, status_code=status.HTTP_201_CREATED)
@@ -86,47 +88,64 @@ async def list_trigger_types(token: str = Depends(require_admin)):
 @router.get("/approvals/pending", response_model=List[AutomationApproval])
 async def list_pending_approvals(token: str = Depends(require_admin)):
     """List all pending automation approvals."""
-    return database.get_pending_automation_approvals()
+    return await adb.get_pending_automation_approvals()
 
 
 @router.post("/approvals/{approval_id}/approve", response_model=AutomationApproval)
 async def approve_run_endpoint(approval_id: str, token: str = Depends(require_admin)):
     """Approve a pending automation run."""
-    approval = database.get_automation_approval(approval_id)
-    if not approval:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Approval not found")
-    if approval["status"] != "pending":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Approval is already {approval['status']}")
 
-    database.update_automation_approval(approval_id, status="approved", decided_by="admin")
-    database.update_automation_run(approval["run_id"], status="approved")
+    def _claim_approval():
+        """read -> decide -> write, in ONE hop.
 
-    # Resume execution
+        The pending check and the two writes must stay in a single offload:
+        split across hops, two concurrent approvals could both read "pending"
+        and both resume the same run. HTTPException raised here propagates out
+        of the thread unchanged.
+        """
+        approval = database.get_automation_approval(approval_id)
+        if not approval:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Approval not found")
+        if approval["status"] != "pending":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Approval is already {approval['status']}")
+
+        database.update_automation_approval(approval_id, status="approved", decided_by="admin")
+        database.update_automation_run(approval["run_id"], status="approved")
+
+    await run_sync(_claim_approval)
+
+    # Resume execution — a real await, so the re-read below cannot join the
+    # hop above (the run may mutate the approval row).
     from app.core.automation_manager import automation_manager
     await automation_manager.execute_approved_run(approval_id)
 
-    return database.get_automation_approval(approval_id)
+    return await adb.get_automation_approval(approval_id)
 
 
 @router.post("/approvals/{approval_id}/deny", response_model=AutomationApproval)
 async def deny_run_endpoint(approval_id: str, token: str = Depends(require_admin)):
     """Deny a pending automation run."""
-    approval = database.get_automation_approval(approval_id)
-    if not approval:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Approval not found")
-    if approval["status"] != "pending":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Approval is already {approval['status']}")
 
-    database.update_automation_approval(approval_id, status="denied", decided_by="admin")
-    database.update_automation_run(approval["run_id"], status="cancelled")
+    def _deny():
+        """read -> decide -> write -> re-read, in ONE hop (no await splits it)."""
+        approval = database.get_automation_approval(approval_id)
+        if not approval:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Approval not found")
+        if approval["status"] != "pending":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Approval is already {approval['status']}")
 
-    return database.get_automation_approval(approval_id)
+        database.update_automation_approval(approval_id, status="denied", decided_by="admin")
+        database.update_automation_run(approval["run_id"], status="cancelled")
+
+        return database.get_automation_approval(approval_id)
+
+    return await run_sync(_deny)
 
 
 @router.get("/{automation_id}", response_model=Automation)
 async def get_automation(automation_id: str, token: str = Depends(require_admin)):
     """Get an automation by ID."""
-    automation = database.get_automation(automation_id)
+    automation = await adb.get_automation(automation_id)
     if not automation:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Automation not found: {automation_id}")
     return automation
@@ -176,34 +195,56 @@ async def delete_automation_endpoint(automation_id: str, token: str = Depends(re
 @router.post("/{automation_id}/enable", response_model=Automation)
 async def enable_automation(automation_id: str, token: str = Depends(require_admin)):
     """Enable an automation and schedule it."""
-    automation = database.get_automation(automation_id)
-    if not automation:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Automation not found: {automation_id}")
 
-    database.update_automation(automation_id, is_enabled=True)
+    def _enable():
+        """read -> decide -> write in ONE hop, plus the re-read when possible.
+
+        Keeping the existence check and the enable write together stops a
+        concurrent delete from turning this into an update of a vanished row.
+        """
+        automation = database.get_automation(automation_id)
+        if not automation:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Automation not found: {automation_id}")
+
+        database.update_automation(automation_id, is_enabled=True)
+
+        # Check if any trigger in the array needs scheduling
+        triggers = automation.get("triggers") or []
+        has_scheduled = any(t.get("type") in ("cron", "interval") for t in triggers)
+        # With nothing to schedule there is no await between the write and the
+        # response read, so it belongs to this same hop. When the scheduler
+        # does run it may stamp the row (next_run_at), so that path has to
+        # re-read *after* the await — see below.
+        return has_scheduled, None if has_scheduled else database.get_automation(automation_id)
+
+    has_scheduled, automation = await run_sync(_enable)
 
     from app.core.automation_manager import automation_manager
-    # Check if any trigger in the array needs scheduling
-    triggers = automation.get("triggers") or []
-    has_scheduled = any(t.get("type") in ("cron", "interval") for t in triggers)
     if has_scheduled:
         await automation_manager.schedule_automation(automation_id)
+        automation = await adb.get_automation(automation_id)
 
-    return database.get_automation(automation_id)
+    return automation
 
 
 @router.post("/{automation_id}/disable", response_model=Automation)
 async def disable_automation(automation_id: str, token: str = Depends(require_admin)):
     """Disable an automation and unschedule it."""
-    automation = database.get_automation(automation_id)
+    automation = await adb.get_automation(automation_id)
     if not automation:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Automation not found: {automation_id}")
 
     from app.core.automation_manager import automation_manager
+    # The unschedule is a real await sitting between the check and the write,
+    # so this handler needs two hops; the write and its read-back are
+    # contiguous and share the second one.
     await automation_manager.unschedule_automation(automation_id)
-    database.update_automation(automation_id, is_enabled=False, status="idle")
 
-    return database.get_automation(automation_id)
+    def _disable():
+        database.update_automation(automation_id, is_enabled=False, status="idle")
+        return database.get_automation(automation_id)
+
+    return await run_sync(_disable)
 
 
 @router.post("/{automation_id}/trigger")
@@ -216,7 +257,7 @@ async def trigger_automation(
 
     For webhook triggers, include the ``X-Webhook-Signature`` header.
     """
-    automation = database.get_automation(automation_id)
+    automation = await adb.get_automation(automation_id)
     if not automation:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Automation not found: {automation_id}")
 
@@ -257,7 +298,7 @@ async def trigger_automation(
 async def test_automation_endpoint(automation_id: str, token: str = Depends(require_admin)):
     """Dry-run: render prompt and check budget without executing."""
     from app.core.automation_service import test_automation
-    automation = database.get_automation(automation_id)
+    automation = await adb.get_automation(automation_id)
     if not automation:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Automation not found: {automation_id}")
     return await test_automation(automation_id)
@@ -273,16 +314,20 @@ async def list_automation_runs(
     token: str = Depends(require_admin),
 ):
     """List execution history for an automation."""
-    automation = database.get_automation(automation_id)
-    if not automation:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Automation not found: {automation_id}")
-    return database.get_automation_runs(automation_id, limit=limit, offset=offset)
+
+    def _load_runs():
+        automation = database.get_automation(automation_id)
+        if not automation:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Automation not found: {automation_id}")
+        return database.get_automation_runs(automation_id, limit=limit, offset=offset)
+
+    return await run_sync(_load_runs)
 
 
 @router.get("/{automation_id}/runs/{run_id}", response_model=AutomationRun)
 async def get_automation_run(automation_id: str, run_id: str, token: str = Depends(require_admin)):
     """Get a specific automation run."""
-    run = database.get_automation_run(run_id)
+    run = await adb.get_automation_run(run_id)
     if not run or run.get("automation_id") != automation_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
     return run
@@ -292,7 +337,14 @@ async def get_automation_run(automation_id: str, run_id: str, token: str = Depen
 async def get_automation_stats_endpoint(automation_id: str, token: str = Depends(require_admin)):
     """Get statistics for an automation."""
     from app.core.automation_service import get_automation_stats
-    automation = database.get_automation(automation_id)
-    if not automation:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Automation not found: {automation_id}")
-    return get_automation_stats(automation_id)
+
+    def _stats():
+        # ``get_automation_stats`` is itself synchronous and DB-backed, so it
+        # joins the existence check in the same hop rather than blocking the
+        # loop after it.
+        automation = database.get_automation(automation_id)
+        if not automation:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Automation not found: {automation_id}")
+        return get_automation_stats(automation_id)
+
+    return await run_sync(_stats)

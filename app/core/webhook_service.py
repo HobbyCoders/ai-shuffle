@@ -20,6 +20,7 @@ from typing import Dict, Any, Optional
 import httpx
 
 from app.db import database
+from app.db.async_database import run_sync
 from app.core.models import WebhookTestResponse
 
 logger = logging.getLogger(__name__)
@@ -102,8 +103,9 @@ async def dispatch_webhook(
         data: The event data payload
         retry: Whether to retry failed deliveries
     """
-    # Get all webhooks subscribed to this event
-    webhooks = database.get_webhooks_for_event(event_type)
+    # Get all webhooks subscribed to this event. One isolated read, so one
+    # thread hop — everything after it (task creation) needs the running loop.
+    webhooks = await run_sync(database.get_webhooks_for_event, event_type)
 
     if not webhooks:
         logger.debug(f"No webhooks subscribed to event: {event_type}")
@@ -200,7 +202,11 @@ async def _deliver_webhook(
                     f"Webhook delivered successfully: {webhook_id} -> {url} "
                     f"(status={response.status_code})"
                 )
-                database.update_webhook_triggered(webhook_id, success=True)
+                # Single write sandwiched between network attempts — offload
+                # it alone; there is no contiguous DB run to batch it with.
+                await run_sync(
+                    database.update_webhook_triggered, webhook_id, success=True
+                )
                 _record_circuit_success(webhook_id)
                 return True
             else:
@@ -241,7 +247,7 @@ async def _deliver_webhook(
         f"Webhook delivery failed after {max_attempts} attempts: {webhook_id} -> {url} "
         f"(last_error={last_error})"
     )
-    database.update_webhook_triggered(webhook_id, success=False)
+    await run_sync(database.update_webhook_triggered, webhook_id, success=False)
     _record_circuit_failure(webhook_id)
     return False
 

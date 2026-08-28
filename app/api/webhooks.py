@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Depends, status
 
 from app.core.models import Webhook, WebhookCreate, WebhookUpdate, WebhookTestResponse
 from app.db import database
+from app.db.async_database import run_sync
 from app.api.auth import require_admin
 
 router = APIRouter(prefix="/api/v1/webhooks", tags=["Webhooks"])
@@ -25,7 +26,7 @@ VALID_EVENT_TYPES = [
 @router.get("", response_model=List[Webhook])
 async def list_webhooks(token: str = Depends(require_admin)):
     """List all webhooks (admin only)"""
-    return database.get_all_webhooks()
+    return await run_sync(database.get_all_webhooks)
 
 
 @router.post("", response_model=Webhook, status_code=status.HTTP_201_CREATED)
@@ -43,7 +44,8 @@ async def create_webhook(
             )
 
     webhook_id = f"wh-{uuid.uuid4().hex[:12]}"
-    webhook = database.create_webhook(
+    webhook = await run_sync(
+        database.create_webhook,
         webhook_id=webhook_id,
         url=webhook_data.url,
         events=webhook_data.events,
@@ -61,7 +63,7 @@ async def list_event_types(token: str = Depends(require_admin)):
 @router.get("/{webhook_id}", response_model=Webhook)
 async def get_webhook(webhook_id: str, token: str = Depends(require_admin)):
     """Get a webhook by ID (admin only)"""
-    webhook = database.get_webhook(webhook_id)
+    webhook = await run_sync(database.get_webhook, webhook_id)
     if not webhook:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -86,7 +88,8 @@ async def update_webhook(
                     detail=f"Invalid event type: {event}. Valid types are: {', '.join(VALID_EVENT_TYPES)}"
                 )
 
-    webhook = database.update_webhook(
+    webhook = await run_sync(
+        database.update_webhook,
         webhook_id=webhook_id,
         url=webhook_data.url,
         events=webhook_data.events,
@@ -104,7 +107,7 @@ async def update_webhook(
 @router.delete("/{webhook_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_webhook(webhook_id: str, token: str = Depends(require_admin)):
     """Delete a webhook (admin only)"""
-    if not database.delete_webhook(webhook_id):
+    if not await run_sync(database.delete_webhook, webhook_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Webhook not found: {webhook_id}"
@@ -114,7 +117,7 @@ async def delete_webhook(webhook_id: str, token: str = Depends(require_admin)):
 @router.post("/{webhook_id}/test", response_model=WebhookTestResponse)
 async def test_webhook(webhook_id: str, token: str = Depends(require_admin)):
     """Send a test event to a webhook (admin only)"""
-    webhook = database.get_webhook(webhook_id)
+    webhook = await run_sync(database.get_webhook, webhook_id)
     if not webhook:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

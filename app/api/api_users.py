@@ -17,6 +17,7 @@ from app.core.models import (
     ApiUserUpdate,
 )
 from app.db import database
+from app.db.async_database import run_sync
 
 router = APIRouter(prefix="/api/v1/api-users", tags=["API Users"])
 
@@ -24,7 +25,7 @@ router = APIRouter(prefix="/api/v1/api-users", tags=["API Users"])
 @router.get("", response_model=List[ApiUserResponse])
 async def list_api_users(token: str = Depends(require_admin)):
     """List all API users."""
-    return database.get_all_api_users()
+    return await run_sync(database.get_all_api_users)
 
 
 @router.post("", response_model=ApiUserCreateResponse, status_code=status.HTTP_201_CREATED)
@@ -37,7 +38,8 @@ async def create_api_user_endpoint(
     api_key = f"aih_{secrets.token_urlsafe(32)}"
     api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()
 
-    user = database.create_api_user(
+    user = await run_sync(
+        database.create_api_user,
         user_id=user_id,
         name=data.name,
         api_key_hash=api_key_hash,
@@ -53,7 +55,7 @@ async def create_api_user_endpoint(
 @router.get("/{user_id}", response_model=ApiUserResponse)
 async def get_api_user_endpoint(user_id: str, token: str = Depends(require_admin)):
     """Get an API user by ID."""
-    user = database.get_api_user(user_id)
+    user = await run_sync(database.get_api_user, user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API user not found")
     return user
@@ -67,7 +69,7 @@ async def update_api_user_endpoint(
 ):
     """Update an API user."""
     kwargs = data.model_dump(exclude_unset=True)
-    result = database.update_api_user(user_id, **kwargs)
+    result = await run_sync(database.update_api_user, user_id, **kwargs)
     if not result:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API user not found")
     return result
@@ -76,20 +78,30 @@ async def update_api_user_endpoint(
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_api_user_endpoint(user_id: str, token: str = Depends(require_admin)):
     """Delete an API user."""
-    if not database.delete_api_user(user_id):
+    if not await run_sync(database.delete_api_user, user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API user not found")
 
 
 @router.post("/{user_id}/rotate-key", response_model=ApiUserRotateKeyResponse)
 async def rotate_api_user_key(user_id: str, token: str = Depends(require_admin)):
     """Regenerate the API key for a user. Returns new plaintext key (shown once)."""
-    user = database.get_api_user(user_id)
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API user not found")
-
     api_key = f"aih_{secrets.token_urlsafe(32)}"
     api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()
 
-    database.update_api_user(user_id, api_key_hash=api_key_hash)
+    def _rotate():
+        """Existence check + key swap in ONE hop.
+
+        This is a read-decide-write: splitting the 404 probe and the update
+        across two thread hops would open a window in which the user is
+        deleted between them, turning a clean 404 into a write against a
+        vanished row. The key material is generated on the loop (outside the
+        DB work) and only its hash is passed in, so nothing about hashing,
+        redaction or logging changes.
+        """
+        if not database.get_api_user(user_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API user not found")
+        database.update_api_user(user_id, api_key_hash=api_key_hash)
+
+    await run_sync(_rotate)
 
     return {"id": user_id, "api_key": api_key}

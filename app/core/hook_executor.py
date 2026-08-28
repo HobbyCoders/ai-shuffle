@@ -20,6 +20,7 @@ from typing import Any, Dict, Optional
 import httpx
 
 from app.db import database
+from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -356,8 +357,11 @@ async def execute_message_hook(
         for key, value in variables.items():
             rendered = rendered.replace(f"{{{key}}}", str(value))
 
-        # Inject as a user message into the session
-        message = database.add_session_message(
+        # Inject as a user message into the session. One isolated write (the
+        # broadcast below is a real await), so one thread hop. Exceptions still
+        # propagate to this coroutine's ``except Exception`` handler unchanged.
+        message = await run_sync(
+            database.add_session_message,
             session_id=session_id,
             role="user",
             content=rendered,
@@ -433,7 +437,7 @@ async def execute_hook(
     # Update hook triggered status
     hook_id = hook.get("id")
     if hook_id:
-        database.update_hook_triggered(hook_id, result["success"])
+        await run_sync(database.update_hook_triggered, hook_id, result["success"])
 
     return result
 
@@ -457,12 +461,16 @@ async def execute_hooks_for_event(
         session_id: Active session ID (required for message hooks)
     """
     try:
+        # Exactly one of these reads runs per call, so this costs a single
+        # thread hop; everything after it (task creation) needs the loop.
         if project_id:
             # Returns both project-scoped and app-level hooks
-            hooks_list = database.get_hooks_for_project_and_event(project_id, event)
+            hooks_list = await run_sync(
+                database.get_hooks_for_project_and_event, project_id, event
+            )
         else:
             # App-level hooks only
-            hooks_list = database.get_app_hooks_for_event(event)
+            hooks_list = await run_sync(database.get_app_hooks_for_event, event)
 
         for hook in hooks_list:
             # Check tool matcher for PreToolUse/PostToolUse events

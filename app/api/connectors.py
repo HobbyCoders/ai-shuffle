@@ -19,7 +19,9 @@ from app.core.models import (
 )
 from app.api.auth import require_admin
 from app.api.common import api_error_handler
+from app.db import async_database as adb
 from app.db import database
+from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +49,16 @@ async def list_event_types(token: str = Depends(require_admin)):
 async def list_connectors(token: str = Depends(require_admin)):
     """List all connectors."""
     from app.core.connector_service import mask_config
-    connectors = database.get_all_connectors()
-    for c in connectors:
-        c["config"] = mask_config(c.get("config", {}), c.get("type", ""))
-    return connectors
+
+    def _list():
+        # The read and the masking pass over its rows are one unit of work —
+        # masking decrypts, so it stays off the loop with the query.
+        connectors = database.get_all_connectors()
+        for c in connectors:
+            c["config"] = mask_config(c.get("config", {}), c.get("type", ""))
+        return connectors
+
+    return await run_sync(_list)
 
 
 @router.post("", response_model=Connector, status_code=status.HTTP_201_CREATED)
@@ -110,19 +118,25 @@ async def discover_discord_resources(
         )
 
     if connector_id:
-        connector = database.get_connector(connector_id)
-        if not connector or connector.get("type") != "discord":
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Discord connector not found: {connector_id}",
-            )
-        decrypted = decrypt_config(connector.get("config", {}) or {}, "discord")
-        bot_token = decrypted.get("bot_token")
-        if not bot_token:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Connector has no stored bot token",
-            )
+        def _stored_bot_token():
+            # Row read + decrypt in one hop; the Discord round-trip below is a
+            # real await and stays on the loop.
+            connector = database.get_connector(connector_id)
+            if not connector or connector.get("type") != "discord":
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Discord connector not found: {connector_id}",
+                )
+            decrypted = decrypt_config(connector.get("config", {}) or {}, "discord")
+            token_value = decrypted.get("bot_token")
+            if not token_value:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Connector has no stored bot token",
+                )
+            return token_value
+
+        bot_token = await run_sync(_stored_bot_token)
     elif bot_token.startswith("****"):
         # A masked token was submitted — the real value lives on the connector.
         raise HTTPException(
@@ -151,11 +165,15 @@ async def discover_discord_resources(
 async def get_connector(connector_id: str, token: str = Depends(require_admin)):
     """Get a connector by ID."""
     from app.core.connector_service import mask_config
-    connector = database.get_connector(connector_id)
-    if not connector:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
-    connector["config"] = mask_config(connector.get("config", {}), connector.get("type", ""))
-    return connector
+
+    def _get():
+        connector = database.get_connector(connector_id)
+        if not connector:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
+        connector["config"] = mask_config(connector.get("config", {}), connector.get("type", ""))
+        return connector
+
+    return await run_sync(_get)
 
 
 @router.patch("/{connector_id}", response_model=Connector)
@@ -210,7 +228,7 @@ def _owns_local_runner(connector: Dict[str, Any]) -> bool:
 async def test_connector_endpoint(connector_id: str, token: str = Depends(require_admin)):
     """Test a connector's connection."""
     from app.core.connector_service import test_connector
-    connector = database.get_connector(connector_id)
+    connector = await adb.get_connector(connector_id)
     if not connector:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
     return await test_connector(connector_id)

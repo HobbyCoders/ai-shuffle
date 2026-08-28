@@ -21,6 +21,7 @@ from app.core.models import (
     AnalyticsSummaryResponse
 )
 from app.db import database
+from app.db.async_database import run_sync
 from app.api.auth import require_auth
 
 router = APIRouter(prefix="/api/v1/analytics", tags=["Analytics"])
@@ -92,8 +93,26 @@ async def get_analytics_summary(
     # Get user filter (None for admin, user_id for API users)
     api_user_id = get_user_filter(request)
 
-    # Get usage stats
-    usage_data = database.get_analytics_usage_stats(start_date, end_date, api_user_id=api_user_id)
+    # Get recent trend window (last 7 days of the range) up front so the three
+    # aggregations can share ONE thread hop.
+    trend_start = (datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
+
+    def _load_summary():
+        """All three `usage_log` aggregations in ONE off-loop hop.
+
+        These are GROUP BY scans over the whole usage table; run inline on the
+        event loop they stall every other request, WebSocket frame and SSE
+        stream on this worker for their full duration. Same queries, same
+        order, one thread hop instead of three (or, unfixed, three stalls).
+        """
+        return (
+            database.get_analytics_usage_stats(start_date, end_date, api_user_id=api_user_id),
+            database.get_analytics_cost_breakdown(start_date, end_date, group_by="profile", api_user_id=api_user_id),
+            database.get_analytics_usage_trends(trend_start, end_date, interval="day", api_user_id=api_user_id),
+        )
+
+    usage_data, profile_breakdown, trend_data = await run_sync(_load_summary)
+
     usage_stats = UsageStats(
         total_tokens_in=usage_data["total_tokens_in"],
         total_tokens_out=usage_data["total_tokens_out"],
@@ -103,7 +122,6 @@ async def get_analytics_summary(
     )
 
     # Get top profiles (limit to 5 for summary)
-    profile_breakdown = database.get_analytics_cost_breakdown(start_date, end_date, group_by="profile", api_user_id=api_user_id)
     top_profiles = [
         CostBreakdownItem(
             key=item["key"],
@@ -117,8 +135,6 @@ async def get_analytics_summary(
     ]
 
     # Get recent trend (last 7 days of the range)
-    trend_start = (datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
-    trend_data = database.get_analytics_usage_trends(trend_start, end_date, interval="day", api_user_id=api_user_id)
     recent_trend = [
         UsageTrend(
             date=item["date"],
@@ -176,8 +192,11 @@ async def get_cost_breakdown(
     # Get user filter (None for admin, user_id for API users)
     api_user_id = get_user_filter(request)
 
-    # Get breakdown data
-    breakdown_data = database.get_analytics_cost_breakdown(start_date, end_date, group_by=group_by, api_user_id=api_user_id)
+    # Get breakdown data (single aggregation — one off-loop hop)
+    breakdown_data = await run_sync(
+        database.get_analytics_cost_breakdown,
+        start_date, end_date, group_by=group_by, api_user_id=api_user_id,
+    )
 
     items = [
         CostBreakdownItem(
@@ -239,8 +258,11 @@ async def get_usage_trends(
     # Get user filter (None for admin, user_id for API users)
     api_user_id = get_user_filter(request)
 
-    # Get trend data
-    trend_data = database.get_analytics_usage_trends(start_date, end_date, interval=interval, api_user_id=api_user_id)
+    # Get trend data (single aggregation — one off-loop hop)
+    trend_data = await run_sync(
+        database.get_analytics_usage_trends,
+        start_date, end_date, interval=interval, api_user_id=api_user_id,
+    )
 
     data_points = [
         UsageTrend(
@@ -290,8 +312,11 @@ async def get_top_sessions(
     # Get user filter (None for admin, user_id for API users)
     api_user_id = get_user_filter(request)
 
-    # Get top sessions data
-    sessions_data = database.get_analytics_top_sessions(start_date, end_date, limit=limit, api_user_id=api_user_id)
+    # Get top sessions data (single aggregation — one off-loop hop)
+    sessions_data = await run_sync(
+        database.get_analytics_top_sessions,
+        start_date, end_date, limit=limit, api_user_id=api_user_id,
+    )
 
     return [
         TopSession(

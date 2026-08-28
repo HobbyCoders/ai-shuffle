@@ -10,6 +10,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app.db import database
+from app.db import async_database as adb
+from app.db.async_database import run_sync
 from app.api.auth import require_admin
 
 logger = logging.getLogger(__name__)
@@ -54,7 +56,8 @@ async def _update_model_setting(setting_name: str, body: ModelUpdateRequest):
     model = body.model.strip()
     if not model:
         raise HTTPException(status_code=400, detail="Model cannot be empty")
-    database.set_system_setting(setting_name, model)
+    # One isolated write — the async twin is a single thread hop.
+    await adb.set_system_setting(setting_name, model)
     return {"success": True, "model": model}
 
 
@@ -146,10 +149,13 @@ async def update_image_settings(
     token: str = Depends(require_admin)
 ):
     """Update image generation defaults (aspect ratio, resolution)."""
-    if request.aspect_ratio is not None:
-        database.set_system_setting("image_aspect_ratio", request.aspect_ratio)
-    if request.resolution is not None:
-        database.set_system_setting("image_resolution", request.resolution)
+    def _write() -> None:
+        if request.aspect_ratio is not None:
+            database.set_system_setting("image_aspect_ratio", request.aspect_ratio)
+        if request.resolution is not None:
+            database.set_system_setting("image_resolution", request.resolution)
+
+    await run_sync(_write)
     return {"success": True}
 
 
@@ -159,12 +165,15 @@ async def update_video_settings(
     token: str = Depends(require_admin)
 ):
     """Update video generation defaults (aspect ratio, duration, resolution)."""
-    if request.aspect_ratio is not None:
-        database.set_system_setting("video_aspect_ratio", request.aspect_ratio)
-    if request.duration is not None:
-        database.set_system_setting("video_duration", str(request.duration))
-    if request.resolution is not None:
-        database.set_system_setting("video_resolution", request.resolution)
+    def _write() -> None:
+        if request.aspect_ratio is not None:
+            database.set_system_setting("video_aspect_ratio", request.aspect_ratio)
+        if request.duration is not None:
+            database.set_system_setting("video_duration", str(request.duration))
+        if request.resolution is not None:
+            database.set_system_setting("video_resolution", request.resolution)
+
+    await run_sync(_write)
     return {"success": True}
 
 
@@ -175,7 +184,7 @@ async def update_stt_settings(
 ):
     """Update STT defaults (language)."""
     if request.language is not None:
-        database.set_system_setting("stt_language", request.language)
+        await adb.set_system_setting("stt_language", request.language)
     return {"success": True}
 
 
@@ -217,7 +226,7 @@ async def read_model_params(
     token: str = Depends(require_admin),
 ):
     """Return the stored schema-driven params for a model-selection key."""
-    return {"key": key, "params": get_model_params(key.strip())}
+    return {"key": key, "params": await run_sync(get_model_params, key.strip())}
 
 
 @media_router.patch("/integrations/model-params")
@@ -237,5 +246,5 @@ async def update_model_params(
         k: v for k, v in (request.params or {}).items()
         if v is not None and v != ""
     }
-    database.set_system_setting(f"{key}_params", json.dumps(cleaned))
+    await adb.set_system_setting(f"{key}_params", json.dumps(cleaned))
     return {"success": True, "params": cleaned}

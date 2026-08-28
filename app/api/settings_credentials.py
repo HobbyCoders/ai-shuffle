@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.db import database
+from app.db.async_database import run_sync
 from app.api.auth import require_admin, require_auth
 from app.api.settings_crypto import get_decrypted_api_key
 
@@ -98,15 +99,24 @@ async def get_credential_policies(token: str = Depends(require_auth)):
     Returns policies that control whether users must provide their own API keys
     or can use admin-provided keys.
     """
-    policies = database.get_all_credential_policies()
-    enriched = []
-    for policy in policies:
-        info = CREDENTIAL_POLICY_INFO.get(policy["id"], {})
-        enriched.append({
-            **policy,
-            "name": info.get("name", policy["id"]),
-            "admin_has_key": info.get("admin_has_key", lambda: False)()
-        })
+    def _load() -> list:
+        """The listing plus every ``admin_has_key`` probe in ONE thread hop.
+
+        Each probe is itself a ``system_settings`` read (plus a decrypt), so on
+        the loop this endpoint was 1 + N blocking queries.
+        """
+        policies = database.get_all_credential_policies()
+        enriched = []
+        for policy in policies:
+            info = CREDENTIAL_POLICY_INFO.get(policy["id"], {})
+            enriched.append({
+                **policy,
+                "name": info.get("name", policy["id"]),
+                "admin_has_key": info.get("admin_has_key", lambda: False)()
+            })
+        return policies
+
+    policies = await run_sync(_load)
     return AllCredentialPoliciesResponse(
         policies=[CredentialPolicyResponse(**p) for p in policies]
     )
@@ -140,18 +150,29 @@ async def update_credential_policy(
             detail="GitHub PAT cannot be admin-provided. Each user must use their own GitHub account."
         )
 
-    # Special case: can't set to admin_provided if admin doesn't have the key
-    if request.policy == "admin_provided" and policy_id in CREDENTIAL_POLICY_INFO:
-        info = CREDENTIAL_POLICY_INFO[policy_id]
-        if not info.get("admin_has_key", lambda: False)():
-            raise HTTPException(
-                status_code=400,
-                detail="Cannot set to 'admin_provided' - admin has not configured this key yet"
-            )
+    def _check_and_update() -> None:
+        """Admin-key probe + the write, atomically in ONE thread hop.
 
-    updated = database.update_credential_policy(policy_id, request.policy)
-    if not updated:
-        raise HTTPException(status_code=404, detail=f"Policy '{policy_id}' not found")
+        The probe reads (and decrypts) the stored admin key and the result
+        decides whether the write happens: splitting them across two awaits
+        would let the key be removed between the check and the write, storing
+        an 'admin_provided' policy with no admin key behind it. Both
+        ``HTTPException``s raised here propagate unchanged through ``to_thread``.
+        """
+        # Special case: can't set to admin_provided if admin doesn't have the key
+        if request.policy == "admin_provided" and policy_id in CREDENTIAL_POLICY_INFO:
+            info = CREDENTIAL_POLICY_INFO[policy_id]
+            if not info.get("admin_has_key", lambda: False)():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot set to 'admin_provided' - admin has not configured this key yet"
+                )
+
+        updated = database.update_credential_policy(policy_id, request.policy)
+        if not updated:
+            raise HTTPException(status_code=404, detail=f"Policy '{policy_id}' not found")
+
+    await run_sync(_check_and_update)
 
     return {
         "success": True,
@@ -167,24 +188,29 @@ async def get_credential_policies_summary(token: str = Depends(require_admin)):
 
     Used by admin UI to show which keys are configured and policy status.
     """
-    policies = database.get_all_credential_policies()
-    summary = []
+    def _load() -> list:
+        """Listing + one admin-key probe per policy, in ONE thread hop."""
+        policies = database.get_all_credential_policies()
+        summary = []
 
-    for policy in policies:
-        info = CREDENTIAL_POLICY_INFO.get(policy["id"], {})
-        admin_has_key = info.get("admin_has_key", lambda: False)()
+        for policy in policies:
+            info = CREDENTIAL_POLICY_INFO.get(policy["id"], {})
+            admin_has_key = info.get("admin_has_key", lambda: False)()
 
-        summary.append({
-            "id": policy["id"],
-            "name": info.get("name", policy["id"]),
-            "description": info.get("description", policy.get("description", "")),
-            "policy": policy["policy"],
-            "admin_has_key": admin_has_key,
-            # Compute effective status
-            "effective_status": _compute_effective_status(policy["policy"], admin_has_key),
-            "updated_at": policy["updated_at"]
-        })
+            summary.append({
+                "id": policy["id"],
+                "name": info.get("name", policy["id"]),
+                "description": info.get("description", policy.get("description", "")),
+                "policy": policy["policy"],
+                "admin_has_key": admin_has_key,
+                # Compute effective status
+                "effective_status": _compute_effective_status(policy["policy"], admin_has_key),
+                "updated_at": policy["updated_at"]
+            })
 
+        return summary
+
+    summary = await run_sync(_load)
     return {"policies": summary}
 
 
@@ -203,16 +229,21 @@ async def get_user_credential_policies(
 
     Returns the policy for each credential type. Policies are per-user only.
     """
-    # Verify user exists
-    user = database.get_api_user(user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    def _load() -> tuple[dict, dict]:
+        """Existence check + the override read, in ONE thread hop."""
+        # Verify user exists
+        user = database.get_api_user(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
 
-    # Get user's policies
-    user_policies = {
-        p["credential_type"]: p["policy"]
-        for p in database.get_all_user_credential_policies(user_id)
-    }
+        # Get user's policies
+        user_policies = {
+            p["credential_type"]: p["policy"]
+            for p in database.get_all_user_credential_policies(user_id)
+        }
+        return user, user_policies
+
+    user, user_policies = await run_sync(_load)
 
     # Build result from known credential types
     result = []
@@ -246,43 +277,53 @@ async def set_user_credential_policy(
 
     Policies are per-user only - this sets the user's policy for this credential type.
     """
-    # Verify user exists
-    user = database.get_api_user(user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    def _validate_and_set() -> None:
+        """User lookup, admin-key probe and the write in ONE thread hop.
 
-    # Validate policy
-    valid_policies = ['admin_provided', 'user_provided', 'optional']
-    if request.policy not in valid_policies:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid policy. Must be one of: {', '.join(valid_policies)}"
-        )
+        This is a read-decide-write: both the user's existence and the presence
+        of an admin key gate the write, so the checks and the write must stay in
+        the same hop — awaiting between them would let either fact change under
+        the decision. Validation order (and every status code) is unchanged.
+        """
+        # Verify user exists
+        user = database.get_api_user(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
 
-    # Validate credential type
-    if credential_type not in CREDENTIAL_POLICY_INFO:
-        raise HTTPException(status_code=400, detail=f"Unknown credential type: {credential_type}")
-
-    # Special case: github_pat cannot be admin_provided
-    if credential_type == "github_pat" and request.policy == "admin_provided":
-        raise HTTPException(
-            status_code=400,
-            detail="GitHub PAT cannot be admin-provided. Each user must use their own GitHub account."
-        )
-
-    # Special case: can't set to admin_provided if admin doesn't have the key
-    if request.policy == "admin_provided":
-        info = CREDENTIAL_POLICY_INFO[credential_type]
-        if not info.get("admin_has_key", lambda: False)():
+        # Validate policy
+        valid_policies = ['admin_provided', 'user_provided', 'optional']
+        if request.policy not in valid_policies:
             raise HTTPException(
                 status_code=400,
-                detail="Cannot set to 'admin_provided' - admin has not configured this key yet"
+                detail=f"Invalid policy. Must be one of: {', '.join(valid_policies)}"
             )
 
-    # Set the override
-    updated = database.set_user_credential_policy(user_id, credential_type, request.policy)
-    if not updated:
-        raise HTTPException(status_code=500, detail="Failed to set policy override")
+        # Validate credential type
+        if credential_type not in CREDENTIAL_POLICY_INFO:
+            raise HTTPException(status_code=400, detail=f"Unknown credential type: {credential_type}")
+
+        # Special case: github_pat cannot be admin_provided
+        if credential_type == "github_pat" and request.policy == "admin_provided":
+            raise HTTPException(
+                status_code=400,
+                detail="GitHub PAT cannot be admin-provided. Each user must use their own GitHub account."
+            )
+
+        # Special case: can't set to admin_provided if admin doesn't have the key
+        if request.policy == "admin_provided":
+            info = CREDENTIAL_POLICY_INFO[credential_type]
+            if not info.get("admin_has_key", lambda: False)():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot set to 'admin_provided' - admin has not configured this key yet"
+                )
+
+        # Set the override
+        updated = database.set_user_credential_policy(user_id, credential_type, request.policy)
+        if not updated:
+            raise HTTPException(status_code=500, detail="Failed to set policy override")
+
+    await run_sync(_validate_and_set)
 
     return {
         "success": True,
@@ -304,12 +345,16 @@ async def delete_user_credential_policy(
 
     The user will revert to the default policy (user_provided).
     """
-    # Verify user exists
-    user = database.get_api_user(user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    def _check_and_delete() -> bool:
+        """Existence check + delete in ONE hop — the check gates the write."""
+        # Verify user exists
+        user = database.get_api_user(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
 
-    deleted = database.delete_user_credential_policy(user_id, credential_type)
+        return database.delete_user_credential_policy(user_id, credential_type)
+
+    deleted = await run_sync(_check_and_delete)
 
     # Default policy when none is set
     fallback_policy = "user_provided"
@@ -359,40 +404,53 @@ async def resolve_credential(
     if credential_type not in admin_setting_map:
         raise HTTPException(status_code=400, detail=f"Unknown credential type: {credential_type}")
 
-    # Get per-user policy (no global fallback, default to user_provided)
-    if user_id:
-        effective = database.get_effective_credential_policy(user_id, credential_type)
-        policy = effective.get("policy", "user_provided")
-    else:
-        # No user specified, default to user_provided (won't resolve any key)
-        policy = "user_provided"
+    def _resolve() -> tuple[Optional[str], Optional[str], str]:
+        """Policy read, user-credential read and admin-key read in ONE hop.
 
-    resolved_key = None
-    source = None
+        The policy read decides which of the following reads happen, so the
+        whole resolution stays in a single hop. Decryption is unchanged and is
+        safe here: ``app.core.encryption`` builds a fresh ``Fernet`` per call
+        from a module-level key and holds no per-thread state. Nothing extra is
+        logged, and the plaintext never leaves this function's return value.
+        """
+        # Get per-user policy (no global fallback, default to user_provided)
+        if user_id:
+            effective = database.get_effective_credential_policy(user_id, credential_type)
+            policy = effective.get("policy", "user_provided")
+        else:
+            # No user specified, default to user_provided (won't resolve any key)
+            policy = "user_provided"
 
-    # Try user's credential if applicable
-    if user_id and policy in ["user_provided", "optional"]:
-        user_cred = database.get_user_credential(user_id, credential_type)
-        if user_cred:
-            encrypted = user_cred.get("encrypted_value")
-            if encrypted:
-                if enc.is_encrypted(encrypted) and enc.is_encryption_ready():
-                    try:
-                        resolved_key = enc.decrypt_value(encrypted)
+        resolved_key = None
+        source = None
+
+        # Try user's credential if applicable
+        if user_id and policy in ["user_provided", "optional"]:
+            user_cred = database.get_user_credential(user_id, credential_type)
+            if user_cred:
+                encrypted = user_cred.get("encrypted_value")
+                if encrypted:
+                    if enc.is_encrypted(encrypted) and enc.is_encryption_ready():
+                        try:
+                            resolved_key = enc.decrypt_value(encrypted)
+                            source = "user"
+                        except Exception:
+                            pass
+                    elif not enc.is_encrypted(encrypted):
+                        resolved_key = encrypted
                         source = "user"
-                    except Exception:
-                        pass
-                elif not enc.is_encrypted(encrypted):
-                    resolved_key = encrypted
-                    source = "user"
 
-    # Try admin's key if applicable
-    if not resolved_key and policy in ["admin_provided", "optional"]:
-        admin_setting = admin_setting_map.get(credential_type)
-        if admin_setting:
-            resolved_key = get_decrypted_api_key(admin_setting)
-            if resolved_key:
-                source = "admin"
+        # Try admin's key if applicable
+        if not resolved_key and policy in ["admin_provided", "optional"]:
+            admin_setting = admin_setting_map.get(credential_type)
+            if admin_setting:
+                resolved_key = get_decrypted_api_key(admin_setting)
+                if resolved_key:
+                    source = "admin"
+
+        return resolved_key, source, policy
+
+    resolved_key, source, policy = await run_sync(_resolve)
 
     if not resolved_key:
         if policy == "user_provided":
