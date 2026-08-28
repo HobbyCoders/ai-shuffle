@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
+import subprocess
+import sys
 from typing import Any
 
 from fluid.tools.builtins._util import _TRUNCATE_LIMIT, strip_ansi, truncate
@@ -132,6 +135,51 @@ SPEC = ToolSpec(
 )
 
 
+def _spawn_kwargs() -> dict[str, Any]:
+    """Extra ``create_subprocess_exec`` kwargs so the tree can be killed later.
+
+    POSIX: a fresh session (= fresh process group) lets ``os.killpg`` take out
+    the shell *and* everything it spawned. Windows has no equivalent that
+    ``asyncio`` exposes; ``kill_tree`` uses ``taskkill /T`` there instead.
+    """
+    if sys.platform != "win32":
+        return {"start_new_session": True}
+    return {}
+
+
+async def kill_tree(proc: asyncio.subprocess.Process) -> None:
+    """Kill ``proc`` and every descendant, then reap it.
+
+    ``proc.kill()`` alone is not enough: the shell is just the root of a tree
+    (Git Bash on Windows even nests a second bash), and killing the root
+    orphans the grandchildren, which run to completion. So kill the whole
+    group (POSIX) or tree (Windows), falling back to ``proc.kill()`` when the
+    group is already gone.
+    """
+    if proc.returncode is not None:
+        return
+    if sys.platform == "win32":
+        try:
+            await asyncio.to_thread(
+                subprocess.run,
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+            )
+        except OSError:
+            pass
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    if proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+    await proc.wait()
+
+
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     command = input["command"]
     timeout = float(input.get("timeout", DEFAULT_TIMEOUT_S))
@@ -145,12 +193,12 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         # Ask the child not to colourise; anything that ignores the hint gets
         # its escapes stripped from the captured output below.
         env=dict(os.environ, NO_COLOR="1", FORCE_COLOR="0"),
+        **_spawn_kwargs(),
     )
     try:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except TimeoutError:
-        proc.kill()
-        await proc.wait()
+        await kill_tree(proc)
         # Killed, so nothing partial survives — say what the retry should
         # change rather than leaving the model to re-run the same command.
         return ToolOutcome(
@@ -162,6 +210,17 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             ),
             is_error=True,
         )
+    except asyncio.CancelledError:
+        # The user interrupted the turn: this task is being torn down
+        # mid-await and nothing downstream will ever reap the process, so
+        # kill the tree here and let the cancellation keep propagating.
+        await kill_tree(proc)
+        raise
+    finally:
+        # Any other abnormal exit (an exception out of communicate, a second
+        # cancellation) must not orphan a live process either.
+        if proc.returncode is None:
+            await kill_tree(proc)
     text = truncate(strip_ansi(stdout.decode(errors="replace")))
     code = proc.returncode or 0
     if not text.strip():
