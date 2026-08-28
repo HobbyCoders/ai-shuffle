@@ -252,9 +252,21 @@ class SweepPass:
     tight_interval: float
     wake_on_notify: bool = False
     next_due: float = field(default=0.0)
+    # The pass's currently-executing task, if any. Passes run as INDEPENDENT
+    # tasks, never inline on the driver: a git-ops claim can spend half a minute
+    # inside a worktree checkout, and before the multiplexing that could not
+    # delay a turn claim because they were separate loops. Sharing a timer must
+    # not quietly reintroduce head-of-line blocking between unrelated passes.
+    task: Optional[asyncio.Task] = field(default=None, repr=False)
+
+    def in_flight(self) -> bool:
+        return self.task is not None and not self.task.done()
 
 
 _passes: Dict[str, SweepPass] = {}
+
+# Strong refs to in-flight pass tasks (the loop only holds weak ones).
+_pass_tasks: Set[asyncio.Task] = set()
 
 
 def register_pass(
@@ -290,8 +302,15 @@ def register_pass(
 
 
 def unregister_pass(name: str) -> None:
-    """Remove a pass (its owner is shutting down). Never raises."""
-    _passes.pop(name, None)
+    """Remove a pass and cancel it if it is mid-flight. Never raises.
+
+    Cancelling matches what the pass's owner used to get from cancelling its own
+    loop task at shutdown — e.g. a git op that is running when the server tears
+    down is stopped rather than left to race the pool shutdown.
+    """
+    sweep = _passes.pop(name, None)
+    if sweep is not None and sweep.in_flight():
+        sweep.task.cancel()
 
 
 def kick(name: Optional[str] = None) -> None:
@@ -374,22 +393,52 @@ def _effective_interval(sweep: SweepPass, peers: bool) -> float:
     return max(sweep.tight_interval, _stretch_interval())
 
 
-async def _run_passes(due: List[SweepPass], peers: bool) -> None:
-    """Execute the given passes, reschedule them, and react to found work."""
-    for sweep in due:
-        try:
-            result = await sweep.run()
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 — one bad pass must not starve the rest
-            logger.warning("turn_claim: sweep pass %r failed", sweep.name,
-                           exc_info=True)
-            result = None
+async def _execute_pass(sweep: SweepPass, peers: bool) -> None:
+    """Run one pass to completion, then reschedule it from the finish time.
+
+    Scheduling from COMPLETION (not from the start) reproduces the
+    ``sleep(interval); await work()`` shape each of these loops had when it
+    owned its own task, so a slow pass cannot pile up on itself.
+    """
+    result = None
+    try:
+        result = await sweep.run()
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 — one bad pass must not starve the rest
+        logger.warning("turn_claim: sweep pass %r failed", sweep.name,
+                       exc_info=True)
+    finally:
         sweep.next_due = time.monotonic() + _effective_interval(sweep, peers)
-        # Real work on a supposedly single-install deployment is the strongest
-        # possible hint that the peer answer is stale — re-derive it next tick.
-        if result and not peers:
-            invalidate_peer_cache()
+    # Real work on a supposedly single-install deployment is the strongest
+    # possible hint that the peer answer is stale — re-derive it next tick.
+    if result and not peers:
+        invalidate_peer_cache()
+        if _wake is not None:
+            _wake.set()
+
+
+def _dispatch_passes(due: List[SweepPass], peers: bool) -> None:
+    """Launch every due pass that is not already running, each as its own task.
+
+    A pass still in flight is simply skipped and re-anchored — the same
+    "one execution at a time" property its private loop had — while the other
+    passes, and the driver's own timing, are untouched by how long it takes.
+    """
+    now = time.monotonic()
+    for sweep in due:
+        if sweep.in_flight():
+            sweep.next_due = max(
+                sweep.next_due, now + _effective_interval(sweep, peers)
+            )
+            continue
+        # Provisional deadline so the driver does not re-dispatch on the next
+        # tick; _execute_pass re-anchors it from the real completion time.
+        sweep.next_due = now + _effective_interval(sweep, peers)
+        task = asyncio.create_task(_execute_pass(sweep, peers))
+        sweep.task = task
+        _pass_tasks.add(task)
+        task.add_done_callback(_pass_tasks.discard)
 
 
 async def sweep_loop() -> None:
@@ -448,14 +497,14 @@ async def sweep_loop() -> None:
             due = [p for p in _passes.values() if p.next_due <= now]
             if notify:
                 for sweep in _passes.values():
-                    if sweep.wake_on_notify and sweep not in due:
+                    if sweep.wake_on_notify and not any(d is sweep for d in due):
                         due.append(sweep)
             if not due:
                 # A bare wake (registration, kick of an already-scheduled pass,
                 # cadence change) — just recompute the sleep.
                 continue
 
-            await _run_passes(due, peers)
+            _dispatch_passes(due, peers)
             # Damping floor: NOTIFY ticks fire per event batch during
             # streaming; never run passes more than once per cooldown.
             await asyncio.sleep(WAKE_COOLDOWN_SECONDS)
@@ -534,6 +583,17 @@ async def stop() -> None:
     unregister_pass("turn_claim")
     task = _loop_task
     _loop_task = None
+    # Cancel any pass still executing: a pass racing the session-pool shutdown
+    # is exactly what this teardown exists to prevent, and each pass used to be
+    # cancelled with its own loop task.
+    in_flight = [t for t in list(_pass_tasks) if not t.done()]
+    for t in in_flight:
+        t.cancel()
+    for t in in_flight:
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
     if task is None or task.done():
         _wake = None
         _loop = None

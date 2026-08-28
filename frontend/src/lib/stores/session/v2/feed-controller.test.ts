@@ -34,19 +34,32 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 const hoisted = vi.hoisted(() => ({
 	onEvent: null as ((e: Record<string, unknown>) => void) | null,
 	onOpen: null as (() => void) | null,
+	onError: null as ((e: unknown) => void) | null,
 	creates: 0,
 	stops: 0,
 	revives: 0,
+	/** from_seq of the most recent createSseFeed (S2 resume cursor). */
+	fromSeq: undefined as number | undefined,
+	/** (sessionId, fromSeq) of every feed opened, oldest first. */
+	opened: [] as Array<{ sessionId: string; fromSeq: number | undefined }>,
 }));
 
 vi.mock('./sse-feed', () => ({
 	createSseFeed: (
 		_sessionId: string,
-		opts: { onEvent: (e: Record<string, unknown>) => void; onOpen?: () => void },
+		opts: {
+			onEvent: (e: Record<string, unknown>) => void;
+			onOpen?: () => void;
+			onError?: (e: unknown) => void;
+			fromSeq?: number;
+		},
 	) => {
 		hoisted.creates++;
 		hoisted.onEvent = opts.onEvent;
 		hoisted.onOpen = opts.onOpen ?? null;
+		hoisted.onError = opts.onError ?? null;
+		hoisted.fromSeq = opts.fromSeq;
+		hoisted.opened.push({ sessionId: _sessionId, fromSeq: opts.fromSeq });
 		return {
 			get running() {
 				return true;
@@ -216,9 +229,12 @@ function interaction(
 beforeEach(() => {
 	hoisted.onEvent = null;
 	hoisted.onOpen = null;
+	hoisted.onError = null;
 	hoisted.creates = 0;
 	hoisted.stops = 0;
 	hoisted.revives = 0;
+	hoisted.fromSeq = undefined;
+	hoisted.opened = [];
 	rafQueue = [];
 	rafId = 0;
 	// Install fake timers FIRST — vitest's fake timers also replace
@@ -238,6 +254,9 @@ beforeEach(() => {
 
 afterEach(() => {
 	feedController.stop();
+	// The transcript cache is module state: a session cached by one test must not
+	// change the hydration path of the next.
+	feedController.invalidate();
 	vi.useRealTimers();
 	vi.unstubAllGlobals();
 });
@@ -914,5 +933,287 @@ describe('feedController browser-panel auto-open', () => {
 		browserPanel.closePanel('s1');
 		hoisted.onEvent!(toolUse('t1', 'mcp__browser__browser_navigate'));
 		expect(browserPanel.current.open).toBe(false);
+	});
+});
+
+// ─── S2: transcript cache + from_seq resume ──────────────────────────────────
+
+/** A user message carrying an explicit seq, so the reducer's resume cursor
+ *  (lastSeq) actually advances and the state becomes cacheable. */
+function userMessageAt(seq: number, content: string): Record<string, unknown> {
+	return {
+		type: 'message.user',
+		id: `evt-u-${seq}`,
+		seq,
+		session_id: 's1',
+		created_at: '2026-07-12T00:00:00.000Z',
+		content,
+	};
+}
+
+/** Hydrate a session to a complete, cacheable state: N messages + a real
+ *  `caught_up` sentinel (the ONLY thing that makes a state cacheable, R1). */
+function hydrate(sessionId: string, seqs: number[]): void {
+	feedController.start(sessionId);
+	for (const seq of seqs) hoisted.onEvent!(userMessageAt(seq, `m${seq}`));
+	hoisted.onEvent!(caughtUp(seqs[seqs.length - 1] ?? 0));
+}
+
+describe('feedController transcript cache (S2)', () => {
+	it('a switch back folds the cached transcript synchronously and resumes at lastSeq', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+
+		// Open s1, hydrate it, then leave (the switcher stops the feed).
+		hydrate('s1', [1, 2, 3]);
+		expect(hoisted.opened[0]).toEqual({ sessionId: 's1', fromSeq: 0 });
+		feedController.stop();
+
+		// Come back. The transcript must be on screen in the SAME synchronous
+		// call — no spinner, no empty list, no fold scheduled for later.
+		deps.update.mockClear();
+		deps.update((s) => ({ ...s, messages: [], isLoadingSession: true, isRestoringSession: true }));
+		const callsBeforeStart = deps.update.mock.calls.length;
+		feedController.start('s1');
+
+		expect(deps.update.mock.calls.length).toBe(callsBeforeStart + 1);
+		expect((deps.state.messages as unknown[]).length).toBe(3);
+		expect(deps.state.isLoadingSession).toBe(false);
+		expect(deps.state.isRestoringSession).toBe(false);
+
+		// …and the feed resumes at the cached cursor instead of replaying the log.
+		expect(hoisted.fromSeq).toBe(3);
+	});
+
+	it('the resumed feed appends the delta without re-downloading history', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		hydrate('s1', [1, 2, 3]);
+		feedController.stop();
+
+		feedController.start('s1');
+		hoisted.onEvent!(userMessageAt(4, 'while-away'));
+		hoisted.onEvent!(caughtUp(4));
+
+		const msgs = deps.state.messages as Array<{ content: string }>;
+		expect(msgs.map((m) => m.content)).toEqual(['m1', 'm2', 'm3', 'while-away']);
+	});
+
+	it('R1: a hydration completed by the FLOOR (no sentinel) is never cached', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(userMessageAt(1, 'partial'));
+		// Stall → the floor publishes what arrived, but the sentinel is still owed
+		// so this state is NOT known to be complete.
+		vi.advanceTimersByTime(CATCHUP_FALLBACK_MS);
+		expect(deps.state.messages).toHaveLength(1);
+		feedController.stop();
+
+		expect(feedController.hasCachedTranscript('s1')).toBe(false);
+		feedController.start('s1');
+		expect(hoisted.fromSeq).toBe(0); // full replay
+	});
+
+	it('R2: restart() discards the cache and replays from seq 0', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		hydrate('s1', [1, 2, 3]);
+		expect(feedController.hasCachedTranscript('s1')).toBe(true);
+
+		// The rewind / reload-session path: the state it was built from is no
+		// longer trustworthy.
+		feedController.restart('s1');
+		expect(feedController.hasCachedTranscript('s1')).toBe(false);
+		expect(hoisted.fromSeq).toBe(0);
+		expect(deps.state.messages).toHaveLength(0);
+		expect(deps.state.isLoadingSession).toBe(true);
+	});
+
+	it('R2: a rewind replayed on a RESUMED feed truncates, so it needs no invalidation', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		hydrate('s1', [1, 2, 3]);
+		feedController.stop();
+
+		// The rewind happened while the user was away. It is an APPENDED event
+		// (never a row deletion), so the resume replays it and the reducer drops
+		// everything created at/after its from_seq — exactly what a full replay
+		// would have produced.
+		feedController.start('s1');
+		hoisted.onEvent!({
+			type: 'transcript.rewound',
+			id: 'evt-rw',
+			seq: 4,
+			session_id: 's1',
+			created_at: '2026-07-12T00:00:00.000Z',
+			from_seq: 2,
+		});
+		hoisted.onEvent!(caughtUp(4));
+
+		const msgs = deps.state.messages as Array<{ content: string }>;
+		expect(msgs.map((m) => m.content)).toEqual(['m1']);
+	});
+
+	it('R3: invalidate() drops one session, or all of them', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		hydrate('s1', [1]);
+		feedController.stop();
+		expect(feedController.hasCachedTranscript('s1')).toBe(true);
+
+		feedController.invalidate('s1');
+		expect(feedController.hasCachedTranscript('s1')).toBe(false);
+
+		hydrate('s1', [1]);
+		feedController.stop();
+		feedController.invalidate();
+		expect(cachedTranscriptCount()).toBe(0);
+	});
+
+	it('R4: an event at/below the resume cursor discards the cache and replays from 0', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		hydrate('s1', [1, 2, 3]);
+		feedController.stop();
+
+		feedController.start('s1');
+		expect(hoisted.fromSeq).toBe(3);
+
+		// The server filter is `seq > from_seq`, so this cannot happen for the log
+		// the cache was built from: the log was rewritten (restore, seq reset, an
+		// id reused by a fork). Trusting the cache here would show a transcript
+		// that never existed.
+		hoisted.onEvent!(userMessageAt(2, 'not-our-log'));
+
+		expect(feedController.hasCachedTranscript('s1')).toBe(false);
+		expect(hoisted.fromSeq).toBe(0); // re-hydrating from scratch
+		expect(deps.state.isLoadingSession).toBe(true);
+		expect(deps.state.messages).toHaveLength(0);
+	});
+
+	it('R5: an entry older than the TTL is ignored and dropped', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		hydrate('s1', [1, 2]);
+		feedController.stop();
+
+		vi.advanceTimersByTime(TRANSCRIPT_CACHE_TTL_MS + 1);
+		expect(feedController.hasCachedTranscript('s1')).toBe(false);
+		feedController.start('s1');
+		expect(hoisted.fromSeq).toBe(0);
+	});
+
+	it('R6: the cache is LRU-capped', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		// getState() reports sessionId 's1', and the fold only writes for the
+		// session in view — irrelevant here, the cache is keyed by the FED id.
+		for (let i = 0; i < TRANSCRIPT_CACHE_MAX + 3; i++) {
+			hydrate(`sess-${i}`, [1, 2]);
+			feedController.stop();
+		}
+		expect(cachedTranscriptCount()).toBe(TRANSCRIPT_CACHE_MAX);
+		expect(feedController.hasCachedTranscript('sess-0')).toBe(false);
+		expect(feedController.hasCachedTranscript(`sess-${TRANSCRIPT_CACHE_MAX + 2}`)).toBe(true);
+	});
+
+	it('cachedPatch() previews the same transcript the switcher primes with', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		hydrate('s1', [1, 2]);
+		feedController.stop();
+
+		const patch = feedController.cachedPatch('s1');
+		expect(patch).not.toBeNull();
+		expect((patch!.messages as unknown[]).length).toBe(2);
+		expect(patch!.isLoadingSession).toBe(false);
+		expect(patch!.isRestoringSession).toBe(false);
+		expect(feedController.cachedPatch('never-opened')).toBeNull();
+	});
+});
+
+// ─── S6: isStreaming has ONE writer ──────────────────────────────────────────
+
+describe('feedController isStreaming single-writer (S6)', () => {
+	function turnStarted(seq: number): Record<string, unknown> {
+		return {
+			type: 'turn.started',
+			id: `evt-turn-${seq}`,
+			seq,
+			session_id: 's1',
+			created_at: '2026-07-12T00:00:00.000Z',
+			turn_id: `turn-${seq}`,
+		};
+	}
+	function turnCompleted(seq: number, turnId: string): Record<string, unknown> {
+		return {
+			type: 'turn.completed',
+			id: `evt-done-${seq}`,
+			seq,
+			session_id: 's1',
+			created_at: '2026-07-12T00:00:00.000Z',
+			turn_id: turnId,
+		};
+	}
+
+	it('a fold between the optimistic flip and turn.started never flips it back', () => {
+		// This is the reported stutter: the send (or a WS `start`) set streaming
+		// true, then an SSE frame folded BEFORE `turn.started` reset it from the
+		// reducer, then `turn.started` set it true again.
+		const deps = makeDeps({ isStreaming: true, optimisticStreaming: true });
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+		expect(deps.state.isStreaming).toBe(true);
+
+		// A frame that is NOT turn.started folds — the indicator must hold.
+		hoisted.onEvent!(userMessageAt(1, 'hi'));
+		flushRaf();
+		expect(deps.state.isStreaming).toBe(true);
+		expect(deps.state.optimisticStreaming).toBe(true);
+
+		// The server confirms: the reducer takes over and the flag is retired.
+		hoisted.onEvent!(turnStarted(2));
+		flushRaf();
+		expect(deps.state.isStreaming).toBe(true);
+		expect(deps.state.optimisticStreaming).toBe(false);
+
+		// And the reducer alone ends it — no stale optimistic flag revives it.
+		hoisted.onEvent!(turnCompleted(3, 'turn-2'));
+		flushRaf();
+		expect(deps.state.isStreaming).toBe(false);
+		expect(deps.state.optimisticStreaming).toBe(false);
+	});
+
+	it('noteOptimisticSend/clearOptimisticSend drive the same single flag', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+
+		feedController.noteOptimisticSend('s1');
+		hoisted.onEvent!(userMessageAt(1, 'hi'));
+		flushRaf();
+		expect(deps.state.isStreaming).toBe(true);
+
+		feedController.clearOptimisticSend('s1');
+		hoisted.onEvent!(userMessageAt(2, 'hi again'));
+		flushRaf();
+		expect(deps.state.isStreaming).toBe(false);
+	});
+
+	it('isReducerStreaming reports the authoritative value for the fed session', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+		expect(feedController.isReducerStreaming('s1')).toBe(false);
+
+		hoisted.onEvent!(turnStarted(1));
+		expect(feedController.isReducerStreaming('s1')).toBe(true);
+		// Not the session being fed → never claims to know.
+		expect(feedController.isReducerStreaming('other')).toBe(false);
+		expect(feedController.isReducerStreaming(null)).toBe(false);
 	});
 });

@@ -7,7 +7,14 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { reduce, reduceAll, initialState, type WireEvent } from './reducer';
+import {
+	reduce,
+	reduceAll,
+	initialState,
+	releaseMessages,
+	sealState,
+	type WireEvent,
+} from './reducer';
 import type { ChatMessage } from '../../types';
 
 // ─── Event builders ─────────────────────────────────────────────────────────
@@ -2124,5 +2131,89 @@ describe('tool.use screenshot', () => {
 		]);
 		const card = s.messages.find((m) => m.toolId === 't1')!;
 		expect(card.toolScreenshot).toBe('data:image/png;base64,ABC');
+	});
+});
+
+// ─── Replay cost: appends must be linear, not quadratic (S2) ────────────────
+
+describe('replay allocation (copy-on-publish ownership)', () => {
+	function userEvent(seq: number): WireEvent {
+		return {
+			type: 'message.user',
+			id: `u-${seq}`,
+			seq,
+			session_id: 's1',
+			created_at: '2026-07-12T00:00:00.000Z',
+			content: `m${seq}`,
+		} as WireEvent;
+	}
+
+	it('appends in place while the reducer owns the containers (no per-event copy)', () => {
+		// The old shape copied the WHOLE messages array and spread the WHOLE
+		// messageOriginSeq record on every appended event — O(N) per event, O(N²)
+		// for a backfill. Identity is the direct, deterministic evidence that the
+		// copy is gone: consecutive appends reuse the same containers.
+		let state = initialState();
+		state = reduce(state, userEvent(1));
+		const messagesAfterFirst = state.messages;
+		const originsAfterFirst = state.messageOriginSeq;
+
+		state = reduce(state, userEvent(2));
+		state = reduce(state, userEvent(3));
+
+		expect(state.messages).toBe(messagesAfterFirst);
+		expect(state.messageOriginSeq).toBe(originsAfterFirst);
+		expect(state.messages).toHaveLength(3);
+		expect(state.messageOriginSeq.get('u-3')).toBe(3);
+	});
+
+	it('copies exactly once after a publish, so a published snapshot never mutates', () => {
+		let state = initialState();
+		state = reduce(state, userEvent(1));
+		state = reduce(state, userEvent(2));
+
+		// What the fold hands to activeSession.
+		const published = releaseMessages(state);
+		expect(published).toHaveLength(2);
+
+		state = reduce(state, userEvent(3));
+		// The consumer's array is untouched…
+		expect(published).toHaveLength(2);
+		// …the reducer copied once and owns the copy again.
+		expect(state.messages).not.toBe(published);
+		expect(state.messages).toHaveLength(3);
+		const afterCopy = state.messages;
+		state = reduce(state, userEvent(4));
+		expect(state.messages).toBe(afterCopy);
+	});
+
+	it('a sealed snapshot (transcript cache) is immune to later reduction', () => {
+		let state = initialState();
+		state = reduce(state, userEvent(1));
+		const snapshot = sealState(state);
+		const snapshotMessages = snapshot.messages;
+		const snapshotOrigins = snapshot.messageOriginSeq;
+
+		// The feed keeps folding into the same lineage after caching.
+		state = reduce(state, userEvent(2));
+		state = reduce(state, userEvent(3));
+
+		expect(snapshotMessages).toHaveLength(1);
+		expect(snapshotOrigins.size).toBe(1);
+		// …and resuming FROM the snapshot reproduces the same result as a replay.
+		const resumed = reduceAll([userEvent(2), userEvent(3)], snapshot);
+		expect(resumed.messages.map((m) => m.content)).toEqual(['m1', 'm2', 'm3']);
+		expect(snapshotMessages).toHaveLength(1);
+	});
+
+	it('a large backfill replays in linear time', () => {
+		// Guard rail, generously bounded: the quadratic shape spent minutes here
+		// (20k events × up to 20k element copies × 2 containers).
+		const events = Array.from({ length: 20_000 }, (_, i) => userEvent(i + 1));
+		const t0 = Date.now();
+		const state = reduceAll(events);
+		const elapsed = Date.now() - t0;
+		expect(state.messages).toHaveLength(20_000);
+		expect(elapsed).toBeLessThan(3_000);
 	});
 });

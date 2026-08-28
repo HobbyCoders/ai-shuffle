@@ -81,9 +81,12 @@ describe('transcript window', () => {
 describe('turn visibility → rail index', () => {
 	const ids = ['a', 'b', 'c', 'd'];
 	const readingLine = 140;
-	const allMounted = () => true;
+	const allMounted = (): boolean => true;
 
-	function indexFor(states: Record<string, TurnVisibility>, mounted = allMounted) {
+	function indexFor(
+		states: Record<string, TurnVisibility>,
+		mounted: (turnId: string) => boolean = allMounted
+	) {
 		const tops = turnTopsFromVisibility(ids, new Map(Object.entries(states)), readingLine, mounted);
 		return resolveCurrentTurnIndex(tops, readingLine);
 	}
@@ -99,7 +102,7 @@ describe('turn visibility → rail index', () => {
 
 	it('counts unmounted older turns as already passed', () => {
 		// 'a' and 'b' are above the mounted window: they are older, hence above.
-		const mounted = (id: string) => id === 'c' || id === 'd';
+		const mounted = (id: string): boolean => id === 'c' || id === 'd';
 		expect(indexFor({ c: 'inside', d: 'below' }, mounted)).toBe(2);
 	});
 

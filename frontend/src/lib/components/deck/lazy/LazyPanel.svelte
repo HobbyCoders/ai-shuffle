@@ -32,6 +32,9 @@
 	let { handle, props = {}, label = 'panel', bare = false, skeletonDelayMs = 140 }: Props = $props();
 
 	// Seed from the cache so an already-loaded chunk renders synchronously.
+	// Reading the prop once at init is deliberate: the effect below re-syncs on
+	// every handle change, so we only need the initial cache hit here.
+	// svelte-ignore state_referenced_locally
 	let Component = $state<any>(handle.resolved);
 	let failed = $state(false);
 	let showSkeleton = $state(false);

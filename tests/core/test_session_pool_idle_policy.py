@@ -383,3 +383,35 @@ def test_configured_defaults_target_a_low_idle_floor():
     assert settings.sdk_session_hot_pool_size <= 2
     assert settings.sdk_session_cold_idle_timeout_seconds <= 600
     assert settings.sdk_session_detached_grace_seconds > 0
+
+
+# ─── Monitor's pool-capacity warning (F10's stale constant) ───────────────
+
+
+def test_capacity_warning_uses_the_reported_pool_max():
+    from app.core.resource_monitor import _check_warnings
+
+    warnings = _check_warnings({"pool_size": 4, "pool_max_size": 4})
+    assert any("Session pool at capacity (4/4)" in w for w in warnings)
+
+    warnings = _check_warnings({"pool_size": 2, "pool_max_size": 4})
+    assert not any("at capacity" in w for w in warnings)
+
+
+def test_capacity_warning_falls_back_to_the_configured_size_not_a_constant():
+    """The old fallback was a literal 3 and went stale the moment the default moved."""
+    from app.core.config import settings
+    from app.core.resource_monitor import _check_warnings
+
+    configured = settings.sdk_session_pool_size
+    at_capacity = _check_warnings({"pool_size": configured})
+    below = _check_warnings({"pool_size": configured - 1})
+
+    assert any("at capacity" in w for w in at_capacity)
+    assert not any("at capacity" in w for w in below)
+
+
+def test_capacity_warning_is_silent_before_the_pool_exists():
+    from app.core.resource_monitor import _check_warnings
+
+    assert not any("at capacity" in w for w in _check_warnings({}))

@@ -935,5 +935,22 @@ export const feedController: FeedController = {
 	clearOptimisticSend(sessionId: string | null) {
 		if (sessionId !== null && currentSessionId !== null && sessionId !== currentSessionId) return;
 		optimisticStreaming = false;
+		// Withdraw the flip on BOTH channels — the module latch above and the
+		// state field the fold reads — or the next fold would re-raise it. The
+		// published `isStreaming` falls back to the authoritative reducer value,
+		// so withdrawing never kills a turn that is genuinely live.
+		if (!deps) return;
+		deps.update((s) => {
+			if (sessionId !== null && s.sessionId !== sessionId) return s;
+			if (!s.optimisticStreaming) return s;
+			return {
+				...s,
+				optimisticStreaming: false,
+				isStreaming:
+					currentSessionId !== null && s.sessionId === currentSessionId
+						? reducerState.isStreaming
+						: s.isStreaming,
+			};
+		});
 	},
 };

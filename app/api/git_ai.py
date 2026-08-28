@@ -17,7 +17,7 @@ from fastapi import APIRouter, HTTPException, Depends, Request, status
 from app.core.git_service import git_service
 from app.api.auth import require_auth
 from app.api.common import check_project_access
-from app.api.git_helpers import run_git, get_working_dir
+from app.api.git_helpers import run_git, get_working_dir, get_working_dir_async
 
 from app.api.schemas.git import (
     GenerateCommitMessageRequest,
@@ -252,7 +252,7 @@ async def generate_commit_message(
     When worktree_id is provided, generates message based on worktree's diff.
     """
     check_project_access(request, project_id)
-    working_dir = get_working_dir(project_id, worktree_id, session_id)
+    working_dir = await get_working_dir_async(project_id, worktree_id, session_id)
     message = await generate_commit_message_for_dir(working_dir, body.include_unstaged)
     return GenerateCommitMessageResponse(message=message)
 
@@ -272,7 +272,7 @@ async def generate_pr_description(
     When worktree_id is provided, generates description from worktree's branch.
     """
     check_project_access(request, project_id)
-    working_dir = get_working_dir(project_id, worktree_id, session_id)
+    working_dir = await get_working_dir_async(project_id, worktree_id, session_id)
     title, pr_body = await generate_pr_description_for_dir(working_dir, body.base_branch)
     return GeneratePRDescriptionResponse(title=title, body=pr_body)
 

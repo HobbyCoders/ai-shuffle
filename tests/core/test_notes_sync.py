@@ -311,3 +311,114 @@ class TestNotesSync:
         # Both are in-sync on first pass, so this simply must not raise.
         result = notes_sync.sync_notes_once()
         assert result["notes"] == 2
+
+
+# =============================================================================
+# F7 — metadata-first cost shape
+# =============================================================================
+
+class TestMetadataFirstReads:
+    """The worker must not pull every note's content on every tick.
+
+    Change detection needs only ``(id, file_path, updated_at)`` plus one
+    ``stat``; the multi-KB ``content`` column is fetched exclusively for rows
+    that actually moved. On a 15-60s cadence that is the difference between
+    megabytes of row traffic a minute and a single small indexed read.
+    """
+
+    def test_steady_state_pass_reads_no_content(self, fs, mock_db):
+        note = make_note()
+        write_raw(fs, "my-note.md", note["title"], note["content"])
+        reads = install_notes(mock_db, note)
+
+        notes_sync.sync_notes_once()          # baseline pass: content needed once
+        assert reads == ["note-1"]
+
+        reads.clear()
+        notes_sync.sync_notes_once()
+        notes_sync.sync_notes_once()
+        notes_sync.sync_notes_once()
+
+        assert reads == [], (
+            "the fast path is still pulling full note rows out of the database"
+        )
+        mock_db.get_all_notes.assert_not_called()
+
+    def test_content_is_fetched_only_for_the_changed_row(self, fs, mock_db):
+        a = make_note(note_id="a", title="A", filename="a.md")
+        b = make_note(note_id="b", title="B", filename="b.md")
+        c = make_note(note_id="c", title="C", filename="c.md")
+        for note, fn in ((a, "a.md"), (b, "b.md"), (c, "c.md")):
+            write_raw(fs, fn, note["title"], note["content"])
+        reads = install_notes(mock_db, a, b, c)
+
+        notes_sync.sync_notes_once()  # baselines
+        reads.clear()
+
+        # Only b changes in the DB (its updated_at moves).
+        b_changed = make_note(
+            note_id="b", title="B", content="edited elsewhere",
+            filename="b.md", updated_at="2024-09-09T00:00:00+00:00",
+        )
+        reads = install_notes(mock_db, a, b_changed, c)
+
+        notes_sync.sync_notes_once()
+
+        assert reads == ["b"], f"fetched content for {reads}, expected only ['b']"
+        assert "edited elsewhere" in read_raw(fs, "b.md")
+
+    def test_a_file_edit_pulls_content_for_that_note_only(self, fs, mock_db):
+        a = make_note(note_id="a", title="A", content="original", filename="a.md")
+        b = make_note(note_id="b", title="B", content="original", filename="b.md")
+        write_raw(fs, "a.md", a["title"], "original")
+        write_raw(fs, "b.md", b["title"], "original")
+        reads = install_notes(mock_db, a, b)
+        mock_db.update_note.return_value = make_note(
+            note_id="a", content="edited", updated_at="2024-04-04T00:00:00+00:00"
+        )
+
+        notes_sync.sync_notes_once()
+        base_mtime = notes_sync._last_file_mtime["a"] or 0.0
+        reads.clear()
+
+        write_raw(fs, "a.md", a["title"], "edited")
+        set_mtime(fs, "a.md", base_mtime + 10)
+
+        notes_sync.sync_notes_once()
+
+        assert reads == ["a"]
+        mock_db.update_note.assert_called_once_with(
+            note_id="a", title="A", content="edited"
+        )
+
+    def test_unmaterialized_note_costs_no_content_read(self, fs, mock_db):
+        """A note with no file_path is the startup materializer's problem."""
+        note = make_note()
+        note["file_path"] = None
+        reads = install_notes(mock_db, note)
+
+        result = notes_sync.sync_notes_once()
+
+        assert reads == []
+        assert result["notes"] == 1
+
+    def test_stats_report_how_many_rows_were_fetched(self, fs, mock_db):
+        note = make_note()
+        write_raw(fs, "my-note.md", note["title"], note["content"])
+        install_notes(mock_db, note)
+
+        assert notes_sync.sync_notes_once() == {"notes": 1, "fetched": 1}
+        assert notes_sync.sync_notes_once() == {"notes": 1, "fetched": 0}
+
+    def test_row_deleted_between_the_two_reads_is_survivable(self, fs, mock_db):
+        note = make_note()
+        write_raw(fs, "my-note.md", note["title"], note["content"])
+        install_notes(mock_db, note)
+        mock_db.get_note.side_effect = lambda _nid: None
+
+        assert notes_sync.sync_notes_once()["notes"] == 1
+
+    def test_configured_cadence_is_not_the_old_hot_one(self):
+        from app.core.config import settings
+
+        assert settings.notes_sync_interval_seconds >= 60

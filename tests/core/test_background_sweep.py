@@ -168,6 +168,78 @@ async def test_unregister_stops_a_pass_without_stopping_the_driver(monkeypatch):
         await _stop_driver()
 
 
+@pytest.mark.asyncio
+async def test_a_slow_pass_does_not_block_the_others(monkeypatch):
+    """No head-of-line blocking.
+
+    Before the multiplexing these were separate loops, so a git-ops claim
+    sitting in a 30s worktree checkout could not delay a turn claim. Sharing one
+    timer must not quietly reintroduce that coupling: passes run as independent
+    tasks.
+    """
+    _set_peers(monkeypatch, True)
+    fast_calls, fast_run = _counter()
+    started = asyncio.Event()
+
+    async def _slow():
+        started.set()
+        await asyncio.sleep(5)
+
+    turn_claim.register_pass("slow", _slow, 0.02)
+    turn_claim.register_pass("fast", fast_run, 0.02)
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        assert await _wait_until(lambda: len(fast_calls) >= 3), (
+            "a long-running pass stalled the whole sweep"
+        )
+    finally:
+        await _stop_driver()
+
+
+@pytest.mark.asyncio
+async def test_a_pass_never_overlaps_itself(monkeypatch):
+    """One execution at a time — the property each private loop had."""
+    _set_peers(monkeypatch, True)
+    concurrent = {"now": 0, "max": 0}
+
+    async def _slow():
+        concurrent["now"] += 1
+        concurrent["max"] = max(concurrent["max"], concurrent["now"])
+        await asyncio.sleep(0.3)
+        concurrent["now"] -= 1
+
+    turn_claim.register_pass("slow", _slow, 0.01)
+    try:
+        await asyncio.sleep(0.5)
+        assert concurrent["max"] == 1, (
+            f"pass re-entered itself ({concurrent['max']} concurrent runs)"
+        )
+    finally:
+        await _stop_driver()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_an_in_flight_pass(monkeypatch):
+    _set_peers(monkeypatch, True)
+    cancelled = {"yes": False}
+    started = asyncio.Event()
+
+    async def _slow():
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled["yes"] = True
+            raise
+
+    turn_claim.register_pass("slow", _slow, 0.01)
+    await asyncio.wait_for(started.wait(), timeout=2)
+
+    await _stop_driver()
+
+    assert cancelled["yes"], "shutdown left a pass running against a closing pool"
+
+
 # ─── Single-install detection ─────────────────────────────────────────────
 
 

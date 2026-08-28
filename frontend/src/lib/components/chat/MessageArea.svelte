@@ -394,7 +394,14 @@
 			isStreaming: false,
 			latestTurnUnsettled: false,
 			groupingEnabled: true,
-			model: { items: [], promptOccurrence: [], subagentToolIds: new Set(), itemIndexByTurnId: new Map() }
+			model: {
+				items: [],
+				promptOccurrence: [],
+				subagentToolIds: new Set<string>(),
+				itemIndexByTurnId: new Map<string, number>(),
+				lastAssistantMetadata: null,
+				latestUserTurnId: null
+			}
 		};
 
 	const transcript: TranscriptModel = $derived.by(() => {

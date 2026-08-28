@@ -23,7 +23,7 @@ from app.core.project_utils import get_worktree_working_dir
 from app.db import database
 from app.api.auth import require_auth
 from app.api.common import check_project_access
-from app.api.git_helpers import run_git, get_project_path
+from app.api.git_helpers import run_git, get_project_path, invalidate_working_dir_cache
 
 from app.api.schemas.git import (
     StagedFile,
@@ -464,6 +464,9 @@ async def delete_worktree(
 
     # The removed worktree changes the fan-out result — drop the cached status.
     _invalidate_worktree_status_cache(project_id)
+    # The checkout no longer exists, so any memoized path for this project's
+    # sessions/worktrees is now wrong — drop it rather than serving a dead path.
+    invalidate_working_dir_cache(project_id=project_id)
 
     branch_msg = " (branch kept)" if keep_branch else " (branch deleted)"
     return OperationResponse(
@@ -512,6 +515,11 @@ async def reopen_worktree(
     if local_repo:
         local_pid = local_repo.get("project_id")
 
+    # Reopen relocates the whole worktree: the fan-out result and any memoized
+    # working dir for this project both describe the old (deleted) checkout.
+    _invalidate_worktree_status_cache(project_id)
+    invalidate_working_dir_cache(project_id=project_id)
+
     # Evict stale pooled subprocesses whose CWD pointed to the old (deleted) worktree.
     # Must be done here (async context) since recreate_worktree is sync.
     from app.core.session_pool import get_session_pool
@@ -555,6 +563,8 @@ async def sync_worktrees(
 
     # Sync can add/remove/import worktrees — drop the cached fan-out status.
     _invalidate_worktree_status_cache(project_id)
+    # Sync moves checkouts around, so memoized working dirs may be stale.
+    invalidate_working_dir_cache(project_id=project_id)
 
     return WorktreeSyncResponse(
         synced=result.get("synced", 0),
