@@ -333,12 +333,24 @@ async def test_boot_reap_requeues_dead_lease_turns_and_kicks(
 # Schema: version parity + parked_task_kind column
 # =============================================================================
 
-def test_schema_version_parity_v83():
+#: Lowest schema version this build is known to be at. The point of this test
+#: is PARITY between the two modules that declare the version — the exact number
+#: is recorded in database.py's changelog comment, which is the single place a
+#: bump has to be documented, so this floor only needs raising when a migration
+#: needs a test to prove it landed (those live next to the migration).
+MIN_SCHEMA_VERSION = 84
+
+
+def test_schema_version_parity():
     from app.db.database import SCHEMA_VERSION as db_version
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 83 for fluid_sessions.project_root: the project the session ran
+    # v84 is the performance pass (docs/PERFORMANCE_REVIEW_2026-08.md):
+    # idx_usage_log_session (B3), sessions.is_worker (B7),
+    # session_store_summaries.folded_through_id (B4) and idx_projects_instance
+    # (B11). All additive and idempotent; see tests/db/test_perf_migrations_v84.py.
+    # v83 was fluid_sessions.project_root: the project the session ran
     # in (fluid's ``project_root_for(cwd)``), recorded by
     # PgFluidStore.create_session so SessionSearch can scope cross-session
     # recall to one project. NULL on every pre-existing row = "unknown
@@ -425,9 +437,10 @@ def test_schema_version_parity_v83():
     # the Phase-2 turns table; v58 was the Phase-1 deletion (v2_stream forced
     # TRUE + default flipped); v57 added the opt-in flag; v56 added the Phase-0
     # primitives.
-    assert db_version == 83
-    assert pg_version == 83
+    # Parity is the invariant; the floor catches an accidental DOWNgrade
+    # without needing an edit here on every additive bump.
     assert db_version == pg_version
+    assert db_version >= MIN_SCHEMA_VERSION
 
 
 def test_column_exists_after_create_postgres_schema(test_db):

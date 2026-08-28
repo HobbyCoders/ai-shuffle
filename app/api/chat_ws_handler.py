@@ -1964,10 +1964,10 @@ class ChatWebSocketHandler:
         # ``queued_messages`` row. ``submit`` kicks the scheduler, which starts it
         # immediately when the session is idle, or leaves it queued behind the
         # live turn (busy-write guard implicit — the unique live index prevents a
-        # double-start). The
-        # queue_updated frame is re-sourced from the turns table (B3). W6: the
-        # enqueue writes run in ONE worker-thread hop (``submit_async``) while
-        # the kick still fires on this loop, so it can schedule.
+        # double-start). The queue_updated frame is re-sourced from the turns
+        # table (B3). W6: the enqueue writes run in ONE worker-thread hop
+        # (``submit_async``) while the kick still fires on this loop, so it can
+        # schedule.
         # Remote-placed: no kick (the owner's claim loop starts it) and the
         # install-local 'claude-code' sentinel never rides a foreign turn row.
         queue_profile_id = profile_id

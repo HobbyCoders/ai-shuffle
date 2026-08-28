@@ -2394,6 +2394,22 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
         except Exception as e:
             results["cleaned_fluid_delta_events"] = f"error: {e}"
 
+        # 2d. session_events delta compaction (finding B6). Streaming deltas are
+        # the bulk of that table and are already coalesced by the replay reader;
+        # for sessions idle past the window this merges each run's consecutive
+        # delta rows into the exact row that coalescer builds, so replay output
+        # is byte-identical and nothing renderable is lost. Round-robin cursor
+        # inside, so a large install is covered across passes rather than in one
+        # long transaction. Shares this maintenance transaction's cursor.
+        try:
+            from app.db.session_events import compact_idle_session_deltas
+
+            results["compacted_session_event_deltas"] = compact_idle_session_deltas(
+                7, cursor=cursor
+            )["rows"]
+        except Exception as e:
+            results["compacted_session_event_deltas"] = f"error: {e}"
+
         # 2b. Notifications retention: drop anything older than 30 days, then cap
         # each user to the most recent N rows so the table can't grow unbounded.
         try:
