@@ -870,14 +870,17 @@ async def auth_diagnostics(token: str = Depends(require_admin)):
     diagnostics["home_env"] = os.environ.get("HOME", "NOT SET")
 
     # Check if claude command exists
-    try:
+    def _which_claude() -> str:
         result = subprocess.run(
             ['which', 'claude'],
             capture_output=True,
             text=True,
             timeout=5
         )
-        diagnostics["claude_path"] = result.stdout.strip() if result.returncode == 0 else "NOT FOUND"
+        return result.stdout.strip() if result.returncode == 0 else "NOT FOUND"
+
+    try:
+        diagnostics["claude_path"] = await run_sync(_which_claude)
     except Exception as e:
         diagnostics["claude_path"] = f"ERROR: {str(e)}"
 

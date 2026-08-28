@@ -1318,30 +1318,37 @@ async def migrate_uploads_to_worktree(
     migrated = []
     errors = []
 
-    for file_path in body.file_paths:
-        try:
-            src = Path(file_path)
-            if not src.exists():
-                errors.append(f"File not found: {file_path}")
-                continue
-
-            # Ensure the file is within the project directory
+    def _migrate_files() -> None:
+        # The WHOLE loop is offloaded, not each copy: N uploads would otherwise
+        # be N thread hops, and every copy2/stat/mkdir in between would run on
+        # the event loop. Per-file errors are still collected exactly as before,
+        # so one bad path does not abort the rest.
+        for file_path in body.file_paths:
             try:
-                rel = src.relative_to(project_dir)
-            except ValueError:
-                errors.append(f"File not in project directory: {file_path}")
-                continue
+                src = Path(file_path)
+                if not src.exists():
+                    errors.append(f"File not found: {file_path}")
+                    continue
 
-            dest = worktree_dir / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(src), str(dest))
+                # Ensure the file is within the project directory
+                try:
+                    rel = src.relative_to(project_dir)
+                except ValueError:
+                    errors.append(f"File not in project directory: {file_path}")
+                    continue
 
-            migrated.append({
-                "original_path": str(src),
-                "new_path": str(dest),
-                "relative_path": rel.as_posix()
-            })
-        except Exception as e:
-            errors.append(f"Failed to copy {file_path}: {str(e)}")
+                dest = worktree_dir / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(src), str(dest))
+
+                migrated.append({
+                    "original_path": str(src),
+                    "new_path": str(dest),
+                    "relative_path": rel.as_posix()
+                })
+            except Exception as e:
+                errors.append(f"Failed to copy {file_path}: {str(e)}")
+
+    await run_sync(_migrate_files)
 
     return MigrateUploadsResponse(migrated=migrated, errors=errors)

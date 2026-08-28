@@ -137,15 +137,19 @@ async def get_version():
     """Get API and Claude Code versions"""
     claude_version = None
 
-    try:
+    def _claude_version() -> str | None:
         result = subprocess.run(
             ['claude', '--version'],
             capture_output=True,
             text=True,
             timeout=5
         )
-        if result.returncode == 0:
-            claude_version = result.stdout.strip()
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    try:
+        # Offloaded: a hung `claude --version` would otherwise block the loop
+        # for the full 5s timeout on an endpoint the UI polls.
+        claude_version = await run_sync(_claude_version)
     except Exception:
         pass
 

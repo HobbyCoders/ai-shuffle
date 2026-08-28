@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.core.config import settings
+from app.db.async_database import run_sync
 from app.api.auth import require_auth
 from app.api.projects import format_file_size, get_file_extension
 
@@ -332,13 +333,18 @@ async def delete_file_or_folder(
             detail="Cannot delete workspace root directory"
         )
 
-    try:
+    def _delete() -> None:
         if is_reserved:
             os.remove(extended)
         elif target_path.is_dir():
             shutil.rmtree(target_path)
         else:
             target_path.unlink()
+
+    try:
+        # Offloaded: rmtree walks the whole subtree, so a big folder would
+        # otherwise stall every other request on this worker.
+        await run_sync(_delete)
     except Exception as e:
         logger.exception("Failed to delete file or folder")
         raise HTTPException(
