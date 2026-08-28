@@ -405,8 +405,8 @@ def test_every_page_matches_the_same_slice_of_the_full_parse(monkeypatch):
     while True:
         messages, usage, pagination = jp.parse_session_window_from_store(
             "sess-window", "/workspace", loader,
+            _full_loader(entries),
             limit=13, before_seq=cursor,
-            store_loader=_full_loader(entries),
             store_version_loader=_version_loader(entries),
         )
         expected = _slice_of_full_parse(
@@ -444,8 +444,8 @@ def test_tool_result_whose_tool_use_is_outside_the_window_still_merges(monkeypat
     # Window starts on a tool_RESULT entry (odd index), so its tool_use is out.
     messages, _usage, pagination = jp.parse_session_window_from_store(
         "sess-window", "/workspace", _window_loader_over(entries),
+        _full_loader(entries),
         limit=7, before_seq=16,
-        store_loader=_full_loader(entries),
         store_version_loader=_version_loader(entries),
     )
     assert pagination["first_seq"] == 9  # a tool_result entry
@@ -466,8 +466,8 @@ def test_tool_use_at_the_newest_edge_gets_its_result_from_the_after_context(monk
 
     messages, _usage, _p = jp.parse_session_window_from_store(
         "sess-window", "/workspace", _window_loader_over(entries),
+        _full_loader(entries),
         limit=5, before_seq=13,  # ends on entry 12 == a tool_use
-        store_loader=_full_loader(entries),
         store_version_loader=_version_loader(entries),
     )
     last_tool = [m for m in messages if m.get("type") == "tool_use"][-1]
@@ -482,8 +482,8 @@ def test_window_larger_than_the_transcript_is_the_whole_transcript(monkeypatch):
 
     messages, _usage, pagination = jp.parse_session_window_from_store(
         "sess-window", "/workspace", _window_loader_over(entries),
+        _full_loader(entries),
         limit=5000,
-        store_loader=_full_loader(entries),
         store_version_loader=_version_loader(entries),
     )
     full, _ = jp.parse_session_history_from_store(
@@ -505,8 +505,8 @@ def test_uuidless_entries_fall_back_to_the_full_parse(monkeypatch):
 
     messages, _usage, pagination = jp.parse_session_window_from_store(
         "sess-window", "/workspace", _window_loader_over(entries),
+        _full_loader(entries),
         limit=6,
-        store_loader=_full_loader(entries),
         store_version_loader=_version_loader(entries),
     )
     expected = _slice_of_full_parse(entries, 10, 16)
@@ -533,8 +533,8 @@ def test_a_windowed_open_reads_only_the_windows_rows(monkeypatch):
 
     jp.parse_session_window_from_store(
         "sess-window", "/workspace", _window_loader_over(entries),
+        _counting_full_loader,
         limit=100,
-        store_loader=_counting_full_loader,
         store_version_loader=_version_loader(entries),
     )
 
@@ -586,8 +586,8 @@ def test_a_result_arriving_far_past_the_merge_context_takes_the_slow_path(monkey
     # result.
     messages, _usage, pagination = jp.parse_session_window_from_store(
         "sess-window", "/workspace", _window_loader_over(entries),
+        _full_loader(entries),
         limit=5, before_seq=5,
-        store_loader=_full_loader(entries),
         store_version_loader=_version_loader(entries),
     )
     assert pagination["first_seq"] == 0
@@ -621,8 +621,8 @@ def test_an_orphan_result_near_the_start_is_kept_when_we_read_from_the_start(mon
 
     messages, _usage, pagination = jp.parse_session_window_from_store(
         "sess-window", "/workspace", _window_loader_over(entries),
+        _full_loader(entries),
         limit=50,
-        store_loader=_full_loader(entries),
         store_version_loader=_version_loader(entries),
     )
     assert pagination["first_seq"] == 0
@@ -641,8 +641,8 @@ def test_a_windowed_read_never_populates_the_full_transcript_entry(monkeypatch):
 
     jp.parse_session_window_from_store(
         "sess-window", "/workspace", _window_loader_over(entries),
+        _full_loader(entries),
         limit=4,
-        store_loader=_full_loader(entries),
         store_version_loader=_version_loader(entries),
     )
 
@@ -671,8 +671,8 @@ def test_a_full_read_is_never_served_to_a_windowed_reader(monkeypatch):
 
     messages, _usage, pagination = jp.parse_session_window_from_store(
         "sess-window", "/workspace", _window_loader_over(entries),
+        _full_loader(entries),
         limit=4,
-        store_loader=_full_loader(entries),
         store_version_loader=_version_loader(entries),
     )
     assert len(messages) == 4

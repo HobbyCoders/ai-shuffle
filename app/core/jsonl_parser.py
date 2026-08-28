@@ -2539,10 +2539,10 @@ def parse_session_window_from_store(
     sdk_session_id: str,
     working_dir: str,
     window_loader,
+    store_loader,
     *,
     limit: int,
     before_seq: Optional[int] = None,
-    store_loader=None,
     use_cache: bool = True,
     store_version_loader=None,
 ) -> tuple[List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
@@ -2562,12 +2562,13 @@ def parse_session_window_from_store(
             ``pg_session_store._load_entries_window_by_session_id_sync``:
             ``entries`` (id ASC, INCLUDING boundary context), ``total``,
             ``start``, ``window_start``, ``window_end``.
+        store_loader: ``loader(session_id, subpath=None) -> list[dict]``
+            returning a WHOLE transcript. Required, for two reasons: subagent
+            child transcripts are always read whole (they are small), and it is
+            the slower-but-correct path this function falls back to whenever a
+            window cannot be proved equivalent to slicing a full parse.
         limit: Maximum ENTRIES in the window (>= 1).
         before_seq: Entry-seq cursor; ``None`` means the newest window.
-        store_loader: ``loader(session_id, subpath=None) -> list[dict]``. Used
-            for subagent child transcripts (always read whole — they are small)
-            and as the slower-but-correct fallback path. Without it, subagent
-            cards render childless and no fallback is possible.
         use_cache: Use the windowed namespace of ``_store_parse_cache``.
         store_version_loader: ``loader(session_id) -> (count, max_id)`` — the
             same cheap version stamp the full path uses.
@@ -2619,24 +2620,22 @@ def parse_session_window_from_store(
                     )
                 _store_parse_cache.pop(cache_key, None)
 
-    agent_children_loader = (
-        _make_store_agent_children_loader(sdk_session_id, store_loader)
-        if store_loader is not None
-        else None
+    agent_children_loader = _make_store_agent_children_loader(
+        sdk_session_id, store_loader
     )
 
     def _full_parse_and_slice(reason: str):
         """The slower-but-certainly-correct path: parse everything, cut the
-        same entry range out of it."""
+        same entry range out of it.
+
+        A fresh subagent-children loader is built here on purpose: the one the
+        fast path used has already CONSUMED the children of any subagent it
+        rendered, and consume-once means a second read would come back empty.
+        """
         logger.debug(
             "Windowed store parse for %s falling back to a full parse (%s)",
             sdk_session_id, reason,
         )
-        if store_loader is None:
-            raise ValueError(
-                "parse_session_window_from_store needs store_loader to fall "
-                "back to a full parse"
-            )
         all_entries = list(store_loader(sdk_session_id, None) or [])
         bounds: List[int] = []
         all_msgs, usage = _transform_entries(
