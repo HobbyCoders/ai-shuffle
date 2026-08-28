@@ -899,6 +899,7 @@
 				projectName={headerProjectName}
 				worktreeBranch={activeWorktreeBranch}
 				openPR={openPrForBranch}
+				githubAvailable={$githubFeaturesAvailable}
 				onClickCommit={handleCommit}
 				onClickCreatePR={handleCreatePR}
 				onClickFinish={handleFinish}

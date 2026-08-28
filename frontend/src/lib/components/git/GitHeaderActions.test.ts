@@ -244,6 +244,44 @@ describe('GitHeaderActions button visibility', () => {
 		expect(screen.getByRole('button', { name: 'Ship It options' })).toBeTruthy();
 	});
 
+	describe('githubAvailable gate (G10c)', () => {
+		// The header itself no longer requires GitHub auth — local git has to keep
+		// working when `gh` is down. That means the gh-BACKED actions now need
+		// their own gate, or they would render as buttons guaranteed to fail.
+		it('hides Create PR and Ship It when GitHub is unavailable', () => {
+			cleanAheadBranch();
+			renderHeader({ githubAvailable: false });
+
+			expect(screen.queryByText('Create PR')).toBeNull();
+			expect(screen.queryByText('Ship It')).toBeNull();
+		});
+
+		it('still offers the LOCAL actions when GitHub is unavailable', () => {
+			cleanAheadBranch();
+			renderHeader({ githubAvailable: false });
+
+			// Push is plain git — losing gh must not take it away.
+			expect(screen.getByText('Push')).toBeTruthy();
+		});
+
+		it('hides Finish (PR merge) when GitHub is unavailable', () => {
+			cleanAheadBranch();
+			renderHeader({
+				githubAvailable: false,
+				openPR: { number: 12, title: 'A PR', url: 'u', mergeable: true }
+			});
+
+			expect(screen.queryByText('Finish')).toBeNull();
+		});
+
+		it('defaults to available so existing call sites are unchanged', () => {
+			cleanAheadBranch();
+			renderHeader();
+
+			expect(screen.getByText('Create PR')).toBeTruthy();
+		});
+	});
+
 	it('shows Push and Create PR for a clean branch ahead of upstream', () => {
 		cleanAheadBranch();
 		renderHeader();

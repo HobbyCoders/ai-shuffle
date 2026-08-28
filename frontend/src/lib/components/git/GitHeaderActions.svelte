@@ -56,13 +56,20 @@
 		onClickPull: (opts?: PullOptions) => void;
 		onClickNewBranch: () => void;
 		onClickInitRepo?: () => void;
+		/** Are the GitHub-backed actions usable? The header itself no longer
+		 *  requires GitHub auth (local git must work without it), so this gates
+		 *  ONLY the gh-dependent actions — Create PR / Finish / Ship It. Pass the
+		 *  git store's hysteresis-guarded `githubFeaturesAvailable`; a single
+		 *  failed `gh auth status` must not flip it. Defaults to true so callers
+		 *  that don't pass it keep today's behaviour. */
+		githubAvailable?: boolean;
 		/** Ship It: one-shot commit → push → PR → merge → cleanup pipeline */
 		onClickShipIt?: (opts?: ShipItOptions) => void;
 		/** Open diff review panel (side-by-side) */
 		onOpenDiffReview?: () => void;
 	}
 
-	let { projectId, isStreaming = false, operationInProgress = false, isGitRepo = true, showBranchSelector = true, projectName = null, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview }: Props = $props();
+	let { projectId, isStreaming = false, operationInProgress = false, isGitRepo = true, showBranchSelector = true, projectName = null, worktreeBranch = null, openPR = null, githubAvailable = true, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview }: Props = $props();
 
 	// Mutating git buttons are blocked while streaming OR while another git
 	// operation is in flight — the user must never fire a second action while
@@ -185,7 +192,18 @@
 	let heldShowShipIt = $state(false);
 	let heldOpenPr = $state<HeaderOpenPr | null>(null);
 
-	const primaryAction = $derived(snapshotPending ? heldPrimaryAction : computedPrimaryAction);
+	// GitHub-only actions degrade to their local predecessor when gh is
+	// unusable, rather than rendering a button that is guaranteed to fail.
+	// 'finish' (merge the open PR) and 'create-pr' both need gh; 'commit' and
+	// 'push' do not. Never invent an action — fall back to 'clean', which is the
+	// no-op placeholder.
+	const GITHUB_ONLY_ACTIONS = new Set<PrimaryGitAction>(['create-pr', 'finish']);
+	const resolvedPrimaryAction = $derived(snapshotPending ? heldPrimaryAction : computedPrimaryAction);
+	const primaryAction = $derived(
+		!githubAvailable && GITHUB_ONLY_ACTIONS.has(resolvedPrimaryAction)
+			? 'clean'
+			: resolvedPrimaryAction
+	);
 	/** The PR the rendered action refers to — held alongside the action so a
 	 *  greyed "Finish" still names the PR it would merge. */
 	const shownPr = $derived(snapshotPending ? heldOpenPr : openPr);
@@ -218,7 +236,10 @@
 		needsPull,
 		hasShipItHandler: !!onClickShipIt
 	}));
-	const showShipIt = $derived(snapshotPending ? heldShowShipIt : computedShowShipIt);
+	// Ship It ends in a PR + merge, so it needs gh just as much as create-pr.
+	const showShipIt = $derived(
+		githubAvailable && (snapshotPending ? heldShowShipIt : computedShowShipIt)
+	);
 
 	// Remember the coherent decision so the next switch has something real to
 	// show while it revalidates.
