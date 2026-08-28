@@ -19,6 +19,7 @@ it is asserted directly rather than implied.
 NOTHING here starts a session, a CLI, or a network call.
 """
 
+from tests.conftest import async_twin
 import asyncio
 from contextlib import ExitStack, contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -143,6 +144,8 @@ def _kill_spies(evicted=True):
             "app.core.session_pool.get_session_pool", return_value=pool))
         stack.enter_context(patch(
             "app.core.turn_manager.interrupt", new=interrupt))
+        stack.enter_context(patch(
+            "app.core.turn_manager.interrupt_async", new=async_twin(interrupt)))
         yield {"pool": pool, "interrupt": interrupt}
 
 

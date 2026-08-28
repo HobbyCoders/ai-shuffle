@@ -18,6 +18,7 @@ git_ops / turns on the pg_shim) rather than the HTTP layer, mirroring how
 tests/api/test_ws_device_selection.py drives ``handle_query``.
 """
 
+from tests.conftest import async_twin
 from contextlib import ExitStack
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -277,9 +278,12 @@ async def test_first_turn_hands_off_no_kick_with_a_claim_wake(project):
 
     from app.core import turn_manager
 
+    _submit = MagicMock(return_value="turn-1")
     with _Patches() as p, patch.object(
-        turn_manager, "submit", MagicMock(return_value="turn-1")
-    ) as submit:
+        turn_manager, "submit", _submit
+    ) as submit, patch.object(
+        turn_manager, "submit_async", async_twin(_submit)
+    ):
         resp = await _create(project, _body(prompt="do the thing"))
 
     assert resp.query_started is True
@@ -300,9 +304,12 @@ async def test_the_no_profile_sentinel_never_rides_a_remote_turn(project):
 
     from app.core import turn_manager
 
+    _submit = MagicMock(return_value="turn-1")
     with _Patches(), patch.object(
-        turn_manager, "submit", MagicMock(return_value="turn-1")
-    ) as submit:
+        turn_manager, "submit", _submit
+    ) as submit, patch.object(
+        turn_manager, "submit_async", async_twin(_submit)
+    ):
         await _create(project, _body(prompt="hi", profile_id="claude-code"))
 
     assert submit.call_args.kwargs["profile_id"] is None

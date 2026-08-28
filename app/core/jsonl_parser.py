@@ -269,9 +269,22 @@ _jsonl_miss_memo: Dict[Tuple[str, str, str], float] = {}
 _jsonl_miss_lock = threading.Lock()
 
 
+#: Bound on the negative memo. Entries are tiny, but a long-lived process should
+#: not accumulate one per session forever — sweep the expired ones when the dict
+#: grows past this.
+_JSONL_MISS_SOFT_CAP = 1024
+
+
 def _memoize_jsonl_miss(sdk_session_id: str, working_dir: str, root: str) -> None:
+    now = time.monotonic()
     with _jsonl_miss_lock:
-        _jsonl_miss_memo[(sdk_session_id, working_dir, root)] = time.monotonic()
+        if len(_jsonl_miss_memo) > _JSONL_MISS_SOFT_CAP:
+            for k in [
+                k for k, at in _jsonl_miss_memo.items()
+                if now - at >= _JSONL_MISS_TTL_SECONDS
+            ]:
+                _jsonl_miss_memo.pop(k, None)
+        _jsonl_miss_memo[(sdk_session_id, working_dir, root)] = now
 
 
 def _jsonl_miss_is_fresh(sdk_session_id: str, working_dir: str, root: str) -> bool:

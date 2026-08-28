@@ -30,11 +30,10 @@ logger = logging.getLogger(__name__)
 # sync with ``app.core.sync_engine._SEND_TIMEOUT_SECONDS`` (core must not import
 # the api layer, hence the duplication).
 #
-# Remaining gap (needs a file outside this change's ownership): the origin
-# socket has no writer queue of its own — ``ChatWebSocketHandler.send_json``
-# still awaits inline. Once a send times out the handler poisons the connection
-# and every later send fast-fails, so the worst case is ONE 2.5s hiccup per dead
-# origin socket rather than one per frame.
+# The origin socket is queued too: ``ChatWebSocketHandler.send_json`` enqueues
+# synchronously onto a ``ConnectionWriter``, so no producer awaits a socket.
+# This timeout now governs only ``safe_ws_send``'s remaining direct users
+# (browser_panel, browser_stream).
 WS_SEND_TIMEOUT_SECONDS = 2.5
 
 

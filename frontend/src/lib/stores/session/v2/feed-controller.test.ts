@@ -1217,3 +1217,48 @@ describe('feedController isStreaming single-writer (S6)', () => {
 		expect(feedController.isReducerStreaming(null)).toBe(false);
 	});
 });
+
+// ─── W7: the feed owns usage once it has published any ───────────────────────
+
+describe('feedController usage ownership (W7)', () => {
+	function turnUsage(seq: number, inputTokens: number): Record<string, unknown> {
+		return {
+			type: 'turn.usage',
+			id: `evt-usage-${seq}`,
+			seq,
+			session_id: 's1',
+			created_at: '2026-07-12T00:00:00.000Z',
+			usage: { input_tokens: inputTokens, output_tokens: 1 },
+		};
+	}
+
+	it('claims the usage fields only once a turn.usage has been folded', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+		// A slow /live snapshot landing now is the only source there is.
+		expect(feedController.hasAppliedUsage('s1')).toBe(false);
+
+		hoisted.onEvent!(turnUsage(1, 12345));
+		flushRaf();
+		expect(deps.state.totalTokensIn).toBe(12345);
+		// From here a snapshot carrying older DB totals must not roll it back.
+		expect(feedController.hasAppliedUsage('s1')).toBe(true);
+		expect(feedController.hasAppliedUsage('other')).toBe(false);
+	});
+
+	it('ownership survives a switch away and back through the cache', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(userMessageAt(1, 'hi'));
+		hoisted.onEvent!(turnUsage(2, 999));
+		hoisted.onEvent!(caughtUp(2));
+		feedController.stop();
+
+		expect(feedController.hasAppliedUsage('s1')).toBe(true);
+		feedController.start('s1');
+		expect(feedController.hasAppliedUsage('s1')).toBe(true);
+	});
+});

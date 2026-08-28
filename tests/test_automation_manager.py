@@ -2,6 +2,7 @@
 Tests for AutomationManager — trigger handling, execution flow, output delivery.
 """
 
+from tests.conftest import async_twin
 import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -412,12 +413,18 @@ def _session_run_env(*, log=None, idle=True):
     submit = stack.enter_context(patch(
         "app.core.turn_manager.submit", MagicMock(return_value="turn-x"),
     ))
+    stack.enter_context(patch(
+        "app.core.turn_manager.submit_async", new=async_twin(submit),
+    ))
     wait_idle = stack.enter_context(patch(
         "app.core.turn_manager.wait_session_idle",
         new=AsyncMock(return_value=idle),
     ))
     interrupt = stack.enter_context(patch(
         "app.core.turn_manager.interrupt", MagicMock(return_value={"id": "turn-x"}),
+    ))
+    stack.enter_context(patch(
+        "app.core.turn_manager.interrupt_async", new=async_twin(interrupt),
     ))
     stack.enter_context(patch("app.core.sync_engine.sync_engine", new=AsyncMock()))
     stack.enter_context(patch(

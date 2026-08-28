@@ -1258,7 +1258,7 @@ async def dispatch_worker(
         # Emit the card BEFORE the turn is submitted so a submit failure still
         # renders as a failed worker rather than as silence.
         await feed.started()
-        worker_turn_id = turn_manager.submit(
+        worker_turn_id = await turn_manager.submit_async(
             worker_session_id,
             WORKER_TURN_SOURCE,
             prompt=prompt,
@@ -1394,7 +1394,7 @@ async def dispatch_worker(
         cancelled = True
         preview = "The parent turn ended before the worker finished."
         try:
-            turn_manager.interrupt(worker_session_id, "stop")
+            await turn_manager.interrupt_async(worker_session_id, "stop")
         except Exception:  # noqa: BLE001
             logger.debug("ProviderAgent: interrupt on cancel failed", exc_info=True)
         raise

@@ -48,11 +48,16 @@ const page1: Row[] = Array.from({ length: 100 }, (_, i) => ({
 	title: `Session ${i}`,
 	is_active: i === 0,
 }));
-const page2: Row[] = Array.from({ length: 40 }, (_, i) => ({
-	id: `s${100 + i}`,
-	title: `Session ${100 + i}`,
-	is_active: false,
-}));
+/** An Active session old enough to sit on the SECOND page. */
+const oldActive: Row = { id: 'old-active', title: 'Long-idle active chat', is_active: true };
+const page2: Row[] = [
+	...Array.from({ length: 39 }, (_, i) => ({
+		id: `s${100 + i}`,
+		title: `Session ${100 + i}`,
+		is_active: false,
+	})),
+	oldActive,
+];
 
 /** Server-side titles, so a test can watch a rename land (or not). */
 let serverTitles: Record<string, string> = {};
@@ -70,6 +75,16 @@ beforeEach(() => {
 	mocks.get.mockImplementation(async (url: string) => {
 		if (url.startsWith('/sessions/cursor')) {
 			if (listDelayMs) await new Promise((r) => setTimeout(r, listDelayMs));
+			// The Active group is pulled in separately so the page cap can never
+			// hide a long-idle active session.
+			if (url.includes('active_only=true')) {
+				return {
+					items: rowsFor([...page1, ...page2].filter((r) => r.is_active)),
+					next_cursor: null,
+					next_cursor_id: null,
+					has_more: false,
+				};
+			}
 			const isSecondPage = url.includes('cursor=c1');
 			return isSecondPage
 				? { items: rowsFor(page2), next_cursor: null, next_cursor_id: null, has_more: false }
@@ -86,21 +101,31 @@ beforeEach(() => {
 });
 
 describe('capped initial load (W1)', () => {
-	it('fetches ONE page up front and reports that more is available', async () => {
+	it('fetches ONE page up front (plus the Active set) and reports more', async () => {
 		await appData.loadSessions();
 
-		expect(mocks.get).toHaveBeenCalledTimes(1);
-		expect(appData.current.sessions).toHaveLength(100);
+		// One page + one active-only request, in parallel — not ⌈N/100⌉
+		// sequential round-trips.
+		expect(mocks.get).toHaveBeenCalledTimes(2);
+		expect(appData.current.sessions).toHaveLength(101);
 		expect(appData.current.sessionsHasMore).toBe(true);
 		expect(appData.current.sessionsCursor).toBe('c1');
 	});
 
-	it('appends the next page only when load-more asks for it', async () => {
+	it('keeps a long-idle Active session that the capped page missed', async () => {
+		await appData.loadSessions();
+
+		expect(appData.current.sessions.some((s) => s.id === 'old-active')).toBe(true);
+		// …and the leading rows stay strictly most-recent-first.
+		expect(appData.current.sessions[0].id).toBe('s0');
+	});
+
+	it('appends the next page without duplicating rows already held', async () => {
 		await appData.loadSessions();
 		await appData.loadMoreSessions();
 
-		expect(mocks.get).toHaveBeenCalledTimes(2);
 		expect(appData.current.sessions).toHaveLength(140);
+		expect(appData.current.sessions.filter((s) => s.id === 'old-active')).toHaveLength(1);
 		expect(appData.current.sessionsHasMore).toBe(false);
 	});
 

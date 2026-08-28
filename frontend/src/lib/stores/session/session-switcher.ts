@@ -724,6 +724,10 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			),
 			messages: [],
 			isStreaming: false,
+			// A send in flight belonged to the session being left (S6), and a
+			// fresh compose has no hydration to be slow about (S1).
+			optimisticStreaming: false,
+			isHydrationSlow: false,
 			// #585: reset the live turn id on newChat (mirrors defaultState).
 			liveTurnId: null,
 			// Reset the live model too so no stale reroute flag survives into the

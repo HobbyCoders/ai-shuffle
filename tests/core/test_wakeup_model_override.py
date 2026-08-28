@@ -8,6 +8,7 @@ wakeup row and replayed as the wake TURN's ``overrides={"model": ...}``.
 Idle-watchdog wakes (``source="idle_watchdog"``) stay model-less by design.
 """
 
+from tests.conftest import async_twin
 import json
 import time
 from unittest.mock import patch
@@ -101,6 +102,7 @@ def _capture_submit(monkeypatch):
         return f"turn-{len(calls)}"
 
     monkeypatch.setattr(turn_manager, "submit", _fake_submit)
+    monkeypatch.setattr(turn_manager, "submit_async", async_twin(_fake_submit))
     return calls
 
 

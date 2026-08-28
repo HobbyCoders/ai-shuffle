@@ -534,7 +534,7 @@ class ConnectorManager:
                 # Enqueue, then block until the session drains. If a turn is
                 # already live this one waits its place in the queue instead of
                 # starting a second loop against the same session.
-                turn_manager.submit(
+                await turn_manager.submit_async(
                     ai_session_id,
                     "connector",
                     prompt=message.text,

@@ -12,6 +12,7 @@ back out of the durable session-event log, which puts them under the
 one-live-turn-per-session unique index like every other turn.
 """
 
+from tests.conftest import async_twin
 import pytest
 
 from app.core.models import ConversationRequest
@@ -35,7 +36,14 @@ def _capture_submit(monkeypatch):
         calls.append({"session_id": session_id, "source": source, **kwargs})
         return f"turn-{len(calls)}"
 
+    async def _fake_submit_async(session_id, source, **kwargs):
+        return _fake_submit(session_id, source, **kwargs)
+
+    # Both seams: the WS/API intakes now await ``submit_async``, while some
+    # callers still use the sync form. Patching only one silently stops
+    # capturing when a caller migrates.
     monkeypatch.setattr(turn_manager, "submit", _fake_submit)
+    monkeypatch.setattr(turn_manager, "submit_async", _fake_submit_async)
     return calls
 
 
@@ -68,9 +76,10 @@ def _capture_interrupt(monkeypatch):
     from app.core import turn_manager
 
     calls = []
+    _fake_interrupt = lambda *a, **kw: calls.append((a, kw))
+    monkeypatch.setattr(turn_manager, "interrupt", _fake_interrupt)
     monkeypatch.setattr(
-        turn_manager, "interrupt",
-        lambda *a, **kw: calls.append((a, kw)),
+        turn_manager, "interrupt_async", async_twin(_fake_interrupt)
     )
     return calls
 

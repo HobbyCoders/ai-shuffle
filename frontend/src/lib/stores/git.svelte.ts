@@ -706,7 +706,10 @@ async function _bgRefreshTick(): Promise<void> {
 	const hasGithub = _state.prState?.has_github === true || !!_state.status?.github_repo_name;
 	if (hasGithub && Date.now() - _lastRepoInfoLoad > REPO_INFO_TTL_MS) {
 		_lastRepoInfoLoad = Date.now();
-		await github.ensureRepoInfo(projectId).catch(() => {});
+		const authed = await github.ensureRepoInfo(projectId).catch(() => null);
+		// `null` means "could not ask GitHub" (502) — an unknown, not a denial.
+		// Only a definitive verdict feeds the availability hysteresis.
+		if (typeof authed === 'boolean') git.setGithubAuth(authed);
 	}
 
 	// CI: only meaningful (and only worth a `gh` round trip) once there is an

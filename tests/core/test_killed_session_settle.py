@@ -13,6 +13,7 @@ runtime DID reach its turn end is left completely alone and nothing is booked
 twice.
 """
 
+from tests.conftest import async_twin
 import pytest
 
 from app.core import query_persistence as qp
@@ -273,11 +274,12 @@ async def test_teardown_worker_settles_the_worker_it_kills(mock_db, monkeypatch)
     )
     # The real interrupt would flip the turn to 'interrupting'; the flush must
     # still claim and settle it from there.
+    _fake_interrupt = lambda sid, mode, stop_background=False: turns_db.interrupt_turn(
+        sid, mode, stop_background
+    )
+    monkeypatch.setattr("app.core.turn_manager.interrupt", _fake_interrupt)
     monkeypatch.setattr(
-        "app.core.turn_manager.interrupt",
-        lambda sid, mode, stop_background=False: turns_db.interrupt_turn(
-            sid, mode, stop_background
-        ),
+        "app.core.turn_manager.interrupt_async", async_twin(_fake_interrupt)
     )
 
     task_registry.start_task(parent, worker, "agent", "worker")

@@ -316,6 +316,13 @@ async def _create_remote_branch_session(
             "create_new_branch": bool(body.create_new_branch),
         },
     )
+    # Latency only (see cluster.py): claim a locally-targeted checkout now
+    # rather than on the next scheduled git-ops pass.
+    from app.core import git_ops_runner
+    from app.core.config import settings
+
+    if target_instance_id == settings.effective_instance_id:
+        git_ops_runner.kick()
 
     query_started = False
     if prompt:
@@ -326,7 +333,7 @@ async def _create_remote_branch_session(
                 payload["api_user_id"] = api_user_id
             if upload_blob_ids:
                 payload["upload_blob_ids"] = upload_blob_ids
-            turn_manager.submit(
+            await turn_manager.submit_async(
                 session_id,
                 "worktree",
                 prompt=prompt,
@@ -510,7 +517,7 @@ async def _create_v2_branch_session(
         # project_v2_id (materializing the same checkout idempotently).
         try:
             from app.core import turn_manager
-            turn_manager.submit(
+            await turn_manager.submit_async(
                 session_id,
                 "worktree",
                 prompt=prompt,

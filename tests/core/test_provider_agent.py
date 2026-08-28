@@ -12,6 +12,7 @@ registration is load-bearing (it is what pins the parent in the session pool),
 so it is asserted against the real predicate rather than a mock.
 """
 
+from tests.conftest import async_twin
 import asyncio
 
 import pytest
@@ -439,8 +440,10 @@ def dispatch_env(monkeypatch):
     monkeypatch.setattr(ts_mod, "on_task_terminal", _on_task_terminal)
 
     monkeypatch.setattr(tm_mod, "submit", fake_tm.submit)
+    monkeypatch.setattr(tm_mod, "submit_async", async_twin(fake_tm.submit))
     monkeypatch.setattr(tm_mod, "wait_session_idle", fake_tm.wait_session_idle)
     monkeypatch.setattr(tm_mod, "interrupt", fake_tm.interrupt)
+    monkeypatch.setattr(tm_mod, "interrupt_async", async_twin(fake_tm.interrupt))
 
     monkeypatch.setattr(
         db, "get_session",
@@ -846,6 +849,7 @@ class TestDispatchWorker:
             raise RuntimeError("scheduler down")
 
         monkeypatch.setattr(tm_mod, "submit", _boom)
+        monkeypatch.setattr(tm_mod, "submit_async", async_twin(_boom))
 
         outcome = _dispatch()
 
@@ -1283,7 +1287,10 @@ class TestDispatchWorkerParentFeed:
             return "turn-1"
 
         from app.core import turn_manager as tm_mod
+        # dispatch_worker awaits the async twin, so patch both seams: the local
+        # override must be what actually runs, not the fixture's default double.
         monkeypatch.setattr(tm_mod, "submit", _submit)
+        monkeypatch.setattr(tm_mod, "submit_async", async_twin(_submit))
 
         outcome = _dispatch()
 

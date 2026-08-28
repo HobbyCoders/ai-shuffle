@@ -272,6 +272,13 @@ async def lifespan(app: FastAPI):
         await voice_bridge.shutdown_all()
     except Exception:
         logger.exception("voice_bridge.shutdown_all failed")
+    # Per-connection WS writer tasks are normally retired by unregister_*; this
+    # cancels any that outlive their connection so none leak past process exit.
+    try:
+        from app.core.sync_engine import sync_engine
+        await sync_engine.shutdown()
+    except Exception:
+        logger.exception("sync_engine.shutdown failed")
     if runner_approved:
         await shutdown_services()
     try:

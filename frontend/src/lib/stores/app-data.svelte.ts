@@ -289,10 +289,30 @@ function commitSessions(rows: Session[], meta: SessionsPageMeta): void {
  * - ONE COMMIT: pages are accumulated and committed once, so subscribers are
  *   notified a single time per load instead of once per page.
  */
+/**
+ * The Active group is the user's working set and must never be truncated by the
+ * page cap: an active session that has not been touched for a while can sit far
+ * below the first page of the recency-ordered list. One extra request (in
+ * PARALLEL with the first page, and filtered server-side) keeps it complete.
+ */
+async function fetchActiveSessions(tagId?: string | null): Promise<Session[]> {
+	let url = `/sessions/cursor?limit=${SESSIONS_PAGE_SIZE}&admin_only=true&active_only=true`;
+	if (tagId) url += `&tag_id=${encodeURIComponent(tagId)}`;
+	try {
+		const result = await api.get<CursorPaginatedSessions>(url);
+		return result.items;
+	} catch (e) {
+		// Never fail the whole load over the supplementary request.
+		console.error('Failed to load active sessions:', e);
+		return [];
+	}
+}
+
 async function loadSessionsInternal(tagId?: string | null, pages: number = INITIAL_SESSION_PAGES) {
 	const requestId = ++_loadSessionsRequestId;
 	_update(s => ({ ...s, sessionsLoading: true }));
 	try {
+		const activeRowsPromise = fetchActiveSessions(tagId);
 		const all: Session[] = [];
 		let cursor: string | null = null;
 		let cursorId: string | null = null;
@@ -325,6 +345,18 @@ async function loadSessionsInternal(tagId?: string | null, pages: number = INITI
 			if (hasMore && !cursor && !cursorId) {
 				hasMore = false;
 			}
+		}
+
+		// Fold in any Active row the capped page missed. They go on the END so the
+		// leading rows stay strictly most-recent-first (consumers that take the
+		// first few as "latest" keep working); the sidebar sorts for itself.
+		const activeRows = await activeRowsPromise;
+		if (requestId !== _loadSessionsRequestId) return;
+		const seen = new Set(all.map(row => row.id));
+		for (const row of activeRows) {
+			if (seen.has(row.id)) continue;
+			seen.add(row.id);
+			all.push(row);
 		}
 
 		// Re-apply optimistic local edits the server hasn't caught up with yet,
@@ -388,8 +420,11 @@ async function loadMoreSessionsInternal() {
 
 		// The appended page goes through the same optimistic-edit re-apply as a
 		// full load: a rename/settle/delete made while this page was in flight
-		// must not come back undone.
-		const appended = applyPendingEdits(result.items);
+		// must not come back undone. Rows already held locally (the Active set is
+		// pulled in up front, ahead of its cursor position) are dropped —
+		// duplicate ids would break the sidebar's keyed lists.
+		const existingIds = new Set(_state.sessions.map(row => row.id));
+		const appended = applyPendingEdits(result.items.filter(row => !existingIds.has(row.id)));
 
 		_update(s => ({
 			...s,

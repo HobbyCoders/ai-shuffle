@@ -1,5 +1,10 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { createSessionSwitcher, type SessionSwitcherDeps } from './session-switcher';
+import {
+	createSessionSwitcher,
+	gateSnapshotPatch,
+	type SessionSwitcherDeps,
+} from './session-switcher';
+import { feedController } from './v2/feed-controller';
 import type { ActiveSessionState } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import type { SessionEphemeral } from '../session-cache';
@@ -470,5 +475,145 @@ describe('session run binding on switch', () => {
 		switcher.destroy();
 
 		expect(getState().modelOverride).toBeNull();
+	});
+});
+
+// ─── S2: cached transcript primes the switch-in ──────────────────────────────
+
+describe('session-switcher · cached transcript prime (S2)', () => {
+	it('renders the cached transcript in the SAME update as the reset — no empty flash', async () => {
+		const cached = [
+			{ id: 'c1', role: 'user', content: 'earlier' },
+			{ id: 'c2', role: 'assistant', content: 'reply' },
+		];
+		vi.mocked(feedController.cachedPatch).mockReturnValue({
+			messages: cached as never,
+			isStreaming: false,
+			isLoadingSession: false,
+			isRestoringSession: false,
+			contextUsed: 4242,
+		});
+
+		// Every state this switch publishes, so the assertion can look for an
+		// intermediate empty one rather than only the end result.
+		const seen: Array<{ messages: unknown[]; isLoadingSession: boolean }> = [];
+		let state = fullState();
+		const getState = () => state;
+		const switcher = createSessionSwitcher({
+			update: (fn) => {
+				state = fn(state);
+				seen.push({ messages: state.messages, isLoadingSession: state.isLoadingSession });
+			},
+			getState,
+			wsSend: vi.fn(() => true),
+			internal: {
+				pendingTools: new Set<string>(),
+				awaitingNewSession: false,
+				pendingRequestId: null,
+				stopRequestedBeforeSession: false,
+				worktreeCreationGeneration: 0,
+				worktreeCreateAbort: null,
+			},
+			sessionEphemeralCache: { save: vi.fn(), restore: () => null },
+			onPersistTimerChanged: vi.fn(),
+		});
+
+		await switcher.switchSession('session-B');
+		switcher.destroy();
+
+		// The switch-in reset and the cached transcript are ONE state, so no
+		// observer can ever see the intermediate `messages: []` the reset alone
+		// would produce (which the chat surface reads as a cleared conversation).
+		expect(seen[0].messages).toHaveLength(2);
+		expect(seen[0].isLoadingSession).toBe(false);
+		expect(getState().messages).toHaveLength(2);
+		expect(getState().contextUsed).toBe(4242);
+	});
+
+	it('falls back to the empty + loading reset on a cache miss', async () => {
+		vi.mocked(feedController.cachedPatch).mockReturnValue(null);
+		const { switcher, getState } = makeSwitcher(fullState());
+		await switcher.switchSession('session-B');
+		switcher.destroy();
+		expect(getState().messages).toHaveLength(0);
+		expect(getState().isLoadingSession).toBe(true);
+	});
+});
+
+// ─── S10 / W7: title precedence and snapshot gating ─────────────────────────
+
+describe('session-switcher · title resolution (S10)', () => {
+	beforeEach(() => {
+		vi.mocked(feedController.cachedPatch).mockReturnValue(null);
+	});
+
+	it('prefers the appData row title over a stale cached "New Chat"', async () => {
+		_mockSessions.current = [{ id: 'session-B', title: 'Real backend title' }];
+		const { switcher, getState, ephemeralStore } = makeSwitcher(fullState());
+		// The ephemeral entry was saved before the backend set the real title.
+		ephemeralStore.set('session-B', { title: 'New Chat', draft: '' } as never);
+
+		await switcher.switchSession('session-B');
+		switcher.destroy();
+		expect(getState().title).toBe('Real backend title');
+	});
+
+	it('still prefers a caller-provided title over everything', async () => {
+		_mockSessions.current = [{ id: 'session-B', title: 'Row title' }];
+		const { switcher, getState } = makeSwitcher(fullState());
+		await switcher.switchSession('session-B', undefined, undefined, 'Caller title');
+		switcher.destroy();
+		expect(getState().title).toBe('Caller title');
+	});
+
+	it('keeps a real cached title when no server title is known', async () => {
+		_mockSessions.current = [];
+		const { switcher, getState, ephemeralStore } = makeSwitcher(fullState());
+		ephemeralStore.set('session-B', { title: 'A real chat', draft: '' } as never);
+		await switcher.switchSession('session-B');
+		switcher.destroy();
+		expect(getState().title).toBe('A real chat');
+	});
+});
+
+describe('gateSnapshotPatch (W7)', () => {
+	const usagePatch = {
+		totalTokensIn: 10,
+		totalTokensOut: 20,
+		totalCacheCreationTokens: 30,
+		totalCacheReadTokens: 40,
+		contextUsed: 80,
+		worktreeId: 'wt-1',
+		title: 'Snapshot title',
+	} as const;
+
+	it('drops usage fields once the feed has published its own', () => {
+		const gated = gateSnapshotPatch({ ...usagePatch }, {
+			feedOwnsUsage: true,
+			currentTitle: 'New Chat',
+		});
+		expect(gated.totalTokensIn).toBeUndefined();
+		expect(gated.contextUsed).toBeUndefined();
+		// Fields the feed does not carry still apply.
+		expect(gated.worktreeId).toBe('wt-1');
+		expect(gated.title).toBe('Snapshot title');
+	});
+
+	it('applies usage when the feed has published none yet', () => {
+		const gated = gateSnapshotPatch({ ...usagePatch }, {
+			feedOwnsUsage: false,
+			currentTitle: 'New Chat',
+		});
+		expect(gated.contextUsed).toBe(80);
+		expect(gated.totalTokensOut).toBe(20);
+	});
+
+	it('never downgrades a title that a fresher source already set', () => {
+		const gated = gateSnapshotPatch({ ...usagePatch }, {
+			feedOwnsUsage: false,
+			currentTitle: 'Renamed by the user',
+		});
+		expect(gated.title).toBeUndefined();
+		expect(gated.contextUsed).toBe(80);
 	});
 });

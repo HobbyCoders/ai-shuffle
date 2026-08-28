@@ -13,6 +13,7 @@ scheduled tick can be attempted on both installs. These tests prove:
 * run accounting is one atomic SQL UPDATE, not a lossy read-modify-write.
 """
 
+from tests.conftest import async_twin
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -377,6 +378,8 @@ class TestAtomicRunAccounting:
 
         with patch("app.core.automation_manager.database") as db, patch(
             "app.core.turn_manager.submit", submit,
+        ), patch(
+            "app.core.turn_manager.submit_async", new=async_twin(submit),
         ), patch(
             "app.core.turn_manager.wait_session_idle",
             new=AsyncMock(return_value=True),

@@ -867,7 +867,7 @@ class AutomationManager:
         #    then kicks the scheduler, which starts the turn in the ONE spawn
         #    path (SessionRuntime). No ``deferred_delivery`` concept survives —
         #    the v2 SSE typed-event feed is always live.
-        turn_manager.submit(
+        await turn_manager.submit_async(
             session_id,
             "automation",
             prompt=rendered_prompt,
@@ -888,7 +888,7 @@ class AutomationManager:
             session_id, timeout=timeout_seconds
         )
         if not idle:
-            turn_manager.interrupt(session_id, "stop")
+            await turn_manager.interrupt_async(session_id, "stop")
             raise asyncio.TimeoutError()
 
         # 5. Read the final outcome from the durable event log (the v2 path no

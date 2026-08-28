@@ -13,7 +13,7 @@
 	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert, CircleDot, CircleCheck, CircleX } from 'lucide-svelte';
 	import { git, gitSnapshot, gitMode } from '$lib/stores/git.svelte';
 	import { checkoutBranchWithToast } from '$lib/stores/gitCheckoutAction';
-	import { githubRepoInfo, githubChecks } from '$lib/stores/github.svelte';
+	import { githubRepoInfo, githubChecks, githubChecksStale } from '$lib/stores/github.svelte';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import { computeShowShipIt } from '$lib/stores/derived/ship-it-visibility';
 	import { computePrimaryAction, finishBlockedByMergeability, type PrimaryGitAction } from '$lib/stores/derived/git-primary-action';
@@ -148,6 +148,7 @@
 		$githubChecks && currentBranch && $githubChecks.branch === currentBranch ? $githubChecks : null
 	);
 
+
 	// Upstream tracking branch state (for push/pull buttons)
 	const currentBranchInfo = $derived(snapshot.branches.find(b => b.current));
 	const commitsBehindUpstream = $derived(currentBranchInfo?.behind ?? 0);
@@ -189,6 +190,12 @@
 	 *  greyed "Finish" still names the PR it would merge. */
 	const shownPr = $derived(snapshotPending ? heldOpenPr : openPr);
 	const finishBlocked = $derived(finishBlockedByMergeability(shownPr?.mergeable ?? null));
+	// The backend serves the LAST KNOWN-GOOD PR when it cannot reach GitHub
+	// (`pr_lookup_failed` + `stale`), and a `gh` transport failure surfaces as a
+	// 502 rather than an empty result. Either way the value shown is real but not
+	// freshly confirmed — say so, and never downgrade it to "Create PR".
+	const prIsLastKnown = $derived(snapshot.prStateStale && !!shownPr);
+	const lastKnownSuffix = $derived(prIsLastKnown ? ' (last known state — GitHub unreachable)' : '');
 
 	// Whether this folder is a *confirmed* git repo. Strict `=== true` (not the
 	// optimistic `!== false` used for the header gate): for a reused/cleaned-up
@@ -576,7 +583,7 @@
 					? 'Cannot finish during streaming'
 					: finishBlocked
 						? `PR #${shownPr?.number} is not mergeable yet — resolve conflicts on GitHub or wait for GitHub to compute mergeability`
-						: `Quick merge PR #${shownPr?.number} with saved settings`}
+						: `Quick merge PR #${shownPr?.number} with saved settings${lastKnownSuffix}`}
 			>
 				{#if finishBlocked}
 					<TriangleAlert size={14} strokeWidth={1.5} />
@@ -584,6 +591,11 @@
 					<CheckCircle2 size={14} strokeWidth={1.5} />
 				{/if}
 				<span class="btn-label">Finish</span>
+				{#if prIsLastKnown}
+					<!-- The PR is real but unconfirmed this cycle: mark it rather than
+					     hiding it or falling back to "Create PR". -->
+					<span class="last-known-dot" aria-label="Last known PR state — GitHub unreachable"></span>
+				{/if}
 			</button>
 			<button
 				class="git-btn split-chevron"
@@ -713,10 +725,11 @@
 	{#if checks}
 		<a
 			class="ci-badge {checks.state}"
+			class:stale={$githubChecksStale}
 			href={checks.url}
 			target="_blank"
 			rel="noopener noreferrer"
-			title="{checks.name}: {checks.state === 'running' ? 'in progress' : (checks.conclusion ?? checks.state)}"
+			title="{checks.name}: {checks.state === 'running' ? 'in progress' : (checks.conclusion ?? checks.state)}{$githubChecksStale ? ' (last known state — GitHub unreachable)' : ''}"
 			aria-label="CI {checks.state} for {checks.branch}"
 		>
 			{#if checks.state === 'success'}
@@ -804,6 +817,19 @@
 
 	.ci-badge.running {
 		color: var(--warning, #d29922);
+	}
+
+	.ci-badge.stale {
+		opacity: 0.6;
+	}
+
+	/* Subtle "this value is real but unconfirmed this cycle" marker. */
+	.last-known-dot {
+		width: 5px;
+		height: 5px;
+		border-radius: 50%;
+		background: var(--warning, #d29922);
+		opacity: 0.8;
 	}
 
 	.branch-selector {

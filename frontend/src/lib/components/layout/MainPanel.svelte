@@ -63,7 +63,7 @@
 	// spinner on the core interaction would be a regression. See
 	// `deck/lazy/panels.ts` for the registry and the prefetch entry points.
 	import LazyPanel from '$lib/components/deck/lazy/LazyPanel.svelte';
-	import { preloadWhenIdle } from '$lib/components/deck/lazy/lazy-component';
+	import { preloadWhenIdle, runWhenIdle } from '$lib/components/deck/lazy/lazy-component';
 	import {
 		featurePanelKeyForView,
 		panelForKey,
@@ -161,15 +161,35 @@
 		});
 	});
 
+	/**
+	 * Grammars worth warming ahead of time. Shiki is dynamically imported now
+	 * (R6), and a *settled* transcript renders each code block once — so a
+	 * grammar that arrives after that render leaves the block plain until
+	 * something re-renders it. Warming the languages an agent transcript
+	 * actually contains closes that window; the rest (rust/go/sql/svelte/html/
+	 * css) still load on demand. This is ~45 kB gzipped fetched at idle, against
+	 * the ~180 kB gzipped of grammars that used to sit in the entry chunk.
+	 */
+	const WARM_LANGS = [
+		'typescript',
+		'javascript',
+		'python',
+		'bash',
+		'json',
+		'diff',
+		'markdown',
+		'yaml'
+	];
+
 	// Warm the secondary chunks once the app is idle, so the first visit to a
 	// panel is already a cache hit and LazyPanel renders it in the same frame.
-	// Also warms the Shiki highlighter (now dynamically imported) off the
-	// critical path, so the first code block in a transcript is highlighted
-	// immediately rather than re-rendering from plain text.
 	$effect(() => {
 		const cancelPreload = preloadWhenIdle(IDLE_PRELOAD_ORDER);
-		warmHighlighter();
-		return cancelPreload;
+		const cancelShiki = runWhenIdle(() => warmHighlighter(WARM_LANGS));
+		return () => {
+			cancelPreload();
+			cancelShiki();
+		};
 	});
 
 	// The live-browser panel only mounts once the user has actually opened it;

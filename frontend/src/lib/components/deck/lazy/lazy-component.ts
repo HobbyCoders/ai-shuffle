@@ -106,6 +106,42 @@ export function createLazyComponent<T>(
 	};
 }
 
+/** True on a Data-Saver or 2G-class connection, where speculative work is rude. */
+function connectionIsFrugal(): boolean {
+	const conn = (navigator as { connection?: { saveData?: boolean; effectiveType?: string } })
+		.connection;
+	return !!conn?.saveData || conn?.effectiveType === 'slow-2g' || conn?.effectiveType === '2g';
+}
+
+/**
+ * Run `fn` once the browser is idle (after `delayMs`), unless the connection is
+ * frugal. Returns a cancel function. Used for speculative warm-ups that must
+ * never compete with the boot requests the user is actually waiting for.
+ */
+export function runWhenIdle(fn: () => void, delayMs = 2_500): () => void {
+	if (typeof window === 'undefined' || connectionIsFrugal()) return () => {};
+	let cancelled = false;
+	let idleHandle: number | null = null;
+	const timer = setTimeout(() => {
+		if (cancelled) return;
+		const w = window as unknown as { requestIdleCallback?: (cb: () => void) => number };
+		if (typeof w.requestIdleCallback === 'function') {
+			idleHandle = w.requestIdleCallback(() => {
+				if (!cancelled) fn();
+			});
+		} else if (!cancelled) {
+			fn();
+		}
+	}, delayMs);
+	return () => {
+		cancelled = true;
+		clearTimeout(timer);
+		if (idleHandle !== null && typeof window.cancelIdleCallback === 'function') {
+			window.cancelIdleCallback(idleHandle);
+		}
+	};
+}
+
 /**
  * Warm a list of handles one at a time while the browser is idle.
  *
@@ -118,6 +154,10 @@ export function preloadWhenIdle(
 	options: { startDelayMs?: number } = {}
 ): () => void {
 	if (typeof window === 'undefined') return () => {};
+	// Respect Data Saver and 2G-class links: speculative warming is a luxury,
+	// and on those connections it competes with the requests the user is
+	// actually waiting for. The panels still load on demand.
+	if (connectionIsFrugal()) return () => {};
 
 	const { startDelayMs = 1_500 } = options;
 	let cancelled = false;

@@ -6,6 +6,7 @@ Covers the three deliverable test areas:
   * the auto-continue latch fail-closed fallback paths in compact_continue.
 """
 
+from tests.conftest import async_twin
 import time
 
 import pytest
@@ -138,6 +139,7 @@ def _capture_submit(monkeypatch):
         return f"turn-{len(calls)}"
 
     monkeypatch.setattr(turn_manager, "submit", _fake_submit)
+    monkeypatch.setattr(turn_manager, "submit_async", async_twin(_fake_submit))
     return calls
 
 

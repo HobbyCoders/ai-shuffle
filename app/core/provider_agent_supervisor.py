@@ -278,9 +278,11 @@ async def _kill_worker_session(worker_session_id: str) -> str:
     try:
         from app.core import turn_manager
 
-        row = await asyncio.to_thread(
-            turn_manager.interrupt, worker_session_id, "stop", True
-        )
+        # interrupt_async, not to_thread(interrupt): the interrupt executor is a
+        # coroutine fn that needs a running loop, so calling the sync form from a
+        # worker thread silently drops the SDK interrupt (the DB row flips but the
+        # live runtime is never told to stop).
+        row = await turn_manager.interrupt_async(worker_session_id, "stop", True)
         interrupted = row is not None
     except Exception:  # noqa: BLE001 — the pool eviction below still runs
         logger.debug(

@@ -10,6 +10,7 @@ routing, auth and wire shape, not the teardown mechanics (those are covered in
 ``tests/core/test_provider_agent_safety.py`` against the real registry).
 """
 
+from tests.conftest import async_twin
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -77,7 +78,8 @@ def kill_spies():
     pool = MagicMock(name="session_pool")
     pool.remove_broken = AsyncMock(return_value=object())
     with patch("app.core.session_pool.get_session_pool", return_value=pool), \
-            patch("app.core.turn_manager.interrupt", MagicMock(return_value={"id": "t"})), \
+            patch("app.core.turn_manager.interrupt", _wt_interrupt := MagicMock(return_value={"id": "t"})), \
+            patch("app.core.turn_manager.interrupt_async", new=async_twin(_wt_interrupt)), \
             patch("app.core.provider_agent_supervisor._note_parent", new=AsyncMock()):
         yield pool
 

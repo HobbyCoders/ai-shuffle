@@ -117,14 +117,45 @@ class _HandlerHarness:
         return False
 
     def make_handler(self):
-        """Real handler on a fake CONNECTED websocket (frames recorded)."""
+        """Real handler on a fake CONNECTED websocket (frames recorded).
+
+        W2: ``send_json`` only ENQUEUES now — the frame reaches the socket on
+        the connection's writer task. These tests assert on frame SHAPE, not on
+        transport timing, so the handler's send is wrapped to drain the writer
+        before returning. The real writer still does the delivering (ordering
+        and coalescing included); the wrapper only removes the scheduling gap.
+        The transport semantics themselves are covered in
+        ``tests/api/test_ws_send_timeout.py``.
+        """
         self.ws = _FakeWebSocket()
-        return cwh.ChatWebSocketHandler(
+        handler = cwh.ChatWebSocketHandler(
             websocket=self.ws,  # type: ignore[arg-type]
             device_id="dev-1",
             user_id="admin",
             api_user_id=None,
         )
+        real_send = handler.send_json
+
+        async def _send_and_drain(data):
+            accepted = await real_send(data)
+            await _drain_writer(handler)
+            return accepted
+
+        handler.send_json = _send_and_drain  # type: ignore[method-assign]
+        self.handler = handler
+        return handler
+
+
+async def _drain_writer(handler, timeout: float = 1.0):
+    """Let the handler's writer task flush everything it has queued."""
+    writer = getattr(handler, "_writer", None)
+    if writer is None:
+        return
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while writer.depth and loop.time() < deadline:
+        await asyncio.sleep(0.001)
+    await asyncio.sleep(0.001)
 
 
 def _shapes(ws):

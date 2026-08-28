@@ -342,6 +342,14 @@ async def refresh_git_state(
         project_v2_id=pv2["id"],
         params={},
     )
+    # Latency only: if the op targets this install, run the claim pass now
+    # instead of waiting for the next scheduled sweep (up to 60s when this is
+    # a single install). A peer-targeted row is left to that peer's runner.
+    from app.core import git_ops_runner
+    from app.core.config import settings
+
+    if runner_id == settings.effective_instance_id:
+        git_ops_runner.kick()
     return {"ops": [{"id": op["id"], "runner_id": op["runner_id"]}]}
 
 

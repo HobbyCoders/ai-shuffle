@@ -7,6 +7,7 @@ become methods.  Behaviour is identical to the original implementation.
 """
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -25,13 +26,17 @@ from app.core.message_resolver import message_resolver, resolve_working_dir
 from app.core.permission_handler import is_plan_approval_text, permission_handler
 from app.core.streaming_context import StreamingContext
 from app.core.sync_engine import sync_engine
+# W2: the origin socket reuses the SAME bounded-queue + writer-task mechanism
+# the device fan-out uses, rather than a second copy of it. Private only by
+# name — promoting it to a public export belongs to sync_engine's owner.
+from app.core.sync_engine import ConnectionWriter
 from app.core.user_question_handler import user_question_handler
 from app.core.webhook_service import dispatch_session_complete, dispatch_session_error
 from app.db import database
 from app.db.async_database import run_sync
 from app.db.sessions import SessionRow
 from app.api.worktree_session_meta import enrich_session_worktree_meta
-from app.api.ws_utils import safe_ws_send, WSPayloadEncodeError
+from app.api.ws_utils import WSPayloadEncodeError
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +47,77 @@ logger = logging.getLogger(__name__)
 # imports only app.db.turns).
 from app.core import turn_manager  # noqa: E402
 from app.db import turns as turns_db  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Origin-socket outbound queue (W2)
+# ---------------------------------------------------------------------------
+# The device fan-out in ``sync_engine`` gives every connection a bounded queue
+# and a dedicated writer task, so no producer ever awaits a socket. The ORIGIN
+# socket — the one this handler owns — was the last unqueued send path: every
+# ``send_json`` awaited the wire inline, so a half-open client (locked phone,
+# wifi switch) blocked whoever was producing the frame for up to the send
+# timeout. It now goes through the same writer, which means ``send_json`` is a
+# synchronous enqueue and the single bounded ``send_text`` await lives on the
+# writer task, where a dead peer costs exactly one stalled task — its own.
+#
+# Overflow is two-tier, matching sync_engine's policy:
+#
+#   1. COALESCABLE frames carry a COMPLETE replacement snapshot, so the newest
+#      alone is sufficient. They are collapsed IN PLACE (the queued frame's text
+#      is overwritten and keeps its position, so ordering relative to other
+#      frame types is preserved and the client never sees a stale snapshot).
+#   2. EVERYTHING ELSE is correctness-bearing on this leg — ``done``, ``error``,
+#      ``tool_use``/``tool_result`` (they maintain the client's pendingTools
+#      set), permission and question frames — and has no safe drop. On overflow
+#      the connection is dropped instead: the client reconnects and resyncs from
+#      durable state (SSE cursor resume, ``/live``, pending-permission replay),
+#      exactly the path an ordinary network drop already takes.
+#
+# Keep these sets aligned with ``sync_engine._COALESCABLE_*`` — same frame
+# families, same reasoning.
+_ORIGIN_COALESCABLE_TYPES = frozenset({
+    "usage_snapshot",             # whole-state token/cost counters
+    "tabs_sync",                  # whole-state open-tab list
+    "user_streaming_sessions",    # whole-state streaming-session list
+})
+_ORIGIN_COALESCABLE_EVENT_TYPES = frozenset({
+    "queue_updated",              # whole-state queue for one session
+})
+
+
+def _origin_coalesce_key(data: Dict[str, Any]) -> Optional[tuple]:
+    """Coalescing key for one origin frame, or ``None`` if it must not drop."""
+    event_type = data.get("event_type")
+    if event_type in _ORIGIN_COALESCABLE_EVENT_TYPES:
+        return ("event", event_type, data.get("session_id"))
+    mtype = data.get("type")
+    if mtype in _ORIGIN_COALESCABLE_TYPES:
+        return ("type", mtype)
+    if mtype == "session_attention":
+        # Whole-state ("N items pending for this session", 0 clears).
+        return ("type", mtype, data.get("session_id"))
+    return None
+
+
+def _encode_frame(data: Dict[str, Any]) -> str:
+    """Serialize one outbound frame exactly as ``ws_utils.safe_ws_send`` does.
+
+    ``default=str`` so values the stock encoder rejects — most importantly
+    ``datetime`` objects that slip through from DB rows — are coerced instead of
+    raising mid-send. Serializing HERE (at enqueue time, on the producer's
+    thread of control) keeps the "one bad message is not a dead socket"
+    contract: the caller learns about an un-encodable payload synchronously
+    instead of the writer discovering it with nobody to report to.
+
+    Raises:
+        WSPayloadEncodeError: the payload still cannot be encoded (a bug in that
+            one message). The caller drops it and keeps the connection.
+    """
+    try:
+        return json.dumps(data, separators=(",", ":"), default=str)
+    except (TypeError, ValueError) as e:
+        raise WSPayloadEncodeError(str(e)) from e
 
 
 # Terminal background-task statuses that should wake the parent (mirror the SDK's
@@ -259,9 +335,14 @@ class ChatWebSocketHandler:
             window_seconds=settings.ws_rate_limit_window_seconds,
         )
 
-        # Lock to serialize WebSocket sends — prevents concurrent sends from
-        # ping_loop, heartbeat, and the main message handler racing each other
-        self.send_lock = asyncio.Lock()
+        # Outbound queue + writer task for THIS socket (W2). Created lazily on
+        # the first send so a handler built outside a running loop costs
+        # nothing, and never created at all on the headless path (no socket).
+        # ``send_json`` is a synchronous enqueue, so sends from ping_loop, the
+        # turn pump and the message handler are ordered by call order alone —
+        # no send lock is needed (or possible to race), and no producer ever
+        # awaits the wire.
+        self._writer: Optional[ConnectionWriter] = None
 
         # Monotonically increasing sequence number for every outbound message.
         # Frontend can track gaps to measure how often WebSocket delivery fails
@@ -290,100 +371,117 @@ class ChatWebSocketHandler:
         }
 
     # ------------------------------------------------------------------
-    # send_json — safe JSON send with connection check
+    # send_json — non-blocking enqueue onto this socket's writer
     # ------------------------------------------------------------------
 
+    def _ensure_writer(self) -> Optional[ConnectionWriter]:
+        """This socket's writer, created on first use (``send_json`` starts it).
+
+        ``None`` on the headless path, where there is no socket to write to.
+        Lazy so a handler constructed outside a running loop never leaves a task
+        behind, and so ``run``'s teardown has nothing to close when nothing was
+        ever sent.
+        """
+        if self._writer is None and self.websocket is not None:
+            writer = ConnectionWriter(
+                self.websocket, label=f"chat device={self.device_id}"
+            )
+            writer.set_on_dead(self._on_writer_dead)
+            self._writer = writer
+        return self._writer
+
+    async def _on_writer_dead(self) -> None:
+        """Reap hook fired when the writer declares this socket finished — its
+        own bounded send failed/timed out, or its queue overflowed. The socket
+        close is already in flight inside the writer; all that is left here is
+        to poison the connection so every later send fast-fails and the receive
+        loop's idle branch exits instead of parking on a zombie."""
+        self.connection_healthy = False
+
     async def send_json(self, data: dict) -> bool:
+        """Queue one JSON frame for this connection. NEVER awaits the socket.
+
+        Despite being a coroutine (every call site awaits it), this performs no
+        awaits at all: the frame is serialized and appended to this
+        connection's bounded queue, and the single bounded ``send_text`` await
+        happens later on the writer task. That is what keeps one half-open
+        client from stalling the turn pump, the recorder, or any other producer
+        (W2) — a dead peer now costs exactly one stalled task, its own.
+
+        Returns True when the frame was ACCEPTED. False means one of:
+
+        * the payload could not be encoded — that ONE message is dropped and
+          the connection stays healthy (a bug in the message, not a dead
+          socket);
+        * the connection is finished (already poisoned, closed, or its queue
+          overflowed with correctness-bearing frames). Callers that check the
+          return value should abort the operation, exactly as before.
+
+        A True is therefore "durably queued in order", not "on the wire" — the
+        same contract the device fan-out adopted. Ordering on this socket is
+        strict call order, since nothing here yields.
+
+        Every frame gets a monotonic ``_seq`` so the frontend can detect
+        delivery gaps (diagnostics only — polling and the event feed handle
+        recovery). A coalesced frame carries the NEWER ``_seq`` in the older
+        frame's queue position, so a supersede shows up there as one skipped
+        number, which is exactly what it is.
         """
-        Safe JSON send with connection check.
-
-        Returns True if send succeeded, False if connection is dead.
-        Callers should check return value and abort operations if False.
-
-        Uses a lock to make the state-check + send atomic, preventing
-        TOCTOU races where a close frame arrives between the check and send.
-
-        Every outbound message gets a monotonic ``_seq`` number so the frontend
-        can detect delivery gaps (for diagnostics — polling handles recovery).
-        """
-        # Fast path: skip lock acquisition if already known dead
+        # Fast path: skip everything if already known dead.
         if not self.connection_healthy:
             return False
 
-        async with self.send_lock:
-            if not self.connection_healthy:
-                return False
+        # Headless path: no websocket attached (e.g. a server-side query kicked
+        # off by the /sessions/with-worktree REST endpoint). Silently "succeed"
+        # so run_query doesn't early-exit; state propagates via sync_engine
+        # broadcasts to any registered devices instead.
+        if self.websocket is None:
+            return True
 
-            # Headless path: no websocket attached (e.g. server-side query
-            # kicked off by the /sessions/with-worktree REST endpoint).
-            # Silently "succeed" so run_query doesn't early-exit; state
-            # propagates via sync_engine broadcasts to any registered
-            # devices instead of via direct-to-WS sends.
-            if self.websocket is None:
-                return True
+        if self.websocket.client_state != WebSocketState.CONNECTED:
+            self.connection_healthy = False
+            logger.debug(f"WebSocket disconnected, cannot send message type: {data.get('type')}")
+            return False
 
-            if self.websocket.client_state != WebSocketState.CONNECTED:
-                self.connection_healthy = False
-                logger.debug(f"WebSocket disconnected, cannot send message type: {data.get('type')}")
-                return False
+        writer = self._ensure_writer()
+        if writer is None or not writer.alive:
+            self.connection_healthy = False
+            return False
 
-            try:
-                self._ws_seq += 1
-                data["_seq"] = self._ws_seq
-                await safe_ws_send(self.websocket, data)
-                return True
-            except WSPayloadEncodeError as e:
-                # Non-serializable payload (e.g. a raw datetime from a DB row) —
-                # a bug in this one message, not a dead socket. Drop it but keep
-                # the connection healthy so a later queue drain can still send.
-                self._ws_drops += 1
-                msg_type = data.get("type") or data.get("event_type", "unknown")
-                logger.warning(
-                    f"Dropping non-serializable WebSocket message "
-                    f"[type={msg_type}, device={self.device_id}]: {e}"
-                )
-                return False
-            except Exception as e:
-                self._ws_drops += 1
-                self.connection_healthy = False
-                msg_type = data.get("type") or data.get("event_type", "unknown")
-                logger.warning(
-                    f"WebSocket send failed [seq={self._ws_seq}, type={msg_type}, "
-                    f"device={self.device_id}, total_drops={self._ws_drops}]: {e}"
-                )
-                # A send timeout means the socket is half-open (dead peer, full
-                # buffer) — starlette still reports it CONNECTED, so the receive
-                # loop would idle on this zombie forever and its finally-cleanup
-                # (device deregistration) would never run. Force-close in the
-                # background to release the transport and unblock receive_json.
-                self._force_close_dead_socket()
-                return False
-
-    def _force_close_dead_socket(self) -> None:
-        """Best-effort background close of a connection marked dead.
-
-        Fire-and-forget: close() itself can block on the same dead transport,
-        so it gets its own timeout and every failure is swallowed — by this
-        point the connection is already excluded from sends via
-        connection_healthy, this just accelerates resource cleanup.
-        """
-        ws = self.websocket
-        if ws is None:
-            return
-
-        async def _close() -> None:
-            try:
-                await asyncio.wait_for(ws.close(code=1011), timeout=5.0)
-            except Exception:  # noqa: BLE001
-                pass
-
+        self._ws_seq += 1
+        data["_seq"] = self._ws_seq
         try:
-            task = asyncio.get_running_loop().create_task(_close())
-            task.add_done_callback(
-                lambda t: t.exception() if not t.cancelled() else None
+            text = _encode_frame(data)
+        except WSPayloadEncodeError as e:
+            # Non-serializable payload (e.g. a raw datetime from a DB row) — a
+            # bug in this one message, not a dead socket. Drop it but keep the
+            # connection healthy so a later queue drain can still send.
+            self._ws_drops += 1
+            msg_type = data.get("type") or data.get("event_type", "unknown")
+            logger.warning(
+                f"Dropping non-serializable WebSocket message "
+                f"[type={msg_type}, device={self.device_id}]: {e}"
             )
-        except RuntimeError:
-            pass  # no running loop (teardown) — nothing to accelerate
+            return False
+
+        writer.start()
+        if not writer.enqueue(text, _origin_coalesce_key(data)):
+            # The writer refused the frame, which always means the connection is
+            # finished: either it had already died (its bounded send failed —
+            # the socket close is in flight inside the writer), or this frame
+            # overflowed a queue of frames that cannot be dropped safely, so the
+            # connection is being dropped instead. Either way the client
+            # reconnects and resyncs from durable state.
+            self._ws_drops += 1
+            self.connection_healthy = False
+            msg_type = data.get("type") or data.get("event_type", "unknown")
+            logger.warning(
+                f"WebSocket frame not accepted [seq={self._ws_seq}, type={msg_type}, "
+                f"device={self.device_id}, reason={writer.death_reason}, "
+                f"total_drops={self._ws_drops}]"
+            )
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # run — main connection loop
@@ -516,6 +614,19 @@ class ChatWebSocketHandler:
 
         except Exception as e:
             logger.error(f"Chat WebSocket error: {e}")
+
+        finally:
+            # W2: a writer task must never outlive its connection. ``aclose``
+            # cancels AND awaits it, so nothing is left pending on a socket that
+            # is going away. Frames still queued at this point are dropped —
+            # the peer is gone, and a reconnecting client resyncs from durable
+            # state (SSE cursor resume, /live, pending-permission replay).
+            # The connection is poisoned first so a late send from the still
+            # running query task fast-fails instead of resurrecting a writer.
+            self.connection_healthy = False
+            writer = self._writer
+            if writer is not None:
+                await writer.aclose()
 
     # ------------------------------------------------------------------
     # handle_query

@@ -1779,7 +1779,7 @@
 				     matters for in-page search, which can only find mounted text. -->
 				<div class="earlier-row">
 					<button type="button" class="earlier-button" onclick={mountAllEarlierItems}>
-						Show {mountedStart} earlier {mountedStart === 1 ? 'message' : 'messages'}
+						Show earlier messages
 					</button>
 				</div>
 			{/if}

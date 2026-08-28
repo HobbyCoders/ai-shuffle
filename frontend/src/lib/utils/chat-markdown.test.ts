@@ -1,8 +1,9 @@
 /**
  * Fence-meta parsing and the code-block chrome the transcript renders.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { parseFenceMeta, renderCodeBlock, renderChatMarkdown } from './chat-markdown';
+import { isHighlightReady, warmHighlighter } from './shiki';
 
 describe('parseFenceMeta', () => {
 	it('reads a bare language', () => {
@@ -46,11 +47,23 @@ describe('renderCodeBlock', () => {
 		expect(html).not.toContain('<script>alert');
 	});
 
-	it('highlights a known language into themed spans', () => {
+	it('renders escaped plain text while the highlighter chunk is still loading', () => {
+		// R6: Shiki is dynamically imported, so the very first render of a code
+		// block returns plain text and re-renders once the grammar lands. The
+		// chrome must be identical either way.
+		const html = renderCodeBlock('const a = 1;', 'ts', true);
+		expect(html).toContain('class="codeblock"');
+		expect(html).toContain('const a = 1;');
+	});
+
+	it('highlights a known language into themed spans once the grammar is loaded', async () => {
+		warmHighlighter(['typescript']);
+		await vi.waitFor(() => expect(isHighlightReady('typescript')).toBe(true), { timeout: 20_000 });
+
 		const html = renderCodeBlock('const a = 1;', 'ts', true);
 		expect(html).toContain('--shiki-light');
 		expect(html).toContain('--shiki-dark');
-	});
+	}, 30_000);
 
 	it('falls back to plain text for an unknown language', () => {
 		const html = renderCodeBlock('whatever', 'brainfuck', true);

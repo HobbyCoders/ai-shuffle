@@ -615,3 +615,27 @@ def mock_encryption():
                     "decrypt": mock_decrypt,
                     "is_ready": mock_ready
                 }
+
+
+# ---------------------------------------------------------------------------
+# turn_manager async twins
+# ---------------------------------------------------------------------------
+
+def async_twin(sync_double):
+    """Adapt a sync test double to stand in for a ``turn_manager`` async twin.
+
+    ``turn_manager`` exposes ``submit``/``submit_async`` and
+    ``interrupt``/``interrupt_async``. The async twins are not
+    ``to_thread(submit)`` — they offload only the DB half and fire the
+    scheduler kick / interrupt executor back on the caller's loop, because
+    those need a running loop and are silently dropped from a worker thread.
+
+    Production async callers therefore go through the ``*_async`` name, so a
+    test that patches only the sync name stops capturing entirely. Pair every
+    sync patch with this wrapper so both seams record into the same double and
+    existing ``call_args`` assertions keep working.
+    """
+    async def _twin(*args, **kwargs):
+        return sync_double(*args, **kwargs)
+
+    return _twin

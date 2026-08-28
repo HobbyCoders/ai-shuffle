@@ -737,8 +737,12 @@ def _set_message_pagination_headers(response: Response, pagination: dict) -> Non
 @router.get("/{session_id}", response_model=SessionWithMessages)
 async def get_session(
     request: Request,
-    response: Response,
     session_id: str,
+    # Injected by FastAPI (recognised by the annotation, not the default). The
+    # default keeps the handler callable directly — several tests and internal
+    # callers invoke it as a plain coroutine — in which case the pagination
+    # headers are simply not published.
+    response: Response = None,
     message_limit: Optional[int] = Query(
         None,
         ge=1,
@@ -906,7 +910,8 @@ async def get_session(
         limit=message_limit,
         before_seq=before_seq,
     )
-    _set_message_pagination_headers(response, message_pagination)
+    if response is not None:
+        _set_message_pagination_headers(response, message_pagination)
 
     session["messages"] = messages
     session["tags"] = await run_sync(database.get_session_tags, session_id)

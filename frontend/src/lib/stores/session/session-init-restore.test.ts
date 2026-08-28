@@ -1,5 +1,17 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
+
+// The SSE feed is started from the restore branch now (finding S5), so the
+// singleton is mocked to observe that without opening a real stream.
+vi.mock('./v2/feed-controller', () => ({
+	feedController: {
+		start: vi.fn(),
+		stop: vi.fn(),
+		isFeeding: vi.fn(() => false),
+	},
+}));
+
 import { bumpInitGeneration, createSessionInit, type SessionInitDeps } from './session-init';
+import { feedController } from './v2/feed-controller';
 import type { ActiveSessionState, PersistedSession } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 
@@ -219,5 +231,92 @@ describe('session-init · isRestoringSession on persisted restore', () => {
 		expect(s.sessionId).toBe('persisted-v2');
 		expect(s.project).toBe('');
 		expect(s.projectV2Id).toBe('pv2-remote');
+	});
+});
+
+// ─── S5: boot waterfall ─────────────────────────────────────────────────────
+
+describe('session-init · boot waterfall (S5)', () => {
+	beforeEach(() => {
+		sessionStorage.clear();
+		vi.mocked(feedController.start).mockClear();
+	});
+
+	function persisted(sessionId: string | null): PersistedSession {
+		return {
+			sessionId,
+			title: 'Old chat',
+			profile: 'profile-1',
+			project: 'proj-1',
+			modelOverride: null,
+			permissionModeOverride: null,
+			effortLevelOverride: null,
+		} as PersistedSession;
+	}
+
+	it('reads the two independent preferences in PARALLEL, not in series', async () => {
+		// Both reads are gated on the same tick: if init still awaited them one
+		// after the other, the second would not have started when the first
+		// resolves, and this test would hang on `started`.
+		let releaseSelection!: () => void;
+		const selectionGate = new Promise<void>((r) => { releaseSelection = r; });
+		let sessionStarted = false;
+		let releaseSession!: () => void;
+		const sessionGate = new Promise<void>((r) => { releaseSession = r; });
+
+		const loadSelectionFromBackend = vi.fn(async () => {
+			await selectionGate;
+			return null;
+		});
+		const loadPersistedSession = vi.fn(async () => {
+			sessionStarted = true;
+			await sessionGate;
+			return persisted('persisted-1');
+		});
+
+		const { init, getState, deps } = makeInit(null, loadPersistedSession);
+		deps.switcher.loadSelectionFromBackend = loadSelectionFromBackend;
+
+		const running = init();
+		await Promise.resolve();
+		// The persisted-session read is already in flight while the selection
+		// read is still pending — that is the whole point of the fix.
+		expect(sessionStarted).toBe(true);
+
+		releaseSelection();
+		releaseSession();
+		await running;
+		expect(getState().sessionId).toBe('persisted-1');
+	});
+
+	it('skips the persisted read entirely when restore is skipped', async () => {
+		sessionStorage.setItem('__aihub_skipSessionRestore', '1');
+		const loadPersistedSession = vi.fn(async () => persisted('persisted-1'));
+		const { init } = makeInit(null, loadPersistedSession);
+
+		await init();
+
+		expect(loadPersistedSession).not.toHaveBeenCalled();
+		expect(feedController.start).not.toHaveBeenCalled();
+	});
+
+	it('starts the SSE feed as soon as the restored sessionId is known', async () => {
+		// The feed is a cookie-authed fetch; it never needed the WS handshake.
+		const { init, deps } = makeInit(persisted('persisted-1'));
+
+		await init();
+
+		expect(feedController.start).toHaveBeenCalledWith('persisted-1');
+		expect(deps.wsConn.connect).toHaveBeenCalled();
+		// …and the feed start must not have waited on the socket.
+		const startOrder = vi.mocked(feedController.start).mock.invocationCallOrder[0];
+		const connectOrder = vi.mocked(deps.wsConn.connect).mock.invocationCallOrder[0];
+		expect(startOrder).toBeLessThan(connectOrder);
+	});
+
+	it('never starts a feed when there is no persisted session', async () => {
+		const { init } = makeInit(persisted(null));
+		await init();
+		expect(feedController.start).not.toHaveBeenCalled();
 	});
 });

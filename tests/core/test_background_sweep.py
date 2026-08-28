@@ -197,6 +197,32 @@ async def test_a_slow_pass_does_not_block_the_others(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_re_registering_does_not_duplicate_an_in_flight_pass(monkeypatch):
+    """A second start() must update the pass, not orphan the running one."""
+    _set_peers(monkeypatch, True)
+    concurrent = {"now": 0, "max": 0}
+    started = asyncio.Event()
+
+    async def _slow():
+        concurrent["now"] += 1
+        concurrent["max"] = max(concurrent["max"], concurrent["now"])
+        started.set()
+        await asyncio.sleep(0.3)
+        concurrent["now"] -= 1
+
+    turn_claim.register_pass("p", _slow, 0.01)
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        turn_claim.register_pass("p", _slow, 0.01)  # second start()
+        await asyncio.sleep(0.15)
+        assert concurrent["max"] == 1, (
+            "re-registration ran a duplicate alongside the in-flight pass"
+        )
+    finally:
+        await _stop_driver()
+
+
+@pytest.mark.asyncio
 async def test_a_pass_never_overlaps_itself(monkeypatch):
     """One execution at a time — the property each private loop had."""
     _set_peers(monkeypatch, True)

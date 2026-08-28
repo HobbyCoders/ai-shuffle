@@ -147,6 +147,12 @@ _SUMMARY_FOLD_INTERVAL_S = 2.0
 _fold_state: dict[str, dict[str, Any]] = {}
 _fold_state_lock = threading.Lock()
 
+#: Bound on the rate-limiter dict. A long-lived process would otherwise keep one
+#: small entry per session it has ever mirrored; above this many entries the
+#: settled (non-pending) ones older than the interval are dropped, which costs
+#: nothing but an extra first fold if such a session streams again.
+_FOLD_STATE_SOFT_CAP = 512
+
 
 def _forget_fold_state(session_id: str) -> None:
     """Drop a session's fold bookkeeping (called when its store rows go away).
@@ -164,6 +170,7 @@ def _reset_fold_state() -> None:
     """Test helper — drop every session's fold bookkeeping."""
     with _fold_state_lock:
         _fold_state.clear()
+        _last_repair.clear()
 
 
 def _claim_fold(session_id: str, project_key: str, now: float) -> bool:
@@ -176,6 +183,15 @@ def _claim_fold(session_id: str, project_key: str, now: float) -> bool:
     again, so the only cost of a wrong guess is a slightly later fold.
     """
     with _fold_state_lock:
+        if len(_fold_state) > _FOLD_STATE_SOFT_CAP:
+            for sid in [
+                sid
+                for sid, st in _fold_state.items()
+                if not st["pending"]
+                and now - st["last_fold"] > _SUMMARY_FOLD_INTERVAL_S
+                and sid != session_id
+            ]:
+                _fold_state.pop(sid, None)
         state = _fold_state.get(session_id)
         if state is None:
             _fold_state[session_id] = {
@@ -316,6 +332,24 @@ def flush_summary_folds(session_id: str | None = None) -> int:
     return folded
 
 
+#: How often the crash-recovery sweep may run per project_key. The sweep probes
+#: the entries table once per summary row, so it must not ride on every read —
+#: but it MUST run the first time a process reads a project (that is the
+#: post-restart case it exists for), which a monotonic "never run yet" naturally
+#: gives.
+_SUMMARY_REPAIR_INTERVAL_S = 300.0
+_last_repair: dict[str, float] = {}
+
+
+def _claim_repair(project_key: str, now: float) -> bool:
+    with _fold_state_lock:
+        last = _last_repair.get(project_key)
+        if last is not None and now - last < _SUMMARY_REPAIR_INTERVAL_S:
+            return False
+        _last_repair[project_key] = now
+        return True
+
+
 def _repair_stale_summaries_sync(project_key: str, limit: int = 100) -> int:
     """Fold summaries left behind by a process that died mid-turn.
 
@@ -325,8 +359,11 @@ def _repair_stale_summaries_sync(project_key: str, limit: int = 100) -> int:
     beyond ``folded_through_id`` and folds them — the crash-recovery half of
     the coalesced fold (the summary is a pure function of the entries, so
     nothing is lost, only late). Bounded by ``limit`` so a first run against a
-    large project cannot turn one read into an unbounded repair loop.
+    large project cannot turn one read into an unbounded repair loop, and
+    throttled per project so a steady-state reader does not pay for it.
     """
+    if not _claim_repair(project_key, time.monotonic()):
+        return 0
     repaired = 0
     try:
         with get_db() as conn:

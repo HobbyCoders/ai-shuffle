@@ -67,6 +67,7 @@ const mocks = vi.hoisted(() => {
 		gitMode: store<string>('project'),
 		githubRepoInfo: store<Record<string, unknown> | null>({ default_branch: 'main' }),
 		githubChecks: store<Record<string, unknown> | null>(null),
+		githubChecksStale: store<boolean>(false),
 		loadBranches: vi.fn(),
 		refreshDiffStats: vi.fn(),
 		refreshChangedFiles: vi.fn(),
@@ -89,7 +90,8 @@ vi.mock('$lib/stores/git.svelte', () => ({
 }));
 vi.mock('$lib/stores/github.svelte', () => ({
 	githubRepoInfo: mocks.githubRepoInfo,
-	githubChecks: mocks.githubChecks
+	githubChecks: mocks.githubChecks,
+	githubChecksStale: mocks.githubChecksStale
 }));
 vi.mock('$lib/stores/gitCheckoutAction', () => ({
 	checkoutBranchWithToast: mocks.checkoutBranchWithToast
@@ -219,6 +221,7 @@ beforeEach(() => {
 	gitActionPreferences.reset();
 	openHeaderDropdown.set(null);
 	mocks.githubChecks.set(null);
+	mocks.githubChecksStale.set(false);
 	vi.clearAllMocks();
 });
 
@@ -441,6 +444,50 @@ describe('GitHeaderActions snapshot coherence', () => {
 	});
 });
 
+// ── Failed PR lookup keeps the PR (findings G2 / G3) ───────────────────────
+
+describe('GitHeaderActions failed PR lookup', () => {
+	it('keeps "Finish" and marks it last-known when the lookup failed', async () => {
+		cleanAheadBranch();
+		renderHeader({ openPR: null });
+		setSnapshot({
+			status: {
+				current_branch: 'feature/x',
+				default_branch: 'main',
+				ahead: 2,
+				differs_from_base: true,
+				is_git_repo: true
+			},
+			diffStats: { additions: 0, deletions: 0, files_changed: 0 },
+			branches: [
+				{ name: 'feature/x', current: true, remote: false, upstream: 'origin/feature/x', ahead: 2, behind: 0 }
+			],
+			// The backend re-served its last known-good PR with pr_lookup_failed +
+			// stale; the store surfaces that as prStateStale.
+			openPr: { number: 12, title: 'x', url: 'http://x', mergeable: null },
+			prStateStale: true
+		});
+		await tick();
+
+		// NEVER "Create PR" because a lookup blipped.
+		expect(screen.queryByText('Create PR')).toBeNull();
+		expect(screen.getByText('Finish')).toBeTruthy();
+		// …and the user is told the value is unconfirmed.
+		expect(screen.getByLabelText('Last known PR state — GitHub unreachable')).toBeTruthy();
+		expect(
+			(screen.getByText('Finish').closest('button') as HTMLButtonElement).title
+		).toContain('last known state');
+	});
+
+	it('shows no last-known marker once the lookup succeeds again', async () => {
+		cleanAheadBranch();
+		renderHeader({ openPR: { number: 12, title: 'x', url: 'http://x', mergeable: null } });
+		await tick();
+		expect(screen.getByText('Finish')).toBeTruthy();
+		expect(screen.queryByLabelText('Last known PR state — GitHub unreachable')).toBeNull();
+	});
+});
+
 // ── CI badge (the previously dead workflow-runs pathway) ────────────────────
 
 describe('GitHeaderActions CI badge', () => {
@@ -457,6 +504,24 @@ describe('GitHeaderActions CI badge', () => {
 		renderHeader();
 		await tick();
 		expect(screen.getByLabelText('CI failure for feature/x')).toBeTruthy();
+	});
+
+	it('marks the badge stale when the last refresh could not reach GitHub (502)', async () => {
+		cleanAheadBranch();
+		mocks.githubChecks.set({
+			branch: 'feature/x',
+			state: 'success',
+			conclusion: 'success',
+			name: 'build',
+			url: 'http://ci/1',
+			updatedAt: '2026-08-01T00:00:00Z'
+		});
+		mocks.githubChecksStale.set(true);
+		renderHeader();
+		await tick();
+		// The badge is kept (a 502 is "unknown", not "no CI") and marked.
+		const badge = screen.getByLabelText('CI success for feature/x');
+		expect(badge.getAttribute('title')).toContain('last known state');
 	});
 
 	it('ignores a verdict for a different branch', async () => {

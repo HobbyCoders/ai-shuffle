@@ -284,18 +284,25 @@ def register_pass(
     shape every one of these loops had when it owned its own task.
 
     Registration is order-independent: a module may register before or after
-    :func:`start`, and the driver is spawned on demand either way.
+    :func:`start`, and the driver is spawned on demand either way. Re-registering
+    an existing name UPDATES that pass in place (keeping its schedule and any
+    in-flight execution) rather than replacing the object — a second ``start()``
+    must not orphan a running pass and let a duplicate run alongside it.
     """
     delay = tight_interval if first_delay is None else first_delay
     existing = _passes.get(name)
-    sweep = SweepPass(
-        name=name,
-        run=run,
-        tight_interval=tight_interval,
-        wake_on_notify=wake_on_notify,
-        next_due=existing.next_due if existing else (time.monotonic() + delay),
-    )
-    _passes[name] = sweep
+    if existing is not None:
+        existing.run = run
+        existing.tight_interval = tight_interval
+        existing.wake_on_notify = wake_on_notify
+    else:
+        _passes[name] = SweepPass(
+            name=name,
+            run=run,
+            tight_interval=tight_interval,
+            wake_on_notify=wake_on_notify,
+            next_due=time.monotonic() + delay,
+        )
     _ensure_driver()
     if _wake is not None:
         _wake.set()

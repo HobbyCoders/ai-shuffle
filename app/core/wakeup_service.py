@@ -19,7 +19,7 @@ parks forever because no next turn arrives:
    the #557 auto-continue latch miss.
 
 A wake does NOT run a query of its own. :func:`_fire` enrolls the prompt in the
-v2 turn queue (``turn_manager.submit(..., source="wakeup")``), so the wake goes
+v2 turn queue (``await turn_manager.submit_async(..., source="wakeup")``), so the wake goes
 through the same run lease and one-live-turn-per-session index every other turn
 obeys. Firing straight at the query engine — as this module used to — created a
 second agent loop against a session that already had one running: a forked
@@ -182,7 +182,7 @@ async def _fire(row: Dict[str, Any]) -> None:
 
     from app.core import turn_manager
 
-    turn_id = turn_manager.submit(
+    turn_id = await turn_manager.submit_async(
         session_id,
         "wakeup",
         prompt=row.get("prompt"),

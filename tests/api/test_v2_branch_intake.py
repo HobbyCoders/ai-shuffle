@@ -15,6 +15,7 @@ Everything is mocked at the handler/DB boundary — no app, no DB, no git, no
 network.
 """
 
+from tests.conftest import async_twin
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -77,6 +78,7 @@ def _wire_v2(monkeypatch, *, pv2=None, checkout_path="/ws/checkouts/proj-A/featu
     import app.core.turn_manager as turn_manager
     submit = MagicMock(return_value="turn-w")
     monkeypatch.setattr(turn_manager, "submit", submit)
+    monkeypatch.setattr(turn_manager, "submit_async", async_twin(submit))
 
     return {
         "pv2": pv2,

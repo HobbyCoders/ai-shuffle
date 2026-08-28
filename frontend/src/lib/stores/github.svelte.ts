@@ -7,7 +7,18 @@
  */
 
 import * as githubApi from '$lib/api/github';
+import { isApiError } from '$lib/api/client';
 import { createSubscribers } from './store-utils';
+
+/**
+ * The backend distinguishes "we could not ask GitHub" from "GitHub says no":
+ * a `gh` transport failure surfaces as **502**, never as an empty list (finding
+ * G2). Treat 502 as UNKNOWN — keep whatever was last known and flag it stale —
+ * and only an actual empty success as "there is nothing".
+ */
+function isGitHubUnavailable(e: unknown): boolean {
+	return isApiError(e) && e.status === 502;
+}
 
 // ============================================================================
 // Types
@@ -48,6 +59,11 @@ interface GitHubState {
 	workflowRuns: githubApi.WorkflowRun[];
 	/** Newest workflow run for the branch the git header is showing. */
 	checks: BranchChecks | null;
+	/** `checks` is the last known-good verdict; the latest refresh could not
+	 *  reach GitHub (502). Never blank the badge because of a transport blip. */
+	checksStale: boolean;
+	/** Same for the PR list. */
+	pullRequestsStale: boolean;
 	loading: boolean;
 	loadingPRs: boolean;
 	loadingRuns: boolean;
@@ -66,6 +82,8 @@ const initialState: GitHubState = {
 	pullRequests: [],
 	workflowRuns: [],
 	checks: null,
+	checksStale: false,
+	pullRequestsStale: false,
 	loading: false,
 	loadingPRs: false,
 	loadingRuns: false,
@@ -144,7 +162,7 @@ export const github = {
 	/**
 	 * Load GitHub status for a project
 	 */
-	async loadStatus(projectId: string) {
+	async loadStatus(projectId: string): Promise<boolean | null> {
 		_update(s => ({ ...s, projectId, loading: true, error: null }));
 
 		try {
@@ -162,12 +180,17 @@ export const github = {
 			return status.authenticated;
 		} catch (e) {
 			const error = e as { detail?: string };
+			// A transport failure is NOT "not authenticated" — return null
+			// ("unknown") and leave the previously known repo info in place so a
+			// blip can't blank the header's default-branch source.
+			const unknown = isGitHubUnavailable(e);
 			_update(s => ({
 				...s,
 				loading: false,
+				authenticated: unknown ? s.authenticated : false,
 				error: error.detail || 'Failed to load GitHub status'
 			}));
-			return false;
+			return unknown ? null : false;
 		}
 	},
 
@@ -184,12 +207,15 @@ export const github = {
 				_state.projectId,
 				state
 			);
-			_update(s => ({ ...s, pullRequests, loadingPRs: false }));
+			_update(s => ({ ...s, pullRequests, pullRequestsStale: false, loadingPRs: false }));
 		} catch (e) {
 			const error = e as { detail?: string };
+			// A 502 means GitHub was unreachable — the previously loaded list is
+			// kept (and flagged stale) instead of collapsing to "no pull requests".
 			_update(s => ({
 				...s,
 				loadingPRs: false,
+				pullRequestsStale: isGitHubUnavailable(e),
 				error: error.detail || 'Failed to load pull requests'
 			}));
 		}
@@ -285,7 +311,7 @@ export const github = {
 	 * lazy load driven by the git store's slow, visibility-gated refresh — never
 	 * a poll. Repo metadata is near-static.
 	 */
-	async ensureRepoInfo(projectId: string): Promise<boolean> {
+	async ensureRepoInfo(projectId: string): Promise<boolean | null> {
 		if (_state.projectId === projectId && _state.repoInfo) return _state.authenticated;
 		return github.loadStatus(projectId);
 	},
@@ -301,24 +327,27 @@ export const github = {
 	 * @returns true when a verdict (or a definitive "no runs") landed.
 	 */
 	async refreshChecks(projectId: string, branch: string): Promise<boolean> {
-		_update(s => ({ ...s, projectId, loadingRuns: true }));
-		try {
-			const runs = await githubApi.getWorkflowRuns(projectId, 10);
-			const checks = summarizeBranchChecks(runs, branch);
-			_update(s => ({ ...s, workflowRuns: runs, checks, loadingRuns: false }));
-			return true;
-		} catch {
-			// Advisory: keep the previous verdict rather than blanking the badge.
-			_update(s => ({ ...s, loadingRuns: false }));
-			return false;
-		}
+		_update(s => ({ ...s, projectId }));
+		const runs = await github.loadWorkflowRuns();
+		// null = the fetch failed. loadWorkflowRuns has already decided whether
+		// that was a 502 ("unknown" — keep the last verdict, flag it stale) or a
+		// hard error; either way the badge must not collapse into a false "no CI".
+		if (!runs) return false;
+		// An empty (or branch-less) success IS authoritative: there are no runs.
+		_update(s => ({ ...s, checks: summarizeBranchChecks(runs, branch) }));
+		return true;
 	},
 
 	/**
-	 * Load workflow runs for the current project
+	 * Load workflow runs for the current project.
+	 *
+	 * The single fetch behind the CI pathway — `refreshChecks` (the git header's
+	 * badge) and `rerunWorkflow` both go through it.
+	 *
+	 * @returns the runs, or null when GitHub could not be reached.
 	 */
-	async loadWorkflowRuns(limit: number = 10) {
-		if (!_state.projectId) return;
+	async loadWorkflowRuns(limit: number = 10): Promise<githubApi.WorkflowRun[] | null> {
+		if (!_state.projectId) return null;
 
 		_update(s => ({ ...s, loadingRuns: true, error: null }));
 
@@ -327,14 +356,19 @@ export const github = {
 				_state.projectId,
 				limit
 			);
-			_update(s => ({ ...s, workflowRuns, loadingRuns: false }));
+			_update(s => ({ ...s, workflowRuns, checksStale: false, loadingRuns: false }));
+			return workflowRuns;
 		} catch (e) {
 			const error = e as { detail?: string };
+			// 502 = "could not ask GitHub" — keep the last known verdict and mark
+			// it stale rather than reporting a false "no CI".
 			_update(s => ({
 				...s,
 				loadingRuns: false,
+				checksStale: isGitHubUnavailable(e),
 				error: error.detail || 'Failed to load workflow runs'
 			}));
+			return null;
 		}
 	},
 
@@ -388,3 +422,6 @@ export const githubRepoInfo = createDerived(() => _state.repoInfo);
 
 /** CI verdict for the branch the git header is showing (null when unknown). */
 export const githubChecks = createDerived(() => _state.checks);
+
+/** The CI verdict is a last-known-good value (the latest refresh hit a 502). */
+export const githubChecksStale = createDerived(() => _state.checksStale);

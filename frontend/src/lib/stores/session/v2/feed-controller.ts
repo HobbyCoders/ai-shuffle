@@ -432,7 +432,6 @@ function transcriptPatch(
 ): Partial<ActiveSessionState> {
 	const optimistic = optimisticStreaming || opts.appOptimistic;
 	const usagePatch = deriveUsageFields(rs.usage);
-	if (Object.keys(usagePatch).length > 0) usageApplied = true;
 	return {
 		// Released: the array leaves the reducer here, so the next append copies
 		// instead of mutating what the view now holds (reducer.ts ownership).
@@ -465,6 +464,11 @@ function fold(hydrationComplete = false): void {
 	// The reducer confirmed a live turn — the optimistic flip has served its
 	// purpose and must not survive into the next turn boundary.
 	if (reducerState.isStreaming) optimisticStreaming = false;
+	// W7: from the first fold that carries `turn.usage`-derived numbers, the feed
+	// owns the usage fields and a late `/live` snapshot must not overwrite them.
+	// Set HERE, not in transcriptPatch, so a mere cache peek for another session
+	// can never claim ownership on the fed session's behalf.
+	if (reducerState.usage !== null) usageApplied = true;
 	if (hydrationComplete) transcriptPublished = true;
 	deps.update((s) =>
 		s.sessionId === currentSessionId

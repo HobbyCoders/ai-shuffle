@@ -17,6 +17,7 @@ These tests lock in the two-part fix:
      dropped WITHOUT marking the connection dead — only real transport errors do.
 """
 
+import asyncio
 import json
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
@@ -112,12 +113,34 @@ async def test_safe_ws_send_propagates_transport_error():
 
 
 # ─── ChatWebSocketHandler.send_json (the real poisoning contract) ────────────
+#
+# W2: ``send_json`` is now a non-blocking enqueue onto this socket's writer, so
+# "accepted" (True) and "on the wire" are two different moments. Encoding still
+# happens synchronously at enqueue time, which is what keeps the "one bad
+# message is not a dead socket" contract below intact; transport failures now
+# surface on the writer task instead of at the call site.
 
 
 def _make_handler(ws) -> ChatWebSocketHandler:
     return ChatWebSocketHandler(
         websocket=ws, device_id="dev-1", user_id="admin", api_user_id=None
     )
+
+
+async def _until(predicate, timeout: float = 2.0):
+    """Wait for a writer-task side effect (delivery, death) to land."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(0.005)
+    return predicate()
+
+
+async def _drain(handler):
+    """Stop the handler's writer task so no task outlives the test."""
+    if handler._writer is not None:
+        await handler._writer.aclose()
 
 
 @pytest.mark.asyncio
@@ -132,7 +155,9 @@ async def test_send_json_datetime_payload_keeps_connection_healthy():
 
     assert ok is True
     assert handler.connection_healthy is True
-    assert len(ws.sent_text) == 1
+    # Delivery happens on the writer task now, not at the call site.
+    assert await _until(lambda: len(ws.sent_text) == 1)
+    await _drain(handler)
 
 
 @pytest.mark.asyncio
@@ -149,24 +174,34 @@ async def test_send_json_unserializable_drops_message_without_poisoning():
 
     assert ok is False
     assert handler.connection_healthy is True  # NOT poisoned
+    # Nothing reached the writer — the bad frame never got queued.
+    assert ws.sent_text == []
     # A subsequent well-formed send still goes through.
     ok2 = await handler.send_json({"type": "start", "session_id": "s"})
     assert ok2 is True
+    assert await _until(lambda: len(ws.sent_text) == 1)
+    await _drain(handler)
 
 
 @pytest.mark.asyncio
 async def test_send_json_transport_error_poisons_connection():
-    """A real transport failure DOES mark the connection dead (fast-path then
-    short-circuits subsequent sends)."""
+    """A real transport failure DOES mark the connection dead.
+
+    W2: the failure surfaces on the writer task (the frame was accepted onto the
+    queue first), and the writer's reap hook poisons the connection — after
+    which the fast path short-circuits every later send without touching the
+    socket, exactly as before.
+    """
     ws = _FakeWebSocket(send_text_side_effect=RuntimeError("socket closed"))
     handler = _make_handler(ws)
 
     ok = await handler.send_json({"type": "start", "session_id": "s"})
+    assert ok is True  # accepted onto the queue; the wire is the writer's job
 
-    assert ok is False
-    assert handler.connection_healthy is False
+    assert await _until(lambda: handler.connection_healthy is False)
     # Fast-path: once dead, further sends return False without touching the socket.
     ws.send_text.reset_mock()
     ok2 = await handler.send_json({"type": "anything"})
     assert ok2 is False
     ws.send_text.assert_not_called()
+    await _drain(handler)

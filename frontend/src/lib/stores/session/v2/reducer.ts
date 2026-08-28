@@ -114,6 +114,14 @@ export interface V2SessionState {
 	/** Same, for `activeTaskSummaries` entries (keyed by task id). Stays a plain
 	 *  record — tasks are a handful per session, not one per event. */
 	taskOriginSeq: Record<string, number>;
+	/** Whether ANY `provider_retry` card exists in `messages`.
+	 *
+	 *  Pure derived bookkeeping, kept because the retry-card sweeps below run on
+	 *  hot events (every tool.use, every user message) and each one scanned the
+	 *  entire transcript to discover that the overwhelmingly common answer is
+	 *  "there are no retry cards" — O(N) per event, O(N²) over a replay. Set on
+	 *  append, recomputed on rewind. */
+	hasRetryCards: boolean;
 	/** Ids of subagent cards that the LAST `turn.completed` speculatively settled
 	 *  to 'completed' via `settleStaleBackgroundWork`. If a `turn.parked` follows
 	 *  (background work genuinely remains — the park gate ran AFTER turn.completed),
@@ -145,6 +153,7 @@ export function initialState(): V2SessionState {
 		liveProvider: null,
 		messageOriginSeq: own(new Map<string, number>()),
 		taskOriginSeq: {},
+		hasRetryCards: false,
 		speculativelySettledCardIds: [],
 		speculativelySettledTaskIds: [],
 	};
@@ -152,18 +161,65 @@ export function initialState(): V2SessionState {
 
 // ─── Small immutable helpers ──────────────────────────────────────────────────
 
+/**
+ * Patch one message by id.
+ *
+ * Same value semantics as before (returns the array to store on the next
+ * state, unchanged when the id is absent), but it no longer maps the whole
+ * transcript into a fresh array per event: it patches the one slot, copying the
+ * array only when this lineage does not already own it (see "Copy-on-publish
+ * ownership"). Searches from the END because every hot caller — a tool result,
+ * a subagent update, closing the open text block — targets something recent.
+ */
 function replaceById(messages: ChatMessage[], id: string, patch: Partial<ChatMessage>): ChatMessage[] {
-	return messages.map((m) => (m.id === id ? { ...m, ...patch } : m));
+	let idx = -1;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		if (messages[i].id === id) {
+			idx = i;
+			break;
+		}
+	}
+	if (idx === -1) return messages;
+	const next = ownedMessages.has(messages) ? messages : own(messages.slice());
+	next[idx] = { ...next[idx], ...patch };
+	return next;
 }
 
-function findByToolId(messages: ChatMessage[], toolId: string): ChatMessage | undefined {
-	return messages.find((m) => m.type === 'tool_use' && m.toolId === toolId);
+/**
+ * Card lookups. Both card kinds have a DETERMINISTIC id (`tooluse-<id>` /
+ * `subagent-<id>`) and are only ever created through `appendMessage`, so
+ * `messageOriginSeq` — passed as `known` — answers "does this card exist?" in
+ * O(1). Without it, the miss case (every fresh tool call during a backfill)
+ * scanned the whole transcript, which is O(N²) over a replay. Optimistic
+ * messages are absent from that map, but they are only ever user text bubbles,
+ * never cards.
+ */
+function findByToolId(
+	messages: ChatMessage[],
+	toolId: string,
+	known?: Map<string, number>
+): ChatMessage | undefined {
+	if (known && !known.has(`tooluse-${toolId}`)) return undefined;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const m = messages[i];
+		if (m.type === 'tool_use' && m.toolId === toolId) return m;
+	}
+	return undefined;
 }
 
-function findSubagentByTask(messages: ChatMessage[], taskId: string): ChatMessage | undefined {
+function findSubagentByTask(
+	messages: ChatMessage[],
+	taskId: string,
+	known?: Map<string, number>
+): ChatMessage | undefined {
 	// Subagent cards are correlated across started/progress/completed by task_id
 	// (agent_id only appears on `subagent.started`). See shape note in reduce().
-	return messages.find((m) => m.type === 'subagent' && m.toolId === taskId);
+	if (known && !known.has(`subagent-${taskId}`)) return undefined;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const m = messages[i];
+		if (m.type === 'subagent' && m.toolId === taskId) return m;
+	}
+	return undefined;
 }
 
 /**
@@ -300,7 +356,8 @@ function settleStaleBackgroundWork(state: V2SessionState): V2SessionState {
  * button, which the settled rendering does not offer. Already-settled cards are
  * skipped so the array identity survives a replay folding the same log twice.
  */
-function settleRetryCards(messages: ChatMessage[]): ChatMessage[] {
+function settleRetryCards(messages: ChatMessage[], present = true): ChatMessage[] {
+	if (!present) return messages;
 	let touched = false;
 	const out = messages.map((m) => {
 		if (m.role !== 'system' || m.systemSubtype !== 'provider_retry') return m;
@@ -329,7 +386,8 @@ function retryCardData(m: ChatMessage): Record<string, unknown> | undefined {
  * Returns the SAME array when no card is resuming, so the hot delta paths pay
  * one `some()` and a replay folding the same log twice lands on equal state.
  */
-function markRetryRecovered(messages: ChatMessage[]): ChatMessage[] {
+function markRetryRecovered(messages: ChatMessage[], present = true): ChatMessage[] {
+	if (!present) return messages;
 	if (!messages.some((m) => retryCardData(m)?.resuming)) return messages;
 	return messages.map((m) => {
 		const d = retryCardData(m);
@@ -340,7 +398,7 @@ function markRetryRecovered(messages: ChatMessage[]): ChatMessage[] {
 
 /** markRetryRecovered lifted to the state, keeping identity when nothing moved. */
 function withRetryRecovered(state: V2SessionState): V2SessionState {
-	const messages = markRetryRecovered(state.messages);
+	const messages = markRetryRecovered(state.messages, state.hasRetryCards);
 	return messages === state.messages ? state : { ...state, messages };
 }
 
@@ -352,7 +410,8 @@ function withRetryRecovered(state: V2SessionState): V2SessionState {
  * else will. Cards that already recovered are untouched — they hold no
  * `resuming` flag by then.
  */
-function clearRetryResuming(messages: ChatMessage[]): ChatMessage[] {
+function clearRetryResuming(messages: ChatMessage[], present = true): ChatMessage[] {
+	if (!present) return messages;
 	if (!messages.some((m) => retryCardData(m)?.resuming)) return messages;
 	return messages.map((m) => {
 		const d = retryCardData(m);
@@ -367,7 +426,8 @@ function clearRetryResuming(messages: ChatMessage[]): ChatMessage[] {
  * A reply to a NEW prompt is not this card's recovery, so the card must not
  * claim it. It reads as superseded: no button, no green check.
  */
-function supersedeRetryCards(messages: ChatMessage[]): ChatMessage[] {
+function supersedeRetryCards(messages: ChatMessage[], present = true): ChatMessage[] {
+	if (!present) return messages;
 	const stale = (d: Record<string, unknown> | undefined) =>
 		!!d?.exhausted && !d.recovered && !d.superseded;
 	if (!messages.some((m) => stale(retryCardData(m)))) return messages;
@@ -454,7 +514,11 @@ function appendMessage(state: V2SessionState, msg: ChatMessage, seq: number): V2
 		? state.messageOriginSeq
 		: own(new Map(state.messageOriginSeq));
 	messageOriginSeq.set(msg.id, seq);
-	return { ...state, messages, messageOriginSeq };
+	const next = { ...state, messages, messageOriginSeq };
+	if (!next.hasRetryCards && msg.systemSubtype === 'provider_retry') {
+		next.hasRetryCards = true;
+	}
+	return next;
 }
 
 /** Record an origin seq once — the earliest (creation) seq wins on replay. */
@@ -995,7 +1059,10 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// that died here answered nothing, so its card re-arms Retry.
 			return {
 				...next,
-				messages: clearRetryResuming(settleRetryCards(next.messages)),
+				messages: clearRetryResuming(
+					settleRetryCards(next.messages, next.hasRetryCards),
+					next.hasRetryCards
+				),
 				isStreaming: false,
 				parked: false,
 				liveTurnId: null,
@@ -1057,17 +1124,28 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// A real typed message (wake-turn notifications returned above): the
 			// user chose to move on rather than retry, so any spent retry card
 			// retires. Whatever this new prompt gets back is not its recovery.
-			const superseded = supersedeRetryCards(state.messages);
+			const superseded = supersedeRetryCards(state.messages, state.hasRetryCards);
 			if (superseded !== state.messages) state = { ...state, messages: superseded };
 
 			const commandId = typeof event.command_id === 'string' ? event.command_id : null;
+			// Whether a reconcile is even possible, both answered in O(1):
+			//   - an OPTIMISTIC message is one the feed controller seeded outside
+			//     the reducer, so it has no origin seq — which is exactly when the
+			//     message count and the origin-map size disagree.
+			//   - a DUPLICATE delivery of this same event (the case the `m.id ===
+			//     event.id` branch below keeps idempotent) is one map lookup.
+			// Without these, every backfilled user message scanned the whole
+			// transcript twice — O(N²) over a replay, for nothing.
+			const reconcilable =
+				state.messages.length !== state.messageOriginSeq.size ||
+				state.messageOriginSeq.has(event.id);
 			// 1. Reconcile against an optimistic message with a matching command_id.
 			let idx = -1;
-			if (commandId) {
+			if (commandId && reconcilable) {
 				idx = state.messages.findIndex((m) => m.role === 'user' && m.commandId === commandId);
 			}
 			// 2. Fallback: same content, appended ≤30s before this event.
-			if (idx === -1) {
+			if (idx === -1 && reconcilable) {
 				const eventMs = Date.parse(createdAt);
 				idx = state.messages.findIndex((m) => {
 					if (m.role !== 'user' || m.content !== content) return false;
@@ -1254,7 +1332,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			let next = { ...closeOpen(state), pendingPumpAck: null, pumpAckBuffer: '' };
 			const input = obj(event.input);
 			const screenshot = str(event.screenshot);
-			const existing = findByToolId(next.messages, toolUseId);
+			const existing = findByToolId(next.messages, toolUseId, next.messageOriginSeq);
 			if (existing) {
 				// Card already created by an earlier input_delta — fill in name/input.
 				return {
@@ -1287,7 +1365,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			const partial = str(event.partial_json);
 			const deltaToolName = str(event.name);
 			if (!toolUseId) return state;
-			const existing = findByToolId(state.messages, toolUseId);
+			const existing = findByToolId(state.messages, toolUseId, state.messageOriginSeq);
 			if (existing) {
 				return {
 					...state,
@@ -1306,7 +1384,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// tool_use block but never tool.use/tool.result. Once the subagent
 			// card exists for that id (launch tool_use_id == task_id), the card
 			// is the rendering surface — do not recreate the orphan placeholder.
-			if (findSubagentByTask(state.messages, toolUseId)) return state;
+			if (findSubagentByTask(state.messages, toolUseId, state.messageOriginSeq)) return state;
 			// input_delta before the tool.use envelope: open a placeholder card.
 			const next = closeOpen(state);
 			const msg: ChatMessage = {
@@ -1330,12 +1408,12 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 		case 'tool.result': {
 			const toolUseId = str(event.tool_use_id);
 			if (!toolUseId) return state;
-			const existing = findByToolId(state.messages, toolUseId);
+			const existing = findByToolId(state.messages, toolUseId, state.messageOriginSeq);
 			if (!existing) {
 				// A Task launch that fails before spawning a worker may surface ONLY
 				// as an error/rejection tool.result joined to the card by toolId —
 				// without this belt the card spins forever.
-				const card = findSubagentByTask(state.messages, toolUseId);
+				const card = findSubagentByTask(state.messages, toolUseId, state.messageOriginSeq);
 				if (!card || card.agentStatus !== 'running') return state;
 				const preview = str(event.content_preview);
 				let errorText: string | null = event.is_error ? preview : null;
@@ -1397,7 +1475,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			const taskId = str(event.task_id);
 			if (!taskId) return state;
 			let next = closeOpen(state);
-			if (findSubagentByTask(next.messages, taskId)) return next; // idempotent
+			if (findSubagentByTask(next.messages, taskId, next.messageOriginSeq)) return next; // idempotent
 			// Reverse ordering of the same fluid dispatch: the worker-keyed card
 			// already landed and absorbed THIS launch id, so a late launch-keyed
 			// `subagent.started` would duplicate it. The surviving card records the
@@ -1466,7 +1544,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 
 		case 'subagent.progress': {
 			const taskId = str(event.task_id);
-			const card = findSubagentByTask(state.messages, taskId);
+			const card = findSubagentByTask(state.messages, taskId, state.messageOriginSeq);
 			if (!card) return state;
 			const kind = str(event.kind);
 			const children = [...(card.agentChildren ?? [])];
@@ -1534,7 +1612,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 
 		case 'subagent.completed': {
 			const taskId = str(event.task_id);
-			const card = findSubagentByTask(state.messages, taskId);
+			const card = findSubagentByTask(state.messages, taskId, state.messageOriginSeq);
 			if (!card) return state;
 			const status = str(event.status);
 			const agentStatus: ChatMessage['agentStatus'] = status === 'completed' ? 'completed' : 'error';
@@ -1651,7 +1729,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// settled with its richer result.
 			if (status === 'completed' || status === 'error' || status === 'killed') {
 				const card = summary.toolUseId
-					? findSubagentByTask(messages, summary.toolUseId)
+					? findSubagentByTask(messages, summary.toolUseId, state.messageOriginSeq)
 					: undefined;
 				if (card && card.agentStatus === 'running') {
 					const children = (card.agentChildren ?? []).map((c) =>
@@ -1805,6 +1883,9 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				messages: keptMessages,
 				messageOriginSeq,
 				taskOriginSeq,
+				hasRetryCards:
+					state.hasRetryCards &&
+					keptMessages.some((m) => m.systemSubtype === 'provider_retry'),
 				activeTaskSummaries,
 				openTextId,
 				openThinkingId,

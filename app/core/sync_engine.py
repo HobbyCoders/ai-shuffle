@@ -86,7 +86,7 @@ _background_tasks: Set["asyncio.Task[Any]"] = set()
 def _spawn_detached(coro: Coroutine[Any, Any, None], name: str) -> None:
     """Run ``coro`` as a fire-and-forget task, keeping a strong reference.
 
-    Used from synchronous, non-blocking code paths (``_ConnectionWriter.enqueue``)
+    Used from synchronous, non-blocking code paths (``ConnectionWriter.enqueue``)
     that must not await anything.
     """
     try:
@@ -125,7 +125,7 @@ class _OutboundFrame:
     coalesce_key: Optional[Tuple[Any, ...]] = None
 
 
-class _ConnectionWriter:
+class ConnectionWriter:
     """Bounded outbound queue + dedicated writer task for a single WebSocket.
 
     Producers call :meth:`enqueue`, which is fully synchronous and never awaits.
@@ -338,6 +338,12 @@ class SyncEvent:
         }
 
 
+
+# Back-compat alias: this writer is shared with the API layer
+# (chat_ws_handler reuses it for the origin socket), so the public name
+# is canonical and the underscored one is retained for older references.
+_ConnectionWriter = ConnectionWriter
+
 @dataclass
 class DeviceConnection:
     """Represents a connected device watching a session"""
@@ -346,10 +352,10 @@ class DeviceConnection:
     websocket: WebSocket
     connected_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    writer: _ConnectionWriter = field(init=False, repr=False, compare=False)
+    writer: ConnectionWriter = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        self.writer = _ConnectionWriter(
+        self.writer = ConnectionWriter(
             self.websocket,
             label=f"device={self.device_id} session={self.session_id}",
             on_sent=self._touch,
@@ -391,10 +397,10 @@ class UserDeviceConnection:
     websocket: WebSocket
     connected_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    writer: _ConnectionWriter = field(init=False, repr=False, compare=False)
+    writer: ConnectionWriter = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        self.writer = _ConnectionWriter(
+        self.writer = ConnectionWriter(
             self.websocket,
             label=f"user={self.user_id} device={self.device_id}",
             on_sent=self._touch,
@@ -420,6 +426,26 @@ class UserDeviceConnection:
             logger.error("Failed to serialize frame for device %s: %s", self.device_id, e)
             return True
         return self.send_text(text, _user_coalesce_key(data))
+
+
+
+def _note_pool_attachment(session_id: str, *, attached: bool) -> None:
+    """Signal the SDK session pool that a session gained/lost its last watcher.
+
+    Imported lazily: session_pool imports sync_engine for its self-healing
+    attachment probe, so a module-level import here would be circular. Never
+    raises — the pool derives the same signal itself within one re-evaluate
+    interval, so this is a latency optimisation, not a correctness dependency.
+    """
+    try:
+        from app.core import session_pool
+
+        if attached:
+            session_pool.note_session_attached(session_id)
+        else:
+            session_pool.note_session_detached(session_id)
+    except Exception:  # noqa: BLE001 - never let a pool hint break WS lifecycle
+        logger.debug("session_pool attachment hint failed for %s", session_id, exc_info=True)
 
 
 class SyncEngine:
@@ -486,6 +512,11 @@ class SyncEngine:
             connection.writer.start()
             self._connections[session_id][device_id] = connection
 
+            # Tell the SDK pool this session is being watched, so its tiered
+            # idle policy doesn't treat it as abandoned. No-raise / no-op before
+            # the pool exists; imported lazily to avoid an import cycle.
+            _note_pool_attachment(session_id, attached=True)
+
             logger.info("Device %s registered to watch session %s", device_id, session_id)
             return connection
 
@@ -516,7 +547,7 @@ class SyncEngine:
                       uses this exact websocket. This prevents race conditions where
                       a new connection is established before cleanup of the old one.
         """
-        writer: Optional[_ConnectionWriter] = None
+        writer: Optional[ConnectionWriter] = None
         async with self._lock:
             devices = self._connections.get(session_id)
             if devices is not None:
@@ -539,6 +570,9 @@ class SyncEngine:
                 # Clean up empty session entries
                 if not devices:
                     self._connections.pop(session_id, None)
+                    # Last watcher gone: let the pool start its detached grace
+                    # timer instead of waiting for the idle sweep to notice.
+                    _note_pool_attachment(session_id, attached=False)
 
         # Outside the lock: cancels the writer task and AWAITS it, so no writer
         # outlives its connection.
@@ -917,7 +951,7 @@ class SyncEngine:
         websocket: Optional[WebSocket] = None
     ):
         """Unregister a device from user connection tracking."""
-        writer: Optional[_ConnectionWriter] = None
+        writer: Optional[ConnectionWriter] = None
         async with self._user_lock:
             devices = self._user_connections.get(user_id)
             if devices is not None:
@@ -1293,7 +1327,7 @@ class SyncEngine:
         pending" once per connected device). Safe to call more than once, and
         safe to call with nothing connected.
         """
-        writers: List[_ConnectionWriter] = []
+        writers: List[ConnectionWriter] = []
         async with self._lock:
             for devices in self._connections.values():
                 writers.extend(conn.writer for conn in devices.values())
