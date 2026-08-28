@@ -103,7 +103,11 @@ describe('Installs API', () => {
 
 		it('GETs git-state by project_v2_id for a v2-only session', async () => {
 			fetchMock.mockResolvedValueOnce(okJson(gitState));
-			await getClusterGitState('pv2-abc', 'project_v2_id');
+			// Signature is (projectId, projectV2Id) — a v2-only session passes null
+			// for the legacy id. This previously passed the id positionally as
+			// projectId with the literal 'project_v2_id' as the second argument,
+			// which asked for `project_id=pv2-abc` while asserting the opposite.
+			await getClusterGitState(null, 'pv2-abc');
 			expect(fetchMock.mock.calls[0][0]).toBe(
 				'/api/v1/cluster/git-state?project_v2_id=pv2-abc'
 			);
