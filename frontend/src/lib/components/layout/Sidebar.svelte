@@ -549,39 +549,39 @@
 			{/if}
 		</div>
 	</div>
-	<div class="sb-rows workspace">
-		<button class="grouplabel ws-head" onclick={toggleWorkspace} aria-expanded={workspaceOpen}>
-			Workspace
-			<span class="rule" aria-hidden="true"></span>
-			<span class="group-chev" class:is-collapsed={!workspaceOpen}>
-				<ChevronDown size={13} strokeWidth={2} />
-			</span>
-		</button>
-		{#if workspaceOpen}
-			{#each railItems as item (item.label)}
-				<!--
-					Intent prefetch: `pointerenter` fires once per genuine entry into the
-					row (not per render, not per scroll tick, and — unlike `pointermove`
-					or `pointerover` — not repeatedly while the pointer sits inside), and
-					`focus` gives keyboard and screen-reader users the identical warm-up.
-					`preloadPanelForView` dedupes against the resolved/in-flight chunk, so
-					re-entering a row costs nothing beyond the call itself.
-				-->
-				<button
-					class="ghostrow wsrow"
-					class:active={item.on}
-					onclick={() => pickFeature(item.type)}
-					onpointerenter={() => preloadPanelForView(item.type)}
-					onfocus={() => preloadPanelForView(item.type)}
-				>
-					<item.icon size={16} strokeWidth={1.85} />
-					<span class="label">{item.label}</span>
-				</button>
-			{/each}
-		{/if}
-	</div>
-
 	<div class="sb-scroll">
+		<div class="workspace">
+			<button class="grouplabel ws-head" onclick={toggleWorkspace} aria-expanded={workspaceOpen}>
+				Workspace
+				<span class="rule" aria-hidden="true"></span>
+				<span class="group-chev" class:is-collapsed={!workspaceOpen}>
+					<ChevronDown size={13} strokeWidth={2} />
+				</span>
+			</button>
+			{#if workspaceOpen}
+				{#each railItems as item (item.label)}
+					<!--
+						Intent prefetch: `pointerenter` fires once per genuine entry into the
+						row (not per render, not per scroll tick, and — unlike `pointermove`
+						or `pointerover` — not repeatedly while the pointer sits inside), and
+						`focus` gives keyboard and screen-reader users the identical warm-up.
+						`preloadPanelForView` dedupes against the resolved/in-flight chunk, so
+						re-entering a row costs nothing beyond the call itself.
+					-->
+					<button
+						class="ghostrow wsrow"
+						class:active={item.on}
+						onclick={() => pickFeature(item.type)}
+						onpointerenter={() => preloadPanelForView(item.type)}
+						onfocus={() => preloadPanelForView(item.type)}
+					>
+						<item.icon size={16} strokeWidth={1.85} />
+						<span class="label">{item.label}</span>
+					</button>
+				{/each}
+			{/if}
+		</div>
+		<div class="divider" role="separator"></div>
 		{#if activeRows.length > 0}
 			<button class="grouplabel" onclick={() => toggleGroup('active')} aria-expanded={!collapsedGroups.active}>
 				Active <span class="count">{activeRows.length}</span>
@@ -934,9 +934,10 @@
 
 	/* Workspace nav — labeled rows reusing the ghost-row language, so the
 	   sidebar reads as one list of named destinations on desktop and touch
-	   alike (no hover-only tooltips). */
-	.workspace { padding-top: 2px; }
-	.ws-head { padding-top: 8px; padding-bottom: 4px; }
+	   alike (no hover-only tooltips). Lives INSIDE the session scroll area so
+	   an expanded Workspace scrolls with the sessions instead of squeezing
+	   the scrollable list down to a sliver at the panel's bottom edge. */
+	.ws-head { padding-top: 6px; padding-bottom: 4px; }
 	.wsrow { height: 30px; }
 	.wsrow.active,
 	.wsrow.active:hover { background: var(--sidebar-accent-active); color: var(--foreground); }
