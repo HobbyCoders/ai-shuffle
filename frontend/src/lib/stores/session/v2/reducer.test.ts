@@ -354,6 +354,32 @@ describe('message.user reconcile', () => {
 		expect(s.messages).toHaveLength(2);
 	});
 
+	it('absorbs the recorder copy onto an adjacent backfill copy (damaged-log repair)', () => {
+		// Logs written before the backfill fix carry the first user message
+		// twice: once seeded by the legacy backfill (turn_id 'backfill'),
+		// once by the turn recorder. Replay must render ONE bubble.
+		const s = fold([
+			ev('message.user', { id: 'srv-bf', content: 'hello', turn_id: 'backfill' }),
+			ev('turn.started', { turn_id: 't-1' }),
+			ev('message.user', { id: 'srv-real', content: 'hello', turn_id: 't-1' }),
+		]);
+		const users = s.messages.filter((m) => m.role === 'user');
+		expect(users).toHaveLength(1);
+		expect(users[0].turnId).toBe('t-1'); // the recorder copy's turn wins
+	});
+
+	it('does NOT absorb onto a backfill message that is not the transcript tail', () => {
+		// A genuine legacy re-send: the earlier identical message was answered,
+		// so both bubbles are real history.
+		const s = fold([
+			ev('message.user', { id: 'srv-bf-1', content: 'same', turn_id: 'backfill' }),
+			ev('message.assistant', { content: 'answered', kind: 'text' }),
+			ev('turn.started', { turn_id: 't-2' }),
+			ev('message.user', { id: 'srv-real-2', content: 'same', turn_id: 't-2' }),
+		]);
+		expect(s.messages.filter((m) => m.role === 'user')).toHaveLength(2);
+	});
+
 	it('stamps the owning turn id, so a steered prompt stays inside its turn', () => {
 		const s = fold([
 			ev('turn.started', { turn_id: 't-1' }),

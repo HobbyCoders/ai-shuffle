@@ -463,12 +463,75 @@ def test_legacy_session_still_uses_the_db_loader(mock_db, monkeypatch):
     import app.core.db_message_loader as dml
     monkeypatch.setattr(
         dml, "load_messages_from_db",
-        lambda sid: ([{"role": "user", "type": "text", "content": "legacy row"}], True),
+        lambda sid: ([
+            {"role": "user", "type": "text", "content": "legacy row"},
+            {"role": "assistant", "type": "text", "content": "legacy reply"},
+        ], True),
     )
 
     messages = hb._load_legacy_history("sess-legacy-bf")
 
-    assert [m["content"] for m in messages] == ["legacy row"]
+    assert [m["content"] for m in messages] == ["legacy row", "legacy reply"]
+
+
+# ---------------------------------------------------------------------------
+# pending-prompt exclusion (first-message duplication fix)
+# ---------------------------------------------------------------------------
+
+def _stub_db_loader(monkeypatch, msgs):
+    import app.core.db_message_loader as dml
+    monkeypatch.setattr(dml, "load_messages_from_db", lambda sid: (msgs, True))
+
+
+def test_user_only_transcript_is_not_migrated(mock_db, monkeypatch):
+    """The pre-submit dual-write is not legacy history: a transcript with only
+    user-side rows (the just-sent prompt) yields NO backfill, so the recorder's
+    own message.user is the single copy."""
+    sessions_db.create_session("sess-pending-1", "default")
+    _stub_db_loader(monkeypatch, [
+        {"role": "user", "type": None, "content": "hello there"},
+    ])
+
+    assert hb._load_legacy_history("sess-pending-1") == []
+
+
+def test_pending_turn_prompt_is_trimmed_from_real_history(mock_db, monkeypatch):
+    """A legacy session with real history: the trailing row matching the
+    queued/live turn's prompt is trimmed; the history itself survives."""
+    sessions_db.create_session("sess-pending-2", "default")
+    _stub_db_loader(monkeypatch, [
+        {"role": "user", "type": None, "content": "old question"},
+        {"role": "assistant", "type": "text", "content": "old answer"},
+        {"role": "user", "type": None, "content": "new prompt"},
+    ])
+    import app.db.turns as turns_db
+    monkeypatch.setattr(turns_db, "get_queued_turns", lambda sid: [])
+    monkeypatch.setattr(
+        turns_db, "get_live_turn", lambda sid: {"prompt": "new prompt"}
+    )
+
+    messages = hb._load_legacy_history("sess-pending-2")
+
+    assert [m["content"] for m in messages] == ["old question", "old answer"]
+
+
+def test_identical_earlier_content_is_not_trimmed(mock_db, monkeypatch):
+    """Only TRAILING rows are trimmed — a historical message that happens to
+    equal the pending prompt stays."""
+    sessions_db.create_session("sess-pending-3", "default")
+    _stub_db_loader(monkeypatch, [
+        {"role": "user", "type": None, "content": "same text"},
+        {"role": "assistant", "type": "text", "content": "answered"},
+    ])
+    import app.db.turns as turns_db
+    monkeypatch.setattr(turns_db, "get_queued_turns", lambda sid: [])
+    monkeypatch.setattr(
+        turns_db, "get_live_turn", lambda sid: {"prompt": "same text"}
+    )
+
+    messages = hb._load_legacy_history("sess-pending-3")
+
+    assert [m["content"] for m in messages] == ["same text", "answered"]
 
 
 # ---------------------------------------------------------------------------

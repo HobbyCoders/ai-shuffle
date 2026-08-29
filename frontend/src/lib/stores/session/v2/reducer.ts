@@ -1157,6 +1157,22 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					return Math.abs(eventMs - ms) <= 30_000;
 				});
 			}
+			// 3. Server-vs-server repair: logs written before the backfill fix
+			//    (history_backfill._without_pending_prompt) carry the first user
+			//    message twice — once seeded by the legacy backfill
+			//    (turn_id 'backfill'), once by the turn recorder. Absorb the
+			//    recorder's copy onto the adjacent backfill copy so those
+			//    sessions render one bubble. Deliberately outside the
+			//    `reconcilable` gate (both copies are real persisted events, so
+			//    the origin map is balanced) and O(1): only the LAST message
+			//    qualifies, which is exactly where the backfill copy sits when
+			//    the duplicate follows it.
+			if (idx === -1) {
+				const last = state.messages[state.messages.length - 1];
+				if (last && last.role === 'user' && last.turnId === 'backfill' && last.content === content) {
+					idx = state.messages.length - 1;
+				}
+			}
 			const stamp = stampTs(event, createdAt);
 			// Pin the sending agent at creation time: the event's own profile wins,
 			// then the optimistic message's (the reconcile branch already knows who

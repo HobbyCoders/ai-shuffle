@@ -190,7 +190,7 @@ def _load_legacy_history(session_id: str) -> List[Dict[str, Any]]:
         from app.core.db_message_loader import load_messages_from_db
         msgs, has_db = load_messages_from_db(session_id)
         if has_db:
-            return msgs
+            return _without_pending_prompt(session_id, msgs)
     except Exception:
         logger.warning(
             "[history_backfill] legacy rescue failed for %s", session_id,
@@ -198,6 +198,69 @@ def _load_legacy_history(session_id: str) -> List[Dict[str, Any]]:
         )
 
     return []
+
+
+def _without_pending_prompt(
+    session_id: str, msgs: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Drop the CURRENT turn's prompt (and user-only residue) from a legacy load.
+
+    The send path persists the user's message to ``session_messages`` BEFORE the
+    turn is submitted (``chat_ws_handler`` — the session-create transaction and
+    the pre-submit dual-write). On a session whose event log is still empty (a
+    brand-new session, or one just cleared by ``clear_session_conversation``)
+    the lazy backfill then reads that row back as "legacy history", wins the
+    exclusive-create seq gate, and seeds ``message.user`` — after which the
+    turn recorder appends the SAME message again. The user's first message
+    rendered twice, durably.
+
+    Two guards, both scoped to this ``session_messages`` rescue branch (the
+    only store the pre-submit write lands in):
+
+    * trailing rows that match a queued/live turn's ``prompt`` are the message
+      the recorder is about to record — trim them (trailing only, so identical
+      text earlier in real history is untouched);
+    * a transcript left with ONLY user-side rows has no conversation to
+      migrate — the pre-submit write is the one way such a transcript arises
+      on the v2 path (covers the window before the ``turns`` row exists, when
+      the trim above has nothing to match against).
+    """
+    if not msgs:
+        return msgs
+
+    pending: set = set()
+    try:
+        from app.db import turns as turns_db
+
+        candidates = list(turns_db.get_queued_turns(session_id))
+        live = turns_db.get_live_turn(session_id)
+        if live:
+            candidates.append(live)
+        for turn in candidates:
+            prompt = (turn or {}).get("prompt")
+            if isinstance(prompt, str) and prompt.strip():
+                pending.add(prompt)
+    except Exception:
+        logger.debug(
+            "[history_backfill] pending-turn lookup failed for %s", session_id,
+            exc_info=True,
+        )
+
+    out = list(msgs)
+    while out and pending:
+        last = out[-1]
+        if last.get("role") == "user" and last.get("content") in pending:
+            out.pop()
+            continue
+        break
+
+    if out and all(m.get("role") == "user" for m in out):
+        logger.debug(
+            "[history_backfill] %s: legacy transcript is user-only (%d row(s)) "
+            "— nothing to migrate", session_id, len(out),
+        )
+        return []
+    return out
 
 
 # ----------------------------------------------------------------------
