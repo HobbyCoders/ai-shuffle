@@ -134,3 +134,44 @@ async def test_non_force_eviction_defers_teardown_of_parked_session():
     # Still tracked — nothing reaped, bucket intact.
     assert [t["id"] for t in task_registry.get_active(sid)] == ["agent-1"]
     assert task_registry.get_active(sid)[0]["status"] == "running"
+
+
+async def test_non_force_eviction_defers_teardown_of_running_monitor_shell():
+    """A routine idle eviction must NOT kill a live Monitor shell (2026-08-29
+    incident: a CI-watch loop was reaped 3.5 minutes in and its task stranded
+    "running" forever). The shell is an OS process independent of the pooled
+    client, and its completion watcher can still wake the parent through a
+    durable turn — but only while the registry keeps the task's OWN-lane mark.
+    """
+    sid = "u3-monitor"
+    task_registry.start_task(sid, "sh-1", "shell", "gh pr checks loop")
+    task_registry.mark_monitor_shell_task(sid, "sh-1")
+    # Monitor shells deliberately do NOT pin the pool — only the new deferral
+    # predicate protects them here.
+    assert task_registry.has_active_background_work(sid) is False
+
+    with _patch_shell_reap() as mock_reap:
+        await resource_monitor._cleanup_evicted_sessions([sid], {}, "idle")
+
+    mock_reap.assert_not_called()
+    assert [t["id"] for t in task_registry.get_active(sid)] == ["sh-1"]
+    # The OWN-lane mark survives, so the shell's eventual terminal frame still
+    # passes is_own_background_task and wakes the parked parent.
+    assert task_registry.is_monitor_shell_task(sid, "sh-1") is True
+
+
+async def test_non_force_eviction_tears_down_once_monitor_shell_finished():
+    """The deferral is scoped to RUNNING shells: once the Monitor completed,
+    a normal eviction clears the bucket and schedules the (self-nooping) reap
+    exactly as before."""
+    sid = "u3-monitor-done"
+    task_registry.start_task(sid, "sh-1", "shell", "loop")
+    task_registry.mark_monitor_shell_task(sid, "sh-1")
+    task_registry.complete_task(sid, "sh-1", "completed")
+
+    with _patch_shell_reap() as mock_reap:
+        await resource_monitor._cleanup_evicted_sessions([sid], {}, "idle")
+
+    mock_reap.assert_called_once_with(sid)
+    assert task_registry.get_active(sid) == []
+    assert task_registry.is_monitor_shell_task(sid, "sh-1") is False
