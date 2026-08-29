@@ -1247,17 +1247,23 @@ class TestTTLCache:
         assert cache.get_or_miss("k") is None
         assert cache.get_or_miss("absent") is CACHE_MISS
 
-    def test_expiry(self):
+    def test_expiry(self, monkeypatch):
+        # time.monotonic can tick in ~15ms steps on Windows, so real sleeps
+        # cannot reliably outrun a millisecond TTL; drive the clock by hand.
+        now = [0.0]
+        monkeypatch.setattr(time, "monotonic", lambda: now[0])
         cache = TTLCache(ttl=60)
         cache.set("k", "v", ttl=0.001)
-        time.sleep(0.005)
+        now[0] += 0.005
         assert cache.get_or_miss("k") is CACHE_MISS
         assert "k" not in cache
 
-    def test_peek_returns_expired_entries_for_stale_while_revalidate(self):
+    def test_peek_returns_expired_entries_for_stale_while_revalidate(self, monkeypatch):
+        now = [0.0]
+        monkeypatch.setattr(time, "monotonic", lambda: now[0])
         cache = TTLCache(ttl=60)
         cache.set("k", "v", ttl=0.001)
-        time.sleep(0.005)
+        now[0] += 0.005
         entry = cache.peek("k")
         assert entry is not None
         assert entry.value == "v"
