@@ -523,11 +523,59 @@ class TestProgressBounding:
             if r["event_type"] == "subagent.progress"
             and r["payload"]["kind"] == "chunk"
         ]
+        notes = (feed_mod._CAP_NOTE, feed_mod._TEXT_CAP_NOTE)
         forwarded = "".join(
             c["payload"]["payload"]["content"] for c in chunks
-            if c["payload"]["payload"]["content"] != feed_mod._CAP_NOTE
+            if c["payload"]["payload"]["content"] not in notes
         )
         assert len(forwarded) <= 40
+
+    def test_text_cap_is_soft_tool_frames_keep_streaming(self, db, monkeypatch):
+        """Exhausting the text budget silences TEXT only — tool activity keeps
+        the card live, with exactly one text-cap note."""
+        monkeypatch.setattr(feed_mod, "MAX_PROGRESS_TEXT_CHARS", 10)
+        f = _feed()
+
+        async def run():
+            await f.started()
+            _seed_worker(
+                _text("x" * 50), _tool_use("t1", "Read"),
+                _text("y" * 50), _tool_use("t2", "Bash"),
+            )
+            await f.drain()
+
+        asyncio.run(run())
+
+        progress = [r for r in _parent_rows() if r["event_type"] == "subagent.progress"]
+        kinds = [r["payload"]["kind"] for r in progress]
+        assert kinds.count("tool_use") == 2  # both tool frames survived the cap
+        notes = [
+            r for r in progress
+            if r["payload"]["kind"] == "chunk"
+            and r["payload"]["payload"]["content"] == feed_mod._TEXT_CAP_NOTE
+        ]
+        assert len(notes) == 1
+        assert f.capped is False  # the feed itself is NOT latched quiet
+        assert f.wants_rows is True
+
+    def test_long_coalesced_text_splits_into_chunk_frames(self, db, monkeypatch):
+        """Text beyond one frame's clip is chunked, not discarded."""
+        monkeypatch.setattr(feed_mod, "MAX_CHUNK_CHARS", 30)
+        f = _feed()
+
+        async def run():
+            await f.started()
+            _seed_worker(_text("q" * 100))
+            await f.drain()
+
+        asyncio.run(run())
+
+        chunks = [
+            r["payload"]["payload"]["content"]
+            for r in _parent_rows() if r["event_type"] == "subagent.progress"
+        ]
+        assert "".join(chunks) == "q" * 100
+        assert all(len(c) <= 30 for c in chunks)
 
     def test_a_single_chunk_frame_is_capped(self, db, monkeypatch):
         monkeypatch.setattr(feed_mod, "MAX_CHUNK_CHARS", 30)

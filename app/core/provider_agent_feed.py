@@ -61,9 +61,14 @@ call, turning N queries per interval into 1. Per-worker bounds, coalescing and
 frame shapes are untouched: the group only changes WHO issues the read.
 
 Volume is bounded on three axes (a chatty worker must not flood the parent's
-log): total frames, total forwarded text, and per-frame size. When a cap is
-reached a single "progress capped" note is forwarded and the tap goes quiet —
-the full detail is always in the worker session.
+log): total frames, total forwarded text, and per-frame size. The bounds are
+sized so a normal worker turn — even a long one — never hits them; they exist
+for the pathological case (native-leg subagents stream into the parent log
+UNCAPPED, so these are a backstop, not parity). The caps degrade in two
+stages: exhausting the TEXT budget forwards a single note and stops text only
+— tool activity keeps streaming, so the card stays live; exhausting the FRAME
+budget forwards a final note and silences the tap. The full detail is always
+in the worker session.
 """
 
 from __future__ import annotations
@@ -90,10 +95,15 @@ DRAIN_BATCH = 500
 MAX_DRAIN_BATCHES = 4
 
 #: Hard ceiling on ``subagent.progress`` frames forwarded for ONE worker.
-MAX_PROGRESS_FRAMES = 200
+#: Sized as a backstop, not a budget: a substantive worker turn runs hundreds
+#: of tool calls (2 frames each), and the native subagent leg is uncapped, so
+#: a ceiling a real workload can hit silences exactly the runs the user most
+#: wants to watch (the original 200 capped nearly every long worker).
+MAX_PROGRESS_FRAMES = 2_000
 
-#: Hard ceiling on total assistant text forwarded for ONE worker.
-MAX_PROGRESS_TEXT_CHARS = 20_000
+#: Ceiling on total assistant text forwarded for ONE worker. Reaching it stops
+#: TEXT only (one note); tool frames keep streaming under the frame ceiling.
+MAX_PROGRESS_TEXT_CHARS = 100_000
 
 #: Per-frame ceilings.
 MAX_CHUNK_CHARS = 2_000
@@ -106,6 +116,11 @@ MAX_RESULT_PREVIEW_CHARS = 2_000
 _CAP_NOTE = (
     "[Live progress capped — the worker is still being recorded in full in its "
     "own session.]"
+)
+
+_TEXT_CAP_NOTE = (
+    "[Live text capped — tool activity continues below; the worker's full "
+    "output is recorded in its own session.]"
 )
 
 #: Worker event types the tap forwards. Everything else in the worker's log
@@ -192,6 +207,7 @@ class WorkerFeed:
         self._frames = 0
         self._text_chars = 0
         self._capped = False
+        self._text_capped = False
         self._started = False
         self._completed = False
         self._group: Optional["WorkerFeedGroup"] = None
@@ -436,19 +452,30 @@ class WorkerFeed:
             pending_text = []
             if not text:
                 return 0
-            if self._text_chars >= MAX_PROGRESS_TEXT_CHARS:
-                await self._cap()
-                return 0
-            remaining = MAX_PROGRESS_TEXT_CHARS - self._text_chars
-            text = _clip(text, min(MAX_CHUNK_CHARS, remaining))
-            self._text_chars += len(text)
-            await self._emit({
-                "type": "subagent_chunk",
-                "agent_id": self.task_id,
-                "content": text,
-            })
-            self._frames += 1
-            return 1
+            # Emit the coalesced text as consecutive MAX_CHUNK_CHARS frames
+            # rather than clipping to one frame: a fast model streams more
+            # than one frame's worth between two poll ticks, and anything
+            # clipped here was silently lost from the live card. The reducer
+            # merges consecutive text children, so N frames render as one run.
+            sent = 0
+            while text:
+                if self._text_capped or self._text_chars >= MAX_PROGRESS_TEXT_CHARS:
+                    await self._cap_text()
+                    break
+                if self._frames >= MAX_PROGRESS_FRAMES:
+                    await self._cap()
+                    break
+                take = min(MAX_CHUNK_CHARS, MAX_PROGRESS_TEXT_CHARS - self._text_chars)
+                piece, text = text[:take], text[take:]
+                self._text_chars += len(piece)
+                await self._emit({
+                    "type": "subagent_chunk",
+                    "agent_id": self.task_id,
+                    "content": piece,
+                })
+                self._frames += 1
+                sent += 1
+            return sent
 
         for row in rows:
             if self._frames >= MAX_PROGRESS_FRAMES:
@@ -459,6 +486,8 @@ class WorkerFeed:
             payload = row.get("payload") or {}
 
             if etype in _TEXT_TYPES:
+                if self._text_capped:
+                    continue
                 if etype == "message.assistant":
                     if payload.get("kind") not in (None, "text"):
                         continue
@@ -531,7 +560,11 @@ class WorkerFeed:
             logger.debug("ProviderAgent feed: usage capture failed", exc_info=True)
 
     async def _cap(self) -> None:
-        """Latch the cap and forward exactly ONE explanatory note."""
+        """Latch the FRAME cap and forward exactly ONE explanatory note.
+
+        This is the hard stage: the whole tap goes quiet (``wants_rows``
+        turns False).
+        """
         if self._capped:
             return
         self._capped = True
@@ -539,6 +572,21 @@ class WorkerFeed:
             "type": "subagent_chunk",
             "agent_id": self.task_id,
             "content": _CAP_NOTE,
+        })
+
+    async def _cap_text(self) -> None:
+        """Latch the TEXT cap and forward exactly ONE explanatory note.
+
+        The soft stage: further assistant text is dropped, but tool frames
+        keep streaming so the card stays live up to the frame ceiling.
+        """
+        if self._text_capped:
+            return
+        self._text_capped = True
+        await self._emit({
+            "type": "subagent_chunk",
+            "agent_id": self.task_id,
+            "content": _TEXT_CAP_NOTE,
         })
 
     # -- follow lifecycle -------------------------------------------------
