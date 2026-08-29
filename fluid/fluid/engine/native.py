@@ -133,6 +133,22 @@ _BACKGROUND_SPAWN_INTERRUPT_GRACE = 1.0
 # NativeLoop._without_stale_plan_reminder.
 PLAN_MODE_REMINDER_MARK = "Plan mode is active:"
 
+# Render-time replacement for the newest stale reminder once the flag is off.
+# Never written to the store: it exists only in the rendered request, so it
+# vanishes on its own if plan mode is ever entered again. The wording must not
+# contain PLAN_MODE_REMINDER_MARK verbatim, or the replacement would match its
+# own output on the next pass.
+PLAN_EXIT_REMINDER_MARK = "Plan mode is over:"
+PLAN_EXIT_REMINDER = (
+    "<system-reminder>\n"
+    f"{PLAN_EXIT_REMINDER_MARK} plan mode has ENDED (the plan was approved, "
+    "or the user switched modes) and is no longer active. Treat any earlier "
+    "notice that plan mode is active as stale. Your write and shell tools "
+    "are back on the surface — implement the approved plan; do not call "
+    "StopPlanning or re-present the plan for approval.\n"
+    "</system-reminder>"
+)
+
 # The builtins that put a file into ``ctx.read_files`` (read.py, write.py).
 # Replaying their calls is what rebuilds the ledger on resume.
 _READ_LEDGER_TOOLS = frozenset({"Read", "Write"})
@@ -1322,32 +1338,56 @@ class NativeLoop(BackgroundLifecycleMixin):
         self.plan_mode = active
 
     def _without_stale_plan_reminder(self, history: list[Message]) -> list[Message]:
-        """Drop plan-mode reminders that the live flag has since contradicted.
+        """Rewrite plan-mode reminders that the live flag has since contradicted.
 
         The reminder is written into the user node when the turn starts, but
         approval lands MID-turn: from that moment every remaining call of the
         same turn re-reads "Plan mode is active" from a node that predates the
         approval, which is exactly the contradiction the audit watched models
-        try to obey. Once the flag is off the block leaves the rendered
-        history; the stored tree keeps it.
+        try to obey. Dropping the block silently was not enough — models that
+        had already read it kept believing plan mode was on (an approval whose
+        tool result was lost to an interrupt or restart leaves NOTHING saying
+        it ended). So the NEWEST stale reminder is replaced with an explicit
+        "plan mode is over" notice and the older ones are dropped. All of this
+        is render-time only: the stored tree keeps its true shape, and the
+        notice disappears by itself if plan mode is ever entered again.
         """
         if self.plan_mode:
             return history
+        last_msg = -1  # index of the message carrying the newest stale reminder
+        for i, message in enumerate(history):
+            if any(
+                isinstance(b, Text) and PLAN_MODE_REMINDER_MARK in b.text
+                for b in message.content
+            ):
+                last_msg = i
+        if last_msg < 0:
+            return history
         out: list[Message] = []
-        changed = False
-        for message in history:
-            kept = [
+        for i, message in enumerate(history):
+            replaced: list[Any] = []
+            stale = [
                 b for b in message.content
-                if not (isinstance(b, Text) and PLAN_MODE_REMINDER_MARK in b.text)
+                if isinstance(b, Text) and PLAN_MODE_REMINDER_MARK in b.text
             ]
-            if len(kept) == len(message.content) or not kept:
+            if not stale:
                 out.append(message)
                 continue
-            changed = True
+            for b in message.content:
+                if not (isinstance(b, Text) and PLAN_MODE_REMINDER_MARK in b.text):
+                    replaced.append(b)
+                elif i == last_msg and b is stale[-1]:
+                    replaced.append(Text(PLAN_EXIT_REMINDER))
+            if not replaced:
+                # Emptying a message would break the request shape; keep it
+                # whole (it cannot be the newest one — that got the notice).
+                out.append(message)
+                continue
             out.append(Message(
-                role=message.role, content=kept, provider_meta=message.provider_meta,
+                role=message.role, content=replaced,
+                provider_meta=message.provider_meta,
             ))
-        return out if changed else history
+        return out
 
     def _plan_mode_reminder(self) -> str | None:
         """Recite the plan-mode contract onto each user turn while active —

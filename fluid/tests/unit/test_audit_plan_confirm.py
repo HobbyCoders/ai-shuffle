@@ -11,7 +11,12 @@ from __future__ import annotations
 
 import json
 
-from fluid.engine.native import PLAN_MODE_REMINDER_MARK, NativeLoop
+from fluid.engine.native import (
+    PLAN_EXIT_REMINDER,
+    PLAN_EXIT_REMINDER_MARK,
+    PLAN_MODE_REMINDER_MARK,
+    NativeLoop,
+)
 from fluid.events import UserTurn
 from fluid.messages import Message, Text
 from fluid.permissions.engine import PermissionEngine
@@ -97,7 +102,7 @@ def test_reminder_reflects_the_flag_at_the_moment_it_is_built() -> None:
     assert loop._plan_mode_reminder() is not None
 
 
-def test_stale_reminder_is_dropped_once_the_flag_is_off() -> None:
+def test_stale_reminder_becomes_the_exit_notice_once_the_flag_is_off() -> None:
     loop = _loop(plan_mode=True)
     reminder = loop._plan_mode_reminder() or ""
     history = [
@@ -108,17 +113,46 @@ def test_stale_reminder_is_dropped_once_the_flag_is_off() -> None:
     assert loop._without_stale_plan_reminder(history) is history
     loop._set_plan_mode(False)
     kept = loop._without_stale_plan_reminder(history)
-    assert [b.text for b in kept[0].content] == ["build the thing"]
+    assert [b.text for b in kept[0].content] == [
+        "build the thing", PLAN_EXIT_REMINDER,
+    ]
     assert kept[1] is history[1]
     assert history[0].content[1].text == reminder  # the stored node is untouched
 
 
-def test_a_reminder_only_message_is_left_alone() -> None:
-    # Emptying a message's content would break the request shape; the guard
-    # keeps such a message whole rather than sending nothing.
+def test_only_the_newest_stale_reminder_carries_the_notice() -> None:
+    # Several plan turns → several stale reminders. Older ones are dropped;
+    # only the newest becomes the exit notice, so the request carries exactly
+    # one "plan mode is over" block.
+    loop = _loop(plan_mode=False)
+    history = [
+        Message(role="user", content=[
+            Text("first ask"), Text(f"{PLAN_MODE_REMINDER_MARK} ..."),
+        ]),
+        Message(role="assistant", content=[Text("a plan")]),
+        Message(role="user", content=[
+            Text("second ask"), Text(f"{PLAN_MODE_REMINDER_MARK} ..."),
+        ]),
+    ]
+    kept = loop._without_stale_plan_reminder(history)
+    assert [b.text for b in kept[0].content] == ["first ask"]
+    assert [b.text for b in kept[2].content] == ["second ask", PLAN_EXIT_REMINDER]
+
+
+def test_a_reminder_only_message_still_gets_the_notice() -> None:
+    # The newest stale reminder is replaced in place, so a reminder-only
+    # message keeps exactly one block and the request shape stays valid.
     loop = _loop(plan_mode=False)
     history = [Message(role="user", content=[Text(f"{PLAN_MODE_REMINDER_MARK} ...")])]
-    assert loop._without_stale_plan_reminder(history) is history
+    kept = loop._without_stale_plan_reminder(history)
+    assert [b.text for b in kept[0].content] == [PLAN_EXIT_REMINDER]
+
+
+def test_the_exit_notice_never_matches_the_stale_mark() -> None:
+    # If the notice contained the active-mode mark verbatim, the next render
+    # pass would rewrite its own output.
+    assert PLAN_MODE_REMINDER_MARK not in PLAN_EXIT_REMINDER
+    assert PLAN_EXIT_REMINDER_MARK in PLAN_EXIT_REMINDER
 
 
 def _flip_server(loop_box: dict):
@@ -151,13 +185,16 @@ async def test_calls_after_a_mid_turn_approval_do_not_carry_the_reminder() -> No
     await loop.submit(UserTurn(content="design the feature"))
     await loop.wait_turn()
 
-    def _carries_reminder(request) -> bool:
+    def _carries(request, mark: str) -> bool:
         return any(
-            isinstance(block, Text) and PLAN_MODE_REMINDER_MARK in block.text
+            isinstance(block, Text) and mark in block.text
             for message in request.messages
             for block in message.content
         )
 
     assert loop.plan_mode is False
-    assert _carries_reminder(provider.requests[0])  # still planning
-    assert not _carries_reminder(provider.requests[1])  # approved mid-turn
+    assert _carries(provider.requests[0], PLAN_MODE_REMINDER_MARK)  # planning
+    # Approved mid-turn: the stale reminder is gone and the very spot where it
+    # stood now states that plan mode is over.
+    assert not _carries(provider.requests[1], PLAN_MODE_REMINDER_MARK)
+    assert _carries(provider.requests[1], PLAN_EXIT_REMINDER_MARK)
