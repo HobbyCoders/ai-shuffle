@@ -172,6 +172,59 @@ async def stop_background_shell_task(
 _reap_tasks: set = set()
 
 
+async def _settle_reaped_shell(session_id: str, task_id: str) -> None:
+    """Record the terminal transition for a shell the session reap just killed.
+
+    The reap cancels the shell's ``_reader`` before terminating the process, so
+    the reader's own ``complete_task`` never runs — without an explicit settle
+    the task stays "running" forever: the in-memory registry row (when it still
+    exists), the durable ``background_tasks`` mirror, and the UI chip built from
+    it (live 2026-08-29, task a0270e18 — stuck 45+ minutes after its process
+    died).
+
+    Two shapes, matching teardown ordering at the call sites:
+
+    - registry row still present and running → ``complete_task("killed")``
+      (persists the durable mirror and fires the guaranteed terminal chip);
+    - registry already cleared (callers run ``clear_session`` BEFORE scheduling
+      this reap) → settle the durable row directly and emit the terminal
+      ``task.updated`` frame, mirroring the stop-click durable force-settle.
+
+    Best-effort in every direction: a settle failure must never block the reap.
+    """
+    from app.core.task_registry import task_registry
+
+    record = task_registry.get_task(session_id, task_id)
+    if record is not None:
+        if record.get("status") == "running":
+            _registry_safe(
+                lambda: task_registry.complete_task(session_id, task_id, "killed")
+            )
+        return
+    try:
+        from app.db.background_tasks import (
+            TERMINAL_STATUSES,
+            get_background_task,
+            mark_background_task_killed,
+        )
+        from app.core.turn_recorder import record_task_settle_frame
+
+        row = await asyncio.to_thread(get_background_task, task_id, session_id)
+        if row is None or row.get("status") in TERMINAL_STATUSES:
+            return
+        await asyncio.to_thread(mark_background_task_killed, task_id, session_id)
+        if task_registry.mark_chipped(session_id, task_id, "terminal"):
+            await record_task_settle_frame(
+                session_id, task_id, "killed",
+                "Background task stopped with its session",
+                reason="session_teardown", tool_use_id=row.get("tool_use_id"),
+            )
+    except Exception:  # noqa: BLE001 — settle is best-effort observability
+        logger.debug(
+            f"Durable settle for reaped shell {task_id} failed", exc_info=True
+        )
+
+
 async def stop_session_background_shells(session_id: str) -> int:
     """Terminate + reap every Monitor shell spawned by a session (U2).
 
@@ -181,9 +234,11 @@ async def stop_session_background_shells(session_id: str) -> int:
     keeps running, its ``_reader`` task awaits ``readline()`` forever (for a
     long-running command like ``tail -f``), and the ``_background_tasks`` entry —
     with its line buffer — leaks for the whole process lifetime. This stops each
-    subprocess (escalating to kill after 5s), cancels the reader, and drops the
-    registry entry. Also reaps already-finished shells, bounding the dict's
-    growth to session lifetime.
+    subprocess (escalating to kill after 5s), cancels the reader, drops the
+    registry entry, and settles the task's registry/durable row to ``killed``
+    (see ``_settle_reaped_shell`` — the cancelled reader can no longer do it).
+    Also reaps already-finished shells, bounding the dict's growth to session
+    lifetime.
 
     Returns the number of shell tasks reaped.
     """
@@ -212,6 +267,7 @@ async def stop_session_background_shells(session_id: str) -> int:
             except Exception:
                 logger.debug(f"Error terminating background shell {tid}", exc_info=True)
         _background_tasks.pop(tid, None)
+        await _settle_reaped_shell(session_id, tid)
         reaped += 1
     if reaped:
         logger.info(

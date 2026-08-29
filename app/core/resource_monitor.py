@@ -425,10 +425,21 @@ async def _cleanup_evicted_sessions(session_ids: list[str], cleaned: dict, reaso
                         f"{reaped} orphaned background task(s) to killed "
                         f"(SDK client destroyed; work cannot complete)"
                     )
-            if not force and task_registry.has_active_background_work(session_id):
+            if not force and (
+                task_registry.has_active_background_work(session_id)
+                or task_registry.has_running_monitor_shell(session_id)
+            ):
                 # A session parked on SDK background work keeps its registry
                 # until the work completes (a later turn end, eviction, or
                 # sweep clears it) — this only DEFERS removal, never blocks it.
+                # Monitor shells defer too: they are OS processes independent
+                # of the pooled client (they deliberately don't PIN the pool),
+                # and their completion watcher wakes the parked parent through
+                # a durable turn — but only while the registry still holds the
+                # task's OWN-lane mark. Clearing + reaping here killed a live
+                # CI watcher 3.5 minutes into a routine idle eviction and left
+                # its task "running" forever (the terminal frame was suppressed
+                # as not-own work once the marks were wiped).
                 logger.info(
                     f"{_PREFIX} Skipping registry teardown of session "
                     f"{session_id}: active background task(s)"
@@ -521,6 +532,18 @@ async def _periodic_cleanup() -> dict:
                 await _cleanup_evicted_sessions(dead, cleaned, "dead")
     except Exception as e:
         logger.debug(f"{_PREFIX} Failed to evict dead pool sessions: {e}")
+
+    # Settle orphaned durable background-task rows (periodic sibling of the
+    # boot reconcile): a non-terminal row this install owns whose task the
+    # in-memory registry no longer knows can never settle on its own — the UI
+    # chip it renders would show "running" until the next restart.
+    try:
+        from app.core.startup_reconcile import settle_stale_background_task_rows
+        stale_tasks = await settle_stale_background_task_rows()
+        if stale_tasks:
+            cleaned["stale_background_task_rows"] = stale_tasks
+    except Exception as e:
+        logger.debug(f"{_PREFIX} Stale background-task sweep failed: {e}")
 
     # Evict idle sessions from the session pool.
     #

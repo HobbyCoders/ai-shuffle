@@ -104,6 +104,36 @@ def mark_stale_background_tasks_killed() -> List[Dict[str, Any]]:
         return rows_to_list(cursor.fetchall())
 
 
+def list_stale_nonterminal_background_tasks(
+    older_than_seconds: int,
+) -> List[Dict[str, Any]]:
+    """THIS install's non-terminal rows not updated for ``older_than_seconds``.
+
+    Feed for the periodic stale-task sweep (``startup_reconcile.
+    settle_stale_background_task_rows``): a non-terminal row this old whose
+    task the in-memory registry no longer knows can never settle on its own —
+    the boot reconcile only runs at boot, and an install can stay up for weeks.
+    Read-only; instance-scoped like the boot sweep. Returns dicts with
+    ``task_id``, ``session_id``, ``tool_use_id``, ``title``, ``status``.
+    """
+    _ph = ph()
+    instance_id = settings.effective_instance_id
+    # Safe literal join: TERMINAL_STATUSES is a module constant of trusted
+    # string literals, never user input.
+    terminal_list = ", ".join(f"'{s}'" for s in TERMINAL_STATUSES)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""SELECT task_id, session_id, tool_use_id, title, status
+                  FROM background_tasks
+                 WHERE instance_id = {_ph}
+                   AND status NOT IN ({terminal_list})
+                   AND updated_at < NOW() - make_interval(secs => {_ph})""",
+            (instance_id, older_than_seconds),
+        )
+        return rows_to_list(cursor.fetchall())
+
+
 def get_background_task(task_id: str, session_id: str) -> Optional[Dict[str, Any]]:
     """Read one durable task row (or ``None``) by its (task_id, session_id) key.
 

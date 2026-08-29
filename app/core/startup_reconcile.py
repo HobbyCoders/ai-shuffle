@@ -174,6 +174,78 @@ async def _mark_stale_background_task_rows() -> int:
     return count
 
 
+# Grace before the periodic sweep settles a non-terminal durable task row the
+# in-memory registry does not know. Long enough to never race the start-write /
+# persistence-flush window; short enough that a stranded chip settles within
+# one glance-back. (Rows the registry DOES know are skipped regardless of age.)
+STALE_TASK_ROW_GRACE_SECONDS = 15 * 60
+
+
+async def settle_stale_background_task_rows(
+    grace_seconds: int = STALE_TASK_ROW_GRACE_SECONDS,
+) -> int:
+    """Periodic sibling of the boot sweep: settle orphaned durable task rows.
+
+    The boot reconcile only runs at boot, but an install can stay up for weeks —
+    any settle path missed at teardown time (historically: routine eviction
+    clearing the registry under a live Monitor shell) left the durable row and
+    the UI chip "running" until the next restart. Every 5 minutes
+    (``resource_monitor._periodic_cleanup``) this settles own-instance
+    non-terminal rows older than the grace window whose task the in-memory
+    registry no longer knows: flip the row to killed and emit the terminal
+    ``task.updated`` frame the frontend needs to settle the chip.
+
+    A row whose task the registry still tracks — ANY status — is skipped: a
+    running record is genuinely live work (e.g. a long Monitor surviving an
+    eviction deferral), and a terminal record persists its own truth. Returns
+    the number of rows settled; never raises.
+    """
+    from app.core.task_registry import task_registry
+    from app.core.turn_recorder import record_task_settle_frame
+    from app.db.background_tasks import (
+        list_stale_nonterminal_background_tasks,
+        mark_background_task_killed,
+    )
+
+    try:
+        rows = await asyncio.to_thread(
+            list_stale_nonterminal_background_tasks, grace_seconds
+        )
+    except Exception:  # noqa: BLE001 — a sweep failure must never break cleanup
+        logger.warning("Stale background-task sweep query failed", exc_info=True)
+        return 0
+
+    settled = 0
+    for row in rows:
+        session_id = _row_value(row, "session_id", 1)
+        task_id = _row_value(row, "task_id", 0)
+        tool_use_id = _row_value(row, "tool_use_id", 2)
+        try:
+            if task_registry.get_task(session_id, task_id) is not None:
+                continue
+            await asyncio.to_thread(
+                mark_background_task_killed, task_id, session_id
+            )
+            if task_registry.mark_chipped(session_id, task_id, "terminal"):
+                await record_task_settle_frame(
+                    session_id, task_id, "killed",
+                    "Background task stopped (stale)",
+                    reason="stale_reap", tool_use_id=tool_use_id,
+                )
+            settled += 1
+            logger.warning(
+                "Stale-task sweep: settled orphaned background task %s "
+                "(session %s) — row was non-terminal with no registry record",
+                task_id, session_id,
+            )
+        except Exception:  # noqa: BLE001 — one bad row must not block the rest
+            logger.warning(
+                "Stale-task sweep: settling %s/%s failed", session_id, task_id,
+                exc_info=True,
+            )
+    return settled
+
+
 def _reset_orphaned_session_statuses() -> int:
     """Reset own-instance sessions stuck in a live-looking ``status``.
 

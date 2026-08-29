@@ -348,6 +348,30 @@ class TaskRegistry:
             return False
         return task_id in self._monitor_shell_tasks.get(session_id, set())
 
+    def has_running_monitor_shell(self, session_id: str) -> bool:
+        """True iff an app-spawned Monitor shell of this session is still running.
+
+        The routine (non-force) eviction cleanup consults this before tearing
+        down a session's registry state. A Monitor shell is an OS process
+        independent of the pooled SDK client, and its completion watcher wakes
+        the parked parent through a durable turn — but only while the registry
+        still holds the task's OWN-lane mark. Clearing the bucket mid-run both
+        suppressed that wake (the terminal frame failed
+        ``is_own_background_task``) and stranded the task "running" forever
+        (live 2026-08-29, task a0270e18: a CI-watch loop killed by an idle
+        eviction 3.5 minutes in, its chip stuck running for 45+ minutes).
+        Defensive: a missing ``session_id`` returns ``False``.
+        """
+        if not session_id:
+            return False
+        bucket = self._tasks.get(session_id)
+        if not bucket:
+            return False
+        return any(
+            (bucket.get(tid) or {}).get("status") == "running"
+            for tid in self._monitor_shell_tasks.get(session_id, set())
+        )
+
     def is_sdk_background_task(self, session_id: str, task_id: str) -> bool:
         """True iff ``task_id`` was recorded as an SDK-managed background task.
 

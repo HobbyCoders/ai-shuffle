@@ -22,10 +22,11 @@ This file keeps the reap mechanics themselves, which are unchanged.
 """
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.core.task_registry import task_registry
 from app.mcp import builtin_tools as bt
 
 
@@ -53,10 +54,12 @@ def _make_running_shell(task_id: str, session_id: str):
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
-    """Keep the module-global shell dict isolated per test."""
+    """Keep the module-global shell dict + task registry isolated per test."""
     bt._background_tasks.clear()
+    task_registry.reset_all()
     yield
     bt._background_tasks.clear()
+    task_registry.reset_all()
 
 
 async def test_reap_terminates_cancels_and_removes_session_shells():
@@ -132,3 +135,102 @@ async def test_reap_scheduler_runs_without_running_loop_guard():
         await asyncio.sleep(0)
 
     assert "t9" not in bt._background_tasks
+
+
+# =============================================================================
+# Terminal settle on reap (the 2026-08-29 stuck-"running" incident)
+# =============================================================================
+# The reap cancels the shell's _reader BEFORE terminating the process, so the
+# reader's own complete_task never runs. Without an explicit settle the killed
+# shell's task stayed "running" forever — in the registry, in the durable
+# background_tasks row, and on the UI chip built from them.
+
+async def test_reap_settles_running_registry_row_to_killed():
+    sid = "sess-settle"
+    task = _make_running_shell("t-set", sid)
+    bt._background_tasks["t-set"] = task
+    task_registry.start_task(sid, "t-set", "shell", "tail -f x")
+    task_registry.mark_monitor_shell_task(sid, "t-set")
+
+    await bt.stop_session_background_shells(sid)
+
+    rec = task_registry.get_task(sid, "t-set")
+    assert rec is not None
+    assert rec["status"] == "killed"
+
+
+async def test_reap_does_not_clobber_finished_registry_row():
+    """A shell that already completed keeps its terminal status through the
+    dict-growth reap of its entry."""
+    sid = "sess-done"
+    task = bt._BackgroundTask("t-fin", "echo hi", "/tmp", session_id=sid)
+    proc = MagicMock()
+    proc.returncode = 0  # already finished
+    proc.terminate = MagicMock()
+    task.process = proc
+    task._reader_task = None
+    bt._background_tasks["t-fin"] = task
+    task_registry.start_task(sid, "t-fin", "shell", "echo hi")
+    task_registry.complete_task(sid, "t-fin", "completed")
+
+    await bt.stop_session_background_shells(sid)
+
+    assert task_registry.get_task(sid, "t-fin")["status"] == "completed"
+
+
+async def test_reap_durable_settles_when_registry_already_cleared(mock_db):
+    """Teardown ordering at the call sites is clear_session → (async) reap, so
+    the registry row can already be gone when the reap runs. The settle must
+    then fall back to the durable background_tasks row AND emit the terminal
+    task.updated frame the frontend needs — a silent DB flip leaves the chip
+    stuck "running"."""
+    from app.db.background_tasks import get_background_task, upsert_background_task
+
+    sid = "sess-durable"
+    task = _make_running_shell("t-dur", sid)
+    bt._background_tasks["t-dur"] = task
+    upsert_background_task({
+        "task_id": "t-dur",
+        "session_id": sid,
+        "kind": "shell",
+        "tool_use_id": "toolu_dur",
+        "title": "loop",
+        "status": "running",
+    })
+    assert task_registry.get_task(sid, "t-dur") is None  # registry cleared
+
+    with patch(
+        "app.core.turn_recorder.record_task_settle_frame", new=AsyncMock()
+    ) as frame:
+        await bt.stop_session_background_shells(sid)
+
+    assert get_background_task("t-dur", sid)["status"] == "killed"
+    frame.assert_awaited_once()
+    args = frame.await_args
+    assert args.args[0] == sid
+    assert args.args[1] == "t-dur"
+    assert args.args[2] == "killed"
+    assert args.kwargs.get("tool_use_id") == "toolu_dur"
+
+
+async def test_reap_durable_settle_skips_already_terminal_row(mock_db):
+    """An already-terminal durable row is left alone (no re-flip, no frame)."""
+    from app.db.background_tasks import get_background_task, upsert_background_task
+
+    sid = "sess-durable-done"
+    task = _make_running_shell("t-td", sid)
+    bt._background_tasks["t-td"] = task
+    upsert_background_task({
+        "task_id": "t-td",
+        "session_id": sid,
+        "kind": "shell",
+        "status": "completed",
+    })
+
+    with patch(
+        "app.core.turn_recorder.record_task_settle_frame", new=AsyncMock()
+    ) as frame:
+        await bt.stop_session_background_shells(sid)
+
+    assert get_background_task("t-td", sid)["status"] == "completed"
+    frame.assert_not_awaited()
