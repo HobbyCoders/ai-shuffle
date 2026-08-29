@@ -10,10 +10,10 @@
 	 * direct git actions. Branch selector is locked during streaming.
 	 */
 	import { onDestroy, onMount } from 'svelte';
-	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert, CircleDot, CircleCheck, CircleX } from 'lucide-svelte';
+	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert, } from 'lucide-svelte';
 	import { git, gitSnapshot, gitMode } from '$lib/stores/git.svelte';
 	import { checkoutBranchWithToast } from '$lib/stores/gitCheckoutAction';
-	import { githubRepoInfo, githubChecks, githubChecksStale } from '$lib/stores/github.svelte';
+	import { githubRepoInfo } from '$lib/stores/github.svelte';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import { computeShowShipIt } from '$lib/stores/derived/ship-it-visibility';
 	import { computePrimaryAction, finishBlockedByMergeability, type PrimaryGitAction } from '$lib/stores/derived/git-primary-action';
@@ -148,13 +148,6 @@
 	// the snapshot is the fallback so the value can never disagree with the rest
 	// of the decision inputs.
 	const openPr = $derived(openPR ?? snapshot.openPr);
-
-	// CI verdict for this branch (wired to the workflow-runs pathway, refreshed
-	// on the same visibility-gated slow cadence as PR state).
-	const checks = $derived(
-		$githubChecks && currentBranch && $githubChecks.branch === currentBranch ? $githubChecks : null
-	);
-
 
 	// Upstream tracking branch state (for push/pull buttons)
 	const currentBranchInfo = $derived(snapshot.branches.find(b => b.current));
@@ -740,32 +733,6 @@
 		</div>
 	{/if}
 
-	<!-- CI status for the current branch. Fed by the (previously dead) workflow-
-	     runs pathway, refreshed on the same visibility-gated slow cadence as PR
-	     state — never a background poll. -->
-	{#if checks}
-		<a
-			class="ci-badge {checks.state}"
-			class:stale={$githubChecksStale}
-			href={checks.url}
-			target="_blank"
-			rel="noopener noreferrer"
-			title="{checks.name}: {checks.state === 'running' ? 'in progress' : (checks.conclusion ?? checks.state)}{$githubChecksStale ? ' (last known state — GitHub unreachable)' : ''}"
-			aria-label="CI {checks.state} for {checks.branch}"
-		>
-			{#if checks.state === 'success'}
-				<CircleCheck size={13} strokeWidth={1.75} />
-			{:else if checks.state === 'failure'}
-				<CircleX size={13} strokeWidth={1.75} />
-			{:else if checks.state === 'running'}
-				<Loader2 size={13} strokeWidth={1.75} class="spin" />
-			{:else}
-				<CircleDot size={13} strokeWidth={1.75} />
-			{/if}
-			<span class="btn-label">CI</span>
-		</a>
-	{/if}
-
 	<!-- Diff stats (clickable to open review panel) -->
 	{#if hasChanges}
 		<button
@@ -813,35 +780,6 @@
 	   current checkout revalidates — indicate it rather than flashing empty. */
 	.git-btn.stale {
 		opacity: 0.55;
-	}
-
-	.ci-badge {
-		display: inline-flex;
-		align-items: center;
-		gap: 4px;
-		padding: 3px 7px;
-		border-radius: 5px;
-		font-size: 11px;
-		line-height: 1;
-		text-decoration: none;
-		border: 1px solid transparent;
-		color: var(--text-secondary, #888);
-	}
-
-	.ci-badge.success {
-		color: var(--success, #3fb950);
-	}
-
-	.ci-badge.failure {
-		color: var(--error, #f85149);
-	}
-
-	.ci-badge.running {
-		color: var(--warning, #d29922);
-	}
-
-	.ci-badge.stale {
-		opacity: 0.6;
 	}
 
 	/* Subtle "this value is real but unconfirmed this cycle" marker. */

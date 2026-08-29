@@ -526,58 +526,6 @@ describe('GitHeaderActions failed PR lookup', () => {
 	});
 });
 
-// ── CI badge (the previously dead workflow-runs pathway) ────────────────────
-
-describe('GitHeaderActions CI badge', () => {
-	it('renders the CI verdict for the current branch', async () => {
-		cleanAheadBranch();
-		mocks.githubChecks.set({
-			branch: 'feature/x',
-			state: 'failure',
-			conclusion: 'failure',
-			name: 'build',
-			url: 'http://ci/1',
-			updatedAt: '2026-08-01T00:00:00Z'
-		});
-		renderHeader();
-		await tick();
-		expect(screen.getByLabelText('CI failure for feature/x')).toBeTruthy();
-	});
-
-	it('marks the badge stale when the last refresh could not reach GitHub (502)', async () => {
-		cleanAheadBranch();
-		mocks.githubChecks.set({
-			branch: 'feature/x',
-			state: 'success',
-			conclusion: 'success',
-			name: 'build',
-			url: 'http://ci/1',
-			updatedAt: '2026-08-01T00:00:00Z'
-		});
-		mocks.githubChecksStale.set(true);
-		renderHeader();
-		await tick();
-		// The badge is kept (a 502 is "unknown", not "no CI") and marked.
-		const badge = screen.getByLabelText('CI success for feature/x');
-		expect(badge.getAttribute('title')).toContain('last known state');
-	});
-
-	it('ignores a verdict for a different branch', async () => {
-		cleanAheadBranch();
-		mocks.githubChecks.set({
-			branch: 'other',
-			state: 'success',
-			conclusion: 'success',
-			name: 'build',
-			url: 'http://ci/2',
-			updatedAt: '2026-08-01T00:00:00Z'
-		});
-		renderHeader();
-		await tick();
-		expect(screen.queryByLabelText(/^CI /)).toBeNull();
-	});
-});
-
 // ── Open / close coordination ───────────────────────────────────────────────
 
 describe('GitHeaderActions option popover open/close', () => {
