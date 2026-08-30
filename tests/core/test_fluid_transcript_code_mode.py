@@ -72,6 +72,7 @@ def _tool_use(tool_use_id, name, input_):
         "node_id": None,
         "turn_id": "turn_1",
         "seq": -1,  # EventBus assigns the real seq at publish time
+        "ts": 0.0,  # like seq, stamped by EventBus.publish; 0.0 pre-publish
         "tool_use_id": tool_use_id,
         "name": name,
         "input": input_,
@@ -85,6 +86,7 @@ def _tool_result(tool_use_id, name, output, is_error=False):
         "node_id": None,
         "turn_id": "turn_1",
         "seq": -1,  # EventBus assigns the real seq at publish time
+        "ts": 0.0,  # like seq, stamped by EventBus.publish; 0.0 pre-publish
         "tool_use_id": tool_use_id,
         "name": name,
         "output": output,
