@@ -2028,6 +2028,117 @@ def test_code_mode_tools_section_carries_full_tool_documentation(agent_workspace
     assert compiled.text == "\n\n".join(s.text for s in compiled.sections)
 
 
+class _FakeRegistry:
+    """Just enough registry for the prompt: which specs exist, and which of
+    them sit in the deferred tier (schemas never loaded into the prefix)."""
+
+    def __init__(self, specs, deferred=()):
+        self._specs = list(specs)
+        self._deferred = set(deferred)
+
+    def list_tools(self, loaded_only: bool = True):
+        return [s for s in self._specs if not loaded_only or s.name not in self._deferred]
+
+    def deferred_tools(self):
+        return [s for s in self._specs if s.name in self._deferred]
+
+
+def _catalog_spec(name: str):
+    from fluid.tools.registry import ToolSpec
+
+    return ToolSpec(
+        name=name,
+        description=(
+            f"{name.split('__')[-1]}: manage the record and return it as JSON.\n"
+            "\n"
+            "Use this when the user asks to inspect or change configuration. "
+            "The response is a JSON object; parse it before reporting values, "
+            "and never invent an id that a previous call did not return.\n"
+            "Errors come back as {\"error\": ...} rather than raising."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "record_id": {"type": "string", "description": "Id of the record to act on."},
+                "name": {"type": "string", "description": "Human-readable name."},
+                "enabled": {"type": "boolean", "description": "Whether it is active."},
+                "mode": {
+                    "type": "string",
+                    "description": "How to apply the change.",
+                    "enum": ["replace", "merge", "append"],
+                    "default": "merge",
+                },
+                "payload": {"type": "object", "description": "Fields to write."},
+            },
+            "required": ["record_id"],
+        },
+    )
+
+
+def test_deferred_tools_collapse_to_name_and_one_liner(agent_workspace):
+    """Deferral was dead under code mode: every projected tool shipped its full
+    docstring and parameter table on every call. Deferred tools now cost one
+    catalog line each, and read_tool_docs serves the rest in the kernel."""
+    import app.core.provider.harness_adapter as ha
+    from fluid.tools.registry import ToolSpec
+
+    grep = ToolSpec(
+        name="Grep",
+        description="Search file contents with a regex.\n\nPrefer this over shell grep.",
+        input_schema={
+            "type": "object",
+            "properties": {"pattern": {"type": "string", "description": "The regex to run"}},
+            "required": ["pattern"],
+        },
+    )
+    deferred_specs = [
+        _catalog_spec(f"mcp__app-config__update_provider_{i}") for i in range(35)
+    ]
+    specs = [grep, *deferred_specs]
+    deferred_names = {s.name for s in deferred_specs}
+
+    def _compile(registry):
+        return ha.HarnessAdapter._compile_prompt_sections(
+            "BASE", None, _agents_options(agent_workspace),
+            code_mode=True, codemode=_FakeCodeMode(specs), registry=registry,
+        )
+
+    before = _compile(_FakeRegistry(specs))  # nothing deferred — the old shape
+    after = _compile(_FakeRegistry(specs, deferred_names))
+
+    # The core tool keeps its full block; the deferred ones lose theirs.
+    assert "## Grep" in after.text
+    assert "- pattern (str, required): The regex to run" in after.text
+    assert "## update_provider_0" not in after.text
+    assert "- record_id (str, required): Id of the record to act on." not in after.text
+    assert "Fields to write." not in after.text
+
+    # ...and are replaced by one catalog line each, under a header that says
+    # how to get the rest.
+    assert "## Deferred tools" in after.text
+    assert 'read_tool_docs("<name>")' in after.text
+    assert (
+        "- update_provider_0: update_provider_0: manage the record and return "
+        "it as JSON. [risk: safe]"
+    ) in after.text
+    for spec in deferred_specs:
+        leaf = spec.name.split("__")[-1]
+        assert f"- {leaf}: " in after.text
+
+    # Sections: one per fully documented tool, plus ONE collapsed section that
+    # names no tool (so the breakdown prices it as prompt, not as loaded tools).
+    tool_sections = [s for s in after.sections if s.kind == "tools"]
+    assert [s.tool_name for s in tool_sections] == ["Grep", ""]
+    assert tool_sections[-1].text.startswith("## Deferred tools")
+    assert len([s for s in before.sections if s.kind == "tools"]) == 36
+    assert after.text == "\n\n".join(s.text for s in after.sections)
+
+    # A deferred catalog must not expand every tool description into the prompt before those tools are loaded.
+    saved = len(before.text) - len(after.text)
+    assert saved > 20_000, f"only saved {saved} chars"
+    assert len(after.text) < len(before.text) * 0.35
+
+
 def test_code_mode_tools_section_skipped_without_a_projection(agent_workspace):
     """A codemode object with no projection (a double, a future refactor) must
     degrade to no section rather than failing the prompt."""

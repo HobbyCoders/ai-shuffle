@@ -2146,11 +2146,15 @@ class HarnessAdapter(ProviderAdapter):
                         text=_code_mode_section(),
                     )
                 )
-                # ... and the catalog it points at. ONE section per tool
-                # (kind "tools", tool_name set) so the usage breakdown prices
-                # each block under System/MCP tools like a JSON schema would
-                # be; empty (no projection) simply omits it.
-                for tool_text, tool_name in _code_mode_tool_sections(codemode, permit):
+                # ... and the catalog it points at. ONE section per fully
+                # documented tool (kind "tools", tool_name set) so the usage
+                # breakdown prices each block under System/MCP tools like a
+                # JSON schema would be; the deferred tier collapses into one
+                # trailing name+one-liner section. Empty (no projection) simply
+                # omits it.
+                for tool_text, tool_name in _code_mode_tool_sections(
+                    codemode, permit, registry=registry
+                ):
                     sections.append(
                         PromptSection(kind="tools", text=tool_text,
                                       tool_name=tool_name)
@@ -2968,9 +2972,13 @@ _CODE_MODE_SECTION_TEMPLATE = """# Code mode
 Your tool schema contains only run_python, list_tools, search_tools and \
 read_tool_docs. Every other tool named in these instructions — @REACHABLE@ \
 — is called from Python inside run_python. The "# Tools" \
-section below lists every tool with its Python signature and full \
-documentation; it is the same documentation those tools carry as direct tool \
-calls, so do not guess names or parameters.
+section below names every tool you can call and documents the core ones in \
+full — Python signature and parameter docs, the same documentation those tools \
+carry as direct tool calls, so do not guess names or parameters. A tool listed \
+there with only a one-line summary is deferred: its signature is not in this \
+prompt, so run `read_tool_docs("<name>")` once before you first call it. \
+Deferred tools import and behave like any other — deferral saves prompt space, \
+it never removes a capability.
 
 ## How calls work
 - `from tools.<name> import <name>`, then call it as an ordinary synchronous \
@@ -3060,8 +3068,9 @@ with a specific offset that a search hit justifies.
 
 ## Discovery
 list_tools returns the catalog, search_tools searches it by keyword, \
-read_tool_docs returns a tool's full stub. The "# Tools" section below already \
-contains all of this.
+read_tool_docs returns a tool's full stub. The "# Tools" section below is that \
+catalog: complete for the tools it documents in full, and read_tool_docs is \
+how you fill in a deferred one.
 
 ## Skills
 Two different things are called skills. The "# Available skills" list above is \
@@ -3167,7 +3176,65 @@ def _permitted_tool_names(options: SessionOptions, registry: Any) -> Optional[fr
     return frozenset(name for name in names if permit(name))
 
 
-def _code_mode_tool_sections(codemode: Any, permit=None) -> List[Tuple[str, str]]:
+def _deferred_tool_names(registry: Any, projection: Any = None) -> frozenset:
+    """Registry entries whose schemas are NOT loaded into the prompt prefix.
+
+    The registry is the source of truth, and it holds two tiers at once: the
+    in-proc servers the app defers by name (``DEFERRED_SDK_SERVERS``) and every
+    external MCP catalog, which ``connect_mcp`` registers deferred by
+    construction. Under code mode nothing ever loads those schemas — the model
+    has no ToolSearch, it has ``read_tool_docs`` — so they stay deferred for the
+    life of the session and the prompt must not pay for them.
+
+    Falls back to the projection's own view when there is no registry to ask
+    (older vendored fluid has neither, and then nothing collapses — the old
+    behaviour, never a wrong one).
+    """
+    if registry is not None:
+        try:
+            return frozenset(s.name for s in registry.deferred_tools())
+        except Exception:  # noqa: BLE001 — an unreadable registry must not kill the turn
+            logger.warning(
+                "[HarnessAdapter] could not read the deferred tool tier", exc_info=True
+            )
+            return frozenset()
+    try:
+        return frozenset(
+            projection.spec_for(leaf).name for leaf in projection.deferred_leaves()
+        )
+    except Exception:  # noqa: BLE001
+        return frozenset()
+
+
+def _catalog_one_liner(spec: Any, leaf: str) -> str:
+    """``<first line of the description> [risk: X]`` — the whole prompt budget a
+    deferred tool gets. Mirrors ``Projection.one_liner``; kept local so the
+    collapse works against the currently vendored fluid too."""
+    first = ""
+    for line in (getattr(spec, "description", "") or "").strip().splitlines():
+        if line.strip():
+            first = line.strip()
+            break
+    note = "" if getattr(spec, "code_mode_allowed", True) else "  [JSON-path only]"
+    return f"{first or leaf} [risk: {getattr(spec, 'risk', 'write')}]{note}"
+
+
+_DEFERRED_CATALOG_HEADER = (
+    "## Deferred tools\n"
+    "Imported and called exactly like the tools above "
+    "(`from tools.<name> import <name>`), but only their one-line summaries are "
+    'here. Run `read_tool_docs("<name>")` for the signature and parameter docs '
+    "before the first call to one — do not guess its parameters."
+)
+
+
+def _code_mode_tool_sections(
+    codemode: Any,
+    permit=None,
+    deferred: Optional[frozenset] = None,
+    *,
+    registry: Any = None,
+) -> List[Tuple[str, str]]:
     """Per-tool ``(section text, registry tool name)`` pairs for the catalog.
 
     One section per tool — not one blob — so fluid's context-usage breakdown
@@ -3194,6 +3261,16 @@ def _code_mode_tool_sections(codemode: Any, permit=None) -> List[Tuple[str, str]
     prompt is compiled BEFORE the engine is constructed (the code-mode rewrites
     depend on whether the session actually came up), so the projection this
     reads is still unfiltered at that moment.
+
+    ``deferred`` is the set of registry names whose schemas are not loaded (see
+    :func:`_deferred_tool_names`). Those collapse to ONE trailing section of
+    name + one-liner rows instead of a full block each — the tool stays every
+    bit as callable, and ``read_tool_docs`` serves the docs on demand. That
+    trailing section carries no ``tool_name``, so the usage breakdown prices it
+    under "System prompt" while fluid reports what the collapsed schemas WOULD
+    have cost in its deferred rows. Without it the app shipped full docstrings
+    and parameter tables for every MCP catalog entry on every single call:
+    ~19k of a 27k-token prompt in the session that surfaced this.
     """
     try:
         from fluid.codemode.projection import _annotation, _param_doc, _py_ident
@@ -3210,6 +3287,11 @@ def _code_mode_tool_sections(codemode: Any, permit=None) -> List[Tuple[str, str]
         return []
 
     blocks: list[str] = []
+    collapsed: list[str] = []
+    if deferred is None:
+        # The registry when there is one; otherwise the projection, which knows
+        # the tier itself once the vendored fluid carries it.
+        deferred = _deferred_tool_names(registry, projection)
     for leaf in leaves:
         spec = projection.spec_for(leaf)
         if spec is None or leaf in _CODE_MODE_CATALOG_SKIP:
@@ -3217,6 +3299,9 @@ def _code_mode_tool_sections(codemode: Any, permit=None) -> List[Tuple[str, str]
         if getattr(spec, "name", None) in _CODE_MODE_CATALOG_SKIP:
             continue
         if permit is not None and not permit(getattr(spec, "name", None) or leaf):
+            continue
+        if getattr(spec, "name", None) in deferred:
+            collapsed.append(f"- {leaf}: {_catalog_one_liner(spec, leaf)}")
             continue
         schema = getattr(spec, "input_schema", None) or {}
         props: dict = schema.get("properties") or {}
@@ -3257,6 +3342,12 @@ def _code_mode_tool_sections(codemode: Any, permit=None) -> List[Tuple[str, str]
                 ))
         blocks.append(("\n".join(lines), str(getattr(spec, "name", "") or leaf)))
 
+    if collapsed:
+        # One section, no tool_name: the rows are a catalog, not documentation,
+        # and pricing them per tool would report a deferred tool as loaded.
+        blocks.append(
+            ("\n".join([_DEFERRED_CATALOG_HEADER, *collapsed]), "")
+        )
     if not blocks:
         return []
     # The heading rides the first tool's section, so the joined text is
