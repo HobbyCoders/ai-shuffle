@@ -15,6 +15,9 @@ The spawner receives ``(input, ctx)`` and must return a ``BackgroundTaskReceipt`
 ``input``:
   * command — the shell command to run (required)
   * cwd     — working directory (default: the session cwd)
+  * serves  — the process is MEANT to stay up (a dev server, a tunnel). The
+              task is still registered, surfaced and stoppable, but it is kept
+              out of park accounting: see ``BackgroundTaskReceipt.serves``.
 
 Returning the receipt is the atomic detach boundary: the monitored process must
 outlive the originating HTTP request, WebSocket turn, and this tool coroutine.
@@ -27,7 +30,9 @@ build logs or CI results it never had to poll for.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import inspect
+import re
 from typing import Any
 
 from fluid.tools.builtins.bash_risk import classify as classify_bash_risk
@@ -74,8 +79,9 @@ def describe(tools: frozenset[str] | None = None) -> str:
     )
     closing = (
         "Prefer Monitor over a blocking Bash call whenever the wait is longer "
-        "than a few seconds: start it, keep doing useful work, and incorporate "
-        "the result when the completion arrives."
+        "than a few seconds — a project type-check, a webpack/vite/cargo "
+        "build, a full test suite, an install, a CI run: start it, keep doing "
+        "useful work, and incorporate the result when the completion arrives."
         if has("Bash")
         else "Start it, keep doing useful work, and incorporate the result "
         "when the completion arrives."
@@ -89,17 +95,29 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "\n"
         "Use it for anything slow enough to be worth overlapping with other "
         "work: CI runs, release and frontend builds, long test suites, "
-        "training jobs, waiting on a dev server to come up.\n"
+        "training jobs.\n"
         "\n"
         f"{wait_here}\n"
         "\n"
-        "**The command must exit.** The completion fires on exit and only on "
-        "exit, so an unbounded command (`tail -f`, `inotifywait -m`, a bare "
-        "`while true`) never wakes you — it just holds a slot until the "
-        "session ends. For \"tell me when X is ready\", give Monitor something "
-        "that ends on its own: the tool's own blocking wait subcommand where "
-        "one exists, otherwise a watch whose condition and overall time budget "
-        "both end it.\n"
+        "**The command must exit** — unless you set `serves`. The completion "
+        "fires on exit and only on exit, so an unbounded command (`tail -f`, "
+        "`inotifywait -m`, a bare `while true`) never wakes you — it just "
+        "holds the session parked until the session ends. For \"tell me when "
+        "X is ready\", give Monitor something that ends on its own: the job's "
+        "own blocking wait subcommand where one exists — for GitHub CI that "
+        "is `gh pr checks <PR> --watch --fail-fast`, which blocks until the "
+        "checks settle and exits non-zero on failure, so no loop of your own "
+        "is needed — otherwise a watch whose condition and overall time "
+        "budget both end it.\n"
+        "\n"
+        "**`serves: true` for a process that is MEANT to stay up** — a dev "
+        "server, a tunnel, a queue worker you need running while you work on "
+        "something else. A serving task is registered and visible like any "
+        "other, and you are notified if it dies, but the session does not "
+        "park on it: the turn that started it can end normally, and it is "
+        "never listed as pending work you are waiting for. Use it instead of "
+        "trying to make a server \"exit\", and never for a job whose result "
+        "you actually want.\n"
         "\n"
         "**Silence is not success.** The exit condition must cover every "
         "terminal state, not just the happy path. A watch that ends only on "
@@ -138,6 +156,16 @@ SPEC = ToolSpec(
                 "type": "string",
                 "description": CWD_PARAM,
             },
+            "serves": {
+                "type": "boolean",
+                "description": (
+                    "Set true for a process that is MEANT to stay up — a dev "
+                    "server, a tunnel, a queue worker. The task is registered "
+                    "and you are notified if it dies, but the session never "
+                    "parks on it, so the turn that starts it can end "
+                    "normally. Never set it for a job whose result you want."
+                ),
+            },
         },
         "required": ["command"],
     },
@@ -165,12 +193,146 @@ def started_text(task_id: str) -> str:
     )
 
 
+def serving_text(task_id: str) -> str:
+    """The receipt for a ``serves`` spawn. A serving task must NOT be read as
+    pending work: the session is not parked on it and no completion is coming
+    while it is healthy, so the receipt says so instead of leaving the model to
+    infer a wake that will never arrive."""
+    return (
+        f"Serving task {task_id} started and is expected to stay up. The "
+        "session is NOT parked on it — end the turn whenever this step is "
+        "done; no completion is coming while it is healthy, and you are "
+        "notified if it stops or dies. Do not sleep, poll, or check on it "
+        "yourself."
+    )
+
+
+# ─── Spawn-time lint ─────────────────────────────────────────────────────────
+#
+# The description already forbids an unbounded watch and demands a time budget,
+# and sessions still write them: an audited CI watcher looped on
+# ``case $s in *pending*|*""*)`` — where quote removal turns ``*""*`` into the
+# glob ``**``, matching every string — and held the session parked for 9m37s
+# past a green CI run until a force-reap killed it. Prose in a tool description
+# is read once; a warning stapled to the receipt is read at the moment the
+# mistake was made. Warn, never refuse: the model may know something the
+# patterns do not.
+
+# Shapes with no natural end. Matching one is not proof of a bug — a bound may
+# be supplied elsewhere in the command, which _TIME_BOUND_PATTERNS covers.
+_UNBOUNDED_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bwhile\s+(?:true|:)(?:\s|;|$)"), "a `while true` loop"),
+    (re.compile(r"\bwhile\s+\[\s*1\s*\]"), "a `while [ 1 ]` loop"),
+    (re.compile(r"\buntil\s"), "an `until` loop"),
+    (re.compile(r"\bfor\s*\(\(\s*;\s*;\s*\)\)"), "a `for((;;))` loop"),
+    (re.compile(r"\btail\s+(?:-[A-Za-z]*f\b|--follow)"), "`tail -f`"),
+    (re.compile(r"\binotifywait\b[^;|]*\s(?:-[A-Za-z]*m\b|--monitor)"),
+     "`inotifywait -m`"),
+    (re.compile(r"(?:^|[|;&]\s*)watch\s"), "the `watch` utility"),
+    (re.compile(
+        r"\b(?:journalctl|docker\s+logs|docker\s+compose\s+logs|kubectl\s+logs)"
+        r"\b[^;|]*(?:\s-[A-Za-z]*f\b|--follow)"
+    ), "a log follow"),
+)
+
+# Evidence that the command DOES carry a time budget or an iteration cap, so a
+# loop above will end on its own.
+_TIME_BOUND_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bg?timeout\s+(?:-\S+\s+)*\d"),      # timeout 900 …
+    re.compile(r"--(?:timeout|max-time|deadline|wait-timeout|time-limit)\b"),
+    re.compile(r"\btimeout=\d"),
+    re.compile(r"\bdate\s+\+%s"),                      # deadline arithmetic
+    re.compile(r"\$SECONDS\b|\bSECONDS="),
+    re.compile(r"\bin\s+\$\(\s*seq\b"),                # for i in $(seq 1 60)
+    re.compile(r"\bfor\s*\(\([^;]*;[^;]*[<>][^;]*;"),  # for ((i=0; i<60; i++))
+    re.compile(r"-(?:lt|le)\s"),                       # while [ $i -lt 60 ]
+)
+
+# ``*""*`` / ``*''*`` in a glob: quote removal collapses it to ``**``, which
+# matches every string, so the arm that was meant to catch one state catches
+# all of them and the loop's exit arm becomes dead code.
+_MATCH_ALL_GLOB = re.compile(r"\*(?:\"\"|'')\*")
+
+# Command shapes that are servers, not jobs — the case `serves` exists for.
+_SERVICE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve|watch)\b"),
+    re.compile(r"\b(?:vite|nodemon|http-server|live-server|serve)\b"),
+    re.compile(r"\bnext\s+(?:dev|start)\b"),
+    re.compile(r"\b(?:uvicorn|gunicorn|hypercorn|daphne|waitress-serve)\b"),
+    re.compile(r"\bflask\s+run\b|\bpython\s+-m\s+http\.server\b|\bmanage\.py\s+runserver\b"),
+    re.compile(r"\brails\s+s(?:erver)?\b|\bphp\s+-S\b|\bgo\s+run\s+\S*\bserve"),
+    re.compile(r"\bngrok\b|\bcloudflared\b|\bssh\s+-[A-Za-z]*[LRD]\b"),
+    re.compile(r"\bdocker(?:\s+compose)?\s+up\b(?![^;|]*\s-d\b)"),
+)
+
+
+def _matches_any(command: str, patterns: Any) -> bool:
+    return any(pattern.search(command) for pattern in patterns)
+
+
+def unbounded_reason(command: str) -> str | None:
+    """The shape that makes ``command`` unbounded, or None if it will end.
+
+    A command carrying its own bound (``timeout``, deadline arithmetic, an
+    iteration cap) is never reported, however loop-shaped it looks.
+    """
+    if _matches_any(command, _TIME_BOUND_PATTERNS):
+        return None
+    for pattern, reason in _UNBOUNDED_PATTERNS:
+        if pattern.search(command):
+            return reason
+    return None
+
+
+def spawn_warning(command: str, *, serves: bool = False) -> str | None:
+    """A pointed warning to staple onto the receipt, or None when clean."""
+    parts: list[str] = []
+    if _MATCH_ALL_GLOB.search(command):
+        parts.append(
+            "Warning — the glob `*\"\"*` (or `*''*`) in this command collapses "
+            "to `**` after quote removal and matches EVERY string, so the "
+            "branch it guards always wins and the arm that was meant to end "
+            "the loop is dead code. Match the literal state names instead."
+        )
+    if not serves:
+        if _matches_any(command, _SERVICE_PATTERNS):
+            parts.append(
+                "Warning — this looks like a server or tunnel, i.e. a process "
+                "meant to stay up. It has no completion to wake you with, so "
+                "as a plain Monitor job it holds the session parked until the "
+                "session ends. If it is meant to stay up, re-run it with "
+                "`serves: true`; if you want a result, run the thing that "
+                "produces one."
+            )
+        else:
+            reason = unbounded_reason(command)
+            if reason is not None:
+                parts.append(
+                    f"Warning — this command has no time budget: {reason} with "
+                    "no `timeout`, deadline, or iteration cap. It will hold "
+                    "the park until the session ends and you will never be "
+                    "woken. Add a bound (wrap it in `timeout 900 ...`, or "
+                    "compute a deadline and break on it), use the job's own "
+                    "blocking wait instead (`gh pr checks <PR> --watch "
+                    "--fail-fast` for GitHub CI), or — if the process is MEANT "
+                    "to stay up — re-run with `serves: true`."
+                )
+    if not parts:
+        return None
+    return "\n\n".join(parts)
+
+
+def _receipt_text(task_id: str, *, serves: bool) -> str:
+    return serving_text(task_id) if serves else started_text(task_id)
+
+
 def _receipt_from(result: Any, input: dict[str, Any]) -> ToolOutcome:
+    serves = bool(input.get("serves"))
     if isinstance(result, ToolOutcome):
         return result
     if isinstance(result, BackgroundTaskReceipt):
         return ToolOutcome(
-            text=started_text(result.task_id),
+            text=_receipt_text(result.task_id, serves=serves or result.serves),
             background_task=result,
         )
     if isinstance(result, dict) and result.get("task_id"):
@@ -186,12 +348,13 @@ def _receipt_from(result: Any, input: dict[str, Any]) -> ToolOutcome:
                 or input.get("label")
                 or input.get("command")
             ),
+            serves=bool(result.get("serves", serves)),
         )
         return ToolOutcome(
             text=str(
                 result.get("text")
                 or result.get("message")
-                or started_text(receipt.task_id)
+                or _receipt_text(receipt.task_id, serves=receipt.serves)
             ),
             ui=result.get("ui", result),
             is_error=bool(result.get("is_error", False)),
@@ -200,8 +363,31 @@ def _receipt_from(result: Any, input: dict[str, Any]) -> ToolOutcome:
     return ToolOutcome(text=str(result))
 
 
+def _with_serves(outcome: ToolOutcome, serves: bool) -> ToolOutcome:
+    """Stamp ``serves`` onto the receipt when the CALLER asked for it.
+
+    The host spawner may not know about the flag (it predates this, or it
+    simply passes the input through), but park accounting reads it off the
+    receipt — so fluid, which owns the tool's shape, is what guarantees it is
+    there. A host that DID set it wins; nothing here ever clears it.
+    """
+    receipt = outcome.background_task
+    if receipt is None or not serves or receipt.serves:
+        return outcome
+    return dataclasses.replace(
+        outcome, background_task=dataclasses.replace(receipt, serves=True)
+    )
+
+
+def _with_warning(outcome: ToolOutcome, warning: str | None) -> ToolOutcome:
+    if not warning or outcome.is_error:
+        return outcome
+    return dataclasses.replace(outcome, text=f"{outcome.text}\n\n{warning}")
+
+
 async def _spawn_detached(spawn: Any, input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
-    outcome = _receipt_from(await spawn(input, ctx), input)
+    serves = bool(input.get("serves"))
+    outcome = _with_serves(_receipt_from(await spawn(input, ctx), input), serves)
     receipt = outcome.background_task
     if receipt is None or outcome.is_error:
         return outcome
@@ -210,7 +396,10 @@ async def _spawn_detached(spawn: Any, input: dict[str, Any], ctx: ToolCtx) -> To
         notified = started(receipt)
         if inspect.isawaitable(notified):
             await notified
-    return outcome
+    return _with_warning(
+        outcome,
+        spawn_warning(str(input.get("command") or ""), serves=receipt.serves),
+    )
 
 
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
