@@ -237,6 +237,37 @@ def _registry_kind(session_id: str, task_id: Any) -> Dict[str, Any]:
         return {}
 
 
+def _registry_tool_use_id(session_id: str, task_id: Any) -> Optional[str]:
+    """The launch ``tool_use_id`` the registry bound to ``task_id``, if any.
+
+    Host Monitor shells learn their launching tool_use_id from the spawner, not
+    from the frame that announces them, so the start/terminal rows have to read
+    it back off the registry or the frontend card join has nothing to key on.
+    Best-effort: unknown ids and a raising registry return ``None``.
+    """
+    if not task_id:
+        return None
+    try:
+        from app.core.task_registry import task_registry
+        return task_registry.get_task_tool_use_id(session_id, str(task_id))
+    except Exception:  # noqa: BLE001 — a join key must never break recording
+        return None
+
+
+def _latch_start_chip(session_id: str, task_id: str) -> bool:
+    """``True`` the FIRST time a start row is recorded for ``task_id``.
+
+    Thin wrapper over ``task_registry.mark_chipped(..., "start")`` so a registry
+    failure degrades to "record it" (a duplicate running row folds onto the same
+    summary in the reducer; a dropped one would leave a running task invisible).
+    """
+    try:
+        from app.core.task_registry import task_registry
+        return task_registry.mark_chipped(session_id, task_id, "start")
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def _translate_shared(
     event: Dict[str, Any],
     session_id: str,
@@ -331,14 +362,33 @@ def _translate_shared(
             "task_progress": "running",
             "task_notification": "notified",
         }[etype]
+        task_id = event.get("task_id") or ""
+        tool_use_id = event.get("tool_use_id")
+        if etype == "task_started":
+            # ONE durable start row per task, whoever emits first (item 4). Both
+            # the shell spawner (app/mcp/builtin_tools._spawn_background) and the
+            # in-stream TaskStarted mirror produce this frame for the SAME host
+            # Monitor shell; the shared ``mark_chipped(..., "start")`` latch —
+            # the one the terminal surface already sets — makes the second a
+            # no-op. Cleared on a genuine resume (task_registry.start_task) so a
+            # revived agent paints a running chip again.
+            if task_id and not _latch_start_chip(session_id, task_id):
+                return []
+            # Host Monitor shells carry no tool_use_id on their SubagentEvent
+            # (fluid's event has no such field), so the terminal chip could not
+            # join the launching card. The registry knows it — the spawner binds
+            # it at start_task — so enrich here, exactly as the system/
+            # task_updated branch below already does.
+            if not tool_use_id:
+                tool_use_id = _registry_tool_use_id(session_id, task_id)
         return [_build_event(
             contract.TaskUpdated, session_id,
-            task_id=event.get("task_id") or "",
+            task_id=task_id,
             state=str(state),
             description=event.get("description"),
             summary=event.get("summary"),
-            tool_use_id=event.get("tool_use_id"),
-            **_registry_kind(session_id, event.get("task_id")),
+            tool_use_id=tool_use_id,
+            **_registry_kind(session_id, task_id),
             **kw,
         )]
 
@@ -1509,6 +1559,41 @@ async def record_voice_exchange(
             exc_info=True,
         )
         return None
+
+
+async def record_task_start_frame(
+    session_id: str,
+    task_id: Optional[str],
+    *,
+    description: Optional[str] = None,
+    tool_use_id: Optional[str] = None,
+    summary: Optional[str] = None,
+) -> None:
+    """Emit the durable RUNNING task frame that puts a task on the chip strip.
+
+    The mirror of :func:`record_task_settle_frame` for the START of a task's
+    life, and the reason a long-lived background shell is now visible after a
+    reload or a session switch: ``deriveActiveTasks`` (feed-controller.ts) is
+    built purely from ``task.updated`` summaries, so before this frame the only
+    surface a running Monitor shell had was the LIVE feed of the turn that
+    spawned it — nothing durable, nothing to replay.
+
+    ``status`` is an explicit ``running`` (rather than the per-type ``started``
+    default) to match the ProviderAgent worker's start frame; the reducer keeps
+    only ``running`` summaries on the strip.
+
+    Deduped downstream by the shared ``mark_chipped(..., "start")`` latch in
+    :func:`_translate_shared`, so a task whose in-stream ``TaskStarted`` also
+    lands records exactly ONE row. Never raises.
+    """
+    await record_drained_event(session_id, {
+        "type": "task_started",
+        "task_id": task_id,
+        "status": "running",
+        "description": description,
+        "summary": summary,
+        "tool_use_id": tool_use_id,
+    })
 
 
 async def record_task_settle_frame(

@@ -326,10 +326,72 @@ def reap_session_background_shells(session_id: str) -> None:
     t.add_done_callback(_reap_tasks.discard)
 
 
+async def _emit_shell_start_frame(
+    session_id: str, task_id: str, command: str, tool_use_id: Optional[str]
+) -> None:
+    """Durable RUNNING chip row for a freshly spawned Monitor shell.
+
+    A Monitor shell is the one background task with NO durable start-phase
+    surface of its own: the SDK/fluid ``TaskStarted`` mirror only exists on the
+    native leg, and the terminal-surface guarantee
+    (``chat_ws_handler._surface_terminal_notification``) fires on FAILURE only.
+    So "I asked the agent to run the app" left nothing in the log to replay and
+    the running server vanished from the chip strip on reload or session switch.
+
+    Latched once per task lifetime, sharing the ``mark_chipped(..., "start")``
+    latch with the in-stream mirror (``turn_recorder._translate_shared``), so
+    the native leg — where both fire — still records exactly one row.
+    """
+    try:
+        from app.core.turn_recorder import record_task_start_frame
+
+        await record_task_start_frame(
+            session_id, task_id, description=command, tool_use_id=tool_use_id,
+        )
+    except Exception:  # noqa: BLE001 — a chip must never break a spawn
+        logger.debug(
+            f"start frame for background shell {task_id} failed", exc_info=True
+        )
+
+
+async def _emit_shell_settle_frame(
+    session_id: str, task_id: str, status: str
+) -> None:
+    """Durable terminal chip row for a Monitor shell that ran to completion.
+
+    ``complete_task``'s guaranteed terminal notification covers error/killed
+    only, so before this a CLEANLY completed shell settled in the registry and
+    in ``background_tasks`` but appended nothing to the event log — and the
+    reducer deliberately exempts ``kind === 'shell'`` summaries from the
+    turn-completed staleness heal, so the chip this task's start row painted
+    would have replayed as "running" forever.
+
+    Shares the ``mark_chipped(..., "terminal")`` latch with every other terminal
+    producer, so the failure path (which routes through the terminal-surface
+    guarantee) still emits exactly one row and history shows one entry per task.
+    """
+    try:
+        from app.core.task_registry import task_registry
+        from app.core.turn_recorder import record_task_settle_frame
+
+        if not task_registry.mark_chipped(session_id, task_id, "terminal"):
+            return
+        record = task_registry.get_task(session_id, task_id) or {}
+        await record_task_settle_frame(
+            session_id, task_id, status, record.get("summary"),
+            tool_use_id=record.get("tool_use_id"),
+        )
+    except Exception:  # noqa: BLE001 — a chip must never break a completion
+        logger.debug(
+            f"settle frame for background shell {task_id} failed", exc_info=True
+        )
+
+
 async def _spawn_background(
     command: str,
     cwd: Optional[str],
     session_id: Optional[str] = None,
+    tool_use_id: Optional[str] = None,
 ) -> _BackgroundTask:
     task_id = str(uuid.uuid4())[:8]
     task = _BackgroundTask(task_id=task_id, command=command, cwd=cwd, session_id=session_id)
@@ -364,8 +426,15 @@ async def _spawn_background(
     if session_id:
         from app.core.task_registry import task_registry
         _registry_safe(
-            lambda: task_registry.start_task(session_id, task_id, "shell", command)
+            lambda: task_registry.start_task(
+                session_id, task_id, "shell", command, tool_use_id=tool_use_id,
+            )
         )
+        # Durable RUNNING chip. Awaited (not fire-and-forget) so the row is in
+        # the log before the spawner hands its receipt back to the model — a
+        # turn that ends immediately after must not race the frame that makes
+        # its shell visible.
+        await _emit_shell_start_frame(session_id, task_id, command, tool_use_id)
 
     async def _reader() -> None:
         assert proc.stdout is not None
@@ -391,6 +460,8 @@ async def _spawn_background(
             from app.core.task_registry import task_registry
             status = "completed" if task.exit_code == 0 else "error"
 
+            settled: Dict[str, Any] = {}
+
             def _finish() -> None:
                 # Don't clobber a deliberate TaskStop "killed" with the reader's
                 # "error" (terminate() yields a non-zero exit code).
@@ -400,8 +471,14 @@ async def _spawn_background(
                 if existing == "killed":
                     return
                 task_registry.complete_task(session_id, task_id, status)
+                settled["status"] = status
 
             _registry_safe(_finish)
+            # Terminal chip row. complete_task's guaranteed notification covers
+            # error/killed; this is what settles a shell that exited cleanly, so
+            # the running chip its start row painted resolves on replay too.
+            if settled.get("status"):
+                await _emit_shell_settle_frame(session_id, task_id, status)
 
     task._reader_task = asyncio.create_task(_reader(), name=f"monitor-{task_id}")
     _background_tasks[task_id] = task

@@ -94,6 +94,39 @@ describe('SystemMessage — task_updated / task_notification', () => {
 		expect(container.querySelector('.text-green-500')).toBeNull();
 	});
 
+	// Audit item 4: `task_started` used to render `hidden: true` — the ONE row
+	// that says a background task is running never reached the transcript, so a
+	// dev server launched through Monitor had no visible affordance at all until
+	// it died. It now renders as the running twin of the task_updated chip.
+	it('renders task_started as a running Task chip instead of hiding it', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'task_started',
+					systemData: { task_id: 'srv00001', description: 'npm run dev' }
+				})
+			}
+		});
+
+		expect(screen.getByText('Task')).toBeTruthy();
+		expect(screen.getByText('running')).toBeTruthy();
+		expect(screen.getByText('npm run dev')).toBeTruthy();
+		expect(container.querySelector('.animate-spin')).not.toBeNull();
+	});
+
+	it('falls back to the 8-char task id on a description-less task_started', () => {
+		render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'task_started',
+					systemData: { task_id: 'abcd1234ef' }
+				})
+			}
+		});
+
+		expect(screen.getByText('abcd1234')).toBeTruthy();
+	});
+
 	it('renders a red X for a failed task', () => {
 		const { container } = render(SystemMessage, {
 			props: {

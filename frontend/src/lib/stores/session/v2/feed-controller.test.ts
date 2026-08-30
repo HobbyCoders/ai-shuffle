@@ -878,6 +878,69 @@ describe('feedController activeTasks', () => {
 		flushRaf();
 		expect(deps.state.activeTasks as unknown[]).toHaveLength(0);
 	});
+
+	// Audit item 4: a long-lived Monitor shell (a dev server) now records a
+	// durable RUNNING row at spawn, so a REPLAY of the log — which is what a
+	// reload and a session switch both do — has to repaint the strip with it.
+	it('replays a running shell onto the strip on a from_seq=0 hydration', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+
+		// Backfill (pre-`caught_up`): the spawn row, no terminal row after it.
+		hoisted.onEvent!(
+			taskUpdated('sh1', 'running', {
+				kind: 'shell',
+				description: 'npm run dev',
+				tool_use_id: null,
+			})
+		);
+		hoisted.onEvent!(caughtUp(1));
+		flushRaf();
+
+		const active = deps.state.activeTasks as Array<{ id: string; kind: string }>;
+		expect(active).toHaveLength(1);
+		expect(active[0].id).toBe('sh1');
+		expect(active[0].kind).toBe('shell');
+	});
+
+	it('settles a shell with no tool_use_id on its terminal row', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+
+		hoisted.onEvent!(
+			taskUpdated('sh2', 'running', { kind: 'shell', tool_use_id: null })
+		);
+		flushRaf();
+		expect(deps.state.activeTasks as unknown[]).toHaveLength(1);
+
+		hoisted.onEvent!(
+			taskUpdated('sh2', 'completed', { kind: 'shell', tool_use_id: null })
+		);
+		flushRaf();
+		expect(deps.state.activeTasks as unknown[]).toHaveLength(0);
+	});
+
+	it('a running shell survives turn.completed (the staleness heal exempts shells)', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+
+		hoisted.onEvent!(taskUpdated('sh3', 'running', { kind: 'shell' }));
+		hoisted.onEvent!({
+			type: 'turn.completed',
+			id: 'evt-turn-done',
+			seq: 0,
+			session_id: 's1',
+			created_at: '2026-07-12T00:00:00.000Z',
+		});
+		flushRaf();
+
+		expect(deps.state.activeTasks as unknown[]).toHaveLength(1);
+	});
 });
 
 // ─── Browser-panel auto-open on a live browser tool.use ──────────────────────
