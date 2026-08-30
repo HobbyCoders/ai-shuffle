@@ -113,7 +113,13 @@ from fluid.messages import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from fluid.permissions.engine import PROMPT_DENIAL, PermissionEngine, plan_mode_tools
+from fluid.permissions.engine import (
+    PROMPT_DENIAL,
+    PermissionEngine,
+    plan_mode_blocks,
+    plan_mode_denial,
+    plan_mode_tools,
+)
 from fluid.providers.base import ProviderClient, ProviderRequest
 from fluid.store.base import SessionMeta, SessionNode, SessionStore, new_id
 from fluid.tools.builtins._util import resolve as resolve_tool_path
@@ -599,8 +605,13 @@ class NativeLoop(BackgroundLifecycleMixin):
             # Ruling T9: code-mode discovery, the projected kernel VFS, and the
             # in-kernel host-call gate all see this session's tool surface, so
             # a filtered tool is never described and never callable from code.
+            # Plan mode rides in as a live predicate for the same reason: the
+            # mode ends mid-turn, and a snapshot taken at construction would
+            # keep the kernel read-only for the rest of the session.
             register_code_mode_tools(
-                registry, codemode, tool_filter=self._tool_available
+                registry, codemode,
+                tool_filter=self._tool_available,
+                plan_mode=lambda: self.plan_mode,
             )
         # ``None`` means unlimited: the provider stays the source of truth for
         # when a turn has to stop. Every comparison below guards that case.
@@ -1823,20 +1834,34 @@ class NativeLoop(BackgroundLifecycleMixin):
         return not _matches_tool_pattern(name, self.disallowed_tools)
 
     def _tool_available(self, name: str) -> bool:
-        """Permitted *and* backed by a wired host capability.
+        """Permitted, plan-mode-allowed, *and* backed by a wired host capability.
 
         The JSON surface drops a ``requires_extra`` tool whose injection is
         missing (:meth:`_capability_present`), but code mode projected it
         anyway — so a kernel cell could import ``SessionSearch`` and get
         "unavailable: no session store directory injected" back as a tool
         error. Absent capability must be invisible on both surfaces.
+
+        Plan mode is here for the mirror-image reason. It used to live only in
+        :meth:`_tools_api`'s non-codemode branch, i.e. only in the request
+        schemas — so a code-mode session in "plan mode" was handed a kernel
+        that still had ``Write`` in it, and ``from tools import Write`` wrote
+        the file while the Plan tool's own result claimed write tools had left
+        the surface. This predicate is what code mode filters its projection
+        and its discovery tools through, so the withholding now happens on the
+        surface the model actually uses. It is read live: an approval that ends
+        plan mode mid-turn puts the tools back on the next call.
         """
         if not self._tool_permitted(name):
             return False
         if self.registry is None:
             return True
         spec = self.registry.get(name)
-        return spec is None or self._capability_present(spec)
+        if spec is None:
+            return True
+        if self.plan_mode and plan_mode_blocks(spec):
+            return False
+        return self._capability_present(spec)
 
     def _tools_api(self) -> list[dict[str, Any]]:
         """The tool schemas the next request would carry (code-mode surface or
@@ -1847,7 +1872,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         if self._codemode is not None:
             # Code-mode replaces N schemas with the four-tool surface; the
             # work-tools stay in the registry (reachable via host calls) but
-            # never enter the prompt schema.
+            # never enter the prompt schema. Plan mode therefore has nothing to
+            # filter HERE — the four tools are all ``safe``, and the write tools
+            # it withholds are not on this surface to begin with. It is enforced
+            # where code mode actually reaches them: the projection and the
+            # host-call gate (both via :meth:`_tool_available`), plus
+            # :meth:`_gated_call`.
             specs = [
                 s for s in self.registry.list_tools(loaded_only=True)
                 if s.source == "codemode"
@@ -2292,6 +2322,18 @@ class NativeLoop(BackgroundLifecycleMixin):
                 ),
             )
         spec = self.registry.get(name)
+
+        # Plan mode's last wall. The JSON surface withholds write schemas while
+        # planning, so a call arriving here names a tool the model was never
+        # offered — but code mode reaches this path from a kernel, where the
+        # model writes the call itself, and "the schema was withheld" enforces
+        # nothing. Live flag: an approval that ends plan mode mid-turn lets the
+        # very next call of the same turn through.
+        if self.plan_mode and spec is not None and plan_mode_blocks(spec):
+            return await self._finish_tool(
+                sid, turn_id, name, tool_use_id,
+                ToolOutcome(text=plan_mode_denial(name), is_error=True),
+            )
 
         # PreToolUse hook: deny short-circuits with an in-context error result;
         # modify replaces the input before permissions/dispatch see it.
