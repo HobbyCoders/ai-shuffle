@@ -82,9 +82,9 @@ describe('browserPanel width clamp + persistence', () => {
 		expect(browserPanel.current.width).toBe(320);
 	});
 
-	it('clamps above the maximum to 960', () => {
-		browserPanel.setWidth(5000);
-		expect(browserPanel.current.width).toBe(960);
+	it('does not cap widths above the old 960px maximum', () => {
+		browserPanel.setWidth(1400);
+		expect(browserPanel.current.width).toBe(1400);
 	});
 
 	it('keeps an in-range width (rounded)', () => {

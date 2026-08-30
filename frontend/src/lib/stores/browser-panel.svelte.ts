@@ -61,7 +61,6 @@ interface BrowserPanelState {
 const STORAGE_KEY = 'ai-shuffle-browser-panel';
 const DEFAULT_WIDTH = 480;
 const MIN_WIDTH = 320;
-const MAX_WIDTH = 960;
 
 // ============================================
 // Persistence (width only)
@@ -69,7 +68,10 @@ const MAX_WIDTH = 960;
 
 function clampWidth(width: number): number {
 	if (!Number.isFinite(width)) return DEFAULT_WIDTH;
-	return Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, Math.round(width)));
+	// No hardcoded max — the panel may fill the chat inner area up to the
+	// sidebar. Layout (CSS max-width: 100% + drag clamp to the parent) is
+	// the ceiling.
+	return Math.max(MIN_WIDTH, Math.round(width));
 }
 
 function loadPersistedWidth(): number {
@@ -225,7 +227,7 @@ export const browserPanel = {
 		_update((s) => ({ ...s, selectedElement: element }));
 	},
 
-	/** Set the panel width (clamped 320–960) and persist it. */
+	/** Set the panel width (clamped to a 320px minimum) and persist it. */
 	setWidth(width: number) {
 		const clamped = clampWidth(width);
 		_update((s) => ({ ...s, width: clamped }));

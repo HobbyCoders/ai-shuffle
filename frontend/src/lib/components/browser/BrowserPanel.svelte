@@ -227,17 +227,23 @@
 	}
 
 	// ── Left-edge drag resize (docked mode only) ───────────────────────────
+	let panelEl: HTMLElement | undefined = $state();
 	let isResizing = $state(false);
 	function startResize(e: PointerEvent) {
 		if (isFullscreen) return; // fullscreen overlay isn't resizable
 		e.preventDefault();
 		isResizing = true;
 		const startX = e.clientX;
-		const startWidth = width;
+		// Use the rendered width so a CSS-capped panel (max-width: 100%)
+		// starts shrinking immediately instead of eating leftover stored px.
+		const rendered = panelEl?.getBoundingClientRect().width;
+		const startWidth = rendered && rendered > 0 ? rendered : width;
+		const parentWidth = panelEl?.parentElement?.clientWidth ?? Number.POSITIVE_INFINITY;
 
 		function onMove(ev: PointerEvent) {
 			// Panel is docked at the right edge → dragging left widens it.
-			browserPanel.setWidth(startWidth + (startX - ev.clientX));
+			// Ceiling is the chat inner panel (`.chat-row`), which stops at the sidebar.
+			browserPanel.setWidth(Math.min(parentWidth, startWidth + (startX - ev.clientX)));
 		}
 		function onUp() {
 			isResizing = false;
@@ -322,6 +328,7 @@
 
 {#if open}
 	<aside
+		bind:this={panelEl}
 		class="browser-panel"
 		class:fullscreen={isFullscreen}
 		class:resizing={isResizing}
@@ -585,6 +592,8 @@
 		background: var(--background);
 		border-left: 1px solid var(--border);
 		overflow: hidden;
+		/* Fill at most the chat inner panel (`.chat-row`), which ends at the sidebar. */
+		max-width: 100%;
 	}
 
 	.browser-panel.resizing {
