@@ -134,7 +134,8 @@ SPEC = ToolSpec(
         "Find and load deferred tools (e.g. MCP server tools) so they can be "
         "called. Deferred tools are known by name and description but their "
         "schemas stay out of context until loaded here. Query forms: "
-        "'select:<name>[,<name>...]' loads those exact tools; any other text "
+        "'select:<name>[,<name>...]' loads those exact tools (names it does "
+        "not recognise are reported, the rest still load); any other text "
         "is a keyword search over names + descriptions. Once a tool's schema "
         "appears in the result, it is callable from your next reply."
     ),
@@ -160,6 +161,28 @@ SPEC = ToolSpec(
     # the request schemas (nothing to search without a registry).
     requires_extra=("tool_registry",),
 )
+
+
+# ── code-mode rendering ──
+# Called from inside run_python, the wire name (``mcp__browser__navigate``) is
+# exactly the wrong thing to print: the kernel mounts tools under the leaf name
+# (``navigate``), the wire name is not importable, and "callable from your next
+# reply" is false — a loaded tool is importable in the very next cell. One
+# audited session burned twelve model calls on that gap.
+
+
+def _kernel_name(tool_name: str) -> str:
+    """The leaf the code-mode VFS mounts a tool under (``fluid.codemode.projection``)."""
+    return tool_name.split("__")[-1]
+
+
+def _import_lines(specs: Sequence[ToolSpec]) -> str:
+    out = []
+    for spec in specs:
+        leaf = _kernel_name(spec.name)
+        wire = f"  (wire name: {spec.name})" if leaf != spec.name else ""
+        out.append(f"- {leaf}: from tools.{leaf} import {leaf}{wire}")
+    return "\n".join(out)
 
 
 def _spec_line(spec: ToolSpec) -> str:
@@ -192,14 +215,23 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     def visible(name: str) -> bool:
         return tool_filter is None or bool(tool_filter(name))
 
+    note = ""
     if query.startswith("select:"):
         names = [n.strip() for n in query[len("select:"):].split(",") if n.strip()]
-        missing = [n for n in names if registry.get(n) is None or not visible(n)]
-        if missing:
+        known = [n for n in names if registry.get(n) is not None and visible(n)]
+        missing = [n for n in names if n not in known]
+        # Partial success: one mistyped name used to throw away the whole call,
+        # including the names that were right.
+        if not known:
             return ToolOutcome(
                 text=f"unknown tool(s): {', '.join(missing)}", is_error=True
             )
-        specs = [registry.load_schema(n) for n in names]
+        if missing:
+            note = (
+                f"\nNot loaded — no such tool: {', '.join(missing)}. Search by "
+                "keyword to find the right name."
+            )
+        specs = [registry.load_schema(n) for n in known]
     else:
         specs = [s for s in registry.search_tools(query) if visible(s.name)][:limit]
         specs = [registry.load_schema(s.name) for s in specs]
@@ -209,8 +241,14 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             text=f"no tools matched {query!r}; try different keywords."
         )
     lines = "\n".join(_spec_line(s) for s in specs)
-    return ToolOutcome(
-        text=(
-            f"Loaded {len(specs)} tool(s) — callable from your next reply:\n{lines}"
+    if (ctx.extra or {}).get("in_kernel_call"):
+        head = (
+            f"Loaded {len(specs)} tool(s). In this session tools are called "
+            "from run_python, so import each one by its kernel name:\n"
+            f"{_import_lines(specs)}\n"
+            "Schemas (the wire form; the kernel stub takes the same "
+            f"parameters):\n{lines}"
         )
-    )
+    else:
+        head = f"Loaded {len(specs)} tool(s) — callable from your next reply:\n{lines}"
+    return ToolOutcome(text=head + note)

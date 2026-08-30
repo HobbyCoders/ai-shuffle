@@ -186,11 +186,16 @@ _UNQUOTED_HINT = (
 )
 
 _UNTERMINATED_HINT = (
-    "Hint: the string literal never closes. Do not nest a shell heredoc "
-    "(<<'EOF') or a long multi-line body inside a Python string — assign the "
-    "text to a triple-quoted variable, or Write it to a file and point the "
-    "command at that file (e.g. gh pr create --body-file), then pass the "
-    "command as one ordinary string."
+    "Hint: the string literal never closes. The usual causes are a shell "
+    "heredoc (<<'EOF') nested in a Python string and a long prose argument — "
+    "a commit message, a PR body, a markdown report — whose own quotes, "
+    '``` fences or """ run into the literal that holds it. Give the prose its '
+    "own triple-quoted variable, with a delimiter the text does not itself "
+    "contain (body = '''…''' when the text has no '''; "
+    'r"""…""" otherwise), or Write it to a file '
+    "and point the command at that file (git commit -F <file>, gh pr create "
+    "--body-file <file>) — a file outside the repo working tree, so git add "
+    "-A cannot commit it. Then pass the command as one ordinary string."
 )
 
 _IMPORT_SPELLING_HINT = (
@@ -261,10 +266,18 @@ def _error_hint(exc: BaseException) -> str:
         return _syntax_hint(exc)
     if isinstance(exc, ImportError) and message.startswith("cannot import name "):
         pkg = getattr(exc, "name", None) or ""
-        if pkg in ("tools", "skills"):
+        if pkg == "tools":
             return (
-                f"Hint: no such {'tool' if pkg == 'tools' else 'skill'} — run "
-                "list_tools or search_tools to find the right name."
+                "Hint: no such tool in the kernel VFS — `dir(tools)` lists "
+                "every name mounted here, and `tools.<name>.__doc__` is its "
+                "documentation. (list_tools / search_tools / read_tool_docs "
+                "are separate top-level tool calls; they are not importable "
+                "from `tools` and cannot be called inside a cell.)"
+            )
+        if pkg == "skills":
+            return (
+                "Hint: no such skill — `dir(skills)` lists the skills mounted "
+                "in this kernel."
             )
     if isinstance(exc, TypeError) and "got an unexpected keyword argument" in message:
         name = message.split("(", 1)[0].strip().rsplit(".", 1)[-1] or "the tool"

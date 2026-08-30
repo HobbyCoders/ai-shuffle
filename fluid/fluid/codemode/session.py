@@ -52,7 +52,9 @@ SKILLS_SOURCE = "skills"
 
 _RUN_PYTHON_DESC = (
     "Execute Python in a persistent per-session kernel (state survives across "
-    "calls). Discover tools with list_tools/search_tools/read_tool_docs, then "
+    "calls). Discover tools with the list_tools/search_tools/read_tool_docs "
+    "tools — they are separate top-level calls, not functions inside the "
+    "kernel; from inside a cell, `dir(tools)` lists what is mounted. Then "
     "`from tools import Read, Edit` and call them as plain synchronous "
     "functions (`import tools; tools.Read(...)` also works) — each call is "
     "permission-gated on the host. Saved skills (reusable helpers that persist "
@@ -75,9 +77,12 @@ _RUN_PYTHON_DESC = (
     "The cell must be valid Python, so:\n"
     "- Quote every argument. `Grep(pattern=r\"def foo|bar\", glob=\"*.py\")`, "
     "never `pattern=def foo|bar`. Raw strings for regexes and Windows paths.\n"
-    "- Never nest a shell heredoc or a long multi-line body inside a command "
-    "string. Put the text in a triple-quoted variable, or Write it to a file "
-    "and point the command at that file (e.g. `--body-file`).\n"
+    "- Never nest a shell heredoc or a long multi-line body (a commit message, "
+    "a PR description, a markdown report) inside a command string. Put the "
+    "text in its own triple-quoted variable, or Write it to a file and point "
+    "the command at that file (`git commit -F <file>`, `gh pr create "
+    "--body-file <file>`) — writing that file OUTSIDE the repo working tree, "
+    "since `git add -A` will otherwise commit it.\n"
     "- Tools return text, not dicts; parse with json.loads when a tool emits "
     "JSON."
 )
@@ -319,10 +324,15 @@ class CodeModeSession:
             previous = extra.get("tool_use_id") if had_previous else None
             if stamped:
                 extra["tool_use_id"] = tool_use_id
+                # Tools whose output talks about how to call things next need
+                # to know they were reached from inside the kernel (ToolSearch
+                # otherwise prints wire names the kernel cannot import).
+                extra["in_kernel_call"] = True
             try:
                 reply = await bridge.on_host_call(name, kwargs)
             finally:
                 if stamped:
+                    extra.pop("in_kernel_call", None)
                     if had_previous:
                         extra["tool_use_id"] = previous
                     else:
