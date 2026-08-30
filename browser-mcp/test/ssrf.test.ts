@@ -184,6 +184,80 @@ describe("classifyIp — env overrides & precedence", () => {
   });
 });
 
+describe("block reasons name their remedy", () => {
+  it("a default-block reason names BROWSER_SSRF_ALLOW and the bind-to-0.0.0.0 workaround", () => {
+    const v = classifyIp("127.0.0.1", DEFAULT);
+    expect(v.blocked).toBe(true);
+    expect(v.reason).toMatch(/IPv4 loopback/);
+    expect(v.reason).toContain("BROWSER_SSRF_ALLOW");
+    expect(v.reason).toContain("BROWSER_SSRF_ALLOW_LOOPBACK");
+    expect(v.reason).toMatch(/0\.0\.0\.0/);
+    expect(v.reason).toMatch(/LAN IP/);
+  });
+
+  it("the metadata reason says plainly that no setting re-enables it", () => {
+    const v = classifyIp("169.254.169.254", DEFAULT);
+    expect(v.blocked).toBe(true);
+    expect(v.reason).toMatch(/NOT overridable/);
+    // It must not dangle BROWSER_SSRF_ALLOW as if it were a way in.
+    expect(v.reason).toMatch(/cannot re-enable/);
+  });
+
+  it("an operator BROWSER_SSRF_BLOCK reason points at that setting", () => {
+    const p = compilePolicy({ BROWSER_SSRF_BLOCK: "10.0.0.0/8" } as NodeJS.ProcessEnv);
+    const v = classifyIp("10.1.2.3", p);
+    expect(v.reason).toContain("BROWSER_SSRF_BLOCK");
+    expect(v.reason).toMatch(/remove that entry/);
+  });
+
+  it("an allowed loopback carries no reason at all", () => {
+    const p = compilePolicy({ BROWSER_SSRF_ALLOW: "127.0.0.0/8,::1/128" } as NodeJS.ProcessEnv);
+    expect(classifyIp("127.0.0.1", p)).toEqual({ blocked: false });
+    expect(classifyIp("::1", p)).toEqual({ blocked: false });
+  });
+});
+
+describe("local-mode loopback default (as injected by app/core/mcp_config.py)", () => {
+  // The app injects BROWSER_SSRF_ALLOW="127.0.0.0/8,::1/128" on local/self-hosted
+  // installs. These assert the server honours that exact string end to end.
+  const LOCAL = compilePolicy({
+    BROWSER_SSRF_ALLOW: "127.0.0.0/8,::1/128",
+  } as NodeJS.ProcessEnv);
+
+  it("allows the whole loopback range, v4 and v6", () => {
+    expect(classifyIp("127.0.0.1", LOCAL).blocked).toBe(false);
+    expect(classifyIp("127.99.1.2", LOCAL).blocked).toBe(false);
+    expect(classifyIp("::1", LOCAL).blocked).toBe(false);
+    // IPv4-mapped loopback resolves through the same rule.
+    expect(classifyIp("::ffff:127.0.0.1", LOCAL).blocked).toBe(false);
+  });
+
+  it("still blocks metadata, link-local and 0.0.0.0/8", () => {
+    expect(classifyIp("169.254.169.254", LOCAL).blocked).toBe(true);
+    expect(classifyIp("fe80::1", LOCAL).blocked).toBe(true);
+    expect(classifyIp("0.0.0.0", LOCAL).blocked).toBe(true);
+  });
+
+  it("an operator's explicit allow-list is used verbatim, not merged with loopback", () => {
+    // mcp_config passes an explicit BROWSER_SSRF_ALLOW straight through; the
+    // server must not quietly widen it.
+    const explicit = compilePolicy({
+      BROWSER_SSRF_ALLOW: "127.0.0.1/32",
+    } as NodeJS.ProcessEnv);
+    expect(classifyIp("127.0.0.1", explicit).blocked).toBe(false);
+    expect(classifyIp("127.0.0.2", explicit).blocked).toBe(true);
+    expect(classifyIp("::1", explicit).blocked).toBe(true);
+  });
+
+  it("BROWSER_SSRF_BLOCK still overrides the injected loopback allow", () => {
+    const p = compilePolicy({
+      BROWSER_SSRF_ALLOW: "127.0.0.0/8,::1/128",
+      BROWSER_SSRF_BLOCK: "127.0.0.0/8",
+    } as NodeJS.ProcessEnv);
+    expect(classifyIp("127.0.0.1", p).blocked).toBe(true);
+  });
+});
+
 describe("describePolicy", () => {
   it("summarizes the effective policy on one line", () => {
     const p = compilePolicy({ BROWSER_SSRF_ALLOW: "127.0.0.0/8" } as NodeJS.ProcessEnv);

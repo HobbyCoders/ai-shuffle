@@ -5,7 +5,7 @@
  */
 
 import type { Session } from "../session.js";
-import { jsonResult, type McpToolResult } from "./result.js";
+import { emptyContentWarning, jsonResult, type McpToolResult } from "./result.js";
 
 export async function runSnapshot(
   session: Session,
@@ -17,13 +17,15 @@ export async function runSnapshot(
     scopeRef: input.scope_ref,
     maxChars: input.max_chars,
   });
+  const warning = emptyContentWarning(snap.text, snap.refs.length);
   return jsonResult(
     {
       ok: true,
       snapshot_id: snap.snapshot_id,
       ref_count: snap.refs.length,
       truncated: snap.truncated,
+      ...(warning ? { warning } : {}),
     },
-    snap.text,
+    warning ? `${snap.text}\n[warning] ${warning}`.trim() : snap.text,
   );
 }

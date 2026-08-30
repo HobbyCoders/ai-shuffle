@@ -171,6 +171,8 @@ MCP admin UI (**Settings → Browser automation**).
 | `CHROME_CDP_PORT` | Loopback DevTools port (default `9221`). |
 | `CHROME_EXECUTABLE` | Explicit Chrome/Edge/Chromium path. Auto-detected from the standard Chrome/Edge install locations when unset. |
 | `BROWSER_MCP_ENTRY` | Override the tool-server entry path (defaults to `<repo>/browser-mcp/dist/index.js` on native checkouts). |
+| `BROWSER_SSRF_ALLOW_LOOPBACK` | Whether the agent's browser may open `localhost` URLs. **On a local install this is on by default**, so an agent can view a dev server it just started. Set `false` to refuse loopback. |
+| `BROWSER_SSRF_ALLOW` / `BROWSER_SSRF_BLOCK` | Comma-separated CIDRs to allow / refuse outright. An explicit `BROWSER_SSRF_ALLOW` replaces the loopback default above; `BROWSER_SSRF_BLOCK` wins over both. Cloud metadata (`169.254.0.0/16`) is always refused and cannot be re-enabled. |
 
 **Troubleshooting.** The **Settings → Browser automation** card shows a health
 dot and, when the browser is unreachable, a **detail line** explaining why —

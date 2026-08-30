@@ -5,7 +5,7 @@
  */
 
 import type { Session } from "../session.js";
-import { jsonResult, type McpToolResult } from "./result.js";
+import { emptyContentWarning, jsonResult, type McpToolResult } from "./result.js";
 
 /** Extract the host from a URL string, or "" if it has none / is unparseable. */
 function hostOf(url: string): string {
@@ -56,14 +56,19 @@ export async function runNavigate(
   }
 
   const snap = await session.snapshot({ filter: "interactive" });
+  // A navigation that "succeeds" onto a page that painted nothing reads as
+  // success unless we say otherwise.
+  const warning = emptyContentWarning(snap.text, snap.refs.length);
   return jsonResult(
     {
       ok: true,
       url: page.url(),
       title: await page.title(),
       snapshot_id: snap.snapshot_id,
+      ref_count: snap.refs.length,
       truncated: snap.truncated,
+      ...(warning ? { warning } : {}),
     },
-    snap.text,
+    warning ? `${snap.text}\n[warning] ${warning}`.trim() : snap.text,
   );
 }
