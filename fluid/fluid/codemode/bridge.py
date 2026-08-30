@@ -15,6 +15,8 @@ same idea at different integration depths:
 Both enforce the same hard refusals before dispatch: a tool outside the
 session's tool surface (``tool_filter``, ruling T9 — ``HostBridge`` checks it
 itself; ``HostCallBridge`` inherits the loop's own check inside ``_gated_call``),
+a write tool while plan mode is active (``plan_mode`` — same rule the request
+schemas apply, asked live so an approval mid-turn lifts it at once),
 a tool with ``code_mode_allowed=False`` (the auditable high-risk escape hatch —
 the model is told to use the JSON tool path), and a denied permission/hook. Refusals come back
 as ``HostReply(denied=…)`` / ``HostReply(error=…)`` so the kernel *raises* in the
@@ -33,6 +35,8 @@ from fluid.permissions.engine import (
     PROMPT_DENIAL,
     PermissionEngine,
     non_interactive_denial,
+    plan_mode_blocks,
+    plan_mode_denial,
 )
 from fluid.store.base import new_id
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
@@ -119,6 +123,7 @@ class HostBridge:
         ctx: ToolCtx | None = None,
         doom_loop: bool = True,
         tool_filter: Callable[[str], bool] | None = None,
+        plan_mode: Callable[[], bool] | None = None,
     ) -> None:
         self._registry = registry
         self._permissions = permissions
@@ -127,8 +132,23 @@ class HostBridge:
         self._ctx = ctx or ToolCtx()
         self._doom_loop = doom_loop
         self._tool_filter = tool_filter
+        # "Is plan mode on right now?" — a live predicate, not a snapshot. The
+        # mode ends mid-turn (StopPlanning's approval flips it during dispatch),
+        # and the very next in-kernel call must be free to write.
+        self._plan_mode = plan_mode
 
     async def on_host_call(self, tool_name: str, kwargs: dict[str, Any]) -> HostReply:
+        # Plan mode, before the surface check: a write tool is filtered out of
+        # the projection while planning, so the generic "not available in this
+        # session" would be true but useless — the model would read it as a
+        # missing tool rather than as the mode it can end itself. Checked here
+        # (not only in the projection) because the projection just decides what
+        # the kernel is TOLD about; a hand-written ``__host_call__`` skips it.
+        if self._plan_mode is not None and self._plan_mode():
+            spec = self._registry.get(tool_name)
+            if spec is not None and plan_mode_blocks(spec):
+                return HostReply(denied=True, message=plan_mode_denial(tool_name))
+
         # Session tool surface (ruling T9), ahead of the registry lookup so the
         # answer does not depend on whether the filtered name happens to exist.
         # The stub was never projected, so the model should not be able to reach
