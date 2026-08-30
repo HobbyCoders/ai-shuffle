@@ -137,6 +137,37 @@ class TestTranslateInput:
         with pytest.raises(Exception):
             browser_stream.translate_input({"type": "command", "command": "minimize"})
 
+    def test_viewport_maps_to_device_metrics(self):
+        cmd = browser_stream.translate_input(
+            {"type": "viewport", "width": 1280, "height": 800}
+        )
+        assert cmd == {
+            "method": "Emulation.setDeviceMetricsOverride",
+            "params": {
+                "width": 1280,
+                "height": 800,
+                "deviceScaleFactor": 1,
+                "mobile": False,
+            },
+        }
+
+    def test_viewport_clamps_to_screencast_ceiling(self):
+        cmd = browser_stream.translate_input(
+            {"type": "viewport", "width": 4000, "height": 3000}
+        )
+        assert cmd["params"]["width"] == browser_stream._VIEWPORT_MAX_WIDTH
+        assert cmd["params"]["height"] == browser_stream._VIEWPORT_MAX_HEIGHT
+
+    def test_viewport_rejects_too_small(self):
+        with pytest.raises(Exception):
+            browser_stream.translate_input(
+                {"type": "viewport", "width": 100, "height": 800}
+            )
+        with pytest.raises(Exception):
+            browser_stream.translate_input(
+                {"type": "viewport", "width": 800, "height": 50}
+            )
+
 
 # ===========================================================================
 # Page-state tracking (toolbar url + loading) and history jumps

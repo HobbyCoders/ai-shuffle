@@ -190,7 +190,7 @@ async def browser_panel_websocket(
             mtype = data.get("type")
             if mtype == "pong":
                 continue
-            if mtype in ("input", "navigate", "command"):
+            if mtype in ("input", "navigate", "command", "viewport"):
                 try:
                     cdp_cmd = browser_stream.translate_input(
                         data, bounds=hub.last_bounds()
@@ -198,6 +198,12 @@ async def browser_panel_websocket(
                 except Exception:
                     await websocket.close(code=4400, reason="Protocol violation")
                     break
+                if (
+                    mtype == "navigate"
+                    and cdp_cmd is not None
+                    and await hub.ensure_target(cdp_cmd["params"]["url"])
+                ):
+                    continue
                 if cdp_cmd is not None:
                     await hub.dispatch_input(cdp_cmd)
                 continue

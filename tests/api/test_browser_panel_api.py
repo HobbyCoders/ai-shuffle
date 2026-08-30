@@ -108,6 +108,9 @@ class _DummyHub:
     async def dispatch_input(self, cmd):
         return None
 
+    async def ensure_target(self, url):
+        return False
+
     async def dispatch_inspect(self, viewer, inspect):
         return None
 
@@ -200,6 +203,36 @@ class TestBrowserPanelWebSocket:
         # After the context exits the connection is closed; the input we sent
         # should have been translated + dispatched.
         assert dispatched and dispatched[0]["method"] == "Input.dispatchMouseEvent"
+
+    def test_handshake_forwards_viewport(self, client, monkeypatch):
+        monkeypatch.setattr(bp, "authenticate_websocket", AsyncMock(return_value=(True, None)))
+        monkeypatch.setattr(bp.database, "get_session", lambda sid: {"id": sid})
+        monkeypatch.setattr(bp, "_browser_running", AsyncMock(return_value=False))
+
+        dispatched = []
+        hub = _DummyHub()
+
+        async def _dispatch(cmd):
+            dispatched.append(cmd)
+
+        hub.dispatch_input = _dispatch
+
+        async def _attach(session_id, websocket):
+            return hub, object()
+
+        async def _detach(session_id, viewer):
+            return None
+
+        monkeypatch.setattr(bp.browser_stream, "attach_viewer", _attach)
+        monkeypatch.setattr(bp.browser_stream, "detach_viewer", _detach)
+
+        with client.websocket_connect("/api/v1/ws/browser/s1?token=x") as ws:
+            ws.receive_json()  # hello
+            ws.receive_json()  # status
+            ws.send_json({"type": "viewport", "width": 1280, "height": 800})
+        assert dispatched and dispatched[0]["method"] == "Emulation.setDeviceMetricsOverride"
+        assert dispatched[0]["params"]["width"] == 1280
+        assert dispatched[0]["params"]["height"] == 800
 
     def test_inspect_is_dispatched_to_hub(self, client, monkeypatch):
         monkeypatch.setattr(bp, "authenticate_websocket", AsyncMock(return_value=(True, None)))

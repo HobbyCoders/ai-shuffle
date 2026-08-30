@@ -8,7 +8,7 @@
  *   ws(s)://{host}/api/v1/ws/browser/{sessionId}?token=…
  *
  *   server→client: hello · status · page · frame · inspect-hit · error · ping
- *   client→server: input · navigate · command · inspect · pong
+ *   client→server: input · navigate · command · inspect · viewport · pong
  *
  * The caller creates ONE client per (open panel, session). `connect()` is a
  * no-op while already connected/connecting; `destroy()` tears down the socket

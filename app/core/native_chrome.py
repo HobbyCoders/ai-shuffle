@@ -145,6 +145,29 @@ async def _cdp_answers(port: int) -> bool:
     return await cdp_get(path="/json/version", port=port) is not None
 
 
+async def create_page(url: str, port: Optional[int] = None) -> Optional[dict]:
+    """Open a new tab via DevTools ``PUT /json/new``. Returns the tab dict or None.
+
+    Chrome takes the URL as the raw query string (``/json/new?https://…``),
+    not a named parameter. Used by the live panel so typing an address can
+    start a page even when the agent has not published a target yet.
+    """
+    from urllib.parse import quote
+
+    p = port or _cdp_port()
+    path = f"/json/new?{quote(url, safe=':/?&=%#')}"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.put(f"http://127.0.0.1:{p}{path}")
+            resp.raise_for_status()
+            data = resp.json()
+            if isinstance(data, dict) and data.get("id"):
+                return data
+            return None
+    except Exception:
+        return None
+
+
 async def cdp_get(path: str, port: Optional[int] = None) -> Optional[object]:
     """GET a Chrome DevTools HTTP endpoint (loopback only). None on failure.
 

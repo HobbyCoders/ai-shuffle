@@ -15,7 +15,10 @@
 	 * truth; the agent makes the edit and the screencast shows the reload.
 	 *
 	 * Layout: a right-aligned, left-edge-resizable overlay on wide screens; a
-	 * fullscreen overlay at/under the app's 1080px handheld cutoff.
+	 * fullscreen overlay at/under the app's 1080px handheld cutoff. The live-view
+	 * box size is pushed to the page as a CDP viewport so CSS media queries
+	 * (including this app's 1080px mobile cutoff) follow the panel, not the
+	 * headless window's launch size.
 	 */
 	import {
 		X,
@@ -99,6 +102,9 @@
 	// ── Stream client lifecycle: connect only while open && session set ────
 	// $state so toolbar enable/disable reacts to connect/disconnect cycles.
 	let client = $state<BrowserStreamClient | null>(null);
+	// isConnected() is not reactive — track OPEN ourselves so the toolbar
+	// enables as soon as the socket is up, not only after a `live` status.
+	let streamOpen = $state(false);
 	// Last session we held a frame for. The canvas keeps its last picture across
 	// reconnects and transient status changes; only a genuine session switch
 	// invalidates it (showing another session's page would be wrong).
@@ -126,7 +132,17 @@
 			},
 			onInspectHit: handleInspectHit,
 			onError: (message) => console.warn('[BrowserPanel] stream error:', message),
+			onOpen: () => {
+				streamOpen = true;
+				// Size may have changed while we were disconnected; always
+				// re-announce so the page isn't stuck on the previous viewport.
+				lastViewportW = 0;
+				lastViewportH = 0;
+				const r = panelBodyEl?.getBoundingClientRect();
+				if (r) sendViewportNow(r.width, r.height);
+			},
 			onClose: (wasClean) => {
+				streamOpen = false;
 				if (!wasClean) browserPanel.setStatus('disconnected');
 			},
 		});
@@ -135,6 +151,7 @@
 
 		return () => {
 			c.destroy();
+			streamOpen = false;
 			if (client === c) client = null;
 		};
 	});
@@ -164,6 +181,54 @@
 	function sendInspect(x: number, y: number, mode: 'hover' | 'select') {
 		client?.send({ type: 'inspect', x, y, mode });
 	}
+
+	// ── Viewport follows the live-view box ──────────────────────────────
+	// Headless Chrome does not resize with the docked panel. Without this
+	// the streamed page stays at its launch (or last agent-resize) size,
+	// so this app's 1080px mobile shell never lifts no matter how wide
+	// the user drags the panel.
+	let panelBodyEl: HTMLElement | undefined = $state();
+	let lastViewportW = 0;
+	let lastViewportH = 0;
+	let viewportTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function sendViewportNow(width: number, height: number) {
+		const w = Math.round(width);
+		const h = Math.round(height);
+		if (w < 200 || h < 200) return;
+		if (w === lastViewportW && h === lastViewportH) return;
+		if (!client?.isConnected()) return;
+		lastViewportW = w;
+		lastViewportH = h;
+		client.send({ type: 'viewport', width: w, height: h });
+	}
+
+	function scheduleViewport(width: number, height: number) {
+		if (viewportTimer) clearTimeout(viewportTimer);
+		viewportTimer = setTimeout(() => {
+			viewportTimer = null;
+			sendViewportNow(width, height);
+		}, 100);
+	}
+
+	$effect(() => {
+		const el = panelBodyEl;
+		if (!el || typeof ResizeObserver === 'undefined') return;
+		const report = () => {
+			const r = el.getBoundingClientRect();
+			scheduleViewport(r.width, r.height);
+		};
+		const ro = new ResizeObserver(report);
+		ro.observe(el);
+		report();
+		return () => {
+			ro.disconnect();
+			if (viewportTimer) {
+				clearTimeout(viewportTimer);
+				viewportTimer = null;
+			}
+		};
+	});
 
 	function toggleInspect() {
 		hoverRect = null;
@@ -285,7 +350,11 @@
 		client.send({ type: 'command', command });
 	}
 
-	const canNavigate = $derived(client !== null && client.isConnected() && status === 'live');
+	// Toolbar is usable whenever the panel socket is up and Chromium is on.
+	// Gating on `live` left back/forward/reload/address disabled for a visible
+	// page whenever status lagged on connecting/no_page (isConnected() also
+	// wasn't reactive, so a connecting→connecting handshake never re-enabled).
+	const canNavigate = $derived(streamOpen && status !== 'browser_off');
 
 	const displayUrl = $derived(url || 'No page open');
 	/** Address text with the scheme trimmed, like a real browser's omnibox. */
@@ -452,7 +521,7 @@
 			</div>
 		</header>
 
-		<div class="panel-body">
+		<div class="panel-body" bind:this={panelBodyEl}>
 			{#if hasFrame}
 				<!-- The canvas stays mounted across reconnects and target re-attaches:
 				     unmounting it made every transient status blank the preview. -->

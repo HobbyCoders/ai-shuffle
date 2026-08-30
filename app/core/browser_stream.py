@@ -5,8 +5,9 @@ down after the last one leaves. The hub opens a single upstream CDP WebSocket to
 the supervised Chromium page published in ``browser_panel_registry`` and drives
 ``Page.startScreencast``; each JPEG frame is fanned out to every connected
 viewer through a per-viewer latest-frame-wins queue. Client input (mouse / key /
-navigate / inspect) is translated — never forwarded raw — into CDP ``Input.*`` /
-``Page.navigate`` / ``Runtime.evaluate`` commands on the same upstream socket.
+navigate / inspect / viewport) is translated — never forwarded raw — into CDP
+``Input.*`` / ``Page.navigate`` / ``Runtime.evaluate`` /
+``Emulation.setDeviceMetricsOverride`` commands on the same upstream socket.
 
 State machine (per hub, run by :meth:`BrowserStreamHub._run`):
   * no target registered            -> broadcast ``no_page``, wait for change
@@ -94,6 +95,21 @@ class _CommandInput(BaseModel):
     """A toolbar command: history walk, reload, or stop loading."""
 
     command: str  # back | forward | reload | stop
+
+
+class _ViewportInput(BaseModel):
+    """Live-view CSS size. Extra keys (``type``) are ignored."""
+
+    width: int
+    height: int
+
+
+# Floor matches a usable live-view; ceiling tracks the screencast cap on
+# height and a 1080p-class desktop width so a dragged-wide panel can cross
+# the app's 1080px mobile cutoff.
+_VIEWPORT_MIN = 200
+_VIEWPORT_MAX_WIDTH = 1920
+_VIEWPORT_MAX_HEIGHT = 1440
 
 
 class InspectInput(BaseModel):
@@ -190,6 +206,31 @@ def _translate_command(msg: dict) -> dict:
     raise ValueError(f"invalid command: {cmd!r}")
 
 
+def _translate_viewport(msg: dict) -> dict:
+    """Map a panel-size update onto CDP device-metrics override.
+
+    Headless Chrome's window does not follow the docked panel, so CSS
+    ``@media (max-width: 1080px)`` would otherwise stay stuck at the
+    launch viewport (or whatever the last agent ``browser_resize`` set).
+    The live view's box is the viewport the user is looking at.
+    """
+    v = _ViewportInput(**msg)
+    w, h = int(v.width), int(v.height)
+    if w < _VIEWPORT_MIN or h < _VIEWPORT_MIN:
+        raise ValueError(f"viewport too small: {w}x{h}")
+    w = min(w, _VIEWPORT_MAX_WIDTH)
+    h = min(h, _VIEWPORT_MAX_HEIGHT)
+    return {
+        "method": "Emulation.setDeviceMetricsOverride",
+        "params": {
+            "width": w,
+            "height": h,
+            "deviceScaleFactor": 1,
+            "mobile": False,
+        },
+    }
+
+
 def translate_input(msg: dict, bounds: Optional[Tuple[int, int]] = None) -> Optional[dict]:
     """Translate one client message into a CDP command dict (or None).
 
@@ -203,6 +244,8 @@ def translate_input(msg: dict, bounds: Optional[Tuple[int, int]] = None) -> Opti
         return _translate_navigate(msg)
     if mtype == "command":
         return _translate_command(msg)
+    if mtype == "viewport":
+        return _translate_viewport(msg)
     if mtype == "input":
         kind = msg.get("kind")
         if kind == "mouse":
@@ -503,6 +546,26 @@ class BrowserStreamHub:
         if w and h:
             return (int(w), int(h))
         return None
+
+    async def ensure_target(self, url: str) -> bool:
+        """Open a CDP tab at ``url`` if this hub has no attached page.
+
+        Returns True if a new tab was created (Chrome already navigated;
+        the caller should not also send ``Page.navigate``). False if a page
+        is already attached — caller should navigate as usual.
+        """
+        if self._upstream is not None:
+            return False
+        created = await native_chrome.create_page(url)
+        if not created:
+            return False
+        registry.register(
+            self.session_id,
+            created.get("id"),
+            None,
+            created.get("url") or url,
+        )
+        return True
 
     async def dispatch_input(self, cdp_cmd: dict) -> None:
         ws = self._upstream

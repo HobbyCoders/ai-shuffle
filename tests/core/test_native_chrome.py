@@ -113,3 +113,45 @@ class TestEnsureStartedNoOps:
             await nc.ensure_started()
         assert nc._supervisor_task is None
 
+
+class TestCreatePage:
+    @pytest.mark.asyncio
+    async def test_put_json_new_returns_tab(self):
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"id": "T1", "url": "https://ex.test/"}
+
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return None
+
+            async def put(self, url):
+                assert "/json/new?" in url
+                assert "https://ex.test/" in url
+                return _Resp()
+
+        with patch("app.core.native_chrome.httpx.AsyncClient", return_value=_Client()):
+            tab = await nc.create_page("https://ex.test/")
+        assert tab == {"id": "T1", "url": "https://ex.test/"}
+
+    @pytest.mark.asyncio
+    async def test_create_page_none_on_error(self):
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return None
+
+            async def put(self, url):
+                raise OSError("down")
+
+        with patch("app.core.native_chrome.httpx.AsyncClient", return_value=_Client()):
+            assert await nc.create_page("https://ex.test/") is None
+
