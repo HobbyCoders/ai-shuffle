@@ -157,6 +157,15 @@ class BackgroundTaskReceipt:
     task_id: str
     worker_session_id: str | None = None
     description: str | None = None
+    # A SERVICE, not a job: a process meant to stay up (a dev server, a
+    # tunnel, a file watcher) for as long as the work needs it. It is
+    # registered, surfaced and stoppable like any other background task, but
+    # it is EXCLUDED from park accounting — a turn that started one may end
+    # without parking, and ``SessionParked.pending_task_ids`` never lists it.
+    # Without this the Monitor contract ("the command must exit") contradicts
+    # its own dev-server use case and every later turn parks on a process
+    # whose only "completion" is its death.
+    serves: bool = False
 
 
 @dataclass(frozen=True, kw_only=True)

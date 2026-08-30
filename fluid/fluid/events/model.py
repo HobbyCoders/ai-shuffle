@@ -362,6 +362,10 @@ class SubagentEvent(Event):
 
     Additive and defaulted, so rows persisted before it existed decode as
     ``"auto"`` — which is what the old default ``wake=True`` already meant."""
+    # ``started``-kind only: the task is a SERVICE meant to stay up (see
+    # ``BackgroundTaskReceipt.serves``). Durable so a rehydrated engine keeps
+    # the task out of park accounting across a restart.
+    serves: bool = False
 
 
 @dataclass(frozen=True, kw_only=True)

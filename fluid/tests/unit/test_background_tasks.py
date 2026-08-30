@@ -354,3 +354,141 @@ async def test_delegated_bundled_task_bridge_registers_and_parks_receipt() -> No
     ))
     await loop.wait_turn()
     await loop.aclose()
+
+
+# ─── serves: a service is tracked, but never parked on ───────────────────────
+
+
+def _monitor_loop(provider, store, spawn, *, session_id=None):
+    registry = ToolRegistry()
+    register_builtins(registry)
+    ctx = ToolCtx(extra={"monitor_spawn": spawn})
+    return NativeLoop(
+        provider=provider,
+        store=store,
+        session_id=session_id,
+        model="test-model",
+        registry=registry,
+        permissions=PermissionEngine("never_ask"),
+        ctx=ctx,
+    )
+
+
+def _monitor_call(command: str, *, serves: bool, call_id: str = "call-monitor"):
+    args = {"command": command}
+    if serves:
+        args["serves"] = True
+    return _tool(call_id, "Monitor", json.dumps(args))
+
+
+async def test_serving_task_is_tracked_but_never_parked_on() -> None:
+    async def spawn(input, ctx):
+        return BackgroundTaskReceipt(task_id="dev-server", description="npm run dev")
+
+    provider = ScriptedProvider([
+        _monitor_call("npm run dev", serves=True),
+        _text("Dev server is up on 8010; carrying on."),
+    ])
+    loop = _monitor_loop(provider, MemoryStore(), spawn, session_id="serve-parent")
+
+    await loop.submit(UserTurn(content="run the app"))
+    await loop.wait_turn()
+
+    events = loop.bus.log(loop.session_id)
+    started = next(
+        e for e in events if isinstance(e, SubagentEvent) and e.kind == "started"
+    )
+    # Registered and surfaced like any other background task…
+    assert started.task_id == "dev-server"
+    assert started.serves is True
+    assert "dev-server" in loop._background_pending
+    # …but the turn ended without parking on it.
+    assert not any(isinstance(e, SessionParked) for e in events)
+    assert loop._park_pending_ids() == ()
+
+
+async def test_serving_and_ordinary_tasks_park_only_on_the_ordinary_one() -> None:
+    async def spawn(input, ctx):
+        command = input["command"]
+        return BackgroundTaskReceipt(
+            task_id="dev-server" if "dev" in command else "ci-job",
+            description=command,
+        )
+
+    provider = ScriptedProvider([
+        _monitor_call("npm run dev", serves=True, call_id="c1"),
+        _monitor_call("gh pr checks 12 --watch --fail-fast", serves=False, call_id="c2"),
+        _text("Server up, CI watching."),
+    ])
+    loop = _monitor_loop(provider, MemoryStore(), spawn, session_id="mixed-parent")
+
+    await loop.submit(UserTurn(content="run app then wait on CI"))
+    await loop.wait_turn()
+
+    parked = next(
+        e for e in loop.bus.log(loop.session_id) if isinstance(e, SessionParked)
+    )
+    assert parked.pending_task_ids == ("ci-job",)
+    # Both are still tracked — only the park accounting differs.
+    assert set(loop._background_pending) == {"dev-server", "ci-job"}
+
+
+async def test_serves_survives_restart_and_still_is_not_parked_on(tmp_path) -> None:
+    async def spawn(input, ctx):
+        return BackgroundTaskReceipt(task_id="dev-server")
+
+    store = JsonlStore(tmp_path)
+    first = _monitor_loop(
+        ScriptedProvider([_monitor_call("npm run dev", serves=True), _text("up")]),
+        store, spawn, session_id="serve-restart",
+    )
+    await first.submit(UserTurn(content="run the app"))
+    await first.wait_turn()
+    await first.aclose()
+
+    # A durable SubagentEvent carries `serves`, so a fresh engine rebuilds the
+    # receipt with it and the restart does not resurrect the park.
+    persisted = await JsonlStore(tmp_path).events_since("serve-restart", 0)
+    started = next(
+        e for e in persisted if isinstance(e, SubagentEvent) and e.kind == "started"
+    )
+    assert started.serves is True
+
+    second = _monitor_loop(
+        ScriptedProvider([_text("still up")]), store, spawn,
+        session_id="serve-restart",
+    )
+    await second._rehydrate_background_lifecycle_unlocked()
+    assert second._background_pending["dev-server"].serves is True
+    assert second._park_pending_ids() == ()
+    await second._emit_terminal_with_park(TurnComplete(
+        session_id=second.session_id, stop_reason="end_turn", num_model_calls=1,
+    ))
+    assert not any(
+        isinstance(e, SessionParked) for e in second.bus.log(second.session_id)
+    )
+    await second.aclose()
+
+
+async def test_serving_task_death_still_wakes_the_session() -> None:
+    async def spawn(input, ctx):
+        return BackgroundTaskReceipt(task_id="dev-server")
+
+    provider = ScriptedProvider([
+        _monitor_call("npm run dev", serves=True),
+        _text("up"),
+        _text("The dev server died; restarting it."),
+    ])
+    loop = _monitor_loop(provider, MemoryStore(), spawn, session_id="serve-death")
+    await loop.submit(UserTurn(content="run the app"))
+    await loop.wait_turn()
+
+    await loop.submit(BackgroundTaskFinished(
+        task_id="dev-server",
+        status="cancelled",
+        summary="Stopped by user",
+    ))
+    await loop.wait_turn()
+
+    assert provider.calls == 3
+    assert "Stopped by user" in provider.requests[-1].messages[-1].text()
