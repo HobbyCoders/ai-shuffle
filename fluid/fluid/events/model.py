@@ -230,7 +230,10 @@ class ContextCompaction(Event):
     byte-identical view after a restart."""
 
     tier: int  # highest rung this batch reached: 1 trim | 2 digest | 3 epoch
-    reason: str  # "trigger" | "overflow"
+    # "trigger" (crossed the size threshold) | "overflow" (provider rejected the
+    # prompt) | "image_consumed" (an image the model has already seen left the
+    # context; unlike text, HistoryExpand cannot bring it back)
+    reason: str
     trimmed: list[list[str]] = field(default_factory=list)  # [node_id, tool_use_id]
     spans: list[list[str]] = field(default_factory=list)  # [start, end, kind]
     reclaimed_chars: int = 0
@@ -317,6 +320,10 @@ class SubagentEvent(Event):
     worker_session_id: str | None = None
     wake: bool = True
     status: str | None = None
+    # Where the worker's full report was written, when the host wrote one; it
+    # rides the completion so a woken parent can open the report directly.
+    # Optional and last so events persisted before the field existed rehydrate.
+    report_path: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

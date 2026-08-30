@@ -59,22 +59,34 @@ def repeat_read_pointer(key: int, size: int) -> str:
 
 
 def windowed_read_pointer(
-    key: int, size: int, start: int, stop: int | None
+    key: int, size: int, start: int, stop: int | None, *, offset: int = 0
 ) -> str:
     """The result a re-read of an unchanged file at a *new* window gets.
 
     Keying the pointer on the exact ``(path, offset, limit)`` window left the
     commonest waste in place: transcripts show the same file re-read six to
     eight times at different offsets, each one a full second payload, when the
-    whole file was sitting in the kernel the entire time. If the ref holds the
-    file whole, any window of it is a slice — so the answer is the slicing
+    whole file was sitting in the kernel the entire time. If the ref contains
+    the window, that window is a slice of it — so the answer is the slicing
     expression, spelled out, rather than the lines.
+
+    ``start``/``stop`` are 0-based line bounds within the FILE; ``offset`` is
+    the file line the held ref itself starts at (0 when it holds the file
+    whole), so a ref built from an earlier windowed read still gets a slice
+    expression whose indices are right for *it*.
     """
-    span = f"[{start}:{'' if stop is None else stop}]"
+    lo = start - offset
+    hi = "" if stop is None else str(stop - offset)
+    span = f"[{lo}:{hi}]"
     last = "end" if stop is None else f"{stop}"
+    holds = (
+        "the whole file is already in the kernel"
+        if not offset
+        else "an earlier read covering these lines is already in the kernel"
+    )
     return (
-        f"unchanged since your earlier read — the whole file is already in the "
-        f"kernel: _refs[{key}] ({size:,} bytes). Lines {start + 1}-{last} are "
+        f"unchanged since your earlier read — {holds}: _refs[{key}] "
+        f"({size:,} bytes). Lines {start + 1}-{last} are "
         f"_refs[{key}].splitlines(){span} — slice it instead of re-reading."
     )
 
@@ -84,14 +96,40 @@ def windowed_read_pointer(
 DEFAULT_STDOUT_CAP = 16384  # chars of cell stdout that reach the model
 _DROP_MARKER = "…[-{n} chars]"
 _NAMED_DROPS = 2  # how many of the heaviest drops the notice names
+_NAMED_REFS = 3  # how many kernel handles the notice names
 
 
 def _drop_marker(dropped: int) -> str:
     return _DROP_MARKER.format(n=dropped)
 
 
+def _recovery_clause(refs: "list[tuple[int, int]] | tuple" ) -> str:
+    """How to get the dropped chars back — a handle, not an instruction to redo.
+
+    Truncated stdout used to end at "heaviest drops", which reads as "that
+    output is gone" and buys a re-run of the tools that produced it. When the
+    payload came from tool calls whose full results are alive in the kernel,
+    the recovery is free and it should be spelled out.
+    """
+    named = list(dict.fromkeys(refs))[:_NAMED_REFS]
+    if not named:
+        return (
+            " Nothing in this cell is held as a ResultRef, so print less per "
+            "cell — slice or summarize — rather than re-running the tools."
+        )
+    handles = ", ".join(f"_refs[{key}] ({size:,} bytes)" for key, size in named)
+    more = " (and others in _refs)" if len(refs) > len(named) else ""
+    return (
+        f" This cell's full tool output is held in the kernel: {handles}{more} "
+        "— slice it instead of re-running the tools or re-printing."
+    )
+
+
 def fair_share_stdout(
-    segments: list[str], cap: int = DEFAULT_STDOUT_CAP
+    segments: list[str],
+    cap: int = DEFAULT_STDOUT_CAP,
+    *,
+    refs: "list[tuple[int, int]] | tuple" = (),
 ) -> str:
     """Fit a cell's prints into ``cap`` chars, fairly, and name the damage.
 
@@ -102,8 +140,13 @@ def fair_share_stdout(
     ``print``): every segment shorter than its share survives whole and frees
     its surplus for the greedy ones, so *something* from every print gets
     through. Each truncated segment keeps its head and carries an inline
-    ``…[-N chars]`` marker, and a closing notice names the totals plus the
-    heaviest drops so the model can see what to re-print in a smaller cell.
+    ``…[-N chars]`` marker, and a closing notice names the totals, the budget
+    that did the cutting, the heaviest drops, and — when the cell's tool
+    results are alive in the kernel — the ``_refs`` handles that hold them
+    whole, so the recovery is a slice rather than a re-run.
+
+    ``refs`` is this cell's ``(registry id, size)`` pairs, in the order the
+    calls happened.
 
     Markers are paid for out of their own segment's share, so the returned
     payload never exceeds ``cap`` (the closing notice is metadata on top).
@@ -153,6 +196,7 @@ def fair_share_stdout(
     plural = "print" if len(segments) == 1 else "prints"
     notice = (
         f"…[stdout truncated: kept {kept_chars} of {total} chars across "
-        f"{len(segments)} {plural}; heaviest drops: {named}]"
+        f"{len(segments)} {plural} — one cell's stdout budget is {cap:,} "
+        f"chars; heaviest drops: {named}.{_recovery_clause(refs)}]"
     )
     return "".join(parts).rstrip("\n") + "\n" + notice

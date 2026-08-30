@@ -82,6 +82,25 @@ _RUN_PYTHON_DESC = (
     "JSON."
 )
 
+
+def _run_python_desc(stdout_cap: int = KernelConfig.stdout_cap) -> str:
+    """run_python's description plus this session's real stdout budget.
+
+    The cap used to be undocumented, and it is the single largest silent loss
+    in the code surface: transcripts show cells printing 27k chars, losing 11k
+    of them, and the model paying to re-run the tools because nothing had told
+    it a budget existed or that the full results were still in the kernel.
+    """
+    return (
+        f"{_RUN_PYTHON_DESC}\n"
+        "\n"
+        f"A cell's stdout is capped at {stdout_cap:,} characters, fair-shared "
+        "across its prints, and what is cut is named in a closing notice. Print "
+        "what you need to decide, not whole payloads: a tool result too large "
+        "to print is already in the kernel as a ResultRef, so slice it (or "
+        "recover it from `_refs[N]`) rather than re-running the tool."
+    )
+
 # Journal previews are bounded so journal.jsonl (synthesis input) stays small.
 _JOURNAL_STDOUT_CAP = 1500
 _JOURNAL_VALUE_CAP = 300
@@ -281,6 +300,10 @@ class CodeModeSession:
             self._registry, permissions,
             hooks=loop.hooks, on_permission=_on_permission, ctx=loop.ctx,
             tool_filter=self.tool_filter,
+            # What this surface actually delivers: a result over the ref
+            # threshold reaches the cell as a ResultRef stub, not as text the
+            # model reads (see ToolCtx.result_budget).
+            result_budget=self._config.ref_threshold,
         )
 
         # Ordered per-call records: name, what it acted on, whether it landed,
@@ -469,7 +492,8 @@ def register_code_mode_tools(
 
     registry.register_builtin(
         ToolSpec(
-            name="run_python", description=_RUN_PYTHON_DESC,
+            name="run_python",
+            description=_run_python_desc(session._config.stdout_cap),
             input_schema={
                 "type": "object",
                 "properties": {

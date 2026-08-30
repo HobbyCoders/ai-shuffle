@@ -19,6 +19,9 @@ from fluid.events.ops import BackgroundTaskFinished, UserTurn
 from fluid.tools.registry import BackgroundTaskReceipt
 
 _TERMINAL_EVENTS = (TurnComplete, Interrupted, ErrorEvent)
+# How much of a long worker report rides the wake turn when the rest is one
+# Read away. Only applied when there IS a report path to point at.
+_REPORT_HEAD_CHARS = 4_000
 _TERMINAL_TASK_KINDS = {"finished", "failed", "cancelled"}
 _BACKGROUND_SPAWN_SETTLE_TIMEOUT = 5.0
 
@@ -78,6 +81,7 @@ class BackgroundLifecycleMixin:
                             summary=event.summary,
                             worker_session_id=event.worker_session_id,
                             wake=event.wake,
+                            report_path=event.report_path,
                         )
                 elif event.kind in _TERMINAL_TASK_KINDS:
                     self._background_pending.pop(event.task_id, None)
@@ -90,6 +94,7 @@ class BackgroundLifecycleMixin:
                             summary=event.summary,
                             worker_session_id=event.worker_session_id,
                             wake=True,
+                            report_path=event.report_path,
                         )
                     else:
                         self._background_completions.pop(event.task_id, None)
@@ -159,6 +164,7 @@ class BackgroundLifecycleMixin:
                         worker_session_id=op.worker_session_id,
                         wake=op.wake,
                         status=op.status,
+                        report_path=op.report_path,
                     ))
             should_wake = bool(self._background_completions)
         if should_wake:
@@ -182,6 +188,7 @@ class BackgroundLifecycleMixin:
             summary=op.summary,
             worker_session_id=worker_session_id,
             wake=op.wake,
+            report_path=op.report_path,
         ))
         if op.wake:
             self._background_completions[op.task_id] = BackgroundTaskFinished(
@@ -190,6 +197,7 @@ class BackgroundLifecycleMixin:
                 summary=op.summary,
                 worker_session_id=worker_session_id,
                 wake=True,
+                report_path=op.report_path,
             )
 
     async def _emit_terminal_with_park(self, event: Event) -> Event:
@@ -291,6 +299,16 @@ class BackgroundLifecycleMixin:
     def _background_wake_content(
         completions: Iterable[BackgroundTaskFinished],
     ) -> str:
+        """The synthetic user turn a completed background worker wakes into.
+
+        A *synchronous* Task hands the model the worker's report directly. A
+        background one used to hand it whatever summary the host chose to
+        include, with no way back to the rest — so a report that arrived elided
+        cost two HistoryExpand round-trips to recover text that had never been
+        in history. When the host names a report file, this carries the same
+        contract the sync path does: a head of the report plus the handle that
+        opens the whole of it.
+        """
         sections = [
             "<system-reminder>",
             (
@@ -300,7 +318,25 @@ class BackgroundLifecycleMixin:
         ]
         for item in completions:
             sections.append(f"\nTask {item.task_id} ({item.status}):")
-            sections.append(item.summary or "(no summary was provided)")
+            summary = item.summary or "(no summary was provided)"
+            path = (item.report_path or "").strip()
+            if not path:
+                # Nothing to point at, so nothing may be dropped: an elided
+                # summary with no recovery handle is the failure being fixed.
+                sections.append(summary)
+                continue
+            if len(summary) > _REPORT_HEAD_CHARS:
+                sections.append(summary[:_REPORT_HEAD_CHARS].rstrip() + "…")
+                sections.append(
+                    f"[report head only — {len(summary)} chars in full. The "
+                    f"complete report is at {path}: Read it. HistoryExpand "
+                    f"cannot help here (the rest was never in this "
+                    f"conversation), and re-running the task is never the "
+                    f"recovery.]"
+                )
+            else:
+                sections.append(summary)
+                sections.append(f"[full report: {path} — Read it for detail.]")
         sections.append("</system-reminder>")
         return "\n".join(sections)
 

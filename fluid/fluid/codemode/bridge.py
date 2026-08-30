@@ -119,6 +119,7 @@ class HostBridge:
         ctx: ToolCtx | None = None,
         doom_loop: bool = True,
         tool_filter: Callable[[str], bool] | None = None,
+        result_budget: int | None = None,
     ) -> None:
         self._registry = registry
         self._permissions = permissions
@@ -127,6 +128,11 @@ class HostBridge:
         self._ctx = ctx or ToolCtx()
         self._doom_loop = doom_loop
         self._tool_filter = tool_filter
+        # What the kernel delivers verbatim (its ResultRef threshold). Stamped
+        # on the shared ctx so repeat-work notes can tell "the model has this"
+        # from "the kernel has this" — see ToolCtx.read_delivered.
+        if result_budget is not None:
+            self._ctx.result_budget = result_budget
 
     async def on_host_call(self, tool_name: str, kwargs: dict[str, Any]) -> HostReply:
         # Session tool surface (ruling T9), ahead of the registry lookup so the

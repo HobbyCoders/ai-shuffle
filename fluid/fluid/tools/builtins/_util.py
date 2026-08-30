@@ -351,13 +351,16 @@ def missing_path_note(raw: str, path: Path) -> str:
 #
 # Re-reading a file nothing has touched, and re-running a search already run,
 # are the two cheapest calls to make and the two most common ones to waste a
-# turn on. The result still comes back in full — the note only says the content
-# is already in the conversation, so the next step can use it instead of asking
-# for it again.
+# turn on.
 
 
 def unchanged_read_note(repeat: bool) -> str:
-    """The trailing note for a Read that returns already-seen content."""
+    """The trailing note for a Read that returns already-seen content.
+
+    The content still comes back in full — the note only says it is already in
+    the conversation. Callers must only pass ``repeat=True`` when the earlier
+    payload really did reach the model (see ``ToolCtx.read_delivered``).
+    """
     if not repeat:
         return ""
     return (
@@ -366,11 +369,23 @@ def unchanged_read_note(repeat: bool) -> str:
     )
 
 
-def repeat_search_note(repeat: bool) -> str:
-    """The trailing note for a search whose inputs were already searched."""
-    if not repeat:
-        return ""
+def repeat_search_pointer(text: str, header_lines: int = 1) -> str:
+    """The result an identical, already-run search gets *instead of* its rows.
+
+    Appending "you already ran this" underneath a second full copy of the rows
+    charged for the duplicate and then asked the model not to want it. The
+    payload is verbatim-identical to one already in the conversation, so this
+    replaces it: the search's own header (so the earlier result is easy to
+    find), the size of what is not being repeated, and where it is.
+    """
+    lines = text.splitlines()
+    head = "\n".join(lines[:header_lines]).strip()
+    withheld = max(0, len(lines) - header_lines)
+    plural = "line" if withheld == 1 else "lines"
     return (
-        "\n[note: identical search already run this session — its results are "
-        "above in the conversation]"
+        (f"{head}\n" if head else "")
+        + f"[identical search already run this session — the same {withheld} "
+        f"{plural} of results are above in this conversation and are not "
+        "repeated here. Re-read them there; change the pattern, path, or "
+        "scope if you need something new.]"
     )
