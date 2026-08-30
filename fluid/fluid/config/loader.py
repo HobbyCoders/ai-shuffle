@@ -614,6 +614,14 @@ def build_engine(
     # Native providers.
     from fluid.engine.native import NativeLoop
 
+    # Materialize the bus here rather than letting NativeLoop default one:
+    # loader-wired background emitters (the continual synthesizer's
+    # ContinualUpdate) must publish to the SAME bus the engine streams from.
+    if bus is None:
+        from fluid.events.bus import EventBus
+
+        bus = EventBus()
+
     if config.hooks:
         from fluid.hooks.bus import HookBus
         from fluid.hooks.command import register_config_hooks

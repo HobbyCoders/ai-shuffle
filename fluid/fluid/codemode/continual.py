@@ -218,6 +218,10 @@ class Synthesizer:
             self.last_error = (
                 f"synthesis on close exceeded {self._close_timeout:.0f}s and was abandoned"
             )
+            # An abandoned pass leaves no cursor movement (the slice retries
+            # next session) — but it must leave a trace, or a slow pass is
+            # indistinguishable from one that never ran.
+            self._log_pass("synthesis", [], error=self.last_error)
             if self._task is not None:
                 self._task.cancel()
                 self._task = None
@@ -237,9 +241,11 @@ class Synthesizer:
             changed = await asyncio.wait_for(self.run(), timeout=self._pass_timeout)
         except TimeoutError:
             self.last_error = f"synthesis pass exceeded {self._pass_timeout:.0f}s"
+            self._log_pass("synthesis", [], error=self.last_error)
             return []
         except Exception as exc:  # never let synthesis break the session
             self.last_error = f"{type(exc).__name__}: {exc}"
+            self._log_pass("synthesis", [], error=self.last_error)
             return []
         if self._consolidation_due():
             try:
@@ -275,7 +281,43 @@ class Synthesizer:
         # The urgency flag covered the slice just consumed; a new Remember
         # re-arms it.
         self._urgent = False
+        self._log_pass(
+            "synthesis", changed, error=self.last_error,
+            consumed=len(entries), output_preview=text,
+        )
         return changed
+
+    def _log_pass(
+        self,
+        kind: str,
+        changed: list[str],
+        *,
+        error: str | None = None,
+        consumed: int | None = None,
+        output_preview: str | None = None,
+    ) -> None:
+        """Append one pass record to ``.synthesis-log.jsonl`` (best-effort).
+
+        ``last_error`` dies with the process, and a background pass that
+        silently fails — or silently decides NO_CHANGES — is otherwise
+        indistinguishable from one that never ran. The log is the audit
+        trail: when it ran, what it consumed, what changed, what went wrong.
+        """
+        record: dict[str, Any] = {"ts": time.time(), "kind": kind, "changed": changed}
+        if consumed is not None:
+            record["consumed"] = consumed
+        if error:
+            record["error"] = error
+        if output_preview is not None and not changed:
+            # Only when nothing landed: the raw head is what explains why.
+            record["output_head"] = " ".join(output_preview.split())[:400]
+        try:
+            with (self._store.root / ".synthesis-log.jsonl").open(
+                "a", encoding="utf-8"
+            ) as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
 
     # ─── consolidation (whole-store curation, interval-gated) ────────────
     def _consolidation_due(self, now: float | None = None) -> bool:
@@ -334,6 +376,7 @@ class Synthesizer:
         for match in _DELETE_RE.finditer(text or ""):
             if self._store.delete(match.group(1)):
                 changed.append(f"-{match.group(1)}")
+        self._log_pass("consolidation", changed, output_preview=text)
         return changed
 
     def _resolve_scope(self, scope_attr: str | None) -> str | None:

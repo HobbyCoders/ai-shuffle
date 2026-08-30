@@ -104,8 +104,27 @@ async def run_once(
     finally:
         if host is not None:
             await host.aclose()
-        await engine.aclose()
+        await _close_and_flush_learning(engine, meta.session_id, out)
     return 0 if stop != "error" else 1
+
+
+async def _close_and_flush_learning(engine, session_id: str, out) -> None:
+    """Close the engine, then render learning that landed during close.
+
+    Session close drains the continual synthesizer — a final pass can run
+    AFTER the turn's event stream ended, so its ``ContinualUpdate`` reaches
+    the bus with nobody consuming. Learning that lands invisibly might as
+    well not have happened; print those late events here. Everything
+    published before close was already rendered by the stream loop.
+    """
+    from fluid.events.model import ContinualUpdate
+
+    before = len(engine.bus.log(session_id))
+    await engine.aclose()
+    for event in engine.bus.log(session_id)[before:]:
+        if isinstance(event, ContinualUpdate):
+            out.write(f"\n  [learned] {', '.join(event.changes)}\n")
+            out.flush()
 
 
 class SessionNotFound(LookupError):
@@ -153,7 +172,7 @@ async def chat_session(
         host = host_of(engine)
         if host is not None:
             await host.aclose()
-        await engine.aclose()
+        await _close_and_flush_learning(engine, meta.session_id, sys.stderr)
 
 
 # ─── argparse wiring ─────────────────────────────────────────────────────────

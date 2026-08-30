@@ -357,6 +357,66 @@ out.
 
 ---
 
+## Implementation status (2026-08-30, this branch)
+
+Phase 0 and Phase 1 landed in full, plus the Phase-2.3 seed, in the commit
+series following this document:
+
+- **0.1/0.2** — `Remember` builtin (propose-then-curate: journals a
+  high-salience `[remember]` entry, arms the synthesizer's urgent flag so the
+  next pass fires on any new entry); the "never manage it" prompt order
+  replaced with Remember/Recall guidance and a memory/Note/skills/sessions
+  ontology line.
+- **0.3** — code-mode addendum teaches `save_skill` with the actual
+  procedure; `skills`-source specs joined the CE12 allowlist exemption;
+  prose disambiguates synthesized Python skills from prose SKILL.md skills.
+- **0.5** — `ContinualUpdate` event + `[learned]` REPL line, flushed even
+  when synthesis lands during session close; `.synthesis-log.jsonl` audit
+  trail (every pass: consumed count, changes, error, output head on no-ops
+  — including abandoned-at-close passes).
+- **1.1/1.2** — `Recall` builtin over live + archived memories and the
+  skill index; per-entry recall counters; LFU-informed eviction.
+- **1.3** — memory scope (`global` | project key from `project_key_for`);
+  the snapshot renders global + current project with a hidden-count footer.
+- **1.4** — interval-gated whole-store consolidation pass (rewrites and
+  deletions only; a `<skill>` tag in its output is ignored).
+- **1.5** — subagents receive the memory snapshot.
+- **2.3 seed** — `~/.fluid/guidance/<family>.md` user-authored guidance
+  blocks matched by stem substring against the model name.
+
+Deferred: anchor sets and the commit gate (2.1/2.2 — needs the regression
+harness generalized into an anchor runner), model_guidance data migration
+beyond the seed, ai-shuffle-side wiring (0.4/0.6 live in that repo).
+
+### E2E verification (z-ai/glm-5.3-flash via OpenRouter)
+
+Twelve unscripted sessions against the live model; every scenario phrased
+as a natural situation, never naming a tool. All passed:
+
+- "keep that in mind going forward" → `Remember` called unprompted, clean
+  fact phrasing, deliberate scope choice; urgent synthesis distilled it
+  into `memories.json` at session close.
+- Fresh session answered the remembered fact from `# Memory`, zero tools.
+- A fact present only in the *archive* → `Recall` + `SessionSearch` fired
+  in parallel, the archived entry was found, and the model verified against
+  the project before answering (honoring the recall footer's caveat).
+- "what were we working on?" → no-query `SessionSearch` listing, then
+  `SessionView` on the substantive session, accurate recap.
+- Code mode: composed multi-call cells, correct results, cells journaled.
+- Project-specific phrasing ("in this repo…") → `scope="project"` chosen by
+  the model and resolved to the project key by the synthesizer.
+- A guidance file `glm.md` changed live behavior (house-style line held
+  across sessions).
+- An abandoned close-time pass (over the 90s budget) lost nothing: the
+  cursor design retried the slice next session and landed all pending facts
+  — then the `[learned]` line and audit log confirmed it visibly.
+- Capstone: a fresh session recapped all nine accumulated facts, grouped
+  and hedged, cross-referencing the snapshot with Recall.
+
+Synthesis quality on glm-5.3-flash: correct tag format every observed pass,
+correct scope attribution, `NO_CHANGES` restraint on the trivial-session and
+consolidation passes.
+
 ## Appendix — paper citations
 
 - Kang, Gu, Lv, Li, Wang, Gao. *Harness Continual Learning: Continual
