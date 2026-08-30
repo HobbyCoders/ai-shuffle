@@ -1647,7 +1647,11 @@ class SessionRuntime:
             if interrupted_row and interrupted_row.get("stop_background"):
                 from app.core.query_session_lifecycle import stop_all_background_tasks
 
-                await stop_all_background_tasks(sid)
+                # Same semantics as the WebSocket Stop that set the bit: end the
+                # turn's own background work, leave a healthy Monitor shell (the
+                # user's dev server) running. See handle_stop's STOP SEMANTICS
+                # note for why, and for what still kills shells.
+                await stop_all_background_tasks(sid, include_shells=False)
         except Exception:
             logger.warning(
                 "SessionRuntime: background-task stop failed for %s", sid,

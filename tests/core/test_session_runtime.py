@@ -593,7 +593,8 @@ async def test_interrupt_honors_durable_stop_background_on_owning_runner(mock_db
         )
 
     assert state == "aborted"
-    stop_all.assert_awaited_once_with("s9-bg")
+    # Same shell-sparing semantics as the WebSocket Stop that set the bit.
+    stop_all.assert_awaited_once_with("s9-bg", include_shells=False)
 
 
 async def test_interrupt_cancels_pending_prompts_before_signalling_the_sdk(mock_db):

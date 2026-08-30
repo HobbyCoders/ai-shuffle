@@ -282,7 +282,10 @@ async def stop_session_task(session_id: str, task_id: str) -> dict:
     from app.mcp.builtin_tools import stop_background_shell_task
     shell = await stop_background_shell_task(task_id, session_id=session_id)
     if shell is not None:
-        return {"ok": True, "kind": "shell", **shell}
+        # ``survivors`` means descendants outlived the shell (a dev server the
+        # command started, typically). The row is settled either way, but the
+        # stop did not do what it says on the tin, so don't report ok.
+        return {"ok": not shell.get("survivors"), "kind": "shell", **shell}
 
     # A registry shell task with no tracked subprocess is a ghost (the shell
     # already exited without the registry being told). Reap it rather than
@@ -383,7 +386,9 @@ async def stop_session_task(session_id: str, task_id: str) -> dict:
         return {"ok": False, "kind": "agent", "detail": str(e)}
 
 
-async def stop_all_background_tasks(session_id: str) -> list[dict]:
+async def stop_all_background_tasks(
+    session_id: str, *, include_shells: bool = True
+) -> list[dict]:
     """Stop EVERY in-flight background task in a session, one at a time.
 
     Used by the normal Stop path: after the main turn is interrupted, iterate
@@ -393,14 +398,45 @@ async def stop_all_background_tasks(session_id: str) -> list[dict]:
     verbatim — no re-implementation of client stop logic — so ghost-reaping and
     idempotency behave identically to a single "x" click.
 
+    ``include_shells=False`` spares Monitor shells whose subprocess is still
+    alive — the Stop-button semantics, documented at that call site: Stop ends
+    the TURN, and a dev server the user asked to keep up is not part of the
+    turn. Ghost shell rows (registry says running, process already gone) are
+    still swept, so nothing strands in the UI. Force paths (session delete,
+    eviction reap) don't come through here at all — they use
+    ``reap_session_background_shells``, which is unchanged.
+
     Snapshots the active list first so mutations during iteration (a task
     dropping to a terminal state as it is stopped) don't disturb the loop.
-    Returns one result dict per task attempted. Never raises.
+    Returns one result dict per task attempted, plus a ``skipped`` entry for
+    each spared shell. Never raises.
     """
     from app.core.task_registry import task_registry
 
     active = task_registry.get_active(session_id)
     task_ids = [task.get("id") for task in active if task.get("id")]
+
+    spared: list[dict] = []
+    if not include_shells:
+        from app.mcp.builtin_tools import is_background_shell_running
+
+        keep = {
+            task.get("id")
+            for task in active
+            if task.get("kind") == "shell"
+            and task.get("id")
+            and is_background_shell_running(task["id"])
+        }
+        if keep:
+            task_ids = [tid for tid in task_ids if tid not in keep]
+            spared = [
+                {"ok": True, "kind": "shell", "task_id": tid, "skipped": "left running"}
+                for tid in sorted(keep)
+            ]
+            logger.info(
+                f"Stop for session {session_id} left {len(keep)} running "
+                f"Monitor shell(s) alive: {sorted(keep)}"
+            )
 
     # Close completion-vs-Stop races BEFORE the first await: every later terminal
     # frame is dropped at the scheduler entry point, and a wake queued a moment
@@ -412,7 +448,7 @@ async def stop_all_background_tasks(session_id: str) -> list[dict]:
 
         turn_scheduler.discard_queued_task_wakes(session_id, task_ids)
 
-    results: list[dict] = []
+    results: list[dict] = list(spared)
     for task_id in task_ids:
         results.append(await stop_session_task(session_id, task_id))
     return results

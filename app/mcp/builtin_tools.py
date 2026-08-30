@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
@@ -107,6 +106,11 @@ class _BackgroundTask:
         self.exit_code: Optional[int] = None
         self.process: Optional[asyncio.subprocess.Process] = None
         self._reader_task: Optional[asyncio.Task] = None
+        # True once the subprocess has been spawned into a process group of
+        # its own (see app.core.process_tree.spawn_kwargs). Group-addressed
+        # signals — CTRL_BREAK on Windows, killpg on POSIX — are only safe
+        # when this holds; otherwise they land on the SERVER's own group.
+        self.own_process_group: bool = False
 
     def is_running(self) -> bool:
         return self.process is not None and self.process.returncode is None
@@ -125,14 +129,34 @@ def _registry_safe(fn) -> None:
         logger.debug("task_registry update failed", exc_info=True)
 
 
+def is_background_shell_running(task_id: str) -> bool:
+    """True when ``task_id`` names a Monitor shell whose subprocess is alive.
+
+    Lets the Stop path tell a healthy long-lived shell (spare it) from a ghost
+    registry row whose process already exited (reap it).
+    """
+    task = _background_tasks.get(task_id)
+    return bool(task and task.is_running())
+
+
 async def stop_background_shell_task(
     task_id: str, session_id: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
     """Force-stop a Monitor shell background task by id.
 
-    Terminates the tracked subprocess (escalating to kill after 5s) and marks
-    the task ``killed`` in the registry. Shared by the ``TaskStop`` MCP tool and
-    the UI "stop task" endpoint.
+    Kills the tracked subprocess AND its descendants
+    (:func:`app.core.process_tree.kill_process_tree`: graceful group signal,
+    escalating to SIGKILL / ``taskkill /F /T``), then VERIFIES the outcome
+    before answering. Shared by the ``TaskStop`` MCP tool and the UI "stop
+    task" endpoint.
+
+    The verification is the point. Terminating the shell used to be reported
+    as a stop even when the thing the shell had started — a dev server three
+    processes down under Git Bash's nested bash — was still holding its
+    listening socket, so ``TaskStop`` answered ``running: false`` while
+    ``netstat`` showed the port bound and the agent had to ``taskkill`` by
+    hand. When descendants survive, this says so: ``running`` stays true and
+    ``warning`` names the pids (and the ports they still hold).
 
     Returns a small status dict when ``task_id`` is a known shell task, or
     ``None`` when no such shell task exists — letting callers fall through to
@@ -141,30 +165,36 @@ async def stop_background_shell_task(
     task = _background_tasks.get(task_id)
     if not task:
         return None
-    if task.process and task.process.returncode is None:
-        try:
-            task.process.terminate()
-            try:
-                await asyncio.wait_for(task.process.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                task.process.kill()
-                await task.process.wait()
-        except ProcessLookupError:
-            pass
+    from app.core.process_tree import kill_process_tree, survivor_warning
+
+    survivors: List[int] = []
+    if task.process is not None:
+        survivors = await kill_process_tree(
+            task.process, own_process_group=task.own_process_group
+        )
     # Mark the task killed in the registry. The reader's completion path may also
     # fire (with exit_code from terminate); the last write wins and both are
-    # terminal, so the surfaced status stays sane.
+    # terminal, so the surfaced status stays sane. Orphans do NOT keep the row
+    # running — the shell itself is gone and nothing would ever settle it — but
+    # they are reported to the caller.
     if session_id:
         from app.core.task_registry import task_registry
         _registry_safe(
             lambda: task_registry.complete_task(session_id, task_id, "killed")
         )
-    return {
+    result: Dict[str, Any] = {
         "task_id": task_id,
         "kind": "shell",
-        "running": task.is_running(),
+        "running": task.is_running() or bool(survivors),
         "exit_code": task.exit_code,
     }
+    if survivors:
+        result["survivors"] = survivors
+        result["warning"] = survivor_warning(task_id, survivors)
+        logger.warning(
+            "TaskStop left orphans for shell %s: %s", task_id, survivors
+        )
+    return result
 
 
 # Strong references to in-flight reap tasks so the fire-and-forget scheduler
@@ -252,18 +282,22 @@ async def stop_session_background_shells(session_id: str) -> int:
         rt = task._reader_task
         if rt is not None and not rt.done():
             rt.cancel()
-        # Terminate the subprocess, escalating to kill after 5s.
+        # Terminate the subprocess AND its descendants, escalating to a forced
+        # tree kill after 5s. Killing only the shell would leave whatever it
+        # started (a dev server, typically) running for the life of the host.
         proc = task.process
         if proc is not None and proc.returncode is None:
+            from app.core.process_tree import kill_process_tree
+
             try:
-                proc.terminate()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=5)
-                except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.wait()
-            except ProcessLookupError:
-                pass
+                survivors = await kill_process_tree(
+                    proc, own_process_group=task.own_process_group
+                )
+                if survivors:
+                    logger.warning(
+                        "Session reap left orphan pids for shell %s: %s",
+                        tid, survivors,
+                    )
             except Exception:
                 logger.debug(f"Error terminating background shell {tid}", exc_info=True)
         _background_tasks.pop(tid, None)
@@ -305,20 +339,24 @@ async def _spawn_background(
     # shell the environment block declares. stdin is closed so a command
     # that prompts exits instead of inheriting the server's stdin.
     from fluid.tools.shell import resolve_shell
+    from app.core.process_tree import child_env, spawn_kwargs
 
-    spawn_kwargs: Dict[str, Any] = {}
-    if sys.platform != "win32":
-        spawn_kwargs["start_new_session"] = True  # own process group for stop
+    # Its own process group on BOTH platforms (POSIX session / Windows
+    # CREATE_NEW_PROCESS_GROUP) so the stop path can address the whole tree,
+    # and a UTF-8 environment so a child Python printing anything outside
+    # cp1252 doesn't die before it binds its port.
     proc = await asyncio.create_subprocess_exec(
         *resolve_shell().argv_prefix,
         command,
         cwd=cwd,
+        env=child_env(),
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
-        **spawn_kwargs,
+        **spawn_kwargs(),
     )
     task.process = proc
+    task.own_process_group = True
 
     # Register the shell task so TaskList / /live can surface it. Keyed by the
     # AI Shuffle session that spawned it; module-level spawns (no session) skip
@@ -834,7 +872,9 @@ def create_builtin_tools_server(
     @tool(
         "Monitor",
         "Spawn a long-running shell command in the background and stream stdout into a buffer. "
-        "Returns a task_id; use TaskOutput to read output and TaskStop to cancel.",
+        "Returns a task_id; use TaskOutput to read output and TaskStop to cancel. "
+        "The shell survives the user pressing Stop — a server started here keeps "
+        "running until TaskStop, the task's x button, or the session ending.",
         {
             "type": "object",
             "properties": {
@@ -995,6 +1035,16 @@ def create_builtin_tools_server(
                         status=record.get("status"),
                     )
             return _err("task not found.", task_id=tid)
+        if result.get("survivors"):
+            # Never claim a stop the OS did not give us. The audited failure was
+            # exactly this line answering success/running:false while port 8010
+            # stayed LISTENING and the model believed the server was down.
+            return _err(
+                result["warning"],
+                task_id=tid,
+                running=True,
+                survivors=result["survivors"],
+            )
         return _ok({
             "task_id": tid,
             "running": result["running"],
