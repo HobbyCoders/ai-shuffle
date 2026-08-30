@@ -180,7 +180,7 @@ describe('buildDisplayItems — settled turns', () => {
 		expect(collapsedVisibleMessages(items).some((message) => message.id === running.id)).toBe(true);
 	});
 
-	it('never folds agent, todo, question, or subagent surfaces', () => {
+	it('never folds agent, todo, question, plan, or subagent surfaces', () => {
 		const messages = [
 			user('go'),
 			tool(),
@@ -190,12 +190,13 @@ describe('buildDisplayItems — settled turns', () => {
 			tool({ toolName: 'Agent' }),
 			tool({ toolName: 'AskUserQuestion' }),
 			tool({ toolName: 'AskUser' }),
+			tool({ toolName: 'StopPlanning', toolInput: { plan: '# Ready' } }),
 			text('done')
 		];
 		const visibleMessages = collapsedVisibleMessages(buildDisplayItems(messages, SETTLED));
 
 		expect(visibleMessages.some((message) => message.type === 'subagent')).toBe(true);
-		for (const name of ['TodoWrite', 'Task', 'Agent', 'AskUserQuestion', 'AskUser']) {
+		for (const name of ['TodoWrite', 'Task', 'Agent', 'AskUserQuestion', 'AskUser', 'StopPlanning']) {
 			expect(visibleMessages.some((message) => message.toolName === name)).toBe(true);
 		}
 	});
@@ -364,6 +365,23 @@ describe('buildDisplayItems — live turn', () => {
 		const items = buildDisplayItems([user('go'), tool(), prose, thinking], LIVE);
 		expect(items.some((item) => item.kind === 'message' && item.message.id === prose.id)).toBe(true);
 		expect(items.some((item) => item.kind === 'message' && item.message.id === thinking.id)).toBe(true);
+	});
+
+	it('keeps StopPlanning outside the live work-log fold', () => {
+		const plan = tool({
+			toolName: 'StopPlanning',
+			toolInput: { plan: '# Ready to build' }
+		});
+		const items = buildDisplayItems(
+			[user('go'), tool(), plan, tool({ toolStatus: 'running', streaming: true })],
+			LIVE
+		);
+
+		expect(items.some((item) => item.kind === 'message' && item.message.id === plan.id)).toBe(true);
+		for (const item of items) {
+			if (item.kind !== 'work_log') continue;
+			expect([...item.folded, ...item.tail].some((entry) => entry.message.id === plan.id)).toBe(false);
+		}
 	});
 
 	it('renders a single active tool plainly', () => {

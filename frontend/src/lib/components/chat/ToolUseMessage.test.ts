@@ -106,6 +106,35 @@ describe('isDismissedQuestion', () => {
 	});
 });
 
+describe('ToolUseMessage — StopPlanning plan', () => {
+	it('renders the complete plan as sanitized Markdown without expanding generic input', async () => {
+		const { container } = render(ToolUseMessage, {
+			props: {
+				name: 'StopPlanning',
+				input: {
+					plan: '# Release plan\n\n- Run tests\n- Ship safely\n\n```ts\nconst ready = true;\n```\n\n<img src="x" onerror="alert(1)"><script>alert(2)</script>'
+				},
+				status: 'complete'
+			}
+		});
+
+		const plan = container.querySelector('[data-testid="stop-planning-plan"]');
+		expect(plan).not.toBeNull();
+		expect(plan?.querySelector('h1')?.textContent).toBe('Release plan');
+		expect(Array.from(plan?.querySelectorAll('li') ?? []).map((item) => item.textContent)).toEqual([
+			'Run tests',
+			'Ship safely'
+		]);
+		expect(plan?.querySelector('code')?.textContent).toContain('const ready = true;');
+		expect(plan?.querySelector('script')).toBeNull();
+		expect(plan?.querySelector('[onerror]')).toBeNull();
+
+		await fireEvent.click(container.querySelector('.wlrow') as HTMLElement);
+		expect(screen.queryByText('Input')).toBeNull();
+		expect(container.textContent).not.toContain('\"plan\"');
+	});
+});
+
 describe('ToolUseMessage — compact live and failure states', () => {
 	it('uses a concise action label for a running command', () => {
 		render(ToolUseMessage, {

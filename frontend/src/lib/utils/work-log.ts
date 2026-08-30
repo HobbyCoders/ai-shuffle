@@ -148,7 +148,8 @@ function isSpecialTool(msg: ChatMessage): boolean {
 		msg.toolName === 'Task' ||
 		msg.toolName === 'Agent' ||
 		msg.toolName === 'AskUserQuestion' ||
-		msg.toolName === 'AskUser'
+		msg.toolName === 'AskUser' ||
+		msg.toolName === 'StopPlanning'
 	);
 }
 
