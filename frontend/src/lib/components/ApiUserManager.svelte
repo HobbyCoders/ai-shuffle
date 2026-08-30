@@ -8,6 +8,7 @@
 
 	import { onMount } from 'svelte';
 	import Banner from '$lib/components/Banner.svelte';
+	import ModelPicker from '$lib/components/settings/ModelPicker.svelte';
 	import { api } from '$lib/api/client';
 	import type { Profile } from '$lib/api/client';
 	import type { Session } from '$lib/api/sessions';
@@ -63,8 +64,22 @@
 	let formProfileIds: string[] = $state([]);
 	let formWebLoginAllowed = $state(false);
 	let formIsActive = $state(true);
+	// Preconfigured run selection: every session a connector starts for this
+	// user binds these (re-bound each turn). NULL/'' falls back to the profile.
+	let formModel = $state('');
+	let formEffort = $state('');
 	let saving = $state(false);
 	let formError = $state('');
+
+	// Same levels the chat composer offers.
+	const effortLevels = [
+		{ value: '', label: 'Default', description: 'Use the agent default' },
+		{ value: 'low', label: 'Low', description: 'Quick, minimal reasoning' },
+		{ value: 'medium', label: 'Medium', description: 'Balanced reasoning' },
+		{ value: 'high', label: 'High', description: 'Thorough reasoning' },
+		{ value: 'xhigh', label: 'XHigh', description: 'Extreme reasoning' },
+		{ value: 'max', label: 'Max', description: 'Maximum reasoning depth' }
+	];
 
 	async function loadData() {
 		try {
@@ -96,7 +111,9 @@
 				description: formDescription.trim() || undefined,
 				project_id: formProjectId || undefined,
 				profile_ids: formProfileIds.length > 0 ? formProfileIds : undefined,
-				web_login_allowed: formWebLoginAllowed
+				web_login_allowed: formWebLoginAllowed,
+				model: formModel || null,
+				effort: formEffort || null
 			});
 
 			revealedApiKey = result.api_key;
@@ -129,7 +146,9 @@
 				project_id: formProjectId || undefined,
 				profile_ids: formProfileIds,
 				is_active: formIsActive,
-				web_login_allowed: formWebLoginAllowed
+				web_login_allowed: formWebLoginAllowed,
+				model: formModel || null,
+				effort: formEffort || null
 			});
 			await loadData();
 			resetForm();
@@ -169,6 +188,8 @@
 		formProfileIds = user.profile_ids ? [...user.profile_ids] : [];
 		formWebLoginAllowed = user.web_login_allowed;
 		formIsActive = user.is_active;
+		formModel = user.model || '';
+		formEffort = user.effort || '';
 		showCreateForm = true;
 	}
 
@@ -181,6 +202,8 @@
 		formProfileIds = [];
 		formWebLoginAllowed = false;
 		formIsActive = true;
+		formModel = '';
+		formEffort = '';
 		formError = '';
 	}
 
@@ -374,31 +397,39 @@
 					</div>
 				{/if}
 
+				<div class="space-y-5">
+					<!-- Identity -->
 				<div class="space-y-3">
-					<!-- Name -->
-					<div>
-						<label class="block text-xs text-muted-foreground mb-1" for="api-user-name">
-							Name <span class="text-destructive">*</span>
-						</label>
-						<input
-							id="api-user-name"
-							type="text"
-							bind:value={formName}
-							placeholder="e.g., Discord Bot, Mobile App"
-							class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors"
-						/>
+					<div class="flex items-center gap-2 pb-1 border-b border-border">
+						<span class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Identity</span>
 					</div>
 
-					<!-- Description -->
-					<div>
-						<label class="block text-xs text-muted-foreground mb-1" for="api-user-desc">Description</label>
-						<input
-							id="api-user-desc"
-							type="text"
-							bind:value={formDescription}
-							placeholder="Optional description for this API user"
-							class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors"
-						/>
+					<!-- Name -->
+					<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+						<div>
+							<label class="block text-xs text-muted-foreground mb-1" for="api-user-name">
+								Name <span class="text-destructive">*</span>
+							</label>
+							<input
+								id="api-user-name"
+								type="text"
+								bind:value={formName}
+								placeholder="e.g., Discord Bot, Mobile App"
+								class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors"
+							/>
+						</div>
+
+						<!-- Description -->
+						<div>
+							<label class="block text-xs text-muted-foreground mb-1" for="api-user-desc">Description</label>
+							<input
+								id="api-user-desc"
+								type="text"
+								bind:value={formDescription}
+								placeholder="Optional description"
+								class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors"
+							/>
+						</div>
 					</div>
 
 					<!-- Project -->
@@ -415,6 +446,57 @@
 							{/each}
 						</select>
 						<p class="text-xs text-muted-foreground mt-1">Restrict this user to a specific project workspace</p>
+					</div>
+				</div>
+
+				<!-- Run configuration -->
+				<div class="space-y-3">
+					<div class="flex items-center gap-2 pb-1 border-b border-border">
+						<span class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Run configuration</span>
+					</div>
+
+					<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+						<!-- Model -->
+						<div>
+							<span class="block text-xs text-muted-foreground mb-1">Model</span>
+							<ModelPicker
+								id="api-user-model"
+								value={formModel}
+								allowEmpty
+								emptyLabel="Agent default"
+								onSelect={(value) => (formModel = value)}
+							/>
+							<p class="text-xs text-muted-foreground mt-1">Preconfigured for every connector session of this user</p>
+						</div>
+
+						<!-- Effort -->
+						<div>
+							<label class="block text-xs text-muted-foreground mb-1" for="api-user-effort">Effort</label>
+							<select
+								id="api-user-effort"
+								bind:value={formEffort}
+								class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground focus:outline-none focus:border-primary transition-colors"
+							>
+								{#each effortLevels as level}
+									<option value={level.value}>{level.label} — {level.description}</option>
+								{/each}
+							</select>
+						</div>
+					</div>
+
+					<div class="rounded-md border border-border bg-background/60 px-3 py-2">
+						<p class="text-xs text-muted-foreground">
+							<span class="font-medium text-foreground">Permissions are always Ask</span> — connector sessions
+							can never inherit a bypass setting. Tool permission requests are sent to the connected
+							platform (e.g. Discord) for the user to approve or deny.
+						</p>
+					</div>
+				</div>
+
+				<!-- Access -->
+				<div class="space-y-3">
+					<div class="flex items-center gap-2 pb-1 border-b border-border">
+						<span class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Access</span>
 					</div>
 
 					<!-- Agents -->
@@ -479,6 +561,7 @@
 							Cancel
 						</button>
 					</div>
+					</div>
 				</div>
 			</div>
 		{/if}
@@ -495,20 +578,35 @@
 					<div class="bg-card/30 rounded-lg p-3 border border-border">
 						<div class="flex items-start justify-between gap-4">
 							<div class="flex-1 min-w-0">
-								<!-- Name + Status -->
-								<div class="flex items-center gap-2">
-									<span class={`w-2 h-2 rounded-full flex-shrink-0 ${user.is_active ? 'bg-success' : 'bg-muted-foreground'}`}></span>
-									<span class="text-sm font-medium text-foreground truncate">{user.name}</span>
-									<span class="text-xs text-muted-foreground">({user.id})</span>
+								<!-- Avatar + Name + Status -->
+								<div class="flex items-center gap-2.5">
+									<span class="w-8 h-8 rounded-full bg-primary/15 text-primary text-xs font-semibold flex items-center justify-center flex-shrink-0 uppercase">
+										{user.name.slice(0, 2)}
+									</span>
+									<div class="min-w-0">
+										<div class="flex items-center gap-2">
+											<span class={`w-2 h-2 rounded-full flex-shrink-0 ${user.is_active ? 'bg-success' : 'bg-muted-foreground'}`}></span>
+											<span class="text-sm font-medium text-foreground truncate">{user.name}</span>
+											<span class="text-xs text-muted-foreground">({user.id})</span>
+										</div>
+										{#if user.description}
+											<p class="text-xs text-muted-foreground mt-0.5 truncate">{user.description}</p>
+										{/if}
+									</div>
 								</div>
 
-								<!-- Description -->
-								{#if user.description}
-									<p class="text-xs text-muted-foreground mt-1 ml-4 truncate">{user.description}</p>
-								{/if}
-
 								<!-- Badges -->
-								<div class="flex flex-wrap items-center gap-1.5 mt-2 ml-4">
+								<div class="flex flex-wrap items-center gap-1.5 mt-2">
+									{#if user.model}
+										<span class="px-1.5 py-0.5 bg-primary/20 text-primary text-xs rounded font-medium" title="Preconfigured model">
+											{user.model}
+										</span>
+									{/if}
+									{#if user.effort}
+										<span class="px-1.5 py-0.5 bg-primary/10 text-primary text-xs rounded" title="Preconfigured effort">
+											effort: {user.effort}
+										</span>
+									{/if}
 									{#if getProjectName(user.project_id)}
 										<span class="px-1.5 py-0.5 bg-primary/20 text-primary text-xs rounded">
 											{getProjectName(user.project_id)}
@@ -519,6 +617,9 @@
 											{user.profile_ids.length} agent{user.profile_ids.length !== 1 ? 's' : ''}
 										</span>
 									{/if}
+									<span class="px-1.5 py-0.5 bg-success/15 text-success text-xs rounded" title="Permission requests funnel to the connector">
+										ask
+									</span>
 									{#if user.web_login_allowed}
 										<span class="px-1.5 py-0.5 bg-muted text-muted-foreground text-xs rounded">
 											web login
@@ -532,7 +633,7 @@
 								</div>
 
 								<!-- Meta -->
-								<div class="flex items-center gap-4 mt-2 ml-4 text-xs text-muted-foreground">
+								<div class="flex items-center gap-4 mt-2 text-xs text-muted-foreground">
 									<span>Created: {formatDate(user.created_at)}</span>
 									<span>Last used: {formatDate(user.last_used_at)}</span>
 								</div>

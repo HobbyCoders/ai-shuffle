@@ -17,6 +17,8 @@ export interface ApiUser {
 	profile_ids: string[] | null;
 	is_active: boolean;
 	web_login_allowed: boolean;
+	model: string | null;
+	effort: string | null;
 	created_at: string;
 	updated_at: string;
 	last_used_at: string | null;
@@ -28,6 +30,9 @@ export interface ApiUserCreate {
 	project_id?: string;
 	profile_ids?: string[];
 	web_login_allowed?: boolean;
+	/** Preconfigured run selection every connector session for this user binds. */
+	model?: string | null;
+	effort?: string | null;
 }
 
 export interface ApiUserUpdate {
@@ -37,6 +42,8 @@ export interface ApiUserUpdate {
 	profile_ids?: string[];
 	is_active?: boolean;
 	web_login_allowed?: boolean;
+	model?: string | null;
+	effort?: string | null;
 }
 
 export interface ApiUserCreateResponse extends ApiUser {

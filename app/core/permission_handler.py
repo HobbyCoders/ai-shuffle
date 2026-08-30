@@ -518,6 +518,25 @@ class PermissionHandler:
         )
         await self._broadcast_permission_request(request, queue_position, broadcast_func)
 
+        # Connector funnel: sessions owned by a connector conversation have
+        # their prompts delivered to the platform (Discord buttons, ...) —
+        # best-effort, AFTER the durable row exists so the normal web/mobile
+        # answer paths stay authoritative even when delivery fails.
+        try:
+            from app.core.connector_permissions import deliver_permission_prompt
+
+            await deliver_permission_prompt(
+                session_id=session_id,
+                request_id=request_id,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                description=description or title or f"Allow {display_name or tool_name}?",
+            )
+        except Exception:  # noqa: BLE001 — the funnel must never break the flow
+            logger.debug(
+                "connector permission funnel failed", exc_info=True
+            )
+
         # Durable lifecycle event (#653): emit AFTER the WS broadcast, swallowed
         # on failure so a log append can never break the permission flow.
         from app.core import interaction_events

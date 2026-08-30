@@ -285,7 +285,7 @@ def _incoming(text="hey there"):
 
 
 def _wire_connector(monkeypatch, manager, instance, session_row,
-                    create_session=None):
+                    create_session=None, api_user=None):
     """Patch the DB helpers the inbound path touches."""
     from app.core.connectors import manager as manager_module
     from app.core.connectors.manager import ConnectorManager
@@ -301,7 +301,7 @@ def _wire_connector(monkeypatch, manager, instance, session_row,
     )
     monkeypatch.setattr(
         db, "get_api_user",
-        lambda uid: {"id": uid, "profile_ids": ["default"], "project_id": None},
+        lambda uid: api_user or {"id": uid, "profile_ids": ["default"], "project_id": None},
     )
     monkeypatch.setattr(db, "get_all_profiles", lambda: [{"id": "default"}])
     monkeypatch.setattr(
@@ -340,7 +340,13 @@ async def test_connector_message_submits_connector_turn(mock_db, monkeypatch):
     assert calls[0]["session_id"] == "ai-sess-1"
     assert calls[0]["prompt"] == "hey there"
     assert calls[0]["profile_id"] == "default"
-    assert calls[0]["overrides"] == {"system_prompt_append": "connector context"}
+    # Connector turns always pin the permission mode to Ask (``default``) so
+    # prompts funnel out through the connector instead of inheriting a
+    # profile-level bypass.
+    assert calls[0]["overrides"] == {
+        "system_prompt_append": "connector context",
+        "permission_mode": "default",
+    }
 
     assert len(instance.sent) == 1
     assert instance.sent[0].text == "from the queue"
@@ -370,3 +376,99 @@ async def test_connector_bails_when_session_cannot_be_minted(mock_db, monkeypatc
     assert calls == []
     assert instance.sent == []
     assert instance.typing == 0
+
+
+async def test_connector_session_mints_with_api_user_run_config(mock_db, monkeypatch):
+    """A freshly minted connector session binds the API user's preconfigured
+    model/effort and ALWAYS pins the permission mode to Ask."""
+    from app.core.connectors.manager import ConnectorManager
+
+    captured = {}
+
+    def _fake_create_session(**kwargs):
+        captured.update(kwargs)
+        return {"id": kwargs["session_id"]}
+
+    manager = ConnectorManager()
+    instance = _FakeConnector()
+    _wire_connector(
+        monkeypatch, manager, instance,
+        session_row={"id": "cs-1", "session_id": None},
+        create_session=_fake_create_session,
+        api_user={
+            "id": "api-user-1",
+            "profile_ids": ["default"],
+            "project_id": None,
+            "model": "opus",
+            "effort": "high",
+        },
+    )
+
+    calls = _capture_submit(monkeypatch)
+    _stub_wait(monkeypatch)
+    _stub_outcome(monkeypatch, text="minted")
+
+    await manager.handle_incoming_message(_incoming())
+
+    assert captured["model"] == "opus"
+    assert captured["effort"] == "high"
+    assert captured["permission_mode"] == "default"
+
+    # The same binding rides every turn's overrides.
+    assert len(calls) == 1
+    assert calls[0]["overrides"]["model"] == "opus"
+    assert calls[0]["overrides"]["effort"] == "high"
+    assert calls[0]["overrides"]["permission_mode"] == "default"
+
+
+async def test_connector_turn_rebinds_when_api_user_config_changes(mock_db, monkeypatch):
+    """``connector`` is a _BINDING_SOURCES member: editing the API user
+    re-binds EXISTING conversations on their next message."""
+    from app.core.connectors.manager import ConnectorManager
+
+    manager = ConnectorManager()
+    instance = _FakeConnector()
+    _wire_connector(
+        monkeypatch, manager, instance,
+        session_row={"id": "cs-1", "session_id": "ai-sess-1"},
+        api_user={
+            "id": "api-user-1",
+            "profile_ids": ["default"],
+            "project_id": None,
+            "model": "fable",
+            "effort": "max",
+        },
+    )
+
+    calls = _capture_submit(monkeypatch)
+    _stub_wait(monkeypatch)
+    _stub_outcome(monkeypatch, text="rebound")
+
+    await manager.handle_incoming_message(_incoming())
+
+    assert calls[0]["overrides"]["model"] == "fable"
+    assert calls[0]["overrides"]["effort"] == "max"
+    assert calls[0]["overrides"]["permission_mode"] == "default"
+
+
+async def test_connector_turn_without_api_user_config_asks_only(mock_db, monkeypatch):
+    """No model/effort on the API user → no binding overrides, but the
+    permission mode is STILL pinned to Ask."""
+    from app.core.connectors.manager import ConnectorManager
+
+    manager = ConnectorManager()
+    instance = _FakeConnector()
+    _wire_connector(
+        monkeypatch, manager, instance,
+        session_row={"id": "cs-1", "session_id": "ai-sess-1"},
+    )
+
+    calls = _capture_submit(monkeypatch)
+    _stub_wait(monkeypatch)
+    _stub_outcome(monkeypatch, text="plain")
+
+    await manager.handle_incoming_message(_incoming())
+
+    assert "model" not in calls[0]["overrides"]
+    assert "effort" not in calls[0]["overrides"]
+    assert calls[0]["overrides"]["permission_mode"] == "default"

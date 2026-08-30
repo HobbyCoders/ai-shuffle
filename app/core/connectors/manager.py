@@ -469,14 +469,18 @@ class ConnectorManager:
                 connector_row = database.get_connector(message.connector_id)
                 api_user_id = connector_row.get("api_user_id") if connector_row else None
 
-                # Resolve profile / project from the API user
+                # Resolve profile / project / run config from the API user
                 api_user = database.get_api_user(api_user_id) if api_user_id else None
                 profile_id = None
                 project_id = None
+                api_user_model = None
+                api_user_effort = None
                 if api_user:
                     profile_ids = api_user.get("profile_ids", [])
                     profile_id = profile_ids[0] if profile_ids else None
                     project_id = api_user.get("project_id")
+                    api_user_model = api_user.get("model")
+                    api_user_effort = api_user.get("effort")
 
                 # Fall back to the first available profile when none is configured
                 if not profile_id:
@@ -492,6 +496,8 @@ class ConnectorManager:
                     "api_user_id": api_user_id,
                     "profile_id": profile_id,
                     "project_id": project_id,
+                    "api_user_model": api_user_model,
+                    "api_user_effort": api_user_effort,
                 }
 
             routing = await run_sync(_resolve_routing_blocking)
@@ -502,6 +508,8 @@ class ConnectorManager:
             api_user_id = routing["api_user_id"]
             profile_id = routing["profile_id"]
             project_id = routing["project_id"]
+            api_user_model = routing["api_user_model"]
+            api_user_effort = routing["api_user_effort"]
 
             # Pre-mint + link the AI session BEFORE the turn is submitted.
             #
@@ -535,6 +543,14 @@ class ConnectorManager:
                         title=title or "Discord conversation",
                         api_user_id=api_user_id,
                         is_active=True,
+                        # Run binding from the API user's preconfigured
+                        # selection. Permission mode is pinned to Ask so a
+                        # profile's bypass/accept-edits setting can never leak
+                        # into a headless connector conversation — prompts ride
+                        # the connector funnel instead.
+                        model=api_user_model,
+                        effort=api_user_effort,
+                        permission_mode="default",
                     )
                     database.update_connector_session_ai_session(
                         session.get("id"), minted_id
@@ -607,6 +623,18 @@ class ConnectorManager:
                     connector_row, instance, message.platform_chat_id
                 )
                 overrides["system_prompt_append"] = context_append
+
+            # Re-assert the API user's run binding every turn (``connector`` is
+            # a _BINDING_SOURCES member, so these persist to the session row —
+            # editing the API user re-binds existing conversations). The
+            # permission mode is ALWAYS Ask: the agent's configured tools list
+            # governs, and every non-whitelisted tool raises a permission
+            # request that funnels out through the connector.
+            if api_user_model:
+                overrides["model"] = api_user_model
+            if api_user_effort:
+                overrides["effort"] = api_user_effort
+            overrides["permission_mode"] = "default"
 
             try:
                 # Enqueue, then block until the session drains. If a turn is

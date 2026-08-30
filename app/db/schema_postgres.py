@@ -127,6 +127,8 @@ def create_postgres_schema(cursor) -> None:
             is_active BOOLEAN DEFAULT TRUE,
             web_login_allowed BOOLEAN DEFAULT TRUE,
             description TEXT,
+            model TEXT,
+            effort TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             last_used_at TIMESTAMP WITH TIME ZONE,

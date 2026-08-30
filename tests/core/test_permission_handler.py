@@ -1321,3 +1321,75 @@ class TestPermissionBroadcastLegs:
 
         origin2.assert_awaited_once()
         fanout.assert_not_awaited()
+
+
+class TestConnectorFunnelHook:
+    """``request_permission`` must fan the prompt out to connector platforms.
+
+    The funnel is best-effort: a connector-less session, a dead lookup, or a
+    platform error must never break the durable permission flow itself.
+    """
+
+    @pytest.fixture
+    def handler(self):
+        return PermissionHandler()
+
+    @pytest.mark.asyncio
+    async def test_funnel_invoked_with_request_details(self, handler, mock_broadcast=None):
+        from unittest.mock import MagicMock
+
+        broadcast = AsyncMock()
+        captured = {}
+
+        async def fake_deliver(**kwargs):
+            captured.update(kwargs)
+
+        with patch("app.db.database.get_permission_rules", return_value=[]), \
+             patch("app.core.connector_permissions.deliver_permission_prompt", fake_deliver):
+            task = asyncio.create_task(
+                handler.request_permission(
+                    request_id="req-funnel",
+                    session_id="session-1",
+                    profile_id="profile-1",
+                    tool_name="Bash",
+                    tool_input={"command": "rm -rf /"},
+                    broadcast_func=broadcast,
+                )
+            )
+            await asyncio.sleep(0.05)
+            await handler.cancel_request("req-funnel", "session-1")
+            await task
+
+        assert captured["session_id"] == "session-1"
+        assert captured["request_id"] == "req-funnel"
+        assert captured["tool_name"] == "Bash"
+        assert captured["tool_input"] == {"command": "rm -rf /"}
+
+    @pytest.mark.asyncio
+    async def test_funnel_failure_does_not_break_request(self, handler):
+        """A connector-side explosion must leave the durable flow intact."""
+        broadcast = AsyncMock()
+
+        async def boom(**kwargs):
+            raise RuntimeError("discord down")
+
+        with patch("app.db.database.get_permission_rules", return_value=[]), \
+             patch("app.core.connector_permissions.deliver_permission_prompt", boom):
+            task = asyncio.create_task(
+                handler.request_permission(
+                    request_id="req-funnel2",
+                    session_id="session-1",
+                    profile_id="profile-1",
+                    tool_name="Bash",
+                    tool_input={"command": "ls"},
+                    broadcast_func=broadcast,
+                )
+            )
+            await asyncio.sleep(0.05)
+
+            # The durable row exists and the WS broadcast still happened.
+            assert handler.get_queue_count("session-1") == 1
+            assert broadcast.called
+
+            await handler.cancel_request("req-funnel2", "session-1")
+            await task

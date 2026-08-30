@@ -1978,6 +1978,17 @@ def _run_column_migrations(cursor):
         cursor.execute("ALTER TABLE sessions ADD COLUMN fast BOOLEAN")
         migrations_applied.append("sessions.fast")
 
+    # API-user run configuration. ``model`` / ``effort`` are the preconfigured
+    # selection every connector/API session created FOR this user binds at
+    # create_session (and re-binds on each connector turn, since ``connector``
+    # is a _BINDING_SOURCES member). NULL keeps the pre-existing fallback
+    # chain (profile legacy config, then the global default). Additive/nullable
+    # with no index; guarded so the ALTER never re-runs.
+    for _col in ("model", "effort"):
+        if table_exists(cursor, "api_users") and not column_exists(cursor, "api_users", _col):
+            cursor.execute(f"ALTER TABLE api_users ADD COLUMN {_col} TEXT")
+            migrations_applied.append(f"api_users.{_col}")
+
     # Rename sessions.is_favorite -> is_active (v63). Favorites were reworked
     # into an "Active group": the flag now marks the session the user is
     # currently working in. Guarded so the rename runs exactly once (only when

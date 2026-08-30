@@ -26,6 +26,8 @@ class ApiUserRow(TypedDict):
     is_active: bool
     web_login_allowed: bool
     description: Optional[str]
+    model: Optional[str]
+    effort: Optional[str]
     created_at: str
     updated_at: str
     last_used_at: Optional[str]
@@ -97,6 +99,8 @@ def create_api_user(
     profile_ids: Optional[List[str]] = None,
     web_login_allowed: bool = True,
     description: Optional[str] = None,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> ApiUserRow:
     """Create a new API user and optionally link profile IDs."""
     now = datetime.now(timezone.utc).isoformat()
@@ -104,9 +108,9 @@ def create_api_user(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO api_users
-               (id, name, api_key_hash, project_id, is_active, web_login_allowed, description, created_at, updated_at)
-               VALUES (%s, %s, %s, %s, TRUE, %s, %s, %s, %s)""",
-            (user_id, name, api_key_hash, project_id, web_login_allowed, description, now, now),
+               (id, name, api_key_hash, project_id, is_active, web_login_allowed, description, model, effort, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, TRUE, %s, %s, %s, %s, %s, %s)""",
+            (user_id, name, api_key_hash, project_id, web_login_allowed, description, model, effort, now, now),
         )
         if profile_ids:
             for pid in profile_ids:
@@ -220,7 +224,8 @@ def update_api_user(user_id: str, **kwargs) -> Optional[ApiUserRow]:
     """Update an API user. Only provided fields are changed.
 
     Supported kwargs: name, description, project_id, is_active,
-    web_login_allowed, api_key_hash, username, password_hash, profile_ids.
+    web_login_allowed, api_key_hash, username, password_hash, model, effort,
+    profile_ids.
 
     profile_ids replaces the full set in the junction table when provided.
     """
@@ -237,6 +242,7 @@ def update_api_user(user_id: str, **kwargs) -> Optional[ApiUserRow]:
     allowed = {
         "name", "description", "project_id", "is_active",
         "web_login_allowed", "api_key_hash", "username", "password_hash",
+        "model", "effort",
     }
     for key, val in kwargs.items():
         if key in allowed:

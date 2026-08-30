@@ -47,6 +47,8 @@ async def create_api_user_endpoint(
         profile_ids=data.profile_ids,
         web_login_allowed=data.web_login_allowed,
         description=data.description,
+        model=data.model,
+        effort=data.effort,
     )
 
     return {**user, "api_key": api_key}

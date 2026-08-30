@@ -1401,6 +1401,11 @@ class ApiUserCreate(BaseModel):
     project_id: Optional[str] = None
     profile_ids: Optional[List[str]] = None
     web_login_allowed: bool = True
+    # Preconfigured run selection every session created for this user binds
+    # (connectors resolve it at session creation and each turn). NULL falls
+    # back to the profile's legacy config, then the global default.
+    model: Optional[str] = None
+    effort: Optional[str] = Field(None, pattern="^(low|medium|high|xhigh|max)$")
 
 
 class ApiUserUpdate(BaseModel):
@@ -1411,6 +1416,8 @@ class ApiUserUpdate(BaseModel):
     profile_ids: Optional[List[str]] = None
     is_active: Optional[bool] = None
     web_login_allowed: Optional[bool] = None
+    model: Optional[str] = None
+    effort: Optional[str] = Field(None, pattern="^(low|medium|high|xhigh|max)$")
 
 
 class ApiUserResponse(BaseModel):
@@ -1423,6 +1430,8 @@ class ApiUserResponse(BaseModel):
     profile_ids: Optional[List[str]] = None
     is_active: bool = True
     web_login_allowed: bool = True
+    model: Optional[str] = None
+    effort: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     last_used_at: Optional[datetime] = None
