@@ -333,7 +333,7 @@ def spawner_harness(monkeypatch):
     task = _FakeTask()
     frames = []
 
-    async def _fake_spawn_background(command, cwd, session_id):
+    async def _fake_spawn_background(command, cwd, session_id, tool_use_id=None):
         tr.task_registry.start_task(session_id, task.task_id, "shell", command)
         return task
 
