@@ -968,7 +968,6 @@ def create_postgres_schema(cursor) -> None:
             tool_use_id TEXT,
             title TEXT,
             status TEXT,
-            unparked BOOLEAN DEFAULT FALSE,
             terminal_notified BOOLEAN DEFAULT FALSE,
             started_at TIMESTAMP WITH TIME ZONE,
             updated_at TIMESTAMP WITH TIME ZONE,

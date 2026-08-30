@@ -225,6 +225,12 @@ def _copy_uncommitted_files(main_dir: str, worktree_path: str) -> dict:
     This allows users to continue working on uncommitted changes in a worktree
     without having to commit or stash first.
 
+    Config files are never copied, whatever git status says about them: see
+    ``checkout_manager._is_never_provisioned``. A ``.env`` that is gitignored
+    already cannot reach this loop, but one that is merely untracked can, and a
+    worktree must not end up holding its own copy of a database password.
+    Configuration reaches worktree processes by env-var reference instead.
+
     Args:
         main_dir: Path to the main repository
         worktree_path: Path to the worktree
@@ -234,9 +240,12 @@ def _copy_uncommitted_files(main_dir: str, worktree_path: str) -> dict:
     """
     import shutil
 
+    from app.core.checkout_manager import _is_never_provisioned
+
     result = {
         "modified_copied": 0,
         "untracked_copied": 0,
+        "skipped_config": [],
         "errors": []
     }
 
@@ -255,6 +264,9 @@ def _copy_uncommitted_files(main_dir: str, worktree_path: str) -> dict:
 
         for file_path in all_modified:
             try:
+                if _is_never_provisioned(file_path):
+                    result["skipped_config"].append(file_path)
+                    continue
                 src = main_path / file_path
                 dest = worktree_abs_path / file_path
 
@@ -277,6 +289,9 @@ def _copy_uncommitted_files(main_dir: str, worktree_path: str) -> dict:
         untracked_files = status.get("untracked", [])
         for file_path in untracked_files:
             try:
+                if _is_never_provisioned(file_path):
+                    result["skipped_config"].append(file_path)
+                    continue
                 src = main_path / file_path
                 dest = worktree_abs_path / file_path
 

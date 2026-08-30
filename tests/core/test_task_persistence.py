@@ -40,7 +40,7 @@ async def _fresh_writer():
 def _rows(mock_db, sid):
     cur = mock_db.execute(
         "SELECT task_id, session_id, instance_id, kind, is_sdk_background, "
-        "tool_use_id, title, status, unparked, terminal_notified, started_at, "
+        "tool_use_id, title, status, terminal_notified, started_at, "
         "updated_at FROM background_tasks WHERE session_id = ? ORDER BY task_id",
         (sid,),
     )
@@ -66,7 +66,6 @@ async def test_start_task_persists_running_row(mock_db):
     assert row["status"] == "running"
     assert row["tool_use_id"] == "toolu_1"
     assert not row["is_sdk_background"]
-    assert not row["unparked"]
     assert not row["terminal_notified"]
     assert row["instance_id"] == settings.effective_instance_id
     assert row["started_at"] and row["updated_at"]

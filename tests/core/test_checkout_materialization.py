@@ -799,3 +799,75 @@ def test_base_resolves_workspace_relative_legacy_path(project, mock_db, workspac
     # Read-only normalization — the DB row is NOT rewritten to the absolute path.
     rows = checkouts_db.list_checkouts(project["id"])
     assert [r["path"] for r in rows] == ["relrepo"]
+
+
+# ---------------------------------------------------------------------------
+# Adopting worktrees the app did not create
+# ---------------------------------------------------------------------------
+
+def _hand_made_worktree(base_repo, branch, path):
+    """What an agent's own `git worktree add` in Bash leaves behind: a real
+    worktree on disk that no app table knows about."""
+    _git(base_repo, "worktree", "add", "-b", branch, str(path))
+    return path
+
+
+def test_a_worktree_the_app_did_not_create_gets_a_row(
+    project, base_checkout, workspace_root, tmp_path
+):
+    """The field symptom: a session's branch was set while its worktree id and
+    path were null, because nothing had ever registered the worktree."""
+    hand_made = _hand_made_worktree(
+        base_checkout, "agent/side-quest", tmp_path / "handmade"
+    )
+    assert not any(
+        r["path"] == str(hand_made) for r in checkouts_db.list_checkouts(project["id"])
+    )
+
+    checkout_manager.ensure_checkout(project, runner_id=RUNNER)
+
+    rows = {r["path"]: r for r in checkouts_db.list_checkouts(project["id"])}
+    assert str(hand_made) in rows
+    assert rows[str(hand_made)]["branch"] == "agent/side-quest"
+    assert rows[str(hand_made)]["status"] == "active"
+
+
+def test_adoption_is_idempotent(project, base_checkout, workspace_root, tmp_path):
+    _hand_made_worktree(base_checkout, "agent/again", tmp_path / "handmade")
+
+    checkout_manager.ensure_checkout(project, runner_id=RUNNER)
+    before = len(checkouts_db.list_checkouts(project["id"]))
+    adopted = checkout_manager.register_unregistered_worktrees(
+        project["id"], RUNNER, str(base_checkout)
+    )
+
+    assert adopted == []
+    assert len(checkouts_db.list_checkouts(project["id"])) == before
+
+
+def test_a_detached_worktree_is_not_adopted(
+    project, base_checkout, workspace_root, tmp_path
+):
+    """Resolution is branch-keyed, so a detached worktree has nothing to key on."""
+    detached = tmp_path / "detached"
+    _git(base_checkout, "worktree", "add", "--detach", str(detached))
+
+    checkout_manager.ensure_checkout(project, runner_id=RUNNER)
+
+    paths = [r["path"] for r in checkouts_db.list_checkouts(project["id"])]
+    assert str(detached) not in paths
+
+
+def test_adoption_failure_never_fails_the_checkout(
+    project, base_checkout, workspace_root, monkeypatch
+):
+    from app.core.git_service import git_service
+
+    monkeypatch.setattr(
+        git_service, "list_worktrees",
+        lambda d: (_ for _ in ()).throw(RuntimeError("git exploded")),
+    )
+
+    assert checkout_manager.ensure_checkout(project, runner_id=RUNNER) == str(
+        base_checkout
+    )
