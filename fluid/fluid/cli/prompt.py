@@ -655,7 +655,9 @@ def compose_code_mode_addendum(tools: frozenset[str] | None = None) -> str:
     )
     body_route = (
         " — assign the text to a triple-quoted variable, or Write it to a file "
-        "and point the command at that file with `--body-file`/`-F`"
+        "and point the command at that file (`git commit -F <file>`, "
+        "`gh pr create --body-file <file>`). Put that file OUTSIDE the repo "
+        "working tree (a temp directory), or `git add -A` will commit it"
         if has("Write")
         else " — assign the text to a triple-quoted variable and pass that"
     )
@@ -674,7 +676,9 @@ def compose_code_mode_addendum(tools: frozenset[str] | None = None) -> str:
 
 In this session tools are reached through run_python, not as individual tool \
 calls. Compose one cell that carries the several calls a step needs — discover \
-with list_tools/search_tools, import with `from tools.<name> import <name>`, \
+with list_tools/search_tools (top-level tool calls, not importable from \
+`tools`; inside a cell `dir(tools)` lists what is mounted), import with \
+`from tools.<name> import <name>`, \
 loop and filter in Python — rather than one cell per call. Iterate scratch \
 logic inside the cell instead of rewriting a script file on disk between runs, \
 and hold intermediate results in kernel variables rather than fetching them a \

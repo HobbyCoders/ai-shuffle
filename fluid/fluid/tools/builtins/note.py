@@ -22,8 +22,9 @@ SPEC = ToolSpec(
         "Working notes — a scratchpad for the current plan and thoughts "
         "through a session. Actions: 'add' appends one or more notes "
         "(text: one note, or several lines for a batch; texts: an array), "
-        "'remove' deletes the one note whose text matches exactly, 'list' "
-        "returns all notes, "
+        "'remove' deletes the notes whose text matches exactly and takes the "
+        "same batch forms as add (retire a finished checklist in one call), "
+        "'list' returns all notes, "
         "'clear' empties them. Notes live outside the context window; calling "
         "Note is what brings them back into view. Before multi-step work, add "
         "every current step in one call. When a step is finished, remove it. "
@@ -40,15 +41,17 @@ SPEC = ToolSpec(
             "text": {
                 "type": "string",
                 "description": (
-                    "The note (action=add/remove). For add, one note per line "
-                    "to batch several in one call. For remove, the note's "
+                    "The note (action=add/remove), one note per line to batch "
+                    "several in one call. For remove, each line is a note's "
                     "full text — matching is whole-note, not substring."
                 ),
             },
             "texts": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Batch add: several notes in one call (action=add).",
+                "description": (
+                    "Batch: several notes in one call (action=add or remove)."
+                ),
             },
         },
         "required": ["action"],
@@ -91,7 +94,7 @@ def _split_note_text(text: str) -> list[str]:
     return lines
 
 
-def _notes_from_add(payload: dict[str, Any]) -> list[str]:
+def _notes_from_payload(payload: dict[str, Any]) -> list[str]:
     lines: list[str] = []
     text = payload.get("text")
     if isinstance(text, str):
@@ -150,17 +153,37 @@ def _outcome(path: Path, prefix: str = "") -> ToolOutcome:
 _CANDIDATES_SHOWN = 5
 
 
-def _no_match(needle: str, existing: list[str]) -> ToolOutcome:
-    """A remove that matched no whole note: delete nothing, show the near ones."""
-    near = [line for line in existing if needle.lower() in line.lower()]
+def _quoted(needles: list[str]) -> str:
+    """``"a"`` / ``"a" or "b"`` — the needles, for the no-match message."""
+    quoted = [f'"{n}"' for n in needles]
+    if len(quoted) == 1:
+        return quoted[0]
+    return ", ".join(quoted[:-1]) + " or " + quoted[-1]
+
+
+def _no_match(needles: list[str], existing: list[str]) -> ToolOutcome:
+    """A remove that matched no whole note: delete nothing, show the near ones.
+
+    ``soft_error`` because removing a note that is already gone is an
+    idempotent no-op, not a failed step: on the code-mode surface a hard error
+    raises inside the cell and throws away every call after it — one audited
+    session lost a 35s passing test run to exactly this.
+    """
+    wanted = _quoted(needles)
+    near = [
+        line
+        for line in existing
+        if any(needle.lower() in line.lower() for needle in needles)
+    ]
     if not near:
         return ToolOutcome(
             text=(
-                f'no note reads exactly "{needle}" — nothing was removed. '
+                f"no note reads exactly {wanted} — nothing was removed. "
                 "remove matches a whole note, not a fragment of one; "
                 "action=list shows the current notes."
             ),
             is_error=True,
+            soft_error=True,
         )
     shown = near[:_CANDIDATES_SHOWN]
     listing = "\n".join(f"- {line}" for line in shown)
@@ -171,12 +194,13 @@ def _no_match(needle: str, existing: list[str]) -> ToolOutcome:
     )
     return ToolOutcome(
         text=(
-            f'no note reads exactly "{needle}" — nothing was removed. remove '
+            f"no note reads exactly {wanted} — nothing was removed. remove "
             f"matches a whole note, not a fragment of one. These notes contain "
             f"it:\n{listing}{more}\n"
             "Re-issue remove with one of those lines verbatim."
         ),
         is_error=True,
+        soft_error=True,
     )
 
 
@@ -185,7 +209,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     path = _notes_path(ctx)
     prefix = ""
     if action == "add":
-        incoming = _notes_from_add(input)
+        incoming = _notes_from_payload(input)
         if not incoming:
             return ToolOutcome(
                 text="action=add requires text or texts", is_error=True
@@ -196,23 +220,36 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         except OSError as exc:
             return ToolOutcome(text=f"failed to write notes: {exc}", is_error=True)
     elif action == "remove":
-        needle = str(input.get("text", "")).strip()
-        if not needle:
-            return ToolOutcome(text="action=remove requires text", is_error=True)
+        # Same batch forms as add: retiring a finished checklist used to cost
+        # one call per note.
+        needles = _notes_from_payload(input)
+        if not needles:
+            return ToolOutcome(
+                text="action=remove requires text or texts", is_error=True
+            )
         existing = _parse_lines(_read_notes(path))
-        target = needle.lower()
-        removed = [line for line in existing if line.strip().lower() == target]
-        kept = [line for line in existing if line.strip().lower() != target]
+        targets = {needle.lower() for needle in needles}
+        removed = [line for line in existing if line.strip().lower() in targets]
+        kept = [line for line in existing if line.strip().lower() not in targets]
         if not removed:
-            return _no_match(needle, existing)
+            return _no_match(needles, existing)
         try:
             _write_lines(path, kept)
         except OSError as exc:
             return ToolOutcome(text=f"failed to write notes: {exc}", is_error=True)
+        hit = {line.strip().lower() for line in removed}
+        missed = [needle for needle in needles if needle.lower() not in hit]
+        label = f'"{removed[0]}"'
+        if len(removed) > 1:
+            label += f" +{len(removed) - 1} more"
         prefix = (
             f'removed {len(removed)} note{"s" if len(removed) != 1 else ""} '
-            f'("{removed[0]}"); {len(kept)} remain'
+            f"({label}); {len(kept)} remain"
         )
+        if missed:
+            # Partial batch: the removals still applied, so this is a note on
+            # a successful call, not a failure.
+            prefix += f"; no note read exactly {_quoted(missed)}"
     elif action == "clear":
         try:
             path.unlink(missing_ok=True)

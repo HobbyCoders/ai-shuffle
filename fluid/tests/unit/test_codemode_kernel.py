@@ -203,7 +203,12 @@ async def test_unknown_tool_in_package_form_points_at_discovery() -> None:
         r = await k.exec("from tools import Nope", timeout=10, on_host_call=_echo_host)
         assert r.error is not None
         assert "ImportError" in r.error
-        assert "Hint: no such tool — run list_tools or search_tools" in r.error
+        # The old hint named list_tools/search_tools, which are top-level tool
+        # calls: a model that followed it reached for tools.list_tools() and
+        # burned a dozen calls. Name what the kernel actually offers.
+        assert "Hint: no such tool in the kernel VFS" in r.error
+        assert "dir(tools)" in r.error
+        assert "separate top-level tool calls" in r.error
     finally:
         await k.stop()
 

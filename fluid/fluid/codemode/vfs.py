@@ -219,10 +219,31 @@ class _VfsPackage(types.ModuleType):
 
     def __getattr__(self, name: str) -> Any:
         if name.startswith("__") or name not in self._leaves():
-            raise AttributeError(f"{self.__name__} has no tool {name!r}")
+            raise AttributeError(self._missing_message(name))
         # importlib binds the submodule as ``self.<name>`` on first load, so
         # this runs once per leaf.
         return importlib.import_module(f"{self.__name__}.{name}")
+
+    def _missing_message(self, name: str) -> str:
+        """Say what the kernel *does* mount, not just what it does not.
+
+        ``tools.list_tools()`` / ``tools.search_tools()`` were a real
+        twelve-call dead end: those are top-level tool calls, so nothing under
+        ``tools`` will ever answer to them, and the reachable catalog inside a
+        cell is ``dir(tools)``.
+        """
+        kind = "tool" if self.__name__ == "tools" else "skill"
+        head = f"{self.__name__} has no {kind} {name!r}"
+        if self.__name__ == "tools" and name in (
+            "list_tools", "search_tools", "read_tool_docs",
+        ):
+            return (
+                f"{head} — {name} is a top-level tool call, not an in-kernel "
+                "function; it cannot be reached from inside a cell. Use "
+                "`dir(tools)` for the names mounted here and "
+                "`tools.<name>.__doc__` for one tool's documentation."
+            )
+        return f"{head} — `dir({self.__name__})` lists what is mounted here."
 
     def __dir__(self) -> list[str]:
         return sorted(set(super().__dir__()) | set(self._leaves()))

@@ -56,7 +56,8 @@ def describe(tools: frozenset[str] | None = None) -> str:
     """Read's description, specialized to the session's tool surface."""
     has = (lambda name: tools is None or name in tools)
     line_prefix = "Text is returned with `lineno<TAB>` prefixes" + (
-        " (display formatting only — never copy it into Edit old_string)"
+        " (display formatting, not file content — strip the line-number "
+        "prefix from anything you copy into Edit's old_string)"
         if has("Edit")
         else " (display formatting only, not file content)"
     )
