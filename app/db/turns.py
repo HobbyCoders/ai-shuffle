@@ -40,6 +40,7 @@ from typing import Any, Dict, List, Optional
 
 import psycopg2
 
+from app.core.config import settings
 from app.db.base import get_db
 from app.db.compat import phs
 
@@ -459,6 +460,41 @@ def park_turn(
         )
         row = cursor.fetchone()
     return _row(row)
+
+
+def list_stalled_parked_turns(min_parked_seconds: int) -> List[Dict[str, Any]]:
+    """This install's parked turns with NO turn of any kind since the park.
+
+    Feed for the park watchdog (``startup_reconcile.sweep_stalled_parks``). A
+    park is supposed to be brief: background work settles, a wake turn is
+    enqueued, the session moves. A park with nothing after it is either a
+    healthy long wait or a lost wake — indistinguishable from outside, which
+    is why an audited session sat parked on a green CI run for nine minutes
+    with nobody noticing. The "no turn since" predicate is what makes it a
+    STALL and not merely an old row: any wake, user message or queued turn
+    after the park excludes the session.
+
+    Returns dicts with ``session_id``, ``turn_id`` and ``parked_seconds``,
+    oldest park first.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT t.session_id AS session_id, t.id AS turn_id, "
+            "       EXTRACT(EPOCH FROM (NOW() - t.ended_at)) AS parked_seconds "
+            "  FROM turns t "
+            " WHERE t.state='parked' "
+            "   AND t.instance_id=%s "
+            "   AND t.ended_at IS NOT NULL "
+            "   AND t.ended_at < NOW() - make_interval(secs => %s) "
+            "   AND NOT EXISTS ("
+            "         SELECT 1 FROM turns t2 "
+            "          WHERE t2.session_id = t.session_id "
+            "            AND t2.created_at > t.ended_at) "
+            " ORDER BY t.ended_at ASC",
+            (settings.effective_instance_id, min_parked_seconds),
+        )
+        return _rows(cursor.fetchall() or [])
 
 
 def settle_parked_turns(

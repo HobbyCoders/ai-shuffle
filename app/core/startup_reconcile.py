@@ -48,7 +48,7 @@ import asyncio
 import logging
 import os
 import traceback
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from app.core.config import settings
 from app.db.base import get_db
@@ -244,6 +244,198 @@ async def settle_stale_background_task_rows(
                 exc_info=True,
             )
     return settled
+
+
+PARK_WATCHDOG_REASON = "park_watchdog"
+
+# Sessions already reported at the WARN stage, so a 30-minute-old park is not
+# re-reported on every 5-minute tick. Per-process and deliberately unbounded-
+# looking: it only holds ids of sessions parked past the warn threshold, and a
+# restart legitimately re-reports (the boot reconcile has settled the rows by
+# then anyway).
+_park_warned: set = set()
+
+
+async def sweep_stalled_parks(
+    warn_seconds: Optional[int] = None,
+    force_seconds: Optional[int] = None,
+) -> int:
+    """Report — and past a hard ceiling, break — a park that never woke.
+
+    A session parked on background work is supposed to wake when that work
+    settles. When the settle never arrives the park is silent AND unbounded:
+    the audited session sat parked 9m37s past a green CI run and only moved
+    because an unrelated force-cleanup killed the shell. From outside, a lost
+    wake looks exactly like a healthy long wait, so the only honest treatment
+    is a time bound with two stages:
+
+    * WARN (``park_watchdog_warn_seconds``) — log it and record a durable
+      error row so the stall is visible in the app's error UI. Reported once
+      per session per process; nothing is touched.
+    * FORCE (``park_watchdog_force_seconds``, 0 disables) — settle this
+      session's still-running task rows and fire their terminal frames, which
+      is what actually wakes the session, then settle the stale ``parked``
+      turn rows so its lifecycle is not stuck forever. Deliberately generous:
+      a legitimate overnight CI run or training job must never be reaped by a
+      timer, and the frames say plainly that the app forced them.
+
+    Runs on the resource monitor's 5-minute tick beside
+    :func:`settle_stale_background_task_rows`. Returns the number of sessions
+    forced; never raises.
+    """
+    from app.core.config import settings as _settings
+    from app.db import turns as turns_db
+
+    if not getattr(_settings, "park_watchdog_enabled", True):
+        return 0
+    warn = int(
+        warn_seconds
+        if warn_seconds is not None
+        else getattr(_settings, "park_watchdog_warn_seconds", 1800)
+    )
+    ceiling = int(
+        force_seconds
+        if force_seconds is not None
+        else getattr(_settings, "park_watchdog_force_seconds", 3600)
+    )
+    if warn <= 0:
+        return 0
+
+    try:
+        rows = await asyncio.to_thread(turns_db.list_stalled_parked_turns, warn)
+    except Exception:  # noqa: BLE001 — a sweep failure must never break cleanup
+        logger.warning("Park watchdog query failed", exc_info=True)
+        return 0
+
+    forced = 0
+    for row in rows:
+        session_id = _row_value(row, "session_id", 0)
+        turn_id = _row_value(row, "turn_id", 1)
+        try:
+            parked_seconds = int(float(_row_value(row, "parked_seconds", 2) or 0))
+        except (TypeError, ValueError):
+            parked_seconds = warn
+        if not session_id:
+            continue
+        try:
+            if ceiling > 0 and parked_seconds >= ceiling:
+                await _force_stalled_park(session_id, turn_id, parked_seconds)
+                _park_warned.discard(session_id)
+                forced += 1
+            elif session_id not in _park_warned:
+                _park_warned.add(session_id)
+                logger.warning(
+                    "Park watchdog: session %s has been parked for %ss with no "
+                    "wake (turn %s)", session_id, parked_seconds, turn_id,
+                )
+                record_error(
+                    "backend",
+                    f"Session {session_id} has been parked on background work "
+                    f"for {parked_seconds}s with no wake. Either the work is "
+                    "genuinely long, or a completion was lost and the session "
+                    "cannot move on its own.",
+                    level="WARNING",
+                    session_id=session_id,
+                    context={
+                        "watchdog": PARK_WATCHDOG_REASON,
+                        "turn_id": turn_id,
+                        "parked_seconds": parked_seconds,
+                    },
+                )
+        except Exception:  # noqa: BLE001 — one bad session must not block the rest
+            logger.warning(
+                "Park watchdog: handling stalled park for %s failed", session_id,
+                exc_info=True,
+            )
+    return forced
+
+
+async def _force_stalled_park(
+    session_id: str, turn_id: Any, parked_seconds: int
+) -> None:
+    """Break one stalled park: settle its tasks, fire their frames, unstick it."""
+    from app.core.task_registry import task_registry
+    from app.core.turn_recorder import record_task_settle_frame
+    from app.db import turns as turns_db
+    from app.db.background_tasks import (
+        list_session_nonterminal_background_tasks,
+        mark_background_task_killed,
+    )
+
+    summary = (
+        f"Stopped: this task was still marked running after the session had "
+        f"been parked on it for {parked_seconds}s with no completion. The app "
+        "settled it so the session could move on — it was not a failure, and "
+        "its result (if any) was never delivered."
+    )
+    try:
+        rows = await asyncio.to_thread(
+            list_session_nonterminal_background_tasks, session_id
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Park watchdog: task lookup for %s failed", session_id, exc_info=True
+        )
+        rows = []
+
+    for row in rows:
+        task_id = _row_value(row, "task_id", 0)
+        tool_use_id = _row_value(row, "tool_use_id", 2)
+        if not task_id:
+            continue
+        try:
+            await asyncio.to_thread(mark_background_task_killed, task_id, session_id)
+            if task_registry.get_task(session_id, task_id) is not None:
+                task_registry.complete_task(
+                    session_id, task_id, "killed",
+                    summary=summary, reason=PARK_WATCHDOG_REASON,
+                )
+            # OWN-lane admission, same as the Monitor spawner's: without it
+            # on_task_terminal drops the frame as not-own work and the park
+            # this sweep exists to break survives the sweep.
+            task_registry.mark_monitor_shell_task(session_id, task_id)
+            if task_registry.mark_chipped(session_id, task_id, "terminal"):
+                await record_task_settle_frame(
+                    session_id, task_id, "killed", summary,
+                    reason=PARK_WATCHDOG_REASON, tool_use_id=tool_use_id,
+                )
+            from app.core import turn_scheduler
+
+            await turn_scheduler.on_task_terminal(session_id, {
+                "task_id": task_id,
+                "status": "killed",
+                "summary": summary,
+                "kind": _row_value(row, "kind", 5) or "shell",
+            })
+        except Exception:  # noqa: BLE001 — one bad row must not block the rest
+            logger.warning(
+                "Park watchdog: forcing terminal frame for %s/%s failed",
+                session_id, task_id, exc_info=True,
+            )
+
+    try:
+        await asyncio.to_thread(turns_db.settle_parked_turns, session_id)
+    except Exception:  # noqa: BLE001
+        logger.debug("Park watchdog: settle_parked_turns failed", exc_info=True)
+
+    logger.warning(
+        "Park watchdog: forced %d task frame(s) for session %s parked %ss "
+        "with no wake (turn %s)", len(rows), session_id, parked_seconds, turn_id,
+    )
+    record_error(
+        "backend",
+        f"Session {session_id} was parked on background work for "
+        f"{parked_seconds}s with no wake; the park watchdog settled "
+        f"{len(rows)} task row(s) and woke it.",
+        level="WARNING",
+        session_id=session_id,
+        context={
+            "watchdog": PARK_WATCHDOG_REASON,
+            "turn_id": turn_id,
+            "parked_seconds": parked_seconds,
+            "tasks": len(rows),
+        },
+    )
 
 
 def _reset_orphaned_session_statuses() -> int:

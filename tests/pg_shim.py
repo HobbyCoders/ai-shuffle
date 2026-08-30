@@ -251,6 +251,17 @@ def translate_sql(sql: str) -> str:
         s,
         flags=re.I,
     )
+    # `EXTRACT(EPOCH FROM (NOW() - <col>))` — an age in seconds, used by the
+    # park watchdog's stalled-park query. SQLite has neither EXTRACT nor EPOCH;
+    # strftime('%s', …) is the equivalent. Safe to emit a literal `%s` here:
+    # the positional-placeholder rewrite above has already run.
+    s = re.sub(
+        r"EXTRACT\(\s*EPOCH\s+FROM\s*\(\s*CURRENT_TIMESTAMP\s*-\s*"
+        r"([A-Za-z_][\w.]*)\s*\)\s*\)",
+        r"(strftime('%s','now') - strftime('%s', \1))",
+        s,
+        flags=re.I,
+    )
     # `NOW() + (<n> * INTERVAL '1 second')` — used by app.db.runs to compute a
     # lease expiry from a ttl-in-seconds param. SQLite has no INTERVAL literal;
     # rewrite to datetime() second-modifier arithmetic. The bound placeholder

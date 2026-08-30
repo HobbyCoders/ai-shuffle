@@ -545,6 +545,19 @@ async def _periodic_cleanup() -> dict:
     except Exception as e:
         logger.debug(f"{_PREFIX} Stale background-task sweep failed: {e}")
 
+    # Park watchdog: a session parked on background work that never woke. The
+    # sibling sweep above settles ORPHANED rows; this one bounds the PARK
+    # itself — report it past the warn threshold, and past the hard ceiling
+    # force the terminal frames so the session wakes instead of sitting
+    # parked until the next restart.
+    try:
+        from app.core.startup_reconcile import sweep_stalled_parks
+        forced_parks = await sweep_stalled_parks()
+        if forced_parks:
+            cleaned["forced_stalled_parks"] = forced_parks
+    except Exception as e:
+        logger.debug(f"{_PREFIX} Park watchdog sweep failed: {e}")
+
     # Evict idle sessions from the session pool.
     #
     # BELT, not braces: the pool's own idle watchdog (started below in

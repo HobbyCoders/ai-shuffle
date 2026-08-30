@@ -539,6 +539,39 @@ class Settings(BaseSettings):
     # Default 24h. Set to 0 to disable the gate. Env: IDLE_WATCHDOG_MAX_IDLE_SECONDS.
     idle_watchdog_max_idle_seconds: int = 86400
 
+    # ── Monitor guardrails (background shells) ────────────────────────────
+    #
+    # Default time budget for a Monitor command. Monitor's completion fires on
+    # exit and only on exit, so a command that never exits parks the session
+    # until the session ends — an audited watch loop held one 9m37s past a
+    # green CI run before a force-reap ended it, and the reap then reached the
+    # model as a failure. This is the backstop: when the deadline passes the
+    # process is stopped and the completion fires with a "timed out after Ns"
+    # summary, so "parked forever" becomes "woken with a timeout".
+    #
+    # NOT applied when the model set ``serves`` (the process is meant to stay
+    # up) or when the command already carries its own bound (``timeout``,
+    # ``--max-time``, deadline arithmetic, an iteration cap) — the model's own
+    # budget wins. Set to 0 to disable the backstop entirely.
+    # Env: MONITOR_COMMAND_TIMEOUT_SECONDS.
+    monitor_command_timeout_seconds: int = 1200  # 20 minutes
+    # Bound the completion summary delivered with a wake; the full buffer remains available through TaskOutput.
+    # MONITOR_SUMMARY_MAX_CHARS controls this budget.
+    monitor_summary_max_chars: int = 1000
+
+    # Park watchdog: periodic sweeps report background parks with no wake after the warning interval. Past the
+    # force ceiling, settle still-running task rows and emit their terminals so the session wakes.
+    # PARK_WATCHDOG_ENABLED=false disables this safeguard.
+    park_watchdog_enabled: bool = True
+    # Park age at which a stalled park is REPORTED (log + durable error row).
+    # Env: PARK_WATCHDOG_WARN_SECONDS.
+    park_watchdog_warn_seconds: int = 1800  # 30 minutes
+    # Hard ceiling: past this the sweep forces the terminal frames. Generous —
+    # a legitimate overnight CI run or training job must never be reaped by a
+    # timer. 0 disables forcing (report only).
+    # Env: PARK_WATCHDOG_FORCE_SECONDS.
+    park_watchdog_force_seconds: int = 3600  # 60 minutes
+
     # Durable background-task state (Phase 1, WRITE-ONLY). When on,
     # task_registry mirrors every task transition into the background_tasks
     # table (v55) via app.core.task_persistence — a coalescing, fire-and-forget
