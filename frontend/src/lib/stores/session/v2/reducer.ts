@@ -1744,9 +1744,16 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// card key); never downgrade a card subagent.completed already
 			// settled with its richer result.
 			if (status === 'completed' || status === 'error' || status === 'killed') {
-				const card = summary.toolUseId
-					? findSubagentByTask(messages, summary.toolUseId, state.messageOriginSeq)
-					: undefined;
+				// Prefer the launch tool_use_id (the card key). Older rows — and
+				// host Monitor shells spawned before the launch id was threaded
+				// through — carry none at all, so fall back to the task_id: a
+				// subagent card launched by the Task tool uses its task_id as
+				// `toolId`, which is why the stale-reap path already settles
+				// cards with `tool_use_id == task_id`.
+				const card =
+					(summary.toolUseId
+						? findSubagentByTask(messages, summary.toolUseId, state.messageOriginSeq)
+						: undefined) ?? findSubagentByTask(messages, taskId, state.messageOriginSeq);
 				if (card && card.agentStatus === 'running') {
 					const children = (card.agentChildren ?? []).map((c) =>
 						c.streaming ? { ...c, streaming: false } : c

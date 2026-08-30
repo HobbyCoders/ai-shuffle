@@ -481,14 +481,31 @@
 			}
 
 			case 'task_started': {
-				// Task/subagent launch notifications - hide as they're internal SDK events
+				// A background task (Monitor shell or sub-agent) is now RUNNING.
+				// Rendered as the running twin of the `task_updated` chip below —
+				// same 'Task' header, same status badge — so a long-lived shell
+				// (a dev server, a watcher) has a visible affordance for as long
+				// as it runs, instead of surfacing only when it dies.
+				const startedDescription =
+					(data.description as string) ||
+					(data.summary as string) ||
+					message.content ||
+					((data.task_id as string) || '').slice(0, 8);
+				const startedStatus = (data.status as string) || 'running';
+				let startedRaw: string | undefined;
+				try {
+					startedRaw = JSON.stringify(data, null, 2);
+				} catch {
+					startedRaw = undefined;
+				}
 				return {
-					title: 'Task Started',
-					content: (data.description as string) || message.content || '',
-					badge: 'task_started',
-					badgeColor: 'gray',
-					hidden: true,
-					compact: true
+					title: 'Task',
+					content: startedDescription,
+					badge: startedStatus,
+					badgeColor: taskStatusColor(startedStatus),
+					taskStatus: startedStatus,
+					collapsible: true,
+					rawOutput: startedRaw
 				};
 			}
 
@@ -766,7 +783,8 @@
 	// tool-card convention (three-way status icon + bot icon + status chip)
 	// rather than the generic hook lightning-bolt row.
 	const isTaskSubtype = $derived(
-		message.systemSubtype === 'task_updated' ||
+		message.systemSubtype === 'task_started' ||
+			message.systemSubtype === 'task_updated' ||
 			message.systemSubtype === 'task_notification'
 	);
 

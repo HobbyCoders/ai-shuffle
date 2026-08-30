@@ -818,6 +818,10 @@ class TaskRegistry:
                 # unpark/pump wake (A-3 clear-on-revival).
                 self._woken.get(session_id, set()).discard(task_id)
                 self._wake_suppressed.get(session_id, set()).discard(task_id)
+                # ...and the chip latches, so the revived run paints a fresh
+                # running chip (the durable start row is deduped on this latch —
+                # see turn_recorder._translate_shared) and can settle again.
+                self._chipped.get(session_id, {}).pop(task_id, None)
             existing["updated_at"] = now
             self._persist_task_state(session_id, task_id)
             return

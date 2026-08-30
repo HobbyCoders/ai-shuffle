@@ -165,7 +165,19 @@ def make_fluid_monitor_spawner(
         cwd = input.get("cwd")
         from app.mcp.builtin_tools import _spawn_background
 
-        task = await _spawn_background(command, cwd, caller_session_id)
+        # The launching tool_use_id, which fluid's native loop publishes on the
+        # ctx for the duration of the dispatch. Without it a host Monitor shell
+        # registers with tool_use_id NULL and its terminal chip has no key to
+        # join the launching card on (reducer.ts task.updated → findSubagentByTask).
+        launch_tool_use_id = None
+        try:
+            launch_tool_use_id = (getattr(ctx, "extra", None) or {}).get("tool_use_id")
+        except Exception:  # noqa: BLE001 — a join key must never fail a spawn
+            launch_tool_use_id = None
+
+        task = await _spawn_background(
+            command, cwd, caller_session_id, tool_use_id=launch_tool_use_id,
+        )
 
         if caller_session_id:
             from app.core.task_registry import task_registry

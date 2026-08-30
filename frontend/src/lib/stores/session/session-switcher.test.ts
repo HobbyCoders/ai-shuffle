@@ -616,4 +616,38 @@ describe('gateSnapshotPatch (W7)', () => {
 		expect(gated.title).toBeUndefined();
 		expect(gated.contextUsed).toBe(80);
 	});
+
+	// Audit item 4: the switch-in reset empties the chip strip, and the feed
+	// repaints it from the target's own `task.updated` rows. The snapshot is the
+	// FLOOR under that — a background task the registry says is running right
+	// now, in a session whose log has no running row to replay.
+	it('seeds activeTasks while the strip is still empty', () => {
+		const tasks = [
+			{
+				id: 't1',
+				subject: 'npm run dev',
+				status: 'running',
+				kind: 'shell',
+				summary: null,
+				toolUseId: null,
+				startedAt: '',
+				updatedAt: '',
+			},
+		];
+		const gated = gateSnapshotPatch({ activeTasks: tasks } as never, {
+			feedOwnsUsage: false,
+			currentTitle: 'New Chat',
+			currentTaskCount: 0,
+		});
+		expect(gated.activeTasks).toHaveLength(1);
+	});
+
+	it('leaves the strip alone once the feed has painted it', () => {
+		const gated = gateSnapshotPatch({ activeTasks: [] } as never, {
+			feedOwnsUsage: false,
+			currentTitle: 'New Chat',
+			currentTaskCount: 2,
+		});
+		expect(gated.activeTasks).toBeUndefined();
+	});
 });

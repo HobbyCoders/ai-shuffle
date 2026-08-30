@@ -12,7 +12,7 @@
 import type { ActiveSessionState, PersistedSession } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import type { SessionEphemeral } from '../session-cache';
-import type { ExecutionMode } from '../types';
+import type { ExecutionMode, Task } from '../types';
 import { api } from '$lib/api/client';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
 import { getOrCreateDeviceId, TAB_ACTIVE_SESSION_KEY } from '../device-id';
@@ -69,6 +69,9 @@ interface LiveSnapshot {
 		worktree_branch?: string | null;
 		worktree_deleted?: boolean;
 	};
+	/** Durable background-task view (task registry `get_visible`), already in
+	 *  the `Task` wire shape. Used to SEED the chip strip on switch-in. */
+	activeTasks?: Task[];
 }
 
 /** Worktree metadata from the session list, used to restore worktree state
@@ -231,12 +234,19 @@ async function loadSelectionFromBackend(): Promise<{ selectedProfile: string; se
  *     (which is exactly the deep-link / notification-open case it exists for).
  *   - worktree/cloud fields: the feed never carries them, so the snapshot is
  *     authoritative and they always apply.
+ *   - activeTasks: the feed owns the strip as soon as it has painted anything
+ *     on it. The snapshot is a FLOOR, not a correction — it exists so a
+ *     background task that is genuinely running right now (task registry
+ *     truth) still shows after a switch-in when the session's event log has no
+ *     running `task.updated` row to replay, which is every task started before
+ *     the durable start row existed. Once the strip is non-empty the feed's
+ *     view is the fresher one and the snapshot must not touch it.
  *
  * Pure and exported so the precedence is unit-testable on its own.
  */
 export function gateSnapshotPatch(
 	patch: Partial<ActiveSessionState>,
-	context: { feedOwnsUsage: boolean; currentTitle: string }
+	context: { feedOwnsUsage: boolean; currentTitle: string; currentTaskCount?: number }
 ): Partial<ActiveSessionState> {
 	const gated: Partial<ActiveSessionState> = { ...patch };
 	if (context.feedOwnsUsage) {
@@ -248,6 +258,9 @@ export function gateSnapshotPatch(
 	}
 	if (context.currentTitle && context.currentTitle !== 'New Chat') {
 		delete gated.title;
+	}
+	if ((context.currentTaskCount ?? 0) > 0) {
+		delete gated.activeTasks;
 	}
 	return gated;
 }
@@ -612,7 +625,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	 * carry into activeSession — closing the v2 metadata gap
 	 * (usage totals and server-authoritative
 	 * worktree/cloud fields). Never touches
-	 * messages / isStreaming / activeTasks (the feed owns those). Guarded on the
+	 * messages / isStreaming (the feed owns those); `activeTasks` is SEEDED from
+	 * it only while the strip is still empty (see gateSnapshotPatch). Guarded on the
 	 * switch generation + active sessionId so a stale response can't write into a
 	 * session the user already left.
 	 */
@@ -650,6 +664,18 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			patch.contextUsed = inTok + cacheCreate + cacheRead;
 		}
 
+		// Seed the chip strip from durable truth. The switch-in reset above wipes
+		// `activeTasks` (the leaving session's tasks must not flash on the target),
+		// and the feed repaints it from the target's `task.updated` rows — but a
+		// task that started BEFORE those rows existed, or in a session whose log
+		// predates them, would leave a genuinely running background shell with no
+		// surface at all. `/live` reports the task registry's own view, so use it
+		// as the floor: only RUNNING rows (never the recently-failed retention
+		// rows `get_visible` also carries), and only while the strip is still
+		// empty, so a fresher feed fold is never overwritten.
+		const snapshotTasks = (snap.activeTasks ?? []).filter((t) => t?.status === 'running');
+		if (snapshotTasks.length > 0) patch.activeTasks = snapshotTasks;
+
 		const meta = snap.session_meta;
 		if (meta) {
 			if (meta.title) patch.title = meta.title;
@@ -665,6 +691,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			const gated = gateSnapshotPatch(patch, {
 				feedOwnsUsage: feedController.hasAppliedUsage(sessionId),
 				currentTitle: s.title,
+				currentTaskCount: (s.activeTasks ?? []).length,
 			});
 			return Object.keys(gated).length > 0 ? { ...s, ...gated } : s;
 		});

@@ -3865,7 +3865,7 @@ async def test_monitor_spawn_runs_detached_and_returns_receipt(
         def is_running(self):
             return True
 
-    async def _fake_spawn(command, cwd, session_id):
+    async def _fake_spawn(command, cwd, session_id, tool_use_id=None):
         spawned.append((command, cwd, session_id))
         return _FakeTask()
 
@@ -3901,7 +3901,7 @@ async def test_monitor_receipt_commands_the_park(monkeypatch, tmp_path):
         def is_running(self):
             return True
 
-    async def _fake_spawn(command, cwd, session_id):
+    async def _fake_spawn(command, cwd, session_id, tool_use_id=None):
         return _FakeTask()
 
     monkeypatch.setattr(bt, "_spawn_background", _fake_spawn)
@@ -3932,7 +3932,7 @@ async def test_monitor_receipt_survives_fluids_outcome_normalizer(
         def is_running(self):
             return True
 
-    async def _fake_spawn(command, cwd, session_id):
+    async def _fake_spawn(command, cwd, session_id, tool_use_id=None):
         return _FakeTask()
 
     monkeypatch.setattr(bt, "_spawn_background", _fake_spawn)
@@ -3967,7 +3967,7 @@ async def test_monitor_spawn_wakes_the_parent_on_completion(monkeypatch, tmp_pat
 
     fake = _FakeTask()
 
-    async def _fake_spawn(command, cwd, session_id):
+    async def _fake_spawn(command, cwd, session_id, tool_use_id=None):
         return fake
 
     wakes: list = []

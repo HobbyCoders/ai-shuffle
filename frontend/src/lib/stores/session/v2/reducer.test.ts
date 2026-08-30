@@ -1308,6 +1308,20 @@ describe('task.updated summaries', () => {
 		expect(s.activeTaskSummaries[0].status).toBe('completed');
 	});
 
+	it('terminal task.updated falls back to task_id when no tool_use_id was ever seen', () => {
+		// Host Monitor shells (and every row written before the launch id was
+		// threaded through) carry tool_use_id null. A card whose toolId IS the
+		// task_id — what the stale-reap path already assumes — must still settle.
+		const s = fold([
+			ev('subagent.started', { task_id: 'reg-1', description: 'bg work' }),
+			ev('task.updated', { task_id: 'reg-1', state: 'running', tool_use_id: null }),
+			ev('task.updated', { task_id: 'reg-1', state: 'completed', tool_use_id: null }),
+		]);
+		const card = s.messages.find((m) => m.type === 'subagent');
+		expect(card?.agentStatus).toBe('completed');
+		expect(s.activeTaskSummaries[0].status).toBe('completed');
+	});
+
 	it('terminal task.updated with a failed state marks the card error', () => {
 		const s = fold([
 			ev('subagent.started', { task_id: 'toolu-1', description: 'bg work' }),
