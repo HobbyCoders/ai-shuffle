@@ -229,13 +229,18 @@ def test_compactor_trims_consumed_image_results() -> None:
 
     viewed = c.view(nodes)
     assert _images(viewed[2]) == []
-    assert "trimmed to save context" in "\n".join(_texts([viewed[2]]))
+    # An image gets its OWN placeholder: HistoryExpand cannot restore it.
+    assert "image consumed from context" in "\n".join(_texts([viewed[2]]))
     assert c.trimmer._trimmed == set()  # view stays read-only
 
     rendered, promotions = c.apply(nodes)
     assert _images(rendered[2]) == []
-    assert "trimmed to save context" in "\n".join(_texts([rendered[2]]))
-    assert promotions == []                   # no tier fired; only consume-once
+    assert "image consumed from context" in "\n".join(_texts([rendered[2]]))
+    # No size tier fired, but the consume-once trim is itself reported so the
+    # loss is visible in the transcript instead of silent.
+    assert [(p.tier, p.reason, p.trimmed) for p in promotions] == [
+        (1, "image_consumed", (("r0", "call0"),))
+    ]
     assert ("r0", "call0") in c.trimmer._trimmed   # persisted into the sticky set
 
 

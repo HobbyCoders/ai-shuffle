@@ -21,7 +21,11 @@ SPEC = ToolSpec(
         "placeholders, large-attachment stubs) carries refs like "
         '"node_ab12cd34ef56" or "node_a..node_b" — pass one to recover the '
         "original, exact text. Large content is windowed: use offset to "
-        "continue reading."
+        "continue reading.\n"
+        "\n"
+        "Text only. Images (screenshots, image Reads) are consumed once and "
+        "cannot be restored from history — expanding a node that carried one "
+        "reports it and names the path to Read again instead."
     ),
     input_schema={
         "type": "object",

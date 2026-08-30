@@ -25,6 +25,7 @@ drives it through :meth:`ToolResultTrimmer.trim_batch`.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -123,6 +124,44 @@ def _placeholder(node_id: str, chars: int, head: str = "") -> Text:
     )
 
 
+# ``[image: <path>, image/png, 1234 bytes]`` — the caption Read puts beside an
+# image it attaches (fluid.tools.builtins.read). Screenshots from other tools
+# may carry no path at all, which the placeholder has to say rather than
+# inventing one.
+_IMAGE_CAPTION_RE = re.compile(r"\[image:\s*([^,\]]+?)\s*,")
+
+
+def image_source_path(head: str) -> str:
+    """The file path named in an image result's caption, or "" if none."""
+    match = _IMAGE_CAPTION_RE.search(head or "")
+    return match.group(1).strip() if match else ""
+
+
+def _image_placeholder(node_id: str, chars: int, head: str = "") -> Text:
+    """What replaces an image once the model has already seen it.
+
+    The generic placeholder pointed at HistoryExpand, which recovers TEXT — it
+    cannot put an image back in context. In the audited transcript the model
+    read that, concluded recall was impossible, and designed a UI from memory
+    of a screenshot it had seen once. So this says what actually happened, says
+    plainly that HistoryExpand is not the recovery route, and names the one
+    that is: re-Read the file.
+    """
+    path = image_source_path(head)
+    recovery = (
+        f'Re-Read the file at "{path}" to see it again'
+        if path
+        else "Re-run the tool that produced it to see it again"
+    )
+    return Text(
+        f"[image consumed from context — {chars} chars removed. You already "
+        f"saw this image; it is NOT in context now, and HistoryExpand cannot "
+        f"restore it (it recovers text only). {recovery}. Do not describe its "
+        f"contents from memory — look again if any detail matters. The text "
+        f'beside it is still recoverable with HistoryExpand("{node_id}")]'
+    )
+
+
 @dataclass
 class ToolResultTrimmer:
     """Holds the sticky trimmed-set and renders trimmed history views."""
@@ -185,11 +224,18 @@ class ToolResultTrimmer:
                     isinstance(block, ToolResultBlock)
                     and (node.node_id, block.tool_use_id) in trimmed
                 ):
+                    # An image is not recoverable the way text is, so it does
+                    # not get text's placeholder.
+                    render = (
+                        _image_placeholder
+                        if self._has_image(block)
+                        else _placeholder
+                    )
                     blocks.append(
                         ToolResultBlock(
                             tool_use_id=block.tool_use_id,
                             content=[
-                                _placeholder(
+                                render(
                                     node.node_id, block_chars(block), block_head(block)
                                 )
                             ],
@@ -235,6 +281,20 @@ class ToolResultTrimmer:
         if not self.config.enabled:
             return []
         newly = self._eligible(nodes)
+        self._trimmed.update(newly)
+        return newly
+
+    def consume_images(self, nodes: list[SessionNode]) -> list[tuple[str, str]]:
+        """Persist consume-once image trims; return the NEWLY consumed pairs.
+
+        Returning them is what makes the trim visible: an image leaving context
+        is a real loss of information the model was working from, and it used
+        to happen with no event at all — invisible in the transcript, and
+        indistinguishable to the model from "I must remember what I saw".
+        """
+        if not self.config.enabled:
+            return []
+        newly = sorted(self._consumed_image_results(nodes) - self._trimmed)
         self._trimmed.update(newly)
         return newly
 
@@ -285,7 +345,7 @@ class ToolResultTrimmer:
         # Consume-once semantics for screenshots and image reads. This is
         # independent of the ordinary text-size trigger because provider image
         # tokenization can dwarf the base64 chars/4 estimate.
-        self._trimmed.update(self._consumed_image_results(nodes))
+        self.consume_images(nodes)
         rendered = self._render(nodes)
         if estimate_tokens_of_messages(rendered) > self.trigger_threshold(
             context_window

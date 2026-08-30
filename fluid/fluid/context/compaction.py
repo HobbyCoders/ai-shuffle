@@ -147,10 +147,24 @@ class Promotion:
     """What one batch rung did — the persistable decision, never the text."""
 
     tier: int  # 1 | 2 | 3
-    reason: str = "trigger"  # "trigger" | "overflow"
+    reason: str = "trigger"  # "trigger" | "overflow" | "image_consumed"
     trimmed: tuple[tuple[str, str], ...] = ()  # (node_id, tool_use_id)
     spans: tuple[tuple[str, str, str], ...] = ()  # (start, end, kind)
     reclaimed_chars: int = 0
+
+
+def _chars_of(
+    nodes: list[SessionNode], pairs: list[tuple[str, str]]
+) -> int:
+    """Estimated chars carried by the named tool-result blocks."""
+    wanted = set(pairs)
+    return sum(
+        block_chars(block)
+        for node in nodes
+        for block in node.message.content
+        if isinstance(block, ToolResultBlock)
+        and (node.node_id, block.tool_use_id) in wanted
+    )
 
 
 def is_turn_start(node: SessionNode) -> bool:
@@ -475,18 +489,14 @@ class Compactor:
         # trimmer.apply, which the Compactor path never calls). The decision
         # is deterministic from the path, so this is about keeping the
         # rendered prefix byte-identical between requests, not durability.
-        if self.trimmer.config.enabled:
-            self.trimmer._trimmed.update(
-                self.trimmer._consumed_image_results(nodes)
-            )
+        promotions: list[Promotion] = self._consume_images(nodes)
         rendered = self._render(nodes)
         threshold = self._threshold(
             self.config.trigger_tokens, context_window, output_reserve_tokens
         )
         total = overhead_tokens + estimate_tokens_of_messages(rendered)
         if total <= threshold:
-            return rendered, []
-        promotions: list[Promotion] = []
+            return rendered, promotions
         target = int(threshold * self.config.target_ratio)
 
         # Rung 1: batch-trim tool results.
@@ -566,6 +576,27 @@ class Compactor:
             output_reserve_tokens=output_reserve_tokens,
         )
 
+    def _consume_images(self, nodes: list[SessionNode]) -> list[Promotion]:
+        """Persist consume-once image trims and report them as a promotion.
+
+        An image dropping out of context is a real loss — HistoryExpand cannot
+        put it back — and it used to happen silently, so neither the transcript
+        nor the user could see it. Reporting it as a tier-1 promotion with its
+        own reason gives it a ``ContextCompaction`` event, and makes the
+        decision replay on resume like every other rung's.
+        """
+        newly = self.trimmer.consume_images(nodes)
+        if not newly:
+            return []
+        return [
+            Promotion(
+                tier=1,
+                reason="image_consumed",
+                trimmed=tuple(newly),
+                reclaimed_chars=_chars_of(nodes, newly),
+            )
+        ]
+
     def _apply_trim_only(
         self,
         nodes: list[SessionNode],
@@ -579,7 +610,7 @@ class Compactor:
         Same batch-and-sticky discipline as the full ladder (rare, amortized,
         cache-safe), driven by the tier-1 trigger rather than the ladder's.
         """
-        self.trimmer._trimmed.update(self.trimmer._consumed_image_results(nodes))
+        promotions = self._consume_images(nodes)
         rendered = self._render(nodes)
         threshold = self._threshold(
             self.config.trim.trigger_tokens,
@@ -588,20 +619,21 @@ class Compactor:
             window_ratio=self.config.trim.trigger_window_ratio,
         )
         if overhead_tokens + estimate_tokens_of_messages(rendered) <= threshold:
-            return rendered, []
+            return rendered, promotions
         pairs = self.trimmer.trim_batch(nodes)
         if not pairs:
-            return rendered, []
+            return rendered, promotions
         before = estimate_tokens_of_messages(rendered)
         rendered = self._render(nodes)
         return rendered, [
+            *promotions,
             Promotion(
                 tier=1,
                 trimmed=tuple(pairs),
                 reclaimed_chars=max(
                     0, (before - estimate_tokens_of_messages(rendered)) * 4
                 ),
-            )
+            ),
         ]
 
     def escalate(self, nodes: list[SessionNode]) -> list[Promotion]:

@@ -41,6 +41,13 @@ class ToolCtx:
     an entry already there returns its full result with a short note saying so.
     Nothing is invalidated by hand — an Edit or a Write bumps the file's mtime,
     which drops the match on its own.
+
+    ``read_delivered`` is the honesty half of that registry: only the keys whose
+    payload the calling surface actually put in front of the model. A repeat-read
+    note claims "you already have this", which is false when the earlier result
+    was handed to a code-mode cell as a ResultRef stub the cell never printed.
+    ``result_budget`` is what the surface declares about itself — the largest
+    result it delivers verbatim (None = no ceiling, the JSON tool path).
     """
 
     cwd: str = "."
@@ -49,7 +56,11 @@ class ToolCtx:
     read_seen: dict[tuple[str, int | None, int | None], tuple[int, int]] = field(
         default_factory=dict
     )
+    read_delivered: set[tuple[str, int | None, int | None]] = field(
+        default_factory=set
+    )
     grep_seen: set[tuple[Any, ...]] = field(default_factory=set)
+    result_budget: int | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 

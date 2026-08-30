@@ -75,6 +75,7 @@ class HostBridge:
         doom_loop: bool = True,
         tool_filter: Callable[[str], bool] | None = None,
         plan_mode: Callable[[], bool] | None = None,
+        result_budget: int | None = None,
     ) -> None:
         self._registry = registry
         self._permissions = permissions
@@ -88,6 +89,11 @@ class HostBridge:
         # mode ends mid-turn (StopPlanning's approval flips it during dispatch),
         # and the very next in-kernel call must be free to write.
         self._plan_mode = plan_mode
+        # What the kernel delivers verbatim (its ResultRef threshold). Stamped
+        # on the shared ctx so repeat-work notes can tell "the model has this"
+        # from "the kernel has this" — see ToolCtx.read_delivered.
+        if result_budget is not None:
+            self._ctx.result_budget = result_budget
 
     async def on_host_call(
         self, tool_name: str, kwargs: dict[str, Any], *,

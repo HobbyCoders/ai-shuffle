@@ -16,7 +16,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from fluid.messages import Text, ToolResultBlock, ToolUseBlock
+from fluid.context.trim import image_source_path
+from fluid.messages import Image, Text, ToolResultBlock, ToolUseBlock
 from fluid.store.base import SessionNode, SessionStore
 
 # A ref is one node id or an inclusive range: "node_ab12" / "node_a..node_b".
@@ -49,10 +50,32 @@ def parse_ref(ref: str) -> tuple[str, str] | None:
     return start, m.group(2) or start
 
 
+def _image_note(count: int, caption: str) -> str:
+    """Say out loud that recall cannot return an image, and what can.
+
+    Recall is a TEXT path: an expanded node with a screenshot in it came back
+    as a caption and nothing else, and a model read that as "the visual is
+    unrecoverable" and worked from memory instead. It is recoverable — by
+    re-Reading the file, not by expanding history — so say which.
+    """
+    plural = "image" if count == 1 else f"{count} images"
+    path = image_source_path(caption)
+    recovery = (
+        f're-Read "{path}" to see it again'
+        if path
+        else "re-run the tool that produced it to see it again"
+    )
+    return (
+        f" [{plural} NOT restored here — HistoryExpand recovers text only; "
+        f"{recovery}]"
+    )
+
+
 def _render_node(node: SessionNode) -> str:
     """Verbatim plain-text rendering of one stored node."""
     lines: list[str] = []
     role = node.message.role
+    loose_images = 0
     for block in node.message.content:
         if isinstance(block, Text):
             lines.append(f"{role} ({node.node_id}): {block.text}")
@@ -65,12 +88,21 @@ def _render_node(node: SessionNode) -> str:
             inner_text = "".join(
                 b.text for b in block.content if isinstance(b, Text)
             )
+            images = sum(
+                1 for b in block.content or () if isinstance(b, Image)
+            )
             lines.append(
                 f"{role} ({node.node_id}) tool_{status} "
                 f"[{block.tool_use_id}]: {inner_text}"
+                + (_image_note(images, inner_text) if images else "")
             )
-        # Thinking/Reasoning/Image blocks are skipped: reasoning is
-        # model-bound state, and base64 payloads are useless as text.
+        elif isinstance(block, Image):
+            loose_images += 1
+        # Thinking/Reasoning blocks are skipped: reasoning is model-bound
+        # state. Image payloads are useless as text, so they are reported
+        # rather than rendered.
+    if loose_images:
+        lines.append(f"{role} ({node.node_id}){_image_note(loose_images, '')}")
     return "\n".join(lines)
 
 

@@ -116,7 +116,10 @@ def test_browser_screenshot_is_available_once_then_compacted() -> None:
     # model call. It is compacted even though the ordinary text trigger is far
     # above this transcript and even though it is the newest tool result.
     second = trimmer.apply([image_result, assistant])
-    assert "trimmed to save context" in _tool_result_texts(second)[0]
+    placeholder = _tool_result_texts(second)[0]
+    assert "image consumed from context" in placeholder
+    # The recovery route is the one that works: HistoryExpand returns text.
+    assert "HistoryExpand cannot restore it" in placeholder
     assert not any(
         isinstance(inner, Image)
         for block in second[0].content
@@ -135,7 +138,7 @@ def test_consumed_screenshot_view_is_read_only_but_matches_next_request() -> Non
     trimmer = ToolResultTrimmer(config=TrimConfig(trigger_tokens=10_000_000))
 
     rendered = trimmer.view([image_result, assistant])
-    assert "trimmed to save context" in _tool_result_texts(rendered)[0]
+    assert "image consumed from context" in _tool_result_texts(rendered)[0]
     assert trimmer._trimmed == set()
 
 
@@ -175,13 +178,15 @@ def test_compactor_trims_consumed_image_results() -> None:
 
     viewed = compactor.view(nodes)
     assert not _has_image(viewed[2])
-    assert "trimmed to save context" in _tool_result_texts([viewed[2]])[0]
+    assert "image consumed from context" in _tool_result_texts([viewed[2]])[0]
     assert compactor.trimmer._trimmed == set()  # view stays read-only
 
     rendered, promotions = compactor.apply(nodes)
     assert not _has_image(rendered[2])
-    assert "trimmed to save context" in _tool_result_texts([rendered[2]])[0]
-    assert promotions == []  # nothing near the digest/epoch triggers
+    assert "image consumed from context" in _tool_result_texts([rendered[2]])[0]
+    # Nothing near the digest/epoch triggers, but the consume-once trim is
+    # reported so an image leaving context is visible in the transcript.
+    assert [(p.tier, p.reason) for p in promotions] == [(1, "image_consumed")]
     assert ("r0", "call0") in compactor.trimmer._trimmed
 
 
