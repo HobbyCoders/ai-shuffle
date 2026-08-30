@@ -17,6 +17,7 @@ from app.core.config import settings
 from app.core.project_utils import (
     get_project_working_dir_as_path,
     get_worktree_working_dir,
+    get_worktree_working_dir_as_path,
 )
 from app.db import database
 from app.api.auth import get_api_user_from_request
@@ -39,6 +40,74 @@ def is_path_safe(file_path: Path, base_path: Path) -> bool:
         return resolved_file.is_relative_to(resolved_base)
     except (ValueError, RuntimeError):
         return False
+
+
+# ---------------------------------------------------------------------------
+# Served-file roots
+#
+# Chat download links (/api/files/by-path and the media by-path routes) must
+# reach files anywhere the app legitimately works: the shared workspace AND
+# every registered project / worktree checkout, which in local mode can live
+# anywhere on disk. Everything else stays rejected.
+# ---------------------------------------------------------------------------
+
+# Registered roots change rarely (project added, worktree created), but a
+# media-heavy chat page can fire dozens of by-path requests at once - cache
+# the root set briefly so each request does not re-scan the DB.
+_SERVED_ROOTS_TTL_SECONDS = 5.0
+_served_roots_cache = None
+
+
+def reset_served_roots_cache() -> None:
+    """Drop the cached served-roots set (used by tests)."""
+    global _served_roots_cache
+    _served_roots_cache = None
+
+
+def _registered_serve_roots() -> tuple:
+    """All registered project/worktree directories, cached briefly.
+
+    Never raises: a DB hiccup must fail closed (workspace-only serving), not
+    take the file endpoints down.
+    """
+    global _served_roots_cache
+    import time
+
+    now = time.monotonic()
+    if _served_roots_cache is not None and now - _served_roots_cache[0] < _SERVED_ROOTS_TTL_SECONDS:
+        return _served_roots_cache[1]
+
+    roots = []
+    try:
+        for project in database.get_all_projects():
+            try:
+                roots.append(get_project_working_dir_as_path(project))
+            except Exception:  # noqa: BLE001 - one bad row must not drop the rest
+                logger.debug("Skipping unresolvable project path", exc_info=True)
+        for repository in database.get_all_git_repositories():
+            for worktree in database.get_worktrees_for_repository(repository["id"]):
+                try:
+                    roots.append(get_worktree_working_dir_as_path(worktree))
+                except Exception:  # noqa: BLE001
+                    logger.debug("Skipping unresolvable worktree path", exc_info=True)
+    except Exception:  # noqa: BLE001 - fail closed: serve from workspace only
+        logger.warning("Could not enumerate served roots; serving workspace files only", exc_info=True)
+        return ()
+
+    _served_roots_cache = (now, tuple(roots))
+    return _served_roots_cache[1]
+
+
+def is_path_served(file_path: Path, workspace: Path) -> bool:
+    """
+    Check if a file may be served over the by-path endpoints.
+
+    Safe when the file resolves inside the workspace OR inside any registered
+    project/worktree directory.
+    """
+    if is_path_safe(file_path, workspace):
+        return True
+    return any(is_path_safe(file_path, root) for root in _registered_serve_roots())
 
 
 # =============================================================================

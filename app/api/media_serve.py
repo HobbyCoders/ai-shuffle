@@ -31,11 +31,11 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.responses import FileResponse
 
 from app.core.config import settings
-from app.api.common import is_path_safe
+from app.api.common import is_path_served
 from app.api.auth import require_auth
 
 # Re-exported so importers can keep doing ``from app.api.media_serve import ...``.
-__all__ = ["MediaConfig", "build_media_module", "settings", "is_path_safe"]
+__all__ = ["MediaConfig", "build_media_module", "settings", "is_path_safe", "is_path_served"]
 
 
 @dataclass(frozen=True)
@@ -108,9 +108,9 @@ def build_media_module(
                 detail="Invalid file type",
             )
 
-        # Security check: must be within workspace
+        # Security check: must be within workspace or a registered project/worktree
         workspace = workspace_dir_getter()
-        if not is_path_safe(file_path, workspace):
+        if not is_path_served(file_path, workspace):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied: file is outside workspace",

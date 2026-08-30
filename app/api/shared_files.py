@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse
 from app.api.auth import require_auth
 
 from app.core.config import settings
-from app.api.common import is_path_safe, format_file_size
+from app.api.common import is_path_safe, is_path_served, format_file_size  # noqa: F401 (is_path_safe re-exported for tests)
 
 router = APIRouter(prefix="/api/files", tags=["files"])
 
@@ -126,9 +126,9 @@ async def get_file_by_path(path: str = Query(..., description="Full path to the 
     """
     file_path = Path(path)
 
-    # Security check: must be within workspace
+    # Security check: must be within workspace or a registered project/worktree
     workspace = settings.effective_workspace_dir
-    if not is_path_safe(file_path, workspace):
+    if not is_path_served(file_path, workspace):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied: file is outside workspace"
@@ -160,9 +160,9 @@ async def get_file_info(path: str = Query(..., description="Full path to the fil
     """
     file_path = Path(path)
 
-    # Security check: must be within workspace
+    # Security check: must be within workspace or a registered project/worktree
     workspace = settings.effective_workspace_dir
-    if not is_path_safe(file_path, workspace):
+    if not is_path_served(file_path, workspace):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied: file is outside workspace"

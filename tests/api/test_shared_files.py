@@ -477,6 +477,75 @@ class TestGetFileInfoEndpoint:
         assert str(test_file) in data["download_url"]
 
 
+
+
+class TestProjectFileServing:
+    """Files in registered project/worktree directories must be servable.
+
+    Regression: chat download links to project files got 403
+    "Access denied: file is outside workspace" because only the workspace
+    root was checked. Projects in local mode live anywhere on disk.
+    """
+
+    @pytest.fixture
+    def project_client(self, files_app, temp_dir):
+        """Client whose DB layer reports one project at an arbitrary path."""
+        project_dir = temp_dir.parent / "fake-project-checkout"
+        project_dir.mkdir(exist_ok=True)
+        (project_dir / "artifact.txt").write_text("from project")
+
+        worktree_dir = temp_dir.parent / "fake-worktree-checkout"
+        worktree_dir.mkdir(exist_ok=True)
+        (worktree_dir / "wt-file.txt").write_text("from worktree")
+
+        from app.api.common import reset_served_roots_cache
+        reset_served_roots_cache()
+
+        with patch("app.api.shared_files.settings") as mock_settings, \
+             patch("app.api.common.database") as mock_db:
+            mock_settings.effective_workspace_dir = temp_dir
+            mock_db.get_all_projects.return_value = [{"id": "p1", "path": str(project_dir)}]
+            mock_db.get_all_git_repositories.return_value = [{"id": "r1"}]
+            mock_db.get_worktrees_for_repository.return_value = [
+                {"id": "w1", "worktree_path": str(worktree_dir)}
+            ]
+            with TestClient(files_app) as client:
+                yield client, temp_dir, project_dir, worktree_dir
+
+            from app.api.common import reset_served_roots_cache
+            reset_served_roots_cache()
+
+    def test_by_path_serves_project_file(self, project_client):
+        """A file inside a registered project dir should download, not 403."""
+        client, temp_dir, project_dir, _ = project_client
+        response = client.get("/api/files/by-path", params={"path": str(project_dir / "artifact.txt")})
+        assert response.status_code == 200
+        assert response.content == b"from project"
+
+    def test_by_path_serves_worktree_file(self, project_client):
+        """A file inside a registered worktree dir should download, not 403."""
+        client, temp_dir, _, worktree_dir = project_client
+        response = client.get("/api/files/by-path", params={"path": str(worktree_dir / "wt-file.txt")})
+        assert response.status_code == 200
+        assert response.content == b"from worktree"
+
+    def test_by_path_still_rejects_unknown_paths(self, project_client):
+        """Paths under no registered root must still 403."""
+        client, temp_dir, _, _ = project_client
+        response = client.get("/api/files/by-path", params={"path": "C:/Windows/system32/drivers/etc/hosts"})
+        assert response.status_code == 403
+
+        response = client.get("/api/files/by-path", params={"path": str(temp_dir.parent / "not-registered" / "x.txt")})
+        assert response.status_code == 403
+
+    def test_info_serves_project_file(self, project_client):
+        """File info for a project file should work too."""
+        client, temp_dir, project_dir, _ = project_client
+        response = client.get("/api/files/info", params={"path": str(project_dir / "artifact.txt")})
+        assert response.status_code == 200
+        assert response.json()["filename"] == "artifact.txt"
+
+
 class TestGetSharedFileEndpoint:
     """Test the /api/files/{filename} endpoint."""
 
