@@ -147,7 +147,8 @@ Knobs for tool-result trimming and the compaction ladder
 |---|---|---|
 | `enabled` | `true` | `false` disables both trimming and compaction. |
 | `trim_only` | `false` | `true` runs tier 1 alone: old tool results become recoverable placeholders, but no turn is ever folded into a digest and no epoch stub is ever written. Ignored when `enabled = false`. |
-| `trigger_tokens` | `120000` | Prompt size at which trimming and compaction start. |
+| `trigger_tokens` | `120000` | Floor for the prompt size at which trimming and compaction start; also the whole trigger when the model's context window is unknown. |
+| `trigger_window_ratio` | `0.6` | Fraction of a **known** context window (`context_window`) the prompt may reach before the ladder arms. The effective trigger is `min(max(trigger_tokens, window × trigger_window_ratio), window − headroom_tokens − output reserve)`, so a 200k model keeps the historical 120k trigger while a 1M model gets ~600k instead of compacting at 12% usage. Set `0` to pin the fixed trigger. |
 | `headroom_tokens` | `16000` | Reserve kept free below the trigger. |
 | `target_ratio` | `0.7` | Compaction aims to bring the prompt down to this fraction of the trigger. |
 | `keep_recent_turns` | `3` | Turns never folded into a digest. |
@@ -346,6 +347,7 @@ Config overrides, applied as layer 5 (`env_overrides` in the loader):
 | `FLUID_APPROVAL_POLICY` | `permission.approval_policy` |
 | `FLUID_CONTEXT_ENABLED` | `context.enabled` |
 | `FLUID_CONTEXT_TRIGGER_TOKENS` | `context.trigger_tokens` |
+| `FLUID_CONTEXT_TRIGGER_WINDOW_RATIO` | `context.trigger_window_ratio` (ignored if not a float) |
 | `FLUID_CONTEXT_HEADROOM_TOKENS` | `context.headroom_tokens` |
 
 Read outside the config loader:

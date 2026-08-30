@@ -48,6 +48,11 @@ from fluid.codemode.session import (
     register_code_mode_tools,
 )
 from fluid.context.cache_plan import plan_cache
+from fluid.context.cache_probe import (
+    CacheProbeConfig,
+    diagnose_cache_miss,
+    fingerprint_prefix,
+)
 from fluid.context.compaction import CompactionConfig, Compactor, Promotion
 from fluid.context.compiler import CompiledPrompt
 from fluid.context.recall import HistoryRecall
@@ -514,6 +519,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         max_continuations_per_turn: int = 3,
         trim: TrimConfig | None = None,
         compaction: CompactionConfig | None = None,
+        cache_probe: CacheProbeConfig | None = None,
         mcp_servers: dict[str, dict[str, Any]] | None = None,
         agents: Sequence[dict[str, Any]] | None = None,
         allowed_tools: Sequence[str] | None = None,
@@ -665,6 +671,13 @@ class NativeLoop(BackgroundLifecycleMixin):
         # while that node is still on the loaded path — a fork or rewind past
         # it means the numbers describe a prompt this session no longer sends.
         self._last_call_usage: dict[str, tuple[str, dict[str, Any]]] = {}
+        # Prompt-cache instrumentation (context/cache_probe.py). Every request
+        # gets a short prefix fingerprint; when a call bills a big fresh prompt
+        # with ~no cache read, the two fingerprints are bisected to name the
+        # segment that moved. Purely diagnostic — it never changes a request.
+        self._cache_probe = cache_probe or CacheProbeConfig()
+        self._prefix_fingerprint: dict[str, str] | None = None
+        self._prev_prefix_fingerprint: dict[str, str] | None = None
         # MCP servers from config, connected lazily on the first turn (the
         # constructor is sync; connecting needs the event loop).
         self._mcp_servers = dict(mcp_servers or {})
@@ -1526,6 +1539,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 usage_raw = dict(result.usage)
                 usage_raw["model_call_index"] = num_calls
                 usage_raw["projected_prompt_tokens"] = projected_prompt
+                usage_raw.update(self._cache_probe_fields(result.usage))
                 await self._emit(Usage(
                     session_id=sid, node_id=parent.node_id, turn_id=turn_id,
                     input_tokens=result.usage.get("input_tokens", 0),
@@ -1601,6 +1615,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             usage_raw = dict(result.usage)
             usage_raw["model_call_index"] = num_calls
             usage_raw["projected_prompt_tokens"] = projected_prompt
+            usage_raw.update(self._cache_probe_fields(result.usage))
             prompt_tokens = _measured_prompt_tokens(result.usage)
             if prompt_tokens > 0:
                 # A provider that reported nothing leaves the estimate in place
@@ -1899,12 +1914,67 @@ class NativeLoop(BackgroundLifecycleMixin):
             },
         )
 
+    def _fingerprint_request(self, request: ProviderRequest) -> None:
+        """Record the prefix fingerprint of the request about to be sent.
+
+        Best-effort: a fingerprint that cannot be computed costs a diagnostic,
+        never a turn.
+        """
+        if not self._cache_probe.enabled:
+            return
+        try:
+            self._prefix_fingerprint = fingerprint_prefix(
+                system=request.system,
+                tools=request.tools,
+                messages=request.messages,
+            )
+        except Exception:  # noqa: BLE001 — instrumentation is never fatal
+            log.debug("prefix fingerprint failed", exc_info=True)
+            self._prefix_fingerprint = None
+
+    def _cache_probe_fields(self, usage: dict[str, Any]) -> dict[str, Any]:
+        """``prefix_hashes`` (+ ``cache_miss`` on a miss) for a Usage payload.
+
+        Consumes the fingerprint of the call that just completed and rotates it
+        into the "previous" slot, so the next call diffs against this one.
+        """
+        fingerprint = self._prefix_fingerprint
+        if fingerprint is None:
+            return {}
+        self._prefix_fingerprint = None
+        out: dict[str, Any] = {"prefix_hashes": fingerprint}
+        try:
+            diagnosis = diagnose_cache_miss(
+                previous=self._prev_prefix_fingerprint,
+                current=fingerprint,
+                input_tokens=int(usage.get("input_tokens", 0) or 0),
+                cache_read_tokens=int(
+                    usage.get("cache_read_input_tokens", 0) or 0
+                ),
+                config=self._cache_probe,
+            )
+        except Exception:  # noqa: BLE001 — instrumentation is never fatal
+            log.debug("cache-miss diagnosis failed", exc_info=True)
+            diagnosis = None
+        self._prev_prefix_fingerprint = fingerprint
+        if diagnosis is not None:
+            out["cache_miss"] = diagnosis
+            log.warning(
+                "prompt cache miss: %s (%s); fresh=%s cache_read=%s",
+                diagnosis.get("reason"),
+                diagnosis.get("note", ""),
+                diagnosis.get("input_tokens"),
+                diagnosis.get("cache_read_tokens"),
+            )
+        return out
+
     async def _stream_once(
         self, sid: str, turn_id: str, history: list[Message], *, sticky: bool = True
     ) -> _CallResult:
         request = self._build_request(
             self._without_stale_plan_reminder(history), sticky=sticky
         )
+        self._fingerprint_request(request)
 
         blocks: dict[int, dict[str, Any]] = {}
         usage_totals: dict[str, Any] = {}

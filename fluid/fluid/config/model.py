@@ -232,6 +232,10 @@ class ContextConfig:
     # Tier 1 only: trim old tool results, never digest a turn or fold an epoch.
     trim_only: bool = False
     trigger_tokens: int = 120_000
+    # Floor/ratio pair: with a known context window the trigger becomes
+    # max(trigger_tokens, window * trigger_window_ratio), capped by headroom.
+    # 0.0 pins the old fixed trigger regardless of window size.
+    trigger_window_ratio: float = 0.6
     headroom_tokens: int = 16_000
     target_ratio: float = 0.7
     keep_recent_turns: int = 3
@@ -249,6 +253,7 @@ class ContextConfig:
             enabled=bool(d.get("enabled", True)),
             trim_only=bool(d.get("trim_only", False)),
             trigger_tokens=int(d.get("trigger_tokens", 120_000)),
+            trigger_window_ratio=float(d.get("trigger_window_ratio", 0.6)),
             headroom_tokens=int(d.get("headroom_tokens", 16_000)),
             target_ratio=float(d.get("target_ratio", 0.7)),
             keep_recent_turns=int(d.get("keep_recent_turns", 3)),
@@ -454,6 +459,7 @@ class HarnessConfig:
                 "enabled": self.context.enabled,
                 "trim_only": self.context.trim_only,
                 "trigger_tokens": self.context.trigger_tokens,
+                "trigger_window_ratio": self.context.trigger_window_ratio,
                 "headroom_tokens": self.context.headroom_tokens,
                 "target_ratio": self.context.target_ratio,
                 "keep_recent_turns": self.context.keep_recent_turns,
