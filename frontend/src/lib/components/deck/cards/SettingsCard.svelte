@@ -11,7 +11,7 @@
 	 */
 	import { onMount } from 'svelte';
 	import './card-design-system.css';
-	import { auth, username, isAdmin } from '$lib/stores/auth.svelte';
+	import { auth, isAdmin } from '$lib/stores/auth.svelte';
 	import { api } from '$lib/api/client';
 	import type { Profile, WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
 	import type { Project } from '$lib/stores/types';
@@ -360,18 +360,6 @@
 				<!-- ACCOUNT -->
 				{#if activeTab === 'account'}
 					<div class="tab-content" transition:fade={{ duration: 150 }}>
-						<!-- Profile -->
-						<div class="set-group">
-							<div class="set-grouphead">
-								<h3><User />Profile</h3>
-								<p>Your account on this install.</p>
-							</div>
-							<div class="set-row">
-								<div class="lab"><h4>Username</h4><p>The name you sign in with.</p></div>
-								<div class="ctl"><span class="ro-val">{$username ?? '—'}</span></div>
-							</div>
-						</div>
-
 						<GeneralSection
 							{workspacePath}
 							onWorkspacePathChange={(v) => workspacePath = v}
@@ -525,13 +513,6 @@
 	   matches the 5 editors exactly (no extra flex gap stacking). */
 	.tab-content {
 		min-width: 0;
-	}
-
-	/* Read-only field value (e.g. username in Profile) */
-	.ro-val {
-		font-size: 13.5px;
-		font-weight: 500;
-		color: var(--foreground);
 	}
 
 	/* Alerts & Messages */
