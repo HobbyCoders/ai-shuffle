@@ -44,6 +44,7 @@ from typing import Any
 
 from fluid.codemode.session import (
     CODE_MODE_SOURCE,
+    SKILLS_SOURCE,
     CodeModeSession,
     register_code_mode_tools,
 )
@@ -1807,13 +1808,16 @@ class NativeLoop(BackgroundLifecycleMixin):
         """
         if self._codemode is not None and self.registry is not None:
             spec = self.registry.get(name)
-            if spec is not None and spec.source == CODE_MODE_SOURCE:
+            if spec is not None and spec.source in (CODE_MODE_SOURCE, SKILLS_SOURCE):
                 # Code mode's four tools ARE the schema surface
                 # (``register_code_mode_tools``): the CE12 allowlist names
                 # WORK tools, and the kernel enforces it through the stamped
                 # ``tool_filter``. An allowlist of work tools must not strip
                 # the surface that reaches them — with every schema filtered
-                # the model can only narrate its calls as text. Deny still
+                # the model can only narrate its calls as text. The skills
+                # pair (save_skill/delete_skill) is part of that same
+                # harness surface: an allowlist of work tools must not
+                # silently amputate the learning loop either. Deny still
                 # beats everything.
                 return not _matches_tool_pattern(name, self.disallowed_tools)
         if self.allowed_tools is not None and not _matches_tool_pattern(

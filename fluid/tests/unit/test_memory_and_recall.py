@@ -123,7 +123,7 @@ async def test_synthesizer_applies_memory_tags(tmp_path) -> None:
     # The synthesis prompt shows the current list with ids.
     prompt = synth._prompt([{"kind": "user", "text": "hi"}])
     assert "## Current memory" in prompt
-    assert f"[{kept.id}] User prefers rebase over merge" in prompt
+    assert f"[{kept.id}] recalls=0 scope=global: User prefers rebase over merge" in prompt
 
 
 async def test_synthesizer_rejects_secret_looking_memory(tmp_path) -> None:

@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from typing import Any
 
 from fluid.codemode.skills import SkillStore, validate_skill
@@ -57,12 +58,18 @@ reusable* workflow improvements:
 Memory rules — add a memory for a durable declarative fact: a preference the
 user stated, a convention of their environment, a correction that should never
 need repeating, or anything the user explicitly asked to remember ("remember
-that…" is a direct order to add one). Rewrite a memory the evidence shows is
-wrong or stale (emit it with its id); delete one the user contradicted or that
-no longer applies. A memory is one or two sentences of fact ("user prefers X",
-"staging deploys go through Y") — never task progress, never instructions to
-yourself ("always do X" replays as a directive and causes repeated work), and
-never secrets. Most journals need NO memory change either.
+that…" is a direct order to add one). A journal entry marked [remember] is the
+agent itself flagging a fact as durable, usually on the user's direct request
+— honor it: distill it into a clean memory entry (or fold it into an existing
+one) unless it is transient task state or a secret. Rewrite a memory the
+evidence shows is wrong or stale (emit it with its id); delete one the user
+contradicted or that no longer applies. A memory is one or two sentences of
+fact ("user prefers X", "staging deploys go through Y") — never task progress,
+never instructions to yourself ("always do X" replays as a directive and
+causes repeated work), and never secrets. Scope: a fact about THIS project's
+codebase, layout, or conventions gets scope="project"; a fact about the user
+or their machine in general stays global (the default). Most journals need NO
+memory change either — but a [remember] entry almost always needs one.
 
 Do NOT capture (these become persistent self-imposed constraints that bite
 later, when the environment has changed):
@@ -92,19 +99,55 @@ Output format — nothing else:
   </skill>
 - to remove a skill: <delete-skill name="snake_case_name"/>
 - for each new memory: <memory>the fact</memory>
+  (project-scoped: <memory scope="project">the fact</memory>)
 - to rewrite a memory: <memory id="m3">the corrected fact</memory>
 - to remove a memory: <delete-memory id="m3"/>
 - if nothing is worth keeping: NO_CHANGES
 """
 
+_CONSOLIDATE_SYSTEM = """\
+You curate the long-term memory and skill library of a code-mode agent
+harness. This is a periodic consolidation pass: no new session evidence, just
+the full current store with usage data. Improve its SHAPE:
+
+- merge near-duplicate memories into one entry (rewrite one with its id,
+  delete the others);
+- generalize entries that captured one narrow instance of a broader fact;
+- delete entries that contradict each other (keep the better-evidenced one),
+  restate stale-looking absolutes more carefully, and drop task narratives
+  that never belonged in memory;
+- an entry with zero recalls and old timestamps is a candidate for deletion,
+  but low usage alone is not proof of uselessness — prefer merging over
+  deleting when the fact still looks true;
+- for skills: delete ones that are superseded by a better one; do NOT write
+  new skills in this pass.
+
+A small, sharp store beats a large, stale one — but do not destroy
+information wholesale: most passes change a handful of entries at most.
+
+Output format — nothing else:
+- to rewrite a memory: <memory id="m3">the merged/corrected fact</memory>
+  (add scope="project" when the fact is project-specific)
+- to remove a memory: <delete-memory id="m3"/>
+- to remove a skill: <delete-skill name="snake_case_name"/>
+- if the store is already in good shape: NO_CHANGES
+"""
+
 _SKILL_RE = re.compile(r'<skill name="([a-z0-9_]+)">\n?(.*?)</skill>', re.DOTALL)
 _DELETE_RE = re.compile(r'<delete-skill name="([a-z0-9_]+)"\s*/>')
-_MEMORY_RE = re.compile(r'<memory(?:\s+id="(m\d+)")?\s*>\n?(.*?)</memory>', re.DOTALL)
+_MEMORY_RE = re.compile(
+    r'<memory(?:\s+id="(m\d+)")?(?:\s+scope="([^"]*)")?\s*>\n?(.*?)</memory>',
+    re.DOTALL,
+)
 _DELETE_MEMORY_RE = re.compile(r'<delete-memory id="(m\d+)"\s*/>')
 
 # Journal previews are already trimmed at write time; cap the slice we show.
 MAX_ENTRIES_PER_PASS = 40
 MIN_NEW_ENTRIES = 8
+# Consolidation (a whole-store curation pass) is interval-gated like skill
+# curation; it rides an ordinary background pass, never session close.
+CONSOLIDATE_INTERVAL_DAYS = 7.0
+CONSOLIDATE_MIN_MEMORIES = 8
 
 
 class Synthesizer:
@@ -114,6 +157,8 @@ class Synthesizer:
         model: str,
         store: SkillStore,
         *,
+        project: str | None = None,
+        on_change: Any | None = None,  # callable(list[str]) -> None|Awaitable
         min_new_entries: int = MIN_NEW_ENTRIES,
         max_entries: int = MAX_ENTRIES_PER_PASS,
         max_tokens: int = 4096,
@@ -123,6 +168,10 @@ class Synthesizer:
         self._provider = provider
         self._model = model
         self._store = store
+        # The current project's memory-scope key: ``scope="project"`` tags in
+        # the model's output resolve to it. ``None`` keeps everything global.
+        self._project = project
+        self._on_change = on_change
         self._min_new = max(1, min_new_entries)
         self._max_entries = max_entries
         self._max_tokens = max_tokens
@@ -131,11 +180,23 @@ class Synthesizer:
         # stalled stream can never wedge a turn or, worse, session close.
         self._pass_timeout = pass_timeout
         self._close_timeout = close_timeout
+        # Set by the Remember channel: a pending explicit remember request
+        # lowers the trigger threshold to "any new entries at all", so a
+        # user's "remember this" lands before the session's eighth event
+        # instead of maybe never.
+        self._urgent = False
         self.last_error: str | None = None
 
     # ─── triggering ──────────────────────────────────────────────────────
+    def mark_urgent(self) -> None:
+        """A high-salience entry (Remember) is waiting: synthesize ASAP."""
+        self._urgent = True
+
     def due(self) -> bool:
-        return self._store.journal_count() - self._store.synth_cursor() >= self._min_new
+        new = self._store.journal_count() - self._store.synth_cursor()
+        if self._urgent and new >= 1:
+            return True
+        return new >= self._min_new
 
     def kick(self) -> None:
         """Start a background pass if one is due and none is running."""
@@ -173,13 +234,33 @@ class Synthesizer:
 
     async def _run_safe(self) -> list[str]:
         try:
-            return await asyncio.wait_for(self.run(), timeout=self._pass_timeout)
+            changed = await asyncio.wait_for(self.run(), timeout=self._pass_timeout)
         except TimeoutError:
             self.last_error = f"synthesis pass exceeded {self._pass_timeout:.0f}s"
             return []
         except Exception as exc:  # never let synthesis break the session
             self.last_error = f"{type(exc).__name__}: {exc}"
             return []
+        if self._consolidation_due():
+            try:
+                changed += await asyncio.wait_for(
+                    self.consolidate(), timeout=self._pass_timeout
+                )
+            except Exception:  # consolidation is opportunistic, never fatal
+                pass
+        await self._notify(changed)
+        return changed
+
+    async def _notify(self, changed: list[str]) -> None:
+        """Tell the host what landed (events/UI). Best-effort, never raises."""
+        if not changed or self._on_change is None:
+            return
+        try:
+            result = self._on_change(list(changed))
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            pass
 
     # ─── one synthesis pass ──────────────────────────────────────────────
     async def run(self) -> list[str]:
@@ -188,10 +269,85 @@ class Synthesizer:
         entries = self._store.journal_entries(cursor, self._max_entries)
         if not entries:
             return []
-        text = await self._complete(self._prompt(entries))
+        text = await self._complete(self._prompt(entries), _SYNTH_SYSTEM)
         changed = await self._apply(text)  # sets last_error (None on a clean pass)
         self._store.set_synth_cursor(cursor + len(entries))
+        # The urgency flag covered the slice just consumed; a new Remember
+        # re-arms it.
+        self._urgent = False
         return changed
+
+    # ─── consolidation (whole-store curation, interval-gated) ────────────
+    def _consolidation_due(self, now: float | None = None) -> bool:
+        now = time.time() if now is None else now
+        if len(self._store.memories()) < CONSOLIDATE_MIN_MEMORIES:
+            return False
+        return (
+            now - self._store.last_consolidated_at()
+            >= CONSOLIDATE_INTERVAL_DAYS * 86_400
+        )
+
+    async def consolidate(self) -> list[str]:
+        """One whole-store curation pass: merge, generalize, retire.
+
+        Sees every memory (with usage counts) and the skill index — no journal
+        slice. Only rewrites and deletions apply; a ``<skill>`` tag in the
+        output is ignored, so a confused pass cannot inject unproven code.
+        """
+        self._store.set_last_consolidated_at(time.time())
+        lines = ["## Memory store (id, recalls, age, scope, text)"]
+        now = time.time()
+        memories = self._store.memories()
+        if not memories:
+            lines.append("(empty)")
+        for m in memories:
+            age_days = (now - (m.updated_at or m.created_at or now)) / 86_400
+            lines.append(
+                f"[{m.id}] recalls={m.uses} age={age_days:.0f}d "
+                f"scope={m.scope}: {m.text}"
+            )
+        lines.append("")
+        lines.append("## Skill library (name, uses, description)")
+        skills = self._store.list()
+        if not skills:
+            lines.append("(empty)")
+        for s in skills:
+            lines.append(f"- {s.name} (used {s.uses}x): {s.description}")
+        text = await self._complete("\n".join(lines), _CONSOLIDATE_SYSTEM)
+        changed: list[str] = []
+        for match in _MEMORY_RE.finditer(text or ""):
+            memory_id, scope_attr, memory_text = match.groups()
+            if memory_id is None:
+                continue  # consolidation rewrites; it does not add
+            try:
+                saved = self._store.save_memory(
+                    memory_text.strip(),
+                    memory_id=memory_id,
+                    scope=self._resolve_scope(scope_attr),
+                )
+            except ValueError:
+                continue
+            changed.append(f"memory:{saved.id}")
+        for match in _DELETE_MEMORY_RE.finditer(text or ""):
+            if self._store.delete_memory(match.group(1)):
+                changed.append(f"-memory:{match.group(1)}")
+        for match in _DELETE_RE.finditer(text or ""):
+            if self._store.delete(match.group(1)):
+                changed.append(f"-{match.group(1)}")
+        return changed
+
+    def _resolve_scope(self, scope_attr: str | None) -> str | None:
+        """Map a tag's scope attribute to a stored scope value.
+
+        ``scope="project"`` resolves to this session's project key;
+        ``scope="global"`` pins global; absent leaves existing scope alone
+        (None → save_memory keeps/defaults).
+        """
+        if not scope_attr:
+            return None
+        if scope_attr == "project":
+            return self._project or "global"
+        return "global"
 
     def _prompt(self, entries: list[dict]) -> str:
         lines = ["## Current skill library"]
@@ -204,19 +360,24 @@ class Synthesizer:
             lines.append(s.source.rstrip("\n"))
             lines.append("```")
         lines.append("")
-        lines.append("## Current memory")
+        lines.append("## Current memory (id, recalls, scope, text)")
         memories = self._store.memories()
         if not memories:
             lines.append("(empty)")
         for m in memories:
-            lines.append(f"[{m.id}] {m.text}")
+            lines.append(f"[{m.id}] recalls={m.uses} scope={m.scope}: {m.text}")
         lines.append("")
         lines.append("## Session journal (conversation + executed cells, in order)")
         cell_no = 0
         for e in entries:
             kind = e.get("kind", "cell")
-            if kind in ("user", "assistant"):
-                lines.append(f"[{kind}] {str(e.get('text', '')).strip()}")
+            if kind in ("user", "assistant", "remember"):
+                scope_hint = (
+                    f" (scope={e['scope']})"
+                    if kind == "remember" and e.get("scope")
+                    else ""
+                )
+                lines.append(f"[{kind}]{scope_hint} {str(e.get('text', '')).strip()}")
                 continue
             if kind == "tool":
                 # JSON-surface call (ToolJournal): one compact line.
@@ -240,11 +401,11 @@ class Synthesizer:
                 lines.append(f"outcome: {json.dumps(summary, ensure_ascii=False)}")
         return "\n".join(lines)
 
-    async def _complete(self, prompt: str) -> str:
+    async def _complete(self, prompt: str, system: str = _SYNTH_SYSTEM) -> str:
         request = ProviderRequest(
             model=self._model,
             messages=[Message(role="user", content=[Text(text=prompt)])],
-            system=_SYNTH_SYSTEM,
+            system=system,
             tools=[],
             max_tokens=self._max_tokens,
         )
@@ -293,9 +454,13 @@ class Synthesizer:
             if self._store.delete(match.group(1)):
                 changed.append(f"-{match.group(1)}")
         for match in _MEMORY_RE.finditer(text or ""):
-            memory_id, memory_text = match.group(1), match.group(2).strip()
+            memory_id, scope_attr, memory_text = match.groups()
             try:
-                saved = self._store.save_memory(memory_text, memory_id=memory_id)
+                saved = self._store.save_memory(
+                    memory_text.strip(),
+                    memory_id=memory_id,
+                    scope=self._resolve_scope(scope_attr),
+                )
             except ValueError as exc:
                 errors.append(f"memory: {exc}")
                 continue

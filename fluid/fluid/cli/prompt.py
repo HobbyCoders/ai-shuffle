@@ -59,7 +59,7 @@ BUILTIN_TOOL_NAMES: tuple[str, ...] = (
     "Read", "Grep", "Glob", "Write", "Edit", "Bash", "Skill", "Note", "Task",
     "Monitor", "ToolSearch", "HistoryExpand", "HistorySearch", "Ledger",
     "AskUser", "SessionSearch", "SessionView", "WebFetch", "WebSearch",
-    "Plan", "StopPlanning",
+    "Plan", "StopPlanning", "Remember", "Recall",
 )
 
 _FULL_TOOLSET = frozenset(BUILTIN_TOOL_NAMES)
@@ -115,6 +115,51 @@ Internal file edits a tool already confirmed do not need re-reading.
 - When a result looks empty, partial, or suspiciously narrow, retry with a \
 broader query or a different strategy before concluding.
 - Done means every stated requirement is verified, not a plausible subset."""
+
+
+GUIDANCE_DIR_MAX_FILES = 8
+GUIDANCE_FILE_MAX_CHARS = 4_000
+
+
+def load_guidance_files(model: str, home: Path | None = None) -> tuple[str, ...]:
+    """User-authored per-model guidance from ``~/.fluid/guidance/*.md``.
+
+    A file's stem is matched as a case-insensitive substring of the session's
+    model name (``glm.md`` matches ``z-ai/glm-5.3-flash``; ``qwen3.md``
+    matches ``qwen/qwen3-coder``), and matching files append after the shipped
+    guidance blocks — screened, capped, sorted by name for byte-stable
+    prompts. This is the no-code path for onboarding a new model: run it,
+    watch its failure modes, write its guidance file. No harness release
+    required, and the shipped blocks stay untouched underneath.
+    """
+    from fluid.context.screening import screen
+
+    directory = (home or Path.home()) / ".fluid" / "guidance"
+    lowered = (model or "").lower()
+    if not lowered:
+        return ()
+    blocks: list[str] = []
+    try:
+        paths = sorted(directory.glob("*.md"))
+    except OSError:
+        return ()
+    for path in paths[:GUIDANCE_DIR_MAX_FILES]:
+        stem = path.stem.strip().lower()
+        if not stem or stem not in lowered:
+            continue
+        try:
+            content = path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError, ValueError):
+            continue
+        if not content:
+            continue
+        if len(content) > GUIDANCE_FILE_MAX_CHARS:
+            content = content[:GUIDANCE_FILE_MAX_CHARS].rstrip() + (
+                f"\n\n[guidance file truncated at {GUIDANCE_FILE_MAX_CHARS} "
+                f"chars — trim {path}]"
+            )
+        blocks.append(screen(content, str(path)))
+    return tuple(blocks)
 
 
 def model_guidance_blocks(
@@ -204,6 +249,10 @@ class PromptProfile:
     identity: str | None = None  # None → the shipped default identity
     model: str = ""
     model_guidance: bool | str | tuple[str, ...] = "auto"
+    # User-authored guidance blocks (~/.fluid/guidance/<family>.md) matched to
+    # the session model — resolved once at profile build, appended after the
+    # shipped guidance blocks.
+    extra_guidance: tuple[str, ...] = ()
 
 
 def profile_for(
@@ -219,6 +268,9 @@ def profile_for(
         model = config.model_for(provider_name)
     except KeyError:
         model = config.default_model
+    extra_guidance: tuple[str, ...] = ()
+    if "user" in config.setting_sources:
+        extra_guidance = load_guidance_files(model)
     return PromptProfile(
         tools=tools,
         code_mode=config.code_mode,
@@ -230,6 +282,7 @@ def profile_for(
         identity=identity,
         model=model,
         model_guidance=config.model_guidance,
+        extra_guidance=extra_guidance,
     )
 
 
@@ -491,13 +544,33 @@ def _instructions_section(p: PromptProfile) -> str | None:
             "must survive the whole session. Keep entries terse."
         )
     if p.continual:
-        bullets.append(
+        remember = "Remember" in t
+        recall = "Recall" in t
+        bullet = (
             "- A `# Memory` section below carries facts your continual "
-            "learner distilled from earlier sessions. Trust it, and never "
-            "manage it — it updates itself from what happens in sessions, so "
-            "a user saying \"remember this\" needs no action beyond "
-            "acknowledging it."
+            "learner distilled from earlier sessions. Trust it, and correct "
+            "course when the user contradicts an entry."
         )
+        if remember:
+            bullet += (
+                " When the user asks you to remember something, or you learn "
+                "a durable fact or lasting preference, save it with Remember "
+                "in the same turn — the learner consolidates it into the "
+                "list; you never edit the list itself."
+            )
+        if recall:
+            bullet += (
+                " The list is bounded: when a task touches something you may "
+                "have learned that the list does not show, search with "
+                "Recall before saying you do not know."
+            )
+        if remember or recall:
+            bullet += (
+                " Division of labor: memory holds durable facts"
+                + ("; Note holds this session's working state" if "Note" in t else "")
+                + "; skills hold procedures; past sessions hold what happened."
+            )
+        bullets.append(bullet)
     if "SessionSearch" in t and "SessionView" in t:
         bullets.append(
             "- Past sessions are your long-term memory, reached with "
@@ -614,6 +687,7 @@ def compose_base_prompt(profile: PromptProfile | None = None) -> str:
         _environment_section(p),
         _ending_section(p),
         *model_guidance_blocks(p.model, p.model_guidance),
+        *p.extra_guidance,
     ]
     return "\n\n".join(s for s in sections if s) + "\n"
 
@@ -659,6 +733,11 @@ def compose_code_mode_addendum(tools: frozenset[str] | None = None) -> str:
         if has("Write")
         else " — assign the text to a triple-quoted variable and pass that"
     )
+    skill_contrast = (
+        "(distinct from the prose skills the Skill tool loads) "
+        if has("Skill")
+        else ""
+    )
     sequencing = ""
     if has("Read") and has("Edit"):
         sequencing = (
@@ -691,7 +770,19 @@ filesystem; `open()`, `os`, `subprocess` and the network are disabled.\
 A cell that does not parse costs a whole turn, so watch the two mistakes that \
 cause nearly all of them. {grep_example} And never nest a shell heredoc or a \
 long multi-line body (a commit message, a PR description) inside a command \
-string{body_route}.{sequencing}"""
+string{body_route}.{sequencing}
+
+Saved skills {skill_contrast}are Python \
+helper modules that persist across sessions and mount into the kernel as \
+`skills.<name>` — import with `from skills import <name>`; list_tools lists \
+the saved ones. When you have just built a multi-step helper you or a future \
+session will plausibly need again, persist it in the same cell: \
+`from tools import save_skill` then `save_skill(name="snake_case_name", \
+source=module_source)`, where the module has a docstring (first line = \
+one-sentence description), a function named like the skill, and a pure \
+_selftest() on inline data — it is verified before it lands, and a saved \
+skill spares every future session from re-deriving the helper. One-off task \
+logic does not qualify; a generalized, parameterized workflow does."""
 
 
 # The full-surface rendering — what a stock code-mode session ships.

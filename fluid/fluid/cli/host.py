@@ -370,6 +370,8 @@ class CliHost:
         worker.worker_session_id = meta.session_id
 
         body = (definition.body.strip() if definition is not None else "") or GENERIC_SUBAGENT_PROMPT
+        from fluid.codemode.skills import DEFAULT_SKILLS_ROOT
+
         compiled = compile_prompt(PromptInputs(
             base=body,
             cwd=self.config.cwd,
@@ -379,6 +381,14 @@ class CliHost:
             include_skills=False,
             include_agents=False,
             include_plugins=False,
+            # Subagents share the learner's memory snapshot: a worker that
+            # doesn't know the user's conventions re-derives (or violates)
+            # them, and its journal evidence feeds the same store.
+            memories_dir=(
+                (self.config.skills_dir or str(DEFAULT_SKILLS_ROOT))
+                if self.config.continual
+                else None
+            ),
             setting_sources=self.config.setting_sources,
         ))
 

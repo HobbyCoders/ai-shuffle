@@ -17,12 +17,16 @@ Alongside the skills the store keeps:
   synthesizer has already looked). Usage counts exist so curation can favor
   skills that earn their keep and prune ones that never get imported.
 - ``memories.json`` — the learner's declarative half: short remembered facts
-  (stated preferences, environment conventions, corrections) written ONLY by
-  the synthesizer and rendered into every session's prompt as a frozen
-  snapshot (``render_memory_section``). No model-facing tool writes them, so
-  there is no file for the agent to curate — the learner adds, rewrites, and
-  retires entries itself as evidence accumulates, and the store caps the
-  count, archiving the oldest instead of growing without bound.
+  (stated preferences, environment conventions, corrections) rendered into
+  every session's prompt as a frozen snapshot (``render_memory_section``).
+  Only the synthesizer writes the file itself; the model *proposes* through
+  the ``Remember`` builtin, which journals a high-salience entry the
+  synthesizer consolidates on its next pass (propose-then-curate: the model
+  flags what seemed durable while context was hot, the learner with global
+  view decides what lands). The store caps the count, archiving the least
+  recalled instead of growing without bound; the ``Recall`` builtin searches
+  live and archived entries and feeds the usage counters that drive that
+  eviction.
 
 Everything is stdlib-only and synchronous; callers are the code-mode session
 (host side) and the synthesizer.
@@ -33,6 +37,7 @@ from __future__ import annotations
 import ast
 import json
 import keyword
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -54,6 +59,36 @@ class MemoryEntry:
     text: str
     created_at: float = 0.0
     updated_at: float = 0.0
+    # Retrieval bookkeeping (the Recall tool bumps these): entries that earn
+    # recalls are protected from eviction; entries nothing ever asks for are
+    # the first to age out. Mirrors the skill store's ``uses`` counter.
+    uses: int = 0
+    last_recalled_at: float = 0.0
+    # "global" (default) or a project key (see :func:`project_key_for`).
+    # Project-scoped entries render only into that project's sessions, so one
+    # repo's conventions stop riding into every other repo on the machine.
+    scope: str = "global"
+
+
+def project_key_for(cwd: "str | Path | os.PathLike[str] | None") -> str:
+    """A stable per-project key for memory scoping.
+
+    The project root is the nearest ancestor with a ``.git`` entry (worktrees
+    carry a ``.git`` *file*, which counts), falling back to the directory
+    itself. The key is the resolved root path with separators flattened, the
+    same shape other tools use for per-project directories.
+    """
+    path = Path(cwd) if cwd else Path.cwd()
+    try:
+        path = path.resolve()
+    except OSError:
+        pass
+    root = path
+    for candidate in (path, *path.parents):
+        if (candidate / ".git").exists():
+            root = candidate
+            break
+    return re.sub(r"[^A-Za-z0-9]+", "-", str(root)).strip("-")
 
 
 @dataclass(frozen=True)
@@ -297,10 +332,18 @@ class SkillStore:
                     text=str(e["text"]).strip(),
                     created_at=float(e.get("created_at", 0.0)),
                     updated_at=float(e.get("updated_at", 0.0)),
+                    uses=int(e.get("uses", 0)),
+                    last_recalled_at=float(e.get("last_recalled_at", 0.0)),
+                    scope=str(e.get("scope") or "global"),
                 ))
         return out
 
-    def save_memory(self, text: str, memory_id: str | None = None) -> MemoryEntry:
+    def save_memory(
+        self,
+        text: str,
+        memory_id: str | None = None,
+        scope: str | None = None,
+    ) -> MemoryEntry:
         """Add (``memory_id=None``) or rewrite one remembered fact.
 
         Raises ``ValueError`` for empty/oversized text and for anything that
@@ -327,22 +370,37 @@ class SkillStore:
                 if isinstance(e, dict) and e.get("id") == memory_id:
                     e["text"] = text
                     e["updated_at"] = now
+                    if scope is not None:
+                        e["scope"] = scope
                     self._save_memories(doc)
                     return MemoryEntry(
                         id=str(memory_id), text=text,
                         created_at=float(e.get("created_at", now)), updated_at=now,
+                        uses=int(e.get("uses", 0)),
+                        last_recalled_at=float(e.get("last_recalled_at", 0.0)),
+                        scope=str(e.get("scope") or "global"),
                     )
         entry = {
             "id": f"m{int(doc.get('next_id', 1))}", "text": text,
             "created_at": now, "updated_at": now,
+            "scope": scope or "global",
         }
         doc["next_id"] = int(doc.get("next_id", 1)) + 1
         doc["entries"].append(entry)
-        # Bounded: past the cap the least-recently-touched entries move to the
-        # archive (never deleted), the same posture as skill curation.
+        # Bounded: past the cap the least-useful entries move to the archive
+        # (never deleted), the same posture as skill curation. "Least useful"
+        # is LFU-informed: fewest recalls first, oldest activity as the
+        # tiebreak — an entry retrieval keeps asking for is protected even
+        # when it is old.
         if len(doc["entries"]) > MAX_MEMORIES:
             doc["entries"].sort(
-                key=lambda e: float(e.get("updated_at", 0.0)) if isinstance(e, dict) else 0.0
+                key=lambda e: (
+                    int(e.get("uses", 0)),
+                    max(
+                        float(e.get("updated_at", 0.0)),
+                        float(e.get("last_recalled_at", 0.0)),
+                    ),
+                ) if isinstance(e, dict) else (0, 0.0)
             )
             overflow = doc["entries"][: len(doc["entries"]) - MAX_MEMORIES]
             doc["entries"] = doc["entries"][len(overflow):]
@@ -358,7 +416,79 @@ class SkillStore:
             except OSError:
                 pass
         self._save_memories(doc)
-        return MemoryEntry(id=str(entry["id"]), text=text, created_at=now, updated_at=now)
+        return MemoryEntry(
+            id=str(entry["id"]), text=text, created_at=now, updated_at=now,
+            scope=str(entry["scope"]),
+        )
+
+    def note_memories_recalled(self, memory_ids: list[str]) -> None:
+        """Bump recall counters for entries a retrieval surfaced (LFU input)."""
+        wanted = {str(i) for i in memory_ids if i}
+        if not wanted:
+            return
+        doc = self._load_memories()
+        now = time.time()
+        hit = False
+        for e in doc["entries"]:
+            if isinstance(e, dict) and str(e.get("id")) in wanted:
+                e["uses"] = int(e.get("uses", 0)) + 1
+                e["last_recalled_at"] = now
+                hit = True
+        if hit:
+            self._save_memories(doc)
+
+    def archived_memories(self) -> list[MemoryEntry]:
+        """Entries evicted past the cap — still searchable, never deleted."""
+        out: list[MemoryEntry] = []
+        path = self.root / ".archive" / "memories-archive.jsonl"
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        e = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(e, dict) and e.get("id") and str(e.get("text", "")).strip():
+                        out.append(MemoryEntry(
+                            id=str(e["id"]),
+                            text=str(e["text"]).strip(),
+                            created_at=float(e.get("created_at", 0.0)),
+                            updated_at=float(e.get("updated_at", 0.0)),
+                            uses=int(e.get("uses", 0)),
+                            last_recalled_at=float(e.get("last_recalled_at", 0.0)),
+                            scope=str(e.get("scope") or "global"),
+                        ))
+        except OSError:
+            pass
+        return out
+
+    def search_memories(
+        self, query: str, *, limit: int = 3
+    ) -> list[tuple[MemoryEntry, bool]]:
+        """Keyword search over live and archived memories.
+
+        Returns ``(entry, archived)`` pairs, best matches first — scored by how
+        many query terms the text contains. Live hits get their recall counters
+        bumped (archived ones have already aged out; a bump there is
+        meaningless). All scopes are searched: retrieval is explicit, so a
+        fact learned in another project is reachable when asked for.
+        """
+        tokens = [t for t in (query or "").lower().split() if t]
+        if not tokens:
+            return []
+        scored: list[tuple[int, float, MemoryEntry, bool]] = []
+        for entry, archived in (
+            *((m, False) for m in self.memories()),
+            *((m, True) for m in self.archived_memories()),
+        ):
+            hay = entry.text.lower()
+            score = sum(1 for t in tokens if t in hay)
+            if score:
+                scored.append((score, entry.updated_at, entry, archived))
+        scored.sort(key=lambda row: (-row[0], -row[1]))
+        hits = [(entry, archived) for _, _, entry, archived in scored[:max(1, limit)]]
+        self.note_memories_recalled([e.id for e, archived in hits if not archived])
+        return hits
 
     def delete_memory(self, memory_id: str) -> bool:
         doc = self._load_memories()
@@ -372,12 +502,15 @@ class SkillStore:
         self._save_memories(doc)
         return True
 
-    def render_memory_section(self) -> str | None:
+    def render_memory_section(self, project: str | None = None) -> str | None:
         """The compiled prompt's ``# Memory`` section (frozen snapshot).
 
         ``None`` when there are no memories, so empty installs pay nothing.
-        Entries pass the injection screen; a finding replaces that entry with
-        a note naming the file, never silently deleting it.
+        With a ``project`` key, only global entries and that project's entries
+        render — other projects' facts stay out of this session's prompt (a
+        count line says they exist). Entries pass the injection screen; a
+        finding replaces that entry with a note naming the file, never
+        silently deleting it.
         """
         entries = self.memories()
         if not entries:
@@ -385,7 +518,15 @@ class SkillStore:
         from fluid.context.screening import screen_findings
 
         shown: list[str] = []
+        hidden = 0
         for entry in entries:
+            if (
+                project is not None
+                and entry.scope != "global"
+                and entry.scope != project
+            ):
+                hidden += 1
+                continue
             findings = screen_findings(entry.text)
             if findings:
                 shown.append(
@@ -395,14 +536,32 @@ class SkillStore:
                 )
             else:
                 shown.append(f"- {entry.text}")
+        if not shown:
+            return None
+        footer = (
+            f"\n\n({hidden} entr{'y' if hidden == 1 else 'ies'} scoped to "
+            "other projects not shown.)"
+            if hidden
+            else ""
+        )
         return (
             "# Memory\n"
             "Facts your continual learner distilled from earlier sessions. "
             "Trust them, and correct course when the user contradicts one — "
-            "the learner curates this list itself from what happens in "
-            "sessions; you never manage it.\n\n"
+            "the list updates between sessions from what happens in them; "
+            "you never edit it directly.\n\n"
             + "\n".join(shown)
+            + footer
         )
+
+    # ─── consolidation bookkeeping (see Synthesizer.consolidate) ─────────
+    def last_consolidated_at(self) -> float:
+        return float(self._load_meta().get("last_consolidated_at", 0.0))
+
+    def set_last_consolidated_at(self, ts: float) -> None:
+        meta = self._load_meta()
+        meta["last_consolidated_at"] = float(ts)
+        self._save_meta(meta)
 
     # ─── lifecycle curation ──────────────────────────────────────────────
     #

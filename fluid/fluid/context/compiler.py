@@ -266,10 +266,12 @@ def compile_prompt(inputs: PromptInputs) -> CompiledPrompt:
         if index:
             sections.append(PromptSection(kind="agents", text=index))
     if inputs.memories_dir is not None:
-        from fluid.codemode.skills import SkillStore
+        from fluid.codemode.skills import SkillStore, project_key_for
 
         store = SkillStore(inputs.memories_dir)
-        section = store.render_memory_section()
+        # Project-scoped entries render only into their own project's
+        # sessions; global entries render everywhere.
+        section = store.render_memory_section(project_key_for(inputs.cwd))
         if section:
             sections.append(
                 PromptSection(

@@ -320,6 +320,19 @@ class SubagentEvent(Event):
 
 
 @dataclass(frozen=True, kw_only=True)
+class ContinualUpdate(Event):
+    """The continual learner landed changes — invisible learning is
+    indistinguishable from no learning, so every synthesis/consolidation pass
+    that changes the store announces what it did. ``changes`` uses the
+    synthesizer's change vocabulary: ``"<skill_name>"`` (saved),
+    ``"-<skill_name>"`` (deleted), ``"memory:m3"`` (added/rewritten),
+    ``"-memory:m3"`` (retired). Never terminal — clients render a line and
+    move on."""
+
+    changes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, kw_only=True)
 class HookEvent(Event):
     """A configured hook spoke: ``level`` is ``"deny"`` (a PreToolUse hook
     blocked a call; the model sees the same reason as an error ToolResult) or
@@ -348,7 +361,7 @@ _EVENT_TYPES: dict[str, type[Event]] = {
         ToolUse, ToolResult, SteerDelivered,
         PermissionRequest, QuestionRequest, HandoffCreated,
         ContextCompaction, Usage, RateLimit, ProviderRetry, SubagentEvent, HookEvent,
-        DelegatedSurface,
+        ContinualUpdate, DelegatedSurface,
     )
 }
 

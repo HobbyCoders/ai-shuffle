@@ -18,6 +18,8 @@ from fluid.tools.builtins import (
     note,
     plan,
     read,
+    recall,
+    remember,
     session_search,
     session_view,
     skill,
@@ -31,7 +33,7 @@ from fluid.tools.registry import ToolRegistry
 _MODULES = (
     read, grep, glob, write, edit, bash, skill, note, task, monitor,
     tool_search, history_expand, history_search, ledger,
-    session_search, session_view, ask_user, web, plan,
+    session_search, session_view, ask_user, web, plan, remember, recall,
 )
 
 # Tools whose descriptions specialize to the session's permitted surface —
@@ -53,6 +55,8 @@ _DESCRIBERS = {
     "SessionView": session_view.describe,
     "WebFetch": web.describe_fetch,
     "WebSearch": web.describe_search,
+    "Remember": remember.describe,
+    "Recall": recall.describe,
 }
 
 

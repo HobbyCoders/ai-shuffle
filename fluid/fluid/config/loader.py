@@ -629,7 +629,7 @@ def build_engine(
     codemode = None
     journal = None
     if config.code_mode or config.continual:
-        from fluid.codemode.skills import SkillStore
+        from fluid.codemode.skills import SkillStore, project_key_for
 
         skills = SkillStore(config.skills_dir)  # None → ~/.fluid/skills
         try:
@@ -639,14 +639,48 @@ def build_engine(
             skills.curate()
         except Exception:
             pass
+        # The Recall builtin searches this store (live + archived memories,
+        # saved skills); wiring the handle makes the tool visible.
+        ctx.extra.setdefault("recall_store", skills)
         synthesizer = None
         if config.continual:
             from fluid.codemode.continual import Synthesizer
 
+            on_change: Any = None
+            if bus is not None:
+                from fluid.events.model import ContinualUpdate
+
+                _bus, _sid = bus, session_id or ""
+
+                async def _announce(changes: list[str]) -> None:
+                    # Learning that lands invisibly might as well not have
+                    # happened — announce what the pass changed.
+                    await _bus.publish(ContinualUpdate(
+                        session_id=_sid, changes=tuple(changes),
+                    ))
+
+                on_change = _announce
+
             # Session provider; continual_model pins synthesis to one model so
             # skill quality doesn't drift with the session's provider choice.
             # Passes are background and best-effort (see continual.py).
-            synthesizer = Synthesizer(client, config.continual_model or model, skills)
+            synthesizer = Synthesizer(
+                client, config.continual_model or model, skills,
+                project=project_key_for(config.cwd),
+                on_change=on_change,
+            )
+
+            def _remember(text: str, scope: str | None = None) -> None:
+                # The Remember builtin's write path: journal a high-salience
+                # entry and pull the next synthesis pass forward.
+                entry: dict[str, Any] = {"kind": "remember", "text": text}
+                if scope:
+                    entry["scope"] = scope
+                skills.journal_append(entry)
+                synthesizer.mark_urgent()
+                synthesizer.kick()
+
+            ctx.extra.setdefault("continual_journal", _remember)
         if config.code_mode:
             from fluid.codemode.session import CodeModeSession
 

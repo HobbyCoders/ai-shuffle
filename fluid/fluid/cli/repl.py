@@ -24,6 +24,7 @@ from typing import Any, TextIO
 from fluid.cli.config import host_of
 from fluid.cli.host import render_worker_event
 from fluid.events.model import (
+    ContinualUpdate,
     ErrorEvent,
     Event,
     HookEvent,
@@ -145,6 +146,14 @@ def render_event(event: Event, out: TextIO) -> None:
         out.write(f"\n[error] {event.message}\n")
     elif isinstance(event, HookEvent):
         out.write(f"  {render_hook_event(event)}\n")
+    elif isinstance(event, ContinualUpdate):
+        line = f"[learned] {', '.join(event.changes)}"
+        if id(out) in _mode:
+            # Synthesis is a background pass; it can land mid-stream. Hold
+            # the note until the turn ends rather than splicing it in.
+            _deferred_notes.setdefault(id(out), []).append(line)
+        else:
+            out.write(f"\n  {line}\n")
     elif isinstance(event, (SubagentEvent, SessionParked, SessionWoken)):
         line = render_worker_event(event)
         if line is None:
