@@ -1416,9 +1416,23 @@ class ChatWebSocketHandler:
             # executes the turn (its turn_claim observe pass drives the live
             # runtime), so stop needs no HTTP hop.
             # Stop now means STOP, not "interrupt so I can send another message":
-            # mid-stream messages have their own steering path. Cancel every task
-            # owned by the interrupted session and suppress canceled completions
+            # mid-stream messages have their own steering path. Cancel the
+            # session's background AGENT work and suppress canceled completions
             # from scheduling a later wake.
+            #
+            # STOP SEMANTICS (audit item 5). ``stop_background`` ends the turn
+            # and everything working ON the turn — sub-agents, provider-lane
+            # workers. It does NOT end a healthy Monitor shell: those are
+            # long-lived services the user asked to keep up ("it stays up while
+            # we work"), and killing the dev server out from under a session
+            # whose turn was merely interrupted is not what the button says.
+            # It was also INCONSISTENT — typing mid-stream goes through
+            # ``interrupt_for_query``, which never set stop_background, so the
+            # server survived a steer but died on Stop. Both paths now leave
+            # running shells alone (``include_shells=False``). Shells still die
+            # on the per-task "x", on session delete, and on the eviction reap
+            # (``reap_session_background_shells``) — those force paths are
+            # unchanged. Ghost shell rows are still swept so nothing strands.
 
             # v2 turns cutover: the ONE interrupt implementation. Flip the live
             # turn running->interrupting (durable intent) and fire the executor,
@@ -1447,7 +1461,7 @@ class ChatWebSocketHandler:
                 # matched no live turn must not cancel a successor's work.
                 from app.core.query_session_lifecycle import stop_all_background_tasks
 
-                await stop_all_background_tasks(session_id)
+                await stop_all_background_tasks(session_id, include_shells=False)
                 # Cross-runner wake: if the executing runtime lives on another
                 # install, its turn_claim observe pass reacts on this NOTIFY
                 # tick instead of its next 5s poll. Locally the executor

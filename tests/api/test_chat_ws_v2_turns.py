@@ -459,7 +459,9 @@ async def test_handle_stop_interrupts_live_turn_and_stops_background(mock_db):
     row = turns_db.get_turn(live)
     assert row["state"] == "interrupting"
     assert row["stop_background"] in (True, 1)
-    stop_bg.assert_awaited_once_with("sess-1")
+    # Stop ends the turn's own background work but SPARES a healthy Monitor
+    # shell (the user's dev server) — see handle_stop's STOP SEMANTICS note.
+    stop_bg.assert_awaited_once_with("sess-1", include_shells=False)
 
 
 async def test_handle_stop_with_current_turn_id_interrupts(mock_db):
