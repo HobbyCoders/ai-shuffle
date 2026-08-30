@@ -137,9 +137,15 @@ export class SsrfGuard {
     // (127.0.0.1) so an operator BROWSER_SSRF_ALLOW override still applies.
     if (host === "localhost" || host.endsWith(".localhost")) {
       const v = classifyIp("127.0.0.1", this.policy);
-      return v.blocked ? { blocked: true, reason: `loopback host "${host}" (127.0.0.1)` } : v;
+      // Keep the classifier's reason: it names the setting that would allow it.
+      return v.blocked
+        ? { blocked: true, reason: `host "${host}" (127.0.0.1) is ${v.reason}` }
+        : v;
     }
-    if (parseIp(host)) return classifyIp(host, this.policy);
+    if (parseIp(host)) {
+      const v = classifyIp(host, this.policy);
+      return v.blocked ? { blocked: true, reason: `host ${host} is ${v.reason}` } : v;
+    }
 
     const addrs = await this.resolve(host);
     // Unresolvable host: let the request fail naturally in Chromium rather than

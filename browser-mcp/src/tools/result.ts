@@ -49,6 +49,42 @@ export function capText(
   return { text: value.slice(0, maxChars), truncated: true, fullChars };
 }
 
+/**
+ * A page that rendered nothing looks exactly like a successful read of an empty
+ * page: ok:true, ref_count:0, no text. Models have shipped broken UIs off that
+ * silence, so an empty result says out loud that it is suspicious. Returns the
+ * warning to attach, or undefined when the page clearly rendered something.
+ *
+ * `renderedText` is whatever content the tool is about to return (snapshot YAML,
+ * extracted prose). Below this many non-whitespace characters a page has
+ * effectively painted nothing — a bare <body>, an app that failed to mount, a
+ * fetch that errored before first paint. `refCount` is checked only when the
+ * caller has one (snapshot-shaped tools); text-only readers omit it.
+ */
+const MEANINGFUL_CONTENT_CHARS = 40;
+
+export function emptyContentWarning(
+  renderedText: string,
+  refCount?: number,
+): string | undefined {
+  const solid = renderedText.replace(/\s+/g, "").length;
+  if (solid < MEANINGFUL_CONTENT_CHARS) {
+    return (
+      "page rendered no content — likely a blank/errored app; check browser_console " +
+      "and browser_network, and confirm the page finished loading, before treating " +
+      "this as success"
+    );
+  }
+  if (refCount === 0) {
+    return (
+      "no interactive elements found (ref_count 0) — the page has text but nothing " +
+      "clickable; if you expected a UI here it may have failed to mount, so check " +
+      "browser_console before treating this as success"
+    );
+  }
+  return undefined;
+}
+
 export function errorResult(error: string, extra: Record<string, unknown> = {}): McpToolResult {
   return {
     content: [text(JSON.stringify({ ok: false, error, ...extra }))],

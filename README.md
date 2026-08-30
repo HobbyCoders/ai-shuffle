@@ -154,9 +154,27 @@ Enable it under **Settings → Browser** (admin): a single toggle turns the tool
 or off and a health dot shows whether the browser is reachable. The browser profile
 persists in the `browser-profile` volume, so logins survive restarts.
 
+**Where the browser may connect.** Cloud metadata (`169.254.0.0/16`) is always
+refused and no setting re-enables it. Private LAN ranges and the public internet
+are allowed. Loopback — `127.0.0.1`, `localhost`, `::1` — is the one range that
+depends on how you run the app:
+
+| Setting | Default | Description |
+|---|---|---|
+| `BROWSER_SSRF_ALLOW_LOOPBACK` | auto | Whether the agent's browser may open `localhost` URLs. Unset = allowed in local mode, refused in Docker. Set `true` on a single-user self-hosted install so an agent can view a dev server it started itself; leave it off if untrusted people can prompt this install |
+| `BROWSER_SSRF_ALLOW` | — | Comma-separated CIDRs to allow outright (e.g. `127.0.0.0/8,::1/128`). Set explicitly, it replaces the automatic choice above |
+| `BROWSER_SSRF_BLOCK` | — | Comma-separated CIDRs to refuse. Wins over any allow entry |
+
+Turning loopback on lets a page the agent visits reach services bound to
+`127.0.0.1` inside the container — including this app's own API, using whatever
+session the browser profile holds. That is a fair trade on a machine with one
+user and no fair trade on a shared one, which is why Docker defaults to off. A
+refused address explains itself in the tool result, naming the setting that
+would allow it.
+
 > 🔒 The DevTools port is bound to `127.0.0.1` only and is never published to the
-> network. The agent drives a real browser with **no egress filtering**
-> (SSRF / local-network reach) — isolate the container if you run untrusted prompts.
+> network. Egress filtering aside, the agent drives a real browser with your
+> profile and your logins — isolate the container if you run untrusted prompts.
 > Diagnose the browser from the Settings panel, or with
 > `docker exec -u appuser -e HOME=/home/appuser ai-shuffle chrome-doctor`.
 

@@ -20,7 +20,13 @@
  *   - Loopback (127.0.0.0/8, ::1, "localhost") and other bogon ranges are blocked
  *     by DEFAULT but MAY be re-enabled with an explicit BROWSER_SSRF_ALLOW entry
  *     (an operator opt-in; also how the test harness reaches its own loopback
- *     fixture server).
+ *     fixture server). Local/self-hosted installs of the app inject that entry
+ *     automatically so an agent can view a dev server it just started — see
+ *     ``app/core/mcp_config.py`` and the BROWSER_SSRF_ALLOW_LOOPBACK setting.
+ *
+ * Every block reason names its own remedy: a blocked address is a configuration
+ * decision, not a network failure, and the agent that hits it should be able to
+ * read what would unblock it instead of guessing (or silently giving up).
  *
  * PRECEDENCE (highest wins):
  *   1. Always-block set (cloud metadata 169.254.0.0/16). Non-overridable.
@@ -267,6 +273,24 @@ const DEFAULT_BLOCK: LabeledCidr[] = [
 ];
 
 /**
+ * Remedy sentences appended to a block reason. A blocked host is a policy
+ * decision an operator can change; saying so turns a dead end into one action.
+ */
+const REMEDY_DEFAULT_BLOCK =
+  "blocked by default policy — to allow it set BROWSER_SSRF_ALLOW " +
+  '(e.g. BROWSER_SSRF_ALLOW="127.0.0.0/8,::1/128") for the app and start a new ' +
+  "session, or on a local/self-hosted install set BROWSER_SSRF_ALLOW_LOOPBACK=true; " +
+  "otherwise bind the server to 0.0.0.0 and browse its LAN IP instead";
+
+const REMEDY_ALWAYS_BLOCK =
+  "always blocked and NOT overridable — BROWSER_SSRF_ALLOW cannot re-enable it; " +
+  "there is no configuration that permits this address";
+
+const REMEDY_ENV_BLOCK =
+  "blocked by the operator's BROWSER_SSRF_BLOCK setting — remove that entry and " +
+  "start a new session to allow it";
+
+/**
  * Compile the effective policy from the environment. Reads BROWSER_SSRF_BLOCK
  * (extra blocks) and BROWSER_SSRF_ALLOW (force-allow / default-block override).
  * Pure aside from reading the passed-in env snapshot.
@@ -294,18 +318,27 @@ export function classifyIp(ip: string, policy: SsrfPolicy): Verdict {
 
   // 1. Always-block (metadata) — cannot be overridden.
   const meta = firstMatch(p, policy.alwaysBlock);
-  if (meta) return { blocked: true, reason: `${meta.label} ${meta.cidr.text}` };
+  if (meta) {
+    return { blocked: true, reason: `${meta.label} ${meta.cidr.text}: ${REMEDY_ALWAYS_BLOCK}` };
+  }
 
   // 2. Operator block list — wins over allow.
   const blocked = firstMatch(p, policy.block);
-  if (blocked) return { blocked: true, reason: `matched ${blocked.label} (${blocked.cidr.text})` };
+  if (blocked) {
+    return {
+      blocked: true,
+      reason: `matched ${blocked.label} (${blocked.cidr.text}): ${REMEDY_ENV_BLOCK}`,
+    };
+  }
 
   // 3. Operator allow list — overrides the default-block set.
   if (firstMatch(p, policy.allow)) return { blocked: false };
 
   // 4. Default-block set.
   const def = firstMatch(p, policy.defaultBlock);
-  if (def) return { blocked: true, reason: `${def.label} ${def.cidr.text}` };
+  if (def) {
+    return { blocked: true, reason: `${def.label} ${def.cidr.text}: ${REMEDY_DEFAULT_BLOCK}` };
+  }
 
   // 5. Default allow (RFC1918, fc00::/7, public).
   return { blocked: false };

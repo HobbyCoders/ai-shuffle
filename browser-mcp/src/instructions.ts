@@ -45,6 +45,8 @@ RESIZE AND UPLOAD
 BATCHING
 - browser_batch runs several of the tools above in order and stops at the first error. Because the schema stays flat, each action is a JSON STRING: {"tool":"browser_act","input":{"kind":"click","ref":"e5"}}. Pass them as the actions array (max 20). A batch cannot contain another batch. You get one result per attempted action ({tool, ok, summary|error}).
 
-Some hosts may be unreachable by network policy: a navigate or request to a blocked address returns "blocked by SSRF policy: <reason>" (cloud metadata and, by default, loopback are blocked) — do not retry it.
+NETWORK POLICY
+- Some addresses are refused by egress policy: navigate returns "blocked by SSRF policy: <reason>". Cloud metadata is always refused and cannot be re-enabled. Loopback (127.0.0.1 / localhost / ::1) is refused only on installs that have not opted in — many have, so try it before assuming it is off.
+- The reason string names the host, why it was refused, and what would allow it (BROWSER_SSRF_ALLOW / BROWSER_SSRF_ALLOW_LOOPBACK). Read it. Retrying the same URL unchanged will not help — this is configuration, not a flaky network — but the situation is fixable: tell the user which setting to flip, or, for a server you control, bind it to 0.0.0.0 and browse its LAN IP instead.
 
 If the browser is momentarily reconnecting you may get error "browser_restarting" — wait briefly and retry.`;

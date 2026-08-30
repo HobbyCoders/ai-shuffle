@@ -39,13 +39,53 @@ _BROWSER_ENV_KEYS = (
 )
 
 # Keys that may also be sourced from the process environment when absent from
-# full_env (Docker sets these on the container, not per-session).
-_BROWSER_ENV_OS_FALLBACK_KEYS = ("CHROME_CDP_PORT", "BROWSER_MCP_ENTRY", "BROWSER_UPLOAD_DIR")
+# full_env (Docker sets these on the container, not per-session). The SSRF knobs
+# belong here for the same reason: an operator sets them in .env / compose, and
+# full_env is built from the session profile, so without this fallback the
+# documented override would silently never reach the spawned server.
+_BROWSER_ENV_OS_FALLBACK_KEYS = (
+    "CHROME_CDP_PORT",
+    "BROWSER_MCP_ENTRY",
+    "BROWSER_UPLOAD_DIR",
+    "BROWSER_SSRF_BLOCK",
+    "BROWSER_SSRF_ALLOW",
+)
 
 # Process-env override for the loopback panel-register URL (same fallback shape
 # as _BROWSER_ENV_OS_FALLBACK_KEYS: an operator may point the spawned server at
 # a non-default host/port when the backend is not on 127.0.0.1:{settings.port}).
 _BROWSER_PANEL_REGISTER_URL_OS_KEY = "BROWSER_PANEL_REGISTER_URL"
+
+# Loopback CIDRs handed to browser-mcp's BROWSER_SSRF_ALLOW when the deployment
+# opts in. browser-mcp blocks these by default; without them an agent cannot view
+# a dev server it started itself, which is the single most common thing it wants
+# a browser for on a self-hosted box.
+_LOOPBACK_ALLOW = "127.0.0.0/8,::1/128"
+
+
+def _browser_ssrf_allow(explicit: Optional[str]) -> Optional[str]:
+    """
+    Resolve the BROWSER_SSRF_ALLOW value for the spawned browser MCP server.
+
+    An explicitly-configured value (session env or process env) is passed through
+    untouched — the operator has stated the policy and we do not append to it.
+    Otherwise loopback is allowed when ``settings.browser_ssrf_allow_loopback`` is
+    true, or (when that is unset) when the install is in local mode. Cloud /
+    multi-tenant style deployments therefore keep blocking loopback by default.
+
+    Returns None when nothing should be injected, leaving browser-mcp on its own
+    default-block policy.
+    """
+    if explicit:
+        return explicit
+    opt_in = settings.browser_ssrf_allow_loopback
+    if opt_in is None:
+        try:
+            opt_in = settings.is_local_mode()
+        except Exception:  # pragma: no cover - defensive: never break session start
+            logger.debug("browser ssrf: local-mode probe failed", exc_info=True)
+            opt_in = False
+    return _LOOPBACK_ALLOW if opt_in else None
 
 
 def _build_browser_server_env(
@@ -74,6 +114,11 @@ def _build_browser_server_env(
             value = os.environ.get(key)
         if value:
             env[key] = value
+
+    # Loopback egress: injected only when nothing explicit was configured above.
+    ssrf_allow = _browser_ssrf_allow(env.get("BROWSER_SSRF_ALLOW"))
+    if ssrf_allow:
+        env["BROWSER_SSRF_ALLOW"] = ssrf_allow
 
     if session_id:
         from app.core import browser_panel_registry

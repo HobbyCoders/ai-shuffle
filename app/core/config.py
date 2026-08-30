@@ -566,6 +566,24 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Whether the browser MCP server may reach loopback (127.0.0.0/8, ::1,
+    # "localhost"). browser-mcp blocks loopback by default: on a shared/multi-user
+    # deployment a hostile page could steer the agent's browser into the app's own
+    # API or a neighbouring service on 127.0.0.1. On a local/self-hosted install
+    # there is nothing on loopback the agent cannot already reach through its
+    # shell, and blocking it means an agent cannot view the dev server it just
+    # started; avoid requiring needless rebinding for permitted local access.
+    #
+    # None (default) = auto: allowed in local mode, blocked otherwise.
+    # True/False force it either way. Setting BROWSER_SSRF_ALLOW explicitly always
+    # wins over this — see app.core.mcp_config._browser_ssrf_allow.
+    browser_ssrf_allow_loopback: Optional[bool] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "BROWSER_SSRF_ALLOW_LOOPBACK", "browser_ssrf_allow_loopback"
+        ),
+    )
+
     # Per-provider rate-limit circuit breaker. The first upstream HTTP 429 for a
     # provider trips the breaker for that provider INSTALL-WIDE for a time-based
     # cooldown. Motivation: the 2026-07-22 rate-limit storm (3,172 upstream POSTs

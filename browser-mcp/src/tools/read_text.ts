@@ -8,7 +8,7 @@
  */
 
 import type { Session } from "../session.js";
-import { jsonResult, capText, type McpToolResult } from "./result.js";
+import { jsonResult, capText, emptyContentWarning, type McpToolResult } from "./result.js";
 
 export const READ_TEXT_MAX_CHARS = 30000;
 
@@ -60,15 +60,18 @@ export async function runReadText(session: Session): Promise<McpToolResult> {
   const extracted: Extracted = await session.evaluate(extractInPage, "");
 
   const { text, truncated, fullChars } = capText(extracted.text, READ_TEXT_MAX_CHARS);
+  const warning = emptyContentWarning(text);
   const body: Record<string, unknown> = {
     ok: true,
     url: extracted.url,
     title: extracted.title,
     chars: text.length,
     truncated,
+    ...(warning ? { warning } : {}),
   };
-  const trailing = truncated
+  let trailing = truncated
     ? `${text}\n[truncated: full text is ${fullChars} chars]`
     : text;
+  if (warning) trailing = `${trailing}\n[warning] ${warning}`.trim();
   return jsonResult(body, trailing);
 }
