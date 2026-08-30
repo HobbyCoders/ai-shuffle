@@ -15,6 +15,15 @@ params first, optionals default ``None``; docstring = the full description + a
 Tools with ``code_mode_allowed=False`` are still *listed* and get a stub, but the
 stub is annotated "JSON-path only" and the host gate rejects the call (hard,
 host-side) — so the escape hatch cannot be bypassed from inside the kernel.
+
+**Deferral.** A registry entry whose schema is not loaded (an MCP catalog, a
+host-deferred in-proc server) is *deferred*: it gets the same stub and is just
+as callable, but a host rendering per-tool documentation into the prompt must
+collapse it to name + one-liner and let the model pull the rest with
+``read_tool_docs``. Deferral is a prompt-cost decision, never a capability one —
+:meth:`Projection.is_deferred` says which tools it applies to, and the stub in
+the kernel VFS carries the full docs either way (so a bad call still gets the
+real signature back from the runner's TypeError hint).
 """
 
 from __future__ import annotations
@@ -156,6 +165,11 @@ class Projection:
     it rejects is dropped here, before any leaf name exists for it, so nothing
     downstream — stubs, catalog, search, docs, or a host rendering per-tool
     documentation sections — can leak a tool the session cannot call.
+
+    ``deferred`` is the set of REGISTRY names whose schemas the host keeps out
+    of the prompt prefix (see the module docstring). It changes nothing about
+    stubs or dispatch — only what a prompt-rendering host is allowed to spend
+    on the tool.
     """
 
     def __init__(
@@ -163,8 +177,10 @@ class Projection:
         specs: Iterable[ToolSpec],
         *,
         tool_filter: Callable[[str], bool] | None = None,
+        deferred: Iterable[str] | None = None,
     ) -> None:
         self._by_leaf: dict[str, ToolSpec] = {}
+        self._deferred: frozenset[str] = frozenset(deferred or ())
         for spec in specs:
             if tool_filter is not None and not tool_filter(spec.name):
                 continue
@@ -175,6 +191,26 @@ class Projection:
 
     def leaves(self) -> list[str]:
         return sorted(self._by_leaf)
+
+    def is_deferred(self, name: str) -> bool:
+        """Whether ``name`` (leaf or full tool name) is documented on demand."""
+        spec = self.spec_for(name)
+        return spec is not None and spec.name in self._deferred
+
+    def deferred_leaves(self) -> list[str]:
+        """Leaves whose docs a host must NOT inline into the prompt."""
+        return sorted(
+            leaf for leaf, spec in self._by_leaf.items() if spec.name in self._deferred
+        )
+
+    def one_liner(self, name: str) -> str:
+        """The catalog summary for one tool — the whole prompt budget a
+        deferred tool gets. Same text ``entries`` puts after the leaf name."""
+        spec = self.spec_for(name)
+        if spec is None:
+            return ""
+        note = "" if spec.code_mode_allowed else "  [JSON-path only]"
+        return f"{_first_line(spec.description)} [risk: {spec.risk}]{note}"
 
     def spec_for(self, name: str) -> ToolSpec | None:
         if name in self._by_leaf:
@@ -196,14 +232,22 @@ class Projection:
         """``{leaf: stub_source}`` for the kernel VFS."""
         return {leaf: stub_source(spec, leaf) for leaf, spec in self._by_leaf.items()}
 
+    DEFERRED_NOTE = "  [deferred — read_tool_docs for the signature]"
+
     def entries(self) -> list[tuple[str, str]]:
-        """``[(leaf, one_liner)]`` sorted by leaf — for ``list_tools``."""
-        out = []
-        for leaf in sorted(self._by_leaf):
-            spec = self._by_leaf[leaf]
-            note = "" if spec.code_mode_allowed else "  [JSON-path only]"
-            out.append((leaf, f"{_first_line(spec.description)} [risk: {spec.risk}]{note}"))
-        return out
+        """``[(leaf, one_liner)]`` sorted by leaf — for ``list_tools``.
+
+        Deferred tools are flagged: their docs are not in the prompt, so the
+        catalog is where the model learns to fetch them before the first call.
+        """
+        return [
+            (
+                leaf,
+                self.one_liner(leaf)
+                + (self.DEFERRED_NOTE if self.is_deferred(leaf) else ""),
+            )
+            for leaf in sorted(self._by_leaf)
+        ]
 
     def search(self, query: str) -> list[tuple[str, str]]:
         tokens = [t for t in query.lower().split() if t]

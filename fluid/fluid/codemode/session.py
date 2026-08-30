@@ -180,7 +180,16 @@ class CodeModeSession:
             s for s in self._registry.list_tools(loaded_only=False)
             if s.source != CODE_MODE_SOURCE
         ]
-        return Projection(specs, tool_filter=self.tool_filter)
+        # Deferral rides along: every projected tool is callable, but a host
+        # that inlines per-tool documentation into the prompt must collapse the
+        # deferred ones to name + one-liner and leave read_tool_docs to serve
+        # the rest. Best-effort — a registry double without the accessor simply
+        # projects everything as loaded.
+        try:
+            deferred = {s.name for s in self._registry.deferred_tools()}
+        except Exception:  # noqa: BLE001
+            deferred = set()
+        return Projection(specs, tool_filter=self.tool_filter, deferred=deferred)
 
     # ── the three discovery tools (tools + persistent skills) ──
     def render_list(self) -> str:

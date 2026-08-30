@@ -420,6 +420,26 @@ async def test_native_breakdown_matches_the_compiled_prompt(tmp_path) -> None:
     assert usage["model"] == "claude-sonnet-5"
 
 
+async def test_code_mode_still_reports_the_deferred_tier(tmp_path) -> None:
+    """Code mode used to report NO deferred tools at all, which hid the whole
+    point of deferring them: the schemas are known, they are simply not in the
+    prompt (read_tool_docs fetches them instead of ToolSearch)."""
+    from fluid.codemode.session import CodeModeSession
+
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    registry = _registry_with_deferred()
+    loop = _loop(tmp_path, store, session_id=sid, context_window=200_000)
+    loop.registry = registry
+    loop._codemode = CodeModeSession(registry)
+    try:
+        usage = await loop.get_context_usage()
+    finally:
+        await loop.aclose()
+    assert [t["name"] for t in usage["deferredBuiltinTools"]] == ["Hidden"]
+    assert _by_name(usage)[SYSTEM_TOOLS_DEFERRED]["isDeferred"] is True
+
+
 async def test_native_messages_use_the_trimmed_history_view(tmp_path) -> None:
     """The Messages category prices what a request would actually send — the
     trimmed view — not the full stored tree."""

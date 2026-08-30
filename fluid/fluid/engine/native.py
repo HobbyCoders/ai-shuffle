@@ -990,8 +990,15 @@ class NativeLoop(BackgroundLifecycleMixin):
         )
 
     def _deferred_tools_api(self) -> list[dict[str, Any]]:
-        """Schemas of known-but-unloaded tools — the ToolSearch catalog."""
-        if self.registry is None or self._codemode is not None:
+        """Schemas of known-but-unloaded tools — the ToolSearch catalog.
+
+        Code mode does not make this empty. The host's deferred set is what it
+        always was: tools that are callable (they get a kernel stub) but whose
+        documentation the prompt does not carry — reachable there with
+        ``read_tool_docs`` rather than ToolSearch. Reporting [] hid the very
+        saving deferral exists to make.
+        """
+        if self.registry is None:
             return []
         return [
             s.to_api() for s in self.registry.deferred_tools()

@@ -688,6 +688,13 @@ do not route around it. The file tools are the only way to touch the \
 filesystem; `open()`, `os`, `subprocess` and the network are disabled.\
 {shell}{search}
 
+A catalog entry marked `[deferred]` carries only its one-line summary here — \
+its signature and parameter docs are not in this prompt. Run \
+`read_tool_docs("<name>")` once before the first call instead of guessing \
+parameter names. It imports and calls exactly like any other tool: deferral \
+saves prompt space, it never withholds a capability, and a tool listed as \
+deferred is never "unavailable".
+
 A cell that does not parse costs a whole turn, so watch the two mistakes that \
 cause nearly all of them. {grep_example} And never nest a shell heredoc or a \
 long multi-line body (a commit message, a PR description) inside a command \

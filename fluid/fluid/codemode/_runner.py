@@ -223,6 +223,10 @@ def _stub_signature(name: str) -> str:
 def _signature_hint(name: str) -> str:
     sig = _stub_signature(name)
     if sig:
+        # Deliberately inline and pointer-free: the kernel holds the stub for
+        # EVERY projected tool, deferred ones included, so a bad call to a tool
+        # whose docs never entered the prompt still self-corrects here without
+        # spending a turn on read_tool_docs.
         return f"Hint: the signature is {sig} — pass only those parameters."
     return (
         "Hint: pass only the parameters in the tool's signature; run "
