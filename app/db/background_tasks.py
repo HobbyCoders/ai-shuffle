@@ -134,6 +134,34 @@ def list_stale_nonterminal_background_tasks(
         return rows_to_list(cursor.fetchall())
 
 
+def list_session_nonterminal_background_tasks(
+    session_id: str,
+) -> List[Dict[str, Any]]:
+    """THIS install's still-running rows for ONE session.
+
+    Feed for the park watchdog (``startup_reconcile.sweep_stalled_parks``):
+    when a session has been parked past the hard ceiling with no wake, these
+    are the tasks it is parked ON, and forcing their terminal frames is what
+    wakes it. Read-only; instance-scoped like the other sweeps.
+    """
+    _ph = ph()
+    instance_id = settings.effective_instance_id
+    # Safe literal join: TERMINAL_STATUSES is a module constant of trusted
+    # string literals, never user input.
+    terminal_list = ", ".join(f"'{s}'" for s in TERMINAL_STATUSES)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""SELECT task_id, session_id, tool_use_id, title, status, kind
+                  FROM background_tasks
+                 WHERE instance_id = {_ph}
+                   AND session_id = {_ph}
+                   AND status NOT IN ({terminal_list})""",
+            (instance_id, session_id),
+        )
+        return rows_to_list(cursor.fetchall())
+
+
 def get_background_task(task_id: str, session_id: str) -> Optional[Dict[str, Any]]:
     """Read one durable task row (or ``None``) by its (task_id, session_id) key.
 
