@@ -10,6 +10,9 @@ from fluid.events.model import (
     ErrorEvent,
     Event,
     Interrupted,
+    WAKE_AUTO,
+    WAKE_NOT_APPLICABLE,
+    WAKE_SUPPRESSED,
     SessionParked,
     SessionWoken,
     SubagentEvent,
@@ -121,6 +124,10 @@ class BackgroundLifecycleMixin:
                     kind="started",
                     description=receipt.description,
                     worker_session_id=receipt.worker_session_id,
+                    # A task that has only just started owes nobody a wake yet.
+                    # The default wake=True here was the dataclass default, not
+                    # a claim about anything.
+                    wake_disposition=WAKE_NOT_APPLICABLE,
                 ))
                 early = self._background_early.pop(receipt.task_id, None)
                 if early is not None:
@@ -159,6 +166,9 @@ class BackgroundLifecycleMixin:
                         worker_session_id=op.worker_session_id,
                         wake=op.wake,
                         status=op.status,
+                        # Still a placeholder — the real terminal event carries
+                        # the disposition that counts.
+                        wake_disposition=WAKE_NOT_APPLICABLE,
                     ))
             should_wake = bool(self._background_completions)
         if should_wake:
@@ -182,6 +192,10 @@ class BackgroundLifecycleMixin:
             summary=op.summary,
             worker_session_id=worker_session_id,
             wake=op.wake,
+            # The one place the distinction is real: a terminal completion the
+            # engine will wake for, versus one where a wake is owed but the
+            # host performs it instead of us.
+            wake_disposition=WAKE_AUTO if op.wake else WAKE_SUPPRESSED,
         ))
         if op.wake:
             self._background_completions[op.task_id] = BackgroundTaskFinished(

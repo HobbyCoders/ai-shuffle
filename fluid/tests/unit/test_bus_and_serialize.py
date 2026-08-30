@@ -1,11 +1,21 @@
 """EventBus replay/ordering + Anthropic request-serialization tests."""
 
 import asyncio
+import time
 from dataclasses import dataclass
 
 import pytest
 
-from fluid.events import Event, EventBus, TextDelta, register_event_type
+from fluid.events import (
+    WAKE_AUTO,
+    WAKE_NOT_APPLICABLE,
+    WAKE_SUPPRESSED,
+    Event,
+    EventBus,
+    SubagentEvent,
+    TextDelta,
+    register_event_type,
+)
 from fluid.events.model import event_from_dict, event_to_dict
 from fluid.messages import Message, Reasoning, Text
 from fluid.providers.anthropic.serialize import build_request_body
@@ -158,3 +168,106 @@ def test_register_event_type_refuses_to_shadow_a_builtin_name() -> None:
 
     with pytest.raises(ValueError):
         register_event_type(Usage)
+
+
+# ─── event timestamps ────────────────────────────────────────────────────────
+
+
+async def test_publish_stamps_wall_clock_alongside_seq() -> None:
+    """Without a ts, a persisted stream cannot answer how long anything took."""
+    bus = EventBus()
+    before = time.time()
+    published = await bus.publish(TextDelta(session_id="s-ts", index=0, text="x"))
+    after = time.time()
+
+    assert published.seq == 1
+    assert before <= published.ts <= after
+    assert bus.log("s-ts")[0].ts == published.ts
+
+
+async def test_publish_keeps_a_timestamp_the_emitter_already_set() -> None:
+    """A replayed event carries its original time, not the time of the replay."""
+    bus = EventBus()
+    published = await bus.publish(
+        TextDelta(session_id="s-ts2", index=0, text="x", ts=1234.5)
+    )
+    assert published.ts == 1234.5
+
+
+def test_unpublished_events_are_unstamped_not_epoch_zero_in_disguise() -> None:
+    """The default must be inert so two identical events compare equal."""
+    a = TextDelta(session_id="s", index=0, text="x")
+    b = TextDelta(session_id="s", index=0, text="x")
+    assert a.ts == 0.0
+    assert a == b
+
+
+def test_ts_round_trips_through_the_durable_codec() -> None:
+    event = TextDelta(session_id="s", index=0, text="x", seq=3, ts=1700000000.25)
+    assert event_from_dict(event_to_dict(event)) == event
+
+
+def test_rows_persisted_before_ts_existed_still_decode() -> None:
+    """Stored events predate the field; they decode as unstamped."""
+    legacy = {"_cls": "TextDelta", "session_id": "s", "seq": 4, "index": 0, "text": "x"}
+    revived = event_from_dict(legacy)
+    assert isinstance(revived, TextDelta)
+    assert revived.ts == 0.0
+
+
+# ─── wake disposition ────────────────────────────────────────────────────────
+
+
+def test_wake_disposition_defaults_to_auto() -> None:
+    event = SubagentEvent(session_id="s", task_id="t1", kind="finished")
+    assert event.wake is True
+    assert event.wake_disposition == WAKE_AUTO
+
+
+def test_wake_disposition_separates_suppressed_from_not_applicable() -> None:
+    """``wake=False`` alone cannot say whether a wake was owed."""
+    suppressed = SubagentEvent(
+        session_id="s",
+        task_id="t1",
+        kind="finished",
+        wake=False,
+        wake_disposition=WAKE_SUPPRESSED,
+    )
+    started = SubagentEvent(
+        session_id="s",
+        task_id="t1",
+        kind="started",
+        wake_disposition=WAKE_NOT_APPLICABLE,
+    )
+    assert suppressed.wake is False
+    assert suppressed.wake_disposition == WAKE_SUPPRESSED
+    # A started event says wake=True only because that is the default; its
+    # disposition is what actually carries the meaning.
+    assert started.wake is True
+    assert started.wake_disposition == WAKE_NOT_APPLICABLE
+
+
+def test_wake_disposition_round_trips_through_the_durable_codec() -> None:
+    event = SubagentEvent(
+        session_id="s",
+        task_id="t1",
+        kind="failed",
+        wake=False,
+        wake_disposition=WAKE_SUPPRESSED,
+    )
+    assert event_from_dict(event_to_dict(event)) == event
+
+
+def test_rows_persisted_before_wake_disposition_existed_still_decode() -> None:
+    """An old row's ``wake=True`` already meant ``auto``; it decodes that way."""
+    legacy = {
+        "_cls": "SubagentEvent",
+        "session_id": "s",
+        "seq": 9,
+        "task_id": "t1",
+        "kind": "finished",
+        "wake": True,
+    }
+    revived = event_from_dict(legacy)
+    assert isinstance(revived, SubagentEvent)
+    assert revived.wake_disposition == WAKE_AUTO

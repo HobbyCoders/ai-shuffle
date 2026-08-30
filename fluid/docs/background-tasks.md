@@ -46,7 +46,25 @@ are batched into one continuation. Started and completed state is rebuilt from
 the durable event log when an engine is recreated.
 
 Set `wake=False` only when the host wants to persist a terminal task result
-without autonomously continuing the parent agent.
+without autonomously continuing the parent agent. `wake` is a directive to the
+engine, not a record of what happened: `wake=False` means fluid stands down
+because the host drives the continuation itself, not that no wake occurred.
+
+Read `SubagentEvent.wake_disposition` when the question is what became of the
+wake. It has three values where `wake` has two:
+
+| value | meaning |
+| --- | --- |
+| `auto` | terminal completion; the engine wakes the parent |
+| `suppressed` | terminal completion; a wake is owed, the host performs it |
+| `not_applicable` | `started` / `completion_pending`; waking is not yet a question |
+
+It defaults to `auto`, so events persisted before the field existed decode to
+the same thing their `wake=True` already meant.
+
+Every persisted event also carries `ts` — wall clock at publish, epoch seconds,
+assigned by the `EventBus` alongside `seq`. `0.0` means unstamped: an event that
+never went through the bus, or a row written before the field existed.
 
 ## Monitor: detached shell commands
 
