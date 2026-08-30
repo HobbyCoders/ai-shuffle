@@ -254,3 +254,29 @@ def test_code_mode_addendum_carries_the_cell_authoring_rules() -> None:
     assert 'Grep(pattern=r"def foo|bar", glob="*.py")' in CODE_MODE_ADDENDUM
     assert "heredoc" in CODE_MODE_ADDENDUM
     assert "Read then Edit the same file in a single cell" in CODE_MODE_ADDENDUM
+
+
+def test_code_mode_addendum_explains_deferred_tools() -> None:
+    """Code mode has no ToolSearch, so the addendum is where the deferred tier
+    is explained: fetch the docs with read_tool_docs, the tool is callable
+    either way."""
+    from fluid.cli.prompt import (
+        CODE_MODE_ADDENDUM,
+        PromptProfile,
+        compose_base_prompt,
+        compose_code_mode_addendum,
+    )
+
+    assert "[deferred]" in CODE_MODE_ADDENDUM
+    assert 'read_tool_docs("<name>")' in CODE_MODE_ADDENDUM
+    assert "never withholds a capability" in CODE_MODE_ADDENDUM
+    # Gated like the rest: the text is surface-independent, so it survives even
+    # the empty builtin surface (it names only code-mode tools).
+    assert "[deferred]" in compose_code_mode_addendum(frozenset())
+
+    # The ToolSearch bullet in the base prompt stays off under code mode — the
+    # tool is not in that schema, so the addendum owns the whole story.
+    code_mode_text = compose_base_prompt(
+        PromptProfile(tools=frozenset(BUILTIN_TOOL_NAMES), code_mode=True, model="claude")
+    )
+    assert "load one with ToolSearch" not in code_mode_text

@@ -206,6 +206,48 @@ def test_stub_compiles_with_hostile_description_characters() -> None:
     assert "mode (str, required): Which mode. (one of: fast, slow)" in doc
 
 
+def test_deferred_tools_keep_stubs_but_collapse_to_one_liners() -> None:
+    """Deferral is a PROMPT-cost decision: the deferred tool is flagged in the
+    catalog and its docs are fetched on demand, but the stub is identical and
+    the tool stays callable."""
+    loaded = _spec("mcp__slack__post_message", risk="write")
+    deferred = _spec("mcp__appcfg__list_providers", risk="safe")
+    proj = Projection([loaded, deferred], deferred={"mcp__appcfg__list_providers"})
+
+    assert proj.is_deferred("list_providers")
+    assert proj.is_deferred("mcp__appcfg__list_providers")  # by full name too
+    assert not proj.is_deferred("post_message")
+    assert proj.deferred_leaves() == ["list_providers"]
+    assert not proj.is_deferred("nonexistent")
+
+    entries = dict(proj.entries())
+    assert Projection.DEFERRED_NOTE.strip() in entries["list_providers"]
+    assert "read_tool_docs" in entries["list_providers"]
+    assert "read_tool_docs" not in entries["post_message"]
+
+    # one_liner is the raw summary a host inlines — no marker, no schema.
+    one = proj.one_liner("list_providers")
+    assert one.startswith("Post a message to a channel.")
+    assert "read_tool_docs" not in one
+    assert "(str, required)" not in one  # parameter docs stay out of it
+    assert "\n" not in one
+
+    # ...and the full docs are one read_tool_docs away, identical to a loaded
+    # tool's, with a compilable stub in the VFS either way.
+    docs = proj.docs("list_providers")
+    assert docs is not None and "channel (str, required)" in docs
+    for leaf, src in proj.sources().items():
+        compile(src, f"<{leaf}>", "exec")
+    assert "list_providers" in proj.sources()
+
+
+def test_projection_without_deferred_set_treats_everything_as_loaded() -> None:
+    proj = Projection([_spec("mcp__slack__post_message")])
+    assert proj.deferred_leaves() == []
+    assert not proj.is_deferred("post_message")
+    assert "read_tool_docs" not in dict(proj.entries())["post_message"]
+
+
 def test_sources_are_all_compilable() -> None:
     specs = [_spec("mcp__slack__post_message"), _spec("mcp__x__y")]
     for leaf, src in Projection(specs).sources().items():

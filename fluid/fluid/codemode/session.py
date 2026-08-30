@@ -229,7 +229,16 @@ class CodeModeSession:
             # docs — the same withholding the request schemas do on the JSON
             # path, rather than a rule the model is merely asked to respect.
             specs = [s for s in specs if not plan_mode_blocks(s)]
-        return Projection(specs, tool_filter=self.tool_filter)
+        # Deferral rides along: every projected tool is callable, but a host
+        # that inlines per-tool documentation into the prompt must collapse the
+        # deferred ones to name + one-liner and leave read_tool_docs to serve
+        # the rest. Best-effort — a registry double without the accessor simply
+        # projects everything as loaded.
+        try:
+            deferred = {s.name for s in self._registry.deferred_tools()}
+        except Exception:  # noqa: BLE001
+            deferred = set()
+        return Projection(specs, tool_filter=self.tool_filter, deferred=deferred)
 
     # ── the three discovery tools (tools + persistent skills) ──
     def render_list(self) -> str:
