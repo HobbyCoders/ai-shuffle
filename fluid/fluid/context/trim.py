@@ -36,8 +36,16 @@ from fluid.store.base import SessionNode
 @dataclass(kw_only=True)
 class TrimConfig:
     enabled: bool = True
-    # Estimated-token threshold that arms a batch trim (≈ chars / 4).
+    # Estimated-token threshold that arms a batch trim (≈ chars / 4). This is
+    # the FLOOR and the fallback: when the model's context window is known, the
+    # effective trigger is max(trigger_tokens, window * trigger_window_ratio),
+    # still capped to leave the compaction headroom free. Trimming a 1M-window
+    # model at a fixed 120k threw away recoverable results — and cache-busted
+    # the prefix — at 12% window usage.
     trigger_tokens: int = 120_000
+    # Fraction of a known context window the history may reach before a batch
+    # trim arms. 0.0 disables scaling (old fixed-trigger behavior).
+    trigger_window_ratio: float = 0.6
     # The newest K tool results are never trimmed.
     keep_recent_tool_results: int = 5
     # Results shorter than this are not worth a placeholder.
@@ -256,7 +264,21 @@ class ToolResultTrimmer:
         trimmed = self._trimmed | self._consumed_image_results(nodes)
         return self._render(nodes, trimmed)
 
-    def apply(self, nodes: list[SessionNode]) -> list[Message]:
+    def trigger_threshold(self, context_window: int | None = None) -> int:
+        """The armed threshold for this trimmer: ``trigger_tokens`` on its own,
+        or ``max(trigger_tokens, window * trigger_window_ratio)`` when the host
+        knows the model's window. (The Compactor applies its own headroom cap
+        on top; a bare trimmer has no headroom budget to respect.)"""
+        if context_window is None or self.config.trigger_window_ratio <= 0:
+            return self.config.trigger_tokens
+        return max(
+            self.config.trigger_tokens,
+            int(context_window * self.config.trigger_window_ratio),
+        )
+
+    def apply(
+        self, nodes: list[SessionNode], *, context_window: int | None = None
+    ) -> list[Message]:
         """Render history with sticky trims; arm a new batch when over trigger."""
         if not self.config.enabled:
             return [n.message for n in nodes]
@@ -265,7 +287,9 @@ class ToolResultTrimmer:
         # tokenization can dwarf the base64 chars/4 estimate.
         self._trimmed.update(self._consumed_image_results(nodes))
         rendered = self._render(nodes)
-        if estimate_tokens_of_messages(rendered) > self.config.trigger_tokens:
+        if estimate_tokens_of_messages(rendered) > self.trigger_threshold(
+            context_window
+        ):
             newly = self._eligible(nodes)
             if newly:
                 self._trimmed.update(newly)

@@ -34,6 +34,20 @@ __all__ = ["ChatCompletionsNormalizer", "build_request_body"]
 
 # Model families that honor Anthropic-style ``cache_control`` breakpoints when
 # routed through OpenRouter's chat/completions endpoint.
+#
+# Audited 2026-08 against OpenRouter's prompt-caching docs, after glm sessions
+# showed ``cache_creation_input_tokens`` pinned at 0 on every call:
+#
+# * Z.AI/GLM, OpenAI, DeepSeek, Grok, Moonshot and Groq cache AUTOMATICALLY —
+#   markers are unnecessary there, and the zero cache-write count is not a
+#   harness bug: OpenRouter returns ``prompt_tokens_details.cache_write_tokens``
+#   only for models with explicit caching AND cache-write pricing, so an
+#   automatic-caching leg reports reads (``cached_tokens``) and nothing else.
+# * Alibaba Qwen and Google Gemini DO honor explicit markers. Qwen is a clean
+#   candidate for this list; Gemini is deliberately left off, because its
+#   explicit cache carries a write premium and a short TTL while its implicit
+#   cache is free — adding a marker there can cost more than it saves. Neither
+#   is added blind: both want a live cost comparison first.
 _CACHE_CONTROL_MODEL_PREFIXES = ("anthropic/",)
 
 
