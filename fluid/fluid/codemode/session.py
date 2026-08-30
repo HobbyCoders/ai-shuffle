@@ -26,9 +26,12 @@ projection (discoverable), carrying zero prompt-schema cost.
 Each in-kernel tool call is gated by ``HostBridge`` — the same PreToolUse hook →
 PermissionEngine (incl. doom-loop) → dispatch → PostToolUse pipeline the JSON
 path uses, with the ``code_mode_allowed=False`` escape hatch enforced host-side.
-The session wraps that bridge with the engine's ``PermissionRequest`` round-trip
-(``on_permission``) and emits ``ToolUse``/``ToolResult`` events so in-kernel calls
-are as observable as JSON calls.
+The session wraps that bridge with the engine's two round-trips back to the
+human — ``PermissionRequest`` (``on_permission``) and the input-required/MRTR
+``QuestionRequest`` (``on_input_required``, which is what lets an in-kernel
+``AskUser``/``StopPlanning`` actually reach the user) — and emits
+``ToolUse``/``ToolResult`` events so in-kernel calls are as observable as JSON
+calls.
 """
 
 from __future__ import annotations
@@ -274,12 +277,27 @@ class CodeModeSession:
             )
             return verdict == "allow"
 
+        # MRTR round-trip: an in-kernel AskUser/StopPlanning (or an elicitating
+        # MCP tool) pauses on ``input_required``, and the engine turns that into
+        # QuestionRequest events, parks for RespondQuestion, and hands the
+        # answers back for the retry leg — the same path the JSON surface uses.
+        # An embedder whose loop has no such round-trip leaves this unwired, and
+        # the bridge then refuses the call loudly instead of answering "".
+        collect = getattr(loop, "_collect_input_responses", None)
+        on_input_required = None
+        if collect is not None:
+            async def on_input_required(
+                name: str, tool_use_id: str | None, marker: Any
+            ) -> dict | None:
+                return await collect(sid, turn_id, name, tool_use_id, marker)
+
         # No engine ⇒ allow-all, matching the JSON path (which skips gating when
         # ``permissions is None``).
         permissions = loop.permissions or PermissionEngine("never_ask")
         bridge = HostBridge(
             self._registry, permissions,
-            hooks=loop.hooks, on_permission=_on_permission, ctx=loop.ctx,
+            hooks=loop.hooks, on_permission=_on_permission,
+            on_input_required=on_input_required, ctx=loop.ctx,
             tool_filter=self.tool_filter,
         )
 
@@ -320,7 +338,9 @@ class CodeModeSession:
             if stamped:
                 extra["tool_use_id"] = tool_use_id
             try:
-                reply = await bridge.on_host_call(name, kwargs)
+                reply = await bridge.on_host_call(
+                    name, kwargs, tool_use_id=tool_use_id
+                )
             finally:
                 if stamped:
                     if had_previous:

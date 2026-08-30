@@ -39,6 +39,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from fluid.tools.mrtr import unresolved_notice
 from fluid.tools.registry import ToolCtx, ToolRegistry
 
 _BUNDLED_SERVER_NAME = "fluid_bundled"
@@ -127,7 +128,23 @@ async def _answer(registry: ToolRegistry, ctx: ToolCtx, req: dict[str, Any]) -> 
             for s in specs
         ]}
     if op == "call":
-        outcome = await registry.dispatch(req.get("name", ""), req.get("arguments") or {}, ctx)
+        name = req.get("name", "")
+        outcome = await registry.dispatch(name, req.get("arguments") or {}, ctx)
+        # MRTR: the tool paused to ask the user something (AskUser,
+        # StopPlanning). This bridge is a request/response socket with no event
+        # bus and no user on the far end — the delegated CLI owns the loop — so
+        # the round-trip cannot happen here. Its first leg is an EMPTY result
+        # carrying the marker; forwarding that text would tell the CLI's model
+        # the question was answered with silence. Say what happened instead.
+        if outcome.input_required is not None:
+            return {
+                "text": unresolved_notice(
+                    name,
+                    "Ask the user directly in your reply and wait for them, or "
+                    "proceed without the answer and say what you assumed.",
+                ),
+                "is_error": True,
+            }
         return {"text": outcome.text, "is_error": outcome.is_error}
     return {"error": f"unknown op: {op!r}"}
 

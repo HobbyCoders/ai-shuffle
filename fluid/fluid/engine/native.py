@@ -122,6 +122,7 @@ from fluid.tools.builtins.tool_search import (
     render_deferred_catalog,
 )
 from fluid.tools.images import condition_image
+from fluid.tools.mrtr import resolve_input_required
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
 
 log = logging.getLogger(__name__)
@@ -2354,7 +2355,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                 )
 
         # run_python is engine-driven: it opens the kernel; the kernel's in-sandbox
-        # tool calls are gated by HostBridge (see CodeModeSession.run_python).
+        # tool calls are gated by HostBridge (see CodeModeSession.run_python),
+        # which runs its own MRTR round-trip through this loop's
+        # ``_collect_input_responses`` — so an in-kernel AskUser reaches the user
+        # exactly as a JSON-path one does.
         if self._codemode is not None and name == "run_python":
             outcome = await self._codemode.run_python(
                 sid=sid, turn_id=turn_id, input=input, loop=self
@@ -2365,29 +2369,17 @@ class NativeLoop(BackgroundLifecycleMixin):
         # MRTR (MCP spec 2026-07-28): a tools/call can pause on input_required.
         # Collect answers via QuestionRequest/RespondQuestion round-trips, then
         # retry the SAME call with inputResponses + the echoed request_state.
-        # Bounded — a server that keeps pausing eventually gets its marker
-        # surfaced as an in-context error instead of wedging the turn.
-        rounds = 0
-        while outcome.input_required is not None and rounds < 3:
-            rounds += 1
-            marker = outcome.input_required
-            answers = await self._collect_input_responses(
+        outcome = await resolve_input_required(
+            outcome,
+            name=name,
+            collect=lambda marker: self._collect_input_responses(
                 sid, turn_id, name, tool_use_id, marker
-            )
-            if answers is None:  # interrupted mid-question
-                return await self._finish_tool(
-                    sid, turn_id, name, tool_use_id,
-                    ToolOutcome(text="input_required round-trip interrupted", is_error=True),
-                )
-            outcome = await self.registry.dispatch(
+            ),
+            redispatch=lambda answers, request_state: self.registry.dispatch(
                 name, input, self.ctx,
-                input_responses=answers, request_state=marker.request_state,
-            )
-        if outcome.input_required is not None:
-            outcome = ToolOutcome(
-                text=f"tool {name} still input_required after {rounds} round-trips",
-                is_error=True,
-            )
+                input_responses=answers, request_state=request_state,
+            ),
+        )
         return await self._finish_tool(sid, turn_id, name, tool_use_id, outcome, input=input)
 
     async def _collect_input_responses(
