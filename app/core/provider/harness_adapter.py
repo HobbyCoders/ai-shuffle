@@ -2389,8 +2389,10 @@ class HarnessAdapter(ProviderAdapter):
         pre = self._pre_plan_permission_mode or "default"
         # Bypass users keep never_ask and their chip. Moving them to plan
         # would make the next send look like a chip-initiated plan and
-        # StopPlanning would prompt — the opposite of bypass. Engine plan_mode
-        # still drops write schemas; only the approval UI is skipped.
+        # StopPlanning would prompt — the opposite of bypass. What this method
+        # decides is the approval policy alone; whether the engine narrows the
+        # tool surface while ``plan_mode`` is set is the engine's business and
+        # is not asserted here.
         #
         # EXCEPT on exit: if the session's own binding is ``plan`` (the user
         # picked Plan Only from the composer, then the model entered plan mode),
@@ -3400,7 +3402,22 @@ restore that entry by its SHA, or prefer a WIP commit you can reset.
 
 Re-read `git worktree list` immediately before any bulk branch delete — \
 another session may have created one since your listing, and `git branch \
---merged` will not tell you."""
+--merged` will not tell you.
+
+Merge with plain `gh pr merge` here, never `--delete-branch`: this checkout \
+has sibling worktrees, so the branch delete fails with "'main' is already \
+used by worktree" AFTER the merge has already landed. Read that as merged, \
+not failed — check `gh pr view <n> --json state` before you re-run the merge \
+or park a watcher on it — and delete the remote branch separately with `git \
+push origin --delete <branch>`.
+
+Your worktree is provisioned for you: node_modules, the virtualenv and the \
+built assets are linked in, and configuration reaches anything you start \
+through the environment it inherits. Never copy a `.env` (or any other \
+credential file) into a worktree — the copy puts a plaintext database \
+password on disk, silently points your branch at the real database, and \
+outlives the worktree. If something genuinely cannot start without a config \
+value, say so rather than materializing a copy."""
 
 
 def _model_guidance_blocks(model: Optional[str]) -> Tuple[str, ...]:

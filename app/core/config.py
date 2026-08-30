@@ -8,10 +8,36 @@ Supports both Docker and Local deployment modes:
 Set LOCAL_MODE=true environment variable to force local mode.
 """
 
+import os
 from pathlib import Path
 from typing import Optional
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings
+
+# Name of the env var that points this process at a config file living
+# somewhere other than its own working directory.
+ENV_FILE_REF_VAR = "AI_SHUFFLE_ENV_FILE"
+
+
+def _resolve_env_file() -> str:
+    """Which ``.env`` this process should read.
+
+    Normally the one in the working directory. A process started inside a git
+    worktree has no ``.env`` there — ``.env`` is gitignored, so `git worktree
+    add` never brings it across — and the historical workaround was to copy the
+    file in, which left a plaintext database password sitting in every worktree
+    on disk. Instead the spawner sets ``AI_SHUFFLE_ENV_FILE`` to the absolute
+    path of the checkout that does have one, and the worktree process reads
+    that single canonical file. Nothing is copied and no secret is duplicated.
+
+    An unreadable or missing path falls back to ``.env`` rather than failing
+    the process: pydantic treats a nonexistent env_file as "no file", which is
+    the same position a plain worktree run was in before.
+    """
+    ref = os.environ.get(ENV_FILE_REF_VAR, "").strip()
+    if ref and os.path.isfile(ref):
+        return ref
+    return ".env"
 
 # Import platform detection (lazy to avoid circular imports)
 def _get_default_data_dir() -> Path:
@@ -610,7 +636,7 @@ class Settings(BaseSettings):
     # git-revert, not a flag flip.
 
     class Config:
-        env_file = ".env"
+        env_file = _resolve_env_file()
         env_file_encoding = "utf-8"
         extra = "ignore"  # Allow env vars not defined as fields
 
@@ -798,6 +824,23 @@ class Settings(BaseSettings):
             "db_path": str(self.db_path),
         }
 
+
+# Absolute path of the config file THIS process read, captured at import time
+# while the working directory is still the one the app was started in. Handed
+# to subprocesses (see app.core.environment) as AI_SHUFFLE_ENV_FILE so a process
+# running in a worktree resolves the same file instead of needing a copy.
+# None when there is no file at all — a Docker/compose install configured purely
+# from the process environment, which needs no reference.
+def _absolute_env_file() -> Optional[str]:
+    resolved = _resolve_env_file()
+    try:
+        path = Path(resolved).resolve()
+    except OSError:  # pragma: no cover - defensive
+        return None
+    return str(path) if path.is_file() else None
+
+
+ENV_FILE_PATH: Optional[str] = _absolute_env_file()
 
 # Global settings instance
 settings = Settings()

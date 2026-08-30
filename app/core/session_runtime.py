@@ -555,6 +555,19 @@ class SessionRuntime:
         # construction — a SessionRuntime instance executes exactly one turn
         # row, and the next turn gets a fresh instance with a fresh guard.
         self._interrupt_driving = False
+        # One-shot guard for the start-window steer sweep. A turn is invisible
+        # to ``turns_db.get_live_turn`` from the moment it is enqueued until
+        # ``start_turn`` lands, and its adapter is not steerable for a while
+        # after that. A message sent inside that window therefore reads the
+        # session as idle, skips ``try_steer_pending`` entirely, and runs as a
+        # turn of its own — which is how two near-identical messages seconds
+        # apart became two turns. The sweep below re-offers those rows to this
+        # turn the moment it is provably live. See ``_sweep_start_window_steers``.
+        self._start_window_swept = False
+        # The in-flight sweep, kept only so it has a strong reference (a bare
+        # create_task can be garbage-collected mid-await) and so the turn can
+        # wait for it at finalize rather than leaving it orphaned.
+        self._start_window_sweep_task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
     # execute
@@ -962,6 +975,10 @@ class SessionRuntime:
                     continue
                 if etype in _MODEL_OUTPUT_FRAMES:
                     self._model_output_at = time.perf_counter()
+                    # First model output proves the engine is up and steerable.
+                    # Anything that queued while this turn was starting can now
+                    # be folded in rather than run as a second turn.
+                    self._sweep_start_window_steers()
                 await recorder.on_event(event)
                 if etype in ("done", "interrupted", "error"):
                     self._terminal = etype
@@ -1085,6 +1102,50 @@ class SessionRuntime:
                 break
             submitted += 1
         return submitted
+
+    def _sweep_start_window_steers(self) -> None:
+        """Once per turn, re-offer rows that queued while this turn was starting.
+
+        ``chat_ws_handler`` decides whether to steer from a ``get_live_turn``
+        read taken before it enqueues. A turn that has been kicked but has not
+        reached ``start_turn`` yet is not live by that test, so a message
+        arriving in the gap is enqueued as an ordinary turn and no steer is ever
+        attempted for it. The same happens a moment later for a different
+        reason: the turn is live, but its pooled client has not come up, so
+        ``steer_pending`` finds no adapter and gives up.
+
+        Neither case is a lost message — the settle-drain runs the row as its
+        own turn — but running it is exactly the duplicate-turn behavior worth
+        avoiding when the two messages are the same intent seconds apart. This
+        sweep costs one queue read on the first model output of each turn, by
+        which point the adapter is provably up, and hands anything still queued
+        to ``steer_pending``, which owns all the eligibility and ordering rules.
+
+        Fire-and-forget: nothing here may add latency to the pump, and a failed
+        sweep is the status quo (the row runs as a turn), not an error.
+        """
+        if self._start_window_swept:
+            return
+        self._start_window_swept = True
+        task = asyncio.create_task(self._sweep_start_window_steers_impl())
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        self._start_window_sweep_task = task
+
+    async def _sweep_start_window_steers_impl(self) -> None:
+        try:
+            folded = await self.steer_pending()
+        except Exception:  # noqa: BLE001 - never surface into the pump
+            logger.debug(
+                "SessionRuntime: start-window steer sweep failed for %s",
+                self.session_id, exc_info=True,
+            )
+            return
+        if folded:
+            logger.info(
+                "SessionRuntime: folded %d message(s) queued during %s turn %s's "
+                "start window into the live turn",
+                folded, self.session_id, self.turn_id,
+            )
 
     async def cancel_steer(self, turn_id: str) -> str:
         """Try to recall the steer submitted for queued turn ``turn_id``.

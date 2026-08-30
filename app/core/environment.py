@@ -16,7 +16,7 @@ from typing import Optional, Dict, Any
 
 from app.db import database
 from app.db.model_providers import ModelProviderRow
-from app.core.config import settings
+from app.core.config import ENV_FILE_PATH, ENV_FILE_REF_VAR, settings
 from app.core.platform import DeploymentMode
 from app.core import encryption
 from app.core.model_registry import resolve_provider_context_window
@@ -776,6 +776,17 @@ def _build_env_with_ai_tools(
     # parent server dying, works on both Windows and Linux via psutil, and can
     # never match a process we didn't spawn.
     env["AI_SHUFFLE_MANAGED_BY"] = settings.effective_instance_id
+
+    # ALWAYS-ON: point the subprocess at THIS process's config file by absolute
+    # path. A session whose cwd is a git worktree has no `.env` of its own (it
+    # is gitignored, so `git worktree add` never brings it across), and the
+    # workaround agents reached for was copying the real one in — which put a
+    # plaintext database password on disk in every worktree, one copy per
+    # session, none of them cleaned up. A reference costs nothing, leaves no
+    # copy, and keeps the secret out of the process environment: the child only
+    # learns where the file is, and only if it can already read it.
+    if ENV_FILE_PATH:
+        env.setdefault(ENV_FILE_REF_VAR, ENV_FILE_PATH)
 
     # ALWAYS-ON: wire the stored anthropic_api_key in as the Claude Code auth
     # credential for EVERY session, regardless of whether AI tools are enabled.

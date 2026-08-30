@@ -13,6 +13,7 @@ Three seams are covered here:
 The turns table is real (pg_shim SQLite); the engine and the pump are stubbed.
 """
 
+import asyncio
 import time
 from contextlib import ExitStack, contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1138,3 +1139,73 @@ def test_the_delegated_leg_prompt_leaves_steering_alone():
     from fluid.context.steering import PROMPT_BLOCK
 
     assert PROMPT_BLOCK not in _compiled_text(native=False)
+
+
+# ---------------------------------------------------------------------------
+# 5. the start-window sweep — the duplicate-turn orphan
+# ---------------------------------------------------------------------------
+#
+# ``chat_ws_handler`` decides whether to steer from a ``get_live_turn`` read
+# taken BEFORE it enqueues. A turn that has been kicked but has not reached
+# ``start_turn`` is not live by that test, so a message arriving in that window
+# is enqueued and no steer is ever attempted for it — which is how two
+# near-identical messages seconds apart became two turns, one of them orphaned.
+# The sweep re-offers those rows once the turn is provably live.
+
+async def test_sweep_folds_a_message_that_queued_during_the_start_window(mock_db):
+    sid = "sweep-window"
+    live = _start_live(sid)
+    runtime = _live_runtime(sid, live)
+    # Sent while the turn was starting: enqueued, never offered as a steer.
+    queued = turns_db.enqueue_turn(sid, "user", prompt="same thing again")
+
+    adapter = _Adapter()
+    with _pooled(adapter):
+        runtime._sweep_start_window_steers()
+        await runtime._start_window_sweep_task
+
+    assert adapter.calls == [("same thing again", queued["id"])]
+
+
+async def test_sweep_runs_once_per_turn(mock_db):
+    sid = "sweep-once"
+    live = _start_live(sid)
+    runtime = _live_runtime(sid, live)
+    turns_db.enqueue_turn(sid, "user", prompt="one")
+
+    adapter = _Adapter()
+    with _pooled(adapter):
+        runtime._sweep_start_window_steers()
+        runtime._sweep_start_window_steers()
+        runtime._sweep_start_window_steers()
+        await runtime._start_window_sweep_task
+
+    assert len(adapter.calls) == 1
+
+
+async def test_sweep_with_an_empty_queue_does_nothing(mock_db):
+    sid = "sweep-empty"
+    live = _start_live(sid)
+    runtime = _live_runtime(sid, live)
+
+    adapter = _Adapter()
+    with _pooled(adapter):
+        runtime._sweep_start_window_steers()
+        await runtime._start_window_sweep_task
+
+    assert adapter.calls == []
+
+
+async def test_a_failing_sweep_leaves_the_row_to_the_drain(mock_db):
+    """The row must stay queued and run as its own turn — the status quo."""
+    sid = "sweep-fails"
+    live = _start_live(sid)
+    runtime = _live_runtime(sid, live)
+    queued = turns_db.enqueue_turn(sid, "user", prompt="unfoldable")
+
+    adapter = _Adapter(refuse=RuntimeError("nothing live to steer into"))
+    with _pooled(adapter):
+        runtime._sweep_start_window_steers()
+        await runtime._start_window_sweep_task
+
+    assert turns_db.get_turn(queued["id"])["state"] == "queued"

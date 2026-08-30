@@ -1336,7 +1336,6 @@ def _run_column_migrations(cursor):
                 tool_use_id TEXT,
                 title TEXT,
                 status TEXT,
-                unparked BOOLEAN DEFAULT FALSE,
                 terminal_notified BOOLEAN DEFAULT FALSE,
                 started_at TIMESTAMP WITH TIME ZONE,
                 updated_at TIMESTAMP WITH TIME ZONE,
@@ -1348,6 +1347,19 @@ def _run_column_migrations(cursor):
         "CREATE INDEX IF NOT EXISTS idx_background_tasks_instance_status "
         "ON background_tasks(instance_id, status)"
     )
+    # Retire background_tasks.unparked. No SCHEMA_VERSION bump: editing this
+    # file changes migrations_fingerprint(), which re-runs the column pass once
+    # on the next boot, which is all a drop needs. The unpark latch it mirrored was
+    # replaced by the in-memory one-shot in task_registry.mark_woken and the
+    # idle reader's terminal handoff (see idle_reader's module docstring); no
+    # writer has set the column since, so every row reads FALSE and audits kept
+    # mistaking that for "the wake never fired". Nothing reads it either, so the
+    # drop is safe.
+    if table_exists(cursor, "background_tasks") and column_exists(
+        cursor, "background_tasks", "unparked"
+    ):
+        cursor.execute("ALTER TABLE background_tasks DROP COLUMN IF EXISTS unparked")
+        migrations_applied.append("background_tasks_drop_unparked")
 
     # v2 core primitives (v56). session_events (append-only log) + its
     # session_event_counters companion, fenced/leased runs, pending_interactions,

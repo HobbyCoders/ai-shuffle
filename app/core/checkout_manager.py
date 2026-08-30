@@ -575,15 +575,15 @@ def _ensure_branch_checkout(
         )
         return None
 
-    # Node packages are gitignored, so the new worktree has none. Link them
-    # from the checkout it branched off before anyone tries to build in it.
-    # Best-effort by contract: a failure here degrades the worktree, it does
-    # not invalidate it.
+    # Everything a run needs is gitignored, so the new worktree has none of it.
+    # Link it from the checkout it branched off before anyone tries to build or
+    # run in it. Best-effort by contract: a failure here degrades the worktree,
+    # it does not invalidate it.
     try:
-        provision_node_modules(base_path, dest_str)
+        provision_worktree_runtime(base_path, dest_str)
     except Exception as e:  # noqa: BLE001 - defence in depth
         logger.warning(
-            "checkout_manager: node provisioning raised for %s: %s", dest_str, e
+            "checkout_manager: runtime provisioning raised for %s: %s", dest_str, e
         )
 
     checkouts_db.upsert_checkout(
@@ -767,6 +767,186 @@ def provision_node_modules(source_root: str, dest_root: str) -> Dict[str, List[s
     return summary
 
 
+# ---------------------------------------------------------------------------
+# The rest of what a runnable worktree needs
+# ---------------------------------------------------------------------------
+
+# node_modules is not the only gitignored thing a run depends on. The Python
+# virtualenv and the built frontend assets are gitignored too, so a fresh
+# worktree has neither, and every attempt to actually run the app from one used
+# to end with somebody wiring them up by hand. These are the directories worth
+# linking; each is skipped when the source does not have it.
+_RUNTIME_LINK_DIRS = (
+    "venv",
+    ".venv",
+    "app/static",
+)
+
+# Files that provisioning must NEVER place in a worktree, however tempting.
+#
+# `.env` holds the database password in plaintext. It is gitignored, so a
+# worktree never gets one, and the observed workaround was to copy the real one
+# in — which put the production password on disk once per worktree, silently
+# pointed the branch's app at the production database, and left the copies
+# behind when the worktree was reaped. Configuration reaches a worktree process
+# by reference instead: the spawner exports AI_SHUFFLE_ENV_FILE with the
+# absolute path of the canonical file (app.core.environment), and
+# app.core.config reads it from there. Nothing is copied.
+_NEVER_PROVISION = (".env",)
+
+
+def _is_never_provisioned(name: str) -> bool:
+    """Whether ``name`` is a config/secret file provisioning must not carry."""
+    base = os.path.basename(name.replace("\\", "/").rstrip("/"))
+    return base in _NEVER_PROVISION or base.endswith(".env")
+
+
+def provision_worktree_runtime(
+    source_root: str, dest_root: str
+) -> Dict[str, List[str]]:
+    """Give a fresh worktree everything a run needs, and nothing it must not have.
+
+    Links the source checkout's node packages (see ``provision_node_modules``),
+    its virtualenv, and its built frontend assets. Deliberately provisions no
+    configuration file: secrets travel by env-var reference at spawn time, never
+    as a copy on disk. See ``_NEVER_PROVISION``.
+
+    Best-effort throughout and never raises, for the same reason
+    ``provision_node_modules`` doesn't: a worktree missing a link is degraded,
+    not broken, and must not cost anyone a checkout.
+    """
+    summary = provision_node_modules(source_root, dest_root)
+
+    try:
+        source = Path(source_root)
+        dest = Path(dest_root)
+    except Exception as e:  # noqa: BLE001 - never fail a checkout over this
+        summary["errors"].append(str(e))
+        return summary
+
+    # Surface a config file somebody already put here by hand. Not deleted —
+    # removing a file the app did not create is not provisioning's call — but
+    # said out loud, because a stray `.env` in a worktree is a plaintext
+    # credential nobody is tracking and is very likely pointed at production.
+    for name in _NEVER_PROVISION:
+        try:
+            if (dest / name).exists():
+                summary["errors"].append(f"{name}: hand-copied config present")
+                logger.warning(
+                    "checkout_manager: %s holds a hand-copied %s — configuration "
+                    "reaches worktree processes by env-var reference; this copy "
+                    "is an untracked credential and should be removed",
+                    dest_root,
+                    name,
+                )
+        except OSError:  # pragma: no cover - defensive
+            continue
+
+    for rel in _RUNTIME_LINK_DIRS:
+        if _is_never_provisioned(rel):  # pragma: no cover - guards the constant
+            continue
+        src_dir = source / rel
+        dst_dir = dest / rel
+        try:
+            if dst_dir.exists() or dst_dir.is_symlink():
+                summary["skipped"].append(f"{rel}: already present")
+                continue
+            if not src_dir.is_dir():
+                summary["skipped"].append(f"{rel}: source has none")
+                continue
+            dst_dir.parent.mkdir(parents=True, exist_ok=True)
+            _link_directory(src_dir, dst_dir)
+            summary["linked"].append(rel)
+            logger.info("checkout_manager: linked %s into %s", rel, dest_root)
+        except Exception as e:  # noqa: BLE001
+            summary["errors"].append(f"{rel}: link failed: {e}")
+            logger.warning(
+                "checkout_manager: could not link %s in %s: %s", rel, dest_root, e
+            )
+
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Adopting worktrees this app did not create
+# ---------------------------------------------------------------------------
+
+
+def register_unregistered_worktrees(
+    project_id: str, runner_id: str, any_checkout_path: str
+) -> List[str]:
+    """Give every worktree of this repo a ``checkouts`` row, whoever made it.
+
+    ``git worktree add`` is not the app's private tool. A session's own agent
+    runs it directly, and the CLI creates isolated worktrees of its own; both
+    land under the same ``.fluid/worktrees/`` tree that the app manages, and
+    neither writes a row. The result observed in the field was worktrees that
+    no table knew about: nothing reaped them, nothing cleaned them up, and the
+    session that made one reported a null worktree id and path while its branch
+    was plainly set.
+
+    Registering them is a pure catch-up write. Rows are keyed on
+    ``(project, runner, path)`` and ``upsert_checkout`` is idempotent, so an
+    already-registered worktree costs one no-op and a worktree the app created
+    a moment ago is simply confirmed. Returns the paths newly adopted, which is
+    what the tests assert on.
+
+    Best-effort and never raises: failing to adopt someone else's worktree must
+    not fail the checkout that triggered the sweep.
+    """
+    adopted: List[str] = []
+    try:
+        entries = git_service.list_worktrees(any_checkout_path)
+        known = {
+            os.path.normcase(os.path.normpath(os.path.abspath(str(r.get("path")))))
+            for r in checkouts_db.list_checkouts(project_id)
+            if r.get("path")
+        }
+    except Exception as e:  # noqa: BLE001 - never fail a checkout over this
+        logger.debug(
+            "checkout_manager: worktree sweep failed for %s: %s",
+            any_checkout_path,
+            e,
+        )
+        return adopted
+
+    for entry in entries or []:
+        path = entry.get("path")
+        if not path or entry.get("is_bare") or not os.path.isabs(path):
+            continue
+        # A detached worktree has no branch to key a checkout row on; the app's
+        # own resolution is branch-keyed, so there is nothing useful to record.
+        wt_branch = (entry.get("branch") or "").strip()
+        if not wt_branch or entry.get("is_detached"):
+            continue
+        # `git worktree list --porcelain` reports forward slashes even on
+        # Windows. Store the OS form the rest of the app writes, or the row is
+        # invisible to every path-keyed lookup that follows.
+        path = os.path.normpath(os.path.abspath(path))
+        if os.path.normcase(path) in known:
+            continue
+        if not os.path.isdir(path):
+            continue
+        try:
+            checkouts_db.upsert_checkout(
+                project_id, runner_id, path, branch=wt_branch, status="active"
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(
+                "checkout_manager: could not adopt worktree %s: %s", path, e
+            )
+            continue
+        adopted.append(path)
+        logger.info(
+            "checkout_manager: adopted unregistered worktree %s (branch %r) "
+            "for project %s",
+            path,
+            wt_branch,
+            project_id,
+        )
+    return adopted
+
+
 def ensure_checkout(
     project_v2_row: Optional[Dict[str, Any]],
     branch: Optional[str] = None,
@@ -804,8 +984,11 @@ def ensure_checkout(
 
     branch = (branch or "").strip()
     if not branch:
-        return _ensure_base_checkout(project_id, runner_id, project_v2_row)
-    return _ensure_branch_checkout(
+        base = _ensure_base_checkout(project_id, runner_id, project_v2_row)
+        if base:
+            register_unregistered_worktrees(project_id, runner_id, base)
+        return base
+    path = _ensure_branch_checkout(
         project_v2_row,
         project_id,
         runner_id,
@@ -813,3 +996,6 @@ def ensure_checkout(
         base_branch=base_branch,
         create_new_branch=create_new_branch,
     )
+    if path:
+        register_unregistered_worktrees(project_id, runner_id, path)
+    return path
