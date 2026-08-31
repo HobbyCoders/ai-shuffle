@@ -60,6 +60,10 @@ Hard rules:
   final reply>}, {"kind": "not_contains", "pattern": ...}, {"kind":
   "tool_called", "name": <tool that should fire>}, {"kind": "file", "path":
   <workspace-relative>, "pattern": <optional regex>}.
+- An anchor protecting an assertion must discriminate: a lone "contains"
+  check false-passes on hedging replies that mention both the right and the
+  wrong answer. Pair it with a "not_contains" for the plausible wrong
+  answer whenever one exists.
 - Keep prompts self-contained: a fresh session with an empty workspace must
   be able to attempt them. Use a "setup" object of workspace seed files when
   the case needs one.

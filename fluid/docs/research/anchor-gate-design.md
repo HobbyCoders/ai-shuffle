@@ -54,6 +54,14 @@ Decisions:
   named tool fired during the turn), `file` (path exists in the replay
   workspace, optional content regex). This is the testing doctrine encoded:
   the *prompt* never names a tool; the *assertion* may check the flow fired.
+- **Anchors that protect an assertion must discriminate.** A lone
+  `contains` check false-passes on hedging replies: live testing planted
+  guidance saying "answer monthly, never mention weekly", and glm replied
+  by flagging the contradiction — mentioning *both* words, satisfying both
+  the anchor's `weekly` check and the harmful edit's `monthly` motivation
+  at once. Pair `contains` with a `not_contains` for the wrong answer
+  (`--expect weekly --forbid monthly`); with the pair in place the same
+  harmful edit parked at retention.
 - **`baseline`** is the recorded status from the anchor's last plain replay
   (`pass` / `fail` / `unknown`). Retention compares candidate replays against
   this recorded baseline — no fresh control run per gate evaluation, which
