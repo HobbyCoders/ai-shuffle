@@ -91,13 +91,16 @@ def guidance_dir(home: Path | None = None) -> Path:
 # ─── guidance proposal: validator + apply ────────────────────────────────────
 
 
-# A tool named where a directive verb expects one ("call X", "invoke X",
-# "the X tool"). ``mentioned_tool_names`` scans for *known* names and so
-# cannot flag invented ones; this catches the hallucinated-tool shape at its
-# source — learned guidance instructing calls to tools that do not exist.
+# A tool named where a directive verb expects one ("call Frobnicate",
+# "invoke Frobnicate", "the Frobnicate tool"). ``mentioned_tool_names`` scans
+# for *known* names and so cannot flag invented ones; this catches the
+# hallucinated-tool shape at its source — learned guidance instructing calls
+# to tools that do not exist. Names must be at least two characters: single
+# capitals are placeholder letters ("never say 'one would invoke Y'" — a
+# live synthesizer proposal parked on exactly that false positive).
 _TOOL_DIRECTIVE_RE = re.compile(
-    r"\b(?:call(?:ing)?|invoke|invoking)\s+(?:the\s+)?([A-Z][A-Za-z0-9_]*)\b"
-    r"|\bthe\s+([A-Z][A-Za-z0-9_]*)\s+tool\b"
+    r"\b(?:call(?:ing)?|invoke|invoking)\s+(?:the\s+)?([A-Z][A-Za-z0-9_]+)\b"
+    r"|\bthe\s+([A-Z][A-Za-z0-9_]+)\s+tool\b"
 )
 
 

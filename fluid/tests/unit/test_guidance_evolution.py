@@ -187,6 +187,17 @@ async def test_consolidation_ignores_guidance_tags(tmp_path) -> None:
     assert pending_queue(store.root) == []
 
 
+def test_synth_prompt_carries_the_channel_rule() -> None:
+    """Live testing caught the miss: shown repeated described-instead-of-done
+    failures, glm wrote a user-preference memory and no guidance proposal.
+    The prompt must say which channel behavior-shaped evidence belongs to."""
+    from fluid.codemode.continual import _SYNTH_SYSTEM
+
+    assert "cannot change how the model behaves" in _SYNTH_SYSTEM
+    assert "rejects the SAME mechanical behavior" in _SYNTH_SYSTEM
+    assert '<guidance stem=' in _SYNTH_SYSTEM
+
+
 # ─── gate evaluation of the queue (fluid evolve run) ─────────────────────────
 
 

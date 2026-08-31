@@ -70,6 +70,12 @@ causes repeated work), and never secrets. Scope: a fact about THIS project's
 codebase, layout, or conventions gets scope="project"; a fact about the user
 or their machine in general stays global (the default). Most journals need NO
 memory change either — but a [remember] entry almost always needs one.
+Channel rule: a recurring mechanical failure of the MODEL itself — narrating
+an action instead of performing it, repeatedly malformed calls, drifting from
+a stated format — is not fixed by a memory (a memory tells the next session
+what is true; it cannot change how the model behaves). That evidence belongs
+in a model-guidance proposal (below), optionally alongside a memory about the
+user's preference.
 
 Model guidance proposals — the harness keeps a per-model-family guidance file
 (shown to you when one exists) that steers HOW a given model family behaves in
@@ -77,13 +83,21 @@ the harness. When the journal shows a RECURRING mechanical failure specific to
 this model — describing an intended action instead of calling the tool,
 repeatedly malformed calls of the same shape, drifting from a stated output
 convention, stopping after a stub — you may propose an edit. This is rare:
-most journals need none, and a one-off mistake never qualifies. Proposals are
+most journals need none, and a one-off mistake never qualifies. But when the
+user rejects the SAME mechanical behavior more than once in a journal, that
+is exactly the recurring evidence this channel exists for — propose the edit
+rather than only noting the preference as a memory. Proposals are
 NOT applied; they are queued and committed only if they survive a replay gate
 against regression anchors, so every proposal must carry a motivation: a
-natural task prompt that reproduces the failure (never naming a tool) and a
-check that detects the fixed behavior. Propose the FULL replacement file
-(short imperative lines), with stem = a lowercase substring of the session
-model id.
+natural task prompt that reproduces the failure (never naming a tool) and
+checks that detect the fixed behavior. The motivation replays in a fresh,
+EMPTY workspace — include a "setup" object of seed files whenever the task
+needs content to act on. Write checks that detect the fix robustly: assert
+the flow fired ({"kind": "tool_called", ...}) or forbid the failure's own
+phrasing ({"kind": "not_contains", ...}); never guess at reply vocabulary —
+a wording-specific "contains" fails even when the behavior is fixed. Propose
+the FULL replacement file (short imperative lines), with stem = a lowercase
+substring of the session model id.
 
 Do NOT capture (these become persistent self-imposed constraints that bite
 later, when the environment has changed):
@@ -121,7 +135,9 @@ Output format — nothing else:
   {"content": "full replacement guidance file",
    "why": "one line of journal evidence",
    "motivation": {"prompt": "task that reproduced the failure",
-                  "checks": [{"kind": "contains", "pattern": "regex the fixed behavior matches"}]}}
+                  "setup": {"relative/path.py": "seed file content the task needs"},
+                  "checks": [{"kind": "tool_called", "name": "ToolTheFlowUses"},
+                             {"kind": "not_contains", "pattern": "regex of the failure's phrasing"}]}}
   </guidance>
 - if nothing is worth keeping: NO_CHANGES
 """

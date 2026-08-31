@@ -165,6 +165,12 @@ async def test_validity_failure_parks_before_any_replay(tmp_path) -> None:
     parked = parked_proposals(tmp_path)
     assert parked and parked[-1]["stage"] == "validity"
     assert parked[-1]["content"] == "Keep replies terse."
+    # The full proposal round-trips out of the parking lot — a requeued
+    # proposal must keep its motivation case (live testing hit the loss).
+    from fluid.codemode.evolution import proposal_from_dict
+
+    revived = proposal_from_dict(parked[-1])
+    assert revived.motivation == _proposal().motivation
 
 
 @pytest.mark.asyncio
@@ -262,6 +268,11 @@ def test_guidance_validator_enforces_vocabulary_and_caps() -> None:
     assert ghost and "FrobnicateTool" in ghost[0]
     assert guidance_validator(
         _proposal(content="Call tools directly; never describe an intended call.")
+    ) == []
+    # Placeholder letters in prohibition prose are not tool directives — a
+    # live synthesizer proposal parked on this false positive.
+    assert guidance_validator(
+        _proposal(content="Never say 'you could run X' or 'one would invoke Y'.")
     ) == []
 
 

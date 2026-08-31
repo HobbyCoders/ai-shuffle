@@ -235,19 +235,19 @@ class CommitGate:
         *,
         regressions: int = 0,
     ) -> GateVerdict:
+        # The full proposal (motivation included) must survive parking —
+        # parked records are the retry evidence, and a requeued proposal
+        # without its motivation case would park again as unevidenced (live
+        # testing hit exactly that round-trip loss).
         self._append(
             PARKED_FILE,
             {
                 "ts": time.time(),
                 "stage": stage,
                 "reasons": reasons,
-                "kind": proposal.kind,
-                "target": proposal.target,
-                "proposer": proposal.proposer,
-                "rationale": proposal.rationale,
-                "evidence": proposal.evidence[:2_000],
-                "content": proposal.content,
                 "anchor_results": anchor_results,
+                **proposal_to_dict(proposal),
+                "evidence": proposal.evidence[:2_000],
             },
         )
         return GateVerdict(

@@ -189,6 +189,23 @@ timescales, matching the memory doctrine one tier up:
   synthesizer never gets the no-motivation waiver. Gate evaluation never
   rides a background synthesis pass: replays cost live model turns and the
   close budget is 90 seconds.
+- **Live-verified end to end** (glm-5.3-flash, 2026-08-31): seeded journal
+  evidence of repeated described-instead-of-done failures → the close-drain
+  synthesis pass drafted a well-formed proposal (full-file amendment
+  preserving the existing guidance line, evidence-quoting rationale,
+  doctrine-clean motivation prompt) → `evolve run` replayed motivation and
+  both anchors live → committed. Four fixes came out of the loop, each
+  live-caught, fixed, and pinned: (1) the first pass wrote a
+  user-preference memory instead of a proposal — the prompt now carries an
+  explicit channel rule (a memory cannot change how the model behaves);
+  (2) the validity stage flagged the placeholder letter in "never say 'one
+  would invoke Y'" as an unknown tool — directive names now need ≥2 chars;
+  (3) parked records dropped the motivation case, so a requeued proposal
+  parked again as unevidenced — parking now persists the full proposal;
+  (4) the drafted motivation guessed reply vocabulary ("found/matched")
+  and assumed a non-empty workspace — the drafting prompt now demands
+  setup files and robust checks (flow assertions / forbid the failure's
+  phrasing, never guessed wording).
 - **Scope choice**: the shipped family guidance blocks stay in code as
   factory defaults — migrating them to data would change fresh-install
   behavior for zero evolution benefit, since learned guidance appends after
