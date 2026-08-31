@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 
 from app.core.config import settings
 from app.core.query_streaming import extract_mcp_image
+from app.core.session_title import derive_session_title
 from app.core.system_message_filter import is_hidden_system_subtype
 
 logger = logging.getLogger(__name__)
@@ -2848,9 +2849,7 @@ def _get_session_title_and_preview(jsonl_path: Path) -> tuple[Optional[str], Opt
                     message_count += 1
                     if title is None:
                         # First user message is the title
-                        title = content[:100].strip()
-                        if len(content) > 100:
-                            title = title.rsplit(' ', 1)[0] + "..."
+                        title = derive_session_title(content)
                 elif isinstance(content, list):
                     # Check for text blocks
                     for block in content:
@@ -2859,9 +2858,7 @@ def _get_session_title_and_preview(jsonl_path: Path) -> tuple[Optional[str], Opt
                             if text and not _is_system_content(text) and not _is_task_notification(text):
                                 message_count += 1
                                 if title is None:
-                                    title = text[:100].strip()
-                                    if len(text) > 100:
-                                        title = title.rsplit(' ', 1)[0] + "..."
+                                    title = derive_session_title(text)
                                 break
 
             elif entry_type == "assistant" and role == "assistant":

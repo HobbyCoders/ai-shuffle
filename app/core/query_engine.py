@@ -57,6 +57,7 @@ from app.core.session_pool import (
     requires_reconnect, graceful_disconnect, mark_subprocess_oom_killable,
 )
 from app.core.oauth import direct_oauth
+from app.core.session_title import derive_session_title
 from app.core.profiles import get_profile
 from app.core.sync_engine import sync_engine
 from app.core.permission_handler import permission_handler, _DeferSentinel
@@ -879,9 +880,9 @@ async def execute_query(
     else:
         session_id = str(uuid.uuid4())
         # Generate title from first message (truncate to 50 chars)
-        title = prompt[:50].strip()
-        if len(prompt) > 50:
-            title += "..."
+        title = derive_session_title(
+            prompt, max_chars=50, word_boundary=False
+        )
         session = await run_sync(
             database.create_session,
             session_id=session_id,
@@ -1336,9 +1337,9 @@ async def stream_query(
     else:
         session_id = str(uuid.uuid4())
         # Generate title from first message (truncate to 50 chars)
-        title = prompt[:50].strip()
-        if len(prompt) > 50:
-            title += "..."
+        title = derive_session_title(
+            prompt, max_chars=50, word_boundary=False
+        )
         session = await run_sync(
             database.create_session,
             session_id=session_id,

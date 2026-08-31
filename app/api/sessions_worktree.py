@@ -13,6 +13,7 @@ from typing import List, Optional, Tuple
 from fastapi import APIRouter, HTTPException, Depends, status, Request
 
 from app.db import database
+from app.core.session_title import derive_session_title
 from app.db.async_database import run_sync
 from app.api.auth import require_auth, get_api_user_from_request
 from app.api.common import ATTACHMENTS_NEED_LOCAL_CHECKOUT, require_origin_access
@@ -121,9 +122,7 @@ async def _persist_and_broadcast_first_message(
     Shared verbatim by the local and remote branch-session paths so the two can
     never drift on what a new worktree session's history looks like.
     """
-    title = prompt[:100].strip()
-    if len(prompt) > 100:
-        title = title.rsplit(' ', 1)[0] + "..."
+    title = derive_session_title(prompt)
     msg_role, msg_meta = _detect_command_meta(prompt)
 
     def _persist_first_message():
