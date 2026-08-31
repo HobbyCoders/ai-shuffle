@@ -117,8 +117,13 @@ broader query or a different strategy before concluding.
 - Done means every stated requirement is verified, not a plausible subset."""
 
 
-GUIDANCE_DIR_MAX_FILES = 8
-GUIDANCE_FILE_MAX_CHARS = 4_000
+# Shared with the synthesizer (raw sources for evidence-based proposals) and
+# the anchor-replay runner (candidate staging) — see fluid.context.guidance.
+from fluid.context.guidance import (  # noqa: E402 — re-exported names
+    GUIDANCE_DIR_MAX_FILES,
+    GUIDANCE_FILE_MAX_CHARS,
+    guidance_dir,
+)
 
 
 def load_guidance_files(model: str, home: Path | None = None) -> tuple[str, ...]:
@@ -134,7 +139,7 @@ def load_guidance_files(model: str, home: Path | None = None) -> tuple[str, ...]
     """
     from fluid.context.screening import screen
 
-    directory = (home or Path.home()) / ".fluid" / "guidance"
+    directory = guidance_dir(home)
     lowered = (model or "").lower()
     if not lowered:
         return ()

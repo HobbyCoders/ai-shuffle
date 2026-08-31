@@ -71,6 +71,20 @@ codebase, layout, or conventions gets scope="project"; a fact about the user
 or their machine in general stays global (the default). Most journals need NO
 memory change either — but a [remember] entry almost always needs one.
 
+Model guidance proposals — the harness keeps a per-model-family guidance file
+(shown to you when one exists) that steers HOW a given model family behaves in
+the harness. When the journal shows a RECURRING mechanical failure specific to
+this model — describing an intended action instead of calling the tool,
+repeatedly malformed calls of the same shape, drifting from a stated output
+convention, stopping after a stub — you may propose an edit. This is rare:
+most journals need none, and a one-off mistake never qualifies. Proposals are
+NOT applied; they are queued and committed only if they survive a replay gate
+against regression anchors, so every proposal must carry a motivation: a
+natural task prompt that reproduces the failure (never naming a tool) and a
+check that detects the fixed behavior. Propose the FULL replacement file
+(short imperative lines), with stem = a lowercase substring of the session
+model id.
+
 Do NOT capture (these become persistent self-imposed constraints that bite
 later, when the environment has changed):
 - environment-dependent failures (missing binaries, install errors) — the
@@ -102,6 +116,13 @@ Output format — nothing else:
   (project-scoped: <memory scope="project">the fact</memory>)
 - to rewrite a memory: <memory id="m3">the corrected fact</memory>
 - to remove a memory: <delete-memory id="m3"/>
+- to propose a model-guidance edit (queued for the replay gate, not applied):
+  <guidance stem="glm">
+  {"content": "full replacement guidance file",
+   "why": "one line of journal evidence",
+   "motivation": {"prompt": "task that reproduced the failure",
+                  "checks": [{"kind": "contains", "pattern": "regex the fixed behavior matches"}]}}
+  </guidance>
 - if nothing is worth keeping: NO_CHANGES
 """
 
@@ -140,6 +161,9 @@ _MEMORY_RE = re.compile(
     re.DOTALL,
 )
 _DELETE_MEMORY_RE = re.compile(r'<delete-memory id="(m\d+)"\s*/>')
+_GUIDANCE_RE = re.compile(
+    r'<guidance stem="([^"]{1,64})">\n?(.*?)</guidance>', re.DOTALL
+)
 
 # Journal previews are already trimmed at write time; cap the slice we show.
 MAX_ENTRIES_PER_PASS = 40
@@ -164,6 +188,8 @@ class Synthesizer:
         max_tokens: int = 4096,
         pass_timeout: float = 180.0,
         close_timeout: float = 90.0,
+        session_model: str | None = None,
+        guidance_snapshot: dict[str, str] | None = None,
     ) -> None:
         self._provider = provider
         self._model = model
@@ -171,6 +197,14 @@ class Synthesizer:
         # The current project's memory-scope key: ``scope="project"`` tags in
         # the model's output resolve to it. ``None`` keeps everything global.
         self._project = project
+        # Phase 2.3: the SESSION's model id (may differ from the synthesis
+        # model above) — a guidance proposal's stem must be a substring of it
+        # to ever load — and the current guidance file(s) matching it, shown
+        # in the prompt so proposals amend rather than overwrite blindly.
+        # ``None`` disables guidance proposals entirely (embedding hosts that
+        # don't wire it keep today's behavior).
+        self._session_model = session_model
+        self._guidance_snapshot = dict(guidance_snapshot or {})
         self._on_change = on_change
         self._min_new = max(1, min_new_entries)
         self._max_entries = max_entries
@@ -409,6 +443,16 @@ class Synthesizer:
             lines.append("(empty)")
         for m in memories:
             lines.append(f"[{m.id}] recalls={m.uses} scope={m.scope}: {m.text}")
+        if self._session_model is not None:
+            lines.append("")
+            lines.append(f"## Session model: {self._session_model}")
+            if self._guidance_snapshot:
+                lines.append("Current model-guidance file(s) — a proposal replaces the whole file:")
+                for stem, content in sorted(self._guidance_snapshot.items()):
+                    lines.append(f"### {stem}.md")
+                    lines.append(content)
+            else:
+                lines.append("(no model-guidance file exists for this model yet)")
         lines.append("")
         lines.append("## Session journal (conversation + executed cells, in order)")
         cell_no = 0
@@ -511,5 +555,32 @@ class Synthesizer:
         for match in _DELETE_MEMORY_RE.finditer(text or ""):
             if self._store.delete_memory(match.group(1)):
                 changed.append(f"-memory:{match.group(1)}")
+        for match in _GUIDANCE_RE.finditer(text or ""):
+            # Phase 2.3: guidance edits are PROPOSED, never applied here.
+            # Queue-time validation is cheap; the commit gate (validity →
+            # improvement → retention over the anchor set) runs out-of-band
+            # via `fluid evolve run`, because gating replays a live model.
+            stem, raw = match.group(1), match.group(2).strip()
+            if self._session_model is None:
+                errors.append(f"guidance:{stem}: no session model wired")
+                continue
+            try:
+                body = json.loads(raw)
+            except ValueError as exc:
+                errors.append(f"guidance:{stem}: body is not valid JSON ({exc})")
+                continue
+            from fluid.codemode.evolution import (
+                draft_guidance_proposal,
+                queue_pending,
+            )
+
+            result = draft_guidance_proposal(
+                stem=stem, body=body, session_model=self._session_model,
+            )
+            if isinstance(result, str):
+                errors.append(f"guidance:{stem}: {result}")
+                continue
+            queue_pending(self._store.root, result)
+            changed.append(f"guidance-proposal:{result.target}")
         self.last_error = "; ".join(errors) if errors else None
         return changed

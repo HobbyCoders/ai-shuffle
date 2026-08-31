@@ -675,6 +675,20 @@ def build_engine(
 
                 on_change = _announce
 
+            # Phase 2.3: the synthesizer sees the SESSION model id (so a
+            # guidance-proposal stem can be validated against it) and the raw
+            # guidance file(s) currently matching it (so proposals amend the
+            # file instead of overwriting blind). Gated on the "user" setting
+            # source like the prompt-side guidance load.
+            guidance_snapshot: dict[str, str] = {}
+            if "user" in config.setting_sources:
+                try:
+                    from fluid.context.guidance import guidance_sources
+
+                    guidance_snapshot = guidance_sources(model)
+                except Exception:
+                    pass
+
             # Session provider; continual_model pins synthesis to one model so
             # skill quality doesn't drift with the session's provider choice.
             # Passes are background and best-effort (see continual.py).
@@ -682,6 +696,8 @@ def build_engine(
                 client, config.continual_model or model, skills,
                 project=project_key_for(config.cwd),
                 on_change=on_change,
+                session_model=model,
+                guidance_snapshot=guidance_snapshot or None,
             )
 
             def _remember(text: str, scope: str | None = None) -> None:

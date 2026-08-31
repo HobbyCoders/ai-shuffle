@@ -29,6 +29,7 @@ at the CLI layer, tests script one.
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,6 +41,10 @@ DEFAULT_BUDGET = 1
 
 PARKED_FILE = "parked.jsonl"
 LOG_FILE = ".evolution-log.jsonl"
+# Synthesizer-drafted proposals waiting for gate evaluation (`fluid evolve
+# run`). Drafting is cheap and in-band; gating replays anchors against a live
+# model, so it never rides a background synthesis pass.
+PENDING_FILE = "pending-proposals.jsonl"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -261,6 +266,152 @@ class CommitGate:
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
         except OSError:
             pass
+
+
+def proposal_to_dict(proposal: Proposal) -> dict:
+    return {
+        "kind": proposal.kind,
+        "target": proposal.target,
+        "content": proposal.content,
+        "rationale": proposal.rationale,
+        "evidence": proposal.evidence,
+        "motivation": proposal.motivation,
+        "proposer": proposal.proposer,
+    }
+
+
+def proposal_from_dict(record: dict) -> Proposal:
+    return Proposal(
+        kind=str(record.get("kind", "guidance")),
+        target=str(record.get("target", "")),
+        content=str(record.get("content", "")),
+        rationale=str(record.get("rationale", "")),
+        evidence=str(record.get("evidence", "")),
+        motivation=(
+            record["motivation"]
+            if isinstance(record.get("motivation"), dict)
+            else None
+        ),
+        proposer=str(record.get("proposer", "manual")),
+    )
+
+
+def draft_guidance_proposal(
+    *,
+    stem: str,
+    body: dict,
+    session_model: str | None,
+    proposer: str = "synthesizer",
+) -> Proposal | str:
+    """Build a validated guidance proposal from a drafted body, or an error.
+
+    Queue-time validation is the cheap half of the gate: a draft that could
+    never load (stem not a substring of the session's model id), carries no
+    reproducible motivation, or is malformed is rejected here instead of
+    wasting a gate evaluation later. Full validity (screening, vocabulary)
+    still runs at gate time.
+    """
+    from fluid.context.guidance import GUIDANCE_FILE_MAX_CHARS
+
+    stem = (stem or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", stem):
+        return f"bad stem {stem!r}"
+    if not session_model:
+        return "no session model recorded; cannot validate the stem match"
+    if stem not in session_model.lower():
+        return (
+            f"stem {stem!r} is not a substring of the session model "
+            f"{session_model!r} — the file would never load"
+        )
+    if not isinstance(body, dict):
+        return "guidance body must be a JSON object"
+    content = body.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return "guidance content is empty"
+    if len(content) > GUIDANCE_FILE_MAX_CHARS:
+        return f"guidance content exceeds {GUIDANCE_FILE_MAX_CHARS} chars"
+    motivation = body.get("motivation")
+    if not isinstance(motivation, dict):
+        return (
+            "a synthesizer proposal must carry a motivation case "
+            "(prompt + checks reproducing the failure)"
+        )
+    from fluid.codemode.anchors import validate_anchor
+
+    error = validate_anchor(
+        motivation.get("prompt", ""),
+        motivation.get("checks", []),
+        motivation.get("setup"),
+    )
+    if error is not None:
+        return f"bad motivation: {error}"
+    return Proposal(
+        kind="guidance",
+        target=stem,
+        content=content.strip(),
+        rationale=str(body.get("why", ""))[:500],
+        evidence=str(body.get("why", ""))[:2_000],
+        motivation=motivation,
+        proposer=proposer,
+    )
+
+
+def queue_pending(root: str | Path, proposal: Proposal) -> None:
+    """Add a proposal to the pending queue.
+
+    One pending proposal per (kind, target): a newer draft for the same
+    guidance file replaces the older one — the synthesizer sees the current
+    file each pass, so its latest draft supersedes.
+    """
+    root = Path(root)
+    records = [
+        r
+        for r in pending_queue(root)
+        if not (
+            r.get("kind") == proposal.kind and r.get("target") == proposal.target
+        )
+    ]
+    records.append({"ts": time.time(), **proposal_to_dict(proposal)})
+    _rewrite_pending(root, records)
+
+
+def pending_queue(root: str | Path) -> list[dict]:
+    """Parsed pending-proposal records, oldest first."""
+    out: list[dict] = []
+    try:
+        with (Path(root) / PENDING_FILE).open("r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(record, dict):
+                    out.append(record)
+    except OSError:
+        pass
+    return out
+
+
+def remove_pending(root: str | Path, *, kind: str, target: str) -> None:
+    """Drop one (kind, target) from the queue (after a gate verdict — the
+    outcome is durable in the evolution log or parked.jsonl either way)."""
+    root = Path(root)
+    records = [
+        r
+        for r in pending_queue(root)
+        if not (r.get("kind") == kind and r.get("target") == target)
+    ]
+    _rewrite_pending(root, records)
+
+
+def _rewrite_pending(root: Path, records: list[dict]) -> None:
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        with (root / PENDING_FILE).open("w", encoding="utf-8") as fh:
+            for record in records:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
 
 
 def parked_proposals(root: str | Path) -> list[dict]:

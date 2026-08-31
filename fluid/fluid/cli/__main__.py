@@ -287,7 +287,14 @@ def build_parser() -> argparse.ArgumentParser:
                            help="waive the improvement stage (deliberate human proposals only)")
     e_propose.add_argument("--budget", type=int, default=None,
                            help="anchor regression budget for this evaluation (default: config anchor_budget)")
+    e_run = evolve_sub.add_parser(
+        "run", help="evaluate synthesizer-queued proposals through the gate (live replays)"
+    )
+    _add_common(e_run)
+    e_run.add_argument("--budget", type=int, default=None,
+                       help="anchor regression budget (default: config anchor_budget)")
     for name, help_text in (
+        ("pending", "list synthesizer-drafted proposals awaiting the gate"),
         ("parked", "list proposals the gate refused, with reasons"),
         ("log", "list committed evolutions"),
     ):

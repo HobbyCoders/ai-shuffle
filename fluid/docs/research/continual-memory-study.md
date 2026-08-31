@@ -393,10 +393,18 @@ compile-only short-circuit (`fluid/cli/replay.py`), and the CLI surfaces
 `fluid anchors …` / `fluid evolve …` with a confirmed harvest pass
 (`fluid/cli/evolve.py`). `anchor_budget` (default 1) is the B knob.
 
-Deferred: 2.3 full (the synthesizer proposing guidance edits through the
-gate — the gate and its first manual client exist; wire the proposer once
-the gate has soaked), model_guidance data migration beyond the seed,
-ai-shuffle-side wiring (0.4/0.6 live in that repo).
+2.3 landed after the gate's live verification: the synthesizer drafts
+`<guidance>` proposals from journal evidence (queue-time validated: stem ⊂
+session model, mandatory motivation case; one pending per stem), announced
+as `guidance-proposal:<stem>`; `fluid evolve pending`/`run` evaluate the
+queue through the same CommitGate with live replays. Shipped family blocks
+stay in code as factory defaults — learned guidance owns new families,
+which is the mission's actual case (see the design doc's 2.3 section for
+the scope argument).
+
+Deferred: ai-shuffle-side wiring (0.4/0.6 live in that repo); optional
+auto-evaluation of the pending queue (today `evolve run` is the trigger —
+a deliberate cost valve while the loop earns trust).
 
 ### E2E verification (z-ai/glm-5.3-flash via OpenRouter)
 

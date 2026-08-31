@@ -32,6 +32,9 @@ from fluid.codemode.evolution import (
     Proposal,
     evolution_log,
     parked_proposals,
+    pending_queue,
+    proposal_from_dict,
+    remove_pending,
 )
 from fluid.codemode.skills import DEFAULT_SKILLS_ROOT
 from fluid.config.model import HarnessConfig
@@ -371,6 +374,23 @@ def parse_anchor_drafts(text: str) -> list[tuple[str, dict]]:
 def cmd_evolve(args, config: HarnessConfig) -> int:
     root = skills_root(config)
     action = args.evolve_command
+    if action == "pending":
+        records = pending_queue(root)
+        if not records:
+            print("no pending proposals — the synthesizer queues them here "
+                  "when journal evidence warrants one")
+            return 0
+        for r in records:
+            print(f"{r.get('kind')}:{r.get('target')} (by {r.get('proposer')})")
+            if r.get("rationale"):
+                print(f"    why: {r['rationale']}")
+            motivation = r.get("motivation") or {}
+            if motivation.get("prompt"):
+                print(f"    motivation: {motivation['prompt'][:100]}")
+        print("\n`fluid evolve run` evaluates them through the gate (live replays)")
+        return 0
+    if action == "run":
+        return asyncio.run(_evolve_run_pending(args, config))
     if action == "parked":
         records = parked_proposals(root)
         if not records:
@@ -400,6 +420,66 @@ def cmd_evolve(args, config: HarnessConfig) -> int:
     if action == "propose":
         return asyncio.run(_evolve_propose(args, config))
     return 2
+
+
+async def _evolve_run_pending(args, config: HarnessConfig) -> int:
+    from fluid.cli.replay import AnchorRunner
+
+    runner = AnchorRunner(config, provider_name=getattr(args, "provider", None))
+    budget = getattr(args, "budget", None)
+    committed, parked = await run_pending(
+        config,
+        runner=runner,
+        budget=budget if budget is not None else config.anchor_budget,
+    )
+    if not committed and not parked:
+        print("no pending proposals")
+        return 0
+    print(f"{len(committed)} committed, {len(parked)} parked")
+    return 0 if not parked else 1
+
+
+async def run_pending(
+    config: HarnessConfig,
+    *,
+    runner,
+    budget: int | None = None,
+    guidance_home: Path | None = None,
+) -> tuple[list[str], list[str]]:
+    """Evaluate every queued proposal through the gate; returns (committed,
+    parked) target lists. Verdicts are durable in the evolution log /
+    parked.jsonl either way, so evaluated proposals leave the queue."""
+    root = skills_root(config)
+    gate = CommitGate(
+        AnchorStore(root),
+        runner,
+        budget=budget if budget is not None else config.anchor_budget,
+    )
+    committed: list[str] = []
+    parked: list[str] = []
+    for record in pending_queue(root):
+        proposal = proposal_from_dict(record)
+        if proposal.kind != "guidance":
+            continue  # unknown kinds stay queued for a newer fluid
+        verdict = await gate.evaluate(
+            proposal,
+            validator=guidance_validator,
+            apply=lambda p: apply_guidance(p, home=guidance_home),
+            require_motivation=True,  # the synthesizer never gets the waiver
+        )
+        label = f"{proposal.kind}:{proposal.target}"
+        for anchor_id, result in sorted(verdict.anchor_results.items()):
+            print(f"  {anchor_id}: {result}")
+        if verdict.committed:
+            committed.append(proposal.target)
+            print(f"committed: guidance/{proposal.target}.md "
+                  f"(regressions {verdict.regressions}/{verdict.budget})")
+        else:
+            parked.append(proposal.target)
+            print(f"parked {label} at {verdict.stage}: "
+                  + "; ".join(verdict.reasons)[:300])
+        remove_pending(root, kind=proposal.kind, target=proposal.target)
+    return committed, parked
 
 
 async def _evolve_propose(args, config: HarnessConfig) -> int:

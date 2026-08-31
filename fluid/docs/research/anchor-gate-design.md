@@ -165,6 +165,38 @@ owns the prompt vocabulary. `codemode` keeps not importing `cli`.
 - Config: `anchor_budget` (int, default 1). B=0 is strict stability; the
   knob exists because HCL's optimum is task-mix-dependent.
 
+## Phase 2.3 — the synthesizer as proposer
+
+The gate's second client, landed once the manual client had soaked. Two
+timescales, matching the memory doctrine one tier up:
+
+- **Drafting is cheap and in-band.** The synthesizer's ordinary pass may
+  emit a `<guidance stem="…">` tag when the journal shows a *recurring*
+  model-specific mechanical failure (described-instead-of-called actions,
+  repeated malformed calls, format drift). The prompt shows it the session
+  model id and the current guidance file(s) matching it, so a proposal is a
+  full-file amendment, not a blind overwrite. Queue-time validation rejects
+  drafts that could never work: stem not a substring of the session model,
+  missing/invalid motivation case, oversize content. Valid drafts land in
+  `pending-proposals.jsonl` (one per stem — a newer draft supersedes) and
+  announce as `guidance-proposal:<stem>` on the `[learned]` line. Nothing
+  writes the guidance directory here.
+- **Gating is expensive and out-of-band.** `fluid evolve pending` lists
+  drafts; `fluid evolve run` evaluates them through the same CommitGate as
+  manual proposals — validity → improvement → retention with live anchor
+  replays — committing or parking each, then clearing it from the queue
+  (the verdict is durable in the log or parked.jsonl either way). The
+  synthesizer never gets the no-motivation waiver. Gate evaluation never
+  rides a background synthesis pass: replays cost live model turns and the
+  close budget is 90 seconds.
+- **Scope choice**: the shipped family guidance blocks stay in code as
+  factory defaults — migrating them to data would change fresh-install
+  behavior for zero evolution benefit, since learned guidance appends after
+  them and fully owns any *new* family, which is the actual mission ("a new
+  model ships → run it → the harness accumulates its guidance block").
+  Embedding hosts that don't wire `session_model` get no proposals — the
+  seed behavior, unchanged.
+
 ## What this deliberately does not do
 
 - No per-turn replays — the gate runs only when something proposes a commit
