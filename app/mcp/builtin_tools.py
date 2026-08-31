@@ -512,6 +512,229 @@ def _discover_agent_registry(cwd: Optional[str]) -> Optional[Dict[str, Any]]:
 
 
 # ============================================================================
+# App-memory bridge (delegated leg)
+# ============================================================================
+
+def _fluid_outcome_result(outcome: Any) -> Dict[str, Any]:
+    """A fluid ``ToolOutcome`` as the SDK MCP envelope (plain text, not JSON —
+    the fluid handlers already format for the model)."""
+    result: Dict[str, Any] = {
+        "content": [{"type": "text", "text": getattr(outcome, "text", "") or ""}]
+    }
+    if getattr(outcome, "is_error", False):
+        result["isError"] = True
+    return result
+
+
+def _build_memory_bridge_tools(
+    tool: Any, *, session_id: Optional[str], cwd: Optional[str]
+) -> list:
+    """The app-memory tools for the delegated (claude CLI) leg.
+
+    2026-08-31 decision (docs/MEMORY_ARCHITECTURE.md): the delegated leg gets
+    a BRIDGE to the app's memory rather than a note saying it has none. Each
+    tool reuses the fluid builtin handler over the same stores the native leg
+    wires through ``ctx.extra`` — Recall over the continual SkillStore,
+    SessionSearch/SessionView over PgFluidStore's recall hooks, Remember into
+    the same episodic journal. One difference is inherent to the leg: no
+    engine means no live synthesizer, so a Remember journals the fact and the
+    next NATIVE session's synthesis pass distills it into memories.json.
+
+    Gating mirrors the native side's: Recall needs the continual store
+    (code-mode or continual on), Remember needs continual learning, the
+    session pair needs a database. The returned list may be empty.
+    """
+    from app.core.config import settings
+
+    tools: list = []
+    store_on = settings.fluid_code_mode or settings.fluid_continual
+    continual_on = settings.fluid_continual
+    db_on = bool(settings.database_url or settings.postgres_password)
+
+    # The bridged surface itself, for fluid's describe() specialization —
+    # cross-tool routing clauses collapse to the tools that actually exist
+    # here (ruling T9 for descriptions), e.g. SessionSearch does not point at
+    # HistorySearch, which the CLI leg does not have.
+    surface = set()
+    if store_on:
+        surface.add("Recall")
+    if continual_on:
+        surface.add("Remember")
+    if db_on:
+        surface.update({"SessionSearch", "SessionView"})
+    frozen = frozenset(surface)
+
+    def _fluid_ctx() -> Any:
+        from fluid.tools.registry import ToolCtx
+
+        return ToolCtx(cwd=cwd or ".", session_id=session_id)
+
+    if continual_on:
+        # Description is the bridge's own: fluid's speaks of "the # Memory
+        # list shown at the start of every future session", which only native
+        # legs render — here the honest promise is Recall + future native
+        # sessions' snapshots.
+        @tool(
+            "Remember",
+            "Save a durable fact to the app's cross-session memory (shared by "
+            "every session and model). Call it the moment the user asks you to "
+            "remember something, states a lasting preference, or corrects you "
+            "on something worth never repeating; also for durable facts you "
+            "establish yourself. One call per fact; `text` is the fact itself "
+            "in one or two plain sentences — a statement about the world, not "
+            "an instruction to yourself. A background learner distills it into "
+            "the shared memory shortly after; retrieve with Recall. Never "
+            "store secrets: record where a credential lives, not its value.",
+            {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": (
+                            "The fact, in one or two plain sentences. State "
+                            "what is true, not what to do."
+                        ),
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["global", "project"],
+                        "description": (
+                            "'project' when the fact is about this project's "
+                            "code, layout, or conventions; 'global' (default) "
+                            "when it is about the user or their machine in "
+                            "general."
+                        ),
+                    },
+                },
+                "required": ["text"],
+            },
+        )
+        async def remember_tool(args: dict) -> dict:
+            try:
+                from fluid.codemode.skills import SkillStore
+                from fluid.tools.builtins import remember as remember_mod
+
+                from app.core.fluid_memory import skills_root
+
+                skills = SkillStore(skills_root())
+
+                def _journal(text: str, scope: Optional[str] = None) -> None:
+                    entry: Dict[str, Any] = {"kind": "remember", "text": text}
+                    if scope:
+                        entry["scope"] = scope
+                    skills.journal_append(entry)
+
+                ctx = _fluid_ctx()
+                ctx.extra["continual_journal"] = _journal
+                outcome = await remember_mod.handler(args, ctx)
+                return _fluid_outcome_result(outcome)
+            except Exception as e:  # noqa: BLE001
+                logger.exception("Remember bridge failed")
+                return _err(f"failed to record: {e}")
+
+        tools.append(remember_tool)
+
+    if store_on:
+        @tool(
+            "Recall",
+            "Search the app's long-term memory: every fact the continual "
+            "learner has kept (archived entries and other projects' entries "
+            "included) plus the saved-skill index. Use it when the task "
+            "touches something that may have been learned before — a "
+            "preference, a convention, a port, a past correction. Returns the "
+            "top matches per category with their source."
+            + (
+                " For past conversations and what happened in them, use "
+                "SessionSearch instead — Recall covers learned facts and "
+                "skills, not transcripts."
+                if "SessionSearch" in frozen
+                else ""
+            ),
+            {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "Keywords (matched case-insensitively, best "
+                            "matches first)."
+                        ),
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": (
+                            "Maximum matches per category (default 3, max 10)."
+                        ),
+                    },
+                },
+                "required": ["query"],
+            },
+        )
+        async def recall_tool(args: dict) -> dict:
+            try:
+                from fluid.codemode.skills import SkillStore
+                from fluid.tools.builtins import recall as recall_mod
+
+                from app.core.fluid_memory import skills_root
+
+                ctx = _fluid_ctx()
+                ctx.extra["recall_store"] = SkillStore(skills_root())
+                outcome = await recall_mod.handler(args, ctx)
+                return _fluid_outcome_result(outcome)
+            except Exception as e:  # noqa: BLE001
+                logger.exception("Recall bridge failed")
+                return _err(f"recall failed: {e}")
+
+        tools.append(recall_tool)
+
+    if db_on:
+        from fluid.tools.builtins import session_search as session_search_mod
+        from fluid.tools.builtins import session_view as session_view_mod
+
+        def _session_ctx() -> Any:
+            from app.core.provider.fluid_pg_store import PgFluidStore
+
+            store = PgFluidStore()
+            ctx = _fluid_ctx()
+            ctx.extra["session_search"] = store.search
+            ctx.extra["session_recent"] = store.recent_sessions
+            ctx.extra["session_view"] = store.session_slice
+            return ctx
+
+        @tool(
+            "SessionSearch",
+            session_search_mod.describe(frozen),
+            session_search_mod.SPEC.input_schema,
+        )
+        async def session_search_tool(args: dict) -> dict:
+            try:
+                outcome = await session_search_mod.handler(args, _session_ctx())
+                return _fluid_outcome_result(outcome)
+            except Exception as e:  # noqa: BLE001
+                logger.exception("SessionSearch bridge failed")
+                return _err(f"session search failed: {e}")
+
+        tools.append(session_search_tool)
+
+        @tool(
+            "SessionView",
+            session_view_mod.describe(frozen),
+            session_view_mod.SPEC.input_schema,
+        )
+        async def session_view_tool(args: dict) -> dict:
+            try:
+                outcome = await session_view_mod.handler(args, _session_ctx())
+                return _fluid_outcome_result(outcome)
+            except Exception as e:  # noqa: BLE001
+                logger.exception("SessionView bridge failed")
+                return _err(f"session view failed: {e}")
+
+        tools.append(session_view_tool)
+
+    return tools
+
+
+# ============================================================================
 # Tool factory
 # ============================================================================
 
@@ -1341,6 +1564,22 @@ def create_builtin_tools_server(
     all_tools.append(get_app_errors)
 
     # ------------------------------------------------------------------
+    # App-memory bridge — Remember / Recall / SessionSearch / SessionView.
+    # These exist for the DELEGATED (claude CLI) leg, which otherwise sees
+    # none of the app's memory (see docs/MEMORY_ARCHITECTURE.md): the CLI
+    # subprocess only receives tools via MCP, so the fluid builtins backed by
+    # the same stores are re-exposed here. On native legs the bridged copies
+    # are shadowed (fluid_tool_bridge.NATIVE_SHADOWED_BUILTINS) in favor of
+    # fluid's bare-named originals.
+    # ------------------------------------------------------------------
+    try:
+        all_tools.extend(
+            _build_memory_bridge_tools(tool, session_id=session_id, cwd=cwd)
+        )
+    except Exception:  # noqa: BLE001 — memory is context, never a blocker
+        logger.warning("memory bridge tool registration failed", exc_info=True)
+
+    # ------------------------------------------------------------------
     # Connector action-gateway tools ({type}_actions / {type}_invoke) —
     # registered ONLY when this AI session is linked to a gateway-enabled
     # connector session. This is the seam that makes connector capabilities
@@ -1385,6 +1624,13 @@ def get_builtin_tool_names() -> List[str]:
         "mcp__builtins__TaskGet",
         "mcp__builtins__ToolSearch",
         "mcp__builtins__GetAppErrors",
+        # The app-memory bridge (delegated leg; shadowed on native legs where
+        # fluid's bare-named builtins serve the same stores). Allow-listed
+        # unconditionally — per-session registration gates real availability.
+        "mcp__builtins__Remember",
+        "mcp__builtins__Recall",
+        "mcp__builtins__SessionSearch",
+        "mcp__builtins__SessionView",
     ]
     # Connector gateway tools share the `builtins` server namespace. Allow-list
     # them unconditionally — per-session REGISTRATION (only for linked

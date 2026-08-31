@@ -1589,30 +1589,15 @@ def build_options_from_profile(
     options.aih_session_id = session_id
     options.aih_profile_id = profile.get("id")
 
-    # The NATIVE leg's project-memory dir (rulings MEM1/MEM3). Anchored on the
-    # PROJECT's root path where we have one — the same anchor memory_sync uses,
-    # so a worktree session points at the main checkout's dir rather than a
-    # per-worktree mirror nothing syncs. Stamped unconditionally: the leg isn't
-    # settled until the adapter connects, and this is inert on the delegated leg
-    # (the claude CLI owns ~/.claude/projects/<slug>/memory itself). The adapter
-    # projects it onto SessionOptions.extra["memory_dir"] and only a native leg
-    # reads it, where it becomes the prompt's "# Project memory" section.
-    #
-    # The dir is CREATED here, not merely resolved: the prompt promises the
-    # model that its memory lives there, and on a project no one has written
-    # memory for nothing else would create it (memory_sync only mkdirs when it
-    # has DB rows to write down). ensure_memory_dir swallows its own OSError.
-    try:
-        from app.core.memory_sync import ensure_memory_dir, memory_dir_for_working_dir
-
-        _memory_anchor = get_project_working_dir(project) if project else None
-        _memory_dir = ensure_memory_dir(
-            memory_dir_for_working_dir(_memory_anchor or working_dir, "native")
-        )
-        options.aih_memory_dir = str(_memory_dir) if _memory_dir else None
-    except Exception:  # noqa: BLE001 — a memory dir is context, never a blocker
-        logger.warning("could not resolve native project-memory dir", exc_info=True)
-        options.aih_memory_dir = None
+    # The old ``aih_memory_dir`` stamping lived here (rulings MEM1/MEM3): the
+    # native leg's per-project memory dir, rendered into the prompt as a
+    # "# Project memory" section. Removed 2026-08-31 (see
+    # docs/MEMORY_ARCHITECTURE.md): the section's write path — the Memory
+    # tool — went away in PR #997, so the prompt was promising a memory that
+    # nothing could write. Durable facts now flow through the continual
+    # learner (Remember → journal → synthesizer → the # Memory snapshot).
+    # memory_sync still resolves its own dir for the DB mirror and the
+    # explicit per-project import.
 
     # Whether THIS machine can reach GitHub through the gh CLI (installed AND
     # signed in). The adapter projects it onto SessionOptions.extra

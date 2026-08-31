@@ -1,0 +1,152 @@
+"""The delegated leg's app-memory bridge (docs/MEMORY_ARCHITECTURE.md).
+
+The claude CLI subprocess sees the app's tools only through MCP, so the
+builtins server re-exposes the memory surface fluid's builtins give native
+legs: Remember and Recall over the continual SkillStore, SessionSearch and
+SessionView over the Postgres store's recall hooks. These tests pin the
+gating (which tools exist under which settings) and drive the journal-backed
+pair end to end against a temp skills root; the session pair is registration-
+gated on a database, so only its wiring is asserted here.
+"""
+
+import json
+from unittest.mock import patch
+
+import pytest
+
+
+def _bridge_tools(session_id="session-1", cwd=None):
+    import claude_agent_sdk as sdk
+
+    from app.mcp import builtin_tools
+
+    captured = {}
+    real_create = sdk.create_sdk_mcp_server
+
+    def _spy(name, version, tools):
+        captured["tools"] = tools
+        return real_create(name=name, version=version, tools=tools)
+
+    with patch.object(sdk, "create_sdk_mcp_server", side_effect=_spy):
+        builtin_tools.create_builtin_tools_server(session_id=session_id, cwd=cwd)
+
+    return {tool.name: tool for tool in captured["tools"]}
+
+
+# ─── registration gating ─────────────────────────────────────────────────────
+
+
+def test_journal_pair_registered_by_default(monkeypatch):
+    """Continual + code mode default ON; no database in unit tests, so the
+    session pair stays off while Remember/Recall ride every server."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "database_url", None)
+    monkeypatch.setattr(settings, "postgres_password", None)
+    tools = _bridge_tools()
+    assert "Remember" in tools
+    assert "Recall" in tools
+    assert "SessionSearch" not in tools
+    assert "SessionView" not in tools
+
+
+def test_session_pair_needs_a_database(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "database_url", "postgresql://x/y")
+    tools = _bridge_tools()
+    assert "SessionSearch" in tools
+    assert "SessionView" in tools
+    # The CLI leg has no HistorySearch, so the description must not route to
+    # it (ruling T9 for descriptions) — fluid's describe() gets the bridged
+    # surface, not the native one.
+    assert "HistorySearch" not in tools["SessionSearch"].description
+
+
+def test_continual_off_drops_remember_but_keeps_recall(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "fluid_continual", False)
+    tools = _bridge_tools()
+    assert "Remember" not in tools
+    # The store still holds whatever was learned before the switch-off.
+    assert "Recall" in tools
+
+
+def test_store_off_drops_recall_too(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "fluid_continual", False)
+    monkeypatch.setattr(settings, "fluid_code_mode", False)
+    tools = _bridge_tools()
+    assert "Recall" not in tools
+    assert "Remember" not in tools
+
+
+def test_native_shadow_set_covers_the_memory_four():
+    """On native legs fluid's bare-named builtins serve the same stores; the
+    bridged copies must be dropped there or the model sees two of each."""
+    from app.core.provider.fluid_tool_bridge import NATIVE_SHADOWED_BUILTINS
+
+    assert {"Remember", "Recall", "SessionSearch", "SessionView"} <= set(
+        NATIVE_SHADOWED_BUILTINS
+    )
+
+
+# ─── the journal-backed pair, end to end ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_remember_journals_the_fact(monkeypatch, tmp_path):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "fluid_skills_dir", str(tmp_path / "skills"))
+    tools = _bridge_tools()
+
+    result = await tools["Remember"].handler(
+        {"text": "the staging deploy runs from the blue box", "scope": "project"}
+    )
+
+    assert not result.get("isError")
+    assert "Recorded" in result["content"][0]["text"]
+    lines = (
+        (tmp_path / "skills" / "journal.jsonl")
+        .read_text(encoding="utf-8").strip().splitlines()
+    )
+    entry = json.loads(lines[-1])
+    assert entry["kind"] == "remember"
+    assert entry["scope"] == "project"
+    assert "blue box" in entry["text"]
+
+
+@pytest.mark.asyncio
+async def test_remember_refuses_secrets(monkeypatch, tmp_path):
+    """fluid's screening rides the bridge unchanged: a credential is refused
+    before it can reach the journal."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "fluid_skills_dir", str(tmp_path / "skills"))
+    tools = _bridge_tools()
+
+    result = await tools["Remember"].handler(
+        {"text": "the api key is sk-ant-abc123def456ghi789"}
+    )
+
+    assert result.get("isError")
+    assert not (tmp_path / "skills" / "journal.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_recall_searches_the_shared_store(monkeypatch, tmp_path):
+    """Recall runs fluid's handler over the SAME store the native leg wires —
+    an empty store answers with fluid's honest no-match text, proving the
+    whole path (SDK envelope → fluid ctx → SkillStore) is live."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "fluid_skills_dir", str(tmp_path / "skills"))
+    tools = _bridge_tools()
+
+    result = await tools["Recall"].handler({"query": "staging deploy"})
+
+    assert not result.get("isError")
+    assert "No stored memory or skill matches" in result["content"][0]["text"]

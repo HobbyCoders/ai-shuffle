@@ -6,10 +6,11 @@ share one logical memory.
 
 Only the NATIVE leg participates. A fluid NativeLoop session has no CLI behind
 it, so the app owns ``<fluid_projects>/<slug>/memory/`` (ruling MEM1,
-~/.fluid/projects by default) and the native system prompt points the model at
-it (ruling MEM3, see ``_compile_prompt_sections`` in
-app/core/provider/harness_adapter.py). That fluid dir is the one and only
-synced mirror.
+~/.fluid/projects by default). That fluid dir is the one and only synced
+mirror. Since 2026-08-31 nothing in the prompt points at it any more (the
+"# Project memory" section is gone — see docs/MEMORY_ARCHITECTURE.md), so the
+sync serves pre-existing content and the explicit per-project import only;
+durable facts travel through the continual learner instead.
 
 The DELEGATED leg does not sync at all. ``<claude_projects>/<slug>/memory/``
 belongs to the claude CLI: the CLI writes it, the CLI reads it, and it stays
@@ -187,31 +188,6 @@ def memory_dir_for_working_dir(
     except Exception:  # noqa: BLE001
         logger.debug("memory_sync: could not resolve memory dir for %r", working_dir, exc_info=True)
         return None
-
-
-def ensure_memory_dir(memory_dir: Optional[Path]) -> Optional[Path]:
-    """Create ``memory_dir`` (parents included) if it is not there yet.
-
-    The native prompt tells the model its memory for this project *lives in*
-    this directory (ruling MEM3), so on a project nobody has written memory for
-    the first thing the model does — list it — fails, and the turn is spent
-    working around a directory that was simply never created. The only other
-    mkdir on this path is in ``_write_local``, which runs solely when the DB
-    already has rows to push down.
-
-    Best-effort by construction: a read-only or otherwise unwritable projects
-    root logs at debug and changes nothing. A missing memory dir is a papercut;
-    failing a query over one would not be. Returns the path either way.
-    """
-    if memory_dir is None:
-        return None
-    try:
-        memory_dir.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        logger.debug(
-            "memory_sync: could not create memory dir %s", memory_dir, exc_info=True
-        )
-    return memory_dir
 
 
 def memory_leg_for_options(options: object) -> str:

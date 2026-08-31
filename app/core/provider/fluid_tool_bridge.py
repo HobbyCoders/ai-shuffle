@@ -135,6 +135,12 @@ def register_sdk_tools(
 # gates writes/deletes the way the SDK path's permission callback did.
 
 BUILTINS_RISK_MAP: Mapping[str, str] = {
+    # The delegated leg's app-memory bridge — same risk fluid assigns the
+    # bare-named originals (Remember journals a proposal; the curator decides).
+    "Remember": "safe",
+    "Recall": "safe",
+    "SessionSearch": "safe",
+    "SessionView": "safe",
     "ScheduleWakeup": "safe",
     "NotifyDevices": "safe",
     "Monitor": "safe",
@@ -235,8 +241,8 @@ SERVER_DEFAULT_RISK: Mapping[str, str] = {
 # (deferred tier: announced by name, loaded on demand via ToolSearch). The
 # app-config CRUD surface alone is ~35 schemas; pushing all of them into every
 # coding session buried the core tools. ``builtins`` stays eager — its tools
-# (Memory, Monitor, task tools, scheduling) are the session's operating
-# surface. Claude Code applies the same tiering to its MCP servers.
+# (the memory bridge, Monitor, task tools, scheduling) are the session's
+# operating surface. Claude Code applies the same tiering to its MCP servers.
 DEFERRED_SDK_SERVERS: frozenset[str] = frozenset({
     "app-config",
     "ai-tools",
@@ -248,8 +254,14 @@ DEFERRED_SDK_SERVERS: frozenset[str] = frozenset({
 # fluid registers its own bare-named versions there (ruling A13), so bridging
 # the copy would show the model two of each. One set, two readers — the harness
 # adapter's ``skip_tools`` (what actually drops them) and the tool catalog's
-# availability marking (what tells the picker why the row is greyed).
-NATIVE_SHADOWED_BUILTINS: frozenset[str] = frozenset({"Task", "Monitor", "ToolSearch"})
+# availability marking (what tells the picker why the row is greyed). The
+# memory four (Remember/Recall/SessionSearch/SessionView) are the delegated
+# leg's app-memory bridge; native legs run fluid's originals over the same
+# stores via ctx.extra.
+NATIVE_SHADOWED_BUILTINS: frozenset[str] = frozenset({
+    "Task", "Monitor", "ToolSearch",
+    "Remember", "Recall", "SessionSearch", "SessionView",
+})
 
 
 def register_recorded_sdk_servers(

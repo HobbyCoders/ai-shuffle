@@ -76,7 +76,8 @@ HONORED:
     dispatch (ruling CE12) — the profile blocklist is now a wall, not just a
     permission-callback denial. Delegated: the CLI's ``--disallowed-tools``,
     unioned with the banned-tool set (Task/Agent/wake family, ruling A6).
-  * code-mode + the continual harness → native ``NativeLoop(codemode=...)``.
+  * code-mode + the continual harness → native ``NativeLoop(codemode=...)``
+    (and ``journal=`` when code mode is not carrying the journal).
     Both are ON by default for every native leg (the delegated CLI leg caps
     ``code_mode`` off and is not touched). Four app settings drive it, mirroring
     fluid's own ``config/loader.py`` wiring: ``fluid_code_mode`` builds the
@@ -85,9 +86,19 @@ HONORED:
     ``fluid_continual_model`` pins synthesis to one model (None = the session's
     model), and ``fluid_skills_dir`` relocates the skill/journal root (None =
     ``<data_dir>/fluid/skills``, so nothing lands in fluid's ``~/.fluid``
-    default). Construction is best-effort: any failure degrades to
-    ``codemode=None`` rather than failing the turn. ``NativeLoop.aclose()``
-    already closes the session, so there is no teardown here. When the session
+    default). The synthesizer is scoped with ``project_key_for(cwd)`` so a
+    project-tagged Remember lands as that project's fact, not an install-global
+    one — the same key the prompt compiler renders the ``# Memory`` snapshot
+    under. The loader's two ctx handles ride along: ``recall_store`` (the
+    Recall builtin's store) whenever the skill store exists, and
+    ``continual_journal`` (the Remember builtin's write path) when continual is
+    on. With continual on but no live ``CodeModeSession`` — code mode off, no
+    registry, or a failed construction — a ``ToolJournal`` takes over the
+    episodic recording, so the learner keeps seeing turns instead of silently
+    starving behind a frozen ``# Memory`` snapshot. Construction is
+    best-effort: any failure degrades to ``codemode=None`` rather than failing
+    the turn. ``NativeLoop.aclose()`` already closes the session (draining the
+    journal's synthesizer), so there is no teardown here. When the session
     really came up (fail-open, so never on the setting alone) the compiled
     prompt gains a trailing ``# Code mode`` section and its skills/agents
     headers are rewritten to say that Skill and Task are imported inside
@@ -228,8 +239,9 @@ from app.core.provider.events import (
 # fluid imports (the library we wrap). Its top-level __init__ is intentionally
 # empty, so we import from submodules directly.
 from fluid.codemode.continual import Synthesizer
+from fluid.codemode.journal import ToolJournal
 from fluid.codemode.session import CodeModeSession
-from fluid.codemode.skills import SkillStore
+from fluid.codemode.skills import SkillStore, project_key_for
 from fluid.codemode.subprocess_kernel import KernelConfig
 from fluid.context.compaction import CompactionConfig
 from fluid.engine.native import NativeLoop
@@ -538,12 +550,15 @@ class HarnessAdapter(ProviderAdapter):
             # dir rather than fluid's ~/.fluid default. Best-effort throughout:
             # a broken skills dir or an unavailable kernel must never take down
             # a turn, so any failure degrades to plain JSON tool calling.
-            # NativeLoop.aclose() closes the session, so there is no teardown.
+            # NativeLoop.aclose() closes the session (and drains the journal's
+            # synthesizer), so there is no teardown here.
             codemode = None
+            journal = None
+            engine_bus = None
             try:
                 from app.core.config import settings
 
-                if settings.fluid_code_mode and self._registry is not None:
+                if settings.fluid_code_mode or settings.fluid_continual:
                     skills = SkillStore(_fluid_skills_root())
                     try:
                         # Opportunistic lifecycle pass, mirroring fluid's own
@@ -553,28 +568,88 @@ class HarnessAdapter(ProviderAdapter):
                         skills.curate()
                     except Exception:  # noqa: BLE001
                         pass
+                    # The Recall builtin searches this store (live + archived
+                    # memories in every scope, saved skills); wiring the handle
+                    # is what makes the tool visible (requires_extra gate).
+                    native_ctx.extra.setdefault("recall_store", skills)
                     synthesizer = None
                     if settings.fluid_continual:
+                        # Materialized HERE rather than letting NativeLoop
+                        # default one, for the same reason fluid's loader does
+                        # it: the synthesizer's ContinualUpdate announcements
+                        # must publish to the SAME bus the engine streams from.
+                        from fluid.events.bus import EventBus
+                        from fluid.events.model import ContinualUpdate
+
+                        engine_bus = EventBus()
+                        _bus, _sid = engine_bus, fluid_session_id or ""
+
+                        async def _announce(changes: list) -> None:
+                            # Learning that lands invisibly might as well not
+                            # have happened — announce what the pass changed.
+                            await _bus.publish(ContinualUpdate(
+                                session_id=_sid, changes=tuple(changes),
+                            ))
+
                         # Session provider; fluid_continual_model pins synthesis
                         # to one model so skill quality doesn't drift with the
-                        # session's provider choice. Passes are background and
-                        # best-effort (see fluid/codemode/continual.py).
+                        # session's provider choice. ``project`` scopes what the
+                        # learner writes: a project-tagged fact lands under this
+                        # cwd's key (the SAME key the prompt compiler renders
+                        # the # Memory snapshot under) instead of leaking into
+                        # every other project's sessions. Passes are background
+                        # and best-effort (see fluid/codemode/continual.py).
                         synthesizer = Synthesizer(
                             provider_client,
                             settings.fluid_continual_model or cast(str, native_model),
                             skills,
+                            project=project_key_for(options.cwd or "."),
+                            on_change=_announce,
                         )
-                    codemode = CodeModeSession(
-                        self._registry, config=_codemode_kernel_config(),
-                        skills=skills, synthesizer=synthesizer,
-                    )
+
+                        def _remember(text: str, scope: Optional[str] = None) -> None:
+                            # The Remember builtin's write path: journal a
+                            # high-salience entry and pull the next synthesis
+                            # pass forward.
+                            entry: Dict[str, Any] = {"kind": "remember", "text": text}
+                            if scope:
+                                entry["scope"] = scope
+                            skills.journal_append(entry)
+                            synthesizer.mark_urgent()
+                            synthesizer.kick()
+
+                        native_ctx.extra.setdefault("continual_journal", _remember)
+                    if settings.fluid_code_mode and self._registry is not None:
+                        try:
+                            codemode = CodeModeSession(
+                                self._registry, config=_codemode_kernel_config(),
+                                skills=skills, synthesizer=synthesizer,
+                            )
+                        except Exception:  # noqa: BLE001 — JSON tool calling
+                            logger.warning(
+                                "[HarnessAdapter] code-mode setup FAILED (fluid "
+                                "session=%s) — this native leg runs plain JSON "
+                                "tool calls",
+                                fluid_session_id, exc_info=True,
+                            )
+                            codemode = None
+                    if codemode is None and settings.fluid_continual:
+                        # JSON-mode leg of the learning loop (code mode off, no
+                        # registry, or a failed construction): same journal
+                        # file, same synthesizer, fed from the engine's
+                        # turn/tool seams — without it the learner sees nothing
+                        # while the model keeps reading a frozen # Memory
+                        # snapshot.
+                        journal = ToolJournal(skills, synthesizer)
             except Exception:  # noqa: BLE001 — degrade to JSON tool calling
                 logger.warning(
                     "[HarnessAdapter] code-mode/continual setup FAILED (fluid "
-                    "session=%s) — this native leg runs plain JSON tool calls",
+                    "session=%s) — this native leg runs plain JSON tool calls "
+                    "and does not journal",
                     fluid_session_id, exc_info=True,
                 )
                 codemode = None
+                journal = None
             # Compiled ONCE, used twice below: the joined text is the prompt
             # the engine sends; the labeled sections feed get_context_usage().
             # Compiled AFTER the block above on purpose — the code-mode prompt
@@ -655,6 +730,14 @@ class HarnessAdapter(ProviderAdapter):
                 # tools onto the registry and swaps the model's tool schema for
                 # them when this is present.
                 codemode=codemode,
+                # The JSON-mode episodic journal built above — NativeLoop feeds
+                # it from its turn/tool seams, and only reads it when codemode
+                # is None (never double-journaled).
+                journal=journal,
+                # The bus the synthesizer's ContinualUpdate announcements were
+                # wired to (None when continual is off — NativeLoop then
+                # defaults its own, exactly as before).
+                bus=engine_bus,
                 registry=self._registry,
                 permissions=permissions,
                 ctx=native_ctx,
@@ -852,12 +935,6 @@ class HarnessAdapter(ProviderAdapter):
         profile_id = getattr(sdk_options, "aih_profile_id", None)
         if profile_id:
             opts.extra["profile_id"] = profile_id
-        # The native leg's project-memory dir (rulings MEM1/MEM3), resolved by
-        # query_options from the project's root path. Only the native prompt
-        # builder reads it — the delegated leg's memory belongs to the CLI.
-        memory_dir = getattr(sdk_options, "aih_memory_dir", None)
-        if memory_dir:
-            opts.extra["memory_dir"] = str(memory_dir)
         # Whether the install's gh CLI is present and signed in (stamped by
         # query_options as ``aih_github_connected``, behind a TTL cache). Only
         # forwarded when true — the prompt's "# GitHub" section exists solely to
@@ -1990,12 +2067,18 @@ class HarnessAdapter(ProviderAdapter):
         tool documentation the model would otherwise never see, since a
         code-mode schema carries four tools instead of forty.
 
-        ``native`` says whether this compilation feeds a native leg. It is the
-        gate on the ``# Project memory`` section (ruling MEM3): only a native
-        leg has an app-owned memory dir to point at — under
-        ``prompt_full_replace`` this same compiler also builds the DELEGATED
-        leg's prompt, and there the claude CLI owns memory and gathers it
-        itself, so naming the fluid dir would send it to the wrong place.
+        ``native`` says whether this compilation feeds a native leg. It gates
+        the ``# Memory`` snapshot and the steering/guidance/recall extras:
+        under ``prompt_full_replace`` this same compiler also builds the
+        DELEGATED leg's prompt, and there the claude CLI owns memory and
+        gathers it itself, so naming the fluid store would double it up.
+
+        The old ``# Project memory`` section (ruling MEM3) is gone (2026-08-31
+        decision, see docs/MEMORY_ARCHITECTURE.md): its write path — the
+        Memory tool — was removed in PR #997, and a standing instruction the
+        model cannot follow poisons trust in the rest of the prompt. Durable
+        facts now travel through the continual learner (Remember → journal →
+        synthesizer → the ``# Memory`` snapshot above).
         """
         try:
             from fluid.context.compiler import (
@@ -2012,7 +2095,6 @@ class HarnessAdapter(ProviderAdapter):
             # ``Task`` is. None is fluid's own "no filter" value, so an
             # unrestricted agent compiles exactly as it did before.
             permitted = _permitted_tool_names(options, registry)
-            memory_dir = (options.extra or {}).get("memory_dir") if native else None
             # The continual learner's ``# Memory`` snapshot (facts the
             # synthesizer distilled from past sessions' journals) — native legs
             # only, and only when continual learning is on. The delegated
@@ -2114,26 +2196,6 @@ class HarnessAdapter(ProviderAdapter):
                 # Before the code-mode section, which stays last.
                 sections.append(
                     PromptSection(kind="extra", text=GITHUB_BLOCK)
-                )
-            if memory_dir:
-                # Ruling MEM3. Before the code-mode section, which must stay
-                # last: it is the operating rule for everything above it, this
-                # section included ("write a file" means the file tools, which
-                # under code mode are reached from run_python). Carried as a
-                # ``memory`` section so get_context_usage() prices it under
-                # "Memory files" with a per-file row naming MEMORY.md — the
-                # section IS that file's contents plus its header, and the
-                # AGENTS.md instruction stack (also memory-kind, gathered by
-                # the compiler above) sits alongside it rather than clashing:
-                # the memory dir lives outside the tree, so no file is counted
-                # twice.
-                sections.append(
-                    PromptSection(
-                        kind="memory",
-                        text=_project_memory_section(str(memory_dir)),
-                        path=str(Path(memory_dir) / "MEMORY.md"),
-                        scope="project",
-                    )
                 )
             if code_mode:
                 # LAST, after env and the app's extra blocks: it is the
@@ -3118,14 +3180,14 @@ def _recall_backend_available() -> bool:
 
 
 def _fluid_skills_root() -> Path:
-    """The continual store's home: saved skills, the journal, memories.json."""
-    from app.core.config import settings
+    """The continual store's home: saved skills, the journal, memories.json.
 
-    return (
-        Path(settings.fluid_skills_dir)
-        if settings.fluid_skills_dir
-        else settings.effective_data_dir / "fluid" / "skills"
-    )
+    Shared with the delegated leg's memory bridge (app/mcp/builtin_tools.py)
+    through app.core.fluid_memory — both legs must open the SAME store.
+    """
+    from app.core.fluid_memory import skills_root
+
+    return skills_root()
 
 
 def _tool_predicate(options: SessionOptions):
@@ -3447,62 +3509,6 @@ def _model_guidance_blocks(model: Optional[str]) -> Tuple[str, ...]:
             exc_info=True,
         )
         return ()
-
-
-# Ruling MEM3: the native leg had no memory surface at all — no CLI behind it
-# means nothing tells the model a memory dir exists, so nothing was ever
-# written or read. This section is that surface. It ships as a ``memory``
-# section pathed at the real MEMORY.md, so the context-usage breakdown lists
-# it under "Memory files" next to the AGENTS.md stack.
-#
-# The inlined index is prompt prefix on every turn, so it is capped. 24k chars
-# is roughly 6k tokens — far more than a healthy index needs, and small enough
-# that a runaway MEMORY.md cannot eat the window.
-_MEMORY_INDEX_CHAR_CAP = 24_000
-
-_PROJECT_MEMORY_HEADER = """# Project memory
-Your memory for this project lives in {memory_dir}. MEMORY.md in that \
-directory is the index, and it is loaded at the start of every session — its \
-current contents are below.
-
-Save one fact per file: a short .md file with frontmatter (name, description, \
-metadata.type = user | feedback | project | reference), then add a one-line \
-pointer to MEMORY.md so the next session can find it:
-
-- [Title](file.md) — the hook, in a few words
-
-Update the existing file when a fact changes; do not write a second file on \
-the same subject. Keep the index in step with the files.
-
-Worth saving: the user's preferences and rulings, how this system actually \
-behaves, decisions and the reasons behind them, traps that cost you time. Not \
-worth saving: anything the repository already records — code, docs and commit \
-history are there to be read."""
-
-_MEMORY_INDEX_EMPTY = "(empty — nothing saved yet)"
-
-
-def _project_memory_section(memory_dir: str) -> str:
-    """The ``# Project memory`` prompt text, with MEMORY.md inlined.
-
-    Reading the index at compile time is deliberate: the model gets the current
-    memory as context instead of having to spend a tool call on it, exactly as
-    the CLI leg does. A missing or unreadable file is stated as empty rather
-    than hidden — "there is a dir, it holds nothing yet" is the useful answer.
-    """
-    index = _MEMORY_INDEX_EMPTY
-    try:
-        text = (Path(memory_dir) / "MEMORY.md").read_text(encoding="utf-8").strip()
-        if text:
-            index = (
-                text
-                if len(text) <= _MEMORY_INDEX_CHAR_CAP
-                else text[:_MEMORY_INDEX_CHAR_CAP] + "\n\n[truncated]"
-            )
-    except (OSError, UnicodeDecodeError):
-        pass
-    header = _PROJECT_MEMORY_HEADER.format(memory_dir=memory_dir)
-    return f"{header}\n\n## MEMORY.md\n{index}"
 
 
 def _code_mode_skills_text(text: str) -> str:

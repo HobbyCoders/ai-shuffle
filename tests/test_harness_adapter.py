@@ -1804,6 +1804,115 @@ async def test_native_leg_code_mode_failure_degrades_to_none(monkeypatch, tmp_pa
     monkeypatch.setattr(ha, "SkillStore", _boom)
     captured = await _connect_native_capturing(monkeypatch, tmp_path)
     assert captured["codemode"] is None
+    assert captured["journal"] is None
+
+
+@pytest.mark.asyncio
+async def test_native_leg_wires_recall_and_remember_handles(monkeypatch, tmp_path):
+    """The loader's two ctx handles ride the app's build too: recall_store
+    makes the Recall builtin visible, continual_journal the Remember builtin
+    (fluid gates both through requires_extra)."""
+    from fluid.codemode.skills import SkillStore
+
+    captured = await _connect_native_capturing(monkeypatch, tmp_path)
+    ctx = captured["ctx"]
+    assert isinstance(ctx.extra.get("recall_store"), SkillStore)
+    assert callable(ctx.extra.get("continual_journal"))
+    # Code mode is up, so IT carries the journal — no ToolJournal rides along
+    # (NativeLoop would ignore one anyway; never double-journaled).
+    assert captured["journal"] is None
+
+
+@pytest.mark.asyncio
+async def test_continual_without_code_mode_gets_a_tool_journal(monkeypatch, tmp_path):
+    """Audit item 0.4, the dead journal wire: with code mode off, the learner
+    used to see nothing while the model kept reading a frozen # Memory
+    snapshot. The ToolJournal is the JSON-mode leg of the learning loop."""
+    from fluid.codemode.journal import ToolJournal
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "fluid_code_mode", False)
+    captured = await _connect_native_capturing(monkeypatch, tmp_path)
+    assert captured["codemode"] is None
+    journal = captured["journal"]
+    assert isinstance(journal, ToolJournal)
+    assert journal._synthesizer is not None
+    # The remember/recall channels do not depend on code mode.
+    assert callable(captured["ctx"].extra.get("continual_journal"))
+    assert captured["ctx"].extra.get("recall_store") is not None
+
+
+@pytest.mark.asyncio
+async def test_code_mode_failure_still_journals(monkeypatch, tmp_path):
+    """When the code-mode session cannot come up, the learner must not
+    silently die with it — the ToolJournal takes over the episodic record."""
+    import app.core.provider.harness_adapter as ha
+    from fluid.codemode.journal import ToolJournal
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("kernel unavailable")
+
+    monkeypatch.setattr(ha, "CodeModeSession", _boom)
+    captured = await _connect_native_capturing(monkeypatch, tmp_path)
+    assert captured["codemode"] is None
+    assert isinstance(captured["journal"], ToolJournal)
+
+
+@pytest.mark.asyncio
+async def test_continual_off_drops_journal_remember_and_bus(monkeypatch, tmp_path):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "fluid_continual", False)
+    captured = await _connect_native_capturing(monkeypatch, tmp_path)
+    assert captured["journal"] is None
+    assert captured["bus"] is None  # NativeLoop defaults its own
+    ctx = captured["ctx"]
+    assert "continual_journal" not in ctx.extra
+    # Recall still serves what was learned before the switch-off.
+    assert ctx.extra.get("recall_store") is not None
+
+
+@pytest.mark.asyncio
+async def test_synthesizer_is_project_scoped_and_announces(monkeypatch, tmp_path):
+    """The learner writes under the session cwd's project key — the same key
+    the prompt compiler renders the # Memory snapshot with — and announces
+    passes on the SAME bus the engine streams from."""
+    from fluid.codemode.skills import project_key_for
+    from fluid.events.bus import EventBus
+
+    captured = await _connect_native_capturing(monkeypatch, tmp_path)
+    synthesizer = captured["codemode"]._synthesizer
+    assert synthesizer._project == project_key_for(".")
+    assert synthesizer._on_change is not None
+    assert isinstance(captured["bus"], EventBus)
+
+
+@pytest.mark.asyncio
+async def test_remember_channel_journals_and_kicks(monkeypatch, tmp_path):
+    """The continual_journal closure is Remember's write path: a high-salience
+    journal entry (scope preserved) plus an urgent synthesis kick."""
+    import json
+
+    from fluid.codemode.continual import Synthesizer
+    from app.core.config import settings
+
+    kicked: list = []
+    monkeypatch.setattr(Synthesizer, "kick", lambda self: kicked.append(True))
+    monkeypatch.setattr(settings, "fluid_skills_dir", str(tmp_path / "skills"))
+    captured = await _connect_native_capturing(monkeypatch, tmp_path)
+
+    remember = captured["ctx"].extra["continual_journal"]
+    remember("the deploy runs from the blue box", "project")
+
+    lines = (
+        (tmp_path / "skills" / "journal.jsonl")
+        .read_text(encoding="utf-8").strip().splitlines()
+    )
+    entry = json.loads(lines[-1])
+    assert entry["kind"] == "remember"
+    assert entry["scope"] == "project"
+    assert "blue box" in entry["text"]
+    assert kicked
 
 
 # ─── Code-mode prompt rewrites ───────────────────────────────────────────────
@@ -5447,12 +5556,14 @@ def test_with_agents_index_is_idempotent():
     assert ha._with_agents_index("BASE", None, None) == ("BASE", None)
 
 
-# ─── Native-leg project memory (ruling MEM3) ─────────────────────────────────
+# ─── No "# Project memory" section (2026-08-31 decision) ─────────────────────
 #
-# The native leg has no CLI behind it, so nothing told the model a memory dir
-# existed and nothing was ever written or read. ``extra["memory_dir"]`` (stamped
-# by query_options as ``aih_memory_dir``) is what turns that on: the prompt names
-# the dir, states the file convention, and inlines the current MEMORY.md.
+# Ruling MEM3's section told the model to save one fact per file in a
+# per-project dir, but its write path — the Memory tool — was removed in
+# PR #997: the prompt was promising a memory nothing could write. The section
+# and its ``memory_dir`` plumbing are gone (docs/MEMORY_ARCHITECTURE.md);
+# durable facts travel through the continual learner (Remember → journal →
+# synthesizer → the # Memory snapshot).
 
 
 async def _connect_with_memory_dir(monkeypatch, workspace, memory_dir):
@@ -5468,11 +5579,11 @@ async def _connect_with_memory_dir(monkeypatch, workspace, memory_dir):
 
 
 @pytest.mark.asyncio
-async def test_native_prompt_carries_the_project_memory_section(
+async def test_no_project_memory_section_even_with_a_memory_dir(
     monkeypatch, agent_workspace, tmp_path
 ):
-    import app.core.provider.harness_adapter as ha
-
+    """A stale ``extra["memory_dir"]`` (an old caller, a replayed options
+    blob) must not resurrect the section."""
     memory_dir = tmp_path / "fluid-projects" / "-proj" / "memory"
     _write_file(
         memory_dir / "MEMORY.md",
@@ -5480,82 +5591,17 @@ async def test_native_prompt_carries_the_project_memory_section(
     )
 
     captured = await _connect_with_memory_dir(monkeypatch, agent_workspace, memory_dir)
-    system = captured["system"]
 
-    assert "# Project memory" in system
-    assert str(memory_dir) in system
-    assert "- [Deploy recipe](deploy.md) — build, copy, restart" in system
-    assert "## MEMORY.md" in system
-    # Code mode stays LAST: it is the operating rule for everything above it,
-    # this section included.
-    assert system.index("# Project memory") < system.index("# Code mode")
-    assert ha.CODE_MODE_SECTION in system
-    # There is no Memory tool anywhere anymore, so the reachable list never
-    # names one.
-    assert "Skill, Task, Memory, Ledger" not in system
+    assert "# Project memory" not in captured["system"]
+    assert str(memory_dir) not in captured["system"]
+    assert not [
+        s for s in captured["system_sections"].sections
+        if s.text.startswith("# Project memory")
+    ]
 
 
 @pytest.mark.asyncio
-async def test_project_memory_section_is_priced_as_a_memory_file(
-    monkeypatch, agent_workspace, tmp_path
-):
-    from fluid.context.usage import build_context_usage
-
-    memory_dir = tmp_path / "fluid-projects" / "-proj" / "memory"
-    _write_file(memory_dir / "MEMORY.md", "- [Thing](thing.md) — a thing")
-
-    captured = await _connect_with_memory_dir(monkeypatch, agent_workspace, memory_dir)
-    compiled = captured["system_sections"]
-
-    memory_sections = [
-        s for s in compiled.sections if s.text.startswith("# Project memory")
-    ]
-    assert len(memory_sections) == 1
-    # Memory-kind, pathed at the real file: that is what puts it under the
-    # breakdown's "Memory files" category with a per-file detail row.
-    assert memory_sections[0].kind == "memory"
-    assert memory_sections[0].path == str(memory_dir / "MEMORY.md")
-    assert memory_sections[0].scope == "project"
-    # The two views never drift: joined sections ARE the prompt.
-    assert compiled.text == captured["system"]
-
-    # …and the breakdown a host renders says the same thing. Exactly one row
-    # for this file — the AGENTS.md instruction stack rides the same category
-    # without either counting the other.
-    usage = build_context_usage(
-        sections=compiled.sections, model="claude-opus-4-6", context_window=200_000
-    )
-    rows = [
-        f for f in usage["memoryFiles"]
-        if f["path"] == str(memory_dir / "MEMORY.md")
-    ]
-    assert len(rows) == 1
-    assert rows[0]["type"] == "Project"
-    assert rows[0]["tokens"] > 0
-    memory_category = [
-        c for c in usage["categories"] if c["name"] == "Memory files"
-    ]
-    assert len(memory_category) == 1
-    assert memory_category[0]["tokens"] == sum(
-        f["tokens"] for f in usage["memoryFiles"]
-    )
-
-
-@pytest.mark.asyncio
-async def test_empty_memory_dir_says_so_rather_than_going_quiet(
-    monkeypatch, agent_workspace, tmp_path
-):
-    """A dir with no MEMORY.md still gets the section — the model has to know
-    where to write the first fact."""
-    captured = await _connect_with_memory_dir(
-        monkeypatch, agent_workspace, tmp_path / "never-written"
-    )
-    assert "# Project memory" in captured["system"]
-    assert "(empty — nothing saved yet)" in captured["system"]
-
-
-@pytest.mark.asyncio
-async def test_no_memory_dir_means_no_project_memory_section(
+async def test_no_project_memory_section_without_a_memory_dir(
     monkeypatch, agent_workspace
 ):
     captured = await _connect_with_memory_dir(monkeypatch, agent_workspace, None)
@@ -5804,19 +5850,6 @@ async def test_native_registry_has_recall_builtins_and_no_memory_tool(tmp_path):
     assert "mcp__builtins__Memory" not in names
     assert "Read" in names and "mcp__builtins__Ledger" in names
     assert registry.get("Memory") is None
-
-
-def test_oversized_memory_index_is_truncated(tmp_path):
-    import app.core.provider.harness_adapter as ha
-
-    memory_dir = tmp_path / "memory"
-    _write_file(memory_dir / "MEMORY.md", "x" * (ha._MEMORY_INDEX_CHAR_CAP + 500))
-
-    text = ha._project_memory_section(str(memory_dir))
-
-    assert text.endswith("[truncated]")
-    assert len(text) < ha._MEMORY_INDEX_CHAR_CAP + 2000
-
 
 
 # ─── Per-session fast mode (v81) ─────────────────────────────────────────────

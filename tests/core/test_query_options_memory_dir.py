@@ -1,20 +1,18 @@
-"""The native leg's project-memory dir is stamped on every built options object.
+"""The old ``aih_memory_dir`` stamping is gone — and stays gone.
 
-Ruling MEM1/MEM3: a native (fluid NativeLoop) session keeps project memory under
-``<fluid_projects_dir>/<slug>/memory``, path-slugged exactly like
-~/.claude/projects so same-named projects never collide. query_options resolves
-it and stamps ``aih_memory_dir``; the harness adapter projects that onto
-``SessionOptions.extra["memory_dir"]`` and only a native leg reads it.
-
-Stamped unconditionally — the leg is not settled until the adapter connects —
-so these tests assert the value, not a leg.
+Until 2026-08-31 query_options resolved a per-project memory dir (rulings
+MEM1/MEM3) and stamped it as ``aih_memory_dir``, which the native leg turned
+into a "# Project memory" prompt section. The section's write path — the
+Memory tool — was removed in PR #997, leaving the prompt promising a memory
+nothing could write, so the section and its plumbing were removed (see
+docs/MEMORY_ARCHITECTURE.md). Durable facts travel through the continual
+learner instead. This file pins the removal: options must not resurrect the
+attribute, and building options must not create memory dirs as a side effect.
 """
 
-from pathlib import Path
 from unittest.mock import patch
 
 import app.core.query_options as qo
-from app.core.jsonl_parser import get_project_dir_name
 
 
 def _profile(config=None):
@@ -24,7 +22,7 @@ def _profile(config=None):
     return {"id": "t", "config": cfg}
 
 
-def test_memory_dir_is_slugged_from_the_project_path(tmp_path, monkeypatch):
+def test_memory_dir_is_not_stamped(tmp_path, monkeypatch):
     from app.core.config import settings
 
     projects_root = tmp_path / "fluid-projects"
@@ -37,65 +35,23 @@ def test_memory_dir_is_slugged_from_the_project_path(tmp_path, monkeypatch):
             profile=_profile(), project={"id": "p1", "path": str(checkout)}
         )
 
-    slug = get_project_dir_name(str(checkout))
-    assert opts.aih_memory_dir is not None
-    assert Path(opts.aih_memory_dir) == projects_root / slug / "memory"
-    assert opts.aih_memory_dir.endswith(str(Path(slug) / "memory"))
+    assert getattr(opts, "aih_memory_dir", None) is None
 
 
-def test_memory_dir_is_created_for_a_fresh_project(tmp_path, monkeypatch):
-    """The prompt tells the model its memory LIVES there, so the dir has to
-    exist before the first turn — nothing else creates it on a project no one
-    has written memory for yet (memory_sync only mkdirs when it has rows to
-    push down), and the model spends its first move working around a Glob that
-    found nothing."""
+def test_building_options_creates_no_memory_dir(tmp_path, monkeypatch):
+    """The dir used to be created eagerly because the prompt promised it
+    existed. No prompt section, no promise — building options must not touch
+    the filesystem for memory."""
     from app.core.config import settings
 
     projects_root = tmp_path / "fluid-projects"
     monkeypatch.setattr(settings, "fluid_projects_dir", str(projects_root))
     checkout = tmp_path / "brand-new-repo"
     checkout.mkdir()
-    assert not projects_root.exists()
 
     with patch.object(qo, "get_security_instructions", return_value=""):
-        opts, _ = qo.build_options_from_profile(
+        qo.build_options_from_profile(
             profile=_profile(), project={"id": "p1", "path": str(checkout)}
         )
 
-    assert Path(opts.aih_memory_dir).is_dir()
-
-
-def test_memory_dir_resolution_survives_an_uncreatable_root(tmp_path, monkeypatch):
-    """A dir we cannot create is a papercut, never a failed query: the path is
-    still stamped so the prompt and memory_sync agree on where memory lives."""
-    from app.core import memory_sync
-    from app.core.config import settings
-
-    monkeypatch.setattr(settings, "fluid_projects_dir", str(tmp_path / "fp"))
-
-    def _boom(self, *a, **k):
-        raise OSError("read-only file system")
-
-    monkeypatch.setattr(Path, "mkdir", _boom)
-    assert memory_sync.ensure_memory_dir(tmp_path / "nope") == tmp_path / "nope"
-
-    with patch.object(qo, "get_security_instructions", return_value=""):
-        opts, _ = qo.build_options_from_profile(profile=_profile())
-
-    assert opts.aih_memory_dir is not None
-    assert opts.aih_memory_dir.endswith("memory")
-
-
-def test_memory_dir_is_stamped_without_a_project(tmp_path, monkeypatch):
-    """No project row still yields a dir — it falls back to the session cwd,
-    so a workspace-only session can still keep memory."""
-    from app.core.config import settings
-
-    monkeypatch.setattr(settings, "fluid_projects_dir", str(tmp_path / "fp"))
-
-    with patch.object(qo, "get_security_instructions", return_value=""):
-        opts, _ = qo.build_options_from_profile(profile=_profile())
-
-    assert opts.aih_memory_dir is not None
-    assert opts.aih_memory_dir.endswith("memory")
-    assert str(tmp_path / "fp") in opts.aih_memory_dir
+    assert not projects_root.exists()
