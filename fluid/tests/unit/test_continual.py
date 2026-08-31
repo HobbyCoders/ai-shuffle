@@ -12,6 +12,7 @@ Covers the three changes on top of M5 code-mode:
    against a scripted fake provider.
 """
 
+import json
 import sys
 
 import pytest
@@ -397,3 +398,110 @@ async def test_drain_is_bounded_when_the_model_stalls(tmp_path) -> None:
     assert synth.due()
     await asyncio.wait_for(synth.drain(), timeout=5)
     assert "exceeded" in (synth.last_error or "")
+
+
+# ─── bounded storage: the harness reaps, the model never does ────────────────
+
+
+def _read_journal_codes(store: SkillStore) -> list[str]:
+    return [e["code"] for e in store.journal_entries(0)]
+
+
+async def test_synthesis_reaps_consumed_journal_and_rebases_cursor(
+    tmp_path, monkeypatch
+) -> None:
+    """A pass drops the consumed prefix past the tail and moves the cursor with it."""
+    from fluid.codemode import skills as skills_mod
+
+    monkeypatch.setattr(skills_mod, "JOURNAL_KEEP_ENTRIES", 4)
+    store = SkillStore(tmp_path)
+    _journal(store, 12)
+    synth = Synthesizer(_FakeProvider("NO_CHANGES"), "m", store, min_new_entries=1)
+    assert await synth.run() == []
+
+    # 12 consumed, 4 kept as the tail → 8 lines dropped, cursor rebased by 8.
+    assert store.journal_count() == 4
+    assert store.synth_cursor() == 4
+    assert _read_journal_codes(store) == [f"x = {i}" for i in range(8, 12)]
+    # Nothing unconsumed is left, so the slice at the cursor is empty...
+    assert store.journal_entries(store.synth_cursor()) == []
+    assert not synth.due()
+    # ...and new entries still land exactly at the cursor.
+    _journal(store, 2)
+    assert [e["code"] for e in store.journal_entries(store.synth_cursor())] == [
+        "x = 0", "x = 1",
+    ]
+
+
+def test_reap_journal_never_drops_unconsumed_entries(tmp_path, monkeypatch) -> None:
+    from fluid.codemode import skills as skills_mod
+
+    monkeypatch.setattr(skills_mod, "JOURNAL_KEEP_ENTRIES", 2)
+    store = SkillStore(tmp_path)
+    _journal(store, 10)
+    store.set_synth_cursor(3)
+    assert store.reap_journal() == 3  # only the consumed prefix goes
+    assert store.synth_cursor() == 0
+    assert _read_journal_codes(store) == [f"x = {i}" for i in range(3, 10)]
+    # Cursor at 0 → nothing droppable, so a second reap is a no-op.
+    assert store.reap_journal() == 0
+
+
+def test_reap_journal_drops_the_whole_prefix_past_the_byte_cap(
+    tmp_path, monkeypatch
+) -> None:
+    from fluid.codemode import skills as skills_mod
+
+    monkeypatch.setattr(skills_mod, "JOURNAL_KEEP_ENTRIES", 500)
+    monkeypatch.setattr(skills_mod, "JOURNAL_MAX_BYTES", 64)
+    store = SkillStore(tmp_path)
+    _journal(store, 10)
+    store.set_synth_cursor(10)
+    assert store.reap_journal() == 10  # tail budget yields to the size cap
+    assert store.journal_count() == 0
+    assert store.synth_cursor() == 0
+
+
+def test_reap_journal_is_a_noop_on_a_quiet_store(tmp_path) -> None:
+    store = SkillStore(tmp_path)
+    assert store.reap_journal() == 0  # no journal file at all
+    _journal(store, 5)
+    store.set_synth_cursor(5)
+    assert store.reap_journal() == 0  # under both caps → no rewrite
+    assert store.journal_count() == 5
+
+
+def test_journal_count_is_cached_and_self_heals(tmp_path) -> None:
+    store = SkillStore(tmp_path)
+    _journal(store, 3)
+    assert store.journal_count() == 3
+    # Cache is live: the count came from memory, validated against the size.
+    assert store._journal_bytes == (tmp_path / "journal.jsonl").stat().st_size
+    _journal(store, 2)
+    assert store.journal_count() == 5
+
+    # Another writer (another process, another store handle) drifts the file.
+    other = SkillStore(tmp_path)
+    other.journal_append({"code": "x = elsewhere"})
+    assert store.journal_count() == 6
+    # An external rewrite shrinks it; the count heals on the next read.
+    (tmp_path / "journal.jsonl").write_text(
+        '{"code": "only one"}\n', encoding="utf-8"
+    )
+    assert store.journal_count() == 1
+
+
+async def test_synthesis_log_rotates(tmp_path, monkeypatch) -> None:
+    from fluid.codemode import continual as continual_mod
+
+    monkeypatch.setattr(continual_mod, "MAX_LOG_BYTES", 200)
+    monkeypatch.setattr(continual_mod, "MAX_LOG_ENTRIES", 5)
+    store = SkillStore(tmp_path)
+    synth = Synthesizer(_FakeProvider("NO_CHANGES"), "m", store, min_new_entries=1)
+    for i in range(40):
+        synth._log_pass("synthesis", [f"skill_{i}"])
+    path = tmp_path / ".synthesis-log.jsonl"
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) <= 5
+    # The most recent passes are the ones that survive.
+    assert json.loads(lines[-1])["changed"] == ["skill_39"]

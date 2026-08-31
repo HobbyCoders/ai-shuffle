@@ -110,18 +110,24 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             lines.append(f"- [{entry.id}] {entry.text}{suffix}")
 
     tokens = [t for t in query.lower().split() if t]
-    skill_hits = []
+    skill_hits: list[tuple[Any, bool]] = []
     try:
-        for s in store.list():
+        # Live skills first, then the ones curation archived — archiving is
+        # bounded storage, not deletion, so an archived skill stays findable.
+        for s, archived in (
+            *((s, False) for s in store.list()),
+            *((s, True) for s in store.archived_skills()),
+        ):
             hay = f"{s.name} {s.description}".lower()
             if any(t in hay for t in tokens):
-                skill_hits.append(s)
+                skill_hits.append((s, archived))
     except Exception:
         skill_hits = []
     if skill_hits:
         lines.append("Saved skills (usable in code mode via `from skills import <name>`):")
-        for s in skill_hits[:limit]:
-            lines.append(f"- {s.name}: {s.description} [used {s.uses}x]")
+        for s, archived in skill_hits[:limit]:
+            tag = "  (archived — restore by moving the file back)" if archived else ""
+            lines.append(f"- {s.name}: {s.description} [used {s.uses}x]{tag}")
 
     if not lines:
         return ToolOutcome(

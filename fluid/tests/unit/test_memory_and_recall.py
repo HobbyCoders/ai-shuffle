@@ -473,3 +473,105 @@ def test_curation_leaves_unstamped_skills_alone(tmp_path) -> None:
     (tmp_path / "handmade.py").write_text(_SKILL_SRC, encoding="utf-8")
     assert store.curate(force=True) == []
     assert (tmp_path / "handmade.py").exists()
+
+
+# ─── bounded storage (harness-owned reaping) ─────────────────────────────────
+
+
+def test_memory_archive_is_capped(tmp_path, monkeypatch) -> None:
+    from fluid.codemode import skills as skills_mod
+
+    monkeypatch.setattr(skills_mod, "MAX_ARCHIVED_MEMORIES", 5)
+    store = SkillStore(tmp_path)
+    for i in range(MAX_MEMORIES + 12):
+        store.save_memory(f"durable fact number {i}")
+    before = [m.text for m in store.archived_memories()]
+    assert len(before) > 5  # the archive really did overflow the cap
+
+    dropped = store.reap()
+    assert dropped["memory_archive"] == len(before) - 5
+    after = [m.text for m in store.archived_memories()]
+    assert after == before[-5:]  # newest archived entries survive
+    # Recall still searches what is left.
+    (hit, archived), = store.search_memories(after[-1], limit=1)
+    assert archived and hit.text == after[-1]
+
+
+def test_reap_bounds_the_curation_log(tmp_path, monkeypatch) -> None:
+    from fluid.codemode import skills as skills_mod
+
+    monkeypatch.setattr(skills_mod, "MAX_LOG_ENTRIES", 3)
+    store = SkillStore(tmp_path)
+    with (tmp_path / ".curation-log.jsonl").open("a", encoding="utf-8") as fh:
+        for i in range(10):
+            fh.write(json.dumps({"ts": i, "actions": [f"did {i}"]}) + "\n")
+    assert store.reap()["curation_log"] == 7
+    lines = (tmp_path / ".curation-log.jsonl").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert len(lines) == 3
+    assert json.loads(lines[-1])["actions"] == ["did 9"]
+
+
+def test_reap_caps_archived_skill_modules(tmp_path, monkeypatch) -> None:
+    import os
+
+    from fluid.codemode import skills as skills_mod
+
+    monkeypatch.setattr(skills_mod, "MAX_ARCHIVED_SKILLS", 2)
+    store = SkillStore(tmp_path)
+    archive = store.archive_dir
+    archive.mkdir()
+    meta = store._load_meta()
+    now = time.time()
+    for i in range(5):
+        path = archive / f"old_{i}.py"
+        path.write_text(_SKILL_SRC, encoding="utf-8")
+        stamp = now - (5 - i) * 86_400  # old_0 oldest, old_4 newest
+        os.utime(path, (stamp, stamp))
+        meta.setdefault("skills", {})[f"old_{i}"] = {"uses": 0, "state": "archived"}
+    store._save_meta(meta)
+
+    assert store.reap()["archived_skills"] == 3
+    assert sorted(p.stem for p in archive.glob("*.py")) == ["old_3", "old_4"]
+    # Meta does not keep entries for modules that are gone for good.
+    kept_meta = store._load_meta()["skills"]
+    assert sorted(kept_meta) == ["old_3", "old_4"]
+
+
+def test_curation_archives_never_imported_skills_sooner(tmp_path) -> None:
+    """Usage counters, not just idleness, decide the archive horizon."""
+    store = SkillStore(tmp_path)
+    store.save("never_used", _SKILL_SRC)
+    store.save("earned_its_keep", _SKILL_SRC)
+    idle = time.time() - 60 * 86_400  # past the unused horizon, not the general one
+    meta = store._load_meta()
+    for name in ("never_used", "earned_its_keep"):
+        meta["skills"][name]["updated_at"] = idle
+    meta["skills"]["earned_its_keep"]["uses"] = 3
+    meta["skills"]["earned_its_keep"]["last_used_at"] = idle
+    store._save_meta(meta)
+
+    actions = store.curate(force=True)
+    assert any("archived never_used (never imported" in a for a in actions)
+    assert not (tmp_path / "never_used.py").exists()
+    assert (tmp_path / "earned_its_keep.py").exists()
+    assert any("marked earned_its_keep stale" in a for a in actions)
+    # Archived is not deleted: it stays in the index Recall searches.
+    assert [s.name for s in store.archived_skills()] == ["never_used"]
+
+
+async def test_recall_surfaces_archived_skills(tmp_path) -> None:
+    from fluid.tools.builtins import recall as recall_mod
+
+    store = SkillStore(tmp_path)
+    store.archive_dir.mkdir()
+    (store.archive_dir / "deploy_check.py").write_text(
+        '"""Verify a deploy landed."""\n\ndef deploy_check():\n    return True\n',
+        encoding="utf-8",
+    )
+    ctx = ToolCtx()
+    ctx.extra["recall_store"] = store
+    out = await recall_mod.handler({"query": "deploy"}, ctx)
+    assert not out.is_error
+    assert "deploy_check" in out.text and "archived" in out.text

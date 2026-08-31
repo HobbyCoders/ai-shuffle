@@ -26,7 +26,13 @@ import re
 import time
 from typing import Any
 
-from fluid.codemode.skills import SkillStore, validate_skill
+from fluid.codemode.skills import (
+    MAX_LOG_BYTES,
+    MAX_LOG_ENTRIES,
+    SkillStore,
+    trim_jsonl,
+    validate_skill,
+)
 from fluid.codemode.verify import verify_sources
 from fluid.messages.content import Message, Text
 from fluid.providers.base import ProviderRequest
@@ -328,6 +334,13 @@ class Synthesizer:
         text = await self._complete(self._prompt(entries), _SYNTH_SYSTEM)
         changed = await self._apply(text)  # sets last_error (None on a clean pass)
         self._store.set_synth_cursor(cursor + len(entries))
+        # Consumed entries have no reader left: drop the ones past the
+        # retention tail and rebase the cursor. Best-effort — a failed reap
+        # must never cost us the pass that just succeeded.
+        try:
+            self._store.reap_journal()
+        except Exception:
+            pass
         # The urgency flag covered the slice just consumed; a new Remember
         # re-arms it.
         self._urgent = False
@@ -352,6 +365,10 @@ class Synthesizer:
         silently fails — or silently decides NO_CHANGES — is otherwise
         indistinguishable from one that never ran. The log is the audit
         trail: when it ran, what it consumed, what changed, what went wrong.
+
+        Bounded like everything else the store owns: once the file grows past
+        ``MAX_LOG_BYTES`` it is rotated down to the most recent
+        ``MAX_LOG_ENTRIES`` passes.
         """
         record: dict[str, Any] = {"ts": time.time(), "kind": kind, "changed": changed}
         if consumed is not None:
@@ -361,11 +378,15 @@ class Synthesizer:
         if output_preview is not None and not changed:
             # Only when nothing landed: the raw head is what explains why.
             record["output_head"] = " ".join(output_preview.split())[:400]
+        path = self._store.root / ".synthesis-log.jsonl"
         try:
-            with (self._store.root / ".synthesis-log.jsonl").open(
-                "a", encoding="utf-8"
-            ) as fh:
+            with path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
+            return
+        try:
+            if path.stat().st_size > MAX_LOG_BYTES:
+                trim_jsonl(path, MAX_LOG_ENTRIES)
         except OSError:
             pass
 
@@ -385,8 +406,16 @@ class Synthesizer:
         Sees every memory (with usage counts) and the skill index — no journal
         slice. Only rewrites and deletions apply; a ``<skill>`` tag in the
         output is ignored, so a confused pass cannot inject unproven code.
+
+        This is also where the store's storage bounds are enforced: the
+        deterministic reap runs first, so the model curates a store that is
+        already trimmed and never sees (or controls) the reaping itself.
         """
         self._store.set_last_consolidated_at(time.time())
+        try:
+            self._store.reap()
+        except Exception:  # cleanup is opportunistic, never fatal
+            pass
         lines = ["## Memory store (id, recalls, age, scope, text)"]
         now = time.time()
         memories = self._store.memories()

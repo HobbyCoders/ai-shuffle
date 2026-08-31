@@ -28,8 +28,25 @@ Alongside the skills the store keeps:
   live and archived entries and feeds the usage counters that drive that
   eviction.
 
+Every one of those files is BOUNDED and the harness owns the cleanup. The
+model has no reaping control at all — its only write path stays the
+propose-only ``Remember`` flow. Reaping is deterministic, best-effort (a
+failure never breaks journaling or synthesis) and rides machinery that
+already exists: :meth:`SkillStore.reap`, called from the interval-gated
+lifecycle pass (:meth:`SkillStore.curate`) and from the synthesizer's
+consolidation pass. The caps live in module constants next to
+``MAX_MEMORIES`` so every bound is visible in one place.
+
 Everything is stdlib-only and synchronous; callers are the code-mode session
 (host side) and the synthesizer.
+
+Concurrency posture matches the rest of the store: no locks, last writer
+wins. Within one process journaling and reaping are synchronous and the
+synthesizer's background pass runs on the same event loop, so they cannot
+interleave; two processes sharing a skills root race exactly as they already
+do on ``meta.json``. Rewrites go through a temp file plus ``os.replace``, so
+the worst a lost race costs is a few dropped log lines — never a truncated or
+half-written file.
 """
 
 from __future__ import annotations
@@ -48,7 +65,67 @@ MAX_SKILL_BYTES = 65536
 MAX_MEMORIES = 40
 MAX_MEMORY_CHARS = 500  # one memory is a fact, not an essay
 
+# ─── storage bounds (the harness reaps; the model never does) ────────────────
+#
+# journal.jsonl: entries the synthesizer has already consumed have no reader
+# left, so they are droppable — but a recent tail is what makes a store
+# debuggable after the fact, so a prefix is only dropped once the file grows
+# past the tail budget. Both caps are ceilings, not targets: a quiet store
+# never reaches either and is never rewritten.
+JOURNAL_KEEP_ENTRIES = 500  # recent lines kept even though they are consumed
+JOURNAL_MAX_BYTES = 1_048_576  # past this, every consumed line goes
+# memories-archive.jsonl: overflow past MAX_MEMORIES lands here and Recall
+# searches it, so it is real storage, not a graveyard — but it is capped.
+MAX_ARCHIVED_MEMORIES = 200
+# .archive/*.py: skills curation archives rather than deletes; the oldest
+# archived modules are dropped for good past this count.
+MAX_ARCHIVED_SKILLS = 100
+# .curation-log.jsonl / .synthesis-log.jsonl: audit trails, newest wins.
+MAX_LOG_ENTRIES = 500
+MAX_LOG_BYTES = 262_144  # only look at a log once it grows past this
+
 DEFAULT_SKILLS_ROOT = Path.home() / ".fluid" / "skills"
+
+
+def trim_jsonl(path: Path, keep: int) -> int:
+    """Keep the newest ``keep`` lines of an append-only log file.
+
+    Returns the number of lines dropped (0 when the file is absent, short
+    enough, or unreadable). The rewrite is atomic — temp file plus
+    ``os.replace`` — so a crash mid-trim leaves the original intact.
+    """
+    keep = max(0, int(keep))
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            total = sum(1 for _ in fh)
+    except OSError:
+        return 0
+    if total <= keep:
+        return 0
+    drop = total - keep
+    # Two streaming passes rather than one slurp: the first trim of a file
+    # that grew unbounded before this cap existed must not need the whole
+    # thing in memory.
+    return drop if _rewrite_dropping_prefix(path, drop) else 0
+
+
+def _rewrite_dropping_prefix(path: Path, drop: int) -> bool:
+    """Atomically rewrite ``path`` without its first ``drop`` lines."""
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with path.open("r", encoding="utf-8") as src, \
+                tmp.open("w", encoding="utf-8") as dst:
+            for i, line in enumerate(src):
+                if i >= drop:
+                    dst.write(line)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -144,6 +221,12 @@ class SkillStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self._meta_path = self.root / "meta.json"
         self._journal_path = self.root / "journal.jsonl"
+        # O(1) journal length: the count is cached against the file size it
+        # was measured at. Any size we did not cause (another process, an
+        # external edit) invalidates it and the next count rescans, so the
+        # cache is self-healing rather than authoritative. -1 = unknown.
+        self._journal_lines = 0
+        self._journal_bytes = -1
 
     # ─── meta ────────────────────────────────────────────────────────────
     def _load_meta(self) -> dict:
@@ -270,18 +353,134 @@ class SkillStore:
         self._save_meta(meta)
 
     # ─── journal ─────────────────────────────────────────────────────────
+    def _journal_size(self) -> int:
+        try:
+            return self._journal_path.stat().st_size
+        except OSError:
+            return -1
+
     def journal_append(self, entry: dict) -> None:
         entry = dict(entry)
         entry.setdefault("ts", time.time())
+        before = self._journal_size()
         with self._journal_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        after = self._journal_size()
+        # Only carry the cached count forward when the file was exactly where
+        # we last left it; otherwise someone else wrote and the count is a
+        # guess, so force a rescan instead of guessing.
+        if self._journal_bytes >= 0 and before == self._journal_bytes and after >= 0:
+            self._journal_lines += 1
+            self._journal_bytes = after
+        else:
+            self._journal_bytes = -1
 
     def journal_count(self) -> int:
+        """Number of journal lines — O(1) unless the cache went stale."""
+        size = self._journal_size()
+        if size < 0:
+            self._journal_lines, self._journal_bytes = 0, -1
+            return 0
+        if size == self._journal_bytes:
+            return self._journal_lines
+        count = 0
         try:
             with self._journal_path.open("r", encoding="utf-8") as fh:
-                return sum(1 for _ in fh)
+                count = sum(1 for _ in fh)
+        except OSError:
+            self._journal_bytes = -1
+            return 0
+        self._journal_lines, self._journal_bytes = count, size
+        return count
+
+    def reap_journal(self) -> int:
+        """Drop consumed journal lines past the retention tail.
+
+        Only lines *behind* the synthesis cursor are droppable — nothing the
+        synthesizer has yet to read is ever removed. Beyond that the tail
+        budget (``JOURNAL_KEEP_ENTRIES`` lines, or nothing once the file is
+        over ``JOURNAL_MAX_BYTES``) decides how much of the consumed prefix
+        survives. The cursor is rebased by exactly the number of lines
+        removed, so ``journal_entries(start=synth_cursor())`` keeps meaning
+        the same slice. Returns the number of lines dropped; every failure
+        path returns 0 and leaves the journal untouched.
+        """
+        size = self._journal_size()
+        if size < 0:
+            return 0
+        cursor = max(0, self.synth_cursor())
+        total = self.journal_count()
+        drop = min(cursor, total)
+        if size <= JOURNAL_MAX_BYTES:
+            drop = min(drop, max(0, total - JOURNAL_KEEP_ENTRIES))
+        if drop <= 0 or not _rewrite_dropping_prefix(self._journal_path, drop):
+            return 0
+        meta = self._load_meta()
+        meta["synth_cursor"] = max(0, int(meta.get("synth_cursor", 0)) - drop)
+        self._save_meta(meta)
+        self._journal_lines = max(0, total - drop)
+        self._journal_bytes = self._journal_size()
+        return drop
+
+    def reap(self) -> dict[str, int]:
+        """Bound every append-only file the store owns. Never raises.
+
+        The single cleanup entry point, called from the interval-gated
+        lifecycle pass and from the synthesizer's consolidation pass — there
+        is no background thread and no model-facing control. Returns
+        ``{what: lines_dropped}`` for logging.
+        """
+        dropped: dict[str, int] = {}
+        for what, fn in (
+            ("journal", self.reap_journal),
+            ("memory_archive", lambda: trim_jsonl(
+                self.archive_dir / "memories-archive.jsonl", MAX_ARCHIVED_MEMORIES,
+            )),
+            ("curation_log", lambda: trim_jsonl(
+                self.root / ".curation-log.jsonl", MAX_LOG_ENTRIES,
+            )),
+            ("archived_skills", self._reap_archived_skills),
+        ):
+            try:
+                n = fn()
+            except Exception:
+                n = 0
+            if n:
+                dropped[what] = n
+        return dropped
+
+    def _reap_archived_skills(self) -> int:
+        """Delete the oldest archived skill modules past the cap.
+
+        Archiving is the maximum action curation takes, but the archive
+        itself cannot grow forever; past ``MAX_ARCHIVED_SKILLS`` the
+        least-recently-touched modules go for good, and their meta entries
+        with them.
+        """
+        try:
+            files = sorted(
+                self.archive_dir.glob("*.py"), key=lambda p: p.stat().st_mtime
+            )
         except OSError:
             return 0
+        if len(files) <= MAX_ARCHIVED_SKILLS:
+            return 0
+        doomed = files[: len(files) - MAX_ARCHIVED_SKILLS]
+        meta = self._load_meta()
+        skills = meta.get("skills") or {}
+        removed = 0
+        for path in doomed:
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            removed += 1
+            info = skills.get(path.stem)
+            if isinstance(info, dict) and info.get("state") == "archived":
+                skills.pop(path.stem, None)
+        if removed:
+            self._save_meta(meta)
+        return removed
 
     def journal_entries(self, start: int = 0, limit: int | None = None) -> list[dict]:
         """Entries [start, start+limit) by line index; malformed lines skipped."""
@@ -302,6 +501,11 @@ class SkillStore:
         return out
 
     # ─── memories (the declarative half — synthesizer-written only) ──────
+    @property
+    def archive_dir(self) -> Path:
+        """Where evicted memories and archived skill modules live."""
+        return self.root / ".archive"
+
     @property
     def memories_path(self) -> Path:
         return self.root / "memories.json"
@@ -404,15 +608,21 @@ class SkillStore:
             )
             overflow = doc["entries"][: len(doc["entries"]) - MAX_MEMORIES]
             doc["entries"] = doc["entries"][len(overflow):]
+            archive_path = self.archive_dir / "memories-archive.jsonl"
             try:
-                archive = self.root / ".archive"
-                archive.mkdir(exist_ok=True)
-                with (archive / "memories-archive.jsonl").open(
-                    "a", encoding="utf-8"
-                ) as fh:
+                self.archive_dir.mkdir(exist_ok=True)
+                with archive_path.open("a", encoding="utf-8") as fh:
                     for old in overflow:
                         fh.write(json.dumps({"archived_at": now, **old},
                                             ensure_ascii=False) + "\n")
+            except OSError:
+                pass
+            # The archive is bounded too: consolidation trims it, but a store
+            # that overflows fast should not wait a week for that pass, so
+            # cap it here as well once the file is worth reading.
+            try:
+                if archive_path.stat().st_size > MAX_LOG_BYTES:
+                    trim_jsonl(archive_path, MAX_ARCHIVED_MEMORIES)
             except OSError:
                 pass
         self._save_memories(doc)
@@ -438,9 +648,13 @@ class SkillStore:
             self._save_memories(doc)
 
     def archived_memories(self) -> list[MemoryEntry]:
-        """Entries evicted past the cap — still searchable, never deleted."""
+        """Entries evicted past the cap — still searchable, oldest-first.
+
+        Bounded at ``MAX_ARCHIVED_MEMORIES``: the archive is a second tier of
+        memory, not an eternal log, so entries that fall out of it are gone.
+        """
         out: list[MemoryEntry] = []
-        path = self.root / ".archive" / "memories-archive.jsonl"
+        path = self.archive_dir / "memories-archive.jsonl"
         try:
             with path.open("r", encoding="utf-8") as fh:
                 for line in fh:
@@ -575,9 +789,17 @@ class SkillStore:
     CURATE_INTERVAL_DAYS = 7.0
     STALE_AFTER_DAYS = 30.0
     ARCHIVE_AFTER_DAYS = 90.0
+    # Usage counters earn a skill its keep: one that has never been imported
+    # since it was written is archived on a tighter horizon than one that has
+    # simply gone quiet lately.
+    UNUSED_ARCHIVE_AFTER_DAYS = 45.0
 
     def curate(self, *, now: float | None = None, force: bool = False) -> list[str]:
-        """Run one lifecycle pass when due. Returns action lines (may be [])."""
+        """Run one lifecycle pass when due. Returns action lines (may be []).
+
+        Also the store's cleanup tick: every bounded file is reaped here (see
+        :meth:`reap`), behind the same interval gate.
+        """
         now = time.time() if now is None else now
         meta = self._load_meta()
         last = float(meta.get("last_curated_at", 0.0))
@@ -585,7 +807,7 @@ class SkillStore:
             return []
         meta["last_curated_at"] = now
         actions: list[str] = []
-        archive_dir = self.root / ".archive"
+        archive_dir = self.archive_dir
         for name, info in sorted((meta.get("skills") or {}).items()):
             if not isinstance(info, dict) or info.get("pinned"):
                 continue
@@ -599,15 +821,22 @@ class SkillStore:
             if last_activity <= 0:
                 continue  # no evidence either way — leave it alone
             idle_days = (now - last_activity) / 86_400
-            if idle_days > self.ARCHIVE_AFTER_DAYS:
+            never_imported = int(info.get("uses", 0)) <= 0
+            horizon = (
+                self.UNUSED_ARCHIVE_AFTER_DAYS
+                if never_imported
+                else self.ARCHIVE_AFTER_DAYS
+            )
+            if idle_days > horizon:
                 try:
                     archive_dir.mkdir(exist_ok=True)
                     path.rename(archive_dir / path.name)
                 except OSError:
                     continue
                 info["state"] = "archived"
+                why = "never imported" if never_imported else "unused"
                 actions.append(
-                    f"archived {name} (unused {idle_days:.0f}d) -> "
+                    f"archived {name} ({why}, {idle_days:.0f}d) -> "
                     f"{archive_dir / path.name} — move it back to restore"
                 )
             elif idle_days > self.STALE_AFTER_DAYS:
@@ -626,7 +855,38 @@ class SkillStore:
                     fh.write(json.dumps({"ts": now, "actions": actions}) + "\n")
             except OSError:
                 pass
+        # Cleanup rides the same tick — deterministic, silent, never fatal.
+        dropped = self.reap()
+        if dropped:
+            actions.append(
+                "reaped " + ", ".join(f"{n} {what}" for what, n in sorted(dropped.items()))
+            )
         return actions
+
+    def archived_skills(self) -> list[Skill]:
+        """Skill modules curation moved to ``.archive/`` — still recallable."""
+        out: list[Skill] = []
+        try:
+            paths = sorted(self.archive_dir.glob("*.py"))
+        except OSError:
+            return out
+        known = self._load_meta().get("skills", {})
+        for path in paths:
+            try:
+                source = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            info = known.get(path.stem) if isinstance(known, dict) else None
+            if not isinstance(info, dict):
+                info = {}
+            out.append(Skill(
+                name=path.stem,
+                source=source,
+                description=_description_of(source) or path.stem,
+                uses=int(info.get("uses", 0)),
+                updated_at=float(info.get("updated_at", 0.0)),
+            ))
+        return out
 
     # ─── synthesis cursor ────────────────────────────────────────────────
     def synth_cursor(self) -> int:
