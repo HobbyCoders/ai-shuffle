@@ -235,3 +235,25 @@ async def test_boot_reconcile_spares_peer_install_rows(mock_db):
 
     assert counts["background_task_rows_killed"] == 0
     assert _rows(mock_db, sid)[0]["status"] == "running"
+
+
+async def test_terminal_notified_persisted_when_a_wake_delivers_a_completion(mock_db):
+    """A CLEAN completion never reaches ``complete_task``'s error/killed chip,
+    so its ``terminal_notified`` used to stay False forever — even after the
+    parent was woken with the result. The scheduler latches it at the delivery
+    itself (steer receipt or wake turn) and flushes the record."""
+    from app.core import turn_scheduler
+
+    sid = "tpers-delivered"
+    task_registry.mark_background_launch(sid, "toolu_del")
+    task_registry.start_task(sid, "t1", "agent", "bg work", tool_use_id="toolu_del")
+    task_registry.complete_task(sid, "t1", "completed", summary="the report")
+    await tp.flush()
+    assert not _rows(mock_db, sid)[0]["terminal_notified"]
+
+    turn_scheduler.on_task_notification_delivered(sid, ["t1"])
+    await tp.flush()
+
+    row = _rows(mock_db, sid)[0]
+    assert row["status"] == "completed"
+    assert row["terminal_notified"]
