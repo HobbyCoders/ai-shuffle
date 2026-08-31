@@ -70,6 +70,18 @@ causes repeated work), and never secrets. Scope: a fact about THIS project's
 codebase, layout, or conventions gets scope="project"; a fact about the user
 or their machine in general stays global (the default). Most journals need NO
 memory change either — but a [remember] entry almost always needs one.
+
+A journal entry marked [friction] is the HARNESS's own mechanical record of a
+call that wasted work — a path that did not exist, one tool failing over and
+over, content re-read after it was already delivered, a search that found
+nothing re-run with near-identical arguments. It carries facts, never the
+agent's interpretation, and deciding what (if anything) it means is your job.
+Friction that repeats usually points at a durable fact about this environment
+worth a memory (where an output actually arrives, what a path is really
+called); friction that is the model mis-driving the harness the same way twice
+belongs in a model-guidance proposal. A single one-off is noise — say nothing,
+and never turn friction into a negative claim about a tool.
+
 Channel rule: a recurring mechanical failure of the MODEL itself — narrating
 an action instead of performing it, repeatedly malformed calls, drifting from
 a stated format — is not fixed by a memory (a memory tells the next session
@@ -474,7 +486,7 @@ class Synthesizer:
         cell_no = 0
         for e in entries:
             kind = e.get("kind", "cell")
-            if kind in ("user", "assistant", "remember"):
+            if kind in ("user", "assistant", "remember", "friction"):
                 scope_hint = (
                     f" (scope={e['scope']})"
                     if kind == "remember" and e.get("scope")
