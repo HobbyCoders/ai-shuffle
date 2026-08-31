@@ -3506,7 +3506,16 @@ through the environment it inherits. Never copy a `.env` (or any other \
 credential file) into a worktree — the copy puts a plaintext database \
 password on disk, silently points your branch at the real database, and \
 outlives the worktree. If something genuinely cannot start without a config \
-value, say so rather than materializing a copy."""
+value, say so rather than materializing a copy.
+
+Never run `git worktree remove` or `rm -rf` on a provisioned worktree \
+yourself. Those links are junctions on Windows, and git's removal recurses \
+THROUGH them — it has gutted the main checkout's entire node_modules once \
+already. Leave worktree deletion to the app (its removal detaches the links \
+first). If you absolutely must remove one by hand, first delete each link \
+itself without recursing (`Remove-Item` on the link path in PowerShell, or \
+`fsutil reparsepoint delete`; never `rm -rf` on it), then remove the \
+worktree."""
 
 
 def _model_guidance_blocks(model: Optional[str]) -> Tuple[str, ...]:
