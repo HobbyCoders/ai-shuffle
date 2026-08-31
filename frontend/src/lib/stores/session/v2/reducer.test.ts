@@ -1829,7 +1829,119 @@ describe('system + unknown events', () => {
 		expect(retries[1].systemData).toMatchObject({ attempt: 1 });
 	});
 
-	it('turn.completed settles a retry card that still had attempts left', () => {
+	it('a real reply settles an active retry card without waiting for end of turn', () => {
+		// The reported bug: a card counting 2 of 10 kept its spinner through the
+		// whole answer, because only `resuming` cards were retired and `resuming`
+		// is never stamped on a card that still has attempts left.
+		const s = fold([
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 2, max_attempts: 10, model: 'ox-alpha' },
+			}),
+			ev('assistant.text_delta', { id: 'd1', text: 'here is your answer' }),
+		]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries).toHaveLength(1);
+		expect(retries[0].systemData).toMatchObject({ attempt: 2, settled: true });
+		expect(retries[0].systemData).not.toHaveProperty('resuming');
+		// The attempt counter still reports what the recovery cost.
+		expect(retries[0].systemData).toMatchObject({ max_attempts: 10 });
+	});
+
+	it('thinking alone settles an active retry card — the provider is answering', () => {
+		const s = fold([
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 3, max_attempts: 10 },
+			}),
+			ev('assistant.thinking_delta', { id: 't1', text: 'let me think' }),
+		]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries[0].systemData).toMatchObject({ attempt: 3, settled: true });
+	});
+
+	it('a tool call settles an active retry card', () => {
+		const s = fold([
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 1, max_attempts: 10 },
+			}),
+			ev('tool.use', { tool_use_id: 'tu1', name: 'Read' }),
+		]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries[0].systemData).toMatchObject({ settled: true });
+	});
+
+	it('a closed assistant bubble settles an active retry card', () => {
+		// Providers that emit no deltas deliver the whole reply as one closed
+		// bubble. That is a reply all the same, so the card must not stay live.
+		const s = fold([
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 2, max_attempts: 10 },
+			}),
+			ev('message.assistant', { id: 'm1', content: 'all done', kind: 'text' }),
+		]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries[0].systemData).toMatchObject({ settled: true });
+	});
+
+	it('an empty closed bubble does NOT settle the retry card', () => {
+		// An empty reply is the condition that CAUSES a retry. Settling on it
+		// would close the card green over a turn that produced no answer.
+		const s = fold([
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 2, max_attempts: 10 },
+			}),
+			ev('message.assistant', { id: 'm1', content: '   ', kind: 'text' }),
+		]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries[0].systemData).not.toHaveProperty('settled');
+	});
+
+	it('an active card settled by a reply stays settled when the turn completes', () => {
+		// Idempotent: turn.completed must not restamp or resurrect anything.
+		const s = fold([
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 2, max_attempts: 10 },
+			}),
+			ev('assistant.text_delta', { id: 'd1', text: 'hi' }),
+			ev('turn.completed', {}),
+		]);
+		const retries = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+		expect(retries).toHaveLength(1);
+		expect(retries[0].systemData).toMatchObject({ settled: true });
+	});
+
+	it('settling an active card on reply folds identically on replay', () => {
+		const log = [
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 2, max_attempts: 10 },
+			}),
+			ev('assistant.text_delta', { id: 'd1', text: 'hi' }),
+			ev('turn.completed', {}),
+		];
+		expect(fold(log)).toEqual(fold(log));
+	});
+
+		it('turn.completed settles a retry card that still had attempts left', () => {
 		// The retries worked: the turn finished. The card must stop reading as
 		// live work, or it spins forever with nothing left to move it.
 		const s = fold([
