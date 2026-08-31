@@ -378,6 +378,7 @@ async def test_auto_continue_on_boundary_cut(mock_db):
     settled = _settled_turn(
         "a1", prompt="long task", stop_reason="tool_use",
         profile_id="p1", payload={"api_user_id": "u1"},
+        overrides={"model": "prov:prov-1:m1"},
     )
 
     with ExitStack() as stack:
@@ -391,6 +392,8 @@ async def test_auto_continue_on_boundary_cut(mock_db):
     assert cont["parent_turn_id"] == settled["id"]
     assert cont["profile_id"] == "p1"
     assert cont["payload"]["api_user_id"] == "u1"
+    # The continuation runs under the settled turn's own per-turn settings.
+    assert cont["overrides"] == {"model": "prov:prov-1:m1"}
     execute.assert_awaited_once()
     assert execute.await_args.args[0]["id"] == cont["id"]
 
@@ -1430,6 +1433,95 @@ async def test_wake_without_context_falls_back_to_session_profile(mock_db, caplo
     assert wake["profile_id"] == "p-sess"
     assert "nc1" in caplog.text
     assert "no profile" in caplog.text
+
+
+async def test_wake_inherits_context_turn_overrides(mock_db):
+    # Regression (2026-08-31, session c66b213a): a wake built with empty
+    # overrides for a session whose model/provider binding lived only in its
+    # turns' overrides ran on the profile/global default leg with the wrong
+    # credentials and 401'd in seconds. The wake continues the parked turn's
+    # work, so it runs under that turn's own per-turn settings.
+    parked = turns_db.enqueue_turn(
+        "ov1", "user", prompt="work", profile_id="p1",
+        overrides={"model": "prov:prov-1:z-ai/glm-5.3-flash", "effort": "high"},
+    )
+    turns_db.start_turn(parked["id"], None, "runner")
+    turns_db.park_turn(parked["id"], ["task-o"])
+
+    frame = _terminal_frame("task-o", "done")
+    wake = await turn_scheduler._enqueue_context_wake(
+        "ov1", "unpark", [frame], ["task-o"], "<task-notification/>",
+    )
+
+    assert wake["overrides"] == {
+        "model": "prov:prov-1:z-ai/glm-5.3-flash", "effort": "high",
+    }
+
+
+async def test_wake_falls_back_to_session_api_user(mock_db):
+    # An API-owned session whose context turn carries no api_user_id payload
+    # must not wake as an admin turn — the wake inherits the session row's
+    # api_user_id so is_admin gates and credential scoping stay per-user.
+    mock_db.execute(
+        "INSERT INTO agents (id, name, config) VALUES (?, ?, ?)",
+        ("p1", "Test", "{}"),
+    )
+    mock_db.execute(
+        "INSERT INTO api_users (id, name, api_key_hash) VALUES (?, ?, ?)",
+        ("u-api", "Test API user", "hash"),
+    )
+    mock_db.execute(
+        "INSERT INTO sessions (id, profile_id, api_user_id) VALUES (?, ?, ?)",
+        ("au1", "p1", "u-api"),
+    )
+    mock_db.commit()
+    parked = turns_db.enqueue_turn(
+        "au1", "api_background", prompt="work", profile_id="p1",
+    )
+    turns_db.start_turn(parked["id"], None, "runner")
+    turns_db.park_turn(parked["id"], ["task-a"])
+
+    frame = _terminal_frame("task-a", "done")
+    wake = await turn_scheduler._enqueue_context_wake(
+        "au1", "unpark", [frame], ["task-a"], "<task-notification/>",
+    )
+
+    assert wake["payload"]["api_user_id"] == "u-api"
+    # A context turn that DOES carry the attribution still wins over the row.
+    parked2 = turns_db.enqueue_turn(
+        "au2", "user", prompt="work", profile_id="p1",
+        payload={"api_user_id": "u-turn"},
+    )
+    turns_db.start_turn(parked2["id"], None, "runner")
+    turns_db.park_turn(parked2["id"], ["task-b"])
+    wake2 = await turn_scheduler._enqueue_context_wake(
+        "au2", "unpark", [_terminal_frame("task-b", "done")], ["task-b"], "<x/>",
+    )
+    assert wake2["payload"]["api_user_id"] == "u-turn"
+
+
+async def test_api_lane_adhoc_parent_context_reaches_the_wake(mock_db):
+    # The exact live failure shape (session c66b213a, 2026-08-31): a
+    # conversation/start session's parent turn is an AD-HOC terminal row
+    # (record_adhoc_turn — the API lane never goes through the scheduler).
+    # Its wake must run with the same model/provider overrides and api_user
+    # attribution the parent ran with, not the profile/global defaults.
+    parent = turns_db.record_adhoc_turn(
+        "api1", "api_background",
+        prompt="start a monitor", profile_id="p1",
+        overrides={"model": "prov:prov-1:z-ai/glm-5.3-flash"},
+        payload={"api_user_id": "u-api"},
+    )
+
+    frame = _terminal_frame("task-m", "ci green")
+    wake = await turn_scheduler._enqueue_context_wake(
+        "api1", "unpark", [frame], ["task-m"], "<task-notification/>",
+    )
+
+    assert wake["parent_turn_id"] == parent["id"]
+    assert wake["profile_id"] == "p1"
+    assert wake["overrides"] == {"model": "prov:prov-1:z-ai/glm-5.3-flash"}
+    assert wake["payload"]["api_user_id"] == "u-api"
 
 
 # ---------------------------------------------------------------------------

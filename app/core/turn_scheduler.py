@@ -426,6 +426,9 @@ async def _maybe_auto_continue(
         profile_id=settled.get("profile_id"),
         project_id=settled.get("project_id"),
         worktree_id=settled.get("worktree_id"),
+        # Continue under the settled turn's own per-turn settings (same rule as
+        # the failover retry and the unpark wake).
+        overrides=settled.get("overrides") or None,
         payload=_context_payload(settled) or None,
         parent_turn_id=settled.get("id"),
     )
@@ -641,21 +644,29 @@ async def _enqueue_context_wake(
     payload["pending_frames"] = _dedupe_frames_by_task_id(list(frames))
     payload["task_ids"] = list(dict.fromkeys(task_ids))
     profile_id = context.get("profile_id")
+    session_row: Any = {}
+    if not profile_id or not payload.get("api_user_id"):
+        from app.db import sessions as sessions_db
+        session_row = await asyncio.to_thread(
+            sessions_db.get_session, session_id,
+        ) or {}
     if not profile_id:
         # Belt and braces: a profile-less wake is refused downstream ("Profile
         # not found: None") and the task notification is lost for good — the
         # mark_woken latch never lets it be enqueued again. Whenever the
         # context turn cannot supply a profile, fall back to the session's own.
-        from app.db import sessions as sessions_db
-        session_row = await asyncio.to_thread(
-            sessions_db.get_session, session_id,
-        ) or {}
         profile_id = session_row.get("profile_id")
         logger.warning(
             "turn_scheduler: %s wake for session %s inherited no profile from "
             "its context turn — falling back to the session profile %s",
             source, session_id, profile_id,
         )
+    if not payload.get("api_user_id") and session_row.get("api_user_id"):
+        # Attribution fallback: an API-owned session whose context turn carries
+        # no api_user_id (the API lane's ad-hoc rows predate the payload trail)
+        # must not run its wake as an admin turn — that flips is_admin gates
+        # (app-config tools) and credential scoping to the wrong principal.
+        payload["api_user_id"] = session_row["api_user_id"]
     return await asyncio.to_thread(
         _enqueue,
         session_id,
@@ -664,6 +675,12 @@ async def _enqueue_context_wake(
         profile_id=profile_id,
         project_id=context.get("project_id"),
         worktree_id=context.get("worktree_id"),
+        # The wake continues the context turn's work, so it runs under the same
+        # per-turn settings (model/provider leg, effort, permission mode) —
+        # exactly as a failover retry already does. Without this, a session
+        # whose binding lives only in its turns' overrides woke on the
+        # profile/global default leg with the wrong credentials.
+        overrides=context.get("overrides") or None,
         payload=payload,
         parent_turn_id=context.get("id"),
     )

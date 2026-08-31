@@ -459,6 +459,24 @@ async def test_interrupted_terminal_settles_aborted(mock_db):
     assert turns_db.get_turn(turn["id"])["state"] == "aborted"
 
 
+async def test_error_terminal_records_the_error_message(mock_db):
+    # Regression (2026-08-31): an 'error' terminal settled the turn with
+    # stop_reason='error' and error=NULL — the provider's own error body (a
+    # raw 401 from the gateway) lived only in the event log, making the abort
+    # undiagnosable from the turns table.
+    turn = turns_db.enqueue_turn("s6err", "user", prompt="hi")
+    body = '{"error":{"message":"User not found.","code":401}}'
+
+    with _runtime_env(pump=_make_pump([{"type": "error", "message": body}])):
+        outcome = await session_runtime.SessionRuntime(turn).execute()
+
+    assert outcome == "aborted"
+    row = turns_db.get_turn(turn["id"])
+    assert row["state"] == "aborted"
+    assert row["stop_reason"] == "error"
+    assert row["error"] == body
+
+
 # ---------------------------------------------------------------------------
 # 5. on_turn_settled fired exactly once
 # ---------------------------------------------------------------------------

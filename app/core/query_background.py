@@ -641,6 +641,12 @@ async def _run_background_query_impl(
             stop_reason="interrupted" if interrupted else metadata.get("stop_reason"),
             error=str(metadata["errors"]) if (_is_error and metadata.get("errors")) else None,
             started_at=turn_started_at,
+            # Context trail for scheduler-enqueued successors: an unpark wake
+            # inherits this turn's overrides and api_user attribution via
+            # turn_scheduler._enqueue_context_wake, so it runs on the same leg
+            # with the same credential scoping as the turn that parked.
+            overrides=overrides or None,
+            payload={"api_user_id": api_user_id} if api_user_id else None,
         )
     except Exception as e:
         logger.warning(f"[Background] Failed to record ad-hoc turn for {session_id}: {e}")
@@ -711,6 +717,30 @@ async def start_background_query(
             is_active=True,
         )
         logger.debug(f"Created new session {session_id} with title: {title}")
+
+    # Persist the run binding the API caller picked (v79). The chat lane does
+    # this in turn_manager._submit_blocking for every human-facing source —
+    # whose _BINDING_SOURCES already include "api" — but this lane bypasses
+    # turn_manager entirely, so API sessions kept NULL model/provider bindings.
+    # A scheduler-enqueued successor (an unpark wake, auto-continue, failover)
+    # then built its options with no binding and empty overrides, fell back to
+    # the bare launched_model with no provider, and died on the wrong leg with
+    # the wrong credentials (the 2s 401 unpark aborts, 2026-08-31).
+    if overrides:
+        try:
+            await run_sync(
+                database.set_session_run_binding,
+                session_id,
+                model=overrides.get("model"),
+                effort=overrides.get("effort"),
+                permission_mode=overrides.get("permission_mode"),
+                context_window=overrides.get("context_window"),
+                fast=overrides.get("fast"),
+            )
+        except Exception:
+            logger.exception(
+                f"[Background] run-binding persist failed for session {session_id}"
+            )
 
     # Generate a message ID for the API response contract (clients key the
     # in-flight turn on it; the runner itself no longer consumes it).

@@ -400,6 +400,83 @@ async def test_background_init_stamps_launched_model(mock_db):
     )
 
 
+async def test_start_background_query_stamps_run_binding(mock_db):
+    """Regression (2026-08-31, session c66b213a): the API lane bypasses
+    turn_manager entirely, so its overrides never reached
+    sessions.set_session_run_binding and API sessions kept NULL model/provider
+    bindings. A scheduler-enqueued unpark wake then built with no binding,
+    fell back to the bare launched_model with no provider, and 401'd on the
+    wrong leg. The lane must stamp the binding like the chat lane does."""
+    sid = "bg-binding-1"
+    sessions_db.create_session(sid, "default")
+    run_sync_calls = []
+
+    from app.db import database
+
+    async def _fake_run_sync(fn, *a, **k):
+        run_sync_calls.append((fn, a, k))
+        if fn is database.get_session:
+            return {"id": sid, "sdk_session_id": None}
+        return {"id": "row-1"}
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(
+            qb, "run_sync", new=AsyncMock(side_effect=_fake_run_sync)
+        ))
+        stack.enter_context(patch.object(
+            qb, "get_profile", return_value={"id": "default"}
+        ))
+        stack.enter_context(patch.object(
+            qb, "_run_background_query", new=AsyncMock()
+        ))
+        await qb.start_background_query(
+            "hi", "default", session_id=sid,
+            overrides={"model": "prov:p1:m1", "effort": "high"},
+        )
+        await asyncio.sleep(0)  # let the (mocked) background task settle
+
+    binding = [
+        (a, k) for fn, a, k in run_sync_calls
+        if fn is database.set_session_run_binding
+    ]
+    assert binding, "API lane never persisted the run binding (v79)"
+    args, kwargs = binding[0]
+    assert args[0] == sid
+    assert kwargs["model"] == "prov:p1:m1"
+    assert kwargs["effort"] == "high"
+
+
+async def test_start_background_query_without_overrides_stamps_nothing(mock_db):
+    sid = "bg-binding-2"
+    sessions_db.create_session(sid, "default")
+    run_sync_calls = []
+
+    from app.db import database
+
+    async def _fake_run_sync(fn, *a, **k):
+        run_sync_calls.append((fn, a, k))
+        if fn is database.get_session:
+            return {"id": sid, "sdk_session_id": None}
+        return {"id": "row-1"}
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(
+            qb, "run_sync", new=AsyncMock(side_effect=_fake_run_sync)
+        ))
+        stack.enter_context(patch.object(
+            qb, "get_profile", return_value={"id": "default"}
+        ))
+        stack.enter_context(patch.object(
+            qb, "_run_background_query", new=AsyncMock()
+        ))
+        await qb.start_background_query("hi", "default", session_id=sid)
+        await asyncio.sleep(0)
+
+    assert not any(
+        fn is database.set_session_run_binding for fn, _, _ in run_sync_calls
+    )
+
+
 # ─── build_session_options guard (FIX 5) ────────────────────────────────────
 
 

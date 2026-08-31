@@ -132,6 +132,20 @@ def test_record_adhoc_turn_writes_a_terminal_row(mock_db):
     assert turns.get_live_turn("s1") is None
 
 
+def test_record_adhoc_turn_stores_overrides_and_payload(mock_db):
+    # The context trail scheduler-enqueued successors inherit from: an unpark
+    # wake copies this turn's overrides (model/provider leg) and api_user
+    # attribution via turn_scheduler._enqueue_context_wake.
+    t = turns.record_adhoc_turn(
+        "s1", "api_background",
+        overrides={"model": "prov:p1:m1", "effort": "high"},
+        payload={"api_user_id": "u-api"},
+    )
+    got = turns.get_turn(t["id"])
+    assert got["overrides"] == {"model": "prov:p1:m1", "effort": "high"}
+    assert got["payload"]["api_user_id"] == "u-api"
+
+
 def test_record_adhoc_turn_aborted_carries_error(mock_db):
     t = turns.record_adhoc_turn(
         "s1", "api_stream", outcome="aborted",

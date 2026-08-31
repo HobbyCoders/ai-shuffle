@@ -205,6 +205,7 @@ def record_adhoc_turn(
     error: Optional[str] = None,
     started_at=None,
     payload: Optional[Dict[str, Any]] = None,
+    overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Write a TERMINAL history row for a turn that already ran outside the
     scheduler (ad-hoc REST calls, automation steps, headless background runs).
@@ -241,8 +242,8 @@ def record_adhoc_turn(
         cursor.execute(
             "INSERT INTO turns "
             "(id, session_id, state, source, prompt, profile_id, project_id, "
-            "payload, position, stop_reason, error, started_at, ended_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+            "overrides, payload, position, stop_reason, error, started_at, ended_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
             "COALESCE(%s, NOW()), NOW()) "
             "RETURNING *",
             (
@@ -253,6 +254,7 @@ def record_adhoc_turn(
                 prompt,
                 profile_id,
                 project_id,
+                json.dumps(overrides or {}),
                 json.dumps(payload or {}),
                 position,
                 stop_reason,

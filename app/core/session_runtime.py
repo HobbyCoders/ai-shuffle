@@ -560,6 +560,10 @@ class SessionRuntime:
         # Last terminal pump event seen ('done'|'interrupted'|'error'|None) —
         # drives the completed/aborted finalize decision. None ⇒ crash path.
         self._terminal: Optional[str] = None
+        # The 'error' terminal's message text, so an aborted settle records WHY
+        # (turns.error used to stay NULL — stop_reason='error' with nothing
+        # behind it, and the provider's own error body only in the event log).
+        self._terminal_error: Optional[str] = None
         # In-flight pump task — interrupt() escalation cancels it (legacy
         # task.cancel() parity): the pump holds the reader token, so nothing
         # else can read until it is gone.
@@ -1064,6 +1068,11 @@ class SessionRuntime:
                 await recorder.on_event(event)
                 if etype in ("done", "interrupted", "error"):
                     self._terminal = etype
+                    if etype == "error":
+                        message = event.get("message")
+                        self._terminal_error = (
+                            str(message) if message else None
+                        )
                 # Render frames ride the recorder → SSE path; only the kept
                 # lifecycle/tool frames hit the WS/broadcast leg (legacy :4155
                 # parity — without the trim, render content double-delivers).
@@ -1754,8 +1763,13 @@ class SessionRuntime:
             stop_reason = self._terminal or self._abort_reason or "crash"
             settled = None
             try:
+                # Record the pump's error text on the row (an 'error' terminal
+                # carries the provider's own message) — a bare
+                # stop_reason='error' with error=NULL made every abort
+                # undiagnosable from the turns table alone.
                 settled = await asyncio.to_thread(
-                    turns_db.settle_turn, tid, "aborted", stop_reason
+                    turns_db.settle_turn, tid, "aborted", stop_reason,
+                    self._terminal_error,
                 )
             except Exception:
                 logger.warning("SessionRuntime: settle_turn(aborted) failed for %s", tid, exc_info=True)

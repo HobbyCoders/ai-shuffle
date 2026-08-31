@@ -1189,6 +1189,11 @@ async def execute_query(
             stop_reason=metadata.get("stop_reason"),
             error=str(metadata["errors"]) if (_is_error and metadata.get("errors")) else None,
             started_at=turn_started_at,
+            # Context trail for scheduler-enqueued successors (unpark wake,
+            # auto-continue): they inherit this turn's overrides and api_user
+            # attribution via turn_scheduler._enqueue_context_wake.
+            overrides=overrides or None,
+            payload={"api_user_id": api_user_id} if api_user_id else None,
         )
     except Exception as e:
         logger.warning(f"Failed to record ad-hoc turn for {session_id}: {e}")
@@ -1932,6 +1937,10 @@ async def stream_query(
             stop_reason="interrupted" if interrupted else metadata.get("stop_reason"),
             error=str(metadata["errors"]) if (_is_error and metadata.get("errors")) else None,
             started_at=turn_started_at,
+            # Context trail for scheduler-enqueued successors — see
+            # turn_scheduler._enqueue_context_wake.
+            overrides=overrides or None,
+            payload={"api_user_id": api_user_id} if api_user_id else None,
         )
     except Exception as e:
         logger.warning(f"Failed to record ad-hoc turn for {session_id}: {e}")
