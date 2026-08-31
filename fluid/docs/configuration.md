@@ -41,6 +41,7 @@ upward search for a project file.
 | `code_mode` | `false` | Expose tools through the sandboxed Python kernel (`run_python`) instead of as individual tool calls. Adds the code-mode addendum to the CLI prompt. |
 | `continual` | `false` | Journal the session and synthesize reusable skills in the background. Under `code_mode` the journal records executed cells; without it, a per-tool-call journal is kept, so plain JSON sessions learn too. `--continual` turns this and `code_mode` on together. |
 | `continual_model` | none | Pin skill synthesis to one model id regardless of the session's model. |
+| `anchor_budget` | `1` | Retention budget for the harness-evolution commit gate (`fluid evolve propose`): anchor regressions a proposed change may cause and still commit. `0` = strict stability. |
 | `skills_dir` | none (`~/.fluid/skills`) | Root directory for persistent code-mode skills. |
 | `cwd` | `"."` | Working directory for config discovery, instruction files, tools, and the prompt's environment block. |
 | `max_tokens` | `8192` | Maximum output tokens per model call. |
@@ -340,6 +341,7 @@ Config overrides, applied as layer 5 (`env_overrides` in the loader):
 | `FLUID_SETTING_SOURCES` | `setting_sources` (comma list of `user`/`project`/`local`; empty = none) |
 | `FLUID_CONTINUAL` | `continual` |
 | `FLUID_CONTINUAL_MODEL` | `continual_model` |
+| `FLUID_ANCHOR_BUDGET` | `anchor_budget` (ignored if not an integer) |
 | `FLUID_MAX_TOKENS` | `max_tokens` (ignored if not an integer) |
 | `FLUID_MAX_CALLS` | `max_model_calls` (ignored if not an integer) |
 | `FLUID_CONTEXT_WINDOW` | `context_window` (ignored if not an integer) |

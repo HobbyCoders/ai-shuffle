@@ -39,6 +39,7 @@ def resolved_prompt(
     *,
     extra_system: str | None = None,
     provider_name: str | None = None,
+    guidance_home: Path | None = None,
 ):
     """CLI prompt assembly, delegated to the shared compiler.
 
@@ -72,7 +73,9 @@ def resolved_prompt(
     if config.system:
         base: str | None = config.system
     elif config.base_prompt:
-        base = default_base_prompt(config, provider_name=provider_name)
+        base = default_base_prompt(
+            config, provider_name=provider_name, guidance_home=guidance_home
+        )
     else:
         base = None
     enabled = config.instruction_files.enabled

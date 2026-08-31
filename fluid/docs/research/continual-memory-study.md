@@ -384,9 +384,19 @@ series following this document:
 - **2.3 seed** — `~/.fluid/guidance/<family>.md` user-authored guidance
   blocks matched by stem substring against the model name.
 
-Deferred: anchor sets and the commit gate (2.1/2.2 — needs the regression
-harness generalized into an anchor runner), model_guidance data migration
-beyond the seed, ai-shuffle-side wiring (0.4/0.6 live in that repo).
+2.1/2.2 landed in a follow-up commit (design round in
+[anchor-gate-design.md](anchor-gate-design.md)): `AnchorStore` +
+outcome-shaped checks (`fluid/codemode/anchors.py`), the three-stage
+`CommitGate` with parking and an evolution log
+(`fluid/codemode/evolution.py`), an in-process isolated replay runner with a
+compile-only short-circuit (`fluid/cli/replay.py`), and the CLI surfaces
+`fluid anchors …` / `fluid evolve …` with a confirmed harvest pass
+(`fluid/cli/evolve.py`). `anchor_budget` (default 1) is the B knob.
+
+Deferred: 2.3 full (the synthesizer proposing guidance edits through the
+gate — the gate and its first manual client exist; wire the proposer once
+the gate has soaked), model_guidance data migration beyond the seed,
+ai-shuffle-side wiring (0.4/0.6 live in that repo).
 
 ### E2E verification (z-ai/glm-5.3-flash via OpenRouter)
 

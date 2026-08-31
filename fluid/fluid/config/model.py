@@ -306,6 +306,11 @@ class HarnessConfig:
     skills_dir: str | None = None
     continual: bool = False
     continual_model: str | None = None
+    # Retention budget for the harness-evolution commit gate (HCL's B): how
+    # many anchor regressions a proposed harness-state change may cause and
+    # still commit. 0 = strict stability; the shipped default follows HCL's
+    # finding that a moderate budget beats both extremes.
+    anchor_budget: int = 1
     instruction_files: InstructionFilesConfig = field(default_factory=InstructionFilesConfig)
     # Which filesystem scopes feed context and settings discovery (instruction
     # files, skills, agents, commands, plugins, settings.json, mcp.json,
@@ -370,6 +375,7 @@ class HarnessConfig:
             skills_dir=d.get("skills_dir"),
             continual=bool(d.get("continual", False)),
             continual_model=d.get("continual_model"),
+            anchor_budget=max(0, int(d.get("anchor_budget", 1))),
             instruction_files=InstructionFilesConfig.from_dict(d.get("instruction_files", {})),
             setting_sources=_setting_sources_from(d.get("setting_sources")),
             tools=ToolsConfig.from_dict(d.get("tools", {})),
@@ -415,6 +421,7 @@ class HarnessConfig:
             "skills_dir": self.skills_dir,
             "continual": self.continual,
             "continual_model": self.continual_model,
+            "anchor_budget": self.anchor_budget,
             "cwd": self.cwd,
             "max_tokens": self.max_tokens,
             "max_model_calls": self.max_model_calls,

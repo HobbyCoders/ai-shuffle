@@ -41,6 +41,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "skills_dir": None,
     "continual": False,
     "continual_model": None,
+    "anchor_budget": 1,
     "cwd": ".",
     "max_tokens": None,
     "max_model_calls": 200,
@@ -318,6 +319,11 @@ def env_overrides(env: dict[str, str] | None = None) -> dict[str, Any]:
         out["continual"] = _coerce_bool(env["FLUID_CONTINUAL"])
     if "FLUID_CONTINUAL_MODEL" in env:
         out["continual_model"] = env["FLUID_CONTINUAL_MODEL"]
+    if "FLUID_ANCHOR_BUDGET" in env:
+        try:
+            out["anchor_budget"] = int(env["FLUID_ANCHOR_BUDGET"])
+        except ValueError:
+            pass
     if "FLUID_MAX_TOKENS" in env:
         try:
             out["max_tokens"] = int(env["FLUID_MAX_TOKENS"])

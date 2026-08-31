@@ -256,9 +256,18 @@ class PromptProfile:
 
 
 def profile_for(
-    config: HarnessConfig, *, provider_name: str | None = None
+    config: HarnessConfig,
+    *,
+    provider_name: str | None = None,
+    guidance_home: Path | None = None,
 ) -> PromptProfile:
-    """Derive the prompt profile from a resolved config (once per session)."""
+    """Derive the prompt profile from a resolved config (once per session).
+
+    ``guidance_home`` redirects the user-guidance directory lookup (the
+    anchor-replay runner stages a candidate guidance state there); the
+    ``setting_sources`` gate still applies, so a config that excludes user
+    settings loads no guidance either way.
+    """
     tools = effective_builtin_tools(config.tools.allowed, config.tools.disallowed)
     inst = config.instruction_files
     identity = (config.identity or "").strip() or None
@@ -270,7 +279,7 @@ def profile_for(
         model = config.default_model
     extra_guidance: tuple[str, ...] = ()
     if "user" in config.setting_sources:
-        extra_guidance = load_guidance_files(model)
+        extra_guidance = load_guidance_files(model, home=guidance_home)
     return PromptProfile(
         tools=tools,
         code_mode=config.code_mode,
@@ -812,7 +821,10 @@ def mentioned_tool_names(text: str) -> frozenset[str]:
 
 
 def default_base_prompt(
-    config: HarnessConfig | None = None, *, provider_name: str | None = None
+    config: HarnessConfig | None = None,
+    *,
+    provider_name: str | None = None,
+    guidance_home: Path | None = None,
 ) -> str:
     """The composed base prompt for a CLI run.
 
@@ -820,10 +832,15 @@ def default_base_prompt(
     apply: restricted tool surfaces drop the prose about missing tools, the
     identity layer resolves, and model guidance keys off the resolved model.
     Everything here is fixed at session start, so the result is byte-stable.
+    ``guidance_home`` redirects the user-guidance lookup (anchor replays).
     """
     if config is None:
         return DEFAULT_BASE_PROMPT
-    return compose_base_prompt(profile_for(config, provider_name=provider_name))
+    return compose_base_prompt(
+        profile_for(
+            config, provider_name=provider_name, guidance_home=guidance_home
+        )
+    )
 
 
 def code_mode_addendum(config: HarnessConfig | None = None) -> str | None:
