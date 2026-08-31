@@ -123,6 +123,19 @@ def to_wire(record: Dict[str, Any]) -> Dict[str, Any]:
     # kind keeps the exact shape it had.
     if record.get("agent"):
         wire["agent"] = record.get("agent")
+    # The worker's provider/model label. It used to BE ``summary``, which made
+    # every agent row in TaskList/TaskGet answer "OpenRouter · openai/gpt-5.6"
+    # to the question "what is this task". The label is still worth having —
+    # just not in the field that is supposed to say what happened.
+    if record.get("model"):
+        wire["model"] = record.get("model")
+    # Where a completed agent worker's full report was persisted, and how long
+    # it is. Additive: only ``complete_task`` on a successful agent dispatch
+    # stamps them, so every other task kind keeps its exact shape.
+    if record.get("report_path"):
+        wire["reportPath"] = record.get("report_path")
+    if record.get("report_chars") is not None:
+        wire["reportChars"] = record.get("report_chars")
     return wire
 
 
@@ -766,6 +779,7 @@ class TaskRegistry:
         summary: Optional[str] = None,
         tool_use_id: Optional[str] = None,
         agent: Optional[str] = None,
+        model: Optional[str] = None,
     ) -> None:
         """Register a new task (idempotent — if it already exists, update it).
 
@@ -804,6 +818,8 @@ class TaskRegistry:
                 existing["tool_use_id"] = tool_use_id
             if agent and not existing.get("agent"):
                 existing["agent"] = agent
+            if model and not existing.get("model"):
+                existing["model"] = model
             # Resume revival: a fresh start for a CLEANLY-COMPLETED task flips it
             # back to running (failures stay terminal — that's a stale leak).
             if existing.get("status") == "completed":
@@ -834,6 +850,9 @@ class TaskRegistry:
             "tool_use_id": tool_use_id,
             # Task-tool workers only: the agent's display name (see to_wire).
             "agent": agent,
+            # Task-tool workers only: the "<provider> · <model>" label, kept out
+            # of ``summary`` so summary can say what the task IS.
+            "model": model,
             "started_at": now,
             "updated_at": now,
         }
@@ -869,9 +888,17 @@ class TaskRegistry:
         *,
         summary: Optional[str] = None,
         reason: Optional[str] = None,
+        report_path: Optional[str] = None,
+        report_chars: Optional[int] = None,
         notify: bool = True,
     ) -> None:
         """Set a terminal status on a task. No-op if the task is unknown.
+
+        ``report_path``/``report_chars`` are the retrieval handle for a finished
+        BACKGROUND agent worker: by the time it completes there is no caller
+        frame left to return a report to, so the file it was written to is
+        recorded HERE and served by ``TaskGet``. Without them the woken parent
+        had only id/status/summary and no way at all to reach the work.
 
         A snapshot of the task is also stashed in the retention store so ``/live``
         (``get_visible``) keeps surfacing it after ``clear_session`` wipes the live
@@ -911,6 +938,10 @@ class TaskRegistry:
             record["summary"] = summary
         if reason is not None:
             record["reason"] = reason
+        if report_path is not None:
+            record["report_path"] = report_path
+        if report_chars is not None:
+            record["report_chars"] = report_chars
         record["updated_at"] = _now_iso()
         now = _now_epoch()
         self._prune_recent_terminal(session_id, now=now)

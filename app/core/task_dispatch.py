@@ -28,7 +28,10 @@ What this module adds on top of raw ``dispatch_worker``:
   selectively instead of paying for it in context up front;
   ``background`` pre-allocates and returns the exact worker session id as a
   Fluid ``BackgroundTaskReceipt``, then announces completion to the parent
-  without a polling loop. A call that names no mode takes the target's own
+  without a polling loop — and writes its report to the SAME directory
+  (:func:`write_task_report`, called from ``provider_agent``'s completion
+  path), so ``TaskGet`` can hand the woken parent a head plus a path instead
+  of leaving it to guess. A call that names no mode takes the target's own
   default: Explore-class agents (ones whose declared tool surface cannot write
   files) go ``background``, since a research child's parent has nothing to wait
   for and blocking it turns a fan-out into a queue; everything else stays
@@ -749,11 +752,17 @@ async def dispatch_task_tool(
                 "dispatch continues",
                 worker_id,
             )
+        # PARK-FIRST wording, mirroring the Monitor receipt
+        # (``monitor_spawn.monitor_receipt_text``) that measurably works: the
+        # audited session parked instantly and correctly on Monitor and then
+        # re-derived a background worker's entire brief off the old "continue
+        # useful work" phrasing here.
         note = (
-            "Worker dispatched in the background. Completion will be "
-            "announced to the parent automatically; continue useful work. "
-            "Use mcp__builtins__TaskList or mcp__builtins__TaskOutput only "
-            "for explicit inspection, not a polling loop."
+            "Worker dispatched in the background. End the turn now unless you "
+            "have genuinely disjoint work — you will be woken with the report "
+            "when it completes. Never re-derive the worker's brief yourself; "
+            "mcp__builtins__TaskList and mcp__builtins__TaskGet are for "
+            "explicit inspection, not polling."
         )
         background_payload: Dict[str, Any] = {
             "ok": True,
@@ -788,7 +797,7 @@ async def dispatch_task_tool(
         # it — and under code mode it lands as one kernel value the model then
         # prints whole. The file holds everything; the head decides.
         report = outcome.report or "(no report)"
-        report_path = _write_sync_report(caller_row, outcome.session_id, report)
+        report_path = write_task_report(caller_row, outcome.session_id, report)
         payload["report_chars"] = len(report)
         payload["report_head"] = report[:SYNC_REPORT_HEAD_CHARS]
         if report_path:
@@ -823,8 +832,8 @@ async def dispatch_task_tool(
     return payload
 
 
-def _sync_report_dir(caller_row: Optional[Mapping[str, Any]]) -> Path:
-    """Where this parent's sync Task reports land.
+def task_report_dir(caller_row: Optional[Mapping[str, Any]]) -> Path:
+    """Where this parent's Task reports land — sync and background alike.
 
     The parent's already-materialized checkout when it has one — a report is
     only useful if the parent's Read reaches it, and its cwd is the one tree
@@ -845,27 +854,34 @@ def _sync_report_dir(caller_row: Optional[Mapping[str, Any]]) -> Path:
     return settings.effective_data_dir.joinpath("fluid", *_REPORT_DIR_PARTS[1:])
 
 
-def _write_sync_report(
+def write_task_report(
     caller_row: Optional[Mapping[str, Any]],
     worker_session_id: str,
     report: str,
 ) -> Optional[str]:
-    """Persist a sync worker's full report; return its absolute path or None.
+    """Persist a worker's full report; return its absolute path or None.
 
     Out-of-band delivery is the point: the parent gets a bounded head in its
     context and reads the rest with ``Read(offset=…, limit=…)`` only if it
     needs to. A write failure returns None and the caller degrades to the old
     inline delivery rather than losing the worker's output.
+
+    ONE writer for both modes. A sync dispatch calls it inline (below); a
+    BACKGROUND dispatch calls it from ``provider_agent.dispatch_worker``'s
+    completion path, because there is no longer a caller frame to return to by
+    then. An audited parent whose background child finished with a 27KB report
+    had nowhere to read it from, guessed this exact path, found nothing, and
+    redid the child's work — so background writes it too.
     """
     try:
-        directory = _sync_report_dir(caller_row)
+        directory = task_report_dir(caller_row)
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{worker_session_id or uuid.uuid4()}.md"
         path.write_text(report, encoding="utf-8")
         return str(path.resolve())
     except Exception:  # noqa: BLE001 — never fail a completed dispatch on I/O
         logger.warning(
-            "task_dispatch: could not write the sync report file for worker %s",
+            "task_dispatch: could not write the report file for worker %s",
             worker_session_id,
             exc_info=True,
         )

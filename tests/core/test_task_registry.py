@@ -88,6 +88,33 @@ class TestLifecycle:
         assert len(all_tasks) == 1
         assert all_tasks[0]["status"] == "completed"
 
+    def test_complete_stamps_the_report_handle(self, reg):
+        """A background worker's report is unreachable without this — by the
+        time it finishes there is no caller frame left to hand it back to."""
+        reg.start_task(
+            "s1", "w-1", "agent", "Audit the retry path",
+            summary="Audit the retry path", model="OpenRouter · gpt-5.6-luna",
+        )
+        reg.complete_task(
+            "s1", "w-1", "completed",
+            summary="Retry backoff is unbounded",
+            report_path="/repo/.fluid/task-reports/w-1.md",
+            report_chars=27_000,
+        )
+
+        record = reg.get_task("s1", "w-1")
+        assert record["reportPath"] == "/repo/.fluid/task-reports/w-1.md"
+        assert record["reportChars"] == 27_000
+        assert record["summary"] == "Retry backoff is unbounded"
+        assert record["model"] == "OpenRouter · gpt-5.6-luna"
+
+    def test_complete_without_a_report_stamps_nothing(self, reg):
+        reg.start_task("s1", "t1", "shell", "npm test")
+        reg.complete_task("s1", "t1", "completed")
+
+        record = reg.get_task("s1", "t1")
+        assert "reportPath" not in record and "reportChars" not in record
+
     @pytest.mark.parametrize("status", ["completed", "error", "killed"])
     def test_complete_terminal_statuses(self, reg, status):
         reg.start_task("s1", "t1", "shell", "cmd")
@@ -513,6 +540,25 @@ class TestToWire:
         assert "agent" not in to_wire(record)
         record["agent"] = "Frontend Designer"
         assert to_wire(record)["agent"] == "Frontend Designer"
+
+    def test_model_label_and_report_handle_are_additive(self):
+        """The model label has its own field so ``summary`` can say what the
+        task IS, and a completed worker's report is reachable by path."""
+        record = {"task_id": "t1", "kind": "agent", "status": "completed"}
+        wire = to_wire(record)
+        assert "model" not in wire
+        assert "reportPath" not in wire and "reportChars" not in wire
+
+        record["model"] = "OpenRouter · openai/gpt-5.6-luna"
+        record["report_path"] = "/repo/.fluid/task-reports/t1.md"
+        record["report_chars"] = 27_000
+        wire = to_wire(record)
+        assert wire["model"] == "OpenRouter · openai/gpt-5.6-luna"
+        assert wire["reportPath"] == "/repo/.fluid/task-reports/t1.md"
+        assert wire["reportChars"] == 27_000
+        # A zero-length report still reports its size rather than vanishing.
+        record["report_chars"] = 0
+        assert to_wire(record)["reportChars"] == 0
 
 
 # =============================================================================
