@@ -409,13 +409,18 @@ class _FakeTurnManager:
 
 
 @pytest.fixture
-def dispatch_env(monkeypatch):
+def dispatch_env(monkeypatch, tmp_path):
     """Stub every out-of-process dependency of dispatch_worker.
 
     Returns a namespace with the fake turn manager, the recorded
     ``create_session`` kwargs, the recorded ``update_session`` calls (the
-    worker's own status verdict) and the terminal frames handed to
-    ``turn_scheduler.on_task_terminal`` (the caller wake).
+    worker's own status verdict), the terminal frames handed to
+    ``turn_scheduler.on_task_terminal`` (the caller wake) and the parent's
+    resolved ``cwd``.
+
+    The cwd is a REAL tmp directory: a background dispatch now writes its
+    report under it, and a hard-coded "/repo/feat-x" would have the suite
+    creating directories at the filesystem root.
     """
     from app.core import turn_manager as tm_mod
     from app.core import turn_scheduler as ts_mod
@@ -426,6 +431,8 @@ def dispatch_env(monkeypatch):
     updates = []
     terminal_frames = []
     fake_tm = _FakeTurnManager()
+    checkout = tmp_path / "repo" / "feat-x"
+    checkout.mkdir(parents=True)
 
     def _update_session(session_id, **kwargs):
         updates.append({"session_id": session_id, **kwargs})
@@ -452,7 +459,7 @@ def dispatch_env(monkeypatch):
             "project_id": "proj-1",
             "worktree_id": "wt-1",
             "worktree_branch": "feat/x",
-            "worktree_path": "/repo/feat-x",
+            "worktree_path": str(checkout),
         },
     )
 
@@ -461,7 +468,9 @@ def dispatch_env(monkeypatch):
         return {"id": kwargs.get("session_id")}
 
     monkeypatch.setattr(db, "create_session", _create_session)
-    monkeypatch.setattr(project_resolver, "resolve_existing_cwd", lambda row: "/repo/feat-x")
+    monkeypatch.setattr(
+        project_resolver, "resolve_existing_cwd", lambda row: str(checkout)
+    )
     monkeypatch.setattr(
         pa, "final_turn_outcome",
         lambda sid: {
@@ -476,6 +485,8 @@ def dispatch_env(monkeypatch):
         create_kwargs = created
         status_updates = updates
         wakes = terminal_frames
+        cwd = str(checkout)
+        report_dir = checkout / ".fluid" / "task-reports"
 
     return _Env()
 
@@ -537,7 +548,7 @@ class TestDispatchWorker:
         assert submitted["overrides"]["provider"] == "prov-openai"
         assert submitted["overrides"]["model"] == "gpt-5.5"
         # cwd inherited from the parent's ALREADY-materialized checkout
-        assert submitted["overrides"]["cwd"] == "/repo/feat-x"
+        assert submitted["overrides"]["cwd"] == dispatch_env.cwd
 
     def test_worker_inherits_the_callers_profile_permission_mode(
         self, dispatch_env, monkeypatch
@@ -758,15 +769,62 @@ class TestDispatchWorker:
         assert "no credentials configured" in record["summary"]
         task_registry.clear_session("parent-1")
 
-    def test_a_clean_completion_keeps_its_provider_model_summary(self, dispatch_env):
+    def test_a_clean_completion_summarizes_the_report_not_the_model(
+        self, dispatch_env
+    ):
+        """``summary`` answers "what came back", ``model`` says what ran.
+
+        The audited parent listed its own workers and read back
+        "OpenRouter · openai/gpt-5.6-luna" for every row — the label had been
+        sitting in the one field meant to describe the task.
+        """
         from app.core.task_registry import task_registry
 
         outcome = _dispatch()
 
         record = task_registry.get_task("parent-1", outcome.session_id)
         assert record["status"] == "completed"
-        assert record["summary"] == "prov-openai · gpt-5.5"
+        assert record["summary"] == "the worker's report"
+        assert record["model"] == "prov-openai · gpt-5.5"
         task_registry.clear_session("parent-1")
+
+    def test_a_running_agent_task_summarizes_its_subject(self, dispatch_env):
+        """Before completion there is no report yet, so the subject stands in."""
+        from app.core.task_registry import task_registry
+
+        seen = {}
+
+        def _on_wait(_sid):
+            record = task_registry.get_task("parent-1", seen["worker"])
+            seen["summary"] = record["summary"]
+            seen["model"] = record["model"]
+
+        dispatch_env.tm.on_wait = _on_wait
+        # The worker id is allocated inside dispatch, so capture it from the
+        # registry the moment the turn is waited on.
+        original_start = task_registry.start_task
+
+        def _spy(session_id, task_id, *a, **kw):
+            seen["worker"] = task_id
+            return original_start(session_id, task_id, *a, **kw)
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(task_registry, "start_task", _spy)
+        try:
+            _dispatch(label="Audit the retry path")
+        finally:
+            monkeypatch.undo()
+
+        assert seen["summary"] == "Audit the retry path"
+        assert seen["model"] == "prov-openai · gpt-5.5"
+        task_registry.clear_session("parent-1")
+
+    def test_completion_summary_takes_the_reports_first_real_line(self):
+        assert pa._completion_summary("# Findings\n\nbody") == "Findings"
+        assert pa._completion_summary("\n\n  answer here \nmore") == "answer here"
+        assert pa._completion_summary("") is None
+        long = pa._completion_summary("z" * 500)
+        assert long.endswith("…") and len(long) == pa._COMPLETION_SUMMARY_CHARS
 
     def test_failure_summary_distinguishes_start_from_mid_run(self):
         assert pa._failure_summary("error", "boom", 0) == "worker failed to start: boom"
@@ -1499,6 +1557,49 @@ class TestWorkerWakesItsCaller:
 
         assert not task_registry.has_unresolved_background_launches("parent-1")
         assert not task_registry.has_active_background_work("parent-1")
+
+    def test_background_completion_writes_the_report_file(self, dispatch_env):
+        """The retrieval seam. A background worker finishes long after the call
+        that launched it returned, so the file under the parent's own cwd is
+        the only place its report can still be read from — an audited parent
+        guessed exactly this path, found nothing, and redid the work."""
+        from app.core.task_registry import task_registry
+
+        outcome = _dispatch_bg()
+
+        written = dispatch_env.report_dir / f"{outcome.session_id}.md"
+        assert written.read_text(encoding="utf-8") == "the worker's report"
+        record = task_registry.get_task("parent-1", outcome.session_id)
+        assert record["reportPath"] == str(written.resolve())
+        assert record["reportChars"] == len("the worker's report")
+        task_registry.clear_session("parent-1")
+
+    def test_a_sync_dispatch_leaves_the_file_to_task_dispatch(self, dispatch_env):
+        """A sync call still has a live caller frame; ``task_dispatch`` writes
+        the file from there with the CALLER's row, so writing twice here would
+        only duplicate it."""
+        outcome = _dispatch(background=False)
+
+        assert not (dispatch_env.report_dir / f"{outcome.session_id}.md").exists()
+
+    def test_a_write_failure_never_breaks_the_completion(
+        self, dispatch_env, monkeypatch
+    ):
+        from app.core import task_dispatch
+        from app.core.task_registry import task_registry
+
+        def _boom(*_a, **_kw):
+            raise OSError("read-only filesystem")
+
+        monkeypatch.setattr(task_dispatch, "write_task_report", _boom)
+
+        outcome = _dispatch_bg()
+
+        assert outcome.ok and outcome.report == "the worker's report"
+        record = task_registry.get_task("parent-1", outcome.session_id)
+        assert record["status"] == "completed"
+        assert "reportPath" not in record
+        task_registry.clear_session("parent-1")
 
     def test_completed_worker_wakes_the_caller(self, dispatch_env):
         outcome = _dispatch_bg()

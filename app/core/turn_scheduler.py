@@ -35,6 +35,10 @@ in this order on every settlement:
    the idle reader's terminal task notification (:func:`on_task_terminal`),
    which synthesizes ONE consolidated ``<task-notification>`` prompt, enqueues
    it as ``source=unpark`` (context copied from the parked turn), and kicks.
+   When the parent is MID-TURN rather than at rest, that same prompt is instead
+   STEERED into the running turn (:func:`_try_steer_terminal_notification`), so
+   it lands at the next cell boundary rather than waiting out a turn that may
+   run for another hour. See "Mid-turn delivery" below.
 
 The FAILOVER and AUTO-CONTINUE derivations share ONE read of the settled
 turn's terminal ``turn.completed`` payload from ``session_events``
@@ -60,6 +64,7 @@ import asyncio
 import json
 import logging
 from typing import Any, Dict, List, Optional, Set
+from uuid import uuid4
 
 from app.db import turns as turns_db
 from app.db.base import get_db
@@ -664,6 +669,156 @@ async def _enqueue_context_wake(
     )
 
 
+# ---------------------------------------------------------------------------
+# Mid-turn delivery — steer the notification into the RUNNING turn
+# ---------------------------------------------------------------------------
+#
+# The bug this closes: a wake enqueued while the parent is MID-TURN cannot run
+# until that turn settles (the session has one live-turn slot), so a sub-agent
+# that finished in two minutes was delivered fifty-two minutes later, at the
+# next turn boundary — while the parent, seeing ``status=completed`` on the
+# task list and no report, redid the child's work by hand.
+#
+# The delivery channel already exists: a user's own mid-turn message is handed
+# to the live engine as a fluid ``Steer`` and folded into the next tool result
+# (``session_runtime.try_steer_pending``). A terminal ``<task-notification>``
+# is the same shape of interjection, so it takes the same road.
+#
+# Ownership of the delivery is settled by the RECEIPT, never by the submit:
+# fluid drops an undelivered steer at turn end, so treating submission as
+# delivery would strand a real completion (R1). Hence:
+#
+#   * submit succeeds  → return here; ``mark_woken`` (latched by the caller just
+#     above) keeps the later park/idle wake from re-delivering the same task;
+#   * receipt arrives  → ``on_task_notification_delivered`` latches
+#     ``terminal_notified``;
+#   * turn ends with the steer unreceipted → ``session_runtime._finalize`` calls
+#     ``on_task_notification_stranded``, which enqueues the ordinary at-rest
+#     wake after all;
+#   * submit fails (no live runtime, no adapter, a dying turn) → the caller
+#     falls straight through to the ordinary enqueue, exactly as before.
+#
+#: Steer-id prefix for a mid-turn ``<task-notification>``. A steer id is
+#: normally a QUEUED TURN's row id, which the receipt handler loads to record
+#: and retire; a notification has no queued row behind it, so the prefix keeps
+#: the two namespaces apart (``session_runtime`` routes a prefixed receipt back
+#: here instead of logging it as a receipt for an unknown turn).
+TASK_STEER_ID_PREFIX = "task-notify:"
+
+
+def _mark_terminal_notified(session_id: str, task_ids: List[str]) -> None:
+    """Latch ``terminal_notified`` for every task whose notification just landed.
+
+    ``background_tasks.terminal_notified`` used to stay False forever: the only
+    caller of ``mark_terminal_notified`` is ``complete_task``, and only on the
+    FAILURE statuses that fire the chat-layer chip — a clean completion delivered
+    as a wake or a steer never touched the latch. This is the missing write, on
+    both delivery paths.
+
+    ``update_task`` with no field to change is the registry's public flush: it
+    re-stamps ``updated_at`` and mirrors the record — including the latch state
+    ``_persist_task_state`` reads back out — into the durable queue. Best-effort
+    throughout; a bookkeeping write never breaks a delivery.
+    """
+    try:
+        from app.core.task_registry import task_registry
+
+        for task_id in task_ids:
+            if not task_id:
+                continue
+            if task_registry.mark_terminal_notified(session_id, task_id):
+                task_registry.update_task(session_id, task_id)
+    except Exception:  # noqa: BLE001 — bookkeeping never breaks a delivery.
+        logger.debug(
+            "turn_scheduler: terminal_notified latch failed for %s (%s)",
+            session_id, task_ids, exc_info=True,
+        )
+
+
+async def _try_steer_terminal_notification(
+    session_id: str,
+    prompt: str,
+    frames: List[Dict[str, Any]],
+    task_ids: List[str],
+) -> bool:
+    """Try to hand ``prompt`` to the session's RUNNING turn as a steer.
+
+    True only when the engine accepted the submission — the caller then skips
+    the queued wake it would otherwise enqueue. False for every "there is no
+    running turn to steer into" answer (no runtime in this process, no adapter,
+    a turn already being interrupted, a backend with no steering channel), which
+    is also the at-rest case: the caller falls through to the ordinary wake.
+
+    Never raises — :func:`session_runtime.try_steer_task_notification` swallows
+    its own failures, and this wrapper covers the import.
+    """
+    try:
+        from app.core import session_runtime
+
+        return await session_runtime.try_steer_task_notification(
+            session_id,
+            prompt,
+            notification_id=f"{TASK_STEER_ID_PREFIX}{uuid4().hex}",
+            frames=frames,
+            task_ids=task_ids,
+        )
+    except Exception:  # noqa: BLE001 — the queued wake is the correctness path.
+        logger.warning(
+            "turn_scheduler: mid-turn notification steer failed for %s",
+            session_id, exc_info=True,
+        )
+        return False
+
+
+def on_task_notification_delivered(session_id: str, task_ids: List[str]) -> None:
+    """Receipt callback: fluid folded a steered ``<task-notification>`` into the
+    live turn, so the model has the words. Latch ``terminal_notified``.
+
+    Called from ``session_runtime._on_steer_delivered`` — the same receipt that
+    retires a steered user message's queue row. SYNC and never raises."""
+    _mark_terminal_notified(session_id, list(task_ids or []))
+    logger.info(
+        "turn_scheduler: mid-turn task notification delivered to %s (tasks=%s)",
+        session_id, list(task_ids or []),
+    )
+
+
+async def on_task_notification_stranded(
+    session_id: str,
+    frames: List[Dict[str, Any]],
+    task_ids: List[str],
+) -> None:
+    """Fallback: a steered notification the turn ended without ever delivering.
+
+    A user's steer that dies this way is safe by construction — its queue row
+    was never retired, so the settle-drain runs it as a turn of its own. A task
+    notification has no such row, so the at-rest wake has to be enqueued HERE
+    instead, or the completion is lost for good.
+
+    Deliberately bypasses the ``mark_woken`` latch: the caller already spent it
+    on the steer attempt, and this is that same single delivery arriving by the
+    other road. Never raises — called from ``_finalize``, which must settle."""
+    frames = [f for f in (frames or []) if isinstance(f, dict)]
+    if not frames:
+        return
+    try:
+        prompt = await asyncio.to_thread(_build_task_notification_prompt, frames)
+        turn = await _enqueue_context_wake(
+            session_id, "unpark", frames, list(task_ids or []), prompt,
+        )
+        logger.info(
+            "turn_scheduler: steered notification for %s (tasks=%s) was never "
+            "delivered — enqueued wake turn %s instead",
+            session_id, list(task_ids or []), turn["id"],
+        )
+        kick(session_id)
+    except Exception:  # noqa: BLE001 — a wake failure must never fail a settle.
+        logger.warning(
+            "turn_scheduler: could not enqueue the fallback wake for %s (tasks=%s)",
+            session_id, list(task_ids or []), exc_info=True,
+        )
+
+
 async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Optional[str]:
     """Idle-reader hook: a background task reached a terminal state between
     turns. Fold the terminal task into ONE consolidated ``source=unpark`` wake.
@@ -684,10 +839,12 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Optional[s
       ``payload.pending_frames``, rebuild the FULL prompt over every pending
       frame, and rewrite the row via a guarded UPDATE. If that UPDATE loses
       (the wake already started), fall through to (c);
-    * (c) otherwise enqueue a new unpark wake carrying ``pending_frames`` +
-      ``task_ids`` (context inherited from the parked turn).
+    * (c) otherwise STEER the notification into the running turn if there is one
+      (mid-turn delivery — it lands at the next cell boundary), else enqueue a
+      new unpark wake carrying ``pending_frames`` + ``task_ids`` (context
+      inherited from the parked turn).
 
-    Kicks after a merge/enqueue (never after the (a) no-op).
+    Kicks after a merge/enqueue (never after the (a) no-op or a steer).
 
     Two lanes, by ownership (#690 retired the PUMP lane — see below):
 
@@ -851,9 +1008,27 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Optional[s
                     session_id, task_id,
                 )
                 return
+            wake_task_ids = [task_id] if task_id else []
             prompt = await asyncio.to_thread(_build_task_notification_prompt, [frame])
+            # MID-TURN DELIVERY: a wake enqueued while the parent is inside a
+            # turn cannot run until that turn settles, so an hour-long turn buys
+            # the completion an hour of silence. Steer it into the live turn
+            # instead — it lands at the next cell boundary. False whenever the
+            # session is genuinely at rest (or unsteerable), which falls through
+            # to the queued wake below exactly as before. The ``mark_woken``
+            # latch above is already spent, so the later park/idle wake cannot
+            # deliver this task a second time.
+            if await _try_steer_terminal_notification(
+                session_id, prompt, [frame], wake_task_ids
+            ):
+                logger.info(
+                    "turn_scheduler: unpark for %s — task %s terminal (%s) "
+                    "steered into the live turn",
+                    session_id, task_id, frame.get("status"),
+                )
+                return
             turn = await _enqueue_context_wake(
-                session_id, "unpark", [frame], [task_id] if task_id else [], prompt
+                session_id, "unpark", [frame], wake_task_ids, prompt
             )
             logger.info(
                 "turn_scheduler: unpark for %s — task %s terminal (%s), wake turn %s",

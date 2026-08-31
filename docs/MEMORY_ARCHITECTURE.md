@@ -90,8 +90,49 @@ syncing them through that table is the natural follow-up — but it changes
 multi-install semantics (concurrent synthesizer writes, last-write-wins on a
 single JSON file) and was explicitly not bolted onto this wiring PR.
 
-**Phase 2 guidance proposals stay unwired.** The app's `Synthesizer` is
-constructed without `session_model=`/`guidance_snapshot=`, which disables
-the guidance-proposal channel entirely — fluid's documented safe default for
-embedding hosts. Wiring it (plus a surface for the anchors/evolution commit
-gate) is future work, gated on the rest of this architecture proving out.
+**Phase 2 guidance proposals are wired.** This is the fifth thing the harness
+learns, and the only one that changes what a model *obeys* rather than what it
+knows — so it carries a heavier gate than memories do.
+
+The state is a per-model-family guidance file, `<home>/.fluid/guidance/<stem>.md`,
+where the stem matches as a case-insensitive substring of the session's model id
+(`glm.md` matches `z-ai/glm-5.3-flash`). `home` is the user's home by default,
+fluid's own location, so an operator running `fluid evolve run` against this
+install's skills root commits into the directory the app reads;
+`FLUID_GUIDANCE_HOME` moves both halves together. Fluid's *shipped* family
+blocks stay in code as factory defaults — learned files append after them and
+fully own any new family.
+
+The loop, in `app/core/guidance_surface.py` plus the adapter:
+
+- **Read.** `_compile_prompt_sections` appends the matching files (screened and
+  capped by fluid's `load_guidance_files`) after the shipped blocks, native legs
+  only. Without this half the gate would write files no session ever reads.
+- **Propose.** The `Synthesizer` is constructed with `session_model=`
+  (`options.model` — the same string the read path keys on, so a proposal's stem
+  can actually match) and `guidance_snapshot=` (the raw, unscreened, untruncated
+  text of those same files, so an amendment does not silently drop the tail it
+  replaces). A pass that sees a *recurring* model-specific mechanical failure in
+  the journal may emit one `<guidance>` draft. Fluid validates it at queue time
+  and appends it to `pending-proposals.jsonl` in the skills root, one per stem, a
+  newer draft superseding. Nothing writes the guidance directory here; the
+  `[learned]` line announces `guidance-proposal:<stem>`.
+- **Gate.** `evaluate_pending()` runs fluid's `CommitGate` — validity (stem
+  shape, size cap, injection screening, no directives to non-existent tools),
+  then improvement (the proposal's motivating case must pass when replayed with
+  the change applied), then retention (every anchor whose baseline passes
+  replays; at most `anchor_budget` regressions, default 1). A survivor is
+  written to `<stem>.md` and logged to `.evolution-log.jsonl`; anything else
+  lands in `parked.jsonl` with the failing stage and its evidence. The
+  synthesizer never gets the no-motivation waiver.
+- **Disposition is out-of-band and explicit.** Gate evaluation replays live
+  model turns, so it never rides a background synthesis pass or a session close
+  — nothing in a turn's path calls it. `pending_proposals()`, `parked_proposals()`,
+  `evolution_log()` and `anchors()` are the read surfaces; `reject_pending()`
+  dismisses a draft by parking it (never deleting — parked records are the
+  evidence a better proposal is built from). What a human approves is submission
+  to the gate, not the edit: the gate decides on replay evidence.
+
+The anchor set itself is managed with fluid's `fluid anchors` CLI (harvest needs
+a human curator; `run` records baselines with live replays). The app reads
+anchors, and does not write them.

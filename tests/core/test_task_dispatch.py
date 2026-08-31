@@ -57,7 +57,7 @@ def agents(mock_db):
 def report_dir(tmp_path, monkeypatch):
     """Point sync Task report files at tmp_path instead of the real data dir.
 
-    Patches the cwd resolution the real ``_sync_report_dir`` reads, so the path
+    Patches the cwd resolution the real ``task_report_dir`` reads, so the path
     logic under test is the shipped one.
     """
     from app.core import project_resolver
@@ -158,7 +158,7 @@ def test_sync_report_lands_in_a_file_not_the_tool_result(agents):
 def test_sync_report_file_failure_falls_back_to_inline(agents, monkeypatch):
     """A write failure must never lose a completed worker's output."""
     _mk_session(agents, "s-report-fail", "root-agent")
-    monkeypatch.setattr(td, "_write_sync_report", lambda *a, **k: None)
+    monkeypatch.setattr(td, "write_task_report", lambda *a, **k: None)
 
     async def fake_worker(**kwargs):
         return WorkerOutcome(ok=True, session_id="w-fail", report="the whole thing")
@@ -212,7 +212,7 @@ def test_sync_report_dir_prefers_the_callers_checkout(monkeypatch, tmp_path):
         project_resolver, "resolve_existing_cwd", lambda row: str(checkout)
     )
 
-    directory = td._sync_report_dir({"id": "s-1"})
+    directory = td.task_report_dir({"id": "s-1"})
 
     assert directory == checkout / ".fluid" / "task-reports"
 
@@ -417,6 +417,52 @@ def test_background_mode_returns_immediately(agents):
     assert started.get("background") is True
     assert payload["task_id"] == payload["worker_session_id"]
     assert started["worker_session_id"] == payload["worker_session_id"]
+
+
+def test_background_receipt_commands_the_park(agents):
+    """The receipt is the only instruction the parent gets at dispatch time.
+
+    "Continue useful work" read as licence to re-derive the child's brief: the
+    audited parent spent ~30 minutes redoing research a 2-minute worker had
+    already finished. The Monitor receipt's park-first wording is what
+    measurably worked in the same session.
+    """
+    _mk_session(agents, "s-bg-receipt", "root-agent")
+
+    async def fake_worker(**kwargs):
+        return WorkerOutcome(ok=True, session_id=kwargs["worker_session_id"])
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker), \
+         patch.object(td, "_await_worker_registration", return_value=None):
+        payload = asyncio.run(_dispatch(
+            {"agent": "helper", "prompt": "go", "mode": "background"},
+            "s-bg-receipt",
+        ))
+
+    note = payload["note"]
+    assert "End the turn now" in note
+    assert "you will be woken" in note
+    assert "Never re-derive the worker's brief" in note
+    assert "continue useful work" not in note.lower()
+
+
+def test_ignored_mode_prefix_survives_the_receipt_rewrite(agents):
+    """The ``requested_mode_ignored`` explanation still leads the note."""
+    _mk_session(agents, "s-bg-ignored", "root-agent")
+
+    async def fake_worker(**kwargs):
+        return WorkerOutcome(ok=True, session_id=kwargs["worker_session_id"])
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker), \
+         patch.object(td, "_await_worker_registration", return_value=None):
+        payload = asyncio.run(_dispatch(
+            {"agent": "explorer", "prompt": "go", "mode": "sync"},
+            "s-bg-ignored",
+        ))
+
+    assert payload["requested_mode_ignored"] == "sync"
+    assert payload["note"].startswith("mode='sync' was ignored")
+    assert "End the turn now" in payload["note"]
 
 
 def test_background_registration_failure_is_not_returned_as_a_receipt(agents):

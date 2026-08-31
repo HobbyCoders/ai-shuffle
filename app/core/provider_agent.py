@@ -872,6 +872,59 @@ def _message_first(text: str) -> str:
     return f"{message} — {rest}" if rest else message
 
 
+#: How much of a completed worker's report becomes its registry ``summary``.
+_COMPLETION_SUMMARY_CHARS = 160
+
+
+def _completion_summary(report: Optional[str]) -> Optional[str]:
+    """A one-line headline for a cleanly finished worker, or None.
+
+    The counterpart to :func:`_failure_summary`. A clean completion used to
+    leave the "<provider> · <model>" summary it started with in place, so a
+    parent reading TaskList/TaskGet after a wake learned only which model had
+    run. The report's first non-empty line is what the worker itself chose to
+    lead with, so it is the cheapest honest answer to "what came back".
+    """
+    for line in (report or "").splitlines():
+        text = " ".join(line.split()).lstrip("# ").strip()
+        if not text:
+            continue
+        if len(text) > _COMPLETION_SUMMARY_CHARS:
+            text = text[: _COMPLETION_SUMMARY_CHARS - 1].rstrip() + "…"
+        return text
+    return None
+
+
+def _persist_worker_report(
+    parent_row: Optional[Mapping[str, Any]],
+    worker_session_id: str,
+    report: str,
+) -> Tuple[Optional[str], Optional[int]]:
+    """Write a background worker's report to the parent's report dir.
+
+    Shares ONE writer with the sync path
+    (:func:`app.core.task_dispatch.write_task_report`) so both modes land in
+    ``<parent cwd>/.fluid/task-reports/<task_id>.md`` — the path a parent can
+    actually reach, and the one an audited model already guessed at.
+
+    Strictly best-effort: a failure returns ``(None, len(report))`` and the
+    completion proceeds untouched. Import is lazy because ``task_dispatch``
+    imports this module.
+    """
+    try:
+        from app.core import task_dispatch
+
+        path = task_dispatch.write_task_report(parent_row, worker_session_id, report)
+    except Exception:  # noqa: BLE001 — a completed worker is never failed on I/O
+        logger.warning(
+            "ProviderAgent: could not persist the report for worker %s",
+            worker_session_id,
+            exc_info=True,
+        )
+        path = None
+    return path, len(report or "")
+
+
 def _failure_summary(
     status: str, preview: Optional[str], frames_forwarded: int
 ) -> Optional[str]:
@@ -1229,7 +1282,13 @@ async def dispatch_worker(
         worker_session_id,
         "agent",
         title,
-        summary=f"{provider_tag} · {model_tag}",
+        # ``summary`` answers "what is this task", not "which model is it on".
+        # It carried the provider/model label until the 2026-08-31 audit, where
+        # a parent listing its own workers read back "OpenRouter ·
+        # openai/gpt-5.6-luna" for every row and learned nothing. The label
+        # keeps its own field.
+        summary=title,
+        model=f"{provider_tag} · {model_tag}",
         tool_use_id=launch_key,
         agent=agent_name,
     )
@@ -1306,6 +1365,14 @@ async def dispatch_worker(
     #: turn on every path that has one (the feed's live capture is a bonus, not
     #: the source of truth).
     usage_seen: Dict[str, Any] = {}
+    #: Retrieval handle for a completed BACKGROUND worker's report, stamped on
+    #: the registry row in ``finally`` so ``TaskGet`` can serve it to the woken
+    #: parent. See ``_persist_worker_report``.
+    report_path: Optional[str] = None
+    report_chars: Optional[int] = None
+    #: The registry ``summary`` for a CLEAN completion — the report's first
+    #: line, so a listing says what came back rather than which model ran.
+    completion_summary: Optional[str] = None
     try:
         # Emit the card BEFORE the turn is submitted so a submit failure still
         # renders as a failed worker rather than as silence.
@@ -1432,6 +1499,16 @@ async def dispatch_worker(
         report, truncated = bound_report(final_text)
         status = "completed"
         preview = report
+        completion_summary = _completion_summary(report)
+        if background:
+            # A SYNC dispatch still returns its report inline to a live caller
+            # frame, and ``task_dispatch`` writes the file from there. A
+            # background dispatch has no caller frame left — this is the only
+            # place its report can be persisted, and without it the woken
+            # parent has no way to read what its child produced.
+            report_path, report_chars = _persist_worker_report(
+                parent_row, worker_session_id, report
+            )
         return WorkerOutcome(
             ok=True,
             session_id=worker_session_id,
@@ -1506,13 +1583,15 @@ async def dispatch_worker(
             ))
             terminal_summary = _failure_summary(
                 status, preview, feed.frames_forwarded
-            )
+            ) or completion_summary
             try:
                 task_registry.complete_task(
                     parent_session_id,
                     worker_session_id,
                     status,
                     summary=terminal_summary,
+                    report_path=report_path,
+                    report_chars=report_chars,
                 )
             except Exception:  # noqa: BLE001
                 logger.exception("ProviderAgent: registry completion failed")

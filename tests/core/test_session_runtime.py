@@ -873,3 +873,176 @@ async def test_pump_caps_oversized_tool_input_on_the_ws_leg_only(mock_db):
     assert broadcast["id"] == "t1"
     assert broadcast["input"]["_ws_truncated"] is True
     assert broadcast["input"]["_original_chars"] > session_runtime._WS_MAX_TOOL_INPUT_CHARS
+
+
+# ---------------------------------------------------------------------------
+# Mid-turn task notifications — the steer channel a background completion takes
+# while the parent is still inside its turn
+# ---------------------------------------------------------------------------
+
+def _notification_frames():
+    return [{"task_id": "bg-1", "status": "completed", "summary": "the report"}]
+
+
+async def test_task_notification_steer_is_submitted_and_registered(mock_db):
+    """The submit reaches the adapter under the scheduler's notification id, and
+    the frames are held for whichever of the two receipts comes back — fluid's
+    delivery, or the turn ending without one."""
+    turn = turns_db.enqueue_turn("sn1", "user", prompt="a long turn")
+    turns_db.start_turn(turn["id"], None, "runner")
+    adapter = MagicMock(name="adapter")
+    adapter.steer = AsyncMock()
+    frames = _notification_frames()
+
+    rt = session_runtime.SessionRuntime(turns_db.get_turn(turn["id"]))
+    with patch.object(
+        session_runtime.SessionRuntime, "_live_adapter", return_value=adapter,
+    ):
+        accepted = await rt.steer_task_notification(
+            "<task-notification/>",
+            notification_id="task-notify:abc",
+            frames=frames,
+            task_ids=["bg-1"],
+        )
+
+    assert accepted is True
+    adapter.steer.assert_awaited_once_with(
+        "<task-notification/>", id="task-notify:abc",
+    )
+    assert rt._task_steers["task-notify:abc"] == {
+        "frames": frames, "task_ids": ["bg-1"],
+    }
+
+
+async def test_task_notification_steer_refused_leaves_nothing_behind(mock_db):
+    """fluid raises when there is nothing live to steer into. The caller gets
+    False (and enqueues the ordinary wake), and no frames are left registered to
+    be handed back a second time at finalize."""
+    turn = turns_db.enqueue_turn("sn2", "user", prompt="a long turn")
+    turns_db.start_turn(turn["id"], None, "runner")
+    adapter = MagicMock(name="adapter")
+    adapter.steer = AsyncMock(side_effect=RuntimeError("no running turn"))
+
+    rt = session_runtime.SessionRuntime(turns_db.get_turn(turn["id"]))
+    with patch.object(
+        session_runtime.SessionRuntime, "_live_adapter", return_value=adapter,
+    ):
+        accepted = await rt.steer_task_notification(
+            "<task-notification/>",
+            notification_id="task-notify:def",
+            frames=_notification_frames(),
+            task_ids=["bg-1"],
+        )
+
+    assert accepted is False
+    assert rt._task_steers == {}
+
+
+async def test_task_notification_steer_refused_on_a_dying_turn(mock_db):
+    """A turn the user is already killing swallows the notification without
+    answering it, and there is no queue row behind it to run instead — so the
+    steer is refused and the at-rest wake keeps the delivery."""
+    turn = turns_db.enqueue_turn("sn2b", "user", prompt="stop me")
+    turns_db.start_turn(turn["id"], None, "runner")
+    turns_db.interrupt_turn("sn2b", "stop")
+    adapter = MagicMock(name="adapter")
+    adapter.steer = AsyncMock()
+
+    rt = session_runtime.SessionRuntime(turns_db.get_turn(turn["id"]))
+    with patch.object(
+        session_runtime.SessionRuntime, "_live_adapter", return_value=adapter,
+    ):
+        accepted = await rt.steer_task_notification(
+            "<task-notification/>",
+            notification_id="task-notify:ghi",
+            frames=_notification_frames(),
+            task_ids=["bg-1"],
+        )
+
+    assert accepted is False
+    adapter.steer.assert_not_awaited()
+    assert rt._task_steers == {}
+
+
+async def test_task_notification_receipt_settles_the_card_and_latches(mock_db):
+    """The delivery receipt is what commits the notification: the event log
+    learns the task is done (so the frontend card stops running) and the
+    scheduler latches terminal_notified. No queue row is touched — there is
+    none."""
+    frames = _notification_frames()
+    rt = session_runtime.SessionRuntime(
+        {"session_id": "sn3", "id": "turn-sn3", "source": "user"}
+    )
+    rt._task_steers["task-notify:jkl"] = {"frames": frames, "task_ids": ["bg-1"]}
+    recorder = _recorder_mock()
+    delivered = MagicMock(name="on_task_notification_delivered")
+
+    with patch(
+        "app.core.turn_scheduler.on_task_notification_delivered", new=delivered,
+    ):
+        await rt._on_steer_delivered(
+            recorder, {"steers": [{"id": "task-notify:jkl"}]},
+        )
+
+    recorder.record_task_terminal.assert_awaited_once_with(frames)
+    delivered.assert_called_once_with("sn3", ["bg-1"])
+    assert rt._task_steers == {}
+
+
+async def test_undelivered_task_notification_is_handed_back_at_finalize(mock_db):
+    """fluid drops an unreceipted steer at turn end. A user's message survives
+    that on its still-queued row; a notification has none, so the runtime hands
+    it back to the scheduler, which enqueues the at-rest wake after all."""
+    turn = turns_db.enqueue_turn("sn4", "user", prompt="hi")
+    frames = _notification_frames()
+    stranded = AsyncMock(name="on_task_notification_stranded")
+
+    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+        rt = session_runtime.SessionRuntime(turn)
+        rt._task_steers["task-notify:mno"] = {
+            "frames": frames, "task_ids": ["bg-1"],
+        }
+        with patch(
+            "app.core.turn_scheduler.on_task_notification_stranded", new=stranded,
+        ):
+            outcome = await rt.execute()
+
+    assert outcome == "completed"
+    stranded.assert_awaited_once_with("sn4", frames, ["bg-1"])
+    assert rt._task_steers == {}
+
+
+async def test_wake_turn_latches_terminal_notified(mock_db):
+    """The other delivery path: a wake turn carrying pending_frames IS the
+    delivery of those completions, so it latches terminal_notified too. The flag
+    used to stay False forever for every clean completion."""
+    frames = [{"task_id": "shell-5", "status": "completed"}]
+    turn = turns_db.enqueue_turn(
+        "sn5", "unpark", prompt="background task completed",
+        payload={"pending_frames": frames, "task_ids": ["shell-5"]},
+    )
+    delivered = MagicMock(name="on_task_notification_delivered")
+
+    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+        with patch(
+            "app.core.turn_scheduler.on_task_notification_delivered", new=delivered,
+        ):
+            outcome = await session_runtime.SessionRuntime(turn).execute()
+
+    assert outcome == "completed"
+    delivered.assert_called_once_with("sn5", ["shell-5"])
+
+
+async def test_plain_turn_latches_nothing(mock_db):
+    """No claimed completions on the payload → nothing was delivered."""
+    turn = turns_db.enqueue_turn("sn6", "user", prompt="hi")
+    delivered = MagicMock(name="on_task_notification_delivered")
+
+    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+        with patch(
+            "app.core.turn_scheduler.on_task_notification_delivered", new=delivered,
+        ):
+            outcome = await session_runtime.SessionRuntime(turn).execute()
+
+    assert outcome == "completed"
+    delivered.assert_not_called()

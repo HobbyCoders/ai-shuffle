@@ -82,6 +82,76 @@ def _all_still_running(tasks: Any) -> bool:
     return all(t.get("status") == "running" for t in records)
 
 
+def _agent_report_fields(task_id: str, record: Dict[str, Any]) -> Dict[str, Any]:
+    """``report_head``/``report_path``/``report_chars`` for a finished worker.
+
+    The retrieval seam TaskGet was missing. A background Task worker finishes
+    long after the call that launched it returned, so its report reaches the
+    parent only through this record — and until now TaskGet answered with
+    id/status/summary and nothing else. The audited parent guessed the sync
+    path, found no file (background never wrote one), searched the filesystem,
+    and redid half an hour of its child's research.
+
+    The stored path is preferred; ``final_turn_outcome`` is the fallback for
+    workers that completed BEFORE the path was recorded. Never raises — a
+    failure here degrades TaskGet to what it already returned.
+    """
+    fields: Dict[str, Any] = {}
+    try:
+        from app.core.task_dispatch import SYNC_REPORT_HEAD_CHARS
+
+        path = record.get("reportPath") or record.get("report_path")
+        chars = record.get("reportChars")
+        if chars is None:
+            chars = record.get("report_chars")
+        head: Optional[str] = None
+        if path:
+            try:
+                from pathlib import Path
+
+                text = Path(path).read_text(encoding="utf-8")
+                head = text[:SYNC_REPORT_HEAD_CHARS]
+                chars = len(text)
+                fields["report_path"] = str(path)
+            except OSError:
+                # The row remembers a file that is gone (worktree removed,
+                # different runner). Fall through to the event log rather than
+                # handing back a path nothing can read.
+                logger.debug("TaskGet: report file unreadable at %s", path)
+        if head is None:
+            from app.core import provider_agent as pa
+
+            outcome = pa.final_turn_outcome(task_id)
+            if outcome.get("terminal_found") and not outcome.get("error"):
+                report, _ = pa.bound_report(pa.final_assistant_text(task_id))
+                if report:
+                    head = report[:SYNC_REPORT_HEAD_CHARS]
+                    chars = len(report)
+        if head is None:
+            return {}
+        fields["report_head"] = head
+        if chars is not None:
+            fields["report_chars"] = chars
+        fields["note"] = (
+            "report_head is the complete report; nothing further to read."
+            if chars is not None and chars <= len(head)
+            else (
+                f"report_head is the first {len(head)} of {chars} characters."
+                + (
+                    " The rest is at report_path — read it with "
+                    "Read(offset=..., limit=...) only if the head does not "
+                    "already answer your question."
+                    if fields.get("report_path")
+                    else " The rest is in the worker session transcript."
+                )
+            )
+        )
+    except Exception:  # noqa: BLE001 — inspection must never fail the tool
+        logger.debug("TaskGet: report enrichment failed", exc_info=True)
+        return {}
+    return fields
+
+
 # ============================================================================
 # Background task registry (Monitor / TaskOutput / TaskStop)
 # ============================================================================
@@ -1401,11 +1471,15 @@ def create_builtin_tools_server(
     @tool(
         "TaskGet",
         "Get the details of ONE background task by task_id (background AGENT "
-        "task or Monitor shell command). For shell tasks it also returns "
-        "whether the process is still running, its exit code, and the tail of "
-        "its output buffer. Completions wake this session on their own, so "
-        "this is for inspecting a task you were just woken about or one the "
-        "user asked about — never a polling loop. Use TaskList to discover ids.",
+        "task or Monitor shell command). For a COMPLETED agent task this is "
+        "how you read what the worker produced: it returns report_head (the "
+        "start of the worker's report), report_chars, and report_path (the "
+        "full report on disk — Read it only if the head does not answer your "
+        "question). For shell tasks it returns whether the process is still "
+        "running, its exit code, and the tail of its output buffer. "
+        "Completions wake this session on their own, so this is for inspecting "
+        "a task you were just woken about or one the user asked about — never "
+        "a polling loop. Use TaskList to discover ids.",
         {
             "type": "object",
             "properties": {
@@ -1443,6 +1517,14 @@ def create_builtin_tools_server(
             out["exit_code"] = shell.exit_code
             out["total_lines"] = len(shell.lines)
             out["lines"] = shell.lines[-tail_n:] if tail_n > 0 else []
+        # A finished agent worker's actual output. This is the whole point of
+        # the call for a parent that was just woken about its child.
+        if (
+            record is not None
+            and record.get("kind") == "agent"
+            and record.get("status") == "completed"
+        ):
+            out.update(_agent_report_fields(tid, record))
         still_running = (
             out.get("running") if shell is not None else _all_still_running([record])
         )
