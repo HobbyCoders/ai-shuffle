@@ -24,6 +24,7 @@ from app.core.config import settings
 from app.core.connectors.manager import connector_manager
 from app.core.message_resolver import message_resolver, resolve_working_dir
 from app.core.permission_handler import is_plan_approval_text, permission_handler
+from app.core.session_title import derive_session_title
 from app.core.streaming_context import StreamingContext
 from app.core.sync_engine import sync_engine
 # W2: the origin socket reuses the SAME bounded-queue + writer-task mechanism
@@ -1075,9 +1076,7 @@ class ChatWebSocketHandler:
             session_id = str(uuid.uuid4())
             is_new_session = True
             # Generate title from the user's first message
-            title = prompt[:100].strip()
-            if len(prompt) > 100:
-                title = title.rsplit(' ', 1)[0] + "..."
+            title = derive_session_title(prompt, upload_paths)
 
             # Create session + first user message atomically so neither is orphaned.
             # Wrapped in run_sync to avoid blocking the event loop during DB I/O.
@@ -1204,9 +1203,7 @@ class ChatWebSocketHandler:
             # run via the queue. (The user-message persist itself happens further
             # down, only after this query WINS the check-and-register.)
             if existing_session and not (existing_session.get("title") or "").strip():
-                derived_title = prompt[:100].strip()
-                if len(prompt) > 100:
-                    derived_title = derived_title.rsplit(' ', 1)[0] + "..."
+                derived_title = derive_session_title(prompt, upload_paths)
                 if derived_title:
                     await run_sync(
                         database.update_session,

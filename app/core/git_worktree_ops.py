@@ -181,6 +181,22 @@ class GitWorktreeMixin:
             True if successful, False otherwise
         """
         try:
+            # Detach provisioned runtime links (node_modules, venv, built
+            # assets) BEFORE git sees the directory. On Windows they are
+            # junctions, and `git worktree remove` recurses through a junction
+            # into its target — left in place, removing a provisioned worktree
+            # guts the main checkout's node_modules. Local import: this module
+            # is a git_service mixin and checkout_manager imports git_service.
+            from app.core.checkout_manager import sever_runtime_links
+
+            sever_summary = sever_runtime_links(path)
+            if sever_summary["errors"]:
+                logger.warning(
+                    "Severing runtime links in %s hit errors (continuing): %s",
+                    path,
+                    sever_summary["errors"],
+                )
+
             args = ["worktree", "remove"]
             if force:
                 args.append("--force")

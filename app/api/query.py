@@ -17,6 +17,7 @@ from app.core.models import (
 )
 from app.core.query_engine import stream_query, interrupt_session, start_background_query
 from app.core.auth import auth_service
+from app.core.session_title import derive_session_title
 from app.api.auth import require_api_key, require_auth
 from app.api.sse_utils import is_client_disconnect
 
@@ -285,9 +286,9 @@ async def conversation(
                 )
         else:
             session_id = str(uuid.uuid4())
-            title = request.prompt[:50].strip()
-            if len(request.prompt) > 50:
-                title += "..."
+            title = derive_session_title(
+                request.prompt, max_chars=50, word_boundary=False
+            )
             await run_sync(
                 database.create_session,
                 session_id=session_id,

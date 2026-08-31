@@ -868,6 +868,99 @@ def provision_worktree_runtime(
 
 
 # ---------------------------------------------------------------------------
+# Severing the links before a worktree is deleted
+# ---------------------------------------------------------------------------
+
+# The links provisioning plants are junctions on Windows, and `git worktree
+# remove` there recurses THROUGH a junction into its target (verified on git
+# 2.50.1.windows.1, with and without --force): removing a provisioned worktree
+# gutted the main checkout's entire frontend/node_modules. shutil.rmtree has
+# been junction-safe since Python 3.8, so the app's own rmtree paths are fine —
+# git is the one deleter that must never see the links. Sever them first.
+
+
+def _is_directory_link(path: Path) -> bool:
+    """Whether ``path`` is a directory link (symlink, or an NT junction)."""
+    try:
+        if path.is_symlink():
+            return True
+        if os.name == "nt":
+            import stat as stat_mod
+
+            st = os.lstat(path)
+            return (
+                getattr(st, "st_reparse_tag", 0)
+                == stat_mod.IO_REPARSE_TAG_MOUNT_POINT
+            )
+    except OSError:
+        pass
+    return False
+
+
+def _remove_directory_link(path: Path) -> None:
+    """Remove the link entry itself, never its target's contents."""
+    try:
+        os.unlink(path)
+    except OSError:
+        # A junction (and, on some platforms, a directory symlink) unlinks as
+        # a directory entry.
+        os.rmdir(path)
+
+
+def sever_runtime_links(dest_root: str) -> Dict[str, List[str]]:
+    """Detach every link provisioning may have planted in ``dest_root``.
+
+    Scans the same spots ``provision_worktree_runtime`` populates — a
+    ``node_modules`` at the root and in each immediate subdirectory, plus
+    ``_RUNTIME_LINK_DIRS`` — and removes the ones that are links. Real
+    directories are never touched: a worktree with its own installed
+    node_modules keeps it (the deletion that follows may take it, but that is
+    the deleter's business, and rmtree/git handle real directories correctly).
+
+    Best-effort and never raises, matching provisioning: a failure to sever
+    must not block a removal — the caller logs the summary and git's own
+    refusal modes still apply.
+    """
+    summary: Dict[str, List[str]] = {"severed": [], "errors": []}
+    try:
+        dest = Path(dest_root)
+        candidates: List[Path] = [dest / "node_modules"]
+        try:
+            children = sorted(p for p in dest.iterdir() if p.is_dir())
+        except OSError:
+            children = []
+        for child in children:
+            candidates.append(child / "node_modules")
+        candidates.extend(dest / rel for rel in _RUNTIME_LINK_DIRS)
+    except Exception as e:  # noqa: BLE001 - never fail a removal over this
+        logger.warning("checkout_manager: link severing aborted: %s", e)
+        summary["errors"].append(str(e))
+        return summary
+
+    for cand in candidates:
+        try:
+            if not _is_directory_link(cand):
+                continue
+            _remove_directory_link(cand)
+            rel = str(cand.relative_to(dest))
+            summary["severed"].append(rel)
+            logger.info(
+                "checkout_manager: severed link %s before removal of %s",
+                rel,
+                dest_root,
+            )
+        except Exception as e:  # noqa: BLE001
+            summary["errors"].append(f"{cand}: {e}")
+            logger.warning(
+                "checkout_manager: could not sever link %s in %s: %s",
+                cand,
+                dest_root,
+                e,
+            )
+    return summary
+
+
+# ---------------------------------------------------------------------------
 # Adopting worktrees this app did not create
 # ---------------------------------------------------------------------------
 

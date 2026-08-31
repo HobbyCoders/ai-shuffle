@@ -22,6 +22,7 @@ from app.core.provider.events import (
 from app.db import database
 from app.db import turns as turns_db
 from app.db.async_database import run_sync
+from app.core.session_title import derive_session_title
 from app.core.session_pool import (
     SessionState, get_session_pool, is_subprocess_alive,
     requires_reconnect,
@@ -704,9 +705,9 @@ async def start_background_query(
         logger.debug(f"Resuming session {session_id} with SDK session {resume_id}")
     else:
         session_id = str(uuid.uuid4())
-        title = prompt[:50].strip()
-        if len(prompt) > 50:
-            title += "..."
+        title = derive_session_title(
+            prompt, max_chars=50, word_boundary=False
+        )
         session = await run_sync(
             database.create_session,
             session_id=session_id,

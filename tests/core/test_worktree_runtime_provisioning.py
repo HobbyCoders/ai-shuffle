@@ -10,6 +10,8 @@ So: link what a run needs, never copy a credential, and pass configuration by
 env-var reference at spawn instead.
 """
 
+from pathlib import Path
+
 import pytest
 
 import app.core.checkout_manager as cm
@@ -185,6 +187,109 @@ def test_config_falls_back_when_no_reference_is_set(monkeypatch):
     assert _resolve_env_file() == ".env"
 
 
+# ─── severing the links before the worktree is deleted ───────────────────────
+
+# On Windows the links are junctions, and `git worktree remove` recurses
+# through a junction into its target: removing a provisioned worktree gutted
+# the main checkout's entire frontend/node_modules (verified incident,
+# git 2.50.1.windows.1, with and without --force). The app's removal path must
+# therefore detach every link before git touches the directory.
+
+
+def test_severing_detaches_the_links_and_the_source_survives(tmp_path):
+    source = _seed_source(tmp_path / "src")
+    (source / "frontend" / "node_modules" / "pkg").mkdir(parents=True)
+    (source / "frontend" / "node_modules" / "pkg" / "index.js").write_text(
+        "hello", encoding="utf-8"
+    )
+    dest = tmp_path / "wt"
+    (dest / "frontend").mkdir(parents=True)
+    (dest / "frontend" / "package.json").write_text("{}", encoding="utf-8")
+
+    summary = cm.provision_worktree_runtime(str(source), str(dest))
+    assert "frontend" in summary["linked"]
+
+    severed = cm.sever_runtime_links(str(dest))
+
+    assert severed["errors"] == []
+    assert set(severed["severed"]) >= {
+        str(Path("frontend") / "node_modules"),
+        "venv",
+    }
+    # The link entries are gone from the worktree...
+    assert not (dest / "frontend" / "node_modules").exists()
+    assert not (dest / "venv").exists()
+    # ...and the source kept every byte.
+    assert (
+        source / "frontend" / "node_modules" / "pkg" / "index.js"
+    ).read_text(encoding="utf-8") == "hello"
+    assert (source / "venv" / "marker.txt").exists()
+    # The worktree's own real files are untouched.
+    assert (dest / "frontend" / "package.json").exists()
+
+
+def test_severing_leaves_a_real_directory_alone(tmp_path):
+    dest = tmp_path / "wt"
+    (dest / "venv").mkdir(parents=True)
+    (dest / "venv" / "mine.txt").write_text("real install", encoding="utf-8")
+
+    severed = cm.sever_runtime_links(str(dest))
+
+    assert severed["severed"] == []
+    assert severed["errors"] == []
+    assert (dest / "venv" / "mine.txt").exists()
+
+
+def test_severing_an_unprovisioned_or_missing_worktree_is_a_quiet_noop(tmp_path):
+    empty = tmp_path / "wt"
+    empty.mkdir()
+    assert cm.sever_runtime_links(str(empty)) == {"severed": [], "errors": []}
+    assert cm.sever_runtime_links(str(tmp_path / "never-existed")) == {
+        "severed": [],
+        "errors": [],
+    }
+
+
+def test_git_worktree_remove_cannot_gut_the_source(tmp_path):
+    """The incident, end to end: provision, then remove through the app path."""
+    import subprocess
+
+    from app.core.git_service import git_service
+
+    main = tmp_path / "main"
+    (main / "frontend").mkdir(parents=True)
+
+    def git(*args):
+        subprocess.run(
+            ["git", *args], cwd=str(main), check=True,
+            capture_output=True, text=True,
+        )
+
+    git("init")
+    git("config", "user.email", "t@t.test")
+    git("config", "user.name", "T")
+    (main / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    (main / "frontend" / "package.json").write_text("{}", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-m", "init")
+    (main / "frontend" / "node_modules" / "pkg").mkdir(parents=True)
+    (main / "frontend" / "node_modules" / "pkg" / "index.js").write_text(
+        "hello", encoding="utf-8"
+    )
+
+    wt = tmp_path / "wt"
+    git("worktree", "add", str(wt), "-b", "feature")
+    summary = cm.provision_node_modules(str(main), str(wt))
+    assert "frontend" in summary["linked"]
+
+    assert git_service.remove_worktree(str(main), str(wt), force=True)
+
+    assert not wt.exists()
+    assert (
+        main / "frontend" / "node_modules" / "pkg" / "index.js"
+    ).read_text(encoding="utf-8") == "hello"
+
+
 # ─── the guidance the model reads ────────────────────────────────────────────
 
 
@@ -195,6 +300,12 @@ def test_git_guidance_covers_multi_worktree_merge_and_env_copying():
     assert "push origin --delete" in GITHUB_BLOCK
     assert "gh pr view" in GITHUB_BLOCK
     assert "Never copy a `.env`" in GITHUB_BLOCK
+
+
+def test_git_guidance_forbids_removing_a_provisioned_worktree_by_hand():
+    from app.core.provider.harness_adapter import GITHUB_BLOCK
+
+    assert "Never run `git worktree remove`" in GITHUB_BLOCK
 
 
 def test_a_hand_copied_config_already_in_the_worktree_is_flagged(tmp_path, caplog):

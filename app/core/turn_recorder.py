@@ -33,6 +33,7 @@ from typing import Any, Callable, Dict, List, Optional
 from app.contract import events as contract
 from app.core import artifact_ingest, artifact_store
 from app.core.config import settings
+from app.core.session_title import derive_session_title
 from app.db import runs as runs_db
 from app.db import session_events as session_events_db
 
@@ -1451,10 +1452,7 @@ _TITLE_MAX_CHARS = 100
 
 
 def _derive_title(text: str) -> str:
-    title = text[:_TITLE_MAX_CHARS].strip()
-    if len(text) > _TITLE_MAX_CHARS:
-        title = title.rsplit(" ", 1)[0] + "..."
-    return title
+    return derive_session_title(text, max_chars=_TITLE_MAX_CHARS)
 
 
 def _voice_exchange_side_effects(
