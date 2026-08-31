@@ -162,6 +162,38 @@ PLAN_EXIT_REMINDER = (
     "</system-reminder>"
 )
 
+# Opening words of the reflection nudge — a stable handle for tests and for
+# hosts that want to find or filter it. See NativeLoop._reflection_nudge.
+REFLECTION_NUDGE_MARK = "This turn cost you some harness friction"
+REFLECTION_NUDGE_DISPATCH_MARK = "This turn dispatched background work"
+
+
+def _reflection_nudge_text(events: int, dispatches: int) -> str:
+    """The one-per-turn reminder to turn a harness mistake into a memory."""
+    if events > 0:
+        opening = (
+            f"{REFLECTION_NUDGE_MARK}: {events} "
+            f"{'event' if events == 1 else 'events'} the harness recorded "
+            "(a path that was not there, a call that kept failing, work "
+            "repeated)."
+        )
+    else:
+        opening = (
+            f"{REFLECTION_NUDGE_DISPATCH_MARK}: {dispatches} "
+            f"{'task' if dispatches == 1 else 'tasks'} whose results arrive "
+            "outside the call that started them."
+        )
+    return (
+        "<system-reminder>\n"
+        f"{opening} If anything you learned there holds beyond this task — "
+        "where a path or a file actually lives, an output shape you had to "
+        "guess at, where a result really arrives — record it with Remember, "
+        "one short line each. Having nothing worth recording is a normal "
+        "answer; either way, do not mention this reminder in your reply.\n"
+        "</system-reminder>"
+    )
+
+
 # The builtins that put a file into ``ctx.read_files`` (read.py, write.py).
 # Replaying their calls is what rebuilds the ledger on resume.
 _READ_LEDGER_TOOLS = frozenset({"Read", "Write"})
@@ -632,6 +664,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         # loop's local counter so terminal events raised OUTSIDE the loop (the
         # catch-all handler in _start_and_loop) can still report the count.
         self._turn_model_calls = 0
+        # End-of-turn reflection nudge (see _reflection_nudge): per-turn state,
+        # reset by _agent_loop. ``_background_dispatches`` counts detached Task
+        # workers started this turn; ``_reflection_nudged`` caps the reminder at
+        # one per turn.
+        self._background_dispatches = 0
+        self._reflection_nudged = False
         self._turn_task: asyncio.Task | None = None
         self._pending_permissions: dict[str, asyncio.Future] = {}
         self._pending_questions: dict[str, asyncio.Future] = {}
@@ -1455,6 +1493,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         parent = user_node
         num_calls = 0
         self._turn_model_calls = 0
+        self._begin_friction_turn()
         total_usage: dict[str, Any] = {}
         final_stop = "end_turn"
         overflow_retries = 0
@@ -2307,6 +2346,15 @@ class NativeLoop(BackgroundLifecycleMixin):
             outcome = await self._gated_call(sid, turn_id, tu["name"], tool_use_id, tu["input"])
         finally:
             self.ctx.extra.pop("tool_use_id", None)
+        if (
+            outcome.background_task is not None
+            and not outcome.background_task.serves
+        ):
+            # A detached worker: its result comes back somewhere other than
+            # this tool's output, and getting that wrong is one of the most
+            # expensive harness mistakes there is. Counts toward the
+            # end-of-turn reflection nudge even on an otherwise clean turn.
+            self._background_dispatches += 1
         content: list[Any] = [Text(outcome.text)]
         # Image payloads (file reads, MCP screenshots) become Image blocks on
         # the result; the base64 never rides the event bus — ToolResult events
@@ -2326,11 +2374,78 @@ class NativeLoop(BackgroundLifecycleMixin):
         reminder = self._nested_instruction_reminder(tu["input"])
         if reminder:
             content.append(Text(reminder))
+        # Reflection nudge: at most one per turn, appended to the first result
+        # that follows the turn's first friction (or its first detached Task).
+        nudge = self._reflection_nudge()
+        if nudge:
+            content.append(Text(nudge))
         return ToolResultBlock(
             tool_use_id=tool_use_id,
             content=content,
             is_error=outcome.is_error,
         )
+
+    # ── end-of-turn reflection nudge ─────────────────────────────────────
+    def _friction_source(self) -> Any | None:
+        """Whichever recorder is journaling this session's tool calls."""
+        return self._codemode if self._codemode is not None else self._journal
+
+    def _begin_friction_turn(self) -> None:
+        """Reset the turn-scoped friction/nudge state. Never raises."""
+        self._background_dispatches = 0
+        self._reflection_nudged = False
+        source = self._friction_source()
+        if source is None:
+            return
+        try:
+            source.begin_turn()
+        except Exception:  # noqa: BLE001 — instrumentation is never fatal
+            pass
+
+    def _reflection_nudge(self) -> str | None:
+        """One appended system-reminder asking the model to record a lesson.
+
+        Small models never call Remember on their own after an expensive
+        harness mistake — audited sessions show the model naming the problem
+        in its own thinking, redoing a subagent's work by hand, and leaving
+        nothing durable behind. The journal now records the mistake
+        mechanically (``FrictionDetector``); this is the other half: a prompt
+        to turn the mistake into a memory while the context is still hot.
+
+        Three properties it must keep:
+
+        - **Appended, never prefix-mutating.** It rides a tool result block on
+          its way into immutable history, exactly like the nested-instruction
+          reminder above; nothing already sent is rewritten, so the prompt
+          cache survives.
+        - **Absent on a clean turn.** No friction and no detached Task means
+          no reminder at all — a turn that went well costs zero tokens here.
+        - **Free to ignore.** It states that having nothing to record is a
+          normal answer, so a model that skips it loses nothing.
+
+        Returns ``None`` when it has already fired this turn, when nothing has
+        gone wrong, or when Remember is not on this session's surface (with no
+        continual learner wired there is nowhere for a lesson to go).
+        """
+        if self._reflection_nudged:
+            return None
+        source = self._friction_source()
+        if source is None:
+            return None
+        if self.registry is not None and (
+            self.registry.get("Remember") is None
+            or not self._tool_available("Remember")
+        ):
+            return None
+        try:
+            events = int(source.friction_count)
+        except Exception:  # noqa: BLE001
+            return None
+        dispatches = self._background_dispatches
+        if events <= 0 and dispatches <= 0:
+            return None
+        self._reflection_nudged = True
+        return _reflection_nudge_text(events, dispatches)
 
     # Tool-input keys that name a filesystem target worth checking for nested
     # instruction files.

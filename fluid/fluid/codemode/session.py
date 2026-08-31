@@ -45,6 +45,7 @@ from collections.abc import Callable
 from typing import Any
 
 from fluid.codemode.bridge import HostBridge
+from fluid.codemode.journal import FrictionDetector, append_friction
 from fluid.codemode.kernel import HostReply
 from fluid.codemode.projection import Projection, func_name
 from fluid.codemode.skills import SkillStore, referenced_skills, validate_skill
@@ -188,6 +189,7 @@ class CodeModeSession:
         synthesizer: Any | None = None,  # fluid.codemode.continual.Synthesizer
         tool_filter: Callable[[str], bool] | None = None,
         plan_mode: Callable[[], bool] | None = None,
+        friction: Any | None = None,  # fluid.codemode.journal.FrictionDetector
     ) -> None:
         self._registry = registry
         self._config = config or KernelConfig()
@@ -196,6 +198,12 @@ class CodeModeSession:
         self._vfs_signature: tuple | None = None
         self._skills = skills
         self._synthesizer = synthesizer
+        # Mechanical harness-friction detection over the turn's in-kernel calls
+        # (the JSON surface has the same detector behind ToolJournal). Entries
+        # are buffered per cell and journaled right after the cell they came
+        # from, so the synthesis prompt reads "cell, then what it cost".
+        self._friction = friction if friction is not None else FrictionDetector()
+        self._friction_pending: list[dict] = []
         # The session's tool surface (ruling T9): a ``(name) -> bool`` predicate,
         # ``None`` for "everything". Settable after construction — the engine
         # wires its own predicate in when it registers the code-mode tools. The
@@ -212,6 +220,19 @@ class CodeModeSession:
     @property
     def skills(self) -> SkillStore | None:
         return self._skills
+
+    @property
+    def friction_count(self) -> int:
+        """Friction entries recorded this turn (the engine's nudge trigger)."""
+        return self._friction.count if self._skills is not None else 0
+
+    def begin_turn(self) -> None:
+        """Turn boundary: reset friction budget and cross-call state."""
+        try:
+            self._friction.begin_turn()
+        except Exception:
+            pass
+        self._friction_pending = []
 
     def _planning(self) -> bool:
         return self.plan_mode is not None and bool(self.plan_mode())
@@ -419,6 +440,15 @@ class CodeModeSession:
                 out, is_error = reply.message or "permission denied", True
             else:
                 out, is_error = reply.error or "tool error", True
+            if self._skills is not None:
+                # Best-effort friction detection over this in-kernel call; the
+                # entries ride out with the cell's journal record.
+                try:
+                    self._friction_pending.extend(
+                        self._friction.observe(name, kwargs, out, is_error)
+                    )
+                except Exception:
+                    pass
             await loop._emit(ToolResult(
                 session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id,
                 name=name, output=out, is_error=is_error,
@@ -454,6 +484,7 @@ class CodeModeSession:
     def _record_cell(self, code: str, result: Any, called_tools: list[dict]) -> None:
         """Journal the cell, bump skill usage, kick synthesis. Never raises."""
         if self._skills is None:
+            self._friction_pending = []
             return
         try:
             error_lines = (result.error or "").strip().splitlines()
@@ -475,6 +506,8 @@ class CodeModeSession:
             self._skills.note_uses(referenced_skills(code))
         except Exception:
             pass
+        pending, self._friction_pending = self._friction_pending, []
+        append_friction(self._skills, self._synthesizer, pending)
         if self._synthesizer is not None:
             try:
                 self._synthesizer.kick()
