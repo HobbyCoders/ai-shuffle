@@ -118,7 +118,7 @@ describe('group ordering', () => {
 
 describe('availability', () => {
 	it('greys the computer-use group until the profile switch is on', () => {
-		expect(groupBlockedReason(computerUse, LOCKED)).toMatch(/enable computer use above/i);
+		expect(groupBlockedReason(computerUse, LOCKED)).toMatch(/enable computer use in settings/i);
 		expect(groupBlockedReason(computerUse, OPEN)).toBeNull();
 	});
 
@@ -295,23 +295,31 @@ describe('profileToolCount', () => {
 	const surface = { groups: [harness, github], discovered_at: '', errors: [] };
 
 	it('reads the saved mode, not the shape of the list', () => {
-		expect(profileToolCount({ tool_selection_mode: 'all', allowed_tools: [] }, surface, true)).toBe(6);
-		expect(profileToolCount({ tool_selection_mode: 'none' }, surface, true)).toBe(0);
+		expect(
+			profileToolCount({ tool_selection_mode: 'all', allowed_tools: [] }, surface, true, true)
+		).toBe(6);
+		expect(profileToolCount({ tool_selection_mode: 'none' }, surface, true, true)).toBe(0);
 		expect(
 			profileToolCount(
 				{ tool_selection_mode: 'allow', allowed_tools: ['Read', 'mcp__github__*'] },
 				surface,
+				true,
 				true
 			)
 		).toBe(4);
 		expect(
-			profileToolCount({ tool_selection_mode: 'disallow', disallowed_tools: ['Bash'] }, surface, true)
+			profileToolCount(
+				{ tool_selection_mode: 'disallow', disallowed_tools: ['Bash'] },
+				surface,
+				true,
+				true
+			)
 		).toBe(5);
 	});
 
 	it('still reads a pre-migration row correctly', () => {
-		expect(profileToolCount({ allowed_tools: [] }, surface, true)).toBe(0);
-		expect(profileToolCount({ allowed_tools: ['Read'] }, surface, true)).toBe(1);
-		expect(profileToolCount({}, surface, true)).toBe(6);
+		expect(profileToolCount({ allowed_tools: [] }, surface, true, true)).toBe(0);
+		expect(profileToolCount({ allowed_tools: ['Read'] }, surface, true, true)).toBe(1);
+		expect(profileToolCount({}, surface, true, true)).toBe(6);
 	});
 });

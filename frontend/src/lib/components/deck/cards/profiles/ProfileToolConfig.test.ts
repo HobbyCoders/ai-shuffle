@@ -12,6 +12,17 @@ import ProfileToolConfig from './ProfileToolConfig.svelte';
 import type { ToolSurface, ToolSurfaceGroup } from '$lib/api/toolSurface';
 import { toggleGroupSelection, toggleToolSelection } from './toolSurface';
 
+// The picker reads the GLOBAL computer-use toggle from the shared store; the
+// tests drive it through this hoisted flag instead of the real poller.
+const cuMocks = vi.hoisted(() => ({ enabled: true }));
+vi.mock('$lib/stores/computerUse.svelte', () => ({
+	computerUse: {
+		get enabled() {
+			return cuMocks.enabled;
+		}
+	}
+}));
+
 const surface: ToolSurface = {
 	discovered_at: '2026-08-23T12:00:00Z',
 	errors: [{ group: 'mcp:broken', message: 'Server did not answer in time.' }],
@@ -93,6 +104,7 @@ interface Overrides {
  * list that would be saved. `saved` holds the latest one.
  */
 function setup(overrides: Overrides = {}) {
+	cuMocks.enabled = overrides.computerUseEnabled ?? true;
 	const mode = overrides.toolSelectionMode ?? 'allow';
 	const saved: { list: string[] } = {
 		list: mode === 'disallow' ? overrides.disallowedTools ?? [] : overrides.allowedTools ?? []
@@ -112,7 +124,6 @@ function setup(overrides: Overrides = {}) {
 			surface,
 			loading: false,
 			refreshing: false,
-			computerUseEnabled: ctx.computerUseEnabled,
 			isAdmin: ctx.isAdmin,
 			onToolSelectionModeChange,
 			onToggleTool: (g: ToolSurfaceGroup, name: string) => {
@@ -257,10 +268,10 @@ describe('read-only modes', () => {
 });
 
 describe('unavailable rows', () => {
-	it('greys the computer-use group until the profile switch is on', () => {
+	it('greys the computer-use group while the global toggle is off', () => {
 		const { getByRole, getByText } = setup({ computerUseEnabled: false });
 		expect(groupBox(getByRole, 'Computer use').disabled).toBe(true);
-		expect(getByText(/enable computer use above/i)).toBeTruthy();
+		expect(getByText(/enable computer use in settings/i)).toBeTruthy();
 	});
 
 	it('greys the admin-only group for a non-admin', () => {

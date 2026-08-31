@@ -97,7 +97,7 @@ export function groupBlockedReason(
 	ctx: SelectabilityContext
 ): string | null {
 	if (group.kind === 'computer_use' && !ctx.computerUseEnabled) {
-		return 'Enable computer use above to grant these tools.';
+		return 'Enable computer use in Settings → Chat & Input to grant these tools.';
 	}
 	if (group.available === false) {
 		return 'This tool source is unavailable on this host.';
@@ -251,14 +251,14 @@ export function profileToolCount(
 		tool_selection_mode?: unknown;
 		allowed_tools?: string[] | null;
 		disallowed_tools?: string[] | null;
-		computer_use?: { enabled?: boolean } | null;
 	} | null | undefined,
 	surface: ToolSurface,
+	computerUseEnabled: boolean,
 	isAdmin: boolean
 ): number {
 	const mode = resolveToolMode(config);
 	const ctx: SelectabilityContext = {
-		computerUseEnabled: !!config?.computer_use?.enabled,
+		computerUseEnabled,
 		isAdmin
 	};
 	const list =

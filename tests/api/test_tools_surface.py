@@ -184,6 +184,40 @@ def test_computer_use_group_names_every_tool(client):
     }
 
 
+def test_computer_use_group_unavailable_while_global_toggle_off(client):
+    from unittest.mock import patch
+
+    from app.db.settings import set_system_setting
+
+    set_system_setting("computer_use_enabled", "false")
+    # Patch the lazy import target: computer_use_tools re-imports it at call time.
+    with patch(
+        "app.mcp.computer_use.scaling.computer_use_available",
+        return_value=(True, "ok"),
+    ):
+        surface = _surface(client)
+    group = _group(surface, "computer_use")
+    assert group["available"] is False
+    assert any(
+        e["group"] == "computer_use" and "Settings" in e["message"]
+        for e in surface["errors"]
+    )
+
+
+def test_computer_use_group_available_when_toggle_on(client):
+    from unittest.mock import patch
+
+    from app.db.settings import set_system_setting
+
+    set_system_setting("computer_use_enabled", "true")
+    with patch(
+        "app.mcp.computer_use.scaling.computer_use_available",
+        return_value=(True, "ok"),
+    ):
+        group = _group(_surface(client), "computer_use")
+    assert group["available"] is True
+
+
 def test_a_failing_mcp_server_becomes_an_error_group_not_a_silent_drop(client):
     with patch.object(
         tool_catalog,

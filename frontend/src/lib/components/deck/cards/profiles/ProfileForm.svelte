@@ -7,7 +7,7 @@
 	 */
 	import type { Profile } from '$lib/api/client';
 	import type { ToolSurface, ToolSurfaceGroup } from '$lib/api/toolSurface';
-	import { Users, Settings, SlidersHorizontal, Bot, Check, Plus, Trash2, FileText, Monitor, OctagonX } from 'lucide-svelte';
+	import { Users, Settings, SlidersHorizontal, Bot, Check, Plus, Trash2, FileText } from 'lucide-svelte';
 	import ProfileToolConfig from './ProfileToolConfig.svelte';
 	import ProfileSystemPrompt from './ProfileSystemPrompt.svelte';
 	import ModelPicker from '$lib/components/settings/ModelPicker.svelte';
@@ -19,29 +19,6 @@
 		NATIVE_PROVIDER_KEY
 	} from '$lib/constants/models';
 	import { onMount } from 'svelte';
-	import { getComputerUseStatus } from '$lib/api/computerUse';
-	import { computerUse } from '$lib/stores/computerUse.svelte';
-
-	// Host capability for the Computer Use toggle. Native-only: unavailable in
-	// Docker/headless, which we surface so the toggle can be greyed out.
-	let computerUseHost = $state<{ available: boolean; reason: string }>({ available: true, reason: 'ok' });
-	onMount(async () => {
-		try {
-			const s = await getComputerUseStatus();
-			computerUseHost = { available: s.available, reason: s.reason };
-		} catch {
-			// Leave optimistic default; backend still no-ops if unavailable.
-		}
-	});
-
-	const COMPUTER_USE_REASONS: Record<string, string> = {
-		docker: 'Unavailable: AI Shuffle is running in Docker, which cannot control the host desktop. Run it natively to use this.',
-		'no-display': 'Unavailable: no desktop display detected on this host.',
-		'no-monitors': 'Unavailable: no monitors detected on this host.',
-		'missing-deps': 'Unavailable: the mss/pynput packages are not installed on the server.',
-		'env-disabled': 'Unavailable: disabled by the COMPUTER_USE_DISABLED environment variable.',
-		'screenshot-probe-failed': 'Unavailable: the screen-capture probe failed on this host.'
-	};
 
 	interface Subagent {
 		id: string;
@@ -87,7 +64,6 @@
 		cwd: string;
 		add_dirs: string;
 		env_vars: { key: string; value: string }[];
-		computer_use_enabled: boolean;
 		/** Setting sources (fluid scope filter). null = all scopes (default). */
 		setting_sources: string[] | null;
 	}
@@ -148,27 +124,6 @@
 		onCreateGroup,
 		onDeleteGroup
 	}: Props = $props();
-
-	// Live control status for the emergency stop in the Computer use section.
-	// That control is the app's ONLY stop surface — the composer no longer
-	// carries one — so the shared poller runs whenever this agent has the
-	// capability on and the Tools tab is open, and nowhere else.
-	let stopBusy = $state(false);
-	$effect(() => {
-		if (activeTab !== 'tools' || !profileForm.computer_use_enabled) return;
-		computerUse.start();
-		return () => computerUse.stop();
-	});
-
-	async function toggleComputerUseStop() {
-		if (stopBusy) return;
-		stopBusy = true;
-		try {
-			await computerUse.toggleStopped();
-		} finally {
-			stopBusy = false;
-		}
-	}
 
 	// Group creation local state
 	let creatingGroup = $state(false);
@@ -328,55 +283,8 @@
 		</div>
 
 	{:else if activeTab === 'tools'}
-		<!-- Computer use keeps its own section: it carries host hardware settings
-		     the picker has no place for, and the picker's computer-use group is
-		     greyed out until this switch is on. -->
-		<div class="set-group">
-			<div class="set-grouphead"><h3><Monitor />Computer use</h3><p>Host desktop control. Off by default; the tools below only appear once it is on.</p></div>
-			<div class="set-row" class:disabled={!computerUseHost.available}>
-				<div class="lab">
-					<h4>Enable computer use</h4>
-					<p>
-						Let the agent control this machine's screen — screenshots, mouse, and keyboard,
-						like Claude Desktop. Shares one cursor with you. Native (non-Docker) hosts only.
-						{#if !computerUseHost.available}
-							<br /><strong>{COMPUTER_USE_REASONS[computerUseHost.reason] ?? `Unavailable (${computerUseHost.reason}).`}</strong>
-						{/if}
-					</p>
-				</div>
-				<div class="ctl">
-					<button type="button" class="switch" class:on={profileForm.computer_use_enabled} role="switch" aria-checked={profileForm.computer_use_enabled} aria-label="Toggle computer use" disabled={!computerUseHost.available} onclick={() => onFormChange('computer_use_enabled', !profileForm.computer_use_enabled)}><i></i></button>
-				</div>
-			</div>
-			{#if profileForm.computer_use_enabled}
-				<!-- The app's only emergency stop. It halts synthetic input for the
-				     whole process, not just this agent, and takes effect at once. -->
-				<div class="set-row">
-					<div class="lab">
-						<h4>
-							<OctagonX />Emergency stop
-							<span class="hint">{computerUse.stopped ? 'Stopped' : computerUse.active ? `Controlling ${computerUse.displayLabel ?? 'your screen'}` : 'Idle'}</span>
-						</h4>
-						<p>
-							Halts every screen, mouse and keyboard action immediately, across all
-							sessions on this host. Resume when you want the agent to carry on.
-						</p>
-					</div>
-					<div class="ctl">
-						<button
-							type="button"
-							class="ed-btn"
-							class:danger={!computerUse.stopped}
-							disabled={stopBusy}
-							onclick={toggleComputerUseStop}
-						>
-							{computerUse.stopped ? 'Resume control' : 'Stop control'}
-						</button>
-					</div>
-				</div>
-			{/if}
-		</div>
-
+		<!-- Computer use is a GLOBAL toggle (Settings → Chat & Input), not agent
+		     configuration: the picker's computer-use group follows that toggle. -->
 		<ProfileToolConfig
 			{toolSelectionMode}
 			allowedTools={profileForm.allowed_tools}
@@ -384,7 +292,6 @@
 			surface={toolSurface}
 			loading={toolsLoading}
 			refreshing={toolsRefreshing}
-			computerUseEnabled={profileForm.computer_use_enabled}
 			{isAdmin}
 			{onToolSelectionModeChange}
 			{onToggleTool}

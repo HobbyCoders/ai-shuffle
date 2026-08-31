@@ -664,6 +664,18 @@ class SessionRuntime:
             # reach us. Self-guarded pop in the outer finally.
             _live_runtimes[sid] = self
 
+            # A fresh turn re-arms computer-use for the session (clears the
+            # halt its previous Stop set) so the new agent can act again.
+            try:
+                from app.mcp.computer_use import abort as cu_abort
+
+                cu_abort.resume(sid)
+            except Exception:
+                logger.debug(
+                    "SessionRuntime: computer-use re-arm failed for %s", sid,
+                    exc_info=True,
+                )
+
             logger.info(
                 "SessionRuntime: started %s turn %s (source=%s)",
                 sid, tid, self.source,
@@ -1718,6 +1730,23 @@ class SessionRuntime:
                 "SessionRuntime: background-task stop failed for %s", sid,
                 exc_info=True,
             )
+
+        # A user Stop kills the agent AND its computer-use control together:
+        # halt synthetic input for this session and drop its access grants, so
+        # nothing the turn was doing can keep driving the screen. The
+        # session's next turn re-arms (see execute). Steering ('send_now') is
+        # not a Stop — control continues across the replacement query.
+        if mode == "stop":
+            try:
+                from app.mcp.computer_use import abort, access
+
+                abort.request_stop(sid)
+                access.revoke(sid)
+            except Exception:
+                logger.warning(
+                    "SessionRuntime: computer-use halt failed for %s", sid,
+                    exc_info=True,
+                )
 
         try:
             await record_interrupting(sid, mode)  # turn.interrupting event

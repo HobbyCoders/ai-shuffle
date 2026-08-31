@@ -2,8 +2,8 @@
  * Shared computer-use status store.
  *
  * Polls `/api/v1/computer-use/status` and exposes live state consumed by the
- * toolbar toggle (ControlsDock) and the "AI Shuffle is controlling your screen"
- * banner (ComputerUseBanner). There is exactly ONE poller per app instance: the
+ * global toggle (Settings → Chat & Input) and the "AI Shuffle is controlling
+ * your screen" toast. There is exactly ONE poller per app instance: the
  * store is a module singleton and `start()`/`stop()` are ref-counted, so any
  * number of session views share a single timer.
  *
@@ -17,7 +17,7 @@
  * this endpoint was hit 78 times in ten minutes from a single device while the
  * backend was already struggling, every call slow.
  */
-import { getComputerUseStatus, stopComputerUse, resumeComputerUse } from '$lib/api/computerUse';
+import { getComputerUseStatus, setComputerUseEnabled } from '$lib/api/computerUse';
 import { toast } from '$lib/stores/toast';
 
 export const POLL_AVAILABLE_MS = 2_000;
@@ -30,7 +30,7 @@ function pageHidden(): boolean {
 class ComputerUseStore {
 	available = $state(true);
 	reason = $state('ok');
-	stopped = $state(false);
+	enabled = $state(false);
 	active = $state(false);
 	display = $state<number | null>(null);
 	displayLabel = $state<string | null>(null);
@@ -61,7 +61,7 @@ class ComputerUseStore {
 			const s = await getComputerUseStatus();
 			this.available = s.available;
 			this.reason = s.reason;
-			this.stopped = s.stopped;
+			this.enabled = s.enabled;
 			this.active = s.active;
 			this.display = s.display;
 			this.displayLabel = s.display_label;
@@ -99,15 +99,19 @@ class ComputerUseStore {
 		this.#removeVisibilityListener();
 	}
 
-	/** Toggle the emergency stop (pause/resume all computer-use actions). */
-	async toggleStopped() {
+	/** Set the global computer-use toggle (persisted server-side). */
+	async setEnabled(on: boolean) {
+		const prev = this.enabled;
+		// Optimistic flip; rolled back below if the server rejects it.
+		this.enabled = on;
 		try {
-			const res = this.stopped ? await resumeComputerUse() : await stopComputerUse();
-			this.stopped = res.stopped;
-			await this.refresh();
+			const res = await setComputerUseEnabled(on);
+			this.enabled = res.enabled;
 		} catch (e) {
-			console.warn('computer-use stop/resume failed', e);
+			console.warn('computer-use toggle failed', e);
+			this.enabled = prev;
 		}
+		await this.refresh();
 	}
 
 	// ── poll loop ──────────────────────────────────────────────────────

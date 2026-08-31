@@ -28,6 +28,7 @@
 		NATIVE_PROVIDER_KEY
 	} from '$lib/constants/models';
 	import './card-design-system.css';
+	import { computerUse } from '$lib/stores/computerUse.svelte';
 
 	// Sub-components
 	import ProfileForm from './profiles/ProfileForm.svelte';
@@ -198,7 +199,6 @@
 		cwd: '',
 		add_dirs: '',
 		env_vars: [] as { key: string; value: string }[],
-		computer_use_enabled: false,
 		// null = all scopes (default, key omitted); [] = filesystem-isolated.
 		setting_sources: null as string[] | null
 	});
@@ -225,9 +225,9 @@
 	];
 
 	// Which rows the editor may actually write into a list: computer use follows
-	// the profile's own switch, admin-only groups follow the signed-in user.
+	// the global toggle, admin-only groups follow the signed-in user.
 	const selectability = $derived<SelectabilityContext>({
-		computerUseEnabled: profileForm.computer_use_enabled,
+		computerUseEnabled: computerUse.enabled,
 		isAdmin: $isAdminStore
 	});
 
@@ -249,7 +249,7 @@
 	 * legacy reading T2 spells out, so they count as what they actually were.
 	 */
 	function getProfileToolCount(profile: Profile): number {
-		return profileToolCount(profile.config, toolSurface, $isAdminStore);
+		return profileToolCount(profile.config, toolSurface, computerUse.enabled, $isAdminStore);
 	}
 
 	function resetForm() {
@@ -268,7 +268,6 @@
 			cwd: '',
 			add_dirs: '',
 			env_vars: [],
-			computer_use_enabled: false,
 			setting_sources: null
 		};
 		toolSelectionMode = 'all';
@@ -338,7 +337,6 @@
 			cwd: (config as any).cwd || '',
 			add_dirs: ((config as any).add_dirs || []).join(', '),
 			env_vars: Object.entries((config as any).env || {}).map(([key, value]) => ({ key, value: value as string })),
-			computer_use_enabled: !!(config as any).computer_use?.enabled,
 			setting_sources: Array.isArray((config as any).setting_sources)
 				? ((config as any).setting_sources as string[])
 				: null
@@ -484,9 +482,8 @@
 
 		// `ai_tools` and `app_config_tools` are no longer independent switches (T5):
 		// the AI-tools and app-config groups are permitted through the one picker,
-		// so the editor stops writing either field. Computer use keeps its own
-		// section because it carries host hardware settings.
-		config.computer_use = { enabled: profileForm.computer_use_enabled };
+		// so the editor stops writing either field. Computer use is a GLOBAL
+		// toggle (Settings → Chat & Input), so nothing is written per-agent here.
 
 		// The configured prompt IS the base (ruling A12) — always the custom
 		// shape. Env/instructions/security are compiled in at runtime by fluid,
@@ -629,7 +626,6 @@
 			cwd: '',
 			add_dirs: '',
 			env_vars: agent.env ? Object.entries(agent.env).map(([key, value]) => ({ key, value: value as string })) : [],
-			computer_use_enabled: false,
 			setting_sources: Array.isArray((agent as any).setting_sources)
 				? ((agent as any).setting_sources as string[])
 				: null

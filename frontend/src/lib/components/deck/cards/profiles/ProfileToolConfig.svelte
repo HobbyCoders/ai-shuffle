@@ -15,6 +15,7 @@
 	 * pattern back to names.
 	 */
 	import { Wrench, ListChecks, Search, RefreshCw, ChevronDown, Check, Minus, AlertTriangle } from 'lucide-svelte';
+	import { computerUse } from '$lib/stores/computerUse.svelte';
 	import type { ToolSurface, ToolSurfaceGroup, ToolSurfaceTool } from '$lib/api/toolSurface';
 	import {
 		type SelectabilityContext,
@@ -37,8 +38,6 @@
 		surface: ToolSurface;
 		loading?: boolean;
 		refreshing?: boolean;
-		/** The profile's own computer-use switch — its group is dead while off. */
-		computerUseEnabled: boolean;
 		/** Signed-in user's admin flag; admin-only groups are read-only otherwise. */
 		isAdmin: boolean;
 		onToolSelectionModeChange: (mode: ToolSelectionMode) => void;
@@ -54,7 +53,6 @@
 		surface,
 		loading = false,
 		refreshing = false,
-		computerUseEnabled,
 		isAdmin,
 		onToolSelectionModeChange,
 		onToggleTool,
@@ -66,7 +64,7 @@
 	// Explicit user expand/collapse; unset groups fall back to the default below.
 	let expanded = $state<Record<string, boolean>>({});
 
-	const ctx = $derived<SelectabilityContext>({ computerUseEnabled, isAdmin });
+	const ctx = $derived<SelectabilityContext>({ computerUseEnabled: computerUse.enabled, isAdmin });
 	const editing = $derived(toolSelectionMode === 'allow' || toolSelectionMode === 'disallow');
 	const list = $derived(
 		toolSelectionMode === 'allow'

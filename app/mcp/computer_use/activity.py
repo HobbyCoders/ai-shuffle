@@ -1,7 +1,7 @@
 """Tracks recent computer-use activity so the UI can show a live "AI Shuffle is
 controlling your screen" indicator and which display.
 
-Process-global, like the emergency stop. An action calls ``record(display)``
+Process-global. An action calls ``record(display)``
 each time it touches the screen; the status endpoint reads ``snapshot()`` and
 considers control "active" if something happened within ACTIVE_WINDOW_SECONDS.
 """

@@ -457,8 +457,8 @@ COMPUTER_USE_GUIDANCE = (
     "`computer_batch` for predictable sequences (click → type → Return).\n"
     "- For multiple monitors, read the display note on screenshots and use `switch_display`.\n"
     "- You share one physical cursor with the user; work in short, verifiable steps. The "
-    "user can engage an emergency Stop at any time, after which actions refuse until "
-    "resumed.\n"
+    "the user can hit Stop in chat at any time, which halts your control for that "
+    "session along with the agent.\n"
     "- Synthetic input cannot operate the Windows UAC / secure desktop or the lock screen. "
     "If you hit an elevation prompt or a black screenshot, stop and ask the user to handle it."
 )
@@ -1227,11 +1227,18 @@ def build_options_from_profile(
         logger.exception("Failed to add built-in MCP server tools to allowed_tools")
 
     # Computer-use (host desktop control). Only allow-list its tools when the
-    # profile explicitly enables it AND the host can actually run it (native /
-    # non-Docker with a usable display). Off by default; tools never reach the
-    # model otherwise.
+    # GLOBAL toggle (Settings → Chat & Input, persisted as a system setting)
+    # is on AND the host can actually run it (native / non-Docker with a usable
+    # display). Off by default; tools never reach the model otherwise. The
+    # legacy per-profile ``computer_use.enabled`` config key is no longer
+    # consulted — the toggle is app-wide, not agent configuration.
     computer_use_cfg = config.get("computer_use") or {}
-    computer_use_enabled = bool(computer_use_cfg.get("enabled"))
+    try:
+        from app.api.computer_use import get_computer_use_enabled
+        computer_use_enabled = get_computer_use_enabled()
+    except Exception:
+        computer_use_enabled = False
+        logger.exception("Failed to read the computer-use global toggle")
     if computer_use_enabled:
         try:
             from app.mcp.computer_use.scaling import computer_use_available
@@ -1368,7 +1375,7 @@ def build_options_from_profile(
 
     # When computer-use is active, append operating guidance to the system prompt
     # so the model uses the tools correctly (coordinate space, screenshot-first,
-    # shared cursor, UAC limits, emergency stop). Handle both string and preset
+    # shared cursor, UAC limits, Stop-button halts). Handle both string and preset
     # (dict with "append") prompt shapes.
     if computer_use_enabled and "computer-use" in mcp_servers_dict:
         if isinstance(final_system_prompt, dict):

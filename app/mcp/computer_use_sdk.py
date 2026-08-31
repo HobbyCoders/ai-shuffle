@@ -14,7 +14,8 @@ session's permission mode — enforced in query_engine's can_use_tool callback):
 - plan              -> denied
 - default/ask/auto/acceptEdits -> request_access surfaces an approve/deny prompt
 Action tools refuse until access is granted (see app/mcp/computer_use/access.py),
-and always check the global emergency stop first.
+and always check their session's halt flag first (the chat Stop button
+sets it; the session's next turn clears it).
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 
 class _Aborted(Exception):
-    """Raised inside a worker thread when the emergency stop trips mid-action."""
+    """Raised inside a worker thread when the session's Stop trips mid-action."""
 
 
 _MOVE_SETTLE = 0.04
@@ -157,8 +158,8 @@ def create_computer_use_server(
         return None
 
     def _guard() -> Optional[dict]:
-        if is_stopped():
-            return _err("Computer-use is paused (emergency stop). Ask the user to resume.")
+        if is_stopped(session_id):
+            return _err("Computer-use was stopped for this session. Start a new turn to continue.")
         return _access_error()
 
     # ----- the synchronous action executor (shared by tools + batch) --------
@@ -193,7 +194,7 @@ def create_computer_use_server(
         return "paced"
 
     def _execute(action: str, p: dict) -> list:
-        if is_stopped():
+        if is_stopped(session_id):
             raise _Aborted()
         activity.record(mgr.selected_index)
 
@@ -219,7 +220,7 @@ def create_computer_use_server(
             for m in mods:
                 keyboard.press(m)
             try:
-                if is_stopped():
+                if is_stopped(session_id):
                     raise _Aborted()
                 mouse.click(button, count)
             finally:
@@ -234,7 +235,7 @@ def create_computer_use_server(
             ex, ey = mgr.to_physical(*p["coordinate"])
             mouse.press(Button.left)
             try:
-                if is_stopped():
+                if is_stopped(session_id):
                     raise _Aborted()
                 mouse.position = (ex, ey)
                 time.sleep(_MOVE_SETTLE)
@@ -329,7 +330,7 @@ def create_computer_use_server(
             content = await asyncio.to_thread(_execute, action, params)
             return {"content": content}
         except _Aborted:
-            return _err("aborted by emergency stop")
+            return _err("aborted — computer-use was stopped for this session")
         except ValueError as e:
             return _err(str(e))
         except Exception as e:
@@ -588,7 +589,7 @@ def create_computer_use_server(
                 try:
                     out.extend(_execute(a.get("action"), a))
                 except _Aborted:
-                    out.append(_text_item({"success": False, "error": "aborted by emergency stop", "action_index": i}))
+                    out.append(_text_item({"success": False, "error": "aborted — computer-use was stopped for this session", "action_index": i}))
                     break
                 except Exception as e:
                     out.append(_text_item({"success": False, "error": str(e), "action_index": i}))

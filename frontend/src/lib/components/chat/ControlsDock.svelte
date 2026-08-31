@@ -13,9 +13,9 @@
 	 * Mobile keeps its primary actions inline and moves the configuration
 	 * matrix into MobileComposerControlsSheet (the sliders trigger below).
 	 *
-	 * Computer use is agent configuration, not a composer control: both the
-	 * capability switch and the emergency stop live in the agent editor's
-	 * Computer use section, so the dock neither shows a toggle nor polls status.
+	 * Computer use is a GLOBAL toggle (Settings → Chat & Input), not a composer
+	 * control: the dock neither shows a toggle nor polls status. Halting it for a
+	 * session is the Stop button's job.
 	 */
 	import type { Snippet } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';

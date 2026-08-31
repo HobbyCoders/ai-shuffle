@@ -1,13 +1,89 @@
 <script lang="ts">
-	import { MessageSquare, Brain } from 'lucide-svelte';
+	import { MessageSquare, Brain, Monitor } from 'lucide-svelte';
 	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences.svelte';
+	import { computerUse } from '$lib/stores/computerUse.svelte';
 
 	interface Props {
 		chatPrefs: ChatPreferences | null;
 	}
 
 	let { chatPrefs }: Props = $props();
+
+	// Host capability for the computer-use toggle. Native-only: unavailable in
+	// Docker/headless, which we surface so the toggle can be greyed out. The
+	// shared poller only runs while this section is mounted.
+	let toggleBusy = $state(false);
+	$effect(() => {
+		computerUse.start();
+		return () => computerUse.stop();
+	});
+
+	const UNAVAILABLE_REASONS: Record<string, string> = {
+		docker: 'AI Shuffle is running in Docker, which cannot control the host desktop. Run it natively to use this.',
+		'no-display': 'No desktop display detected on this host.',
+		'no-monitors': 'No monitors detected on this host.',
+		'missing-deps': 'The mss/pynput packages are not installed on the server.',
+		'env-disabled': 'Disabled by the COMPUTER_USE_DISABLED environment variable.',
+		'screenshot-probe-failed': 'The screen-capture probe failed on this host.'
+	};
+
+	const unavailableText = $derived(
+		UNAVAILABLE_REASONS[computerUse.reason] ?? `Unavailable (${computerUse.reason}).`
+	);
+
+	const statusText = $derived(
+		computerUse.active
+			? `Controlling ${computerUse.displayLabel ?? 'your screen'}`
+			: computerUse.enabled
+				? 'On — available to every chat'
+				: 'Off'
+	);
+
+	async function toggleComputerUse() {
+		if (toggleBusy || !computerUse.available) return;
+		toggleBusy = true;
+		try {
+			await computerUse.setEnabled(!computerUse.enabled);
+		} finally {
+			toggleBusy = false;
+		}
+	}
 </script>
+
+<!-- Computer use: one GLOBAL toggle for the whole app, living here rather
+	not in the agent editor: it grants the same host hardware to every chat,
+	so it is an input setting, not agent configuration. -->
+<div class="set-group" data-testid="computer-use-section">
+	<div class="set-grouphead">
+		<h3><Monitor />Computer use</h3>
+		<p>Host desktop control, shared with you. Stop in chat ends it for that chat.</p>
+	</div>
+	<div class="set-row" class:disabled={!computerUse.available}>
+		<div class="lab">
+			<h4>Enable computer use <span class="hint">{statusText}</span></h4>
+			<p>
+				Let chats control this machine's screen — screenshots, mouse, and keyboard,
+				like Claude Desktop. Shares one cursor with you. Native (non-Docker) hosts only.
+				{#if !computerUse.available}
+					<br /><strong>{unavailableText}</strong>
+				{/if}
+			</p>
+		</div>
+		<div class="ctl">
+			<button
+				type="button"
+				class="switch"
+				class:on={computerUse.enabled}
+				role="switch"
+				aria-checked={computerUse.enabled}
+				aria-label="Toggle computer use"
+				aria-disabled={!computerUse.available || toggleBusy}
+				disabled={!computerUse.available || toggleBusy}
+				onclick={toggleComputerUse}
+			><i></i></button>
+		</div>
+	</div>
+</div>
 
 {#if chatPrefs}
 	<!-- Reasoning & tools -->
@@ -109,5 +185,14 @@
 	.switch:disabled {
 		opacity: 0.4;
 		cursor: not-allowed;
+	}
+
+	/* Live status next to the toggle title — small, quiet, never competes
+	   with the row's description. */
+	.hint {
+		font-size: 0.78em;
+		font-weight: normal;
+		opacity: 0.65;
+		margin-left: 0.4em;
 	}
 </style>

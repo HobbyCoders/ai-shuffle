@@ -112,7 +112,7 @@ class _OverlayManager:
         from app.mcp.computer_use import activity, abort
 
         snap = activity.snapshot()
-        show = bool(snap["active"]) and not abort.is_stopped() and snap["display"] is not None
+        show = bool(snap["active"]) and not abort.any_stopped() and snap["display"] is not None
 
         if not show:
             if self._visible:

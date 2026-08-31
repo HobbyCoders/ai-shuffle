@@ -6,20 +6,20 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const getStatus = vi.fn();
+const setEnabled = vi.fn();
 vi.mock('$lib/api/computerUse', () => ({
 	getComputerUseStatus: (...args: unknown[]) => getStatus(...args),
-	stopComputerUse: vi.fn(),
-	resumeComputerUse: vi.fn()
+	setComputerUseEnabled: (...args: unknown[]) => setEnabled(...args)
 }));
 vi.mock('$lib/stores/toast', () => ({ toast: { push: vi.fn() } }));
 
 import { computerUse, POLL_AVAILABLE_MS, POLL_UNAVAILABLE_MS } from './computerUse.svelte';
 
-function status(available: boolean) {
+function status(available: boolean, enabled = false) {
 	return {
 		available,
 		reason: available ? 'ok' : 'no display',
-		stopped: false,
+		enabled,
 		active: false,
 		display: null,
 		display_label: null
@@ -36,6 +36,7 @@ const tick = async (n = 10) => {
 beforeEach(() => {
 	vi.useFakeTimers();
 	getStatus.mockReset();
+	setEnabled.mockReset();
 	visibility = 'visible';
 	Object.defineProperty(document, 'visibilityState', {
 		configurable: true,
@@ -166,5 +167,33 @@ describe('computerUse poller', () => {
 		await tick();
 		await vi.advanceTimersByTimeAsync(POLL_AVAILABLE_MS);
 		expect(getStatus).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe('computerUse toggle', () => {
+	it('flips optimistically, confirms from the server, and refreshes', async () => {
+		getStatus.mockResolvedValue(status(true, false));
+		setEnabled.mockResolvedValue({ enabled: true });
+		computerUse.start();
+		await tick();
+		expect(computerUse.enabled).toBe(false);
+
+		const flip = computerUse.setEnabled(true);
+		expect(computerUse.enabled).toBe(true); // optimistic
+		// The refresh inside setEnabled reads the NEW state back.
+		getStatus.mockResolvedValue(status(true, true));
+		await flip;
+		expect(setEnabled).toHaveBeenCalledWith(true);
+		expect(computerUse.enabled).toBe(true);
+	});
+
+	it('rolls back when the server rejects the toggle', async () => {
+		getStatus.mockResolvedValue(status(true, false));
+		setEnabled.mockRejectedValue(new Error('forbidden'));
+		computerUse.start();
+		await tick();
+
+		await computerUse.setEnabled(true);
+		expect(computerUse.enabled).toBe(false);
 	});
 });

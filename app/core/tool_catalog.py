@@ -512,6 +512,19 @@ async def build_tool_surface(*, refresh: bool = False) -> Dict[str, Any]:
 
     cu_result = _safe("computer_use", computer_use_tools)
     cu_rows, cu_available, cu_reason = cu_result if cu_result else ([], False, None)
+    # The GLOBAL toggle gates the group just like host availability does: a
+    # host that can run computer-use still reports the group unusable while
+    # the toggle (Settings → Chat & Input) is off.
+    if cu_available:
+        try:
+            from app.api.computer_use import get_computer_use_enabled
+
+            cu_available = get_computer_use_enabled()
+            if not cu_available:
+                cu_reason = "Computer use is off — enable it in Settings → Chat & Input."
+        except Exception:  # noqa: BLE001 — availability is best-effort
+            cu_available = False
+            cu_reason = "could not read the computer-use toggle"
     if cu_reason:
         errors.append({"group": "computer_use", "message": cu_reason})
     groups.append(

@@ -1,9 +1,10 @@
 """Computer-use control endpoints.
 
-Backs the UI's "Stop controlling my computer" panic button and the capability
-toggle. The emergency stop is a process-global switch (see
-``app.mcp.computer_use.abort``) that every computer-use action checks before
-running, so engaging it halts all synthetic input immediately.
+Backs the global computer-use toggle (Settings → Chat & Input) and the live
+status the UI's indicators consume. The toggle is a system setting consulted
+by ``query_options`` when wiring the computer-use tools; the per-session halt
+switch (see ``app.mcp.computer_use.abort``) is driven by the chat Stop button,
+not by any endpoint here.
 """
 
 import logging
@@ -12,30 +13,46 @@ from typing import Optional
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from app.api.auth import require_auth
-from app.mcp.computer_use import abort, activity
+from app.api.auth import require_admin, require_auth
+from app.db.settings import get_system_setting, set_system_setting
+from app.mcp.computer_use import activity
 from app.mcp.computer_use.scaling import computer_use_available
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/computer-use", tags=["Computer Use"])
 
+# System-settings key the global toggle persists under. Read on the hot
+# query-options path via get_system_setting_cached, so writes here take
+# effect immediately in this process (and within its short TTL elsewhere).
+ENABLED_SETTING_KEY = "computer_use_enabled"
 
-class StopStateResponse(BaseModel):
-    """Current emergency-stop state."""
-    stopped: bool
+
+class EnabledStateResponse(BaseModel):
+    """Current global toggle state."""
+    enabled: bool
+
+
+class SetEnabledRequest(BaseModel):
+    """Payload for the global toggle."""
+    enabled: bool
 
 
 class StatusResponse(BaseModel):
-    """Host capability + current stop state for the capability toggle, plus a
-    live 'is the agent controlling the screen right now, and which one' signal
-    for the in-app notification banner."""
+    """Host capability + toggle state for the global toggle, plus a live
+    'is the agent controlling the screen right now, and which one' signal for
+    the in-app notification banner."""
     available: bool
     reason: str  # "ok" when available; otherwise why not (docker, no-display, ...)
-    stopped: bool
+    enabled: bool
     active: bool = False               # an action ran within the recent window
     display: Optional[int] = None      # which monitor it's acting on (when active)
     display_label: Optional[str] = None  # human label, e.g. "Display 1 · 3440×1440 (primary)"
+
+
+def get_computer_use_enabled() -> bool:
+    """Read the persisted global toggle (the hot-path seam query_options uses)."""
+    return get_system_setting(ENABLED_SETTING_KEY) == "true"
 
 
 def _display_label(index: int) -> str:
@@ -53,11 +70,11 @@ def _display_label(index: int) -> str:
 
 @router.get("/status", response_model=StatusResponse)
 async def get_status(token: str = Depends(require_auth)) -> StatusResponse:
-    """Report capability, stop state, and live control activity.
+    """Report capability, toggle state, and live control activity.
 
-    ``available`` drives the capability toggle (greyed out + reason on
-    unsupported hosts). ``active``/``display_label`` drive the "AI Shuffle is
-    controlling <screen>" banner while the agent is acting.
+    ``available`` drives the toggle (greyed out + reason on unsupported hosts).
+    ``active``/``display_label`` drive the "AI Shuffle is controlling <screen>"
+    banner while the agent is acting.
     """
     available, reason = computer_use_available()
     snap = activity.snapshot()
@@ -67,23 +84,24 @@ async def get_status(token: str = Depends(require_auth)) -> StatusResponse:
     return StatusResponse(
         available=available,
         reason=reason,
-        stopped=abort.is_stopped(),
+        enabled=get_computer_use_enabled(),
         active=bool(snap["active"]),
         display=snap["display"],
         display_label=label,
     )
 
 
-@router.post("/stop", response_model=StopStateResponse)
-async def stop(token: str = Depends(require_auth)) -> StopStateResponse:
-    """Engage the emergency stop — all computer-use actions refuse until resumed."""
-    abort.request_stop()
-    logger.warning("computer-use emergency stop engaged via API")
-    return StopStateResponse(stopped=True)
+@router.get("/enabled", response_model=EnabledStateResponse)
+async def get_enabled(token: str = Depends(require_auth)) -> EnabledStateResponse:
+    """Report the global toggle."""
+    return EnabledStateResponse(enabled=get_computer_use_enabled())
 
 
-@router.post("/resume", response_model=StopStateResponse)
-async def resume(token: str = Depends(require_auth)) -> StopStateResponse:
-    """Clear the emergency stop, re-enabling computer-use actions."""
-    abort.resume()
-    return StopStateResponse(stopped=False)
+@router.put("/enabled", response_model=EnabledStateResponse)
+async def set_enabled(
+    payload: SetEnabledRequest, token: str = Depends(require_admin)
+) -> EnabledStateResponse:
+    """Set the global computer-use toggle (admin — it grants host input access)."""
+    set_system_setting(ENABLED_SETTING_KEY, "true" if payload.enabled else "false")
+    logger.info("computer-use global toggle set to %s via API", payload.enabled)
+    return EnabledStateResponse(enabled=payload.enabled)
