@@ -149,6 +149,50 @@ async def try_steer_pending(session_id: str) -> int:
         return 0
 
 
+async def try_steer_task_notification(
+    session_id: str,
+    prompt: str,
+    *,
+    notification_id: str,
+    frames: Optional[List[Dict[str, Any]]] = None,
+    task_ids: Optional[List[str]] = None,
+) -> bool:
+    """Try to hand a terminal ``<task-notification>`` to this session's RUNNING
+    turn, so a background completion reaches the model at the next cell boundary
+    instead of waiting out the whole turn.
+
+    The same channel :func:`try_steer_pending` uses for a mid-turn user message,
+    with one difference that shapes everything: a user's steer has a durable
+    queue row behind it, so an undelivered one simply runs as its own turn. A
+    notification has no row, so this call also carries ``frames``/``task_ids`` —
+    the runtime hands them back to the scheduler when the receipt arrives (latch
+    ``terminal_notified``) or when the turn ends without one (enqueue the
+    ordinary at-rest wake after all).
+
+    True only when the engine ACCEPTED the submission. False — never an
+    exception — when there is nothing to steer into: no runtime for this session
+    in this process (the at-rest case, and a session running on another install),
+    no adapter, or a turn already being interrupted. The caller enqueues the
+    ordinary wake on False.
+    """
+    runtime = _live_runtimes.get(session_id)
+    if runtime is None:
+        return False
+    try:
+        return await runtime.steer_task_notification(
+            prompt,
+            notification_id=notification_id,
+            frames=list(frames or []),
+            task_ids=list(task_ids or []),
+        )
+    except Exception:  # noqa: BLE001 — the queued wake is the correctness path.
+        logger.warning(
+            "SessionRuntime: task-notification steer failed for %s", session_id,
+            exc_info=True,
+        )
+        return False
+
+
 async def try_cancel_steer(session_id: str, turn_id: str) -> str:
     """Adjudicate an attempt to un-send queued turn ``turn_id``.
 
@@ -538,6 +582,13 @@ class SessionRuntime:
         # whether an absorbed message died unanswered inside an interrupt.
         # Per-turn by construction, like ``_steer_attempted``.
         self._steer_absorbed: Dict[str, tuple] = {}
+        # Terminal task notifications steered into THIS turn and still awaiting
+        # their delivery receipt: notification id → {"frames", "task_ids"}.
+        # Unlike a user steer there is no queue row to fall back on, so an entry
+        # still sitting here at ``_finalize`` is handed back to the scheduler,
+        # which enqueues the ordinary at-rest wake for it. Per-turn by
+        # construction, like the two sets above.
+        self._task_steers: Dict[str, Dict[str, Any]] = {}
         # When this turn last produced MODEL output (text, thinking, a tool call)
         # — same clock as the absorb stamps above. A steer lands inside a tool
         # result, so any model output after its absorb stamp is proof the model
@@ -942,6 +993,25 @@ class SessionRuntime:
                     "%s (%d frame(s))",
                     self.session_id, len(completion_frames), exc_info=True,
                 )
+            # This wake turn IS the delivery of those completions, so it is also
+            # where ``terminal_notified`` becomes true — the steered mid-turn
+            # path latches it at its own delivery receipt. Without this the flag
+            # stayed False forever for every clean completion (only the
+            # error/killed chip in ``complete_task`` ever set it).
+            try:
+                from app.core import turn_scheduler
+
+                turn_scheduler.on_task_notification_delivered(
+                    self.session_id,
+                    (self.turn.get("payload") or {}).get("task_ids")
+                    or [f.get("task_id") for f in completion_frames
+                        if isinstance(f, dict)],
+                )
+            except Exception:  # noqa: BLE001 — bookkeeping never kills a turn
+                logger.warning(
+                    "SessionRuntime: terminal_notified latch failed for %s",
+                    self.session_id, exc_info=True,
+                )
         try:
             async for event in _stream_to_websocket_impl(
                 prompt=engine_prompt,
@@ -1103,6 +1173,76 @@ class SessionRuntime:
             submitted += 1
         return submitted
 
+    async def steer_task_notification(
+        self,
+        prompt: str,
+        *,
+        notification_id: str,
+        frames: List[Dict[str, Any]],
+        task_ids: List[str],
+    ) -> bool:
+        """Submit one terminal ``<task-notification>`` into the live turn.
+
+        Same gates as :meth:`steer_pending` — an adapter must be up and the turn
+        must not already be dying — minus the queue walk and the eligibility
+        rules, which are about honoring what a USER picked for a message of their
+        own. A background completion belongs to the turn that launched it; the
+        model it reaches is whichever one is running.
+
+        The frames are registered BEFORE the submit so a receipt that comes back
+        on the very next event still finds them, and are dropped again the moment
+        the submit is refused. Returns True only for an accepted submission —
+        delivery is the receipt's word, not this one's.
+        """
+        if not prompt or not notification_id:
+            return False
+        adapter = self._live_adapter()
+        if adapter is None:
+            return False
+        if await self._turn_is_dying():
+            # Steering a notification into a turn the user is killing loses it:
+            # the engine takes the text and dies before the model reads it, and
+            # there is no queue row behind it to run instead. Leave it to the
+            # caller's at-rest wake.
+            logger.info(
+                "SessionRuntime: %s is being interrupted — leaving the task "
+                "notification to the at-rest wake", self.session_id,
+            )
+            return False
+        self._task_steers[notification_id] = {
+            "frames": list(frames or []),
+            "task_ids": list(task_ids or []),
+        }
+        try:
+            await adapter.steer(prompt, id=notification_id)
+        except NotImplementedError:
+            self._task_steers.pop(notification_id, None)
+            logger.debug(
+                "SessionRuntime: adapter cannot steer %s — task notification "
+                "falls back to the at-rest wake", self.session_id,
+            )
+            return False
+        except RuntimeError as exc:
+            self._task_steers.pop(notification_id, None)
+            logger.info(
+                "SessionRuntime: %s not steerable right now (%s) — task "
+                "notification falls back to the at-rest wake",
+                self.session_id, exc,
+            )
+            return False
+        except Exception:
+            self._task_steers.pop(notification_id, None)
+            logger.warning(
+                "SessionRuntime: task-notification steer submit failed for %s",
+                self.session_id, exc_info=True,
+            )
+            return False
+        logger.info(
+            "SessionRuntime: steered a task notification (tasks=%s) into %s "
+            "turn %s", list(task_ids or []), self.session_id, self.turn_id,
+        )
+        return True
+
     def _sweep_start_window_steers(self) -> None:
         """Once per turn, re-offer rows that queued while this turn was starting.
 
@@ -1262,6 +1402,17 @@ class SessionRuntime:
                     "nothing to record", self.session_id,
                 )
                 continue
+            if row_id in self._task_steers:
+                # A terminal task notification, not a user message: no queue row
+                # to load, record or retire. The receipt IS the delivery, so
+                # this is where the scheduler latches terminal_notified and
+                # where the event log learns the task is done — the same
+                # ``task.updated`` append the wake turn makes, so the frontend
+                # card settles mid-turn instead of running forever (#991).
+                await self._on_task_notification_delivered(
+                    recorder, self._task_steers.pop(row_id)
+                )
+                continue
             try:
                 row = await asyncio.to_thread(turns_db.get_turn, row_id)
             except Exception:
@@ -1311,6 +1462,72 @@ class SessionRuntime:
         if absorbed:
             # The rows left the queue — clear their pending bubbles everywhere.
             await _broadcast_queue_after_start(self.session_id)
+
+    async def _on_task_notification_delivered(
+        self, recorder: TurnRecorder, entry: Dict[str, Any]
+    ) -> None:
+        """Close out one steered ``<task-notification>`` fluid just delivered.
+
+        Two effects, both best-effort and neither allowed to disturb the pump:
+        the frontend card settles (``task.updated``, the same append the wake
+        turn makes for its ``pending_frames``) and the scheduler latches
+        ``terminal_notified`` for the tasks now provably in front of the model.
+        """
+        frames = entry.get("frames") or []
+        task_ids = entry.get("task_ids") or []
+        if frames:
+            try:
+                await recorder.record_task_terminal(frames)
+            except Exception:  # noqa: BLE001 — a card badge never kills a turn
+                logger.warning(
+                    "SessionRuntime: recording steered terminal task events "
+                    "failed for %s (%d frame(s))",
+                    self.session_id, len(frames), exc_info=True,
+                )
+        try:
+            from app.core import turn_scheduler
+
+            turn_scheduler.on_task_notification_delivered(self.session_id, task_ids)
+        except Exception:  # noqa: BLE001 — bookkeeping never kills a turn
+            logger.warning(
+                "SessionRuntime: task-notification delivery callback failed "
+                "for %s", self.session_id, exc_info=True,
+            )
+
+    async def _strand_task_steers(self) -> None:
+        """Hand back every task notification this turn swallowed undelivered.
+
+        fluid drops an unreceipted steer at turn end. A user's message survives
+        that — its queue row was never retired, so the settle-drain runs it as a
+        turn of its own — but a task notification has no row, so the scheduler
+        has to be told to enqueue the ordinary at-rest wake for it instead.
+        Never raises: this runs inside ``_finalize``, which must settle.
+        """
+        pending = self._task_steers
+        self._task_steers = {}
+        if not pending:
+            return
+        try:
+            from app.core import turn_scheduler
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "SessionRuntime: cannot reach the scheduler to re-wake %d "
+                "stranded task notification(s) on %s",
+                len(pending), self.session_id, exc_info=True,
+            )
+            return
+        for entry in pending.values():
+            try:
+                await turn_scheduler.on_task_notification_stranded(
+                    self.session_id,
+                    entry.get("frames") or [],
+                    entry.get("task_ids") or [],
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "SessionRuntime: could not re-wake a stranded task "
+                    "notification on %s", self.session_id, exc_info=True,
+                )
 
     async def _absorb_delivered_row(self, row_id: str) -> bool:
         """Retire a delivered steer's queue row, retrying a failing write.
@@ -1442,6 +1659,11 @@ class SessionRuntime:
         # engine at turn end; its row is still ``queued`` and the settle-drain
         # below runs it as an ordinary turn.
         self._steer_attempted.clear()
+        # A task notification is the exception: it has no queue row behind it,
+        # so an undelivered one has to be handed back to the scheduler or the
+        # completion is lost. Before the park gate, so a wake enqueued here is
+        # already in the queue when the settle-drain looks.
+        await self._strand_task_steers()
 
         # Absorb turn_finalize.persist_turn_end_state (durable parked marker +
         # unpark-latch backstop). Legacy stays intact — we CALL it.

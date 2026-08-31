@@ -16,7 +16,7 @@ resolves lazily at call time (``session_runtime.execute``,
 
 import asyncio
 import logging
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -1646,3 +1646,228 @@ async def test_a_repeat_frame_never_doubles_the_stored_wake(mock_db):
 
     assert wake["payload"]["pending_frames"] == [frame]
     assert wake["payload"]["task_ids"] == ["task-r"]
+
+
+# Deliver background terminal notifications into a running parent turn through the same steer path as an owner
+# message, rather than waiting for the parent to finish and encouraging duplicate work.
+
+class _FakeLiveRuntime:
+    """Stand-in for the SessionRuntime holding this session's running turn.
+
+    Only the one method ``turn_scheduler`` reaches for. ``accepts`` chooses
+    between an engine that took the steer and one with nothing live to steer
+    into (no adapter, a turn already being killed)."""
+
+    def __init__(self, *, accepts=True):
+        self.accepts = accepts
+        self.steers = []
+
+    async def steer_task_notification(
+        self, prompt, *, notification_id, frames, task_ids
+    ):
+        self.steers.append({
+            "prompt": prompt,
+            "id": notification_id,
+            "frames": frames,
+            "task_ids": task_ids,
+        })
+        return self.accepts
+
+
+@contextmanager
+def _live_runtime(session_id, *, accepts=True):
+    runtime = _FakeLiveRuntime(accepts=accepts)
+    session_runtime._live_runtimes[session_id] = runtime
+    try:
+        yield runtime
+    finally:
+        session_runtime._live_runtimes.pop(session_id, None)
+
+
+def _own_agent_task(session_id, task_id):
+    """Register ``task_id`` as the parent's OWN background work."""
+    task_registry.start_task(
+        session_id, task_id, "agent", "bg", tool_use_id=f"tu-{task_id}",
+    )
+    task_registry.mark_background_launch(session_id, f"tu-{task_id}")
+
+
+async def test_midturn_completion_is_steered_instead_of_queued(mock_db):
+    """(a) The parent is INSIDE a turn: the notification is steered into it and
+    NO wake is queued behind the still-running turn."""
+    live = turns_db.enqueue_turn("mt1", "user", prompt="a very long turn")
+    turns_db.start_turn(live["id"], None, "runner")
+    _own_agent_task("mt1", "task-mt1")
+    frame = _terminal_frame("task-mt1", "the child's report")
+
+    with ExitStack() as stack:
+        execute = stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        runtime = stack.enter_context(_live_runtime("mt1"))
+        await turn_scheduler.on_task_terminal("mt1", frame)
+        await _drain_kicks()
+
+    assert _by_source("mt1", "unpark") == []
+    assert len(runtime.steers) == 1
+    steer = runtime.steers[0]
+    assert "<task-notification>" in steer["prompt"]
+    assert "<task-id>task-mt1</task-id>" in steer["prompt"]
+    assert "the child's report" in steer["prompt"]
+    assert steer["task_ids"] == ["task-mt1"]
+    assert steer["frames"] == [frame]
+    # The receipt handler tells a notification id from a queued turn's row id by
+    # this prefix — they share one namespace on the wire.
+    assert steer["id"].startswith(turn_scheduler.TASK_STEER_ID_PREFIX)
+    execute.assert_not_awaited()
+
+
+async def test_steered_completion_is_not_redelivered_when_the_turn_parks(mock_db):
+    """(a, exactly-once) The turn parks after the steer and the frame arrives
+    again from the idle reader: the ``mark_woken`` latch the steer spent keeps
+    the at-rest path from delivering the same completion twice."""
+    live = turns_db.enqueue_turn("mt2", "user", prompt="a very long turn")
+    turns_db.start_turn(live["id"], None, "runner")
+    _own_agent_task("mt2", "task-mt2")
+    frame = _terminal_frame("task-mt2", "done once")
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        runtime = stack.enter_context(_live_runtime("mt2"))
+        await turn_scheduler.on_task_terminal("mt2", frame)
+        await _drain_kicks()
+
+    assert len(runtime.steers) == 1
+    # The turn parks, the session goes to rest (no live runtime), and the idle
+    # reader replays the same terminal frame.
+    turns_db.park_turn(live["id"], ["task-mt2"])
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("mt2", dict(frame))
+        await _drain_kicks()
+
+    assert _by_source("mt2", "unpark") == []
+
+
+async def test_parked_parent_still_gets_the_at_rest_wake(mock_db):
+    """(b) Nothing changes at rest: a parked parent's completion is enqueued as
+    the ordinary wake and no steer is even attempted (no live runtime)."""
+    parked = turns_db.enqueue_turn("mt3", "user", prompt="run bg shell")
+    turns_db.start_turn(parked["id"], None, "runner")
+    turns_db.park_turn(parked["id"], ["shell-mt3"])
+    task_registry.start_task("mt3", "shell-mt3", "shell", "make", tool_use_id="tu-mt3")
+    task_registry.mark_background_launch("mt3", "tu-mt3")
+    frame = _terminal_frame("shell-mt3", "build ok")
+
+    with ExitStack() as stack:
+        execute = stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("mt3", frame)
+        await _drain_kicks()
+
+    (wake,) = _by_source("mt3", "unpark")
+    assert "<task-id>shell-mt3</task-id>" in wake["prompt"]
+    assert wake["payload"]["task_ids"] == ["shell-mt3"]
+    execute.assert_awaited_once()
+
+
+async def test_unsteerable_turn_falls_back_to_the_queued_wake(mock_db):
+    """(d) A live turn that cannot take the steer (its engine is gone, or the
+    user is already killing it) falls straight through to the wake path — the
+    delivery is late, never lost."""
+    live = turns_db.enqueue_turn("mt4", "user", prompt="dying turn")
+    turns_db.start_turn(live["id"], None, "runner")
+    _own_agent_task("mt4", "task-mt4")
+    frame = _terminal_frame("task-mt4", "report anyway")
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        runtime = stack.enter_context(_live_runtime("mt4", accepts=False))
+        await turn_scheduler.on_task_terminal("mt4", frame)
+        await _drain_kicks()
+
+    assert len(runtime.steers) == 1  # attempted...
+    (wake,) = _by_source("mt4", "unpark")  # ...refused, so the wake stands
+    assert "<task-id>task-mt4</task-id>" in wake["prompt"]
+    assert wake["payload"]["pending_frames"] == [frame]
+
+
+async def test_a_steer_the_turn_never_delivered_re_enqueues_the_wake(mock_db):
+    """(d) The submit was accepted but the turn ended before fluid delivered it.
+    A user's steer survives that on its still-queued row; a notification has no
+    row, so ``_finalize`` hands it back here and the ordinary wake is enqueued."""
+    context = turns_db.enqueue_turn(
+        "mt5", "user", prompt="kick off bg work",
+        profile_id="p5", project_id="proj-5",
+    )
+    turns_db.start_turn(context["id"], None, "runner")
+    frame = _terminal_frame("task-mt5", "stranded report")
+
+    with ExitStack() as stack:
+        execute = stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_notification_stranded(
+            "mt5", [frame], ["task-mt5"],
+        )
+        await _drain_kicks()
+
+    (wake,) = _by_source("mt5", "unpark")
+    assert "<task-id>task-mt5</task-id>" in wake["prompt"]
+    assert wake["payload"]["task_ids"] == ["task-mt5"]
+    assert wake["profile_id"] == "p5"
+    execute.assert_awaited_once()
+
+
+async def test_a_cli_owned_wake_is_never_steered(mock_db):
+    """A-1 keeps precedence: a top-level backgrounded agent completing while the
+    parent is parked is the CLI's wake to deliver, so the app neither steers nor
+    enqueues. (A parked parent has no live runtime in practice — this pins the
+    order of the two decisions.)"""
+    parked = turns_db.enqueue_turn("mt6", "user", prompt="kick off bg")
+    turns_db.start_turn(parked["id"], None, "runner")
+    turns_db.park_turn(parked["id"], ["agent-mt6"])
+    _own_agent_task("mt6", "agent-mt6")
+    frame = {
+        "task_id": "agent-mt6", "status": "completed",
+        "tool_use_id": "tu-agent-mt6",
+    }
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        runtime = stack.enter_context(_live_runtime("mt6"))
+        signal = await turn_scheduler.on_task_terminal("mt6", frame)
+        await _drain_kicks()
+
+    assert signal == "cli-owned-wake"
+    assert runtime.steers == []
+    assert _by_source("mt6", "unpark") == []
+
+
+async def test_delivery_latches_terminal_notified(mock_db):
+    """(c) ``terminal_notified`` is latched when a notification is actually
+    delivered. It used to stay False forever for a clean completion: the only
+    caller of the latch is ``complete_task``, and only on error/killed."""
+    _own_agent_task("mt7", "task-mt7")
+    task_registry.complete_task("mt7", "task-mt7", "completed", summary="done")
+
+    turn_scheduler.on_task_notification_delivered("mt7", ["task-mt7"])
+
+    # The one-shot latch is spent: a second delivery cannot claim it again.
+    assert task_registry.mark_terminal_notified("mt7", "task-mt7") is False
