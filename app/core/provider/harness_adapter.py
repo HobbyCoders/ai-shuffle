@@ -599,12 +599,30 @@ class HarnessAdapter(ProviderAdapter):
                         # the # Memory snapshot under) instead of leaking into
                         # every other project's sessions. Passes are background
                         # and best-effort (see fluid/codemode/continual.py).
+                        # Phase 2: ``session_model``/``guidance_snapshot`` open
+                        # fluid's guidance-proposal channel. ``session_model``
+                        # is ``options.model`` — NOT the resolved api id above
+                        # — because it must be the same string the guidance
+                        # read path keys on (``_model_guidance_blocks`` and
+                        # ``prompt_guidance_blocks``): a proposal's stem has to
+                        # be a substring of it or the committed file would
+                        # never load. The snapshot is the raw text of the very
+                        # files this session's prompt carries, so the
+                        # synthesizer amends rather than blindly overwrites.
+                        # Drafts are queued and validated, never applied — the
+                        # commit gate disposes of them out-of-band
+                        # (app/core/guidance_surface.py).
+                        session_model = options.model or cast(str, native_model)
                         synthesizer = Synthesizer(
                             provider_client,
                             settings.fluid_continual_model or cast(str, native_model),
                             skills,
                             project=project_key_for(options.cwd or "."),
                             on_change=_announce,
+                            session_model=session_model,
+                            guidance_snapshot=_session_guidance_snapshot(
+                                session_model
+                            ),
                         )
 
                         def _remember(text: str, scope: Optional[str] = None) -> None:
@@ -2174,6 +2192,15 @@ class HarnessAdapter(ProviderAdapter):
                 # text is fixed per model, so the prefix stays cache-stable.
                 for block in _model_guidance_blocks(options.model):
                     sections.append(PromptSection(kind="extra", text=block))
+                # Learned guidance (Phase 2), appended AFTER the shipped
+                # blocks in fluid's own order. The shipped blocks are factory
+                # defaults in code; these are the evolvable half — the files
+                # the commit gate writes when a proposal survives it. Reading
+                # them here is what lets a committed proposal reach a session;
+                # snapshotting the same files is what lets the synthesizer
+                # amend them (see app/core/guidance_surface.py).
+                for block in _learned_guidance_blocks(options.model):
+                    sections.append(PromptSection(kind="extra", text=block))
             if native and _recall_backend_available() and (
                 permitted is None
                 or {"SessionSearch", "SessionView"} <= permitted
@@ -3509,6 +3536,33 @@ def _model_guidance_blocks(model: Optional[str]) -> Tuple[str, ...]:
             exc_info=True,
         )
         return ()
+
+
+def _learned_guidance_blocks(model: Optional[str]) -> Tuple[str, ...]:
+    """Committed per-model guidance files for ``model``, or ``()``.
+
+    The evolvable counterpart to ``_model_guidance_blocks`` above: the gate
+    writes ``<home>/.fluid/guidance/<stem>.md`` when a proposal survives
+    validity, improvement and retention, and this is the only thing that reads
+    it back into a session. Screening and the size cap are fluid's
+    (``load_guidance_files``); the surface module owns where "home" is.
+    """
+    from app.core.guidance_surface import prompt_guidance_blocks
+
+    return prompt_guidance_blocks(model)
+
+
+def _session_guidance_snapshot(model: Optional[str]) -> Dict[str, str]:
+    """The raw ``{stem: content}`` behind ``_learned_guidance_blocks(model)``.
+
+    Handed to the ``Synthesizer`` so a drafted proposal is a full-file
+    amendment of what the session actually carries. Unscreened and
+    untruncated on purpose: an amendment written against a truncated view
+    would silently drop the tail of the file it replaces.
+    """
+    from app.core.guidance_surface import session_guidance_snapshot
+
+    return session_guidance_snapshot(model)
 
 
 def _code_mode_skills_text(text: str) -> str:
